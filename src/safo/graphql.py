@@ -173,6 +173,14 @@ class Client:
                     f"{op}: the token lacks a scope the query needs ({message}); for `gh` run "
                     "`gh auth refresh -s project`, for an App grant the Projects permission"
                 )
+            # For mutations, any error in the response means the outcome is unknown
+            if is_mut:
+                raise UnknownOutcomeError(
+                    f"{op}: the mutation may or may not have been applied; re-read state to determine next steps",
+                    data=body.get("data"),
+                    errors=errors,
+                )
+            # For queries, RATE_LIMITED can be retried
             if "RATE_LIMITED" in types and not last:
                 self._sleep(min(self._max_wait, 30.0 * attempt))
                 continue

@@ -390,3 +390,76 @@ def test_invalid_x_ratelimit_reset_with_rate_limit_signals_still_retries(fake: F
             c.execute(META, VARS)
         # Should have waited based on secondary rate limit signal
         assert len(sleeps) == 1
+
+
+def test_mutation_with_partial_data_and_rate_limited_error_raises_unknown_outcome(
+    fake: FakeGitHub, client: Client
+) -> None:
+    """A mutation returning partial data plus RATE_LIMITED error is unknown outcome, not a retry."""
+    world(fake)
+
+    def partial_mutation(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        raise GqlError(
+            "RATE_LIMITED",
+            "Rate limit reached",
+            {"addItem": {"id": "ITEM_1"}},  # Partial success
+        )
+
+    fake.handlers["AddItem"] = partial_mutation
+    doc = "mutation AddItem($p: ID!) { addItem(id: $p) { id } }"
+
+    with pytest.raises(UnknownOutcomeError, match="may or may not have been applied") as exc_info:
+        client.execute(doc, {"p": "PVT_1"})
+
+    # Verify that partial data is preserved
+    assert exc_info.value.data == {"addItem": {"id": "ITEM_1"}}
+    # Verify that exactly one request was made (no retry)
+    assert len(fake.requests) == 1
+
+
+def test_mutation_with_null_data_and_rate_limited_error_raises_unknown_outcome(
+    fake: FakeGitHub, client: Client
+) -> None:
+    """A mutation returning null data plus RATE_LIMITED error is unknown outcome."""
+    world(fake)
+
+    def null_mutation(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        raise GqlError("RATE_LIMITED", "Rate limit reached", None)
+
+    fake.handlers["NullMutation"] = null_mutation
+    doc = "mutation NullMutation { x }"
+
+    with pytest.raises(UnknownOutcomeError, match="may or may not have been applied") as exc_info:
+        client.execute(doc)
+
+    # Verify that null data is preserved
+    assert exc_info.value.data is None
+    # Verify that exactly one request was made (no retry)
+    assert len(fake.requests) == 1
+
+
+def test_query_with_in_body_rate_limited_still_retries(fake: FakeGitHub, sleeps: list[float]) -> None:
+    """Queries with in-body RATE_LIMITED error still retry and succeed."""
+    fake = FakeGitHub()
+    with fake.serve():
+        world(fake)
+
+        call_count = 0
+
+        def rate_limited_then_success(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise GqlError("RATE_LIMITED", "Rate limited by GraphQL API")
+            return {"test": "result"}
+
+        fake.handlers["TestQuery"] = rate_limited_then_success
+        doc = "query TestQuery { test }"
+
+        c = Client(fake.token, fake.url, sleep=sleeps.append, max_attempts=3)
+        result = c.execute(doc)
+
+        # Should have retried once and succeeded
+        assert result == {"test": "result"}
+        assert call_count == 2
+        assert len(sleeps) == 1

@@ -44,9 +44,16 @@ class RateLimitedError(ApiError):
 class UnknownOutcomeError(ApiError):
     """A mutation's outcome is unknown: the server may or may not have processed it.
 
-    The caller must re-read state to decide whether to retry. Wraps the underlying transport failure.
+    The caller must re-read state to decide whether to retry. Can wrap a transport failure
+    (cause) or contain GraphQL errors/data received in a 200 response.
     """
 
-    def __init__(self, message: str, cause: Exception):
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        cause: Exception | None = None,
+        data: dict[str, Any] | None = None,
+        errors: list[dict[str, Any]] | None = None,
+    ):
+        super().__init__(message, errors, data)
         self.cause = cause
