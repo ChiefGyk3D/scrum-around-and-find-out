@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """board.yaml: the schema, the loader and a validator that names the offending key.
 
-PyYAML is the one runtime dependency and is only ever called as `yaml.safe_load`.
+PyYAML is the one runtime dependency and is loaded through a custom SafeLoader subclass
+that refuses duplicate keys, anchors, aliases, and merge keys, and enforces depth and size limits.
 Every error is a `ConfigError` whose message starts with `<file>: <key path>:`.
 """
 
@@ -15,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+import yaml.constructor
+import yaml.events
+import yaml.nodes
 
 from safo.errors import ConfigError
 
@@ -24,6 +28,8 @@ LAYOUTS = ("board", "table", "roadmap")
 OWNER_TYPES = ("organization", "user")
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+_MAX_YAML_SIZE = 1024 * 1024  # 1 MiB
+_MAX_YAML_DEPTH = 64
 
 
 @dataclass(frozen=True)
@@ -118,6 +124,83 @@ class Board:
         return next((f for f in self.fields if f.name == name), None)
 
 
+# -- YAML loader with safety guards against hostile input --------------------
+
+
+class _SafeLoader(yaml.SafeLoader):
+    """A YAML loader that refuses duplicate keys, aliases, anchors, merge keys, and limits depth/size."""
+
+    def __init__(self, stream: Any) -> None:
+        super().__init__(stream)
+        self._depth = 0
+
+    def check_event(self, *args: Any, **kwargs: Any) -> bool:
+        # Refuse alias events
+        if isinstance(self.current_event, yaml.events.AliasEvent):
+            start_mark = self.current_event.start_mark
+            line = start_mark.line + 1 if start_mark else 0
+            raise ConfigError(f"line {line}: aliases are not allowed")
+        # Refuse anchors (attached to scalar/sequence/mapping start events)
+        if hasattr(self.current_event, "anchor") and self.current_event.anchor is not None:
+            start_mark = self.current_event.start_mark
+            line = start_mark.line + 1 if start_mark else 0
+            raise ConfigError(f"line {line}: anchors are not allowed")
+        return super().check_event(*args, **kwargs)
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[str, Any]:  # type: ignore[override]
+        if not isinstance(node, yaml.MappingNode):
+            raise ConfigError("expected a mapping")
+
+        # Check for merge keys and track duplicates
+        mapping: dict[str, Any] = {}
+        for key_node, value_node in node.value:
+            # Extract key
+            key = self.construct_object(key_node, deep=deep)
+
+            # Refuse non-string keys
+            if not isinstance(key, str):
+                key_type = type(key).__name__
+                line = key_node.start_mark.line + 1
+                raise ConfigError(f"line {line}: mapping key must be a string, not {key_type}")
+
+            # Refuse merge keys
+            if key == "<<":
+                line = key_node.start_mark.line + 1
+                raise ConfigError(f"line {line}: merge keys (<<) are not allowed")
+
+            # Refuse duplicate keys
+            if key in mapping:
+                line = key_node.start_mark.line + 1
+                raise ConfigError(f"line {line}: duplicate key {key!r}")
+
+            # Construct value with depth check
+            self._depth += 1
+            if self._depth > _MAX_YAML_DEPTH:
+                line = value_node.start_mark.line + 1
+                msg = f"line {line}: nesting exceeds maximum depth ({_MAX_YAML_DEPTH})"
+                raise ConfigError(msg)
+            mapping[key] = self.construct_object(value_node, deep=deep)
+            self._depth -= 1
+
+        return mapping
+
+
+def _safe_load(text: str, source: str = "board.yaml") -> object:
+    """Load YAML with duplicate key, anchor, alias, and depth checking."""
+    # Check size
+    if len(text) > _MAX_YAML_SIZE:
+        raise ConfigError(f"{source}: file exceeds maximum size ({_MAX_YAML_SIZE} bytes)")
+
+    try:
+        return yaml.load(text, Loader=_SafeLoader)  # noqa: S506
+    except yaml.YAMLError as err:
+        raise ConfigError(f"{source}: not valid YAML ({err.__class__.__name__})") from None
+    except ConfigError:
+        raise
+    except RecursionError:
+        raise ConfigError(f"{source}: nested too deeply") from None
+
+
 # -- validation helpers ------------------------------------------------------------
 
 
@@ -185,7 +268,10 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
         {"version", "project", "repositories", "fields", "views", "rules", "agents", "ui_only"},
         {"version", "project", "repositories"},
     )
-    if top["version"] != 1:
+
+    # Check version is int 1 (not bool True)
+    version_val = top["version"]
+    if isinstance(version_val, bool) or not isinstance(version_val, int) or version_val != 1:
         raise r.fail("version", "only version 1 is supported")
 
     p = r.mapping(
@@ -311,15 +397,20 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
         None if s.get("opened_pr") is None else r.string(s["opened_pr"], "rules.status.opened_pr"),
         None if s.get("draft_pr") is None else r.string(s["draft_pr"], "rules.status.draft_pr"),
     )
-    nid = r.mapping(
-        m.get("new_item_defaults", {}), "rules.new_item_defaults", set(m.get("new_item_defaults", {}) or {})
-    )
+    nid_raw = m.get("new_item_defaults", {})
+    if not isinstance(nid_raw, Mapping):
+        raise r.fail("rules.new_item_defaults", "expected a mapping")
+    nid: dict[str, str] = {}
+    for k, v in nid_raw.items():
+        if not isinstance(k, str):
+            raise r.fail("rules.new_item_defaults", f"key must be a string, not {type(k).__name__}")
+        nid[k] = r.string(v, f"rules.new_item_defaults.{k}")
     return Rules(
         r.string(m.get("status_field", "Status"), "rules.status_field"),
         r.string(m.get("area_field", "Area"), "rules.area_field"),
         status,
         r.string(m.get("done_date_field", ""), "rules.done_date_field", empty=True),
-        tuple((str(k), r.string(v, f"rules.new_item_defaults.{k}")) for k, v in nid.items()),
+        tuple((str(k), v) for k, v in nid.items()),
         r.integer(m.get("add_closed_days", 0), "rules.add_closed_days"),
     )
 
@@ -369,16 +460,34 @@ def _cross_check(r: Reader, board: Board) -> None:
         for j, rule in enumerate(repo.area_rules):
             option_exists(rules.area_field, rule.area, f"repositories[{i}].area_rules[{j}].area")
 
+    # Cross-check agents
+    agents_field = board.field_named(rules.area_field if board.agents.field == "Area" else board.agents.field)
+    if board.agents.field != "Area":
+        agents_field = board.field_named(board.agents.field)
+        if agents_field is None:
+            raise r.fail("agents.field", f"field {board.agents.field!r} is not in fields")
+        if agents_field.type != "single_select":
+            raise r.fail("agents.field", f"field {board.agents.field!r} is {agents_field.type}, not single_select")
+
+    # Check agents.working and agents.waiting are valid status options
+    status_field = board.field_named(rules.status_field)
+    if status_field and status_field.type == "single_select":
+        status_options = {o.name for o in status_field.options}
+        for i, ws in enumerate(board.agents.working):
+            if ws not in status_options:
+                raise r.fail(f"agents.working[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
+        for i, ws in enumerate(board.agents.waiting):
+            if ws not in status_options:
+                raise r.fail(f"agents.waiting[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
+
 
 def load_board(path: str | Path, *, check_fields: bool = True) -> Board:
-    """Read and validate a board.yaml. Only `yaml.safe_load` ever touches the file."""
+    """Read and validate a board.yaml. Uses a custom YAML loader that refuses hostile inputs."""
     p = Path(path)
     try:
         text = p.read_text(encoding="utf-8")
     except OSError as err:
         raise ConfigError(f"{p}: cannot read the board file ({err.strerror})") from None
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as err:
-        raise ConfigError(f"{p}: not valid YAML ({err.__class__.__name__})") from None
+
+    data = _safe_load(text, str(p))
     return parse_board(data, str(p), check_fields=check_fields)

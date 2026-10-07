@@ -3,11 +3,28 @@
 `board.yaml` describes one GitHub Project (v2) and the repositories whose issues and pull requests belong on it.
 `safo` validates it before it makes any request, and every error names the offending key, for example
 `board.yaml: fields[0].options[2].color: 'TEAL' is not one of GRAY, BLUE, GREEN, YELLOW, ORANGE, RED, PINK, PURPLE`.
-The file is read with `yaml.safe_load` only. A complete worked file is
+The file is loaded with a custom YAML loader that refuses hostile inputs. A complete worked file is
 [examples/renegade-penguin.yaml](../examples/renegade-penguin.yaml).
 
 Quote any option name YAML might read as something else. `No`, `yes`, `on`, `off` become booleans and `1.0`
 becomes a number; `safo` refuses them with the key path rather than guessing.
+
+## Top level
+
+The top-level mapping is required and must contain:
+
+| Key | Type | Required | Meaning |
+|---|---|---|---|
+| `version` | integer | yes | Must be `1` (exactly; not a boolean) |
+| `project` | mapping | yes | The project description |
+| `repositories` | list | yes | Repositories whose items belong on the board (may be empty) |
+| `fields` | list | no | Custom fields; built-in fields are not listed |
+| `views` | list | no | Views of the board |
+| `rules` | mapping | no | Automation and field cross-references |
+| `agents` | mapping | no | Agent status tracking |
+| `ui_only` | list | no | Manual settings not readable via the API |
+
+Unknown keys are refused with the key path.
 
 ## project
 
@@ -36,9 +53,10 @@ A list of fields the project must have. Built-in fields (Title, Assignees, Label
 |---|---|
 | `name`, `type` | `single_select`, `iteration`, `date`, `text` or `number` |
 | `options` | For `single_select`: a list of `{name, color, description}`; color is one of GRAY, BLUE, GREEN, YELLOW, ORANGE, RED, PINK, PURPLE |
-| `start`, `duration_days`, `count` | For `iteration`: the first start date, the length of each iteration, and how many to create |
-| `title_prefix` | For `iteration`: iterations are titled `<prefix> 1`, `<prefix> 2` (default: the field name) |
+| `start`, `duration_days`, `count` | For `iteration` only: the first start date (YYYY-MM-DD), the length of each iteration (integer >= 1), and how many to create (integer >= 1). Required together for an iteration field |
+| `title_prefix` | For `iteration` only: iterations are titled `<prefix> 1`, `<prefix> 2` (default: the field name) |
 
+A `single_select` field requires at least one option. Duplicate option names within a field are refused.
 `bootstrap` creates a field that is missing, with all its options or iterations. It never edits a field that exists:
 see [Lessons](lessons.md) for why.
 
@@ -68,9 +86,30 @@ against the live project before it changes anything.
 
 ## agents
 
-Used by `agents-status`: `field` (default `Agent`), `working` (default `In progress`, `Next`) and `waiting` (default `Blocked`).
+Used by `agents-status`. All keys are optional.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `field` | `Agent` | A single-select field that names the agent. Must exist in `fields` |
+| `working` | `In progress`, `Next` | Status options that mean the agent is working on an item |
+| `waiting` | `Blocked` | Status options that mean the agent is blocked |
+
+All values in `working` and `waiting` must be options of the status field.
 
 ## ui_only
 
 A list of sentences for the settings no API can read or set (a Roadmap's date fields and zoom, a view's grouping, the
 project's built-in workflows). `bootstrap` prints them as a checklist and `audit` prints them as a reminder.
+
+## Refused YAML
+
+The YAML loader refuses the following as hostile or ambiguous:
+
+- **Duplicate keys**: a key appears twice in any mapping (e.g., `project: {owner: a, owner: b}`)
+- **Anchors** (e.g., `project: &p {...}`): mark locations in the file; `safo` forbids them to avoid hidden references
+- **Aliases** (e.g., `- *p`): refer to anchored nodes; silently shared nodes hide what a value really is
+- **Merge keys** (`<<`): combine mappings; they obscure the actual keys
+- **File size** > 1 MiB: prevents reading huge files
+- **Nesting depth** > 64 levels: prevents exponential parse times and RecursionError crashes
+
+All four YAML features are checked in the loader itself; parsing fails with an error that names the line or kind.
