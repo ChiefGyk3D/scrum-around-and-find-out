@@ -54,6 +54,7 @@ class Fault:
     times: int = 1
     op: str | None = None  # only requests for this operation
     after: int = 0  # let this many matching requests through first
+    commit_then_drop: bool = False  # if true, process the request (record mutation) then drop connection
 
 
 @dataclass
@@ -245,14 +246,18 @@ class FakeGitHub:
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = json.loads(self.rfile.read(length) or b"{}")
-                status, headers, payload = fake.respond(body, self.headers.get("Authorization"))
+                status, headers, payload, drop_connection = fake.respond(body, self.headers.get("Authorization"))
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 for key, value in headers.items():
                     self.send_header(key, value)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(payload)
+                if drop_connection:
+                    # Abruptly close the connection without sending the body, simulating a timeout/reset
+                    self.connection.close()
+                else:
+                    self.wfile.write(payload)
 
             def log_message(self, format: str, *args: Any) -> None:
                 return
@@ -268,19 +273,30 @@ class FakeGitHub:
             server.server_close()
             thread.join()
 
-    def respond(self, body: JSON, auth: str | None) -> tuple[int, dict[str, str], bytes]:
+    def respond(self, body: JSON, auth: str | None) -> tuple[int, dict[str, str], bytes, bool]:
+        """Return (status, headers, payload, should_drop_connection)."""
         document = str(body.get("query", ""))
         match = _OPERATION.match(document)
         op = str(body.get("operationName") or "")
         if not match or match.group(2) != op:
-            return 400, {}, b'{"message": "operationName does not match the document"}'
+            return 400, {}, b'{"message": "operationName does not match the document"}', False
         if auth != f"Bearer {self.token}":
-            return 401, {}, b'{"message": "Bad credentials"}'
+            return 401, {}, b'{"message": "Bad credentials"}', False
         fault = self._next_fault(op)
         self.requests.append(op)
-        if fault:
-            return fault.status, fault.headers, fault.body.encode()
         variables: JSON = body.get("variables") or {}
+
+        # If commit_then_drop, process the mutation first
+        if fault and fault.commit_then_drop:
+            if match.group(1) == "mutation":
+                self.mutations.append(Mutation(op, variables))
+            return fault.status, fault.headers, fault.body.encode(), True
+
+        # Normal fault handling (return immediately without processing)
+        if fault:
+            return fault.status, fault.headers, fault.body.encode(), False
+
+        # Normal request processing
         if match.group(1) == "mutation":
             self.mutations.append(Mutation(op, variables))
         fn = self.handlers.get(op) or HANDLERS.get(op)
@@ -289,13 +305,14 @@ class FakeGitHub:
                 200,
                 {},
                 json.dumps({"errors": [{"type": "INTERNAL", "message": f"fake has no handler for {op}"}]}).encode(),
+                False,
             )
         try:
             data = fn(self, variables | {"__document__": document})
         except GqlError as err:
             error = {"type": err.kind, "message": str(err)}
-            return 200, {}, json.dumps({"data": err.data, "errors": [error]}).encode()
-        return 200, {}, json.dumps({"data": data}).encode()
+            return 200, {}, json.dumps({"data": err.data, "errors": [error]}).encode(), False
+        return 200, {}, json.dumps({"data": data}).encode(), False
 
     def _next_fault(self, op: str) -> Fault | None:
         for fault in self.faults:

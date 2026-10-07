@@ -7,6 +7,7 @@ an exception, and a dry run sends no mutation at all.
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import re
@@ -19,7 +20,15 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, TextIO
 
 from safo import __version__
-from safo.errors import ApiError, AuthError, ConfigError, NotFoundError, RateLimitedError, SafoError
+from safo.errors import (
+    ApiError,
+    AuthError,
+    ConfigError,
+    NotFoundError,
+    RateLimitedError,
+    SafoError,
+    UnknownOutcomeError,
+)
 
 JSON = dict[str, Any]
 GRAPHQL_URL = "https://api.github.com/graphql"
@@ -39,6 +48,15 @@ def operation_name(document: str) -> str:
 def is_mutation(document: str) -> bool:
     match = _OPERATION.match(document)
     return bool(match and match.group(1) == "mutation")
+
+
+def _is_mutation_robust(document: str) -> bool:
+    """Detect mutation robustly by stripping comments and leading whitespace."""
+    # Remove GraphQL comments (# to end of line)
+    cleaned = re.sub(r"#[^\n]*", "", document)
+    # Match the first operation keyword (query or mutation) ignoring whitespace
+    match = re.search(r"\b(query|mutation)\b", cleaned)
+    return match is not None and match.group(1) == "mutation"
 
 
 def _check_url(url: str) -> None:
@@ -88,7 +106,8 @@ class Client:
             # It regenerates every option id and wipes every item's value for the field.
             raise SafoError(f"{op}: updateProjectV2Field is never sent; see docs/lessons.md")
         variables = dict(variables or {})
-        if self.dry_run and is_mutation(document):
+        is_mut = _is_mutation_robust(document)
+        if self.dry_run and is_mut:
             self.skipped += 1
             print(f"dry run: would {op} {json.dumps(variables, sort_keys=True, default=str)}", file=self._out)
             return dry_result or {}
@@ -97,7 +116,12 @@ class Client:
             last = attempt == self._max_attempts
             try:
                 status, headers, raw = self._post(payload)
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as err:
+                if is_mut:
+                    raise UnknownOutcomeError(
+                        f"{op}: the mutation may or may not have been applied; re-read state to determine next steps",
+                        err,
+                    ) from None
                 if last:
                     raise ApiError(f"could not reach GitHub for {op}: {err.__class__.__name__}") from None
                 self._sleep(min(self._max_wait, 2.0**attempt))
@@ -117,6 +141,11 @@ class Client:
                 self._sleep(wait)
                 continue
             if status in (500, 502, 503, 504):
+                if is_mut:
+                    raise UnknownOutcomeError(
+                        f"{op}: the mutation may or may not have been applied; re-read state to determine next steps",
+                        ApiError(f"GitHub answered {status}"),
+                    ) from None
                 if last:
                     raise ApiError(f"GitHub answered {status} to {op} {attempt} times")
                 self._sleep(min(self._max_wait, 2.0**attempt))
@@ -127,11 +156,15 @@ class Client:
                 body: JSON = json.loads(raw)
             except json.JSONDecodeError as err:
                 raise ApiError(f"GitHub answered {op} with invalid JSON: {err}") from None
+            if not isinstance(body, dict):
+                raise ApiError(f"GitHub answered {op} with non-object JSON: {type(body).__name__}")
             errors: list[dict[str, Any]] = body.get("errors") or []
             if not errors:
                 if "data" not in body:
                     raise ApiError(f"GitHub answered {op} with neither errors nor data")
                 data: JSON = body["data"]
+                if data is None:
+                    raise ApiError(f"GitHub answered {op} with null data and no errors")
                 return data
             types = {str(e.get("type", "")) for e in errors}
             message = "; ".join(str(e.get("message", e)) for e in errors)

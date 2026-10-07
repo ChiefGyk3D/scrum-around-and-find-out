@@ -39,3 +39,14 @@ class NotFoundError(ApiError):
 
 class RateLimitedError(ApiError):
     """Still rate limited after every retry, or the reset is further away than we will wait."""
+
+
+class UnknownOutcomeError(ApiError):
+    """A mutation's outcome is unknown: the server may or may not have processed it.
+
+    The caller must re-read state to decide whether to retry. Wraps the underlying transport failure.
+    """
+
+    def __init__(self, message: str, cause: Exception):
+        super().__init__(message)
+        self.cause = cause

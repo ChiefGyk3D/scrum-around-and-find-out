@@ -9,7 +9,7 @@ import pytest
 
 from fakegh import FakeGitHub, GqlError
 from fakegh.core import Fault
-from safo.errors import ApiError, AuthError, ConfigError, RateLimitedError, SafoError
+from safo.errors import ApiError, AuthError, ConfigError, RateLimitedError, SafoError, UnknownOutcomeError
 from safo.graphql import Client, is_mutation, operation_name
 
 FIELDS = """query ProjectFieldsOrg($login: String!, $number: Int!, $endCursor: String) {
@@ -316,3 +316,77 @@ def test_in_body_rate_limited_error_retries(fake: FakeGitHub, sleeps: list[float
 
     # Should have slept twice (for attempts 1 and 2, not on the last attempt)
     assert len(sleeps) == 2
+
+
+def test_a_mutation_that_commits_then_drops_connection_raises_unknown_outcome(fake: FakeGitHub, client: Client) -> None:
+    """A mutation whose outcome is unknown (connection dropped after send) must raise UnknownOutcomeError."""
+    world(fake)
+
+    def add_item(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        # This handler commits the mutation to the fake's state
+        return {"ok": True}
+
+    fake.handlers["AddItem"] = add_item
+
+    # Set up a fault that commits the mutation then drops the connection
+    fake.faults.append(Fault(200, {}, "{}", times=1, op="AddItem", commit_then_drop=True))
+
+    doc = "mutation AddItem($p: ID!) { x }"
+    with pytest.raises(UnknownOutcomeError, match="may or may not have been applied"):
+        client.execute(doc, {"p": "PVT_1"})
+
+    # The mutation should have been recorded (it was processed before the drop)
+    assert len(fake.mutations_named("AddItem")) == 1
+
+
+def test_a_query_still_retries_on_5xx(fake: FakeGitHub, client: Client, sleeps: list[float]) -> None:
+    """Queries should still retry on 502/503."""
+    world(fake)
+    fake.faults.append(Fault(502, {}, "bad gateway", times=1, op="ProjectMetaOrg"))
+    result = client.execute(META, VARS)
+    assert result["organization"]["projectV2"]["number"] == 1
+    # Should have slept once before retrying
+    assert len(sleeps) == 1
+
+
+def test_a_200_response_with_non_dict_json_raises_api_error(fake: FakeGitHub, client: Client) -> None:
+    """A 200 response with JSON that is not an object (null, array, number) must raise ApiError."""
+    fake.faults.append(Fault(200, {}, "null", times=1, op="NonDictJson"))
+    with pytest.raises(ApiError, match="non-object JSON"):
+        client.execute("query NonDictJson { x }")
+
+    fake.faults.append(Fault(200, {}, "[]", times=1, op="ArrayJson"))
+    with pytest.raises(ApiError, match="non-object JSON"):
+        client.execute("query ArrayJson { x }")
+
+    fake.faults.append(Fault(200, {}, "42", times=1, op="NumberJson"))
+    with pytest.raises(ApiError, match="non-object JSON"):
+        client.execute("query NumberJson { x }")
+
+
+def test_a_200_response_with_null_data_and_no_errors_raises_api_error(fake: FakeGitHub, client: Client) -> None:
+    """A 200 response with {"data": null} and no errors must raise ApiError."""
+    fake.faults.append(Fault(200, {}, '{"data": null}', times=1, op="NullData"))
+    with pytest.raises(ApiError, match="null data"):
+        client.execute("query NullData { x }")
+
+
+def test_invalid_x_ratelimit_reset_with_rate_limit_signals_still_retries(fake: FakeGitHub, sleeps: list[float]) -> None:
+    """A 403 with X-RateLimit-Remaining=0 but invalid reset should still be treated as rate limited."""
+    fake = FakeGitHub()
+    with fake.serve():
+        world(fake)
+        # Create a fault with: secondary rate limit body signal, remaining=0, but invalid reset
+        fake.faults.append(
+            Fault(
+                403,
+                {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "nan"},
+                '{"message": "You have exceeded a secondary rate limit"}',
+                times=99,
+            )
+        )
+        c = Client(fake.token, fake.url, sleep=sleeps.append, max_attempts=2)
+        with pytest.raises(RateLimitedError):
+            c.execute(META, VARS)
+        # Should have waited based on secondary rate limit signal
+        assert len(sleeps) == 1
