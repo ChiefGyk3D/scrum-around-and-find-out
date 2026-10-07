@@ -1,6 +1,6 @@
 # Scrum Around and Find Out — design
 
-**Status:** draft for the maintainer's review, 2026-10-07.
+**Status:** approved by the maintainer, 2026-10-07 (SAFO #1).
 **Repository:** `ChiefGyk3D/scrum-around-and-find-out` (public).
 **Delivered by:** `ChiefGyk3D/git-your-ship-together` (GYST), whose
 `project-sync.yml` becomes a thin wrapper around this project's Action.
@@ -36,6 +36,9 @@ a playbook for running the agent team, with the lessons that shaped it.
    with GYST's existing `wiki.yml` / `wiki-publish.yml`).
 5. **Board as code, safe apply:** create what is missing; never edit an
    existing single-select field's options through the API.
+6. **This repository's own board** is user-owned: it stays on scheduled
+   `reconcile` run from the maintainer's own `gh` login. No PAT in CI (SAFO #1).
+7. **Licence: MIT**, matching GYST, its delivery sibling (SAFO #1).
 
 ## Scope
 
@@ -210,10 +213,9 @@ CI calls GYST (python-ci, security; release on tags), pinned by commit with the
 4. tray and gps-tether still need their Doppler identities (Hammunition #367)
    for event-driven sync; `reconcile` covers them meanwhile.
 
-This repository has its own board (a user-owned project, so its `sync` uses
-the documented PAT exception **or** stays on `reconcile` through the
-maintainer's own `gh` login; decided at plan time), created by its own
-`bootstrap` as the first real use.
+This repository has its own board (a user-owned project), created by its own
+`bootstrap` as the first real use and kept current by scheduled `reconcile`
+from the maintainer's own `gh` login (ruling 6).
 
 ## Release
 
@@ -222,8 +224,4 @@ suite board; signed tags; GYST release workflow.
 
 ## Open questions for the maintainer
 
-1. SAFO's own board is user-owned: sync it with a fine-grained PAT (the
-   exception this project documents) or keep it on scheduled `reconcile` run
-   from your own login only?
-2. Licence: GPL-3.0-or-later like your other tools, or MIT/Apache-2.0 so
-   companies adopt the Action more readily?
+None: both were answered in SAFO #1 (rulings 6 and 7).
