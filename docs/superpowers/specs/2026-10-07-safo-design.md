@@ -32,8 +32,8 @@ a playbook for running the agent team, with the lessons that shaped it.
    repositories.
 4. **Split with GYST:** this repository owns the project-management logic;
    GYST is the delivery layer and deploys it through a thin reusable workflow.
-   Generic CI plumbing still goes straight into GYST (for example the new
-   `wiki-mirror` workflow below).
+   Generic CI plumbing still goes straight into GYST (the wiki is published
+   with GYST's existing `wiki.yml` / `wiki-publish.yml`).
 5. **Board as code, safe apply:** create what is missing; never edit an
    existing single-select field's options through the API.
 
@@ -42,7 +42,7 @@ a playbook for running the agent team, with the lessons that shaped it.
 **In (v0.1.0):** `board.yaml` schema; the Action with five modes; the `safo`
 CLI; `agents-status`; the docs and wiki (why, roles, routing, handoff, limits,
 board conventions, lessons, adoption); the Renegade-Penguin example; tests;
-GYST wrapper and `wiki-mirror`; migration of the suite board.
+GYST wrapper; the wiki through GYST's existing wiki workflows; migration of the suite board.
 
 **Out:** a hosted webhook App; any non-GitHub tracker; automatic agent
 dispatch (the playbook says how a lead hands work out; this project does not
@@ -160,9 +160,8 @@ page says so.
   today) → `uses: ChiefGyk3D/scrum-around-and-find-out@<sha> # vX.Y.Z` with
   `mode: sync` on issue events and `mode: reconcile` on its weekly schedule.
   Inputs keep their names, so callers only bump their GYST pin.
-- New GYST reusable workflow `wiki-mirror.yml`: publishes `docs/` to the
-  repository's GitHub wiki (generalised from Hammunition #255); called by this
-  repository and by Hammunition.
+- The wiki is published with GYST's existing `wiki.yml` / `wiki-publish.yml`
+  (measured on GYST main 2026-10-07); no new workflow.
 
 ## Documentation (source in `docs/`, mirrored to the wiki)
 
