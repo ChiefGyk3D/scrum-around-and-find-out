@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: MIT
+# A small, generic board for the tests: an organization, two repositories, no real names.
+version: 1
+project:
+  owner: acme
+  owner_type: organization
+  number: 1
+  title: Acme board
+repositories:
+  - owner: acme
+    name: widgets
+    default_area: Core
+    area_rules:
+      - {match: docs, area: Docs}
+  - owner: acme
+    name: manuals
+    default_area: Docs
+fields:
+  - name: Status
+    type: single_select
+    options:
+      - {name: Backlog, color: GRAY, description: "Not scheduled"}
+      - {name: Next, color: BLUE, description: "Scheduled"}
+      - {name: In progress, color: YELLOW, description: ""}
+      - {name: Blocked, color: RED, description: "Needs the maintainer"}
+      - {name: Done, color: GREEN, description: ""}
+  - name: Area
+    type: single_select
+    options:
+      - {name: Core, color: BLUE, description: ""}
+      - {name: Docs, color: PURPLE, description: ""}
+  - name: Priority
+    type: single_select
+    options:
+      - {name: P1 soon, color: ORANGE, description: ""}
+      - {name: P2 later, color: GRAY, description: ""}
+  - name: Agent
+    type: single_select
+    options:
+      - {name: Claude, color: ORANGE, description: ""}
+      - {name: Codex, color: GREEN, description: ""}
+  - {name: Sprint, type: iteration, start: 2026-10-06, duration_days: 14, count: 3}
+  - {name: Done on, type: date}
+views:
+  - {name: Board, layout: board, filter: "-status:Done"}
+  - {name: Roadmap, layout: roadmap, filter: "-status:Done"}
+rules:
+  status:
+    opened: Backlog
+    opened_pr: In progress
+    draft_pr: Backlog
+    reopened: Backlog
+    closed: Done
+    merged: Done
+  done_date_field: Done on
+  new_item_defaults:
+    Priority: P2 later
+ui_only:
+  - "Roadmap: Date fields = Start date / Target date; Zoom = Quarter"
