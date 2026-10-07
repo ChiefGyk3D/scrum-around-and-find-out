@@ -67,7 +67,16 @@ repositories:                    # every repo whose issues and PRs belong here
   - owner: ChiefGyk3D
     name: git-your-ship-together
     default_area: CI and GYST
+  - owner: ChiefGyk3D
+    name: penguin-overlord
+    default_area: Penguin Overlord
 fields:
+  - name: Area
+    type: single_select
+    options:                     # as the live board has them; audit fixes this list until it reports zero drift
+      - {name: Engine, color: GRAY, description: "Hammunition's engine and catalog"}
+      - {name: CI and GYST, color: GRAY, description: "Shared workflows and the baseline"}
+      - {name: Penguin Overlord, color: GRAY, description: "The Discord bot"}
   - name: Status
     type: single_select
     options:
@@ -212,6 +221,8 @@ CI calls GYST (python-ci, security; release on tags), pinned by commit with the
 3. Two weekly reconciles checked by hand; then the dotfiles board tools retire.
 4. tray and gps-tether still need their Doppler identities (Hammunition #367)
    for event-driven sync; `reconcile` covers them meanwhile.
+5. Penguin Overlord (amendment below) is added to `repositories` and gets its
+   Area; its GYST caller goes green once its own settings exist.
 
 This repository has its own board (a user-owned project), created by its own
 `bootstrap` as the first real use and kept current by scheduled `reconcile`
@@ -222,6 +233,42 @@ from the maintainer's own `gh` login (ruling 6).
 `v0.1.0` when `bootstrap`, `audit` and `reconcile` are proven against the real
 suite board; signed tags; GYST release workflow.
 
+## Amendment 2026-10-07: Penguin Overlord joins the board (proposed)
+
+The maintainer said the same day that Penguin Overlord had not been added to
+GYST or to SAFO. GYST it has called since 2026-09-21 (five callers, in the
+baseline); a board it has never been on. The ruling this amendment asks for:
+**the Discord bot's issues and pull requests belong on the suite board**, the
+one place the "Why" section wants, rather than on a board of their own.
+
+What follows from the rulings already taken:
+
+- `ChiefGyk3D/penguin-overlord` is a personal-account repository, as GYST is.
+  It cannot be linked to the organization project (learned rule 5), so it
+  reaches the board the way GYST does: `reconcile` across `repositories`, and
+  an event-driven GYST `project-sync.yml` caller of its own until this
+  project's Action replaces it. That caller is written (penguin-overlord, the
+  pull request of 2026-10-07, with the plan
+  `docs/superpowers/plans/2026-10-07-board-and-gyst-onboarding.md`).
+- The `Area` option `Penguin Overlord` is a UI step. `bootstrap` creates
+  options for **new** fields only (ruling 5), and the sync script refuses an
+  option it cannot find before changing anything.
+- The `Area` field was absent from the `board.yaml` example although
+  `default_area`, `sync` and `reconcile` all refer to it; the example now
+  carries it. Its options are written as the example names them and are
+  corrected, like the rest of the example, until `audit` reports zero drift
+  (migration step 1).
+- The App must be installed on the `ChiefGyk3D` account with access to the
+  repository, and the `gha-projects` identity needs that repository's
+  subjects. Both are settings, not code; the plan lists them in order.
+- The first reconcile adds every open issue, and on 2026-10-07 thirty-one of
+  that repository's thirty-six were CodeQL findings filed by the security
+  scan. A triage pass before the first reconcile is in the same plan. The
+  general rule it suggests for `lessons.md`: a scanner that files issues
+  fills a board; close or fix its findings before a repository joins one.
+
 ## Open questions for the maintainer
 
-None: both were answered in SAFO #1 (rulings 6 and 7).
+One: the amendment above, that Penguin Overlord joins the suite board
+rather than getting a board of its own. The two original questions were
+answered in SAFO #1 (rulings 6 and 7).
