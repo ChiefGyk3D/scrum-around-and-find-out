@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: MIT
+# The generic legs (ruff, mypy, the pytest matrix, the smoke test, the workflow lint, and for the one shell
+# script shellcheck and shfmt) are ChiefGyk3D/git-your-ship-together's python-ci.yml and bash-ci.yml; each
+# reports its gate as `CI green`, here `ci / CI green` and `shell / CI green`. Nothing project-specific
+# lives in this file: safo has no Docker image and no service to smoke-test beyond `safo --version`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@a5b834a6e03e0bf7187eeebfa84685498d73b139 # v1.14.0
+    permissions:
+      contents: read
+      id-token: write   # Doppler OIDC, when an identity is configured; python-ci keeps it off the test job
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional Service Token fallback; unset means OIDC only
+    with:
+      python-versions: '["3.11", "3.12", "3.13"]'
+      install-command: |
+        python -m pip install --upgrade pip
+        pip install --require-hashes -r requirements-dev.txt
+        pip install --no-deps -e .
+      test-command: pytest --cov=safo --cov-report=xml
+      lint-install-command: pip install --require-hashes -r requirements-dev.txt
+      lint-command: |
+        ruff check .
+        ruff format --check .
+      typecheck-install-command: |
+        pip install --require-hashes -r requirements-dev.txt
+        pip install --no-deps -e .
+      typecheck-command: mypy
+      smoke-command: safo --version
+      docker-build: false
+      egress-policy: block
+
+  shell:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@a5b834a6e03e0bf7187eeebfa84685498d73b139 # v1.14.0
+    permissions:
+      contents: read
+    with:
+      workflow-lint: false   # python-ci already lints the workflow files
+      egress-policy: block
