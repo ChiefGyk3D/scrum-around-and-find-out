@@ -72,7 +72,8 @@ call() {
 
 if $apply; then
     command -v gh >/dev/null || die "gh is not installed"
-    echo "applying the baseline to $repo as $(gh api user --jq .login)"
+    login=$(gh api user --jq .login)
+    echo "applying the baseline to $repo as $login"
 else
     echo "plan only (nothing is changed); add --apply to run it against $repo"
 fi
@@ -103,7 +104,6 @@ fi
 
 call PUT "repos/$repo/actions/permissions/workflow" "" -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false
 call PUT "repos/$repo/actions/permissions/fork-pr-contributor-approval" "" -f approval_policy=all_external_contributors
-call PUT "repos/$repo/actions/permissions" "" -F enabled=true -f allowed_actions=selected
 
 selected="repos/$GYST/contents/baseline/selected-actions.json?ref=$GYST_SHA"
 echo "+ gh api $selected --jq .content | base64 -d > selected-actions.json   # GYST's list, at the pinned commit"
@@ -112,8 +112,12 @@ if $apply; then
     list=$(mktemp)
     trap 'rm -f "$list"' EXIT
     gh api "$selected" --jq .content | base64 -d >"$list"
+    jq -e . >"$list.jq" <"$list" || die "allow-list is not valid JSON"
+    mv "$list.jq" "$list"
     gh api -X PUT "repos/$repo/actions/permissions/selected-actions" --input "$list" >/dev/null
 fi
+
+call PUT "repos/$repo/actions/permissions" "" -F enabled=true -f allowed_actions=selected
 
 call PATCH "repos/$repo" "" -f 'security_and_analysis[secret_scanning][status]=enabled' \
     -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'
@@ -124,7 +128,11 @@ call PATCH "repos/$repo" "" -F allow_auto_merge=true
 ruleset='{"name": "Version tags are immutable", "target": "tag", "enforcement": "active",
  "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
  "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}, {"type": "update"}]}'
-if $apply && [ -n "$(gh api "repos/$repo/rulesets" --jq '.[] | select(.target == "tag") | .id')" ]; then
+has_tag_ruleset=""
+if $apply; then
+    has_tag_ruleset=$(gh api "repos/$repo/rulesets" --jq '.[] | select(.target == "tag") | .id')
+fi
+if [ -n "$has_tag_ruleset" ]; then
     echo "a tag ruleset exists already; not adding another"
 else
     call POST "repos/$repo/rulesets" "$ruleset"

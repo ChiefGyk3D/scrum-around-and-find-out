@@ -15,24 +15,48 @@ ROOT = Path(__file__).parent.parent
 SCRIPT = ROOT / "scripts" / "apply-baseline.sh"
 REPO = "ChiefGyk3D/scrum-around-and-find-out"
 
-FAKE_GH = """#!/bin/sh
-echo "$*" >> "$LOG"
-case "$*" in
-*"--input -"*) cat >> "$LOG.stdin" ;;
-esac
-case "$*" in
-"api user"*) echo maintainer ;;
-*selected-actions.json?ref=*) printf '%s' 'eyJnaXRodWJfb3duZWRfYWxsb3dlZCI6IHRydWV9' ;;
-esac
-exit 0
-"""
+
+def make_fake_gh(fail_on_cmd: str = "", graphql_response: str = "") -> str:
+    """Build a fake gh script that can fail on a specific command or return custom GraphQL responses."""
+    script_lines = [
+        "#!/bin/sh",
+        'echo "$*" >> "$LOG"',
+        'case "$*" in',
+        '*"--input -"*) cat >> "$LOG.stdin" ;;',
+        "esac",
+    ]
+    if fail_on_cmd:
+        script_lines.append(f'[ "$*" = "{fail_on_cmd}" ] && exit 1')
+    if graphql_response:
+        script_lines.extend(
+            [
+                'case "$*" in',
+                f"*graphql*) printf \"%s\" '{graphql_response}' ;;",
+                "esac",
+            ]
+        )
+    script_lines.extend(
+        [
+            'case "$*" in',
+            '"api user"*) echo maintainer ;;',
+            "*selected-actions.json?ref=*) printf '%s' 'eyJnaXRodWJfb3duZWRfYWxsb3dlZCI6IHRydWV9' ;;",
+            "esac",
+            "exit 0",
+        ]
+    )
+    return "\n".join(script_lines)
 
 
-def run(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
+def run(
+    tmp_path: Path,
+    *args: str,
+    fail_on_cmd: str = "",
+    graphql_response: str = "",
+) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     gh = bin_dir / "gh"
-    gh.write_text(FAKE_GH)
+    gh.write_text(make_fake_gh(fail_on_cmd=fail_on_cmd, graphql_response=graphql_response))
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     log = tmp_path / "gh.log"
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "LOG": str(log)}
@@ -112,3 +136,34 @@ def test_an_unknown_option_and_a_bad_repository_are_refused(tmp_path: Path) -> N
     assert done.returncode == 1 and "unknown option" in done.stderr and calls == []
     done, _, _ = run(tmp_path, "--repo", "no-slash")
     assert done.returncode == 1 and "OWNER/NAME" in done.stderr
+
+
+def test_apply_with_graphql_showing_bypass_exits_nonzero_and_prints_refusal(tmp_path: Path) -> None:
+    """GraphQL response showing a bypassForcePushAllowances entry forces exit non-zero."""
+    graphql_response = '{"data":{"repository":{"branchProtectionRules":{"nodes":[{"pattern":"main","allowsForcePushes":false,"bypassForcePushAllowances":{"totalCount":1}}]}}}}'  # noqa: E501
+    done, _, _ = run(tmp_path, "--apply", graphql_response=graphql_response)
+    assert done.returncode != 0, "should exit non-zero when bypasses exist"
+    assert "force pushes are still possible" in done.stderr
+
+
+def test_apply_with_failing_gh_call_exits_nonzero_before_any_put(tmp_path: Path) -> None:
+    """A failing gh call (e.g. 'api user') under --apply exits non-zero before any PUT/POST/PATCH."""
+    done, calls, _ = run(tmp_path, "--apply", fail_on_cmd="api user --jq .login")
+    assert done.returncode != 0, "should exit non-zero when gh call fails"
+    # No PUT, POST, or PATCH should be logged before the gh failure
+    joined = "\n".join(calls)
+    assert "-X PUT" not in joined and "-X POST" not in joined and "-X PATCH" not in joined
+
+
+def test_apply_with_allow_list_fetch_failure_exits_nonzero_and_skips_allowed_actions(
+    tmp_path: Path,
+) -> None:
+    """A failing allow-list fetch under --apply exits non-zero and no 'allowed_actions=selected' call is logged."""
+    fail_cmd = (
+        "api repos/ChiefGyk3D/git-your-ship-together/contents/baseline/"
+        "selected-actions.json?ref=a5b834a6e03e0bf7187eeebfa84685498d73b139 --jq .content"
+    )
+    done, calls, _ = run(tmp_path, "--apply", fail_on_cmd=fail_cmd)
+    assert done.returncode != 0, "should exit non-zero when allow-list fetch fails"
+    joined = "\n".join(calls)
+    assert "allowed_actions=selected" not in joined, "allowed_actions should not be set if fetch fails"
