@@ -15,8 +15,14 @@ from typing import Any
 import pytest
 
 _real_connect = socket.socket.connect
+_real_connect_ex = socket.socket.connect_ex
 _real_create_connection = socket.create_connection
 _real_getaddrinfo = socket.getaddrinfo
+_real_gethostbyname = socket.gethostbyname
+_real_gethostbyname_ex = socket.gethostbyname_ex
+_real_getnameinfo = socket.getnameinfo
+_real_sendto = socket.socket.sendto
+_real_sendmsg = socket.socket.sendmsg
 
 
 class NetworkAccessDenied(RuntimeError):
@@ -46,6 +52,22 @@ def _loopback_only(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             raise refuse("getaddrinfo", host)
         return _real_getaddrinfo(host, *args, **kwargs)
 
+    def gethostbyname(host: Any) -> Any:
+        if not is_local(host):
+            raise refuse("gethostbyname", host)
+        return _real_gethostbyname(host)
+
+    def gethostbyname_ex(host: Any) -> Any:
+        if not is_local(host):
+            raise refuse("gethostbyname_ex", host)
+        return _real_gethostbyname_ex(host)
+
+    def getnameinfo(address: Any, *args: Any, **kwargs: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else address
+        if not is_local(host):
+            raise refuse("getnameinfo", host)
+        return _real_getnameinfo(address, *args, **kwargs)
+
     def create_connection(address: Any, *args: Any, **kwargs: Any) -> Any:
         host = address[0] if isinstance(address, tuple) else address
         if not is_local(host):
@@ -58,7 +80,33 @@ def _loopback_only(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             raise refuse("socket.connect", host)
         return _real_connect(self, address)
 
+    def connect_ex(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else address
+        if self.family != socket.AF_UNIX and not is_local(host):
+            raise refuse("socket.connect_ex", host)
+        return _real_connect_ex(self, address)
+
+    def sendto(self: socket.socket, data: Any, address: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(address, tuple):
+            host = address[0]
+            if self.family != socket.AF_UNIX and not is_local(host):
+                raise refuse("socket.sendto", host)
+        return _real_sendto(self, data, address, *args, **kwargs)
+
+    def sendmsg(self: socket.socket, buffers: Any, ancdata: Any = None, flags: Any = 0, address: Any = None) -> Any:
+        if address is not None and isinstance(address, tuple):
+            host = address[0]
+            if self.family != socket.AF_UNIX and not is_local(host):
+                raise refuse("socket.sendmsg", host)
+        return _real_sendmsg(self, buffers, ancdata, flags, address)
+
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket, "gethostbyname", gethostbyname)
+    monkeypatch.setattr(socket, "gethostbyname_ex", gethostbyname_ex)
+    monkeypatch.setattr(socket, "getnameinfo", getnameinfo)
     monkeypatch.setattr(socket, "create_connection", create_connection)
     monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket.socket, "sendto", sendto)
+    monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
     yield

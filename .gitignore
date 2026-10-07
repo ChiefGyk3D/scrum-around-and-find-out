@@ -5,13 +5,13 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .venv/
-build/
-dist/
+/build/
+/dist/
 *.egg-info/
 .coverage
 coverage.xml
-check.log
+/check.log
 wiki-out/
 board.local.yaml
 agents.local.yaml
-outcomes.jsonl
+/outcomes.jsonl
