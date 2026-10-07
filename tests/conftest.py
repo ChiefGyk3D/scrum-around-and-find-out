@@ -86,12 +86,16 @@ def _loopback_only(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             raise refuse("socket.connect_ex", host)
         return _real_connect_ex(self, address)
 
-    def sendto(self: socket.socket, data: Any, address: Any, *args: Any, **kwargs: Any) -> Any:
-        if isinstance(address, tuple):
-            host = address[0]
+    def sendto(self: socket.socket, data: Any, *args: Any, **kwargs: Any) -> Any:
+        # sendto has two forms:
+        # 2-arg: sendto(data, address) -> args = (address,)
+        # 3-arg: sendto(data, flags, address) -> args = (flags, address)
+        # In both cases, the address is args[-1]
+        if args and isinstance(args[-1], tuple):
+            host = args[-1][0]
             if self.family != socket.AF_UNIX and not is_local(host):
                 raise refuse("socket.sendto", host)
-        return _real_sendto(self, data, address, *args, **kwargs)
+        return _real_sendto(self, data, *args, **kwargs)
 
     def sendmsg(self: socket.socket, buffers: Any, ancdata: Any = None, flags: Any = 0, address: Any = None) -> Any:
         if address is not None and isinstance(address, tuple):

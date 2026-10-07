@@ -70,3 +70,37 @@ def test_loopback_connect_and_connect_ex_are_allowed() -> None:
             pytest.fail(f"loopback connect_ex should be allowed: {e}")
     finally:
         server.close()
+
+
+def test_udp_sendto_three_argument_form_to_public_address_is_refused() -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with pytest.raises(NetworkAccessDenied, match=re.escape("203.0.113.5")):
+            sock.sendto(b"test", 0, ("203.0.113.5", 53))
+    finally:
+        sock.close()
+
+
+def test_gethostbyname_ex_of_a_domain_is_refused() -> None:
+    with pytest.raises(NetworkAccessDenied, match=re.escape("example.org")):
+        socket.gethostbyname_ex("example.org")
+
+
+def test_getnameinfo_of_a_public_address_is_refused() -> None:
+    with pytest.raises(NetworkAccessDenied, match=re.escape("203.0.113.5")):
+        socket.getnameinfo(("203.0.113.5", 80), 0)
+
+
+def test_getnameinfo_of_loopback_is_allowed() -> None:
+    result = socket.getnameinfo(("127.0.0.1", 80), 0)
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+
+
+def test_sendmsg_to_a_public_address_is_refused() -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with pytest.raises(NetworkAccessDenied, match=re.escape("203.0.113.5")):
+            sock.sendmsg([b"test"], [], 0, ("203.0.113.5", 53))
+    finally:
+        sock.close()
