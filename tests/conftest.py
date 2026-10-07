@@ -14,6 +14,9 @@ from typing import Any
 
 import pytest
 
+from fakegh import FakeGitHub
+from safo.graphql import Client
+
 _real_connect = socket.socket.connect
 _real_connect_ex = socket.socket.connect_ex
 _real_create_connection = socket.create_connection
@@ -114,3 +117,21 @@ def _loopback_only(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(socket.socket, "sendto", sendto)
     monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
     yield
+
+
+@pytest.fixture
+def fake() -> Iterator[FakeGitHub]:
+    """A fake GitHub on a loopback port, torn down with the test."""
+    with FakeGitHub().serve() as server:
+        yield server
+
+
+@pytest.fixture
+def sleeps() -> list[float]:
+    """Every backoff the client asked for. Nothing actually sleeps."""
+    return []
+
+
+@pytest.fixture
+def client(fake: FakeGitHub, sleeps: list[float]) -> Client:
+    return Client(fake.token, fake.url, sleep=sleeps.append)

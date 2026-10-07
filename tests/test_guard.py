@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import re
 import socket
+from urllib.parse import urlsplit
 
 import pytest
 
 from conftest import NetworkAccessDenied
+from fakegh import FakeGitHub
 
 
 def test_a_connection_to_a_public_address_is_refused_by_name() -> None:
@@ -104,3 +106,8 @@ def test_sendmsg_to_a_public_address_is_refused() -> None:
             sock.sendmsg([b"test"], [], 0, ("203.0.113.5", 53))
     finally:
         sock.close()
+
+
+def test_loopback_is_allowed(fake: FakeGitHub) -> None:
+    with socket.create_connection(("127.0.0.1", urlsplit(fake.url).port), timeout=2):
+        pass

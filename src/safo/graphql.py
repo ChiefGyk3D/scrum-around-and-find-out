@@ -1,0 +1,206 @@
+# SPDX-License-Identifier: MIT
+"""GraphQL over urllib: retries, backoff, pagination through `$endCursor`.
+
+The token stays inside this object. It is never put in a message, a log line or
+an exception, and a dry run sends no mutation at all.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import Any, TextIO
+
+from safo import __version__
+from safo.errors import ApiError, AuthError, ConfigError, NotFoundError, RateLimitedError, SafoError
+
+JSON = dict[str, Any]
+GRAPHQL_URL = "https://api.github.com/graphql"
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+_OPERATION = re.compile(r"^\s*(query|mutation)\s+(\w+)")
+
+
+def operation_name(document: str) -> str:
+    """The one named operation a document defines. Every document must have a name."""
+    match = _OPERATION.match(document)
+    if not match:
+        raise SafoError("a GraphQL document must start with `query Name` or `mutation Name`")
+    return match.group(2)
+
+
+def is_mutation(document: str) -> bool:
+    match = _OPERATION.match(document)
+    return bool(match and match.group(1) == "mutation")
+
+
+def _check_url(url: str) -> None:
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in LOOPBACK):
+        return
+    raise ConfigError(f"GraphQL URL {url!r} must be https (plain http is accepted for loopback only)")
+
+
+class Client:
+    """`execute(document, variables)`: one named operation, retried on transient failures."""
+
+    def __init__(
+        self,
+        token: str,
+        url: str = GRAPHQL_URL,
+        *,
+        dry_run: bool = False,
+        sleep: Callable[[float], None] = time.sleep,
+        max_attempts: int = 5,
+        max_wait: float = 120.0,
+        timeout: float = 60.0,
+        out: TextIO | None = None,
+    ) -> None:
+        _check_url(url)
+        self._token = token
+        self._url = url
+        self.dry_run = dry_run
+        self._sleep = sleep
+        self._max_attempts = max_attempts
+        self._max_wait = max_wait
+        self._timeout = timeout
+        self._out = out or sys.stdout
+        self.skipped = 0
+        self.requests = 0
+
+    def __repr__(self) -> str:
+        return f"Client(url={self._url!r}, dry_run={self.dry_run})"
+
+    # -- one request ---------------------------------------------------------
+
+    def execute(
+        self, document: str, variables: Mapping[str, Any] | None = None, *, dry_result: JSON | None = None
+    ) -> JSON:
+        op = operation_name(document)
+        if "updateProjectV2Field" in document:
+            # It regenerates every option id and wipes every item's value for the field.
+            raise SafoError(f"{op}: updateProjectV2Field is never sent; see docs/lessons.md")
+        variables = dict(variables or {})
+        if self.dry_run and is_mutation(document):
+            self.skipped += 1
+            print(f"dry run: would {op} {json.dumps(variables, sort_keys=True, default=str)}", file=self._out)
+            return dry_result or {}
+        payload = json.dumps({"query": document, "variables": variables, "operationName": op}).encode()
+        for attempt in range(1, self._max_attempts + 1):
+            last = attempt == self._max_attempts
+            try:
+                status, headers, raw = self._post(payload)
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
+                if last:
+                    raise ApiError(f"could not reach GitHub for {op}: {err.__class__.__name__}") from None
+                self._sleep(min(self._max_wait, 2.0**attempt))
+                continue
+            self.requests += 1
+            if status == 401:
+                raise AuthError(f"GitHub refused the token (401) on {op}")
+            if status in (403, 429):
+                wait = self._rate_limit_wait(headers, raw, attempt)
+                if wait is None:
+                    raise AuthError(
+                        f"GitHub refused the token ({status}) on {op}; it needs Projects read/write and "
+                        "Issues and Pull requests read on the installation that owns the repositories"
+                    )
+                if last or wait > self._max_wait:
+                    raise RateLimitedError(f"{op}: still rate limited after {attempt} attempts")
+                self._sleep(wait)
+                continue
+            if status in (500, 502, 503, 504):
+                if last:
+                    raise ApiError(f"GitHub answered {status} to {op} {attempt} times")
+                self._sleep(min(self._max_wait, 2.0**attempt))
+                continue
+            if status != 200:
+                raise ApiError(f"GitHub answered {status} to {op}")
+            body: JSON = json.loads(raw)
+            errors: list[dict[str, Any]] = body.get("errors") or []
+            if not errors:
+                data: JSON = body["data"]
+                return data
+            types = {str(e.get("type", "")) for e in errors}
+            message = "; ".join(str(e.get("message", e)) for e in errors)
+            if "INSUFFICIENT_SCOPES" in types:
+                raise AuthError(
+                    f"{op}: the token lacks a scope the query needs ({message}); for `gh` run "
+                    "`gh auth refresh -s project`, for an App grant the Projects permission"
+                )
+            if "RATE_LIMITED" in types and not last:
+                self._sleep(min(self._max_wait, 30.0 * attempt))
+                continue
+            if types == {"NOT_FOUND"}:
+                raise NotFoundError(f"{op}: {message}", errors, body.get("data"))
+            raise ApiError(f"GitHub rejected {op}: {message}", errors, body.get("data"))
+        raise ApiError(f"GitHub kept failing {op}")  # pragma: no cover - the loop always returns or raises
+
+    def _post(self, payload: bytes) -> tuple[int, Mapping[str, str], bytes]:
+        request = urllib.request.Request(  # noqa: S310 - _check_url allows https or loopback only
+            self._url,
+            data=payload,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+                "User-Agent": f"safo/{__version__}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
+                return response.status, _lower(response.headers.items()), response.read()
+        except urllib.error.HTTPError as err:
+            return err.code, _lower(err.headers.items()), err.read()
+
+    def _rate_limit_wait(self, headers: Mapping[str, str], raw: bytes, attempt: int) -> float | None:
+        """Seconds to wait, or None when a 403 is a refusal rather than a rate limit."""
+        if "retry-after" in headers:
+            try:
+                return float(headers["retry-after"])
+            except ValueError:
+                return 60.0
+        text = raw.decode("utf-8", "replace").lower()
+        if "secondary rate limit" in text or "abuse detection" in text:
+            return min(self._max_wait, 60.0 * attempt)
+        if headers.get("x-ratelimit-remaining") == "0" and "x-ratelimit-reset" in headers:
+            return max(0.0, float(headers["x-ratelimit-reset"]) - time.time())
+        return None
+
+    # -- pagination ------------------------------------------------------------
+
+    def pages(self, document: str, variables: Mapping[str, Any], path: Sequence[str]) -> Iterator[JSON]:
+        """Yield each page's connection object. The document declares `$endCursor: String`."""
+        cursor: str | None = None
+        seen: set[str] = set()
+        while True:
+            data = self.execute(document, {**variables, "endCursor": cursor})
+            node: Any = data
+            for key in path:
+                node = node.get(key) if isinstance(node, dict) else None
+                if node is None:
+                    raise NotFoundError(f"{operation_name(document)}: nothing at {'.'.join(path)}")
+            connection: JSON = node
+            yield connection
+            info = connection["pageInfo"]
+            if not info["hasNextPage"]:
+                return
+            cursor = str(info["endCursor"])
+            if cursor in seen:
+                raise ApiError(f"{operation_name(document)}: GitHub repeated the cursor {cursor}")
+            seen.add(cursor)
+
+    def nodes(self, document: str, variables: Mapping[str, Any], path: Sequence[str]) -> Iterator[JSON]:
+        for page in self.pages(document, variables, path):
+            for node in page["nodes"]:
+                if node is not None:
+                    yield node
+
+
+def _lower(items: Any) -> dict[str, str]:
+    return {str(k).lower(): str(v) for k, v in items}
