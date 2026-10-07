@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -55,6 +56,8 @@ class Fault:
     op: str | None = None  # only requests for this operation
     after: int = 0  # let this many matching requests through first
     commit_then_drop: bool = False  # if true, process the request (record mutation) then drop connection
+    commit: bool = False  # if true, record the mutation (it was applied) and still answer with this fault
+    delay: float = 0.0  # seconds to wait before answering, to trip a client timeout
 
 
 @dataclass
@@ -286,11 +289,14 @@ class FakeGitHub:
         self.requests.append(op)
         variables: JSON = body.get("variables") or {}
 
-        # If commit_then_drop, process the mutation first
-        if fault and fault.commit_then_drop:
+        if fault and fault.delay:
+            time.sleep(fault.delay)
+
+        # A committing fault records the mutation first: the server applied it, then misbehaved
+        if fault and (fault.commit_then_drop or fault.commit):
             if match.group(1) == "mutation":
                 self.mutations.append(Mutation(op, variables))
-            return fault.status, fault.headers, fault.body.encode(), True
+            return fault.status, fault.headers, fault.body.encode(), fault.commit_then_drop
 
         # Normal fault handling (return immediately without processing)
         if fault:

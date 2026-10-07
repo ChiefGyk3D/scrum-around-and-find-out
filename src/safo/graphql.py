@@ -66,6 +66,55 @@ def _check_url(url: str) -> None:
     raise ConfigError(f"GraphQL URL {url!r} must be https (plain http is accepted for loopback only)")
 
 
+class _Transport(Exception):
+    """The request did not complete. `before_send` is true when no byte of it left this machine."""
+
+    def __init__(self, error: Exception, *, before_send: bool) -> None:
+        super().__init__(error.__class__.__name__)
+        self.error = error
+        self.before_send = before_send
+
+
+class _Connected:
+    """Set once the TCP (and TLS) connection is up; before that nothing has been sent."""
+
+    done = False
+
+
+def _tracking(base: type[http.client.HTTPConnection], state: _Connected) -> type[http.client.HTTPConnection]:
+    class Tracking(base):  # type: ignore[valid-type, misc]
+        def connect(self) -> None:
+            super().connect()
+            state.done = True
+
+    return Tracking
+
+
+def _http_handler(state: _Connected) -> urllib.request.HTTPHandler:
+    class Handler(urllib.request.HTTPHandler):
+        def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+            return self.do_open(_tracking(http.client.HTTPConnection, state), req)
+
+    return Handler()
+
+
+def _https_handler(state: _Connected) -> urllib.request.HTTPSHandler:
+    class Handler(urllib.request.HTTPSHandler):
+        def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+            return self.do_open(
+                _tracking(http.client.HTTPSConnection, state), req, context=getattr(self, "_context", None)
+            )
+
+    return Handler()
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse all redirects: any 3xx becomes an error, so the token never follows one."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, hdrs: Any, newurl: str) -> Any:
+        return None
+
+
 class Client:
     """`execute(document, variables)`: one named operation, retried on transient failures."""
 
@@ -106,24 +155,112 @@ class Client:
             # It regenerates every option id and wipes every item's value for the field.
             raise SafoError(f"{op}: updateProjectV2Field is never sent; see docs/lessons.md")
         variables = dict(variables or {})
-        is_mut = _is_mutation_robust(document)
-        if self.dry_run and is_mut:
-            self.skipped += 1
-            print(f"dry run: would {op} {json.dumps(variables, sort_keys=True, default=str)}", file=self._out)
-            return dry_result or {}
-        payload = json.dumps({"query": document, "variables": variables, "operationName": op}).encode()
+        if _is_mutation_robust(document):
+            if self.dry_run:
+                self.skipped += 1
+                print(f"dry run: would {op} {json.dumps(variables, sort_keys=True, default=str)}", file=self._out)
+                return dry_result or {}
+            return self._mutate(op, self._payload(document, variables, op))
+        return self._query(op, self._payload(document, variables, op))
+
+    @staticmethod
+    def _payload(document: str, variables: Mapping[str, Any], op: str) -> bytes:
+        return json.dumps({"query": document, "variables": variables, "operationName": op}).encode()
+
+    # -- mutations: one rule ---------------------------------------------------
+    #
+    # A mutation is never replayed unless the server provably refused it before running it. The
+    # refusals that prove it are a connection that failed before any byte was sent, HTTP 401, and an
+    # HTTP-level 403/429 that carries a rate-limit signal. Once the request has gone out, the only
+    # success is HTTP 200 with a JSON object holding `data` as an object and no errors. Anything
+    # else (a timeout, a 5xx, a dropped connection, a body that is not what it should be, any
+    # error entry at all, even next to data) says nothing about whether it was applied.
+
+    def _mutate(self, op: str, payload: bytes) -> JSON:
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                status, headers, raw = self._post(payload)
+            except _Transport as err:
+                if err.before_send:
+                    raise ApiError(f"could not reach GitHub for {op}: {err.error.__class__.__name__}") from None
+                raise self._unknown(op, "the connection failed after the request was sent", cause=err.error) from None
+            self.requests += 1
+            if status == 401:
+                raise AuthError(f"GitHub refused the token (401) on {op}")
+            if status in (403, 429):
+                wait = self._rate_limit_wait(headers, raw, attempt)
+                if wait is not None:
+                    if attempt == self._max_attempts or wait > self._max_wait:
+                        raise RateLimitedError(f"{op}: still rate limited after {attempt} attempts")
+                    self._sleep(wait)
+                    continue
+            return self._mutation_data(op, status, raw)
+        raise ApiError(f"GitHub kept failing {op}")  # pragma: no cover - the loop always returns or raises
+
+    def _mutation_data(self, op: str, status: int, raw: bytes) -> JSON:
+        """The data of a clean success, or UnknownOutcomeError carrying everything the server said."""
+        try:
+            body: Any = json.loads(raw)
+        except (ValueError, RecursionError):
+            body = None
+            parsed = False
+        else:
+            parsed = True
+        data: JSON | None = None
+        errors: list[dict[str, Any]] | None = None
+        if isinstance(body, dict):
+            if isinstance(body.get("data"), dict):
+                data = body["data"]
+            if isinstance(body.get("errors"), list):
+                errors = body["errors"]
+
+        def unknown(reason: str) -> UnknownOutcomeError:
+            return self._unknown(op, reason, data=data, errors=errors, status=status)
+
+        if status != 200:
+            raise unknown(f"GitHub answered {status}")
+        if not parsed:
+            raise unknown("the response was not valid JSON")
+        if not isinstance(body, dict):
+            raise unknown(f"the response was {type(body).__name__}, not an object")
+        if "errors" in body and body["errors"] != []:
+            raise unknown("the response carried errors: " + _describe(body["errors"]))
+        if data is None:
+            raise unknown("the response had no data object")
+        return data
+
+    def _unknown(
+        self,
+        op: str,
+        reason: str,
+        *,
+        cause: Exception | None = None,
+        data: JSON | None = None,
+        errors: list[dict[str, Any]] | None = None,
+        status: int | None = None,
+    ) -> UnknownOutcomeError:
+        message = (
+            f"{op}: the mutation may or may not have been applied ({reason}); "
+            "re-read state before retrying, do not simply resend it"
+        )
+        return UnknownOutcomeError(
+            message.replace(self._token, "***") if self._token else message,
+            cause,
+            data=data,
+            errors=errors,
+            status=status,
+        )
+
+    # -- queries: read-only, so safe to retry -----------------------------------
+
+    def _query(self, op: str, payload: bytes) -> JSON:
         for attempt in range(1, self._max_attempts + 1):
             last = attempt == self._max_attempts
             try:
                 status, headers, raw = self._post(payload)
-            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as err:
-                if is_mut:
-                    raise UnknownOutcomeError(
-                        f"{op}: the mutation may or may not have been applied; re-read state to determine next steps",
-                        err,
-                    ) from None
+            except _Transport as err:
                 if last:
-                    raise ApiError(f"could not reach GitHub for {op}: {err.__class__.__name__}") from None
+                    raise ApiError(f"could not reach GitHub for {op}: {err.error.__class__.__name__}") from None
                 self._sleep(min(self._max_wait, 2.0**attempt))
                 continue
             self.requests += 1
@@ -141,11 +278,6 @@ class Client:
                 self._sleep(wait)
                 continue
             if status in (500, 502, 503, 504):
-                if is_mut:
-                    raise UnknownOutcomeError(
-                        f"{op}: the mutation may or may not have been applied; re-read state to determine next steps",
-                        ApiError(f"GitHub answered {status}"),
-                    ) from None
                 if last:
                     raise ApiError(f"GitHub answered {status} to {op} {attempt} times")
                 self._sleep(min(self._max_wait, 2.0**attempt))
@@ -173,14 +305,6 @@ class Client:
                     f"{op}: the token lacks a scope the query needs ({message}); for `gh` run "
                     "`gh auth refresh -s project`, for an App grant the Projects permission"
                 )
-            # For mutations, any error in the response means the outcome is unknown
-            if is_mut:
-                raise UnknownOutcomeError(
-                    f"{op}: the mutation may or may not have been applied; re-read state to determine next steps",
-                    data=body.get("data"),
-                    errors=errors,
-                )
-            # For queries, RATE_LIMITED can be retried
             if "RATE_LIMITED" in types and not last:
                 self._sleep(min(self._max_wait, 30.0 * attempt))
                 continue
@@ -190,6 +314,7 @@ class Client:
         raise ApiError(f"GitHub kept failing {op}")  # pragma: no cover - the loop always returns or raises
 
     def _post(self, payload: bytes) -> tuple[int, Mapping[str, str], bytes]:
+        """One POST. A transport failure is raised as _Transport, saying whether any byte was sent."""
         request = urllib.request.Request(  # noqa: S310 - _check_url allows https or loopback only
             self._url,
             data=payload,
@@ -200,20 +325,17 @@ class Client:
                 "User-Agent": f"safo/{__version__}",
             },
         )
-
-        class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-            """Refuse all redirects: any 3xx becomes an error."""
-
-            def redirect_request(self, req: Any, fp: Any, code: int, msg: str, hdrs: Any, newurl: str) -> Any:
-                return None
-
-        opener = urllib.request.build_opener(NoRedirectHandler)
+        connected = _Connected()
+        opener = urllib.request.build_opener(_NoRedirect, _http_handler(connected), _https_handler(connected))
         try:
-            response = opener.open(request, timeout=self._timeout)
-            with response as resp:
-                return resp.status, _lower(resp.headers.items()), resp.read()
-        except urllib.error.HTTPError as err:
-            return err.code, _lower(err.headers.items()), err.read()
+            try:
+                response = opener.open(request, timeout=self._timeout)
+                with response as resp:
+                    return resp.status, _lower(resp.headers.items()), resp.read()
+            except urllib.error.HTTPError as err:
+                return err.code, _lower(err.headers.items()), err.read()
+        except (OSError, http.client.HTTPException) as err:
+            raise _Transport(err, before_send=not connected.done) from None
 
     def _rate_limit_wait(self, headers: Mapping[str, str], raw: bytes, attempt: int) -> float | None:
         """Seconds to wait, or None when a 403 is a refusal rather than a rate limit."""
@@ -273,6 +395,13 @@ class Client:
             for node in page["nodes"]:
                 if node is not None:
                     yield node
+
+
+def _describe(errors: Any) -> str:
+    """The error messages in a response, short enough for one line."""
+    entries = errors if isinstance(errors, list) else [errors]
+    text = "; ".join(str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in entries)
+    return text if len(text) <= 300 else text[:300] + "..."
 
 
 def _lower(items: Any) -> dict[str, str]:

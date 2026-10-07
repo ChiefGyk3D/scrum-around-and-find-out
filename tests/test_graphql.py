@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import io
+import json
+from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -463,3 +466,194 @@ def test_query_with_in_body_rate_limited_still_retries(fake: FakeGitHub, sleeps:
         assert result == {"test": "result"}
         assert call_count == 2
         assert len(sleeps) == 1
+
+
+# -- the one rule for mutations ------------------------------------------------------------------
+#
+# After a mutation has been sent, only HTTP 200 with a JSON object, `data` an object and no errors
+# is success. Everything else is an unknown outcome and is never sent twice. Only a refusal that
+# proves the server never ran it (nothing sent, 401, an HTTP-level rate limit) keeps its own error.
+
+ADD = "mutation AddItem($p: ID!) { addItem(id: $p) { id } }"
+PARTIAL = {"addItem": {"id": "ITEM_1"}}
+PARTIAL_JSON = '{"addItem": {"id": "ITEM_1"}}'
+
+
+def _err(kind: str, message: str) -> dict[str, str]:
+    return {"type": kind, "message": message}
+
+
+@dataclass
+class Row:
+    name: str
+    fault: Fault
+    expect: type[Exception] | None  # None means a clean success
+    requests: int = 1
+    data: dict[str, Any] | None = None
+    errors: list[dict[str, Any]] | None = None
+    status: int | None = None
+    committed: bool = False  # the fake applied the mutation before it answered
+
+
+def _answer(status: int, body: str, **kw: Any) -> Fault:
+    return Fault(status, kw.pop("headers", {}), body, times=99, op="AddItem", **kw)
+
+
+ROWS = [
+    # -- the request went out and the answer cannot be trusted
+    Row("drop after commit", _answer(200, "{}", commit_then_drop=True), UnknownOutcomeError, committed=True),
+    Row("timeout", _answer(200, '{"data": {}}', delay=1.0), UnknownOutcomeError),
+    *[
+        Row(f"http {code}", _answer(code, "gateway", commit=True), UnknownOutcomeError, status=code, committed=True)
+        for code in (500, 502, 503, 504)
+    ],
+    *[
+        Row(f"http {code}", _answer(code, "{}", commit=True), UnknownOutcomeError, status=code, committed=True)
+        for code in (201, 204, 302, 400, 404, 418)
+    ],
+    Row(
+        "403 without a rate-limit signal",
+        _answer(403, "{}", commit=True),
+        UnknownOutcomeError,
+        status=403,
+        committed=True,
+    ),
+    Row("invalid JSON", _answer(200, "not json", commit=True), UnknownOutcomeError, status=200, committed=True),
+    Row("empty body", _answer(200, "", commit=True), UnknownOutcomeError, status=200, committed=True),
+    *[
+        Row(f"non-object {body}", _answer(200, body, commit=True), UnknownOutcomeError, status=200, committed=True)
+        for body in ("null", "[]", "42", '"x"')
+    ],
+    Row("data missing", _answer(200, "{}", commit=True), UnknownOutcomeError, status=200, committed=True),
+    Row("data null", _answer(200, '{"data": null}', commit=True), UnknownOutcomeError, status=200, committed=True),
+    Row("data a list", _answer(200, '{"data": []}', commit=True), UnknownOutcomeError, status=200, committed=True),
+    Row("data a string", _answer(200, '{"data": "x"}', commit=True), UnknownOutcomeError, status=200, committed=True),
+    Row(
+        "errors null beside data",
+        _answer(200, '{"data": {"addItem": null}, "errors": null}', commit=True),
+        UnknownOutcomeError,
+        data={"addItem": None},
+        status=200,
+        committed=True,
+    ),
+    # -- an error entry of any kind, with or without partial data
+    *[
+        Row(
+            f"{kind} with partial data",
+            _answer(200, json.dumps({"data": PARTIAL, "errors": [_err(kind, "boom")]}), commit=True),
+            UnknownOutcomeError,
+            data=PARTIAL,
+            errors=[_err(kind, "boom")],
+            status=200,
+            committed=True,
+        )
+        for kind in ("RATE_LIMITED", "INSUFFICIENT_SCOPES", "NOT_FOUND", "FORBIDDEN", "INTERNAL")
+    ],
+    *[
+        Row(
+            f"{kind} with null data",
+            _answer(200, json.dumps({"data": None, "errors": [_err(kind, "boom")]}), commit=True),
+            UnknownOutcomeError,
+            errors=[_err(kind, "boom")],
+            status=200,
+            committed=True,
+        )
+        for kind in ("RATE_LIMITED", "INSUFFICIENT_SCOPES", "NOT_FOUND", "FORBIDDEN", "INTERNAL")
+    ],
+    Row(
+        "errors without data",
+        _answer(200, json.dumps({"errors": [_err("INTERNAL", "boom")]}), commit=True),
+        UnknownOutcomeError,
+        errors=[_err("INTERNAL", "boom")],
+        status=200,
+        committed=True,
+    ),
+    Row(
+        "one root field applied, another out of scope",
+        _answer(
+            200,
+            json.dumps(
+                {
+                    "data": {"addItem": {"id": "ITEM_1"}, "removeLabel": None},
+                    "errors": [_err("INSUFFICIENT_SCOPES", "removeLabel needs a scope")],
+                }
+            ),
+            commit=True,
+        ),
+        UnknownOutcomeError,
+        data={"addItem": {"id": "ITEM_1"}, "removeLabel": None},
+        errors=[_err("INSUFFICIENT_SCOPES", "removeLabel needs a scope")],
+        status=200,
+        committed=True,
+    ),
+    # -- refused before the server ran it: typed errors, and the bounded retry for rate limits
+    Row("401", _answer(401, "{}"), AuthError),
+    Row("rate limit that never ends", _answer(429, "{}", headers={"Retry-After": "1"}), RateLimitedError, requests=3),
+    Row("reset too far away", _answer(403, "{}", headers={"Retry-After": "3600"}), RateLimitedError),
+    # -- the clean successes
+    Row("clean 200", _answer(200, json.dumps({"data": PARTIAL}), commit=True), None, data=PARTIAL, committed=True),
+    Row(
+        "clean 200 with an empty errors list",
+        _answer(200, json.dumps({"data": PARTIAL, "errors": []}), commit=True),
+        None,
+        data=PARTIAL,
+        committed=True,
+    ),
+]
+
+
+@pytest.mark.parametrize("row", ROWS, ids=lambda r: r.name)
+def test_a_mutation_is_only_a_success_when_the_answer_is_clean(fake: FakeGitHub, row: Row) -> None:
+    world(fake)
+    fake.faults.append(row.fault)
+    waits: list[float] = []
+    c = Client(fake.token, fake.url, sleep=waits.append, max_attempts=3, max_wait=120, timeout=0.2)
+
+    if row.expect is None:
+        assert c.execute(ADD, {"p": "PVT_1"}) == row.data
+    else:
+        with pytest.raises(row.expect) as caught:
+            c.execute(ADD, {"p": "PVT_1"})
+        err = caught.value
+        assert type(err) is row.expect  # not a subclass: UnknownOutcomeError must not pass for ApiError
+        assert fake.token not in str(err)
+        if isinstance(err, UnknownOutcomeError):
+            assert "may or may not have been applied" in str(err)
+            assert "AddItem" in str(err)
+            assert err.data == row.data
+            assert err.errors == (row.errors or [])
+            assert err.status == row.status
+    assert len(fake.requests) == row.requests
+    assert len(fake.mutations_named("AddItem")) == (1 if row.committed else 0)
+    if row.expect is UnknownOutcomeError:
+        assert waits == []  # an unknown outcome is never retried, so never backed off for
+
+
+def test_a_rate_limit_before_execution_is_retried_and_the_mutation_runs_once(fake: FakeGitHub) -> None:
+    world(fake)
+    fake.handlers["AddItem"] = lambda f, v: PARTIAL
+    fake.faults.append(Fault(403, {"Retry-After": "7"}, '{"message": "secondary rate limit"}', times=2, op="AddItem"))
+    waits: list[float] = []
+    c = Client(fake.token, fake.url, sleep=waits.append)
+    assert c.execute(ADD, {"p": "PVT_1"}) == PARTIAL
+    assert waits == [7.0, 7.0]
+    assert len(fake.requests) == 3  # two refusals, then the one that ran
+    assert len(fake.mutations_named("AddItem")) == 1
+
+
+def test_a_mutation_that_cannot_connect_is_not_an_unknown_outcome(sleeps: list[float]) -> None:
+    """Nothing was sent, so the caller knows the change was not made; it is not asked to reconcile."""
+    c = Client("t", "http://127.0.0.1:9/graphql", sleep=sleeps.append, max_attempts=3)
+    with pytest.raises(ApiError, match="could not reach GitHub") as caught:
+        c.execute(ADD, {"p": "PVT_1"})
+    assert type(caught.value) is ApiError
+    assert sleeps == [] and c.requests == 0
+
+
+def test_a_mutation_spread_over_lines_gets_the_same_rule(fake: FakeGitHub, client: Client) -> None:
+    """Mutation detection must not depend on layout."""
+    world(fake)
+    fake.faults.append(_answer(200, "not json", commit=True))
+    with pytest.raises(UnknownOutcomeError):
+        client.execute("mutation   AddItem ($p: ID!)\n{ addItem(id: $p) { id } }", {"p": "PVT_1"})
+    assert len(fake.requests) == 1
