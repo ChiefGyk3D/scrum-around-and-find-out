@@ -168,3 +168,151 @@ def test_plain_http_is_refused_except_for_loopback() -> None:
         Client("t", "http://api.example.org/graphql")
     Client("t", "http://127.0.0.1:1/graphql")
     Client("t", "https://api.github.com/graphql")
+
+
+def test_a_redirect_response_is_refused_not_followed(sleeps: list[float]) -> None:
+    """The token must never follow a redirect to another server."""
+    from urllib.parse import urlsplit
+
+    # Create first fake server (the endpoint)
+    fake1 = FakeGitHub()
+    with fake1.serve():
+        fake2 = FakeGitHub()
+        with fake2.serve():
+            # Make fake1 redirect to fake2
+            port2 = urlsplit(fake2.url).port
+            fake1.faults.append(
+                Fault(
+                    302,
+                    {"Location": f"http://127.0.0.1:{port2}/graphql"},
+                    "{}",
+                    times=1,
+                )
+            )
+
+            c = Client(fake1.token, fake1.url, sleep=sleeps.append)
+            with pytest.raises(ApiError, match="302"):
+                c.execute(META, VARS)
+
+            # Server 2 must not have received any requests
+            assert fake2.requests == [], "token leaked to redirect target"
+
+
+def test_retry_after_with_nan_or_negative_falls_back_to_backoff(sleeps: list[float]) -> None:
+    fake = FakeGitHub()
+    with fake.serve():
+        world(fake)
+        # Retry-After: nan (which float() accepts) - persist for multiple attempts
+        fake.faults.append(Fault(403, {"Retry-After": "nan"}, '{"message": "rate limit"}', times=99))
+        c = Client(fake.token, fake.url, sleep=sleeps.append, max_attempts=2)
+        with pytest.raises(RateLimitedError):
+            c.execute(META, VARS)
+        # Should have used fallback, not nan
+        assert len(sleeps) == 1
+        assert sleeps[0] == 60.0
+
+
+def test_x_ratelimit_reset_with_invalid_value_falls_back(sleeps: list[float]) -> None:
+    fake = FakeGitHub()
+    with fake.serve():
+        world(fake)
+        fake.faults.append(
+            Fault(
+                403,
+                {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "not-a-number"},
+                '{"message": "rate limit"}',
+                times=99,
+            )
+        )
+        c = Client(fake.token, fake.url, sleep=sleeps.append, max_attempts=2)
+        with pytest.raises(RateLimitedError):
+            c.execute(META, VARS)
+        # Should not have raised ValueError; should have waited with computed backoff
+        assert len(sleeps) == 1
+        assert sleeps[0] == 60.0  # fallback: min(120.0, 60.0 * 1)
+
+
+def test_pagination_with_null_end_cursor_raises_error(fake: FakeGitHub, client: Client) -> None:
+    fake.page_size = 2
+    project = fake.add_project("organization", "acme", 1, "Board")
+    fake.add_field(project, "Extra 0", "TEXT")
+    fake.add_field(project, "Extra 1", "TEXT")
+
+    # Make the fake server return hasNextPage=true but endCursor=null on second page
+    def broken_fields(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        from fakegh.reads import _field_json
+
+        start = int(str(v.get("endCursor") or 0))
+        end = min(start + f.page_size, len(project.fields))
+        if end < len(project.fields):
+            # Second page: set endCursor to None
+            return {
+                "organization": {
+                    "projectV2": {
+                        "fields": {
+                            "pageInfo": {"hasNextPage": True, "endCursor": None},
+                            "nodes": [_field_json(f) for f in project.fields[start:end]],
+                        }
+                    }
+                }
+            }
+        return {"organization": {"projectV2": {"fields": fake.connection([_field_json(f) for f in project.fields], v)}}}
+
+    fake.handlers["ProjectFieldsOrg"] = broken_fields
+    with pytest.raises(ApiError, match="endCursor is null or empty"):
+        list(client.nodes(FIELDS, VARS, ("organization", "projectV2", "fields")))
+
+
+def test_pagination_with_too_many_pages_raises_error(fake: FakeGitHub, client: Client) -> None:
+    fake.page_size = 1
+    project = fake.add_project("organization", "acme", 1, "Board")
+    # Add many fields to exceed MAX_PAGES
+    for i in range(1100):
+        fake.add_field(project, f"Field {i}", "TEXT")
+
+    with pytest.raises(ApiError, match=r"exceeded.*pages"):
+        list(client.nodes(FIELDS, VARS, ("organization", "projectV2", "fields")))
+
+
+def test_a_200_response_with_non_json_body_is_an_api_error(fake: FakeGitHub, client: Client) -> None:
+    def bad_json(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        raise Exception("should not reach here")
+
+    fake.handlers["BadJSON"] = bad_json
+
+    # Inject a response that bypasses the handler
+    fake.faults.append(Fault(200, {}, "not valid json", times=1, op="BadJSON"))
+    with pytest.raises(ApiError, match="invalid JSON"):
+        client.execute("query BadJSON { x }")
+
+
+def test_a_200_response_with_no_data_and_no_errors_is_an_api_error(fake: FakeGitHub, client: Client) -> None:
+    fake.faults.append(Fault(200, {}, "{}", times=1, op="EmptyResponse"))
+    with pytest.raises(ApiError, match="neither errors nor data"):
+        client.execute("query EmptyResponse { x }")
+
+
+def test_generic_errors_in_response_are_api_errors(fake: FakeGitHub, client: Client) -> None:
+    def generic_error(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        raise GqlError("INTERNAL", "Something went wrong")
+
+    fake.handlers["GenericError"] = generic_error
+    with pytest.raises(ApiError, match="Something went wrong"):
+        client.execute("query GenericError { x }")
+
+
+def test_in_body_rate_limited_error_retries(fake: FakeGitHub, sleeps: list[float]) -> None:
+    world(fake)
+
+    def rate_limited(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        raise GqlError("RATE_LIMITED", "Rate limited by GraphQL API")
+
+    fake.handlers["RateLimitedQuery"] = rate_limited
+    doc = "query RateLimitedQuery { x }"
+
+    c = Client(fake.token, fake.url, sleep=sleeps.append, max_attempts=3)
+    with pytest.raises(ApiError, match="Rate limited"):
+        c.execute(doc)
+
+    # Should have slept twice (for attempts 1 and 2, not on the last attempt)
+    assert len(sleeps) == 2

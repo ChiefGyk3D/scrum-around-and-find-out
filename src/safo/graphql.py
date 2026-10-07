@@ -8,6 +8,7 @@ an exception, and a dry run sends no mutation at all.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 import time
@@ -24,6 +25,7 @@ JSON = dict[str, Any]
 GRAPHQL_URL = "https://api.github.com/graphql"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _OPERATION = re.compile(r"^\s*(query|mutation)\s+(\w+)")
+MAX_PAGES = 1000
 
 
 def operation_name(document: str) -> str:
@@ -121,9 +123,14 @@ class Client:
                 continue
             if status != 200:
                 raise ApiError(f"GitHub answered {status} to {op}")
-            body: JSON = json.loads(raw)
+            try:
+                body: JSON = json.loads(raw)
+            except json.JSONDecodeError as err:
+                raise ApiError(f"GitHub answered {op} with invalid JSON: {err}") from None
             errors: list[dict[str, Any]] = body.get("errors") or []
             if not errors:
+                if "data" not in body:
+                    raise ApiError(f"GitHub answered {op} with neither errors nor data")
                 data: JSON = body["data"]
                 return data
             types = {str(e.get("type", "")) for e in errors}
@@ -152,9 +159,18 @@ class Client:
                 "User-Agent": f"safo/{__version__}",
             },
         )
+
+        class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            """Refuse all redirects: any 3xx becomes an error."""
+
+            def redirect_request(self, req: Any, fp: Any, code: int, msg: str, hdrs: Any, newurl: str) -> Any:
+                return None
+
+        opener = urllib.request.build_opener(NoRedirectHandler)
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
-                return response.status, _lower(response.headers.items()), response.read()
+            response = opener.open(request, timeout=self._timeout)
+            with response as resp:
+                return resp.status, _lower(resp.headers.items()), resp.read()
         except urllib.error.HTTPError as err:
             return err.code, _lower(err.headers.items()), err.read()
 
@@ -162,14 +178,23 @@ class Client:
         """Seconds to wait, or None when a 403 is a refusal rather than a rate limit."""
         if "retry-after" in headers:
             try:
-                return float(headers["retry-after"])
+                wait = float(headers["retry-after"])
+                if math.isfinite(wait) and wait >= 0:
+                    return wait
             except ValueError:
-                return 60.0
+                pass
+            return 60.0
         text = raw.decode("utf-8", "replace").lower()
         if "secondary rate limit" in text or "abuse detection" in text:
             return min(self._max_wait, 60.0 * attempt)
         if headers.get("x-ratelimit-remaining") == "0" and "x-ratelimit-reset" in headers:
-            return max(0.0, float(headers["x-ratelimit-reset"]) - time.time())
+            try:
+                reset = float(headers["x-ratelimit-reset"])
+                if math.isfinite(reset) and reset >= 0:
+                    return max(0.0, reset - time.time())
+            except ValueError:
+                # Invalid reset header: fall back to computed backoff
+                return min(self._max_wait, 60.0 * attempt)
         return None
 
     # -- pagination ------------------------------------------------------------
@@ -178,6 +203,7 @@ class Client:
         """Yield each page's connection object. The document declares `$endCursor: String`."""
         cursor: str | None = None
         seen: set[str] = set()
+        page_count = 0
         while True:
             data = self.execute(document, {**variables, "endCursor": cursor})
             node: Any = data
@@ -190,7 +216,13 @@ class Client:
             info = connection["pageInfo"]
             if not info["hasNextPage"]:
                 return
-            cursor = str(info["endCursor"])
+            page_count += 1
+            if page_count >= MAX_PAGES:
+                raise ApiError(f"{operation_name(document)}: exceeded {MAX_PAGES} pages")
+            next_cursor = info.get("endCursor")
+            if next_cursor is None or next_cursor == "":
+                raise ApiError(f"{operation_name(document)}: hasNextPage is true but endCursor is null or empty")
+            cursor = str(next_cursor)
             if cursor in seen:
                 raise ApiError(f"{operation_name(document)}: GitHub repeated the cursor {cursor}")
             seen.add(cursor)
