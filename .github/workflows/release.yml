@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: MIT
+# A tag v* builds the sdist and wheel, checks the tag against safo.__version__, records build provenance and
+# attaches the files to a GitHub release. safo is an Action, so nothing goes to PyPI. A pull request builds
+# and checks but never publishes.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@a5b834a6e03e0bf7187eeebfa84685498d73b139 # v1.14.0
+    permissions:
+      contents: write       # the GitHub release and its assets
+      id-token: write       # build provenance
+      attestations: write   # the provenance record
+    with:
+      publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      pypi: false
+      verify-command: grep -qx "__version__ = \"$VERSION\"" src/safo/__init__.py
+      smoke-command: safo --version
+      egress-policy: block

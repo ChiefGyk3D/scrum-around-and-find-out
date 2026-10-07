@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: MIT
+# The one runtime dependency. Regenerate the hash lock after editing:
+#   pip-compile --generate-hashes --strip-extras --no-header --output-file requirements.txt requirements.in
+PyYAML==6.0.3

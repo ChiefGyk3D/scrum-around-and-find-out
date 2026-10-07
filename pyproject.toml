@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safo"
+dynamic = ["version"]
+description = "Scrum Around and Find Out: a GitHub Project defined as code, kept current by an Action."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ChiefGyk3D" }]
+dependencies = ["PyYAML==6.0.3"]
+
+[project.scripts]
+safo = "safo.cli:run"
+
+[tool.setuptools.dynamic]
+version = { attr = "safo.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["docs/superpowers"]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I", "UP", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S107", "S108"]
+
+[tool.mypy]
+strict = true
+mypy_path = "src:tests"
+files = ["src", "tests"]
+python_version = "3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q --strict-markers"

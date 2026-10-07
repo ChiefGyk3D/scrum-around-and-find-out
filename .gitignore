@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+/build/
+/dist/
+*.egg-info/
+/.coverage
+coverage.xml
+/check.log
+wiki-out/
+board.local.yaml
+agents.local.yaml
+/outcomes.jsonl

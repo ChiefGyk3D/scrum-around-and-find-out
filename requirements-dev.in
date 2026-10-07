@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Direct dev/test dependencies (tests/, run by .github/workflows/ci.yml). Regenerate the lock after editing:
+#   pip-compile --generate-hashes --strip-extras --no-header --output-file requirements-dev.txt requirements-dev.in
+-r requirements.in
+build==1.6.1
+mypy==2.4.0
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.16.9
+types-PyYAML==6.0.12.20260906
