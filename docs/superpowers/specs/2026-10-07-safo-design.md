@@ -39,11 +39,18 @@ a playbook for running the agent team, with the lessons that shaped it.
 6. **This repository's own board** is user-owned: it stays on scheduled
    `reconcile` run from the maintainer's own `gh` login. No PAT in CI (SAFO #1).
 7. **Licence: MIT**, matching GYST, its delivery sibling (SAFO #1).
+8. **Agent routing and optimization is in v0.1.0:** routing rules as data (`agents.yaml`), measured headroom
+   (`safo usage`), recommendations (`safo route`), and an outcomes log, built from the maintainer's own measured
+   workload (2026-10-07).
+9. **A local LLM served by Ollama is the cheapest agent** and is part of the same routing: endpoints come from
+   configuration (never from the repository), a probe is read-only, and a request that would evict a model another
+   service keeps resident is never sent (2026-10-07).
 
 ## Scope
 
 **In (v0.1.0):** `board.yaml` schema; the Action with five modes; the `safo`
-CLI; `agents-status`; the docs and wiki (why, roles, routing, handoff, limits,
+CLI; `agents-status`; agent routing and optimization (`agents.yaml`, `safo usage`, `safo route`,
+`safo outcome`, `safo local run`, the outcomes log); the docs and wiki (why, roles, routing, usage, handoff, limits,
 board conventions, lessons, adoption); the Renegade-Penguin example; tests;
 GYST wrapper; the wiki through GYST's existing wiki workflows; migration of the suite board.
 
@@ -157,6 +164,79 @@ and Next items by Agent, Codex sessions and plan limits read from
 (`gh agent-task list`). Claude subagents cannot be listed from a shell; the
 page says so.
 
+## Agent routing and optimization
+
+Agents differ in what they are good at, what they cost and how much room is left today. Choosing between them from
+feeling wastes the cheap ones and exhausts the scarce ones, so the choice becomes data (rules and limits), measurement
+(what is left) and a record (what happened). Everything below is read-only and local, and none of it dispatches
+anything: the lead reads the answer and sets the card.
+
+**a) `agents.yaml`.** One file, validated like `board.yaml` (every error names the key), with:
+
+- *Agents.* The Claude lead, Claude subagents by model (Sonnet, Haiku, Opus), Codex, Copilot, a local LLM (Ollama) and
+  the maintainer. Each has its limits (Codex: a 5-hour and a weekly window; Copilot: a monthly premium-request
+  allowance; Claude: the plan), its measured strengths and its constraints. The shipped values are one maintainer's
+  measured workload: Codex's sandbox cannot commit inside a git worktree or open sockets, so the lead runs the full
+  suite and commits; Copilot pull requests need a review gate; Codex's adversarial review is a strong second reviewer;
+  Opus only with the maintainer's OK.
+- *Task shapes, each with a preferred agent, a fallback chain and a required reviewer.* Research: Codex, then Sonnet.
+  Plan writing: Codex or Sonnet. Integration code: Sonnet, then Codex. Well-specified code from a complete plan: Codex,
+  then Sonnet. A small mechanical pull request: Copilot, then Haiku, reviewed by Sonnet. Security-sensitive design: the
+  Claude lead, and Opus only with approval. Adversarial review: Codex. Plus the local shapes below.
+- *Thresholds.* An agent whose measured headroom is over a line is skipped, with the agent to use instead.
+
+`docs/routing.md` is **generated** from `agents.yaml` by `scripts/gen_routing.py`, and a test fails if the two differ.
+
+**b) `safo usage`.** Reads local meters only: Codex's `~/.codex/sessions/**/*.jsonl` `token_count` rows
+(`rate_limits.primary` the 5-hour window, `secondary` the weekly one, `plan_type`, `resets_at`, plus per-session token
+totals); Claude Code's `~/.claude/projects/**/*.jsonl` message usage per model, subagent transcripts included;
+Copilot sessions per month from `gh agent-task list`, and exact premium-request use only if the token can read the
+billing endpoint (optional, `--billing`; `safo` never asks for a broader scope on the maintainer's behalf and reports
+`unknown` otherwise). Exit 0; `--json`.
+
+**c) `safo route <shape>`.** Applies the rules to the live headroom and prints the recommended agent, the reason and a
+reviewer who is not the author (for example: Codex above 80% of its 5-hour window goes to Sonnet; Copilot above 70% of
+its month goes to Haiku). Unknown headroom never blocks. It prints the value for the card's Agent field and never
+dispatches anything.
+
+**d) The outcomes log.** One JSON line per finished task: date, card URL, agent, shape, review rounds, findings by
+severity, tokens or requests when known. `safo outcome add ...` appends one after validating it; `safo usage --report`
+summarises the month; the lessons cite it. `examples/outcomes-2026-10.jsonl` is seeded from the maintainer's measured
+day (Codex at 14% of its weekly and 56% of its 5-hour window after about 27M input tokens across research, a
+3,400-line plan, a review and one implementation task; Copilot's 40 October sessions, 4 of 4 pull requests needing
+fixes, one a functional bug its own test hid; the Codex-authored plan's preflight scan finding 21 conflicts and 19
+defects; Codex's adversarial review of GYST #114 finding 3 real issues; Task 1 by Codex passing review after one fix
+round), written generically.
+
+**e) Privacy.** Usage reading is local and read-only. It sends nothing about the maintainer's sessions anywhere; its only
+network requests are `gh`'s own calls made with the maintainer's login (`gh agent-task list`, and the optional billing
+read) and read-only probes of the maintainer's own endpoints. The docs say so, and a test fails if the meter code
+mentions the real home directory or opens a socket of its own.
+
+**f) The local LLM.** An `ollama` agent has one or more endpoints from configuration: base URL, roles (`general`,
+`embedding`), the only models `safo` may ask for, a `num_ctx` cap, a `think` default and `protected_models` that must
+never be evicted. The public example uses a placeholder host (`http://ollama.lan:11434` and `:11435`); the real
+endpoints live in a local, git-ignored file (`~/.config/safo/agents.local.yaml`) merged over the example. No real
+address, hostname or remote-access name is ever written into the repository, and the privacy test fails on private
+and carrier-grade addresses.
+
+Measured facts encoded in the example. Instance A (a 16 GB GPU) keeps a 12B thinking model and a safety model resident at
+`num_ctx` 8192 for other services; requesting any other model there *evicts* a resident one, so its rule allows only the
+already-resident general model at `num_ctx` 8192 or less, and it is marked shared with production. Instance B (an 8 GB
+GPU) is free for small models (3 to 7B) and embeddings. The resident 12B model generated about 50 tokens a second, and
+a one-sentence answer cost about 436 evaluated tokens because it thinks by default, so cheap tasks send `think: false`.
+
+Availability comes and goes (the LAN at home, a zero-trust remote-access client when away). `safo usage` probes each
+endpoint read-only (`GET /api/tags`, `GET /api/ps`, 3-second timeout; never `/api/generate`, never loading a model) and
+reports reachable, loaded models, or unreachable. `safo route` uses the local agent only when it is reachable, falls
+back otherwise, and never routes to a protected-model endpoint anything that would load a different model.
+
+Local shapes (cost zero, always reviewed by a Claude model before anything lands; never a security decision, never
+code that ships without review): CI-log and test-output summaries, issue triage and labelling, first drafts of
+changelog fragments and commit messages, documentation proofreading, and embedding-based duplicate-issue search on the
+free endpoint. `safo local run --shape <shape> --prompt-file F` sends one prompt to the endpoint routing picks (Ollama's
+native API, the `think` flag honoured, a timeout), prints the answer and appends an outcomes line.
+
 ## GYST delivery
 
 - `project-sync.yml` in GYST becomes: Doppler OIDC fetch of the App key (as
@@ -196,7 +276,9 @@ a callsign pattern anywhere under `docs/`, `examples/` or `README.md`.
   nothing the second time; pagination through `$endCursor` across three pages;
   view filter set after creation; secondary-rate-limit retry.
 - Schema validation of `board.yaml` and `examples/renegade-penguin.yaml`.
-- A socket guard: nothing but loopback (the GYST/hill pattern).
+- A socket guard: nothing but loopback (the GYST/hill pattern). Routing tests build synthetic Codex and Claude session
+  files under a temporary `$HOME` (never the real one), use a fake Ollama server on loopback, and cover an endpoint that
+  flips to unreachable mid-task and a request that would evict a protected model.
 - The privacy test.
 - One live, read-only `audit` against the real board, run on demand
   (`workflow_dispatch`), never on pull requests.
