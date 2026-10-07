@@ -110,6 +110,6 @@ The YAML loader refuses the following as hostile or ambiguous:
 - **Aliases** (e.g., `- *p`): refer to anchored nodes; silently shared nodes hide what a value really is
 - **Merge keys** (`<<`): combine mappings; they obscure the actual keys
 - **File size** > 1 MiB: prevents reading huge files
-- **Nesting depth** > 64 levels: prevents exponential parse times and RecursionError crashes
+- **Nesting depth** > 64 levels (measured during composition): prevents exponential parse times and RecursionError crashes
 
-All four YAML features are checked in the loader itself; parsing fails with an error that names the line or kind.
+All these YAML features are checked in the loader itself; parsing fails with an error that names the file, line, and kind.

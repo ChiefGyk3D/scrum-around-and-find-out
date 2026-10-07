@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # The worked example: the Renegade-Penguin suite board, as safo will read it after bootstrap.
-# Colours and descriptions below are best guesses until T11 checks them against the live board; an
+# Colours and descriptions below are best guesses until they are checked against the live board; an
 # option that differs only in colour or description is a NOTE, never drift, because safo cannot edit
 # an existing field's options (see docs/board.md).
 version: 1

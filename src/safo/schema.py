@@ -130,22 +130,33 @@ class Board:
 class _SafeLoader(yaml.SafeLoader):
     """A YAML loader that refuses duplicate keys, aliases, anchors, merge keys, and limits depth/size."""
 
-    def __init__(self, stream: Any) -> None:
+    def __init__(self, stream: Any, source: str = "board.yaml") -> None:
         super().__init__(stream)
-        self._depth = 0
+        self._compose_depth = 0
+        self._source = source
 
     def check_event(self, *args: Any, **kwargs: Any) -> bool:
         # Refuse alias events
         if isinstance(self.current_event, yaml.events.AliasEvent):
             start_mark = self.current_event.start_mark
             line = start_mark.line + 1 if start_mark else 0
-            raise ConfigError(f"line {line}: aliases are not allowed")
+            raise ConfigError(f"{self._source}: line {line}: aliases are not allowed")
         # Refuse anchors (attached to scalar/sequence/mapping start events)
         if hasattr(self.current_event, "anchor") and self.current_event.anchor is not None:
             start_mark = self.current_event.start_mark
             line = start_mark.line + 1 if start_mark else 0
-            raise ConfigError(f"line {line}: anchors are not allowed")
+            raise ConfigError(f"{self._source}: line {line}: anchors are not allowed")
         return super().check_event(*args, **kwargs)
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        """Track composition depth and refuse nesting over the limit."""
+        self._compose_depth += 1
+        if self._compose_depth > _MAX_YAML_DEPTH:
+            raise ConfigError(f"{self._source}: nesting exceeds maximum depth ({_MAX_YAML_DEPTH})")
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._compose_depth -= 1
 
     def construct_mapping(self, node: Any, deep: bool = False) -> dict[str, Any]:  # type: ignore[override]
         if not isinstance(node, yaml.MappingNode):
@@ -161,26 +172,20 @@ class _SafeLoader(yaml.SafeLoader):
             if not isinstance(key, str):
                 key_type = type(key).__name__
                 line = key_node.start_mark.line + 1
-                raise ConfigError(f"line {line}: mapping key must be a string, not {key_type}")
+                msg = f"{self._source}: line {line}: mapping key must be a string, not {key_type}"
+                raise ConfigError(msg)
 
             # Refuse merge keys
             if key == "<<":
                 line = key_node.start_mark.line + 1
-                raise ConfigError(f"line {line}: merge keys (<<) are not allowed")
+                raise ConfigError(f"{self._source}: line {line}: merge keys (<<) are not allowed")
 
             # Refuse duplicate keys
             if key in mapping:
                 line = key_node.start_mark.line + 1
-                raise ConfigError(f"line {line}: duplicate key {key!r}")
+                raise ConfigError(f"{self._source}: line {line}: duplicate key {key!r}")
 
-            # Construct value with depth check
-            self._depth += 1
-            if self._depth > _MAX_YAML_DEPTH:
-                line = value_node.start_mark.line + 1
-                msg = f"line {line}: nesting exceeds maximum depth ({_MAX_YAML_DEPTH})"
-                raise ConfigError(msg)
             mapping[key] = self.construct_object(value_node, deep=deep)
-            self._depth -= 1
 
         return mapping
 
@@ -192,7 +197,10 @@ def _safe_load(text: str, source: str = "board.yaml") -> object:
         raise ConfigError(f"{source}: file exceeds maximum size ({_MAX_YAML_SIZE} bytes)")
 
     try:
-        return yaml.load(text, Loader=_SafeLoader)  # noqa: S506
+        from io import StringIO
+
+        loader_instance = _SafeLoader(StringIO(text), source)
+        return loader_instance.get_single_data()
     except yaml.YAMLError as err:
         raise ConfigError(f"{source}: not valid YAML ({err.__class__.__name__})") from None
     except ConfigError:
@@ -375,7 +383,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
     ui_only = tuple(r.string(s, f"ui_only[{i}]") for i, s in enumerate(r.seq(top.get("ui_only", []), "ui_only")))
     board = Board(project, tuple(repos), tuple(fields), tuple(views), rules, agents, ui_only)
     if check_fields:
-        _cross_check(r, board)
+        _cross_check(r, board, agents_present="agents" in top)
     return board
 
 
@@ -429,7 +437,7 @@ def _parse_agents(r: Reader, raw: object) -> AgentsView:
     )
 
 
-def _cross_check(r: Reader, board: Board) -> None:
+def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
     rules = board.rules
 
     def option_exists(field_name: str, option: str, path: str) -> None:
@@ -460,25 +468,24 @@ def _cross_check(r: Reader, board: Board) -> None:
         for j, rule in enumerate(repo.area_rules):
             option_exists(rules.area_field, rule.area, f"repositories[{i}].area_rules[{j}].area")
 
-    # Cross-check agents
-    agents_field = board.field_named(rules.area_field if board.agents.field == "Area" else board.agents.field)
-    if board.agents.field != "Area":
+    # Cross-check agents only when agents key is present in the document
+    if agents_present:
         agents_field = board.field_named(board.agents.field)
         if agents_field is None:
             raise r.fail("agents.field", f"field {board.agents.field!r} is not in fields")
         if agents_field.type != "single_select":
             raise r.fail("agents.field", f"field {board.agents.field!r} is {agents_field.type}, not single_select")
 
-    # Check agents.working and agents.waiting are valid status options
-    status_field = board.field_named(rules.status_field)
-    if status_field and status_field.type == "single_select":
-        status_options = {o.name for o in status_field.options}
-        for i, ws in enumerate(board.agents.working):
-            if ws not in status_options:
-                raise r.fail(f"agents.working[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
-        for i, ws in enumerate(board.agents.waiting):
-            if ws not in status_options:
-                raise r.fail(f"agents.waiting[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
+        # Check agents.working and agents.waiting are valid status options
+        status_field = board.field_named(rules.status_field)
+        if status_field and status_field.type == "single_select":
+            status_options = {o.name for o in status_field.options}
+            for i, ws in enumerate(board.agents.working):
+                if ws not in status_options:
+                    raise r.fail(f"agents.working[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
+            for i, ws in enumerate(board.agents.waiting):
+                if ws not in status_options:
+                    raise r.fail(f"agents.waiting[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
 
 
 def load_board(path: str | Path, *, check_fields: bool = True) -> Board:
