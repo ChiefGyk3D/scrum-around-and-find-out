@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from safo.errors import ConfigError, NotFoundError
+from safo.errors import ConfigError, MalformedDataError, NotFoundError
 from safo.graphql import JSON, Client
 from safo.schema import Project
 from safo.values import iso_day, whole_number
@@ -157,7 +157,20 @@ def owner_id(client: Client, project: Project) -> str:
 
 
 def load_live(client: Client, project: Project) -> LiveBoard:
-    """Three reads: meta, fields (paginated), views (paginated). Needs `project.number`."""
+    """Three reads: meta, fields (paginated), views (paginated). Needs `project.number`.
+
+    A payload that is not shaped as asked (a null `items`, a missing key) is a MalformedDataError, never a
+    TypeError or KeyError: the caller can then say "cannot tell" and exit 2.
+    """
+    try:
+        return _load_live(client, project)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise MalformedDataError(
+            "the project's data from GitHub is not shaped as expected (a key is missing)"
+        ) from None
+
+
+def _load_live(client: Client, project: Project) -> LiveBoard:
     if project.number is None:
         raise ConfigError(
             "project.number is not set; run `safo bootstrap` to create the project, then write its number in board.yaml"

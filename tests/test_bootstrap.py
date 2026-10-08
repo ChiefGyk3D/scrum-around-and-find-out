@@ -11,8 +11,8 @@ from typing import Any
 import pytest
 
 from fakegh import FakeGitHub, GqlError
-from fakegh.core import FField, FProject
-from safo.errors import ApiError
+from fakegh.core import FField, FOption, FProject
+from safo.errors import ApiError, UnknownOutcomeError
 from safo.graphql import Client
 from safo.modes.audit import run as audit_run
 from safo.modes.bootstrap import M_CREATE_VIEW, run
@@ -207,7 +207,7 @@ def test_a_dry_run_sends_nothing(fake: FakeGitHub, sleeps: list[float]) -> None:
     sent = io.StringIO()
     dry = Client(fake.token, fake.url, dry_run=True, sleep=sleeps.append, out=sent)
     ctx, _ = make_context(fake, board, dry)
-    assert run(ctx, ARGS) == 0
+    assert run(ctx, ARGS) == 1  # work is pending, so a dry run is not clean
     assert fake.mutations == [] and "dry run: would CreateField" in sent.getvalue()
     assert "dry run: would UpdateView" in sent.getvalue()
 
@@ -389,3 +389,200 @@ def test_the_cli_exit_code_for_a_refusal_is_1(fake: FakeGitHub, client: Client) 
     code = main(["--board", board_file, "bootstrap"], env={}, client_factory=lambda b, e, d: client, out=out, err=err)
     assert code == 1 and "REFUSED field 'Status' lacks the option 'Next'" in out.getvalue()
     assert "UpdateField" not in fake.requests
+
+
+def _cli(fake: FakeGitHub, client: Client, *argv: str) -> tuple[int, str, str]:
+    from pathlib import Path
+
+    from safo.cli import main
+
+    out, err = io.StringIO(), io.StringIO()
+    board_file = str(Path(__file__).parent / "data" / "board.yaml")
+    code = main(["--board", board_file, *argv], env={}, client_factory=lambda b, e, d: client, out=out, err=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("op", "payload", "prefilled"),
+    [
+        ("CreateField", {"createProjectV2Field": None}, False),
+        ("CreateField", {"createProjectV2Field": {"projectV2Field": {"name": "no id"}}}, False),
+        ("CreateView", {"createProjectV2View": None}, True),
+        ("CreateView", {"createProjectV2View": {"projectV2View": {"name": "no id"}}}, True),
+        ("UpdateView", {"updateProjectV2View": None}, True),
+        ("UpdateView", {"updateProjectV2View": {"projectV2View": {"filter": "x"}}}, True),
+    ],
+)
+def test_a_mutation_answered_with_null_or_no_id_is_an_unknown_outcome_never_created(
+    fake: FakeGitHub, client: Client, op: str, payload: dict[str, object], prefilled: bool
+) -> None:
+    board = load_test_board()
+    project = empty_project(fake, board)
+    if prefilled:  # reach the view mutations without a CreateField in the way
+        for f in board.fields:
+            if f.type == "single_select":
+                fake.add_field(project, f.name, "SINGLE_SELECT", [(o.name, o.color, o.description) for o in f.options])
+        fake.add_field(project, "Sprint", "ITERATION").iterations = [
+            {"id": f"I{n}", "title": f"Sprint {n}", "startDate": d, "duration": 14}
+            for n, d in enumerate(["2026-10-06", "2026-10-20", "2026-11-03"])
+        ]
+        fake.add_field(project, "Done on", "DATE")
+    fake.handlers[op] = lambda f, v: payload
+    code, text = bootstrap(fake, client, board)
+    assert code == 2 and "unknown outcome" in text and "CREATED" not in text
+    assert "observed:" in text
+    assert [m.op for m in fake.mutations][-1] == op and fake.requests.count(op) == 1
+
+
+def test_a_null_create_project_payload_is_unknown_and_the_reread_says_nothing_landed(
+    fake: FakeGitHub, client: Client
+) -> None:
+    board = load_test_board()
+    board = dataclasses.replace(board, project=dataclasses.replace(board.project, number=None))
+    fake.add_owner("organization", "acme")
+    fake.handlers["CreateProject"] = lambda f, v: {"createProjectV2": None}
+    code, text = bootstrap(fake, client, board)
+    assert code == 2 and "created project" not in text and len(fake.mutations) == 1
+    assert "observed: no project titled 'Acme board' exists" in text
+
+
+def test_a_malformed_reread_after_an_unknown_outcome_is_exit_2_with_a_line_not_a_traceback(
+    fake: FakeGitHub, client: Client
+) -> None:
+    from fakegh.reads import meta_org
+
+    board = load_test_board()
+    empty_project(fake, board)
+
+    def forbidden(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        raise GqlError("FORBIDDEN", "Resource not accessible by integration")
+
+    def broken(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        data = meta_org(f, v)
+        if f.mutations:
+            data["organization"]["projectV2"]["items"] = None
+        return data
+
+    fake.handlers["CreateField"] = forbidden
+    fake.handlers["ProjectMetaOrg"] = broken
+    code, out, err = _cli(fake, client, "bootstrap")
+    assert code == 2 and err == "" and "live reread failed; no further writes" in out
+
+
+def test_load_live_turns_a_missing_key_into_malformed_data(fake: FakeGitHub, client: Client) -> None:
+    from fakegh.reads import meta_org
+    from safo.errors import MalformedDataError
+    from safo.live import load_live
+
+    board = load_test_board()
+    empty_project(fake, board)
+
+    def broken(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        data = meta_org(f, v)
+        del data["organization"]["projectV2"]["items"]
+        return data
+
+    fake.handlers["ProjectMetaOrg"] = broken
+    with pytest.raises(MalformedDataError, match="not shaped as expected"):
+        load_live(client, board.project)
+
+
+def _lose_reply(client: Client, monkeypatch: pytest.MonkeyPatch, operation: str, *, apply: bool) -> None:
+    real = client.execute
+
+    def execute(document: str, variables: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if f"mutation {operation}(" in document:
+            if apply:
+                real(document, variables, **kwargs)
+            raise UnknownOutcomeError("reply lost", data=None, errors=[], status=502)
+        return real(document, variables, **kwargs)
+
+    monkeypatch.setattr(client, "execute", execute)
+
+
+@pytest.mark.parametrize(("apply", "seen"), [(True, "exists as single_select"), (False, "does not exist")])
+def test_the_reread_after_a_lost_field_create_says_whether_the_field_exists(
+    fake: FakeGitHub, client: Client, monkeypatch: pytest.MonkeyPatch, apply: bool, seen: str
+) -> None:
+    board = load_test_board()
+    empty_project(fake, board)
+    _lose_reply(client, monkeypatch, "CreateField", apply=apply)
+    code, text = bootstrap(fake, client, board)
+    assert code == 2 and f"observed: field 'Status' {seen}" in text
+
+
+@pytest.mark.parametrize(("apply", "seen"), [(True, "'-status:Done'"), (False, "''")])
+def test_the_reread_after_a_lost_filter_update_shows_the_live_filter(
+    fake: FakeGitHub, client: Client, monkeypatch: pytest.MonkeyPatch, apply: bool, seen: str
+) -> None:
+    board = load_test_board()
+    empty_project(fake, board)
+    _lose_reply(client, monkeypatch, "UpdateView", apply=apply)
+    code, text = bootstrap(fake, client, board)
+    assert code == 2 and f"observed: view 'Board' exists with the filter {seen}" in text
+
+
+def test_a_reread_that_finds_several_projects_says_so(
+    fake: FakeGitHub, client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = load_test_board()
+    board = dataclasses.replace(board, project=dataclasses.replace(board.project, number=None))
+    fake.add_owner("organization", "acme")
+    real = client.execute
+
+    def execute(document: str, variables: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if "mutation CreateProject(" in document:
+            fake.add_project("organization", "acme", 1, "Acme board")
+            fake.add_project("organization", "acme", 2, "Acme board")
+            raise UnknownOutcomeError("reply lost", data=None, errors=[], status=502)
+        return real(document, variables, **kwargs)
+
+    monkeypatch.setattr(client, "execute", execute)
+    code, text = bootstrap(fake, client, board)
+    assert code == 2 and "observed: 2 projects are titled 'Acme board'; set project.number" in text
+    assert "re-read the live board" in text
+
+
+def test_a_dry_run_with_nothing_to_create_exits_0(fake: FakeGitHub, sleeps: list[float]) -> None:
+    board = load_test_board()
+    empty_project(fake, board)
+    sent = io.StringIO()
+    real = Client(fake.token, fake.url, sleep=sleeps.append, out=sent)
+    ctx, _ = make_context(fake, board, real)
+    assert run(ctx, ARGS) == 0
+    dry = Client(fake.token, fake.url, dry_run=True, sleep=sleeps.append, out=sent)
+    ctx, out = make_context(fake, board, dry)
+    assert run(ctx, ARGS) == 0 and "nothing to create" in out.getvalue()
+
+
+def test_a_dry_run_says_would_create_never_created(fake: FakeGitHub, sleeps: list[float]) -> None:
+    board = load_test_board()
+    empty_project(fake, board)
+    dry = Client(fake.token, fake.url, dry_run=True, sleep=sleeps.append, out=io.StringIO())
+    ctx, out = make_context(fake, board, dry)
+    assert run(ctx, ARGS) == 1
+    assert "WOULD CREATE field 'Status' (single_select)" in out.getvalue() and "CREATED" not in out.getvalue()
+
+
+def test_a_dry_run_that_would_create_the_project_says_so_and_exits_1(fake: FakeGitHub, sleeps: list[float]) -> None:
+    board = load_test_board()
+    board = dataclasses.replace(board, project=dataclasses.replace(board.project, number=None))
+    fake.add_owner("organization", "acme")
+    dry = Client(fake.token, fake.url, dry_run=True, sleep=sleeps.append, out=io.StringIO())
+    ctx, out = make_context(fake, board, dry)
+    assert run(ctx, ARGS) == 1 and "WOULD CREATE project 'Acme board'" in out.getvalue()
+    assert "created project" not in out.getvalue() and fake.mutations == []
+
+
+def test_live_extras_get_one_note_pointing_at_audit_and_do_not_change_the_exit(
+    fake: FakeGitHub, client: Client
+) -> None:
+    board = load_test_board()
+    empty_project(fake, board)
+    bootstrap(fake, client, board)
+    project = next(iter(fake.projects.values()))
+    fake.field(project, "Status").options.append(FOption("OPT_X", "Extra", "GRAY", ""))
+    fake.add_view(project, "Mine", "TABLE_LAYOUT")
+    code, text = bootstrap(fake, client, board)
+    assert code == 0 and text.count("NOTE") == 1
+    assert "2 live option(s) or view(s) are not in board.yaml; `safo audit` reports them" in text

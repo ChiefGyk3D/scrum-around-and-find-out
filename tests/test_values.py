@@ -52,3 +52,15 @@ def test_a_malformed_value_is_an_api_error_that_audit_can_tell_apart() -> None:
         iso_day("soon", "x")
     assert issubclass(MalformedDataError, ApiError)
     assert "not an integer" in str(number.value) and "not a date" in str(day.value)
+
+
+@pytest.mark.parametrize("value", [-1, 2**31, 10**100, "2147483648", True])
+def test_a_negative_or_oversized_integer_is_refused_and_never_echoed(value: object) -> None:
+    """GitHub's GraphQL Int is 32-bit signed; a count or a project number is never negative."""
+    with pytest.raises(MalformedDataError, match="expected a whole number") as caught:
+        whole_number(value, "x")
+    assert str(value) not in str(caught.value).replace("2**31", "")
+
+
+def test_the_largest_graphql_int_is_accepted() -> None:
+    assert whole_number(2**31 - 1, "x") == 2**31 - 1 and whole_number("0", "x") == 0

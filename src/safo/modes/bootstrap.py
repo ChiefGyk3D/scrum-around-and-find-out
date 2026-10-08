@@ -15,12 +15,12 @@ import datetime as dt
 from typing import Any
 
 from safo.context import Context
-from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, SafoError, UnknownOutcomeError
+from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, UnknownOutcomeError
 from safo.graphql import JSON
 from safo.live import DATA_TYPES, LAYOUT_ENUMS, LiveBoard, _both, _root, load_live, owner_id
 from safo.modes import Mode, register
 from safo.mutation import mutate
-from safo.schema import Field, View
+from safo.schema import Board, Field, Project, View
 from safo.values import whole_number
 
 M_CREATE_PROJECT = """mutation CreateProject($input: CreateProjectV2Input!) {
@@ -125,29 +125,67 @@ def check_existing_field(f: Field, live: LiveBoard, report: Report) -> None:
                     )
 
 
-def create_view(ctx: Context, project_id: str, v: View, report: Report) -> None:
+@dataclasses.dataclass
+class State:
+    """What `run` needs to re-read after an unknown outcome: the project in use and the write in flight."""
+
+    project: Project
+    attempt: tuple[str, str] | None = None  # ("project" | "field" | "view" | "filter", name)
+
+
+def create_view(ctx: Context, project_id: str, v: View, report: Report, state: State) -> None:
+    state.attempt = ("view", v.name)
     created = mutate(
         ctx.client,
         M_CREATE_VIEW,
         {"input": {"projectId": project_id, "name": v.name, "layout": LAYOUT_ENUMS[v.layout]}},
         dry_result={"createProjectV2View": {"projectV2View": {"id": "DRY_RUN"}}},
+        returns=("createProjectV2View", "projectV2View"),
     )
     view_id = str(created["createProjectV2View"]["projectV2View"]["id"])
     if v.filter:
         # createProjectV2View takes no filter; it is set afterwards.
-        mutate(ctx.client, M_UPDATE_VIEW, {"input": {"viewId": view_id, "filter": v.filter}})
+        state.attempt = ("filter", v.name)
+        mutate(
+            ctx.client,
+            M_UPDATE_VIEW,
+            {"input": {"viewId": view_id, "filter": v.filter}},
+            returns=("updateProjectV2View", "projectV2View"),
+        )
     report.created.append(f"view {v.name!r} ({v.layout}" + (f", filter {v.filter!r})" if v.filter else ")"))
 
 
-def _run(ctx: Context, args: argparse.Namespace) -> int:
+def _extras(board: Board, live: LiveBoard) -> int:
+    """How many live options and views board.yaml does not list. Bootstrap manages none of them."""
+    count = sum(1 for v in live.views if v not in {x.name for x in board.views})
+    for f in board.fields:
+        found = live.fields.get(f.name)
+        if found and f.type == "single_select":
+            count += sum(1 for o in found.options if o.name not in {x.name for x in f.options})
+    return count
+
+
+def _run(ctx: Context, args: argparse.Namespace, state: State) -> int:
     board = ctx.board
     report = Report()
-    project = board.project
+    dry = ctx.client.dry_run
+    project = state.project
     if project.number is None:
+        state.attempt = ("project", project.title)
         owner = owner_id(ctx.client, project)
         matches = discover(ctx)
         if len(matches) > 1:
             raise ConfigError("multiple projects match the title; set project.number before creating or writing")
+        if not matches and dry:
+            mutate(
+                ctx.client,
+                M_CREATE_PROJECT,
+                {"input": {"ownerId": owner, "title": project.title}},
+                dry_result={"createProjectV2": {"projectV2": {"id": "DRY_RUN", "number": 0}}},
+            )
+            ctx.say(f"WOULD CREATE project {project.title!r}")
+            ctx.say("dry run: nothing exists to read yet, so the fields and views are not planned")
+            return EXIT_DRIFT
         made = (
             matches[0]
             if matches
@@ -155,17 +193,15 @@ def _run(ctx: Context, args: argparse.Namespace) -> int:
                 ctx.client,
                 M_CREATE_PROJECT,
                 {"input": {"ownerId": owner, "title": project.title}},
-                dry_result={"createProjectV2": {"projectV2": {"id": "DRY_RUN", "number": 0}}},
+                returns=("createProjectV2", "projectV2"),
             )["createProjectV2"]["projectV2"]
         )
         number = whole_number(made.get("number"), "createProjectV2.projectV2.number")
         verb = "adopted existing project" if matches else "created project"
         ctx.say(f"{verb} {project.title!r}: number {number}.")
         ctx.say(f"Write `number: {number}` under project: in board.yaml.")
-        if ctx.client.dry_run:
-            ctx.say("dry run: nothing exists to read yet, so the fields and views are not planned")
-            return EXIT_OK
         project = dataclasses.replace(project, number=number)
+        state.project = project
     live = load_live(ctx.client, project)
     for f in board.fields:
         if f.name in live.fields:
@@ -179,12 +215,18 @@ def _run(ctx: Context, args: argparse.Namespace) -> int:
                     elif have and have.description != o.description:
                         report.left.append(f"field {f.name!r} option {o.name!r} keeps its live description")
             continue
-        mutate(ctx.client, M_CREATE_FIELD, {"input": field_input(live.id, f)})
+        state.attempt = ("field", f.name)
+        mutate(
+            ctx.client,
+            M_CREATE_FIELD,
+            {"input": field_input(live.id, f)},
+            returns=("createProjectV2Field", "projectV2Field"),
+        )
         report.created.append(f"field {f.name!r} ({f.type})")
     for v in board.views:
         found_view = live.views.get(v.name)
         if found_view is None:
-            create_view(ctx, live.id, v, report)
+            create_view(ctx, live.id, v, report, state)
         elif found_view.layout != v.layout:
             report.refused.append(
                 f"REFUSED view {v.name!r} is a {found_view.layout} layout on the project but {v.layout} in board.yaml. "
@@ -195,42 +237,67 @@ def _run(ctx: Context, args: argparse.Namespace) -> int:
                 f"REFUSED view {v.name!r} exists with the filter {found_view.filter!r}; "
                 "left alone; repair its filter in the project UI, then re-run bootstrap"
             )
+    state.attempt = None
     for text in report.created:
-        ctx.say(f"CREATED {text}")
+        ctx.say(f"{'WOULD CREATE' if dry else 'CREATED'} {text}")
     for text in report.left:
         ctx.say(f"LEFT    {text}")
     for text in report.refused:
         ctx.say(text)
+    extras = _extras(board, live)
+    if extras:
+        ctx.say(f"NOTE    {extras} live option(s) or view(s) are not in board.yaml; `safo audit` reports them")
     if not (report.created or report.refused):
         ctx.say("nothing to create: the project already has everything board.yaml names")
     if board.ui_only:
         ctx.say("UI-only settings (no API can set these; do them once by hand):")
         for text in board.ui_only:
             ctx.say(f"  [ ] {text}")
-    return EXIT_DRIFT if report.refused else EXIT_OK
+    # A real run that made everything exits 0; a dry run with work pending exits 1, as a refusal does.
+    return EXIT_DRIFT if report.refused or (dry and report.created) else EXIT_OK
+
+
+def _observe(ctx: Context, state: State) -> None:
+    """Re-read the board after an unknown outcome and say what the thing in flight looks like now."""
+    project = state.project
+    kind, name = state.attempt or ("", "")
+    if project.number is None:
+        matches = discover(ctx)
+        if not matches:
+            ctx.say(f"observed: no project titled {project.title!r} exists, so the create did not land")
+            return
+        if len(matches) > 1:
+            ctx.say(f"observed: {len(matches)} projects are titled {project.title!r}; set project.number")
+            return
+        number = whole_number(matches[0].get("number"), "projectsV2.nodes.number")
+        ctx.say(f"observed: project {project.title!r} exists as number {number}")
+        ctx.say(f"Write `number: {number}` under project: in board.yaml.")
+        project = dataclasses.replace(project, number=number)
+    live = load_live(ctx.client, project)
+    if kind == "field":
+        found = live.fields.get(name)
+        ctx.say(f"observed: field {name!r} " + (f"exists as {found.type}" if found else "does not exist"))
+    elif kind in ("view", "filter"):
+        view = live.views.get(name)
+        ctx.say(f"observed: view {name!r} " + (f"exists with the filter {view.filter!r}" if view else "does not exist"))
+    else:
+        ctx.say(f"observed: the project has {len(live.fields)} fields and {len(live.views)} views")
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
+    state = State(ctx.board.project)
     try:
-        return _run(ctx, args)
-    except UnknownOutcomeError:
+        return _run(ctx, args, state)
+    except UnknownOutcomeError as err:
+        ctx.say(f"unknown outcome: {err}")
         # No dependent writes, even if the reread proves that the write landed.
         try:
-            if ctx.board.project.number is None:
-                matches = discover(ctx)
-                if len(matches) == 1:
-                    ctx.say(f"Write `number: {matches[0]['number']}` under project: in board.yaml.")
-                    load_live(
-                        ctx.client,
-                        dataclasses.replace(
-                            ctx.board.project, number=whole_number(matches[0].get("number"), "projectsV2.nodes.number")
-                        ),
-                    )
-            else:
-                load_live(ctx.client, ctx.board.project)
-            ctx.say("re-read the live board after the unknown outcome; no further writes were sent")
-        except SafoError:
+            _observe(ctx, state)
+        except Exception:
+            # Any failure of the reread, even one nobody foresaw, still ends in a visible line and exit 2.
             ctx.say("live reread failed; no further writes")
+        else:
+            ctx.say("re-read the live board after the unknown outcome; no further writes were sent")
         ctx.say("unknown outcome: re-run after checking the board")
         return EXIT_UNKNOWN
 

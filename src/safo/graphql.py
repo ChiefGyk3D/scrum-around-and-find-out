@@ -24,6 +24,7 @@ from safo.errors import (
     ApiError,
     AuthError,
     ConfigError,
+    MalformedDataError,
     NotFoundError,
     RateLimitedError,
     SafoError,
@@ -227,6 +228,9 @@ class Client:
             raise unknown("the response carried errors: " + _describe(body["errors"]))
         if data is None:
             raise unknown("the response had no data object")
+        if any(payload is None for payload in data.values()):
+            # `{"data": {"createX": null}}` with no errors is not a success: nothing says the write landed.
+            raise unknown("the mutation's payload was null")
         return data
 
     def _unknown(
@@ -374,7 +378,7 @@ class Client:
                 node = node.get(key) if isinstance(node, dict) else None
                 if node is None:
                     raise NotFoundError(f"{operation_name(document)}: nothing at {'.'.join(path)}")
-            connection: JSON = node
+            connection = _connection(operation_name(document), node)
             yield connection
             info = connection["pageInfo"]
             if not info["hasNextPage"]:
@@ -395,6 +399,25 @@ class Client:
             for node in page["nodes"]:
                 if node is not None:
                     yield node
+
+
+def _connection(op: str, node: Any) -> JSON:
+    """A connection with a boolean hasNextPage and a list of non-null nodes, or MalformedDataError.
+
+    A page that cannot be read in full must never look like the last page, and a null node must never
+    be skipped: either would make a partial read look complete.
+    """
+    if not isinstance(node, dict):
+        raise MalformedDataError(f"{op}: the connection is {type(node).__name__}, not an object")
+    info = node.get("pageInfo")
+    if not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
+        raise MalformedDataError(f"{op}: pageInfo.hasNextPage is missing or not a boolean")
+    rows = node.get("nodes")
+    if not isinstance(rows, list):
+        raise MalformedDataError(f"{op}: the connection has no list of nodes")
+    if any(row is None for row in rows):
+        raise MalformedDataError(f"{op}: the connection contains a null node")
+    return node
 
 
 def _describe(errors: Any) -> str:
