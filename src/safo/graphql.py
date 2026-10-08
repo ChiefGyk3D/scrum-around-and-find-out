@@ -436,6 +436,11 @@ def _connection(op: str, node: Any, require: Sequence[str] = ()) -> JSON:
     return node
 
 
+def check_connection(op: str, node: Any, require: Sequence[str] = ()) -> JSON:
+    """`_connection` for a caller that fetched a connection by hand (a batch of ids) rather than through `pages`."""
+    return _connection(op, node, require)
+
+
 def _describe(errors: Any) -> str:
     """The error messages in a response, short enough for one line."""
     entries = errors if isinstance(errors, list) else [errors]
