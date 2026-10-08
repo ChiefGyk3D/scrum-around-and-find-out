@@ -1,0 +1,146 @@
+# SPDX-License-Identifier: MIT
+# The worked example: the Renegade-Penguin suite board, as safo will read it after bootstrap.
+# Colours and descriptions below are best guesses until they are checked against the live board; an
+# option that differs only in colour or description is a NOTE, never drift, because safo cannot edit
+# an existing field's options (see docs/board.md).
+version: 1
+project:
+  owner: Renegade-Penguin
+  owner_type: organization
+  number: 1
+  title: Hammunition suite
+
+repositories:
+  - owner: Renegade-Penguin
+    name: Hammunition
+    default_area: Engine
+    area_rules:
+      - {match: console, area: Console}
+      - {match: repeater, area: Repeaters}
+      - {match: fuzz, area: Security}
+      - {match: scorecard, area: Security}
+      - {match: codeql, area: Security}
+      - {match: security, area: Security}
+      - {match: gps, area: GPS and time}
+      - {match: ntp, area: GPS and time}
+      - {match: mesh, area: Mesh}
+      - {match: reticulum, area: Mesh}
+      - {match: meshtastic, area: Mesh}
+      - {match: navigation, area: Navigation and maps}
+      - {match: qmapshack, area: Navigation and maps}
+      - {match: docs, area: Docs}
+      - {match: wiki, area: Docs}
+      - {match: catalog, area: Catalog}
+      - {match: manifest, area: Catalog}
+      - {match: bench, area: Bench}
+  - {owner: Renegade-Penguin, name: hammunition-hill, default_area: Hill}
+  - {owner: Renegade-Penguin, name: hammunition-tray, default_area: Tray}
+  - {owner: Renegade-Penguin, name: hammunition-bunker, default_area: Bunker}
+  - {owner: Renegade-Penguin, name: hammunition-gps-tether, default_area: GPS tether}
+
+fields:
+  - name: Status
+    type: single_select
+    options:
+      - {name: Backlog, color: GRAY, description: "Not scheduled"}
+      - {name: Next, color: BLUE, description: "Scheduled for the current or next sprint"}
+      - {name: In progress, color: YELLOW, description: ""}
+      - {name: Blocked, color: RED, description: "Needs the maintainer"}
+      - {name: Done, color: GREEN, description: ""}
+  - name: Area
+    type: single_select
+    options:
+      - {name: Engine, color: BLUE, description: ""}
+      - {name: Catalog, color: GREEN, description: ""}
+      - {name: Docs, color: GRAY, description: ""}
+      - {name: Mesh, color: PURPLE, description: ""}
+      - {name: Navigation and maps, color: YELLOW, description: ""}
+      - {name: Repeaters, color: ORANGE, description: ""}
+      - {name: GPS and time, color: RED, description: ""}
+      - {name: Console, color: PINK, description: ""}
+      - {name: Tray, color: BLUE, description: ""}
+      - {name: Hill, color: GREEN, description: ""}
+      - {name: Bunker, color: GRAY, description: ""}
+      - {name: GPS tether, color: PURPLE, description: ""}
+      - {name: CI and GYST, color: YELLOW, description: ""}
+      - {name: Security, color: RED, description: ""}
+      - {name: Bench, color: ORANGE, description: ""}
+  - name: Kind
+    type: single_select
+    options:
+      - {name: Feature, color: BLUE, description: ""}
+      - {name: Bug, color: RED, description: ""}
+      - {name: Decision, color: PURPLE, description: ""}
+      - {name: Bench, color: ORANGE, description: ""}
+      - {name: Chore, color: GRAY, description: ""}
+      - {name: Docs, color: GREEN, description: ""}
+      - {name: Release, color: YELLOW, description: ""}
+      - {name: Epic, color: PINK, description: ""}
+  - name: Priority
+    type: single_select
+    options:
+      - {name: P0 now, color: RED, description: ""}
+      - {name: P1 soon, color: ORANGE, description: ""}
+      - {name: P2 later, color: YELLOW, description: ""}
+      - {name: P3 someday, color: GRAY, description: ""}
+  - name: Effort
+    type: single_select
+    options:
+      - {name: S (hours), color: GREEN, description: ""}
+      - {name: M (a day), color: YELLOW, description: ""}
+      - {name: L (days), color: ORANGE, description: ""}
+      - {name: XL (a week or more), color: RED, description: ""}
+  - name: Epic
+    type: single_select
+    options:
+      - {name: Repeaters on the map, color: GRAY, description: ""}
+      - {name: Console in the engine, color: GRAY, description: ""}
+      - {name: "Suite documentation (#298)", color: GRAY, description: ""}
+      - {name: "Track C: mesh (#105)", color: GRAY, description: ""}
+      - {name: Navigation and offline data, color: GRAY, description: ""}
+      - {name: GPS and time on the bench, color: GRAY, description: ""}
+      - {name: Security and Scorecard, color: GRAY, description: ""}
+      - {name: CI and GYST, color: GRAY, description: ""}
+      - {name: Tray and devices, color: GRAY, description: ""}
+      - {name: 1.0 release, color: GRAY, description: ""}
+      - {name: Bunker, color: GRAY, description: ""}
+      - {name: Hill, color: GRAY, description: ""}
+  - name: Agent
+    type: single_select
+    options:
+      - {name: Claude, color: ORANGE, description: "Claude lead or a Claude subagent"}
+      - {name: Codex, color: GREEN, description: "OpenAI Codex"}
+      - {name: Copilot, color: BLUE, description: "GitHub Copilot coding agent"}
+      - {name: You, color: PURPLE, description: "The maintainer"}
+  - {name: Sprint, type: iteration, start: 2026-10-06, duration_days: 14, count: 11}
+  - {name: Decision, type: text}
+  - {name: Start date, type: date}
+  - {name: Target date, type: date}
+  - {name: Done on, type: date}
+
+views:
+  - {name: Board, layout: board, filter: "-status:Done"}
+  - {name: Roadmap, layout: roadmap, filter: "-status:Done"}
+  - {name: Agents at work, layout: table, filter: 'status:"In progress",Next'}
+
+rules:
+  status:
+    opened: Backlog
+    opened_pr: In progress
+    draft_pr: Backlog
+    reopened: Backlog
+    closed: Done
+    merged: Done
+  done_date_field: Done on
+  new_item_defaults:
+    Priority: P2 later
+
+agents:
+  field: Agent
+  working: [In progress, Next]
+  waiting: [Blocked]
+
+ui_only:
+  - "Roadmap: Date fields = Start date / Target date; Zoom = Quarter"
+  - "By repository: Group by = Repository"
+  - "Workflows: Item closed -> Done; Pull request merged -> Done"
