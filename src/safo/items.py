@@ -7,7 +7,7 @@ import datetime as dt
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from safo.errors import ApiError, NotFoundError
+from safo.errors import NotFoundError
 from safo.graphql import JSON, Client
 from safo.live import LiveBoard
 from safo.schema import Board, Repository
