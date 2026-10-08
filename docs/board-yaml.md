@@ -78,7 +78,7 @@ filter is set in a second call. An existing view with another layout is refused;
 | `status.reopened` | `Backlog` | An issue reopened out of Done |
 | `status.closed`, `status.merged` | `Done` | A closed issue or pull request, a merged pull request |
 | `done_date_field` | empty (off) | The date field set to the close date; cleared when an issue is reopened |
-| `new_item_defaults` | none | `{field: option}` pairs filled only when blank on any managed card, so a later run repairs partial initialization; nonblank manual values are preserved |
+| `new_item_defaults` | none | `{field: option}` pairs filled only when blank on any managed card, so a later run repairs partial initialization; nonblank manual values are preserved. A default never writes the status, Area or Done-date field: those follow their own rules |
 | `add_closed_days` | `0` | `reconcile` also adds items closed or merged within this many days, as Done |
 
 Every status name must be an option of the status field; `safo` checks that against `fields` when it loads the file and
