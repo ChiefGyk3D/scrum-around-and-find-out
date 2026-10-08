@@ -192,6 +192,22 @@ def test_nothing_is_opened_when_the_body_cannot_even_start() -> None:
         output.block(stream, ["x"])
 
 
+def test_no_resume_marker_is_written_for_an_opening_marker_that_never_went_out() -> None:
+    class FailsFirst(io.StringIO):
+        failed = False
+
+        def write(self, text: str) -> int:
+            if not self.failed:
+                self.failed = True
+                raise OSError("closed")
+            return super().write(text)
+
+    stream = FailsFirst()
+    with pytest.raises(OSError):
+        output.block(stream, ["x"])
+    assert stream.getvalue() == ""
+
+
 def test_a_context_block_writes_to_the_context_stream() -> None:
     fake = FakeGitHub()
     ctx, out = make_context(fake, load_test_board(), Client("t", "http://127.0.0.1:1/graphql"))
