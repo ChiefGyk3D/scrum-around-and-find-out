@@ -510,6 +510,7 @@ def via_cli(client: Client, *flags: str) -> tuple[int, str, str]:
     code = main(
         ["--board", BOARD_FILE, *flags, "reconcile"], env={}, client_factory=lambda b, e, d: client, out=out, err=err
     )
+    assert "could not reach GitHub" not in err.getvalue(), "the fake crashed: the test, not the code, caused this exit"
     return code, out.getvalue(), err.getvalue()
 
 
@@ -686,7 +687,11 @@ def test_malformed_work_is_exit_2_before_any_write_and_the_value_is_not_echoed(
 ) -> None:
     build_world(fake)
     fake.add_content("acme/widgets", "Issue", 1)
-    wrap(fake, "RepoOpenIssues", lambda data, v: change(data["repository"]["issues"]["nodes"][0]))
+    wrap(
+        fake,
+        "RepoOpenIssues",
+        lambda data, v: [change(n) for n in data["repository"]["issues"]["nodes"]],
+    )
     code, out, err = via_cli(client)
     assert code == 2, (out, err)
     assert fake.mutations == [], "a repository that cannot be read in full is not worked on"
@@ -853,3 +858,27 @@ def test_a_done_date_field_that_is_not_a_date_is_refused_before_any_mutation(fak
     with pytest.raises(ConfigError, match="is not a date field"):
         reconcile(fake, client)
     assert fake.mutations == []
+
+
+def test_a_board_item_whose_content_is_not_an_object_is_exit_2(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Area="Core", Priority="P2 later")
+    wrap(fake, "ProjectItems", lambda data, v: data["node"]["items"]["nodes"][0].update(content=5))
+    code, out, _ = via_cli(client)
+    assert code == 2 and fake.mutations == [] and "nothing to do" not in out
+
+
+def test_an_add_acknowledged_with_another_cards_id_is_an_unknown_outcome(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1)
+    real = HANDLERS["AddItem"]
+
+    def handler(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        real(f, v)  # the card is added, but the reply names a different one
+        return {"addProjectV2ItemById": {"item": {"id": "PVTI_not_this_one"}}}
+
+    fake.handlers["AddItem"] = handler
+    code, text = reconcile(fake, client)
+    assert code == 2 and "unknown outcome" in text
+    assert fake.mutations_named("SetSelect") == []
