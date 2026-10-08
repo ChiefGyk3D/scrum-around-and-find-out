@@ -324,3 +324,39 @@ def test_an_impossible_calendar_date_is_unknown_not_a_raise(fake: FakeGitHub, cl
     fake.field(project, "Sprint").iterations[0]["startDate"] = "2026-13-45"
     code, text = run_audit(fake, client)
     assert code == 2 and "UNKNOWN" in text
+
+
+def test_a_fields_connection_with_a_null_node_is_unknown_not_a_silent_skip(fake: FakeGitHub, client: Client) -> None:
+    from fakegh.reads import _field_json
+
+    _, project = build_world(fake)
+
+    def with_null(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        nodes: list[Any] = [_field_json(x) for x in project.fields] + [None]
+        return {
+            "organization": {
+                "projectV2": {"fields": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}
+            }
+        }
+
+    fake.handlers["ProjectFieldsOrg"] = with_null
+    code, text = run_audit(fake, client)
+    assert code == 2 and "UNKNOWN" in text and "null node" in text
+
+
+def test_a_non_boolean_has_next_page_is_unknown_not_the_last_page(fake: FakeGitHub, client: Client) -> None:
+    from fakegh.reads import _field_json
+
+    _, project = build_world(fake)
+    fake.handlers["ProjectFieldsOrg"] = lambda f, v: {
+        "organization": {
+            "projectV2": {
+                "fields": {
+                    "pageInfo": {"hasNextPage": None, "endCursor": "9"},
+                    "nodes": [_field_json(x) for x in project.fields],
+                }
+            }
+        }
+    }
+    code, text = run_audit(fake, client)
+    assert code == 2 and "hasNextPage" in text

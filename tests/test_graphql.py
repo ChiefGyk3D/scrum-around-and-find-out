@@ -657,3 +657,50 @@ def test_a_mutation_spread_over_lines_gets_the_same_rule(fake: FakeGitHub, clien
     with pytest.raises(UnknownOutcomeError):
         client.execute("mutation   AddItem ($p: ID!)\n{ addItem(id: $p) { id } }", {"p": "PVT_1"})
     assert len(fake.requests) == 1
+
+
+def _fields_page(info: Any, nodes: Any) -> Any:
+    def handler(f: FakeGitHub, v: dict[str, object]) -> dict[str, object]:
+        return {"organization": {"projectV2": {"fields": {"pageInfo": info, "nodes": nodes}}}}
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("info", "nodes", "message"),
+    [
+        ({"hasNextPage": None, "endCursor": "1"}, [], "hasNextPage"),
+        ({"hasNextPage": "false", "endCursor": "1"}, [], "hasNextPage"),
+        ({"endCursor": "1"}, [], "hasNextPage"),
+        (None, [], "hasNextPage"),
+        ({"hasNextPage": False, "endCursor": None}, [None], "null node"),
+        ({"hasNextPage": False, "endCursor": None}, None, "no list of nodes"),
+    ],
+)
+def test_a_connection_that_cannot_be_read_in_full_is_malformed_not_a_silent_stop(
+    fake: FakeGitHub, client: Client, info: Any, nodes: Any, message: str
+) -> None:
+    from safo.errors import MalformedDataError
+
+    world(fake)
+    fake.handlers["ProjectFieldsOrg"] = _fields_page(info, nodes)
+    with pytest.raises(MalformedDataError, match=message):
+        list(client.nodes(FIELDS, VARS, ("organization", "projectV2", "fields")))
+
+
+def test_a_null_mutation_payload_with_no_errors_is_an_unknown_outcome(fake: FakeGitHub, client: Client) -> None:
+    fake.handlers["Touch"] = lambda f, v: {"touchThing": None}
+    with pytest.raises(UnknownOutcomeError, match="payload was null") as caught:
+        client.execute("mutation Touch($input: ID!) { touchThing(input: $input) { id } }", {"input": "x"})
+    assert caught.value.status == 200
+
+
+def test_mutate_returns_requires_an_id_at_the_path(fake: FakeGitHub, client: Client) -> None:
+    from safo.mutation import mutate
+
+    doc = "mutation Touch($input: ID!) { touchThing(input: $input) { thing { id } } }"
+    fake.handlers["Touch"] = lambda f, v: {"touchThing": {"thing": {"name": "no id"}}}
+    with pytest.raises(UnknownOutcomeError, match=r"carried no touchThing\.thing\.id"):
+        mutate(client, doc, {"input": "x"}, returns=("touchThing", "thing"))
+    fake.handlers["Touch"] = lambda f, v: {"touchThing": {"thing": {"id": "T1"}}}
+    assert mutate(client, doc, {"input": "x"}, returns=("touchThing", "thing"))["touchThing"]["thing"]["id"] == "T1"

@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any
 
 from safo.errors import ConfigError, MalformedDataError, NotFoundError
 from safo.graphql import JSON, Client
 from safo.schema import Project
+from safo.values import iso_day, whole_number
 
 
 def _both(template: str) -> tuple[str, str]:
@@ -138,25 +138,6 @@ class LiveBoard:
         return found.id
 
 
-def _int(value: Any, where: str) -> int:
-    """An integer from a live value, or MalformedDataError naming where it came from."""
-    if isinstance(value, bool):
-        raise MalformedDataError(f"{where} is {value!r} on the project, not an integer")
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        raise MalformedDataError(f"{where} is {str(value)[:40]!r} on the project, not an integer") from None
-
-
-def _date(value: Any, where: str) -> str:
-    """A YYYY-MM-DD string from a live value, or MalformedDataError naming where it came from."""
-    try:
-        dt.date.fromisoformat(str(value))
-    except ValueError:
-        raise MalformedDataError(f"{where} is {str(value)[:40]!r} on the project, not a date (YYYY-MM-DD)") from None
-    return str(value)
-
-
 def _root(owner_type: str) -> str:
     return "organization" if owner_type == "organization" else "user"
 
@@ -176,7 +157,20 @@ def owner_id(client: Client, project: Project) -> str:
 
 
 def load_live(client: Client, project: Project) -> LiveBoard:
-    """Three reads: meta, fields (paginated), views (paginated). Needs `project.number`."""
+    """Three reads: meta, fields (paginated), views (paginated). Needs `project.number`.
+
+    A payload that is not shaped as asked (a null `items`, a missing key) is a MalformedDataError, never a
+    TypeError or KeyError: the caller can then say "cannot tell" and exit 2.
+    """
+    try:
+        return _load_live(client, project)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise MalformedDataError(
+            "the project's data from GitHub is not shaped as expected (a key is missing)"
+        ) from None
+
+
+def _load_live(client: Client, project: Project) -> LiveBoard:
     if project.number is None:
         raise ConfigError(
             "project.number is not set; run `safo bootstrap` to create the project, then write its number in board.yaml"
@@ -191,23 +185,21 @@ def load_live(client: Client, project: Project) -> LiveBoard:
     live = LiveBoard(
         str(node["id"]),
         str(node["title"]),
-        _int(node["number"], "the project number"),
-        _int(node["items"]["totalCount"], "the project's items totalCount"),
+        whole_number(node["number"], "the project number"),
+        whole_number(node["items"]["totalCount"], "the project's items totalCount"),
     )
-    for page in client.pages(fields_doc, variables, (root, "projectV2", "fields")):
+    for page in client.pages(fields_doc, variables, (root, "projectV2", "fields"), ("id", "name", "dataType")):
         for raw in page["nodes"]:
-            if raw:
-                parsed = _parse_field(raw)
-                live.fields[parsed.name] = parsed
-    for page in client.pages(views_doc, variables, (root, "projectV2", "views")):
+            parsed = _parse_field(raw)
+            live.fields[parsed.name] = parsed
+    for page in client.pages(views_doc, variables, (root, "projectV2", "views"), ("id", "name", "layout")):
         for raw in page["nodes"]:
-            if raw:
-                live.views[str(raw["name"])] = LiveView(
-                    str(raw["id"]),
-                    str(raw["name"]),
-                    LAYOUT_NAMES.get(str(raw["layout"]), str(raw["layout"])),
-                    str(raw.get("filter") or ""),
-                )
+            live.views[str(raw["name"])] = LiveView(
+                str(raw["id"]),
+                str(raw["name"]),
+                LAYOUT_NAMES.get(str(raw["layout"]), str(raw["layout"])),
+                str(raw.get("filter") or ""),
+            )
     return live
 
 
@@ -226,8 +218,8 @@ def _parse_field(raw: JSON) -> LiveField:
             LiveIteration(
                 str(i["id"]),
                 str(i["title"]),
-                _date(i["startDate"], f"an iteration startDate of field {name!r}"),
-                _int(i["duration"], f"an iteration duration of field {name!r}"),
+                iso_day(i["startDate"], f"an iteration startDate of field {name!r}").isoformat(),
+                whole_number(i["duration"], f"an iteration duration of field {name!r}"),
             )
             for i in rows
         )

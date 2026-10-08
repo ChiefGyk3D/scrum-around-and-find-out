@@ -105,6 +105,7 @@ class FItem:
     content_id: str | None
     values: JSON = field(default_factory=dict)  # field id -> option id | date | text
     hidden_for: int = 0  # listings that still leave this item out (a fresh add can lag)
+    unreadable: bool = False  # the token cannot read the content: GitHub sends `content: null`
 
 
 @dataclass

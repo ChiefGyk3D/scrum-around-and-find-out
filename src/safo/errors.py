@@ -24,10 +24,6 @@ class AuthError(SafoError):
     """GitHub refused the token (401, or 403 that is not a rate limit)."""
 
 
-class MalformedDataError(SafoError):
-    """GitHub answered with a value of the wrong kind (a date that is not a date, a count that is not a number)."""
-
-
 class ApiError(SafoError):
     """GitHub answered with an error the caller cannot work around."""
 
@@ -35,6 +31,14 @@ class ApiError(SafoError):
         super().__init__(message)
         self.errors = errors or []
         self.data = data
+
+
+class MalformedDataError(ApiError):
+    """GitHub answered with a value of the wrong kind (a date that is not a date, a count that is not a number).
+
+    An ApiError, so a caller that guards against any bad answer catches it; a distinct class, so audit can
+    report "cannot tell" for it. The message names the field and never echoes the value.
+    """
 
 
 class NotFoundError(ApiError):

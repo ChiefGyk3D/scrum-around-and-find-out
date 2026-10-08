@@ -19,11 +19,12 @@ import urllib.request
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, TextIO
 
-from safo import __version__
+from safo import __version__, output
 from safo.errors import (
     ApiError,
     AuthError,
     ConfigError,
+    MalformedDataError,
     NotFoundError,
     RateLimitedError,
     SafoError,
@@ -158,7 +159,8 @@ class Client:
         if _is_mutation_robust(document):
             if self.dry_run:
                 self.skipped += 1
-                print(f"dry run: would {op} {json.dumps(variables, sort_keys=True, default=str)}", file=self._out)
+                shown = json.dumps(variables, sort_keys=True, default=str)
+                output.write(self._out, f"dry run: would {op} {shown}")
                 return dry_result or {}
             return self._mutate(op, self._payload(document, variables, op))
         return self._query(op, self._payload(document, variables, op))
@@ -227,6 +229,9 @@ class Client:
             raise unknown("the response carried errors: " + _describe(body["errors"]))
         if data is None:
             raise unknown("the response had no data object")
+        if any(payload is None for payload in data.values()):
+            # `{"data": {"createX": null}}` with no errors is not a success: nothing says the write landed.
+            raise unknown("the mutation's payload was null")
         return data
 
     def _unknown(
@@ -362,8 +367,14 @@ class Client:
 
     # -- pagination ------------------------------------------------------------
 
-    def pages(self, document: str, variables: Mapping[str, Any], path: Sequence[str]) -> Iterator[JSON]:
-        """Yield each page's connection object. The document declares `$endCursor: String`."""
+    def pages(
+        self, document: str, variables: Mapping[str, Any], path: Sequence[str], require: Sequence[str] = ()
+    ) -> Iterator[JSON]:
+        """Yield each page's connection object. The document declares `$endCursor: String`.
+
+        Every node must be an object holding each key in `require` (non-null); anything else is
+        MalformedDataError, because a node that is skipped or half-read makes a partial read look complete.
+        """
         cursor: str | None = None
         seen: set[str] = set()
         page_count = 0
@@ -374,7 +385,7 @@ class Client:
                 node = node.get(key) if isinstance(node, dict) else None
                 if node is None:
                     raise NotFoundError(f"{operation_name(document)}: nothing at {'.'.join(path)}")
-            connection: JSON = node
+            connection = _connection(operation_name(document), node, require)
             yield connection
             info = connection["pageInfo"]
             if not info["hasNextPage"]:
@@ -390,11 +401,45 @@ class Client:
                 raise ApiError(f"{operation_name(document)}: GitHub repeated the cursor {cursor}")
             seen.add(cursor)
 
-    def nodes(self, document: str, variables: Mapping[str, Any], path: Sequence[str]) -> Iterator[JSON]:
-        for page in self.pages(document, variables, path):
+    def nodes(
+        self, document: str, variables: Mapping[str, Any], path: Sequence[str], require: Sequence[str] = ()
+    ) -> Iterator[JSON]:
+        for page in self.pages(document, variables, path, require):
             for node in page["nodes"]:
                 if node is not None:
                     yield node
+
+
+def _connection(op: str, node: Any, require: Sequence[str] = ()) -> JSON:
+    """A connection with a boolean hasNextPage and a list of non-null nodes, or MalformedDataError.
+
+    A page that cannot be read in full must never look like the last page, and a null node must never
+    be skipped: either would make a partial read look complete.
+    """
+    if not isinstance(node, dict):
+        raise MalformedDataError(f"{op}: the connection is {type(node).__name__}, not an object")
+    info = node.get("pageInfo")
+    if not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
+        raise MalformedDataError(f"{op}: pageInfo.hasNextPage is missing or not a boolean")
+    rows = node.get("nodes")
+    if not isinstance(rows, list):
+        raise MalformedDataError(f"{op}: the connection has no list of nodes")
+    for row in rows:
+        if row is None:
+            raise MalformedDataError(f"{op}: the connection contains a null node")
+        if not isinstance(row, dict):
+            raise MalformedDataError(
+                f"{op}: the connection contains a node that is {type(row).__name__}, not an object"
+            )
+        missing = [key for key in require if row.get(key) is None]
+        if missing:
+            raise MalformedDataError(f"{op}: a node lacks {', '.join(missing)}")
+    return node
+
+
+def check_connection(op: str, node: Any, require: Sequence[str] = ()) -> JSON:
+    """`_connection` for a caller that fetched a connection by hand (a batch of ids) rather than through `pages`."""
+    return _connection(op, node, require)
 
 
 def _describe(errors: Any) -> str:

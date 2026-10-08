@@ -78,7 +78,7 @@ filter is set in a second call. An existing view with another layout is refused;
 | `status.reopened` | `Backlog` | An issue reopened out of Done |
 | `status.closed`, `status.merged` | `Done` | A closed issue or pull request, a merged pull request |
 | `done_date_field` | empty (off) | The date field set to the close date; cleared when an issue is reopened |
-| `new_item_defaults` | none | `{field: option}` pairs set on every item `safo` adds, and only on those |
+| `new_item_defaults` | none | `{field: option}` pairs filled only when blank on any managed card, so a later run repairs partial initialization; nonblank manual values are preserved. A default never writes the status, Area or Done-date field: those follow their own rules |
 | `add_closed_days` | `0` | `reconcile` also adds items closed or merged within this many days, as Done |
 
 Every status name must be an option of the status field; `safo` checks that against `fields` when it loads the file and
@@ -113,3 +113,7 @@ The YAML loader refuses the following as hostile or ambiguous:
 - **Nesting depth** > 64 levels (measured during composition): prevents exponential parse times and RecursionError crashes
 
 All these YAML features are checked in the loader itself; parsing fails with an error that names the file, line, and kind.
+
+After an unknown outcome, `status` cannot verify whether the update landed; check the existing project updates before posting again.
+
+`sync` treats the event payload as a pointer: it reads the issue or pull request live (state, draft flag, number, repository) and writes from that. An action that contradicts the live state, or a node that is not in the repository the payload names, is a NOTE (exit 1) and writes nothing. `status` checks that the acknowledged update belongs to the project (`statusUpdate.project.id`); an acknowledgement that does not say so is an unknown outcome. An exhausted rate limit before any write exits 1; after a write was sent it is an unknown outcome (exit 2). Text from GitHub is escaped on every log line, and `status --post --print` shows the update inside `::stop-commands::`.

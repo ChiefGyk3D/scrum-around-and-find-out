@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import math
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -86,3 +89,30 @@ def month(value: str) -> str:
     if not re.fullmatch(r"[0-9]{4}-(?:0[1-9]|1[0-2])", value) or value[:4] == "0000":
         raise ValueError("expected YYYY-MM")
     return value
+
+
+class NotRegularFileError(OSError):
+    """The path names a FIFO, a directory, a device or the like."""
+
+
+def read_bounded(path: Path, limit: int) -> bytes:
+    """At most `limit` bytes of a regular file, judged by the descriptor it was opened as.
+
+    The open neither follows a symlink in the last component nor waits for a writer on a FIFO, and the file type is
+    asked of the descriptor (not of the path), so the file cannot be swapped for a FIFO between a check and the open.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise NotRegularFileError(errno.EINVAL, "not a regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while total < limit:
+            chunk = os.read(fd, min(65_536, limit - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
