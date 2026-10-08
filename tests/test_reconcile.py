@@ -834,3 +834,22 @@ def test_an_item_count_that_is_not_a_number_is_exit_2(fake: FakeGitHub, client: 
     wrap(fake, "ProjectMetaOrg", lambda data, v: data["organization"]["projectV2"]["items"].update(totalCount="many"))
     code, out, err = via_cli(client)
     assert code == 2 and fake.mutations == [], (out, err)
+
+
+def test_a_closed_pull_request_older_than_the_window_is_not_added(fake: FakeGitHub, client: Client) -> None:
+    board = load_test_board()
+    board = dataclasses.replace(board, rules=dataclasses.replace(board.rules, add_closed_days=30))
+    _, project = build_world(fake, board)
+    fake.add_content("acme/widgets", "PullRequest", 1, state="MERGED", closed_at="2026-01-01T00:00:00Z")
+    fake.add_content("acme/widgets", "PullRequest", 2, state="CLOSED", closed_at="2026-01-01T00:00:00Z")
+    code, text = reconcile(fake, client, board)
+    assert code == 0 and project.items == [] and fake.mutations == [], text
+
+
+def test_a_done_date_field_that_is_not_a_date_is_refused_before_any_mutation(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    fake.field(project, "Done on").data_type = "TEXT"
+    fake.add_content("acme/widgets", "Issue", 1)
+    with pytest.raises(ConfigError, match="is not a date field"):
+        reconcile(fake, client)
+    assert fake.mutations == []
