@@ -540,7 +540,7 @@ def test_a_reread_that_finds_several_projects_says_so(
     monkeypatch.setattr(client, "execute", execute)
     code, text = bootstrap(fake, client, board)
     assert code == 2 and "observed: 2 projects are titled 'Acme board'; set project.number" in text
-    assert "re-read the live board" in text
+    assert "re-read the live board" not in text and "no board was loaded" in text
 
 
 def test_a_dry_run_with_nothing_to_create_exits_0(fake: FakeGitHub, sleeps: list[float]) -> None:
@@ -586,3 +586,51 @@ def test_live_extras_get_one_note_pointing_at_audit_and_do_not_change_the_exit(
     code, text = bootstrap(fake, client, board)
     assert code == 0 and text.count("NOTE") == 1
     assert "2 live option(s) or view(s) are not in board.yaml; `safo audit` reports them" in text
+
+
+def _reread_raises(client: Client, monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    real = client.execute
+    lost = False
+
+    def execute(document: str, variables: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        nonlocal lost
+        if "mutation CreateField(" in document:
+            lost = True
+            raise UnknownOutcomeError("lost response", data=None, errors=[], status=502)
+        if "query ProjectFieldsOrg(" in document and lost:
+            raise error
+        return real(document, variables, **kwargs)
+
+    monkeypatch.setattr(client, "execute", execute)
+
+
+def test_a_failed_reread_names_the_error_type_and_a_safo_errors_own_message(
+    fake: FakeGitHub, client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = load_test_board()
+    empty_project(fake, board)
+    _reread_raises(client, monkeypatch, ApiError("reread unavailable"))
+    code, text = bootstrap(fake, client, board)
+    assert code == 2 and "live reread failed; no further writes (ApiError: reread unavailable)" in text
+
+
+def test_a_failed_reread_with_a_foreign_error_prints_the_type_only(
+    fake: FakeGitHub, client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board = load_test_board()
+    empty_project(fake, board)
+    _reread_raises(client, monkeypatch, RuntimeError("sentinel-payload-value"))
+    code, text = bootstrap(fake, client, board)
+    assert code == 2 and "live reread failed; no further writes (RuntimeError)" in text
+    assert "sentinel-payload-value" not in text
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(3)])
+def test_an_interrupt_during_the_reread_still_propagates(
+    fake: FakeGitHub, client: Client, monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    board = load_test_board()
+    empty_project(fake, board)
+    _reread_raises(client, monkeypatch, error)
+    with pytest.raises(type(error)):
+        bootstrap(fake, client, board)

@@ -7,10 +7,11 @@ import datetime as dt
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from safo.errors import NotFoundError
+from safo.errors import MalformedDataError, NotFoundError
 from safo.graphql import JSON, Client
 from safo.live import LiveBoard
 from safo.schema import Board, Repository
+from safo.values import whole_number
 
 _CONTENT = """
         content {
@@ -109,7 +110,17 @@ class ItemState:
     values: dict[str, str | None] = field(default_factory=dict)
 
 
+ISSUE_KEYS = ("id", "number", "state")
+
+
 def content_from_node(node: JSON, repo: str, typename: str) -> Content:
+    try:
+        return _content_from_node(node, repo, typename)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise MalformedDataError(f"an {typename} of {repo} from GitHub is not shaped as expected") from None
+
+
+def _content_from_node(node: JSON, repo: str, typename: str) -> Content:
     kind = "pr" if typename == "PullRequest" else "issue"
     state = "merged" if node.get("merged") else str(node["state"]).lower()
     labels = tuple(str(label["name"]) for label in (node.get("labels") or {}).get("nodes") or [] if label)
@@ -119,7 +130,7 @@ def content_from_node(node: JSON, repo: str, typename: str) -> Content:
         state,
         bool(node.get("isDraft")),
         node.get("closedAt"),
-        int(node["number"]),
+        whole_number(node["number"], f"a {typename} number of {repo}"),
         repo,
         str(node.get("title", "")),
         labels,
@@ -137,12 +148,16 @@ def list_board_items(client: Client, board: Board, live: LiveBoard) -> list[Item
         "withDone": bool(rules.done_date_field),
     }
     items: list[ItemState] = []
-    for node in client.nodes(Q_ITEMS, variables, ("node", "items")):
+    for node in client.nodes(Q_ITEMS, variables, ("node", "items"), ("id",)):
         raw = node.get("content") or {}
         typename = raw.get("__typename")
         content = None
         if typename in ("Issue", "PullRequest"):
-            content = content_from_node(raw, str(raw["repository"]["nameWithOwner"]), typename)
+            try:
+                repo_name = str(raw["repository"]["nameWithOwner"])
+            except (KeyError, TypeError):
+                raise MalformedDataError("a board item's content has no repository from GitHub") from None
+            content = content_from_node(raw, repo_name, typename)
         items.append(
             ItemState(
                 str(node["id"]),
@@ -163,14 +178,14 @@ def list_repo_work(client: Client, repo: Repository, *, closed_since: dt.date | 
     """
     variables = {"owner": repo.owner, "name": repo.name}
     full = repo.full_name
-    for node in client.nodes(Q_OPEN_ISSUES, variables, ("repository", "issues")):
+    for node in client.nodes(Q_OPEN_ISSUES, variables, ("repository", "issues"), ISSUE_KEYS):
         yield content_from_node(node, full, "Issue")
-    for node in client.nodes(Q_OPEN_PULLS, variables, ("repository", "pullRequests")):
+    for node in client.nodes(Q_OPEN_PULLS, variables, ("repository", "pullRequests"), ISSUE_KEYS):
         yield content_from_node(node, full, "PullRequest")
     if closed_since is None:
         return
     for doc, key, typename in ((Q_CLOSED_ISSUES, "issues", "Issue"), (Q_CLOSED_PULLS, "pullRequests", "PullRequest")):
-        for node in client.nodes(doc, variables, ("repository", key)):
+        for node in client.nodes(doc, variables, ("repository", key), ISSUE_KEYS):
             content = content_from_node(node, full, typename)
             if content.closed_day and content.closed_day >= closed_since.isoformat():
                 yield content
@@ -231,8 +246,8 @@ def find_item(client: Client, board: Board, live: LiveBoard, content_id: str) ->
         "withDone": bool(rules.done_date_field),
         "areaField": rules.area_field,
     }
-    for node in client.nodes(Q_ITEM_LOOKUP, variables, ("node", "projectItems")):
-        if node["project"]["id"] == live.id:
+    for node in client.nodes(Q_ITEM_LOOKUP, variables, ("node", "projectItems"), ("id", "project")):
+        if str((node["project"] or {}).get("id")) == live.id:
             values = {}
             for name, _ in rules.new_item_defaults:
                 raw = client.execute(Q_ITEM_VALUE, {"id": node["id"], "name": name}).get("node")

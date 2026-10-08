@@ -188,20 +188,18 @@ def _load_live(client: Client, project: Project) -> LiveBoard:
         whole_number(node["number"], "the project number"),
         whole_number(node["items"]["totalCount"], "the project's items totalCount"),
     )
-    for page in client.pages(fields_doc, variables, (root, "projectV2", "fields")):
+    for page in client.pages(fields_doc, variables, (root, "projectV2", "fields"), ("id", "name", "dataType")):
         for raw in page["nodes"]:
-            if raw:
-                parsed = _parse_field(raw)
-                live.fields[parsed.name] = parsed
-    for page in client.pages(views_doc, variables, (root, "projectV2", "views")):
+            parsed = _parse_field(raw)
+            live.fields[parsed.name] = parsed
+    for page in client.pages(views_doc, variables, (root, "projectV2", "views"), ("id", "name", "layout")):
         for raw in page["nodes"]:
-            if raw:
-                live.views[str(raw["name"])] = LiveView(
-                    str(raw["id"]),
-                    str(raw["name"]),
-                    LAYOUT_NAMES.get(str(raw["layout"]), str(raw["layout"])),
-                    str(raw.get("filter") or ""),
-                )
+            live.views[str(raw["name"])] = LiveView(
+                str(raw["id"]),
+                str(raw["name"]),
+                LAYOUT_NAMES.get(str(raw["layout"]), str(raw["layout"])),
+                str(raw.get("filter") or ""),
+            )
     return live
 
 

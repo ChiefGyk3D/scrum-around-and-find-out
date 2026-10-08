@@ -15,7 +15,7 @@ import datetime as dt
 from typing import Any
 
 from safo.context import Context
-from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, UnknownOutcomeError
+from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, SafoError, UnknownOutcomeError
 from safo.graphql import JSON
 from safo.live import DATA_TYPES, LAYOUT_ENUMS, LiveBoard, _both, _root, load_live, owner_id
 from safo.modes import Mode, register
@@ -54,7 +54,9 @@ def discover(ctx: Context) -> list[JSON]:
     doc = Q_DISCOVER_ORG if project.owner_type == "organization" else Q_DISCOVER_USER
     return [
         n
-        for n in ctx.client.nodes(doc, {"login": project.owner}, (_root(project.owner_type), "projectsV2"))
+        for n in ctx.client.nodes(
+            doc, {"login": project.owner}, (_root(project.owner_type), "projectsV2"), ("id", "number", "title")
+        )
         if n["title"] == project.title
     ]
 
@@ -257,18 +259,21 @@ def _run(ctx: Context, args: argparse.Namespace, state: State) -> int:
     return EXIT_DRIFT if report.refused or (dry and report.created) else EXIT_OK
 
 
-def _observe(ctx: Context, state: State) -> None:
-    """Re-read the board after an unknown outcome and say what the thing in flight looks like now."""
+def _observe(ctx: Context, state: State) -> bool:
+    """Re-read the board after an unknown outcome and say what the thing in flight looks like now.
+
+    Returns whether a board was loaded: a discovery that finds zero or several projects loads none.
+    """
     project = state.project
     kind, name = state.attempt or ("", "")
     if project.number is None:
         matches = discover(ctx)
         if not matches:
             ctx.say(f"observed: no project titled {project.title!r} exists, so the create did not land")
-            return
+            return False
         if len(matches) > 1:
             ctx.say(f"observed: {len(matches)} projects are titled {project.title!r}; set project.number")
-            return
+            return False
         number = whole_number(matches[0].get("number"), "projectsV2.nodes.number")
         ctx.say(f"observed: project {project.title!r} exists as number {number}")
         ctx.say(f"Write `number: {number}` under project: in board.yaml.")
@@ -282,6 +287,7 @@ def _observe(ctx: Context, state: State) -> None:
         ctx.say(f"observed: view {name!r} " + (f"exists with the filter {view.filter!r}" if view else "does not exist"))
     else:
         ctx.say(f"observed: the project has {len(live.fields)} fields and {len(live.views)} views")
+    return True
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
@@ -292,12 +298,17 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         ctx.say(f"unknown outcome: {err}")
         # No dependent writes, even if the reread proves that the write landed.
         try:
-            _observe(ctx, state)
-        except Exception:
+            loaded = _observe(ctx, state)
+        except Exception as reread_error:
             # Any failure of the reread, even one nobody foresaw, still ends in a visible line and exit 2.
-            ctx.say("live reread failed; no further writes")
+            # Only a SafoError's own message is shown (it never carries payload data); anything else, the type only.
+            detail = f": {reread_error}" if isinstance(reread_error, SafoError) else ""
+            ctx.say(f"live reread failed; no further writes ({type(reread_error).__name__}{detail})")
         else:
-            ctx.say("re-read the live board after the unknown outcome; no further writes were sent")
+            if loaded:
+                ctx.say("re-read the live board after the unknown outcome; no further writes were sent")
+            else:
+                ctx.say("no board was loaded; no further writes were sent")
         ctx.say("unknown outcome: re-run after checking the board")
         return EXIT_UNKNOWN
 
