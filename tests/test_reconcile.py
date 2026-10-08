@@ -1556,7 +1556,9 @@ def test_a_default_field_of_the_wrong_type_is_a_note_and_is_never_written(fake: 
     assert snap["acme/widgets#1"]["Priority"] == "high"
 
 
-@pytest.mark.parametrize("damage", ["repeat-l0", "repeat-other-case", "middle-total-zero", "last-total-off"])
+@pytest.mark.parametrize(
+    "damage", ["repeat-l0", "repeat-other-case", "middle-total-zero", "last-total-off", "drop-last"]
+)
 def test_label_pages_must_agree_on_the_total_and_must_not_repeat_a_label(
     fake: FakeGitHub, client: Client, damage: str
 ) -> None:
@@ -1580,8 +1582,17 @@ def test_label_pages_must_agree_on_the_total_and_must_not_repeat_a_label(
                 labels["totalCount"] = 0
             if damage == "last-total-off" and not labels["pageInfo"]["hasNextPage"]:
                 labels["totalCount"] = 20
+            if damage == "drop-last" and not labels["pageInfo"]["hasNextPage"]:
+                labels["nodes"].pop()
 
     wrap(fake, "ContentLabels", change)
     code, out, err = via_cli(client)
     assert code == 2 and fake.mutations == [], (out, err)
     assert "nothing to do" not in out
+
+
+def test_a_label_repeated_on_the_first_page_is_exit_2(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1, labels=["bug", "BUG"])
+    code, out, err = via_cli(client)
+    assert code == 2 and fake.mutations == [], (out, err)
