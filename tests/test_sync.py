@@ -950,6 +950,16 @@ def test_an_edit_event_is_taken_at_whatever_state_the_issue_has_now(
             "merged": False,
             "repository": {"nameWithOwner": "acme/widgets"},
         },
+        {"id": "X", "number": 0, "state": "OPEN", "closedAt": None, "repository": {"nameWithOwner": "acme/widgets"}},
+        {"id": "X", "number": 1, "state": "OPEN", "repository": {"nameWithOwner": "acme/widgets"}},
+        {
+            "id": "X",
+            "__typename": "Repository",
+            "number": 1,
+            "state": "OPEN",
+            "closedAt": None,
+            "repository": {"nameWithOwner": "acme/widgets"},
+        },
     ],
     ids=[
         "other-id",
@@ -960,6 +970,9 @@ def test_an_edit_event_is_taken_at_whatever_state_the_issue_has_now(
         "bad-repository",
         "bool-number",
         "bad-draft",
+        "zero-number",
+        "no-closedAt",
+        "foreign-typename",
     ],
 )
 def test_a_live_read_that_is_not_shaped_as_asked_is_exit_2_and_writes_nothing(
@@ -972,8 +985,36 @@ def test_a_live_read_that_is_not_shaped_as_asked_is_exit_2_and_writes_nothing(
     served = {"__typename": "Issue", **node, "id": issue.id if node["id"] == "X" else node["id"]}
     fake.handlers["SyncContent"] = lambda f, v: {"node": served}
     path = event(tmp_path, "issue", "opened", issue)
-    code, _, _ = run_cli("--board", BOARD, "sync", "--event-path", str(path), client=client)
-    assert code == 2 and fake.mutations == []
+    code, _, err = run_cli("--board", BOARD, "sync", "--event-path", str(path), client=client)
+    assert code == 2 and fake.mutations == [] and err.startswith("error: ")
+
+
+def test_an_answer_for_another_node_than_the_one_asked_is_named_as_such(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    from cliutil import BOARD, run_cli
+    from fakegh.reads import content_json
+
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    other = fake.add_content("acme/widgets", "Issue", 2)
+    fake.handlers["SyncContent"] = lambda f, v: {"node": content_json(other)}
+    path = event(tmp_path, "issue", "opened", issue)
+    code, _, err = run_cli("--board", BOARD, "sync", "--event-path", str(path), client=client)
+    assert code == 2 and "another node" in err and fake.mutations == []
+
+
+def test_a_live_answer_without_a_node_is_exit_2_not_a_traceback(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    from cliutil import BOARD, run_cli
+
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    fake.handlers["SyncContent"] = lambda f, v: {}
+    path = event(tmp_path, "issue", "opened", issue)
+    code, _, err = run_cli("--board", BOARD, "sync", "--event-path", str(path), client=client)
+    assert code == 2 and "SyncContent" in err and fake.mutations == []
 
 
 def test_a_card_that_cannot_be_read_though_the_issue_exists_is_not_called_vanished(

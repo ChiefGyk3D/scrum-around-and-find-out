@@ -882,6 +882,8 @@ def test_a_dry_run_line_for_the_post_cannot_carry_a_command_from_a_title(fake: F
         {"id": "PVTSU_1", "project": None},
         {"id": "PVTSU_1", "project": {"id": 5}},
         {"id": "PVTSU_1", "project": {}},
+        {"id": "PVTSU_1", "project": "PVT_0002"},
+        {"id": "PVTSU_1", "project": ["PVT_0002"]},
     ],
 )
 def test_an_update_acknowledged_for_another_project_is_an_unknown_outcome_and_not_sent_again(
@@ -986,3 +988,12 @@ def test_the_post_asks_for_the_project_of_the_update_it_made(fake: FakeGitHub, c
 
     fake.handlers["StatusUpdate"] = spy
     assert post(fake, client, body) == 0 and "statusUpdate { id project { id } }" in seen[0]
+
+
+def test_a_line_of_the_printed_block_has_its_control_characters_written_out() -> None:
+    from safo.modes.status import print_block
+
+    ctx, out = make_context(FakeGitHub(), load_test_board(), Client("t", "http://127.0.0.1:1/graphql"))
+    print_block(ctx, "a\x1b[2Jb\x00c\n- d\n")
+    lines = out.getvalue().splitlines()
+    assert lines[1] == "a\\x1b[2Jb\\x00c" and lines[2] == "- d" and len(lines) == 4
