@@ -8,7 +8,7 @@ import datetime as dt
 from dataclasses import dataclass, field
 
 from safo.context import Context
-from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, NotFoundError
+from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, MalformedDataError, NotFoundError
 from safo.items import collect_work, list_board_items
 from safo.live import LiveBoard, LiveField, load_live
 from safo.modes import Mode, register
@@ -98,12 +98,17 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     findings = Findings()
     try:
         live = load_live(ctx.client, board.project)
-    except NotFoundError as err:
+    except (NotFoundError, MalformedDataError) as err:
         ctx.say(f"UNKNOWN {err}")
         return EXIT_UNKNOWN
     compare_structure(board, live, findings)
     items = list_board_items(ctx.client, board, live)
     work, unreachable = collect_work(ctx.client, board, ctx.today)
+    if len(items) < live.items_total:
+        # Listing lag or a cut-short walk: the cards we did not see could be anything, so never "clean".
+        findings.unknown.append(
+            f"read {len(items)} of {live.items_total} board items; the rest were not listed, so the audit is incomplete"
+        )
     for name in unreachable:
         findings.unknown.append(f"repository {name} cannot be read with this token (is the App installed on it?)")
     for item in items:

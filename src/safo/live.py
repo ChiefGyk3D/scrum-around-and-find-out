@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any
 
-from safo.errors import ConfigError, NotFoundError
+from safo.errors import ConfigError, MalformedDataError, NotFoundError
 from safo.graphql import JSON, Client
 from safo.schema import Project
 
@@ -137,6 +138,25 @@ class LiveBoard:
         return found.id
 
 
+def _int(value: Any, where: str) -> int:
+    """An integer from a live value, or MalformedDataError naming where it came from."""
+    if isinstance(value, bool):
+        raise MalformedDataError(f"{where} is {value!r} on the project, not an integer")
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise MalformedDataError(f"{where} is {str(value)[:40]!r} on the project, not an integer") from None
+
+
+def _date(value: Any, where: str) -> str:
+    """A YYYY-MM-DD string from a live value, or MalformedDataError naming where it came from."""
+    try:
+        dt.date.fromisoformat(str(value))
+    except ValueError:
+        raise MalformedDataError(f"{where} is {str(value)[:40]!r} on the project, not a date (YYYY-MM-DD)") from None
+    return str(value)
+
+
 def _root(owner_type: str) -> str:
     return "organization" if owner_type == "organization" else "user"
 
@@ -168,7 +188,12 @@ def load_live(client: Client, project: Project) -> LiveBoard:
     node = owner and owner.get("projectV2")
     if not node:
         raise NotFoundError(f"no project {project.number} under {project.owner}, or the token cannot see it")
-    live = LiveBoard(str(node["id"]), str(node["title"]), int(node["number"]), int(node["items"]["totalCount"]))
+    live = LiveBoard(
+        str(node["id"]),
+        str(node["title"]),
+        _int(node["number"], "the project number"),
+        _int(node["items"]["totalCount"], "the project's items totalCount"),
+    )
     for page in client.pages(fields_doc, variables, (root, "projectV2", "fields")):
         for raw in page["nodes"]:
             if raw:
@@ -196,7 +221,14 @@ def _parse_field(raw: JSON) -> LiveField:
     config: Any = raw.get("configuration")
     if config:
         rows = list(config.get("completedIterations") or []) + list(config.get("iterations") or [])
+        name = str(raw.get("name"))
         iterations = tuple(
-            LiveIteration(str(i["id"]), str(i["title"]), str(i["startDate"]), int(i["duration"])) for i in rows
+            LiveIteration(
+                str(i["id"]),
+                str(i["title"]),
+                _date(i["startDate"], f"an iteration startDate of field {name!r}"),
+                _int(i["duration"], f"an iteration duration of field {name!r}"),
+            )
+            for i in rows
         )
     return LiveField(str(raw["id"]), str(raw["name"]), ftype, options, iterations)

@@ -24,6 +24,10 @@ class AuthError(SafoError):
     """GitHub refused the token (401, or 403 that is not a rate limit)."""
 
 
+class MalformedDataError(SafoError):
+    """GitHub answered with a value of the wrong kind (a date that is not a date, a count that is not a number)."""
+
+
 class ApiError(SafoError):
     """GitHub answered with an error the caller cannot work around."""
 

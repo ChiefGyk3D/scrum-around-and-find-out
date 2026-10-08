@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import io
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +19,18 @@ from safo.modes.audit import run
 from world import build_world, make_context
 
 
+@pytest.fixture(autouse=True)
+def _audit_sends_no_mutations(fake: FakeGitHub) -> Iterator[None]:
+    """Every test in this file, whichever way it calls audit, fails if the fake recorded a mutation."""
+    yield
+    assert fake.mutations == [], "audit must never mutate"
+
+
 def run_audit(fake: FakeGitHub, client: Client) -> tuple[int, str]:
     from world import load_test_board
 
     ctx, out = make_context(fake, load_test_board(), client)
     code = run(ctx, argparse.Namespace())
-    assert fake.mutations == [], "audit must never mutate"
     return code, out.getvalue()
 
 
@@ -250,3 +257,70 @@ def test_iteration_duration_alone_is_drift(fake: FakeGitHub, client: Client) -> 
     fake.field(project, "Sprint").iterations[0]["duration"] = 7
     code, text = run_audit(fake, client)
     assert code == 1 and "duration is not 14 days" in text
+
+
+def test_a_listing_shorter_than_the_total_is_unknown_never_clean(fake: FakeGitHub, client: Client) -> None:
+    """Review finding 1: three closed, not-Done cards, totalCount 3, an empty listing. Exit 2, not 0."""
+    _, project = build_world(fake)
+    for n in range(1, 4):
+        c = fake.add_content("acme/widgets", "Issue", n, state="CLOSED", closed_at="2026-10-05T10:00:00Z")
+        item = fake.add_item(project, c, Status="In progress", Area="Core")
+        item.hidden_for = 5
+    code, text = run_audit(fake, client)
+    assert code == 2
+    assert "UNKNOWN read 0 of 3 board items" in text
+    assert text.splitlines()[-1] != "clean"
+
+
+def test_a_listing_that_matches_the_total_is_not_flagged(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    c = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, c, Status="Backlog", Area="Core")
+    code, text = run_audit(fake, client)
+    assert code == 0 and "read 1 of" not in text
+
+
+def _cli_audit(fake: FakeGitHub, client: Client) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    board_file = str(Path(__file__).parent / "data" / "board.yaml")
+    code = main(["--board", board_file, "audit"], env={}, client_factory=lambda b, e, d: client, out=out, err=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+def test_a_malformed_iteration_start_date_is_exit_2_not_a_traceback(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    fake.field(project, "Sprint").iterations[0]["startDate"] = "not-a-date"
+    code, out, err = _cli_audit(fake, client)
+    assert code == 2 and err == ""
+    assert "UNKNOWN" in out and "Sprint" in out and "startDate" in out and "not a date" in out
+
+
+def test_a_non_numeric_iteration_duration_is_exit_2_not_a_traceback(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    fake.field(project, "Sprint").iterations[0]["duration"] = "soon"
+    code, out, err = _cli_audit(fake, client)
+    assert code == 2 and err == ""
+    assert "UNKNOWN" in out and "Sprint" in out and "duration" in out and "not an integer" in out
+
+
+def test_a_non_numeric_item_total_is_exit_2_not_a_traceback(fake: FakeGitHub, client: Client) -> None:
+    from fakegh.reads import meta_org
+
+    build_world(fake)
+
+    def broken(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        data = meta_org(f, v)
+        data["organization"]["projectV2"]["items"]["totalCount"] = "many"
+        return data
+
+    fake.handlers["ProjectMetaOrg"] = broken
+    code, out, err = _cli_audit(fake, client)
+    assert code == 2 and err == ""
+    assert "UNKNOWN" in out and "totalCount" in out and "not an integer" in out
+
+
+def test_an_impossible_calendar_date_is_unknown_not_a_raise(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    fake.field(project, "Sprint").iterations[0]["startDate"] = "2026-13-45"
+    code, text = run_audit(fake, client)
+    assert code == 2 and "UNKNOWN" in text
