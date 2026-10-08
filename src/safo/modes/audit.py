@@ -14,6 +14,7 @@ from safo.live import LiveBoard, LiveField, load_live
 from safo.modes import Mode, register
 from safo.plan import build_plan
 from safo.schema import Board, Field
+from safo.values import iso_day
 
 
 @dataclass
@@ -65,7 +66,7 @@ def compare_field(f: Field, live: LiveField | None, out: Findings) -> None:
                     f"{found.color}/{found.description!r}, board.yaml {o.color}/{o.description!r}"
                 )
     elif f.type == "iteration":
-        starts = {dt.date.fromisoformat(i.start) for i in live.iterations}
+        starts = {iso_day(i.start, f"an iteration startDate of field {f.name!r}") for i in live.iterations}
         missing = [d for d in expected_starts(f) if d not in starts]
         if missing:
             out.drift.append(

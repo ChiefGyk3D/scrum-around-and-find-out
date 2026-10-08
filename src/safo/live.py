@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any
 
-from safo.errors import ConfigError, MalformedDataError, NotFoundError
+from safo.errors import ConfigError, NotFoundError
 from safo.graphql import JSON, Client
 from safo.schema import Project
+from safo.values import iso_day, whole_number
 
 
 def _both(template: str) -> tuple[str, str]:
@@ -138,25 +138,6 @@ class LiveBoard:
         return found.id
 
 
-def _int(value: Any, where: str) -> int:
-    """An integer from a live value, or MalformedDataError naming where it came from."""
-    if isinstance(value, bool):
-        raise MalformedDataError(f"{where} is {value!r} on the project, not an integer")
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        raise MalformedDataError(f"{where} is {str(value)[:40]!r} on the project, not an integer") from None
-
-
-def _date(value: Any, where: str) -> str:
-    """A YYYY-MM-DD string from a live value, or MalformedDataError naming where it came from."""
-    try:
-        dt.date.fromisoformat(str(value))
-    except ValueError:
-        raise MalformedDataError(f"{where} is {str(value)[:40]!r} on the project, not a date (YYYY-MM-DD)") from None
-    return str(value)
-
-
 def _root(owner_type: str) -> str:
     return "organization" if owner_type == "organization" else "user"
 
@@ -191,8 +172,8 @@ def load_live(client: Client, project: Project) -> LiveBoard:
     live = LiveBoard(
         str(node["id"]),
         str(node["title"]),
-        _int(node["number"], "the project number"),
-        _int(node["items"]["totalCount"], "the project's items totalCount"),
+        whole_number(node["number"], "the project number"),
+        whole_number(node["items"]["totalCount"], "the project's items totalCount"),
     )
     for page in client.pages(fields_doc, variables, (root, "projectV2", "fields")):
         for raw in page["nodes"]:
@@ -226,8 +207,8 @@ def _parse_field(raw: JSON) -> LiveField:
             LiveIteration(
                 str(i["id"]),
                 str(i["title"]),
-                _date(i["startDate"], f"an iteration startDate of field {name!r}"),
-                _int(i["duration"], f"an iteration duration of field {name!r}"),
+                iso_day(i["startDate"], f"an iteration startDate of field {name!r}").isoformat(),
+                whole_number(i["duration"], f"an iteration duration of field {name!r}"),
             )
             for i in rows
         )
