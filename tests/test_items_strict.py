@@ -124,3 +124,18 @@ def test_a_timestamp_is_read_in_utc(stamp: str, day: str) -> None:
 def test_a_timestamp_that_is_not_rfc_3339_is_refused(stamp: Any) -> None:
     with pytest.raises(MalformedDataError):
         utc_timestamp(stamp, "t")
+
+
+def test_audit_reports_a_field_of_the_wrong_type_as_drift_not_as_an_unreadable_answer(
+    fake: FakeGitHub, client: Client
+) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Area="Core", Priority="P2 later")
+    fake.field(project, "Priority").data_type = "TEXT"
+    fake.field(project, "Priority").options = []
+    for item in project.items:
+        item.values[fake.field(project, "Priority").id] = "high"  # a populated text value
+    code, out, err = audit(client)
+    assert code == 1, (out, err)
+    assert "field 'Priority' is text on the project but single_select in board.yaml" in out

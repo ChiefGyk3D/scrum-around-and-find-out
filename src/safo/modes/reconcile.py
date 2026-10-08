@@ -41,6 +41,7 @@ from safo.items import (
     discover_items,
     find_item,
     list_board_items,
+    mismatched_fields,
 )
 from safo.live import LiveBoard, load_live
 from safo.modes import Mode, register
@@ -96,8 +97,10 @@ def validate(board: Board, live: LiveBoard) -> None:
         live.option_id(rules.status_field, status)
     if rules.done_date_field and live.field(rules.done_date_field).type != "date":
         raise ConfigError(f"the field {rules.done_date_field!r} is not a date field on the project")
+    refused = mismatched_fields(board, live)
     for field_name, option in rules.new_item_defaults:
-        live.option_id(field_name, option)
+        if field_name not in refused:  # a type mismatch is a NOTE and the field is never written
+            live.option_id(field_name, option)
     for repo in board.repositories:
         for area in [repo.default_area, *(r.area for r in repo.area_rules)]:
             if area:
@@ -105,7 +108,13 @@ def validate(board: Board, live: LiveBoard) -> None:
 
 
 def desired_writes(
-    board: Board, repo: Repository, content: Content, item: ItemState, action: str, today: dt.date
+    board: Board,
+    repo: Repository,
+    content: Content,
+    item: ItemState,
+    action: str,
+    today: dt.date,
+    refused: frozenset[str] = frozenset(),
 ) -> list[Write]:
     """What one card needs, one write per field at most, decided in priority order.
 
@@ -137,7 +146,7 @@ def desired_writes(
         claim(Write("select", rules.area_field, area, f"{rules.area_field} = {area}"))
     roles = {rules.status_field, rules.area_field, rules.done_date_field}
     for name, option in rules.new_item_defaults:
-        if name not in roles and item.values.get(name) is None:
+        if name not in roles and name not in refused and item.values.get(name) is None:
             claim(Write("select", name, option, f"{name} = {option}"))
     return writes
 
@@ -157,7 +166,8 @@ def initialize(
     """
     applier = Applier(ctx.client, live)
     did = [] if did is None else did
-    for write in desired_writes(ctx.board, repo, content, item, action, ctx.today):
+    refused = frozenset(mismatched_fields(ctx.board, live))
+    for write in desired_writes(ctx.board, repo, content, item, action, ctx.today, refused):
         if write.kind == "select":
             applier.set_select(item.id, write.field, write.value)
         elif write.kind == "date":
@@ -331,6 +341,11 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     if any(i.content is None and i.content_type != "DraftIssue" for i in items):
         say(ctx, "UNKNOWN inaccessible content; no mutations sent")
         return EXIT_UNKNOWN
+    for name, kind in mismatched_fields(ctx.board, live).items():
+        if name in {n for n, _ in ctx.board.rules.new_item_defaults}:
+            plan.anomalies.append(
+                f"field {name!r} is {kind} on the project but a single select in board.yaml; reconcile never writes it"
+            )
     counts: dict[str, int] = {}
     labels: dict[str, str] = {}
     for i in items:

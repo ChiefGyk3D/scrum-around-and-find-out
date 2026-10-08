@@ -276,6 +276,7 @@ def _label_page(connection: Any, what: str) -> tuple[list[str], bool, int]:
         if not isinstance(row, dict) or not isinstance(row.get("name"), str):
             raise MalformedDataError(f"{what}: a label has no name")
         names.append(row["name"])
+    _distinct(names, what)
     more = info["hasNextPage"]
     if total < len(names) or (not more and total != len(names)):
         raise MalformedDataError(f"{what}: the label count contradicts the labels listed")
@@ -294,16 +295,23 @@ def with_all_labels(client: Client, node: JSON, content: Content) -> Content:
     if not more:
         return dataclasses.replace(content, labels=tuple(names))
     names = []
-    last_total = total
     for page in client.pages(Q_CONTENT_LABELS, {"id": content.id}, ("node", "labels"), ("name",)):
-        last_total = whole_number(page.get("totalCount"), f"{what}: the label count")
+        if whole_number(page.get("totalCount"), f"{what}: the label count") != total:
+            raise MalformedDataError(f"{what}: the label count changes between pages")
         for row in page["nodes"]:
             if not isinstance(row.get("name"), str):
                 raise MalformedDataError(f"{what}: a label has no name")
             names.append(row["name"])
-    if last_total != len(names):
+    if total != len(names):
         raise MalformedDataError(f"{what}: the label count contradicts the labels listed")
+    _distinct(names, what)
     return dataclasses.replace(content, labels=tuple(names))
+
+
+def _distinct(names: Sequence[str], what: str) -> None:
+    """A label appears once: a repeat (compared without case) means a page was replayed and another hidden."""
+    if len({n.casefold() for n in names}) != len(names):
+        raise MalformedDataError(f"{what}: a label is listed twice")
 
 
 def _canonical_repo(node: JSON, what: str) -> str:
@@ -352,23 +360,51 @@ def _default_names(board: Board) -> list[str]:
     return [name for name, _ in board.rules.new_item_defaults]
 
 
-def _read_variables(board: Board) -> dict[str, Any]:
+EXPECTED_TYPES = {"single_select", "date"}
+
+
+def mismatched_fields(board: Board, live: LiveBoard) -> dict[str, str]:
+    """Field name -> live type, for each field a card read would ask for as one type when the project holds another.
+
+    A value read through the wrong type's fragment comes back as an empty object, which is indistinguishable from
+    a malformed answer. Such a field is not asked for (the name `-` matches nothing, so it reads as blank):
+    audit reports the type drift on its own, and reconcile refuses to write the field.
+    """
     rules = board.rules
+    wanted = {rules.status_field: "single_select", rules.area_field: "single_select"}
+    if rules.done_date_field:
+        wanted[rules.done_date_field] = "date"
+    for name, _ in rules.new_item_defaults:
+        wanted.setdefault(name, "single_select")
+    return {
+        name: live.fields[name].type
+        for name, kind in wanted.items()
+        if name in live.fields and live.fields[name].type != kind
+    }
+
+
+def _read_variables(board: Board, live: LiveBoard) -> dict[str, Any]:
+    rules = board.rules
+    bad = mismatched_fields(board, live)
+
+    def name_of(field_name: str) -> str:
+        return "-" if field_name in bad else field_name
+
     out: dict[str, Any] = {
-        "statusField": rules.status_field,
-        "doneField": rules.done_date_field or "-",
+        "statusField": name_of(rules.status_field),
+        "doneField": name_of(rules.done_date_field) if rules.done_date_field else "-",
         "withDone": bool(rules.done_date_field),
-        "areaField": rules.area_field,
+        "areaField": name_of(rules.area_field),
     }
     for i, name in enumerate(_default_names(board)):
-        out[f"default{i}"] = name
+        out[f"default{i}"] = name_of(name)
     return out
 
 
 def list_board_items(client: Client, board: Board, live: LiveBoard) -> list[ItemState]:
     """One walk of the board. The listing can lag behind `live.items_total` for a while after an add."""
     defaults = _default_names(board)
-    variables = {"id": live.id, **_read_variables(board)}
+    variables = {"id": live.id, **_read_variables(board, live)}
     items: list[ItemState] = []
     for node in client.nodes(items_query(len(defaults)), variables, ("node", "items"), ("id",)):
         raw = node.get("content") or {}
@@ -429,10 +465,6 @@ def collect_work(client: Client, board: Board, today: dt.date) -> tuple[dict[str
     return work, unreachable
 
 
-def _lookup_variables(board: Board) -> dict[str, Any]:
-    return _read_variables(board)
-
-
 def _row_project_id(row: JSON) -> str:
     project = row["project"]
     if not isinstance(project, dict) or not isinstance(project.get("id"), str):
@@ -443,7 +475,7 @@ def _row_project_id(row: JSON) -> str:
 def find_item(client: Client, board: Board, live: LiveBoard, content_id: str) -> ItemState | None:
     """The card for one issue or pull request on this board, read through the content (never a lagging listing)."""
     defaults = _default_names(board)
-    variables = {"id": content_id, **_lookup_variables(board)}
+    variables = {"id": content_id, **_read_variables(board, live)}
     for node in client.nodes(lookup_query(len(defaults)), variables, ("node", "projectItems"), ("id", "project")):
         if _row_project_id(node) == live.id:
             return _state(node, None, None, "a project item", board, defaults)
@@ -462,7 +494,7 @@ def discover_items(client: Client, board: Board, live: LiveBoard, ids: list[str]
     found: dict[str, ItemState] = {}
     for offset in range(0, len(ids), BATCH):
         batch = ids[offset : offset + BATCH]
-        data = client.execute(batch_query(len(defaults)), {"ids": batch, **_lookup_variables(board)})
+        data = client.execute(batch_query(len(defaults)), {"ids": batch, **_read_variables(board, live)})
         nodes = data.get("nodes")
         if not isinstance(nodes, list) or len(nodes) != len(batch):
             raise MalformedDataError("BatchItems: the answer does not match the ids asked for")

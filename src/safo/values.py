@@ -11,7 +11,7 @@ from safo.errors import MalformedDataError
 MAX_INT = 2**31 - 1  # GitHub GraphQL Int is 32-bit signed; a count or number is never negative
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _STAMP = re.compile(
-    r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})"
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]+)?(Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
 )
 
 

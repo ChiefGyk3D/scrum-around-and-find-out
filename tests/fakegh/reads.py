@@ -89,6 +89,8 @@ def _value(project: FProject, item: FItem, field_name: str) -> JSON | None:
     raw = item.values[f.id]
     if f.data_type == "DATE":
         return {"date": raw}
+    if f.data_type not in ("SINGLE_SELECT",):
+        return {}  # a value of another type matches neither fragment, so GitHub sends an empty object
     return {"name": next((o.name for o in f.options if o.id == raw), str(raw))}
 
 

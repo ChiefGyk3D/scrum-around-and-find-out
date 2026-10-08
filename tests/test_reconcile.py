@@ -1533,3 +1533,55 @@ def test_a_reread_that_finds_the_card_deleted_but_the_issue_alive_names_the_card
     code, text = reconcile(fake, client)
     assert code == 2 and "VANISHED acme/widgets#1" in text
     assert "the card no longer exists" in text
+
+
+def text_priority(fake: FakeGitHub, project: FProject) -> None:
+    f = fake.field(project, "Priority")
+    f.data_type, f.options = "TEXT", []
+
+
+def test_a_default_field_of_the_wrong_type_is_a_note_and_is_never_written(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    text_priority(fake, project)
+    old = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, old, Status="Backlog", Area="Core", Priority="high")
+    fake.add_content("acme/widgets", "Issue", 2)  # a new card goes through the lookup after the add
+    code, text = reconcile(fake, client)
+    assert code == 1, text
+    assert "NOTE field 'Priority' is text on the project but a single select in board.yaml" in text
+    priority = fake.field(project, "Priority").id
+    assert all(m.variables.get("fieldId") != priority for m in fake.mutations)
+    snap = snapshot(fake, project)
+    assert snap["acme/widgets#2"]["Status"] == "Backlog" and snap["acme/widgets#2"]["Area"] == "Core"
+    assert snap["acme/widgets#1"]["Priority"] == "high"
+
+
+@pytest.mark.parametrize("damage", ["repeat-l0", "repeat-other-case", "middle-total-zero", "last-total-off"])
+def test_label_pages_must_agree_on_the_total_and_must_not_repeat_a_label(
+    fake: FakeGitHub, client: Client, damage: str
+) -> None:
+    fake.page_size = 10
+    build_world(fake)
+    names = [f"l{i}" for i in range(20)] + ["docs"]
+    fake.add_content("acme/widgets", "Issue", 1, "Plain", labels=names)
+    if damage.startswith("repeat"):
+        again = "l0" if damage == "repeat-l0" else "L0"
+
+        def change(data: dict[str, Any], v: dict[str, Any]) -> None:
+            nodes = data["node"]["labels"]["nodes"]
+            if not data["node"]["labels"]["pageInfo"]["hasNextPage"]:
+                nodes[-1] = {"name": again}
+
+    else:
+
+        def change(data: dict[str, Any], v: dict[str, Any]) -> None:
+            labels = data["node"]["labels"]
+            if damage == "middle-total-zero" and labels["pageInfo"]["hasNextPage"]:
+                labels["totalCount"] = 0
+            if damage == "last-total-off" and not labels["pageInfo"]["hasNextPage"]:
+                labels["totalCount"] = 20
+
+    wrap(fake, "ContentLabels", change)
+    code, out, err = via_cli(client)
+    assert code == 2 and fake.mutations == [], (out, err)
+    assert "nothing to do" not in out
