@@ -113,3 +113,5 @@ The YAML loader refuses the following as hostile or ambiguous:
 - **Nesting depth** > 64 levels (measured during composition): prevents exponential parse times and RecursionError crashes
 
 All these YAML features are checked in the loader itself; parsing fails with an error that names the file, line, and kind.
+
+After an unknown outcome, `status` cannot verify whether the update landed; check the existing project updates before posting again.

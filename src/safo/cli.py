@@ -15,6 +15,7 @@ from safo.context import Context
 from safo.errors import ConfigError, SafoError
 from safo.graphql import GRAPHQL_URL, Client
 from safo.modes import load_all
+from safo.modes.reconcile import safe
 from safo.schema import Board, load_board
 
 ClientFactory = Callable[[Board, Mapping[str, str], bool], Client]
@@ -43,10 +44,11 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
 
 
 def report(err: SafoError, env: Mapping[str, str], stream: TextIO) -> None:
+    text = safe(str(err))  # the text may carry what GitHub or a payload sent: no newline can start a new command
     if env.get("GITHUB_ACTIONS") == "true":
-        print(f"::error title=safo::{err}", file=stream)
+        print(f"::error title=safo::{text}", file=stream)
     else:
-        print(f"error: {err}", file=stream)
+        print(f"error: {text}", file=stream)
 
 
 def main(
