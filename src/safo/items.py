@@ -467,19 +467,15 @@ def discover_items(client: Client, board: Board, live: LiveBoard, ids: list[str]
         if not isinstance(nodes, list) or len(nodes) != len(batch):
             raise MalformedDataError("BatchItems: the answer does not match the ids asked for")
         by_id: dict[str, JSON] = {}
-        nulls = 0
         for node in nodes:
             if node is None:
-                nulls += 1
-                continue
+                continue  # a deleted content answers null; the follow-up existence read decides what it means
             if not isinstance(node, dict):
                 raise MalformedDataError("BatchItems: an answer is not an object")
             node_id = node.get("id")
             if not isinstance(node_id, str) or node_id not in batch or node_id in by_id:
                 raise MalformedDataError("BatchItems: an answer names an id that was not asked for, or twice")
             by_id[node_id] = node
-        if len(batch) - len(by_id) != nulls:
-            raise MalformedDataError("BatchItems: an id asked for is missing from the answer")
         for content_id, node in by_id.items():
             if "projectItems" not in node:
                 continue  # an id that is neither an issue nor a pull request has no cards

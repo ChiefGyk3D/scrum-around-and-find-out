@@ -1482,3 +1482,54 @@ def test_the_documents_with_default_aliases_follow_the_pagination_rules() -> Non
         for name, doc in (("items", items_query(n)), ("lookup", lookup_query(n)), ("batch", batch_query(n))):
             assert check_document(f"{name}{n}", doc) == []
             assert doc.count("fieldValueByName(name: $default") == n
+
+
+def test_a_default_never_fills_the_area_when_no_area_rule_applies(fake: FakeGitHub, client: Client) -> None:
+    """The Area belongs to the Area rules; a default for that field is not a way around them."""
+    board = with_defaults(load_test_board(), ("Area", "Docs"), ("Priority", "P2 later"))
+    plain = dataclasses.replace(board.repositories[0], default_area=None, area_rules=())
+    board = dataclasses.replace(board, repositories=(plain, *board.repositories[1:]))
+    _, project = build_world(fake, board)
+    fake.add_content("acme/widgets", "Issue", 1, "Plain")
+    code, text = reconcile(fake, client, board)
+    assert code == 0, text
+    assert snapshot(fake, project)["acme/widgets#1"]["Area"] is None
+    assert not any(m.variables.get("optionId") == fake.field(project, "Area").options[1].id for m in fake.mutations)
+
+
+def test_a_repeated_card_in_the_listing_is_a_contradiction_even_when_the_total_allows_it(
+    fake: FakeGitHub, client: Client
+) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Area="Core", Priority="P2 later")
+    wrap(fake, "ProjectItems", lambda data, v: data["node"]["items"]["nodes"].append(data["node"]["items"]["nodes"][0]))
+    wrap(fake, "ProjectMetaOrg", lambda data, v: data["organization"]["projectV2"]["items"].update(totalCount=10))
+    code, out, _ = via_cli(client)
+    assert code == 2 and "contradictory" in out and fake.mutations == []
+
+
+def test_a_reread_that_finds_no_card_but_a_live_card_node_says_not_on_the_board(
+    fake: FakeGitHub, client: Client
+) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Priority="P2 later")
+    fake.faults.append(Fault(502, {}, "{}", times=1, op="SetSelect"))
+    fake.handlers["ItemLookup"] = lambda f, v: {
+        "node": {"projectItems": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}
+    }
+    code, text = reconcile(fake, client)
+    assert code == 2 and "observed acme/widgets#1: not on the board" in text and "VANISHED" not in text
+
+
+def test_a_reread_that_finds_the_card_deleted_but_the_issue_alive_names_the_card_vanished(
+    fake: FakeGitHub, client: Client
+) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    item = fake.add_item(project, card, Status="Backlog", Priority="P2 later")
+    fake.vanished.add(item.id)
+    code, text = reconcile(fake, client)
+    assert code == 2 and "VANISHED acme/widgets#1" in text
+    assert "the card no longer exists" in text
