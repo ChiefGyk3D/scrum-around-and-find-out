@@ -10,6 +10,9 @@ from safo.errors import MalformedDataError
 
 MAX_INT = 2**31 - 1  # GitHub GraphQL Int is 32-bit signed; a count or number is never negative
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_STAMP = re.compile(
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})"
+)
 
 
 def _kind(value: object) -> str:
@@ -36,4 +39,24 @@ def iso_day(value: object, what: str) -> dt.date:
             pass
     raise MalformedDataError(
         f"{what}: expected a date as YYYY-MM-DD, got {_kind(value)} (the value on the project is not a date)"
+    )
+
+
+def utc_timestamp(value: object, what: str) -> dt.datetime:
+    """An RFC 3339 timestamp with an explicit offset (`Z` or `+hh:mm`), converted to UTC.
+
+    A bare date, a missing offset, trailing text and out-of-range parts are refused: a day computed from a
+    timestamp is only the right day once it is in UTC.
+    """
+    if isinstance(value, str):
+        match = _STAMP.fullmatch(value)
+        if match:
+            offset = "+00:00" if match.group(2) == "Z" else match.group(2)
+            try:
+                return dt.datetime.fromisoformat(match.group(1) + offset).astimezone(dt.UTC)
+            except (ValueError, OverflowError):
+                pass
+    raise MalformedDataError(
+        f"{what}: expected a timestamp such as 2000-01-02T03:04:05Z, got {_kind(value)} "
+        "(the value from GitHub is not a valid RFC 3339 timestamp)"
     )

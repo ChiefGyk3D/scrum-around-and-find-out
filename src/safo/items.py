@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: MIT
-"""Issues, pull requests and board items: the read side shared by audit, reconcile and sync."""
+"""Issues, pull requests and board items: the read side shared by audit, reconcile and sync.
+
+Every answer is read strictly. A key that is missing, an empty object where a field value was asked for, a
+count that contradicts its list, a timestamp without an offset: each is MalformedDataError, never "blank".
+Only an explicit null means a field is empty.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
-from collections.abc import Iterator
+import re
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,71 +19,171 @@ from safo.errors import MalformedDataError, NotFoundError
 from safo.graphql import JSON, Client, check_connection
 from safo.live import LiveBoard
 from safo.schema import Board, Repository
-from safo.values import iso_day, whole_number
+from safo.values import iso_day, utc_timestamp, whole_number
 
-_CONTENT = """
+_LABELS = "labels(first: 20) { totalCount pageInfo { hasNextPage endCursor } nodes { name } }"
+
+_CONTENT = (
+    """
         content {
           __typename
           ... on Issue {
-            id number title state closedAt repository { nameWithOwner } labels(first: 20) { nodes { name } }
+            id number title state closedAt repository { nameWithOwner } """
+    + _LABELS
+    + """
           }
           ... on PullRequest {
             id number title state isDraft merged closedAt
-            repository { nameWithOwner } labels(first: 20) { nodes { name } }
+            repository { nameWithOwner } """
+    + _LABELS
+    + """
           }
         }"""
+)
 
-Q_ITEMS = (
-    """query ProjectItems(
-  $id: ID!, $statusField: String!, $doneField: String!, $areaField: String!, $withDone: Boolean!, $endCursor: String
-) {
-  node(id: $id) { ... on ProjectV2 { items(first: 100, after: $endCursor) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
+_SELECT = "{ ... on ProjectV2ItemFieldSingleSelectValue { name } }"
+_DATE = "{ ... on ProjectV2ItemFieldDateValue { date } }"
+
+
+def _default_declarations(count: int) -> str:
+    return "".join(f", $default{i}: String!" for i in range(count))
+
+
+def _default_selections(count: int) -> str:
+    return "".join(f"\n      d{i}: fieldValueByName(name: $default{i}) {_SELECT}" for i in range(count))
+
+
+def items_query(defaults: int) -> str:
+    """The board walk, with one aliased read per `new_item_defaults` field, so no card is read twice."""
+    return (
+        f"""query ProjectItems(
+  $id: ID!, $statusField: String!, $doneField: String!, $areaField: String!, $withDone: Boolean!,
+  $endCursor: String{_default_declarations(defaults)}
+) {{
+  node(id: $id) {{ ... on ProjectV2 {{ items(first: 100, after: $endCursor) {{
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{
       id
-      status: fieldValueByName(name: $statusField) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
-      done: fieldValueByName(name: $doneField) @include(if: $withDone) { ... on ProjectV2ItemFieldDateValue { date } }
-      area: fieldValueByName(name: $areaField) { ... on ProjectV2ItemFieldSingleSelectValue { name } }"""
-    + _CONTENT
-    + """
+      status: fieldValueByName(name: $statusField) {_SELECT}
+      done: fieldValueByName(name: $doneField) @include(if: $withDone) {_DATE}
+      area: fieldValueByName(name: $areaField) {_SELECT}{_default_selections(defaults)}"""
+        + _CONTENT
+        + """
     }
   } } }
 }"""
-)
+    )
 
-Q_OPEN_ISSUES = """query RepoOpenIssues($owner: String!, $name: String!, $endCursor: String) {
+
+def _items_fragment(defaults: int) -> str:
+    return f"""fragment Items on ProjectV2ItemConnection {{
+  pageInfo {{ hasNextPage endCursor }}
+  nodes {{
+    id
+    project {{ id }}
+    area: fieldValueByName(name: $areaField) {_SELECT}
+    status: fieldValueByName(name: $statusField) {_SELECT}
+    done: fieldValueByName(name: $doneField) @include(if: $withDone) {_DATE}{_default_selections(defaults)}
+  }}
+}}"""
+
+
+def lookup_query(defaults: int) -> str:
+    return f"""query ItemLookup(
+  $id: ID!, $statusField: String!, $doneField: String!, $withDone: Boolean!, $areaField: String!,
+  $endCursor: String{_default_declarations(defaults)}
+) {{
+  node(id: $id) {{
+    ... on Issue {{ projectItems(first: 50, after: $endCursor) {{ ...Items }} }}
+    ... on PullRequest {{ projectItems(first: 50, after: $endCursor) {{ ...Items }} }}
+  }}
+}}
+""" + _items_fragment(defaults)
+
+
+def batch_query(defaults: int) -> str:
+    return f"""query BatchItems(
+  $ids: [ID!]!, $statusField: String!, $doneField: String!, $withDone: Boolean!, $areaField: String!,
+  $endCursor: String{_default_declarations(defaults)}
+) {{
+  nodes(ids: $ids) {{
+    id
+    ... on Issue {{ projectItems(first: 50, after: $endCursor) {{ ...Items }} }}
+    ... on PullRequest {{ projectItems(first: 50, after: $endCursor) {{ ...Items }} }}
+  }}
+}}
+""" + _items_fragment(defaults)
+
+
+Q_ITEMS = items_query(0)
+Q_ITEM_LOOKUP = lookup_query(0)
+Q_BATCH_ITEMS = batch_query(0)
+
+_REPO_NODE = "id number title state closedAt repository { nameWithOwner } " + _LABELS
+_PULL_NODE = "id number title state isDraft merged closedAt repository { nameWithOwner } " + _LABELS
+
+Q_OPEN_ISSUES = (
+    """query RepoOpenIssues($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) { issues(states: OPEN, first: 100, after: $endCursor) {
     pageInfo { hasNextPage endCursor }
-    nodes { id number title state closedAt labels(first: 20) { nodes { name } } }
+    nodes { """
+    + _REPO_NODE
+    + """ }
   } }
 }"""
+)
 
-Q_OPEN_PULLS = """query RepoOpenPulls($owner: String!, $name: String!, $endCursor: String) {
+Q_OPEN_PULLS = (
+    """query RepoOpenPulls($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) { pullRequests(states: OPEN, first: 100, after: $endCursor) {
     pageInfo { hasNextPage endCursor }
-    nodes { id number title state isDraft merged closedAt labels(first: 20) { nodes { name } } }
+    nodes { """
+    + _PULL_NODE
+    + """ }
   } }
 }"""
+)
 
-Q_CLOSED_ISSUES = """query RepoClosedIssues($owner: String!, $name: String!, $endCursor: String) {
+Q_CLOSED_ISSUES = (
+    """query RepoClosedIssues($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     issues(states: CLOSED, first: 100, after: $endCursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
-      nodes { id number title state closedAt labels(first: 20) { nodes { name } } }
+      nodes { """
+    + _REPO_NODE
+    + """ }
     }
   }
 }"""
+)
 
-Q_CLOSED_PULLS = """query RepoClosedPulls($owner: String!, $name: String!, $endCursor: String) {
+Q_CLOSED_PULLS = (
+    """query RepoClosedPulls($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequests(
       states: [CLOSED, MERGED], first: 100, after: $endCursor, orderBy: {field: UPDATED_AT, direction: DESC}
     ) {
       pageInfo { hasNextPage endCursor }
-      nodes { id number title state isDraft merged closedAt labels(first: 20) { nodes { name } } }
+      nodes { """
+    + _PULL_NODE
+    + """ }
     }
   }
 }"""
+)
+
+Q_CONTENT_LABELS = """query ContentLabels($id: ID!, $endCursor: String) {
+  node(id: $id) {
+    ... on Issue {
+      labels(first: 100, after: $endCursor) { totalCount pageInfo { hasNextPage endCursor } nodes { name } }
+    }
+    ... on PullRequest {
+      labels(first: 100, after: $endCursor) { totalCount pageInfo { hasNextPage endCursor } nodes { name } }
+    }
+  }
+}"""
+
+Q_CONTENT_EXISTS = """query ContentExists($id: ID!) { node(id: $id) { id } }"""
 
 
 @dataclass(frozen=True)
@@ -85,9 +192,9 @@ class Content:
     kind: str  # issue | pr
     state: str  # open | closed | merged
     draft: bool
-    closed_at: str | None
+    closed_at: str | None  # normalised to UTC: YYYY-MM-DDTHH:MM:SSZ
     number: int
-    repo: str
+    repo: str  # the repository GitHub says the content belongs to (canonical name)
     title: str = ""
     labels: tuple[str, ...] = ()
 
@@ -108,10 +215,12 @@ class ItemState:
     done: str | None
     area: str | None
     content_type: str | None = None
-    values: dict[str, str | None] = field(default_factory=dict)
+    values: dict[str, str | None] = field(default_factory=dict)  # new_item_defaults fields -> current option
 
 
-ISSUE_KEYS = ("id", "number", "state")
+_REPO_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+ISSUE_KEYS = ("id", "number", "state", "repository", "labels")
+STATES = {"OPEN": "open", "CLOSED": "closed", "MERGED": "merged"}
 
 
 def content_from_node(node: JSON, repo: str, typename: str) -> Content:
@@ -123,17 +232,11 @@ def content_from_node(node: JSON, repo: str, typename: str) -> Content:
         raise MalformedDataError(f"an {typename} of {repo} from GitHub is not shaped as expected") from None
 
 
-STATES = {"OPEN": "open", "CLOSED": "closed", "MERGED": "merged"}
-
-
 def _closed_at(value: object, what: str) -> str | None:
-    """GitHub's closedAt: null, or a timestamp whose first ten characters are a real day."""
+    """GitHub's closedAt: null, or an RFC 3339 timestamp with an offset, held in UTC."""
     if value is None:
         return None
-    if isinstance(value, str) and len(value) >= 10 and value[10:11] in ("", "T"):
-        iso_day(value[:10], what)
-        return value
-    raise MalformedDataError(f"{what}: expected a timestamp, got {type(value).__name__}")
+    return utc_timestamp(value, what).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _content_from_node(node: JSON, repo: str, typename: str) -> Content:
@@ -141,7 +244,10 @@ def _content_from_node(node: JSON, repo: str, typename: str) -> Content:
     raw_state = STATES.get(node["state"]) if isinstance(node["state"], str) else None
     if raw_state is None:
         raise MalformedDataError(f"{typename} state of {repo}: expected OPEN, CLOSED or MERGED")
-    state = "merged" if node.get("merged") is True else raw_state
+    merged = node.get("merged")
+    if merged is not None and not isinstance(merged, bool):
+        raise MalformedDataError(f"{typename} of {repo}: merged is {type(merged).__name__}, not a boolean")
+    state = "merged" if merged is True else raw_state
     labels = tuple(str(label["name"]) for label in (node.get("labels") or {}).get("nodes") or [] if label)
     return Content(
         str(node["id"]),
@@ -156,85 +262,149 @@ def _content_from_node(node: JSON, repo: str, typename: str) -> Content:
     )
 
 
-def _value(node: JSON, key: str, what: str) -> JSON:
-    """A `fieldValueByName` answer: null, or an object."""
-    raw = node.get(key)
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise MalformedDataError(f"{what}: the {key} value is {type(raw).__name__}, not an object")
-    return raw
+def _label_page(connection: Any, what: str) -> tuple[list[str], bool, int]:
+    """(names on this page, whether more follow, the total) of a labels connection, or MalformedDataError."""
+    if not isinstance(connection, dict):
+        raise MalformedDataError(f"{what}: the labels are not an object")
+    info = connection.get("pageInfo")
+    rows = connection.get("nodes")
+    if not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool) or not isinstance(rows, list):
+        raise MalformedDataError(f"{what}: the labels have no page information")
+    total = whole_number(connection.get("totalCount"), f"{what}: the label count")
+    names: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            raise MalformedDataError(f"{what}: a label has no name")
+        names.append(row["name"])
+    more = info["hasNextPage"]
+    if total < len(names) or (not more and total != len(names)):
+        raise MalformedDataError(f"{what}: the label count contradicts the labels listed")
+    return names, more, total
 
 
-def _option(node: JSON, key: str, what: str) -> str | None:
-    name = _value(node, key, what).get("name")
-    if name is not None and not isinstance(name, str):
-        raise MalformedDataError(f"{what}: the {key} name is {type(name).__name__}, not text")
+def with_all_labels(client: Client, node: JSON, content: Content) -> Content:
+    """The content with every label, paginating when the first page was not all of them.
+
+    The Area rule matches a label anywhere in the list, so a label on page two must count.
+    """
+    what = f"the labels of an {content.kind} of {content.repo}"
+    if "labels" not in node:
+        raise MalformedDataError(f"{what}: GitHub sent no labels")
+    names, more, total = _label_page(node["labels"], what)
+    if not more:
+        return dataclasses.replace(content, labels=tuple(names))
+    names = []
+    last_total = total
+    for page in client.pages(Q_CONTENT_LABELS, {"id": content.id}, ("node", "labels"), ("name",)):
+        last_total = whole_number(page.get("totalCount"), f"{what}: the label count")
+        for row in page["nodes"]:
+            if not isinstance(row.get("name"), str):
+                raise MalformedDataError(f"{what}: a label has no name")
+            names.append(row["name"])
+    if last_total != len(names):
+        raise MalformedDataError(f"{what}: the label count contradicts the labels listed")
+    return dataclasses.replace(content, labels=tuple(names))
+
+
+def _canonical_repo(node: JSON, what: str) -> str:
+    repo = node.get("repository")
+    name = repo.get("nameWithOwner") if isinstance(repo, dict) else None
+    if not isinstance(name, str) or not _REPO_NAME.fullmatch(name) or any(p in (".", "..") for p in name.split("/")):
+        raise MalformedDataError(f"{what}: GitHub names no usable repository for it")
     return name
 
 
-def _done(node: JSON, what: str) -> str | None:
-    day = _value(node, "done", what).get("date")
-    if day is None:
+def _field_value(node: JSON, key: str, sub: str, what: str) -> str | None:
+    """A `fieldValueByName` answer: an explicit null is blank; anything else must carry `sub` as text.
+
+    A missing key, an empty object or the wrong shape is never "blank": a blank is what reconcile fills in.
+    """
+    if key not in node:
+        raise MalformedDataError(f"{what}: the {key} value was not sent")
+    raw = node[key]
+    if raw is None:
         return None
-    iso_day(day, f"{what}: the Done date")
-    return str(day)
+    if not isinstance(raw, dict) or not isinstance(raw.get(sub), str):
+        raise MalformedDataError(f"{what}: the {key} value is not shaped as asked (an empty or foreign object)")
+    return str(raw[sub])
 
 
-def _state(node: JSON, content: Content | None, typename: str | None, what: str) -> ItemState:
+def _state(
+    node: JSON, content: Content | None, typename: str | None, what: str, board: Board, defaults: Sequence[str]
+) -> ItemState:
+    done: str | None = None
+    if board.rules.done_date_field:
+        done = _field_value(node, "done", "date", what)
+        if done is not None:
+            iso_day(done, f"{what}: the Done date")
     return ItemState(
         str(node["id"]),
         content,
-        _option(node, "status", what),
-        _done(node, what),
-        _option(node, "area", what),
+        _field_value(node, "status", "name", what),
+        done,
+        _field_value(node, "area", "name", what),
         typename,
+        {name: _field_value(node, f"d{i}", "name", what) for i, name in enumerate(defaults)},
     )
+
+
+def _default_names(board: Board) -> list[str]:
+    return [name for name, _ in board.rules.new_item_defaults]
+
+
+def _read_variables(board: Board) -> dict[str, Any]:
+    rules = board.rules
+    out: dict[str, Any] = {
+        "statusField": rules.status_field,
+        "doneField": rules.done_date_field or "-",
+        "withDone": bool(rules.done_date_field),
+        "areaField": rules.area_field,
+    }
+    for i, name in enumerate(_default_names(board)):
+        out[f"default{i}"] = name
+    return out
 
 
 def list_board_items(client: Client, board: Board, live: LiveBoard) -> list[ItemState]:
     """One walk of the board. The listing can lag behind `live.items_total` for a while after an add."""
-    rules = board.rules
-    variables = {
-        "id": live.id,
-        "statusField": rules.status_field,
-        "doneField": rules.done_date_field or "-",
-        "areaField": rules.area_field,
-        "withDone": bool(rules.done_date_field),
-    }
+    defaults = _default_names(board)
+    variables = {"id": live.id, **_read_variables(board)}
     items: list[ItemState] = []
-    for node in client.nodes(Q_ITEMS, variables, ("node", "items"), ("id",)):
+    for node in client.nodes(items_query(len(defaults)), variables, ("node", "items"), ("id",)):
         raw = node.get("content") or {}
         if not isinstance(raw, dict):
             raise MalformedDataError("a board item's content from GitHub is not an object")
         typename = raw.get("__typename")
         content = None
         if typename in ("Issue", "PullRequest"):
-            try:
-                repo_name = str(raw["repository"]["nameWithOwner"])
-            except (KeyError, TypeError):
-                raise MalformedDataError("a board item's content has no repository from GitHub") from None
-            content = content_from_node(raw, repo_name, typename)
-        items.append(_state(node, content, typename, "a board item"))
+            content = content_from_node(raw, _canonical_repo(raw, "a board item's content"), typename)
+            content = with_all_labels(client, raw, content)
+        items.append(_state(node, content, typename, "a board item", board, defaults))
     return items
 
 
 def list_repo_work(client: Client, repo: Repository, *, closed_since: dt.date | None = None) -> Iterator[Content]:
     """Open issues and pull requests of one repository, plus closed ones since a date when asked.
 
-    Raises NotFoundError when the repository does not exist or the token's installation does not cover it.
+    A content carries the repository GitHub says it belongs to, which can differ from the one asked (a
+    repository that was renamed or transferred); the caller compares. Raises NotFoundError when the repository
+    does not exist or the token's installation does not cover it.
     """
     variables = {"owner": repo.owner, "name": repo.name}
-    full = repo.full_name
+
+    def parse(node: JSON, typename: str) -> Content:
+        content = content_from_node(node, _canonical_repo(node, f"an {typename} of {repo.full_name}"), typename)
+        return with_all_labels(client, node, content)
+
     for node in client.nodes(Q_OPEN_ISSUES, variables, ("repository", "issues"), ISSUE_KEYS):
-        yield content_from_node(node, full, "Issue")
+        yield parse(node, "Issue")
     for node in client.nodes(Q_OPEN_PULLS, variables, ("repository", "pullRequests"), ISSUE_KEYS):
-        yield content_from_node(node, full, "PullRequest")
+        yield parse(node, "PullRequest")
     if closed_since is None:
         return
     for doc, key, typename in ((Q_CLOSED_ISSUES, "issues", "Issue"), (Q_CLOSED_PULLS, "pullRequests", "PullRequest")):
         for node in client.nodes(doc, variables, ("repository", key), ISSUE_KEYS):
-            content = content_from_node(node, full, typename)
+            content = parse(node, typename)
             if content.closed_day and content.closed_day >= closed_since.isoformat():
                 yield content
 
@@ -259,62 +429,8 @@ def collect_work(client: Client, board: Board, today: dt.date) -> tuple[dict[str
     return work, unreachable
 
 
-_ITEMS_FRAGMENT = """fragment Items on ProjectV2ItemConnection {
-  pageInfo { hasNextPage endCursor }
-  nodes {
-    id
-    project { id }
-    area: fieldValueByName(name: $areaField) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
-    status: fieldValueByName(name: $statusField) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
-    done: fieldValueByName(name: $doneField) @include(if: $withDone) { ... on ProjectV2ItemFieldDateValue { date } }
-  }
-}"""
-
-Q_ITEM_LOOKUP = (
-    """query ItemLookup(
-  $id: ID!, $statusField: String!, $doneField: String!, $withDone: Boolean!, $areaField: String!, $endCursor: String
-) {
-  node(id: $id) {
-    ... on Issue { projectItems(first: 50, after: $endCursor) { ...Items } }
-    ... on PullRequest { projectItems(first: 50, after: $endCursor) { ...Items } }
-  }
-}
-"""
-    + _ITEMS_FRAGMENT
-)
-
-Q_BATCH_ITEMS = (
-    """query BatchItems(
-  $ids: [ID!]!, $statusField: String!, $doneField: String!, $withDone: Boolean!, $areaField: String!,
-  $endCursor: String
-) {
-  nodes(ids: $ids) {
-    ... on Issue { projectItems(first: 50, after: $endCursor) { ...Items } }
-    ... on PullRequest { projectItems(first: 50, after: $endCursor) { ...Items } }
-  }
-}
-"""
-    + _ITEMS_FRAGMENT
-)
-
-
-Q_ITEM_VALUE = """query ItemValue($id: ID!, $name: String!) {
-  node(id: $id) { ... on ProjectV2Item {
-    value: fieldValueByName(name: $name) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
-  } }
-}"""
-
-Q_CONTENT_EXISTS = """query ContentExists($id: ID!) { node(id: $id) { id } }"""
-
-
 def _lookup_variables(board: Board) -> dict[str, Any]:
-    rules = board.rules
-    return {
-        "statusField": rules.status_field,
-        "doneField": rules.done_date_field or "-",
-        "withDone": bool(rules.done_date_field),
-        "areaField": rules.area_field,
-    }
+    return _read_variables(board)
 
 
 def _row_project_id(row: JSON) -> str:
@@ -324,48 +440,47 @@ def _row_project_id(row: JSON) -> str:
     return str(project["id"])
 
 
-def read_defaults(client: Client, board: Board, item_id: str) -> dict[str, str | None]:
-    """The current option of each `new_item_defaults` field on one item."""
-    values: dict[str, str | None] = {}
-    for name, _ in board.rules.new_item_defaults:
-        raw = client.execute(Q_ITEM_VALUE, {"id": item_id, "name": name}).get("node")
-        if raw is None:
-            raise NotFoundError("cannot read item values")
-        if not isinstance(raw, dict):
-            raise MalformedDataError("an item's field value from GitHub is not an object")
-        values[name] = _option(raw, "value", "an item's field value")
-    return values
-
-
 def find_item(client: Client, board: Board, live: LiveBoard, content_id: str) -> ItemState | None:
     """The card for one issue or pull request on this board, read through the content (never a lagging listing)."""
+    defaults = _default_names(board)
     variables = {"id": content_id, **_lookup_variables(board)}
-    for node in client.nodes(Q_ITEM_LOOKUP, variables, ("node", "projectItems"), ("id", "project")):
+    for node in client.nodes(lookup_query(len(defaults)), variables, ("node", "projectItems"), ("id", "project")):
         if _row_project_id(node) == live.id:
-            state = _state(node, None, None, "a project item")
-            state.values = read_defaults(client, board, state.id)
-            return state
+            return _state(node, None, None, "a project item", board, defaults)
     return None
 
 
 def discover_items(client: Client, board: Board, live: LiveBoard, ids: list[str]) -> dict[str, ItemState]:
     """Batch the identities of issues and pull requests not seen in the listing.
 
-    A content that is gone answers null and is simply absent from the result. A connection that is cut
-    (hasNextPage) is continued one content at a time. Any answer not shaped as asked is MalformedDataError.
+    Answers are matched to the ids asked for by the `id` each carries, never by position. A requested id that
+    is absent must be accounted for by a null (a deleted content); an unrequested or repeated id, a count that
+    does not match, or any other shape is MalformedDataError. A connection that is cut (hasNextPage) is
+    continued one content at a time.
     """
+    defaults = _default_names(board)
     found: dict[str, ItemState] = {}
-    for offset in range(0, len(ids), 50):
-        batch = ids[offset : offset + 50]
-        data = client.execute(Q_BATCH_ITEMS, {"ids": batch, **_lookup_variables(board)})
+    for offset in range(0, len(ids), BATCH):
+        batch = ids[offset : offset + BATCH]
+        data = client.execute(batch_query(len(defaults)), {"ids": batch, **_lookup_variables(board)})
         nodes = data.get("nodes")
         if not isinstance(nodes, list) or len(nodes) != len(batch):
             raise MalformedDataError("BatchItems: the answer does not match the ids asked for")
-        for content_id, node in zip(batch, nodes, strict=True):
+        by_id: dict[str, JSON] = {}
+        nulls = 0
+        for node in nodes:
             if node is None:
+                nulls += 1
                 continue
             if not isinstance(node, dict):
                 raise MalformedDataError("BatchItems: an answer is not an object")
+            node_id = node.get("id")
+            if not isinstance(node_id, str) or node_id not in batch or node_id in by_id:
+                raise MalformedDataError("BatchItems: an answer names an id that was not asked for, or twice")
+            by_id[node_id] = node
+        if len(batch) - len(by_id) != nulls:
+            raise MalformedDataError("BatchItems: an id asked for is missing from the answer")
+        for content_id, node in by_id.items():
             if "projectItems" not in node:
                 continue  # an id that is neither an issue nor a pull request has no cards
             connection = check_connection("BatchItems", node["projectItems"], ("id", "project"))
@@ -376,10 +491,24 @@ def discover_items(client: Client, board: Board, live: LiveBoard, ids: list[str]
                 continue
             for row in connection["nodes"]:
                 if _row_project_id(row) == live.id:
-                    found[content_id] = _state(row, None, None, "a project item")
+                    found[content_id] = _state(row, None, None, "a project item", board, defaults)
                     break
     return found
 
 
-def content_exists(client: Client, content_id: str) -> bool:
-    return bool(client.execute(Q_CONTENT_EXISTS, {"id": content_id}).get("node"))
+BATCH = 50  # GitHub accepts at most 100 ids in `nodes(ids:)`
+
+
+def content_exists(client: Client, node_id: str) -> bool:
+    """Whether a node exists. Only a clean answer of exactly `node: null` says it is gone.
+
+    A NOT_FOUND error (even beside data), an empty object or another node's id is not evidence of deletion:
+    it is MalformedDataError or ApiError, and the caller cannot tell.
+    """
+    data = client.execute(Q_CONTENT_EXISTS, {"id": node_id})
+    if data == {"node": None}:
+        return False
+    node = data.get("node")
+    if isinstance(node, dict) and node.get("id") == node_id:
+        return True
+    raise MalformedDataError("ContentExists: the answer is neither the node nor a clean null")

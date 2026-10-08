@@ -97,6 +97,12 @@ def build_plan(
     for key, contents in work.items():
         owner = repos[key]
         for c in contents:
+            if c.repo.lower() != key:
+                plan.anomalies.append(
+                    f"{c.repo}#{c.number} was listed under {owner.full_name} but GitHub says it belongs to {c.repo} "
+                    "(renamed or transferred): not added; update repositories in board.yaml"
+                )
+                continue
             if c.id in on_board:
                 continue
             if c.is_open:

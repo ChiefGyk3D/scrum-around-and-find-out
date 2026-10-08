@@ -92,7 +92,16 @@ def _value(project: FProject, item: FItem, field_name: str) -> JSON | None:
     return {"name": next((o.name for o in f.options if o.id == raw), str(raw))}
 
 
-def content_json(c: FContent, *, with_repo: bool) -> JSON:
+def labels_json(c: FContent) -> JSON:
+    """The first page of 20 labels, with the total and whether more follow, as GitHub sends them."""
+    return {
+        "totalCount": len(c.labels),
+        "pageInfo": {"hasNextPage": len(c.labels) > 20, "endCursor": "20"},
+        "nodes": [{"name": n} for n in c.labels[:20]],
+    }
+
+
+def content_json(c: FContent, *, with_repo: bool = True) -> JSON:
     out: JSON = {
         "__typename": c.kind,
         "id": c.id,
@@ -100,13 +109,22 @@ def content_json(c: FContent, *, with_repo: bool) -> JSON:
         "title": c.title,
         "state": c.state if c.kind == "Issue" else ("MERGED" if c.state == "MERGED" else c.state),
         "closedAt": c.closed_at,
-        "labels": {"nodes": [{"name": n} for n in c.labels]},
+        "labels": labels_json(c),
+        "repository": {"nameWithOwner": c.repo},
     }
     if c.kind == "PullRequest":
         out["isDraft"] = c.draft
         out["merged"] = c.state == "MERGED"
-    if with_repo:
-        out["repository"] = {"nameWithOwner": c.repo}
+    return out
+
+
+def defaults_json(project: FProject, item: FItem, v: JSON) -> JSON:
+    """The aliased reads of `new_item_defaults`: d0, d1, ... for the variables default0, default1, ..."""
+    out: JSON = {}
+    i = 0
+    while f"default{i}" in v:
+        out[f"d{i}"] = _value(project, item, str(v[f"default{i}"]))
+        i += 1
     return out
 
 
@@ -130,7 +148,10 @@ def project_items(fake: FakeGitHub, v: JSON) -> JSON:
             "id": item.id,
             "status": _value(project, item, str(v["statusField"])),
             "area": _value(project, item, str(v["areaField"])),
-            "content": content_json(content, with_repo=True) if content else {"__typename": "DraftIssue"},
+            "content": (
+                None if item.unreadable else content_json(content) if content else {"__typename": "DraftIssue"}
+            ),
+            **defaults_json(project, item, v),
         }
         if v.get("withDone"):
             node["done"] = _value(project, item, str(v["doneField"]))

@@ -2,14 +2,21 @@
 """reconcile: discover identities before adding; repair blanks without resetting manual values.
 
 Exit codes: 0 the board is current (or the changes were applied), 1 changes are needed or something was left
-(a dry run with work pending, a rate limit that did not clear, an open card sitting in Done), 2 the run cannot
-tell (an unknown outcome, an unreadable repository, cards the listing did not show, a payload not shaped as asked).
-After an unknown outcome nothing more is written: the run re-reads, says what it saw and stops.
+(a dry run with work pending, a rate limit that did not clear, an open card sitting in Done, a repository that
+was renamed), 2 the run cannot tell (an unknown outcome, an unreadable repository, cards the listing did not
+show, a read that contradicts itself, a payload not shaped as asked). After an unknown outcome nothing more is
+written: the run re-reads, says what it saw and stops.
+
+Each card gets one desired value per field, decided from the rules in priority order (a closed card is Done,
+then the Area rule, then `new_item_defaults`) against what the card holds now. The status, Area and Done
+fields are never written by a default.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import re
 from dataclasses import dataclass, field
 
 from safo.apply import Applier
@@ -21,13 +28,12 @@ from safo.errors import (
     ApiError,
     AuthError,
     ConfigError,
-    NotFoundError,
+    MalformedDataError,
     RateLimitedError,
     SafoError,
     UnknownOutcomeError,
 )
 from safo.items import (
-    Q_ITEM_VALUE,
     Content,
     ItemState,
     collect_work,
@@ -35,7 +41,6 @@ from safo.items import (
     discover_items,
     find_item,
     list_board_items,
-    read_defaults,
 )
 from safo.live import LiveBoard, load_live
 from safo.modes import Mode, register
@@ -44,6 +49,22 @@ from safo.rules import area_for, done_day, target_status
 from safo.schema import Board, Repository
 
 SHOWN = 20  # how many cards a "not attempted" line names before it counts the rest
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def safe(text: str) -> str:
+    """Text from GitHub or from an exception, made safe for one log line: no control characters, no newlines."""
+    return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
+def _quote(value: str | None) -> str:
+    return "None" if value is None else "'" + safe(value) + "'"
+
+
+def say(ctx: Context, line: str) -> None:
+    """Print one line. Nothing printed can start a workflow command (`::error::`) or move the cursor."""
+    line = safe(line)
+    ctx.say("\\" + line if line.startswith("::") else line)
 
 
 @dataclass
@@ -56,6 +77,14 @@ class Outcome:
     not_attempted: list[str] = field(default_factory=list)
     verified: list[tuple[str, str]] = field(default_factory=list)
     seen: set[str] = field(default_factory=set)  # item ids the run actually read: listed, or looked up by content
+
+
+@dataclass(frozen=True)
+class Write:
+    kind: str  # select | date | clear
+    field: str
+    value: str
+    text: str
 
 
 def validate(board: Board, live: LiveBoard) -> None:
@@ -75,6 +104,44 @@ def validate(board: Board, live: LiveBoard) -> None:
                 live.option_id(rules.area_field, area)
 
 
+def desired_writes(
+    board: Board, repo: Repository, content: Content, item: ItemState, action: str, today: dt.date
+) -> list[Write]:
+    """What one card needs, one write per field at most, decided in priority order.
+
+    1. the status, and the Done date, a closed card is owed (never a default's business);
+    2. the Area, when blank, from the repository's rules;
+    3. each `new_item_defaults` field, when blank, except the three above.
+    A field already claimed by an earlier rule is not written again, so a default can never overwrite a value
+    this run decided, and the second run finds nothing to do.
+    """
+    rules = board.rules
+    writes: list[Write] = []
+    claimed: set[str] = set()
+
+    def claim(write: Write) -> None:
+        if write.field not in claimed:
+            claimed.add(write.field)
+            writes.append(write)
+
+    target = target_status(rules, content, action, item.status)
+    if target:
+        claim(Write("select", rules.status_field, target, f"{rules.status_field} = {target}"))
+    if rules.done_date_field:
+        if not content.is_open and item.done is None:
+            claim(Write("date", rules.done_date_field, done_day(content, today), "Done date filled"))
+        elif content.is_open and action == "reopened" and item.done is not None:
+            claim(Write("clear", rules.done_date_field, "", f"{rules.done_date_field} cleared"))
+    area = area_for(repo, content)
+    if item.area is None and area:
+        claim(Write("select", rules.area_field, area, f"{rules.area_field} = {area}"))
+    roles = {rules.status_field, rules.area_field, rules.done_date_field}
+    for name, option in rules.new_item_defaults:
+        if name not in roles and item.values.get(name) is None:
+            claim(Write("select", name, option, f"{name} = {option}"))
+    return writes
+
+
 def initialize(
     ctx: Context,
     live: LiveBoard,
@@ -84,32 +151,20 @@ def initialize(
     action: str = "reconcile",
     did: list[str] | None = None,
 ) -> list[str]:
-    """Blank-default repair policy applies to every card; nonblank manual defaults are never overwritten.
+    """Blank-default repair policy applies to every card; nonblank manual values are never overwritten.
 
     Each write is appended to `did` once it succeeded, so a caller that is stopped halfway still knows what landed.
     """
-    rules = ctx.board.rules
     applier = Applier(ctx.client, live)
     did = [] if did is None else did
-    target = target_status(rules, content, action, item.status)
-    if target:
-        applier.set_select(item.id, rules.status_field, target)
-        did.append(f"Status = {target}")
-    if rules.done_date_field:
-        if not content.is_open and item.done is None:
-            applier.set_date(item.id, rules.done_date_field, done_day(content, ctx.today))
-            did.append("Done date filled")
-        elif content.is_open and action == "reopened" and item.done is not None:
-            applier.clear(item.id, rules.done_date_field)
-            did.append(f"{rules.done_date_field} cleared")
-    area = area_for(repo, content)
-    if item.area is None and area:
-        applier.set_select(item.id, rules.area_field, area)
-        did.append(f"Area = {area}")
-    for name, option in rules.new_item_defaults:
-        if item.values.get(name) is None:
-            applier.set_select(item.id, name, option)
-            did.append(f"{name} = {option}")
+    for write in desired_writes(ctx.board, repo, content, item, action, ctx.today):
+        if write.kind == "select":
+            applier.set_select(item.id, write.field, write.value)
+        elif write.kind == "date":
+            applier.set_date(item.id, write.field, write.value)
+        else:
+            applier.clear(item.id, write.field)
+        did.append(write.text)
     return did
 
 
@@ -126,32 +181,31 @@ def _label(repo: Repository, content: Content) -> str:
 def _observe(
     ctx: Context, live: LiveBoard, content: Content, label: str, previous: ItemState | None, out: Outcome
 ) -> None:
-    """Re-read one card after an unknown outcome and say what it looks like now. Never writes."""
+    """Re-read one card after an unknown outcome and say what it looks like now. Never writes.
+
+    Only a clean `node: null` from a dedicated read says something is gone; any other answer is "cannot tell".
+    """
     try:
-        try:
-            item = find_item(ctx.client, ctx.board, live, content.id)
-        except NotFoundError:
-            item = None  # GitHub answers null for a deleted issue or pull request
-        exists = content_exists(ctx.client, content.id)
-        gone = not exists
-        if item is None and previous is not None and exists:
-            gone = (
-                ctx.client.execute(Q_ITEM_VALUE, {"id": previous.id, "name": ctx.board.rules.status_field}).get("node")
-                is None
-            )
+        if not content_exists(ctx.client, content.id):
+            out.vanished.append(label)
+            out.observed.append(f"observed {label}: the issue or pull request no longer exists")
+            return
+        item = find_item(ctx.client, ctx.board, live, content.id)
+        if item is None and previous is not None and not content_exists(ctx.client, previous.id):
+            out.vanished.append(label)
+            out.observed.append(f"observed {label}: the card no longer exists")
+            return
     except Exception as err:  # any failure of the reread still ends in a visible line and exit 2
         detail = f": {err}" if isinstance(err, SafoError) else ""
         out.observed.append(f"live reread failed; no further writes ({type(err).__name__}{detail})")
         return
-    if item is not None:
-        out.observed.append(
-            f"observed {label}: on the board, Status {item.status!r}, Area {item.area!r}, Done on {item.done!r}"
-        )
-    elif gone:
-        out.vanished.append(label)
-        out.observed.append(f"observed {label}: the card or its issue no longer exists")
-    else:
+    if item is None:
         out.observed.append(f"observed {label}: not on the board")
+    else:
+        out.observed.append(
+            f"observed {label}: on the board, Status {_quote(item.status)}, Area {_quote(item.area)}, "
+            f"Done on {_quote(item.done)}"
+        )
 
 
 def apply_plan(
@@ -162,9 +216,10 @@ def apply_plan(
     repos = {r.full_name.lower(): r for r in ctx.board.repositories}
     skipped = {u.lower() for u in plan.unreachable}
     contents: dict[str, Content] = {}
-    for rows in work.values():
+    for key, rows in work.items():
         for c in rows:
-            contents.setdefault(c.id, c)
+            if c.repo.lower() == key:  # a renamed or transferred repository's content is the plan's NOTE, not ours
+                contents.setdefault(c.id, c)
     by_content: dict[str, ItemState] = {}
     for i in listed:
         if i.content and i.content.repo.lower() in repos and i.content.repo.lower() not in skipped:
@@ -174,6 +229,13 @@ def apply_plan(
     out.seen = {i.id for i in by_content.values()}
     pending = list(contents.values())
     applier = Applier(ctx.client, live)
+
+    def applied(added: bool, label: str, did: list[str], *, stopped: bool = False) -> None:
+        text = f"{_verb(added, dry)} {label}" + (": " + "; ".join(did) if did else "")
+        line = text + (" (then stopped)" if stopped else "")
+        out.applied.append(line)
+        say(ctx, line)  # printed as it happens: a crash later cannot hide a write that landed
+
     for index, content in enumerate(pending):
         repo = repos[content.repo.lower()]
         label = _label(repo, content)
@@ -182,17 +244,12 @@ def apply_plan(
         previous = by_content.get(content.id)
         try:
             item = previous
-            if item is not None:
-                try:
-                    item.values = read_defaults(ctx.client, ctx.board, item.id)
-                except NotFoundError:
-                    out.vanished.append(label)  # a read proved the card is gone since it was listed: nothing to fix
-                    continue
-            else:
+            if item is None:
                 if not content_exists(ctx.client, content.id):
                     out.vanished.append(label)
                     continue
                 item_id = applier.add(content.id)
+                added = True
                 if dry:
                     item = ItemState(item_id, content, None, None, None)
                 else:
@@ -201,24 +258,24 @@ def apply_plan(
                     if item is None or item.id != item_id:
                         raise UnknownOutcomeError(f"{label}: the added card cannot be found on the board")
                     out.verified.append((content.id, item.id))
-                added = True
             initialize(ctx, live, repo, content, item, did=did)
-        except (UnknownOutcomeError, RateLimitedError, ApiError, AuthError) as err:
+        except (UnknownOutcomeError, ApiError, AuthError) as err:
             if did or added:
-                out.applied.append(f"{_verb(added, dry)} {label}: {'; '.join(did)} (then stopped)")
-            if isinstance(err, UnknownOutcomeError):
-                out.unknown.append(f"{label}: unknown outcome: re-run after checking the board")
-                _observe(ctx, live, content, label, previous, out)
-            elif isinstance(err, RateLimitedError):
+                applied(added, label, did, stopped=True)
+            if isinstance(err, RateLimitedError):
                 out.failed.append(f"FAILED {label}: stopped: still rate limited")
             elif isinstance(err, AuthError):
                 out.unknown.append(f"{label}: stopped: {err}")
+            elif isinstance(err, UnknownOutcomeError) or added:
+                # An acknowledged add whose follow-up read failed is as unknown as a lost reply: look, do not write.
+                out.unknown.append(f"{label}: unknown outcome: re-run after checking the board")
+                _observe(ctx, live, content, label, previous, out)
             else:
                 out.unknown.append(f"{label}: stopped: cannot read live state ({type(err).__name__})")
             out.not_attempted = [_label(repos[c.repo.lower()], c) for c in pending[index + 1 :]]
             break
         if did or added:
-            out.applied.append(f"{_verb(added, dry)} {label}: {'; '.join(did)}")
+            applied(added, label, did)
     return out
 
 
@@ -235,7 +292,7 @@ def verify_adds(ctx: Context, live: LiveBoard, out: Outcome) -> str | None:
             if item is None or item.id != item_id:
                 return "unknown outcome: re-run after checking the board"
         # Supporting observation only, never a substitute for the identity checks above.
-        ctx.say(f"items.totalCount after verified adds: {load_live(ctx.client, ctx.board.project).items_total}")
+        say(ctx, f"items.totalCount after verified adds: {load_live(ctx.client, ctx.board.project).items_total}")
     except ApiError as err:
         return f"unknown outcome: re-run after checking the board (the adds could not be re-read: {type(err).__name__})"
     return None
@@ -247,15 +304,32 @@ def _not_attempted(names: list[str]) -> str:
     return f"NOT ATTEMPTED {shown}{more}"
 
 
+def _refuse_future(today: dt.date, contents: list[Content]) -> None:
+    """A close date more than a day ahead of today is not a close date: stop before anything is written."""
+    limit = (today + dt.timedelta(days=1)).isoformat()
+    for c in contents:
+        if c.closed_day and c.closed_day > limit:
+            raise MalformedDataError("a closedAt from GitHub is more than a day in the future")
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
     dry = ctx.client.dry_run
     live = load_live(ctx.client, ctx.board.project)
     validate(ctx.board, live)
     items = list_board_items(ctx.client, ctx.board, live)
+    ids = [i.id for i in items]
+    if len(set(ids)) != len(ids) or len(ids) > live.items_total:
+        say(
+            ctx,
+            f"UNKNOWN the listing holds {len(ids)} items (some repeated: {len(ids) != len(set(ids))}) but the project "
+            f"reports {live.items_total}: contradictory reads, cannot tell; no mutations sent",
+        )
+        return EXIT_UNKNOWN
     work, unreachable = collect_work(ctx.client, ctx.board, ctx.today)
+    _refuse_future(ctx.today, [c for rows in work.values() for c in rows] + [i.content for i in items if i.content])
     plan = build_plan(ctx.board, items, work, unreachable, ctx.today)
     if any(i.content is None and i.content_type != "DraftIssue" for i in items):
-        ctx.say("UNKNOWN inaccessible content; no mutations sent")
+        say(ctx, "UNKNOWN inaccessible content; no mutations sent")
         return EXIT_UNKNOWN
     counts: dict[str, int] = {}
     labels: dict[str, str] = {}
@@ -272,36 +346,35 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     problem = verify_adds(ctx, live, out)
     # The listing lags behind items.totalCount, and a lookup by content id covers only the work this run knows about.
     # Cards that neither reached cannot be named: the run cannot say the board is current.
-    listed_ids = {i.id for i in items}
+    listed_ids = set(ids)
     unread = live.items_total - len(listed_ids | out.seen)
-    for line in out.applied:
-        ctx.say(line)
     for line in out.vanished:
-        ctx.say(f"VANISHED {line}")
+        say(ctx, f"VANISHED {line}")
     for line in out.unknown + out.observed + out.failed:
-        ctx.say(line)
+        say(ctx, line)
     if out.not_attempted:
-        ctx.say(_not_attempted(out.not_attempted))
+        say(ctx, _not_attempted(out.not_attempted))
     for name in unreachable:
-        ctx.say(f"UNREACHABLE {name}: the token cannot read it (is the App installed on it?)")
+        say(ctx, f"UNREACHABLE {name}: the token cannot read it (is the App installed on it?)")
     for line in plan.anomalies:
-        ctx.say(f"NOTE {line}")
+        say(ctx, f"NOTE {line}")
     if problem:
-        ctx.say(problem)
+        say(ctx, problem)
     if unread > 0:
         looked_up = len(out.seen - listed_ids)
-        ctx.say(
+        say(
+            ctx,
             f"UNKNOWN {unread} of {live.items_total} items on the project were not read (the listing lags or hides "
             f"them, so they cannot be named): {len(listed_ids)} read from the listing, {looked_up} looked up through "
             "their issue or pull request. Only the items that were read were worked on; those changes were applied "
-            "as listed above. Cannot tell whether the board is current; run again in a minute"
+            "as listed above. Cannot tell whether the board is current; run again in a minute",
         )
     if out.unknown or problem or unreachable or unread > 0:
         return EXIT_UNKNOWN
     if plan.anomalies or out.failed or (dry and out.applied):
         return EXIT_DRIFT
     if not out.applied and not out.vanished:
-        ctx.say("nothing to do: the board is current")
+        say(ctx, "nothing to do: the board is current")
     return EXIT_OK
 
 

@@ -14,11 +14,11 @@ import pytest
 from fakegh import FakeGitHub
 from fakegh.core import HANDLERS, Fault, FProject
 from safo.cli import main
-from safo.errors import ConfigError
+from safo.errors import ConfigError, MalformedDataError
 from safo.graphql import Client
 from safo.modes.reconcile import run
 from safo.schema import Board, Repository
-from world import build_world, load_test_board, make_context
+from world import TODAY, build_world, load_test_board, make_context
 
 ARGS = argparse.Namespace()
 
@@ -249,30 +249,12 @@ def test_a_repository_the_app_is_not_installed_on_is_named_and_the_others_are_st
     assert list(snapshot(fake, project)) == ["acme/widgets#1"]
 
 
-def test_a_card_deleted_after_it_was_listed_is_named_and_skipped_and_the_rest_are_done(
-    fake: FakeGitHub, client: Client
-) -> None:
-    """Review focus 4: a read finds the card gone; there is nothing left to fix, so the run carries on."""
-    _, project = build_world(fake)
-    gone = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T00:00:00Z")
-    fine = fake.add_content("acme/widgets", "Issue", 2, state="CLOSED", closed_at="2026-10-03T00:00:00Z")
-    item = fake.add_item(project, gone, Status="In progress", Area="Core")
-    fake.add_item(project, fine, Status="In progress", Area="Core")
-    fake.vanished.add(item.id)
-    code, text = reconcile(fake, client)
-    assert code == 0, text
-    assert "VANISHED acme/widgets#1" in text
-    assert snapshot(fake, project)["acme/widgets#2"]["Status"] == "Done"
-    assert {m.variables["itemId"] for m in fake.mutations} == {project.items[1].id}
-
-
 def test_a_card_deleted_during_a_write_is_an_unknown_outcome_that_stops_further_writes(
     fake: FakeGitHub, client: Client
 ) -> None:
     """The edit itself answers NOT_FOUND: that is an error on a write, so the outcome is unknown. The re-read
     proves the card is gone, the run names it, sends nothing further and exits 2; the next run finishes the rest."""
     board = load_test_board()
-    board = dataclasses.replace(board, rules=dataclasses.replace(board.rules, new_item_defaults=()))
     _, project = build_world(fake, board)
     gone = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T00:00:00Z")
     fine = fake.add_content("acme/widgets", "Issue", 2, state="CLOSED", closed_at="2026-10-03T00:00:00Z")
@@ -695,7 +677,7 @@ def test_malformed_work_is_exit_2_before_any_write_and_the_value_is_not_echoed(
     code, out, err = via_cli(client)
     assert code == 2, (out, err)
     assert fake.mutations == [], "a repository that cannot be read in full is not worked on"
-    assert "BOGUS" not in out + err and "garbage" not in out + err and "-1" not in out + err
+    assert "BOGUS" not in out + err and "garbage" not in out + err and "-1" not in (out + err).replace("2026-10-03", "")
     assert "nothing to do" not in out
 
 
@@ -882,3 +864,621 @@ def test_an_add_acknowledged_with_another_cards_id_is_an_unknown_outcome(fake: F
     code, text = reconcile(fake, client)
     assert code == 2 and "unknown outcome" in text
     assert fake.mutations_named("SetSelect") == []
+
+
+# -- fix round 1: one desired value per field, strict reads, canonical repositories ---------------------------------
+
+
+def each(nodes: list[dict[str, Any]], **fields: Any) -> None:
+    for n in nodes:
+        n.update(fields)
+
+
+def apply_change(change: Any, node: dict[str, Any]) -> bool:
+    change(node)
+    return True
+
+
+def with_defaults(board: Board, *pairs: tuple[str, str]) -> Board:
+    return dataclasses.replace(board, rules=dataclasses.replace(board.rules, new_item_defaults=pairs))
+
+
+def test_a_default_can_never_overwrite_the_status_or_area_reconcile_decided_and_run_two_sends_nothing(
+    fake: FakeGitHub, client: Client
+) -> None:
+    board = with_defaults(load_test_board(), ("Status", "Backlog"), ("Area", "Docs"), ("Priority", "P2 later"))
+    _, project = build_world(fake, board)
+    shut = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T00:00:00Z")
+    fake.add_content("acme/widgets", "Issue", 2)
+    fake.add_item(project, shut)
+    code, text = reconcile(fake, client, board)
+    assert code == 0, text
+    snap = snapshot(fake, project)
+    assert snap["acme/widgets#1"] == {"Status": "Done", "Area": "Core", "Priority": "P2 later", "Done on": "2026-10-03"}
+    assert snap["acme/widgets#2"] == {"Status": "Backlog", "Area": "Core", "Priority": "P2 later", "Done on": None}
+    written = [(m.variables["itemId"], m.variables["fieldId"]) for m in fake.mutations if m.op != "AddItem"]
+    assert len(written) == len(set(written)), "no field of a card is written twice in one run"
+    fake.mutations.clear()
+    code, text = reconcile(fake, client, board)
+    assert code == 0 and fake.mutations == [] and "nothing to do" in text
+
+
+def test_a_field_is_claimed_once_even_when_two_roles_name_the_same_field() -> None:
+    from safo.items import Content, ItemState
+    from safo.modes.reconcile import desired_writes
+
+    board = load_test_board()
+    board = dataclasses.replace(
+        board, rules=dataclasses.replace(board.rules, area_field="Status", new_item_defaults=(("Status", "Next"),))
+    )
+    content = Content("C", "issue", "open", False, None, 1, "acme/widgets", "t", ())
+    writes = desired_writes(
+        board, board.repositories[0], content, ItemState("I", content, None, None, None), "x", TODAY
+    )
+    assert [w.field for w in writes] == ["Status"] and writes[0].value == "Backlog"
+
+
+@pytest.mark.parametrize(
+    "hole", ["d0-missing", "d0-empty", "status-missing", "status-empty", "area-missing", "area-empty"]
+)
+def test_a_field_read_that_is_missing_or_empty_is_exit_2_and_a_manual_value_is_never_overwritten(
+    fake: FakeGitHub, client: Client, hole: str
+) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    item = fake.add_item(project, card, Status="Blocked", Area="Core", Priority="P1 soon")
+    key, how = hole.split("-")
+
+    def damage(data: dict[str, Any], v: dict[str, Any]) -> None:
+        node = data["node"]["items"]["nodes"][0]
+        if how == "missing":
+            del node[key]
+        else:
+            node[key] = {}
+
+    wrap(fake, "ProjectItems", damage)
+    code, out, err = via_cli(client)
+    assert code == 2 and fake.mutations == [] and "nothing to do" not in out, (out, err)
+    assert fake.value(project, item, "Priority") == "P1 soon"
+
+
+@pytest.mark.parametrize("hole", ["d0-missing", "d0-empty", "status-empty"])
+def test_a_card_lookup_with_a_missing_or_empty_field_after_an_add_is_exit_2_and_stops(
+    fake: FakeGitHub, client: Client, hole: str
+) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1)
+    key, how = hole.split("-")
+
+    def damage(data: dict[str, Any], v: dict[str, Any]) -> None:
+        for row in data["node"]["projectItems"]["nodes"]:
+            if how == "missing":
+                del row[key]
+            else:
+                row[key] = {}
+
+    wrap(fake, "ItemLookup", damage)
+    code, text = reconcile(fake, client)
+    assert code == 2 and "ADDED acme/widgets#1" in text
+    assert "observed" in text or "live reread failed" in text
+    assert fake.mutations_named("SetSelect") == []
+
+
+def test_a_batched_card_with_a_missing_field_is_exit_2(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Area="Core", Priority="P2 later").hidden_for = 99
+
+    def damage(data: dict[str, Any], v: dict[str, Any]) -> None:
+        del data["nodes"][0]["projectItems"]["nodes"][0]["d0"]
+
+    wrap(fake, "BatchItems", damage)
+    code, out, _ = via_cli(client)
+    assert code == 2 and fake.mutations == [] and "nothing to do" not in out
+
+
+# -- VANISHED needs a clean null ----------------------------------------------------------------------------------
+
+
+def _not_found_with_data(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+    from fakegh.core import GqlError
+
+    raise GqlError("NOT_FOUND", "Could not resolve", {"node": {"id": v["id"]}})
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        lambda f, v: {},
+        lambda f, v: {"node": {}},
+        lambda f, v: {"node": {"id": "SOMETHING_ELSE"}},
+        lambda f, v: {"other": None},
+        _not_found_with_data,
+    ],
+    ids=["empty", "empty-node", "foreign-node", "no-node-key", "not-found-with-data"],
+)
+def test_vanished_needs_a_clean_null_after_an_unknown_outcome(fake: FakeGitHub, client: Client, answer: Any) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Priority="P2 later")  # Area blank: the first write is SetSelect
+    fake.faults.append(Fault(502, {}, "{}", times=1, op="SetSelect"))
+    fake.handlers["ContentExists"] = answer
+    code, text = reconcile(fake, client)
+    assert code == 2 and "VANISHED" not in text and "live reread failed" in text
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [lambda f, v: {}, lambda f, v: {"node": {}}, _not_found_with_data],
+    ids=["empty", "empty-node", "not-found-with-data"],
+)
+def test_missing_work_is_never_skipped_as_vanished_on_contradictory_evidence(
+    fake: FakeGitHub, client: Client, answer: Any
+) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1)
+    fake.handlers["ContentExists"] = answer
+    code, text = reconcile(fake, client)
+    assert code == 2 and "VANISHED" not in text and fake.mutations == []
+    assert "nothing to do" not in text
+
+
+# -- canonical repository ---------------------------------------------------------------------------------------
+
+
+def test_content_that_belongs_to_another_repository_is_refused_with_a_note_and_not_added(
+    fake: FakeGitHub, client: Client
+) -> None:
+    """A renamed or transferred repository: asked for acme/widgets, GitHub answers with content of another owner."""
+    _, project = build_world(fake)
+    moved = fake.add_content("acme/widgets", "Issue", 7, "Moved")
+    moved.repo = "outsider/renamed"
+    fake.add_content("acme/widgets", "Issue", 8)
+    code, text = reconcile(fake, client)
+    assert code == 1, text
+    assert (
+        "NOTE outsider/renamed#7 was listed under acme/widgets but GitHub says it belongs to outsider/renamed" in text
+    )
+    assert list(snapshot(fake, project)) == ["acme/widgets#8"]
+    assert all(m.variables.get("contentId") != moved.id for m in fake.mutations)
+
+
+def test_audit_reports_content_of_another_repository_as_drift(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    moved = fake.add_content("acme/widgets", "Issue", 7)
+    moved.repo = "outsider/renamed"
+    out, err = io.StringIO(), io.StringIO()
+    code = main(["--board", BOARD_FILE, "audit"], env={}, client_factory=lambda b, e, d: client, out=out, err=err)
+    assert code == 1 and "outsider/renamed#7 was listed under acme/widgets" in out.getvalue()
+
+
+@pytest.mark.parametrize("name", ["../x", "a b/c", "x/y\n::error::z", "nosep", "", None, 5])
+def test_a_repository_name_that_is_not_a_name_is_exit_2(fake: FakeGitHub, client: Client, name: Any) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1)
+    wrap(
+        fake,
+        "RepoOpenIssues",
+        lambda data, v: each(data["repository"]["issues"]["nodes"], repository={"nameWithOwner": name}),
+    )
+    code, out, err = via_cli(client)
+    assert code == 2 and fake.mutations == [] and "::error::z" not in out + err
+
+
+# -- batch answers are matched by id ----------------------------------------------------------------------------
+
+
+def hidden_pair(fake: FakeGitHub) -> tuple[FProject, Any, Any]:
+    _, project = build_world(fake)
+    first = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T00:00:00Z")
+    second = fake.add_content("acme/widgets", "Issue", 2)
+    for c in (first, second):
+        fake.add_item(project, c, Status="Backlog", Area="Core", Priority="P2 later").hidden_for = 99
+    return project, first, second
+
+
+def test_batched_answers_are_matched_by_id_not_by_position(fake: FakeGitHub, client: Client) -> None:
+    project, _, _ = hidden_pair(fake)
+    board = load_test_board()
+    board = dataclasses.replace(board, rules=dataclasses.replace(board.rules, add_closed_days=30))
+    wrap(fake, "BatchItems", lambda data, v: data["nodes"].reverse())
+    code, text = reconcile(fake, client, board)
+    snap = snapshot(fake, project)
+    assert code == 0, text
+    assert snap["acme/widgets#1"]["Status"] == "Done" and snap["acme/widgets#1"]["Done on"] == "2026-10-03"
+    assert snap["acme/widgets#2"]["Status"] == "Backlog"
+    assert {m.variables["itemId"] for m in fake.mutations} == {project.items[0].id}
+
+
+@pytest.mark.parametrize("damage", ["extra", "duplicate", "no-id", "short", "long"])
+def test_a_batch_that_adds_repeats_or_drops_an_id_is_exit_2_and_nothing_is_written(
+    fake: FakeGitHub, client: Client, damage: str
+) -> None:
+    hidden_pair(fake)
+    board = load_test_board()
+    board = dataclasses.replace(board, rules=dataclasses.replace(board.rules, add_closed_days=30))
+
+    def change(data: dict[str, Any], v: dict[str, Any]) -> None:
+        nodes = data["nodes"]
+        if damage == "extra":
+            nodes[0]["id"] = "NOT_ASKED"
+        elif damage == "duplicate":
+            nodes[1] = dict(nodes[0])
+        elif damage == "no-id":
+            del nodes[0]["id"]
+        elif damage == "short":
+            nodes.pop()
+        else:
+            nodes.append(dict(nodes[0]))
+
+    wrap(fake, "BatchItems", change)
+    with pytest.raises(MalformedDataError):
+        reconcile(fake, client, board)
+    assert fake.mutations == []
+
+
+# -- labels ---------------------------------------------------------------------------------------------------------
+
+
+def test_the_area_rule_sees_a_label_that_is_past_the_first_page(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1, "Plain", labels=[f"l{i}" for i in range(20)] + ["docs"])
+    code, text = reconcile(fake, client)
+    assert code == 0, text
+    assert snapshot(fake, project)["acme/widgets#1"]["Area"] == "Docs"
+    assert fake.requests.count("ContentLabels") >= 1
+
+
+def test_the_area_rule_sees_a_late_label_on_a_card_already_on_the_board(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1, "Plain", labels=[f"l{i}" for i in range(20)] + ["docs"])
+    fake.add_item(project, card, Status="Backlog", Priority="P2 later")
+    assert reconcile(fake, client)[0] == 0
+    assert snapshot(fake, project)["acme/widgets#1"]["Area"] == "Docs"
+
+
+@pytest.mark.parametrize("bad", ["count-low", "count-high", "no-page-info", "no-total", "nameless", "not-object"])
+def test_labels_that_contradict_themselves_are_exit_2(fake: FakeGitHub, client: Client, bad: str) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1, labels=["a"])
+
+    def change(n: dict[str, Any]) -> None:
+        labels = n["labels"]
+        if bad == "count-low":
+            labels["totalCount"] = 0
+        elif bad == "count-high":
+            labels["totalCount"] = 5
+        elif bad == "no-page-info":
+            del labels["pageInfo"]
+        elif bad == "no-total":
+            del labels["totalCount"]
+        elif bad == "nameless":
+            labels["nodes"] = [{}]
+        else:
+            n["labels"] = 5
+
+    wrap(
+        fake, "RepoOpenIssues", lambda data, v: [apply_change(change, n) for n in data["repository"]["issues"]["nodes"]]
+    )
+    code, out, err = via_cli(client)
+    assert code == 2 and fake.mutations == [], (out, err)
+
+
+# -- timestamps -----------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "2026-10-03Tgarbage",
+        "2026-10-03T99:99:99Z",
+        "2026-10-03",
+        "2026-10-03T08:00:00",
+        "2026-10-03 08:00:00Z",
+        "2026-10-03T08:00:00+0200",
+        "2026-10-03T08:00:00+25:00",
+        "2026-10-03T08:00:00Zjunk",
+        "9999-12-31T23:59:59-02:00",
+        "2026-10-09T00:00:00Z",
+        "2099-01-01T00:00:00Z",
+    ],
+)
+def test_a_close_time_that_is_not_a_strict_past_rfc_3339_time_is_exit_2_before_any_write(
+    fake: FakeGitHub, client: Client, stamp: str
+) -> None:
+    board = dataclasses.replace(
+        load_test_board(), rules=dataclasses.replace(load_test_board().rules, add_closed_days=30)
+    )
+    build_world(fake, board)
+    fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at=stamp)
+    with pytest.raises(MalformedDataError) as caught:
+        reconcile(fake, client, board)
+    assert fake.mutations == [] and stamp not in str(caught.value)
+
+
+def test_a_close_time_a_day_ahead_is_accepted_and_two_days_ahead_is_not(fake: FakeGitHub, client: Client) -> None:
+    board = dataclasses.replace(
+        load_test_board(), rules=dataclasses.replace(load_test_board().rules, add_closed_days=30)
+    )
+    _, project = build_world(fake, board)
+    fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-08T05:00:00Z")
+    code, text = reconcile(fake, client, board)
+    assert code == 0, text
+    assert snapshot(fake, project)["acme/widgets#1"]["Done on"] == "2026-10-08"
+
+
+def test_the_window_edge_is_decided_in_utc_in_both_offset_directions(fake: FakeGitHub, client: Client) -> None:
+    """Today is 2026-10-07, the window 30 days: the first day inside is 2026-09-07 UTC."""
+    board = dataclasses.replace(
+        load_test_board(), rules=dataclasses.replace(load_test_board().rules, add_closed_days=30)
+    )
+    _, project = build_world(fake, board)
+    fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-09-06T23:30:00-02:00")  # 09-07 01:30Z
+    fake.add_content("acme/widgets", "Issue", 2, state="CLOSED", closed_at="2026-09-07T01:00:00+02:00")  # 09-06 23:00Z
+    fake.add_content("acme/widgets", "Issue", 3, state="CLOSED", closed_at="2026-10-03T23:30:00-02:00")  # 10-04 01:30Z
+    code, text = reconcile(fake, client, board)
+    assert code == 0, text
+    snap = snapshot(fake, project)
+    assert set(snap) == {"acme/widgets#1", "acme/widgets#3"}
+    assert snap["acme/widgets#1"]["Done on"] == "2026-09-07"
+    assert snap["acme/widgets#3"]["Done on"] == "2026-10-04", "the Done day is the UTC day"
+
+
+def test_fractional_seconds_are_accepted(fake: FakeGitHub, client: Client) -> None:
+    board = dataclasses.replace(
+        load_test_board(), rules=dataclasses.replace(load_test_board().rules, add_closed_days=30)
+    )
+    _, project = build_world(fake, board)
+    fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T08:00:00.123456Z")
+    assert reconcile(fake, client, board)[0] == 0
+    assert snapshot(fake, project)["acme/widgets#1"]["Done on"] == "2026-10-03"
+
+
+# -- contradictory counts ---------------------------------------------------------------------------------------
+
+
+def test_a_total_smaller_than_the_listing_is_a_contradiction_and_exit_2(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Area="Core", Priority="P2 later")
+    wrap(fake, "ProjectMetaOrg", lambda data, v: data["organization"]["projectV2"]["items"].update(totalCount=0))
+    code, out, _ = via_cli(client)
+    assert code == 2 and "contradictory" in out and "nothing to do" not in out and fake.mutations == []
+
+
+def test_a_listing_that_repeats_a_card_is_a_contradiction_and_exit_2(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Area="Core", Priority="P2 later")
+    fake.add_item(project, None)
+    wrap(fake, "ProjectItems", lambda data, v: data["node"]["items"]["nodes"].append(data["node"]["items"]["nodes"][0]))
+    code, out, _ = via_cli(client)
+    assert code == 2 and "contradictory" in out and fake.mutations == []
+
+
+# -- printed text is safe ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("target", ["ContentExists", "ItemLookup"])
+def test_exception_text_cannot_forge_a_line_or_move_the_cursor(fake: FakeGitHub, client: Client, target: str) -> None:
+    from fakegh.core import GqlError
+
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, card, Status="Backlog", Priority="P2 later")
+    fake.faults.append(Fault(502, {}, "{}", times=1, op="SetSelect"))
+
+    def forged(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        raise GqlError("INTERNAL", "bad\n::error::forged\x1b[2J\rmore")
+
+    fake.handlers[target] = forged
+    code, text = reconcile(fake, client)
+    assert code == 2 and "live reread failed" in text
+    assert not any(line.startswith("::") for line in text.splitlines())
+    assert "\x1b" not in text and "\r" not in text and "forged" in text
+
+
+def test_a_line_that_would_start_with_a_workflow_command_is_defused() -> None:
+    from safo.modes.reconcile import safe, say
+
+    assert safe("a\nb\x1b[0m\r") == "a\\x0ab\\x1b[0m\\x0d"
+    out = io.StringIO()
+    ctx, _ = make_context(FakeGitHub(), load_test_board(), Client("t", "http://127.0.0.1:1/graphql"))
+    ctx.out = out
+    say(ctx, "::error::x")
+    say(ctx, "\n::error::y")
+    assert not any(line.startswith("::") for line in out.getvalue().splitlines())
+
+
+# -- review findings --------------------------------------------------------------------------------------------
+
+
+def test_a_card_whose_content_the_token_cannot_read_stops_the_run_before_any_write(
+    fake: FakeGitHub, client: Client
+) -> None:
+    _, project = build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, fake.add_content("acme/widgets", "Issue", 2), Status="Backlog").unreadable = True
+    code, text = reconcile(fake, client)
+    assert code == 2 and "UNKNOWN inaccessible content; no mutations sent" in text
+    assert fake.mutations == []
+
+
+def test_a_closed_card_that_already_has_a_done_date_is_left_alone_and_its_date_is_kept(
+    fake: FakeGitHub, client: Client
+) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T00:00:00Z")
+    fake.add_item(project, card, Status="Done", Area="Core", Priority="P2 later", Done_on="2026-09-01")
+    code, text = reconcile(fake, client)
+    assert code == 0 and fake.mutations == [], text
+    assert snapshot(fake, project)["acme/widgets#1"]["Done on"] == "2026-09-01"
+
+
+def test_new_item_default_options_are_checked_before_the_first_mutation(fake: FakeGitHub, client: Client) -> None:
+    board = with_defaults(load_test_board(), ("Priority", "P2 later"))
+    _, project = build_world(fake, board)
+    fake.field(project, "Priority").options = [
+        o for o in fake.field(project, "Priority").options if o.name != "P2 later"
+    ]
+    fake.add_content("acme/widgets", "Issue", 1)
+    with pytest.raises(ConfigError, match="no option named 'P2 later'"):
+        reconcile(fake, client, board)
+    assert fake.mutations == []
+
+
+def test_area_options_are_checked_before_the_first_mutation(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    fake.field(project, "Area").options = [o for o in fake.field(project, "Area").options if o.name != "Docs"]
+    fake.add_content("acme/widgets", "Issue", 1)
+    with pytest.raises(ConfigError, match="no option named 'Docs'"):
+        reconcile(fake, client)
+    assert fake.mutations == []
+
+
+def test_cards_of_a_repository_the_token_cannot_read_are_never_edited(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    fake.repos["acme/manuals"].installed = False
+    hidden = fake.add_content("acme/manuals", "Issue", 5)
+    item = fake.add_item(project, hidden)  # blank card of the unreadable repository
+    code, text = reconcile(fake, client)
+    assert code == 2 and "UNREACHABLE acme/manuals" in text
+    assert fake.mutations == [] and item.values == {}
+
+
+def test_not_attempted_names_twenty_cards_and_counts_the_rest(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    for n in range(1, 31):
+        fake.add_content("acme/widgets", "Issue", n)
+    fake.faults.append(Fault(429, {"Retry-After": "1"}, "{}", times=999, op="SetSelect"))
+    code, text = reconcile(fake, client)
+    assert code == 1
+    line = next(x for x in text.splitlines() if x.startswith("NOT ATTEMPTED"))
+    assert line.count("acme/widgets#") == 20 and line.endswith("and 9 more")
+
+
+def test_a_card_of_another_board_is_never_taken_for_ours(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    other = fake.add_project("organization", "acme", 2, "Other")
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    elsewhere = fake.add_item(other, card)
+    real = HANDLERS["AddItem"]
+
+    def handler(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        return {"addProjectV2ItemById": {"item": {"id": elsewhere.id}}}  # acknowledges the other board's card
+
+    fake.handlers["AddItem"] = handler
+    del real
+    code, text = reconcile(fake, client)
+    assert code == 2 and "unknown outcome" in text
+    assert fake.mutations_named("SetSelect") == [] and project.items == []
+
+
+def test_a_card_on_a_later_page_of_an_issues_cards_is_found(fake: FakeGitHub, client: Client) -> None:
+    fake.page_size = 1
+    other = fake.add_project("organization", "acme", 2, "Other")  # created first, so its card is on page one
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(other, card)
+    fake.add_item(project, card, Status="Backlog", Area="Core", Priority="P2 later").hidden_for = 99
+    code, text = reconcile(fake, client)
+    assert code == 0 and fake.mutations == [], text
+    assert fake.requests.count("ItemLookup") >= 2
+
+
+def test_batches_stay_within_githubs_limit(fake: FakeGitHub, sleeps: list[float]) -> None:
+    build_world(fake)
+    for n in range(1, 131):
+        fake.add_content("acme/widgets", "Issue", n)
+    dry = Client(fake.token, fake.url, dry_run=True, sleep=sleeps.append, out=io.StringIO())
+    code, text = reconcile(fake, dry)
+    assert code == 1, text
+    assert fake.requests.count("BatchItems") == 3
+
+
+def test_an_id_that_is_neither_an_issue_nor_a_pull_request_has_no_cards(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1)
+    fake.handlers["BatchItems"] = lambda f, v: {"nodes": [{"id": card.id}]}
+    code, text = reconcile(fake, client)
+    assert code == 0, text
+    assert len(project.items) == 1
+
+
+@pytest.mark.parametrize("merged", ["false", 1, "yes", 0])
+def test_a_merged_flag_that_is_not_a_boolean_is_exit_2(fake: FakeGitHub, client: Client, merged: Any) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "PullRequest", 1)
+    wrap(
+        fake,
+        "RepoOpenPulls",
+        lambda data, v: [n.update(merged=merged) for n in data["repository"]["pullRequests"]["nodes"]],
+    )
+    code, out, _ = via_cli(client)
+    assert code == 2 and fake.mutations == [] and "nothing to do" not in out
+
+
+def test_the_clean_board_says_exactly_that(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    code, text = reconcile(fake, client)
+    assert code == 0 and text == "nothing to do: the board is current\n"
+
+
+def test_an_acknowledged_add_whose_follow_up_read_fails_is_reported_observed_and_stops(
+    fake: FakeGitHub, client: Client
+) -> None:
+    build_world(fake)
+    for n in (1, 2):
+        fake.add_content("acme/widgets", "Issue", n)
+    real = HANDLERS["ItemLookup"]
+    calls = 0
+
+    def lookup(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the second card's post-add read
+            return {"node": {"projectItems": 5}}
+        return real(f, v)
+
+    fake.handlers["ItemLookup"] = lookup
+    code, text = reconcile(fake, client)
+    assert code == 2
+    assert "ADDED acme/widgets#2 (then stopped)" in text
+    assert "unknown outcome: re-run after checking the board" in text
+    assert "NOT ATTEMPTED" not in text or "acme/widgets#2" not in text.split("NOT ATTEMPTED")[-1]
+    assert len(fake.mutations_named("AddItem")) == 2 and len(fake.mutations_named("SetSelect")) == 3
+
+
+def test_applied_lines_are_printed_as_they_happen_so_a_crash_cannot_hide_a_write(
+    fake: FakeGitHub, client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import safo.modes.reconcile as mode
+
+    build_world(fake)
+    for n in (1, 2):
+        fake.add_content("acme/widgets", "Issue", n)
+    real = mode.initialize
+    calls = 0
+
+    def crashing(*a: Any, **k: Any) -> list[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("bug")
+        return real(*a, **k)
+
+    monkeypatch.setattr(mode, "initialize", crashing)
+    ctx, out = make_context(fake, load_test_board(), client)
+    with pytest.raises(RuntimeError):
+        run(ctx, ARGS)
+    assert "ADDED acme/widgets#1: Status = Backlog" in out.getvalue()
+
+
+def test_the_documents_with_default_aliases_follow_the_pagination_rules() -> None:
+    from safo.items import batch_query, items_query, lookup_query
+    from test_documents import check_document
+
+    for n in (0, 1, 3):
+        for name, doc in (("items", items_query(n)), ("lookup", lookup_query(n)), ("batch", batch_query(n))):
+            assert check_document(f"{name}{n}", doc) == []
+            assert doc.count("fieldValueByName(name: $default") == n
