@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import io
 import os
+import re
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from fakegh import FakeGitHub
-from fakegh.core import HANDLERS, JSON
+from fakegh.core import HANDLERS, JSON, Fault
 from safo.errors import ApiError, ConfigError, MalformedDataError, UnknownOutcomeError
 from safo.graphql import Client
 from safo.modes.status import run
@@ -92,7 +95,7 @@ def test_a_body_file_name_cannot_start_a_command_in_the_error(fake: FakeGitHub, 
     build_world(fake)
     with pytest.raises(ConfigError) as caught:
         post(fake, client, tmp_path / "x\n::error::forged.md")
-    assert "\n" not in str(caught.value) and "\\x0a::error::forged" in str(caught.value)
+    assert "\n" not in str(caught.value) and "\\x0a:\\x3aerror:\\x3aforged" in str(caught.value)
 
 
 def test_status_unknown_outcome_rereads_and_does_not_retry(
@@ -359,8 +362,9 @@ def test_post_print_shows_the_update_and_sends_nothing(fake: FakeGitHub, client:
     populate(fake, project)
     ctx, out = make_context(fake, load_test_board(), client)
     assert run(ctx, ns(post=True, print_only=True, since="2026-10-06")) == 0
-    assert out.getvalue().startswith("2 done since 2026-10-06, 1 in progress, 2 waiting on the maintainer, 1 next.")
-    assert fake.mutations == []
+    lines = out.getvalue().splitlines()
+    assert lines[1] == "2 done since 2026-10-06, 1 in progress, 2 waiting on the maintainer, 1 next."
+    assert lines[0].startswith("::stop-commands::") and lines[-1].startswith("::") and fake.mutations == []
 
 
 def test_post_in_a_dry_run_says_it_would_post_and_exits_1(fake: FakeGitHub, sleeps: list[float]) -> None:
@@ -515,6 +519,10 @@ def raw_connection(fake: FakeGitHub, items: JSON) -> None:
         card(agent=KeyError),
         card(id=KeyError),
         card(id=None),
+        card(id=[]),
+        card(id=1),
+        card(id=""),
+        card(id={"a": 1}),
     ],
     ids=lambda n: str(n)[:60],
 )
@@ -680,7 +688,9 @@ def test_a_title_from_the_board_cannot_forge_a_command_in_a_printed_update(fake:
     fake.add_item(project, evil, Status="Next")
     ctx, out = make_context(fake, load_test_board(), client)
     assert run(ctx, ns(post=True, print_only=True)) == 0
-    assert not any(line.startswith("::") for line in out.getvalue().splitlines())
+    lines = out.getvalue().splitlines()
+    assert lines[0].startswith("::stop-commands::") and lines[-1].startswith("::")
+    assert not any(line.startswith("::") for line in lines[1:-1])
     assert "\x1b" not in out.getvalue() and "@octocat" not in out.getvalue()
 
 
@@ -745,3 +755,234 @@ def test_count_labels_and_claims_cannot_be_supplied_by_the_model(text: str) -> N
     assert not headline_acceptable(text, g)
     first = render_body(text, g).splitlines()[0]
     assert first == "1 done since 2026-10-06, 2 in progress, 3 waiting on the maintainer, 4 next."
+
+
+# -- Markdown in titles and agent names cannot form a link, image, heading or HTML -------------------------------
+
+SPECIAL = re.compile(r"[\\`*_{}\[\]()#+\-.!|<>~:&]")
+
+
+def card_line(body: str, number: int) -> str:
+    return next(line for line in body.splitlines() if line.startswith(f"- acme/widgets#{number} "))
+
+
+def only_escaped(text: str) -> bool:
+    """True when no special character is left once every backslash pair has been consumed."""
+    return not SPECIAL.search(re.sub(r"\\(.)", "", text))
+
+
+def test_a_title_cannot_become_an_image_a_link_a_heading_or_html_in_the_posted_body(
+    fake: FakeGitHub, client: Client
+) -> None:
+    _, project = build_world(fake)
+    title = (
+        "![99 done](https://evil.invalid/badge) [board](https://evil.invalid) # h <b>x</b> | a | ~~s~~ www.evil.invalid"
+    )
+    evil = fake.add_content("acme/widgets", "Issue", 1, title)
+    fake.add_item(project, evil, Status="Next")
+    ctx, _ = make_context(fake, load_test_board(), client)
+    assert run(ctx, ns(post=True)) == 0
+    body = fake.mutations_named("StatusUpdate")[0].variables["input"]["body"]
+    line = card_line(body, 1)
+    assert "![" not in line and "](" not in line and "<b>" not in line and "](https" not in line
+    assert only_escaped(line.removeprefix("- acme/widgets#1 "))
+    assert "99 done" in line, "the words stay; only the syntax goes"
+
+
+def test_an_agent_name_cannot_become_a_link_either(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    card = fake.add_content("acme/widgets", "Issue", 1, "ok")
+    fake.add_item(project, card, Status="In progress", Agent="[admin](https://evil.invalid)")
+    ctx, _ = make_context(fake, load_test_board(), client)
+    assert run(ctx, ns(post=True)) == 0
+    line = card_line(fake.mutations_named("StatusUpdate")[0].variables["input"]["body"], 1)
+    assert "](" not in line and only_escaped(line.removeprefix("- acme/widgets#1 ok (").removesuffix(")"))
+
+
+def test_every_unicode_format_and_control_character_is_stripped_from_a_title() -> None:
+    marks = [
+        chr(c) for c in (0x061C, 0x200E, 0x200F, 0x202A, 0x2066, 0x2069, 0x00AD, 0x200D, 0xFEFF, 0xE0001, 0x7F, 0x85)
+    ]
+    hostile = "a" + "".join(marks) + "b"
+    text = render_body("h", group_rows([Row("acme/widgets", 1, hostile, "Next", "", None)], load_test_board(), SINCE))
+    assert "a b" in text
+    assert not any(m in text for m in marks)
+
+
+@pytest.mark.parametrize("char", list("\\`*_{}[]()#+-.!|<>~:&"))
+def test_each_markdown_character_is_escaped_in_a_title(char: str) -> None:
+    line = render_body(
+        "h", group_rows([Row("acme/widgets", 1, f"a{char}b", "Next", "", None)], load_test_board(), SINCE)
+    )
+    assert f"a\\{char}b" in line
+
+
+# -- printing: a block of untrusted text goes inside stop-commands ----------------------------------------------
+
+
+def printed(fake: FakeGitHub, client: Client) -> list[str]:
+    ctx, out = make_context(fake, load_test_board(), client)
+    assert run(ctx, ns(post=True, print_only=True)) == 0
+    return out.getvalue().splitlines()
+
+
+def test_a_printed_update_is_wrapped_in_stop_commands_with_a_fresh_token(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    evil = fake.add_content("acme/widgets", "Issue", 1, "x ::error::FORGED ::stop-commands::x %0A::warning::w")
+    fake.add_item(project, evil, Status="Next")
+    first, second = printed(fake, client), printed(fake, client)
+    for lines in (first, second):
+        match = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", lines[0])
+        assert match and lines[-1] == f"::{match.group(1)}::"
+        assert not any(match.group(1) in line for line in lines[1:-1])
+        assert "ERROR" not in "".join(lines) and "error" in "".join(lines)
+    assert first[0] != second[0], "a fresh token each time"
+
+
+def test_a_warning_outside_the_block_is_a_single_neutralised_line(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    secret = fake.add_content("acme/widgets", "Issue", 8, "Hidden")
+    fake.add_item(project, secret, Status="Next").unreadable = True
+    ctx, out = make_context(fake, load_test_board(), client)
+    run(ctx, ns(post=True, print_only=True))
+    lines = out.getvalue().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("::stop-commands::"))
+    end = next(i for i, line in enumerate(lines) if i > start and re.fullmatch(r"::[0-9a-f]{32}::", line))
+    outside = lines[:start] + lines[end + 1 :]
+    assert outside and all("::" not in line for line in outside)
+
+
+def test_the_posted_body_is_not_wrapped(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    populate(fake, project)
+    ctx, _ = make_context(fake, load_test_board(), client)
+    run(ctx, ns(post=True, since="2026-10-06"))
+    assert fake.mutations_named("StatusUpdate")[0].variables["input"]["body"] == EXPECTED
+
+
+def test_a_dry_run_line_for_the_post_cannot_carry_a_command_from_a_title(fake: FakeGitHub, sleeps: list[float]) -> None:
+    _, project = build_world(fake)
+    evil = fake.add_content("acme/widgets", "Issue", 1, "x ::error::FORGED")
+    fake.add_item(project, evil, Status="Next")
+    log = io.StringIO()
+    dry = Client(fake.token, fake.url, dry_run=True, sleep=sleeps.append, out=log)
+    ctx, out = make_context(fake, load_test_board(), dry)
+    run(ctx, ns(post=True))
+    assert "dry run: would StatusUpdate" in log.getvalue() and "::" not in log.getvalue() + out.getvalue()
+
+
+# -- the acknowledgement must belong to our project ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"id": "PVTSU_1", "project": {"id": "PVT_other"}},
+        {"id": "PVTSU_1"},
+        {"id": "PVTSU_1", "project": None},
+        {"id": "PVTSU_1", "project": {"id": 5}},
+        {"id": "PVTSU_1", "project": {}},
+    ],
+)
+def test_an_update_acknowledged_for_another_project_is_an_unknown_outcome_and_not_sent_again(
+    fake: FakeGitHub, client: Client, tmp_path: Path, reply: JSON
+) -> None:
+    build_world(fake)
+    body = tmp_path / "status.md"
+    body.write_text("On track")
+    fake.handlers["StatusUpdate"] = lambda f, v: {"createProjectV2StatusUpdate": {"statusUpdate": reply}}
+    ctx, out = make_context(fake, load_test_board(), client)
+    assert run(ctx, ns(body_file=str(body))) == 2
+    assert "unknown outcome" in out.getvalue() and "posted a" not in out.getvalue()
+    assert len(fake.mutations_named("StatusUpdate")) == 1
+
+
+# -- rate limits: before any write exit 1, once the post was sent unknown (2) ------------------------------------
+
+
+@pytest.mark.parametrize("op", ["ProjectMetaOrg", "ProjectFieldsOrg", "StatusItems"])
+def test_a_rate_limit_before_the_post_was_sent_is_exit_1_and_nothing_changed(
+    fake: FakeGitHub, client: Client, op: str
+) -> None:
+    _, project = build_world(fake)
+    populate(fake, project)
+    fake.faults.append(Fault(403, {"retry-after": "0"}, "{}", times=50, op=op))
+    ctx, out = make_context(fake, load_test_board(), client)
+    assert run(ctx, ns(post=True)) == 1
+    assert "rate limited" in out.getvalue() and "try again later" in out.getvalue() and fake.mutations == []
+
+
+def test_a_rate_limit_before_a_body_file_post_is_exit_1(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    build_world(fake)
+    body = tmp_path / "status.md"
+    body.write_text("On track")
+    fake.faults.append(Fault(403, {"retry-after": "0"}, "{}", times=50, op="ProjectMetaOrg"))
+    assert post(fake, client, body) == 1 and fake.mutations == []
+
+
+def test_a_rate_limit_on_the_post_itself_is_an_unknown_outcome_exit_2(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    build_world(fake)
+    body = tmp_path / "status.md"
+    body.write_text("On track")
+    fake.faults.append(Fault(403, {"retry-after": "0"}, "{}", times=50, op="StatusUpdate"))
+    ctx, out = make_context(fake, load_test_board(), client)
+    assert run(ctx, ns(body_file=str(body))) == 2
+    assert "unknown outcome" in out.getvalue() and "NOT ATTEMPTED a second post" in out.getvalue()
+
+
+# -- the body file is opened without following links or blocking, then judged by its descriptor --------------------
+
+
+def within(call: Any, seconds: float = 5.0) -> Any:
+    box: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            box["result"] = call()
+        except BaseException as err:
+            box["error"] = err
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "the call hung"
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
+def test_a_fifo_body_file_is_refused_without_hanging(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    build_world(fake)
+    fifo = tmp_path / "pipe.md"
+    os.mkfifo(fifo)
+    with pytest.raises(ConfigError, match="not a regular file"):
+        within(lambda: post(fake, client, fifo))
+    assert fake.requests == []
+
+
+def test_a_symlink_body_file_is_refused(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    build_world(fake)
+    real = tmp_path / "real.md"
+    real.write_text("On track")
+    link = tmp_path / "link.md"
+    link.symlink_to(real)
+    with pytest.raises(ConfigError, match="cannot read the status body"):
+        within(lambda: post(fake, client, link))
+    assert fake.requests == []
+
+
+def test_the_post_asks_for_the_project_of_the_update_it_made(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    build_world(fake)
+    body = tmp_path / "status.md"
+    body.write_text("On track")
+    seen: list[str] = []
+    real = HANDLERS["StatusUpdate"]
+
+    def spy(f: FakeGitHub, v: JSON) -> JSON:
+        seen.append(str(v["__document__"]))
+        return real(f, v)
+
+    fake.handlers["StatusUpdate"] = spy
+    assert post(fake, client, body) == 0 and "statusUpdate { id project { id } }" in seen[0]

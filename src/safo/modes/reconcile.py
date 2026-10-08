@@ -53,9 +53,18 @@ SHOWN = 20  # how many cards a "not attempted" line names before it counts the r
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
-def safe(text: str) -> str:
-    """Text from GitHub or from an exception, made safe for one log line: no control characters, no newlines."""
+def controls(text: str) -> str:
+    """Control characters written out as \\xNN. Enough inside a `::stop-commands::` block, not on a line by itself."""
     return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
+def safe(text: str) -> str:
+    """Text from GitHub or from an exception, made safe for one log line.
+
+    No control character or newline, and no `::` anywhere: the runner looks for a workflow command anywhere in a
+    line, not only at its start.
+    """
+    return controls(text).replace("::", ":\\x3a")
 
 
 def _quote(value: str | None) -> str:

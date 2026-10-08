@@ -1,28 +1,30 @@
 # SPDX-License-Identifier: MIT
 """sync: one issue or pull request event in, that one card brought in line. Same rules as reconcile.
 
-Ported from GYST's project_sync.py. The event payload is read as JSON data and never expanded into a
-shell; only the node id, state, draft flag, dates and the repository name are used. Area comes from the
-repository's `default_area` alone, so a pull request's title is never read.
+Ported from GYST's project_sync.py. The event payload is only a pointer: its node id says which issue or pull request
+to look at, its action is a hint, and its repository name is checked against what GitHub says. State, draft flag,
+dates, number and repository all come from a live read of that node, so a replayed or edited payload cannot write
+state the content no longer has. The title is never read: Area comes from the repository's `default_area` alone.
 
 Exit codes: 0 the card is current (or the changes were applied, or the event changes no card), 1 a dry run with
-work pending, a rate limit that did not clear, or an event for a repository board.yaml does not list (a NOTE, and
-nothing is sent), 2 the run cannot tell (a payload not shaped as asked, a read that fails or contradicts itself,
-an unknown outcome, a card that vanished). After an unknown outcome nothing more is written: the run re-reads,
-says what it saw, names what it did not attempt and stops. A mutation is never sent twice.
+work pending, a rate limit that ended the run before any write was sent, or a NOTE (an event for a repository
+board.yaml does not list, a node that is not in the repository the payload names, an action that contradicts the
+live state): nothing is written for a NOTE. 2 the run cannot tell: a payload not shaped as asked, a read that fails
+or contradicts itself, an unknown outcome (a rate limit after a write was sent is one), a card that vanished. After
+an unknown outcome nothing more is written: the run re-reads, says what it saw, names what it did not attempt and
+stops. A mutation is never sent twice.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import stat
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from safo.apply import Applier
-from safo.bounded import read_json
+from safo.bounded import MAX_BYTES, NotRegularFileError, loads, read_bounded
 from safo.context import Context
 from safo.errors import (
     EXIT_DRIFT,
@@ -30,21 +32,29 @@ from safo.errors import (
     EXIT_UNKNOWN,
     ApiError,
     ConfigError,
+    MalformedDataError,
     NotFoundError,
     RateLimitedError,
     SafoError,
     UnknownOutcomeError,
 )
-from safo.items import Content, ItemState, content_exists, find_item, mismatched_fields
+from safo.items import Content, ItemState, _canonical_repo, content_from_node, find_item, mismatched_fields
 from safo.live import LiveBoard, load_live
 from safo.modes import Mode, register
 from safo.modes.reconcile import Outcome, Write, _observe, _refuse_future, desired_writes, safe, say, validate
 from safo.schema import Repository
-from safo.values import utc_timestamp, whole_number
 
 ISSUE_ACTIONS = {"opened", "reopened", "closed", "edited"}
 PR_ACTIONS = {"opened", "reopened", "ready_for_review", "converted_to_draft", "closed"}
 CLIP = 100  # the longest payload text a message repeats
+
+Q_SYNC_CONTENT = """query SyncContent($id: ID!) {
+  node(id: $id) {
+    __typename
+    ... on Issue { id number state closedAt repository { nameWithOwner } }
+    ... on PullRequest { id number state isDraft merged closedAt repository { nameWithOwner } }
+  }
+}"""
 
 
 def clip(text: str) -> str:
@@ -52,8 +62,17 @@ def clip(text: str) -> str:
     return safe(text[:CLIP]) + ("..." if len(text) > CLIP else "")
 
 
-def content_from_event(event_name: str, payload: Any) -> Content:
-    """The content an event names, or ConfigError / MalformedDataError. The title and labels are never read."""
+@dataclass(frozen=True)
+class Pointer:
+    """What an event payload is trusted for: which node, what the event says happened, and where it says it is."""
+
+    action: str
+    repo: str  # the payload's repository.full_name
+    node_id: str
+    kind: str  # issue | pr
+
+
+def pointer_from_event(event_name: str, payload: Any) -> Pointer:
     if not isinstance(payload, dict):
         raise ConfigError("event payload must be an object")
     repository = payload.get("repository")
@@ -65,39 +84,61 @@ def content_from_event(event_name: str, payload: Any) -> Content:
         raise ConfigError("event repository.full_name must be a string")
     if not isinstance(payload.get("action"), str) or not isinstance(raw, dict):
         raise ConfigError("event action and content have invalid types")
-    number = raw.get("number")
-    if (
-        not isinstance(raw.get("node_id"), str)
-        or not raw["node_id"]
-        or type(number) is not int
-        or raw.get("state") not in ("open", "closed")
-        or (raw.get("closed_at") is not None and not isinstance(raw["closed_at"], str))
-        or any(k in raw and type(raw[k]) is not bool for k in ("draft", "merged"))
-    ):
-        raise ConfigError("event content has missing keys or invalid types")
-    number = whole_number(number, "the event's issue or pull request number")
-    if number < 1:
-        raise ConfigError("event content has missing keys or invalid types")
-    closed_at = None
-    if raw.get("closed_at") is not None:
-        closed_at = utc_timestamp(raw["closed_at"], "the event's closed_at").strftime("%Y-%m-%dT%H:%M:%SZ")
-    if raw.get("merged") is True and raw["state"] != "closed":
-        raise ConfigError("event content says merged but not closed")
-    repo = repository["full_name"]
-    if key == "pull_request":
-        state = "merged" if raw.get("merged") else raw["state"]
-        return Content(raw["node_id"], "pr", state, bool(raw.get("draft")), closed_at, number, repo)
-    return Content(raw["node_id"], "issue", raw["state"], False, closed_at, number, repo)
+    node_id = raw.get("node_id")
+    if not isinstance(node_id, str) or not node_id:
+        raise ConfigError("event content has no node_id")
+    return Pointer(payload["action"], repository["full_name"], node_id, "pr" if key == "pull_request" else "issue")
 
 
 def read_event(path_text: str) -> Any:
-    path = Path(path_text)
     try:
-        if not stat.S_ISREG(os.stat(path).st_mode):  # a FIFO would block the read
-            raise ConfigError(f"cannot read the event payload {clip(path_text)}: it is not a regular file")
-        return read_json(path)
+        return loads(read_bounded(Path(path_text), MAX_BYTES + 1))
+    except NotRegularFileError:
+        raise ConfigError(f"cannot read the event payload {clip(path_text)}: it is not a regular file") from None
     except (OSError, ValueError, UnicodeError) as err:
         raise ConfigError(f"cannot read the event payload {clip(path_text)}: {err.__class__.__name__}") from None
+
+
+def read_live(ctx: Context, node_id: str) -> Content | None:
+    """The issue or pull request itself, as GitHub says it is now; None only for a clean null (deleted)."""
+    data = ctx.client.execute(Q_SYNC_CONTENT, {"id": node_id})
+    if "node" not in data:
+        raise MalformedDataError("SyncContent: the answer has no node")
+    node = data["node"]
+    if node is None:
+        return None
+    if not isinstance(node, dict):
+        raise MalformedDataError("SyncContent: the node is not an object")
+    typename = node.get("__typename")
+    if typename not in ("Issue", "PullRequest"):
+        raise MalformedDataError("SyncContent: the node is neither an issue nor a pull request")
+    if node.get("id") != node_id:
+        raise MalformedDataError("SyncContent: the answer is for another node than the one asked for")
+    if "closedAt" not in node:
+        raise MalformedDataError("SyncContent: closedAt was not sent")
+    if typename == "PullRequest" and not all(isinstance(node.get(k), bool) for k in ("isDraft", "merged")):
+        raise MalformedDataError("SyncContent: isDraft or merged is missing or not a boolean")
+    content = content_from_node(node, _canonical_repo(node, "the event's content"), typename)
+    if content.number < 1:
+        raise MalformedDataError("SyncContent: the number is not a whole number of at least 1")
+    # Whatever else came with the node, the title and labels are never read: Area comes from default_area alone.
+    return dataclasses.replace(content, title="", labels=())
+
+
+def contradiction(action: str, content: Content) -> str | None:
+    """Why the event's action cannot be applied to the content as it is now, or None."""
+    state = content.state + (", draft" if content.draft else "")
+    if action == "closed":
+        ok = not content.is_open
+    elif action in ("opened", "reopened"):
+        ok = content.is_open
+    elif action == "ready_for_review":
+        ok = content.is_open and not content.draft
+    elif action == "converted_to_draft":
+        ok = content.is_open and content.draft
+    else:
+        ok = True  # an edit is taken at whatever state the content has now
+    return None if ok else f"the {action} event does not match the live state ({state})"
 
 
 def _report(ctx: Context, number: int, did: list[str], added: bool) -> None:
@@ -116,33 +157,56 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             f"the {clip(event_name) or 'sync'} event has no payload file: pass --event-path or set GITHUB_EVENT_PATH"
         )
     payload = read_event(path)
-    content = content_from_event(event_name, payload)
-    action = str(payload["action"])
-    allowed = PR_ACTIONS if content.kind == "pr" else ISSUE_ACTIONS
-    if action not in allowed:
-        say(ctx, f"{clip(event_name) or 'event'} action {clip(action)!r} does not change a card; nothing to do")
+    pointer = pointer_from_event(event_name, payload)
+    allowed = PR_ACTIONS if pointer.kind == "pr" else ISSUE_ACTIONS
+    if pointer.action not in allowed:
+        say(ctx, f"{clip(event_name) or 'event'} action {clip(pointer.action)!r} does not change a card; nothing to do")
         return EXIT_OK
-    repo = next((r for r in ctx.board.repositories if r.full_name.lower() == content.repo.lower()), None)
-    if repo is None:
+    if not any(r.full_name.lower() == pointer.repo.lower() for r in ctx.board.repositories):
         say(
             ctx,
-            f"NOTE repository {clip(content.repo)} is not listed in board.yaml; nothing was sent "
+            f"NOTE repository {clip(pointer.repo)} is not listed in board.yaml; nothing was sent "
             "(add it under repositories)",
         )
+        return EXIT_DRIFT
+    try:
+        return follow_pointer(ctx, pointer)
+    except RateLimitedError:
+        say(ctx, "rate limited before any write was sent; nothing was changed; try again later")
+        return EXIT_DRIFT
+
+
+def follow_pointer(ctx: Context, pointer: Pointer) -> int:
+    content = read_live(ctx, pointer.node_id)
+    if content is None:
+        say(ctx, f"VANISHED {clip(pointer.repo)} content {clip(pointer.node_id)} (confirmed by read)")
+        return EXIT_UNKNOWN
+    repo = next((r for r in ctx.board.repositories if r.full_name.lower() == content.repo.lower()), None)
+    if repo is None or content.repo.lower() != pointer.repo.lower():
+        say(
+            ctx,
+            f"NOTE #{content.number} is in {safe(content.repo)}, but the event names {clip(pointer.repo)}"
+            + (" and board.yaml does not list it" if repo is None else "")
+            + "; nothing was written",
+        )
+        return EXIT_DRIFT
+    label = f"{repo.full_name}#{content.number}"
+    if (content.kind == "pr") != (pointer.kind == "pr"):
+        say(ctx, f"NOTE {label}: the event names a {pointer.kind}, but it is a {content.kind}; nothing was written")
+        return EXIT_DRIFT
+    reason = contradiction(pointer.action, content)
+    if reason:
+        say(ctx, f"NOTE {label}: {reason}; nothing was written")
         return EXIT_DRIFT
     _refuse_future(ctx.today, [content])
     live = load_live(ctx.client, ctx.board.project)
     validate(ctx.board, live)
-    label = f"{repo.full_name}#{content.number}"
     try:
         item = find_item(ctx.client, ctx.board, live, content.id)
     except NotFoundError:
-        if not content_exists(ctx.client, content.id):
-            say(ctx, f"VANISHED {label} (confirmed by read)")
-        else:
-            say(ctx, f"{label}: the card could not be read, though the issue or pull request exists")
+        say(ctx, f"{label}: the card could not be read, though the issue or pull request exists")
         return EXIT_UNKNOWN
-    return apply_event(ctx, live, repo, content, action, item, label)
+    return apply_event(ctx, live, repo, content, pointer.action, item, label)
 
 
 @dataclass
@@ -210,11 +274,10 @@ def stopped(
     if p.failed is not None:
         verdict = "unknown" if isinstance(err, UnknownOutcomeError) else "not applied"
         say(ctx, f"{label}: {p.failed.text}: {verdict}")
-    if isinstance(err, RateLimitedError):
-        say(ctx, f"FAILED {label}: stopped: still rate limited")
-        code = EXIT_DRIFT
-    elif isinstance(err, UnknownOutcomeError):
-        say(ctx, f"{label}: unknown outcome: re-run after checking the board")
+    if isinstance(err, UnknownOutcomeError | RateLimitedError):
+        # A rate limit after a write went out leaves the board half done: as unknown as a lost reply.
+        why = " (rate limited)" if isinstance(err, RateLimitedError) else ""
+        say(ctx, f"{label}: unknown outcome{why}: re-run after checking the board")
         out = Outcome()
         _observe(ctx, live, content, label, previous, out)
         for line in out.vanished:

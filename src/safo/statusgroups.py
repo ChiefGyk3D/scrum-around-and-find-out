@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -19,8 +20,8 @@ SECTION_LIMIT = 12
 TITLE_LIMIT = 80
 ZERO_WIDTH_SPACE = chr(0x200B)  # after an @, it stops GitHub treating the title as a mention
 HEADLINE_LIMIT = 160
-# Control characters, line and paragraph separators, zero-width and bidirectional marks: none belong in a title.
-_UNSAFE = re.compile("[\\x00-\\x1f\\x7f-\\x9f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff]")
+# Everything Markdown gives a meaning to in a list line, and `:` and `&` (autolinks, entities).
+_MARKDOWN = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~:&])")
 
 
 @dataclass(frozen=True)
@@ -103,16 +104,25 @@ def headline_acceptable(text: str, groups: Groups) -> bool:
 
 
 def plain(text: str) -> str:
-    """Text from GitHub made safe for a Markdown list line: one line, no control characters, no mention."""
-    one_line = " ".join(_UNSAFE.sub(" ", text).split())
-    return one_line
+    """Text from GitHub made safe for one list line: every control and format character gone, one line of words.
+
+    Category C covers controls, format characters (bidi marks, zero-width, soft hyphen, tags), surrogates and
+    private use; line and paragraph separators and every kind of space collapse into a single space.
+    """
+    kept = "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in text)
+    return " ".join(kept.split())
+
+
+def markdown_safe(text: str) -> str:
+    """The text as plain words: no link, image, heading, emphasis, table, HTML or mention can form from it."""
+    escaped = _MARKDOWN.sub(r"\\\1", text)
+    return re.sub(r"@(?=\w)", f"@{ZERO_WIDTH_SPACE}", escaped)  # a title cannot ping anyone from a status update
 
 
 def _line(row: Row) -> str:
-    title = plain(row.title)[:TITLE_LIMIT]
-    title = re.sub(r"@(?=\w)", f"@{ZERO_WIDTH_SPACE}", title)  # a title cannot ping anyone from a status update
-    agent = re.sub(r"@(?=\w)", f"@{ZERO_WIDTH_SPACE}", plain(row.agent)[:TITLE_LIMIT])
-    suffix = f" ({agent})" if agent and agent != "unassigned" else ""
+    title = markdown_safe(plain(row.title)[:TITLE_LIMIT])
+    agent = plain(row.agent)[:TITLE_LIMIT]
+    suffix = f" ({markdown_safe(agent)})" if agent and agent != "unassigned" else ""
     return f"- {row.ref} {title}{suffix}"
 
 

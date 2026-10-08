@@ -15,10 +15,11 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import re
-import stat
+import secrets
 from pathlib import Path
 from typing import Any
 
+from safo.bounded import NotRegularFileError, read_bounded
 from safo.context import Context
 from safo.errors import (
     EXIT_DRIFT,
@@ -27,13 +28,14 @@ from safo.errors import (
     ApiError,
     ConfigError,
     MalformedDataError,
+    RateLimitedError,
     SafoError,
     UnknownOutcomeError,
 )
 from safo.items import _canonical_repo, _field_value
 from safo.live import LiveBoard, load_live
 from safo.modes import Mode, register
-from safo.modes.reconcile import safe, say
+from safo.modes.reconcile import controls, safe, say
 from safo.mutation import mutate
 from safo.statusgroups import SECTION_LIMIT, Row, group_rows, render_body, template_headline
 from safo.values import utc_timestamp, whole_number
@@ -45,7 +47,7 @@ MAX_LIMIT = 50
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 M_STATUS_UPDATE = """mutation StatusUpdate($input: CreateProjectV2StatusUpdateInput!) {
-  createProjectV2StatusUpdate(input: $input) { statusUpdate { id } }
+  createProjectV2StatusUpdate(input: $input) { statusUpdate { id project { id } } }
 }"""
 
 Q_STATUS_ITEMS = """query StatusItems(
@@ -136,9 +138,12 @@ def read_rows(ctx: Context, live: LiveBoard) -> tuple[list[Row], int]:
         total = page_total
         for node in page["nodes"]:
             listed += 1
-            if node["id"] in ids:
+            card_id = node["id"]
+            if not isinstance(card_id, str) or not card_id:
+                raise MalformedDataError("StatusItems: a card's id is not a non-empty string")
+            if card_id in ids:
                 raise MalformedDataError("StatusItems: a card is listed twice")
-            ids.add(node["id"])
+            ids.add(card_id)
             row = _row(node)
             if row is None:
                 unreadable += 1
@@ -182,12 +187,10 @@ def _date_option(value: str, flag: str) -> dt.date:
 
 
 def read_body(path_text: str) -> str:
-    path = Path(path_text)
     try:
-        if not stat.S_ISREG(path.stat().st_mode):
-            raise ConfigError(f"cannot read the status body {safe(path_text)}: it is not a regular file")
-        with path.open("rb") as handle:
-            raw = handle.read(MAX_BODY_BYTES + 1)
+        raw = read_bounded(Path(path_text), MAX_BODY_BYTES + 1)
+    except NotRegularFileError:
+        raise ConfigError(f"cannot read the status body {safe(path_text)}: it is not a regular file") from None
     except OSError as err:
         raise ConfigError(f"cannot read the status body {safe(path_text)}: {safe(str(err.strerror))}") from None
     if len(raw) > MAX_BODY_BYTES:
@@ -211,14 +214,24 @@ def post_update(ctx: Context, live: LiveBoard, body: str, args: argparse.Namespa
             update[key] = _date_option(value, flag).isoformat()
     where = f"{ctx.board.project.owner}/{ctx.board.project.number}"
     try:
-        mutate(
+        data = mutate(
             ctx.client,
             M_STATUS_UPDATE,
             {"input": update},
             dry_result={},
             returns=("createProjectV2StatusUpdate", "statusUpdate"),
         )
-    except UnknownOutcomeError:
+        if not ctx.client.dry_run:
+            owner = data["createProjectV2StatusUpdate"]["statusUpdate"].get("project")
+            if not isinstance(owner, dict) or owner.get("id") != live.id:
+                raise UnknownOutcomeError(
+                    "StatusUpdate: the reply does not say the update belongs to this project, so it is not known "
+                    "what was written; check the project's updates before posting again",
+                    data=data,
+                    errors=[],
+                    status=200,
+                )
+    except (UnknownOutcomeError, RateLimitedError):
         # The reread covers board metadata only: it cannot say whether the update landed.
         say(
             ctx,
@@ -257,21 +270,37 @@ def check_options(args: argparse.Namespace) -> None:
             _date_option(value, flag)
 
 
+def print_block(ctx: Context, body: str) -> None:
+    """Show text that came from GitHub inside `::stop-commands::`, so no line of it can act as a workflow command.
+
+    The token is fresh each time and unknown to whoever wrote the text.
+    """
+    token = secrets.token_hex(16)
+    ctx.say(f"::stop-commands::{token}")
+    for line in body.rstrip("\n").splitlines():
+        ctx.say(controls(line))
+    ctx.say(f"::{token}::")
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
     check_options(args)
-    if args.post:
-        live = load_live(ctx.client, ctx.board.project)
-        body, unreadable = build_post(ctx, args, live)
-        if unreadable:
-            say(ctx, f"WARNING {unreadable} card(s) could not be read; the update says so and does not count them")
-        if args.print_only:
-            for line in body.rstrip("\n").splitlines():
-                say(ctx, line)
-            return EXIT_DRIFT if unreadable else EXIT_OK
-        code = post_update(ctx, live, body, args)
-        return code if code != EXIT_OK or not unreadable else EXIT_DRIFT
-    body = read_body(args.body_file)
-    return post_update(ctx, load_live(ctx.client, ctx.board.project), body, args)
+    try:
+        if args.post:
+            live = load_live(ctx.client, ctx.board.project)
+            body, unreadable = build_post(ctx, args, live)
+        else:
+            body, unreadable = read_body(args.body_file), 0
+            live = load_live(ctx.client, ctx.board.project)
+    except RateLimitedError:
+        say(ctx, "rate limited before the update was sent; nothing was changed; try again later")
+        return EXIT_DRIFT
+    if unreadable:
+        say(ctx, f"WARNING {unreadable} card(s) could not be read; the update says so and does not count them")
+    if args.print_only:
+        print_block(ctx, body)
+        return EXIT_DRIFT if unreadable else EXIT_OK
+    code = post_update(ctx, live, body, args)
+    return code if code != EXIT_OK or not unreadable else EXIT_DRIFT
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:

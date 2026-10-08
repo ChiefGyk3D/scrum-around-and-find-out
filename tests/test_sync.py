@@ -7,6 +7,7 @@ import argparse
 import dataclasses
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -222,7 +223,7 @@ def test_an_unlisted_repository_name_is_escaped_clipped_and_cannot_start_a_comma
     code, text = sync(fake, client, path)
     assert code == 1 and fake.requests == []
     assert not any(line.startswith("::") for line in text.splitlines()) and "\x1b" not in text
-    assert "\\x0a::error::forged" in text and "..." in text and "z" * 200 not in text
+    assert "\\x0a:\\x3aerror:\\x3aforged" in text and "..." in text and "z" * 200 not in text
 
 
 def test_a_notice_about_an_action_cannot_start_with_a_command_even_from_the_event_name(
@@ -269,6 +270,25 @@ def test_a_missing_payload_file_is_a_config_error(fake: FakeGitHub, client: Clie
         sync(fake, client, tmp_path / "nope.json")
 
 
+def run_with_timeout(call: Any, seconds: float = 5.0) -> Any:
+    """Run `call` on a thread: a hang is a failure, not a stuck test run."""
+    box: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            box["result"] = call()
+        except BaseException as err:
+            box["error"] = err
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "the call hung"
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
 def test_a_payload_path_that_is_a_fifo_is_refused_without_blocking(
     fake: FakeGitHub, client: Client, tmp_path: Path
 ) -> None:
@@ -276,7 +296,19 @@ def test_a_payload_path_that_is_a_fifo_is_refused_without_blocking(
     fifo = tmp_path / "pipe.json"
     os.mkfifo(fifo)
     with pytest.raises(ConfigError, match="not a regular file"):
-        sync(fake, client, fifo)
+        run_with_timeout(lambda: sync(fake, client, fifo))
+    assert fake.requests == []
+
+
+def test_a_payload_path_that_is_a_symlink_is_refused(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    real = event(tmp_path, "issue", "opened", issue)
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    with pytest.raises(ConfigError, match="cannot read the event payload"):
+        run_with_timeout(lambda: sync(fake, client, link))
+    assert fake.requests == []
 
 
 def test_the_payload_path_comes_from_the_environment_when_no_flag_is_given(
@@ -300,7 +332,7 @@ def test_an_issue_deleted_after_the_event_is_named_and_exits_2(
     issue = fake.add_content("acme/widgets", "Issue", 1)
     fake.vanished.add(issue.id)
     code, text = sync(fake, client, event(tmp_path, "issue", "opened", issue))
-    assert code == 2 and "VANISHED acme/widgets#1 (confirmed by read)" in text and fake.mutations == []
+    assert code == 2 and "VANISHED" in text and "(confirmed by read)" in text and fake.mutations == []
 
 
 # -- hostile payloads: refused before any request ---------------------------------------------------------------
@@ -342,6 +374,7 @@ def good_payload(**issue: Any) -> dict[str, Any]:
 
 
 def bad_payloads() -> list[tuple[str, dict[str, Any]]]:
+    """What the pointer must carry: an action, the repository's full name, and the node id."""
     cases: list[tuple[str, dict[str, Any]]] = []
     for name, value in (("missing", None), ("int", 5), ("list", ["acme/widgets"])):
         payload = good_payload()
@@ -354,26 +387,9 @@ def bad_payloads() -> list[tuple[str, dict[str, Any]]]:
     del no_repo["repository"]
     cases.append(("no-repository", no_repo))
     cases.append(("action-int", {**good_payload(), "action": 7}))
-    for number in (0, -1, True, 1.5, "7", 2**31, None):
-        cases.append((f"number-{number!r}", good_payload(number=number)))
-    for node_id in ("", 5, None):
+    for node_id in ("", 5, None, ["I_1"]):
         cases.append((f"node_id-{node_id!r}", good_payload(node_id=node_id)))
-    for state in ("OPEN", "merged", None, 1):
-        cases.append((f"state-{state!r}", good_payload(state=state)))
-    for stamp in (
-        "2026-10-03",
-        "2026-10-03T08:00:00",
-        "2026-10-03T08:00:00+25:00",
-        "2026-10-03T08:00:00+0100",
-        "2026-10-03T08:00:00Z junk",
-        "2026-13-03T08:00:00Z",
-        "",
-        5,
-        True,
-    ):
-        cases.append((f"closed_at-{stamp!r}", good_payload(state="closed", closed_at=stamp)))
-    cases.append(("merged-but-open", {**good_payload(), "pull_request": {**good_payload()["issue"], "merged": True}}))
-    cases.append(("draft-string", {**good_payload(), "pull_request": {**good_payload()["issue"], "draft": "yes"}}))
+    cases.append(("issue-list", {**good_payload(), "issue": ["x"]}))
     return cases
 
 
@@ -382,33 +398,76 @@ def test_a_payload_that_is_not_shaped_as_asked_is_refused_before_any_request(
     fake: FakeGitHub, client: Client, tmp_path: Path, payload: dict[str, Any]
 ) -> None:
     build_world(fake)
-    if "pull_request" in payload:
-        payload = {k: v for k, v in payload.items() if k != "issue"}
     with pytest.raises(SafoError) as caught:
         sync(fake, client, raw_event(tmp_path, payload))
     assert caught.value.exit_code == 2 and fake.requests == [] and fake.mutations == []
 
 
+@pytest.mark.parametrize(
+    "lies",
+    [
+        {"number": 99, "state": "closed", "closed_at": "garbage"},
+        {"number": 0, "state": "OPEN", "closed_at": 5},
+        {"number": True, "state": None, "closed_at": "2026-10-03"},
+        {"merged": "yes", "draft": "maybe"},
+    ],
+)
+def test_the_payload_is_only_a_pointer_so_its_other_fields_are_not_believed(
+    fake: FakeGitHub, client: Client, tmp_path: Path, lies: dict[str, Any]
+) -> None:
+    _, project = build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    code, text = sync(fake, client, event(tmp_path, "issue", "opened", issue, **lies))
+    assert code == 0 and text.startswith("added #1; Status = Backlog")
+    assert values(fake, project)["Done on"] is None
+
+
+def test_a_missing_draft_flag_in_the_payload_does_not_make_a_draft_pull_request_ready(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    _, project = build_world(fake)
+    pr = fake.add_content("acme/widgets", "PullRequest", 2, draft=True)
+    path = raw_event(
+        tmp_path,
+        {
+            "action": "opened",
+            "repository": {"full_name": "acme/widgets"},
+            "pull_request": {"node_id": pr.id},
+        },
+    )
+    assert sync(fake, client, path)[0] == 0 and values(fake, project)["Status"] == "Backlog"
+
+
+def test_the_number_in_the_output_is_the_live_one(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 7)
+    code, text = sync(fake, client, event(tmp_path, "issue", "opened", issue, number=99))
+    assert code == 0 and text.startswith("added #7;") and "99" not in text
+
+
 def test_a_close_date_is_converted_to_utc_from_its_offset(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
     _, project = build_world(fake)
-    issue = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-04T04:30:00Z")
-    sync(fake, client, event(tmp_path, "issue", "closed", issue, closed_at="2026-10-03T23:30:00-05:00"))
+    issue = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T23:30:00-05:00")
+    sync(fake, client, event(tmp_path, "issue", "closed", issue, closed_at="2026-10-03T08:00:00Z"))
     assert values(fake, project)["Done on"] == "2026-10-04"
-    other = fake.add_content("acme/widgets", "Issue", 2, state="CLOSED", closed_at="2026-10-03T22:30:00Z")
-    sync(fake, client, event(tmp_path, "issue", "closed", other, closed_at="2026-10-04T01:30:00.250+03:00"))
+    other = fake.add_content("acme/widgets", "Issue", 2, state="CLOSED", closed_at="2026-10-04T01:30:00.250+03:00")
+    sync(fake, client, event(tmp_path, "issue", "closed", other))
     assert fake.value(project, project.items[1], "Done on") == "2026-10-03"
 
 
-def test_a_close_date_in_the_future_stops_before_anything_is_sent(
-    fake: FakeGitHub, client: Client, tmp_path: Path
+@pytest.mark.parametrize(
+    "stamp", ["2026-10-20T00:00:00Z", "2026-10-03", "2026-10-03T08:00:00", "2026-10-03T08:00:00+25:00"]
+)
+def test_a_live_close_date_that_is_wrong_stops_before_anything_is_written(
+    fake: FakeGitHub, client: Client, tmp_path: Path, stamp: str
 ) -> None:
     build_world(fake)
-    issue = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-20T00:00:00Z")
+    issue = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at=stamp)
     from safo.errors import MalformedDataError
 
     with pytest.raises(MalformedDataError):
         sync(fake, client, event(tmp_path, "issue", "closed", issue))
-    assert fake.requests == []
+    assert fake.mutations == []
 
 
 # -- one second run sends nothing; one desired value per field ---------------------------------------------------
@@ -528,9 +587,9 @@ def test_sync_mutation_not_found_is_unknown_until_deletion_is_read(
     fake: FakeGitHub, client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, project = build_world(fake)
-    issue = fake.add_content("acme/widgets", "Issue", 1)
+    issue = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T08:00:00Z")
     item = fake.add_item(project, issue, Status="Backlog", Area="Core")
-    path = event(tmp_path, "issue", "closed", issue, state="closed")
+    path = event(tmp_path, "issue", "closed", issue)
     real = client.execute
 
     def execute(document: str, variables: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -601,15 +660,26 @@ def test_an_add_acknowledged_with_another_id_than_the_card_found_is_unknown(
     assert [m.op for m in fake.mutations] == ["AddItem"] and len(project.items) == 1
 
 
-def test_a_rate_limit_that_does_not_clear_stops_with_exit_1_and_names_the_rest(
+def test_a_rate_limit_after_a_write_was_sent_is_an_unknown_outcome_exit_2_and_names_the_rest(
     fake: FakeGitHub, client: Client, tmp_path: Path
 ) -> None:
     _, project = build_world(fake)
     issue = fake.add_content("acme/widgets", "Issue", 1)
     fake.faults.append(Fault(403, {"retry-after": "0"}, "{}", times=50, op="SetSelect"))
     code, text = sync(fake, client, event(tmp_path, "issue", "opened", issue))
-    assert code == 1 and "still rate limited" in text and "NOT ATTEMPTED Area = Core" in text
+    assert code == 2 and "unknown outcome" in text and "NOT ATTEMPTED Area = Core" in text
     assert fake.mutations_named("SetSelect") == [] and project.items
+
+
+@pytest.mark.parametrize("op", ["ProjectMetaOrg", "SyncContent", "ItemLookup"])
+def test_a_rate_limit_before_any_write_was_sent_is_exit_1_and_nothing_changed(
+    fake: FakeGitHub, client: Client, tmp_path: Path, op: str
+) -> None:
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    fake.faults.append(Fault(403, {"retry-after": "0"}, "{}", times=50, op=op))
+    code, text = sync(fake, client, event(tmp_path, "issue", "opened", issue))
+    assert code == 1 and "rate limited" in text and "try again later" in text and fake.mutations == []
 
 
 def test_a_read_that_keeps_failing_is_exit_2_and_nothing_is_written(
@@ -642,7 +712,7 @@ def test_error_text_from_github_cannot_start_a_command_on_the_error_line(
     code, _, err = run_cli(
         "--board", BOARD, "sync", "--event-path", str(path), env={"GITHUB_ACTIONS": "true"}, client=client
     )
-    assert code == 2 and len(err.splitlines()) == 1 and "\x1b" not in err and "\\x0a::error::forged" in err
+    assert code == 2 and len(err.splitlines()) == 1 and "\x1b" not in err and "\\x0a:\\x3aerror:\\x3aforged" in err
 
 
 # -- malformed answers are "cannot tell", never "blank" ---------------------------------------------------------
@@ -724,5 +794,253 @@ def test_a_card_that_disappears_during_an_unknown_outcome_is_named_as_gone(
         return real(document, variables, **kwargs)
 
     monkeypatch.setattr(client, "execute", execute)
-    code, text = sync(fake, client, event(tmp_path, "issue", "closed", issue, state="closed"))
+    issue.state, issue.closed_at = "CLOSED", "2026-10-03T08:00:00Z"
+    code, text = sync(fake, client, event(tmp_path, "issue", "closed", issue))
     assert code == 2 and "the card no longer exists" in text
+
+
+# -- the live content decides: the payload is a pointer ---------------------------------------------------------
+
+
+def note_free(text: str) -> bool:
+    return "::" not in text
+
+
+def test_a_node_that_belongs_to_another_repository_than_the_payload_names_is_a_note_and_writes_nothing(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    _, project = build_world(fake)
+    fake.add_repo("outside/moved")
+    stray = fake.add_content("outside/moved", "Issue", 19)
+    path = event(tmp_path, "issue", "opened", stray)
+    payload = json.loads(path.read_text())
+    payload["repository"]["full_name"] = "acme/widgets"
+    path.write_text(json.dumps(payload))
+    code, text = sync(fake, client, path)
+    assert code == 1 and "NOTE" in text and "outside/moved" in text and "acme/widgets" in text
+    assert fake.mutations == [] and project.items == []
+
+
+def test_a_node_in_another_listed_repository_than_the_payload_names_is_also_a_note(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    build_world(fake)
+    other = fake.add_content("acme/manuals", "Issue", 3)
+    path = event(tmp_path, "issue", "opened", other)
+    payload = json.loads(path.read_text())
+    payload["repository"]["full_name"] = "acme/widgets"
+    path.write_text(json.dumps(payload))
+    code, text = sync(fake, client, path)
+    assert code == 1 and "acme/manuals" in text and "acme/widgets" in text and fake.mutations == []
+
+
+def test_a_live_repository_that_differs_only_in_case_is_the_same_repository(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    _, project = build_world(fake)
+    issue = fake.add_content("ACME/Widgets", "Issue", 1)
+    path = event(tmp_path, "issue", "opened", issue)
+    payload = json.loads(path.read_text())
+    payload["repository"]["full_name"] = "acme/WIDGETS"
+    path.write_text(json.dumps(payload))
+    assert sync(fake, client, path)[0] == 0 and values(fake, project)["Area"] == "Core"
+
+
+def test_a_live_repository_board_yaml_does_not_list_is_a_note_even_when_the_payload_says_it_is_listed(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    build_world(fake)
+    fake.add_repo("acme/elsewhere")
+    stray = fake.add_content("acme/elsewhere", "Issue", 1)
+    path = event(tmp_path, "issue", "opened", stray)
+    payload = json.loads(path.read_text())
+    payload["repository"]["full_name"] = "acme/elsewhere"
+    path.write_text(json.dumps(payload))
+    code, text = sync(fake, client, path)
+    assert code == 1 and "not listed in board.yaml" in text and fake.requests == []
+
+
+def test_a_node_of_the_other_kind_than_the_payload_names_is_a_note(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    build_world(fake)
+    pr = fake.add_content("acme/widgets", "PullRequest", 2)
+    path = event(tmp_path, "pull_request", "opened", pr)
+    payload = json.loads(path.read_text())
+    payload["issue"] = payload.pop("pull_request")
+    path.write_text(json.dumps(payload))
+    code, text = sync(fake, client, path)
+    assert code == 1 and "NOTE" in text and fake.mutations == []
+
+
+def test_a_replayed_ready_event_after_the_pull_request_went_back_to_draft_writes_nothing(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    _, project = build_world(fake)
+    pr = fake.add_content("acme/widgets", "PullRequest", 2, draft=True)
+    assert sync(fake, client, event(tmp_path, "pull_request", "opened", pr))[0] == 0
+    pr.draft = False
+    ready = tmp_path / "ready.json"
+    ready.write_text(event(tmp_path, "pull_request", "ready_for_review", pr).read_text())
+    assert sync(fake, client, ready)[0] == 0 and values(fake, project)["Status"] == "In progress"
+    pr.draft = True
+    assert sync(fake, client, event(tmp_path, "pull_request", "converted_to_draft", pr))[0] == 0
+    assert values(fake, project)["Status"] == "Backlog"
+    fake.mutations.clear()
+    code, text = sync(fake, client, ready)
+    assert code == 1 and "NOTE" in text and "ready_for_review" in text
+    assert fake.mutations == [] and values(fake, project)["Status"] == "Backlog"
+
+
+@pytest.mark.parametrize(
+    "kind,action,live",
+    [
+        ("issue", "closed", {}),
+        ("issue", "reopened", {"state": "CLOSED", "closed_at": "2026-10-03T08:00:00Z"}),
+        ("issue", "opened", {"state": "CLOSED", "closed_at": "2026-10-03T08:00:00Z"}),
+        ("pull_request", "closed", {"kind": "PullRequest"}),
+        ("pull_request", "converted_to_draft", {"kind": "PullRequest"}),
+        ("pull_request", "ready_for_review", {"kind": "PullRequest", "draft": True}),
+        ("pull_request", "opened", {"kind": "PullRequest", "state": "MERGED", "closed_at": "2026-10-03T08:00:00Z"}),
+        ("pull_request", "reopened", {"kind": "PullRequest", "state": "CLOSED", "closed_at": "2026-10-03T08:00:00Z"}),
+    ],
+)
+def test_an_action_that_contradicts_the_live_state_is_a_note_and_writes_nothing(
+    fake: FakeGitHub, client: Client, tmp_path: Path, kind: str, action: str, live: dict[str, Any]
+) -> None:
+    _, project = build_world(fake)
+    content_kind = live.pop("kind", "Issue")
+    content = fake.add_content("acme/widgets", content_kind, 1, **live)
+    code, text = sync(fake, client, event(tmp_path, kind, action, content))
+    assert code == 1 and "NOTE" in text and fake.mutations == [] and project.items == []
+
+
+def test_an_edit_event_is_taken_at_whatever_state_the_issue_has_now(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    _, project = build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T08:00:00Z")
+    assert sync(fake, client, event(tmp_path, "issue", "edited", issue))[0] == 0
+    assert values(fake, project)["Status"] == "Done"
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {
+            "id": "ISSUE_other",
+            "number": 1,
+            "state": "OPEN",
+            "closedAt": None,
+            "repository": {"nameWithOwner": "acme/widgets"},
+        },
+        {"id": "X", "state": "OPEN", "closedAt": None, "repository": {"nameWithOwner": "acme/widgets"}},
+        {"id": "X", "number": 1, "closedAt": None, "repository": {"nameWithOwner": "acme/widgets"}},
+        {"id": "X", "number": 1, "state": "WEIRD", "closedAt": None, "repository": {"nameWithOwner": "acme/widgets"}},
+        {"id": "X", "number": 1, "state": "OPEN", "closedAt": None},
+        {"id": "X", "number": 1, "state": "OPEN", "closedAt": None, "repository": {"nameWithOwner": "../x"}},
+        {"id": "X", "number": True, "state": "OPEN", "closedAt": None, "repository": {"nameWithOwner": "acme/widgets"}},
+        {
+            "id": "X",
+            "number": 1,
+            "state": "OPEN",
+            "closedAt": None,
+            "isDraft": "no",
+            "__typename": "PullRequest",
+            "merged": False,
+            "repository": {"nameWithOwner": "acme/widgets"},
+        },
+    ],
+    ids=[
+        "other-id",
+        "no-number",
+        "no-state",
+        "bad-state",
+        "no-repository",
+        "bad-repository",
+        "bool-number",
+        "bad-draft",
+    ],
+)
+def test_a_live_read_that_is_not_shaped_as_asked_is_exit_2_and_writes_nothing(
+    fake: FakeGitHub, client: Client, tmp_path: Path, node: dict[str, Any]
+) -> None:
+    from cliutil import BOARD, run_cli
+
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    served = {"__typename": "Issue", **node, "id": issue.id if node["id"] == "X" else node["id"]}
+    fake.handlers["SyncContent"] = lambda f, v: {"node": served}
+    path = event(tmp_path, "issue", "opened", issue)
+    code, _, _ = run_cli("--board", BOARD, "sync", "--event-path", str(path), client=client)
+    assert code == 2 and fake.mutations == []
+
+
+def test_a_card_that_cannot_be_read_though_the_issue_exists_is_not_called_vanished(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    fake.handlers["ItemLookup"] = lambda f, v: {"node": None}
+    code, text = sync(fake, client, event(tmp_path, "issue", "opened", issue))
+    assert code == 2 and "could not be read, though the issue or pull request exists" in text
+    assert "VANISHED" not in text and fake.mutations == []
+
+
+@pytest.mark.parametrize("bad", [[], 1, "", None, {"a": 1}])
+def test_a_card_id_that_is_not_a_string_stops_the_run_with_exit_2_not_a_traceback(
+    fake: FakeGitHub, client: Client, tmp_path: Path, bad: Any
+) -> None:
+    from cliutil import BOARD, run_cli
+
+    _, project = build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+
+    def lookup(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        row = {"id": bad, "project": {"id": project.id}, "status": None, "area": None, "d0": None, "done": None}
+        return {"node": {"projectItems": f.connection([row], v)}}
+
+    fake.handlers["ItemLookup"] = lookup
+    path = event(tmp_path, "issue", "opened", issue)
+    code, _, _ = run_cli("--board", BOARD, "sync", "--event-path", str(path), client=client)
+    assert code == 2 and fake.mutations == []
+
+
+# -- text that GitHub or a payload sent never reaches a log as a command --------------------------------------
+
+
+MID_LINE = "x/y ::error::forged %0A::warning::w ::stop-commands::tok"
+
+
+def test_a_double_colon_anywhere_in_a_notice_is_neutralised(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    path = event(tmp_path, "issue", "opened", issue)
+    payload = json.loads(path.read_text())
+    payload["repository"]["full_name"] = MID_LINE
+    path.write_text(json.dumps(payload))
+    code, text = sync(fake, client, path)
+    assert code == 1 and note_free(text) and "error" in text
+
+
+def test_a_double_colon_in_the_action_or_event_name_is_neutralised(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    path = event(tmp_path, "issue", MID_LINE, issue)
+    code, text = sync(fake, client, path, event_name=MID_LINE)
+    assert code == 0 and note_free(text)
+
+
+def test_a_dry_run_line_cannot_carry_a_command_from_a_value_in_the_request(
+    fake: FakeGitHub, tmp_path: Path, sleeps: list[float]
+) -> None:
+    import io
+
+    build_world(fake)
+    buf = io.StringIO()
+    dry = Client(fake.token, fake.url, dry_run=True, sleep=sleeps.append, out=buf)
+    dry.execute("mutation M($b: String!) { x(b: $b) { id } }", {"b": MID_LINE})
+    assert buf.getvalue().startswith("dry run: would M ") and note_free(buf.getvalue())
+    assert "error" in buf.getvalue()

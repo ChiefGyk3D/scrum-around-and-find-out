@@ -345,8 +345,11 @@ def _state(
         done = _field_value(node, "done", "date", what)
         if done is not None:
             iso_day(done, f"{what}: the Done date")
+    item_id = node["id"]
+    if not isinstance(item_id, str) or not item_id:
+        raise MalformedDataError(f"{what}: its id is not a non-empty string")
     return ItemState(
-        str(node["id"]),
+        item_id,
         content,
         _field_value(node, "status", "name", what),
         done,

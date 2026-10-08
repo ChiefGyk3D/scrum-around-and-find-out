@@ -4,14 +4,24 @@
 from __future__ import annotations
 
 from fakegh.core import JSON, FakeGitHub, GqlError, handler
-from fakegh.reads import _value
+from fakegh.reads import _value, content_json
 
 
 @handler("StatusUpdate")
 def status_update(fake: FakeGitHub, v: JSON) -> JSON:
     if str(v["input"]["projectId"]) not in fake.projects:
         raise GqlError("NOT_FOUND", "Could not resolve to a ProjectV2")
-    return {"createProjectV2StatusUpdate": {"statusUpdate": {"id": fake.new_id("PVTSU")}}}
+    update = {"id": fake.new_id("PVTSU"), "project": {"id": str(v["input"]["projectId"])}}
+    return {"createProjectV2StatusUpdate": {"statusUpdate": update}}
+
+
+@handler("SyncContent")
+def sync_content(fake: FakeGitHub, v: JSON) -> JSON:
+    """The live issue or pull request behind an event's node id; a deleted one answers a null node."""
+    content = fake.content(str(v["id"]))
+    if content is None or content.id in fake.vanished:
+        return {"node": None}
+    return {"node": content_json(content)}
 
 
 @handler("StatusItems")
