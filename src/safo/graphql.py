@@ -19,7 +19,7 @@ import urllib.request
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, TextIO
 
-from safo import __version__
+from safo import __version__, output
 from safo.errors import (
     ApiError,
     AuthError,
@@ -159,10 +159,8 @@ class Client:
         if _is_mutation_robust(document):
             if self.dry_run:
                 self.skipped += 1
-                shown = json.dumps(variables, sort_keys=True, default=str).replace(
-                    "::", ":\\u003a"
-                )  # no command in a log
-                print(f"dry run: would {op} {shown}", file=self._out)
+                shown = json.dumps(variables, sort_keys=True, default=str)
+                output.write(self._out, f"dry run: would {op} {shown}")
                 return dry_result or {}
             return self._mutate(op, self._payload(document, variables, op))
         return self._query(op, self._payload(document, variables, op))

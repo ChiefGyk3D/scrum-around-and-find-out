@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import re
-import secrets
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +34,7 @@ from safo.errors import (
 from safo.items import _canonical_repo, _field_value
 from safo.live import LiveBoard, load_live
 from safo.modes import Mode, register
-from safo.modes.reconcile import controls, safe, say
+from safo.modes.reconcile import safe, say
 from safo.mutation import mutate
 from safo.statusgroups import SECTION_LIMIT, Row, group_rows, render_body, template_headline
 from safo.values import utc_timestamp, whole_number
@@ -271,15 +270,8 @@ def check_options(args: argparse.Namespace) -> None:
 
 
 def print_block(ctx: Context, body: str) -> None:
-    """Show text that came from GitHub inside `::stop-commands::`, so no line of it can act as a workflow command.
-
-    The token is fresh each time and unknown to whoever wrote the text.
-    """
-    token = secrets.token_hex(16)
-    ctx.say(f"::stop-commands::{token}")
-    for line in body.rstrip("\n").splitlines():
-        ctx.say(controls(line))
-    ctx.say(f"::{token}::")
+    """Show text that came from GitHub inside `::stop-commands::`, so no line of it can act as a workflow command."""
+    ctx.block(body.rstrip("\n").splitlines())
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:

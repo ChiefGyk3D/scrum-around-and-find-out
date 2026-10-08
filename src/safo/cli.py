@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import TextIO
 
-from safo import __version__, credentials
+from safo import __version__, credentials, output
 from safo.context import Context
 from safo.errors import ConfigError, SafoError
 from safo.graphql import GRAPHQL_URL, Client
@@ -46,9 +46,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
 def report(err: SafoError, env: Mapping[str, str], stream: TextIO) -> None:
     text = safe(str(err))  # the text may carry what GitHub or a payload sent: no newline can start a new command
     if env.get("GITHUB_ACTIONS") == "true":
-        print(f"::error title=safo::{text}", file=stream)
+        output.annotation(stream, text)
     else:
-        print(f"error: {text}", file=stream)
+        output.write(stream, f"error: {text}")
 
 
 def main(
