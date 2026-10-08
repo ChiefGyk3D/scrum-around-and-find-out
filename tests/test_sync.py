@@ -570,6 +570,7 @@ def test_a_reply_naming_another_item_stops_the_run_and_the_rest_is_not_attempted
     assert "NOT ATTEMPTED Area = Core; Priority = P2 later" in text
     assert [m.op for m in fake.mutations] == ["AddItem", "SetSelect"], "the failed write is not sent again"
     assert "observed acme/widgets#1: on the board" in text and "Status None" in text
+    assert "acme/widgets#1: Status = Backlog: unknown" in text
     assert project.items
 
 
@@ -695,3 +696,33 @@ def test_an_empty_status_object_is_not_read_as_blank_and_the_card_is_left_alone(
     path = event(tmp_path, "issue", "edited", issue)
     code, _, _ = run_cli("--board", BOARD, "sync", "--event-path", str(path), client=client)
     assert code == 2 and fake.mutations == []
+
+
+def test_a_default_field_of_another_type_is_not_written_and_does_not_stop_the_run(
+    fake: FakeGitHub, client: Client, tmp_path: Path
+) -> None:
+    _, project = build_world(fake)
+    fake.field(project, "Priority").data_type = "TEXT"
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    code, text = sync(fake, client, event(tmp_path, "issue", "opened", issue))
+    assert code == 0 and "Priority" not in text
+    assert [m.op for m in fake.mutations] == ["AddItem", "SetSelect", "SetSelect"]
+
+
+def test_a_card_that_disappears_during_an_unknown_outcome_is_named_as_gone(
+    fake: FakeGitHub, client: Client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, project = build_world(fake)
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    item = fake.add_item(project, issue, Status="Backlog", Area="Core", Priority="P2 later")
+    real = client.execute
+
+    def execute(document: str, variables: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if document.lstrip().startswith("mutation"):
+            fake.vanished.add(item.id)  # the card is deleted, the issue stays
+            raise UnknownOutcomeError("lost", data=None, errors=[], status=502)
+        return real(document, variables, **kwargs)
+
+    monkeypatch.setattr(client, "execute", execute)
+    code, text = sync(fake, client, event(tmp_path, "issue", "closed", issue, state="closed"))
+    assert code == 2 and "the card no longer exists" in text

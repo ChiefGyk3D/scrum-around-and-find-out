@@ -214,6 +214,20 @@ def test_a_title_or_an_agent_name_is_one_clean_line_with_no_mention_and_no_contr
     assert plain("a\tb\n c") == "a b c"
 
 
+def test_the_maintainer_holding_a_backlog_card_does_not_make_it_wait_and_unassigned_has_no_suffix() -> None:
+    rows = [row(1, "Backlog", agent="You"), row(2, "Next", agent="unassigned")]
+    g = group_rows(rows, load_test_board(), SINCE)
+    assert g.waiting == () and [r.number for r in g.upcoming] == [2]
+    assert "- acme/widgets#2 Card 2\n" in render_body("h", g)
+
+
+def test_a_long_title_is_cut_and_a_section_exactly_at_the_limit_has_no_more_line() -> None:
+    long = Row("acme/widgets", 1, "x" * 300, "Next", "", None)
+    assert "x" * 81 not in render_body("h", group_rows([long], load_test_board(), SINCE))
+    g = group_rows([row(n, "Next") for n in range(1, 13)], load_test_board(), SINCE)
+    assert "and 0 more" not in render_body("h", g, limit=12) and "...and 1 more" in render_body("h", g, limit=11)
+
+
 def test_the_template_headline_states_the_four_counts() -> None:
     g = group_rows([row(1, "Done", when="2026-10-07"), row(2, "Blocked")], load_test_board(), SINCE)
     assert template_headline(g) == "1 done since 2026-10-06, 0 in progress, 1 waiting on the maintainer, 0 next."
@@ -616,12 +630,20 @@ def test_a_field_of_another_type_is_refused_rather_than_read_as_blank(fake: Fake
 def test_a_board_without_the_agent_field_still_builds_the_update(fake: FakeGitHub, client: Client) -> None:
     _, project = build_world(fake)
     populate(fake, project)
+    seen: list[Any] = []
+    real = HANDLERS["StatusItems"]
+
+    def spy(f: FakeGitHub, v: JSON) -> JSON:
+        seen.append(v["agentField"])
+        return real(f, v)
+
+    fake.handlers["StatusItems"] = spy
     project.fields.remove(fake.field(project, "Agent"))
     for item in project.items:
         item.values = {k: v for k, v in item.values.items() if k in {f.id for f in project.fields}}
     ctx, out = make_context(fake, load_test_board(), client)
     assert run(ctx, ns(post=True, print_only=True, since="2026-10-06")) == 0
-    assert "**Waiting on the maintainer** (1)" in out.getvalue()
+    assert "**Waiting on the maintainer** (1)" in out.getvalue() and seen == ["-"]
 
 
 def test_cards_the_token_cannot_read_are_warned_about_recorded_in_the_update_and_exit_1(
