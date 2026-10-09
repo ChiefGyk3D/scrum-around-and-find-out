@@ -42,54 +42,54 @@ fields:
   - name: Status
     type: single_select
     options:
-      - {name: Backlog, color: GRAY, description: "Not scheduled"}
-      - {name: Next, color: BLUE, description: "Scheduled for the current or next sprint"}
-      - {name: In progress, color: YELLOW, description: ""}
-      - {name: Blocked, color: RED, description: "Needs the maintainer"}
-      - {name: Done, color: GREEN, description: ""}
+      - {name: Backlog, color: GRAY, description: "Known, not scheduled"}
+      - {name: Next, color: BLUE, description: "Scheduled; the next things to pick up"}
+      - {name: In progress, color: YELLOW, description: "Being worked: a branch, an agent, a PR"}
+      - {name: Blocked, color: RED, description: "Needs the maintainer or an outside party"}
+      - {name: Done, color: GREEN, description: "Merged, released or measured"}
   - name: Area
     type: single_select
     options:
-      - {name: Engine, color: BLUE, description: ""}
-      - {name: Catalog, color: GREEN, description: ""}
+      - {name: Engine, color: GRAY, description: ""}
+      - {name: Catalog, color: GRAY, description: ""}
       - {name: Docs, color: GRAY, description: ""}
-      - {name: Mesh, color: PURPLE, description: ""}
-      - {name: Navigation and maps, color: YELLOW, description: ""}
-      - {name: Repeaters, color: ORANGE, description: ""}
-      - {name: GPS and time, color: RED, description: ""}
-      - {name: Console, color: PINK, description: ""}
-      - {name: Tray, color: BLUE, description: ""}
-      - {name: Hill, color: GREEN, description: ""}
+      - {name: Mesh, color: GRAY, description: ""}
+      - {name: Navigation and maps, color: GRAY, description: ""}
+      - {name: Repeaters, color: GRAY, description: ""}
+      - {name: GPS and time, color: GRAY, description: ""}
+      - {name: Console, color: GRAY, description: ""}
+      - {name: Tray, color: GRAY, description: ""}
+      - {name: Hill, color: GRAY, description: ""}
       - {name: Bunker, color: GRAY, description: ""}
-      - {name: GPS tether, color: PURPLE, description: ""}
-      - {name: CI and GYST, color: YELLOW, description: ""}
-      - {name: Security, color: RED, description: ""}
-      - {name: Bench, color: ORANGE, description: ""}
+      - {name: GPS tether, color: GRAY, description: ""}
+      - {name: CI and GYST, color: GRAY, description: ""}
+      - {name: Security, color: GRAY, description: ""}
+      - {name: Bench, color: GRAY, description: ""}
   - name: Kind
     type: single_select
     options:
-      - {name: Feature, color: BLUE, description: ""}
-      - {name: Bug, color: RED, description: ""}
-      - {name: Decision, color: PURPLE, description: ""}
-      - {name: Bench, color: ORANGE, description: ""}
+      - {name: Feature, color: GRAY, description: ""}
+      - {name: Bug, color: GRAY, description: ""}
+      - {name: Decision, color: GRAY, description: ""}
+      - {name: Bench, color: GRAY, description: ""}
       - {name: Chore, color: GRAY, description: ""}
-      - {name: Docs, color: GREEN, description: ""}
-      - {name: Release, color: YELLOW, description: ""}
-      - {name: Epic, color: PINK, description: ""}
+      - {name: Docs, color: GRAY, description: ""}
+      - {name: Release, color: GRAY, description: ""}
+      - {name: Epic, color: PURPLE, description: "A parent issue with sub-issues"}
   - name: Priority
     type: single_select
     options:
-      - {name: P0 now, color: RED, description: ""}
-      - {name: P1 soon, color: ORANGE, description: ""}
-      - {name: P2 later, color: YELLOW, description: ""}
+      - {name: P0 now, color: GRAY, description: ""}
+      - {name: P1 soon, color: GRAY, description: ""}
+      - {name: P2 later, color: GRAY, description: ""}
       - {name: P3 someday, color: GRAY, description: ""}
   - name: Effort
     type: single_select
     options:
-      - {name: S (hours), color: GREEN, description: ""}
-      - {name: M (a day), color: YELLOW, description: ""}
-      - {name: L (days), color: ORANGE, description: ""}
-      - {name: XL (a week or more), color: RED, description: ""}
+      - {name: S (hours), color: GRAY, description: ""}
+      - {name: M (a day), color: GRAY, description: ""}
+      - {name: L (days), color: GRAY, description: ""}
+      - {name: XL (a week or more), color: GRAY, description: ""}
   - name: Epic
     type: single_select
     options:
@@ -108,10 +108,10 @@ fields:
   - name: Agent
     type: single_select
     options:
-      - {name: Claude, color: ORANGE, description: "Claude lead or a Claude subagent"}
-      - {name: Codex, color: GREEN, description: "OpenAI Codex"}
+      - {name: Claude, color: ORANGE, description: "Claude lead or a Claude subagent (Sonnet/Haiku/Opus)"}
+      - {name: Codex, color: GREEN, description: "ChatGPT Codex via the codex plugin"}
       - {name: Copilot, color: BLUE, description: "GitHub Copilot coding agent"}
-      - {name: You, color: PURPLE, description: "The maintainer"}
+      - {name: You, color: PURPLE, description: "The maintainer: decisions, bench, merges"}
   - {name: Sprint, type: iteration, start: 2026-10-06, duration_days: 14, count: 11}
   - {name: Decision, type: text}
   - {name: Start date, type: date}

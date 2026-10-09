@@ -8,8 +8,10 @@ purpose: the fake GraphQL server in tests/fakegh answers on 127.0.0.1.
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -117,6 +119,26 @@ def _loopback_only(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(socket.socket, "sendto", sendto)
     monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _sane_umask() -> Iterator[None]:
+    """Directories a test makes by hand are 0755, whatever the developer's shell umask: the hooks refuse to trust a
+    group-writable state or config directory, and a test that makes one by accident must not depend on the umask."""
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.fixture(autouse=True)
+def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """HOME is an empty temporary directory in every test: no test ever reads the real home or its agent files."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return home
 
 
 @pytest.fixture

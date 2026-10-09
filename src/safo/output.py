@@ -11,7 +11,8 @@ reaches a stream except through here:
 - `block` shows several lines of untrusted text between `::stop-commands::<token>` and `::<token>::`, with a fresh
   random token each time, and always attempts the closing marker once the opening one is out.
 
-A test walks the package and fails on any `print` or `sys.stdout`/`sys.stderr` write outside this module.
+`mask` is the one command written unescaped, for the reason in its docstring. A test walks the package and fails
+on any `print` or `sys.stdout`/`sys.stderr` write outside this module.
 """
 
 from __future__ import annotations
@@ -50,6 +51,28 @@ def write(stream: TextIO, text: str) -> None:
 def annotation(stream: TextIO, message: str) -> None:
     """The error annotation GitHub shows on the run: the one command safo writes, with its text escaped."""
     print(f"::error title=safo::{line(message)}", file=stream)
+
+
+def mask(stream: TextIO, value: str) -> None:
+    """Tell the runner to hide `value` in every later log line, one command per non-blank line (a PEM key is many).
+
+    The one place a command is written from text that is not ours, so it is the only writer that does not escape:
+    the text after `add-mask::` is the value to hide, taken to the end of its own line, and a value holding a line
+    break is split here so no line can start a second command.
+    """
+    for text in value.splitlines():
+        if text.strip():
+            print(f"::add-mask::{text.strip()}", file=stream)
+
+
+def set_output(path: str, name: str, value: str) -> None:
+    """Append `name=value` to the step output file the runner gave us. Neither may carry a control character or a
+    line or paragraph separator (a carriage return is a line break to some readers), and the name may not be empty or
+    hold `=`, so nothing can start a second output."""
+    if not name or "=" in name or inner(name) != name or inner(value) != value:
+        raise ValueError("a step output is one line")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(f"{name}={value}\n")
 
 
 def block(stream: TextIO, lines: Iterable[str]) -> None:

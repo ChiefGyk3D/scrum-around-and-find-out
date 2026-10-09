@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: MIT
+# This project's own board: a user-owned GitHub Project, created by `safo bootstrap` (the first real use) and
+# kept current by a scheduled `safo reconcile` run from the maintainer's own gh login (examples/systemd/).
+# No App can write a user-owned board and no token is kept in CI.
+#
+# Copy this immutable example to your local board file; write the discovered project number in that copy.
+version: 1
+project:
+  owner: ChiefGyk3D
+  owner_type: user
+  title: Scrum Around and Find Out
+repositories:
+  - owner: ChiefGyk3D
+    name: scrum-around-and-find-out
+    default_area: Core
+    area_rules:
+      - {match: action, area: Action}
+      - {match: docs, area: Docs}
+      - {match: wiki, area: Docs}
+      - {match: route, area: Routing}
+      - {match: usage, area: Routing}
+      - {match: ollama, area: Routing}
+      - {match: ci, area: CI and release}
+      - {match: release, area: CI and release}
+fields:
+  - name: Status
+    type: single_select
+    options:
+      - {name: Backlog, color: GRAY, description: "Not scheduled"}
+      - {name: Next, color: BLUE, description: "Scheduled for the current or next sprint"}
+      - {name: In progress, color: YELLOW, description: ""}
+      - {name: Blocked, color: RED, description: "Needs the maintainer"}
+      - {name: Done, color: GREEN, description: ""}
+  - name: Area
+    type: single_select
+    options:
+      - {name: Core, color: BLUE, description: "Client, schema, modes"}
+      - {name: Action, color: PURPLE, description: "action.yml and credentials"}
+      - {name: Routing, color: ORANGE, description: "agents.yaml, usage, route, outcomes, local LLM"}
+      - {name: Docs, color: GRAY, description: "docs/ and the wiki"}
+      - {name: CI and release, color: YELLOW, description: "Workflows, baseline, releases"}
+  - name: Priority
+    type: single_select
+    options:
+      - {name: P1 soon, color: ORANGE, description: ""}
+      - {name: P2 later, color: YELLOW, description: ""}
+      - {name: P3 someday, color: GRAY, description: ""}
+  - name: Agent
+    type: single_select
+    options:
+      - {name: Claude, color: ORANGE, description: "Claude lead or a Claude subagent"}
+      - {name: Codex, color: GREEN, description: "OpenAI Codex"}
+      - {name: Copilot, color: BLUE, description: "GitHub Copilot coding agent"}
+      - {name: You, color: PURPLE, description: "The maintainer"}
+  - {name: Sprint, type: iteration, start: 2026-10-20, duration_days: 14, count: 6}
+  - {name: Done on, type: date}
+views:
+  - {name: Board, layout: board, filter: "-status:Done"}
+  - {name: Agents at work, layout: table, filter: 'status:"In progress",Next'}
+rules:
+  status:
+    opened: Backlog
+    opened_pr: In progress
+    draft_pr: Backlog
+    reopened: Backlog
+    closed: Done
+    merged: Done
+  done_date_field: Done on
+  new_item_defaults:
+    Priority: P2 later
+agents:
+  field: Agent
+  working: [In progress, Next]
+  waiting: [Blocked]
+ui_only:
+  - "Board view: Group by = Status"
+  - "Workflows: Item closed -> Done; Pull request merged -> Done"

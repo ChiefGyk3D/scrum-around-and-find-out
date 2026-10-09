@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: MIT
+# Copy to ~/.config/safo/agents.local.yaml (git-ignored) and put your real endpoints there. It is merged over
+# agents.yaml key by key; a list replaces the example's list. Never commit the real file: an address, a hostname
+# or a VPN name does not belong in a public repository, and tests/test_privacy.py fails on them.
+agents:
+  ollama:
+    endpoints:
+      - id: instance-a
+        url: http://ollama.lan:11434
+        roles: [general]
+        models: [resident-12b-thinking, small-4b-agent]
+        protected_models: [resident-12b-thinking, small-4b-agent]
+        loaded_num_ctx: {resident-12b-thinking: 131072, small-4b-agent: 8192}
+        num_ctx_max: 131072
+        think: false
+        shared_with_production: true
+        note: "A 16 GB GPU, pinned to its own card, that keeps a resident 12B general model (num_ctx 131072) and a resident
+          small 4B agent model (num_ctx 8192). Requesting any other model EVICTS a resident one, and so does any other
+          num_ctx: send exactly the loaded value."
+      - id: instance-b
+        url: http://ollama.lan:11435
+        roles: [guard, embedding]
+        models: [resident-safety, embed-small]
+        protected_models: [resident-safety]
+        on_demand_models: [embed-small]
+        keep_alive: 30s
+        loaded_num_ctx: {resident-safety: 8192, embed-small: 2048}
+        num_ctx_max: 8192
+        think: false
+        shared_with_production: true
+        note: "An 8 GB GPU, pinned to its own card, that keeps a resident safety model (num_ctx 8192) for a moderation bot
+          in production. The safety model is a guard: it is never routed to. An embedding model loads on demand beside
+          it with a short keep_alive and its own num_ctx (2048 here) without evicting it. Measured: the safety model stays
+          fully on the GPU, and the embedding model sits partly on the GPU and partly on the CPU, with about 1.1 GB of
+          VRAM left. An embedding request never carries the safety model's num_ctx."
+shapes:
+  ci-log-summary:
+    local: {role: general, model: small-4b-agent}
+  changelog-draft:
+    local: {role: general, model: small-4b-agent}
+  status-headline:
+    local: {role: general, model: small-4b-agent}
+  duplicate-issue-search:
+    local: {role: embedding, model: embed-small}

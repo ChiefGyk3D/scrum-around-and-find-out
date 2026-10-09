@@ -2,8 +2,9 @@
 """status: post a project status update, from a body file or built from the board.
 
 `--body-file FILE` posts the Markdown you wrote. `--post` builds the update: the cards are grouped and counted in
-code (statusgroups.py) and a one-line headline sits on top. The headline is a template here; with a local model
-reachable, a later step lets it write that one line and nothing else. The body and every number in it come from code.
+code (statusgroups.py) and a one-line headline sits on top. With a local model reachable (the `status-headline` shape in
+agents.yaml) it may append one exact clause from the approved prose vocabulary. Code always renders the count sentence;
+invalid or missing prose adds nothing. The body and every number in it come from code.
 
 Exit codes: 0 posted (or printed), 1 a dry run with the post pending, or an update that had to leave cards out
 (each is said in a WARNING line and in the update itself), 2 the run cannot tell (a read that is not shaped as
@@ -31,12 +32,22 @@ from safo.errors import (
     SafoError,
     UnknownOutcomeError,
 )
+from safo.headline import local_headline
 from safo.items import _canonical_repo, _field_value
 from safo.live import LiveBoard, load_live
+from safo.localfiles import add_agents_arguments
 from safo.modes import Mode, register
 from safo.modes.reconcile import safe, say
 from safo.mutation import mutate
-from safo.statusgroups import SECTION_LIMIT, Row, group_rows, render_body, template_headline
+from safo.statusgroups import (
+    SECTION_LIMIT,
+    Groups,
+    Row,
+    group_rows,
+    headline_acceptable,
+    render_body,
+    template_headline,
+)
 from safo.values import utc_timestamp, whole_number
 
 STATES = ("INACTIVE", "ON_TRACK", "AT_RISK", "OFF_TRACK", "COMPLETE")
@@ -160,6 +171,15 @@ def read_rows(ctx: Context, live: LiveBoard) -> tuple[list[Row], int]:
     return rows, unreadable
 
 
+def choose_headline(ctx: Context, args: argparse.Namespace, groups: Groups) -> str:
+    """Code-rendered counts, followed by at most one exact validated prose clause."""
+    template = template_headline(groups)
+    if args.no_local:
+        return template
+    line = local_headline(ctx.env, args, groups)
+    return template + " " + line if line is not None and headline_acceptable(line, groups) else template
+
+
 def build_post(ctx: Context, args: argparse.Namespace, live: LiveBoard) -> tuple[str, int]:
     """The update body and the number of cards it could not cover."""
     rows, unreadable = read_rows(ctx, live)
@@ -167,7 +187,7 @@ def build_post(ctx: Context, args: argparse.Namespace, live: LiveBoard) -> tuple
     notes = []
     if unreadable:
         notes.append(f"{unreadable} card(s) on the board could not be read with this token and are not counted above.")
-    return render_body(template_headline(groups), groups, args.limit, notes), unreadable
+    return render_body(choose_headline(ctx, args, groups), groups, args.limit, notes), unreadable
 
 
 def _since(ctx: Context, args: argparse.Namespace) -> dt.date:
@@ -296,6 +316,10 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    add_agents_arguments(parser)
+    parser.add_argument(
+        "--no-local", action="store_true", help="with --post: do not ask a local model for the headline"
+    )
     parser.add_argument("--body-file", default="", help="Markdown file holding the update")
     parser.add_argument("--post", action="store_true", help="build the update from the board instead of a file")
     parser.add_argument(
