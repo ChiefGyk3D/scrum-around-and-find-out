@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+# Keeps a user-owned board current from your own gh login. Install under ~/.config/systemd/user/ and edit the paths:
+#   systemctl --user daemon-reload && systemctl --user enable --now safo-reconcile.timer
+# No token is stored: safo asks `gh auth token` each run. Check the active account first (`gh auth status`).
+[Unit]
+Description=Keep the SAFO project board current (safo reconcile)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/safo --board %h/.config/safo/board.yaml reconcile

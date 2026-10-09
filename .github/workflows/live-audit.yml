@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: MIT
+# One live, read-only `safo audit` of the Renegade-Penguin suite board against examples/renegade-penguin.yaml.
+# Run by hand (Actions, Live audit, Run workflow). Never on a pull request: it needs the App's key, and a
+# pull request must never receive a secret. Exit 0 means the example still matches the live board.
+#
+# The Action fetches the App key from Doppler over this job's OIDC identity and mints a one-hour installation
+# token; no personal access token. The owner sets this up once (docs/adoption.md): the repository variables
+# PROJECTS_APP_CLIENT_ID and PROJECTS_DOPPLER_IDENTITY_ID, and this repository's subject on that identity.
+name: Live audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write   # the Doppler OIDC fetch of the App key
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: >-
+            api.doppler.com:443 api.github.com:443 github.com:443 pypi.org:443 files.pythonhosted.org:443
+          disable-sudo: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit the live board
+        uses: ./ # zizmor: ignore[self-repository] this repository's own Action, at the commit being run
+        with:
+          mode: audit
+          board-file: examples/renegade-penguin.yaml
+          client-id: ${{ vars.PROJECTS_APP_CLIENT_ID }}
+          app-owner: Renegade-Penguin
+          doppler-identity-id: ${{ vars.PROJECTS_DOPPLER_IDENTITY_ID }}
+          doppler-project: projects
+          doppler-config: prd
