@@ -48,12 +48,12 @@ def test_a_pat_is_refused_for_an_organization_board_unless_allowed() -> None:
 @pytest.mark.parametrize("value", ["yes", "1", "on", "tru", "truee"])
 def test_the_allow_flag_accepts_only_true_or_false(value: str) -> None:
     """A loose truthy word must not unlock the exception; an unknown word is an error, not a silent refusal."""
-    with pytest.raises(ConfigError, match="allow-token-for-org"):
+    with pytest.raises(ConfigError, match="must be true or false"):
         credentials.check_for_board(Credentials("t", PAT), "organization", {"SAFO_ALLOW_TOKEN_FOR_ORG": value})
 
 
 def test_the_allow_flag_is_checked_even_when_it_is_not_needed() -> None:
-    with pytest.raises(ConfigError, match="allow-token-for-org"):
+    with pytest.raises(ConfigError, match="must be true or false"):
         credentials.check_for_board(Credentials("t", PAT), "user", {"SAFO_ALLOW_TOKEN_FOR_ORG": "maybe"})
 
 

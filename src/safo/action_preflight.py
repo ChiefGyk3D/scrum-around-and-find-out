@@ -11,12 +11,13 @@ import os
 import re
 import sys
 from collections.abc import Mapping
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from safo import compat, credentials, output
 from safo.credentials import APP, PAT
 from safo.errors import ConfigError, MalformedDataError, SafoError
 from safo.modes import load_all
+from safo.modes.status import STATES
 from safo.schema import LOGIN, REPO_NAME, Board, load_board
 from safo.values import whole_number
 
@@ -36,6 +37,9 @@ READS = (
     "SAFO_DEFAULT_AREA",
     "SAFO_ALLOW_TOKEN_FOR_ORG",
     "SAFO_STATUS_BODY_FILE",
+    "SAFO_STATUS_STATE",
+    "SAFO_DRY_RUN",
+    "GITHUB_WORKSPACE",
     "GITHUB_REPOSITORY",
     "HAS_PRIVATE_KEY",
     "HAS_TOKEN",
@@ -45,7 +49,6 @@ READS = (
     "REPOSITORIES",
     "REPOSITORY_OWNER",
     "REPO_PRIVATE",
-    "DRY_RUN",
     "DOPPLER_IDENTITY_ID",
     "DOPPLER_PROJECT",
     "DOPPLER_CONFIG",
@@ -69,11 +72,17 @@ def boolean(env: Mapping[str, str], name: str, label: str, *, default: str = "fa
     return value == "true"
 
 
-def workspace_path(text: str, label: str) -> None:
-    """A path the Action reads must stay inside the workspace: relative, no `..`, no control characters."""
+def workspace_path(env: Mapping[str, str], text: str, label: str) -> str:
+    """The real path of a file the Action reads, which must stay inside the workspace: relative, no `..`, no control
+    characters, and once every symlink is followed still under the real workspace. Returns that real path."""
     path = PurePosixPath(text)
     if path.is_absolute() or ".." in path.parts or text[0] in "-~" or any(ord(c) < 32 or ord(c) == 127 for c in text):
         raise ConfigError(f"{label} {shown(text)} must be a path inside the workspace")
+    workspace = os.path.realpath(env.get("GITHUB_WORKSPACE") or os.getcwd())
+    real = os.path.realpath(os.path.join(workspace, text))
+    if not Path(real).is_relative_to(workspace):
+        raise ConfigError(f"{label} {shown(text)} must be a path inside the workspace")
+    return real
 
 
 def check_board_source(env: Mapping[str, str]) -> Board:
@@ -87,16 +96,51 @@ def check_board_source(env: Mapping[str, str]) -> Board:
         if mode not in BOARD_LESS_MODES:
             raise ConfigError(f"mode {mode} needs board-file: the board-less inputs describe no fields to check")
         return compat.board_from_env(env)
-    workspace_path(file, "board-file")
-    return load_board(file)
+    return load_board(workspace_path(env, file, "board-file"))
 
 
-def check_repositories(text: str) -> None:
+def check_repositories(text: str) -> list[str]:
+    """The explicit repository list, as names. Control characters are refused whole, before any splitting."""
     if not text:
-        return
-    for name in (part.strip() for part in text.split(",")):
+        return []
+    if any(ord(c) < 32 or ord(c) == 127 for c in text):
+        raise ConfigError("repositories must not contain control characters")
+    names = [part.strip() for part in text.split(",")]
+    for name in names:
         if not REPO_NAME.fullmatch(name) or name in (".", ".."):
             raise ConfigError(f"repositories: {shown(name)} is not a repository name (names only, comma separated)")
+    return names
+
+
+def token_scope(env: Mapping[str, str], board: Board, explicit: list[str]) -> str:
+    """The repositories the installation token is limited to, comma separated, or "" for the whole installation.
+
+    Only repositories owned by the account the token is minted for can be named. Default: those board.yaml lists
+    (the calling repository in the board-less mode); with none listed, the calling repository when it belongs to
+    that account. An explicit list must be a subset of what the board lists.
+    """
+    repo_owner = env.get("REPOSITORY_OWNER", "")
+    owner = (env.get("APP_OWNER") or repo_owner).lower()
+    listed: dict[str, str] = {}
+    for repo in board.repositories:
+        if repo.owner.lower() == owner:
+            listed.setdefault(repo.name.lower(), repo.name)
+    if explicit:
+        chosen: dict[str, str] = {}
+        for name in explicit:
+            if listed and name.lower() not in listed:
+                raise ConfigError(f"repositories: {shown(name)} is not listed in the board")
+            chosen.setdefault(name.lower(), listed.get(name.lower(), name))
+        return ",".join(chosen.values())
+    if listed:
+        return ",".join(listed.values())
+    calling = env.get("GITHUB_REPOSITORY", "").partition("/")[2]
+    return calling if owner == repo_owner.lower() and calling else ""
+
+
+def check_status_state(env: Mapping[str, str]) -> None:
+    if env.get("SAFO_MODE") == "status" and env.get("SAFO_STATUS_STATE", "ON_TRACK") not in STATES:
+        raise ConfigError(f"status-state {shown(env.get('SAFO_STATUS_STATE', ''))} is not one of {', '.join(STATES)}")
 
 
 def check_app_owner(env: Mapping[str, str], *, has_token: bool) -> None:
@@ -144,20 +188,22 @@ def check_app_identifier(env: Mapping[str, str]) -> None:
         raise ConfigError("app-id must be a whole number")
 
 
-def check(env: Mapping[str, str]) -> None:
+def check(env: Mapping[str, str]) -> str:
+    """Refuse anything wrong; return the repositories the installation token is to be limited to."""
     mode = env.get("SAFO_MODE", "")
     if mode not in MODES:
         raise ConfigError(f"mode {shown(mode)} is not one of {', '.join(sorted(MODES))}")
-    boolean(env, "DRY_RUN", "dry-run", default="")
+    boolean(env, "SAFO_DRY_RUN", "dry-run", default="")
     board = check_board_source(env)
     if env.get("SAFO_STATUS_BODY_FILE"):
-        workspace_path(env["SAFO_STATUS_BODY_FILE"], "status-body-file")
+        workspace_path(env, env["SAFO_STATUS_BODY_FILE"], "status-body-file")
+    check_status_state(env)
     if mode == "validate":
-        return
+        return ""
     has_key = boolean(env, "HAS_PRIVATE_KEY", "private-key presence")
     has_token = boolean(env, "HAS_TOKEN", "token presence")
     from_doppler = check_doppler(env)
-    check_repositories(env.get("REPOSITORIES", ""))
+    explicit = check_repositories(env.get("REPOSITORIES", ""))
     check_app_owner(env, has_token=has_token)
     if has_key and has_token:
         raise ConfigError("pass either an App (client-id and private-key) or a token, not both")
@@ -178,11 +224,14 @@ def check(env: Mapping[str, str]) -> None:
         kind = APP
     # Only the kind matters to the rules, never the secret.
     credentials.check_for_board(credentials.Credentials("preflight", kind), board.project.owner_type, env)
+    return "" if has_token else token_scope(env, board, explicit)
 
 
 def main() -> int:
     try:
-        check(dict(os.environ))
+        scope = check(dict(os.environ))
+        if os.environ.get("GITHUB_OUTPUT"):
+            output.set_output(os.environ["GITHUB_OUTPUT"], "repositories", scope)
     except SafoError as err:
         output.annotation(sys.stderr, str(err))
         return err.exit_code

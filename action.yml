@@ -9,7 +9,8 @@
 #   1. an App installation token minted here, valid one hour and revoked when the job ends, from `client-id` (or the
 #      deprecated `app-id`) and the App's private key. The key is `private-key` (from a secret store, never a
 #      literal) or fetched from Doppler over the job's OIDC identity (`doppler-identity-id`, `doppler-project`,
-#      `doppler-config`; the caller needs `id-token: write` and the key must be named PROJECTS_APP_PRIVATE_KEY);
+#      `doppler-config`; the caller needs `id-token: write` and the key must be named PROJECTS_APP_PRIVATE_KEY, the only
+#      secret read from the fetch step's outputs; nothing is exported to the job environment);
 #   2. `token`, a fine-grained personal access token, for a USER-owned board only (Apps cannot write those). It is
 #      refused for an organization-owned board unless `allow-token-for-org` is "true".
 # There is no other fallback. The token's permissions are named, not inherited: organization Projects (read for
@@ -106,28 +107,34 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
-    - name: Mask the credentials
+    - name: Install SAFO into its own venv (hash-pinned)
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
+        VENV: ${{ runner.temp }}/safo-venv
+      run: |
+        set -euo pipefail
+        python -I -m venv "$VENV"
+        "$VENV/bin/python" -I -m pip install --disable-pip-version-check --no-deps --require-hashes -r "$ACTION_PATH/requirements.txt"
+        purelib="$("$VENV/bin/python" -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+        cp -R "$ACTION_PATH/src/safo" "$purelib/safo"
+
+    - name: Mask the credentials
+      shell: bash
+      env:
+        VENV: ${{ runner.temp }}/safo-venv
         PRIVATE_KEY: ${{ inputs.private-key }}
         TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
-        PYTHONPATH="$ACTION_PATH/src" python -m safo.action_mask
-
-    - name: Install PyYAML (hash-pinned)
-      shell: bash
-      env:
-        ACTION_PATH: ${{ github.action_path }}
-      run: |
-        set -euo pipefail
-        python -m pip install --disable-pip-version-check --no-deps --require-hashes -r "$ACTION_PATH/requirements.txt"
+        "$VENV/bin/python" -I -m safo.action_mask
 
     - name: Preflight, the inputs and the credential, before anything is minted
+      id: preflight
       shell: bash
       env:
-        ACTION_PATH: ${{ github.action_path }}
+        VENV: ${{ runner.temp }}/safo-venv
+        GITHUB_WORKSPACE: ${{ github.workspace }}
         SAFO_MODE: ${{ inputs.mode }}
         SAFO_BOARD: ${{ inputs.board-file }}
         SAFO_PROJECT_URL: ${{ inputs.project-url }}
@@ -141,6 +148,8 @@ runs:
         SAFO_DEFAULT_AREA: ${{ inputs.default-area }}
         SAFO_STATUS_BODY_FILE: ${{ inputs.status-body-file }}
         SAFO_ALLOW_TOKEN_FOR_ORG: ${{ inputs.allow-token-for-org }}
+        SAFO_STATUS_STATE: ${{ inputs.status-state }}
+        SAFO_DRY_RUN: ${{ inputs.dry-run }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         HAS_PRIVATE_KEY: ${{ inputs.private-key != '' }}
         HAS_TOKEN: ${{ inputs.token != '' }}
@@ -150,7 +159,6 @@ runs:
         REPOSITORIES: ${{ inputs.repositories }}
         REPOSITORY_OWNER: ${{ github.repository_owner }}
         REPO_PRIVATE: ${{ github.event.repository.private }}
-        DRY_RUN: ${{ inputs.dry-run }}
         DOPPLER_IDENTITY_ID: ${{ inputs.doppler-identity-id }}
         DOPPLER_PROJECT: ${{ inputs.doppler-project }}
         DOPPLER_CONFIG: ${{ inputs.doppler-config }}
@@ -158,50 +166,50 @@ runs:
         IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       run: |
         set -euo pipefail
-        PYTHONPATH="$ACTION_PATH/src" python -m safo.action_preflight
+        "$VENV/bin/python" -I -m safo.action_preflight
 
     - name: Fetch the App key from Doppler (OIDC)
       if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+      id: doppler
       uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
       with:
         auth-method: oidc
         doppler-identity-id: ${{ inputs.doppler-identity-id }}
         doppler-project: ${{ inputs.doppler-project }}
         doppler-config: ${{ inputs.doppler-config }}
-        inject-env-vars: true
 
     - name: Mask the Doppler key
       if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
       shell: bash
       env:
-        ACTION_PATH: ${{ github.action_path }}
-        PRIVATE_KEY: ${{ env.PROJECTS_APP_PRIVATE_KEY }}
+        VENV: ${{ runner.temp }}/safo-venv
+        PRIVATE_KEY: ${{ steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY }}
       run: |
         set -euo pipefail
-        PYTHONPATH="$ACTION_PATH/src" python -m safo.action_mask
+        "$VENV/bin/python" -I -m safo.action_mask
 
     - name: Mint a one-hour installation token
       id: app
-      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id != '' && (inputs.private-key != '' || env.PROJECTS_APP_PRIVATE_KEY != '') }}
+      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id != '' && (inputs.private-key != '' || steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY != '') }}
       uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
       with:
         client-id: ${{ inputs.client-id }}
-        private-key: ${{ inputs.private-key || env.PROJECTS_APP_PRIVATE_KEY }}
+        private-key: ${{ inputs.private-key || steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY }}
         owner: ${{ inputs.app-owner || github.repository_owner }}
-        repositories: ${{ inputs.repositories || (inputs.board-file == '' && (inputs.app-owner == '' || inputs.app-owner == github.repository_owner) && github.event.repository.name) || '' }}
+        repositories: ${{ steps.preflight.outputs.repositories }}
         permission-organization-projects: ${{ (inputs.mode == 'audit' || inputs.mode == 'validate' || inputs.dry-run == 'true') && 'read' || 'write' }}
         permission-issues: read
         permission-pull-requests: read
 
     - name: Mint a one-hour installation token (deprecated app-id)
       id: app_legacy
-      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id == '' && inputs.app-id != '' && (inputs.private-key != '' || env.PROJECTS_APP_PRIVATE_KEY != '') }}
+      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id == '' && inputs.app-id != '' && (inputs.private-key != '' || steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY != '') }}
       uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
       with:
         app-id: ${{ inputs.app-id }}
-        private-key: ${{ inputs.private-key || env.PROJECTS_APP_PRIVATE_KEY }}
+        private-key: ${{ inputs.private-key || steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY }}
         owner: ${{ inputs.app-owner || github.repository_owner }}
-        repositories: ${{ inputs.repositories || (inputs.board-file == '' && (inputs.app-owner == '' || inputs.app-owner == github.repository_owner) && github.event.repository.name) || '' }}
+        repositories: ${{ steps.preflight.outputs.repositories }}
         permission-organization-projects: ${{ (inputs.mode == 'audit' || inputs.mode == 'validate' || inputs.dry-run == 'true') && 'read' || 'write' }}
         permission-issues: read
         permission-pull-requests: read
@@ -210,16 +218,16 @@ runs:
       if: ${{ steps.app.outputs.token != '' || steps.app_legacy.outputs.token != '' }}
       shell: bash
       env:
-        ACTION_PATH: ${{ github.action_path }}
+        VENV: ${{ runner.temp }}/safo-venv
         MINTED_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token }}
       run: |
         set -euo pipefail
-        PYTHONPATH="$ACTION_PATH/src" python -m safo.action_mask
+        "$VENV/bin/python" -I -m safo.action_mask
 
     - name: Run safo
       shell: bash
       env:
-        ACTION_PATH: ${{ github.action_path }}
+        VENV: ${{ runner.temp }}/safo-venv
         SAFO_MODE: ${{ inputs.mode }}
         SAFO_BOARD: ${{ inputs.board-file }}
         SAFO_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token || inputs.token }}
@@ -246,4 +254,4 @@ runs:
           if [ -n "$SAFO_STATUS_BODY_FILE" ]; then args+=(--body-file "$SAFO_STATUS_BODY_FILE"); else args+=(--post); fi
           args+=(--state "$SAFO_STATUS_STATE")
         fi
-        PYTHONPATH="$ACTION_PATH/src" python -m safo "${args[@]}"
+        "$VENV/bin/python" -I -m safo "${args[@]}"

@@ -286,7 +286,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
         top["project"], "project", {"owner", "owner_type", "number", "title"}, {"owner", "owner_type", "title"}
     )
     owner = r.string(p["owner"], "project.owner")
-    if not LOGIN.match(owner):
+    if not LOGIN.fullmatch(owner):
         raise r.fail("project.owner", f"{owner!r} is not a GitHub login")
     number = None if p.get("number") is None else r.integer(p["number"], "project.number", minimum=1)
     project = Project(
@@ -316,7 +316,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
             None if m.get("default_area") is None else r.string(m["default_area"], f"{path}.default_area"),
             tuple(area_rules),
         )
-        if not LOGIN.match(repo.owner) or not REPO_NAME.match(repo.name):
+        if not LOGIN.fullmatch(repo.owner) or not REPO_NAME.fullmatch(repo.name):
             raise r.fail(path, f"{repo.full_name!r} is not an owner/name pair")
         if any(x.full_name.lower() == repo.full_name.lower() for x in repos):
             raise r.fail(path, f"{repo.full_name} is listed twice")

@@ -65,6 +65,15 @@ def mask(stream: TextIO, value: str) -> None:
             print(f"::add-mask::{text.strip()}", file=stream)
 
 
+def set_output(path: str, name: str, value: str) -> None:
+    """Append `name=value` to the step output file the runner gave us. The value may not carry a line break, so it
+    can never start a second output; the callers hold names that already passed a strict pattern."""
+    if "\n" in value or "\r" in value or "=" in name or "\n" in name:
+        raise ValueError("a step output is one line")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(f"{name}={value}\n")
+
+
 def block(stream: TextIO, lines: Iterable[str]) -> None:
     """Untrusted lines between stop and resume markers. The resume marker is attempted even if a write or the
     iterable fails; if the opening marker cannot be written, nothing was opened and nothing is closed."""

@@ -455,3 +455,18 @@ def test_board_with_agents_field_area_but_no_area_field_is_refused() -> None:
     }
     with pytest.raises(ConfigError, match=r"agents\.field.*is not in fields"):
         parse_board(d)
+
+
+def test_a_login_with_a_trailing_newline_is_refused_for_the_owner_and_for_a_repository() -> None:
+    bad = doc()
+    bad["project"]["owner"] = "acme\n"
+    with pytest.raises(ConfigError, match=r"project\.owner"):
+        parse_board(bad)
+    bad = doc()
+    bad["repositories"][0]["owner"] = "acme\n"
+    with pytest.raises(ConfigError, match="owner/name"):
+        parse_board(bad)
+    bad = doc()
+    bad["repositories"][0]["name"] = "widgets\n"
+    with pytest.raises(ConfigError, match="owner/name"):
+        parse_board(bad)

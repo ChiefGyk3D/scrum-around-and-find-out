@@ -167,13 +167,11 @@ def test_projects_write_is_requested_only_for_a_run_that_writes(mode: str, dry: 
         assert got == ("read" if mode in ("audit", "validate") or dry == "true" else "write")
 
 
-def test_the_token_is_scoped_to_the_calling_repository_in_the_board_less_mode_only() -> None:
+def test_the_token_is_scoped_to_what_the_preflight_resolved_and_nothing_else() -> None:
+    """The scope is computed and validated in Python (board.yaml's repositories, or the calling one), never inline."""
     for s in mint_steps():
-        expression = s["with"]["repositories"]
-        assert "inputs.repositories" in expression
-        assert "github.event.repository.name" in expression
-        assert "inputs.board-file == ''" in expression
-        assert "inputs.app-owner" in expression  # a foreign owner is never scoped to this repository's name
+        assert s["with"]["repositories"].replace(" ", "") == "${{steps.preflight.outputs.repositories}}"
+    assert step("Preflight").get("id") == "preflight"
 
 
 def test_the_owner_is_the_app_owner_input_else_the_repository_owner() -> None:
@@ -210,15 +208,13 @@ def test_no_secrets_context_and_no_literal_key_anywhere() -> None:
 
 
 def test_the_credentials_are_masked_before_anything_else_can_print_them() -> None:
-    first_use = min(
-        index("preflight"), index("Install PyYAML"), STEPS.index(next(s for s in STEPS if s.get("id") == "app"))
-    )
+    first_use = min(index("preflight"), STEPS.index(next(s for s in STEPS if s.get("id") == "app")))
     mask = index("Mask the credentials")
     assert mask < first_use
     env = step("Mask the credentials")["env"]
     assert env["PRIVATE_KEY"].replace(" ", "") == "${{inputs.private-key}}"
     assert env["TOKEN"].replace(" ", "") == "${{inputs.token}}"
-    assert "python -m safo.action_mask" in step("Mask the credentials")["run"]
+    assert '"$VENV/bin/python" -I -m safo.action_mask' in step("Mask the credentials")["run"]
 
 
 def test_the_minted_token_and_a_doppler_key_are_masked_again_when_they_appear() -> None:
@@ -227,7 +223,7 @@ def test_the_minted_token_and_a_doppler_key_are_masked_again_when_they_appear() 
     names = [s["name"].lower() for s in after_doppler]
     assert any("doppler" in n for n in names) and any("installation token" in n for n in names)
     key_step = next(s for s in after_doppler if "doppler" in s["name"].lower())
-    assert "env.PROJECTS_APP_PRIVATE_KEY" in key_step["env"]["PRIVATE_KEY"]
+    assert "steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY" in key_step["env"]["PRIVATE_KEY"]
     token_step = next(s for s in after_doppler if "installation token" in s["name"].lower())
     assert "steps.app.outputs.token" in token_step["env"]["MINTED_TOKEN"]
     assert "steps.app_legacy.outputs.token" in token_step["env"]["MINTED_TOKEN"]
@@ -238,7 +234,7 @@ def test_the_minted_token_and_a_doppler_key_are_masked_again_when_they_appear() 
 def test_the_credential_check_runs_before_doppler_and_before_any_mint() -> None:
     check = index("preflight")
     assert check < index("Doppler (OIDC)") < min(STEPS.index(s) for s in mint_steps())
-    assert "python -m safo.action_preflight" in STEPS[check]["run"]
+    assert '"$VENV/bin/python" -I -m safo.action_preflight' in STEPS[check]["run"]
 
 
 def test_preflight_is_handed_the_environment_it_reads_and_no_secret_value() -> None:
@@ -253,12 +249,7 @@ def test_preflight_is_handed_the_environment_it_reads_and_no_secret_value() -> N
 
 def test_the_board_less_inputs_reach_preflight_and_run_identically() -> None:
     pre, run = step("preflight")["env"], step("Run safo")["env"]
-    names = [
-        n
-        for n in run
-        if n.startswith("SAFO_")
-        and n not in {"SAFO_TOKEN", "SAFO_TOKEN_KIND", "SAFO_MODE", "SAFO_DRY_RUN", "SAFO_STATUS_STATE"}
-    ]
+    names = [n for n in run if n.startswith("SAFO_") and n not in {"SAFO_TOKEN", "SAFO_TOKEN_KIND"}]
     assert {
         "SAFO_BOARD",
         "SAFO_PROJECT_URL",
@@ -268,7 +259,7 @@ def test_the_board_less_inputs_reach_preflight_and_run_identically() -> None:
     } <= set(names)
     for name in names:
         assert pre[name] == run[name], name
-    assert pre["SAFO_MODE"] == run["SAFO_MODE"]
+    assert {"SAFO_MODE", "SAFO_DRY_RUN", "SAFO_STATUS_STATE", "SAFO_STATUS_BODY_FILE"} <= set(names)
 
 
 def test_the_token_goes_to_python_in_the_environment_with_its_kind() -> None:
@@ -284,10 +275,33 @@ def test_the_minted_token_is_never_passed_on_a_command_line_or_written_to_an_out
         assert "GITHUB_OUTPUT" not in script and "GITHUB_ENV" not in script, s["name"]
 
 
-def test_the_run_step_uses_the_actions_own_code_not_the_workspace() -> None:
-    run = step("Run safo")
-    assert 'PYTHONPATH="$ACTION_PATH/src"' in run["run"] and run["env"]["ACTION_PATH"] == "${{ github.action_path }}"
-    assert "python -m safo " in run["run"]
+def test_nothing_builds_a_python_path_and_every_python_is_isolated_in_the_actions_own_venv() -> None:
+    assert "PYTHONPATH" not in TEXT and "PYTHONHOME" not in TEXT
+    for s in STEPS:
+        for line in s.get("run", "").splitlines():
+            if "python" in line:
+                assert '"$VENV/bin/python" -I ' in line or line.strip().startswith("python -I -m venv"), (
+                    s["name"],
+                    line,
+                )
+    for part in (
+        "Install SAFO",
+        "Mask the credentials",
+        "Preflight",
+        "Mask the Doppler",
+        "Mask the installation",
+        "Run safo",
+    ):
+        assert step(part)["env"]["VENV"] == "${{ runner.temp }}/safo-venv", part
+
+
+def test_safo_is_installed_into_the_venv_from_the_action_path_with_the_hash_lock() -> None:
+    script = step("Install SAFO")["run"]
+    assert 'python -I -m venv "$VENV"' in script
+    assert '"$VENV/bin/python" -I -m pip install --disable-pip-version-check --no-deps --require-hashes' in script
+    assert '-r "$ACTION_PATH/requirements.txt"' in script
+    assert '"$ACTION_PATH/src/safo" "$purelib/safo"' in script
+    assert step("Install SAFO")["env"]["ACTION_PATH"] == "${{ github.action_path }}"
 
 
 def test_the_status_and_mode_arguments_are_quoted_array_elements() -> None:
@@ -299,14 +313,25 @@ def test_the_status_and_mode_arguments_are_quoted_array_elements() -> None:
 
 
 def test_doppler_runs_only_with_an_identity_and_never_with_a_literal_key_or_a_fork() -> None:
-    for s in (step("Doppler (OIDC)"),):
-        condition = s["if"].replace(" ", "")
-        assert "inputs.doppler-identity-id!=''" in condition
-        assert "inputs.private-key==''" in condition
-        assert "inputs.mode!='validate'" in condition
-        assert "github.event.pull_request.head.repo.full_name" in condition
-        assert s["with"]["auth-method"] == "oidc" and s["with"]["inject-env-vars"] is True
-        assert s["with"]["doppler-identity-id"] == "${{ inputs.doppler-identity-id }}"
+    s = step("Doppler (OIDC)")
+    condition = s["if"].replace(" ", "")
+    assert "inputs.doppler-identity-id!=''" in condition
+    assert "inputs.private-key==''" in condition
+    assert "inputs.mode!='validate'" in condition
+    assert "github.event.pull_request.head.repo.full_name" in condition
+    assert s["with"]["auth-method"] == "oidc" and s.get("id") == "doppler"
+    assert s["with"]["doppler-identity-id"] == "${{ inputs.doppler-identity-id }}"
+
+
+def test_no_doppler_secret_but_the_app_key_reaches_the_job_environment() -> None:
+    """The fetch action exports every secret in the config when inject-env-vars is true; it must stay off, and the
+    one secret needed is read from the step's output by name."""
+    s = step("Doppler (OIDC)")
+    assert "inject-env-vars" not in s["with"] and "inject-env-vars" not in TEXT
+    assert "GITHUB_ENV" not in TEXT and "PROJECTS_APP_PRIVATE_KEY" in TEXT
+    assert "env.PROJECTS_APP_PRIVATE_KEY" not in TEXT
+    referenced = set(re.findall(r"steps\.doppler\.outputs\.([A-Za-z0-9_]+)", TEXT))
+    assert referenced == {"PROJECTS_APP_PRIVATE_KEY"}
 
 
 def test_there_is_no_doppler_token_fallback() -> None:
@@ -315,7 +340,10 @@ def test_there_is_no_doppler_token_fallback() -> None:
 
 def test_the_mint_reads_the_key_from_the_input_or_the_doppler_environment() -> None:
     for s in mint_steps():
-        assert s["with"]["private-key"].replace(" ", "") == "${{inputs.private-key||env.PROJECTS_APP_PRIVATE_KEY}}"
+        assert (
+            s["with"]["private-key"].replace(" ", "")
+            == "${{inputs.private-key||steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY}}"
+        )
 
 
 def test_the_mint_steps_are_exclusive_and_skipped_for_validate_and_for_a_token() -> None:
@@ -334,7 +362,7 @@ def test_the_mint_steps_are_exclusive_and_skipped_for_validate_and_for_a_token()
 
 
 def test_pyyaml_is_installed_from_the_hash_lock_only() -> None:
-    install = step("Install PyYAML")
+    install = step("Install SAFO")
     assert "--require-hashes" in install["run"] and "--no-deps" in install["run"]
     assert '-r "$ACTION_PATH/requirements.txt"' in install["run"]
     assert "pip install" in install["run"] and "git+" not in install["run"] and "http" not in install["run"]
@@ -349,4 +377,4 @@ def test_the_lock_is_hashed_and_pinned() -> None:
 
 def test_python_is_set_up_before_anything_runs_it() -> None:
     setup = next(i for i, s in enumerate(STEPS) if str(s.get("uses", "")).startswith("actions/setup-python@"))
-    assert setup < index("Mask the credentials") < index("Install PyYAML") < index("preflight")
+    assert setup < index("Install SAFO") < index("Mask the credentials") < index("preflight")

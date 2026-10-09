@@ -117,3 +117,11 @@ def test_a_blank_or_control_laden_name_is_refused(name: str) -> None:
     for bad in ("", "  ", "a\nb", "x" * 201):
         with pytest.raises(ConfigError, match=name.removeprefix("SAFO_").lower().replace("_", "-")):
             board_from_env({**ENV, name: bad})
+
+
+def test_a_trailing_newline_in_the_owner_is_refused() -> None:
+    for bad in ("acme\n/widgets", "acme\n", "ac\nme/widgets"):
+        with pytest.raises(ConfigError, match="GITHUB_REPOSITORY"):
+            board_from_env({**ENV, "GITHUB_REPOSITORY": bad})
+    with pytest.raises(ConfigError, match="GITHUB_REPOSITORY"):
+        board_from_env({**ENV, "GITHUB_REPOSITORY": "acme/widgets\n"})

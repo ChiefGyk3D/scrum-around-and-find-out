@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from safo import action_preflight
 from safo.errors import ConfigError
@@ -23,7 +24,8 @@ BASE = {
     "GITHUB_REPOSITORY": "acme/widgets",
     "REPOSITORY_OWNER": "acme",
     "REPO_PRIVATE": "true",
-    "DRY_RUN": "false",
+    "GITHUB_WORKSPACE": str(ROOT),
+    "SAFO_DRY_RUN": "false",
 }
 
 
@@ -59,7 +61,7 @@ def test_an_unknown_mode_is_refused(mode: str) -> None:
 
 @pytest.mark.parametrize("value", ["", "yes", "TRUE ", "1"])
 def test_dry_run_is_true_or_false(value: str) -> None:
-    refused("dry-run", DRY_RUN=value)
+    refused("dry-run", SAFO_DRY_RUN=value)
 
 
 def test_no_credential_is_refused_unless_validating() -> None:
@@ -178,7 +180,10 @@ def test_an_app_owner_is_meaningless_with_a_token() -> None:
     )
 
 
-@pytest.mark.parametrize("repositories", ["a b", "a,,b", "a/b", "..", ".", "a,..", "x;y", "a\nb", ",a"])
+@pytest.mark.parametrize(
+    "repositories",
+    ["a b", "a,,b", "a/b", "..", ".", "a,..", "x;y", "a\nb", ",a", "widgets\n,manuals", "wid\x00gets", "widgets\t"],
+)
 def test_the_repository_list_is_names_only(repositories: str) -> None:
     refused("repositories", REPOSITORIES=repositories)
 
@@ -267,3 +272,117 @@ def test_main_never_echoes_a_hostile_input_as_a_command() -> None:
 def test_the_preflight_is_handed_booleans_for_the_key_and_the_token_never_the_values() -> None:
     assert "HAS_PRIVATE_KEY" in action_preflight.READS and "HAS_TOKEN" in action_preflight.READS
     assert not {"PRIVATE_KEY", "TOKEN", "SAFO_TOKEN", "PROJECTS_APP_PRIVATE_KEY"} & set(action_preflight.READS)
+
+
+# -- fix round 1: scope, symlinks, status state ------------------------------------------------------------------
+
+
+def board_with(tmp_path: Path, repositories: list[dict[str, str]]) -> None:
+    data = yaml.safe_load((ROOT / BOARD).read_text())
+    data["repositories"] = repositories
+    (tmp_path / "b.yaml").write_text(yaml.safe_dump(data))
+
+
+def resolved(**changes: str) -> str:
+    return action_preflight.check(env(**changes))
+
+
+def test_a_board_file_run_scopes_the_token_to_the_repositories_the_board_lists() -> None:
+    assert resolved() == "widgets,manuals"
+
+
+def test_an_explicit_list_must_be_a_subset_of_the_board_and_comes_back_in_the_boards_spelling() -> None:
+    assert resolved(REPOSITORIES="manuals") == "manuals"
+    assert resolved(REPOSITORIES="WIDGETS, Manuals") == "widgets,manuals"
+    refused("not listed in the board", REPOSITORIES="widgets,other")
+    refused("not listed in the board", REPOSITORIES="other")
+
+
+def test_a_board_that_lists_no_repository_falls_back_to_the_calling_one(tmp_path: Path) -> None:
+    board_with(tmp_path, [])
+    assert resolved(SAFO_BOARD="b.yaml", GITHUB_WORKSPACE=str(tmp_path)) == "widgets"
+
+
+def test_only_the_repositories_of_the_token_owner_are_listed(tmp_path: Path) -> None:
+    board_with(tmp_path, [{"owner": "acme", "name": "one"}, {"owner": "elsewhere", "name": "two"}])
+    ws = {"SAFO_BOARD": "b.yaml", "GITHUB_WORKSPACE": str(tmp_path)}
+    assert resolved(**ws) == "one"
+    # another account's installation is limited to the repositories the board lists under that account
+    assert resolved(**ws, APP_OWNER="elsewhere", REPO_PRIVATE="false") == "two"
+    assert resolved(**ws, APP_OWNER="third", REPO_PRIVATE="false") == ""
+
+
+def test_the_board_less_run_is_scoped_to_the_calling_repository() -> None:
+    kw = {"SAFO_BOARD": "", "SAFO_PROJECT_URL": "https://github.com/orgs/acme/projects/1", "SAFO_MODE": "sync"}
+    assert resolved(**kw) == "widgets"
+    assert resolved(**kw, REPOSITORIES="widgets") == "widgets"
+    refused("not listed in the board", **kw, REPOSITORIES="manuals")
+
+
+def test_a_token_or_a_validate_run_has_nothing_to_scope() -> None:
+    assert resolved(SAFO_MODE="validate") == ""
+    assert resolved(HAS_PRIVATE_KEY="false", HAS_TOKEN="true", SAFO_ALLOW_TOKEN_FOR_ORG="true") == ""
+
+
+def test_main_writes_the_scope_to_the_step_output_file(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    done = run_main(GITHUB_OUTPUT=str(out))
+    assert done.returncode == 0 and out.read_text() == "repositories=widgets,manuals\n"
+
+
+def test_main_writes_no_output_when_it_refuses(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    assert run_main(GITHUB_OUTPUT=str(out), HAS_PRIVATE_KEY="false").returncode == 2
+    assert not out.exists()
+
+
+def workspace_with(tmp_path: Path) -> Path:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "board.yaml").write_text((ROOT / BOARD).read_text())
+    (ws / "note.md").write_text("update")
+    return ws
+
+
+@pytest.mark.parametrize("name", ["SAFO_BOARD", "SAFO_STATUS_BODY_FILE"])
+def test_a_symlink_out_of_the_workspace_is_refused_and_one_inside_is_not(tmp_path: Path, name: str) -> None:
+    ws = workspace_with(tmp_path)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text((ROOT / BOARD).read_text())
+    (ws / "out-link").symlink_to(outside)
+    (ws / "in-link").symlink_to(ws / "board.yaml")
+    (ws / "dir-link").symlink_to(tmp_path, target_is_directory=True)
+    base = {"GITHUB_WORKSPACE": str(ws), "SAFO_BOARD": "board.yaml"}
+    refused("inside the workspace", **{**base, name: "out-link"})
+    refused("inside the workspace", **{**base, name: "dir-link/outside.yaml"})
+    action_preflight.check(env(**{**base, name: "in-link"}))
+
+
+def test_a_workspace_that_is_itself_reached_through_a_link_still_works(tmp_path: Path) -> None:
+    ws = workspace_with(tmp_path)
+    alias = tmp_path / "alias"
+    alias.symlink_to(ws, target_is_directory=True)
+    action_preflight.check(env(GITHUB_WORKSPACE=str(alias), SAFO_BOARD="board.yaml"))
+
+
+def test_a_sibling_directory_sharing_the_workspace_prefix_is_outside(tmp_path: Path) -> None:
+    ws = workspace_with(tmp_path)
+    sibling = tmp_path / "ws-evil"
+    sibling.mkdir()
+    (sibling / "board.yaml").write_text((ROOT / BOARD).read_text())
+    (ws / "link").symlink_to(sibling / "board.yaml")
+    refused("inside the workspace", GITHUB_WORKSPACE=str(ws), SAFO_BOARD="link")
+
+
+@pytest.mark.parametrize("state", ["BOGUS", "", "on_track", "ON_TRACK ", "ON_TRACK\n--post"])
+def test_the_status_state_is_checked_before_anything_is_minted(state: str) -> None:
+    refused("status-state", SAFO_MODE="status", SAFO_STATUS_STATE=state)
+
+
+@pytest.mark.parametrize("state", ["INACTIVE", "ON_TRACK", "AT_RISK", "OFF_TRACK", "COMPLETE"])
+def test_every_real_status_state_passes(state: str) -> None:
+    action_preflight.check(env(SAFO_MODE="status", SAFO_STATUS_STATE=state))
+
+
+def test_the_status_state_is_only_a_status_input() -> None:
+    action_preflight.check(env(SAFO_MODE="audit", SAFO_STATUS_STATE="BOGUS"))
