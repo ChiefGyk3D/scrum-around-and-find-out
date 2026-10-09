@@ -111,3 +111,10 @@ def test_the_checker_uses_only_the_standard_library_because_it_runs_before_anyth
     imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     imported |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     assert imported <= {"__future__", "os", "re", "sys", "pathlib"}
+
+
+def test_main_refuses_the_wrong_number_of_arguments_and_returns_zero_when_clean(tmp_path: Path) -> None:
+    for argv in (["x"], ["x", "created"], ["x", "created", "v", "extra"]):
+        with pytest.raises(SystemExit, match="usage"):
+            venv_check.main(argv)
+    assert venv_check.main(["x", "created", str(venv_root(tmp_path, FRESH))]) == 0
