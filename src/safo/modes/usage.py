@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+from typing import Any
 
+from safo import outcomes
 from safo.agentsfile import Endpoint
 from safo.bounded import month as valid_month
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
-from safo.localfiles import add_agents_arguments, agents_path, load_agents_for
+from safo.localfiles import add_agents_arguments, agents_path, load_agents_for, outcomes_path
 from safo.meters import Meters, as_json, collect
 from safo.meters.codex import CodexUsage
 from safo.modes import LocalMode, register_local
@@ -77,6 +79,8 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
         raise ConfigError("month: expected YYYY-MM") from None
     allowance = None
     endpoints: tuple[Endpoint, ...] = ()
+    if args.report:
+        return report(ctx, args, month)
     if agents_path(ctx, args).is_file():
         doc = load_agents_for(ctx, args)
         allowance = doc.monthly_allowance()
@@ -92,6 +96,28 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def report(ctx: LocalContext, args: argparse.Namespace, month: str) -> int:
+    path = outcomes_path(ctx, args)
+    if not path.is_file():
+        raise ConfigError(f"no outcomes log at {path.name}; record one with `safo outcome add`")
+    rows = outcomes.summarise(outcomes.load(path), month)
+    if args.json:
+        data: list[dict[str, Any]] = [s.__dict__ for s in rows]
+        # one line, ASCII only; `::` is written as a JSON escape so no value can start a workflow command
+        ctx.say(json.dumps({"month": month, "agents": data}, separators=(",", ":")).replace("::", ":\\u003a"))
+        return EXIT_OK
+    ctx.say(f"Outcomes for {month} ({path.name})")
+    if not rows:
+        ctx.say("  nothing recorded")
+    for s in rows:
+        findings = ", ".join(f"{k} {v}" for k, v in sorted(s.findings.items())) or "none"
+        ctx.say(
+            f"  {s.agent:<14} {s.tasks} tasks, {s.needed_fixes} needed fixes, {s.review_rounds} review rounds, "
+            f"findings: {findings}, tokens {s.tokens:,}, requests {s.requests:,}"
+        )
+    return EXIT_OK
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     add_agents_arguments(parser)
     parser.add_argument("--days", type=float, default=7.0, help="the window for Codex sessions and Claude transcripts")
@@ -101,6 +127,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--billing", action="store_true", help="also try the billing read for exact Copilot premium requests"
     )
     parser.add_argument("--no-local", action="store_true", help="do not probe the local LLM endpoints")
+    parser.add_argument("--report", action="store_true", help="summarise the outcomes log for the month instead")
+    parser.add_argument(
+        "--log", default="", help="the outcomes log (default: $SAFO_OUTCOMES, else ~/.local/state/safo/outcomes.jsonl)"
+    )
 
 
 register_local(LocalMode("usage", "what each agent has used and has left (local, read-only)", add_arguments, run))
