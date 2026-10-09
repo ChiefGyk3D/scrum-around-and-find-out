@@ -1,0 +1,6 @@
+# Test fixtures in commit dd7d893 (build/group4, T8): a fake PEM header and two
+# 40-hex action pins that the generic rules match. Later commits build them at
+# run time; the scan reads every ref (--all), so the old commit stays flagged.
+dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_mask.py:private-key:15
+dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_action.py:generic-api-key:144
+dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_action.py:generic-api-key:145
