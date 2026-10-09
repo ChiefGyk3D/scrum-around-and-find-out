@@ -54,7 +54,7 @@ def config_dir(env: Mapping[str, str]) -> Path | None:
 WARNING = "SAFO routing guard degraded: enforcement may be incomplete; inspect safo hooks status."
 MODEL_IDS = ("sonnet", "haiku", "opus", "unknown")
 RULE_IDS = ("no-model", "approval", "no-local-step")
-DIAGNOSTICS = ("mode", "config", "input", "probe", "state-write", "log-write", "unexpected")
+DIAGNOSTICS = ("mode", "config", "input", "timeout", "probe", "state-write", "log-write", "unexpected")
 HEALTH = ("healthy", "degraded", "stale", "unknown")
 RECORD_CAP = 2048
 FILE_CAP = 4 * 1024 * 1024

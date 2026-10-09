@@ -48,6 +48,7 @@ class LocalContext:
     run: Callable[..., Any] = subprocess.run
     which_override: Callable[[str], str | None] | None = None
     dry_run: bool = False
+    stdin: TextIO | None = None  # what a hook reads its event from; None means the process's own standard input
 
     @property
     def which(self) -> Callable[[str], str | None]:

@@ -14,7 +14,7 @@ from safo import __version__, compat, credentials, output
 from safo.context import Context, LocalContext
 from safo.errors import ConfigError, SafoError
 from safo.graphql import GRAPHQL_URL, Client
-from safo.modes import LocalMode, load_all, validate
+from safo.modes import LocalMode, hooks, load_all, validate
 from safo.modes.reconcile import safe
 from safo.schema import Board, load_board
 
@@ -79,19 +79,29 @@ def main(
     err: TextIO | None = None,
     today: dt.date | None = None,
     now: dt.datetime | None = None,
+    stdin: TextIO | None = None,
 ) -> int:
     env = os.environ if env is None else env
     out = out or sys.stdout
     err = err or sys.stderr
     parser, _ = build_parser()
-    args = parser.parse_args(argv)
+    clock = now or dt.datetime.now(dt.UTC)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as stop:
+        # argparse exits 2 on a bad flag, and a host reads exit 2 from a hook as "block this". A hook that cannot even
+        # parse its own command line (a changed install, an older safo) fails open, visibly, like every other failure.
+        event = hooks.hook_event(argv)
+        if event is None or not stop.code:
+            raise
+        hooks.diagnostic(LocalContext(out, env, clock), "input", event)
+        return 0
     mode = load_all()[args.mode]
     if args.gh_user:
         env = {**env, "SAFO_GH_USER": args.gh_user}
-    clock = now or dt.datetime.now(dt.UTC)
     if isinstance(mode, LocalMode):
         try:
-            return mode.run(LocalContext(out, env, clock, dry_run=args.dry_run), args)
+            return mode.run(LocalContext(out, env, clock, dry_run=args.dry_run, stdin=stdin), args)
         except SafoError as error:
             report(error, env, err)
             return error.exit_code
