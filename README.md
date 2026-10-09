@@ -3,39 +3,66 @@
 SAFO is three things, built for one maintainer running a team of AI agents across a dozen repositories:
 
 1. **A GitHub Project defined as code.** `board.yaml` names the fields, options, iterations and views. An Action and a
-   command line (`safo`) apply it and keep the board current, in five modes: `bootstrap`, `audit`, `sync`, `reconcile`
-   and `status`.
+   command line (`safo`) apply it and keep the board current, in the modes listed under [What it does](#what-it-does).
 2. **Agent routing.** `agents.yaml` records which agent should get which kind of work, from one maintainer's
    measurements: Claude Code (Sonnet, Haiku, Opus), OpenAI Codex, the GitHub Copilot coding agent and a local Ollama
    model. Commands read local usage meters and recommend an agent. They dispatch nothing.
 3. **A playbook and a lessons wiki.** Why the team is run this way, who does what, and what broke along the way.
 
-This README is the interim documentation. SAFO is being built toward v0.1.0, and most of it does not exist yet. The
-status table below is the honest account.
+SAFO is being built toward v0.1.0. The playbook pages start at [docs/why.md](docs/why.md); the status table below says
+which pieces are on `main` and which are on a branch waiting for review.
 
 ## Status
 
-Checked 2026-10-08.
+Checked 2026-10-09.
 
 | Piece | State |
 |---|---|
-| Python scaffold, CI on git-your-ship-together, repository files | Built, merged on `main` |
-| `scripts/apply-baseline.sh` (repository settings, run by the maintainer) | Built, merged on `main` |
-| T2: GraphQL client (refuses redirects; never replays a mutation whose outcome is unknown) | Built on branch `build/group2`, not merged |
-| T3: `board.yaml` schema and validator (refuses duplicate keys, aliases, anchors, merge keys, runaway nesting and oversized files) | Built on branch `build/group2`, not merged |
-| `audit`, `bootstrap`, `reconcile`, `sync`, `status` modes | Planned |
-| The Action (`action.yml`) | Planned |
-| `safo usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built on branch `build/group4`, not merged |
-| `safo route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built on branch `build/group4`, not merged |
-| `safo outcome add` and `safo usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built on branch `build/group4`, not merged |
-| `safo local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `safo status --post` | Built on branch `build/group4`, not merged |
-| `safo hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built on branch `build/group4`, not merged; not yet exercised in a real Claude Code session |
-| `agents-status` | Planned |
-| Generated docs and the wiki mirror | Planned (the wiki is hand-written until then) |
+| Python scaffold, CI on git-your-ship-together, repository files, `scripts/apply-baseline.sh` | Built, merged on `main` |
+| GraphQL client (refuses redirects; never replays a mutation whose outcome is unknown), `board.yaml` schema and validator | Built, merged on `main` |
+| `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
+| `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App token, no checkout needed) | Built on branch `build/group4`, not merged. Read the trust boundary below before you call it |
+| `agents-status` (the board, Codex, Copilot and the routing-guard counts in one read-only view) | Built on branch `build/group4`, not merged |
+| `usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built on branch `build/group4`, not merged |
+| `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built on branch `build/group4`, not merged |
+| `outcome add` and `usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built on branch `build/group4`, not merged |
+| `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built on branch `build/group4`, not merged |
+| `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built on branch `build/group4`, not merged; not yet exercised in a real Claude Code session |
+| The playbook pages in `docs/` and this README | On branch `build/group4`, not merged |
+| Generated docs and the wiki mirror | Not built yet (the wiki is hand-written until then) |
 
 The design is in [`docs/superpowers/specs/2026-10-07-safo-design.md`](docs/superpowers/specs/2026-10-07-safo-design.md)
 and the implementation plan is split into seven pull-request groups, listed on the
 [Roadmap](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Roadmap) page.
+
+## What it does
+
+| Mode | Does |
+|---|---|
+| `validate` | Validates `board.yaml` offline; reads nothing from GitHub and makes no claim about the live board |
+| `bootstrap` | Creates the fields, options, iterations and views `board.yaml` names and the project lacks. Never edits an existing field's options |
+| `audit` | Compares the live board and the repositories' open work with `board.yaml`. Exit 0 clean, 1 drift, 2 cannot tell |
+| `sync` | Brings the card of one issue or pull request event in line |
+| `reconcile` | Adds every missing open issue and pull request, marks closed ones Done with the date, fills Area. Idempotent |
+| `status` | Posts a project status update from a Markdown file, or builds it from the board with `--post`: the cards are grouped and counted in code, with an optional one-line headline on top |
+| `agents-status` | One read-only view of what Claude, Codex and Copilot are doing |
+| `usage` | What each agent has used and has left, from local files only: Codex windows, Claude Code tokens, Copilot sessions, Ollama reachability. `--report` summarises the outcomes log |
+| `route <shape>` | Which agent a task shape should go to, from the rules in `agents.yaml` and the live headroom. Recommends; dispatches nothing |
+| `outcome add` | Appends a finished task to the outcomes log |
+| `local run` | Sends one prompt to the local model (Ollama) that routing picks, never one that would evict a protected model |
+| `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard` |
+
+The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`) read
+files on a person's machine and are not allowed in the Action.
+
+## Trust boundary
+
+Never run untrusted code (a PR checkout, a build, a script) in the same job before the SAFO Action. With
+`pull_request_target`, run SAFO in its own job with no checkout of PR code. The job/runner boundary is the trust boundary:
+a same-user process from an earlier step can mutate the Action's venv or read credential-step environments.
+
+The approval token that `safo hooks` checks is a speed bump, not proof that the maintainer said yes: a prompt-injected
+model can write it. The other accepted residuals are listed in [docs/limits.md](docs/limits.md).
 
 ## Routing
 
@@ -69,7 +96,7 @@ scripts/apply-baseline.sh --repo OWNER/NAME  # plan mode for another repository
 
 The maintainer runs `--apply`; an agent never does.
 
-**Planned for v0.1.0** (none of these commands exist yet):
+**For v0.1.0** (needs the branch merged and installed):
 
 ```sh
 pip install .                                  # Python 3.11+, one dependency: PyYAML
@@ -80,8 +107,8 @@ safo --board board.yaml reconcile              # add missing items, mark closed 
 safo route research                            # recommend an agent for a task shape
 ```
 
-The Action is planned as `ChiefGyk3D/scrum-around-and-find-out@<sha>` with a bring-your-own GitHub App. There is no
-hosted service.
+As an Action, see [docs/adoption.md](docs/adoption.md): `ChiefGyk3D/scrum-around-and-find-out@<sha>` with a
+bring-your-own GitHub App. There is no hosted service. The reference for the file is [docs/board-yaml.md](docs/board-yaml.md).
 
 ## Relationship to git-your-ship-together
 
