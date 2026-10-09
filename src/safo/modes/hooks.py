@@ -252,6 +252,15 @@ def settings_bytes(path: Path) -> bytes | None:
         return None
 
 
+def identity(path: Path) -> tuple[int, int, int, int] | None:
+    """Which file this is, not only what it says: device, inode, size and modification time. None when absent."""
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
 def read_settings(path: Path) -> Any:
     try:
         raw = settings_bytes(path)
@@ -268,9 +277,16 @@ def install_settings(target: Path, probe_command: str, guard_command: str, dry_r
 
 
 def _install_locked(target: Path, probe_command: str, guard_command: str, dry_run: bool) -> bool:
-    with contextlib.nullcontext() if dry_run else file_lock(target.with_name(target.name + ".safo.lock")):
+    with (
+        contextlib.nullcontext()
+        if dry_run
+        else file_lock(target.with_name(target.name + ".safo.lock"), check_dir=False)
+    ):
         try:
+            seen = identity(target)
             original = settings_bytes(target)
+            if identity(target) != seen:
+                raise ConfigError("settings changed while installing; nothing replaced")
             settings = loads(original) if original is not None else {}
             settings, changed = merge_settings(settings, probe_command, guard_command)
             if not changed or dry_run:
@@ -288,14 +304,20 @@ def _install_locked(target: Path, probe_command: str, guard_command: str, dry_ru
 
             # Cooperating installers share the lock. External writers must not change the originally read bytes.
             # A conflict replaces nothing, so the backup it would have protected is removed; a failed write keeps it.
+            # The identity is checked as well as the bytes: a writer that swaps in a new file with the same bytes
+            # (an editor's rename, a dotfiles sync) passes a bytes-only check and would then be overwritten.
             def unchanged() -> None:
                 if settings_bytes(target) != original:
                     if backup is not None:
                         backup.unlink(missing_ok=True)
                     raise ConfigError("settings: concurrent edit detected; nothing replaced")
+                if identity(target) != seen:
+                    if backup is not None:
+                        backup.unlink(missing_ok=True)
+                    raise ConfigError("settings changed while installing; nothing replaced")
 
             unchanged()
-            write_text(target, json.dumps(settings, indent=2) + "\n", mode, before_replace=unchanged)
+            write_text(target, json.dumps(settings, indent=2) + "\n", mode, before_replace=unchanged, check_dir=False)
             return True
         except (OSError, ValueError, UnicodeError):
             raise ConfigError("settings: invalid JSON, nonregular file or write failure; nothing replaced") from None

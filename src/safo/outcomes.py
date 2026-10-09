@@ -132,7 +132,7 @@ def append(path: Path, outcome: Outcome) -> None:
     validate(json.loads(outcome.to_json()))
     line = (outcome.to_json() + "\n").encode("utf-8")
     try:
-        with file_lock(path.with_name(path.name + ".lock")):
+        with file_lock(path.with_name(path.name + ".lock"), check_dir=False):
             try:
                 existing = _read(path)
             except ConfigError:
@@ -143,7 +143,7 @@ def append(path: Path, outcome: Outcome) -> None:
                 existing += b"\n"
             if len(existing) + len(line) > MAX_LOG_BYTES:
                 raise ConfigError("outcomes log would exceed its size limit")
-            write_text(path, (existing + line).decode("utf-8"))
+            write_text(path, (existing + line).decode("utf-8"), check_dir=False)
     except (OSError, TimeoutError, ValueError):
         raise ConfigError("cannot write outcomes log (is it locked, or not a regular file?)") from None
 

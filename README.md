@@ -29,7 +29,7 @@ Checked 2026-10-08.
 | `safo route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built on branch `build/group4`, not merged |
 | `safo outcome add` and `safo usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built on branch `build/group4`, not merged |
 | `safo local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `safo status --post` | Built on branch `build/group4`, not merged |
-| `safo hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; see [`docs/hooks.md`](docs/hooks.md)) | Built on branch `build/group4`, not merged; not yet exercised in a real Claude Code session |
+| `safo hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built on branch `build/group4`, not merged; not yet exercised in a real Claude Code session |
 | `agents-status` | Planned |
 | Generated docs and the wiki mirror | Planned (the wiki is hand-written until then) |
 

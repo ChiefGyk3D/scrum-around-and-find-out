@@ -53,7 +53,7 @@ def config_dir(env: Mapping[str, str]) -> Path | None:
 
 WARNING = "SAFO routing guard degraded: enforcement may be incomplete; inspect safo hooks status."
 MODEL_IDS = ("sonnet", "haiku", "opus", "unknown")
-RULE_IDS = ("no-model", "approval", "no-local-step")
+RULE_IDS = ("no-model", "unknown-model", "approval", "no-local-step")
 DIAGNOSTICS = ("mode", "config", "input", "timeout", "probe", "state-write", "log-write", "unexpected")
 HEALTH = ("healthy", "degraded", "stale", "unknown")
 RECORD_CAP = 2048
@@ -71,9 +71,43 @@ def bounded_read(path: Path, limit: int = MAX_BYTES) -> bytes:
     return raw
 
 
+def trusted_dir(folder: Path) -> bool:
+    """True when `folder` is a directory owned by the effective user that no other user can write to.
+
+    A lock is a pathname's current inode, and the mode, probe and log files are found by pathname, so whoever can write
+    to the directory can unlink and replace them. Judged on the directory itself (a link to it is followed); the
+    directories above it are the user's own business.
+    """
+    try:
+        info = os.stat(folder)
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o022
+
+
+def ensure_dir(folder: Path, check_dir: bool = True) -> None:
+    """Make `folder` and any missing parents mode 0700 (whatever the umask); PermissionError for an untrusted one.
+
+    Only directories created here are changed; one that already exists keeps its mode and is judged as it is.
+    """
+    missing: list[Path] = []
+    here = folder
+    while not here.exists() and here != here.parent:
+        missing.append(here)
+        here = here.parent
+    for created in reversed(missing):
+        try:
+            os.mkdir(created, 0o700)
+        except FileExistsError:
+            continue
+        os.chmod(created, 0o700)
+    if check_dir and not trusted_dir(folder):
+        raise PermissionError(f"{folder.name}: not owned by this user, or writable by others")
+
+
 @contextlib.contextmanager
-def file_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def file_lock(path: Path, check_dir: bool = True) -> Iterator[None]:
+    ensure_dir(path.parent, check_dir)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -92,9 +126,15 @@ def file_lock(path: Path) -> Iterator[None]:
         os.close(fd)
 
 
-def write_text(path: Path, text: str, mode: int = 0o600, before_replace: Callable[[], None] | None = None) -> None:
+def write_text(
+    path: Path,
+    text: str,
+    mode: int = 0o600,
+    before_replace: Callable[[], None] | None = None,
+    check_dir: bool = True,
+) -> None:
     """Exclusive random temp, cleanup, file and directory fsync; callers lock read/modify/write sequences."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(path.parent, check_dir)
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp = Path(name)
     try:
@@ -119,6 +159,8 @@ def mode_health(env: Mapping[str, str]) -> tuple[str, str]:
     folder = config_dir(env)
     if folder is None:
         return DEFAULT_MODE, "unknown"
+    if os.path.lexists(folder) and not trusted_dir(folder):
+        return DEFAULT_MODE, "degraded"  # a mode file another user could have written is not a block setting
     try:
         text = bounded_read(folder / MODE_NAME, 16).decode("utf-8").strip()
     except FileNotFoundError:
@@ -154,7 +196,7 @@ def valid_record(row: Any) -> bool:
         and row["diagnostic"] in ("", *DIAGNOSTICS)
         and all(type(row[k]) is bool for k in ("local_reachable", "local_step", "na"))
         and isinstance(row["rules"], list)
-        and len(row["rules"]) <= 3
+        and len(row["rules"]) <= len(RULE_IDS)
         and all(type(r) is str and r in RULE_IDS for r in row["rules"])
         and len(set(row["rules"])) == len(row["rules"])
     )
@@ -166,6 +208,8 @@ def read_log(path: Path | None) -> list[dict[str, Any]]:
     try:
         os.lstat(path)  # read-only: a missing log is "nothing yet", never a reason to create its folder or a lock
     except OSError:
+        return []
+    if not trusted_dir(path.parent):
         return []
     try:
         with file_lock(path.with_name(path.name + ".lock")):
@@ -224,7 +268,9 @@ def guard_lines(env: Mapping[str, str]) -> list[str]:
     counts = summarise(rows)
     mode, health = mode_health(env)
     last_health = rows[-1]["health"] if rows else "unknown"
-    if folder is not None:
+    if folder is not None and os.path.lexists(folder) and not trusted_dir(folder):
+        last_health = "degraded"
+    elif folder is not None:
         try:
             raw = bounded_read(folder / LOG_NAME, FILE_CAP)
             complete_lines = [line for line in raw.splitlines(keepends=True) if line.strip()]

@@ -26,15 +26,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from safo.agentsfile import AgentsFile, Endpoint
+from safo.agentsfile import Agent, AgentsFile, Endpoint
 from safo.bounded import loads
 from safo.errors import ConfigError
 from safo.guardlog import (
     FILE_CAP,
     RECORD_CAP,
     bounded_read,
+    ensure_dir,
     file_lock,
     finite_time,
+    trusted_dir,
     valid_record,
 )
 from safo.guardlog import (
@@ -53,7 +55,8 @@ REPROBE_TIMEOUT_SECONDS = 1.5  # per request; the guard sits in front of every d
 NO_MODEL = "no-model"
 APPROVAL = "approval"
 NO_LOCAL_STEP = "no-local-step"
-RULES = (NO_MODEL, APPROVAL, NO_LOCAL_STEP)
+UNKNOWN_MODEL = "unknown-model"
+RULES = (NO_MODEL, UNKNOWN_MODEL, APPROVAL, NO_LOCAL_STEP)
 
 
 # -- the probe -------------------------------------------------------------------------------------
@@ -98,6 +101,8 @@ def session_output(message: str) -> str:
 
 
 def read_state(path: Path | None) -> dict[str, Any] | None:
+    if path is not None and not trusted_dir(path.parent):
+        return None  # a folder another user could have written holds no state we trust
     try:
         raw = bounded_read(path) if path else b""
         state = loads(raw)
@@ -220,7 +225,7 @@ def first_notice(path: Path) -> bool:
     one."""
     marker = notice_path(path)
     try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
+        ensure_dir(marker.parent)
         os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
     except FileExistsError:
         return False
@@ -241,19 +246,38 @@ class Verdict:
     na: bool
 
 
+FULL_MODEL_ID = re.compile(r"claude-([a-z]+)-[0-9][0-9a-z.-]*")  # claude-opus-5-5: a full id of a named family
+APPROVAL_NOTE = (
+    "the token is a speed bump against accidents, not proof of approval: text a prompt injected into the session can "
+    "write it too"
+)
+
+
+def known_agent(doc: AgentsFile, model: str) -> Agent | None:
+    """The agent a model value names: an exact (case-insensitive) agent model or id, or a full id of that model's
+    family. Anything else, `inherit` and a fork's missing model included, names no agent."""
+    lowered = model.lower()
+    family = FULL_MODEL_ID.fullmatch(lowered)
+    wanted = {lowered, family.group(1)} if family else {lowered}
+    return next((a for a in doc.agents if a.model and (a.model.lower() in wanted or a.id.lower() in wanted)), None)
+
+
 def needs_approval(doc: AgentsFile, model: str) -> bool:
     """True when `model` names an agent that agents.yaml marks approval_required (Opus, in the shipped file)."""
-    lowered = model.lower()
-    return any(a.approval_required and a.model and a.model.lower() in lowered for a in doc.agents)
+    agent = known_agent(doc, model)
+    return agent is not None and agent.approval_required
 
 
 def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bool) -> Verdict:
-    """Apply the three routing rules to one Agent tool call."""
+    """Apply the routing rules to one Agent tool call."""
     raw_prompt, raw_model = tool_input.get("prompt"), tool_input.get("model")
     prompt = raw_prompt if isinstance(raw_prompt, str) else ""
     raw = raw_model.strip() if isinstance(raw_model, str) else ""
-    model = raw.lower() if raw.lower() in ("sonnet", "haiku", "opus") else ("unknown" if raw else "")
-    subtype = tool_input.get("subagent_type")
+    # A model is explicit only when it names a known agent. `inherit`, garbage and a fork's missing model resolve to
+    # the parent's model, which the hook cannot see, so they are treated as if they might be an approval-required one.
+    agent = known_agent(doc, raw) if raw else None
+    unknown = (bool(raw) and agent is None) or (not raw and tool_input.get("subagent_type") in FORK_TYPES)
+    model = raw.lower() if raw.lower() in ("sonnet", "haiku", "opus") else ("unknown" if raw or unknown else "")
     hooks = doc.hooks
     lowered = prompt.lower()
     local_step = any(marker in lowered for marker in hooks.local_step_markers)
@@ -261,15 +285,23 @@ def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bo
     na = re.search(r"\s+".join(re.escape(word) for word in hooks.na_marker.split()) + r"\s*\S", lowered) is not None
     rules: list[str] = []
     reasons: list[str] = []
-    if not model and subtype not in FORK_TYPES:
+    # The token is typed by hand, so it is found however it is cased or wrapped: [TOKEN], (token), a line of its own.
+    token = hooks.approval_token.lower() in lowered
+    if not raw and not unknown:
         rules.append(NO_MODEL)
         reasons.append("no explicit `model` (set one: sonnet by default, haiku for mechanical work)")
-    # The token is typed by hand, so it is found however it is cased or wrapped: [TOKEN], (token), a line of its own.
-    if raw and needs_approval(doc, raw) and hooks.approval_token.lower() not in lowered:
+    if unknown and not token:
+        rules.append(UNKNOWN_MODEL)
+        reasons.append(
+            "unknown-model: the model is not a known agent (a placeholder, a fork or an unrecognised name), so it may be one "
+            "that needs the maintainer's OK; name sonnet or haiku, or add the approval token from agents.yaml "
+            f"(hooks.approval_token) only once he has said yes; {APPROVAL_NOTE}"
+        )
+    if agent is not None and agent.approval_required and not token:
         rules.append(APPROVAL)
         reasons.append(
             f"model {model} needs the maintainer's recorded OK: add the approval token from agents.yaml "
-            "(hooks.approval_token) to the brief, with his reason, only once he has said yes"
+            f"(hooks.approval_token) to the brief, with his reason, only once he has said yes; {APPROVAL_NOTE}"
         )
     if reachable and not local_step and not na:
         rules.append(NO_LOCAL_STEP)

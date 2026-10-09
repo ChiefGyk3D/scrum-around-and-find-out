@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -333,10 +334,42 @@ def test_an_empty_model_is_no_model(_private_home: Path, agents: Path, model: st
     assert "no-model" in read_after(_private_home, agents, dispatch(model=model))["rules"]
 
 
-def test_a_fork_has_no_model_to_name_and_is_not_flagged(_private_home: Path, agents: Path) -> None:
+def test_a_fork_with_no_model_cannot_be_told_from_an_unapproved_parent_model_so_it_needs_the_token(
+    _private_home: Path, agents: Path
+) -> None:
     set_probe(_private_home)
+    set_mode(_private_home, "block")
     code, out, _ = guard(_private_home, agents, dispatch(model=None, subagent_type="fork"))
-    assert code == 0 and out == "" and read_log(_private_home)[0]["decision"] == "allow"
+    assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    row = read_log(_private_home)[0]
+    assert row["rules"] == ["unknown-model"] and row["model"] == "unknown"
+    ok = dispatch(model=None, subagent_type="fork", prompt="safo local run. OPUS-APPROVED: he said so")
+    assert guard(_private_home, agents, ok)[1] == ""
+
+
+@pytest.mark.parametrize("model", ["inherit", "INHERIT", "arbitrary-garbage", "gpt-5", "opus-but-not", "sonnet 4"])
+def test_a_model_that_is_not_a_known_agent_id_or_alias_needs_the_token_like_opus_does(
+    _private_home: Path, agents: Path, model: str
+) -> None:
+    set_probe(_private_home)
+    set_mode(_private_home, "block")
+    code, out, _ = guard(_private_home, agents, dispatch(model=model))
+    assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "unknown-model" in reason(out) or "unknown model" in reason(out)
+    assert model not in out, "the raw value is never echoed"
+    row = read_log(_private_home)[0]
+    assert row["rules"] == ["unknown-model"] and row["model"] == "unknown"
+    ok = dispatch(model=model, prompt="safo local run. OPUS-APPROVED: he said so")
+    assert guard(_private_home, agents, ok)[1] == "" and read_log(_private_home)[-1]["decision"] == "allow"
+
+
+def test_an_unknown_model_only_warns_in_warn_mode_and_a_known_model_is_not_flagged(
+    _private_home: Path, agents: Path
+) -> None:
+    set_probe(_private_home)
+    assert read_after(_private_home, agents, dispatch(model="inherit"))["decision"] == "warn"
+    assert read_after(_private_home, agents, dispatch(model="sonnet"))["rules"] == []
+    assert read_after(_private_home, agents, dispatch(model=None))["rules"] == ["no-model"]
 
 
 # -- guard rule 2: the approval token for a model that needs the maintainer's OK -----------------------------
@@ -800,10 +833,14 @@ def test_the_final_conflict_check_runs_just_before_replacement(
     target.write_text("{}")
 
     def edit_then_write(
-        path: Path, text: str, mode: int = 0o600, before_replace: Callable[[], None] | None = None
+        path: Path,
+        text: str,
+        mode: int = 0o600,
+        before_replace: Callable[[], None] | None = None,
+        check_dir: bool = True,
     ) -> None:
         target.write_text('{"external":"keep"}')
-        real(path, text, mode, before_replace)
+        real(path, text, mode, before_replace, check_dir)
 
     monkeypatch.setattr("safo.modes.hooks.write_text", edit_then_write)
     code, _, err = hooks("install", "--settings", str(target), home=_private_home)
@@ -1582,3 +1619,87 @@ def test_a_session_start_prunes_probe_files_nobody_has_touched_for_a_week_and_no
     assert hooks("probe", "--agents", str(agents), home=_private_home)[0] == 0
     assert not any(p.exists() for p in old)
     assert all(p.exists() for p in keep[:3]) and keep[3].exists() and (folder / "probe-link.json").is_symlink()
+
+
+# -- the approval token is a speed bump, and every place that mentions it says so ------------------------------
+
+
+@pytest.mark.parametrize("mode", ["warn", "block"])
+@pytest.mark.parametrize("model", ["opus", "inherit"])
+def test_the_denial_and_the_warning_say_the_token_is_not_proof_of_approval(
+    _private_home: Path, agents: Path, mode: str, model: str
+) -> None:
+    set_mode(_private_home, mode)
+    text = reason(guard(_private_home, agents, dispatch(model=model))[1]).lower()
+    assert "not proof of approval" in text and "speed bump" in text
+
+
+def test_the_docs_and_the_readme_state_plainly_that_the_token_is_forgeable_and_name_the_roadmap() -> None:
+    root = Path(__file__).resolve().parent.parent
+    docs = (root / "docs" / "hooks.md").read_text().lower()
+    assert "not proof of" in docs and "forge" in docs and "prompt-injected" in docs
+    assert "known limits" in docs and "signed" in docs and "future work" in docs
+    readme = (root / "README.md").read_text().lower()
+    assert "approval token" in readme and "not proof" in readme
+
+
+# -- the installer revalidates the identity of settings.json, not only its bytes --------------------------------
+
+
+def _swap_inode_keeping_the_bytes(target: Path) -> None:
+    """What another editor does: write the same bytes to a new file and rename it over the target."""
+    twin = target.with_name("twin.json")
+    twin.write_bytes(target.read_bytes())
+    twin.replace(target)
+
+
+def _install_with(monkeypatch: pytest.MonkeyPatch, during: Callable[[Path], None]) -> None:
+    import safo.modes.hooks as hooks_mode
+
+    real = hooks_mode.write_text
+
+    def racing(path: Path, text: str, *args: Any, before_replace: Callable[[], None] | None = None, **kw: Any) -> None:
+        def intercept() -> None:
+            during(path)
+            assert before_replace is not None
+            before_replace()
+
+        real(path, text, *args, before_replace=intercept, **kw)
+
+    monkeypatch.setattr(hooks_mode, "write_text", racing)
+
+
+def test_an_inode_swapped_in_with_identical_bytes_before_the_replace_aborts_the_install(
+    _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo.modes.hooks import install_settings
+
+    settings = _private_home / "settings.json"
+    settings.write_text('{"model": "sonnet"}\n')
+    before = settings.read_bytes()
+    _install_with(monkeypatch, _swap_inode_keeping_the_bytes)
+    with pytest.raises(ConfigError, match="settings changed while installing"):
+        install_settings(settings, "safo hooks probe", "safo hooks guard")
+    assert settings.read_bytes() == before, "the file another editor made is not clobbered"
+    assert not list(_private_home.glob(".settings.json.*")), "no temp file or backup is left behind"
+
+
+def test_a_touch_that_changes_only_the_mtime_also_aborts_the_install(
+    _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo.modes.hooks import install_settings
+
+    settings = _private_home / "settings.json"
+    settings.write_text('{"model": "sonnet"}\n')
+    _install_with(monkeypatch, lambda path: os.utime(path, ns=(1, 1)))
+    with pytest.raises(ConfigError, match="settings changed while installing"):
+        install_settings(settings, "safo hooks probe", "safo hooks guard")
+
+
+def test_an_untouched_settings_file_still_installs_with_the_identity_check_in_place(_private_home: Path) -> None:
+    from safo.modes.hooks import install_settings
+
+    settings = _private_home / "settings.json"
+    settings.write_text('{"model": "sonnet"}\n')
+    assert install_settings(settings, "safo hooks probe", "safo hooks guard") is True
+    assert "safo hooks guard" in settings.read_text()

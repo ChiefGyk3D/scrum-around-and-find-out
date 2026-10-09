@@ -91,7 +91,8 @@ def main(
     except SystemExit as stop:
         # argparse exits 2 on a bad flag, and a host reads exit 2 from a hook as "block this". A hook that cannot even
         # parse its own command line (a changed install, an older safo) fails open, visibly, like every other failure.
-        event = hooks.hook_event(argv)
+        # The installed entrypoint passes no list, so the host's own command line is sys.argv.
+        event = hooks.hook_event(sys.argv[1:] if argv is None else argv)
         if event is None or not stop.code:
             raise
         hooks.diagnostic(LocalContext(out, env, clock), "input", event)
