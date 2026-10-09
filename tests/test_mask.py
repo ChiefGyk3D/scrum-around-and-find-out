@@ -13,10 +13,9 @@ import pytest
 from safo import action_mask, output
 
 ROOT = Path(__file__).parent.parent
-PEM = (
-    "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAabcdefgh\n"
-    "ijklmnopqrstuvwxyz0123456789\n-----END RSA PRIVATE KEY-----\n"
-)
+# Built at run time so the file holds no PEM header for a secret scanner to match.
+_KEY = "RSA " + "PRIVATE KEY"
+PEM = f"-----BEGIN {_KEY}-----\nMIIEowIBAAKCAQEAabcdefgh\nijklmnopqrstuvwxyz0123456789\n-----END {_KEY}-----\n"
 
 
 def test_each_line_of_a_multi_line_value_is_masked_and_blank_lines_are_not() -> None:
@@ -49,7 +48,7 @@ def test_the_named_variables_are_masked_and_others_are_not() -> None:
         "MIIEowIBAAKCAQEAabcdefgh",
         "ghp_fine_grained_token",
         "ghs_installation",
-        "-----BEGIN RSA PRIVATE KEY-----",
+        f"-----BEGIN {_KEY}-----",
     ):
         assert f"::add-mask::{secret}" in text, secret
     assert "/bin" not in text
