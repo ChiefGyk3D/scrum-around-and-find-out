@@ -50,3 +50,19 @@ untouched for a week are removed when a session starts. The mode lives in `~/.co
 Run `safo hooks install --dry-run --settings /tmp/try.json` first. Start in `warn`, read `safo hooks status`, then
 switch to `block`. Before recommending `block`, run the disposable real-session smoke test listed in the plan (Task
 T9h, step 5): fixture tests cannot show that a real Claude Code session displays the warning or honours a denial.
+
+## Where the local files may live
+
+Under GitHub Actions the agents file, the local override and the outcomes log are refused when they lie inside
+`$GITHUB_WORKSPACE`, by the path as written or after following links, and every explicit path is refused when
+`GITHUB_WORKSPACE` is unset; only the home defaults remain. Accepted residual: outside Actions, an explicit `--agents`,
+`--log` or `$SAFO_AGENTS` naming a file in the current directory is the user's own deliberate choice and is allowed
+(the current directory is never searched on its own).
+
+## Endpoint destinations
+
+An Ollama endpoint may be loopback or a private LAN address. Link-local, unspecified, multicast and cloud-metadata
+addresses (including IPv4-mapped IPv6 and decimal, octal and hex spellings) are refused when `agents.yaml` is loaded
+and again at connect time. A name is resolved once, every address it returns is checked, and the connection goes to the
+checked address with the original `Host` header, so a DNS answer that changes between the check and the connection has
+no effect.
