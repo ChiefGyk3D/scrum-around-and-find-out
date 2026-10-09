@@ -100,6 +100,7 @@ def ensure_dir(folder: Path, check_dir: bool = True) -> None:
             os.mkdir(created, 0o700)
         except FileExistsError:
             continue
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- 0o700 is owner-only; a directory needs the x bit
         os.chmod(created, 0o700)
     if check_dir and not trusted_dir(folder):
         raise PermissionError(f"{folder.name}: not owned by this user, or writable by others")
