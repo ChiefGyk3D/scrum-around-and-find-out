@@ -72,7 +72,10 @@ def test_a_step_output_is_one_line_named_without_an_equals_sign(tmp_path: Path) 
     output.set_output(str(target), "repositories", "a,b")
     output.set_output(str(target), "second", "c")
     assert target.read_text() == "repositories=a,b\nsecond=c\n"
-    for name, value in (("n", "a\nrepositories=evil"), ("n", "a\rb"), ("a=b", "v"), ("a\nb", "v")):
+    hostile = [("n", "a\nrepositories=evil"), ("n", "a\rb"), ("a=b", "v"), ("a\nb", "v"), ("a\rb", "v"), ("", "v")]
+    hostile += [("a\x00b", "v"), ("n", "a\x00b"), ("a\tb", "v"), ("n", "a\x1bb"), ("a\x7fb", "v"), ("n", "a\u2028b")]
+    hostile += [("a\u2029b", "v"), ("a\x85b", "v"), ("n", "\x85")]
+    for name, value in hostile:
         with pytest.raises(ValueError, match="one line"):
             output.set_output(str(target), name, value)
     assert target.read_text() == "repositories=a,b\nsecond=c\n"

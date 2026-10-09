@@ -150,12 +150,14 @@ def test_a_status_body_file_must_stay_inside_the_workspace(path: str) -> None:
 # -- app-owner: GYST issue 139 -------------------------------------------------------------------------------------
 
 
-def test_a_foreign_app_owner_needs_a_public_repository() -> None:
-    refused("public", APP_OWNER="other-org", REPO_PRIVATE="true")
-    refused("public", APP_OWNER="other-org", REPO_PRIVATE="")
-    refused("public", APP_OWNER="other-org", REPO_PRIVATE="<unset>")
-    refused("public", APP_OWNER="other-org", REPO_PRIVATE="TRUE")
-    action_preflight.check(env(APP_OWNER="other-org", REPO_PRIVATE="false"))
+def test_a_foreign_app_owner_needs_a_public_repository(tmp_path: Path) -> None:
+    board_with(tmp_path, [{"owner": "other-org", "name": "theirs"}])
+    ws = {"SAFO_BOARD": "b.yaml", "GITHUB_WORKSPACE": str(tmp_path)}
+    refused("public", **ws, APP_OWNER="other-org", REPO_PRIVATE="true")
+    refused("public", **ws, APP_OWNER="other-org", REPO_PRIVATE="")
+    refused("public", **ws, APP_OWNER="other-org", REPO_PRIVATE="<unset>")
+    refused("public", **ws, APP_OWNER="other-org", REPO_PRIVATE="TRUE")
+    action_preflight.check(env(**ws, APP_OWNER="other-org", REPO_PRIVATE="false"))
 
 
 def test_the_owner_comparison_ignores_case_and_a_same_owner_needs_no_public_repository() -> None:
@@ -309,7 +311,25 @@ def test_only_the_repositories_of_the_token_owner_are_listed(tmp_path: Path) -> 
     assert resolved(**ws) == "one"
     # another account's installation is limited to the repositories the board lists under that account
     assert resolved(**ws, APP_OWNER="elsewhere", REPO_PRIVATE="false") == "two"
-    assert resolved(**ws, APP_OWNER="third", REPO_PRIVATE="false") == ""
+    refused("lists no repository", **ws, APP_OWNER="third", REPO_PRIVATE="false")
+
+
+def test_a_foreign_owner_with_no_listed_repository_is_refused_never_minted_installation_wide() -> None:
+    refused("lists no repository", APP_OWNER="other-org", REPO_PRIVATE="false")
+    refused("installation-wide", APP_OWNER="other-org", REPO_PRIVATE="false")
+
+
+def test_an_explicit_list_is_refused_when_the_board_lists_none_for_the_owner_unless_it_is_the_calling_repository(
+    tmp_path: Path,
+) -> None:
+    board_with(tmp_path, [])
+    ws = {"SAFO_BOARD": "b.yaml", "GITHUB_WORKSPACE": str(tmp_path)}
+    assert resolved(**ws, REPOSITORIES="widgets") == "widgets"
+    assert resolved(**ws, REPOSITORIES="WIDGETS") == "widgets"
+    refused("not listed in the board", **ws, REPOSITORIES="other")
+    refused("not listed in the board", **ws, REPOSITORIES="widgets,other")
+    # the calling repository belongs to acme, not to the owner the token is minted for
+    refused("lists no repository", **ws, APP_OWNER="other-org", REPO_PRIVATE="false", REPOSITORIES="widgets")
 
 
 def test_the_board_less_run_is_scoped_to_the_calling_repository() -> None:
@@ -386,3 +406,19 @@ def test_every_real_status_state_passes(state: str) -> None:
 
 def test_the_status_state_is_only_a_status_input() -> None:
     action_preflight.check(env(SAFO_MODE="audit", SAFO_STATUS_STATE="BOGUS"))
+
+
+# -- fork pull requests never carry a literal credential ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("kw", [{"HAS_PRIVATE_KEY": "true"}, {"HAS_PRIVATE_KEY": "false", "HAS_TOKEN": "true"}])
+def test_a_literal_key_or_token_on_a_fork_pull_request_is_refused(kw: dict[str, str]) -> None:
+    extra = {"SAFO_ALLOW_TOKEN_FOR_ORG": "true"}
+    refused("fork", **kw, **extra, EVENT_NAME="pull_request", IS_FORK="true")
+    action_preflight.check(env(**kw, **extra, EVENT_NAME="pull_request", IS_FORK="false"))
+    action_preflight.check(env(**kw, **extra, EVENT_NAME="push", IS_FORK="true"))
+    action_preflight.check(env(**kw, **extra))
+
+
+def test_a_fork_pull_request_may_still_validate() -> None:
+    action_preflight.check(env(SAFO_MODE="validate", EVENT_NAME="pull_request", IS_FORK="true"))

@@ -134,3 +134,94 @@ def test_the_control_run_shows_the_same_workspace_does_hijack_a_plain_python(wor
     env = {"VENV": str(venv), "PYTHONPATH": str(workspace), "PRIVATE_KEY": PEM}
     plain = bash('"$VENV/bin/python" -m safo.action_mask', workspace, env)
     assert plain.returncode != 0 and list(workspace.rglob("MARKER"))
+
+
+# -- the install step: a fresh, unpredictable venv, verified before anything runs in it ---------------------------
+
+FAKE_PIP = (
+    'P="$(echo "$VENV"/lib/python*/site-packages)"; cp -R "$FAKE_SRC/yaml" "$P/yaml"; '
+    '[ ! -d "$FAKE_SRC/_yaml" ] || cp -R "$FAKE_SRC/_yaml" "$P/_yaml"; mkdir "$P/PyYAML-6.0.3.dist-info"'
+)
+
+
+def install_script() -> str:
+    """The install step's script with only the network line replaced: the hash-locked pip install becomes a copy of
+    the test environment's PyYAML, so it can run offline. The venv creation, checks and copy are the Action's own."""
+    lines = script("Install SAFO").splitlines()
+    out = [FAKE_PIP if "-m pip install" in line else line for line in lines]
+    assert out != lines
+    return "\n".join(out)
+
+
+def run_install(
+    tmp_path: Path, runner_temp: Path, *, path_prefix: str = ""
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    import yaml
+
+    out = tmp_path / f"out-{len(list(tmp_path.glob('out-*')))}"
+    env = {
+        "PATH": f"{path_prefix}{Path(sys.executable).parent}:/usr/bin:/bin",
+        "ACTION_PATH": str(ROOT),
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_OUTPUT": str(out),
+        "FAKE_SRC": str(Path(yaml.__file__).parent.parent),
+        "STEP_SCRIPT": install_script(),
+    }
+    runner_temp.mkdir(exist_ok=True)
+    return bash('eval "$STEP_SCRIPT"', tmp_path, env), out
+
+
+def venv_of(out: Path) -> Path:
+    line = out.read_text().strip()
+    assert line.startswith("venv=") and "\n" not in line
+    return Path(line.removeprefix("venv="))
+
+
+def test_two_runs_get_two_different_unpredictable_directories(tmp_path: Path) -> None:
+    rt = tmp_path / "rt"
+    first, out1 = run_install(tmp_path, rt)
+    second, out2 = run_install(tmp_path, rt)
+    assert first.returncode == 0 and second.returncode == 0, first.stderr + second.stderr
+    a, b = venv_of(out1), venv_of(out2)
+    assert a != b and a.parent.parent == rt == b.parent.parent
+    assert a.parent.name.startswith("safo.") and len(a.parent.name) == len("safo.") + 10
+    assert (a / "bin" / "python").exists()
+
+
+def test_a_venv_pre_planted_at_the_old_fixed_path_is_never_executed(tmp_path: Path, workspace: Path) -> None:
+    rt = tmp_path / "rt"
+    marker = tmp_path / "PLANTED-RAN"
+    site = rt / "safo-venv" / "lib" / "python3.13" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "evil.pth").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('ran')\n")
+    (site / "sitecustomize.py").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('ran')\n")
+    done, out = run_install(tmp_path, rt)
+    assert done.returncode == 0, done.stderr
+    venv = venv_of(out)
+    assert venv.name == "venv" and venv != rt / "safo-venv"
+    for step_name, extra in (("Mask the credentials", {"PRIVATE_KEY": PEM}),):
+        ran = run_step(step_name, workspace, venv, extra)
+        assert ran.returncode == 0, ran.stderr
+    assert not marker.exists() and (site / "evil.pth").exists()
+
+
+def test_a_file_planted_in_the_new_venv_is_detected_and_nothing_is_published(tmp_path: Path) -> None:
+    """A `python` that plants a sitecustomize into the venv it just made: the step refuses before running the venv."""
+    marker = tmp_path / "PLANTED-RAN"
+    wrap = tmp_path / "wrap"
+    wrap.mkdir()
+    real = sys.executable
+    (wrap / "python").write_text(
+        "#!/bin/bash\n"
+        f'{real!r} "$@"; rc=$?\n'
+        'if [ "$3" = "venv" ]; then\n'
+        '  for d in "${@: -1}"/lib/python*/site-packages; do\n'
+        f"    echo \"import pathlib; pathlib.Path('{marker}').write_text('ran')\" > \"$d/sitecustomize.py\"\n"
+        "  done\n"
+        "fi\n"
+        "exit $rc\n"
+    )
+    (wrap / "python").chmod(0o755)
+    done, out = run_install(tmp_path, tmp_path / "rt", path_prefix=f"{wrap}:")
+    assert done.returncode != 0 and "sitecustomize.py" in done.stderr + done.stdout
+    assert not marker.exists() and (not out.exists() or out.read_text() == "")

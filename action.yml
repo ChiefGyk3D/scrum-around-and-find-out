@@ -107,22 +107,28 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
-    - name: Install SAFO into its own venv (hash-pinned)
+    - name: Install SAFO into its own fresh venv (hash-pinned)
+      id: install
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-        VENV: ${{ runner.temp }}/safo-venv
+        RUNNER_TEMP: ${{ runner.temp }}
       run: |
         set -euo pipefail
-        python -I -m venv "$VENV"
+        D="$(mktemp -d "$RUNNER_TEMP/safo.XXXXXXXXXX")"
+        VENV="$D/venv"
+        python -I -m venv --clear "$VENV"
+        python -I "$ACTION_PATH/src/safo/venv_check.py" created "$VENV"
         "$VENV/bin/python" -I -m pip install --disable-pip-version-check --no-deps --require-hashes -r "$ACTION_PATH/requirements.txt"
         purelib="$("$VENV/bin/python" -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
         cp -R "$ACTION_PATH/src/safo" "$purelib/safo"
+        python -I "$ACTION_PATH/src/safo/venv_check.py" installed "$VENV"
+        echo "venv=$VENV" >> "$GITHUB_OUTPUT"
 
     - name: Mask the credentials
       shell: bash
       env:
-        VENV: ${{ runner.temp }}/safo-venv
+        VENV: ${{ steps.install.outputs.venv }}
         PRIVATE_KEY: ${{ inputs.private-key }}
         TOKEN: ${{ inputs.token }}
       run: |
@@ -133,7 +139,7 @@ runs:
       id: preflight
       shell: bash
       env:
-        VENV: ${{ runner.temp }}/safo-venv
+        VENV: ${{ steps.install.outputs.venv }}
         GITHUB_WORKSPACE: ${{ github.workspace }}
         SAFO_MODE: ${{ inputs.mode }}
         SAFO_BOARD: ${{ inputs.board-file }}
@@ -182,7 +188,7 @@ runs:
       if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
       shell: bash
       env:
-        VENV: ${{ runner.temp }}/safo-venv
+        VENV: ${{ steps.install.outputs.venv }}
         PRIVATE_KEY: ${{ steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY }}
       run: |
         set -euo pipefail
@@ -218,7 +224,7 @@ runs:
       if: ${{ steps.app.outputs.token != '' || steps.app_legacy.outputs.token != '' }}
       shell: bash
       env:
-        VENV: ${{ runner.temp }}/safo-venv
+        VENV: ${{ steps.install.outputs.venv }}
         MINTED_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token }}
       run: |
         set -euo pipefail
@@ -227,7 +233,7 @@ runs:
     - name: Run safo
       shell: bash
       env:
-        VENV: ${{ runner.temp }}/safo-venv
+        VENV: ${{ steps.install.outputs.venv }}
         SAFO_MODE: ${{ inputs.mode }}
         SAFO_BOARD: ${{ inputs.board-file }}
         SAFO_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token || inputs.token }}

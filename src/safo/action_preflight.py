@@ -113,11 +113,12 @@ def check_repositories(text: str) -> list[str]:
 
 
 def token_scope(env: Mapping[str, str], board: Board, explicit: list[str]) -> str:
-    """The repositories the installation token is limited to, comma separated, or "" for the whole installation.
+    """The repositories the installation token is limited to, comma separated; never empty.
 
     Only repositories owned by the account the token is minted for can be named. Default: those board.yaml lists
     (the calling repository in the board-less mode); with none listed, the calling repository when it belongs to
-    that account. An explicit list must be a subset of what the board lists.
+    that account. An explicit list must be a subset of what the board lists, or, when it lists none, the calling
+    repository itself. If nothing can be named the token is not minted: it is never installation-wide.
     """
     repo_owner = env.get("REPOSITORY_OWNER", "")
     owner = (env.get("APP_OWNER") or repo_owner).lower()
@@ -125,17 +126,32 @@ def token_scope(env: Mapping[str, str], board: Board, explicit: list[str]) -> st
     for repo in board.repositories:
         if repo.owner.lower() == owner:
             listed.setdefault(repo.name.lower(), repo.name)
+    calling = env.get("GITHUB_REPOSITORY", "").partition("/")[2]
+    own = owner == repo_owner.lower() and bool(calling)  # the calling repository belongs to the token's owner
     if explicit:
         chosen: dict[str, str] = {}
         for name in explicit:
-            if listed and name.lower() not in listed:
+            if listed:
+                if name.lower() not in listed:
+                    raise ConfigError(f"repositories: {shown(name)} is not listed in the board")
+            elif not (own and name.lower() == calling.lower()):
+                if not own:
+                    raise ConfigError(no_repository_message(owner))
                 raise ConfigError(f"repositories: {shown(name)} is not listed in the board")
-            chosen.setdefault(name.lower(), listed.get(name.lower(), name))
+            chosen.setdefault(name.lower(), listed[name.lower()] if listed else calling)
         return ",".join(chosen.values())
     if listed:
         return ",".join(listed.values())
-    calling = env.get("GITHUB_REPOSITORY", "").partition("/")[2]
-    return calling if owner == repo_owner.lower() and calling else ""
+    if own:
+        return calling
+    raise ConfigError(no_repository_message(owner))
+
+
+def no_repository_message(owner: str) -> str:
+    return (
+        f"the board lists no repository owned by {shown(owner)}, whose installation the token would be minted for; "
+        "an installation-wide token is never minted, so list the repositories in board.yaml"
+    )
 
 
 def check_status_state(env: Mapping[str, str]) -> None:
@@ -211,7 +227,10 @@ def check(env: Mapping[str, str]) -> str:
         raise ConfigError("the doppler inputs supply an App key; they cannot be combined with the token input")
     if from_doppler and has_key:
         raise ConfigError("pass the App key as private-key or from Doppler, not both")
-    if from_doppler and boolean(env, "IS_FORK", "fork flag") and env.get("EVENT_NAME") == "pull_request":
+    fork_pull_request = boolean(env, "IS_FORK", "fork flag") and env.get("EVENT_NAME") == "pull_request"
+    if fork_pull_request and (has_key or has_token):
+        raise ConfigError("a pull request from a fork never receives a literal private-key or token input")
+    if from_doppler and fork_pull_request:
         raise ConfigError("a pull request from a fork never receives the App key: no Doppler fetch")
     if not (has_key or has_token or from_doppler):
         raise ConfigError(

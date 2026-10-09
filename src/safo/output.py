@@ -66,9 +66,10 @@ def mask(stream: TextIO, value: str) -> None:
 
 
 def set_output(path: str, name: str, value: str) -> None:
-    """Append `name=value` to the step output file the runner gave us. The value may not carry a line break, so it
-    can never start a second output; the callers hold names that already passed a strict pattern."""
-    if "\n" in value or "\r" in value or "=" in name or "\n" in name:
+    """Append `name=value` to the step output file the runner gave us. Neither may carry a control character or a
+    line or paragraph separator (a carriage return is a line break to some readers), and the name may not be empty or
+    hold `=`, so nothing can start a second output."""
+    if not name or "=" in name or inner(name) != name or inner(value) != value:
         raise ValueError("a step output is one line")
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(f"{name}={value}\n")

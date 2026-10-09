@@ -199,7 +199,7 @@ def test_every_script_is_strict_and_quotes_what_it_expands() -> None:
     for s in STEPS:
         if "run" in s:
             assert "set -euo pipefail" in s["run"], s["name"]
-            assert re.findall(r'(?<!")\$[A-Z_]+', s["run"]) == [], s["name"]
+            assert re.findall(r'(?<![="])\$[A-Z_]+', s["run"]) == [], s["name"]
 
 
 def test_no_secrets_context_and_no_literal_key_anywhere() -> None:
@@ -272,7 +272,8 @@ def test_the_token_goes_to_python_in_the_environment_with_its_kind() -> None:
 def test_the_minted_token_is_never_passed_on_a_command_line_or_written_to_an_output_file() -> None:
     for s in STEPS:
         script = s.get("run", "")
-        assert "GITHUB_OUTPUT" not in script and "GITHUB_ENV" not in script, s["name"]
+        assert "GITHUB_ENV" not in script, s.get("name")
+        assert ("GITHUB_OUTPUT" in script) == (s.get("name", "").startswith("Install SAFO")), s.get("name")
 
 
 def test_nothing_builds_a_python_path_and_every_python_is_isolated_in_the_actions_own_venv() -> None:
@@ -280,28 +281,39 @@ def test_nothing_builds_a_python_path_and_every_python_is_isolated_in_the_action
     for s in STEPS:
         for line in s.get("run", "").splitlines():
             if "python" in line:
-                assert '"$VENV/bin/python" -I ' in line or line.strip().startswith("python -I -m venv"), (
+                assert '"$VENV/bin/python" -I ' in line or line.strip().startswith("python -I "), (
                     s["name"],
                     line,
                 )
     for part in (
-        "Install SAFO",
         "Mask the credentials",
         "Preflight",
         "Mask the Doppler",
         "Mask the installation",
         "Run safo",
     ):
-        assert step(part)["env"]["VENV"] == "${{ runner.temp }}/safo-venv", part
+        assert step(part)["env"]["VENV"] == "${{ steps.install.outputs.venv }}", part
 
 
-def test_safo_is_installed_into_the_venv_from_the_action_path_with_the_hash_lock() -> None:
-    script = step("Install SAFO")["run"]
-    assert 'python -I -m venv "$VENV"' in script
+def test_safo_is_installed_into_a_fresh_unpredictable_venv_checked_before_and_after() -> None:
+    install = step("Install SAFO")
+    script = install["run"]
+    assert install.get("id") == "install"
+    assert 'D="$(mktemp -d "$RUNNER_TEMP/safo.XXXXXXXXXX")"' in script and 'VENV="$D/venv"' in script
+    assert 'python -I -m venv --clear "$VENV"' in script
+    assert "safo-venv" not in TEXT
     assert '"$VENV/bin/python" -I -m pip install --disable-pip-version-check --no-deps --require-hashes' in script
     assert '-r "$ACTION_PATH/requirements.txt"' in script
     assert '"$ACTION_PATH/src/safo" "$purelib/safo"' in script
-    assert step("Install SAFO")["env"]["ACTION_PATH"] == "${{ github.action_path }}"
+    created = 'python -I "$ACTION_PATH/src/safo/venv_check.py" created "$VENV"'
+    installed = 'python -I "$ACTION_PATH/src/safo/venv_check.py" installed "$VENV"'
+    publish = 'echo "venv=$VENV" >> "$GITHUB_OUTPUT"'
+    assert script.index("-m venv") < script.index(created) < script.index("-m pip install")
+    assert script.index("-m pip install") < script.index("cp -R") < script.index(installed) < script.index(publish)
+    assert install["env"]["ACTION_PATH"] == "${{ github.action_path }}"
+    assert install["env"]["RUNNER_TEMP"] == "${{ runner.temp }}"
+    # nothing in the venv runs before the first check: the check itself uses the interpreter that made the venv
+    assert script.index(created) < script.index('"$VENV/bin/python"')
 
 
 def test_the_status_and_mode_arguments_are_quoted_array_elements() -> None:
