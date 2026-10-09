@@ -16,12 +16,13 @@ from pathlib import Path, PurePosixPath
 from safo import compat, credentials, output
 from safo.credentials import APP, PAT
 from safo.errors import ConfigError, MalformedDataError, SafoError
-from safo.modes import load_all
+from safo.modes import LocalMode, load_all
 from safo.modes.status import STATES
 from safo.schema import LOGIN, REPO_NAME, Board, load_board
 from safo.values import whole_number
 
-MODES = frozenset(load_all()) | {"validate"}
+# Local modes (usage, route, outcome, local, hooks, ...) read files on a person's machine; the Action runs none of them.
+MODES = frozenset(name for name, mode in load_all().items() if not isinstance(mode, LocalMode)) | {"validate"}
 BOARD_LESS_MODES = frozenset({"sync", "reconcile", "status", "validate"})  # a board with no fields cannot be audited
 READS = (
     "SAFO_MODE",

@@ -48,10 +48,22 @@ def test_the_baseline_app_audit_passes() -> None:
     action_preflight.check(env())
 
 
-def test_the_modes_it_knows_are_the_modes_that_exist_plus_validate() -> None:
-    from safo.modes import load_all
+def test_the_modes_it_knows_are_the_board_modes_that_exist_plus_validate() -> None:
+    from safo.modes import LocalMode, load_all
 
-    assert frozenset(load_all()) | {"validate"} == action_preflight.MODES
+    board_modes = {name for name, mode in load_all().items() if not isinstance(mode, LocalMode)}
+    assert board_modes and board_modes | {"validate"} == action_preflight.MODES
+
+
+def test_every_local_mode_is_outside_what_the_action_accepts() -> None:
+    """A local mode reads files on a person's machine (agents.yaml, a hook's state); the Action has none of them."""
+    from safo.modes import LocalMode, load_all
+
+    local = {name for name, mode in load_all().items() if isinstance(mode, LocalMode)}
+    assert {"usage", "route", "outcome", "local"} <= local
+    assert not local & action_preflight.MODES
+    for name in sorted(local):
+        refused("mode", SAFO_MODE=name)
 
 
 @pytest.mark.parametrize("mode", ["", "agents_status", "AUDIT", "audit; id", "sync\n", "dispatch"])
