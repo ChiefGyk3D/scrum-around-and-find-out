@@ -28,7 +28,7 @@ Checked 2026-10-08.
 | `safo usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built on branch `build/group4`, not merged |
 | `safo route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built on branch `build/group4`, not merged |
 | `safo outcome add` and `safo usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built on branch `build/group4`, not merged |
-| `safo local run` | Planned |
+| `safo local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `safo status --post` | Built on branch `build/group4`, not merged |
 | `safo hooks` | Planned |
 | `agents-status` | Planned |
 | Generated docs and the wiki mirror | Planned (the wiki is hand-written until then) |
