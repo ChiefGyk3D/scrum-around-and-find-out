@@ -15,3 +15,5 @@ wiki-out/
 board.local.yaml
 agents.local.yaml
 /outcomes.jsonl
+privacy-terms*
+*.privacy-terms

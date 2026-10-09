@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from privacy import EXCLUDED, ROOT, findings, scanned_files
+from privacy import EXCLUDED, ROOT, extra_patterns, findings, scanned_files
 
 
 @pytest.mark.parametrize("path", scanned_files(), ids=lambda p: str(p.relative_to(ROOT)))
@@ -121,3 +121,10 @@ def test_more_private_shapes_are_caught(text: str, category: str) -> None:
 
 def test_the_grid_square_placeholder_alone_passes() -> None:
     assert findings("FN31pr") == []
+
+
+def test_a_terms_file_inside_the_repository_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    inside = ROOT / "privacy-terms.txt"
+    monkeypatch.setenv("SAFO_PRIVACY_EXTRA_FILE", str(inside))
+    with pytest.raises(RuntimeError, match="outside"):
+        extra_patterns()
