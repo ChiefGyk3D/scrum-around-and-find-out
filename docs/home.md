@@ -15,6 +15,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [agents-status](agents-status.md): one read-only view of what every agent is doing.
 - [Lessons](lessons.md): what went wrong, the evidence, and the rule the code enforces now.
 - [Adoption](adoption.md): create an App, write a `board.yaml`, run it.
+- [Privacy check](privacy.md): what the public files are scanned for, and how to add your own private terms safely.
 
 The source of these pages is the `docs/` directory of the repository. The wiki is a generated mirror: edit the
 files, not the wiki.

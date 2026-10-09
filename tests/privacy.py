@@ -73,7 +73,10 @@ def extra_patterns() -> dict[str, str]:
     path = os.environ.get("SAFO_PRIVACY_EXTRA_FILE", "")
     if not path:
         return {}
-    lines = [x for x in Path(path).read_text().splitlines() if x.strip() and not x.startswith("#")]
+    resolved = Path(path).expanduser().resolve()
+    if resolved.is_relative_to(ROOT.resolve()):
+        raise RuntimeError("SAFO_PRIVACY_EXTRA_FILE points inside the repository; keep the terms file outside it")
+    lines = [x for x in resolved.read_text().splitlines() if x.strip() and not x.startswith("#")]
     return {f"private term {i + 1}": line for i, line in enumerate(lines)}
 
 
