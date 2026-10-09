@@ -57,12 +57,12 @@ def test_a_group_or_world_writable_state_folder_degrades_the_guard_visibly_and_i
 
 def test_an_untrusted_state_folder_is_not_read_for_the_probe_state_or_the_log(_private_home: Path) -> None:
     set_probe(_private_home, reachable=True)
-    assert guard(_private_home)[0] == 0
-    assert len(read_log(_private_home)) == 1
+    assert guard(_private_home, dispatch(model="sonnet", prompt="no local step named"))[0] == 0
+    assert read_log(_private_home)[0]["rules"] == ["no-local-step"], "while trusted, the saved probe state is used"
     state_folder(_private_home).chmod(0o777)
     # The reachable probe saved there is ignored: the local-step rule is off (state unknown), not applied from it.
     out = guard(_private_home, dispatch(model="sonnet", prompt="no local step named"))[1]
-    assert "no-local-step" not in out
+    assert "no local step" not in out, "the rule is off, not applied from the untrusted folder's saved state"
     assert guardlog.read_log(state_folder(_private_home) / "log.jsonl") == []
     status = hooks("status", home=_private_home)[1]
     assert "health: degraded" in status or "no dispatches logged yet" in status
@@ -118,3 +118,13 @@ def test_a_lock_in_a_folder_the_caller_opts_out_of_checking_still_works(tmp_path
     folder.chmod(0o777)
     with file_lock(folder / "z.lock", check_dir=False):
         pass
+
+
+def test_the_installer_still_works_in_a_shared_folder_such_as_a_temporary_directory(tmp_path: Path) -> None:
+    """The settings file's folder is the user's choice (the docs suggest /tmp); only SAFO's own folders are checked."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    settings = shared / "try.json"
+    assert hooks("install", "--settings", str(settings), home=tmp_path)[0] == 0
+    assert "safo hooks guard" in settings.read_text()
