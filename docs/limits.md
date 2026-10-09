@@ -57,6 +57,9 @@ takes it for a bug that was hidden.
 - **An explicit `--agents`, `--log` or `$SAFO_AGENTS` path in the current directory is the user's own choice.** Outside
   Actions it is allowed, because the person typed it. SAFO never searches the current directory for these files on its own.
   Under Actions an explicit path inside the workspace is refused.
+- **User-supplied directories are not trust-checked.** An outcomes log given with `--log` or `$SAFO_OUTCOMES`, and the
+  settings directory `safo hooks install` is pointed at, are the user's choice; only SAFO's own default directories
+  are checked for being private to the user.
 - **The installer race is narrowed, not closed.** `safo hooks install` checks the identity of `settings.json` again just
   before it replaces the file, but pathname operations cannot make that atomic: a writer can still land between the last
   check and the rename.

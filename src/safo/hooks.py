@@ -253,19 +253,20 @@ APPROVAL_NOTE = (
 )
 
 
-def known_agent(doc: AgentsFile, model: str) -> Agent | None:
-    """The agent a model value names: an exact (case-insensitive) agent model or id, or a full id of that model's
-    family. Anything else, `inherit` and a fork's missing model included, names no agent."""
+def known_agents(doc: AgentsFile, model: str) -> list[Agent]:
+    """Every agent a model value names: an exact (case-insensitive) agent model or id, or a full id of that model's
+    family. Two agents may share a model, so all of them count. Anything else, `inherit` and a fork's missing model
+    included, names none."""
     lowered = model.lower()
     family = FULL_MODEL_ID.fullmatch(lowered)
     wanted = {lowered, family.group(1)} if family else {lowered}
-    return next((a for a in doc.agents if a.model and (a.model.lower() in wanted or a.id.lower() in wanted)), None)
+    return [a for a in doc.agents if a.model and (a.model.lower() in wanted or a.id.lower() in wanted)]
 
 
 def needs_approval(doc: AgentsFile, model: str) -> bool:
-    """True when `model` names an agent that agents.yaml marks approval_required (Opus, in the shipped file)."""
-    agent = known_agent(doc, model)
-    return agent is not None and agent.approval_required
+    """True when `model` names an agent that agents.yaml marks approval_required (Opus, in the shipped file); with
+    several agents on one model, any one of them is enough, so the order of agents.yaml never decides."""
+    return any(a.approval_required for a in known_agents(doc, model))
 
 
 def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bool) -> Verdict:
@@ -275,8 +276,8 @@ def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bo
     raw = raw_model.strip() if isinstance(raw_model, str) else ""
     # A model is explicit only when it names a known agent. `inherit`, garbage and a fork's missing model resolve to
     # the parent's model, which the hook cannot see, so they are treated as if they might be an approval-required one.
-    agent = known_agent(doc, raw) if raw else None
-    unknown = (bool(raw) and agent is None) or (not raw and tool_input.get("subagent_type") in FORK_TYPES)
+    agents = known_agents(doc, raw) if raw else []
+    unknown = (bool(raw) and not agents) or (not raw and tool_input.get("subagent_type") in FORK_TYPES)
     model = raw.lower() if raw.lower() in ("sonnet", "haiku", "opus") else ("unknown" if raw or unknown else "")
     hooks = doc.hooks
     lowered = prompt.lower()
@@ -298,7 +299,7 @@ def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bo
             "from agents.yaml "
             f"(hooks.approval_token) only once he has said yes; {APPROVAL_NOTE}"
         )
-    if agent is not None and agent.approval_required and not token:
+    if any(a.approval_required for a in agents) and not token:
         rules.append(APPROVAL)
         reasons.append(
             f"model {model} needs the maintainer's recorded OK: add the approval token from agents.yaml "

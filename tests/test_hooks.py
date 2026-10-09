@@ -1707,3 +1707,29 @@ def test_an_untouched_settings_file_still_installs_with_the_identity_check_in_pl
     settings.write_text('{"model": "sonnet"}\n')
     assert install_settings(settings, "safo hooks probe", "safo hooks guard") is True
     assert "safo hooks guard" in settings.read_text()
+
+
+# -- two agents sharing a model: approval is required if any of them requires it -----------------------------
+
+
+@pytest.mark.parametrize("model", ["sonnet", "SONNET", "claude-sonnet-4-5", "safe", "gated"])
+@pytest.mark.parametrize("flip", [False, True])
+def test_approval_does_not_depend_on_the_order_of_agents_sharing_a_model(model: str, flip: bool) -> None:
+    from safo.agentsfile import Agent, AgentsFile, Hooks
+    from safo.hooks import check_dispatch, decide
+
+    safe = Agent("safe", "Safe", "claude", "r", model="sonnet", approval_required=False)
+    gated = Agent("gated", "Gated", "claude", "r", model="sonnet", approval_required=True)
+    agents = (gated, safe) if flip else (safe, gated)
+    doc = AgentsFile(agents, (), (), (), hooks=Hooks())
+    if model in ("safe", "gated"):
+        # an id names exactly one agent: only that agent's own flag counts
+        verdict = check_dispatch(doc, {"model": model, "prompt": "ordinary"}, False)
+        assert (verdict.rules == ("approval",)) == (model == "gated")
+        return
+    verdict = check_dispatch(doc, {"model": model, "prompt": "ordinary"}, False)
+    assert verdict.rules == ("approval",) and decide(verdict, "block") == "deny"
+    # the logged model stays the enum: an alias is logged as itself, a full id never is (it logs as unknown)
+    assert verdict.model == ("unknown" if model.startswith("claude-") else "sonnet")
+    token = doc.hooks.approval_token
+    assert check_dispatch(doc, {"model": model, "prompt": f"ordinary {token}"}, False).rules == ()

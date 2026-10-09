@@ -10,7 +10,7 @@ from pathlib import Path
 from safo import outcomes
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
-from safo.localfiles import add_agents_arguments, agents_path, load_agents_for, outcomes_path
+from safo.localfiles import add_agents_arguments, agents_path, load_agents_for, outcomes_is_default, outcomes_path
 from safo.modes import LocalMode, register_local
 
 
@@ -37,7 +37,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if ctx.dry_run:
         ctx.say("dry run: would append outcome; nothing written")
         return EXIT_OK
-    outcomes.append(path, record)
+    outcomes.append(path, record, check_dir=outcomes_is_default(ctx, args))
     ctx.say(f"recorded {record.agent} / {record.shape} in {path}")
     return EXIT_OK
 

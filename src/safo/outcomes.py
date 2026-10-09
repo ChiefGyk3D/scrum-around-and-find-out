@@ -126,13 +126,14 @@ def _read(path: Path) -> bytes:
         raise ConfigError("cannot read outcomes log within resource limits (a regular file, not a link)") from None
 
 
-def append(path: Path, outcome: Outcome) -> None:
+def append(path: Path, outcome: Outcome, check_dir: bool = False) -> None:
     """One line, appended under a lock by rewriting the file atomically (mode 0600). The record is validated first,
-    so a bad one never reaches the file; a symlinked, special or oversize log is refused, never followed."""
+    so a bad one never reaches the file; a symlinked, special or oversize log is refused, never followed. `check_dir` is
+    True for SAFO's own default directory (it must be private to the user); a path the user chose is theirs."""
     validate(json.loads(outcome.to_json()))
     line = (outcome.to_json() + "\n").encode("utf-8")
     try:
-        with file_lock(path.with_name(path.name + ".lock"), check_dir=False):
+        with file_lock(path.with_name(path.name + ".lock"), check_dir=check_dir):
             try:
                 existing = _read(path)
             except ConfigError:
@@ -143,7 +144,7 @@ def append(path: Path, outcome: Outcome) -> None:
                 existing += b"\n"
             if len(existing) + len(line) > MAX_LOG_BYTES:
                 raise ConfigError("outcomes log would exceed its size limit")
-            write_text(path, (existing + line).decode("utf-8"), check_dir=False)
+            write_text(path, (existing + line).decode("utf-8"), check_dir=check_dir)
     except (OSError, TimeoutError, ValueError):
         raise ConfigError("cannot write outcomes log (is it locked, or not a regular file?)") from None
 

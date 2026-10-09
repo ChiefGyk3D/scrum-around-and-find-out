@@ -17,7 +17,7 @@ from safo.agentsfile import AgentsFile
 from safo.bounded import read_bounded
 from safo.context import LocalContext
 from safo.errors import EXIT_DRIFT, EXIT_OK, ConfigError
-from safo.localfiles import add_agents_arguments, load_agents_for, outcomes_path
+from safo.localfiles import add_agents_arguments, load_agents_for, outcomes_is_default, outcomes_path
 from safo.modes import LocalMode, register_local
 from safo.ollama import EndpointUnreachableError, generate, probe
 from safo.routing import probes_by_id, resolve_endpoint
@@ -98,6 +98,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             1,
             note,
         ),
+        check_dir=outcomes_is_default(ctx, args),
     )
     ctx.say(f"-- {note}")
     return EXIT_OK

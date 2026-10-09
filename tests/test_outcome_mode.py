@@ -116,3 +116,23 @@ def test_report_json_is_one_line_and_a_note_never_appears_in_it(_private_home: P
     )
     code, out, _ = cli("usage", "--report", "--json", "--log", str(log), home=_private_home)
     assert code == 0 and out.count("\n") == 1 and "stop-commands" not in out
+
+
+def test_the_default_log_in_a_group_writable_state_dir_is_refused_visibly(_private_home: Path) -> None:
+    state = _private_home / ".local" / "state" / "safo"
+    state.mkdir(parents=True)
+    state.chmod(0o770)
+    code, _, err = cli("outcome", "add", "--agent", "codex", "--shape", "research", home=_private_home)
+    assert code != 0 and "cannot write outcomes log" in err
+    assert not (state / "outcomes.jsonl").exists()
+
+
+def test_an_explicit_log_in_a_group_writable_dir_is_the_users_choice_and_works(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    folder = tmp_path / "shared"
+    folder.mkdir()
+    folder.chmod(0o770)
+    log = folder / "outcomes.jsonl"
+    code, _, _ = cli("outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log), home=_private_home)
+    assert code == 0 and log.is_file()

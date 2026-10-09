@@ -88,3 +88,9 @@ def outcomes_path(ctx: LocalContext, args: argparse.Namespace) -> Path:
     given = args.log or ctx.env.get("SAFO_OUTCOMES", "")
     path = Path(given) if given else ctx.home / ".local" / "state" / "safo" / "outcomes.jsonl"
     return refuse_workspace(path, ctx.env, "the outcomes log", explicit=bool(given))
+
+
+def outcomes_is_default(ctx: LocalContext, args: argparse.Namespace) -> bool:
+    """True when the outcomes log is SAFO's own default path: its directory is trust-checked. A path the user supplied
+    (--log or $SAFO_OUTCOMES) is their choice and is not."""
+    return not (args.log or ctx.env.get("SAFO_OUTCOMES", ""))
