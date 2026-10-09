@@ -12,7 +12,7 @@ from typing import TextIO
 
 from safo import __version__, compat, credentials, output
 from safo.context import Context, LocalContext
-from safo.errors import SafoError
+from safo.errors import ConfigError, SafoError
 from safo.graphql import GRAPHQL_URL, Client
 from safo.modes import LocalMode, load_all, validate
 from safo.modes.reconcile import safe
@@ -29,7 +29,11 @@ def default_client(board: Board, env: Mapping[str, str], dry_run: bool) -> Clien
             "or log in with `gh auth login`"
         )
     credentials.check_for_board(creds, board.project.owner_type, env)
-    return Client(creds.token, env.get("GITHUB_GRAPHQL_URL", GRAPHQL_URL), dry_run=dry_run)
+    url = env.get("GITHUB_GRAPHQL_URL", "").strip() or GRAPHQL_URL
+    if creds.kind == credentials.GH and url != GRAPHQL_URL:
+        # a token read from gh is the caller's own login: it goes to exactly one place, whatever the environment says
+        raise ConfigError(f"a gh token is only sent to {GRAPHQL_URL}; GITHUB_GRAPHQL_URL cannot redirect it")
+    return Client(creds.token, url, dry_run=dry_run)
 
 
 def resolve_board(path: str | None, env: Mapping[str, str]) -> Board:

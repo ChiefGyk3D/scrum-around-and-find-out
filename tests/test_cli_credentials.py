@@ -45,7 +45,7 @@ def test_the_allow_flag_lets_a_pat_through(fake: FakeGitHub) -> None:
 
 def test_the_token_never_reaches_the_output(fake: FakeGitHub) -> None:
     build_world(fake)
-    env = {"SAFO_TOKEN": fake.token, "SAFO_TOKEN_KIND": "gh", "GITHUB_GRAPHQL_URL": fake.url}
+    env = {"SAFO_TOKEN": fake.token, "SAFO_TOKEN_KIND": "app", "GITHUB_GRAPHQL_URL": fake.url}
     code, out, err = run_cli("--board", BOARD, "audit", env=env)
     assert code == 0 and fake.token not in out + err and fake.requests
 
@@ -79,7 +79,7 @@ def test_the_board_less_inputs_drive_a_sync(fake: FakeGitHub, tmp_path: Path) ->
 
 def test_safo_board_in_the_environment_names_the_board(fake: FakeGitHub) -> None:
     build_world(fake)
-    env = {"SAFO_BOARD": BOARD, "SAFO_TOKEN": fake.token, "SAFO_TOKEN_KIND": "gh", "GITHUB_GRAPHQL_URL": fake.url}
+    env = {"SAFO_BOARD": BOARD, "SAFO_TOKEN": fake.token, "SAFO_TOKEN_KIND": "app", "GITHUB_GRAPHQL_URL": fake.url}
     code, out, err = run_cli("audit", env=env)
     assert code == 0 and "audit acme/1" in out, out + err
 

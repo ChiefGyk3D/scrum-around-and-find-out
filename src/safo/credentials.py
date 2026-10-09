@@ -8,6 +8,7 @@ import re
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from safo.errors import ConfigError
 
@@ -75,30 +76,57 @@ def check_for_board(creds: Credentials, owner_type: str, env: Mapping[str, str])
         )
 
 
-def find_gh(env: Mapping[str, str]) -> str | None:
-    """The first executable `gh` on an absolute PATH entry. A relative or empty entry is the current directory,
-    which a hostile checkout controls, so it is never searched."""
+def _inside(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, os.path.realpath(root)]) == os.path.realpath(root)
+    except ValueError:
+        return False
+
+
+# Set by an ambient environment, they would replace the stored github.com login `gh auth token` is meant to read.
+AMBIENT_GH_VARIABLES = ("GH_HOST", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def find_gh(env: Mapping[str, str], repo: Path | str | None = None) -> str | None:
+    """The first trustworthy `gh` on PATH. A relative or empty entry is the current directory, which a hostile
+    checkout controls, so it is never searched; neither is a candidate whose real path (symlinks resolved) is inside
+    the current directory, $GITHUB_WORKSPACE or the repository being operated on, because a checkout can add its own
+    `bin` to an absolute PATH. The first entry that passes wins."""
+    roots = [os.getcwd()]
+    if env.get("GITHUB_WORKSPACE"):
+        roots.append(env["GITHUB_WORKSPACE"])
+    if repo:
+        roots.append(str(repo))
     for entry in env.get("PATH", "").split(os.pathsep):
         if not os.path.isabs(entry):
             continue
         candidate = os.path.join(entry, "gh")
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            continue
+        real = os.path.realpath(candidate)
+        if any(_inside(real, root) for root in roots):
+            continue
+        return candidate
     return None
 
 
-def from_gh(env: Mapping[str, str], user: str = "") -> Credentials | None:
-    """The caller's `gh auth token` (the active account, or `--user`). None when gh is absent or not logged in.
+def from_gh(env: Mapping[str, str], user: str = "", repo: Path | str | None = None) -> Credentials | None:
+    """The caller's stored github.com login from `gh auth token` (the active account, or `--user`). None when gh is
+    absent or not logged in, and always None under GitHub Actions, where the credential is the App or token input.
 
-    The command is a fixed argument list, never a shell string; stdin is closed so gh cannot prompt; its stderr is
-    discarded and never repeated; its stdout is accepted only as one plain printable token.
+    The command is a fixed argument list, never a shell string, always pinned to github.com; the child gets no
+    GH_HOST or token variable; stdin is closed so gh cannot prompt; its stderr is discarded and never repeated; its
+    stdout is accepted only as one plain printable token.
     """
     if user and not LOGIN.fullmatch(user):
         raise ConfigError("gh-user is not a GitHub login")
-    gh = find_gh(env)  # an empty PATH finds nothing: tests and the Action never reach a real gh
+    if env.get("GITHUB_ACTIONS") == "true":
+        return None
+    gh = find_gh(env, repo)  # an empty PATH finds nothing: tests and the Action never reach a real gh
     if gh is None:
         return None
-    argv = [gh, "auth", "token"] + (["--user", user] if user else [])
+    child = {k: v for k, v in env.items() if k not in AMBIENT_GH_VARIABLES}
+    argv = [gh, "auth", "token", "--hostname", "github.com"] + (["--user", user] if user else [])
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv, absolute executable, validated login, no shell
             argv,
@@ -107,7 +135,7 @@ def from_gh(env: Mapping[str, str], user: str = "") -> Credentials | None:
             text=True,
             check=False,
             timeout=GH_TIMEOUT_SECONDS,
-            env=dict(env),
+            env=child,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return None
