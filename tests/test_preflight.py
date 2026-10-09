@@ -54,7 +54,7 @@ def test_the_modes_it_knows_are_the_modes_that_exist_plus_validate() -> None:
     assert frozenset(load_all()) | {"validate"} == action_preflight.MODES
 
 
-@pytest.mark.parametrize("mode", ["", "agents_status", "AUDIT", "audit; id", "sync\n", "route"])
+@pytest.mark.parametrize("mode", ["", "agents_status", "AUDIT", "audit; id", "sync\n", "dispatch"])
 def test_an_unknown_mode_is_refused(mode: str) -> None:
     refused("mode", SAFO_MODE=mode)
 

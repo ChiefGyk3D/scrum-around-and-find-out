@@ -26,7 +26,8 @@ Checked 2026-10-08.
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` modes | Planned |
 | The Action (`action.yml`) | Planned |
 | `safo usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built on branch `build/group4`, not merged |
-| `safo route`, `safo outcome`, `safo local run` | Planned |
+| `safo route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built on branch `build/group4`, not merged |
+| `safo outcome`, `safo local run` | Planned |
 | `safo hooks` | Planned |
 | `agents-status` | Planned |
 | Generated docs and the wiki mirror | Planned (the wiki is hand-written until then) |
