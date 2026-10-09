@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from safo import netguard
 from safo.errors import ConfigError
 from safo.schema import Reader, _safe_load
 
@@ -182,6 +183,10 @@ def _endpoints(r: Reader, value: object, path: str) -> tuple[Endpoint, ...]:
             or parts.fragment
         ):
             raise r.fail(f"{p}.url", "expected http(s)://host:port with no credentials in it")
+        if netguard.literal_blocked(parts.hostname):
+            raise r.fail(
+                f"{p}.url", "expected a loopback or private LAN address, not link-local, unspecified or metadata"
+            )
         roles = _strings(r, m["roles"], f"{p}.roles")
         for j, role in enumerate(roles):
             r.choice(role, f"{p}.roles[{j}]", ROLES)

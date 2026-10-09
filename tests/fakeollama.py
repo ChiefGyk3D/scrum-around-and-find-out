@@ -27,6 +27,7 @@ class FakeOllama:
             "eval_duration": 2_000_000_000,
         }
         self.url = ""
+        self.hosts: list[str] = []  # the Host header of every request
         self.stall_seconds = 0.0  # hold every GET this long before answering: a reachable host that is hung
         self.raw_reply: bytes | None = None  # answer /api/generate and /api/tags with these exact bytes, status 200
         self.redirect_to = ""  # answer every request with a 302 to this URL
@@ -60,6 +61,7 @@ class FakeOllama:
                 return False
 
             def do_GET(self) -> None:
+                fake.hosts.append(self.headers.get("Host", ""))
                 fake.requests.append(("GET", self.path, {}))
                 if fake.stall_seconds:
                     time.sleep(fake.stall_seconds)
@@ -73,6 +75,7 @@ class FakeOllama:
                     self._send(404, {})
 
             def do_POST(self) -> None:
+                fake.hosts.append(self.headers.get("Host", ""))
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
                 fake.requests.append(("POST", self.path, body))
                 if self._raw():

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""The workspace boundary: lexical and resolved forms, symlinked parents, and a missing GITHUB_WORKSPACE under Actions."""
+"""The workspace boundary: lexical and resolved forms, symlinked parents, a missing GITHUB_WORKSPACE under Actions."""
 
 from __future__ import annotations
 

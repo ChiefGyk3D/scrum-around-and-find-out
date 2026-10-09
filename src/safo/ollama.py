@@ -15,6 +15,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
+from safo import netguard
 from safo.agentsfile import Endpoint
 from safo.bounded import MAX_BYTES, count, loads
 from safo.errors import ApiError, SafoError
@@ -59,17 +60,32 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-# No proxy from the environment either: the endpoint is exactly the configured one.
+class _PinnedHTTP(urllib.request.HTTPHandler):
+    def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(netguard.PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPS(urllib.request.HTTPSHandler):
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(netguard.PinnedHTTPSConnection, req, context=getattr(self, "_context", None))
+
+
+# No proxy from the environment either: the endpoint is exactly the configured one, reached at a checked address.
 def _opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect, _PinnedHTTP(), _PinnedHTTPS())
 
 
 def _request(url: str, *, data: bytes | None, timeout: float) -> Any:
     request = urllib.request.Request(  # noqa: S310 - the scheme is checked when the endpoint is parsed
         url, data=data, method="POST" if data is not None else "GET", headers={"Content-Type": "application/json"}
     )
-    with _opener().open(request, timeout=timeout) as response:
-        return loads(response.read(MAX_BYTES + 1))
+    try:
+        with _opener().open(request, timeout=timeout) as response:
+            return loads(response.read(MAX_BYTES + 1))
+    except urllib.error.URLError as err:
+        if isinstance(err.reason, netguard.BlockedDestinationError):
+            raise err.reason from None
+        raise
 
 
 def _names(body: Any, key: str) -> tuple[str, ...]:
@@ -103,6 +119,8 @@ def generate(
     body = json.dumps(payload).encode()
     try:
         answer = _request(f"{endpoint.url}/api/generate", data=body, timeout=timeout)
+    except netguard.BlockedDestinationError:
+        raise EndpointUnreachableError(f"{endpoint.id} refused: its destination address is not allowed") from None
     except urllib.error.HTTPError as err:
         raise ApiError(f"{endpoint.id} answered {err.code} to the generate request") from None
     except (OSError, http.client.HTTPException) as err:
