@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from safo import action_mask, output
 
 ROOT = Path(__file__).parent.parent
@@ -63,3 +65,14 @@ def test_the_masking_command_prints_only_commands_never_a_value_on_its_own() -> 
     )
     assert run.returncode == 0 and run.stderr == ""
     assert all(line.startswith("::add-mask::") for line in run.stdout.splitlines()) and run.stdout
+
+
+def test_a_step_output_is_one_line_named_without_an_equals_sign(tmp_path: Path) -> None:
+    target = tmp_path / "out"
+    output.set_output(str(target), "repositories", "a,b")
+    output.set_output(str(target), "second", "c")
+    assert target.read_text() == "repositories=a,b\nsecond=c\n"
+    for name, value in (("n", "a\nrepositories=evil"), ("n", "a\rb"), ("a=b", "v"), ("a\nb", "v")):
+        with pytest.raises(ValueError, match="one line"):
+            output.set_output(str(target), name, value)
+    assert target.read_text() == "repositories=a,b\nsecond=c\n"
