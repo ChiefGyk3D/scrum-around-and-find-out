@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import os
+import re
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -11,6 +14,10 @@ from safo.errors import ConfigError
 APP = "app"  # a GitHub App installation token minted by actions/create-github-app-token
 PAT = "token"  # a fine-grained personal access token handed to the Action
 GH = "gh"  # the caller's `gh auth token`
+
+GH_TIMEOUT_SECONDS = 20.0
+LOGIN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,38}")  # a GitHub login (EMU logins carry an underscore); never a flag
+PLAIN_TOKEN = re.compile(r"[\x21-\x7e]{1,4096}")  # one printable run: it goes into an Authorization header
 
 
 class NoTokenError(ConfigError):
@@ -66,3 +73,45 @@ def check_for_board(creds: Credentials, owner_type: str, env: Mapping[str, str])
             "a personal access token is refused for an organization-owned project; mint an App installation token "
             "(client-id and private-key inputs), or set allow-token-for-org to true to accept the risk"
         )
+
+
+def find_gh(env: Mapping[str, str]) -> str | None:
+    """The first executable `gh` on an absolute PATH entry. A relative or empty entry is the current directory,
+    which a hostile checkout controls, so it is never searched."""
+    for entry in env.get("PATH", "").split(os.pathsep):
+        if not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, "gh")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def from_gh(env: Mapping[str, str], user: str = "") -> Credentials | None:
+    """The caller's `gh auth token` (the active account, or `--user`). None when gh is absent or not logged in.
+
+    The command is a fixed argument list, never a shell string; stdin is closed so gh cannot prompt; its stderr is
+    discarded and never repeated; its stdout is accepted only as one plain printable token.
+    """
+    if user and not LOGIN.fullmatch(user):
+        raise ConfigError("gh-user is not a GitHub login")
+    gh = find_gh(env)  # an empty PATH finds nothing: tests and the Action never reach a real gh
+    if gh is None:
+        return None
+    argv = [gh, "auth", "token"] + (["--user", user] if user else [])
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv, absolute executable, validated login, no shell
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GH_TIMEOUT_SECONDS,
+            env=dict(env),
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        return None
+    token = done.stdout.strip()
+    if done.returncode != 0 or not PLAIN_TOKEN.fullmatch(token):
+        return None
+    return Credentials(token, GH)

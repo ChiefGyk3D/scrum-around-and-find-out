@@ -22,9 +22,12 @@ ClientFactory = Callable[[Board, Mapping[str, str], bool], Client]
 
 
 def default_client(board: Board, env: Mapping[str, str], dry_run: bool) -> Client:
-    creds = credentials.from_env(env)
+    creds = credentials.from_env(env) or credentials.from_gh(env, env.get("SAFO_GH_USER", "").strip())
     if creds is None:
-        raise credentials.NoTokenError("no token: set SAFO_TOKEN (the Action does this from its token or App inputs)")
+        raise credentials.NoTokenError(
+            "no token: set SAFO_TOKEN (the Action does this from its token or App inputs), "
+            "or log in with `gh auth login`"
+        )
     credentials.check_for_board(creds, board.project.owner_type, env)
     return Client(creds.token, env.get("GITHUB_GRAPHQL_URL", GRAPHQL_URL), dry_run=dry_run)
 
@@ -45,6 +48,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     )
     parser.add_argument("--version", action="version", version=f"safo {__version__}")
     parser.add_argument("--board", default=None, help="the board file (default: $SAFO_BOARD, else ./board.yaml)")
+    parser.add_argument("--gh-user", default="", help="use this logged-in gh account's token instead of the active one")
     parser.add_argument("--dry-run", action="store_true", help="read, and print every mutation instead of sending it")
     sub = parser.add_subparsers(dest="mode", required=True)
     subs: dict[str, argparse.ArgumentParser] = {}
@@ -77,6 +81,8 @@ def main(
     parser, _ = build_parser()
     args = parser.parse_args(argv)
     mode = load_all()[args.mode]
+    if args.gh_user:
+        env = {**env, "SAFO_GH_USER": args.gh_user}
     try:
         board = resolve_board(args.board, env)
         if args.mode == "validate":
