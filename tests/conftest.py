@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -117,6 +118,15 @@ def _loopback_only(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(socket.socket, "sendto", sendto)
     monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """HOME is an empty temporary directory in every test: no test ever reads the real home or its agent files."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return home
 
 
 @pytest.fixture

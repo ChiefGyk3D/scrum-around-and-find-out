@@ -11,10 +11,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TextIO
 
 from safo import __version__, compat, credentials, output
-from safo.context import Context
+from safo.context import Context, LocalContext
 from safo.errors import SafoError
 from safo.graphql import GRAPHQL_URL, Client
-from safo.modes import load_all, validate
+from safo.modes import LocalMode, load_all, validate
 from safo.modes.reconcile import safe
 from safo.schema import Board, load_board
 
@@ -74,6 +74,7 @@ def main(
     out: TextIO | None = None,
     err: TextIO | None = None,
     today: dt.date | None = None,
+    now: dt.datetime | None = None,
 ) -> int:
     env = os.environ if env is None else env
     out = out or sys.stdout
@@ -83,6 +84,13 @@ def main(
     mode = load_all()[args.mode]
     if args.gh_user:
         env = {**env, "SAFO_GH_USER": args.gh_user}
+    clock = now or dt.datetime.now(dt.UTC)
+    if isinstance(mode, LocalMode):
+        try:
+            return mode.run(LocalContext(out, env, clock, dry_run=args.dry_run), args)
+        except SafoError as error:
+            report(error, env, err)
+            return error.exit_code
     try:
         board = resolve_board(args.board, env)
         if args.mode == "validate":
@@ -95,7 +103,7 @@ def main(
                 raise
             output.write(out, "UNKNOWN no token: nothing read; use validate for offline configuration checks")
             return 2
-        return mode.run(Context(board, client, out, today or dt.datetime.now(dt.UTC).date(), env), args)
+        return mode.run(Context(board, client, out, today or clock.date(), env), args)
     except SafoError as error:
         report(error, env, err)
         return error.exit_code

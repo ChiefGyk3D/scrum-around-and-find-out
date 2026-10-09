@@ -9,7 +9,7 @@ import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from safo.context import Context
+from safo.context import Context, LocalContext
 
 
 @dataclass(frozen=True)
@@ -20,7 +20,18 @@ class Mode:
     run: Callable[[Context, argparse.Namespace], int]
 
 
+@dataclass(frozen=True)
+class LocalMode:
+    """A mode that reads local files and needs neither board.yaml nor a token: usage, route, outcome."""
+
+    name: str
+    help: str
+    add_arguments: Callable[[argparse.ArgumentParser], None]
+    run: Callable[[LocalContext, argparse.Namespace], int]
+
+
 REGISTRY: dict[str, Mode] = {}
+LOCAL: dict[str, LocalMode] = {}
 
 
 def register(mode: Mode) -> Mode:
@@ -28,7 +39,13 @@ def register(mode: Mode) -> Mode:
     return mode
 
 
-def load_all() -> dict[str, Mode]:
+def register_local(mode: LocalMode) -> LocalMode:
+    LOCAL[mode.name] = mode
+    return mode
+
+
+def load_all() -> dict[str, Mode | LocalMode]:
     for info in pkgutil.iter_modules(__path__):
         importlib.import_module(f"{__name__}.{info.name}")
-    return dict(sorted(REGISTRY.items()))
+    every: dict[str, Mode | LocalMode] = {**REGISTRY, **LOCAL}
+    return dict(sorted(every.items()))

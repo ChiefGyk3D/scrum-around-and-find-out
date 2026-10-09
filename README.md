@@ -25,7 +25,8 @@ Checked 2026-10-08.
 | T3: `board.yaml` schema and validator (refuses duplicate keys, aliases, anchors, merge keys, runaway nesting and oversized files) | Built on branch `build/group2`, not merged |
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` modes | Planned |
 | The Action (`action.yml`) | Planned |
-| `safo route`, `safo usage`, `safo outcome`, `safo local run` | Planned |
+| `safo usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only) | Built on branch `build/group4`, not merged |
+| `safo route`, `safo outcome`, `safo local run` | Planned |
 | `safo hooks` | Planned |
 | `agents-status` | Planned |
 | Generated docs and the wiki mirror | Planned (the wiki is hand-written until then) |
