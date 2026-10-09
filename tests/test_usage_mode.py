@@ -81,3 +81,80 @@ def test_usage_json_cannot_carry_a_workflow_command(_private_home: Path) -> None
     code, out, _ = cli("usage", "--json", "--no-local", home=_private_home)
     assert code == 0 and "::" not in out and out.count("\n") == 1
     assert json.loads(out)["codex"]["sessions"][0]["cwd"] == "::stop-commands::x"
+
+
+# -- T9d fix 1: the agents file is never found in the current directory -------------------------------------------
+
+
+def test_usage_does_not_load_or_probe_an_agents_file_from_the_current_directory(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        write_agents(checkout / "agents.yaml", a.url, b.url)
+        monkeypatch.chdir(checkout)
+        code, out, _ = cli("usage", home=_private_home)
+        assert code == 0 and "Local LLM" not in out
+        assert a.requests == [] and b.requests == []
+
+
+def test_usage_reads_the_user_level_agents_file(_private_home: Path) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        (_private_home / ".config" / "safo").mkdir(parents=True)
+        write_agents(_private_home / ".config" / "safo" / "agents.yaml", a.url, b.url)
+        code, out, _ = cli("usage", home=_private_home)
+    assert code == 0 and "Local LLM instance-a: reachable" in out
+
+
+def test_usage_reads_an_agents_file_named_by_the_environment(_private_home: Path, tmp_path: Path) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = write_agents(tmp_path / "elsewhere.yaml", a.url, b.url)
+        code, out, _ = cli("usage", home=_private_home, extra_env={"SAFO_AGENTS": str(path)})
+    assert code == 0 and "Local LLM instance-b: reachable" in out
+
+
+@pytest.mark.parametrize("via", ["flag", "env", "local-flag", "local-env"])
+def test_under_actions_an_agents_file_inside_the_workspace_is_refused(
+    _private_home: Path, tmp_path: Path, via: str
+) -> None:
+    ws = tmp_path / "ws"
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        (ws / "sub").mkdir(parents=True)
+        path = write_agents(ws / "sub" / "agents.yaml", a.url, b.url)
+        env = {"GITHUB_ACTIONS": "true", "GITHUB_WORKSPACE": str(ws)}
+        flags: list[str] = []
+        if via == "flag":
+            flags = ["--agents", str(path)]
+        elif via == "env":
+            env["SAFO_AGENTS"] = str(path)
+        elif via == "local-flag":
+            flags = ["--agents-local", str(path)]
+        else:
+            env["SAFO_AGENTS_LOCAL"] = str(path)
+        outside = write_agents(tmp_path / "outside.yaml", a.url, b.url)
+        argv = ["usage", *flags] + (["--agents", str(outside)] if via.startswith("local") else [])
+        code, _, err = cli(*argv, home=_private_home, extra_env=env)
+        assert code == 2 and "GITHUB_WORKSPACE" in err
+        assert a.requests == [] and b.requests == []
+
+
+def test_under_actions_a_symlink_into_the_workspace_is_refused(_private_home: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        real = write_agents(ws / "agents.yaml", a.url, b.url)
+        link = tmp_path / "link.yaml"
+        link.symlink_to(real)
+        env = {"GITHUB_ACTIONS": "true", "GITHUB_WORKSPACE": str(ws)}
+        code, _, err = cli("usage", "--agents", str(link), home=_private_home, extra_env=env)
+        assert code == 2 and "GITHUB_WORKSPACE" in err and a.requests == []
+
+
+def test_outside_actions_a_file_inside_the_workspace_variable_is_allowed(_private_home: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = write_agents(ws / "agents.yaml", a.url, b.url)
+        code, out, _ = cli("usage", "--agents", str(path), home=_private_home, extra_env={"GITHUB_WORKSPACE": str(ws)})
+    assert code == 0 and "Local LLM instance-a" in out
