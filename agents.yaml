@@ -1,0 +1,244 @@
+# SPDX-License-Identifier: MIT
+# Who does what, how much room each has, and which agent a task shape goes to. docs/routing.md is GENERATED from this
+# file (python scripts/gen_routing.py --write); `safo route <shape>` reads it with the live headroom `safo usage` measures.
+# The numbers are one maintainer's measured workload, not a vendor's published limits: replace them with your own.
+version: 1
+
+agents:
+  claude-lead:
+    name: Claude lead
+    kind: claude
+    role: Plans, splits work into cards, hands out briefs, reviews results and keeps the board current.
+    limits: {plan: "the Claude plan allowance, read in the client"}
+    strengths:
+      - Holds the whole picture and the maintainer's standing rules.
+    constraints:
+      - Does not merge. Opus is used only with the maintainer's OK and the reason stated.
+  claude-sonnet:
+    name: Claude Sonnet
+    kind: claude
+    model: sonnet
+    role: The default implementer and reviewer.
+    limits: {plan: "counts against the Claude plan; cheap enough to run in parallel"}
+    strengths:
+      - Integration code that touches several files and an existing codebase.
+      - Code from prose, every task review (a review with no memory of the work), and ops runbooks.
+      - Builds security-sensitive code; a Codex adversarial review attacks it before merge.
+    constraints:
+      - Needs a complete brief; does not pick its own scope.
+  claude-haiku:
+    name: Claude Haiku
+    kind: claude
+    model: haiku
+    role: Mechanical code from a complete spec, and single-file edits with an exact before and after.
+    limits: {plan: "negligible against the Claude plan"}
+    strengths:
+      - Cheap and fast for work with no judgment in it.
+      - "Transcribes a plan's code exactly, including the plan's own bugs: a redirect that carried the auth token to another host shipped in the plan's code and was caught in review."
+    constraints:
+      - Anything that needs the word "decide" is not a Haiku task.
+      - Transcribed security code still gets a Sonnet review plus a Codex adversarial review.
+  claude-opus:
+    name: Claude Opus
+    kind: claude
+    model: opus
+    approval_required: true
+    role: A judgment problem a Sonnet agent failed twice on, or a whole-branch review of something risky.
+    limits: {plan: "burns the plan several times faster than Sonnet"}
+    strengths:
+      - The hardest design judgment.
+    constraints:
+      - Only with the maintainer's OK and the reason stated; never upgraded silently.
+  codex:
+    name: Codex
+    kind: codex
+    role: Research, plans, and adversarial review of risky changes; implementation only when its window allows.
+    limits: {five_hour_window: "percent used, read from the session files", weekly_window: "percent used, read from the session files"}
+    strengths:
+      - "Adversarial review is a strong second reviewer: it found three real issues in one pull request."
+      - "Adversarial review found a high-severity issue the Sonnet reviews missed on two security-sensitive changes the same day: mutation replay after an ambiguous failure, and an authenticated-scan claim with no proof of sign-in."
+      - Writes long plans; a plan it wrote still needs a preflight scan before anyone builds from it.
+    constraints:
+      - "Its binding constraint is the five-hour window, which reached 78% after one burst: space its jobs."
+      - Its sandbox cannot commit inside a git worktree or open sockets, so the lead runs the full suite and commits.
+      - "Cannot resume a thread across git worktrees: hand it a self-contained prompt that reads state from files."
+  copilot:
+    name: Copilot coding agent
+    kind: copilot
+    role: Small, fully specified issues and deferred minor items.
+    limits: {monthly_ai_credits: 7000}
+    strengths:
+      - Runs on its own and returns a pull request.
+    constraints:
+      - "Measured burn about 400 a day early in the month: spend it on small single-repo PRs."
+      - "Every pull request needs a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup."
+  ollama:
+    name: Local LLM (Ollama)
+    kind: ollama
+    role: "The cheapest agent: models on machines you own, and the first stop for text-in/text-out work. Cost is zero; a Claude model checks anything that will be applied."
+    limits: {cost: "zero, but a shared GPU is never free: see the protected models"}
+    strengths:
+      - Summaries of CI logs and test output, issue triage, first drafts of changelog fragments and commit messages, docs
+        proofreading, and embedding-based duplicate search.
+      - "Measured: the small 4B model gives 58 to 116 tokens a second."
+      - "Measured: the resident 12B model generates about 50 tokens a second, and a one-sentence answer cost about 436
+        evaluated tokens because it thinks by default, so cheap tasks send think=false."
+      - "Measured: the 12B model drafted a triage (kind, priority, effort) of 114 issues in minutes, at zero cost."
+    constraints:
+      - Never a security decision, and never code that ships without review.
+      - "Its output is a draft. Error modes seen: it misspelled repository names in ids, gave the same CVE different
+        priorities in two repos, and asserted 'false positive' verdicts it could not verify. Only field values a
+        reviewer checked are applied, never its verdicts."
+      - "Send exactly the num_ctx a model is loaded with. Any other value makes Ollama reload the model and can evict
+        another resident: a client sending 65536 to a model loaded at 131072 reloaded it."
+      - "On a multi-GPU NVIDIA machine, Ollama's Vulkan backend ignores CUDA_VISIBLE_DEVICES and spilled models onto the
+        wrong card until OLLAMA_VULKAN=0."
+      - "An on-demand embedding model loads beside the resident safety model without evicting it, but only partly fits on
+        the card: the safety model stays fully on the GPU and the embedding model sits partly on the GPU and partly on the
+        CPU, with about 1.1 GB of VRAM left. Give it a short keep_alive and its own num_ctx, never the safety model's."
+      - "Reachability comes and goes (the LAN at home, a zero-trust remote-access client when away): `safo route` uses it
+        only when `safo usage` finds it reachable, and falls back otherwise."
+      - "Real endpoints never go in this repository: put them in ~/.config/safo/agents.local.yaml, which is merged over
+        this file and git-ignored."
+    endpoints:
+      - id: local
+        url: http://ollama.lan:11434
+        roles: [general]
+        models: [small-4b-agent]
+        loaded_num_ctx: {small-4b-agent: 8192}
+        num_ctx_max: 8192
+        think: false
+        shared_with_production: false
+  maintainer:
+    name: The maintainer
+    kind: human
+    role: Decisions, bench and hardware work, and every merge.
+    limits: {time: "evenings and weekends: batch the questions"}
+    strengths:
+      - The only one who can decide or touch the hardware.
+    constraints:
+      - Merges are the one gate that never moves.
+
+shapes:
+  research:
+    description: Find out how something works or what exists; no code to merge.
+    prefer: [codex]
+    fallback: [claude-sonnet]
+    reviewer: [claude-sonnet, codex]
+  plan-writing:
+    description: Turn a spec into a plan another agent can build from.
+    prefer: [codex, claude-sonnet]
+    fallback: [claude-lead]
+    reviewer: [claude-sonnet, codex]
+  integration-code:
+    description: Code that touches several files of an existing codebase.
+    prefer: [claude-sonnet]
+    fallback: [codex]
+    reviewer: [codex, claude-sonnet]
+  well-specified-code:
+    description: Code from a complete plan with the files, the change and the test all named.
+    prefer: [claude-haiku]
+    fallback: [claude-sonnet]
+    reviewer: [claude-sonnet, codex]
+    note: Haiku transcribes the plan's code exactly, its bugs included, so the review reads the plan's code as well.
+  small-mechanical-pr:
+    description: A small pull request with an exact change.
+    prefer: [copilot]
+    fallback: [claude-haiku]
+    reviewer: [claude-sonnet]
+  security-sensitive-design:
+    description: A design whose mistakes expose a secret or widen access.
+    prefer: [claude-lead]
+    fallback: []
+    reviewer: [codex]
+    note: Opus only with the maintainer's OK and the reason stated.
+  security-sensitive-code:
+    description: "Code whose mistakes expose a secret, widen access or replay a mutation, including security code transcribed from a plan."
+    prefer: [claude-sonnet]
+    fallback: []
+    reviewer: [codex, claude-sonnet]
+    note: Both reviews are required before merge, a Sonnet review of the diff and a Codex adversarial review; space Codex's jobs, because its five-hour window is the binding limit.
+  ops-runbook:
+    description: A runbook or operational procedure someone will follow on a live system.
+    prefer: [claude-sonnet]
+    fallback: []
+    reviewer: [claude-lead]
+  adversarial-review:
+    description: Try to break a finished change and its claims.
+    prefer: [codex]
+    fallback: [claude-sonnet]
+    reviewer: [claude-lead]
+  ci-log-summary:
+    description: Summarise a CI log or test output so a person or a Claude model reads ten lines, not ten thousand.
+    prefer: [ollama]
+    fallback: [claude-haiku]
+    reviewer: [claude-sonnet]
+    local: {role: general}
+  issue-triage:
+    description: "Draft a triage (kind, priority, effort) for issues."
+    prefer: [ollama]
+    fallback: [claude-haiku]
+    reviewer: [claude-sonnet]
+    note: Only field values a reviewer checked are applied, never the draft's verdicts.
+    local: {role: general}
+  changelog-draft:
+    description: A first draft of a changelog fragment or a commit message.
+    prefer: [ollama]
+    fallback: [claude-haiku]
+    reviewer: [claude-sonnet]
+    local: {role: general}
+  docs-proofread:
+    description: "A proofreading pass over documentation: typos, broken sentences, inconsistent terms."
+    prefer: [ollama]
+    fallback: [claude-haiku]
+    reviewer: [claude-sonnet]
+    local: {role: general}
+  duplicate-issue-search:
+    description: Recommend an embedding-search route; local run does not execute embedding or similarity search.
+    prefer: [ollama]
+    fallback: [claude-haiku]
+    reviewer: [claude-sonnet]
+    local: {role: embedding}
+  status-headline:
+    description: An optional fixed prose clause for a status update; code renders the groups and the entire count sentence.
+    prefer: [ollama]
+    fallback: []
+    reviewer: [maintainer]
+    note: Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted.
+    local: {role: general}
+  decision:
+    description: A trade-off, or anything that touches hardware.
+    prefer: [maintainer]
+    fallback: []
+    reviewer: []
+    note: The lead frames the options and recommends; the maintainer decides. Opus only with the maintainer's OK and the reason stated.
+
+# `safo route` skips an agent whose measured headroom is below the line and says why.
+# Meters: five_hour and weekly (Codex, percent used), monthly_percent (Copilot, percent of the monthly AI-credit quota used;
+# the billing read must report the same unit as `monthly_ai_credits`, so check it on first use).
+thresholds:
+  - {agent: codex, meter: five_hour, above: 80, then: claude-sonnet}
+  - {agent: codex, meter: weekly, above: 90, then: claude-sonnet}
+  - {agent: copilot, meter: monthly_percent, above: 70, then: claude-haiku}
+
+# What `safo hooks` enforces in a Claude Code session. A brief for an agent marked approval_required (Opus) must contain
+# the approval token, which you put there only with your own recorded OK. While the local LLM was reachable at session
+# start (the probe is trusted for max_state_age_seconds; after that the guard asks again, at most once a minute), a brief
+# must name a local step (any marker) or say why it has none: the n/a marker followed by a reason, for example
+# `local-llm: n/a - a one-line rename`.
+hooks:
+  approval_token: OPUS-APPROVED
+  max_state_age_seconds: 300
+  local_step_markers: [safo local run, llm-local]
+  na_marker: "local-llm: n/a -"
+
+rules_of_thumb:
+  - "Routing order 1: text-in/text-out work (summaries, triage, classification, first drafts, log and CI digests) goes to the local LLM first, and a Claude model checks anything that will be applied."
+  - "Routing order 2: mechanical code from a complete spec goes to Haiku, or to Copilot when it is a small single-repo PR and credits allow."
+  - "Routing order 3: code from prose, every task review, and ops runbooks go to Sonnet."
+  - "Routing order 4: security-sensitive or risky code is built by Sonnet, and Codex attacks it before merge."
+  - "Routing order 5: decisions go to the lead and the maintainer; Opus only with the maintainer's OK."
+  - Write the brief before choosing the agent. If you cannot write a complete one, the task is a decision or research.
+  - The reviewer is a different agent or model from the author, and starts with no memory of the work.
+  - Run agents in parallel only when their work is independent.
+  - Read the limits before a batch, not during it.
