@@ -293,8 +293,9 @@ def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bo
     if unknown and not token:
         rules.append(UNKNOWN_MODEL)
         reasons.append(
-            "unknown-model: the model is not a known agent (a placeholder, a fork or an unrecognised name), so it may be one "
-            "that needs the maintainer's OK; name sonnet or haiku, or add the approval token from agents.yaml "
+            "unknown-model: the model is not a known agent (a placeholder, a fork or an unrecognised name), "
+            "so it may be one that needs the maintainer's OK; name sonnet or haiku, or add the approval token "
+            "from agents.yaml "
             f"(hooks.approval_token) only once he has said yes; {APPROVAL_NOTE}"
         )
     if agent is not None and agent.approval_required and not token:

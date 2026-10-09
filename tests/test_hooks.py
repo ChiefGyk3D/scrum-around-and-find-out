@@ -1654,19 +1654,23 @@ def _swap_inode_keeping_the_bytes(target: Path) -> None:
 
 
 def _install_with(monkeypatch: pytest.MonkeyPatch, during: Callable[[Path], None]) -> None:
-    import safo.modes.hooks as hooks_mode
+    from safo.hooks import write_text as real
 
-    real = hooks_mode.write_text
-
-    def racing(path: Path, text: str, *args: Any, before_replace: Callable[[], None] | None = None, **kw: Any) -> None:
+    def racing(
+        path: Path,
+        text: str,
+        mode: int = 0o600,
+        before_replace: Callable[[], None] | None = None,
+        check_dir: bool = True,
+    ) -> None:
         def intercept() -> None:
             during(path)
             assert before_replace is not None
             before_replace()
 
-        real(path, text, *args, before_replace=intercept, **kw)
+        real(path, text, mode, intercept, check_dir)
 
-    monkeypatch.setattr(hooks_mode, "write_text", racing)
+    monkeypatch.setattr("safo.modes.hooks.write_text", racing)
 
 
 def test_an_inode_swapped_in_with_identical_bytes_before_the_replace_aborts_the_install(

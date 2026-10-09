@@ -22,7 +22,8 @@ SRC = str(Path(__file__).resolve().parent.parent / "src")
 def run_hook(home: Path, *args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
     env = {"HOME": str(home), "PATH": os.environ.get("PATH", ""), "PYTHONPATH": SRC}
     # No -I: it would also drop PYTHONPATH, and the sources under test are found through it.
-    return subprocess.run(
+    # Fixed argv of this interpreter and the module under test, never a shell: S603 has nothing untrusted to find.
+    return subprocess.run(  # noqa: S603
         [sys.executable, "-m", "safo", *args], input=stdin, capture_output=True, text=True, env=env, timeout=60
     )
 
