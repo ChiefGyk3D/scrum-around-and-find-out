@@ -10,11 +10,11 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import TextIO
 
-from safo import __version__, credentials, output
+from safo import __version__, compat, credentials, output
 from safo.context import Context
-from safo.errors import ConfigError, SafoError
+from safo.errors import SafoError
 from safo.graphql import GRAPHQL_URL, Client
-from safo.modes import load_all
+from safo.modes import load_all, validate
 from safo.modes.reconcile import safe
 from safo.schema import Board, load_board
 
@@ -24,8 +24,19 @@ ClientFactory = Callable[[Board, Mapping[str, str], bool], Client]
 def default_client(board: Board, env: Mapping[str, str], dry_run: bool) -> Client:
     creds = credentials.from_env(env)
     if creds is None:
-        raise ConfigError("no token: set SAFO_TOKEN (the Action does this from its token or App inputs)")
+        raise credentials.NoTokenError("no token: set SAFO_TOKEN (the Action does this from its token or App inputs)")
+    credentials.check_for_board(creds, board.project.owner_type, env)
     return Client(creds.token, env.get("GITHUB_GRAPHQL_URL", GRAPHQL_URL), dry_run=dry_run)
+
+
+def resolve_board(path: str | None, env: Mapping[str, str]) -> Board:
+    """--board, then $SAFO_BOARD, then the board-less inputs ($SAFO_PROJECT_URL), then ./board.yaml."""
+    chosen = path or env.get("SAFO_BOARD", "")
+    if chosen:
+        return load_board(chosen)
+    if env.get("SAFO_PROJECT_URL"):
+        return compat.board_from_env(env)
+    return load_board("board.yaml")
 
 
 def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
@@ -33,7 +44,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
         prog="safo", description="Scrum Around and Find Out: a GitHub Project defined as code."
     )
     parser.add_argument("--version", action="version", version=f"safo {__version__}")
-    parser.add_argument("--board", default="board.yaml", help="the board file (default: board.yaml)")
+    parser.add_argument("--board", default=None, help="the board file (default: $SAFO_BOARD, else ./board.yaml)")
     parser.add_argument("--dry-run", action="store_true", help="read, and print every mutation instead of sending it")
     sub = parser.add_subparsers(dest="mode", required=True)
     subs: dict[str, argparse.ArgumentParser] = {}
@@ -67,8 +78,17 @@ def main(
     args = parser.parse_args(argv)
     mode = load_all()[args.mode]
     try:
-        board = load_board(args.board)
-        client = client_factory(board, env, args.dry_run)
+        board = resolve_board(args.board, env)
+        if args.mode == "validate":
+            output.write(out, validate.MESSAGE)
+            return 0
+        try:
+            client = client_factory(board, env, args.dry_run)
+        except credentials.NoTokenError:
+            if not args.dry_run:
+                raise
+            output.write(out, "UNKNOWN no token: nothing read; use validate for offline configuration checks")
+            return 2
         return mode.run(Context(board, client, out, today or dt.datetime.now(dt.UTC).date(), env), args)
     except SafoError as error:
         report(error, env, err)

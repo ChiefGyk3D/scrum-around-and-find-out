@@ -1,0 +1,249 @@
+# SPDX-License-Identifier: MIT
+# Scrum Around and Find Out as a composite Action.
+#
+# Put step-security/harden-runner FIRST in the job that calls this: a composite action cannot be the first step of
+# a job, so it cannot do that for you (GYST's project-sync.yml does). The job reaches api.github.com, pypi.org and
+# files.pythonhosted.org, and api.doppler.com when the key comes from Doppler; nothing else.
+#
+# One credential, in order of preference:
+#   1. an App installation token minted here, valid one hour and revoked when the job ends, from `client-id` (or the
+#      deprecated `app-id`) and the App's private key. The key is `private-key` (from a secret store, never a
+#      literal) or fetched from Doppler over the job's OIDC identity (`doppler-identity-id`, `doppler-project`,
+#      `doppler-config`; the caller needs `id-token: write` and the key must be named PROJECTS_APP_PRIVATE_KEY);
+#   2. `token`, a fine-grained personal access token, for a USER-owned board only (Apps cannot write those). It is
+#      refused for an organization-owned board unless `allow-token-for-org` is "true".
+# There is no other fallback. The token's permissions are named, not inherited: organization Projects (read for
+# audit and for any dry run, write otherwise), Issues read, Pull requests read. Inputs reach the shell only through
+# environment variables, never by template expansion into a script, and every credential is masked before use.
+name: Scrum Around and Find Out
+description: Keep a GitHub Project defined as code (board.yaml) in step with its repositories.
+author: ChiefGyk3D
+branding:
+  icon: check-square
+  color: orange
+
+inputs:
+  mode:
+    description: validate, bootstrap, audit, sync, reconcile or status.
+    required: true
+  board-file:
+    description: Path to board.yaml, relative to the workspace. Empty uses the project-url inputs below (GYST's project-sync inputs); give one or the other.
+    default: ""
+  client-id:
+    description: Client ID of the GitHub App that holds Projects write on the organization. An identifier, not a secret.
+    default: ""
+  app-id:
+    description: Deprecated numeric App ID; used only when client-id is empty.
+    default: ""
+  private-key:
+    description: The App's private key (PEM), from a secret store. Leave empty to fetch it from Doppler.
+    default: ""
+  app-owner:
+    description: Account whose installation the token is minted for; empty means the repository owner. Another account's installation can read this repository only if it is public, so a private repository is refused.
+    default: ""
+  repositories:
+    description: Comma-separated repository names to limit the token to. Empty means the calling repository in the board-less mode, otherwise every repository the installation covers.
+    default: ""
+  token:
+    description: A fine-grained personal access token, for a USER-owned board only (Apps cannot write those).
+    default: ""
+  allow-token-for-org:
+    description: 'Set to "true" to accept a personal access token for an organization-owned board.'
+    default: "false"
+  dry-run:
+    description: 'Read the board and print every change instead of making it ("true" or "false"). The token is then read-only.'
+    default: "false"
+  doppler-project:
+    description: Doppler project slug holding the App private key as PROJECTS_APP_PRIVATE_KEY. Set with doppler-config and doppler-identity-id.
+    default: ""
+  doppler-config:
+    description: Doppler config slug. Use a config that holds only what this job needs, because every secret in it is exported to the job.
+    default: ""
+  doppler-identity-id:
+    description: Doppler Service Account Identity UUID for OIDC. The caller needs id-token write.
+    default: ""
+  python-version:
+    description: Python used to run safo (3.11 or newer).
+    default: "3.13"
+  status-body-file:
+    description: For mode status, the Markdown file holding the update, relative to the workspace. Empty builds the update from the board.
+    default: ""
+  status-state:
+    description: For mode status, one of INACTIVE, ON_TRACK, AT_RISK, OFF_TRACK, COMPLETE.
+    default: ON_TRACK
+  project-url:
+    description: Without board-file, the project URL (https://github.com/orgs/<login>/projects/<n>).
+    default: ""
+  status-field:
+    description: Without board-file, the single-select field holding an item's status.
+    default: Status
+  status-open-issue:
+    description: Without board-file, the status of an opened or reopened issue.
+    default: Backlog
+  status-open-pr:
+    description: Without board-file, the status of an opened or ready-for-review pull request.
+    default: In progress
+  status-draft-pr:
+    description: Without board-file, the status of a draft pull request.
+    default: Backlog
+  status-done:
+    description: Without board-file, the status of a closed issue or a closed or merged pull request.
+    default: Done
+  done-date-field:
+    description: Without board-file, the date field set to the close date; empty disables it.
+    default: Done on
+  default-area-field:
+    description: Without board-file, a single-select field set on items safo adds; set together with default-area.
+    default: ""
+  default-area:
+    description: Without board-file, the option of default-area-field given to an item safo adds.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Mask the credentials
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PRIVATE_KEY: ${{ inputs.private-key }}
+        TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        PYTHONPATH="$ACTION_PATH/src" python -m safo.action_mask
+
+    - name: Install PyYAML (hash-pinned)
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        python -m pip install --disable-pip-version-check --no-deps --require-hashes -r "$ACTION_PATH/requirements.txt"
+
+    - name: Preflight, the inputs and the credential, before anything is minted
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        SAFO_MODE: ${{ inputs.mode }}
+        SAFO_BOARD: ${{ inputs.board-file }}
+        SAFO_PROJECT_URL: ${{ inputs.project-url }}
+        SAFO_STATUS_FIELD: ${{ inputs.status-field }}
+        SAFO_STATUS_OPEN_ISSUE: ${{ inputs.status-open-issue }}
+        SAFO_STATUS_OPEN_PR: ${{ inputs.status-open-pr }}
+        SAFO_STATUS_DRAFT_PR: ${{ inputs.status-draft-pr }}
+        SAFO_STATUS_DONE: ${{ inputs.status-done }}
+        SAFO_DONE_DATE_FIELD: ${{ inputs.done-date-field }}
+        SAFO_DEFAULT_AREA_FIELD: ${{ inputs.default-area-field }}
+        SAFO_DEFAULT_AREA: ${{ inputs.default-area }}
+        SAFO_STATUS_BODY_FILE: ${{ inputs.status-body-file }}
+        SAFO_ALLOW_TOKEN_FOR_ORG: ${{ inputs.allow-token-for-org }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        HAS_PRIVATE_KEY: ${{ inputs.private-key != '' }}
+        HAS_TOKEN: ${{ inputs.token != '' }}
+        CLIENT_ID: ${{ inputs.client-id }}
+        APP_ID: ${{ inputs.app-id }}
+        APP_OWNER: ${{ inputs.app-owner }}
+        REPOSITORIES: ${{ inputs.repositories }}
+        REPOSITORY_OWNER: ${{ github.repository_owner }}
+        REPO_PRIVATE: ${{ github.event.repository.private }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        DOPPLER_IDENTITY_ID: ${{ inputs.doppler-identity-id }}
+        DOPPLER_PROJECT: ${{ inputs.doppler-project }}
+        DOPPLER_CONFIG: ${{ inputs.doppler-config }}
+        EVENT_NAME: ${{ github.event_name }}
+        IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+      run: |
+        set -euo pipefail
+        PYTHONPATH="$ACTION_PATH/src" python -m safo.action_preflight
+
+    - name: Fetch the App key from Doppler (OIDC)
+      if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+      uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+      with:
+        auth-method: oidc
+        doppler-identity-id: ${{ inputs.doppler-identity-id }}
+        doppler-project: ${{ inputs.doppler-project }}
+        doppler-config: ${{ inputs.doppler-config }}
+        inject-env-vars: true
+
+    - name: Mask the Doppler key
+      if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PRIVATE_KEY: ${{ env.PROJECTS_APP_PRIVATE_KEY }}
+      run: |
+        set -euo pipefail
+        PYTHONPATH="$ACTION_PATH/src" python -m safo.action_mask
+
+    - name: Mint a one-hour installation token
+      id: app
+      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id != '' && (inputs.private-key != '' || env.PROJECTS_APP_PRIVATE_KEY != '') }}
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        client-id: ${{ inputs.client-id }}
+        private-key: ${{ inputs.private-key || env.PROJECTS_APP_PRIVATE_KEY }}
+        owner: ${{ inputs.app-owner || github.repository_owner }}
+        repositories: ${{ inputs.repositories || (inputs.board-file == '' && (inputs.app-owner == '' || inputs.app-owner == github.repository_owner) && github.event.repository.name) || '' }}
+        permission-organization-projects: ${{ (inputs.mode == 'audit' || inputs.mode == 'validate' || inputs.dry-run == 'true') && 'read' || 'write' }}
+        permission-issues: read
+        permission-pull-requests: read
+
+    - name: Mint a one-hour installation token (deprecated app-id)
+      id: app_legacy
+      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id == '' && inputs.app-id != '' && (inputs.private-key != '' || env.PROJECTS_APP_PRIVATE_KEY != '') }}
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key || env.PROJECTS_APP_PRIVATE_KEY }}
+        owner: ${{ inputs.app-owner || github.repository_owner }}
+        repositories: ${{ inputs.repositories || (inputs.board-file == '' && (inputs.app-owner == '' || inputs.app-owner == github.repository_owner) && github.event.repository.name) || '' }}
+        permission-organization-projects: ${{ (inputs.mode == 'audit' || inputs.mode == 'validate' || inputs.dry-run == 'true') && 'read' || 'write' }}
+        permission-issues: read
+        permission-pull-requests: read
+
+    - name: Mask the installation token
+      if: ${{ steps.app.outputs.token != '' || steps.app_legacy.outputs.token != '' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        MINTED_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token }}
+      run: |
+        set -euo pipefail
+        PYTHONPATH="$ACTION_PATH/src" python -m safo.action_mask
+
+    - name: Run safo
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        SAFO_MODE: ${{ inputs.mode }}
+        SAFO_BOARD: ${{ inputs.board-file }}
+        SAFO_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token || inputs.token }}
+        SAFO_TOKEN_KIND: ${{ (steps.app.outputs.token || steps.app_legacy.outputs.token) && 'app' || 'token' }}
+        SAFO_ALLOW_TOKEN_FOR_ORG: ${{ inputs.allow-token-for-org }}
+        SAFO_DRY_RUN: ${{ inputs.dry-run }}
+        SAFO_STATUS_BODY_FILE: ${{ inputs.status-body-file }}
+        SAFO_STATUS_STATE: ${{ inputs.status-state }}
+        SAFO_PROJECT_URL: ${{ inputs.project-url }}
+        SAFO_STATUS_FIELD: ${{ inputs.status-field }}
+        SAFO_STATUS_OPEN_ISSUE: ${{ inputs.status-open-issue }}
+        SAFO_STATUS_OPEN_PR: ${{ inputs.status-open-pr }}
+        SAFO_STATUS_DRAFT_PR: ${{ inputs.status-draft-pr }}
+        SAFO_STATUS_DONE: ${{ inputs.status-done }}
+        SAFO_DONE_DATE_FIELD: ${{ inputs.done-date-field }}
+        SAFO_DEFAULT_AREA_FIELD: ${{ inputs.default-area-field }}
+        SAFO_DEFAULT_AREA: ${{ inputs.default-area }}
+      run: |
+        set -euo pipefail
+        args=()
+        if [ "$SAFO_DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+        args+=("$SAFO_MODE")
+        if [ "$SAFO_MODE" = "status" ]; then
+          if [ -n "$SAFO_STATUS_BODY_FILE" ]; then args+=(--body-file "$SAFO_STATUS_BODY_FILE"); else args+=(--post); fi
+          args+=(--state "$SAFO_STATUS_STATE")
+        fi
+        PYTHONPATH="$ACTION_PATH/src" python -m safo "${args[@]}"

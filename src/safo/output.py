@@ -11,7 +11,8 @@ reaches a stream except through here:
 - `block` shows several lines of untrusted text between `::stop-commands::<token>` and `::<token>::`, with a fresh
   random token each time, and always attempts the closing marker once the opening one is out.
 
-A test walks the package and fails on any `print` or `sys.stdout`/`sys.stderr` write outside this module.
+`mask` is the one command written unescaped, for the reason in its docstring. A test walks the package and fails
+on any `print` or `sys.stdout`/`sys.stderr` write outside this module.
 """
 
 from __future__ import annotations
@@ -50,6 +51,18 @@ def write(stream: TextIO, text: str) -> None:
 def annotation(stream: TextIO, message: str) -> None:
     """The error annotation GitHub shows on the run: the one command safo writes, with its text escaped."""
     print(f"::error title=safo::{line(message)}", file=stream)
+
+
+def mask(stream: TextIO, value: str) -> None:
+    """Tell the runner to hide `value` in every later log line, one command per non-blank line (a PEM key is many).
+
+    The one place a command is written from text that is not ours, so it is the only writer that does not escape:
+    the text after `add-mask::` is the value to hide, taken to the end of its own line, and a value holding a line
+    break is split here so no line can start a second command.
+    """
+    for text in value.splitlines():
+        if text.strip():
+            print(f"::add-mask::{text.strip()}", file=stream)
 
 
 def block(stream: TextIO, lines: Iterable[str]) -> None:
