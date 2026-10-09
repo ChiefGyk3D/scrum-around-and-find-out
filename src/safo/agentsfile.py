@@ -139,7 +139,9 @@ MAX_KEEP_ALIVE_SECONDS = 600  # an on-demand model must not linger on a shared G
 
 def _short_duration(text: str) -> bool:
     match = re.fullmatch(r"([1-9][0-9]{0,5})([sm])", text)
-    return bool(match) and int(match[1]) * (60 if match[2] == "m" else 1) <= MAX_KEEP_ALIVE_SECONDS
+    if match is None:
+        return False
+    return int(match[1]) * (60 if match[2] == "m" else 1) <= MAX_KEEP_ALIVE_SECONDS
 
 
 def _strings(r: Reader, value: object, path: str) -> tuple[str, ...]:
