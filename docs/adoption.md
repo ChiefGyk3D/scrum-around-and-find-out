@@ -93,6 +93,16 @@ If your repositories already call the shared workflows in
 [git-your-ship-together](https://github.com/ChiefGyk3D/git-your-ship-together), its `project-sync.yml` is a thin wrapper
 around this Action with the same inputs it always had; bump the pin.
 
+## A public repository on a personal account, a board in an organization
+
+Set `app-owner` to the organization and the token is minted from the organization's App installation, so a public
+repository on a personal account can sync to the organization's board. The token is never installation-wide, so it
+needs a repository scope, and the calling repository cannot be one (it belongs to the personal account). Name the
+organization's repositories in `repositories` (names only, no owner), or list them in `board.yaml`. The token then
+carries only the one organization-projects permission, limited to those repositories, and the repository must be public
+because the organization's App can read a personal account's issues and pull requests only then. Without a scope the
+run stops and says so.
+
 ## The personal-token exception (user-owned boards)
 
 A GitHub App has no user-account Projects permission, so an App cannot write a board owned by a user. For that one case the

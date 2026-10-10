@@ -119,7 +119,10 @@ def token_scope(env: Mapping[str, str], board: Board, explicit: list[str]) -> st
     Only repositories owned by the account the token is minted for can be named. Default: those board.yaml lists
     (the calling repository in the board-less mode); with none listed, the calling repository when it belongs to
     that account. An explicit list must be a subset of what the board lists, or, when it lists none, the calling
-    repository itself. If nothing can be named the token is not minted: it is never installation-wide.
+    repository itself. The one exception is another account's installation (app-owner) with nothing listed for it:
+    the calling repository cannot be named there, so the caller must name that account's repositories itself, and
+    each name is taken to be one of that account's. If nothing can be named the token is not minted: it is never
+    installation-wide.
     """
     repo_owner = env.get("REPOSITORY_OWNER", "")
     owner = (env.get("APP_OWNER") or repo_owner).lower()
@@ -135,11 +138,10 @@ def token_scope(env: Mapping[str, str], board: Board, explicit: list[str]) -> st
             if listed:
                 if name.lower() not in listed:
                     raise ConfigError(f"repositories: {shown(name)} is not listed in the board")
-            elif not (own and name.lower() == calling.lower()):
-                if not own:
-                    raise ConfigError(no_repository_message(owner))
+            elif own and name.lower() != calling.lower():
                 raise ConfigError(f"repositories: {shown(name)} is not listed in the board")
-            chosen.setdefault(name.lower(), listed[name.lower()] if listed else calling)
+            # nothing listed for another account: the name is that account's own repository, as the caller gave it
+            chosen.setdefault(name.lower(), listed[name.lower()] if listed else calling if own else name)
         return ",".join(chosen.values())
     if listed:
         return ",".join(listed.values())
@@ -151,7 +153,8 @@ def token_scope(env: Mapping[str, str], board: Board, explicit: list[str]) -> st
 def no_repository_message(owner: str) -> str:
     return (
         f"the board lists no repository owned by {shown(owner)}, whose installation the token would be minted for; "
-        "an installation-wide token is never minted, so list the repositories in board.yaml"
+        "an installation-wide token is never minted, so list the repositories in board.yaml "
+        "or name them in the repositories input"
     )
 
 

@@ -340,8 +340,34 @@ def test_an_explicit_list_is_refused_when_the_board_lists_none_for_the_owner_unl
     assert resolved(**ws, REPOSITORIES="WIDGETS") == "widgets"
     refused("not listed in the board", **ws, REPOSITORIES="other")
     refused("not listed in the board", **ws, REPOSITORIES="widgets,other")
-    # the calling repository belongs to acme, not to the owner the token is minted for
-    refused("lists no repository", **ws, APP_OWNER="other-org", REPO_PRIVATE="false", REPOSITORIES="widgets")
+    # another account's installation with nothing listed for it: the caller names that account's repositories
+    # itself (the calling repository, acme/widgets, is not one of them; the name is taken as other-org's)
+    foreign = {"APP_OWNER": "other-org", "REPO_PRIVATE": "false"}
+    assert resolved(**ws, **foreign, REPOSITORIES="hub") == "hub"
+    assert resolved(**ws, **foreign, REPOSITORIES="Hub, tools, hub") == "Hub,tools"
+
+
+def test_a_foreign_owner_board_less_run_scopes_the_token_to_the_repositories_the_caller_names() -> None:
+    kw = {
+        "SAFO_BOARD": "",
+        "SAFO_PROJECT_URL": "https://github.com/orgs/other-org/projects/4",
+        "SAFO_MODE": "sync",
+        "APP_OWNER": "other-org",
+        "REPO_PRIVATE": "false",
+    }
+    assert resolved(**kw, REPOSITORIES="hub") == "hub"
+    refused("installation-wide", **kw)  # naming nothing is still never an installation-wide token
+    refused("repositories", **kw, REPOSITORIES="other-org/hub")  # names only: no owner can be smuggled in
+    refused("repositories", **kw, REPOSITORIES="hub,../x")
+    refused("repositories", **kw, REPOSITORIES=",")
+
+
+def test_a_board_that_lists_repositories_for_the_foreign_owner_still_limits_an_explicit_list(tmp_path: Path) -> None:
+    board_with(tmp_path, [{"owner": "other-org", "name": "hub"}])
+    ws = {"SAFO_BOARD": "b.yaml", "GITHUB_WORKSPACE": str(tmp_path), "APP_OWNER": "other-org", "REPO_PRIVATE": "false"}
+    assert resolved(**ws) == "hub"
+    assert resolved(**ws, REPOSITORIES="HUB") == "hub"
+    refused("not listed in the board", **ws, REPOSITORIES="elsewhere")
 
 
 def test_the_board_less_run_is_scoped_to_the_calling_repository() -> None:
