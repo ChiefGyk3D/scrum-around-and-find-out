@@ -43,7 +43,7 @@ inputs:
     description: Account whose installation the token is minted for; empty means the repository owner. Another account's installation can read this repository only if it is public, so a private repository is refused.
     default: ""
   repositories:
-    description: Comma-separated repository names to limit the token to. Empty means the calling repository in the board-less mode, otherwise every repository the installation covers.
+    description: Comma-separated repository names to limit the token to. Empty means the repositories board.yaml lists for the token's account, or the calling repository in the board-less mode. With app-owner naming another account and no board repository listed for it, name that account's repositories here (names only, no owner); nothing is minted without a scope.
     default: ""
   token:
     description: A fine-grained personal access token, for a USER-owned board only (Apps cannot write those).
