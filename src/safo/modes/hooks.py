@@ -349,13 +349,21 @@ def write_mode(ctx: LocalContext, value: str) -> None:
     folder = config_dir(ctx.env)
     if folder is None:
         raise ConfigError("HOME is not set, so there is nowhere to keep the guard mode")
-    write_text(folder / guardlog.MODE_NAME, value + "\n")
+    try:
+        write_text(folder / guardlog.MODE_NAME, value + "\n")
+    except PermissionError as exc:
+        raise ConfigError(
+            f"the guard mode cannot be kept in {folder.name}: {exc}; make it private with chmod 700 on that directory"
+        ) from exc
 
 
 def run_install(ctx: LocalContext, args: argparse.Namespace) -> int:
     given = Path(args.settings) if args.settings else ctx.home / ".claude" / "settings.json"
     target = given.resolve()  # a settings.json that is a symlink into a dotfiles repo stays a symlink
-    changed = install_settings(target, hook_command(args, "probe"), hook_command(args, "guard"), ctx.dry_run)
+    probe_command, guard_command = hook_command(args, "probe"), hook_command(args, "guard")
+    if args.guard_mode and not ctx.dry_run:
+        write_mode(ctx, args.guard_mode)  # first: a refused config directory must leave settings.json untouched
+    changed = install_settings(target, probe_command, guard_command, ctx.dry_run)
     if not changed:
         ctx.say(f"already installed in {given}: nothing changed")
     elif ctx.dry_run:
@@ -363,7 +371,6 @@ def run_install(ctx: LocalContext, args: argparse.Namespace) -> int:
     else:
         ctx.say(f"installed the SessionStart probe and the PreToolUse (Agent) guard in {given}")
     if args.guard_mode and not ctx.dry_run:
-        write_mode(ctx, args.guard_mode)
         ctx.say(f"guard mode: {args.guard_mode}")
     ctx.say(
         f"The guard is in {read_mode(ctx.env)} mode. Start with warn, read `safo hooks status`, "

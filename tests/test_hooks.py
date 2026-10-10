@@ -247,6 +247,18 @@ def test_install_sets_the_mode_only_when_asked_and_a_dry_run_writes_nothing(_pri
     assert (_private_home / ".config" / "safo" / "mode").read_text() == "block\n"
 
 
+def test_install_with_a_shared_config_directory_stops_with_one_line_and_leaves_settings_alone(
+    _private_home: Path,
+) -> None:
+    config = _private_home / ".config" / "safo"
+    config.mkdir(parents=True)
+    config.chmod(0o775)
+    settings = _private_home / "settings.json"
+    code, out, err = hooks("install", "--settings", str(settings), "--mode", "warn", home=_private_home)
+    assert code != 0 and "chmod 700" in (out + err) and "Traceback" not in (out + err)
+    assert not settings.exists(), "the mode is checked first, so a refusal changes nothing"
+
+
 # -- probe: SessionStart -------------------------------------------------------------------------------------
 
 
