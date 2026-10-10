@@ -14,21 +14,21 @@ which pieces are on `main` and which are on a branch waiting for review.
 
 ## Status
 
-Checked 2026-10-09.
+Checked 2026-10-10.
 
 | Piece | State |
 |---|---|
 | Python scaffold, CI on git-your-ship-together, repository files, `scripts/apply-baseline.sh` | Built, merged on `main` |
 | GraphQL client (refuses redirects; never replays a mutation whose outcome is unknown), `board.yaml` schema and validator | Built, merged on `main` |
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
-| `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App token, no checkout needed) | Built on branch `build/group4`, not merged. Read the trust boundary below before you call it |
-| `agents-status` (the board, Codex, Copilot and the routing-guard counts in one read-only view) | Built on branch `build/group4`, not merged |
-| `usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built on branch `build/group4`, not merged |
-| `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built on branch `build/group4`, not merged |
-| `outcome add` and `usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built on branch `build/group4`, not merged |
-| `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built on branch `build/group4`, not merged |
-| `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built on branch `build/group4`, not merged; not yet exercised in a real Claude Code session |
-| The playbook pages in `docs/` and this README | On branch `build/group4`, not merged |
+| `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App token, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
+| `agents-status` (the board, Codex, Copilot and the routing-guard counts in one read-only view) | Built, merged on `main` and released in v0.1.0 |
+| `usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built, merged on `main` and released in v0.1.0 |
+| `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built, merged on `main` and released in v0.1.0 |
+| `outcome add` and `usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built, merged on `main` and released in v0.1.0 |
+| `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built, merged on `main` and released in v0.1.0 |
+| `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main` and released in v0.1.0; not yet exercised in a real Claude Code session |
+| The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | Generated docs and the wiki mirror | Not built yet (the wiki is hand-written until then) |
 
 The design is in [`docs/superpowers/specs/2026-10-07-safo-design.md`](docs/superpowers/specs/2026-10-07-safo-design.md)
