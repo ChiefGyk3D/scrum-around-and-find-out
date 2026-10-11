@@ -12,7 +12,20 @@ from safo.modes import load_all
 
 ROOT = Path(__file__).parent.parent
 README = (ROOT / "README.md").read_text(encoding="utf-8")
-PAGES = ("home", "why", "roles", "handoff", "limits", "board", "agents-status", "usage", "lessons", "adoption")
+PAGES = (
+    "home",
+    "why",
+    "roles",
+    "handoff",
+    "review-loop",
+    "local-llm",
+    "limits",
+    "board",
+    "agents-status",
+    "usage",
+    "lessons",
+    "adoption",
+)
 EM_DASH = "\N{EM DASH}"
 
 

@@ -10,7 +10,7 @@ Work moves from a card to a merged pull request in six steps. Each step leaves s
 4. **Result out.** A comment on the pull request: what changed, how it was checked (the command and its output), and what
    was left. The numbers in the comment come from running the checks, not from memory.
 5. **A fresh reviewer.** A different agent or model reviews the diff and the claims, with no memory of the work. Findings go
-   on the pull request; the author fixes them.
+   on the pull request; the author fixes them. How many rounds, and when Codex attacks it: [The review loop](review-loop.md).
 6. **CI green, then the maintainer merges.** `CI green` is required by branch protection. Only the maintainer merges.
 
 ## Before you say "CI is not running"
