@@ -139,3 +139,65 @@ def test_the_lessons_are_seeded_with_the_dated_ones() -> None:
 def test_the_usage_page_records_that_code_counts_and_the_model_writes_prose() -> None:
     usage = squash((ROOT / "docs" / "usage.md").read_text(encoding="utf-8"))
     assert "code does the grouping and the counting" in usage
+
+
+DOIA = "https://github.com/ChiefGyk3D/department-of-internal-arguments"
+DOIA_ROLES = ("implementer", "reviewer", "adversarial-reviewer", "transcriber")
+DOIA_PACKS = (
+    "python-untrusted-input",
+    "gha-security-dast",
+    "threat-model",
+    "rf-emcomm",
+    "linux-platform",
+    "local-llm-routing",
+)
+
+
+def doia_links(text: str) -> list[str]:
+    return re.findall(r"\]\((" + re.escape(DOIA) + r"[^)\s]*)\)", text)
+
+
+def moving_doia_links(text: str) -> list[str]:
+    """Links to DoIA that are not pinned at a tag: a bare repository link, or one at a branch."""
+    return [x for x in doia_links(text) if not re.search(r"/(?:tree|blob)/v\d+\.\d+\.\d+(?:/|$)", x)]
+
+
+def shapes_named(text: str) -> set[str]:
+    names = set(re.findall(r"`([a-z]+(?:-[a-z]+)+)`", section(text, "Which routing shapes use each role")))
+    return names - set(DOIA_ROLES)
+
+
+def test_personas_reference_doia_at_a_tag_and_carry_no_copies() -> None:
+    page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
+    assert doia_links(page) and f"{DOIA}/tree/v0.2.0" in page
+    assert moving_doia_links(page) == []
+    assert not (ROOT / "examples" / "personas").exists()
+    assert "examples/personas" not in "\n".join(p.read_text(encoding="utf-8") for p in public_pages())
+    for old in ("disallowedTools", "model: sonnet", "model: haiku"):
+        assert old not in page, old
+
+
+def test_the_tag_guard_bites() -> None:
+    assert moving_doia_links(f"[x]({DOIA})") == [f"{DOIA}"]
+    assert moving_doia_links(f"[x]({DOIA}/tree/main)") == [f"{DOIA}/tree/main"]
+    assert moving_doia_links(f"[x]({DOIA}/blob/main/README.md)")
+    assert moving_doia_links(f"[x]({DOIA}/blob/v0.2.0/templates/lead.md)") == []
+
+
+def test_personas_name_every_role_pack_and_the_shared_rules() -> None:
+    page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
+    for name in (*DOIA_ROLES, *DOIA_PACKS):
+        assert f"`{name}`" in page, name
+    for phrase in ("`MODEL:`", "blocking", "important", "minor", "never push", "templates/lead.md", "--update"):
+        assert phrase in page, phrase
+    assert "install.py" in page and "--branch v0.2.0" in page
+
+
+def test_every_shape_the_personas_page_names_exists_in_agents_yaml() -> None:
+    import yaml
+
+    page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
+    real = set(yaml.safe_load((ROOT / "agents.yaml").read_text(encoding="utf-8"))["shapes"])
+    named = shapes_named(page)
+    assert named and named <= real, named - real
+    assert shapes_named(page.replace("`adversarial-review`", "`no-such-shape`")) - real == {"no-such-shape"}

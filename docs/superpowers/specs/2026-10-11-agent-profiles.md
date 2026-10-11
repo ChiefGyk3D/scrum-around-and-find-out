@@ -39,7 +39,7 @@ so a pointer is always attached to the one claim it supports.
 | Key | Type | Rule |
 |---|---|---|
 | `status` | `unmeasured` or `profiled` | Required. |
-| `persona` | identifier | Optional, Claude only. Names a file in `examples/personas/` (or the adopter's persona directory). |
+| `persona` | identifier | Optional, Claude only. Names an installed persona file, such as one DoIA's installer put in `.claude/agents/` (see `docs/personas.md`). |
 | `brief` | mapping | `template` (relative path) or `inline` (string), never both. Required or optional per 1.3. |
 | `context_ceiling` | `{value, evidence}` | `value` 1024 to 2,000,000 tokens. Evidence kinds: `config` or `lessons`/`outcomes`. |
 | `output_cap` | `{value, evidence}` | `value` 64 to 200,000, at most `context_ceiling` when both are set. |

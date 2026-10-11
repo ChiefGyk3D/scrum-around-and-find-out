@@ -31,7 +31,7 @@ Checked 2026-10-11.
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
 | Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
-| Personas (`docs/personas.md`) and the examples (`examples/personas/`, the outcomes log, systemd units) | Built and merged on `main` |
+| Personas (`docs/personas.md`, a description of the Department of Internal Arguments roles and how to install them, with no copies kept here) and the examples (the outcomes log, systemd units) | Built and merged on `main` |
 | [Measurements](docs/measurements.md): what the first month measured, dated and aggregated | Written; read it as a soak, not a finding |
 | Issue #23 roadmap: agent profiles, promotion of lessons into rules, and metrics from the outcomes log | Specified only; the spec is in review (PR #29) and none of it is built |
 
