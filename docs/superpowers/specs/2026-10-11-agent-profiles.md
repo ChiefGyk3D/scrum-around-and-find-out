@@ -89,7 +89,10 @@ Exactly one of:
 - `inline`: a string of at most 4,000 characters.
 
 Template placeholders are a closed set: `{{task}}`, `{{files_in_scope}}`, `{{acceptance_criteria}}`,
-`{{test_command}}`, `{{card}}`. Any other `{{...}}` is a load error. A template containing a front-matter fence, a
+`{{test_command}}`, `{{card}}`. Any other `{{...}}` is a load error. **Placement is constrained so the fence below
+holds:** a placeholder must be the whole content of its line (no leading or trailing characters, no indentation), with a
+blank line before and after it (or the file edge), at most once per template, and never inside a code fence the
+template opens; a list item, quote, table, heading or HTML line containing one is a load error. A template containing a front-matter fence, a
 level-1 heading, the generated-header marker (2.4), the policy-boundary text (2.3) or a control character other than
 newline and tab is rejected. Templates cannot include other files.
 
@@ -118,7 +121,8 @@ sentence.
 |---|---|
 | `do`, `dont`, `must_not_get` entries | `lessons`, `outcomes` |
 | `review_gate.checks[*]` | `lessons`, `outcomes` |
-| `context_ceiling`, `output_cap` | `config` (only to the allowlisted pointers below), `lessons`, `outcomes` |
+| `context_ceiling` | `config` (only to the allowlisted pointers below), `lessons`, `outcomes` |
+| `output_cap` | `lessons`, `outcomes` only (no `config` target exists for it) |
 | `thinking` | `config` (only to the allowlisted pointers below), `lessons`, `outcomes` |
 
 A `config:` pointer on a behavioural claim is a load error, however valid the pointer. This closes the case where a
@@ -148,20 +152,24 @@ scalar fields resolves, and each is tied to the setting it can support:
 - `context_ceiling`: `/agents/<id>/endpoints/<n>/num_ctx_max` and `/agents/<id>/endpoints/<n>/loaded_num_ctx/<model>`;
 - `thinking`: `/agents/<id>/endpoints/<n>/think`.
 
-Anything else (`version`, `kind`, a URL, a note) does not resolve. `output_cap` may use `lessons` or `outcomes` only.
+Anything else (`version`, `kind`, a URL, a note) does not resolve. The table and this allowlist are one rule: a `config:`
+pointer is valid only for the setting whose row names it.
 
 **Resolution is part of loading profiles, not an optional command.** Two stages share one entry point:
 
 1. `parse_agents` checks form, kinds and compatibility, with no file access (pure, as today).
-2. `load_verified_agents(path)` calls `parse_agents`, then resolves every pointer against the files named in
-   top-level `evidence_sources` (`lessons`, `outcomes`; relative paths confined like templates), and returns the
-   agents plus a list of `Resolution(field, kind, subject, excerpt_digest)` records. An unresolved or unsupported
-   pointer, a missing source file, or an `outcomes:` pointer when no outcomes source is configured raises `ConfigError`.
+2. `load_verified_agents(path)` calls `parse_agents` (a form error is global and raises), then resolves every pointer
+   against the files named in top-level `evidence_sources` (`lessons`, `outcomes`; relative paths confined like
+   templates). It returns a `VerifiedAgents` object: the parsed document, the `Resolution(field, kind, subject,
+   excerpt_digest)` records, and `errors_by_agent` (an unresolved or unsupported pointer, a missing source file, or an
+   `outcomes:` pointer with no outcomes source, each attributed to the agent that cites it). It never raises for a
+   resolution error itself.
 
-`gen_profiles.py`, `safo profiles verify`, `safo profiles brief` and `safo validate` all call `load_verified_agents`;
-none has a bypass flag. `safo route` and item 4 call it too, but fail closed differently: a profile whose evidence
-does not resolve is treated as `unmeasured` for that run, with the reason in `skipped`, because a lookup failure at
-routing time must not make routing unusable. The verifier prints, for every claim, the field, the evidence kind and the
+Strict consumers call `VerifiedAgents.require_clean()`, which raises `ConfigError` if any agent has an error:
+`gen_profiles.py`, `safo profiles verify`, `safo profiles brief` and `safo validate`, with no bypass flag. `safo route`
+and item 4 consume the same object without reparsing: an agent listed in `errors_by_agent` is treated as `unmeasured`
+for that run, with the reason in `skipped`, and every other agent routes normally, so one dangling pointer in Copilot's
+profile does not stop an unrelated `research` recommendation. There is no unverified second load path. The verifier prints, for every claim, the field, the evidence kind and the
 resolved subject (the lesson's heading and first line, or the computed metric value) side by side so a reviewer can
 judge relevance. Relevance itself is a human judgement and is stated as a residual in section 7.
 
@@ -179,14 +187,15 @@ Each rule has a test that goes red when the rule is deleted; a mutation sweep ov
 6. `must_not_get.shape` exists in `shapes`; a shape whose `prefer` names this agent is an error, and one whose
    `fallback` names it is a warning shown by `safo validate` and in the generator's output.
 7. **Ollama agents with more than one endpoint:** `context_ceiling.value` must be at most the **minimum** of every
-   endpoint's `num_ctx_max` and every `loaded_num_ctx` value; `thinking.value` must equal **every** endpoint's `think`
-   default (so `off` requires all endpoints `think: false`). Disagreeing endpoints make a profile with these settings
+   endpoint's `num_ctx_max` and every `loaded_num_ctx` value; `thinking.value` maps to the endpoint boolean
+   as `off` = `false` and `on` = `true`, must match **every** endpoint's `think` default, and `default` is forbidden for an
+   Ollama agent (an endpoint default is always explicit). Disagreeing endpoints make a profile with these settings
    an error; the fix is to align the endpoints or omit the setting.
 8. Text fields obey section 7.3: single line, printable, 300 characters, no private-path or e-mail pattern, no
    structure-breaking markup, no policy-override phrase.
 9. `persona` exists as a file in the persona directory (confined, same file rules as a template).
 10. `kind: human` takes no profile; `kind: ollama` takes the profile on the agent, not per endpoint.
-11. **Every non-human agent has a profile**, except ids listed in the migration allowlist (1.7).
+11. **Every non-human agent has a profile**, except ids in the migration list (1.7).
 
 ### 1.7 No profile means unmeasured; the one time-boxed exception
 
@@ -200,13 +209,16 @@ unmeasured agents) is not built yet and some shipped agents (the lead, Sonnet, O
 that supports a trait. So the change ships with:
 
 - profiles for the agents whose lessons support them (`claude-haiku`, `copilot`, `codex`, `ollama`, section 4);
-- a top-level `profile_migration: {introduced: YYYY-MM-DD, until: YYYY-MM-DD, agents: [claude-lead, claude-sonnet, claude-opus]}` allowlist.
-  Only listed ids may omit a profile; `until` must be a valid date at most 120 days after `introduced` (a test pins `introduced` to the
-  date of the commit that added the allowlist, so the horizon cannot be moved by editing `until` alone); after `until` the loader fails with "migration expired: profile these
-  agents or mark them unmeasured";
-- a test that an agent not in the allowlist and without a profile cannot load, that an expired allowlist fails, and
-  that the allowlist can only contain ids that exist. Item 4 reads the allowlist as the only agents exempt from the
-  unmeasured rule, and the exemption ends on `until`, so the bypass cannot outlive the migration.
+- a top-level `profile_migration: {agents: [...]}` list. The cohort and the deadline live in **code**, not in the file:
+  a constant `MIGRATION_COHORT = (claude-lead, claude-sonnet, claude-opus)` and `MIGRATION_UNTIL = 2026-12-31`. The
+  file's list must be a subset of the cohort, so it can shrink as agents are profiled and can never grow or name a
+  different id; adding `new-agent` to the list, or swapping an id, is a load error. After `MIGRATION_UNTIL` the loader
+  fails with "migration expired: profile these agents or mark them unmeasured". Changing the constants takes a pull
+  request touching source files that CODEOWNERS covers (7.2);
+- tests: an agent outside the cohort and without a profile cannot load, even when added to the list; a swapped or
+  added id fails; an expired deadline fails (the clock is injected); the constants equal the values the maintainer
+  approved. Item 4 reads the list as the only agents exempt from the unmeasured rule, and the exemption ends on
+  `MIGRATION_UNTIL`, so the bypass can neither be widened nor outlive the migration.
 
 ## 2. Rendering per harness
 
@@ -249,15 +261,20 @@ contains it is rejected so it cannot be spoofed.
 
 ### 2.4 The header and the render manifest
 
-Every rendered file begins with a header in the comment form of its format:
+Every rendered file carries one header line in the comment form of its format:
 `GENERATED by scripts/gen_profiles.py from agents.yaml; do not edit; manifest sha256:<hex>; body sha256:<hex>`.
+**Position is per format.** A Claude subagent file keeps its `---` front-matter fence at byte zero (so the harness and
+any parser still read `name`, `model` and tool lists) and the header is an HTML comment on the first line after the
+closing fence. Codex and local files carry it on line one; the issue form carries it as a leading `#` comment line
+(which a YAML parser ignores). `--check` requires exactly one header line, at the position its format defines.
 
 - The **manifest** is a canonical JSON object (sorted keys, no whitespace, UTF-8) with: `format` (an integer constant
   `RENDER_FORMAT` bumped on any renderer change), `renderer` (the SAFO version), `harness`, `output_path`, `agent_id`,
   the agent's canonical profile data, `persona_sha256` and `template_sha256` (or null), and the resolved evidence
   records of 1.5 (field, kind, subject, excerpt digest). The manifest digest is SHA-256 of that JSON.
-- The **body digest** is SHA-256 of the final bytes after the header line, so any hand edit of the instruction text,
-  including persona frontmatter such as the tools list, is detected even if it left the manifest alone.
+- The **body digest** is SHA-256 of the whole file with the header line removed (so, for a Claude file, front matter
+  followed by the rest). Any hand edit of the instruction text, including the front matter's tools list, is detected even
+  if it left the manifest alone. The digest scope is the same rule for every format, which keeps it testable.
 - `--check` recomputes both and reports which one failed: a stale manifest means the sources changed, a stale body
   means the file was edited or the renderer changed.
 
@@ -296,8 +313,11 @@ can monkeypatch them, as `test_routing_doc.py` does. It does **not** inherit `ge
   `--write` alike. The comparison is of exact path sets: a missing file, an unexpected file and a stale file all fail.
 - **Reads:** each file opened `O_NOFOLLOW | O_NONBLOCK`, `fstat` must be a regular file, size capped at 64 KiB.
 - **Writes:** temp file created `O_EXCL | O_NOFOLLOW` in the destination directory, `fsync`, rename, then `fsync` of the
-  directory. It refuses to replace a directory or link and never deletes one; it removes a stale file only when it is a
-  regular file that carries the generated header, and otherwise stops with an error naming it.
+  directory. It refuses to replace a directory or link and never removes a link or special file. It removes a stale file only
+  when it is a regular file that carries the generated header, then removes directories left empty and no longer
+  expected, bottom-up, refusing any that are non-empty. Anything else stops with an error naming it. So a renamed
+  output is repaired by `--write`, and `--write` followed by `--check` passes on every tree that contains only
+  header-bearing generated files and empty directories.
 - It calls `load_verified_agents` (1.5): unresolved evidence is a render failure.
 - `make check` and the CI job that runs `gen_routing.py --check` gain a second line for `gen_profiles.py --check`.
 
@@ -382,7 +402,7 @@ First shipped content is limited to what the repository already measures, each l
   Sonnet reviews missed.
 - `ollama`: think off for cheap tasks, send exactly the loaded `num_ctx`, output is a draft, code does the grouping and
   counting.
-- `claude-sonnet`, `claude-opus`, `claude-lead`: in the migration allowlist (1.7), no traits claimed.
+- `claude-sonnet`, `claude-opus`, `claude-lead`: in the migration list (1.7), no traits claimed.
 
 ## 5. Tooling surface
 
@@ -403,10 +423,16 @@ First shipped content is limited to what the repository already measures, each l
 - **The counter returns a typed result, not an int.** `qualify(outcomes, agents, agent_id, model=None, today)` returns
   a `Qualification` with `qualified`, `counted`, `distinct_cards`, `distinct_dates` and `rejected`, a list of
   `(reason, count)`. A **qualifying** outcome is a validated record that: names an `agent` that exists in `agents.yaml`
-  (and a `model` that is a key of that agent's `profile.models` when a model is asked for), has a non-null `card` URL,
-  has `review_rounds >= 1`, and falls inside `window_days` of `today`. Records are deduplicated on `(agent, model,
-  card)`; two records for one card with different `shape` or `findings` are reported as a conflict and neither counts.
-  An agent is promotable when `counted >= min_outcomes` and `distinct_dates >= min_distinct_dates`.
+  (for a model layer, a `model` that is a key of that agent's `profile.models`), has a non-null `card` URL, has
+  `review_rounds >= 1`, and has a date `d` with `today - window_days <= d <= today` (inclusive; a future date is rejected
+  with its own reason).
+  **Scope and deduplication are fixed so the result does not depend on log order.** With `model=None` (the harness
+  layer) all of the agent's records are considered and deduplicated on `(agent, card)`; with a model, records are first
+  filtered to that model and deduplicated on `(agent, model, card)`. Records for one key that agree on every material
+  field (`date`, `shape`, `review_rounds`, `findings`, `model`) collapse to one; if they disagree on any, including date
+  or review metadata, or on `model` in harness scope, the key is a **conflict** and none of its records counts.
+  `distinct_dates` is computed over counted records only. An agent is promotable when `counted >= min_outcomes` and
+  `distinct_dates >= min_distinct_dates`.
 - **Stance, stated in the docs page and in `docs/limits.md` under accepted residuals:** outcomes are self-reported, by
   the lead, into a file the user owns. N=10 is a speed bump, not proof, in the same sense as the approval token: it
   makes a thin sample visible and slows an honest mistake; it does not stop a user (or anything that can write the log)
@@ -418,9 +444,9 @@ First shipped content is limited to what the repository already measures, each l
 - **How `route` will treat unmeasured agents (item 4, stated so the data fits):** an agent whose effective status is
   unmeasured (explicit, no profile, evidence unresolved, or not qualified) is skipped for every shape except
   `adversarial-review`, where it may be an additional reviewer but never the sole reviewer and never the author. The
-  skip appears in `Recommendation.skipped` with the counts. The migration allowlist (1.7) is the only exemption and it
+  skip appears in `Recommendation.skipped` with the counts. The migration list (1.7) is the only exemption and it
   expires. `Recommendation` gains `profile_status` (`"profiled"` or `"unmeasured"`, plus `"migrating"` while
-  allowlisted); informational until item 4.
+  in the migration list); informational until item 4.
 - The ChatGPT-side models in the issue are the intended first `unmeasured` entries. Nothing here names one, because the
   repository has no measurement of them.
 
@@ -455,10 +481,13 @@ Two different situations, two different rules; the first draft conflated them.
 1. **Repository build generation** (`gen_profiles.py` on a checkout, in CI or locally). Ownership and mode checks mean
    nothing here: checkout files belong to the runner. The control is review. Deployment prerequisite, not a
    suggestion: `.github/CODEOWNERS` covers `agents.yaml`, `examples/harness/`, the persona directory, the template
-   directory and `docs/lessons.md` (the evidence source), and branch protection requires a code-owner review. The
-   offline check `safo profiles verify` fails when CODEOWNERS does not cover those paths; whether branch protection is
-   enabled cannot be checked offline and is stated in `docs/adoption.md` as the adopter's step. A repository without
-   code-owner review gets no protection from this design against a hostile pull request, and the docs say so.
+   directory, `docs/lessons.md` (the evidence source) and the source files holding the profile constants and renderer
+   (`src/safo/agentsfile.py`, `src/safo/profile_render.py`). The offline check `safo profiles verify` fails when
+   CODEOWNERS does not cover those paths. In a repository with more than one contributor, branch protection must also
+   require code-owner review; that cannot be checked offline and is the adopter's step in `docs/adoption.md`. In this
+   single-maintainer repository the maintainer is the code owner and no second reviewer exists, so the control is
+   that every change arrives by pull request with a visible generated diff. A repository with neither gets no
+   protection from this design against a hostile pull request, and the docs say so.
 2. **Local private files** (the home `agents.yaml` and its local override, read by `route`, `hooks`, `verify` and
    `brief`). A new `trusted_regular_file(path)` policy, separate from `guardlog.trusted_dir` (which checks a directory
    and follows a symlink to it, and does not inspect the file): open `O_NOFOLLOW | O_NONBLOCK`, then on the descriptor
@@ -501,7 +530,7 @@ test plan asserts it for the new key.
 | A hostile `do` cites a nonexistent lessons slug | `load_verified_agents` raises; generator, `validate` and `verify` all use it | Delete the call: generation test goes red |
 | A persona or template changes while the profile does not | Manifest digest covers persona and template bytes; body digest covers final bytes | One test per changed input |
 | Outcomes appended or duplicated to promote an agent | `qualify` requires card URL, review, uniqueness, distinct dates, window; stance stated as speed bump | Duplicate, null-card, conflict and ancient-record tests |
-| Profileless new agent bypasses unmeasured status | Rule 11; expiring allowlist | Bypass and expiry tests |
+| Profileless new agent bypasses unmeasured status | Rule 11; migration cohort and deadline pinned in code | Bypass and expiry tests |
 | Task text impersonates generated sections | `safo profiles brief` fencing with a random id; manual paste is outside the claim | Fence-escape and delimiter-in-value tests |
 | Template path escapes (`..`, symlink, FIFO) | Confinement, `O_NOFOLLOW`, `S_ISREG` | Hostile-path tests |
 | YAML alias bomb, merge key, duplicates in `profile` | Shared reader | Fixtures extended to the subtree |
@@ -534,7 +563,7 @@ Each item includes the failing case that proves the guard bites.
    override cannot satisfy a pointer.
 7. `test_profile_crosschecks`: unknown `must_not_get` shape; shape prefers (error) or falls back to (warning) the
    agent; two Ollama endpoints with different `num_ctx_max` and different `think` (ceiling above the minimum fails,
-   `thinking` disagreeing with either fails); gated agent in a shape with no reviewer or itself as reviewer; `models` on
+   `thinking` disagreeing with either fails; `off`, `on` and `default` each tested, `default` refused for Ollama); gated agent in a shape with no reviewer or itself as reviewer; `models` on
    a non-copilot agent; profile on `kind: human`.
 8. `test_review_gate`: checks as `{code, evidence}`; missing evidence, duplicate code, unknown code, bare string form all
    fail.
@@ -547,18 +576,20 @@ Each item includes the failing case that proves the guard bites.
     `test_agentsfile.py`.
 12. `test_profile_render`: golden render of a fixture covering all four harness outputs; header and both digests on every
     file; policy-boundary paragraph present by exact match in every file; issue form parses with `yaml.safe_load` and has
-    the required fields; Claude frontmatter parses and its `tools` equal the persona's; round-trip structure parse.
+    the required fields; Claude front matter starts at byte zero, parses, and its `tools` equal the persona's, with the header on the first
+    line after the closing fence; round-trip structure parse.
 13. `test_manifest_digest`: change only a persona, only a template, only the output path, only `RENDER_FORMAT`, only a
-    profile text: each changes the manifest digest. Edit the body of a rendered file keeping its header: `--check`
-    reports a body-digest failure.
+    profile text: each changes the manifest digest. Edit the body of a rendered file keeping its header, and edit only a Claude
+    file's front-matter tools list: `--check` reports a body-digest failure in both.
 14. `test_profile_drift` (mirrors `test_routing_doc.py`): tree equals render; `--check` passes, then fails on a hand
-    edit, a deleted file, a stray file and a stale digest; `--write` then `--check` passes.
+    edit, a deleted file, a stray file and a stale digest; `--write` then `--check` passes; a renamed output leaves no stale file or empty directory after `--write`.
 15. `test_generator_filesystem`: output tree containing a symlink, a FIFO, a directory where a file belongs, a file where
     a directory belongs, and `OUT` itself a symlink: `--check` reports each as an error without hanging, `--write`
-    refuses without deleting or following; a stale file without the header is not removed.
+    refuses without deleting or following; a stale file without the header is not removed; a non-empty unexpected directory is refused.
 16. `test_brief_fill`: fence ids differ per call; a value containing the delimiter text, a NUL, or over 64 KiB is
     refused; line endings normalised; a value with headings and front matter stays inside the fence; unknown
-    placeholder refused.
+    placeholder refused; placeholders that are inline, in a list item, quote, heading, table, HTML line or code fence,
+    indented, repeated, or missing a surrounding blank line are rejected at load.
 17. `test_trusted_regular_file`: symlinked file, symlinked parent, FIFO, group-writable file, wrong owner (monkeypatched
     uid), world-writable parent without sticky bit, all refused; the repository-generation path does not apply it
     (asserted).
@@ -566,13 +597,15 @@ Each item includes the failing case that proves the guard bites.
     generator ignores the local override; `examples/harness/` passes `tests/privacy.py`, whose new generic patterns have
     their own positive and negative cases.
 19. `test_profile_route`: `route` prints the `checks` wording and the brief path, `--json` has the additive keys,
-    selection results for every shipped shape are identical before and after (snapshot), and a profile with unresolved
-    evidence routes as `unmeasured` with the reason.
-20. `test_profile_migration`: an agent without a profile and not in the allowlist fails to load; an expired allowlist
-    fails; an allowlist naming an unknown id fails; a horizon past 120 days fails.
+    selection results for every shipped shape are identical before and after (snapshot), and one agent with a dangling
+    pointer routes as `unmeasured` with the reason while an unrelated shape still gets its normal recommendation (no
+    global failure, no second load path).
+20. `test_profile_migration`: an agent outside the cohort and without a profile fails to load even when added to the
+    list; a swapped or added id fails; an expired deadline fails (injected clock); a list shrunk to a subset loads.
 21. `test_qualify` (the item 4 seam): unknown agent, null card, `review_rounds` 0, duplicate cards, conflicting
-    duplicates, ten records on one date, ten on distinct dates, an ancient record, model layer lookup: each yields the
-    stated `Qualification` with reasons; promotion keys bounded.
+    duplicates, ten records on one date, ten on distinct dates, an ancient record, model layer lookup, the same card under two models (counts once for the harness layer, conflict reported), reordered
+    duplicates (same result), duplicates differing in date or review rounds (conflict), a future-dated record, the
+    window's inclusive edges: each yields the stated `Qualification` with reasons; promotion keys bounded.
 22. `test_codeowners_check`: `verify` fails when CODEOWNERS misses any listed path.
 23. Mutation sweep over the profile helper, evidence resolver and filesystem code: delete each validation in a scratch
     copy and run the suite; any green run is a survivor and blocks the PR (recorded in the PR description).
@@ -595,22 +628,21 @@ Each item includes the failing case that proves the guard bites.
 - No per-endpoint profiles, no profile merging from the local override, no secrets or endpoint URLs in any profile.
 - No auto-writing of rendered files into a consumer repo's `.github/`; adopters copy what they want.
 
-## 10. Open questions for the maintainer
+## 10. Decisions (approved by the maintainer, 2026-10-11)
 
-1. **Evidence pointers into `docs/lessons.md`: heading slugs or stable ids?** Recommend slugs now. Resolution is now
-   part of generation, so a retitle fails the build the same day. Add explicit ids only if retitles prove common.
-2. **Promotion thresholds and qualification:** N=10 outcomes, at least 3 distinct dates, a 180-day window, card URL and
-   one review round required, counted per agent and model for model layers and per agent for the harness layer. Recommend
-   exactly these; they are config, so they can move without a spec change.
-3. **Where do rendered files live?** Recommend `examples/harness/` (adopter-copyable, scanned by the privacy test, not
-   published as wiki pages), and not installing them into this repository's own `.github/` until item 4 lands.
-4. **The migration allowlist:** which agents, and until when? Recommend `claude-lead`, `claude-sonnet`, `claude-opus`
-   until 2026-12-31 (under the 120-day cap), and giving `claude-sonnet` a profile earlier only if the maintainer names a
-   measured `do` or `dont` for it; nothing is invented to shorten the list.
-5. **Is a code-owner review requirement acceptable on `agents.yaml` and the profile sources in this repository**, given a
-   single-maintainer repo where the maintainer would review their own change? Recommend yes, with the maintainer as the
-   code owner and no extra reviewer, because the control that matters is that the change arrives by pull request with a
-   visible generated diff; document the gap for adopters with more than one contributor.
+No questions remain open. The five recommendations of the first drafts were approved as written:
+
+1. **Lessons evidence uses heading slugs.** Resolution is part of generation, so a retitle fails the build the same day.
+   Explicit ids are added only if retitles prove common.
+2. **Promotion:** N=10 qualifying outcomes, at least 3 distinct dates, a 180-day window, a card URL and at least one
+   review round per record. Counted per agent and model for model layers, per agent for the harness layer. These are
+   `promotion:` config values and can move without a spec change.
+3. **Rendered files live in `examples/harness/`** (adopter-copyable, scanned by the privacy test, not wiki pages). They
+   are not installed into this repository's own `.github/` until item 4 lands.
+4. **Migration list:** `claude-lead`, `claude-sonnet`, `claude-opus`, until 2026-12-31, both pinned in code (1.7).
+   `claude-sonnet` gets a profile earlier only if the maintainer names a measured `do` or `dont` for it.
+5. **The maintainer is code owner on the profile paths, with no extra reviewer** (7.2). The control is that every change
+   arrives by pull request with a visible generated diff. The gap for multi-contributor adopters is documented.
 
 ## 11. Review log
 
@@ -621,7 +653,7 @@ Two are closed in part, and what remains is named.
 |---|---|---|---|
 | 1 | High | Any evidence form supports any claim | Fixed: 1.5 compatibility table and `config:` allowlist per setting; negative tests (8.3); the verifier prints claim and resolved subject together. Relevance remains a human judgement (7.3). |
 | 2 | High | Dangling evidence reaches active files | Fixed: 1.5 `load_verified_agents` shared by generator, `validate`, `verify`, `brief`; test that removing the call goes red (8.4). |
-| 3 | High | Legacy state is a routing bypass | Fixed: no legacy state (1.7); rule 11; a profileless agent is unmeasured; expiring, horizon-capped migration allowlist; tests (8.20). |
+| 3 | High | Legacy state is a routing bypass | Fixed: no legacy state (1.7); rule 11; a profileless agent is unmeasured; expiring migration list (superseded in round 2: cohort and deadline pinned in code); tests (8.20). |
 | 4 | High | `measured_runs` is gameable | Fixed in part: typed `qualify` with card, review, dedup, distinct dates, window, conflicts (6.1, 8.21). Residual: outcomes are self-reported and N is a speed bump, stated in 6.1 and for `docs/limits.md`. The card-or-finding variant was narrowed to card required, because a finding alone is not unique. |
 | 5 | High | Outcomes evidence unimplementable | Fixed: versioned grammar with explicit range, `findings.*` accessors, `query_outcomes`, "no data" semantics, multi-month tests (1.5, 8.5). |
 | 6 | High | `review_gate` cannot carry evidence | Fixed: checks are `{code, evidence}` objects, no profile-level evidence list (3.4, 8.8). |
@@ -634,3 +666,35 @@ Two are closed in part, and what remains is named.
 | 13 | Medium | Drift check lacks filesystem safety | Fixed: non-following inventory, special entries rejected, exact path sets, atomic no-follow writes, no destructive replacement (2.6, 8.15). |
 | 14 | Medium | Privacy claim exceeds what CI proves | Fixed: claim narrowed to generic patterns, e-mail and home-path checks added, the external supplement required at release (2.5, 8.18). Residual: private handles and employer terms are caught only where the supplement is applied. |
 | 15 | Low | `brief` requiredness contradictory | Fixed: requiredness table by harness and status with minimal valid profiles (1.3, 8.1). |
+
+### Round 2
+
+Eight findings from the second adversarial review, mostly contradictions the rewrite introduced.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | High | Generated header breaks Claude front matter | Fixed: per-format header position, `---` stays at byte zero for Claude, one rule for the digest scope (2.4, 8.12, 8.13). |
+| 2 | High | Strict resolution cannot degrade one profile in `route` | Fixed: `load_verified_agents` returns `VerifiedAgents` with per-agent errors and never raises for resolution; strict callers use `require_clean()`; route downgrades only affected agents with no second load path (1.5, 8.19). |
+| 3 | High | Migration allowlist is still a bypass | Fixed: cohort and deadline are constants in code, the file list must be a subset, adding or swapping an id fails (1.7, 8.20). The 120-day cap is dropped because the fixed date replaces it. |
+| 4 | Medium | `qualify()` dedup unstable | Fixed: scope-specific keys, material-field conflict rule, inclusive window, future dates rejected, `distinct_dates` over counted records, order-independence tests (6.1, 8.21). |
+| 5 | Medium | Template placement defeats fencing | Fixed: a placeholder is the whole line, blank-line separated, once, outside fences and Markdown constructs, enforced at load (1.4, 8.16). |
+| 6 | Medium | Evidence table contradicts allowlist | Fixed: `output_cap` has its own row, `lessons` and `outcomes` only; one rule (1.5). |
+| 7 | Medium | `thinking: default` vs endpoint booleans | Fixed: `off` = false, `on` = true, `default` forbidden for Ollama, all three tested (1.6 rule 7, 8.7). |
+| 8 | Low | `--write` cannot repair stale directories | Fixed: after removing header-bearing stale files it removes empty unexpected directories bottom-up, refusing non-empty ones and never touching links (2.6, 8.14, 8.15). |
+
+## 12. Build plan
+
+Five groups of pull requests in dependency order; each is a separate PR (or short stack), reviewed by Sonnet against
+its tests, with a mutation sweep (8.23) over the code it adds. "Codex" means an adversarial Codex pass before merge,
+required wherever file trust, digests, brief fencing or evidence resolution is touched. The maintainer merges.
+
+| Group | Contents | Tests (section 8) | Codex pass |
+|---|---|---|---|
+| 1. Loader, schema, migration | `profile` and `promotion` blocks in `agentsfile.py`; text and placeholder rules; cross-checks; migration cohort in code; template and persona reads with confinement; `trusted_regular_file`; shipped profiles for haiku, copilot, codex, ollama (pointer form checked only); `docs/profiles.md` stub; `docs/limits.md` residuals | 1, 2, 7, 8 (schema part), 9, 10, 11, 17, 20, 25 | Yes: file trust and migration bypass |
+| 2. Evidence and outcomes | Pointer grammar and compatibility; `load_verified_agents` and `VerifiedAgents`; JSON Pointer resolver; `query_outcomes`; `qualify`; `safo profiles verify` (CODEOWNERS check included); `validate` wired; route degradation for unresolved agents | 3, 4, 5, 6, 19 (degradation part), 21, 22 | Yes: evidence resolution |
+| 3. Renderer, digest, drift | `profile_render.py`; manifest and body digests; policy boundary; `gen_profiles.py` with filesystem-safe inventory, reads and writes; `examples/harness/` output; `.github/CODEOWNERS` as a prerequisite; privacy patterns for e-mail and home paths; `make check` and CI line | 12, 13, 14, 15, 18, 24 | Yes: digest and filesystem handling |
+| 4. Copilot harness and route | Copilot two-layer schema; issue form and `copilot-instructions.md`; `review_gate` with evidenced checks; cross-checks on shapes; `route` lines and additive JSON keys | 8 (review gate), 19 (surface and snapshot) | No: Sonnet review only; the evidence and digest code it uses is already reviewed in groups 2 and 3 |
+| 5. Brief fencing | `safo profiles brief`, fence ids, refusal rules, placement enforcement at fill time | 16 | Yes: brief fencing |
+
+Dependencies: 1, then 2, then 3; 4 needs 1 to 3; 5 needs 1 and 2 and can run beside 3 and 4. Items 4 and 5 of the
+issue (promotion and metrics) start only after group 2 lands, since they consume `qualify` and the profile status.
