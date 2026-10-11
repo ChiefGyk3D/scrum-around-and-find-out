@@ -99,7 +99,9 @@ def test_a_ceiling_citing_the_thinking_field_fails_and_so_does_the_reverse() -> 
     rejects(d, r"thinking\.evidence: a config pointer for thinking must address one of")
 
 
-@pytest.mark.parametrize("ref", ["/version", "/agents/ollama/kind", "/agents/ollama/endpoints/0/url", "/agents/ollama/endpoints/0/note"])
+@pytest.mark.parametrize(
+    "ref", ["/version", "/agents/ollama/kind", "/agents/ollama/endpoints/0/url", "/agents/ollama/endpoints/0/note"]
+)
 def test_a_pointer_outside_the_allowlist_fails_at_parse_and_at_resolution(ref: str) -> None:
     d = doc()
     put_ceiling(d, f"config:{ref}")

@@ -65,7 +65,7 @@ takes it for a bug that was hidden.
   check and the rename.
 - **The `gh` fallback is off under Actions.** On a laptop SAFO may use `gh auth token`; under GitHub Actions it never runs
   `gh`, and the only credentials are the App or the token you pass in.
-- **Local modes are not allowed in the Action.** `usage`, `route`, `outcome`, `local` and `hooks` read files and logins on
+- **Local modes are not allowed in the Action.** `usage`, `route`, `outcome`, `local`, `hooks` and `profiles` read files and logins on
   a person's machine; the Action refuses them before it mints anything.
 - **The trust policy covers every private agents file.** A file read from a private path (the `agents.yaml` and its local
   override) must be a regular file you own, not writable by its group or by others, with no symbolic link on the way and

@@ -17,6 +17,7 @@ from pathlib import Path
 from safo.agentsfile import AgentsFile, load_agents_merged
 from safo.context import LocalContext
 from safo.errors import ConfigError
+from safo.evidence import VerifiedAgents, load_verified_agents
 
 
 def add_agents_arguments(parser: argparse.ArgumentParser) -> None:
@@ -82,6 +83,11 @@ def local_path(ctx: LocalContext, args: argparse.Namespace) -> Path:
 
 def load_agents_for(ctx: LocalContext, args: argparse.Namespace) -> AgentsFile:
     return load_agents_merged(agents_path(ctx, args), local_path(ctx, args))
+
+
+def load_verified_for(ctx: LocalContext, args: argparse.Namespace) -> VerifiedAgents:
+    """The agents file with its evidence pointers resolved: the one load path for anything that reads a profile."""
+    return load_verified_agents(agents_path(ctx, args), local_path(ctx, args))
 
 
 def outcomes_path(ctx: LocalContext, args: argparse.Namespace) -> Path:

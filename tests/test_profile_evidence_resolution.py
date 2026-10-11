@@ -12,7 +12,7 @@ from evdata import LESSON_HEADINGS, lessons_text, rec, repo
 from localcli import cli
 from profiledata import LESSON, OTHER_LESSON, claim, doc, profile, put
 from safo.errors import ConfigError
-from safo.evidence import VerifiedAgents, load_verified_agents, lesson_sections
+from safo.evidence import VerifiedAgents, lesson_sections, load_verified_agents
 
 BOARD = Path(__file__).parent / "data" / "board.yaml"
 
@@ -58,7 +58,9 @@ def test_a_dangling_slug_is_an_error_for_the_citing_agent_only(tmp_path: Path) -
 
 
 def test_a_retitled_heading_dangles(tmp_path: Path) -> None:
-    path = repo(tmp_path, lessons=["Codex's sandbox cannot commit in a worktree", OTHER_LESSON.split(":")[1].replace("-", " ")])
+    path = repo(
+        tmp_path, lessons=["Codex's sandbox cannot commit in a worktree", OTHER_LESSON.split(":")[1].replace("-", " ")]
+    )
     v = verified(path)
     assert "codex" in v.errors_by_agent
 
@@ -96,7 +98,9 @@ def test_a_known_model_layer_resolves(tmp_path: Path) -> None:
 def test_a_model_layer_claim_is_resolved_too(tmp_path: Path) -> None:
     d = doc()
     profile(d, "copilot").update(status="profiled", do=[claim("Small pull requests.", LESSON)])
-    profile(d, "copilot")["models"] = {"gpt-5.1": {"status": "profiled", "dont": [claim("Trust its tests.", "lessons:gone")]}}
+    profile(d, "copilot")["models"] = {
+        "gpt-5.1": {"status": "profiled", "dont": [claim("Trust its tests.", "lessons:gone")]}
+    }
     v = verified(repo(tmp_path, d))
     assert set(v.errors_by_agent) == {"copilot"} and "models.gpt-5.1.dont[0]" in v.errors_by_agent["copilot"][0]
 
@@ -147,7 +151,7 @@ def test_an_outcomes_pointer_with_a_missing_log_file(tmp_path: Path) -> None:
 def test_a_source_that_escapes_the_repository_is_refused(tmp_path: Path) -> None:
     d = doc()
     d["evidence_sources"] = {"lessons": "../lessons.md"}
-    with pytest.raises(ConfigError, match="evidence_sources.lessons"):
+    with pytest.raises(ConfigError, match=r"evidence_sources\.lessons"):
         verified(repo(tmp_path, d, lessons=None))
 
 
@@ -225,6 +229,7 @@ def test_validate_reads_the_default_home_file_when_it_exists(_private_home: Path
     config = _private_home / ".config" / "safo"
     config.mkdir(parents=True)
     path = dangling(tmp_path)
+    put(config, "docs/lessons.md", (tmp_path / "docs" / "lessons.md").read_bytes())
     (config / "agents.yaml").write_bytes(path.read_bytes())
     (config / "agents.yaml").chmod(0o600)
     code, _, err = cli("--board", str(BOARD), "validate", home=_private_home)
@@ -236,8 +241,10 @@ def test_verify_fails_on_the_same_dangling_input(tmp_path: Path, _private_home: 
     assert code == 1 and "no-such-lesson" in out
 
 
-def test_the_strict_callers_all_go_through_require_clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _private_home: Path) -> None:
-    """Remove require_clean (make it a no-op) and the strict callers go green on a dangling pointer: this is red then."""
+def test_the_strict_callers_all_go_through_require_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _private_home: Path
+) -> None:
+    """With require_clean a no-op the strict callers go green on a dangling pointer: they rely on it alone."""
     bad = dangling(tmp_path)
     monkeypatch.setattr(VerifiedAgents, "require_clean", lambda self: None)
     code, _, _ = cli("--board", str(BOARD), "validate", "--agents", str(bad), home=_private_home)

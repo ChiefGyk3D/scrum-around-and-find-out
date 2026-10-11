@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,7 +28,7 @@ def owners(lines: list[str]) -> str:
     return "".join(f"{x} @owner\n" for x in lines)
 
 
-def verify(tmp_path: Path, home: Path, text: str | None, d: dict | None = None) -> tuple[int, str]:
+def verify(tmp_path: Path, home: Path, text: str | None, d: dict[str, Any] | None = None) -> tuple[int, str]:
     path = repo(tmp_path, d, codeowners=text)
     code, out, _ = cli("profiles", "verify", "--agents", str(path), home=home)
     return code, out
@@ -151,7 +152,14 @@ def test_a_symbolic_link_or_a_huge_codeowners_is_refused(tmp_path: Path) -> None
 
 
 def test_the_required_list_is_the_one_the_spec_names() -> None:
-    assert REQUIRED == ("agents.yaml", "examples/harness/", ".claude/agents/", "agents/", "src/safo/agentsfile.py", "src/safo/profile_render.py")
+    assert REQUIRED == (
+        "agents.yaml",
+        "examples/harness/",
+        ".claude/agents/",
+        "agents/",
+        "src/safo/agentsfile.py",
+        "src/safo/profile_render.py",
+    )
     assert "docs/lessons.md" in required_paths("docs/lessons.md", ())
     assert "briefs/" in required_paths("docs/lessons.md", ("briefs/a.md",))
     assert "x/y/" in required_paths("docs/lessons.md", ("x/y/z.md",))

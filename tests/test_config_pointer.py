@@ -48,7 +48,9 @@ def test_pointer_get_follows_rfc_6901(ref: str, expected: object) -> None:
         assert pointer_get(data, ref) == expected
 
 
-@pytest.mark.parametrize("ref", ["/list/-", "/list/01", "/list/+1", "/list/1.0", "/list/9", "/list/x", "/nope", "/a/b/c", "a/b", "/m~2n"])
+@pytest.mark.parametrize(
+    "ref", ["/list/-", "/list/01", "/list/+1", "/list/1.0", "/list/9", "/list/x", "/nope", "/a/b/c", "a/b", "/m~2n"]
+)
 def test_pointer_get_refuses_what_the_rfc_does_not_resolve(ref: str) -> None:
     data = {"a": {"b": 1}, "list": ["x", "y"], "m~n": 3}
     with pytest.raises(EvidenceError):
@@ -63,8 +65,14 @@ def test_the_empty_pointer_is_the_whole_document_and_is_not_on_the_allowlist() -
 
 def test_an_allowlisted_pointer_resolves_for_its_setting_only() -> None:
     d = endpoint_doc()
-    assert resolve_config(d, "/agents/ollama/endpoints/0/num_ctx_max", "context_ceiling", "ollama")[0] == "num_ctx_max = 8192"
-    assert resolve_config(d, "/agents/ollama/endpoints/0/loaded_num_ctx/small-4b-agent", "context_ceiling", "ollama")[0] == "loaded_num_ctx[small-4b-agent] = 4096"
+    assert (
+        resolve_config(d, "/agents/ollama/endpoints/0/num_ctx_max", "context_ceiling", "ollama")[0]
+        == "num_ctx_max = 8192"
+    )
+    assert (
+        resolve_config(d, "/agents/ollama/endpoints/0/loaded_num_ctx/small-4b-agent", "context_ceiling", "ollama")[0]
+        == "loaded_num_ctx[small-4b-agent] = 4096"
+    )
     assert resolve_config(d, "/agents/ollama/endpoints/0/think", "thinking", "ollama")[0] == "think = false"
     for claim, ref in [
         ("thinking", "/agents/ollama/endpoints/0/num_ctx_max"),
@@ -129,7 +137,10 @@ def test_a_config_pointer_resolves_through_the_loader(tmp_path: Path) -> None:
 def test_the_merged_local_override_cannot_satisfy_or_alter_a_committed_claim(tmp_path: Path) -> None:
     path = cited(tmp_path, "/agents/ollama/endpoints/0/num_ctx_max")
     local = tmp_path / "local.yaml"
-    local.write_text("agents:\n  ollama:\n    endpoints:\n      - {id: lab, url: 'http://127.0.0.1:9', roles: [general], models: [m], num_ctx_max: 4096}\n")
+    local.write_text(
+        "agents:\n  ollama:\n    endpoints:\n"
+        "      - {id: lab, url: 'http://127.0.0.1:9', roles: [general], models: [m], num_ctx_max: 4096}\n"
+    )
     local.chmod(0o600)
     v = load_verified_agents(path, local, trusted=False)
     # the override replaced the endpoint list, yet the pointer still reads the committed value

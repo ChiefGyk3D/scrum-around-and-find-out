@@ -304,7 +304,7 @@ def summarise_models(outcomes: list[Outcome], month: str) -> list[ModelSummary]:
     return out
 
 
-# -- queries across months (the evidence resolver and `qualify` read these; summarise_models is untouched) ----------------
+# -- queries across months (the evidence resolver and `qualify` read these; summarise_models is untouched) ---------
 
 METRICS = (
     "runs",
@@ -362,9 +362,7 @@ def query_outcomes(outcomes: list[Outcome], span: str, agent: str, model: str | 
     """
     first, last = month_span(span)
     rows = [
-        o
-        for o in outcomes
-        if o.agent == agent and (model is None or o.model == model) and first <= o.date[:7] <= last
+        o for o in outcomes if o.agent == agent and (model is None or o.model == model) and first <= o.date[:7] <= last
     ]
     values: dict[str, Fraction | None] = dict.fromkeys(METRICS)
     if rows:

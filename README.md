@@ -54,9 +54,10 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `route <shape>` | Which agent a task shape should go to, from the rules in `agents.yaml` and the live headroom. Recommends; dispatches nothing |
 | `outcome add` | Appends a finished task to the outcomes log |
 | `local run` | Sends one prompt to the local model (Ollama) that routing picks, never one that would evict a protected model |
+| `profiles verify` | Resolves every evidence pointer of the agent profiles in `agents.yaml` and prints each claim beside what it cites; checks CODEOWNERS covers the files the profiles are made from. Read-only |
 | `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard` |
 
-The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`) read
+The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`) read
 files on a person's machine and are not allowed in the Action.
 
 ## Trust boundary

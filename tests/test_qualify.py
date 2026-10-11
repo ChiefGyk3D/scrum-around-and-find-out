@@ -68,7 +68,7 @@ def test_the_thresholds_come_from_the_promotion_block() -> None:
     rows = [rec(1, date=days_ago(1)), rec(2, date=days_ago(2)), rec(3, date=days_ago(31))]
     r = qualify(rows, small, "copilot", None, today=TODAY)
     assert (r.counted, r.qualified, dict(r.rejected)) == (2, False, {q.OUTSIDE_WINDOW: 1})
-    r = qualify(rows[:2] + [rec(3, date=days_ago(30))], small, "copilot", None, today=TODAY)
+    r = qualify([*rows[:2], rec(3, date=days_ago(30))], small, "copilot", None, today=TODAY)
     assert (r.counted, r.qualified) == (3, True)
 
 
@@ -78,14 +78,14 @@ def test_an_unknown_agent_never_qualifies() -> None:
 
 
 def test_a_record_without_a_card_or_a_review_round_does_not_count() -> None:
-    rows = spread(10, 10) + [rec(50, card=None), rec(51, card=None), rec(52, rounds=0)]
+    rows = [*spread(10, 10), rec(50, card=None), rec(51, card=None), rec(52, rounds=0)]
     r = run(rows)
     assert r.counted == 10 and reasons(r) == {q.NO_CARD: 2, q.NO_REVIEW: 1}
 
 
 def test_duplicate_cards_that_agree_count_once() -> None:
     rows = spread(10, 10)
-    r = run(rows + [rows[0], rows[0]])
+    r = run([*rows, rows[0], rows[0]])
     assert r.counted == 10 and r.distinct_cards == 10 and reasons(r) == {q.DUPLICATE: 2}
 
 
@@ -98,13 +98,13 @@ def test_conflicting_duplicates_void_the_key(change: dict[str, Any]) -> None:
     rows = spread(10, 10)
     twin = rec(1, **{"date": days_ago(1), **change})
     assert rows[0].date == twin.date or "date" in change
-    r = run(rows + [twin])
+    r = run([*rows, twin])
     assert r.counted == 9 and reasons(r) == {q.CONFLICT: 2}
 
 
 def test_a_duplicate_with_no_review_rounds_conflicts_rather_than_being_filtered_away() -> None:
     rows = spread(10, 10)
-    r = run(rows + [rec(1, date=days_ago(1), rounds=0)])
+    r = run([*rows, rec(1, date=days_ago(1), rounds=0)])
     assert r.counted == 9 and reasons(r) == {q.CONFLICT: 2}
 
 
@@ -151,7 +151,13 @@ def test_other_agents_records_are_out_of_scope_not_rejected() -> None:
 
 
 def test_the_result_does_not_depend_on_log_order() -> None:
-    rows = spread(6, 3) + [rec(1, date=days_ago(1)), rec(2, rounds=2, date=days_ago(2)), rec(70, card=None), rec(71, date=days_ago(400))]
+    rows = [
+        *spread(6, 3),
+        rec(1, date=days_ago(1)),
+        rec(2, rounds=2, date=days_ago(2)),
+        rec(70, card=None),
+        rec(71, date=days_ago(400)),
+    ]
     want = run(rows)
     for perm in itertools.islice(itertools.permutations(rows), 200):
         assert run(list(perm)) == want

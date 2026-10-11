@@ -126,8 +126,15 @@ def test_the_result_does_not_depend_on_log_order() -> None:
 
 
 def test_summarise_models_is_untouched() -> None:
-    assert str(inspect.signature(outcomes.summarise_models)) == "(outcomes: 'list[Outcome]', month: 'str') -> 'list[ModelSummary]'"
+    assert (
+        str(inspect.signature(outcomes.summarise_models))
+        == "(outcomes: 'list[Outcome]', month: 'str') -> 'list[ModelSummary]'"
+    )
     got = outcomes.summarise_models(ROWS, "2026-09")
-    assert [(m.agent, m.model, m.runs) for m in got] == [("codex", "unknown", 1), ("copilot", "gpt-5.1", 1), ("copilot", "unknown", 1)]
+    assert [(m.agent, m.model, m.runs) for m in got] == [
+        ("codex", "unknown", 1),
+        ("copilot", "gpt-5.1", 1),
+        ("copilot", "unknown", 1),
+    ]
     with pytest.raises(ConfigError, match="YYYY-MM"):
         outcomes.summarise_models(ROWS, "2026-08..2026-10")

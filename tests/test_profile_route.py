@@ -36,11 +36,15 @@ def broken(tmp_path: Path, agent: str = "copilot") -> Path:
     return path
 
 
-def test_route_output_for_resolved_profiles_is_what_it_was_before_this_work(_private_home: Path, tmp_path: Path) -> None:
+def test_route_output_for_resolved_profiles_is_what_it_was_before_this_work(
+    _private_home: Path, tmp_path: Path
+) -> None:
     assert snapshot(_private_home, write_agents(tmp_path / "agents.yaml")) == SNAPSHOT.read_text()
 
 
-def test_a_dangling_pointer_routes_that_agent_as_unmeasured_with_the_reason(_private_home: Path, tmp_path: Path) -> None:
+def test_a_dangling_pointer_routes_that_agent_as_unmeasured_with_the_reason(
+    _private_home: Path, tmp_path: Path
+) -> None:
     path = broken(tmp_path)
     code, out, err = cli("route", "small-mechanical-pr", "--agents", str(path), "--no-usage", home=_private_home)
     assert code == 0, err
@@ -77,7 +81,9 @@ def test_json_gains_a_key_only_when_an_agent_is_degraded(_private_home: Path, tm
     assert "profile_unverified" not in json.loads(out)
 
 
-def test_a_missing_lessons_file_degrades_every_agent_that_cites_it_and_nothing_else(_private_home: Path, tmp_path: Path) -> None:
+def test_a_missing_lessons_file_degrades_every_agent_that_cites_it_and_nothing_else(
+    _private_home: Path, tmp_path: Path
+) -> None:
     path = write_agents(tmp_path / "agents.yaml")
     (tmp_path / "docs" / "lessons.md").unlink()
     code, out, _ = cli("route", "research", "--agents", str(path), "--no-usage", home=_private_home)

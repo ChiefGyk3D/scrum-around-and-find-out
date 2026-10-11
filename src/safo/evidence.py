@@ -137,7 +137,7 @@ def _layer_items(base: str, layer: Profile | ModelLayer) -> Iterator[Item]:
         yield Item(f"{base}.must_not_get[{i}]", "claim", f"must not get {m.shape}", m.evidence)
 
 
-# -- lessons ------------------------------------------------------------------------------------------------------------
+# -- lessons ---------------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -230,9 +230,8 @@ def resolve_config(base: object, ref: str, claim: str, agent_id: str) -> tuple[s
         and fields.get(seg[4]) == len(seg)
         and all(seg)
     ):
-        raise EvidenceError(
-            f"the pointer is not on the allowlist for {claim} ({', '.join(f'an endpoint {f}' for f in fields) or 'none'})"
-        )
+        allowed = ", ".join(f"an endpoint {f}" for f in fields) or "none"
+        raise EvidenceError(f"the pointer is not on the allowlist for {claim} (allowed: {allowed})")
     if seg[1] != agent_id:
         raise EvidenceError("a config pointer must address the citing agent's own endpoint")
     value = pointer_get(base, ref)
@@ -256,7 +255,7 @@ def _shown(value: Fraction) -> str:
 
 
 def resolve_outcomes(ref: str, rows: list[Outcome], doc: AgentsFile) -> tuple[str, str]:
-    """(subject, digest) when the log makes the statement true; EvidenceError for no data, a false claim or a bad subject."""
+    """(subject, digest) when the log makes the statement true; else EvidenceError (no data, false, bad subject)."""
     _, span, subject, expression = ref.split(":", 3)
     m = METRIC.fullmatch(expression)
     if m is None:
@@ -309,21 +308,24 @@ class _Sources:
 
     def outcomes(self) -> list[Outcome] | str:
         if self._outcomes is None:
-            rel = self.doc.evidence_sources.outcomes
-            if not rel:
-                self._outcomes = "no outcomes source: set evidence_sources.outcomes in agents.yaml"
-                return self._outcomes
-            try:
-                raw = read_confined(self.root, rel, MAX_LOG_BYTES)
-                if len(raw) > MAX_LOG_BYTES:
-                    self._outcomes = f"the outcomes log {rel} is larger than {MAX_LOG_BYTES} bytes"
-                else:
-                    self._outcomes = parse_log(raw, rel)
-            except ConfigError as err:
-                self._outcomes = f"the outcomes log {rel} is not valid: {err}"
-            except OSError:
-                self._outcomes = f"cannot read the outcomes log {rel} (missing, a symbolic link or not a regular file)"
+            self._outcomes = read_outcomes(self.root, self.doc)
         return self._outcomes
+
+
+def read_outcomes(root: Path, doc: AgentsFile) -> list[Outcome] | str:
+    """The records of the outcomes source, or the reason it cannot be used. Confined to `root`, never through a link."""
+    rel = doc.evidence_sources.outcomes
+    if not rel:
+        return "no outcomes source: set evidence_sources.outcomes in agents.yaml"
+    try:
+        raw = read_confined(root, rel, MAX_LOG_BYTES)
+        if len(raw) > MAX_LOG_BYTES:
+            return f"the outcomes log {rel} is larger than {MAX_LOG_BYTES} bytes"
+        return parse_log(raw, rel)
+    except ConfigError as err:
+        return f"the outcomes log {rel} is not valid: {err}"
+    except OSError:
+        return f"cannot read the outcomes log {rel} (missing, a symbolic link or not a regular file)"
 
 
 def _resolve(item: Item, agent_id: str, sources: _Sources, base: object) -> tuple[str, str]:
@@ -345,7 +347,7 @@ def _resolve(item: Item, agent_id: str, sources: _Sources, base: object) -> tupl
 
 
 def verify_document(doc: AgentsFile, base: object, root: Path) -> VerifiedAgents:
-    """Resolve every pointer of an already parsed document. `base` is the base agents.yaml data, `root` its directory."""
+    """Resolve every pointer of a parsed document. `base` is the base agents.yaml data and `root` its directory."""
     sources = _Sources(root, doc)
     resolutions: list[Resolution] = []
     errors: dict[str, list[str]] = {}
@@ -360,9 +362,7 @@ def verify_document(doc: AgentsFile, base: object, root: Path) -> VerifiedAgents
     return VerifiedAgents(doc, tuple(resolutions), {k: tuple(v) for k, v in errors.items()})
 
 
-def load_verified_agents(
-    path: str | Path, local: str | Path | None = None, *, trusted: bool = True
-) -> VerifiedAgents:
+def load_verified_agents(path: str | Path, local: str | Path | None = None, *, trusted: bool = True) -> VerifiedAgents:
     """Load agents.yaml (and an optional local override) and resolve every evidence pointer.
 
     A form error raises ConfigError, as for any agents file. A pointer that does not resolve is returned in

@@ -49,7 +49,7 @@ class Rule:
 
 
 def find_codeowners(root: Path) -> str:
-    """The text of the first CODEOWNERS GitHub would read under `root`; a link, a special file or a huge one is refused."""
+    """The text of the first CODEOWNERS GitHub would read under `root`; a link or a huge file is refused."""
     for place in LOCATIONS:
         try:
             raw = read_confined(root, place, MAX_BYTES)

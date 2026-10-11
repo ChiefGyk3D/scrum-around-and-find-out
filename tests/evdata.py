@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Fixtures for the evidence tests: a repository-shaped directory with agents.yaml, a lessons file and an outcomes log."""
+"""Fixtures for the evidence tests: a repository-shaped directory (agents.yaml, a lessons file, an outcomes log)."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def repo(
     sources: dict[str, str] | None = None,
     codeowners: str | None = "* @owner\n",
 ) -> Path:
-    """tmp_path/agents.yaml with docs/lessons.md (when `lessons`) and docs/outcomes.jsonl (when `outcomes`) beside it."""
+    """tmp_path/agents.yaml, with docs/lessons.md (if `lessons`) and docs/outcomes.jsonl (if `outcomes`) beside it."""
     d = d if d is not None else doc()
     if lessons is not None:
         put(tmp_path, "docs/lessons.md", lessons_text(lessons))

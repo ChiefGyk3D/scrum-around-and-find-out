@@ -109,7 +109,10 @@ def main(
     try:
         board = resolve_board(args.board, env)
         if args.mode == "validate":
+            note = validate.check_agents(LocalContext(out, env, clock), args)  # before any claim of validity
             output.write(out, validate.MESSAGE)
+            if note:
+                output.write(out, note)
             return 0
         try:
             client = client_factory(board, env, args.dry_run)

@@ -529,8 +529,10 @@ def _carries_profile(data: Any) -> bool:
     if not isinstance(data, dict):
         return False
     agents = data.get("agents")
-    return "profile_migration" in data or "evidence_sources" in data or (
-        isinstance(agents, dict) and any(isinstance(a, dict) and "profile" in a for a in agents.values())
+    return (
+        "profile_migration" in data
+        or "evidence_sources" in data
+        or (isinstance(agents, dict) and any(isinstance(a, dict) and "profile" in a for a in agents.values()))
     )
 
 

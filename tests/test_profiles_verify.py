@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from evdata import repo, rec
+from evdata import rec, repo
 from localcli import cli
 from profiledata import LESSON, claim, doc, profile, put
 
@@ -14,7 +14,9 @@ def verify(path: Path, home: Path, *extra: str) -> tuple[int, str, str]:
     return cli("profiles", "verify", "--agents", str(path), *extra, home=home)
 
 
-def test_every_claim_is_printed_with_its_evidence_kind_and_the_resolved_subject(tmp_path: Path, _private_home: Path) -> None:
+def test_every_claim_is_printed_with_its_evidence_kind_and_the_resolved_subject(
+    tmp_path: Path, _private_home: Path
+) -> None:
     code, out, err = verify(repo(tmp_path), _private_home)
     assert code == 0, err
     line = next(x for x in out.splitlines() if x.startswith("agents.codex.profile.dont[0]"))
@@ -62,7 +64,9 @@ def test_the_home_default_file_is_checked_without_codeowners(tmp_path: Path, _pr
     assert "CODEOWNERS: not checked" in out
 
 
-def test_a_group_writable_default_file_is_refused_but_an_explicit_checkout_file_is_not(tmp_path: Path, _private_home: Path) -> None:
+def test_a_group_writable_default_file_is_refused_but_an_explicit_checkout_file_is_not(
+    tmp_path: Path, _private_home: Path
+) -> None:
     config = _private_home / ".config" / "safo"
     config.mkdir(parents=True)
     src = repo(tmp_path)
