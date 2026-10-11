@@ -9,12 +9,12 @@ SAFO is three things, built for one maintainer running a team of AI agents acros
    model. Commands read local usage meters and recommend an agent. They dispatch nothing.
 3. **A playbook and a lessons wiki.** Why the team is run this way, who does what, and what broke along the way.
 
-SAFO is being built toward v0.1.0. The playbook pages start at [docs/why.md](docs/why.md); the status table below says
-which pieces are on `main` and which are on a branch waiting for review.
+SAFO is at v0.1.2. The playbook pages start at [docs/why.md](docs/why.md); the status table below says what is
+released and what is still only specified.
 
 ## Status
 
-Checked 2026-10-10.
+Checked 2026-10-11.
 
 | Piece | State |
 |---|---|
@@ -29,7 +29,11 @@ Checked 2026-10-10.
 | `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built, merged on `main` and released in v0.1.0 |
 | `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main` and released in v0.1.0; not yet exercised in a real Claude Code session |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
-| Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built and merged on `main`; the wiki becomes the generated mirror of `docs/` on the first publish from `main` |
+| The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
+| Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
+| Personas (`docs/personas.md`) and the examples (`examples/personas/`, the outcomes log, systemd units) | Built and merged on `main` |
+| [Measurements](docs/measurements.md): what the first month measured, dated and aggregated | Written; read it as a soak, not a finding |
+| Issue #23 roadmap: agent profiles, promotion of lessons into rules, and metrics from the outcomes log | Specified only; the spec is in review (PR #29) and none of it is built |
 
 The design is in [`docs/superpowers/specs/2026-10-07-safo-design.md`](docs/superpowers/specs/2026-10-07-safo-design.md)
 and the implementation plan is split into seven pull-request groups, listed on the
@@ -96,7 +100,7 @@ scripts/apply-baseline.sh --repo OWNER/NAME  # plan mode for another repository
 
 The maintainer runs `--apply`; an agent never does.
 
-**For v0.1.0** (needs the branch merged and installed):
+**Since v0.1.0** (needs installing):
 
 ```sh
 pip install .                                  # Python 3.11+, one dependency: PyYAML
@@ -120,8 +124,8 @@ keeps its logic in its own repository and GYST deploys it.
 ## Wiki
 
 The wiki is a generated mirror of `docs/` (edit the files, not the wiki): `scripts/gen_wiki.py` writes the pages and
-`.github/workflows/wiki.yml` publishes them on every push to `main` that touches `docs/`. The first publish replaces the
-old hand-written pages, which are removed.
+`.github/workflows/wiki.yml` publishes them on every push to `main` that touches `docs/`. The hand-written pages it
+replaced are gone.
 
 - [Home](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki)
 - [Why](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Why)
@@ -135,6 +139,7 @@ old hand-written pages, which are removed.
 - [Board-yaml](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-yaml)
 - [Agents-status](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Agents-status)
 - [Lessons](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Lessons)
+- [Measurements](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Measurements)
 - [Adoption](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Adoption)
 - [Privacy](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Privacy)
 

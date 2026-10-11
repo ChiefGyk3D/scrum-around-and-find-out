@@ -17,6 +17,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.
 - [agents-status](agents-status.md): one read-only view of what every agent is doing.
 - [Lessons](lessons.md): what went wrong, the evidence, and the rule the code enforces now.
+- [Measurements](measurements.md): what the first month measured, dated and aggregated, and what is not measured yet.
 - [Adoption](adoption.md): create an App, write a `board.yaml`, run it.
 - [Privacy check](privacy.md): what the public files are scanned for, and how to add your own private terms safely.
 
