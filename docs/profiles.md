@@ -116,7 +116,7 @@ the window, deduplicated per card, conflicting duplicates voiding their card) ag
 CODEOWNERS is evaluated with gitignore semantics (checked against `git check-ignore` in the tests): `*`, `?`, and `**`
 as a whole segment, escapes `\#`, `\ `, `\*`. A rule it cannot evaluate with confidence (a `[...]` class or a
 section header, a negation, an unknown escape, a long or wildcard-heavy pattern) fails closed: `verify` names the line
-and exits 2, it never drops the rule. Each required directory is probed with `.md` and `.yaml` files at two depths, so a
+and exits 2, it never drops the rule. GitHub does not load a CODEOWNERS of 3 MiB or more and does not support an escaped leading `#`; both fail closed. Each required directory is probed with `.md` and `.yaml` files at two depths, so a
 later rule that removes the owner for one extension is seen.
 
 Exit 0 when everything resolves and is owned, 1 when a pointer does not resolve or a path has no owner, 2 when the file

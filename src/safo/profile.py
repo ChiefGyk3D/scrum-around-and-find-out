@@ -439,7 +439,16 @@ _BLOCK_TAGS = (
 _BLOCK_TAG = re.compile(r"^ {0,3}</?(?:" + _BLOCK_TAGS + r")(?:[ \t]|/?>|$)", re.IGNORECASE)
 
 
-def _html_block_end(line: str) -> tuple[int, re.Pattern[str]] | None:
+_ATTR_VALUE = r"""(?:[^\s"'=<>`]+|'[^']*'|"[^"]*")"""
+_TAG_ATTR = r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*" + _ATTR_VALUE + r")?)"
+# CommonMark type 7: a complete open or closing tag and nothing else on the line (type 1 names are caught earlier)
+_LONE_TAG = re.compile(
+    r"^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*" + _TAG_ATTR + r"*[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$"
+)
+_ATX = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
+
+
+def _html_block_end(line: str, in_paragraph: bool = False) -> tuple[int, re.Pattern[str]] | None:
     """(where the opener ends, the pattern that ends the block) when the line opens a raw HTML block."""
     raw = _RAW_TAG.match(line)
     if raw:
@@ -452,6 +461,8 @@ def _html_block_end(line: str) -> tuple[int, re.Pattern[str]] | None:
     block = _BLOCK_TAG.match(line)
     if block:
         return block.end(), _BLANK  # CommonMark type 6: ends at the next blank line
+    if not in_paragraph and _LONE_TAG.match(line):
+        return len(line), _BLANK  # type 7: cannot interrupt a paragraph; ends at the next blank line
     return None
 
 
@@ -465,7 +476,9 @@ def _constructs(lines: list[str]) -> list[str]:
     inside: list[str] = []
     fence: tuple[str, int] | None = None
     ender: re.Pattern[str] | None = None
+    paragraph = False  # the previous line is paragraph text, which a type 7 block cannot interrupt
     for line in lines:
+        was_paragraph, paragraph = paragraph, False
         if fence is not None:
             inside.append("fence")
             closer = re.fullmatch(r" {0,3}(" + re.escape(fence[0]) + r"{" + str(fence[1]) + r",})[ \t]*", line)
@@ -482,9 +495,10 @@ def _constructs(lines: list[str]) -> list[str]:
             fence = (opener[1][0], len(opener[1]))
             inside.append("")
             continue
-        opened = _html_block_end(line)
+        opened = _html_block_end(line, was_paragraph)
         if opened and not opened[1].search(line, opened[0]):
             ender = opened[1]
+        paragraph = opened is None and bool(line.strip()) and _ATX.match(line) is None
         inside.append("")
     return inside
 

@@ -60,8 +60,8 @@ def find_codeowners(root: Path) -> str:
             continue
         except OSError:
             raise CodeownersError(f"{place} is a symbolic link or not a regular file") from None
-        if len(raw) > MAX_BYTES:
-            raise CodeownersError(f"{place} is larger than {MAX_BYTES} bytes")
+        if len(raw) >= MAX_BYTES:
+            raise CodeownersError(f"{place} is 3 MiB or more: GitHub does not load a CODEOWNERS file that large")
         try:
             return raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -109,6 +109,8 @@ def _translate(pattern: str) -> re.Pattern[str]:
     """
     if len(pattern) > MAX_PATTERN or sum(pattern.count(c) for c in "*?") > MAX_WILDCARDS:
         raise _Unsupported("the pattern is too long or has too many wildcards")
+    if pattern.startswith("\\#"):
+        raise _Unsupported("an escaped leading # is not supported by GitHub")
     if pattern.startswith("!") or "[" in pattern or "]" in pattern:
         raise _Unsupported("negation and [...] classes are not evaluated")
     directory = pattern.endswith("/") and not pattern.endswith("\\/")

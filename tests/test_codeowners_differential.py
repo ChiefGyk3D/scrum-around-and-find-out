@@ -78,7 +78,7 @@ PATTERNS = [
     "docs/lessons.md",
     "/.claude/agents/",
     "/agents/",
-    "\\#b",
+    "a\\#b",
     "a\\ b",
     "a\\*b",
     "*b",
@@ -160,6 +160,5 @@ def test_rules_past_the_cap_fail_closed() -> None:
 
 def test_escapes_are_honoured() -> None:
     assert covered(parse_rules("a\\ b @o\n"), "a b")
-    assert covered(parse_rules("\\#b @o\n"), "a#b") is False
-    assert covered(parse_rules("\\#b @o\n"), "#b")
+    assert covered(parse_rules("a\\#b @o\n"), "a#b")
     assert covered(parse_rules("a\\*b @o\n"), "a*b") and not covered(parse_rules("a\\*b @o\n"), "axb")
