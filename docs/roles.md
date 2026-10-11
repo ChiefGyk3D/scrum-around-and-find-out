@@ -18,4 +18,4 @@
 - **Every card carries an Agent.** An unassigned card is unowned work; `agents-status` shows it as `unassigned`.
 - **The maintainer merges.** Agents open pull requests and report; a person decides. That is the one gate that never moves.
 
-See [Personas](personas.md) for how each Claude subagent role is configured: its model, tool limits and hard rules.
+See [Personas](personas.md) for the Claude subagent roles, which are defined in the Department of Internal Arguments, not here.
