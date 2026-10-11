@@ -29,7 +29,7 @@ Checked 2026-10-10.
 | `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built, merged on `main` and released in v0.1.0 |
 | `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main` and released in v0.1.0; not yet exercised in a real Claude Code session |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
-| Generated docs and the wiki mirror | Not built yet (the wiki is hand-written until then) |
+| Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built and merged on `main`; the wiki becomes the generated mirror of `docs/` on the first publish from `main` |
 
 The design is in [`docs/superpowers/specs/2026-10-07-safo-design.md`](docs/superpowers/specs/2026-10-07-safo-design.md)
 and the implementation plan is split into seven pull-request groups, listed on the
@@ -119,16 +119,24 @@ keeps its logic in its own repository and GYST deploys it.
 
 ## Wiki
 
-Hand-written for the pre-release; v0.1.0 will generate or extend these pages.
+The wiki is a generated mirror of `docs/` (edit the files, not the wiki): `scripts/gen_wiki.py` writes the pages and
+`.github/workflows/wiki.yml` publishes them on every push to `main` that touches `docs/`. The first publish replaces the
+old hand-written pages, which are removed.
 
 - [Home](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki)
-- [Board-as-code](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-as-code)
-- [The-agent-team](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/The-agent-team)
-- [Routing-and-limits](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Routing-and-limits)
-- [The-review-loop](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/The-review-loop)
-- [Local-LLM](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-LLM)
-- [Lessons-learned](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Lessons-learned)
-- [Roadmap](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Roadmap)
+- [Why](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Why)
+- [Roles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Roles)
+- [Routing](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Routing)
+- [Usage](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Usage)
+- [Hooks](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Hooks)
+- [Handoff](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Handoff)
+- [Limits](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Limits)
+- [Board](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board)
+- [Board-yaml](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-yaml)
+- [Agents-status](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Agents-status)
+- [Lessons](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Lessons)
+- [Adoption](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Adoption)
+- [Privacy](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Privacy)
 
 ## Licence
 

@@ -10,6 +10,8 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
 - [Handoff](handoff.md): how work moves from a card to a merged pull request without losing the thread.
+- [The review loop](review-loop.md): the implement, review, fix and adversarial cycle, with what the build showed.
+- [Local LLM](local-llm.md): what a local model is good and bad at, and the guard that keeps it from evicting a resident model.
 - [Limits](limits.md): reading each tool's real usage and deciding when to switch.
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.
 - [agents-status](agents-status.md): one read-only view of what every agent is doing.
