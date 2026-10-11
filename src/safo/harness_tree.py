@@ -14,7 +14,8 @@ agents obey, and the directory is one a contributor's pull request can fill, so 
   only when it is a regular file that carries the generated header; then the directories left empty and no longer
   expected are removed bottom-up. Anything else stops the whole write, before the first change, with an error naming it.
 
-POSIX only (descriptors and `dir_fd`). Counts and depth are capped so a hostile tree cannot make the walk expensive.
+POSIX only (descriptors and `dir_fd`). The walk is capped at 8 levels and 500 entries, and a file at 64 KiB, so a
+hostile tree cannot make it expensive.
 """
 
 from __future__ import annotations

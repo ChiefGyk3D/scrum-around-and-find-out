@@ -464,6 +464,7 @@ def test_the_header_parser_names_what_is_wrong(tmp_path: Path) -> None:
         good.replace(b"<!-- ", b"", 1): "malformed",
         good + good.split(b"\n")[5] + b"\n": "more than one",
         b"name: x\n" + good.split(b"---\n", 2)[2]: "after the front matter",
+        b"some text\n---\n" + good.split(b"---\n", 2)[2]: "after the front matter",  # a rule, not a front matter fence
     }
     for data, message in cases.items():
         with pytest.raises(RenderError, match=message):

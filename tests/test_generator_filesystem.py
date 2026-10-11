@@ -416,8 +416,10 @@ def test_the_output_directory_that_cannot_be_opened_is_a_problem_naming_why(tmp_
 def test_opening_a_missing_directory_without_create_neither_succeeds_nor_creates_it(tmp_path: Path) -> None:
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
+        before = open_fds()
         with pytest.raises(FileNotFoundError):
             ht._open_dir(fd, "a/b", False)
+        assert open_fds() == before, "the failed walk closes the descriptors it opened"
         assert not (tmp_path / "a").exists()
         sub = ht._open_dir(fd, "a/b", True)
         os.close(sub)
@@ -438,7 +440,7 @@ def test_modes_are_fixed_by_the_writer_not_by_luck(tmp_path: Path, monkeypatch: 
         _, out = good(tmp_path, monkeypatch)
     finally:
         os.umask(old)
-    for p in out.rglob("*"):
+    for p in [out, *out.rglob("*")]:
         assert (p.stat().st_mode & 0o777) == (0o755 if p.is_dir() else 0o644), p
 
 
@@ -533,3 +535,8 @@ def test_the_script_runs_as_a_program() -> None:
         check=False,
     )
     assert done.returncode == 0 and done.stdout.startswith("ok: examples/harness matches agents.yaml"), done.stderr
+
+
+def test_the_caps_are_the_ones_the_docs_and_the_spec_state() -> None:
+    assert ht.MAX_FILE == 64 * 1024  # spec 2.6
+    assert (ht.MAX_DEPTH, ht.MAX_ENTRIES) == (8, 500)  # the bounds on a hostile tree, stated in the module docstring
