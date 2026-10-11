@@ -22,6 +22,7 @@ import posixpath
 import re
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO_URL = "https://github.com/ChiefGyk3D/scrum-around-and-find-out"
@@ -29,6 +30,10 @@ OUT_NAME = "wiki-out"
 
 _SCHEME = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:|//)")
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
+_REFDEF = re.compile(r" {0,3}\[(?:[^\]\\]|\\.)+\]:[ \t]*")
+_ATTR = re.compile(
+    r"(?<=[\s<\"'])((?:xlink:)?(?:href|src|srcset|poster|formaction|action))[ \t]*=[ \t]*", re.IGNORECASE
+)
 _CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -82,28 +87,152 @@ def _read_docs(docs: Path) -> dict[str, str]:
     return texts
 
 
-def _rewrite_target(target: str, source: str, pages: dict[str, str], root: Path, blob: str) -> str:
+def _resolve(target: str, source: str, pages: dict[str, str], root: Path, blob: str, image: bool) -> str:
+    """The wiki destination for a link target written in docs/<source>, or a clear error."""
+    where = f"docs/{source}: link '{target}'"
+    if target == "":
+        raise WikiError(f"{where} has an empty target")
     if target.startswith("#") or _SCHEME.match(target):
         return target
+    if "\\" in target or "&" in target or "\x00" in target:
+        raise WikiError(
+            f"{where} uses an escape or entity, which this generator does not support; write the plain path"
+        )
     path, hash_, frag = target.partition("#")
     suffix = hash_ + frag
     joined = posixpath.normpath(posixpath.join("docs", path))
-    if joined.startswith("docs/") and "/" not in joined[len("docs/") :]:
-        name = joined[len("docs/") :]
-        if name in pages:
-            return pages[name] + suffix
-        raise WikiError(f"docs/{source}: link '{target}' points at docs/{name}, which is not a wiki page")
-    if joined == "docs" or joined.startswith("docs/") or joined.startswith(".."):
-        if joined.startswith("docs/"):
-            raise WikiError(f"docs/{source}: link '{target}' points into {joined}, which is not published")
-        raise WikiError(f"docs/{source}: link '{target}' leaves the repository")
-    if not (root / joined).exists():
-        raise WikiError(f"docs/{source}: link '{target}' points at {joined}, which does not exist")
-    return f"{blob}/{joined}{suffix}"
+    if joined.startswith("..") or joined == "docs":
+        raise WikiError(f"{where} leaves the repository or points at docs/ itself")
+    name = joined[len("docs/") :] if joined.startswith("docs/") else None
+    if name is not None and "/" not in name and name in pages:
+        if image:
+            raise WikiError(f"{where} is an image but points at the page docs/{name}")
+        return pages[name] + suffix
+    if joined.endswith(".md") and (name is not None):
+        raise WikiError(f"{where} points at docs/{name}, which is not a wiki page")
+    if name is not None and "/" in name and image is False:
+        raise WikiError(f"{where} points into {joined}, which is not published")
+    full = root / joined
+    if not full.exists():
+        raise WikiError(f"{where} points at {joined}, which does not exist")
+    if full.is_symlink() or root.resolve() not in full.resolve().parents:
+        raise WikiError(f"{where} points at {joined}, which is a symbolic link or resolves outside the repository")
+    return f"{blob}/{quote(joined)}{'?raw=true' if image else ''}{suffix}"
+
+
+class _Ctx:
+    def __init__(self, source: str, pages: dict[str, str], root: Path, blob: str) -> None:
+        self.source, self.pages, self.root, self.blob = source, pages, root, blob
+
+    def fix(self, target: str, image: bool) -> str:
+        return _resolve(target, self.source, self.pages, self.root, self.blob, image)
+
+    def fail(self, why: str) -> WikiError:
+        return WikiError(f"docs/{self.source}: {why}")
+
+
+def _parse_destination(line: str, start: int, ctx: _Ctx) -> tuple[int, int, str, int]:
+    """Parse a link destination at `start`: (span start, span end, target, index after it)."""
+    j = start
+    while j < len(line) and line[j] in " \t":
+        j += 1
+    if j < len(line) and line[j] == "<":
+        k = line.find(">", j + 1)
+        if k < 0:
+            raise ctx.fail(f"an unclosed <destination> in: {line.strip()[:80]}")
+        return j, k + 1, line[j + 1 : k], k + 1
+    depth = 0
+    k = j
+    while k < len(line) and line[k] not in " \t":
+        if line[k] == "(":
+            depth += 1
+        elif line[k] == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        k += 1
+    return j, k, line[j:k], k
+
+
+def _skip_title(line: str, i: int, ctx: _Ctx) -> int:
+    """Skip optional whitespace and a quoted title; return the index after them."""
+    while i < len(line) and line[i] in " \t":
+        i += 1
+    if i >= len(line):
+        return i
+    if line[i] in "\"'(":
+        end = ")" if line[i] == "(" else line[i]
+        k = i + 1
+        while k < len(line) and line[k] != end:
+            k += 2 if line[k] == "\\" else 1
+        if k >= len(line):
+            raise ctx.fail(f"an unterminated link title in: {line.strip()[:80]}")
+        i = k + 1
+        while i < len(line) and line[i] in " \t":
+            i += 1
+    return i
+
+
+def _mask_code(line: str) -> str:
+    return _CODE_SPAN.sub(lambda m: "\x00" * len(m.group(0)), line)
+
+
+def _rewrite_line(line: str, ctx: _Ctx) -> str:
+    mask = _mask_code(line)
+    edits: list[tuple[int, int, str]] = []
+    definition = _REFDEF.match(mask)
+    if definition:
+        d0, d1, target, after = _parse_destination(line, definition.end(), ctx)
+        if _skip_title(line, after, ctx) != len(line.rstrip()):
+            raise ctx.fail(f"cannot read the reference definition: {line.strip()[:80]}")
+        edits.append((d0, d1, ctx.fix(target, False)))
+    else:
+        pos = 0
+        while (at := mask.find("](", pos)) >= 0:
+            pos = at + 2
+            depth = 0
+            opener = -1
+            for k in range(at - 1, -1, -1):
+                if mask[k] == "]":
+                    depth += 1
+                elif mask[k] == "[":
+                    if depth == 0:
+                        opener = k
+                        break
+                    depth -= 1
+            if opener < 0:
+                continue
+            image = opener > 0 and mask[opener - 1] == "!"
+            d0, d1, target, after = _parse_destination(line, at + 2, ctx)
+            end = _skip_title(line, after, ctx)
+            if end >= len(line) or line[end] != ")":
+                raise ctx.fail(
+                    f"a link that is not closed on its line (multi-line links are not supported): {line.strip()[:80]}"
+                )
+            edits.append((d0, d1, ctx.fix(target, image)))
+            pos = end + 1
+    for attr in _ATTR.finditer(mask):
+        if any(a <= attr.start() < b for a, b, _ in edits):
+            continue
+        name = attr.group(1).lower()
+        value = line[attr.end() :]
+        quote_char = value[:1]
+        if name not in ("href", "src") or quote_char not in ("'", '"'):
+            raise ctx.fail(
+                f"HTML attribute {name}= is not supported here (use href or src, quoted): {line.strip()[:80]}"
+            )
+        close = value.find(quote_char, 1)
+        if close < 0:
+            raise ctx.fail(f"an unterminated HTML attribute in: {line.strip()[:80]}")
+        edits.append((attr.end() + 1, attr.end() + close, ctx.fix(value[1:close], name == "src")))
+    for a, b, new in sorted(edits, reverse=True):
+        line = line[:a] + new + line[b:]
+    return line
 
 
 def rewrite_links(text: str, source: str, pages: dict[str, str], root: Path, blob: str) -> str:
-    """Rewrite links outside fenced blocks and inline code spans."""
+    """Rewrite links, images, reference definitions and href/src attributes outside code."""
+    ctx = _Ctx(source, pages, root, blob)
     out: list[str] = []
     fence: str | None = None
     for line in text.split("\n"):
@@ -112,24 +241,12 @@ def rewrite_links(text: str, source: str, pages: dict[str, str], root: Path, blo
             if m and m[1][0] == fence[0] and len(m[1]) >= len(fence) and line.strip() == m[1]:
                 fence = None
             out.append(line)
-            continue
-        if m:
+        elif m:
             fence = m[1]
             out.append(line)
-            continue
-        pieces: list[str] = []
-        pos = 0
-        for span in _CODE_SPAN.finditer(line):
-            pieces.append(_sub(line[pos : span.start()], source, pages, root, blob))
-            pieces.append(span.group(0))
-            pos = span.end()
-        pieces.append(_sub(line[pos:], source, pages, root, blob))
-        out.append("".join(pieces))
+        else:
+            out.append(_rewrite_line(line, ctx))
     return "\n".join(out)
-
-
-def _sub(segment: str, source: str, pages: dict[str, str], root: Path, blob: str) -> str:
-    return _LINK.sub(lambda m: f"]({_rewrite_target(m[1], source, pages, root, blob)})", segment)
 
 
 def _title(text: str, fallback: str) -> str:
@@ -147,17 +264,15 @@ def _escape_label(text: str) -> str:
     return _LABEL_META.sub(lambda m: "\\" + m[1], text)
 
 
-def _reading_order(home: str, pages: dict[str, str]) -> list[str]:
-    """Page names linked from home.md's 'Read in this order' section, in list order."""
+def _reading_order(home: str, names: set[str]) -> list[str]:
+    """Page names linked from the rewritten home page's 'Read in this order' section, in list order."""
     section = re.split(r"^## ", home, flags=re.MULTILINE)
-    body = next((s for s in section if s.startswith("Read in this order")), "")
-    names: list[str] = []
-    for m in _LINK.finditer(body):
-        target = m[1].partition("#")[0]
-        page = pages.get(target)
-        if page and page not in names:
-            names.append(page)
-    return names
+    body = next((x for x in section if x.startswith("Read in this order")), "")
+    found: list[str] = []
+    for m in re.finditer(r"\]\(([A-Za-z0-9._-]+)(?=[#\s)])", body):
+        if m[1] in names and m[1] not in found:
+            found.append(m[1])
+    return found
 
 
 def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL) -> dict[str, str]:
@@ -185,7 +300,7 @@ def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL)
         notice = f"> Generated from docs/{filename} at {short}. Edit the repository file, not the wiki.\n\n"
         result[f"{name}.md"] = notice + body
         titles[name] = _title(text, name)
-    ordered = ["Home", *[n for n in _reading_order(texts["home.md"], pages) if n != "Home"]]
+    ordered = ["Home", *[n for n in _reading_order(result["Home.md"], set(pages.values())) if n != "Home"]]
     ordered += sorted(n for n in pages.values() if n not in ordered)
     result["_Sidebar.md"] = "".join(f"- [{_escape_label(titles[n])}]({n})\n" for n in ordered)
     return result

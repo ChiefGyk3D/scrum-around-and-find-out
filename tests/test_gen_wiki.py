@@ -384,3 +384,109 @@ def test_a_hostile_heading_cannot_forge_a_sidebar_link(tmp_path: Path) -> None:
     assert shape, line
     assert "<b>" not in line and "\\]" in line
     assert [m for m in re.findall(r"(?<!\\)\]\(([^)]*)\)", line)] == ["Zed"]
+
+
+# Link forms: rewritten correctly, or refused loudly. Samples are written out by hand, not derived from the script.
+
+
+def home_with(tmp_path: Path, body: str, extra: dict[str, bytes] | None = None) -> Path:
+    repo = make_repo(tmp_path, {"home.md": f"# H\n\n{body}\n", "alpha.md": "# A\n"})
+    for rel, data in (extra or {}).items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_bytes(data)
+    return repo
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('[t](alpha.md "the title")', '[t](Alpha "the title")'),
+        ("[t](alpha.md 'single')", "[t](Alpha 'single')"),
+        ("[t](alpha.md (paren))", "[t](Alpha (paren))"),
+        ('[t](alpha.md#frag "ti")', '[t](Alpha#frag "ti")'),
+        ("[x](<alpha.md>)", "[x](Alpha)"),
+        ("[x](<alpha.md#f> 'T')", "[x](Alpha#f 'T')"),
+        ("[`code`](alpha.md)", "[`code`](Alpha)"),
+        ("[a](alpha.md) and [b](alpha.md)", "[a](Alpha) and [b](Alpha)"),
+        ("[r]: alpha.md", "[r]: Alpha"),
+        ('  [r2]: <alpha.md#z> "Title"', '  [r2]: Alpha#z "Title"'),
+        ('<a href="alpha.md#x">t</a>', '<a href="Alpha#x">t</a>'),
+        ("<a class='c' href='alpha.md'>t</a>", "<a class='c' href='Alpha'>t</a>"),
+        ("[t][r]", "[t][r]"),
+        ('[t](https://e.example/a.md "x")', '[t](https://e.example/a.md "x")'),
+        ('<a href="https://e.example/a.md">t</a>', '<a href="https://e.example/a.md">t</a>'),
+        ("[a]: https://e.example/a.md", "[a]: https://e.example/a.md"),
+    ],
+)
+def test_link_forms_are_rewritten(tmp_path: Path, source: str, expected: str) -> None:
+    text = run(home_with(tmp_path, source))["Home.md"]
+    assert expected in text
+    if "alpha" in source:
+        assert "alpha.md" not in text
+
+
+def test_images_with_local_targets_become_blob_urls(tmp_path: Path) -> None:
+    repo = home_with(
+        tmp_path,
+        '![shot](pic.png) ![ex](../examples/p.png "cap")\n\n'
+        '<img src="pic.png" alt="x">\n\n[![badge](../examples/p.png)](alpha.md)',
+        {"docs/pic.png": b"x", "examples/p.png": b"y"},
+    )
+    text = run(repo)["Home.md"]
+    blob = f"{gw.REPO_URL}/blob/{SHA}"
+    assert f"![shot]({blob}/docs/pic.png?raw=true)" in text
+    assert f'![ex]({blob}/examples/p.png?raw=true "cap")' in text
+    assert f'<img src="{blob}/docs/pic.png?raw=true"' in text
+    assert f"[![badge]({blob}/examples/p.png?raw=true)](Alpha)" in text
+
+
+def test_a_missing_image_is_an_error_naming_it(tmp_path: Path) -> None:
+    repo = home_with(tmp_path, "![x](nope.png)")
+    with pytest.raises(gw.WikiError, match=r"nope\.png"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "<a href=alpha.md>t</a>",
+        "[t](alpha.md",
+        "[t](alpha\\_x.md)",
+        '[t](alpha.md "unclosed)',
+        "[t](a&amp;b.md)",
+        '<img srcset="alpha.md 2x">',
+        "[t](",
+        "[t](<alpha.md)",
+        '[t](missing.md "title")',
+        "[t]: missing.md",
+        '<a href="missing.md">t</a>',
+        '<a href="">t</a>',
+        "[t]()",
+    ],
+)
+def test_unsupported_or_broken_forms_fail_loudly(tmp_path: Path, source: str) -> None:
+    repo = home_with(tmp_path, source)
+    with pytest.raises(gw.WikiError):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert gw.main(["--out", str(repo / "wiki-out")], root=repo) == 1
+
+
+def test_a_link_split_across_lines_fails_loudly(tmp_path: Path) -> None:
+    repo = home_with(tmp_path, "[t](\nalpha.md)")
+    with pytest.raises(gw.WikiError):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_code_is_left_alone_for_every_form(tmp_path: Path) -> None:
+    body = (
+        '`[a](nope.md)` `<a href="nope.md">` `[r]: nope.md`\n\n'
+        '```html\n<a href="nope.md">x</a>\n[r]: nope.md\n![i](nope.png)\n```\n'
+    )
+    text = run(home_with(tmp_path, body))["Home.md"]
+    assert body in text
+
+
+def test_reading_order_follows_titled_and_angle_links(tmp_path: Path) -> None:
+    home = "# H\n\n## Read in this order\n\n- [Z](<zed.md> \"t\")\n- [A](alpha.md 'x')\n- [B](board-yaml.md#f)\n"
+    repo = make_repo(tmp_path, {"home.md": home, "zed.md": "# Zed\n", "alpha.md": "# A\n", "board-yaml.md": "# B\n"})
+    assert re.findall(r"\]\((\S+)\)", run(repo)["_Sidebar.md"]) == ["Home", "Zed", "Alpha", "Board-yaml"]
