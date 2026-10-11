@@ -17,6 +17,8 @@ PAGES = (
     "why",
     "roles",
     "handoff",
+    "review-loop",
+    "local-llm",
     "limits",
     "board",
     "agents-status",

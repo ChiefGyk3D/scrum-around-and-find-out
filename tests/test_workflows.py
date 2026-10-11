@@ -63,3 +63,22 @@ def test_the_live_audit_never_runs_on_a_pull_request() -> None:
         pytest.skip("live-audit.yml arrives with the dogfood task")
     triggers = load(path).get("on") or load(path).get(True) or {}
     assert set(triggers) == {"workflow_dispatch"}
+
+
+def test_the_wiki_caller_is_pinned_and_only_the_publish_call_can_write() -> None:
+    path = ROOT / ".github" / "workflows" / "wiki.yml"
+    doc = load(path)
+    assert doc["permissions"] == {"contents": "read"}
+    jobs = doc["jobs"]
+    assert set(jobs) == {"wiki"}
+    uses = [line for line in uses_lines(path) if GYST_USE.search(line)]
+    assert len(uses) == 1, "pinned by commit with a version comment"
+    match = GYST_USE.search(uses[0])
+    assert match and match[1] == "wiki-publish.yml"
+    assert jobs["wiki"]["permissions"] == {"contents": "write"}
+    triggers = doc.get("on") or doc.get(True) or {}
+    assert set(triggers) == {"push", "workflow_dispatch"}
+    assert triggers["push"] == {"branches": ["main"], "paths": ["docs/**", "scripts/gen_wiki.py"]}
+    command = jobs["wiki"]["with"]["generate-command"]
+    assert command == 'python scripts/gen_wiki.py --out "$OUT_DIR" --commit "$SOURCE_SHA"'
+    assert "${{" not in command, "no expression expands into a shell"
