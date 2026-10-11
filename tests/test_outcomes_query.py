@@ -141,3 +141,13 @@ def test_summarise_models_is_untouched() -> None:
     ]
     with pytest.raises(ConfigError, match="YYYY-MM"):
         outcomes.summarise_models(ROWS, "2026-08..2026-10")
+
+
+def test_a_run_with_findings_needed_fixes_even_in_one_review_round() -> None:
+    rows = [
+        rec(1, rounds=1, findings={"minor": 1}),
+        rec(2, rounds=1),
+        rec(3, rounds=2),
+        rec(4, rounds=1, findings={"minor": 0}),
+    ]
+    assert query_outcomes(rows, "2026-10", "copilot", None).value("fix_share") == Fraction(2, 4)
