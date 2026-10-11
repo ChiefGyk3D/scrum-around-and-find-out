@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
 from pathlib import Path
 from types import ModuleType
 
@@ -212,41 +213,60 @@ def test_out_with_foreign_files_is_refused_and_survives(tmp_path: Path) -> None:
     with pytest.raises(gw.WikiError, match="not empty"):
         gw.generate(repo, mine, SHA)
     assert (mine / "keep.txt").read_text() == "keep"
-    named = repo / "wiki-out"
-    named.mkdir()
-    (named / "Old.md").write_text("old")
-    (named / "notes.txt").write_text("keep")
-    with pytest.raises(gw.WikiError, match="more than a previous wiki tree"):
+
+
+def test_a_wiki_out_by_name_alone_is_never_cleaned(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    named = repo / "archive" / "wiki-out"
+    named.mkdir(parents=True)
+    (named / "notes.md").write_text("my notes")
+    with pytest.raises(gw.WikiError, match="not written by gen_wiki"):
         gw.generate(repo, named, SHA)
-    assert (named / "Old.md").exists() and (named / "notes.txt").exists()
+    assert (named / "notes.md").read_text() == "my notes"
+    assert gw.main(["--out", str(named)], root=repo) == 1
+    assert (named / "notes.md").read_text() == "my notes"
 
 
-def test_a_previous_tree_in_wiki_out_is_replaced(tmp_path: Path) -> None:
+def test_a_previous_generator_tree_is_replaced_but_extra_files_stop_it(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    first = run(repo)
+    named = repo / "wiki-out"
+    (named / "Stale.md").write_text("added by hand")
+    with pytest.raises(gw.WikiError, match="not written by gen_wiki"):
+        gw.generate(repo, named, SHA)
+    assert (named / "Stale.md").exists() and (named / "Home.md").exists()
+    (named / "Stale.md").unlink()
+    (repo / "docs" / "alpha.md").unlink()
+    second = run(repo)
+    assert "Alpha.md" in first and "Alpha.md" not in second
+
+
+def test_the_ownership_record_is_not_inside_the_published_tree(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    got = run(repo)
+    assert set(got) == {"Home.md", "Zed.md", "Board-yaml.md", "Alpha.md", "_Sidebar.md"}
+    assert [p.name for p in (repo / "wiki-out").iterdir() if p.name.startswith(".")] == []
+
+
+def test_a_forged_ownership_record_cannot_name_other_paths(tmp_path: Path) -> None:
     repo = make_repo(tmp_path)
     named = repo / "wiki-out"
     named.mkdir()
-    (named / "Old.md").write_text("old")
-    got = run(repo)
-    assert "Old.md" not in got and "Home.md" in got
-    empty = repo / "other"
-    empty.mkdir()
-    assert "Home.md" in run(repo, empty)
+    (named / "x.md").write_text("mine")
+    (repo / ".wiki-out.gen_wiki").write_text("../../etc/passwd\nx.md\n")
+    with pytest.raises(gw.WikiError, match="not written by gen_wiki"):
+        gw.generate(repo, named, SHA)
+    assert (named / "x.md").read_text() == "mine"
 
 
 # The real tree.
 
 
 def test_the_real_docs_generate_and_every_internal_link_resolves(tmp_path: Path) -> None:
-    out = ROOT / "wiki-out"
-    if out.exists():
-        pytest.skip("wiki-out holds a local run; remove it to run this test")
-    try:
-        got = run(ROOT, out)
-    finally:
-        for p in out.glob("*.md"):
-            p.unlink()
-        if out.exists():
-            out.rmdir()
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT / "docs", repo / "docs")
+    shutil.copytree(ROOT / "examples", repo / "examples")
+    got = run(repo, repo / "wiki-out")
     assert "Home.md" in got and "_Sidebar.md" in got
     assert len(got) >= len(list((ROOT / "docs").glob("*.md"))) + 1
     names = {n.removesuffix(".md") for n in got}

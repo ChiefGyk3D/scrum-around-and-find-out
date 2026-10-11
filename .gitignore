@@ -17,3 +17,4 @@ agents.local.yaml
 /outcomes.jsonl
 privacy-terms*
 *.privacy-terms
+.*.gen_wiki

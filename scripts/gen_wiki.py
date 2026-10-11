@@ -9,8 +9,9 @@ Board-yaml.md). docs/superpowers/ is not published. Relative links between pages
 to a docs file that is not a page is an error, and a link out of docs/ points at the file on GitHub. The output is
 deterministic: the same docs and commit always write the same bytes.
 
---out must be inside the repository and either not exist, be empty, or be named wiki-out holding only a previous
-output tree (.md files), so a mistyped path can never delete anything else.
+--out must be inside the repository and either not exist, be empty, or hold exactly the files a previous run wrote.
+A run records what it wrote in .<out name>.gen_wiki beside the tree (not inside it, because the publish step copies
+the whole tree), and only those files are replaced; any other file, or no record, makes the run refuse.
 """
 
 from __future__ import annotations
@@ -179,8 +180,28 @@ def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL)
     return result
 
 
+_OWNED_NAME = re.compile(r"^[A-Za-z0-9._-]+\.md$")
+
+
+def manifest_path(out: Path) -> Path:
+    """The record of what a run wrote, kept beside the tree, not in it: the publish step copies the whole tree."""
+    return out.parent / f".{out.name}.gen_wiki"
+
+
+def _owned(out: Path) -> set[str] | None:
+    """The file names a previous run wrote into `out`, or None if there is no valid record."""
+    try:
+        names = manifest_path(out).read_text(encoding="utf-8").split("\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+    listed = {n for n in names if n}
+    if not listed or not all(_OWNED_NAME.match(n) for n in listed):
+        return None
+    return listed
+
+
 def check_out(out: Path, root: Path) -> Path:
-    """Resolve --out and refuse anything that could clobber more than a previous output tree."""
+    """Resolve --out and refuse anything that could clobber more than a previous run's own output."""
     root = root.resolve()
     if out.is_symlink():
         raise WikiError(f"--out {out} is a symbolic link")
@@ -194,11 +215,12 @@ def check_out(out: Path, root: Path) -> Path:
     entries = list(resolved.iterdir())
     if not entries:
         return resolved
-    if resolved.name != OUT_NAME:
-        raise WikiError(f"--out {out} is not empty and is not named {OUT_NAME}; refusing to write into it")
-    stray = [e.name for e in entries if not (e.is_file() and not e.is_symlink() and e.suffix == ".md")]
+    owned = _owned(resolved)
+    if owned is None:
+        raise WikiError(f"--out {out} is not empty and was not written by gen_wiki; refusing to write into it")
+    stray = [e.name for e in entries if e.name not in owned or e.is_symlink() or not e.is_file()]
     if stray:
-        raise WikiError(f"--out {out} holds more than a previous wiki tree ({', '.join(sorted(stray))}); refusing")
+        raise WikiError(f"--out {out} holds files not written by gen_wiki ({', '.join(sorted(stray))}); refusing")
     return resolved
 
 
@@ -206,11 +228,13 @@ def generate(root: Path, out: Path, commit: str | None, repo_url: str = REPO_URL
     root = root.resolve()
     pages = render(root / "docs", root, commit, repo_url)
     target = check_out(out, root)
+    owned = _owned(target) if target.exists() else None
     target.mkdir(parents=True, exist_ok=True)
-    for old in target.glob("*.md"):
-        old.unlink()
+    for old in owned or ():
+        (target / old).unlink(missing_ok=True)
     for name, text in pages.items():
         (target / name).write_text(text, encoding="utf-8", newline="\n")
+    manifest_path(target).write_text("".join(f"{n}\n" for n in sorted(pages)), encoding="utf-8")
     return sorted(pages)
 
 
