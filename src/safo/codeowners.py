@@ -35,6 +35,7 @@ MAX_BYTES = 3 * 1024 * 1024
 MAX_RULES = 10_000
 MAX_PATTERN = 200
 MAX_WILDCARDS = 6
+MAX_OWNER = 256
 OWNER = re.compile(r"@[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9._-]+)?|[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
@@ -110,7 +111,7 @@ def parse_rules(text: str) -> list[Rule]:
             continue
         matcher = _translate(tokens[0])
         if matcher is not None:
-            rules.append(Rule(matcher, any(OWNER.fullmatch(t) for t in tokens[1:])))
+            rules.append(Rule(matcher, any(len(t) <= MAX_OWNER and OWNER.fullmatch(t) for t in tokens[1:])))
     return rules
 
 

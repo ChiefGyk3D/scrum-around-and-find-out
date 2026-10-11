@@ -47,6 +47,7 @@ from safo.profile import (
 
 MAX_LESSONS = 1024 * 1024
 MAX_SHOWN = 20  # problems named in the message of require_clean
+MAX_HEADING_LINE = 1000  # a longer line is body text: the heading pattern below is only safe on a short line
 HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 INDEX = re.compile(r"0|[1-9][0-9]*")
@@ -170,7 +171,7 @@ def lesson_sections(text: str) -> dict[str, Section]:
         elif marker and not (marker[1][0] == "`" and "`" in line[marker.end() :]):
             fence = (marker[1][0], len(marker[1]))
         else:
-            heading = HEADING.match(line)
+            heading = HEADING.match(line) if len(line) <= MAX_HEADING_LINE else None
             if heading and heading[2].strip():
                 close()
                 slug = slugify(heading[2])

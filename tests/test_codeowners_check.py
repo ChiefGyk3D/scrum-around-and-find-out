@@ -169,3 +169,13 @@ def test_this_repositorys_own_codeowners_covers_the_profile_paths() -> None:
     root = Path(__file__).parent.parent
     rules = parse_rules(find_codeowners(root))
     assert all(covered(rules, p) for p in required_paths("docs/lessons.md", ()))
+
+
+def test_an_overlong_owner_token_is_not_an_owner() -> None:
+    assert covered(parse_rules("* " + "a" * 200 + "@example.com\n"), "x")
+    assert not covered(parse_rules("* " + "a" * 300 + "@example.com\n"), "x")
+
+
+def test_a_pattern_with_too_many_wildcards_matches_nothing() -> None:
+    assert covered(parse_rules("/a*b*c*d* @o\n"), "aXbXcXdX")
+    assert not covered(parse_rules("/a*b*c*d*e*f*g*h* @o\n"), "aXbXcXdXeXfXgXhX")

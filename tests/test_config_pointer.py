@@ -49,10 +49,24 @@ def test_pointer_get_follows_rfc_6901(ref: str, expected: object) -> None:
 
 
 @pytest.mark.parametrize(
-    "ref", ["/list/-", "/list/01", "/list/+1", "/list/1.0", "/list/9", "/list/x", "/nope", "/a/b/c", "a/b", "/m~2n"]
+    "ref",
+    [
+        "/list/-",
+        "/list/01",
+        "/list/+1",
+        "/list/1.0",
+        "/list/9",
+        "/list/x",
+        "/nope",
+        "/a/b/c",
+        "a/b",
+        "xa",
+        "/m~2n",
+        "/m~",
+    ],
 )
 def test_pointer_get_refuses_what_the_rfc_does_not_resolve(ref: str) -> None:
-    data = {"a": {"b": 1}, "list": ["x", "y"], "m~n": 3}
+    data = {"a": {"b": 1}, "list": ["x", "y"], "m~n": 3, "m~2n": 4}
     with pytest.raises(EvidenceError):
         pointer_get(data, ref)
 
@@ -86,6 +100,31 @@ def test_an_allowlisted_pointer_resolves_for_its_setting_only() -> None:
     ]:
         with pytest.raises(EvidenceError, match="allowlist"):
             resolve_config(d, ref, claim, "ollama")
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "/other/ollama/endpoints/0/num_ctx_max",
+        "/agents/ollama/other/0/num_ctx_max",
+        "/agents/ollama/endpoints/00/num_ctx_max",
+        "/agents/ollama/endpoints/0/num_ctx_max/x",
+        "/agents//endpoints/0/num_ctx_max",
+        "/agents/ollama/endpoints/0",
+    ],
+)
+def test_the_allowlist_is_checked_segment_by_segment_against_data_that_would_resolve(ref: str) -> None:
+    """Each wrong segment is tried against a document that has a value at that exact place, so only the allowlist stops it."""
+    ep = {"num_ctx_max": 1024, "think": False}
+    base = {
+        "other": {"ollama": {"endpoints": [ep]}},
+        "agents": {"ollama": {"other": [ep], "endpoints": [ep, ep], "": {"endpoints": [ep]}}},
+    }
+    with pytest.raises(EvidenceError, match="allowlist"):
+        resolve_config(base, ref, "context_ceiling", "ollama")
+    base["agents"]["ollama"]["endpoints"] = {"00": ep}  # type: ignore[index]
+    with pytest.raises(EvidenceError, match="allowlist"):
+        resolve_config(base, "/agents/ollama/endpoints/00/num_ctx_max", "context_ceiling", "ollama")
 
 
 def test_a_pointer_into_another_agent_does_not_support_this_agents_claim() -> None:

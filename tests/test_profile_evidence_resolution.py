@@ -6,6 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import time
+
 import pytest
 
 from evdata import LESSON_HEADINGS, lessons_text, rec, repo
@@ -76,6 +78,14 @@ def test_a_repeated_heading_gets_the_github_suffix() -> None:
 
 def test_an_atx_heading_loses_its_closing_hashes_and_a_level_one_counts() -> None:
     assert set(lesson_sections("# Top ##\n\n## Next ###  \n")) == {"top", "next"}
+
+
+def test_a_hostile_heading_line_does_not_make_the_scan_quadratic() -> None:
+    hostile = "# a" + " " * 300_000 + "x\n\n### Real\n\nbody\n"
+    start = time.monotonic()
+    sections = lesson_sections(hostile)
+    assert time.monotonic() - start < 10, "a heading line of 300,000 spaces took far too long"
+    assert "real" in sections and len(sections) == 1  # the long line is body text, not a heading
 
 
 def test_unknown_agent_and_unknown_model_in_an_outcomes_pointer(tmp_path: Path) -> None:
@@ -169,6 +179,19 @@ def test_evidence_sources_validates_its_keys(tmp_path: Path) -> None:
         d["evidence_sources"] = bad
         with pytest.raises(ConfigError, match="evidence_sources"):
             verified(repo(tmp_path, d))
+
+
+def test_an_agent_without_a_profile_is_migrating_only_while_it_is_listed(tmp_path: Path) -> None:
+    import dataclasses
+
+    v = verified(repo(tmp_path))
+    assert v.status_of("claude-lead") == "migrating"
+    unlisted = dataclasses.replace(v, agents=dataclasses.replace(v.agents, profile_migration=()))
+    assert unlisted.status_of("claude-lead") == "unmeasured"
+
+
+def test_an_empty_heading_is_not_a_lesson() -> None:
+    assert lesson_sections("###  \n\nbody\n\n#\n") == {}
 
 
 def test_the_local_override_cannot_carry_evidence_sources(tmp_path: Path) -> None:
