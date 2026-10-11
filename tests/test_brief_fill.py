@@ -292,6 +292,12 @@ def test_the_marks_and_joiners_that_legitimate_text_needs_are_allowed(mark: str)
     assert fences(fill(values={"task": value, "files_in_scope": "y"}))[0][2] == [value]
 
 
+@pytest.mark.parametrize("code", [0x2029, 0x202F, 0x2030, 0x2065, 0x206A])
+def test_the_code_points_next_to_the_refused_ranges_are_not_refused(code: int) -> None:
+    value = f"a{chr(code)}b"
+    assert fences(fill(values={"task": value, "files_in_scope": "y"}))[0][2] == [value]
+
+
 def test_a_real_arabic_and_hebrew_paragraph_with_marks_still_passes() -> None:
     arabic = (
         "\u0627\u0644\u0645\u0647\u0645\u0629 \u061c(\u0661\u0662\u0663) \u0645\u0639 \u200fabc\u200e "
