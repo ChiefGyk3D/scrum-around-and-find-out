@@ -612,7 +612,17 @@ def test_a_fence_like_line_in_a_heading_search_does_not_hide_the_title(tmp_path:
 
 
 def test_pathological_lines_finish_quickly(tmp_path: Path) -> None:
-    for payload in ("](" * 10_000, "[](" * 6_000, "[" * 15_000 + "](x", "`a" * 9_000, "<a href=" * 2_500):
+    for payload in (
+        "- " * 9_000,
+        "-  " * 6_000 + "x",
+        "> " * 9_000,
+        "1. " * 6_000 + "[",
+        "](" * 10_000,
+        "[](" * 6_000,
+        "[" * 15_000 + "](x",
+        "`a" * 9_000,
+        "<a href=" * 2_500,
+    ):
         assert len(payload) <= gw.MAX_LINE
         repo = make_repo(tmp_path / str(abs(hash(payload))), {"home.md": f"# H\n{payload}\n"})
         started = time.monotonic()
@@ -660,3 +670,60 @@ def test_names_that_differ_only_in_case_collide_even_when_the_output_differs(tmp
 )
 def test_backslash_escapes_in_brackets(tmp_path: Path, source: str, expected: str) -> None:
     assert expected in run(home_with(tmp_path, source))["Home.md"]
+
+
+# Code inside block containers.
+
+
+@pytest.mark.parametrize(
+    ("body", "kept", "rewritten"),
+    [
+        ("> ```\n> [x](nope.md)\n> ```\n\n[ok](alpha.md)\n", ["[x](nope.md)"], ["[ok](Alpha)"]),
+        ("> > ```\n> > [x](nope.md)\n> > ```\n[ok](alpha.md)\n", ["[x](nope.md)"], ["[ok](Alpha)"]),
+        ("> ```\n> [x](nope.md)\n[ok](alpha.md)\n", ["[x](nope.md)"], ["[ok](Alpha)"]),
+        ("- ```\n  [x](nope.md)\n  ```\n- [ok](alpha.md)\n", ["[x](nope.md)"], ["[ok](Alpha)"]),
+        ("1. ```\n   [x](nope.md)\n   ```\n2. [ok](alpha.md)\n", ["[x](nope.md)"], ["[ok](Alpha)"]),
+        ("- item\n\n  ```\n  [x](nope.md)\n  ```\n\n[ok](alpha.md)\n", ["[x](nope.md)"], ["[ok](Alpha)"]),
+        ("- a\n  - b\n\n    ~~~\n    [x](nope.md)\n    ~~~\n\n  [ok](alpha.md)\n", ["[x](nope.md)"], ["[ok](Alpha)"]),
+        ("- ```\n  [x](nope.md)\n[ok](alpha.md)\n", ["[x](nope.md)"], ["[ok](Alpha)"]),
+        ("> ```\n> [x](alpha.md)\n> ```\n", ["[x](alpha.md)"], []),
+        ("- ```\n  [x](alpha.md)\n  ```\n", ["[x](alpha.md)"], []),
+        ("para\n\n    [x](nope.md)\n\n[ok](alpha.md)\n", ["    [x](nope.md)"], ["[ok](Alpha)"]),
+        ("para\n\n\t[x](nope.md)\n\n[ok](alpha.md)\n", ["\t[x](nope.md)"], ["[ok](Alpha)"]),
+        ("para\n\n    [x](alpha.md)\n", ["    [x](alpha.md)"], []),
+        ("para\n\n    one\n\n    [x](nope.md)\n", ["    [x](nope.md)"], []),
+        ("# T\n    [x](nope.md)\n", ["    [x](nope.md)"], []),
+        ("- item\n\n      [x](nope.md)\n\n- [ok](alpha.md)\n", ["      [x](nope.md)"], ["[ok](Alpha)"]),
+        ("> para\n>\n>     [x](nope.md)\n", [">     [x](nope.md)"], []),
+        # Not code: a paragraph continuation, a nested list, a fence indented by 4 relative to the item.
+        ("para\n    [x](alpha.md)\n", [], ["    [x](Alpha)"]),
+        ("- a\n  - b [x](alpha.md)\n", [], ["[x](Alpha)"]),
+        ("> [r]: alpha.md\n", [], ["> [r]: Alpha"]),
+        ("- [r]: alpha.md\n", [], ["- [r]: Alpha"]),
+    ],
+)
+def test_code_inside_containers(tmp_path: Path, body: str, kept: list[str], rewritten: list[str]) -> None:
+    text = render_home(tmp_path, body)
+    for fragment in kept:
+        assert fragment in text, fragment
+    for fragment in rewritten:
+        assert fragment in text, fragment
+
+
+@pytest.mark.parametrize("body", ["- > ```\n  > [x](nope.md)\n  > ```\n", "1. > ~~~\n   > [x](nope.md)\n"])
+def test_a_fence_in_a_quote_in_a_list_is_refused_naming_file_and_line(tmp_path: Path, body: str) -> None:
+    repo = make_repo(tmp_path, {"home.md": f"# H\n\n{body}", "alpha.md": "# A\n"})
+    with pytest.raises(gw.WikiError, match=r"docs/home\.md.*line 3"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert gw.main(["--out", str(repo / "wiki-out")], root=repo) == 1
+
+
+def test_a_missing_target_in_code_never_aborts_and_a_live_one_beside_it_still_does(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, {"home.md": "# H\n\n    [x](nope.md)\n\n[bad](nope.md)\n"})
+    with pytest.raises(gw.WikiError, match=r"nope\.md"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_a_heading_in_indented_code_is_not_the_title(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, {"home.md": "# H\n", "zed.md": "intro\n\n    # fake\n\n# Real\n"})
+    assert "- [Real](Zed)" in run(repo)["_Sidebar.md"]

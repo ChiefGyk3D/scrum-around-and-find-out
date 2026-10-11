@@ -22,6 +22,7 @@ import os
 import posixpath
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
 
@@ -31,7 +32,7 @@ OUT_NAME = "wiki-out"
 
 _SCHEME = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:|//)")
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
-_REFDEF = re.compile(r" {0,3}\[(?:[^\]\\]|\\.)+\]:[ \t]*")
+_REFDEF = re.compile(r"[ ]*(?:(?:>|[-*+]|\d{1,9}[.)])[ ]*)*\[(?:[^\]\\]|\\.)+\]:[ \t]*")
 _ATTR = re.compile(
     r"(?<=[\s<\"'])((?:xlink:)?(?:href|src|srcset|poster|formaction|action))[ \t]*=[ \t]*", re.IGNORECASE
 )
@@ -262,35 +263,118 @@ def _fence_closes(line: str, fence: str) -> bool:
     return bool(m and m[1][0] == fence[0] and len(m[1]) >= len(fence))
 
 
+_QUOTE = re.compile(r" {0,3}>[ ]?")
+_ITEM = re.compile(r"( *)([-*+]|\d{1,9}[.)])( +|$)")
+_BLOCK_START = re.compile(r"#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|[=-]+[ \t]*$")
+
+
+class _Blocks:
+    """Tell code from prose line by line, following CommonMark for the containers this repository could use.
+
+    Handled: fenced blocks at the top level, inside blockquotes (any depth) and inside list items (any depth,
+    on the marker line or a continuation line), and indented code blocks (4+ columns, tabs to 4-column stops,
+    not continuing a paragraph), also inside quotes and list items. Refused, not guessed: a fence or indented
+    block inside a blockquote that is itself inside a list item.
+    """
+
+    def __init__(self, fail: Callable[[str], WikiError]) -> None:
+        self.fail = fail
+        self.lists: list[int] = []
+        self.fence: tuple[str, int, int] | None = None  # (fence, quote depth, content column)
+        self.paragraph = False
+
+    def is_code(self, line: str) -> bool:
+        ex = line.expandtabs(4)
+        if self.fence is not None:
+            if self._in_fence(ex, self.fence):
+                return True
+            self.fence = None
+        rest, quotes = ex, 0
+        while m := _QUOTE.match(rest):
+            rest, quotes = rest[m.end() :], quotes + 1
+        if not rest.strip():
+            self.paragraph = False
+            return False
+        indent = len(rest) - len(rest.lstrip(" "))
+        while self.lists and self.lists[-1] > indent:
+            self.lists.pop()
+        col = self.lists[-1] if self.lists else 0
+        rest = rest[col:]
+        started = False
+        in_list_quote = False
+        while True:
+            if len(rest) - len(rest.lstrip(" ")) >= 4:
+                break
+            if item := _ITEM.match(rest):
+                width = len(item[1]) + len(item[2])
+                gap = len(item[3])
+                gap = 1 if gap == 0 or gap > 4 else gap
+                col += width + gap
+                self.lists.append(col)
+                rest, started = rest[width + gap :], True
+            elif (m := _QUOTE.match(rest)) and self.lists:
+                rest, in_list_quote = rest[m.end() :], True
+            else:
+                break
+        deep = len(rest) - len(rest.lstrip(" ")) >= 4
+        if deep and (not self.paragraph or started):
+            if in_list_quote:
+                raise self.fail("code inside a blockquote inside a list item is not supported; restructure it")
+            return True
+        if deep:
+            self.paragraph = True
+            return False
+        opened = _fence_open(rest)
+        if opened is not None:
+            if in_list_quote:
+                raise self.fail(
+                    "a fenced block inside a blockquote inside a list item is not supported; restructure it"
+                )
+            self.fence = (opened, quotes, col)
+            self.paragraph = False
+            return True
+        self.paragraph = bool(rest.strip()) and not _BLOCK_START.match(rest.lstrip(" "))
+        return False
+
+    def _in_fence(self, ex: str, state: tuple[str, int, int]) -> bool:
+        fence, quotes, col = state
+        rest = ex
+        for _ in range(quotes):
+            m = _QUOTE.match(rest)
+            if not m:
+                return False
+            rest = rest[m.end() :]
+        if not rest.strip():
+            return True
+        if len(rest) - len(rest.lstrip(" ")) < col:
+            return False
+        if _fence_closes(rest[col:], fence):
+            self.fence = None
+            self.paragraph = False
+        return True
+
+
 def rewrite_links(text: str, source: str, pages: dict[str, str], root: Path, blob: str) -> str:
     """Rewrite links, images, reference definitions and href/src attributes outside code."""
     ctx = _Ctx(source, pages, root, blob)
     out: list[str] = []
-    fence: str | None = None
+    number = 0
+
+    def fail(why: str) -> WikiError:
+        return ctx.fail(f"line {number}: {why}")
+
+    blocks = _Blocks(fail)
     for number, line in enumerate(text.split("\n"), 1):
         if len(line) > MAX_LINE:
             raise ctx.fail(f"line {number} is longer than {MAX_LINE} characters; refusing to scan it")
-        if fence is not None:
-            if _fence_closes(line, fence):
-                fence = None
-            out.append(line)
-        elif (opened := _fence_open(line)) is not None:
-            fence = opened
-            out.append(line)
-        else:
-            out.append(_rewrite_line(line, ctx))
+        out.append(line if blocks.is_code(line) else _rewrite_line(line, ctx))
     return "\n".join(out)
 
 
 def _title(text: str, fallback: str) -> str:
-    fence: str | None = None
+    blocks = _Blocks(lambda why: WikiError(why))
     for line in text.split("\n"):
-        if fence is not None:
-            if _fence_closes(line, fence):
-                fence = None
-        elif (opened := _fence_open(line)) is not None:
-            fence = opened
-        elif m := _HEADING.match(line):
+        if not blocks.is_code(line) and (m := _HEADING.match(line)):
             return m[1]
     return fallback
 
