@@ -326,7 +326,8 @@ def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL)
         name = page_name(filename)
         if name.casefold() in {n.casefold() for n in pages.values()}:
             raise WikiError(
-                f"docs/{filename} maps to the page name {name}, which another file already uses (names are compared ignoring case)"
+                f"docs/{filename} maps to the page name {name}, which another file already uses "
+                "(names are compared ignoring case)"
             )
         pages[filename] = name
     blob = f"{repo_url}/blob/{commit.lower() if commit else 'main'}"
