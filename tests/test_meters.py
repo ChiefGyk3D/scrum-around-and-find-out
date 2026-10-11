@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from meterdata import NOW, assistant, claude_transcript, codex_session, token_count, touch
-from safo.meters.claude import family_of, read_claude_usage
+from safo.meters.claude import COUNTERS, family_of, read_claude_usage
 from safo.meters.codex import read_codex_usage
 from safo.meters.copilot import read_copilot_usage
 
@@ -358,7 +358,7 @@ def test_claude_a_missing_counter_is_zero(_private_home: Path) -> None:
     assert read_claude_usage(_private_home, SINCE).by_family["haiku"].cache_read_tokens == 0
 
 
-@pytest.mark.parametrize("field", ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"])
+@pytest.mark.parametrize("field", COUNTERS)
 @pytest.mark.parametrize("bad", [-1, 1.5, True, "12", 10**30, None, {"x": 1}])
 def test_claude_a_malformed_counter_skips_the_message_even_with_nested_usage(
     _private_home: Path, field: str, bad: object
