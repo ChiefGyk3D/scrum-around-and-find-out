@@ -114,7 +114,7 @@ def test_an_allowlisted_pointer_resolves_for_its_setting_only() -> None:
     ],
 )
 def test_the_allowlist_is_checked_segment_by_segment_against_data_that_would_resolve(ref: str) -> None:
-    """Each wrong segment is tried against a document that has a value at that exact place, so only the allowlist stops it."""
+    """Each wrong segment is tried against a document that has a value there, so only the allowlist stops it."""
     ep = {"num_ctx_max": 1024, "think": False}
     base = {
         "other": {"ollama": {"endpoints": [ep]}},
