@@ -17,10 +17,13 @@ the whole tree), and only those files are replaced; any other file, or no record
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import hashlib
 import os
 import posixpath
 import re
+import stat
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -436,9 +439,9 @@ _HEADER = "gen_wiki-v1"
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
-def manifest_path(out: Path) -> Path:
+def _record_name(out_name: str) -> str:
     """The record of what a run wrote, kept beside the tree, not in it: the publish step copies the whole tree."""
-    return out.parent / f".{out.name}.gen_wiki"
+    return f".{out_name}.gen_wiki"
 
 
 def _digest(data: bytes) -> str:
@@ -450,19 +453,58 @@ def _record_body(hashes: dict[str, str]) -> str:
     return f"{_HEADER} {_digest(chr(10).join(lines).encode())}\n" + "".join(f"{x}\n" for x in lines)
 
 
-def _check_record_kind(out: Path) -> Path:
-    record = manifest_path(out)
-    if record.is_symlink() or (record.exists() and not record.is_file()):
-        raise WikiError(f"the ownership record {record} is a symbolic link or not a regular file; refusing")
-    return record
+# Everything below works on directory file descriptors opened once with O_NOFOLLOW, so a path swapped for a
+# symbolic link after the checks cannot redirect a write, a read or a delete.
 
 
-def _owned(out: Path) -> dict[str, str] | None:
-    """{name: sha256} of what a previous run wrote into `out`, or None if there is no valid, intact record."""
-    record = _check_record_kind(out)
+def _lstat(name: str, dir_fd: int) -> os.stat_result | None:
     try:
-        text = record.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _open_dir(name: str, dir_fd: int) -> int:
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError as err:
+        if err.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise WikiError(f"{name} is a symbolic link or not a directory; refusing to write through it") from err
+        raise
+
+
+def _read(name: str, dir_fd: int) -> bytes | None:
+    """The bytes of a regular file, or None if it is absent; a symbolic link is an error."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise WikiError(f"{name} is a symbolic link or cannot be read: {err.strerror}") from err
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read()
+
+
+def _write(dir_fd: int, name: str, data: bytes) -> None:
+    """Write through a new temporary file and rename it over `name`, never following a link at either path."""
+    tmp = f".{name}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+
+
+def _owned(parent_fd: int, out_name: str) -> dict[str, str] | None:
+    """{name: sha256} of what a previous run wrote into the tree, or None if there is no valid, intact record."""
+    try:
+        raw = _read(_record_name(out_name), parent_fd)
+        text = raw.decode("utf-8") if raw is not None else ""
+    except (WikiError, UnicodeDecodeError):
         return None
     head, _, rest = text.partition("\n")
     hashes: dict[str, str] = {}
@@ -478,65 +520,116 @@ def _owned(out: Path) -> dict[str, str] | None:
     return hashes
 
 
-def _regular(path: Path) -> bool:
-    return path.is_file() and not path.is_symlink()
+def _after_checks() -> None:
+    """Runs between the checks and the writes; the tests swap paths here."""
 
 
-def check_out(out: Path, root: Path) -> Path:
-    """Resolve --out and refuse anything that could clobber more than a previous run's own, unchanged output."""
+class _Target:
+    """The validated output directory and its parent, held open by file descriptor."""
+
+    def __init__(self, resolved: Path, parent_fd: int, out_fd: int) -> None:
+        self.resolved, self.parent_fd, self.out_fd = resolved, parent_fd, out_fd
+        self.name = resolved.name
+        self.ids = (self._id(parent_fd), self._id(out_fd))
+
+    @staticmethod
+    def _id(fd: int) -> tuple[int, int]:
+        st = os.fstat(fd)
+        return st.st_dev, st.st_ino
+
+    def close(self) -> None:
+        os.close(self.out_fd)
+        os.close(self.parent_fd)
+
+    def verify(self) -> None:
+        """Fail unless the path still leads to the directories that were opened and checked."""
+        try:
+            same = self.resolved.resolve() == self.resolved and (
+                (os.stat(self.resolved.parent).st_dev, os.stat(self.resolved.parent).st_ino) == self.ids[0]
+                and (os.stat(self.resolved).st_dev, os.stat(self.resolved).st_ino) == self.ids[1]
+            )
+        except OSError:
+            same = False
+        if not same:
+            raise WikiError(f"{self.resolved} changed while gen_wiki was running (a path was swapped); refusing")
+
+
+def _open_target(out: Path, root: Path) -> _Target:
+    """Resolve --out, refuse anything outside the repository, and open it (creating it) by descriptor."""
     root = root.resolve()
     if out.is_symlink():
         raise WikiError(f"--out {out} is a symbolic link")
     resolved = out.resolve()
     if resolved == root or root not in resolved.parents:
         raise WikiError(f"--out {out} must be a directory inside the repository {root}")
-    _check_record_kind(resolved)
-    if not resolved.exists():
-        return resolved
-    if not resolved.is_dir():
-        raise WikiError(f"--out {out} exists and is not a directory")
-    entries = list(resolved.iterdir())
+    current = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        parts = resolved.relative_to(root).parts
+        for part in parts[:-1]:
+            try:
+                nxt = _open_dir(part, current)
+            except FileNotFoundError:
+                os.mkdir(part, dir_fd=current)
+                nxt = _open_dir(part, current)
+            os.close(current)
+            current = nxt
+        name = parts[-1]
+        record = _lstat(_record_name(name), current)
+        if record is not None and not stat.S_ISREG(record.st_mode):
+            raise WikiError(f"the ownership record for {out} is a symbolic link or not a regular file; refusing")
+        existing = _lstat(name, current)
+        if existing is None:
+            os.mkdir(name, dir_fd=current)
+        elif not stat.S_ISDIR(existing.st_mode):
+            raise WikiError(f"--out {out} exists and is not a directory")
+        return _Target(resolved, current, _open_dir(name, current))
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _check_clean(target: _Target, out: Path) -> dict[str, str]:
+    """What a previous run owns in a non-empty tree; refuse a tree that holds anything else or was edited."""
+    entries = os.listdir(target.out_fd)
     if not entries:
-        return resolved
-    owned = _owned(resolved)
+        return {}
+    owned = _owned(target.parent_fd, target.name)
     if owned is None:
         raise WikiError(f"--out {out} is not empty and was not written by gen_wiki; refusing to write into it")
-    stray = [e.name for e in entries if e.name not in owned or not _regular(e)]
+    stray = []
+    for entry in entries:
+        found = _lstat(entry, target.out_fd)
+        if entry not in owned or found is None or not stat.S_ISREG(found.st_mode):
+            stray.append(entry)
     if stray:
         raise WikiError(f"--out {out} holds files not written by gen_wiki ({', '.join(sorted(stray))}); refusing")
-    changed = [n for n in owned if (resolved / n).exists() and _digest((resolved / n).read_bytes()) != owned[n]]
+    changed = [n for n, digest in owned.items() if _digest(_read(n, target.out_fd) or b"") != digest and n in entries]
     if changed:
         raise WikiError(f"--out {out}: {', '.join(sorted(changed))} changed since gen_wiki wrote it; refusing")
-    return resolved
-
-
-def _write(directory: Path, name: str, data: bytes) -> None:
-    """Write through a new temporary file and rename it over `name`, never following a link at either path."""
-    tmp = directory / f".{name}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.replace(tmp, directory / name)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    return owned
 
 
 def generate(root: Path, out: Path, commit: str | None, repo_url: str = REPO_URL) -> list[str]:
     root = root.resolve()
     pages = render(root / "docs", root, commit, repo_url)
-    target = check_out(out, root)
-    owned = _owned(target) if target.exists() and any(target.iterdir()) else None
-    target.mkdir(parents=True, exist_ok=True)
-    for old in owned or ():
-        path = target / old
-        if _regular(path):
-            path.unlink()
-    data = {name: text.encode("utf-8") for name, text in pages.items()}
-    for name, raw in data.items():
-        _write(target, name, raw)
-    _write(target.parent, manifest_path(target).name, _record_body({n: _digest(r) for n, r in data.items()}).encode())
+    target = _open_target(out, root)
+    try:
+        owned = _check_clean(target, out)
+        _after_checks()
+        target.verify()
+        for old in owned:
+            found = _lstat(old, target.out_fd)
+            if found is not None and stat.S_ISREG(found.st_mode):
+                os.unlink(old, dir_fd=target.out_fd)
+        data = {name: text.encode("utf-8") for name, text in pages.items()}
+        for name, raw in data.items():
+            _write(target.out_fd, name, raw)
+        target.verify()
+        record = _record_body({n: _digest(r) for n, r in data.items()})
+        _write(target.parent_fd, _record_name(target.name), record.encode())
+        target.verify()
+    finally:
+        target.close()
     return sorted(pages)
 
 

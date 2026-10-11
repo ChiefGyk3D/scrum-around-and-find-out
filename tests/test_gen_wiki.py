@@ -727,3 +727,78 @@ def test_a_missing_target_in_code_never_aborts_and_a_live_one_beside_it_still_do
 def test_a_heading_in_indented_code_is_not_the_title(tmp_path: Path) -> None:
     repo = make_repo(tmp_path, {"home.md": "# H\n", "zed.md": "intro\n\n    # fake\n\n# Real\n"})
     assert "- [Real](Zed)" in run(repo)["_Sidebar.md"]
+
+
+# The output directory is opened once and used by file descriptor, so a swap after the checks cannot redirect writes.
+
+
+def snapshot(directory: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(directory)): p.read_bytes() for p in sorted(directory.rglob("*")) if p.is_file()}
+
+
+def make_external(tmp_path: Path, *, nested: bool) -> Path:
+    external = tmp_path / "external"
+    target = external / "wiki-out" if nested else external
+    target.mkdir(parents=True)
+    for name in ("Home.md", "Zed.md", "_Sidebar.md"):
+        (target / name).write_bytes(b"PRECIOUS " + name.encode())
+    return external
+
+
+def test_swapping_the_out_directory_for_a_symlink_after_the_checks_cannot_redirect_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repo(tmp_path)
+    (repo / "wiki-out").mkdir()
+    external = make_external(tmp_path, nested=False)
+    before = snapshot(external)
+
+    def swap() -> None:
+        (repo / "wiki-out").rename(repo / "moved")
+        (repo / "wiki-out").symlink_to(external, target_is_directory=True)
+
+    monkeypatch.setattr(gw, "_after_checks", swap)
+    with pytest.raises(gw.WikiError, match="changed while"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert snapshot(external) == before
+
+
+def test_swapping_a_parent_directory_for_a_symlink_after_the_checks_cannot_redirect_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repo(tmp_path)
+    (repo / "sub" / "wiki-out").mkdir(parents=True)
+    external = make_external(tmp_path, nested=True)
+    before = snapshot(external)
+
+    def swap() -> None:
+        (repo / "sub").rename(repo / "sub_moved")
+        (repo / "sub").symlink_to(external, target_is_directory=True)
+
+    monkeypatch.setattr(gw, "_after_checks", swap)
+    with pytest.raises(gw.WikiError, match="changed while"):
+        gw.generate(repo, repo / "sub" / "wiki-out", SHA)
+    assert snapshot(external) == before
+
+
+def test_swapping_the_record_for_a_symlink_after_the_checks_cannot_overwrite_its_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repo(tmp_path)
+    readme = repo / "README.md"
+    readme.write_bytes(b"# readme\n")
+
+    monkeypatch.setattr(gw, "_after_checks", lambda: (repo / ".wiki-out.gen_wiki").symlink_to(readme))
+    gw.generate(repo, repo / "wiki-out", SHA)
+    assert readme.read_bytes() == b"# readme\n"
+    assert not (repo / ".wiki-out.gen_wiki").is_symlink()
+
+
+def test_a_directory_swapped_for_a_symlink_is_also_refused_before_any_write(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    external = make_external(tmp_path, nested=True)
+    (repo / "sub").symlink_to(external, target_is_directory=True)
+    before = snapshot(external)
+    with pytest.raises(gw.WikiError):
+        gw.generate(repo, repo / "sub" / "wiki-out", SHA)
+    assert snapshot(external) == before
