@@ -179,12 +179,25 @@ def _mask_code(line: str) -> str:
     return _CODE_SPAN.sub(lambda m: "\x00" * len(m.group(0)), line)
 
 
+def _escaped(text: str, i: int) -> bool:
+    """True if the character at `i` is preceded by an odd number of backslashes."""
+    n = 0
+    while i - n - 1 >= 0 and text[i - n - 1] == "\\":
+        n += 1
+    return n % 2 == 1
+
+
 def _bracket_openers(mask: str) -> dict[int, int]:
-    """Map the index of each `]` to the index of the `[` it closes, in one forward pass."""
+    """Map the index of each unescaped `]` to the index of the unescaped `[` it closes, in one forward pass."""
     stack: list[int] = []
     found: dict[int, int] = {}
+    escaped = False
     for i, ch in enumerate(mask):
-        if ch == "[":
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == "[":
             stack.append(i)
         elif ch == "]" and stack:
             found[i] = stack.pop()
@@ -207,7 +220,7 @@ def _rewrite_line(line: str, ctx: _Ctx) -> str:
             if at < pos or mask[at + 1 : at + 2] != "(":
                 continue
             opener = openers[at]
-            image = opener > 0 and mask[opener - 1] == "!"
+            image = opener > 0 and mask[opener - 1] == "!" and not _escaped(mask, opener - 1)
             d0, d1, target, after = _parse_destination(line, at + 2, ctx)
             end = _skip_title(line, after, ctx)
             if end >= len(line) or line[end] != ")":
@@ -311,8 +324,10 @@ def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL)
                 f"docs/{filename}: file name must match [A-Za-z0-9][A-Za-z0-9._-]*.md to become a wiki page"
             )
         name = page_name(filename)
-        if name in pages.values():
-            raise WikiError(f"docs/{filename} maps to the page name {name}, which another file already uses")
+        if name.casefold() in {n.casefold() for n in pages.values()}:
+            raise WikiError(
+                f"docs/{filename} maps to the page name {name}, which another file already uses (names are compared ignoring case)"
+            )
         pages[filename] = name
     blob = f"{repo_url}/blob/{commit.lower() if commit else 'main'}"
     result: dict[str, str] = {}

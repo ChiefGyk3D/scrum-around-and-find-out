@@ -635,3 +635,28 @@ def test_a_line_over_the_cap_is_refused_in_and_out_of_fences(tmp_path: Path) -> 
             gw.generate(repo, repo / "wiki-out", SHA)
     repo = make_repo(tmp_path / "ok", {"home.md": "# H\n" + "x" * 20_000 + "\n"})
     assert "Home.md" in run(repo)
+
+
+# Round 3: collisions ignoring case, backslash escapes.
+
+
+def test_names_that_differ_only_in_case_collide_even_when_the_output_differs(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, {"home.md": "# H\n", "foo.md": "# a\n", "FOO.md": "# b\n"})
+    with pytest.raises(gw.WikiError, match="ignoring case"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert not (repo / "wiki-out").exists()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("[a\\]](alpha.md)", "[a\\]](Alpha)"),
+        ("[a\\[b](alpha.md)", "[a\\[b](Alpha)"),
+        ("\\[not a link](alpha.md)", "\\[not a link](alpha.md)"),
+        ("\\\\[x](alpha.md)", "\\\\[x](Alpha)"),
+        ("x \\] y [z](alpha.md)", "x \\] y [z](Alpha)"),
+        ("\\![img](alpha.md)", "\\![img](Alpha)"),
+    ],
+)
+def test_backslash_escapes_in_brackets(tmp_path: Path, source: str, expected: str) -> None:
+    assert expected in run(home_with(tmp_path, source))["Home.md"]
