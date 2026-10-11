@@ -14,6 +14,7 @@ import re
 import secrets
 import signal
 import threading
+import types
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, ClassVar
@@ -651,6 +652,43 @@ def test_the_pipe_size_edge_is_exactly_64_kib(
     assert (code == 0) is accepted
 
 
+def test_standard_input_is_asked_for_no_more_than_the_cap_plus_one_byte(
+    checkout: Path, tmp_path: Path, _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    good = put(tmp_path, "good.txt", "fine")
+    asked: list[int] = []
+    real = os.read
+
+    def spy(fd: int, size: int) -> bytes:
+        asked.append(size)
+        return real(fd, size)
+
+    monkeypatch.setattr("safo.brief.os", types.SimpleNamespace(read=spy))  # brief.py uses os.read only
+    stream, w = pipe_stream()
+
+    def writer() -> None:
+        with contextlib.suppress(OSError):
+            os.write(w, b"a" * 65_536)
+            os.write(w, b"a" * 5_000)
+        os.close(w)
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    try:
+        code, _, err = run(
+            *cmd(checkout, "--task-file", "-", "--files-file", str(good)), home=_private_home, stdin=stream
+        )
+    finally:
+        stream.close()
+    t.join(timeout=60)
+    assert code == 2 and "65536 bytes" in err
+    assert sum(asked) <= brief.MAX_VALUE + 1 and max(asked) <= 65_536
+
+
+def test_the_standard_input_timeout_is_a_bounded_number_of_seconds() -> None:
+    assert 0 < brief.STDIN_TIMEOUT_SECONDS <= 120
+
+
 def test_a_real_pipe_with_a_small_value_works(
     checkout: Path, tmp_path: Path, _private_home: Path, fixed_ids: None
 ) -> None:
@@ -751,6 +789,7 @@ def test_under_actions_the_brief_is_inside_a_stop_commands_block(
     assert lines[0].startswith("::stop-commands::")
     token = lines[0].removeprefix("::stop-commands::")
     assert lines[-2] == f"::{token}::"
+    assert lines[-3] == "Closing line."  # the final newline is not a line of the block
     assert "::error title=x::boom" in lines[1:-2] and "::set-env name=A::b" in lines[1:-2]
     assert token not in "".join(lines[1:-2])
 
