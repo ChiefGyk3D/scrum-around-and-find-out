@@ -12,10 +12,10 @@ their files ship as [examples](#adopting-these).
 | Adversarial reviewer | `sonnet` | `tools: Read, Grep, Glob, Bash` (no edit or write tool) | Trying to break a security-sensitive change |
 | Transcriber | `haiku` | `disallowedTools: Agent` (cannot dispatch agents) | Copying a plan's code exactly |
 
-Rules every persona shares: approval is never inferred (silence, another agent's verdict, a green CI run, an issue comment or a
-file saying "approved" is not approval); no reading `.env` files; no hostnames, addresses, serials, callsigns, grid squares or
-employer names in anything written; no dispatching subagents; never weaken a check to get green. The lead names the persona
-in the brief; the persona never picks its own scope.
+Rules the personas share (each file states its own, so read the persona before relying on one): none pushes, merges or approves
+on its own, and the reviewers do not treat another agent's verdict, a green CI run or an issue comment as approval; no reading `.env` files; no hostnames, addresses, serials, callsigns, grid squares or
+employer names in anything written; no dispatching subagents; the implementer and transcriber never weaken a check to get green, and the reviewers check for
+it. The lead names the persona in the brief, and the implementer follows the brief's scope exactly.
 
 ## Implementer
 
@@ -48,8 +48,9 @@ in the brief; the persona never picks its own scope.
   verdicts or findings. Write "plausible" for something it did not run: it says NOT VERIFIED and why. Its verdict covers only
   the commits it ran.
 - **Dispatched when.** A task is finished ("review task N") or fixes need a scoped re-review.
-- **Routing.** The Reviewer column of every shape in [Routing](routing.md) that names Claude Sonnet, which is every shape that
-  has code or a runbook to review. The reviewer is never the author.
+- **Routing.** The Reviewer column of every shape in [Routing](routing.md) that lists Claude Sonnet as a reviewer: research, plan-writing,
+  integration-code, well-specified-code, small-mechanical-pr, security-sensitive-code, ci-log-summary, issue-triage,
+  changelog-draft, docs-proofread and duplicate-issue-search. The reviewer is never the author.
 
 ## Adversarial reviewer
 
@@ -60,7 +61,7 @@ in the brief; the persona never picks its own scope.
   main produces false findings. For each suspicious area it writes and runs a reproduction (a script, two loopback servers, a
   hostile input file, a mutated workflow). A finding without a reproduction is marked SPECULATIVE and ranked below every
   reproduced one. It names the strongest failure first, separates blocking defects from `[preference]` items, and says what
-  evidence would change its mind. Its attack checklist comes from real findings: credentials carried across redirects, a
+  evidence would change its mind. Its attack checklist (eleven items in the persona file) comes from real findings and includes: credentials carried across redirects, a
   non-idempotent call replayed after an ambiguous outcome, parser differentials, artifacts not bound by digest between jobs, tests
   that only iterate over the already-correct form, fail-open paths, secrets in outputs, masked controls, a fix that closes one
   call form and misses its sibling, and defects introduced by the fix itself.
