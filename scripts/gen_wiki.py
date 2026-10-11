@@ -34,7 +34,6 @@ REPO_URL = "https://github.com/ChiefGyk3D/scrum-around-and-find-out"
 OUT_NAME = "wiki-out"
 
 _SCHEME = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:|//)")
-_LINK = re.compile(r"\]\(([^)\s]+)\)")
 _REFDEF = re.compile(r"[ ]*(?:(?:>|[-*+]|\d{1,9}[.)])[ ]*)*\[(?:[^\]\\]|\\.)+\]:[ \t]*")
 _ATTR = re.compile(
     r"(?<=[\s<\"'])((?:xlink:)?(?:href|src|srcset|poster|formaction|action))[ \t]*=[ \t]*", re.IGNORECASE
@@ -68,24 +67,60 @@ def _refuse_symlinks(docs: Path) -> None:
                 raise WikiError(f"{path.relative_to(docs.parent)} is a symbolic link; refusing to publish through it")
 
 
+def _after_listing() -> None:
+    """Runs between listing docs/ and reading it; the tests swap paths here."""
+
+
 def _read_docs(docs: Path) -> dict[str, str]:
-    """Map each docs/*.md filename to its text."""
+    """Map each docs/*.md filename to its text, reading by descriptor so a swapped path is never followed."""
     _refuse_symlinks(docs)
     try:
-        files = sorted(p for p in docs.iterdir() if p.is_file() and p.suffix == ".md")
+        root_fd = os.open(docs.parent, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as err:
-        raise WikiError(f"cannot read the docs directory {docs}: {err.strerror or err}") from err
-    if not files:
-        raise WikiError(f"no docs/*.md pages in {docs}")
-    texts: dict[str, str] = {}
-    base = docs.resolve()
-    for path in files:
-        if base not in path.resolve().parents:
-            raise WikiError(f"{path.name} resolves outside docs/")
+        raise WikiError(f"cannot read the repository {docs.parent}: {err.strerror or err}") from err
+    try:
         try:
-            texts[path.name] = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as err:
-            raise WikiError(f"cannot read {path.name}: {err}") from err
+            docs_fd = _open_dir(docs.name, root_fd)
+        except FileNotFoundError as err:
+            raise WikiError(f"cannot read the docs directory {docs}: {err.strerror or err}") from err
+        try:
+            return _read_pages(docs, docs_fd)
+        finally:
+            os.close(docs_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _read_pages(docs: Path, docs_fd: int) -> dict[str, str]:
+    ident = os.fstat(docs_fd)
+    names = []
+    for name in sorted(os.listdir(docs_fd)):
+        found = _lstat(name, docs_fd)
+        if found is None or not name.endswith(".md"):
+            continue
+        if stat.S_ISLNK(found.st_mode):
+            raise WikiError(f"docs/{name} is a symbolic link; refusing to publish through it")
+        if stat.S_ISREG(found.st_mode):
+            names.append(name)
+    if not names:
+        raise WikiError(f"no docs/*.md pages in {docs}")
+    _after_listing()
+    texts: dict[str, str] = {}
+    for name in names:
+        raw = _read(name, docs_fd)
+        if raw is None:
+            raise WikiError(f"cannot read docs/{name}: it disappeared")
+        try:
+            texts[name] = raw.decode("utf-8")
+        except UnicodeDecodeError as err:
+            raise WikiError(f"cannot read docs/{name}: {err}") from err
+    try:
+        now = os.stat(docs)
+        same = docs.resolve() == docs and (now.st_dev, now.st_ino) == (ident.st_dev, ident.st_ino)
+    except OSError:
+        same = False
+    if not same:
+        raise WikiError(f"{docs} changed while gen_wiki was running (a path was swapped); refusing")
     if "home.md" not in texts:
         raise WikiError("docs/home.md is missing: it becomes the wiki's Home page")
     return texts
@@ -516,14 +551,16 @@ def _open_dir(name: str, dir_fd: int) -> int:
 
 
 def _read(name: str, dir_fd: int) -> bytes | None:
-    """The bytes of a regular file, or None if it is absent; a symbolic link is an error."""
+    """The bytes of a regular file, or None if it is absent; a symbolic link or a non-regular file is an error."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except FileNotFoundError:
         return None
     except OSError as err:
         raise WikiError(f"{name} is a symbolic link or cannot be read: {err.strerror}") from err
     with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise WikiError(f"{name} is not a regular file; refusing to read it")
         return handle.read()
 
 

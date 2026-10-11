@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import os
 import re
 import shutil
 import time
@@ -802,3 +803,136 @@ def test_a_directory_swapped_for_a_symlink_is_also_refused_before_any_write(tmp_
     with pytest.raises(gw.WikiError):
         gw.generate(repo, repo / "sub" / "wiki-out", SHA)
     assert snapshot(external) == before
+
+
+# Round 4: code spans in linear time, and docs read by descriptor.
+
+
+@pytest.mark.parametrize(
+    ("body", "kept", "rewritten"),
+    [
+        ("``a`b[x](nope.md)`` [ok](alpha.md)", ["``a`b[x](nope.md)``"], ["[ok](Alpha)"]),
+        ("`` [ok](alpha.md)", [], ["[ok](Alpha)"]),
+        ("`a [ok](alpha.md)", [], ["[ok](Alpha)"]),
+        ("```a`` [ok](alpha.md)", [], ["[ok](Alpha)"]),
+        ("``a` [x](nope.md) `b`` [ok](alpha.md)", ["``a` [x](nope.md) `b``"], ["[ok](Alpha)"]),
+        ("`one` and `[x](nope.md)` and [ok](alpha.md)", ["`[x](nope.md)`"], ["[ok](Alpha)"]),
+        ("\\`[ok](alpha.md)`", [], ["[ok](Alpha)"]),
+        ("`a` ``b`` ```c``` [ok](alpha.md)", ["`a` ``b`` ```c```"], ["[ok](Alpha)"]),
+    ],
+)
+def test_code_spans_follow_commonmark(tmp_path: Path, body: str, kept: list[str], rewritten: list[str]) -> None:
+    text = render_home(tmp_path, body + "\n")
+    for fragment in kept + rewritten:
+        assert fragment in text, fragment
+
+
+def test_hostile_backtick_lines_are_scanned_in_linear_time(tmp_path: Path) -> None:
+    payloads = [
+        "`" * 10_000 + "a" * 10_000,
+        "`" * 20_000,
+        "`a" * 10_000,
+        "`" + "a" * 19_999,
+        "".join("`" * (i % 7 + 1) + "ab" for i in range(4_000))[:20_000],
+        "`" * 5_000 + " text " * 2_500,
+        "``" + "`a" * 9_990,
+        "[x](" + "`" * 10_000 + "a" * 9_900,
+    ]
+    for number, payload in enumerate(payloads):
+        assert len(payload) <= gw.MAX_LINE
+        repo = make_repo(tmp_path / str(number), {"home.md": f"# H\n{payload}\n"})
+        started = time.monotonic()
+        with contextlib.suppress(gw.WikiError):  # the point is the time taken, not the verdict
+            gw.generate(repo, repo / "wiki-out", SHA)
+        assert time.monotonic() - started < 1, (number, payload[:12])
+
+
+def test_other_regexes_are_linear_on_twenty_thousand_character_lines(tmp_path: Path) -> None:
+    payloads = [
+        "# x" + " " * 19_990 + "y",
+        "# " + "a " * 9_990,
+        "[" + "a" * 19_990 + "]: ",
+        "[" + "\\]" * 9_990 + "]: x.md",
+        "- " * 9_990 + "[r]: x",
+        "-" + " " * 19_990 + "-",
+        "<a " + 'href="x" ' * 2_000,
+        "    " + "\t" * 19_000,
+        "> " * 9_990 + "```",
+        "[a](" + "(" * 19_990,
+    ]
+    for number, payload in enumerate(payloads):
+        repo = make_repo(tmp_path / str(number), {"home.md": f"{payload}\n", "zed.md": f"{payload}\n\n# T\n"})
+        started = time.monotonic()
+        with contextlib.suppress(gw.WikiError):  # the point is the time taken, not the verdict
+            gw.generate(repo, repo / "wiki-out", SHA)
+        assert time.monotonic() - started < 1, (number, payload[:12])
+
+
+def swap_to_outside(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "home.md").write_text("# H\nOUTSIDE-SECRET\n")
+    return outside
+
+
+def no_secret_anywhere(repo: Path) -> bool:
+    return not any(b"OUTSIDE-SECRET" in p.read_bytes() for p in repo.rglob("*") if p.is_file() and not p.is_symlink())
+
+
+def test_a_docs_file_swapped_for_a_symlink_after_the_listing_is_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repo(tmp_path)
+    outside = swap_to_outside(tmp_path)
+
+    def swap() -> None:
+        (repo / "docs" / "home.md").unlink()
+        (repo / "docs" / "home.md").symlink_to(outside / "home.md")
+
+    monkeypatch.setattr(gw, "_after_listing", swap)
+    with pytest.raises(gw.WikiError, match=r"home\.md"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert no_secret_anywhere(repo)
+
+
+def test_the_docs_directory_swapped_for_a_symlink_after_the_listing_is_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repo(tmp_path)
+    outside = swap_to_outside(tmp_path)
+
+    def swap() -> None:
+        (repo / "docs").rename(repo / "docs_moved")
+        (repo / "docs").symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(gw, "_after_listing", swap)
+    with pytest.raises(gw.WikiError, match="changed while"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert no_secret_anywhere(repo)
+
+
+def test_a_docs_file_swapped_for_a_fifo_does_not_hang(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = make_repo(tmp_path)
+
+    def swap() -> None:
+        (repo / "docs" / "alpha.md").unlink()
+        os.mkfifo(repo / "docs" / "alpha.md")
+
+    monkeypatch.setattr(gw, "_after_listing", swap)
+    with pytest.raises(gw.WikiError, match=r"alpha\.md"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_heading_titles_are_read_correctly(tmp_path: Path) -> None:
+    repo = make_repo(
+        tmp_path,
+        {
+            "home.md": "#  Spaced   title  ##  \n",
+            "a.md": "# C#\n",
+            "b.md": "#nospace\n\n#\tTabbed\n",
+            "c.md": "# \n\nplain\n",
+        },
+    )
+    sidebar = run(repo)["_Sidebar.md"]
+    assert "- [Spaced   title](Home)" in sidebar and "- [C\\#](A)" not in sidebar and "- [C#](A)" in sidebar
+    assert "- [Tabbed](B)" in sidebar and "- [C](C)" in sidebar
