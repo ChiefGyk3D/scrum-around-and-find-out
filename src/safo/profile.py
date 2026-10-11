@@ -313,6 +313,8 @@ def tripwire_problem(text: str) -> str:
     return ""
 
 
+squash = _squash  # public name for the comparison form, shared with brief filling
+
 _BOUNDARY = _squash(BOUNDARY_PARAGRAPH)
 _BOUNDARY_WINDOWS = frozenset(_BOUNDARY[i : i + BOUNDARY_WINDOW] for i in range(len(_BOUNDARY) - BOUNDARY_WINDOW + 1))
 
@@ -416,6 +418,7 @@ def read_text_file(r: Reader, base: Path, rel: str, path: str, what: str, *, mis
 
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _PLACEHOLDER = re.compile(r"\{\{([a-z_]+)\}\}")
+PLACEHOLDER_LINE = _PLACEHOLDER  # public name: a line that is exactly one placeholder
 _ANY_BRACES = re.compile(r"\{\{([^{}]*)\}\}")
 _HEADING_ONE = re.compile(r"^ {0,3}#(?:\s|$)|^ {0,3}=+\s*$")
 # CommonMark HTML blocks that a blank line does not end (types 1 to 5): the opener, and what ends that block. Type 1
