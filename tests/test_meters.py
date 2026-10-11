@@ -314,3 +314,70 @@ def test_a_billing_login_that_is_not_a_login_is_never_put_in_a_path() -> None:
     reading = read_copilot_usage(run, lambda name: "gh", "2026-10", billing=True, allowance=None)
     assert reading.premium_requests is None
     assert not any("evil" in part for call in called for part in call)
+
+
+def _real_shaped(msg_id: str, model: str, out: int = 325) -> dict:
+    """A current Claude Code transcript line: nested objects sit beside the four counters."""
+    return {
+        "type": "assistant",
+        "timestamp": (NOW - dt.timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        "message": {
+            "id": msg_id,
+            "model": model,
+            "usage": {
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 37244,
+                "cache_read_input_tokens": 23147,
+                "output_tokens": out,
+                "output_tokens_details": {"thinking_tokens": 122},
+                "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+            },
+        },
+    }
+
+
+def test_claude_nested_usage_objects_are_ignored_and_the_four_counters_summed(_private_home: Path) -> None:
+    rows = [_real_shaped("a", "claude-opus-5-5"), _real_shaped("b", "claude-opus-5-5", out=75)]
+    claude_transcript(_private_home, "p/s.jsonl", rows)
+    opus = read_claude_usage(_private_home, SINCE).by_family["opus"]
+    assert (opus.messages, opus.input_tokens, opus.output_tokens) == (2, 4, 400)
+    assert (opus.cache_read_tokens, opus.cache_creation_tokens) == (46294, 74488)
+
+
+def test_claude_nested_usage_duplicates_keep_the_larger_output(_private_home: Path) -> None:
+    rows = [_real_shaped("same", "claude-sonnet-5-5", out=n) for n in (300, 900, 100)]
+    claude_transcript(_private_home, "p/s.jsonl", rows)
+    sonnet = read_claude_usage(_private_home, SINCE).by_family["sonnet"]
+    assert (sonnet.messages, sonnet.output_tokens) == (1, 900)
+
+
+def test_claude_a_missing_counter_is_zero(_private_home: Path) -> None:
+    row = _real_shaped("m", "claude-haiku-5-5")
+    del row["message"]["usage"]["cache_read_input_tokens"]
+    claude_transcript(_private_home, "p/s.jsonl", [row])
+    assert read_claude_usage(_private_home, SINCE).by_family["haiku"].cache_read_tokens == 0
+
+
+@pytest.mark.parametrize("field", ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"])
+@pytest.mark.parametrize("bad", [-1, 1.5, True, "12", 10**30, None, {"x": 1}])
+def test_claude_a_malformed_counter_skips_the_message_even_with_nested_usage(
+    _private_home: Path, field: str, bad: object
+) -> None:
+    row = _real_shaped("bad", "claude-sonnet-5-5")
+    row["message"]["usage"][field] = bad
+    claude_transcript(_private_home, "p/s.jsonl", [row, _real_shaped("ok", "claude-sonnet-5-5", out=7)])
+    sonnet = read_claude_usage(_private_home, SINCE).by_family["sonnet"]
+    assert (sonnet.messages, sonnet.output_tokens) == (1, 7)
+
+
+def test_claude_a_malformed_ignored_key_does_not_skip_the_message(_private_home: Path) -> None:
+    row = _real_shaped("m", "claude-sonnet-5-5")
+    row["message"]["usage"]["service_tier"] = "standard"
+    row["message"]["usage"]["bogus"] = -5
+    claude_transcript(_private_home, "p/s.jsonl", [row])
+    assert read_claude_usage(_private_home, SINCE).by_family["sonnet"].messages == 1
+
+
+def test_claude_family_of_current_model_ids() -> None:
+    ids = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1")
+    assert [family_of(m) for m in ids] == ["opus", "sonnet", "haiku", "other"]

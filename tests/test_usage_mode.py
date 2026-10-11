@@ -158,3 +158,14 @@ def test_outside_actions_a_file_inside_the_workspace_variable_is_allowed(_privat
         path = write_agents(ws / "agents.yaml", a.url, b.url)
         code, out, _ = cli("usage", "--agents", str(path), home=_private_home, extra_env={"GITHUB_WORKSPACE": str(ws)})
     assert code == 0 and "Local LLM instance-a" in out
+
+
+def test_usage_shows_a_model_family_that_is_not_opus_sonnet_or_haiku(_private_home: Path) -> None:
+    claude_transcript(
+        _private_home, "p/s.jsonl", [assistant("m1", "claude-fable-5-1", 50), assistant("m2", "claude-opus-5-5", 5)]
+    )
+    code, out, _ = cli("usage", "--no-local", home=_private_home)
+    assert code == 0
+    assert "other       1 messages" in out and "opus        1 messages" in out
+    code, out, _ = cli("usage", "--json", "--no-local", home=_private_home)
+    assert json.loads(out)["claude"]["by_family"]["other"]["messages"] == 1

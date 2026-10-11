@@ -16,6 +16,9 @@ from typing import Any
 from safo.bounded import count, json_lines
 
 FAMILIES = ("opus", "sonnet", "haiku")
+# The only usage keys the meter reads. Current transcripts also carry nested objects (output_tokens_details,
+# server_tool_use) and strings (service_tier); those are ignored, never parsed.
+COUNTERS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
 
 @dataclass(frozen=True)
@@ -79,7 +82,7 @@ def read_claude_usage(home: Path, since: dt.datetime) -> ClaudeUsage:
                 continue
             key = str(message.get("id") or f"{path}:{number}")
             try:
-                usage = {k: count(v) for k, v in message["usage"].items()}
+                usage = {k: count(message["usage"][k]) for k in COUNTERS if k in message["usage"]}
             except ValueError:
                 continue
             previous = best.get(key)
