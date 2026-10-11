@@ -16,6 +16,7 @@ output tree (.md files), so a mistyped path can never delete anything else.
 from __future__ import annotations
 
 import argparse
+import os
 import posixpath
 import re
 import sys
@@ -44,8 +45,20 @@ def page_name(filename: str) -> str:
     return stem[:1].upper() + stem[1:]
 
 
+def _refuse_symlinks(docs: Path) -> None:
+    """No symbolic link anywhere under docs/ (or docs/ itself): a link could publish a file from outside it."""
+    if docs.is_symlink():
+        raise WikiError(f"{docs} is a symbolic link; refusing to read through it")
+    for here, dirs, names in os.walk(docs, followlinks=False):
+        for name in sorted(dirs + names):
+            path = Path(here) / name
+            if path.is_symlink():
+                raise WikiError(f"{path.relative_to(docs.parent)} is a symbolic link; refusing to publish through it")
+
+
 def _read_docs(docs: Path) -> dict[str, str]:
     """Map each docs/*.md filename to its text."""
+    _refuse_symlinks(docs)
     try:
         files = sorted(p for p in docs.iterdir() if p.is_file() and p.suffix == ".md")
     except OSError as err:
@@ -53,7 +66,10 @@ def _read_docs(docs: Path) -> dict[str, str]:
     if not files:
         raise WikiError(f"no docs/*.md pages in {docs}")
     texts: dict[str, str] = {}
+    base = docs.resolve()
     for path in files:
+        if base not in path.resolve().parents:
+            raise WikiError(f"{path.name} resolves outside docs/")
         try:
             texts[path.name] = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as err:

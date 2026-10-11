@@ -261,3 +261,50 @@ def test_the_real_docs_generate_and_every_internal_link_resolves(tmp_path: Path)
             assert target.partition("#")[0] in names, f"{filename}: {target}"
     assert checked > 10
     assert not any(".md)" in re.sub(r"`[^`]*`", "", t) for t in got.values())
+
+
+# Symlinks under docs/ never leak their targets.
+
+
+def test_a_symlinked_page_is_refused_and_its_content_never_written(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    secret = tmp_path / "secret.md"
+    secret.write_text("# Secret\nTOP-SECRET-TOKEN\n")
+    (repo / "docs" / "leak.md").symlink_to(secret)
+    with pytest.raises(gw.WikiError, match="symbolic link"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert not (repo / "wiki-out").exists()
+
+
+def test_a_symlink_to_a_system_file_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    (repo / "docs" / "passwd.md").symlink_to("/etc/passwd")
+    with pytest.raises(gw.WikiError, match="symbolic link"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_a_symlinked_subdirectory_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.md").write_text("TOP-SECRET-TOKEN")
+    (repo / "docs" / "linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(gw.WikiError, match="symbolic link"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_a_symlinked_docs_directory_is_refused(tmp_path: Path) -> None:
+    real = make_repo(tmp_path / "real")
+    repo = tmp_path / "repo2"
+    repo.mkdir()
+    (repo / "docs").symlink_to(real / "docs", target_is_directory=True)
+    with pytest.raises(gw.WikiError, match="symbolic link"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_a_symlink_in_the_unpublished_tree_is_refused_too(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    (repo / "docs" / "superpowers").mkdir()
+    (repo / "docs" / "superpowers" / "l.md").symlink_to("/etc/passwd")
+    with pytest.raises(gw.WikiError, match="symbolic link"):
+        gw.generate(repo, repo / "wiki-out", SHA)
