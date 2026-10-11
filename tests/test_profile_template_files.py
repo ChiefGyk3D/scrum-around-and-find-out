@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 from collections.abc import Iterator
@@ -23,22 +24,28 @@ class Hung(BaseException):
     """Not an Exception, so no `except OSError` in the code under test can turn it into the expected error."""
 
 
-@pytest.fixture
-def hang_guard() -> Iterator[None]:
-    """For the FIFO tests only: a regression that opens a FIFO would hang, so fail after two seconds instead.
+@contextlib.contextmanager
+def guard(seconds: int = 2) -> Iterator[None]:
+    """A regression that opens a FIFO would hang, so fail after a few seconds instead.
 
-    Not autouse: a slow CI runner must not turn a merely slow test into a failure."""
+    Used only around the FIFO read itself: a slow CI runner must not turn a merely slow test into a failure."""
 
     def boom(signum: int, frame: Any) -> None:
         raise Hung("a template read waited on a FIFO")
 
     old = signal.signal(signal.SIGALRM, boom)
-    signal.alarm(2)
+    signal.alarm(seconds)
     try:
         yield
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
+
+
+@pytest.fixture
+def hang_guard() -> Iterator[None]:
+    with guard():
+        yield
 
 
 def load_template(tmp_path: Path, text: str | bytes, rel: str = "templates/brief.md") -> Any:
@@ -444,7 +451,7 @@ def test_a_missing_persona_is_a_typed_error(tmp_path: Path) -> None:
         loads(tmp_path, persona_doc())
 
 
-def test_a_persona_goes_through_the_same_file_rules(tmp_path: Path, hang_guard: None) -> None:
+def test_a_persona_goes_through_the_same_file_rules(tmp_path: Path) -> None:
     base = tmp_path / ".claude" / "agents"
     for name, make in (
         ("linked", lambda p: p.symlink_to(tmp_path)),
@@ -461,7 +468,11 @@ def test_a_persona_goes_through_the_same_file_rules(tmp_path: Path, hang_guard: 
         base.mkdir(parents=True, exist_ok=True)
         make(base / f"{name}.md")
         with pytest.raises(ConfigError, match=r"profile\.persona"):
-            loads(tmp_path, persona_doc(name))
+            if name == "fifo":
+                with guard():
+                    loads(tmp_path, persona_doc(name))
+            else:
+                loads(tmp_path, persona_doc(name))
 
 
 def test_a_symlinked_persona_directory_is_refused(tmp_path: Path) -> None:
