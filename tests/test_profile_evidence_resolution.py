@@ -341,7 +341,7 @@ def test_a_blank_line_ends_a_div_block_so_the_next_heading_counts() -> None:
 
 def test_a_hostile_closing_hash_heading_file_is_scanned_in_linear_time() -> None:
     line = "# a" + " " * 985 + "b" + " #" * 3
-    text = (line + "\n") * 1000
+    text = (line + "\n") * 3000
     start = time.monotonic()
     lesson_sections(text)
     assert time.monotonic() - start < 10
