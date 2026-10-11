@@ -95,7 +95,7 @@ says which ones were loaded. DoIA's v0.2.0 README lists these six and publishes 
 
 ## Which routing shapes use each role
 
-These come from `shapes` in [`agents.yaml`](../agents.yaml),
+These come from `shapes` in [`agents.yaml`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/agents.yaml),
 rendered on [Routing](routing.md#task-shapes). The mapping from agent to DoIA role is SAFO's own: DoIA's roles run on Claude,
 so a shape that names Claude Sonnet or Claude Haiku is where a role applies.
 
@@ -113,7 +113,7 @@ The reviewer is never the author of the work it reviews.
 Pin DoIA by tag, read what the installer would write, then apply it. This is DoIA's own installer and usage:
 
 ```
-git clone --branch v0.2.0 https://github.com/ChiefGyk3D/department-of-internal-arguments.git
+git clone --branch v0.2.0 https://github.com/ChiefGyk3D/department-of-internal-arguments
 cd department-of-internal-arguments
 python3 scripts/install.py --target /path/to/project --adapter claude
 python3 scripts/install.py --target /path/to/project --adapter both --apply
