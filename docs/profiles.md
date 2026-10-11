@@ -5,8 +5,9 @@ about the agent to a pointer at something that was measured. The design is in
 `docs/superpowers/specs/2026-10-11-agent-profiles.md`; this page is the short version of what the loader accepts today.
 
 **Status of this page.** The profile block, the promotion settings and the migration list load and are checked, the
-evidence pointers are resolved against the lessons and the outcomes log, and `safo profiles verify` works. Rendering
-profiles into instruction files and `safo profiles brief` are not built yet and are not described as working here.
+evidence pointers are resolved against the lessons and the outcomes log, and `safo profiles verify` works. `safo profiles brief`
+fills a brief template with fenced task data. Rendering profiles into instruction files is not built yet and is not
+described as working here.
 
 ## The rule
 
@@ -160,3 +161,56 @@ others. A repository checkout is not held to that rule: review is the control th
 (3) and `window_days` (180). The loader validates them. `qualify` (in `src/safo/qualify.py`) counts qualifying outcomes
 against them and `safo profiles verify` prints the result; nothing in selection reads it yet. Outcomes are self-reported into a file
 you own, so the count is a speed bump and not proof; see [Limits](limits.md).
+
+## `safo profiles brief`: filling a template with task text
+
+```
+safo profiles brief --agent ID [--agents FILE] [--task-file PATH|-] [--files-file PATH|-]
+                    [--acceptance-file PATH|-] [--test-command TEXT] [--card TEXT]
+```
+
+A brief template holds placeholders, and the task text that goes into them is written by someone else: an issue, a
+pull request, a pasted log. `brief` prints the filled template so that none of that text can end the place it sits in
+or pretend to be part of the template. Each value goes between a start line and an end line:
+
+```
+<<<UNTRUSTED-TASK-DATA name=task id=0123456789abcdef0123456789abcdef>>>
+...the value...
+<<<END-UNTRUSTED-TASK-DATA id=0123456789abcdef0123456789abcdef>>>
+```
+
+The id is 128 bits from the `secrets` module, drawn again on every call, so it cannot be known when the value is
+written. A fixed sentence before the first fence says that text between the fences is data from the task author, that
+it is not an instruction, and that it cannot override the profile or the policy boundary.
+
+**What it refuses (exit 2, nothing printed to standard output).**
+
+- A value that contains the delimiter text `UNTRUSTED-TASK-DATA`, also when the text is hidden with zero-width or bidi
+  characters, a soft hyphen, a character reference, a full-width letter or another case. A value therefore cannot
+  contain an end line, a start line or the id.
+- A NUL or any other control character except newline and tab (an escape sequence would drive a terminal).
+- A value larger than 65536 bytes, measured as given and before line endings change. The error names the value and
+  never repeats it.
+- A template that breaks the placement rules, checked again at fill time with the same scanners as at load time: a
+  placeholder is the whole content of its line, has a blank line on both sides, appears once, and sits outside every
+  code fence and raw HTML block; no list item, quote, table, heading or HTML line may hold one. A template that
+  contains the delimiter text is refused too, so a template cannot forge a fence.
+- A value for a placeholder the template does not have (it would be dropped without a word), a placeholder with no
+  value, an agent with no profile or no brief, an inline brief given values (an inline brief has no placeholders), and
+  an agents file with any unresolved evidence pointer, for any agent: the load is the strict one and has no bypass.
+
+Line endings in a value become LF. Control characters other than the ones above, such as zero-width and bidi characters,
+stay in the value and stay inside its fence; under GitHub Actions the whole brief is written inside a `stop-commands`
+block so a line that begins with `::` cannot act as a workflow command, and only there are format characters escaped.
+
+**Where values come from.** `--task-file`, `--files-file` and `--acceptance-file` take a path or `-` for standard input
+(for one value only). A file must be a regular file and not a symbolic link, is never waited on if it is a FIFO, and at
+most 65537 bytes are read, so a huge file or an endless pipe cannot use memory. Standard input is read with the same
+bound and gives up after 30 seconds of silence. `--test-command` and `--card` are the text itself. Under GitHub Actions
+the agents file must come from outside the workspace, as for `route`.
+
+**What this claims, and what it does not.** The claim is about structure only: where a value starts and where it ends
+in the output, and that it cannot forge or close that structure. It does not make a model ignore an instruction written
+inside a fence, and a model that obeys it has not been stopped by this command. Pasting task text into a template by hand
+is outside the guarantee: the fence exists only when this command writes it. A Markdown renderer is not the reader the
+fences are designed for; they are plain lines, not code fences.

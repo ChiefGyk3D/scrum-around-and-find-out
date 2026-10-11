@@ -79,10 +79,10 @@ def test_a_group_writable_default_file_is_refused_but_an_explicit_checkout_file_
     assert verify(src, _private_home)[0] == 0
 
 
-def test_only_the_verify_action_exists() -> None:
+def test_the_actions_are_verify_and_brief() -> None:
     from safo.modes.profiles import ACTIONS
 
-    assert ACTIONS == ("verify",)
+    assert ACTIONS == ("verify", "brief")
     assert LESSON
 
 
