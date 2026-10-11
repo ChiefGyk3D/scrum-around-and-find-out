@@ -109,6 +109,7 @@ def test_a_scalar_setting_needs_evidence() -> None:
         "outcomes:v1:2026-10:codex:runs>=",
         "outcomes:v1:2026-10:codex:runs>=1e5",
         "outcomes:v1:2026-10:codex:runs>=-1",
+        "outcomes:v1:2026-01..2026-02..2026-03:codex:runs>=1",
         "outcomes:v1:2026-10:codex/:runs>=1",
         "outcomes:v1:2026-10:co dex:runs>=1",
         "outcomes:v1:2026-10:a/b/c:runs>=1",
@@ -140,6 +141,35 @@ def test_well_formed_pointers_are_accepted_without_touching_any_file(pointer: st
     d = doc()
     profile(d, "codex")["dont"] = [claim("Some claim.", pointer)]
     assert prof(parse_agents(d), "codex").dont[0].evidence.raw == pointer
+
+
+@pytest.mark.parametrize(
+    ("pointer", "message"),
+    [
+        ("unknown:thing", r"expected lessons:<slug>, outcomes"),
+        ("lessons:", r"expected lessons:<slug>, outcomes"),
+        ("outcomes:", r"expected lessons:<slug>, outcomes"),
+        ("outcomes:v1:2026-01..2026-02..2026-03:codex:runs>=1", r"range is YYYY-MM or YYYY-MM"),
+        ("lessons:" + "a" * 300, r"printable characters, at most 300"),
+        ("lessons:caf\u00e9", r"printable characters, at most 300"),
+        ("lessons:two words", r"printable characters, at most 300"),
+        ("lessons:tab\there", r"printable characters, at most 300"),
+    ],
+)
+def test_the_pointer_error_says_which_rule_refused_it(pointer: str, message: str) -> None:
+    d = doc()
+    profile(d, "codex")["dont"] = [claim("Some claim.", pointer)]
+    rejects(d, rf"dont\[0\]\.evidence: .*{message}")
+
+
+@pytest.mark.parametrize("model", ["bad model", "caf\u00e9", "a\nb", "m" * 300])
+def test_a_config_pointer_with_an_unprintable_or_overlong_segment_is_refused_by_the_character_rule(model: str) -> None:
+    d = doc()
+    profile(d, "codex")["context_ceiling"] = {
+        "value": 4096,
+        "evidence": f"config:/agents/ollama/endpoints/0/loaded_num_ctx/{model}",
+    }
+    rejects(d, r"context_ceiling\.evidence: .*printable characters, at most 300")
 
 
 def test_a_config_pointer_is_refused_on_every_behavioural_claim() -> None:

@@ -57,7 +57,7 @@ def _open_checked(path: Path) -> int:
     parts = Path(os.path.abspath(path)).parts
     if len(parts) < 2:
         raise ConfigError("the file is not a regular file")
-    dir_fd = -1
+    dir_fd: int | None = None
     try:
         dir_fd = os.open(parts[0], _DIR_FLAGS)
         _check_directory(dir_fd)
@@ -72,7 +72,7 @@ def _open_checked(path: Path) -> int:
             "the file cannot be opened without following a symbolic link (a link, a missing path or no permission)"
         ) from None
     finally:
-        if dir_fd >= 0:
+        if dir_fd is not None:
             os.close(dir_fd)
     try:
         _check_file(file_fd)

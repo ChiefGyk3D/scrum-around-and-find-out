@@ -83,6 +83,14 @@ def test_traversal_and_absolute_paths_are_refused_at_load_time(tmp_path: Path, r
         parse_agents(d)  # the syntax is checked even with no directory to read from
 
 
+def test_the_path_length_edge_is_two_hundred_characters() -> None:
+    ok = "a/" * 96 + "bcdef.md"  # 200 characters
+    assert len(ok) == 200
+    parse_agents(template_doc(ok))
+    with pytest.raises(ConfigError, match=r"brief\.template: expected a path of at most 200 characters"):
+        parse_agents(template_doc(ok + "x"))
+
+
 def test_a_nul_or_control_character_in_the_path_is_refused(tmp_path: Path) -> None:
     for rel in ("a\x00b.md", "a\nb.md"):
         with pytest.raises(ConfigError, match=r"brief\.template"):

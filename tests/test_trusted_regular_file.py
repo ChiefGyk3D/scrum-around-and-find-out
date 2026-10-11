@@ -95,6 +95,13 @@ def test_a_fifo_is_refused_without_hanging(safe: Path) -> None:
         trusted_regular_file(fifo)
 
 
+def test_the_root_itself_and_a_file_directly_under_it_are_judged_not_waved_through(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="not a regular file"):
+        trusted_regular_file(Path("/"))
+    with pytest.raises(ConfigError, match="cannot be opened"):
+        trusted_regular_file(Path("/no-such-file-directly-under-root"))
+
+
 def test_a_directory_and_a_missing_path_are_typed_errors(safe: Path) -> None:
     with pytest.raises(ConfigError, match="not a regular file"):
         trusted_regular_file(safe.parent)
