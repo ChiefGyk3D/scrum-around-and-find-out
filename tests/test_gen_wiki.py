@@ -109,7 +109,7 @@ def test_code_spans_and_fences_are_untouched(tmp_path: Path) -> None:
 
 def test_a_link_after_a_closed_fence_is_checked_again(tmp_path: Path) -> None:
     repo = make_repo(tmp_path, {"home.md": "# H\n```\nx\n```\n[bad](missing.md)\n"})
-    with pytest.raises(gw.WikiError, match="missing.md"):
+    with pytest.raises(gw.WikiError, match=r"missing\.md"):
         gw.generate(repo, repo / "wiki-out", SHA)
 
 
@@ -149,7 +149,7 @@ def test_missing_empty_or_homeless_docs_fail(tmp_path: Path) -> None:
     with pytest.raises(gw.WikiError, match="no docs"):
         gw.generate(empty, empty / "wiki-out", SHA)
     homeless = make_repo(tmp_path / "h", {"alpha.md": "# A\n"})
-    with pytest.raises(gw.WikiError, match="home.md"):
+    with pytest.raises(gw.WikiError, match=r"home\.md"):
         gw.generate(homeless, homeless / "wiki-out", SHA)
 
 
