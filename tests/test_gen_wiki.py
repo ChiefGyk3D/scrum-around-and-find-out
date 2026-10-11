@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import re
 import shutil
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -490,3 +492,146 @@ def test_reading_order_follows_titled_and_angle_links(tmp_path: Path) -> None:
     home = "# H\n\n## Read in this order\n\n- [Z](<zed.md> \"t\")\n- [A](alpha.md 'x')\n- [B](board-yaml.md#f)\n"
     repo = make_repo(tmp_path, {"home.md": home, "zed.md": "# Zed\n", "alpha.md": "# A\n", "board-yaml.md": "# B\n"})
     assert re.findall(r"\]\((\S+)\)", run(repo)["_Sidebar.md"]) == ["Home", "Zed", "Alpha", "Board-yaml"]
+
+
+# Round 2: the ownership record, fences, and linear scanning.
+
+
+def test_a_symlinked_record_is_refused_and_its_target_never_written(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    readme = repo / "README.md"
+    readme.write_bytes(b"# precious readme\n")
+    (repo / ".wiki-out.gen_wiki").symlink_to(readme)
+    for existing in (False, True):
+        if existing:
+            (repo / "wiki-out").mkdir()
+        with pytest.raises(gw.WikiError, match="ownership record"):
+            gw.generate(repo, repo / "wiki-out", SHA)
+        assert readme.read_bytes() == b"# precious readme\n"
+    assert not list((repo / "wiki-out").iterdir())
+
+
+def test_a_record_that_is_not_a_regular_file_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    (repo / ".wiki-out.gen_wiki").mkdir()
+    with pytest.raises(gw.WikiError, match="ownership record"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_a_forged_record_cannot_delete_an_unrelated_file(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    publish = repo / "publish"
+    publish.mkdir()
+    (publish / "Notes.md").write_text("my notes")
+    (repo / ".publish.gen_wiki").write_text("Notes.md\n")
+    with pytest.raises(gw.WikiError, match="not written by gen_wiki"):
+        gw.generate(repo, publish, SHA)
+    (repo / ".publish.gen_wiki").write_text(f"gen_wiki-v1 {'0' * 64}\nNotes.md {'1' * 64}\n")
+    with pytest.raises(gw.WikiError, match="not written by gen_wiki"):
+        gw.generate(repo, publish, SHA)
+    assert (publish / "Notes.md").read_text() == "my notes"
+
+
+def test_a_modified_generated_file_stops_the_cleanup(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    run(repo)
+    page = repo / "wiki-out" / "Zed.md"
+    page.write_text("edited by hand")
+    with pytest.raises(gw.WikiError, match="changed since"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert page.read_text() == "edited by hand" and (repo / "wiki-out" / "Home.md").exists()
+
+
+def test_a_tampered_record_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    run(repo)
+    record = repo / ".wiki-out.gen_wiki"
+    record.write_text(record.read_text().replace("Zed.md ", "Zed.md 0", 1))
+    with pytest.raises(gw.WikiError, match="not written by gen_wiki"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_a_normal_rerun_replaces_its_own_output_and_a_symlinked_page_is_replaced_not_followed(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    first = run(repo)
+    assert run(repo) == first
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched")
+    (repo / "wiki-out" / "Zed.md").unlink()
+    (repo / "wiki-out" / "Zed.md").symlink_to(victim)
+    with pytest.raises(gw.WikiError):
+        gw.generate(repo, repo / "wiki-out", SHA)
+    assert victim.read_text() == "untouched"
+
+
+# Fences follow CommonMark.
+
+
+def render_home(tmp_path: Path, body: str) -> str:
+    repo = make_repo(tmp_path, {"home.md": f"# H\n\n{body}", "alpha.md": "# A\n"})
+    return run(repo)["Home.md"]
+
+
+def test_a_backtick_opener_with_a_backtick_in_the_info_string_is_not_a_fence(tmp_path: Path) -> None:
+    text = render_home(tmp_path, "``` bad`info\n[l](alpha.md)\n[m](alpha.md)\n")
+    assert "[l](Alpha)" in text and "[m](Alpha)" in text
+    assert "alpha.md" not in text.split("bad`info", 1)[1]
+
+
+def test_a_tilde_opener_may_have_a_backtick_in_its_info_string(tmp_path: Path) -> None:
+    text = render_home(tmp_path, "~~~ ok`info\n[l](nope.md)\n~~~\n[m](alpha.md)\n")
+    assert "[l](nope.md)" in text and "[m](Alpha)" in text
+
+
+def test_a_longer_closer_closes_and_a_shorter_one_does_not(tmp_path: Path) -> None:
+    text = render_home(tmp_path, "```\n[a](nope.md)\n``\n[b](nope.md)\n`````\n[c](alpha.md)\n")
+    assert "[a](nope.md)" in text and "[b](nope.md)" in text and "[c](Alpha)" in text
+
+
+def test_a_closer_of_another_character_or_with_trailing_text_does_not_close(tmp_path: Path) -> None:
+    text = render_home(tmp_path, "```\n~~~\n[a](nope.md)\n``` x\n[b](nope.md)\n```  \n[c](alpha.md)\n")
+    assert "[a](nope.md)" in text and "[b](nope.md)" in text and "[c](Alpha)" in text
+
+
+def test_indent_over_three_spaces_is_not_a_fence(tmp_path: Path) -> None:
+    text = render_home(tmp_path, "    ```\n[a](alpha.md)\n   ```\n[b](nope.md)\n   ```\n[c](alpha.md)\n")
+    assert "[a](Alpha)" in text and "[b](nope.md)" in text and "[c](Alpha)" in text
+
+
+def test_an_unclosed_fence_makes_the_rest_of_the_page_code(tmp_path: Path) -> None:
+    text = render_home(tmp_path, "```\n[a](nope.md)\n[b](alpha.md)\n")
+    assert "[a](nope.md)" in text and "[b](alpha.md)" in text
+
+
+def test_a_fence_like_line_in_a_heading_search_does_not_hide_the_title(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, {"home.md": "``` bad`info\n# Real title\n", "alpha.md": "# A\n"})
+    assert run(repo)["_Sidebar.md"].splitlines()[0] == "- [Real title](Home)"
+
+
+# Scanning is linear and lines are capped.
+
+
+def test_pathological_lines_finish_quickly(tmp_path: Path) -> None:
+    for payload in ("](" * 10_000, "[](" * 6_000, "[" * 15_000 + "](x", "`a" * 9_000, "<a href=" * 2_500):
+        assert len(payload) <= gw.MAX_LINE
+        repo = make_repo(tmp_path / str(abs(hash(payload))), {"home.md": f"# H\n{payload}\n"})
+        started = time.monotonic()
+        with contextlib.suppress(gw.WikiError):  # the point is the time taken, not the verdict
+            gw.generate(repo, repo / "wiki-out", SHA)
+        assert time.monotonic() - started < 3, payload[:6]
+
+
+def test_a_very_long_valid_line_is_linear(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, {"home.md": "# H\n" + "[a](alpha.md) " * 1400 + "\n", "alpha.md": "# A\n"})
+    started = time.monotonic()
+    text = run(repo)["Home.md"]
+    assert time.monotonic() - started < 3 and text.count("(Alpha)") == 1400
+
+
+def test_a_line_over_the_cap_is_refused_in_and_out_of_fences(tmp_path: Path) -> None:
+    for body in ("x" * 20_001, "```\n" + "x" * 20_001 + "\n```"):
+        repo = make_repo(tmp_path / str(len(body)), {"home.md": f"# H\n{body}\n"})
+        with pytest.raises(gw.WikiError, match="longer than 20000"):
+            gw.generate(repo, repo / "wiki-out", SHA)
+    repo = make_repo(tmp_path / "ok", {"home.md": "# H\n" + "x" * 20_000 + "\n"})
+    assert "Home.md" in run(repo)

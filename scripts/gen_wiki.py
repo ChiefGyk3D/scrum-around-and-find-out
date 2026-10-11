@@ -17,6 +17,7 @@ the whole tree), and only those files are replaced; any other file, or no record
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import posixpath
 import re
@@ -35,7 +36,8 @@ _ATTR = re.compile(
     r"(?<=[\s<\"'])((?:xlink:)?(?:href|src|srcset|poster|formaction|action))[ \t]*=[ \t]*", re.IGNORECASE
 )
 _CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
-_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+MAX_LINE = 20_000
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
 _LABEL_META = re.compile(r"([\\\[\]<>`|*_&])")
@@ -177,6 +179,18 @@ def _mask_code(line: str) -> str:
     return _CODE_SPAN.sub(lambda m: "\x00" * len(m.group(0)), line)
 
 
+def _bracket_openers(mask: str) -> dict[int, int]:
+    """Map the index of each `]` to the index of the `[` it closes, in one forward pass."""
+    stack: list[int] = []
+    found: dict[int, int] = {}
+    for i, ch in enumerate(mask):
+        if ch == "[":
+            stack.append(i)
+        elif ch == "]" and stack:
+            found[i] = stack.pop()
+    return found
+
+
 def _rewrite_line(line: str, ctx: _Ctx) -> str:
     mask = _mask_code(line)
     edits: list[tuple[int, int, str]] = []
@@ -187,21 +201,12 @@ def _rewrite_line(line: str, ctx: _Ctx) -> str:
             raise ctx.fail(f"cannot read the reference definition: {line.strip()[:80]}")
         edits.append((d0, d1, ctx.fix(target, False)))
     else:
+        openers = _bracket_openers(mask)
         pos = 0
-        while (at := mask.find("](", pos)) >= 0:
-            pos = at + 2
-            depth = 0
-            opener = -1
-            for k in range(at - 1, -1, -1):
-                if mask[k] == "]":
-                    depth += 1
-                elif mask[k] == "[":
-                    if depth == 0:
-                        opener = k
-                        break
-                    depth -= 1
-            if opener < 0:
+        for at in sorted(openers):
+            if at < pos or mask[at + 1 : at + 2] != "(":
                 continue
+            opener = openers[at]
             image = opener > 0 and mask[opener - 1] == "!"
             d0, d1, target, after = _parse_destination(line, at + 2, ctx)
             end = _skip_title(line, after, ctx)
@@ -230,19 +235,34 @@ def _rewrite_line(line: str, ctx: _Ctx) -> str:
     return line
 
 
+def _fence_open(line: str) -> str | None:
+    """The fence a line opens (CommonMark: up to 3 spaces; a backtick fence's info string has no backtick)."""
+    m = _FENCE.fullmatch(line)
+    if not m or (m[1][0] == "`" and "`" in m[2]):
+        return None
+    return m[1]
+
+
+def _fence_closes(line: str, fence: str) -> bool:
+    """A closer is the same character, at least as long, up to 3 spaces of indent and only spaces after."""
+    m = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*", line)
+    return bool(m and m[1][0] == fence[0] and len(m[1]) >= len(fence))
+
+
 def rewrite_links(text: str, source: str, pages: dict[str, str], root: Path, blob: str) -> str:
     """Rewrite links, images, reference definitions and href/src attributes outside code."""
     ctx = _Ctx(source, pages, root, blob)
     out: list[str] = []
     fence: str | None = None
-    for line in text.split("\n"):
-        m = _FENCE.match(line)
+    for number, line in enumerate(text.split("\n"), 1):
+        if len(line) > MAX_LINE:
+            raise ctx.fail(f"line {number} is longer than {MAX_LINE} characters; refusing to scan it")
         if fence is not None:
-            if m and m[1][0] == fence[0] and len(m[1]) >= len(fence) and line.strip() == m[1]:
+            if _fence_closes(line, fence):
                 fence = None
             out.append(line)
-        elif m:
-            fence = m[1]
+        elif (opened := _fence_open(line)) is not None:
+            fence = opened
             out.append(line)
         else:
             out.append(_rewrite_line(line, ctx))
@@ -250,11 +270,14 @@ def rewrite_links(text: str, source: str, pages: dict[str, str], root: Path, blo
 
 
 def _title(text: str, fallback: str) -> str:
-    in_fence = False
+    fence: str | None = None
     for line in text.split("\n"):
-        if _FENCE.match(line):
-            in_fence = not in_fence
-        elif not in_fence and (m := _HEADING.match(line)):
+        if fence is not None:
+            if _fence_closes(line, fence):
+                fence = None
+        elif (opened := _fence_open(line)) is not None:
+            fence = opened
+        elif m := _HEADING.match(line):
             return m[1]
     return fallback
 
@@ -309,31 +332,65 @@ def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL)
 _OWNED_NAME = re.compile(r"^[A-Za-z0-9._-]+\.md$")
 
 
+_HEADER = "gen_wiki-v1"
+_HASH = re.compile(r"^[0-9a-f]{64}$")
+
+
 def manifest_path(out: Path) -> Path:
     """The record of what a run wrote, kept beside the tree, not in it: the publish step copies the whole tree."""
     return out.parent / f".{out.name}.gen_wiki"
 
 
-def _owned(out: Path) -> set[str] | None:
-    """The file names a previous run wrote into `out`, or None if there is no valid record."""
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _record_body(hashes: dict[str, str]) -> str:
+    lines = [f"{name} {hashes[name]}" for name in sorted(hashes)]
+    return f"{_HEADER} {_digest(chr(10).join(lines).encode())}\n" + "".join(f"{x}\n" for x in lines)
+
+
+def _check_record_kind(out: Path) -> Path:
+    record = manifest_path(out)
+    if record.is_symlink() or (record.exists() and not record.is_file()):
+        raise WikiError(f"the ownership record {record} is a symbolic link or not a regular file; refusing")
+    return record
+
+
+def _owned(out: Path) -> dict[str, str] | None:
+    """{name: sha256} of what a previous run wrote into `out`, or None if there is no valid, intact record."""
+    record = _check_record_kind(out)
     try:
-        names = manifest_path(out).read_text(encoding="utf-8").split("\n")
+        text = record.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    listed = {n for n in names if n}
-    if not listed or not all(_OWNED_NAME.match(n) for n in listed):
+    head, _, rest = text.partition("\n")
+    hashes: dict[str, str] = {}
+    for line in rest.split("\n"):
+        if not line:
+            continue
+        name, _, digest = line.partition(" ")
+        if not _OWNED_NAME.match(name) or not _HASH.match(digest) or name in hashes:
+            return None
+        hashes[name] = digest
+    if not hashes or text != _record_body(hashes) or head.split(" ")[0] != _HEADER:
         return None
-    return listed
+    return hashes
+
+
+def _regular(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
 
 
 def check_out(out: Path, root: Path) -> Path:
-    """Resolve --out and refuse anything that could clobber more than a previous run's own output."""
+    """Resolve --out and refuse anything that could clobber more than a previous run's own, unchanged output."""
     root = root.resolve()
     if out.is_symlink():
         raise WikiError(f"--out {out} is a symbolic link")
     resolved = out.resolve()
     if resolved == root or root not in resolved.parents:
         raise WikiError(f"--out {out} must be a directory inside the repository {root}")
+    _check_record_kind(resolved)
     if not resolved.exists():
         return resolved
     if not resolved.is_dir():
@@ -344,23 +401,42 @@ def check_out(out: Path, root: Path) -> Path:
     owned = _owned(resolved)
     if owned is None:
         raise WikiError(f"--out {out} is not empty and was not written by gen_wiki; refusing to write into it")
-    stray = [e.name for e in entries if e.name not in owned or e.is_symlink() or not e.is_file()]
+    stray = [e.name for e in entries if e.name not in owned or not _regular(e)]
     if stray:
         raise WikiError(f"--out {out} holds files not written by gen_wiki ({', '.join(sorted(stray))}); refusing")
+    changed = [n for n in owned if (resolved / n).exists() and _digest((resolved / n).read_bytes()) != owned[n]]
+    if changed:
+        raise WikiError(f"--out {out}: {', '.join(sorted(changed))} changed since gen_wiki wrote it; refusing")
     return resolved
+
+
+def _write(directory: Path, name: str, data: bytes) -> None:
+    """Write through a new temporary file and rename it over `name`, never following a link at either path."""
+    tmp = directory / f".{name}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, directory / name)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def generate(root: Path, out: Path, commit: str | None, repo_url: str = REPO_URL) -> list[str]:
     root = root.resolve()
     pages = render(root / "docs", root, commit, repo_url)
     target = check_out(out, root)
-    owned = _owned(target) if target.exists() else None
+    owned = _owned(target) if target.exists() and any(target.iterdir()) else None
     target.mkdir(parents=True, exist_ok=True)
     for old in owned or ():
-        (target / old).unlink(missing_ok=True)
-    for name, text in pages.items():
-        (target / name).write_text(text, encoding="utf-8", newline="\n")
-    manifest_path(target).write_text("".join(f"{n}\n" for n in sorted(pages)), encoding="utf-8")
+        path = target / old
+        if _regular(path):
+            path.unlink()
+    data = {name: text.encode("utf-8") for name, text in pages.items()}
+    for name, raw in data.items():
+        _write(target, name, raw)
+    _write(target.parent, manifest_path(target).name, _record_body({n: _digest(r) for n, r in data.items()}).encode())
     return sorted(pages)
 
 
