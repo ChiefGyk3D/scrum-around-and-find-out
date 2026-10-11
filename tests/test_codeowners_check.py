@@ -118,6 +118,9 @@ def test_the_last_matching_rule_wins() -> None:
         ("/a?c.md", "abc.md", True),
         ("/a?c.md", "a/c.md", False),
         ("/src", "src/safo/x.py", True),
+        ("docs/lessons.md", "sub/docs/lessons.md", False),
+        ("examples/harness/", "sub/examples/harness/x", False),
+        ("lessons.md", "sub/docs/lessons.md", True),
     ],
 )
 def test_the_pattern_forms(pattern: str, path: str, expected: bool) -> None:
@@ -179,3 +182,32 @@ def test_an_overlong_owner_token_is_not_an_owner() -> None:
 def test_a_pattern_with_too_many_wildcards_matches_nothing() -> None:
     assert covered(parse_rules("/a*b*c*d* @o\n"), "aXbXcXdX")
     assert not covered(parse_rules("/a*b*c*d*e*f*g*h* @o\n"), "aXbXcXdXeXfXgXhX")
+
+
+def test_an_inline_comment_ends_the_rule() -> None:
+    assert not covered(parse_rules("/x/ # @owner\n"), "x/y")
+    assert covered(parse_rules("/x/ @owner # and a note\n"), "x/y")
+
+
+def test_a_symbolic_link_codeowners_is_refused_even_when_another_location_is_fine(tmp_path: Path) -> None:
+    put(tmp_path, "elsewhere", "* @owner\n")
+    put(tmp_path, "CODEOWNERS", "* @owner\n")
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "CODEOWNERS").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(CodeownersError, match="symbolic link"):
+        find_codeowners(tmp_path)
+
+
+def test_rules_past_the_cap_are_not_read() -> None:
+    from safo.codeowners import MAX_RULES
+
+    text = "# note\n" * MAX_RULES + "* @owner\n"
+    assert not covered(parse_rules(text), "x")
+    assert covered(parse_rules("# note\n" * (MAX_RULES - 1) + "* @owner\n"), "x")
+
+
+def test_a_directory_is_probed_with_a_file_inside_it() -> None:
+    from safo.codeowners import uncovered
+
+    assert uncovered(parse_rules("/agents/????? @o\n"), ["agents/"]) == []
+    assert uncovered(parse_rules("/agents/????? @o\n"), ["agents"]) == ["agents"]

@@ -281,3 +281,42 @@ def test_the_shipped_file_resolves_against_the_shipped_lessons() -> None:
     v.require_clean()
     assert len(v.resolutions) >= 12
     assert LESSON_HEADINGS  # the fixture headings are real ones
+
+
+def test_a_model_that_is_not_a_layer_is_refused_even_when_the_log_has_records_for_it(tmp_path: Path) -> None:
+    d = copilot_cites(doc(), "outcomes:v1:2026-10:copilot/ghost:runs>=1")
+    v = verified(repo(tmp_path, d, outcomes=[rec(1, model="ghost")]))
+    assert "not a model layer" in v.errors_by_agent["copilot"][0]
+
+
+def test_a_statement_that_is_not_a_metric_comparison_does_not_resolve() -> None:
+    import safo.agentsfile as af
+    from safo.evidence import EvidenceError, resolve_outcomes
+
+    parsed = af.parse_agents(doc())
+    with pytest.raises(EvidenceError, match="not <metric><op><number>"):
+        resolve_outcomes("v1:2026-10:copilot:speed>=1", [rec(1)], parsed)
+
+
+def test_an_oversize_lessons_file_or_outcomes_log_is_refused(tmp_path: Path) -> None:
+    from safo.evidence import MAX_LESSONS
+    from safo.outcomes import MAX_LOG_BYTES
+
+    path = repo(tmp_path)
+    put(tmp_path, "docs/lessons.md", "x" * (MAX_LESSONS + 1))
+    assert "larger than" in verified(path).errors_by_agent["codex"][0]
+    d = copilot_cites(doc(), "outcomes:v1:2026-10:copilot:runs>=1")
+    path = repo(tmp_path / "b", d, outcomes=[rec(1)])
+    put(tmp_path / "b", "docs/outcomes.jsonl", "\n" * (MAX_LOG_BYTES + 1))
+    assert "larger than" in verified(path).errors_by_agent["copilot"][0]
+
+
+def test_a_review_check_that_dangles_is_an_error(tmp_path: Path) -> None:
+    d = doc()
+    profile(d, "copilot")["review_gate"] = {
+        "required": True,
+        "reviewer_differs": True,
+        "checks": [{"code": "test_vs_behaviour", "evidence": "lessons:gone"}],
+    }
+    v = verified(repo(tmp_path, d))
+    assert "review_gate.checks[0]" in v.errors_by_agent["copilot"][0]

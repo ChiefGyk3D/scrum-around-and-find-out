@@ -97,7 +97,10 @@ def test_a_third_is_compared_exactly_not_as_a_float() -> None:
     assert not compare(third, "=", "0.333333")
 
 
-@pytest.mark.parametrize("span", ["2026-1", "2026-13", "2026-00", "2026-10..2026-09", "2025-10..2026-10", "x", ""])
+@pytest.mark.parametrize(
+    "span",
+    ["2026-1", "2026-13", "2026-00", "2026-10..2026-09", "2025-10..2026-10", "x", "", "2026-01..2026-02..2026-03"],
+)
 def test_a_bad_range_is_a_config_error(span: str) -> None:
     with pytest.raises(ConfigError):
         query_outcomes(ROWS, span, "copilot", None)

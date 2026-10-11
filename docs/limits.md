@@ -88,5 +88,8 @@ takes it for a bug that was hidden.
   `promotion` settings make a thin sample visible and slow an honest mistake. They do not stop anyone who can append to
   the log from adding ten plausible records, and `safo` does not fetch the card URLs. Status stays declared in
   `agents.yaml`, a reviewed file, and the maintainer reads the evidence before accepting a change of status.
+- **A resolved pointer proves the evidence exists, not that it fits the claim.** `safo profiles verify` prints each claim
+  beside the lesson or the computed metric it cites so a person can judge. `safo profiles verify` checks that CODEOWNERS
+  names an owner for the profile paths; it cannot see whether branch protection requires that owner's review.
 - **The migration cohort and deadline are code.** The three agents allowed to have no profile, and the date that ends the
   allowance, are constants in `src/safo/agentsfile.py`. Changing them is a pull request to that file.

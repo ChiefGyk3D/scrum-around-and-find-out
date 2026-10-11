@@ -100,3 +100,10 @@ def test_a_form_error_is_still_global(_private_home: Path, tmp_path: Path) -> No
     path.chmod(0o600)
     code, _, err = cli("route", "research", "--agents", str(path), "--no-usage", home=_private_home)
     assert code == 2 and "codex" in err
+
+
+def test_route_holds_the_agents_file_to_the_private_file_policy(_private_home: Path, tmp_path: Path) -> None:
+    path = write_agents(tmp_path / "agents.yaml")
+    path.chmod(0o664)
+    code, _, err = cli("route", "research", "--agents", str(path), "--no-usage", home=_private_home)
+    assert code == 2 and "writable by its group" in err

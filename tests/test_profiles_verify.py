@@ -8,6 +8,7 @@ from pathlib import Path
 from evdata import rec, repo
 from localcli import cli
 from profiledata import LESSON, claim, doc, profile, put
+from safo.outcomes import Outcome
 
 
 def verify(path: Path, home: Path, *extra: str) -> tuple[int, str, str]:
@@ -83,3 +84,42 @@ def test_only_the_verify_action_exists() -> None:
 
     assert ACTIONS == ("verify",)
     assert LESSON
+
+
+def outcomes_for_codex() -> list[Outcome]:
+    return [rec(i, agent="codex", shape="research", date=f"2026-10-0{1 + i % 4}") for i in range(1, 11)]
+
+
+def test_a_local_override_is_ignored_for_a_repository_file_and_judged_for_a_private_one(
+    tmp_path: Path, _private_home: Path
+) -> None:
+    config = _private_home / ".config" / "safo"
+    config.mkdir(parents=True)
+    (config / "agents.local.yaml").write_text("agents:\n  codex:\n    profile: {status: unmeasured}\n")
+    (config / "agents.local.yaml").chmod(0o600)
+    src = repo(tmp_path)
+    code, out, err = verify(src, _private_home)
+    assert code == 0, err + out  # the override would be refused (it carries a profile) if it were read
+    code, _, err = verify(src, _private_home, "--agents-local", str(config / "agents.local.yaml"))
+    assert code == 2 and "local override" in err
+
+
+def test_promotion_is_not_reported_for_an_agent_whose_evidence_does_not_resolve(
+    tmp_path: Path, _private_home: Path
+) -> None:
+    d = doc()
+    profile(d, "codex")["dont"] = [claim("Some claim.", "lessons:gone")]
+    code, out, _ = verify(repo(tmp_path, d, outcomes=outcomes_for_codex()), _private_home)
+    assert code == 1
+    assert "promotion: codex" not in out and "warning: codex" not in out
+
+
+def test_promotion_is_not_reported_for_an_unmeasured_agent_or_layer(tmp_path: Path, _private_home: Path) -> None:
+    d = doc()
+    profile(d, "copilot")["models"] = {"gpt-5.1": {"status": "unmeasured"}}
+    profile(d, "copilot")["status"] = "profiled"
+    profile(d, "copilot")["do"] = [claim("Small pull requests.")]
+    code, out, _ = verify(repo(tmp_path, d, outcomes=outcomes_for_codex()), _private_home)
+    assert code == 0, out
+    assert "warning: copilot is profiled" in out, "the harness layer is profiled and has no outcomes"
+    assert "copilot/gpt-5.1" not in out.replace("agents.copilot.profile.models", "")
