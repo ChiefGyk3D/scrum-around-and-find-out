@@ -193,6 +193,14 @@ def test_a_relative_path_is_judged_by_its_absolute_form(safe: Path, monkeypatch:
         trusted_regular_file(Path("agents.yaml"))
 
 
+def test_read_is_bounded_across_chunk_boundaries(safe: Path) -> None:
+    safe.write_bytes(b"x" * 65_537)
+    safe.chmod(0o600)
+    assert len(read_trusted_regular_file(safe, 65_537)) == 65_537
+    with pytest.raises(ConfigError, match="larger than 65536 bytes"):
+        read_trusted_regular_file(safe, 65_536)
+
+
 def test_read_is_bounded(safe: Path) -> None:
     safe.write_bytes(b"x" * 100)
     safe.chmod(0o600)

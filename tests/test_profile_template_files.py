@@ -91,6 +91,15 @@ def test_the_path_length_edge_is_two_hundred_characters() -> None:
         parse_agents(template_doc(ok + "x"))
 
 
+def test_read_confined_stops_one_byte_past_the_limit_even_on_a_chunk_boundary(tmp_path: Path) -> None:
+    from safo.profile import read_confined
+
+    put(tmp_path, "big.bin", b"x" * 65_537)
+    assert len(read_confined(tmp_path, "big.bin", 65_537)) == 65_537
+    assert len(read_confined(tmp_path, "big.bin", 65_536)) == 65_537, "one byte more than the limit tells the caller"
+    assert len(read_confined(tmp_path, "big.bin", 10)) == 11
+
+
 def test_a_nul_or_control_character_in_the_path_is_refused(tmp_path: Path) -> None:
     for rel in ("a\x00b.md", "a\nb.md"):
         with pytest.raises(ConfigError, match=r"brief\.template"):

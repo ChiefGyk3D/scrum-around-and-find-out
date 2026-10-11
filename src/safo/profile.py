@@ -353,12 +353,14 @@ def read_confined(base: Path, rel: str, limit: int) -> bytes:
             raise OSError(errno.EINVAL, "not a regular file")
         chunks: list[bytes] = []
         total = 0
-        while total <= limit:
+        while True:
             chunk = os.read(leaf, min(65_536, limit + 1 - total))
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
+            if total > limit:
+                break
         return b"".join(chunks)
     finally:
         os.close(leaf)

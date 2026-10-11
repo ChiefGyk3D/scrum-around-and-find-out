@@ -55,8 +55,6 @@ def _check_file(fd: int) -> None:
 def _open_checked(path: Path) -> int:
     """A descriptor for the file, opened through checked directories; the caller closes it."""
     parts = Path(os.path.abspath(path)).parts
-    if len(parts) < 2:
-        raise ConfigError("the file is not a regular file")
     dir_fd: int | None = None
     try:
         dir_fd = os.open(parts[0], _DIR_FLAGS)
@@ -93,12 +91,14 @@ def read_trusted_regular_file(path: Path, limit: int) -> bytes:
     try:
         chunks: list[bytes] = []
         total = 0
-        while total <= limit:
+        while True:
             chunk = os.read(fd, min(65_536, limit + 1 - total))
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
+            if total > limit:
+                break
     except OSError:
         raise ConfigError("the file cannot be read") from None
     finally:

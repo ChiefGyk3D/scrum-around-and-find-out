@@ -172,6 +172,15 @@ def test_a_config_pointer_with_an_unprintable_or_overlong_segment_is_refused_by_
     rejects(d, r"context_ceiling\.evidence: .*printable characters, at most 300")
 
 
+def test_the_pointer_length_edge_is_three_hundred_characters() -> None:
+    head = "config:/agents/ollama/endpoints/0/loaded_num_ctx/"
+    d = doc()
+    profile(d, "codex")["context_ceiling"] = {"value": 4096, "evidence": head + "m" * (300 - len(head))}
+    parse_agents(d)
+    profile(d, "codex")["context_ceiling"]["evidence"] += "m"
+    rejects(d, r"context_ceiling\.evidence: .*printable characters, at most 300")
+
+
 def test_a_config_pointer_is_refused_on_every_behavioural_claim() -> None:
     pointer = "config:/agents/ollama/endpoints/0/think"
     for key in ("do", "dont"):
