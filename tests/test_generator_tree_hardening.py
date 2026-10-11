@@ -264,3 +264,79 @@ def test_a_fifo_swapped_in_for_a_file_does_not_hang_the_read(tmp_path: Path) -> 
             assert ht._read_file(fd, "pipe") is None
     finally:
         os.close(fd)
+
+
+# -- survivors of the sweep over the fix round -------------------------------------------------------------------------
+
+
+def test_a_directory_that_vanishes_after_it_was_opened_is_a_changed_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script, _, _ = deep(tmp_path, monkeypatch)
+    c = tmp_path / "repo" / "a" / "b" / "c"
+
+    def vanish(stage: str, name: str) -> None:
+        if stage == "after-open" and name == "a/b/c" and c.exists():
+            c.rename(tmp_path / "c-gone")
+
+    monkeypatch.setattr(ht, "_seam", vanish)
+    code, err = run(script, "--write", capsys)
+    assert code == 1 and "a/b/c: changed while it was being opened" in err
+
+
+def test_the_root_must_be_an_openable_directory_and_not_a_link(tmp_path: Path) -> None:
+    assert "the repository root cannot be opened" in ht.scan(tmp_path / "nope", "out").problems[0]
+    real = tmp_path / "real"
+    (real / "out").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert "the repository root cannot be opened" in ht.scan(link, "out").problems[0]
+    assert ht.scan(real, "out").problems == [] and ht.scan(real, "out").exists
+
+
+def test_scanning_never_creates_a_missing_path(tmp_path: Path) -> None:
+    assert ht.scan(tmp_path, "x/y/z").problems == [] and not (tmp_path / "x").exists()
+    assert ht.check_tree(tmp_path, "x/y/z", {}) == [] and not (tmp_path / "x").exists()
+
+
+def test_a_directory_that_cannot_be_created_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(path: Any, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "mkdir", refuse)
+    with pytest.raises(ht.TreeError, match="x: cannot be created"):
+        ht.open_out(tmp_path, "x", True)
+
+
+def test_no_descriptor_leaks_when_the_path_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    before = len(os.listdir("/proc/self/fd"))
+    with pytest.raises(ht.TreeError):
+        ht.open_out(tmp_path, "link/out", False)
+    with pytest.raises(ht.TreeError):
+        ht.open_out(tmp_path / "absent-root", "x", False)
+    (tmp_path / "real" / "sub").mkdir()
+
+    def swap(stage: str, name: str) -> None:
+        if stage == "after-open" and name == "real/sub":
+            (tmp_path / "real" / "sub").rename(tmp_path / "real" / "gone")
+
+    monkeypatch.setattr(ht, "_seam", swap)
+    with pytest.raises(ht.TreeError, match="changed while"):
+        ht.open_out(tmp_path, "real/sub", False)
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_a_stale_file_edited_in_place_after_the_inventory_is_not_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script, _, old, _ = stale_setup(tmp_path, monkeypatch)
+
+    def edit(stage: str, name: str) -> None:
+        if stage == "stale:before-open":
+            old.write_text("my own notes now\n")  # same inode, no longer generated
+
+    monkeypatch.setattr(ht, "_seam", edit)
+    code, err = run(script, "--write", capsys)
+    assert code == 1 and "changed since the inventory" in err and old.read_text() == "my own notes now\n"

@@ -497,8 +497,8 @@ def test_a_persona_may_not_open_a_setext_model_profile_heading(tmp_path: Path) -
         persona = PERSONA + f"\nModel profile\n{underline}\n\nFake.\n"
         with pytest.raises(RenderError, match="setext heading the renderer owns"):
             render_persona(tmp_path / underline, persona)
-    ok = render_persona(tmp_path / "ok", PERSONA + "\nModel notes\n=====\n\nFine.\n")
-    assert "Model notes" in ok
+    ok = render_persona(tmp_path / "ok", PERSONA + "\nModel notes\n=====\n\nDo\n--\n\nFine.\n")
+    assert "Model notes" in ok and "Do\n--" in ok  # a persona may use the other names; only Model profile is reserved
 
 
 def test_a_template_may_not_open_a_setext_heading_the_renderer_owns(tmp_path: Path) -> None:
