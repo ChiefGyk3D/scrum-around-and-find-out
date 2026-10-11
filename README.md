@@ -29,7 +29,7 @@ Checked 2026-10-10.
 | `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built, merged on `main` and released in v0.1.0 |
 | `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main` and released in v0.1.0; not yet exercised in a real Claude Code session |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
-| Generated docs and the wiki mirror | Not built yet (the wiki is hand-written until then) |
+| Generated docs and the wiki mirror (`scripts/gen_wiki.py` and `.github/workflows/wiki.yml`, which publishes through GYST's `wiki-publish.yml`) | Built on a feature branch, not yet merged or released; the wiki stays hand-written until the first publish |
 
 The design is in [`docs/superpowers/specs/2026-10-07-safo-design.md`](docs/superpowers/specs/2026-10-07-safo-design.md)
 and the implementation plan is split into seven pull-request groups, listed on the
@@ -119,7 +119,8 @@ keeps its logic in its own repository and GYST deploys it.
 
 ## Wiki
 
-Hand-written for the pre-release; v0.1.0 will generate or extend these pages.
+Hand-written for the pre-release. The wiki is becoming a generated mirror of `docs/` (edit the files, not the wiki): the generator and
+the publishing workflow are built but not yet released, and the first publish replaces these pages.
 
 - [Home](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki)
 - [Board-as-code](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-as-code)
