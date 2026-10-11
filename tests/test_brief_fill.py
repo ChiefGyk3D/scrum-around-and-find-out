@@ -124,6 +124,22 @@ def test_an_id_source_that_does_not_give_128_bits_of_hex_is_refused(bad: str) ->
         fill(ids=bad)
 
 
+@pytest.mark.parametrize("bad", [None, 5, b"0123456789abcdef0123456789abcdef", ["x"]])
+def test_an_id_source_that_does_not_return_text_is_refused(bad: Any) -> None:
+    with pytest.raises(ConfigError, match="id source"):
+        brief.fill(TEMPLATE, {"task": "x", "files_in_scope": "y"}, new_id=lambda n: bad)
+
+
+def test_an_explicit_id_source_wins_over_the_module_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(brief, "NEW_ID", fixed(OTHER))
+    assert fences(fill(ids=ID))[0][1] == ID
+
+
+def test_an_id_that_already_appears_in_the_template_is_redrawn() -> None:
+    text = f"Prose that happens to hold {ID} in it.\n\n{{{{task}}}}\n"
+    assert fences(brief.fill(text, {"task": "x"}, new_id=fixed(ID, OTHER)))[0][1] == OTHER
+
+
 def test_an_id_that_already_appears_in_a_value_is_redrawn_and_a_stuck_source_is_refused() -> None:
     values = {"task": f"mentions {ID} in prose", "files_in_scope": "y"}
     text = brief.fill(TEMPLATE, values, new_id=fixed(ID, OTHER))
@@ -167,10 +183,20 @@ def test_a_nul_is_refused(bad: str) -> None:
         fill(values={"task": bad, "files_in_scope": "y"})
 
 
-@pytest.mark.parametrize("bad", ["\x1b[2J", "a\x07b", "a\x0bb", "a\x0cb", "a\x7fb", "a\x85b", "a\x9bb"])
-def test_other_control_characters_are_refused_so_a_terminal_cannot_be_driven(bad: str) -> None:
+@pytest.mark.parametrize("code", [c for c in (*range(1, 32), 127, *range(0x80, 0xA0)) if c not in (9, 10, 13)])
+def test_every_other_control_character_is_refused_so_a_terminal_cannot_be_driven(code: int) -> None:
     with pytest.raises(ConfigError, match="control character"):
-        fill(values={"task": bad, "files_in_scope": "y"})
+        fill(values={"task": f"a{chr(code)}b", "files_in_scope": "y"})
+
+
+@pytest.mark.parametrize("ok", ["a\tb", "tab\tand\nnewline", "\u00a0nbsp \u00a1", "\u00a0\u00ff\u0100"])
+def test_the_characters_just_outside_the_refused_ranges_are_allowed(ok: str) -> None:
+    assert fences(fill(values={"task": ok, "files_in_scope": "y"}))[0][2] == ok.split("\n")
+
+
+def test_a_value_that_is_not_encodable_as_utf8_is_refused() -> None:
+    with pytest.raises(ConfigError, match="not valid UTF-8"):
+        fill(values={"task": "a\udcffb", "files_in_scope": "y"})  # what a non-UTF-8 argument looks like to Python
 
 
 def test_size_edges_are_counted_in_bytes() -> None:
@@ -349,9 +375,10 @@ def test_a_template_without_placeholders_takes_no_values() -> None:
         brief.fill("Just text.\n", {"task": "x"}, new_id=fixed(ID))
 
 
-def test_an_empty_template_is_refused() -> None:
+@pytest.mark.parametrize("text", ["", "\n", "   \n\n  ", "\t"])
+def test_an_empty_template_is_refused(text: str) -> None:
     with pytest.raises(ConfigError, match="empty"):
-        brief.fill("", {}, new_id=fixed(ID))
+        brief.fill(text, {}, new_id=fixed(ID))
 
 
 # -- the command ------------------------------------------------------------------------------------------------------
@@ -598,6 +625,30 @@ def test_a_silent_standard_input_times_out_instead_of_hanging(
         stream.close()
         os.close(w)
     assert code == 2 and out == "" and "standard input" in err
+
+
+@pytest.mark.parametrize(("size", "accepted"), [(brief.MAX_VALUE, True), (brief.MAX_VALUE + 1, False)])
+def test_the_pipe_size_edge_is_exactly_64_kib(
+    checkout: Path, tmp_path: Path, _private_home: Path, size: int, accepted: bool
+) -> None:
+    good = put(tmp_path, "good.txt", "fine")
+    stream, w = pipe_stream()
+
+    def writer() -> None:
+        with contextlib.suppress(OSError):
+            os.write(w, b"a" * size)
+        os.close(w)
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    try:
+        code, _, _ = run(
+            *cmd(checkout, "--task-file", "-", "--files-file", str(good)), home=_private_home, stdin=stream
+        )
+    finally:
+        stream.close()
+    t.join(timeout=60)
+    assert (code == 0) is accepted
 
 
 def test_a_real_pipe_with_a_small_value_works(

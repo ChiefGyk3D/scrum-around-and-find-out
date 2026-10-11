@@ -55,7 +55,8 @@ FLAGS = {
 
 NEW_ID: Callable[[int], str] | None = None  # a test's deterministic id source; None means the secrets module
 _ID = re.compile(r"[0-9a-f]{32}")
-_FORBIDDEN = {chr(c) for c in (*range(0, 32), 127, *range(0x80, 0xA0))} - {"\n", "\t"}
+# C0 (NUL has its own message), DEL and C1, except newline and tab
+_FORBIDDEN = {chr(c) for c in (*range(1, 32), 127, *range(0x80, 0xA0))} - {"\n", "\t"}
 
 
 def _forges_delimiter(text: str) -> bool:
@@ -116,9 +117,8 @@ def fill(template: str, values: Mapping[str, str], new_id: Callable[[int], str] 
         )
     check_template(Reader("the brief template"), template, "template")
     lines = template.split("\n")
-    trailing = lines[-1] == ""
-    if trailing:
-        lines.pop()
+    if lines[-1] == "":
+        lines.pop()  # the newline that ends the file is not a line of its own
     slots = {i: m[1] for i, line in enumerate(lines) if (m := PLACEHOLDER_LINE.fullmatch(line))}
     for name in values:
         if name not in PLACEHOLDERS:
@@ -129,7 +129,7 @@ def fill(template: str, values: Mapping[str, str], new_id: Callable[[int], str] 
         if name not in values:
             raise ConfigError(f"the template needs a value for {{{{{name}}}}}: give {FLAGS[name]}")
     texts = {name: normalise(name, values[name]) for name in values}
-    fence_id = _fresh_id(new_id, [template, PREAMBLE, *texts.values()])
+    fence_id = _fresh_id(new_id, [template, *texts.values()])
     out = [PREAMBLE, ""]
     for i, line in enumerate(lines):
         out.extend(_fence(slots[i], fence_id, texts[slots[i]]) if i in slots else [line])
