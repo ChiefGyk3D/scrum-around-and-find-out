@@ -7,6 +7,7 @@ generated from it by `scripts/gen_routing.py`, and `safo route` reads it with th
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,11 +18,20 @@ import yaml
 
 from safo import netguard
 from safo.errors import ConfigError
+from safo.profile import Budget, Profile, check_profiles, parse_profile
 from safo.schema import Reader, _safe_load
+from safo.trust import read_trusted_regular_file
 
 KINDS = ("claude", "codex", "copilot", "ollama", "human")
 ROLES = ("general", "embedding", "guard")
 METERS = ("five_hour", "weekly", "monthly_percent")
+
+# The agents that may go without a profile while profiles are rolled out, and the day that stops. Both live here, in
+# code, and not in agents.yaml: the file's `profile_migration` list can only shrink to a subset of this cohort, so it
+# can neither be widened nor outlive the migration. Changing them takes a pull request to this file (spec 1.7).
+MIGRATION_COHORT = ("claude-lead", "claude-sonnet", "claude-opus")
+MIGRATION_UNTIL = dt.date(2026, 12, 31)
+PROMOTION_BOUNDS = {"min_outcomes": (3, 1000), "min_distinct_dates": (1, 30), "window_days": (30, 730)}
 
 
 @dataclass(frozen=True)
@@ -66,6 +76,7 @@ class Agent:
     strengths: tuple[str, ...] = ()
     constraints: tuple[str, ...] = ()
     endpoints: tuple[Endpoint, ...] = ()
+    profile: Profile | None = None  # how to brief this agent, each claim tied to a pointer to evidence
 
     def limit(self, key: str) -> str | None:
         return next((v for k, v in self.limits if k == key), None)
@@ -107,6 +118,15 @@ class Hooks:
 
 
 @dataclass(frozen=True)
+class Promotion:
+    """When an agent has enough recorded outcomes to count as measured. Nothing in selection reads this yet."""
+
+    min_outcomes: int = 10
+    min_distinct_dates: int = 3
+    window_days: int = 180
+
+
+@dataclass(frozen=True)
 class AgentsFile:
     agents: tuple[Agent, ...]
     shapes: tuple[Shape, ...]
@@ -114,6 +134,8 @@ class AgentsFile:
     rules_of_thumb: tuple[str, ...]
     warnings: tuple[str, ...] = ()  # a problem that falls back instead of failing
     hooks: Hooks = field(default_factory=Hooks)
+    promotion: Promotion = field(default_factory=Promotion)
+    profile_migration: tuple[str, ...] = ()  # the cohort members still allowed to have no profile
 
     def agent(self, agent_id: str) -> Agent:
         found = next((a for a in self.agents if a.id == agent_id), None)
@@ -275,14 +297,49 @@ def _hooks(r: Reader, value: object) -> Hooks:
     return Hooks(token, age, tuple(x.lower() for x in markers), na.strip().lower())
 
 
-def parse_agents(data: object, source: str = "agents.yaml") -> AgentsFile:
+def _today() -> dt.date:
+    return dt.date.today()
+
+
+def _promotion(r: Reader, value: object) -> Promotion:
+    m = r.mapping(value if value is not None else {}, "promotion", set(PROMOTION_BOUNDS))
+    out: dict[str, int] = {}
+    for key, (low, high) in PROMOTION_BOUNDS.items():
+        if key not in m:
+            continue
+        out[key] = r.integer(m[key], f"promotion.{key}", minimum=low)
+        if out[key] > high:
+            raise r.fail(f"promotion.{key}", f"expected an integer from {low} to {high}")
+    return Promotion(**out)
+
+
+def _migration(r: Reader, value: object, today: dt.date) -> tuple[str, ...]:
+    m = r.mapping(value, "profile_migration", {"agents"}, {"agents"})
+    listed: list[str] = []
+    for i, item in enumerate(r.seq(m["agents"], "profile_migration.agents")):
+        name = r.string(item, f"profile_migration.agents[{i}]")
+        if name not in MIGRATION_COHORT:
+            raise r.fail(f"profile_migration.agents[{i}]", f"{name!r} is not in the migration cohort")
+        if name in listed:
+            raise r.fail(f"profile_migration.agents[{i}]", f"{name!r} is listed twice")
+        listed.append(name)
+    if listed and today > MIGRATION_UNTIL:
+        raise r.fail("profile_migration", "migration expired: profile these agents or mark them unmeasured")
+    return tuple(listed)
+
+
+def parse_agents(
+    data: object, source: str = "agents.yaml", *, base_dir: Path | None = None, today: dt.date | None = None
+) -> AgentsFile:
+    """Validate a loaded document. With a `base_dir`, profile templates and personas are read from under it."""
     r = Reader(source)
     top = r.mapping(
         data,
         "",
-        {"version", "agents", "shapes", "thresholds", "rules_of_thumb", "hooks"},
+        {"version", "agents", "shapes", "thresholds", "rules_of_thumb", "hooks", "profile_migration", "promotion"},
         {"version", "agents", "shapes"},
     )
+    budget = Budget(r)
     if top["version"] != 1:
         raise r.fail("version", "only version 1 is supported")
 
@@ -292,7 +349,18 @@ def parse_agents(data: object, source: str = "agents.yaml") -> AgentsFile:
         m = r.mapping(
             raw,
             path,
-            {"name", "kind", "role", "model", "approval_required", "limits", "strengths", "constraints", "endpoints"},
+            {
+                "name",
+                "kind",
+                "role",
+                "model",
+                "approval_required",
+                "limits",
+                "strengths",
+                "constraints",
+                "endpoints",
+                "profile",
+            },
             {"name", "kind", "role"},
         )
         limits_raw = r.mapping(m.get("limits", {}), f"{path}.limits", set(m.get("limits") or {}))
@@ -317,9 +385,25 @@ def parse_agents(data: object, source: str = "agents.yaml") -> AgentsFile:
                 _strings(r, m.get("strengths"), f"{path}.strengths"),
                 _strings(r, m.get("constraints"), f"{path}.constraints"),
                 endpoints,
+                parse_profile(r, m["profile"], f"{path}.profile", kind=kind, base_dir=base_dir, budget=budget)
+                if "profile" in m
+                else None,
             )
         )
     known = {a.id for a in agents}
+    migrating: tuple[str, ...] = ()
+    if "profile_migration" in top:
+        migrating = _migration(r, top["profile_migration"], today or _today())
+    if "profile_migration" in top or any(a.profile for a in agents):
+        # a file that carries profiles must profile every agent a person or a model could be briefed as
+        for a in agents:
+            if a.profile is None and a.kind != "human" and a.id not in migrating:
+                where = (
+                    "needs a profile, or a place in profile_migration.agents"
+                    if a.id in MIGRATION_COHORT
+                    else f"needs a profile; only {', '.join(MIGRATION_COHORT)} may be unprofiled"
+                )
+                raise r.fail(f"agents.{a.id}", where)
 
     def agent_ids(value: object, path: str) -> tuple[str, ...]:
         ids = _strings(r, value, path)
@@ -381,6 +465,7 @@ def parse_agents(data: object, source: str = "agents.yaml") -> AgentsFile:
                 agent_ids([m["then"]], f"{path}.then")[0],
             )
         )
+    check_profiles(r, tuple(agents), tuple(shapes), warnings)
     return AgentsFile(
         tuple(agents),
         tuple(shapes),
@@ -388,12 +473,16 @@ def parse_agents(data: object, source: str = "agents.yaml") -> AgentsFile:
         _strings(r, top.get("rules_of_thumb"), "rules_of_thumb"),
         tuple(warnings),
         _hooks(r, top.get("hooks")),
+        _promotion(r, top.get("promotion")),
+        migrating,
     )
 
 
 def load_agents(path: str | Path) -> AgentsFile:
+    """Load one agents file. A repository checkout goes through here: its files belong to the runner, so no ownership
+    check is meaningful and the control is review (spec 7.2, rule 1). Local private files use `load_agents_merged`."""
     p = Path(path)
-    return parse_agents(_read_yaml(p), str(p))
+    return parse_agents(_read_yaml(p), str(p), base_dir=p.parent)
 
 
 def merge(base: Any, over: Any) -> Any:
@@ -403,18 +492,39 @@ def merge(base: Any, over: Any) -> Any:
     return over
 
 
-def load_agents_merged(path: str | Path, local: str | Path | None) -> AgentsFile:
-    """agents.yaml with an optional local file merged over it: where real endpoints live, git-ignored."""
+LOCAL_FORBIDDEN = "the local override may not carry profile, profile_migration or promotion"
+
+
+def _carries_profile(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    agents = data.get("agents")
+    return "profile_migration" in data or (
+        isinstance(agents, dict) and any(isinstance(a, dict) and "profile" in a for a in agents.values())
+    )
+
+
+def load_agents_merged(path: str | Path, local: str | Path | None, *, trusted: bool = True) -> AgentsFile:
+    """agents.yaml with an optional local file merged over it: where real endpoints live, git-ignored.
+
+    This is the path for a person's private files (route, hooks, usage, local run). A base file that carries a profile
+    must pass `trusted_regular_file` (spec 7.2, rule 2); one that carries none is read as it always was. A profile never
+    comes from the local override: it would change what is rendered without a reviewed diff. `trusted=False` is for a
+    repository checkout read through this function (a test of the shipped file), where review is the control.
+    """
     base = Path(path)
-    data = _read_yaml(base)
+    data = _read_yaml(base, trusted=trusted)
     source = str(base)
     if local is not None and Path(local).exists():
-        data = merge(data, _read_yaml(Path(local)))
+        over = _read_yaml(Path(local))
+        if isinstance(over, dict) and ("promotion" in over or _carries_profile(over)):
+            raise ConfigError(f"{Path(local).name}: {LOCAL_FORBIDDEN}")
+        data = merge(data, over)
         source = f"{base} (merged with {Path(local).name})"
-    return parse_agents(data, source)
+    return parse_agents(data, source, base_dir=base.parent)
 
 
-def _read_yaml(p: Path) -> Any:
+def _read_yaml(p: Path, *, trusted: bool = False) -> Any:
     try:
         from safo.guardlog import bounded_read
 
@@ -431,7 +541,11 @@ def _read_yaml(p: Path) -> Any:
                 raise ConfigError("agents file: aliases are not allowed")
             if isinstance(event, yaml.events.ScalarEvent) and event.value == "<<":
                 raise ConfigError("agents file: merge keys (<<) are not allowed")
-        return _safe_load(text, "agents file")
+        data = _safe_load(text, "agents file")
+        # a file with a profile is judged on the descriptor that is read, and must be the bytes just parsed
+        if trusted and _carries_profile(data) and read_trusted_regular_file(p, 1_048_576) != raw:
+            raise ConfigError("agents file changed while it was being read")
+        return data
     except yaml.YAMLError:
         raise ConfigError("agents file: not valid YAML") from None
     except (OSError, UnicodeError, ValueError):

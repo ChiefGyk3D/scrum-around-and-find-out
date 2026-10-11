@@ -47,6 +47,7 @@ def agents_file(
     data = agents_dict(a_url, b_url)
     data["hooks"] = {**data.get("hooks", {}), **hooks_over}
     path.write_text(yaml.safe_dump(data))
+    path.chmod(0o600)  # a private file that carries profiles must not be group or world writable
     return path
 
 
