@@ -429,7 +429,7 @@ _HEADING_ONE = re.compile(r"^ {0,3}#(?:\s|$)|^ {0,3}=+\s*$")
 # ends at its OWN closing tag, so the closer is built from the tag the block opened with.
 _RAW_TAG = re.compile(r"^ {0,3}<(pre|script|style|textarea)(?:\s|>|$)", re.IGNORECASE)
 _HTML_BLOCKS = (
-    (re.compile(r"^ {0,3}<!--"), re.compile(r"-->")),
+    (re.compile(r"^ {0,3}<!--"), re.compile(r"--!?>")),  # HTML5 also ends a comment at --!>
     (re.compile(r"^ {0,3}<\?"), re.compile(r"\?>")),
     (re.compile(r"^ {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
     (re.compile(r"^ {0,3}<![A-Za-z]"), re.compile(r">")),
@@ -440,7 +440,8 @@ def _html_block_end(line: str) -> tuple[int, re.Pattern[str]] | None:
     """(where the opener ends, the pattern that ends the block) when the line opens a raw HTML block."""
     raw = _RAW_TAG.match(line)
     if raw:
-        return raw.end(), re.compile(r"</" + raw[1] + r">", re.IGNORECASE)
+        # a closing tag may carry whitespace or attributes before the > (HTML5 tokenizer): </script >, </pre foo>
+        return raw.end(), re.compile(r"</" + raw[1] + r"(?:[\s/][^>]*)?>", re.IGNORECASE)
     for start, end in _HTML_BLOCKS:
         m = start.match(line)
         if m:

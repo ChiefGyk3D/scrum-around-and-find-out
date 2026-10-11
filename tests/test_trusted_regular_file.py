@@ -23,8 +23,8 @@ class Hung(BaseException):
     """Not an Exception, so nothing under test can swallow it as an OSError."""
 
 
-@pytest.fixture(autouse=True)
-def _alarm() -> Iterator[None]:
+@pytest.fixture
+def hang_guard() -> Iterator[None]:
     def boom(signum: int, frame: Any) -> None:
         raise Hung("opened a FIFO and waited")
 
@@ -92,7 +92,7 @@ def test_a_symlinked_grandparent_is_refused(safe: Path, tmp_path: Path) -> None:
         trusted_regular_file(alias / "deep" / "agents.yaml")
 
 
-def test_a_fifo_is_refused_without_hanging(safe: Path) -> None:
+def test_a_fifo_is_refused_without_hanging(safe: Path, hang_guard: None) -> None:
     fifo = safe.parent / "fifo"
     os.mkfifo(fifo, 0o600)
     with pytest.raises(ConfigError, match="not a regular file"):

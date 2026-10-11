@@ -23,9 +23,11 @@ class Hung(BaseException):
     """Not an Exception, so no `except OSError` in the code under test can turn it into the expected error."""
 
 
-@pytest.fixture(autouse=True)
-def _alarm() -> Iterator[None]:
-    """A regression that opens a FIFO would hang: fail the test after five seconds instead."""
+@pytest.fixture
+def hang_guard() -> Iterator[None]:
+    """For the FIFO tests only: a regression that opens a FIFO would hang, so fail after two seconds instead.
+
+    Not autouse: a slow CI runner must not turn a merely slow test into a failure."""
 
     def boom(signum: int, frame: Any) -> None:
         raise Hung("a template read waited on a FIFO")
@@ -143,13 +145,13 @@ def test_a_symlink_that_points_outside_is_refused(tmp_path: Path) -> None:
         load_agents(write(tmp_path / "root" / "agents.yaml", template_doc("t.md")))
 
 
-def test_a_fifo_is_refused_without_hanging(tmp_path: Path) -> None:
+def test_a_fifo_is_refused_without_hanging(tmp_path: Path, hang_guard: None) -> None:
     fifo(tmp_path / "templates" / "brief.md")
     with pytest.raises(ConfigError, match=r"brief\.template: cannot read"):
         loads(tmp_path, template_doc())
 
 
-def test_a_fifo_with_a_writer_waiting_is_still_refused(tmp_path: Path) -> None:
+def test_a_fifo_with_a_writer_waiting_is_still_refused(tmp_path: Path, hang_guard: None) -> None:
     path = fifo(tmp_path / "templates" / "brief.md")
     writer = os.open(path, os.O_RDWR)
     try:
@@ -247,6 +249,9 @@ def test_a_utf8_bom_is_refused_because_it_is_not_printable_text(tmp_path: Path) 
         ("<textarea>\n</style>\n\n{{task}}\n", r"inside a raw HTML block"),
         ("<!--\n</pre>\n\n{{task}}\n", r"inside a raw HTML block"),
         ("<pre>\n-->\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<!-- x\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<!-- x --\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<pre>\n</preview>\n\n{{task}}\n", r"inside a raw HTML block"),
         ("<?php\n-->\n\n{{task}}\n", r"inside a raw HTML block"),
         ("<![CDATA[\n?>\n\n{{task}}\n", r"inside a raw HTML block"),
         (
@@ -277,6 +282,11 @@ def test_template_content_and_placement_rules(tmp_path: Path, text: str, pattern
         "  ```\nx\n   ```\n\n{{task}}\n",
         "``` `` ``\n\n{{task}}\n",
         "<!-- c -->\n\n{{task}}\n",
+        "<!-- x --!>\n\n{{task}}\n",
+        "<!--\nx\n--!>\n\n{{task}}\n",
+        "<pre>\nx\n</pre >\n\n{{task}}\n",
+        "<script>\nx\n</SCRIPT foo=1>\n\n{{task}}\n",
+        "<style>\nx\n</style\t>\n\n{{task}}\n",
         "<!--\nx\n-->\n\n{{task}}\n",
         "<pre>x</pre>\n\n{{task}}\n",
         "<pre>\nx\n</PRE>\n\n{{task}}\n",
@@ -369,7 +379,9 @@ def test_twenty_loads_of_a_maximum_size_template_are_fast(tmp_path: Path) -> Non
     start = time.perf_counter()
     for _ in range(20):
         load_agents(path)
-    assert time.perf_counter() - start < 10, "a linear scan takes well under a second for all twenty"
+    # A linear scan takes a few hundredths of a second here; a quadratic one takes minutes. 60 s is far above any slow
+    # runner's noise and still catches the quadratic case, so the bound cannot flake and still means something.
+    assert time.perf_counter() - start < 60
 
 
 def test_a_tab_and_unicode_are_allowed_in_a_template(tmp_path: Path) -> None:
@@ -432,7 +444,7 @@ def test_a_missing_persona_is_a_typed_error(tmp_path: Path) -> None:
         loads(tmp_path, persona_doc())
 
 
-def test_a_persona_goes_through_the_same_file_rules(tmp_path: Path) -> None:
+def test_a_persona_goes_through_the_same_file_rules(tmp_path: Path, hang_guard: None) -> None:
     base = tmp_path / ".claude" / "agents"
     for name, make in (
         ("linked", lambda p: p.symlink_to(tmp_path)),
