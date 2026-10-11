@@ -567,7 +567,7 @@ def _read(name: str, dir_fd: int) -> bytes | None:
 def _write(dir_fd: int, name: str, data: bytes) -> None:
     """Write through a new temporary file and rename it over `name`, never following a link at either path."""
     tmp = f".{name}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dir_fd)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)

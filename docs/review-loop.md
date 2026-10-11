@@ -70,8 +70,8 @@ The later tasks kept the same cycle. The fix rounds below are counted from the c
 | T6 | `safo reconcile` | 2 | Fix 1, three commits: `one desired value per field, strict reads, canonical repositories, alias defaults`; `pin the role rule, the repeated listing and the not-on-the-board reread`; `document that a default never writes the status, Area or Done field`. Fix 2, two commits: `audit keeps type drift, labels agree page to page, RFC 3339 offsets are validated`; `tests that pin the offset pattern, the fraction, a short label list and a first-page repeat` |
 | T7 | `safo sync` and `safo status` | 2 | Fix 1, two commits: `the live content decides, escaping reaches every log line and body, acknowledgement ownership, rate-limit exits, descriptor-checked reads`; `tests that kill the surviving mutations (live read shapes, project ownership shapes, printed block controls)`. Fix 2, two commits: `one output module, a structural test that nothing prints outside it, and a stop-commands block that always resumes`; `a resume marker is never written for an opening marker that did not go out` |
 
-T5, T6 and T7 each ended at two fix rounds, short of the cap of five, so no task needed the fresh-agent hand-off in
-round four. T4 and T8 to T11 were merged as squashed pull requests (T4 inside the group 2 merge, T8 to T11 as group 4), so
+T5, T6 and T7 each ended at two fix rounds, short of the cap of five. The history shows no third fix label for any of them, so none
+appears to have reached the fresh-agent hand-off in round four. T4 and T8 to T11 were merged as squashed pull requests (T4 inside the group 2 merge, T8 to T11 as group 4), so
 their per-round commits are not in the history and no count is given for them. The only T8 trace in the history is
 a commit that ignores the three fixture findings in T8's first commit, so the scanners treat the deliberate test fixtures
 as such.
