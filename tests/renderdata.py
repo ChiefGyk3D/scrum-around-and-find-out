@@ -51,7 +51,10 @@ def render_doc() -> dict[str, object]:
             "checks": [{"code": "test_vs_behaviour", "evidence": OTHER_LESSON}],
         },
         "do": [claim("Give it small single-repo pull requests.", OTHER_LESSON)],
-        "models": {"gpt-5.1": {"status": "profiled", "dont": [claim("Trust its tests.", OTHER_LESSON)]}},
+        "models": {
+            "gpt-5.1": {"status": "profiled", "dont": [claim("Trust its tests.", OTHER_LESSON)]},
+            "o3": {"status": "unmeasured", "thinking": {"value": "on", "evidence": OTHER_LESSON}},
+        },
     }
     d["agents"]["ollama"]["profile"] = {
         "status": "profiled",

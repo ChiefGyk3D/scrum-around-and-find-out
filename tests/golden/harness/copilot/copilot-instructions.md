@@ -31,3 +31,9 @@ Keep the pull request small and say what you ran.
 #### Do not
 
 - Trust its tests. (`lessons:every-copilot-pull-request-needed-fixes`)
+
+### Model layer: o3
+
+Nothing is claimed about this model: its profile is unmeasured.
+
+- Thinking: on. (`lessons:every-copilot-pull-request-needed-fixes`)

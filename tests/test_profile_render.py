@@ -15,10 +15,11 @@ import yaml
 from profiledata import need
 from renderdata import PERSONA, RENDER_PATHS, profile_of, verified, with_agent, with_profile
 from safo import __version__
-from safo.profile import BOUNDARY_PARAGRAPH, GENERATED_MARKER, Brief
+from safo.profile import BOUNDARY_PARAGRAPH, GENERATED_MARKER, Brief, Thinking
 from safo.profile_render import (
     MAX_RENDERED,
     RENDER_FORMAT,
+    UNMEASURED_LINE,
     RenderError,
     manifest_digest,
     render_harness,
@@ -301,3 +302,187 @@ def test_the_rendering_does_not_depend_on_the_working_directory(
 def test_the_renderer_version_and_format_are_in_the_manifest_inputs() -> None:
     assert isinstance(RENDER_FORMAT, int) and RENDER_FORMAT >= 1
     assert __version__
+
+
+# -- boundaries and branches the golden files do not reach -----------------------------------------------------------
+
+
+def persona_with(front: str, body: str = "Do the work.\n") -> str:
+    return f"---\n{front}\n---\n{body}"
+
+
+def render_persona(tmp_path: Path, persona: str) -> str:
+    v = with_profile(verified(tmp_path), "claude-sonnet", persona_text=persona)
+    return render_harness(v)["claude/claude-sonnet.md"].data.decode()
+
+
+def test_the_model_name_may_be_64_characters_and_not_65(tmp_path: Path) -> None:
+    v = verified(tmp_path)
+    assert (
+        "model: " + "m" * 64
+        in render_harness(with_agent(v, "claude-haiku", model="m" * 64))["claude/claude-haiku.md"].data.decode()
+    )
+    with pytest.raises(RenderError, match="model name"):
+        render_harness(with_agent(v, "claude-haiku", model="m" * 65))
+    assert (
+        "model:" not in render_harness(with_agent(v, "claude-haiku", model=""))["claude/claude-haiku.md"].data.decode()
+    )
+
+
+def test_the_tool_lists_are_bounded_in_text_items_and_item_length(tmp_path: Path) -> None:
+    ok = render_persona(tmp_path / "a", persona_with("tools: " + "t" * 500))
+    assert "t" * 500 in ok
+    with pytest.raises(RenderError, match="tools is not"):
+        render_persona(tmp_path / "b", persona_with("tools: " + "t" * 501))
+    assert "tools:" in render_persona(tmp_path / "c", persona_with("tools: [" + ", ".join(["x"] * 50) + "]"))
+    with pytest.raises(RenderError, match="tools is not"):
+        render_persona(tmp_path / "d", persona_with("tools: [" + ", ".join(["x"] * 51) + "]"))
+    assert "tools:" in render_persona(tmp_path / "e", persona_with("tools: [" + "y" * 100 + "]"))
+    with pytest.raises(RenderError, match="tools is not"):
+        render_persona(tmp_path / "f", persona_with("tools: [" + "y" * 101 + "]"))
+    with pytest.raises(RenderError, match="tools is not"):
+        render_persona(tmp_path / "g", persona_with("tools: []"))
+    with pytest.raises(RenderError, match="tools is not"):
+        render_persona(tmp_path / "h", persona_with("tools: ''"))
+
+
+def test_a_persona_without_front_matter_is_the_body_and_one_with_an_empty_body_adds_no_blank_lines(
+    tmp_path: Path,
+) -> None:
+    plain = render_persona(tmp_path / "a", "Just text, no front matter.\n")
+    assert "\nJust text, no front matter.\n" in plain and "tools" not in plain
+    empty = render_persona(tmp_path / "b", persona_with("tools: Read", ""))
+    assert "tools: Read" in empty and "\n\n\n" not in empty
+
+
+def test_a_manifest_needs_a_profile(tmp_path: Path) -> None:
+    v = verified(tmp_path)
+    agent = v.agents.agent("codex")
+    with pytest.raises(RenderError, match="no profile"):
+        manifest_digest("p.md", "codex", replace(agent, profile=None), v.resolutions)
+
+
+def test_the_think_comment_follows_the_setting_and_is_absent_without_one(tmp_path: Path) -> None:
+    v = verified(tmp_path)
+    p = profile_of(v, "ollama")
+    ev = need(p.thinking).evidence
+    on = render_harness(with_profile(v, "ollama", thinking=Thinking("on", ev)))[
+        "local/ollama.wrapper.txt"
+    ].data.decode()
+    assert (
+        on.split("\n")[1] == "# think=true: a setting for the caller, who removes this line before sending the prompt."
+    )
+    for thinking in (None, Thinking("default", ev)):
+        text = render_harness(with_profile(v, "ollama", thinking=thinking))["local/ollama.wrapper.txt"].data.decode()
+        assert "# think=" not in text and text.split("\n")[1] == "You are a local model working on one task."
+
+
+def test_a_copilot_profile_without_a_gate_has_only_the_boundary_in_its_form_notice(tmp_path: Path) -> None:
+    v = verified(tmp_path)
+    files = render_harness(with_profile(v, "copilot", review_gate=None))
+    form = yaml.safe_load(files["copilot/ISSUE_TEMPLATE/copilot-task.yml"].data.decode())
+    assert form["body"][0]["attributes"]["value"] == BOUNDARY_PARAGRAPH
+    assert "### Review gate" not in files["copilot/copilot-instructions.md"].data.decode()
+
+
+def test_an_empty_template_text_renders_no_brief_section(tmp_path: Path) -> None:
+    v = verified(tmp_path)
+    text = render_harness(with_profile(v, "ollama", brief=Brief(template="templates/x.md", template_text="")))[
+        "local/ollama.wrapper.txt"
+    ].data.decode()
+    assert "### Brief" not in text
+    assert (
+        "### Brief"
+        not in render_harness(with_profile(v, "ollama", brief=None))["local/ollama.wrapper.txt"].data.decode()
+    )
+
+
+def test_an_evidence_pointer_with_a_backtick_cannot_be_shown(tmp_path: Path) -> None:
+    v = verified(tmp_path)
+    c = profile_of(v, "codex").dont[0]
+    bad = replace(c, evidence=replace(c.evidence, raw="lessons:a`b"))
+    with pytest.raises(RenderError, match="evidence pointer"):
+        render_harness(with_profile(v, "codex", dont=(bad,)))
+
+
+def test_model_layers_say_when_unmeasured_and_show_their_thinking(tmp_path: Path) -> None:
+    text = render_harness(verified(tmp_path))["copilot/copilot-instructions.md"].data.decode()
+    layer = text.split("### Model layer: o3\n", 1)[1]
+    assert layer.startswith("\n" + UNMEASURED_LINE + "\n")
+    assert "- Thinking: on. (`lessons:" in layer
+    gpt = text.split("### Model layer: gpt-5.1\n", 1)[1].split("### Model layer: o3", 1)[0]
+    assert UNMEASURED_LINE not in gpt and "Thinking" not in gpt
+
+
+def pad_to(size: int, tmp_path: Path) -> str:
+    """A persona body that makes claude-sonnet's file exactly `size` bytes."""
+    base = len(render_persona(tmp_path / "base", persona_with("tools: Read", "x\n")).encode())
+    return persona_with("tools: Read", "x" * (size - base + 1) + "\n")
+
+
+def test_a_file_of_exactly_64_kib_renders_and_one_byte_more_does_not(tmp_path: Path) -> None:
+    exact = pad_to(MAX_RENDERED, tmp_path)
+    assert len(render_persona(tmp_path / "a", exact).encode()) == MAX_RENDERED
+    with pytest.raises(RenderError, match="64 KiB"):
+        render_persona(tmp_path / "b", pad_to(MAX_RENDERED + 1, tmp_path))
+
+
+def test_the_template_may_not_borrow_any_generated_heading(tmp_path: Path) -> None:
+    v = verified(tmp_path)
+    brief = need(profile_of(v, "codex").brief)
+    for heading in (
+        "### Do",
+        "### Do not",
+        "### Brief",
+        "## Task",
+        "### Model layer: x",
+        "#### Review gate",
+        "## Scope rules",
+    ):
+        with pytest.raises(RenderError, match="heading the renderer owns"):
+            render_harness(
+                with_profile(v, "codex", brief=replace(brief, template_text=f"Intro.\n\n{heading}\n\nText.\n"))
+            )
+    ok = render_harness(with_profile(v, "codex", brief=replace(brief, template_text="Intro.\n\n### Notes\n\nText.\n")))
+    assert "### Notes" in ok["codex/codex.prompt.md"].data.decode()
+
+
+# -- the header parser ---------------------------------------------------------------------------------------------
+
+
+def test_the_header_parser_names_what_is_wrong(tmp_path: Path) -> None:
+    files = render_harness(verified(tmp_path))
+    good = files["claude/claude-haiku.md"].data
+    assert split_header("claude/x.md", good)
+    cases = {
+        b"": "no generated header",
+        b"\xff\xfe": "not valid UTF-8",
+        good.replace(b"<!-- GENERATED", b"<!-- GENERATEd"): "no generated header",
+        good.replace(b"model: haiku\n---\n", b"model: haiku\n"): "after the front matter",
+        b"---\nname: GENERATED by scripts/gen_profiles.py\n---": "after the front matter",
+        good.replace(b" -->", b"", 1): "malformed",
+        good.replace(b"<!-- ", b"", 1): "malformed",
+        good + good.split(b"\n")[5] + b"\n": "more than one",
+        b"name: x\n" + good.split(b"---\n", 2)[2]: "after the front matter",
+    }
+    for data, message in cases.items():
+        with pytest.raises(RenderError, match=message):
+            split_header("claude/claude-haiku.md", data)
+    plain = files["codex/codex.prompt.md"].data
+    with pytest.raises(RenderError, match="malformed"):
+        split_header("codex/codex.prompt.md", plain.replace(b" -->", b"", 1))
+    with pytest.raises(RenderError, match="malformed"):
+        split_header("codex/codex.prompt.md", plain.replace(b"<!-- ", b"# ", 1))
+    wrapper = files["local/ollama.wrapper.txt"].data
+    with pytest.raises(RenderError, match="malformed"):
+        split_header("local/ollama.wrapper.txt", wrapper.replace(b"# GENERATED", b"#GENERATED", 1))
+    assert split_header("local/ollama.wrapper.txt", wrapper)[0].startswith(b"# think=false")
+
+
+def test_has_header_sees_each_of_the_three_formats_and_nothing_else(tmp_path: Path) -> None:
+    from safo.profile_render import has_header
+
+    for rel, r in render_harness(verified(tmp_path)).items():
+        assert has_header(r.data), rel
+    assert not has_header(b"# my notes\n\nGENERATED by scripts/gen_profiles.py is mentioned here.\n")
+    assert not has_header(b"")

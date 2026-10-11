@@ -527,12 +527,9 @@ def _copilot_form(agent: Agent, p: Profile) -> tuple[str, str]:
 
 
 def _assemble(path: str, front: str, text: str, manifest: str) -> bytes:
-    body = (front + text).encode("utf-8")
-    body_digest = hashlib.sha256(body).hexdigest()
-    header = header_line(path, manifest, body_digest)
-    if style_of(path) == "fence":
-        return (front + header + "\n" + text).encode("utf-8")
-    return (header + "\n" + text).encode("utf-8")
+    """The file: the front matter (empty except for Claude), the header line, then the text."""
+    body_digest = hashlib.sha256((front + text).encode("utf-8")).hexdigest()
+    return (front + header_line(path, manifest, body_digest) + "\n" + text).encode("utf-8")
 
 
 def _render_one(v: VerifiedAgents, agent: Agent, path: str, harness: str, parts: tuple[str, str]) -> Rendered:
