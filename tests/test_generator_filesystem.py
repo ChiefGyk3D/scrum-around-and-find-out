@@ -408,7 +408,7 @@ def test_a_file_read_refuses_what_is_not_a_regular_file_without_hanging(tmp_path
     (tmp_path / "dir").mkdir()
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with bounded():
+        with bounded(10):
             got = ht._read_file(fd, "plain")
             assert got is not None and got[0] == b"abc"
             assert ht._read_file(fd, "pipe") is None

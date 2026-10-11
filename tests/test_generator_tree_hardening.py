@@ -260,7 +260,7 @@ def test_a_fifo_swapped_in_for_a_file_does_not_hang_the_read(tmp_path: Path) -> 
     os.mkfifo(tmp_path / "pipe")
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with bounded(20):
+        with bounded(5):
             assert ht._read_file(fd, "pipe") is None
     finally:
         os.close(fd)
