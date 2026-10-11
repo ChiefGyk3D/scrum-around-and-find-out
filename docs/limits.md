@@ -71,6 +71,10 @@ takes it for a bug that was hidden.
   override) must be a regular file you own, not writable by its group or by others, with no symbolic link on the way and
   only directories that are yours or root's above it. That is strict on a system where your group is private and
   directories are created group-writable; fix the modes. See [Agent profiles](profiles.md).
+- **Look-alike letters and deep encodings are not caught in profile text.** The private-path and e-mail checks run on the
+  text as written, with character references decoded, NFKC-normalised and after two rounds of percent-decoding. A
+  confusable letter from another script in an e-mail host (a Cyrillic letter that looks Latin), or a path encoded three
+  times, passes. This is a tripwire for accidents, and a person reads the generated diff.
 - **The migration deadline turns CI red on 2027-01-01.** The shipped `agents.yaml` lists three agents in
   `profile_migration`, and a non-empty list is a load error after 2026-12-31. Prune the list (give the agents a profile)
   before then.
