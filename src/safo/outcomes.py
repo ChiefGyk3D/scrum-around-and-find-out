@@ -14,6 +14,7 @@ import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -176,19 +177,24 @@ def append(path: Path, outcome: Outcome, check_dir: bool = False) -> None:
         raise ConfigError("cannot write outcomes log (is it locked, or not a regular file?)") from None
 
 
-def load(path: Path) -> list[Outcome]:
+def parse_log(raw: bytes, source: str) -> list[Outcome]:
+    """The records of a log already read (and size-capped) by the caller; `source` only labels errors."""
     out: list[Outcome] = []
-    for number, line in enumerate(_read(path).split(b"\n"), 1):
+    for number, line in enumerate(raw.split(b"\n"), 1):
         if not line.strip():
             continue
         try:
-            raw = loads(line)
+            record = loads(line)
         except DuplicateKeyError as err:
-            raise ConfigError(f"{path}:{number}: {err}") from None
+            raise ConfigError(f"{source}:{number}: {err}") from None
         except (ValueError, UnicodeError):
-            raise ConfigError(f"{path}:{number}: not valid bounded JSON") from None
-        out.append(validate(raw, f"{path}:{number}"))
+            raise ConfigError(f"{source}:{number}: not valid bounded JSON") from None
+        out.append(validate(record, f"{source}:{number}"))
     return out
+
+
+def load(path: Path) -> list[Outcome]:
+    return parse_log(_read(path), str(path))
 
 
 @dataclass(frozen=True)
@@ -296,3 +302,91 @@ def summarise_models(outcomes: list[Outcome], month: str) -> list[ModelSummary]:
             )
         )
     return out
+
+
+# -- queries across months (the evidence resolver and `qualify` read these; summarise_models is untouched) ----------------
+
+METRICS = (
+    "runs",
+    "fix_share",
+    "rounds_per_run",
+    "credits_per_run",
+    "findings.critical",
+    "findings.important",
+    "findings.minor",
+    "findings.unrated",
+)
+OPERATORS = (">=", "<=", ">", "<", "=")
+NUMBER = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?")
+MAX_SPAN_MONTHS = 12
+
+
+def month_span(span: str) -> tuple[str, str]:
+    """`YYYY-MM` or `YYYY-MM..YYYY-MM` as (first, last) months, at most 12 months long, or ConfigError."""
+    months = span.split("..")
+    try:
+        if len(months) > 2:
+            raise ValueError
+        for m in months:
+            valid_month(m)
+    except ValueError:
+        raise ConfigError("outcomes range: expected YYYY-MM or YYYY-MM..YYYY-MM") from None
+    first, last = months[0], months[-1]
+    length = (int(last[:4]) - int(first[:4])) * 12 + int(last[5:]) - int(first[5:]) + 1
+    if length < 1:
+        raise ConfigError("outcomes range: ends before it starts")
+    if length > MAX_SPAN_MONTHS:
+        raise ConfigError(f"outcomes range: at most {MAX_SPAN_MONTHS} months")
+    return first, last
+
+
+@dataclass(frozen=True)
+class OutcomeQuery:
+    """What a range of the log says about one agent (or one agent and model). A metric with no data is None:
+    unsupported, which is not zero and not false."""
+
+    records: int
+    values: dict[str, Fraction | None]
+
+    def value(self, metric: str) -> Fraction | None:
+        if metric not in METRICS:
+            raise ConfigError(f"unknown outcomes metric {metric!r} (metrics: {', '.join(METRICS)})")
+        return self.values[metric]
+
+
+def query_outcomes(outcomes: list[Outcome], span: str, agent: str, model: str | None = None) -> OutcomeQuery:
+    """The metrics over every record of `agent` (and `model`, when given) dated within the months of `span`.
+
+    With no records every metric is None. `credits_per_run` is the mean over the runs whose credits are known, and None
+    when none are. The result does not depend on the order of the log.
+    """
+    first, last = month_span(span)
+    rows = [
+        o
+        for o in outcomes
+        if o.agent == agent and (model is None or o.model == model) and first <= o.date[:7] <= last
+    ]
+    values: dict[str, Fraction | None] = dict.fromkeys(METRICS)
+    if rows:
+        known = [o.credits_used for o in rows if o.credits_used is not None]
+        values["runs"] = Fraction(len(rows))
+        values["fix_share"] = Fraction(sum(1 for o in rows if o.needed_fixes), len(rows))
+        values["rounds_per_run"] = Fraction(sum(o.review_rounds for o in rows), len(rows))
+        values["credits_per_run"] = Fraction(sum(known), len(known)) if known else None
+        for severity in SEVERITIES:
+            values[f"findings.{severity}"] = Fraction(sum(o.findings.get(severity, 0) for o in rows))
+    return OutcomeQuery(len(rows), values)
+
+
+def compare(value: Fraction, op: str, number: str) -> bool:
+    """`value op number`, exactly (no floating point)."""
+    if op not in OPERATORS or NUMBER.fullmatch(number) is None:
+        raise ConfigError(f"outcomes comparison: expected one of {' '.join(OPERATORS)} and a plain decimal number")
+    n = Fraction(number)
+    return {
+        ">=": value >= n,
+        "<=": value <= n,
+        ">": value > n,
+        "<": value < n,
+        "=": value == n,
+    }[op]
