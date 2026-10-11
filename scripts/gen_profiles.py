@@ -33,7 +33,11 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--write", action="store_true")
     group.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
-    shown = OUT.relative_to(ROOT) if OUT.is_relative_to(ROOT) else OUT
+    if not OUT.is_relative_to(ROOT) or OUT == ROOT:
+        print("error: the output directory must be inside the repository", file=sys.stderr)
+        return 1
+    rel = OUT.relative_to(ROOT).as_posix()
+    shown = rel
     try:
         # a repository checkout: review is the control (spec 7.2), and no local override is ever read
         verified = load_verified_agents(AGENTS, None, trusted=False)
@@ -45,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 1
     if args.write:
-        problems, changes = write_tree(OUT, files)
+        problems, changes = write_tree(ROOT, rel, files)
         if problems:
             for problem in problems:
                 print(f"error: {problem}", file=sys.stderr)
@@ -54,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             print(change)
         print(f"ok: {shown} is {len(files)} generated files")
         return 0
-    problems = check_tree(OUT, files)
+    problems = check_tree(ROOT, rel, files)
     if problems:
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)

@@ -205,15 +205,37 @@ def explicit_rules(text: str) -> set[str]:
     return rules
 
 
-def test_codeowners_names_every_profile_path_explicitly_not_only_through_the_catch_all() -> None:
+def missing_explicit(text: str, required: set[str]) -> set[str]:
+    """The required paths with no explicit CODEOWNERS entry of their own (the catch-all does not count)."""
+    return {path for path in required if "/" + path not in explicit_rules(text)}
+
+
+def listed_paths() -> set[str]:
+    """Every path the repository's CODEOWNERS must name: the checker's fixed list, the lessons file, the templates
+    directory and the source files that render and write the profiles."""
     from safo.codeowners import REQUIRED
 
-    rules = explicit_rules((ROOT / ".github" / "CODEOWNERS").read_text())
-    for path in REQUIRED:
-        assert "/" + path in rules, f"{path}: add an explicit entry to .github/CODEOWNERS"
-    assert "/scripts/gen_profiles.py" in rules and "/src/safo/harness_tree.py" in rules
+    extra = {
+        "docs/lessons.md",
+        "templates/",
+        "src/safo/profile.py",
+        "src/safo/harness_tree.py",
+        "scripts/gen_profiles.py",
+    }
+    return set(REQUIRED) | extra
 
 
-def test_the_explicit_codeowners_check_bites_on_a_catch_all_only_file() -> None:
+def test_codeowners_names_every_profile_path_explicitly_not_only_through_the_catch_all() -> None:
+    text = (ROOT / ".github" / "CODEOWNERS").read_text()
+    assert missing_explicit(text, listed_paths()) == set()
+    assert len(listed_paths()) >= 11
+
+
+def test_the_explicit_codeowners_check_bites_on_a_catch_all_only_file_and_on_each_dropped_entry() -> None:
     assert explicit_rules("* @owner\n") == set()
     assert explicit_rules("* @owner\n/agents.yaml @owner # note\n") == {"/agents.yaml"}
+    text = (ROOT / ".github" / "CODEOWNERS").read_text()
+    assert missing_explicit("* @owner\n", listed_paths()) == listed_paths()
+    for path in listed_paths():
+        dropped = "\n".join(x for x in text.splitlines() if x.split("#", 1)[0].split()[:1] != ["/" + path])
+        assert missing_explicit(dropped, listed_paths()) == {path}, path

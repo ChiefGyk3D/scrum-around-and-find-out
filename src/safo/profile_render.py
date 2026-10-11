@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -43,6 +44,7 @@ from safo.profile import (
     Evidence,
     ModelLayer,
     Profile,
+    block_constructs,
     spoof_problem,
 )
 from safo.schema import _safe_load
@@ -81,6 +83,41 @@ _OWNED_HEADINGS = re.compile(
     r"|model layer:.*)[ \t]*#*[ \t]*$",
     re.IGNORECASE,
 )
+
+
+_SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+_OWNED_NAMES = {
+    "model profile",
+    "brief",
+    "limits",
+    "do",
+    "do not",
+    "must not be given",
+    "review gate",
+    "task",
+    "scope rules",
+}
+
+
+def _owned(name: str, only_generated: bool) -> bool:
+    name = name.strip().lower()
+    if only_generated:
+        return name == "model profile"
+    return name in _OWNED_NAMES or name.startswith("model layer:")
+
+
+def structure_problem(text: str, *, only_generated: bool) -> str:
+    """A reason the text could hide or imitate the generated part: a setext heading the renderer owns (a title line
+    with a = or - underline), or a code fence or raw HTML block that is never closed and so swallows what follows."""
+    lines = text.split("\n")
+    for line, underline in itertools.pairwise(lines):
+        if _owned(line, only_generated) and _SETEXT_UNDERLINE.match(underline):
+            return "a setext heading the renderer owns"
+    if block_constructs([*lines, "", "x"])[
+        -1
+    ]:  # a sentinel line after a blank: still inside a block means unterminated
+        return "an unterminated code fence or HTML block"
+    return ""
 
 
 class RenderError(ConfigError):
@@ -209,13 +246,17 @@ def split_header(path: str, data: bytes) -> tuple[bytes, str, str]:
 
 
 def has_header(data: bytes) -> bool:
-    """True when the bytes carry a well-formed header at the place of any of the three formats."""
+    """True when the bytes carry a well-formed header whose body digest matches the file, in any of the three formats.
+
+    The manifest digest is not resolved (a stale file's sources are gone), but a file whose body no longer matches its
+    own body digest was edited by someone and is not treated as generated.
+    """
     for path in ("claude/x.md", "x.md", "x.txt"):
         try:
-            split_header(path, data)
+            body, _, body_digest = split_header(path, data)
         except HeaderError:
             continue
-        return True
+        return hashlib.sha256(body).hexdigest() == body_digest
     return False
 
 
@@ -376,6 +417,9 @@ def split_persona(text: str, agent_id: str) -> tuple[dict[str, str | list[str]],
             if front and key in front:
                 tools[key] = _tools_value(front[key], key, agent_id)
         body = "\n".join(lines[end + 1 :])
+    problem = structure_problem(body, only_generated=True)
+    if problem:
+        raise RenderError(f"{agent_id}: the persona has {problem}")
     return tools, body.strip("\n")
 
 
@@ -415,6 +459,9 @@ def _check_template(agent: Agent, p: Profile) -> None:
         return
     if any(_OWNED_HEADINGS.match(line) for line in p.brief.template_text.split("\n")):
         raise RenderError(f"{agent.id}: the template has a heading the renderer owns (Model profile, Do, Brief ...)")
+    problem = structure_problem(p.brief.template_text, only_generated=False)
+    if problem:
+        raise RenderError(f"{agent.id}: the template has {problem}")
 
 
 def _claude(agent: Agent, p: Profile) -> tuple[str, str]:

@@ -41,8 +41,7 @@ PATTERNS: dict[str, str] = {
 
 # An e-mail address: a local part, an @ and a host whose last label is letters (so pkg@v1.2.3 is not one).
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}\b")
-ALLOWED_EMAIL_DOMAINS = {"example.com", "example.org", "users.noreply.github.com"}
-ALLOWED_EMAIL_LOCALS = {"N0CALL", "N0TST"}
+ALLOWED_EMAIL_DOMAINS = {"example.com", "example.org"}  # spec 2.5: the reserved documentation domains, any local part
 
 # A domain-like token must be one of these; anything else is a hostname that does not belong in a public document.
 HOST = re.compile(r"(?i)\b(?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,63}\b")
@@ -119,8 +118,7 @@ def findings(text: str) -> list[str]:
                 continue
             record(kind, m.start())
     for m in EMAIL.finditer(text):
-        local, _, domain = m.group(0).rpartition("@")
-        if domain.lower() not in ALLOWED_EMAIL_DOMAINS and local.upper() not in ALLOWED_EMAIL_LOCALS:
+        if m.group(0).rpartition("@")[2].lower() not in ALLOWED_EMAIL_DOMAINS:
             record("e-mail address", m.start())
     for m in HOST.finditer(text):
         host = m.group(0).lower()

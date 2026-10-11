@@ -170,14 +170,27 @@ closing fence; Codex and Markdown files carry it on line one; the issue form and
 the sources. They are not a signature: they are not secret and do not stop anyone who can rewrite the sources and the files
 together. Review of the generated diff, and CODEOWNERS on `examples/harness/`, are the controls.
 
-**The output tree.** The generator never follows a symbolic link. It walks the tree on directory descriptors; a link,
+**The output tree.** The generator never follows a symbolic link. It opens the repository root once and then every component
+of the output path (`examples`, `harness`) relative to the descriptor above it, without following a link and checking each
+one against its parent entry, so a symbolic link at any level of the path is an error and cannot redirect a read or a write;
+missing levels are made the same way. It walks the tree on directory descriptors, stops reading a directory after 501
+entries, and rejects an output path that is absolute or has an empty, `.` or `..` component; a link,
 FIFO, socket, device or oversized file anywhere under it, or the output directory itself being a link, is an error for
 `--check` and `--write` alike. The comparison is of exact path sets, so a missing, unexpected or stale file fails. Writes
 go to a temporary file created exclusively in the destination directory, then rename, with `fsync` of the file and the
-directory. A directory or a link is never replaced or removed; a stale file is removed only when it carries the generated
-header, and then the directories left empty are removed bottom-up. Anything else stops the whole write before the first
+directory. A directory or a link is never replaced or removed; a stale file is removed only when it carries a well-formed
+generated header AND its body matches the body digest in that header (a user's file with a copied header but different text
+is reported as not generated and kept); the manifest digest need not resolve, since a stale file's sources are gone. The
+file is opened without following a link, checked from that descriptor, and looked up again by inode just before the unlink,
+which is refused if the name now names something else. Then the directories left empty are removed bottom-up. Anything else stops the whole write before the first
 change, with an error naming the entry. A race between the inventory and the write (another process swapping an entry in
 that window) is narrowed by the exclusive, no-follow opens but not closed.
+
+**Known limitation: who reads the generated text.** The Codex and local-model files are sent to a model, but a few lines
+are written for the caller: the header line and the generated-by comment, the `think=false` comment that tells the caller to
+strip it, and `do`/`dont` lines such as "give it a self-contained prompt" that address whoever builds the prompt, not the
+model. The model sees those lines too. This is a mismatch between the two audiences and is not redesigned here; the
+proposal is that the spec for the Copilot and route group splits a caller section from a model section.
 
 **Before publishing the files.** `tests/privacy.py` checks the generic patterns (home paths, e-mail addresses, private
 addresses, callsign-shaped tokens) in `examples/harness/`. It cannot know a private handle, an employer term or an internal

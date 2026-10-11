@@ -25,12 +25,20 @@ from safo.errors import SafoError
 Hostile = Callable[[Path], Path]
 
 
+class Hung(BaseException):
+    """Not an Exception: the code under test catches OSError, and a hang must not be swallowed as one."""
+
+
+def scan_path(path: Path) -> ht.Tree:
+    return ht.scan(path.parent, path.name)
+
+
 @contextmanager
 def bounded(seconds: int = 60) -> Iterator[None]:
     """A generous alarm around the one call that could hang if a FIFO were opened for reading."""
 
     def boom(*_: object) -> None:
-        raise TimeoutError("the generator hung")
+        raise Hung("the generator hung")
 
     old = signal.signal(signal.SIGALRM, boom)
     signal.alarm(seconds)
@@ -293,20 +301,20 @@ def test_the_walk_is_bounded_in_depth_and_entries(tmp_path: Path) -> None:
     for i in range(ht.MAX_DEPTH + 2):
         deep = deep / f"d{i}"
     deep.mkdir(parents=True)
-    tree = ht.scan(out)
+    tree = scan_path(out)
     assert any("deeper than" in p for p in tree.problems)
     wide = tmp_path / "wide"
     wide.mkdir()
     for i in range(ht.MAX_ENTRIES + 1):
         (wide / f"f{i}").write_text("x")
-    assert any("more than" in p for p in ht.scan(wide).problems)
+    assert any("more than" in p for p in scan_path(wide).problems)
 
 
 def test_a_scan_of_a_missing_tree_is_empty_and_of_a_file_is_a_problem(tmp_path: Path) -> None:
-    assert ht.scan(tmp_path / "absent").problems == []
+    assert scan_path(tmp_path / "absent").problems == []
     plain = tmp_path / "plain"
     plain.write_text("x")
-    assert ht.scan(plain).problems and isinstance(ht.TreeError("x"), SafoError)
+    assert scan_path(plain).problems and isinstance(ht.TreeError("x"), SafoError)
 
 
 # -- bounds, races and the writer's details --------------------------------------------------------------------------
@@ -342,9 +350,9 @@ def test_a_file_of_exactly_64_kib_is_accepted_and_one_byte_more_is_not(tmp_path:
     out = tmp_path / "out"
     out.mkdir()
     (out / "exact.md").write_bytes(b"x" * ht.MAX_FILE)
-    assert ht.scan(out).problems == [] and len(ht.scan(out).files["exact.md"]) == ht.MAX_FILE
+    assert scan_path(out).problems == [] and len(scan_path(out).files["exact.md"]) == ht.MAX_FILE
     (out / "over.md").write_bytes(b"x" * (ht.MAX_FILE + 1))
-    assert ht.scan(out).problems == ["over.md: larger than 64 KiB"]
+    assert scan_path(out).problems == ["over.md: larger than 64 KiB"]
 
 
 def test_depth_and_entry_limits_are_inclusive_and_reported_once(tmp_path: Path) -> None:
@@ -353,9 +361,9 @@ def test_depth_and_entry_limits_are_inclusive_and_reported_once(tmp_path: Path) 
     for i in range(ht.MAX_DEPTH):
         deep = deep / f"d{i}"
     deep.mkdir(parents=True)
-    assert ht.scan(chain).problems == []
+    assert scan_path(chain).problems == []
     (deep / "more").mkdir()
-    assert [p for p in ht.scan(chain).problems if "deeper than" in p] == [
+    assert [p for p in scan_path(chain).problems if "deeper than" in p] == [
         f"{'/'.join(f'd{i}' for i in range(ht.MAX_DEPTH))}/more: the tree is deeper than {ht.MAX_DEPTH} levels; "
         "the walk stopped here"
     ]
@@ -363,13 +371,13 @@ def test_depth_and_entry_limits_are_inclusive_and_reported_once(tmp_path: Path) 
     full.mkdir()
     for i in range(ht.MAX_ENTRIES):
         (full / f"f{i:04}").write_text("x")
-    assert ht.scan(full).problems == []
+    assert scan_path(full).problems == []
     spread = tmp_path / "spread"
     for name in ("a", "b", "c"):
         (spread / name).mkdir(parents=True)
         for i in range(ht.MAX_ENTRIES // 2):
             (spread / name / f"f{i:04}").write_text("x")
-    assert len([p for p in ht.scan(spread).problems if "more than" in p]) == 1
+    assert len([p for p in scan_path(spread).problems if "more than" in p]) == 1
 
 
 def test_an_entry_that_cannot_be_inspected_or_opened_or_read_is_a_problem(
@@ -387,7 +395,8 @@ def test_an_entry_that_cannot_be_inspected_or_opened_or_read_is_a_problem(
     ]
     os.mkfifo(out / "a-pipe-that-is-a-fifo")
     monkeypatch.setattr(os, "scandir", lambda fd: FakeScan(entries))
-    problems = ht.scan(out).problems
+    with bounded():
+        problems = scan_path(out).problems
     assert "broken: cannot be inspected" in problems
     assert "vanished-dir: a directory that cannot be opened without following a link" in problems
     assert "a-pipe-that-is-a-fifo: changed while it was being read, or is not a regular file" in problems
@@ -400,7 +409,8 @@ def test_a_file_read_refuses_what_is_not_a_regular_file_without_hanging(tmp_path
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         with bounded():
-            assert ht._read_file(fd, "plain") == b"abc"
+            got = ht._read_file(fd, "plain")
+            assert got is not None and got[0] == b"abc"
             assert ht._read_file(fd, "pipe") is None
             assert ht._read_file(fd, "dir") is None
             assert ht._read_file(fd, "absent") is None
@@ -409,7 +419,7 @@ def test_a_file_read_refuses_what_is_not_a_regular_file_without_hanging(tmp_path
 
 
 def test_the_output_directory_that_cannot_be_opened_is_a_problem_naming_why(tmp_path: Path) -> None:
-    problems = ht.scan(tmp_path / ("x" * 5000)).problems
+    problems = scan_path(tmp_path / ("x" * 5000)).problems
     assert len(problems) == 1 and "cannot be opened (File name too long)" in problems[0]
 
 

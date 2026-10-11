@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import itertools
 import os
 import secrets
 import stat
@@ -37,6 +38,7 @@ MAX_DEPTH = 8
 MAX_ENTRIES = 500
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_UNSAFE = "not a safe relative path (it must be non-empty, relative, and without empty, . or .. components or a NUL)"
 
 
 class TreeError(ConfigError):
@@ -49,9 +51,79 @@ class Tree:
 
     exists: bool = False
     files: dict[str, bytes] = field(default_factory=dict)
+    ids: dict[str, tuple[int, int]] = field(default_factory=dict)  # (st_dev, st_ino) of each file as it was read
     dirs: set[str] = field(default_factory=set)
     problems: list[str] = field(default_factory=list)
     entries: int = 0
+
+
+def _seam(stage: str, name: str) -> None:
+    """A no-op hook between two steps; a test replaces it to swap an entry at the exact moment that matters."""
+
+
+def components(rel: str) -> list[str]:
+    """The components of a relative path, or TreeError: no absolute path, no empty, . or .. component, no NUL."""
+    parts = rel.split("/")
+    if not rel or "\0" in rel or any(p in ("", ".", "..") for p in parts):
+        raise TreeError(f"{rel!r}: {_UNSAFE}")
+    return parts
+
+
+def _verify(fd: int, parent_fd: int, name: str, walked: str) -> None:
+    """The descriptor still names the directory that `name` is in its parent: same device and inode, a directory."""
+    here = os.fstat(fd)
+    try:
+        there = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        raise TreeError(f"{walked}: changed while it was being opened") from None
+    if not stat.S_ISDIR(here.st_mode) or (here.st_dev, here.st_ino) != (there.st_dev, there.st_ino):
+        raise TreeError(f"{walked}: changed while it was being opened")
+
+
+def open_out(root: Path, rel: str, create: bool) -> int | None:
+    """A descriptor for the output directory `rel` under the trusted directory `root`, or None when it is missing.
+
+    `root` is opened once; every component after it is opened (or made, when `create`) relative to the descriptor of the
+    one above with O_NOFOLLOW | O_DIRECTORY, then checked against its parent entry. The full pathname is never opened
+    again, so a symbolic link at any level is a TreeError and cannot redirect a read or a write.
+    """
+    parts = components(rel)
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as err:
+        raise TreeError(f"the repository root cannot be opened ({err.strerror})") from None
+    walked = ""
+    try:
+        for part in parts:
+            walked = f"{walked}/{part}" if walked else part
+            _seam("before-open", walked)
+            try:
+                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(fd)
+                    return None
+                try:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                    nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except OSError as err:
+                    raise TreeError(f"{walked}: cannot be created ({err.strerror})") from None
+            except OSError as err:
+                if err.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise TreeError(f"{walked}: a symbolic link or not a directory, so it is not followed") from None
+                raise TreeError(f"{walked}: cannot be opened ({err.strerror})") from None
+            try:
+                _seam("after-open", walked)
+                _verify(nxt, fd, part, walked)
+            except BaseException:
+                os.close(nxt)
+                raise
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _kind(mode: int) -> str:
@@ -67,14 +139,15 @@ def _kind(mode: int) -> str:
     return "a special entry"
 
 
-def _read_file(dir_fd: int, name: str) -> bytes | None:
-    """At most MAX_FILE + 1 bytes of the regular file `name` of the directory, or None when it is not one any more."""
+def _read_file(dir_fd: int, name: str) -> tuple[bytes, int, int] | None:
+    """(at most MAX_FILE + 1 bytes, st_dev, st_ino) of the regular file `name`; None when it is not one."""
     try:
         fd = os.open(name, _FILE_FLAGS, dir_fd=dir_fd)
     except OSError:
         return None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
             return None
         chunks: list[bytes] = []
         total = 0
@@ -84,14 +157,17 @@ def _read_file(dir_fd: int, name: str) -> bytes | None:
                 break
             chunks.append(chunk)
             total += len(chunk)
-        return b"".join(chunks)
+        return b"".join(chunks), info.st_dev, info.st_ino
     finally:
         os.close(fd)
 
 
 def _walk(fd: int, rel: str, depth: int, tree: Tree) -> None:
-    with os.scandir(fd) as it:
-        entries = sorted(it, key=lambda e: e.name)
+    remaining = MAX_ENTRIES + 1 - tree.entries
+    if remaining <= 0:
+        return
+    with os.scandir(fd) as it:  # at most `remaining` entries are taken from the iterator: the cap bounds the work
+        entries = sorted(itertools.islice(it, remaining), key=lambda e: e.name)
     for entry in entries:
         tree.entries += 1
         if tree.entries > MAX_ENTRIES:
@@ -119,29 +195,27 @@ def _walk(fd: int, rel: str, depth: int, tree: Tree) -> None:
             finally:
                 os.close(sub)
         elif stat.S_ISREG(mode):
-            data = _read_file(fd, entry.name)
-            if data is None:
+            got = _read_file(fd, entry.name)
+            if got is None:
                 tree.problems.append(f"{path}: changed while it was being read, or is not a regular file")
-            elif len(data) > MAX_FILE:
+            elif len(got[0]) > MAX_FILE:
                 tree.problems.append(f"{path}: larger than {MAX_FILE // 1024} KiB")
             else:
-                tree.files[path] = data
+                tree.files[path] = got[0]
+                tree.ids[path] = (got[1], got[2])
         else:
             tree.problems.append(f"{path}: {_kind(mode)}, which a generated tree never holds")
 
 
-def scan(out: Path) -> Tree:
-    """Inventory `out` without following a link. A missing tree is empty; a link or a file in its place is a problem."""
+def scan(root: Path, rel: str) -> Tree:
+    """Inventory `rel` under `root` without following a link. A missing tree is empty; a link or file is a problem."""
     tree = Tree()
     try:
-        fd = os.open(out, _DIR_FLAGS)
-    except FileNotFoundError:
+        fd = open_out(root, rel, False)
+    except TreeError as err:
+        tree.problems.append(str(err))
         return tree
-    except OSError as err:
-        if err.errno in (errno.ELOOP, errno.ENOTDIR):
-            tree.problems.append(f"{out.name}: the output directory is a symbolic link or not a directory")
-        else:
-            tree.problems.append(f"{out.name}: the output directory cannot be opened ({err.strerror})")
+    if fd is None:
         return tree
     tree.exists = True
     try:
@@ -159,9 +233,18 @@ def _parents(paths: Mapping[str, object]) -> set[str]:
     return out
 
 
-def check_tree(out: Path, expected: Mapping[str, Rendered]) -> list[str]:
+def _check_expected(expected: Mapping[str, Rendered]) -> None:
+    for path in expected:
+        components(path)
+
+
+def check_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> list[str]:
     """Every difference between the tree and the render, one line each. [] when the tree is exactly the render."""
-    tree = scan(out)
+    try:
+        _check_expected(expected)
+    except TreeError as err:
+        return [str(err)]
+    tree = scan(root, rel)
     problems = list(tree.problems)
     expected_dirs = _parents(expected)
     for path, rendered in expected.items():
@@ -193,7 +276,9 @@ def _plan(expected: Mapping[str, Rendered], tree: Tree) -> tuple[list[str], list
         if has_header(tree.files[path]):
             stale.append(path)
         else:
-            problems.append(f"{path}: not a generated file (it has no generated header), so it is not removed")
+            problems.append(
+                f"{path}: not a generated file (no generated header whose body digest matches), so it is not removed"
+            )
     for path in expected:
         if path in tree.dirs:
             problems.append(f"{path}: a directory where a generated file belongs; it is never replaced")
@@ -245,31 +330,51 @@ def _write_file(root_fd: int, rel: str, data: bytes) -> None:
         os.close(dir_fd)
 
 
-def write_tree(out: Path, expected: Mapping[str, Rendered]) -> tuple[list[str], list[str]]:
+def _remove_stale(root_fd: int, path: str, ident: tuple[int, int]) -> None:
+    """Unlink the stale generated file `path` only if it is still the inode that was inventoried and still generated.
+
+    The leaf is opened O_NOFOLLOW | O_NONBLOCK, its header and both digests are checked from that descriptor, and the
+    name is looked up again in its directory just before the unlink. Between that lookup and the unlink a rename can
+    still win (POSIX has no conditional unlink); docs/limits.md says so.
+    """
+    head, _, name = path.rpartition("/")
+    changed = TreeError(f"{path}: changed since the inventory, so it is not removed")
+    dir_fd = _open_dir(root_fd, head, False)
+    try:
+        _seam("stale:before-open", path)
+        got = _read_file(dir_fd, name)
+        if got is None or (got[1], got[2]) != ident or not has_header(got[0]):
+            raise changed
+        _seam("stale:after-read", path)
+        now = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != ident:
+            raise changed
+        os.unlink(name, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def write_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> tuple[list[str], list[str]]:
     """Make the tree exactly the render. Returns (problems, changes); with problems, nothing was changed."""
-    tree = scan(out)
+    try:
+        components(rel)
+        _check_expected(expected)
+    except TreeError as err:
+        return [str(err)], []
+    tree = scan(root, rel)
     problems, stale, stale_dirs = _plan(expected, tree)
     if problems:
         return problems, []
     changes: list[str] = []
-    if not tree.exists:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.mkdir(out, 0o755)
-        except FileExistsError:
-            return [f"{out.name}: appeared while the write was starting; run it again"], []
     try:
-        root_fd = os.open(out, _DIR_FLAGS)
-    except OSError:
-        return [f"{out.name}: the output directory cannot be opened without following a link"], []
+        root_fd = open_out(root, rel, True)
+    except TreeError as err:
+        return [str(err)], []
+    if root_fd is None:
+        return [f"{rel}: could not be created"], []
     try:
         for path in stale:
-            head, _, name = path.rpartition("/")
-            dir_fd = _open_dir(root_fd, head, False)
-            try:
-                os.unlink(name, dir_fd=dir_fd)
-            finally:
-                os.close(dir_fd)
+            _remove_stale(root_fd, path, tree.ids[path])
             changes.append(f"removed {path}")
         for path, rendered in expected.items():
             if tree.files.get(path) == rendered.data:
@@ -286,8 +391,10 @@ def write_tree(out: Path, expected: Mapping[str, Rendered]) -> tuple[list[str], 
             finally:
                 os.close(dir_fd)
             changes.append(f"removed directory {path}")
+    except TreeError as err:
+        return [str(err)], changes
     except OSError as err:
-        return [f"{out.name}: the write stopped ({err.strerror})"], changes
+        return [f"{rel}: the write stopped ({err.strerror})"], changes
     finally:
         os.close(root_fd)
     return [], changes

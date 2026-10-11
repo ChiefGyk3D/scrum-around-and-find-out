@@ -95,6 +95,11 @@ takes it for a bug that was hidden.
   and a body digest. They are not secret: anyone who can rewrite `agents.yaml`, the persona, the template and the generated
   files together produces a consistent set. They show a reader holding the sources that a file was edited or is stale; the
   controls are the generated diff and CODEOWNERS. See [Agent profiles](profiles.md).
+- **Stale-file removal narrows the race, it does not close it.** The stale file is opened without following a link, its
+  header and both digests are checked from the descriptor, and its inode is compared again just before the unlink. POSIX has
+  no conditional unlink, so a rename that lands between that last lookup and the unlink can still win.
+- **The generated files mix two audiences.** The header, the `think=false` comment and some `do`/`dont` lines address the
+  caller, but the Codex and local-model files are sent whole to the model (see [Agent profiles](profiles.md)).
 - **The generator narrows the output-tree race, it does not close it.** Files are opened without following links and written
   through directory descriptors with an exclusive temporary file and a rename, but another process with write access to
   `examples/harness/` can still swap an entry between the inventory and the write.
