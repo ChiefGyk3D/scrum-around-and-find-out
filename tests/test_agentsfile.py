@@ -203,7 +203,7 @@ def test_the_shipped_example_uses_placeholder_hosts_only() -> None:
 
 
 def test_the_shipped_local_example_merges_into_a_valid_file() -> None:
-    merged = load_agents_merged(ROOT / "agents.yaml", ROOT / "examples" / "agents.local.example.yaml")
+    merged = load_agents_merged(ROOT / "agents.yaml", ROOT / "examples" / "agents.local.example.yaml", trusted=False)
     assert [e.id for e in merged.agent("ollama").endpoints] == ["instance-a", "instance-b"]
 
 
@@ -214,13 +214,16 @@ def test_a_local_file_is_merged_over_the_example_so_real_endpoints_stay_out_of_t
         "      - {id: lab, url: 'http://127.0.0.1:11434', roles: [general, embedding],\n"
         "         models: [small-7b, embed-small], num_ctx_max: 4096}\n"
     )
-    merged = load_agents_merged(ROOT / "agents.yaml", local)
+    merged = load_agents_merged(ROOT / "agents.yaml", local, trusted=False)
     assert [(e.id, e.url) for e in merged.agent("ollama").endpoints] == [("lab", "http://127.0.0.1:11434")]
     assert merged.shape("research").prefer == ("codex",), "everything else comes from the example"
     assert merged.shape("ci-log-summary").local_model == "", "the default uses the first allowed model"
     assert merged.warnings == ()
     assert [
-        e.id for e in load_agents_merged(ROOT / "agents.yaml", tmp_path / "absent.yaml").agent("ollama").endpoints
+        e.id
+        for e in load_agents_merged(ROOT / "agents.yaml", tmp_path / "absent.yaml", trusted=False)
+        .agent("ollama")
+        .endpoints
     ] == ["local"]
 
 

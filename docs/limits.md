@@ -67,3 +67,26 @@ takes it for a bug that was hidden.
   `gh`, and the only credentials are the App or the token you pass in.
 - **Local modes are not allowed in the Action.** `usage`, `route`, `outcome`, `local` and `hooks` read files and logins on
   a person's machine; the Action refuses them before it mints anything.
+- **The trust policy covers every private agents file.** A file read from a private path (the `agents.yaml` and its local
+  override) must be a regular file you own, not writable by its group or by others, with no symbolic link on the way and
+  only directories that are yours or root's above it. That is strict on a system where your group is private and
+  directories are created group-writable; fix the modes. See [Agent profiles](profiles.md).
+- **Look-alike letters and deep encodings are not caught in profile text.** The private-path and e-mail checks run on the
+  text as written, with character references decoded, NFKC-normalised and after two rounds of percent-decoding. A
+  confusable letter from another script in an e-mail host (a Cyrillic letter that looks Latin), or a path encoded three
+  times, passes. This is a tripwire for accidents, and a person reads the generated diff.
+- **The migration deadline turns CI red on 2027-01-01.** The shipped `agents.yaml` lists three agents in
+  `profile_migration`, and a non-empty list is a load error after 2026-12-31. Prune the list (give the agents a profile)
+  before then.
+- **A repository checkout is trusted by review, not by ownership.** Its files belong to the runner, so no ownership check
+  means anything there. The control is that `agents.yaml`, the persona files and the templates change only by a pull request
+  with a visible diff, and that the maintainer is the code owner. A repository without that gets no protection from
+  profiles against a hostile pull request.
+- **The phrase list in profile text is a tripwire, not a filter.** It catches accidents and the lazy attack. A well-formed,
+  plausibly cited, harmful instruction passes it, and whether a citation is relevant to its claim is a person's judgement.
+- **Promotion counts are a speed bump, not proof.** Outcomes are self-reported by the lead into a file you own. The
+  `promotion` settings make a thin sample visible and slow an honest mistake. They do not stop anyone who can append to
+  the log from adding ten plausible records, and `safo` does not fetch the card URLs. Status stays declared in
+  `agents.yaml`, a reviewed file, and the maintainer reads the evidence before accepting a change of status.
+- **The migration cohort and deadline are code.** The three agents allowed to have no profile, and the date that ends the
+  allowance, are constants in `src/safo/agentsfile.py`. Changing them is a pull request to that file.

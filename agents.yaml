@@ -38,6 +38,16 @@ agents:
     constraints:
       - Anything that needs the word "decide" is not a Haiku task.
       - Transcribed security code still gets a Sonnet review plus a Codex adversarial review.
+    profile:
+      status: profiled
+      brief:
+        inline: Copy the plan's code exactly as written and report every concern about the plan; do not improve it.
+      do:
+        - text: Review security code that was transcribed from a plan twice, with a Sonnet review and a Codex adversarial review.
+          evidence: "lessons:haiku-transcribes-a-plans-bugs-along-with-its-code-2026-10-07-evening"
+      dont:
+        - text: Treat a plan as correct because it was transcribed exactly, since the plan's own bugs are transcribed too.
+          evidence: "lessons:haiku-transcribes-a-plans-bugs-along-with-its-code-2026-10-07-evening"
   claude-opus:
     name: Claude Opus
     kind: claude
@@ -62,6 +72,22 @@ agents:
       - "Its binding constraint is the five-hour window, which reached 78% after one burst: space its jobs."
       - Its sandbox cannot commit inside a git worktree or open sockets, so the lead runs the full suite and commits.
       - "Cannot resume a thread across git worktrees: hand it a self-contained prompt that reads state from files."
+    profile:
+      status: profiled
+      brief:
+        inline: Work from this self-contained prompt, read any state from the files it names, and leave the commit and the full test run to the lead.
+      do:
+        - text: Give it a self-contained prompt that reads its state from files.
+          evidence: "lessons:codex-cannot-resume-a-thread-across-git-worktrees"
+        - text: Use it for adversarial review of security-sensitive changes, after the Sonnet review.
+          evidence: "lessons:codexs-adversarial-review-found-what-the-sonnet-reviews-missed-2026-10-07-evening"
+        - text: Space its jobs, because the five-hour window is its binding limit.
+          evidence: "lessons:codexs-adversarial-review-found-what-the-sonnet-reviews-missed-2026-10-07-evening"
+      dont:
+        - text: Rely on resuming a thread from another git worktree; threads are found per repository path.
+          evidence: "lessons:codex-cannot-resume-a-thread-across-git-worktrees"
+        - text: Expect it to commit inside a git worktree or open sockets; the lead runs the full suite and commits.
+          evidence: "lessons:codexs-sandbox-cannot-commit-inside-a-git-worktree"
   copilot:
     name: Copilot coding agent
     kind: copilot
@@ -72,6 +98,22 @@ agents:
     constraints:
       - "Measured burn about 400 a day early in the month: spend it on small single-repo PRs."
       - "Every pull request needs a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup."
+    profile:
+      status: profiled
+      review_gate:
+        required: true
+        reviewer_differs: true
+        checks:
+          - code: test_vs_behaviour
+            evidence: "lessons:every-copilot-pull-request-needed-fixes"
+          - code: workflow_permissions
+            evidence: "lessons:copilots-quota-is-credits-and-a-reviewer-still-caught-a-startup-failure-2026-10-07-evening"
+      do:
+        - text: Give it small single-repo pull requests, because its quota is credits.
+          evidence: "lessons:copilots-quota-is-credits-and-a-reviewer-still-caught-a-startup-failure-2026-10-07-evening"
+      dont:
+        - text: Merge its pull request without a Claude review; in the measured month every one needed fixes.
+          evidence: "lessons:every-copilot-pull-request-needed-fixes"
   ollama:
     name: Local LLM (Ollama)
     kind: ollama
@@ -100,6 +142,23 @@ agents:
         only when `safo usage` finds it reachable, and falls back otherwise."
       - "Real endpoints never go in this repository: put them in ~/.config/safo/agents.local.yaml, which is merged over
         this file and git-ignored."
+    profile:
+      status: profiled
+      brief:
+        inline: Answer in exactly the output format asked for; your reply is a draft that a reviewer checks, and code does any grouping or counting.
+      thinking:
+        value: "off"
+        evidence: "lessons:a-local-thinking-model-spends-hundreds-of-tokens-on-one-sentence"
+      do:
+        - text: Send exactly the num_ctx the model is loaded with.
+          evidence: "lessons:any-num_ctx-other-than-the-loaded-one-reloads-the-model-2026-10-07-evening"
+        - text: Treat its output as a draft and apply only field values a reviewer checked.
+          evidence: "lessons:a-local-models-triage-is-a-draft-2026-10-07-evening"
+        - text: Let code do the grouping and the counting, and let the model write prose only.
+          evidence: "lessons:code-does-the-grouping-and-the-counting-the-model-writes-prose-2026-10-07"
+      dont:
+        - text: Take its verdicts as facts, since it asserted false-positive verdicts it could not verify.
+          evidence: "lessons:a-local-models-triage-is-a-draft-2026-10-07-evening"
     endpoints:
       - id: local
         url: http://ollama.lan:11434
@@ -212,6 +271,11 @@ shapes:
     fallback: []
     reviewer: []
     note: The lead frames the options and recommends; the maintainer decides. Opus only with the maintainer's OK and the reason stated.
+
+# Agents that may go without a profile until MIGRATION_UNTIL (see src/safo/agentsfile.py). The cohort and the date are
+# fixed in code; this list can only shrink, as an agent gets a profile its lessons support. docs/profiles.md says how.
+profile_migration:
+  agents: [claude-lead, claude-sonnet, claude-opus]
 
 # `safo route` skips an agent whose measured headroom is below the line and says why.
 # Meters: five_hour and weekly (Codex, percent used), monthly_percent (Copilot, percent of the monthly AI-credit quota used;
