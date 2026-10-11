@@ -8,10 +8,11 @@ Each value goes between a start line and an end line that carry a 128-bit random
     <<<END-UNTRUSTED-TASK-DATA id=HEX>>>
 
 A value that contains the delimiter text (also when it is hidden by zero-width characters, a character reference, a
-look-alike letter or another case), a NUL or another control character, or is larger than 64 KiB is refused, so a value
-can neither end its own fence nor open another. Line endings are normalised. The template is checked again here with the
-scanners that checked it at load time (`profile.check_template`): a placeholder is a whole line between blank lines,
-once, outside every code fence and raw HTML block, so the lines that replace it start and end in plain text.
+look-alike letter or another case), a NUL or another control character, a directional override or isolate (a reversed
+end line would read as a forward one), or is larger than 64 KiB is refused, so a value can neither end its own fence
+nor open another. Line endings are normalised. The template is checked again here with the scanners that checked it at
+load time (`profile.check_template`): a placeholder is a whole line between blank lines, once, outside every code fence
+and raw HTML block, so the lines that replace it start and end in plain text.
 
 What this claims: structure, and only structure. It says where a value starts and where it ends in the output. It does
 not make a model ignore an instruction written inside a fence, and pasting task text into a template by hand is outside
@@ -59,6 +60,11 @@ _ID = re.compile(r"[0-9a-f]{32}")
 _FORBIDDEN = {chr(c) for c in (*range(1, 32), 127, *range(0x80, 0xA0))} - {"\n", "\t"}
 
 
+# embeddings, overrides and isolates (U+202A..U+202E, U+2066..U+2069) reorder what a reader sees. LRM, RLM, ALM and the
+# joiners stay allowed: right-to-left text needs them and they cannot reverse a run.
+_DIRECTIONAL = {chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))}
+
+
 def _forges_delimiter(text: str) -> bool:
     """True when the text holds the delimiter as a reader would see it: character references decoded, NFKC, invisible
     format characters (zero-width, bidi, soft hyphen) dropped, case folded. This includes the literal text."""
@@ -78,6 +84,12 @@ def normalise(name: str, value: str) -> str:
     text = value.replace("\r\n", "\n").replace("\r", "\n")
     if any(c in _FORBIDDEN for c in text):
         raise ConfigError(f"the {name} value holds a control character other than newline and tab")
+    for char in text:
+        if char in _DIRECTIONAL:
+            raise ConfigError(
+                f"the {name} value holds the directional control U+{ord(char):04X}, which can make text read "
+                "backwards (an end line written in reverse looks like a forward one)"
+            )
     if _forges_delimiter(text):
         raise ConfigError(f"the {name} value holds the fence delimiter text ({DELIMITER}), which a value may not carry")
     return text

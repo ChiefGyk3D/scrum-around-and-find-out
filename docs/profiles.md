@@ -189,6 +189,10 @@ it is not an instruction, and that it cannot override the profile or the policy 
   characters, a soft hyphen, a character reference, a full-width letter or another case. A value therefore cannot
   contain an end line, a start line or the id.
 - A NUL or any other control character except newline and tab (an escape sequence would drive a terminal).
+- A directional embedding, override or isolate (U+202A to U+202E and U+2066 to U+2069). Shown right to left, an end
+  line written backwards reads as a forward one, so these nine are refused and the error names the code point. The
+  left-to-right, right-to-left and Arabic letter marks (U+200E, U+200F, U+061C) and the zero-width joiner and non-joiner
+  stay allowed, because Arabic and Hebrew text needs them.
 - A value larger than 65536 bytes, measured as given and before line endings change. The error names the value and
   never repeats it.
 - A template that breaks the placement rules, checked again at fill time with the same scanners as at load time: a
@@ -199,9 +203,10 @@ it is not an instruction, and that it cannot override the profile or the policy 
   value, an agent with no profile or no brief, an inline brief given values (an inline brief has no placeholders), and
   an agents file with any unresolved evidence pointer, for any agent: the load is the strict one and has no bypass.
 
-Line endings in a value become LF. Control characters other than the ones above, such as zero-width and bidi characters,
-stay in the value and stay inside its fence; under GitHub Actions the whole brief is written inside a `stop-commands`
-block so a line that begins with `::` cannot act as a workflow command, and only there are format characters escaped.
+Line endings in a value become LF. Other invisible format characters stay in the value and inside its fence. Under
+GitHub Actions the whole brief is written inside a `stop-commands` block so a line that begins with `::` cannot act as a
+workflow command, and only there are control and format characters written out as `\uXXXX`. That output is escaped
+and not reversible: a literal `\u200b` in a value and a real U+200B look the same in the Actions log.
 
 **Where values come from.** `--task-file`, `--files-file` and `--acceptance-file` take a path or `-` for standard input
 (for one value only). A file must be a regular file and not a symbolic link, is never waited on if it is a FIFO, and at
