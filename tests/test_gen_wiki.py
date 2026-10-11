@@ -283,7 +283,15 @@ def test_the_real_docs_generate_and_every_internal_link_resolves(tmp_path: Path)
             checked += 1
             assert target.partition("#")[0] in names, f"{filename}: {target}"
     assert checked > 10
-    assert not any(".md)" in re.sub(r"`[^`]*`", "", t) for t in got.values())
+    relative_md = [
+        target
+        for text in got.values()
+        for target in re.findall(
+            r"\]\(([^)\s]+)\)", re.sub(r"`[^`]*`", "", re.sub(r"```.*?```", "", text, flags=re.DOTALL))
+        )
+        if target.partition("#")[0].endswith(".md") and not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target)
+    ]
+    assert not relative_md
 
 
 # Symlinks under docs/ never leak their targets.

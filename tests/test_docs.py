@@ -25,6 +25,7 @@ PAGES = (
     "usage",
     "lessons",
     "adoption",
+    "personas",
 )
 EM_DASH = "\N{EM DASH}"
 
