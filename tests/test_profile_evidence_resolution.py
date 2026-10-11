@@ -320,3 +320,50 @@ def test_a_review_check_that_dangles_is_an_error(tmp_path: Path) -> None:
     }
     v = verified(repo(tmp_path, d))
     assert "review_gate.checks[0]" in v.errors_by_agent["copilot"][0]
+
+
+def test_headings_inside_html_comments_and_blocks_are_not_headings() -> None:
+    text = (
+        "<!--\n### Hidden in a comment\n-->\n\n"
+        "<div>\n### Hidden heading\n</div>\n\n"
+        "<!-- one line -->\n### Visible one\n\n"
+        "<!--\n### Hidden again\n--!>\n\n"
+        "<pre>\n### In pre\n</pre>\n\n"
+        "### Visible two\n\n"
+        "```\n### Fenced\n```\n"
+    )
+    assert set(lesson_sections(text)) == {"visible-one", "visible-two"}
+
+
+def test_a_blank_line_ends_a_div_block_so_the_next_heading_counts() -> None:
+    assert set(lesson_sections("<div>\ntext\n\n### After the blank\n")) == {"after-the-blank"}
+
+
+def test_a_hostile_closing_hash_heading_file_is_scanned_in_linear_time() -> None:
+    line = "# a" + " " * 985 + "b" + " #" * 3
+    text = (line + "\n") * 1000
+    start = time.monotonic()
+    lesson_sections(text)
+    assert time.monotonic() - start < 10
+    line = "# " + "a #" * 330
+    start = time.monotonic()
+    lesson_sections((line + "\n") * 1000)
+    assert time.monotonic() - start < 10
+
+
+def test_a_closing_sequence_is_stripped_by_hand_like_commonmark() -> None:
+    assert set(lesson_sections("## Foo ##   \n### Bar#\n#### Baz \\#\n##### ###\n###### x #\t\n")) == {
+        "foo",
+        "bar",
+        "baz-",
+        "x",
+    }
+
+
+def test_slugify_keeps_the_text_of_a_link() -> None:
+    from safo.profile import slugify
+
+    assert slugify("See [the docs](https://example.com/x) now") == "see-the-docs-now"
+    assert slugify("[a](b)[c](d)") == "ac"
+    assert slugify("[unclosed](") == "unclosed"
+    assert slugify("[" * 5000 + "x") == "x"

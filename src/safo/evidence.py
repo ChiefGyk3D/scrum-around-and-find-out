@@ -41,15 +41,14 @@ from safo.profile import (
     Evidence,
     ModelLayer,
     Profile,
+    block_constructs,
     read_confined,
     slugify,
 )
 
 MAX_LESSONS = 1024 * 1024
 MAX_SHOWN = 20  # problems named in the message of require_clean
-MAX_HEADING_LINE = 1000  # a longer line is body text: the heading pattern below is only safe on a short line
-HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
-FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+MAX_HEADING_TEXT = 2000  # a longer heading cannot be cited (a pointer's slug is at most 200 characters)
 INDEX = re.compile(r"0|[1-9][0-9]*")
 
 
@@ -138,6 +137,21 @@ def _layer_items(base: str, layer: Profile | ModelLayer) -> Iterator[Item]:
         yield Item(f"{base}.must_not_get[{i}]", "claim", f"must not get {m.shape}", m.evidence)
 
 
+def heading_text(line: str) -> str:
+    """The text of an ATX heading line, or '' when it is not one. A hand parse, linear in the line: no backtracking."""
+    body = line.lstrip(" ")
+    if len(line) - len(body) > 3:
+        return ""
+    hashes = len(body) - len(body.lstrip("#"))
+    if not 1 <= hashes <= 6 or len(body) == hashes or body[hashes] not in " \t":
+        return ""
+    text = body[hashes:].strip(" \t")
+    stripped = text.rstrip("#")
+    if len(stripped) < len(text) and (not stripped or stripped[-1] in " \t"):
+        text = stripped.rstrip(" \t")  # the optional closing sequence
+    return text
+
+
 # -- lessons ---------------------------------------------------------------------------------------------------------
 
 
@@ -152,7 +166,6 @@ def lesson_sections(text: str) -> dict[str, Section]:
     """The headings of a Markdown file by GitHub slug: fenced code is not searched, a repeated slug gets -1, -2, ..."""
     found: dict[str, Section] = {}
     seen: dict[str, int] = {}
-    fence: tuple[str, int] | None = None
     current: tuple[str, str, list[str]] | None = None  # slug, heading, body lines
 
     def close() -> None:
@@ -163,21 +176,16 @@ def lesson_sections(text: str) -> dict[str, Section]:
         digest = hashlib.sha256((heading + "\n" + "\n".join(body).strip()).encode()).hexdigest()
         found[slug] = Section(heading, first[:200], digest)
 
-    for line in text.splitlines():
-        marker = FENCE.match(line)
-        if fence is not None:
-            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}[ \t]*", line):
-                fence = None
-        elif marker and not (marker[1][0] == "`" and "`" in line[marker.end() :]):
-            fence = (marker[1][0], len(marker[1]))
-        else:
-            heading = HEADING.match(line) if len(line) <= MAX_HEADING_LINE else None
-            if heading and heading[2].strip():
+    lines = text.splitlines()
+    for line, inside in zip(lines, block_constructs(lines), strict=True):
+        if not inside:
+            title = heading_text(line)
+            if title and len(title) <= MAX_HEADING_TEXT:
                 close()
-                slug = slugify(heading[2])
+                slug = slugify(title)
                 count = seen.get(slug, 0)
                 seen[slug] = count + 1
-                current = (slug if count == 0 else f"{slug}-{count}", heading[2].strip(), [])
+                current = (slug if count == 0 else f"{slug}-{count}", title, [])
                 continue
         if current is not None:
             current[2].append(line)

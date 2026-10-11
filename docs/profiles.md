@@ -90,6 +90,16 @@ verify` and (when it exists) the generator stop on any such error and have no fl
 agent is treated as unmeasured for that run, `route` prints a `profile:` line with the reason, and every other agent
 routes as before. Selection itself does not change until promotion is built.
 
+`route` names the problem for the recommended agent only. The spec's entry in the recommendation's `skipped`
+list and its `profile_status` field are not built; TODO for group 4 (route surface), together with the `--json` keys that spec
+section 3.5 adds. Today `--json` gains `profile_unverified` only when the recommended agent is degraded.
+
+Where the evidence lives: `lessons` and `outcomes` are resolved beside the `agents.yaml` that is read. In a repository
+that is the checkout. For a home `~/.config/safo/agents.yaml`, copy the lessons file next to it (into a
+`docs` folder of `~/.config/safo`) or set `evidence_sources` to another path under that directory. A lesson heading
+that contains an inline Markdown link is slugged by the link's text, as GitHub does. Headings inside code fences, HTML comments and HTML blocks
+(`<div>` up to the next blank line, `<pre>`, comments) are not headings.
+
 ## `safo profiles verify`
 
 ```
@@ -103,11 +113,18 @@ the two source files that hold the profile constants and the renderer. When an o
 reports, for each profiled agent and model layer, how many recorded outcomes qualify (a card, a review round, a date in
 the window, deduplicated per card, conflicting duplicates voiding their card) against `promotion`, as information only.
 
+CODEOWNERS is evaluated with gitignore semantics (checked against `git check-ignore` in the tests): `*`, `?`, and `**`
+as a whole segment, escapes `\#`, `\ `, `\*`. A rule it cannot evaluate with confidence (a `[...]` class or a
+section header, a negation, an unknown escape, a long or wildcard-heavy pattern) fails closed: `verify` names the line
+and exits 2, it never drops the rule. Each required directory is probed with `.md` and `.yaml` files at two depths, so a
+later rule that removes the owner for one extension is seen.
+
 Exit 0 when everything resolves and is owned, 1 when a pointer does not resolve or a path has no owner, 2 when the file
 cannot be read or fails its form checks. With `--agents FILE` the file is treated as a repository checkout (CODEOWNERS is
-checked, the private-file trust policy is not applied). Without it the file is `~/.config/safo/agents.yaml`, held to the
-private-file policy, and CODEOWNERS is not checked. Under GitHub Actions a path inside the workspace is refused, as for
-every local mode.
+checked, the private-file trust policy is not applied), and this mode, being read-only, is allowed to read a file inside
+`GITHUB_WORKSPACE` under Actions, so CI can run `safo profiles verify --agents agents.yaml` on a checkout. Without it the file is `~/.config/safo/agents.yaml`, held to the
+private-file policy, and CODEOWNERS is not checked. Without `--agents` (the home file), a path inside the workspace is still refused under Actions, as for every other local
+mode and for `safo validate`; so is a local override named with `--agents-local`.
 
 ## Text rules
 

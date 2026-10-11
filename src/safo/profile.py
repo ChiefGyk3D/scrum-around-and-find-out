@@ -28,8 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from safo.bounded import month as valid_month
-from safo.outcomes import IDENTIFIER
+from safo.outcomes import IDENTIFIER, parse_span
 from safo.schema import Reader
 
 if TYPE_CHECKING:
@@ -175,9 +174,13 @@ class Budget:
             raise self.r.fail("profiles", f"at most {MAX_ENTRIES} entries in the file")
 
 
+_INLINE_LINK = re.compile(r"\[([^\[\]]*)\]\([^()]*\)")  # bracket-free text: linear on hostile input
+
+
 def slugify(heading: str) -> str:
     """The GitHub-style anchor of a heading: lower case, punctuation dropped, spaces to hyphens."""
-    return re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
+    text = _INLINE_LINK.sub(r"\1", heading.strip())  # [text](target) keeps its text, as GitHub renders it
+    return re.sub(r"[^\w\- ]", "", text.lower()).replace(" ", "-")
 
 
 def _outcomes_form(r: Reader, ref: str, path: str) -> None:
@@ -185,20 +188,10 @@ def _outcomes_form(r: Reader, ref: str, path: str) -> None:
     if len(bits) != 4 or bits[0] != "v1":
         raise r.fail(path, "expected outcomes:v1:<range>:<subject>:<metric><op><number>")
     _, span, subject, expression = bits
-    months = span.split("..")
-    if len(months) > 2:
-        raise r.fail(path, "the outcomes range is YYYY-MM or YYYY-MM..YYYY-MM")
     try:
-        for m in months:
-            valid_month(m)
-    except ValueError:
-        raise r.fail(path, "the outcomes range is YYYY-MM or YYYY-MM..YYYY-MM") from None
-    first, last = months[0], months[-1]
-    length = (int(last[:4]) - int(first[:4])) * 12 + int(last[5:]) - int(first[5:]) + 1
-    if length < 1:
-        raise r.fail(path, "the outcomes range ends before it starts")
-    if length > 12:
-        raise r.fail(path, "the outcomes range is at most 12 months")
+        parse_span(span)
+    except ValueError as err:
+        raise r.fail(path, str(err)) from None
     names = subject.split("/")
     if len(names) > 2 or not all(IDENTIFIER.fullmatch(n) for n in names):
         raise r.fail(path, "the outcomes subject is <agent> or <agent>/<model>")
@@ -436,6 +429,16 @@ _HTML_BLOCKS = (
 )
 
 
+_BLANK = re.compile(r"^\s*$")
+_BLOCK_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt"
+    "|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li"
+    "|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th"
+    "|thead|title|tr|track|ul"
+)
+_BLOCK_TAG = re.compile(r"^ {0,3}</?(?:" + _BLOCK_TAGS + r")(?:[ \t]|/?>|$)", re.IGNORECASE)
+
+
 def _html_block_end(line: str) -> tuple[int, re.Pattern[str]] | None:
     """(where the opener ends, the pattern that ends the block) when the line opens a raw HTML block."""
     raw = _RAW_TAG.match(line)
@@ -446,7 +449,15 @@ def _html_block_end(line: str) -> tuple[int, re.Pattern[str]] | None:
         m = start.match(line)
         if m:
             return m.end(), end
+    block = _BLOCK_TAG.match(line)
+    if block:
+        return block.end(), _BLANK  # CommonMark type 6: ends at the next blank line
     return None
+
+
+def block_constructs(lines: list[str]) -> list[str]:
+    """Which lines are inside a fenced code block or a raw HTML block (comment, pre, div ...): see `_constructs`."""
+    return _constructs(lines)
 
 
 def _constructs(lines: list[str]) -> list[str]:

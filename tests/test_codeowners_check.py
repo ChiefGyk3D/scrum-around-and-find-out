@@ -179,9 +179,19 @@ def test_an_overlong_owner_token_is_not_an_owner() -> None:
     assert not covered(parse_rules("* " + "a" * 300 + "@example.com\n"), "x")
 
 
-def test_a_pattern_with_too_many_wildcards_matches_nothing() -> None:
+def test_a_pattern_with_too_many_wildcards_fails_closed() -> None:
     assert covered(parse_rules("/a*b*c*d* @o\n"), "aXbXcXdX")
-    assert not covered(parse_rules("/a*b*c*d*e*f*g*h* @o\n"), "aXbXcXdXeXfXgXhX")
+    with pytest.raises(CodeownersError, match="cannot evaluate"):
+        parse_rules("/a*b*c*d*e*f*g*h* @o\n")
+
+
+def test_verify_exits_two_when_a_rule_cannot_be_evaluated(tmp_path: Path, _private_home: Path) -> None:
+    code, _ = verify(tmp_path, _private_home, "* @o\n/a*g*e*n*t*s*.*y*a*ml @o\n")
+    assert code == 2
+    code, _, err = cli(
+        "profiles", "verify", "--agents", str(repo(tmp_path / "b", codeowners="* @o\n/a[b] @o\n")), home=_private_home
+    )
+    assert code == 2 and "cannot evaluate CODEOWNERS rule at line 2" in err
 
 
 def test_an_inline_comment_ends_the_rule() -> None:
@@ -198,16 +208,9 @@ def test_a_symbolic_link_codeowners_is_refused_even_when_another_location_is_fin
         find_codeowners(tmp_path)
 
 
-def test_rules_past_the_cap_are_not_read() -> None:
-    from safo.codeowners import MAX_RULES
-
-    text = "# note\n" * MAX_RULES + "* @owner\n"
-    assert not covered(parse_rules(text), "x")
-    assert covered(parse_rules("# note\n" * (MAX_RULES - 1) + "* @owner\n"), "x")
-
-
 def test_a_directory_is_probed_with_a_file_inside_it() -> None:
     from safo.codeowners import uncovered
 
-    assert uncovered(parse_rules("/agents/????? @o\n"), ["agents/"]) == []
-    assert uncovered(parse_rules("/agents/????? @o\n"), ["agents"]) == ["agents"]
+    assert uncovered(parse_rules("/agents/?????.md @o\n"), ["agents/"]) != []
+    assert uncovered(parse_rules("/agents/**  @o\n"), ["agents/"]) == []
+    assert uncovered(parse_rules("/agents/** @o\n"), ["agents"]) == ["agents"]

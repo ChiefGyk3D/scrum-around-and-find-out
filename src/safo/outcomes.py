@@ -321,8 +321,9 @@ NUMBER = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?")
 MAX_SPAN_MONTHS = 12
 
 
-def month_span(span: str) -> tuple[str, str]:
-    """`YYYY-MM` or `YYYY-MM..YYYY-MM` as (first, last) months, at most 12 months long, or ConfigError."""
+def parse_span(span: str) -> tuple[str, str]:
+    """`YYYY-MM` or `YYYY-MM..YYYY-MM` as (first, last) months, at most 12 months long; ValueError says what is wrong.
+    The one definition of the range form: the pointer checker and the query both use it."""
     months = span.split("..")
     try:
         if len(months) > 2:
@@ -330,14 +331,21 @@ def month_span(span: str) -> tuple[str, str]:
         for m in months:
             valid_month(m)
     except ValueError:
-        raise ConfigError("outcomes range: expected YYYY-MM or YYYY-MM..YYYY-MM") from None
+        raise ValueError("the outcomes range is YYYY-MM or YYYY-MM..YYYY-MM") from None
     first, last = months[0], months[-1]
     length = (int(last[:4]) - int(first[:4])) * 12 + int(last[5:]) - int(first[5:]) + 1
     if length < 1:
-        raise ConfigError("outcomes range: ends before it starts")
+        raise ValueError("the outcomes range ends before it starts")
     if length > MAX_SPAN_MONTHS:
-        raise ConfigError(f"outcomes range: at most {MAX_SPAN_MONTHS} months")
+        raise ValueError(f"the outcomes range is at most {MAX_SPAN_MONTHS} months")
     return first, last
+
+
+def month_span(span: str) -> tuple[str, str]:
+    try:
+        return parse_span(span)
+    except ValueError as err:
+        raise ConfigError(str(err)) from None
 
 
 @dataclass(frozen=True)

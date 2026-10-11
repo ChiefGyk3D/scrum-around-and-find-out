@@ -123,3 +123,33 @@ def test_promotion_is_not_reported_for_an_unmeasured_agent_or_layer(tmp_path: Pa
     assert code == 0, out
     assert "warning: copilot is profiled" in out, "the harness layer is profiled and has no outcomes"
     assert "copilot/gpt-5.1" not in out.replace("agents.copilot.profile.models", "")
+
+
+def test_verify_with_an_explicit_file_works_inside_the_workspace_under_actions(
+    tmp_path: Path, _private_home: Path
+) -> None:
+    path = repo(tmp_path)
+    env = {"GITHUB_ACTIONS": "true", "GITHUB_WORKSPACE": str(tmp_path)}
+    code, out, err = cli("profiles", "verify", "--agents", str(path), home=_private_home, extra_env=env)
+    assert code == 0 and "ok:" in out, err
+
+
+def test_the_home_file_mode_and_validate_keep_the_workspace_refusal(tmp_path: Path, _private_home: Path) -> None:
+    path = repo(tmp_path)
+    env = {"GITHUB_ACTIONS": "true", "GITHUB_WORKSPACE": str(tmp_path), "SAFO_AGENTS": str(path)}
+    code, _, err = cli("profiles", "verify", home=_private_home, extra_env=env)
+    assert code == 2 and "GITHUB_WORKSPACE" in err
+    board = Path(__file__).parent / "data" / "board.yaml"
+    code, _, err = cli("--board", str(board), "validate", "--agents", str(path), home=_private_home, extra_env=env)
+    assert code == 2 and "GITHUB_WORKSPACE" in err
+
+
+def test_the_local_override_is_still_refused_inside_the_workspace(tmp_path: Path, _private_home: Path) -> None:
+    path = repo(tmp_path)
+    local = tmp_path / "local.yaml"
+    local.write_text("version: 1\n")
+    env = {"GITHUB_ACTIONS": "true", "GITHUB_WORKSPACE": str(tmp_path)}
+    code, _, err = cli(
+        "profiles", "verify", "--agents", str(path), "--agents-local", str(local), home=_private_home, extra_env=env
+    )
+    assert code == 2 and "GITHUB_WORKSPACE" in err

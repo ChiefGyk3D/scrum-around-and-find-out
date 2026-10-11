@@ -48,10 +48,11 @@ def _owners(ctx: LocalContext, v: VerifiedAgents, root: Path) -> int:
     ]
     required = codeowners.required_paths(v.agents.evidence_sources.lessons, templates)
     try:
-        rules = codeowners.parse_rules(codeowners.find_codeowners(root))
+        text = codeowners.find_codeowners(root)
     except ConfigError as err:
         ctx.say(f"CODEOWNERS: {err}")
         return 1
+    rules = codeowners.parse_rules(text)  # a rule it cannot evaluate raises: exit 2, never a rule left out
     missing = codeowners.uncovered(rules, required)
     for path in missing:
         ctx.say(f"not covered by CODEOWNERS: {path}")
@@ -95,7 +96,9 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if args.action != "verify":
         raise ConfigError("the only profiles action is `verify`")
     repository = bool(args.agents)
-    path = agents_path(ctx, args)
+    # an explicit --agents FILE is a checkout being reviewed: this read-only mode may look at it even inside the CI
+    # workspace (the file is never trusted as a private one). The home-file mode keeps the workspace refusal.
+    path = Path(args.agents) if repository else agents_path(ctx, args)
     local = local_path(ctx, args) if not repository or args.agents_local else None
     v = load_verified_agents(path, local, trusted=not repository)
     _claims(ctx, v)
