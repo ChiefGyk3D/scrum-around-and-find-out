@@ -17,6 +17,20 @@ MAX_FILE_BYTES = 16 * MAX_BYTES
 MAX_DEPTH = 64
 
 
+class DuplicateKeyError(ValueError):
+    """An object repeats a key; json would silently keep the last value."""
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            shown = key if len(key) <= 40 else key[:40] + "..."
+            raise DuplicateKeyError(f"duplicate JSON key {shown!r}")  # the key only, never a value
+        result[key] = value
+    return result
+
+
 def loads(raw: str | bytes) -> Any:
     if len(raw) > MAX_BYTES:
         raise ValueError("JSON exceeds size limit")
@@ -43,7 +57,7 @@ def loads(raw: str | bytes) -> Any:
     def bad_constant(value: str) -> None:
         raise ValueError("nonfinite JSON number")
 
-    return json.loads(text, parse_constant=bad_constant)
+    return json.loads(text, parse_constant=bad_constant, object_pairs_hook=_no_duplicate_keys)
 
 
 def read_json(path: Path) -> Any:
