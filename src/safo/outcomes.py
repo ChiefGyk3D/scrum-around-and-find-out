@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from safo.bounded import loads
+from safo.bounded import DuplicateKeyError, loads
 from safo.bounded import month as valid_month
 from safo.errors import ConfigError
 from safo.guardlog import bounded_read, file_lock, write_text
@@ -183,6 +183,8 @@ def load(path: Path) -> list[Outcome]:
             continue
         try:
             raw = loads(line)
+        except DuplicateKeyError as err:
+            raise ConfigError(f"{path}:{number}: {err}") from None
         except (ValueError, UnicodeError):
             raise ConfigError(f"{path}:{number}: not valid bounded JSON") from None
         out.append(validate(raw, f"{path}:{number}"))

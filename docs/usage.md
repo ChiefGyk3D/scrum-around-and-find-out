@@ -105,7 +105,9 @@ known, and a one-line `note`. Two optional fields make agents comparable on cost
 model of the run (for example `claude-sonnet-5-5` or `gpt-5.4`; letters, digits and `. _ -`, at most 64), and
 `credits_used`, the whole number of credits or premium requests the run consumed (0 to 10^12). Leave either out, or use
 null, when it is not known: records without a model or credits stay valid, and the seed file has none. They are written
-only when set, so an older line is unchanged. Any other key is refused.
+only when set, so an older line is unchanged. Any other key is refused, and so is a key repeated in any object of a
+line (JSON would silently keep the last one); the error names the key and the line. A session or state file read by the
+meters and hooks with a repeated key is treated like any other malformed line: skipped, not guessed at.
 
 `safo outcome add` appends one after checking it; add `--model gpt-5.4 --credits-used 12` for the two optional fields.
 `safo usage --report` summarises a month per agent: tasks, how many needed fixes, review rounds, findings, tokens. It then
