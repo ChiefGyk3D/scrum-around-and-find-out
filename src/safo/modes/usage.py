@@ -100,11 +100,18 @@ def report(ctx: LocalContext, args: argparse.Namespace, month: str) -> int:
     path = outcomes_path(ctx, args)
     if not path.is_file():
         raise ConfigError(f"no outcomes log at {path.name}; record one with `safo outcome add`")
-    rows = outcomes.summarise(outcomes.load(path), month)
+    loaded = outcomes.load(path)
+    rows = outcomes.summarise(loaded, month)
+    model_rows = outcomes.summarise_models(loaded, month)
     if args.json:
         data: list[dict[str, Any]] = [s.__dict__ for s in rows]
+        models: list[dict[str, Any]] = [m.__dict__ for m in model_rows]
         # one line, ASCII only; `::` is written as a JSON escape so no value can start a workflow command
-        ctx.say(json.dumps({"month": month, "agents": data}, separators=(",", ":")).replace("::", ":\\u003a"))
+        ctx.say(
+            json.dumps({"month": month, "agents": data, "models": models}, separators=(",", ":")).replace(
+                "::", ":\\u003a"
+            )
+        )
         return EXIT_OK
     ctx.say(f"Outcomes for {month} ({path.name})")
     if not rows:
@@ -115,7 +122,21 @@ def report(ctx: LocalContext, args: argparse.Namespace, month: str) -> int:
             f"  {s.agent:<14} {s.tasks} tasks, {s.needed_fixes} needed fixes, {s.review_rounds} review rounds, "
             f"findings: {findings}, tokens {s.tokens:,}, requests {s.requests:,}"
         )
+    if model_rows:
+        ctx.say("By agent and model (credit averages count only runs with credits recorded)")
+    for m in model_rows:
+        findings = ", ".join(f"{k} {v}" for k, v in sorted(m.findings.items())) or "none"
+        ctx.say(
+            f"  {m.agent:<14} {m.model:<20} {m.runs} runs, {m.rounds_per_run:.2f} rounds/run, "
+            f"{m.fix_share:.0%} needed fixes, findings: {findings}, credits {m.credits_total:,} "
+            f"(per run {_avg(m.credits_per_run)}, clean {_avg(m.credits_per_clean_run)}, "
+            f"fixed {_avg(m.credits_per_fixed_run)})"
+        )
     return EXIT_OK
+
+
+def _avg(value: float | None) -> str:
+    return "unknown" if value is None else f"{value:g}"
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:

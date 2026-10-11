@@ -136,3 +136,37 @@ def test_an_explicit_log_in_a_group_writable_dir_is_the_users_choice_and_works(
     log = folder / "outcomes.jsonl"
     code, _, _ = cli("outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log), home=_private_home)
     assert code == 0 and log.is_file()
+
+
+def test_outcome_add_takes_model_and_credits_and_the_report_shows_them(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    base = ["--log", str(log)]
+    code, _, _ = cli(
+        "outcome", "add", "--agent", "codex", "--shape", "research", "--model", "gpt-5.4", "--credits-used", "12",
+        *base, home=_private_home,
+    )  # fmt: skip
+    assert code == 0
+    record = json.loads(log.read_text())
+    assert record["model"] == "gpt-5.4" and record["credits_used"] == 12
+    code, _, _ = cli("outcome", "add", "--agent", "codex", "--shape", "research", *base, home=_private_home)
+    assert code == 0 and "model" not in json.loads(log.read_text().splitlines()[1])
+    code, out, _ = cli("usage", "--report", *base, home=_private_home)
+    assert code == 0 and "By agent and model" in out
+    assert "codex" in out and "gpt-5.4" in out and "unknown" in out
+    code, out, _ = cli("usage", "--report", "--json", *base, home=_private_home)
+    models = json.loads(out)["models"]
+    assert [(m["model"], m["credits_per_run"]) for m in models] == [("gpt-5.4", 12), ("unknown", None)]
+
+
+def test_hostile_model_and_credits_flags_never_reach_the_log(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    base = ["outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log)]
+    for extra in (
+        ["--model", "two words"], ["--model", "a\nb"], ["--model", "a\u2028b"], ["--model", "x" * 65], ["--model", ""],
+        ["--credits-used", "-1"], ["--credits-used", str(10**13)],
+    ):  # fmt: skip
+        code, _, err = cli(*base, *extra, home=_private_home)
+        assert code == 2 and ("model" in err or "credits_used" in err), extra
+    with pytest.raises(SystemExit):
+        cli(*base, "--credits-used", "1.5", home=_private_home)
+    assert not log.exists()

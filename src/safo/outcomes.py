@@ -2,7 +2,9 @@
 """The outcomes log: one JSON line per finished task, so routing can be judged by what happened, not by feeling.
 
 A record: date, card (a GitHub URL or null), agent, shape, review_rounds (review passes, the passing one included),
-findings by severity, tokens and requests when known, and a note. Appended one line at a time.
+findings by severity, tokens and requests when known, and a note. Optional `model` (the underlying model of the
+run) and `credits_used` (credits or premium requests consumed) make agents comparable on cost against rework; a record
+without them stays valid and is written without those keys. Appended one line at a time.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ NOTE_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")  # any control 
 NOTE_LIMIT = 500
 MAX_COUNT = 10**12
 MAX_ROUNDS = 1000
+OPTIONAL_KEYS = ("model", "credits_used")
 MAX_LOG_BYTES = 4 * 1024 * 1024
 
 
@@ -43,9 +46,12 @@ class Outcome:
     tokens: int | None = None
     requests: int | None = None
     note: str = ""
+    model: str | None = None
+    credits_used: int | None = None
 
     def to_json(self) -> str:
-        return json.dumps(self.__dict__, sort_keys=True)  # ASCII only: no Unicode line break can split a record
+        data = {k: v for k, v in self.__dict__.items() if v is not None or k not in OPTIONAL_KEYS}  # unset: no key
+        return json.dumps(data, sort_keys=True)  # ASCII only: no Unicode line break can split a record
 
     @property
     def finding_count(self) -> int:
@@ -72,7 +78,18 @@ def parse_findings(text: str) -> dict[str, int]:
 def validate(raw: Any, where: str = "outcome") -> Outcome:
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}: expected a JSON object")
-    allowed = {"date", "card", "agent", "shape", "review_rounds", "findings", "tokens", "requests", "note"}
+    allowed = {
+        "date",
+        "card",
+        "agent",
+        "shape",
+        "review_rounds",
+        "findings",
+        "tokens",
+        "requests",
+        "note",
+        *OPTIONAL_KEYS,
+    }
     for key in raw:
         if key not in allowed:
             raise ConfigError(f"{where}.{key}: unknown key")
@@ -102,6 +119,14 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         value = raw.get(key)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_COUNT):
             raise ConfigError(f"{where}.{key}: expected an integer >= 0 or null")
+    model = raw.get("model")
+    if model is not None and not (isinstance(model, str) and IDENTIFIER.fullmatch(model)):
+        raise ConfigError(f"{where}.model: expected a string of letters, digits, . _ - (at most 64), or null")
+    credits = raw.get("credits_used")
+    if credits is not None and (
+        isinstance(credits, bool) or not isinstance(credits, int) or not 0 <= credits <= MAX_COUNT
+    ):
+        raise ConfigError(f"{where}.credits_used: expected an integer >= 0 or null")
     note = raw.get("note", "")
     if not isinstance(note, str) or NOTE_FORBIDDEN.search(note) or len(note) > NOTE_LIMIT:
         raise ConfigError(f"{where}.note: expected one line of text (printable, at most 500 characters)")
@@ -115,6 +140,8 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         raw.get("tokens"),
         raw.get("requests"),
         note,
+        model,
+        credits,
     )
 
 
@@ -198,6 +225,72 @@ def summarise(outcomes: list[Outcome], month: str) -> list[AgentSummary]:
                 findings,
                 sum(o.tokens or 0 for o in rows),
                 sum(o.requests or 0 for o in rows),
+            )
+        )
+    return out
+
+
+UNKNOWN_MODEL = "unknown"
+
+
+@dataclass(frozen=True)
+class ModelSummary:
+    """One agent + model group. Credit averages use only runs whose credits are known; None when there are none."""
+
+    agent: str
+    model: str
+    runs: int
+    review_rounds: int
+    rounds_per_run: float
+    needed_fixes: int
+    fix_share: float
+    findings: dict[str, int]
+    credits_total: int
+    credits_known: int
+    credits_per_run: float | None
+    credits_per_clean_run: float | None
+    credits_per_fixed_run: float | None
+
+
+def _mean(values: list[int]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def summarise_models(outcomes: list[Outcome], month: str) -> list[ModelSummary]:
+    """Per agent and model (unknown model grouped as `unknown`), for the outcomes dated in `month`. Sorted by agent,
+    then model, so the output does not depend on log order."""
+    try:
+        valid_month(month)
+    except ValueError:
+        raise ConfigError("month: expected YYYY-MM") from None
+    groups: dict[tuple[str, str], list[Outcome]] = defaultdict(list)
+    for o in outcomes:
+        if o.date.startswith(month):
+            groups[(o.agent, o.model or UNKNOWN_MODEL)].append(o)
+    out = []
+    for (agent, model), rows in sorted(groups.items()):
+        findings: dict[str, int] = {}
+        for o in rows:
+            for k, v in o.findings.items():
+                findings[k] = findings.get(k, 0) + v
+        known = [o for o in rows if o.credits_used is not None]
+        fixed = sum(1 for o in rows if o.needed_fixes)
+        rounds = sum(o.review_rounds for o in rows)
+        out.append(
+            ModelSummary(
+                agent,
+                model,
+                len(rows),
+                rounds,
+                rounds / len(rows),
+                fixed,
+                fixed / len(rows),
+                findings,
+                sum(o.credits_used or 0 for o in known),
+                len(known),
+                _mean([o.credits_used or 0 for o in known]),
+                _mean([o.credits_used or 0 for o in known if not o.needed_fixes]),
+                _mean([o.credits_used or 0 for o in known if o.needed_fixes]),
             )
         )
     return out
