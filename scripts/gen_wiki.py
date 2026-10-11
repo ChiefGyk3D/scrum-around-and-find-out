@@ -39,13 +39,11 @@ _REFDEF = re.compile(r"[ ]*(?:(?:>|[-*+]|\d{1,9}[.)])[ ]*)*\[(?:[^\]\\]|\\.)+\]:
 _ATTR = re.compile(
     r"(?<=[\s<\"'])((?:xlink:)?(?:href|src|srcset|poster|formaction|action))[ \t]*=[ \t]*", re.IGNORECASE
 )
-_CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 MAX_LINE = 20_000
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
 _LABEL_META = re.compile(r"([\\\[\]<>`|*_&])")
-_HEADING = re.compile(r"^#\s+(.+?)\s*#*\s*$")
 
 
 class WikiError(Exception):
@@ -180,7 +178,40 @@ def _skip_title(line: str, i: int, ctx: _Ctx) -> int:
 
 
 def _mask_code(line: str) -> str:
-    return _CODE_SPAN.sub(lambda m: "\x00" * len(m.group(0)), line)
+    """Replace every code span (CommonMark: a run of N backticks to the next run of exactly N) with NULs.
+
+    One pass finds the backtick runs, one pass pairs each run with the next run of the same length, so the whole
+    line costs O(n). An unmatched run is literal text, and a backtick after an odd number of backslashes is escaped.
+    """
+    runs: list[tuple[int, int]] = []  # (start, length)
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] != "`":
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == "`":
+            j += 1
+        start = i + 1 if _escaped(line, i) else i
+        if j > start:
+            runs.append((start, j - start))
+        i = j
+    following: list[int] = [-1] * len(runs)  # index of the next run with the same length
+    latest: dict[int, int] = {}
+    for k in range(len(runs) - 1, -1, -1):
+        following[k] = latest.get(runs[k][1], -1)
+        latest[runs[k][1]] = k
+    chars = list(line)
+    k = 0
+    while k < len(runs):
+        close = following[k]
+        if close < 0:
+            k += 1
+            continue
+        for x in range(runs[k][0], runs[close][0] + runs[close][1]):
+            chars[x] = "\x00"
+        k = close + 1
+    return "".join(chars)
 
 
 def _escaped(text: str, i: int) -> bool:
@@ -374,11 +405,22 @@ def rewrite_links(text: str, source: str, pages: dict[str, str], root: Path, blo
     return "\n".join(out)
 
 
+def _heading_text(line: str) -> str | None:
+    """The text of an ATX level-1 heading, found without a backtracking pattern, or None."""
+    if not line.startswith("#") or not line[1:2].isspace():
+        return None
+    body = line[1:].strip()
+    bare = body.rstrip("#")
+    if bare != body and (not bare or bare[-1].isspace()):
+        body = bare.rstrip()
+    return body or None
+
+
 def _title(text: str, fallback: str) -> str:
     blocks = _Blocks(lambda why: WikiError(why))
     for line in text.split("\n"):
-        if not blocks.is_code(line) and (m := _HEADING.match(line)):
-            return m[1]
+        if not blocks.is_code(line) and (heading := _heading_text(line)) is not None:
+            return heading
     return fallback
 
 
