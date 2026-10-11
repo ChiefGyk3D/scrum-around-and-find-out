@@ -403,3 +403,18 @@ def test_no_descriptor_leaks_when_the_path_is_refused(tmp_path: Path, monkeypatc
     with pytest.raises(ht.TreeError, match="changed while"):
         ht.open_out(tmp_path, "real/sub", False)
     assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_an_output_directory_replaced_by_another_directory_at_the_same_path_is_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script, out = scratch(tmp_path, monkeypatch)
+
+    def replace_dir(stage: str, name: str) -> None:
+        if stage == "end":
+            out.rename(tmp_path / "old-out")
+            out.mkdir()  # a different directory (a different inode) now sits at the same path
+
+    monkeypatch.setattr(ht, "_seam", replace_dir)
+    code, err = run(script, "--write", capsys)
+    assert code == 1 and "the output directory moved during the run" in err

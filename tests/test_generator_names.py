@@ -116,3 +116,11 @@ def test_a_leading_dash_name_cannot_become_an_option() -> None:
     assert ht._dir_hint("out", "d\x1b").startswith("remove it by hand")
     assert ht._file_hint("out", "é.md").startswith("remove it by hand")
     assert ht._file_hint("out", "n" * 200 + ".md").startswith("remove it by hand")
+
+
+def test_the_length_cap_and_the_command_cap_agree() -> None:
+    assert ht.MAX_SHOWN == 120
+    rel = "out"
+    fits = "n" * (ht.MAX_SHOWN - len(rel) - 1)
+    assert ht._file_hint(rel, fits).startswith("remove it with: git rm -- ")
+    assert ht._file_hint(rel, fits + "n").startswith("remove it by hand: ")
