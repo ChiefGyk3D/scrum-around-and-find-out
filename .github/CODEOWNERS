@@ -1,1 +1,15 @@
 * @ChiefGyk3D
+
+# Everything an agent obeys, or that renders it, needs the code owner (spec 7.2): `safo profiles verify` fails when one of
+# these paths has no owner. In a repository with more than one contributor, also require code-owner review in branch protection.
+/agents.yaml @ChiefGyk3D
+/examples/harness/ @ChiefGyk3D
+/.claude/agents/ @ChiefGyk3D
+/agents/ @ChiefGyk3D
+/templates/ @ChiefGyk3D
+/docs/lessons.md @ChiefGyk3D
+/src/safo/agentsfile.py @ChiefGyk3D
+/src/safo/profile.py @ChiefGyk3D
+/src/safo/profile_render.py @ChiefGyk3D
+/src/safo/harness_tree.py @ChiefGyk3D
+/scripts/gen_profiles.py @ChiefGyk3D

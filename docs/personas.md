@@ -146,4 +146,7 @@ Before relying on a persona in a host other than Claude Code, run DoIA's `evals/
 client. DoIA says it has no Copilot, ChatGPT or local-model runs, and that the Copilot tool names its generator writes are
 unverified.
 
+A persona says what job an agent does; a profile says how to brief a given model. The persona file a profile names is
+an input of the generated instruction files: see [Agent profiles](profiles.md).
+
 Next to this page, [Adoption](adoption.md) covers the rest of the baseline and [Hooks](hooks.md) the routing guard.

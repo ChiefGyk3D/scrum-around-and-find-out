@@ -91,5 +91,15 @@ takes it for a bug that was hidden.
 - **A resolved pointer proves the evidence exists, not that it fits the claim.** `safo profiles verify` prints each claim
   beside the lesson or the computed metric it cites so a person can judge. `safo profiles verify` checks that CODEOWNERS
   names an owner for the profile paths; it cannot see whether branch protection requires that owner's review.
+- **The render digests are tamper-evidence, not a signature.** The header of each generated file carries a manifest digest
+  and a body digest. They are not secret: anyone who can rewrite `agents.yaml`, the persona, the template and the generated
+  files together produces a consistent set. They show a reader holding the sources that a file was edited or is stale; the
+  controls are the generated diff and CODEOWNERS. See [Agent profiles](profiles.md).
+- **The generator narrows the output-tree race, it does not close it.** Files are opened without following links and written
+  through directory descriptors with an exclusive temporary file and a rename, but another process with write access to
+  `examples/harness/` can still swap an entry between the inventory and the write.
+- **The privacy scan proves only the generic patterns.** CI checks home paths, e-mail addresses, private addresses and
+  callsign-shaped tokens in `examples/harness/`. A private handle, an employer term or an internal hostname is caught only
+  where `SAFO_PRIVACY_EXTRA_FILE` is applied, which a release that publishes the files must do ([Privacy check](privacy.md)).
 - **The migration cohort and deadline are code.** The three agents allowed to have no profile, and the date that ends the
   allowance, are constants in `src/safo/agentsfile.py`. Changing them is a pull request to that file.

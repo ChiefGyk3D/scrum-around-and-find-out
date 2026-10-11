@@ -43,6 +43,12 @@ def test_the_scan_covers_the_docs_the_examples_and_the_readme() -> None:
         ("host mybox.tail1234.ts.net", "tailnet name"),
         ("through twingate or Tailscale", "tailnet name"),
         ("http://nas.home:11434", "hostname"),
+        ("write to alice@corp.io", "e-mail address"),
+        ("a.b+tag@mail.subdomain.org", "e-mail address"),
+        ("/Users/alice/projects", "home-directory path"),
+        ("/home/Alice.B/src", "home-directory path"),
+        ("C:\\Users\\alice\\Desktop", "home-directory path"),
+        ("open file:///home/x", "file URL"),
     ],
 )
 def test_the_patterns_catch_what_they_are_for(text: str, category: str) -> None:
@@ -61,6 +67,11 @@ def test_the_patterns_catch_what_they_are_for(text: str, category: str) -> None:
         "agents.local.yaml and ~/.config/safo/agents.local.yaml",
         "board.yaml, action.yml, requirements.txt, P2 later, S (hours), M (a day)",
         "Python 3.11, the W3C, PyYAML 6.0.3 and scripts/apply-baseline.sh",
+        "mail someone@example.com, someone@example.org or N0CALL@example.com",
+        "pin actions/checkout@v4.1.0 and the tag repo@v0.2.0 or pkg@1.2.3",
+        "the @ChiefGyk3D handle and a @team mention, and user@host without a dot",
+        "the home directory is ~/.config/safo and /home/ alone, or /Users/ alone",
+        "the file path C:\\ alone and a URL like https://github.com/x/y",
     ],
 )
 def test_ordinary_text_passes(text: str) -> None:

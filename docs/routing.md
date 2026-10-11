@@ -2,7 +2,8 @@
 
 > Generated from `agents.yaml` by `scripts/gen_routing.py`. Do not edit this page: edit `agents.yaml` and run
 > `python scripts/gen_routing.py --write`. `safo route <shape>` applies these rules to the live headroom
-> that `safo usage` measures; see [Usage](usage.md).
+> that `safo usage` measures; see [Usage](usage.md). How to brief each agent is in
+> [Agent profiles](profiles.md).
 
 ## Task shapes
 
