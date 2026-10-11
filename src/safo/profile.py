@@ -28,8 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from safo.bounded import month as valid_month
-from safo.outcomes import IDENTIFIER
+from safo.outcomes import IDENTIFIER, parse_span
 from safo.schema import Reader
 
 if TYPE_CHECKING:
@@ -175,9 +174,13 @@ class Budget:
             raise self.r.fail("profiles", f"at most {MAX_ENTRIES} entries in the file")
 
 
+_INLINE_LINK = re.compile(r"\[([^\[\]]*)\]\([^()]*\)")  # bracket-free text: linear on hostile input
+
+
 def slugify(heading: str) -> str:
     """The GitHub-style anchor of a heading: lower case, punctuation dropped, spaces to hyphens."""
-    return re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
+    text = _INLINE_LINK.sub(r"\1", heading.strip())  # [text](target) keeps its text, as GitHub renders it
+    return re.sub(r"[^\w\- ]", "", text.lower()).replace(" ", "-")
 
 
 def _outcomes_form(r: Reader, ref: str, path: str) -> None:
@@ -185,20 +188,10 @@ def _outcomes_form(r: Reader, ref: str, path: str) -> None:
     if len(bits) != 4 or bits[0] != "v1":
         raise r.fail(path, "expected outcomes:v1:<range>:<subject>:<metric><op><number>")
     _, span, subject, expression = bits
-    months = span.split("..")
-    if len(months) > 2:
-        raise r.fail(path, "the outcomes range is YYYY-MM or YYYY-MM..YYYY-MM")
     try:
-        for m in months:
-            valid_month(m)
-    except ValueError:
-        raise r.fail(path, "the outcomes range is YYYY-MM or YYYY-MM..YYYY-MM") from None
-    first, last = months[0], months[-1]
-    length = (int(last[:4]) - int(first[:4])) * 12 + int(last[5:]) - int(first[5:]) + 1
-    if length < 1:
-        raise r.fail(path, "the outcomes range ends before it starts")
-    if length > 12:
-        raise r.fail(path, "the outcomes range is at most 12 months")
+        parse_span(span)
+    except ValueError as err:
+        raise r.fail(path, str(err)) from None
     names = subject.split("/")
     if len(names) > 2 or not all(IDENTIFIER.fullmatch(n) for n in names):
         raise r.fail(path, "the outcomes subject is <agent> or <agent>/<model>")
@@ -436,7 +429,26 @@ _HTML_BLOCKS = (
 )
 
 
-def _html_block_end(line: str) -> tuple[int, re.Pattern[str]] | None:
+_BLANK = re.compile(r"^\s*$")
+_BLOCK_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt"
+    "|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li"
+    "|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th"
+    "|thead|title|tr|track|ul"
+)
+_BLOCK_TAG = re.compile(r"^ {0,3}</?(?:" + _BLOCK_TAGS + r")(?:[ \t]|/?>|$)", re.IGNORECASE)
+
+
+_ATTR_VALUE = r"""(?:[^\s"'=<>`]+|'[^']*'|"[^"]*")"""
+_TAG_ATTR = r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*" + _ATTR_VALUE + r")?)"
+# CommonMark type 7: a complete open or closing tag and nothing else on the line (type 1 names are caught earlier)
+_LONE_TAG = re.compile(
+    r"^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*" + _TAG_ATTR + r"*[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$"
+)
+_ATX = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
+
+
+def _html_block_end(line: str, in_paragraph: bool = False) -> tuple[int, re.Pattern[str]] | None:
     """(where the opener ends, the pattern that ends the block) when the line opens a raw HTML block."""
     raw = _RAW_TAG.match(line)
     if raw:
@@ -446,7 +458,17 @@ def _html_block_end(line: str) -> tuple[int, re.Pattern[str]] | None:
         m = start.match(line)
         if m:
             return m.end(), end
+    block = _BLOCK_TAG.match(line)
+    if block:
+        return block.end(), _BLANK  # CommonMark type 6: ends at the next blank line
+    if not in_paragraph and _LONE_TAG.match(line):
+        return len(line), _BLANK  # type 7: cannot interrupt a paragraph; ends at the next blank line
     return None
+
+
+def block_constructs(lines: list[str]) -> list[str]:
+    """Which lines are inside a fenced code block or a raw HTML block (comment, pre, div ...): see `_constructs`."""
+    return _constructs(lines)
 
 
 def _constructs(lines: list[str]) -> list[str]:
@@ -454,7 +476,9 @@ def _constructs(lines: list[str]) -> list[str]:
     inside: list[str] = []
     fence: tuple[str, int] | None = None
     ender: re.Pattern[str] | None = None
+    paragraph = False  # the previous line is paragraph text, which a type 7 block cannot interrupt
     for line in lines:
+        was_paragraph, paragraph = paragraph, False
         if fence is not None:
             inside.append("fence")
             closer = re.fullmatch(r" {0,3}(" + re.escape(fence[0]) + r"{" + str(fence[1]) + r",})[ \t]*", line)
@@ -471,9 +495,10 @@ def _constructs(lines: list[str]) -> list[str]:
             fence = (opener[1][0], len(opener[1]))
             inside.append("")
             continue
-        opened = _html_block_end(line)
+        opened = _html_block_end(line, was_paragraph)
         if opened and not opened[1].search(line, opened[0]):
             ender = opened[1]
+        paragraph = opened is None and bool(line.strip()) and _ATX.match(line) is None
         inside.append("")
     return inside
 

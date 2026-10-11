@@ -34,5 +34,8 @@ def agents_with(a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.
 
 def write_agents(path: Path, a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.1:9") -> Path:
     path.write_text(yaml.safe_dump(agents_dict(a_url, b_url)))
+    lessons = path.parent / "docs" / "lessons.md"  # the evidence the profiles point at, beside the file like a checkout
+    lessons.parent.mkdir(exist_ok=True)
+    lessons.write_bytes((ROOT / "docs" / "lessons.md").read_bytes())
     path.chmod(0o600)  # a user's private file: a profile-bearing agents file must not be group or world writable
     return path

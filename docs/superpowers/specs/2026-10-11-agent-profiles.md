@@ -603,7 +603,7 @@ Each item includes the failing case that proves the guard bites.
 20. `test_profile_migration`: an agent outside the cohort and without a profile fails to load even when added to the
     list; a swapped or added id fails; an expired deadline fails (injected clock); a list shrunk to a subset loads.
 21. `test_qualify` (the item 4 seam): unknown agent, null card, `review_rounds` 0, duplicate cards, conflicting
-    duplicates, ten records on one date, ten on distinct dates, an ancient record, model layer lookup, the same card under two models (counts once for the harness layer, conflict reported), reordered
+    duplicates, ten records on one date, ten on distinct dates, an ancient record, model layer lookup, the same card under two models (a conflict in the harness layer, which counts 0 there, and counted once in each model layer), reordered
     duplicates (same result), duplicates differing in date or review rounds (conflict), a future-dated record, the
     window's inclusive edges: each yields the stated `Qualification` with reasons; promotion keys bounded.
 22. `test_codeowners_check`: `verify` fails when CODEOWNERS misses any listed path.

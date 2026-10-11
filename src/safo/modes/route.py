@@ -5,24 +5,29 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from safo.context import LocalContext
 from safo.errors import EXIT_OK
-from safo.localfiles import add_agents_arguments, load_agents_for
+from safo.localfiles import add_agents_arguments, load_verified_for
 from safo.meters import as_json, collect
 from safo.meters.copilot import cached_percent
 from safo.modes import LocalMode, register_local
 from safo.routing import Recommendation, probes_by_id, recommend
 
 
-def lines(r: Recommendation) -> list[str]:
+def lines(r: Recommendation, unverified: Mapping[str, tuple[str, ...]] | None = None) -> list[str]:
     out = [f"shape: {r.shape}"]
     if r.agent is None:
         out += [f"recommended: nobody ({r.why})"]
     else:
         out.append(f"recommended: {r.agent} (put Agent = {r.card_label} on the card)")
         out.append(f"why: {r.why}")
+        problems = (unverified or {}).get(r.agent)
+        if problems:
+            more = f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""
+            out.append(f"profile: {r.agent} is treated as unmeasured for this run: {problems[0]}{more}")
     if r.endpoint and r.local_role != "embedding":
         out.append(
             f"local: endpoint {r.endpoint}, model {r.model}; "
@@ -50,7 +55,8 @@ def lines(r: Recommendation) -> list[str]:
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
-    doc = load_agents_for(ctx, args)
+    verified = load_verified_for(ctx, args)
+    doc = verified.agents
     if not args.json:
         for warning in doc.warnings:
             ctx.say(f"warning: {warning}")
@@ -70,12 +76,16 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             Path(args.copilot_meter), ctx.now.strftime("%Y-%m"), doc.monthly_allowance()
         )
     rec = recommend(doc, args.shape, headroom, probes, model=args.model, num_ctx=args.num_ctx)
+    # an agent whose evidence does not resolve is unmeasured for this run; every other agent routes as before
+    unverified = {a: p for a, p in verified.errors_by_agent.items() if a == rec.agent}
     if args.json:
         document = {**as_json(rec), "warnings": list(doc.warnings)}
+        if unverified:
+            document["profile_unverified"] = {a: list(p) for a, p in unverified.items()}
         # one line, ASCII only; `::` is written as a JSON escape so no value can start a workflow command
         ctx.say(json.dumps(document, separators=(",", ":")).replace("::", ":\\u003a"))
     else:
-        for line in lines(rec):
+        for line in lines(rec, unverified):
             ctx.say(line)
     return EXIT_OK
 

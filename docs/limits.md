@@ -65,7 +65,7 @@ takes it for a bug that was hidden.
   check and the rename.
 - **The `gh` fallback is off under Actions.** On a laptop SAFO may use `gh auth token`; under GitHub Actions it never runs
   `gh`, and the only credentials are the App or the token you pass in.
-- **Local modes are not allowed in the Action.** `usage`, `route`, `outcome`, `local` and `hooks` read files and logins on
+- **Local modes are not allowed in the Action.** `usage`, `route`, `outcome`, `local`, `hooks` and `profiles` read files and logins on
   a person's machine; the Action refuses them before it mints anything.
 - **The trust policy covers every private agents file.** A file read from a private path (the `agents.yaml` and its local
   override) must be a regular file you own, not writable by its group or by others, with no symbolic link on the way and
@@ -88,5 +88,8 @@ takes it for a bug that was hidden.
   `promotion` settings make a thin sample visible and slow an honest mistake. They do not stop anyone who can append to
   the log from adding ten plausible records, and `safo` does not fetch the card URLs. Status stays declared in
   `agents.yaml`, a reviewed file, and the maintainer reads the evidence before accepting a change of status.
+- **A resolved pointer proves the evidence exists, not that it fits the claim.** `safo profiles verify` prints each claim
+  beside the lesson or the computed metric it cites so a person can judge. `safo profiles verify` checks that CODEOWNERS
+  names an owner for the profile paths; it cannot see whether branch protection requires that owner's review.
 - **The migration cohort and deadline are code.** The three agents allowed to have no profile, and the date that ends the
   allowance, are constants in `src/safo/agentsfile.py`. Changing them is a pull request to that file.
