@@ -24,6 +24,7 @@ PAGES = (
     "agents-status",
     "usage",
     "lessons",
+    "measurements",
     "adoption",
     "personas",
 )
