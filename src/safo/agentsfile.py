@@ -394,16 +394,15 @@ def parse_agents(
     migrating: tuple[str, ...] = ()
     if "profile_migration" in top:
         migrating = _migration(r, top["profile_migration"], today or _today())
-    if "profile_migration" in top or any(a.profile for a in agents):
-        # a file that carries profiles must profile every agent a person or a model could be briefed as
-        for a in agents:
-            if a.profile is None and a.kind != "human" and a.id not in migrating:
-                where = (
-                    "needs a profile, or a place in profile_migration.agents"
-                    if a.id in MIGRATION_COHORT
-                    else f"needs a profile; only {', '.join(MIGRATION_COHORT)} may be unprofiled"
-                )
-                raise r.fail(f"agents.{a.id}", where)
+    # unconditional: dropping every profile and the migration list does not switch the rule off
+    for a in agents:
+        if a.profile is None and a.kind != "human" and a.id not in migrating:
+            where = (
+                "needs a profile, or a place in profile_migration.agents"
+                if a.id in MIGRATION_COHORT
+                else f"needs a profile; only {', '.join(MIGRATION_COHORT)} may be unprofiled"
+            )
+            raise r.fail(f"agents.{a.id}", where)
 
     def agent_ids(value: object, path: str) -> tuple[str, ...]:
         ids = _strings(r, value, path)
@@ -507,8 +506,8 @@ def _carries_profile(data: Any) -> bool:
 def load_agents_merged(path: str | Path, local: str | Path | None, *, trusted: bool = True) -> AgentsFile:
     """agents.yaml with an optional local file merged over it: where real endpoints live, git-ignored.
 
-    This is the path for a person's private files (route, hooks, usage, local run). A base file that carries a profile
-    must pass `trusted_regular_file` (spec 7.2, rule 2); one that carries none is read as it always was. A profile never
+    This is the path for a person's private files (route, hooks, usage, local run). Every file read here, the base and
+    the override, must pass `trusted_regular_file` (spec 7.2, rule 2), whatever it carries. A profile never
     comes from the local override: it would change what is rendered without a reviewed diff. `trusted=False` is for a
     repository checkout read through this function (a test of the shipped file), where review is the control.
     """
@@ -516,7 +515,7 @@ def load_agents_merged(path: str | Path, local: str | Path | None, *, trusted: b
     data = _read_yaml(base, trusted=trusted)
     source = str(base)
     if local is not None and Path(local).exists():
-        over = _read_yaml(Path(local))
+        over = _read_yaml(Path(local), trusted=trusted)
         if isinstance(over, dict) and ("promotion" in over or _carries_profile(over)):
             raise ConfigError(f"{Path(local).name}: {LOCAL_FORBIDDEN}")
         data = merge(data, over)
@@ -542,8 +541,8 @@ def _read_yaml(p: Path, *, trusted: bool = False) -> Any:
             if isinstance(event, yaml.events.ScalarEvent) and event.value == "<<":
                 raise ConfigError("agents file: merge keys (<<) are not allowed")
         data = _safe_load(text, "agents file")
-        # a file with a profile is judged on the descriptor that is read, and must be the bytes just parsed
-        if trusted and _carries_profile(data) and read_trusted_regular_file(p, 1_048_576) != raw:
+        # a private file is judged on the descriptor that is read, and must be the bytes just parsed
+        if trusted and read_trusted_regular_file(p, 1_048_576) != raw:
             raise ConfigError("agents file changed while it was being read")
         return data
     except yaml.YAMLError:

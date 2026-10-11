@@ -19,7 +19,7 @@ profile that lists traits is a load error, and so is a profiled one that lists n
 | Key | What it is |
 |---|---|
 | `status` | `unmeasured` or `profiled`. Required. |
-| `persona` | A Claude agent only. The name of a file in `examples/personas/` beside `agents.yaml`. |
+| `persona` | A Claude agent only. The name of an installed persona file: `.claude/agents/<name>.md` or `agents/<name>.md` beside `agents.yaml`, the first that exists. |
 | `brief` | Exactly one of `template` (a path under the directory of `agents.yaml`) or `inline` (one line, 4,000 characters at most). |
 | `context_ceiling`, `output_cap` | A number and its evidence. How much to put in a brief, not a vendor limit. |
 | `thinking` | `"off"`, `"default"` or `"on"` and its evidence. Quote `"off"` and `"on"`: bare, YAML reads them as booleans. |
@@ -77,14 +77,14 @@ outside code fences. A template cannot hold front matter, a level-1 heading or g
 ## Migration
 
 An agent with no profile counts as unmeasured. A file that carries profiles must profile every agent that is not a human,
-with one exception: the agents in `profile_migration`. The cohort (`claude-lead`, `claude-sonnet`, `claude-opus`) and the
+with one exception, and the rule holds even in a file with no profile at all: the agents in `profile_migration`. The cohort (`claude-lead`, `claude-sonnet`, `claude-opus`) and the
 deadline (2026-12-31) are fixed in `src/safo/agentsfile.py`, not in the file. The list in `agents.yaml` can shrink to a
 subset of the cohort as agents get a profile their lessons support, and cannot grow or name another agent. After the
-deadline a non-empty list is a load error.
+deadline a non-empty list is a load error, so prune the list before 2027-01-01.
 
 ## Local files
 
-A private `agents.yaml` that carries a profile is read only when it is a regular file owned by you, not writable by its
+Every private agents file (the `agents.yaml` and its local override) is read only when it is a regular file owned by you, not writable by its
 group or by others, and reached without a symbolic link through directories that are yours or root's and not writable by
 others. A repository checkout is not held to that rule: review is the control there. A local override file cannot carry
 `profile`, `profile_migration` or `promotion`.

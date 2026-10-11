@@ -214,6 +214,14 @@ def test_a_config_pointer_is_refused_on_every_behavioural_claim() -> None:
         ("context_ceiling", "config:/agents/ollama/endpoints/0/loaded_num_ctx/", False),
         ("context_ceiling", "config:agents/ollama/endpoints/0/num_ctx_max", False),
         ("context_ceiling", "config:", False),
+        ("context_ceiling", "config:/agents/ollama/endpoints/0/num_ctx_max/extra", False),
+        ("context_ceiling", "config:/agents/ollama/endpoints/0/loaded_num_ctx", False),
+        ("context_ceiling", "config:/agents/ollama/endpoints/0/loaded_num_ctx/m/extra", False),
+        ("context_ceiling", "config:/agents/ollama/endpoints/0", False),
+        ("context_ceiling", "config:/agents//endpoints/0/num_ctx_max", False),
+        ("context_ceiling", "config:/other/ollama/endpoints/0/num_ctx_max", False),
+        ("context_ceiling", "config:/agents/ollama/other/0/num_ctx_max", False),
+        ("thinking", "config:/agents/ollama/endpoints/0/think/extra", False),
     ],
 )
 def test_a_config_pointer_is_valid_only_for_the_setting_its_row_names(setting: str, pointer: str, ok: bool) -> None:

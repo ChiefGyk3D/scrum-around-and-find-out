@@ -19,13 +19,17 @@ from safo.errors import ConfigError
 from safo.trust import read_trusted_regular_file, trusted_regular_file
 
 
+class Hung(BaseException):
+    """Not an Exception, so nothing under test can swallow it as an OSError."""
+
+
 @pytest.fixture(autouse=True)
 def _alarm() -> Iterator[None]:
     def boom(signum: int, frame: Any) -> None:
-        raise TimeoutError("opened a FIFO and waited")
+        raise Hung("opened a FIFO and waited")
 
     old = signal.signal(signal.SIGALRM, boom)
-    signal.alarm(5)
+    signal.alarm(2)
     try:
         yield
     finally:
@@ -222,13 +226,28 @@ def test_the_local_path_applies_it_to_a_profile_bearing_file_and_the_repository_
     assert load_agents_merged(path, None).agent("codex").profile is not None
 
 
-def test_a_profile_less_file_is_loaded_as_before_even_when_group_writable(tmp_path: Path) -> None:
+def test_the_policy_applies_to_every_private_agents_file_not_only_to_one_with_a_profile(tmp_path: Path) -> None:
     d = doc()
     for agent in d["agents"].values():
         agent.pop("profile", None)
-    del d["profile_migration"]
+    d.pop("profile_migration")
+    d["promotion"] = {"min_outcomes": 10}  # a promotion-only file
     path = write(tmp_path / "private" / "agents.yaml", d, mode=0o664)
-    assert load_agents_merged(path, None).agent("codex").profile is None
+    with pytest.raises(ConfigError, match="writable by its group or by others"):
+        load_agents_merged(path, None)
+
+
+def test_a_group_writable_local_override_is_refused_too(tmp_path: Path) -> None:
+    base = write(tmp_path / "private" / "agents.yaml", doc())
+    local = tmp_path / "private" / "agents.local.yaml"
+    local.write_text("agents: {}\n")
+    local.chmod(0o664)
+    with pytest.raises(ConfigError, match="writable by its group or by others"):
+        load_agents_merged(base, local)
+    local.chmod(0o600)
+    load_agents_merged(base, local)
+    local.chmod(0o664)
+    load_agents_merged(base, local, trusted=False)
 
 
 def test_a_profile_bearing_symlinked_agents_file_is_refused_on_the_local_path(tmp_path: Path) -> None:

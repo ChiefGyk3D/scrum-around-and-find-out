@@ -133,6 +133,29 @@ def test_a_human_needs_no_profile_and_is_never_in_the_cohort() -> None:
     rejects(d, r"profile_migration\.agents\[3\]: 'maintainer' is not in the migration cohort")
 
 
+def test_removing_every_profile_and_the_migration_list_does_not_disable_the_rule() -> None:
+    d = doc()
+    for agent in d["agents"].values():
+        agent.pop("profile", None)
+    d.pop("profile_migration")
+    rejects(d, r"agents\.claude-lead: needs a profile")
+
+
+def test_a_promotion_only_file_is_held_to_the_rule_too() -> None:
+    d = doc()
+    for agent in d["agents"].values():
+        agent.pop("profile", None)
+    d.pop("profile_migration")
+    d["promotion"] = {"min_outcomes": 10}
+    rejects(d, r"needs a profile")
+
+
+def test_a_cohort_agent_with_no_profile_must_be_listed() -> None:
+    d = doc()
+    d["profile_migration"]["agents"] = ["claude-lead", "claude-sonnet"]
+    rejects(d, r"agents\.claude-opus: needs a profile, or a place in profile_migration")
+
+
 def test_without_the_migration_list_the_cohort_needs_profiles_too() -> None:
     d = doc()
     del d["profile_migration"]

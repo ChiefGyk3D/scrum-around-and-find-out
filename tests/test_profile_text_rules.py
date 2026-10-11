@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from profiledata import doc, profile, rejects
+from profiledata import claim, doc, profile, rejects
 from safo import profile as profile_module
 from safo.agentsfile import parse_agents
 from safo.profile import BOUNDARY_PARAGRAPH, GENERATED_MARKER
@@ -49,6 +49,15 @@ BAD = {
     "file url": "open file:///etc/passwd",
     "email": "ask someone@corp.test",
     "email upper": "ask Someone@Corp.Test",
+    "fullwidth at": "ask someone\uff20corp\uff0etest",
+    "fullwidth home": "read \uff0fhome\uff0fsomeone",
+    "fullwidth users": "read \uff0fUsers\uff0fsomeone",
+    "fullwidth drive": "read \uff23\uff1a\uff3cwork",
+    "fullwidth tilde": "read \uff5e\uff0fnotes",
+    "fullwidth file url": "open \uff46\uff49\uff4c\uff45\uff1a\uff0f\uff0f\uff0fetc",
+    "partial boundary copy": "we say: " + BOUNDARY_PARAGRAPH[40:80] + " ok",
+    "partial boundary copy, shouted": BOUNDARY_PARAGRAPH[100:140].upper(),
+    "partial boundary copy, fullwidth": BOUNDARY_PARAGRAPH[10:50].replace("a", "\uff41"),
     "long": "x" * 301,
     "blank": "   ",
     "empty": "",
@@ -131,7 +140,20 @@ def test_a_hostile_text_that_is_not_a_string_is_a_typed_error() -> None:
         rejects(d, r"profile\.dont\[0\]\.text: expected a non-empty string")
 
 
-def test_the_boundary_text_constant_is_what_the_loader_matches_on() -> None:
-    assert profile_module.BOUNDARY_PHRASES
-    for phrase in profile_module.BOUNDARY_PHRASES:
-        assert phrase in " ".join(BOUNDARY_PARAGRAPH.lower().split())
+def test_a_forty_character_slice_of_the_boundary_is_refused_and_a_shorter_one_is_not() -> None:
+    squashed = " ".join(BOUNDARY_PARAGRAPH.casefold().split())
+    for start in range(0, len(squashed) - 40, 7):
+        piece = squashed[start : start + 40]
+        if piece[0] != " " and piece[-1] != " ":
+            rejects(with_text(piece + " x", "dont"), r"policy-boundary")
+    start = next(i for i in range(50, 90) if squashed[i] != " " and squashed[i + 39] != " ")
+    parse_agents(with_text(squashed[start : start + 39], "dont"))  # 39 characters of it
+    assert profile_module.spoof_problem(squashed[start : start + 39]) == ""
+    assert profile_module.spoof_problem(squashed[start : start + 40]) != ""
+
+
+def test_the_duplicate_check_uses_the_normalised_text() -> None:
+    d = doc()
+    profile(d, "codex")["do"] = [claim("Same text.")]
+    profile(d, "codex")["dont"] = [claim("\uff33AME \uff34ext.")]
+    rejects(d, r"profile\.dont\[0\]: duplicate of do\[0\]")

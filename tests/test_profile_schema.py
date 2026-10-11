@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from profiledata import LESSON, MINIMAL_CLAUDE, claim, doc, loads, need, prof, profile, rejects
+from profiledata import COHORT, LESSON, MINIMAL_CLAUDE, claim, doc, loads, need, prof, profile, rejects
 from safo.agentsfile import parse_agents
 
 
@@ -28,12 +28,14 @@ def test_an_agent_without_a_profile_block_has_none() -> None:
     assert parse_agents(doc()).agent("claude-lead").profile is None
 
 
-def test_a_file_with_no_profile_at_all_still_loads_as_in_version_zero_point_one() -> None:
+def test_a_file_with_no_profile_at_all_no_longer_loads() -> None:
     d = doc()
     for agent in d["agents"].values():
         agent.pop("profile", None)
     del d["profile_migration"]
-    assert all(a.profile is None for a in parse_agents(d).agents)
+    rejects(d, r"agents\.claude-lead: needs a profile")
+    d["profile_migration"] = {"agents": list(COHORT)}
+    rejects(d, r"agents\.claude-haiku: needs a profile; only claude-lead")
 
 
 def test_unknown_keys_are_refused_with_the_dotted_path() -> None:

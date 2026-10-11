@@ -193,7 +193,7 @@ Each rule has a test that goes red when the rule is deleted; a mutation sweep ov
    an error; the fix is to align the endpoints or omit the setting.
 8. Text fields obey section 7.3: single line, printable, 300 characters, no private-path or e-mail pattern, no
    structure-breaking markup, no policy-override phrase.
-9. `persona` exists as a file in the persona directory (confined, same file rules as a template).
+9. `persona` exists as `.claude/agents/<persona>.md` or `agents/<persona>.md` beside `agents.yaml` (the first that exists; confined, same file rules as a template).
 10. `kind: human` takes no profile; `kind: ollama` takes the profile on the agent, not per endpoint.
 11. **Every non-human agent has a profile**, except ids in the migration list (1.7).
 
@@ -493,8 +493,8 @@ Two different situations, two different rules; the first draft conflated them.
    and follows a symlink to it, and does not inspect the file): open `O_NOFOLLOW | O_NONBLOCK`, then on the descriptor
    require `S_ISREG`, owner equal to the effective user, and no group or world write bit; every parent directory up to
    the root must be owned by the effective user or root and not group or world writable unless it has the sticky bit
-   and is root-owned. Failures are typed `ConfigError`s. It applies to files that carry a `profile` block (the v0.1
-   loaders for profile-less files are unchanged, and `docs/limits.md` records that as an accepted residual).
+   and is root-owned. Failures are typed `ConfigError`s. It applies to every agents file read from a local private path, whatever it
+   carries (rule 11 of 1.6 is likewise unconditional).
 
 Existing confinement stays: never the current directory; refused inside `$GITHUB_WORKSPACE` under Actions; read through
 `bounded_read`. A profile is never loaded from a pull request's checkout by `route` or `hooks` under Actions, and the
