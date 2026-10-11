@@ -143,9 +143,9 @@ def test_write_deletes_nothing_and_reports_every_entry_that_is_not_in_the_render
     assert "legacy/old.prompt.md: unexpected file (looks generated but is not expected)" in err
     assert "hollow: unexpected directory" in err and "legacy: unexpected directory" in err
     for hint in (
-        "git rm examples/harness/claude/notes.md",
-        "git rm -r examples/harness/legacy",
-        "rmdir examples/harness/hollow",
+        "git rm -- examples/harness/claude/notes.md",
+        "git rm -r -- examples/harness/legacy",
+        "rmdir -- examples/harness/hollow",
     ):
         assert hint in err
     after = snapshot(tmp_path)

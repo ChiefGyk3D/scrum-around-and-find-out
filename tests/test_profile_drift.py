@@ -131,7 +131,7 @@ def test_a_renamed_output_is_reported_never_deleted_and_the_tree_is_clean_once_t
     assert script.main(["--write"]) == 1
     err = capsys.readouterr().err
     assert "legacy/deep/old-name.prompt.md: unexpected file (looks generated but is not expected)" in err
-    assert "git rm examples/harness/legacy/deep/old-name.prompt.md" in err and "emptied: unexpected directory" in err
+    assert "git rm -- examples/harness/legacy/deep/old-name.prompt.md" in err and "emptied: unexpected directory" in err
     assert old.is_file() and (out / "emptied").is_dir(), "the generator deletes nothing"
     shutil.rmtree(out / "legacy")  # what `git rm -r` does
     (out / "emptied").rmdir()

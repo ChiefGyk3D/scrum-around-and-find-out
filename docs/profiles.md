@@ -178,7 +178,7 @@ entries, and rejects an output path that is absolute or has an empty, `.` or `..
 FIFO, socket, device or oversized file anywhere under it, or the output directory itself being a link, is an error for
 `--check` and `--write` alike. The comparison is of exact path sets, so a missing, unexpected or stale file fails. Writes
 go to a temporary file created exclusively in the destination directory, then rename, with `fsync` of the file and the
-directory. A directory or a link is never replaced. **The generator never deletes a file or a directory.** `--write` writes and updates
+directory. Every name read from the output tree is untrusted when printed: control, bidi and DEL characters are written as `\x..` or `\u....` escapes, a colon at the start of a line is escaped, a long name is cut, and a ready-to-paste `git rm -- 'path'` command is printed only for a plain printable ASCII name, shell-quoted; any other name gets `remove it by hand:` and the escaped name. A directory or a link is never replaced. **The generator never deletes a file or a directory.** `--write` writes and updates
 the expected files only. A stale generated file, a file without the header, and an empty or non-empty unexpected directory
 are each reported by name with the `git rm` command that removes them, and `--write` exits 1 after writing the expected
 files, so a renamed output takes two steps: write, then remove the old one yourself. A header and its digests are tamper

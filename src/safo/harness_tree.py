@@ -29,8 +29,11 @@ import contextlib
 import errno
 import itertools
 import os
+import re
 import secrets
+import shlex
 import stat
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +65,38 @@ class Tree:
     entries: int = 0
 
 
+MAX_SHOWN = 120
+_PLAIN = re.compile(r"[ -~]+")  # printable ASCII: the only names a ready-to-paste command is built for
+
+
+def shown(name: str) -> str:
+    """A name from the output tree made safe to print: control, bidi, format, line-separator and DEL characters and
+    backslashes are written as \\x.., \\u.... or \\U........ escapes (so one name is always one line), leading colons
+    cannot start a workflow command (`::error::`), and a long name is cut. Names come from a directory a pull request
+    can fill: untrusted."""
+    out = []
+    for i, c in enumerate(name):
+        n = ord(c)
+        if c == "\\":
+            out.append("\\\\")
+        elif c == ":" and (i == 0 or name[:i] == ":" * i):
+            out.append("\\x3a")  # a run of colons at the start: `::error::` is a workflow command
+        elif n < 0x20 or n == 0x7F or unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"):
+            out.append(f"\\x{n:02x}" if n < 0x100 else f"\\u{n:04x}" if n < 0x10000 else f"\\U{n:08x}")
+        else:
+            out.append(c)
+    text = "".join(out)
+    return text if len(text) <= MAX_SHOWN else text[: MAX_SHOWN - 3] + "..."
+
+
+def _quoted(rel: str, path: str) -> str | None:
+    """The shell-quoted repository path of an entry, or None when its name needed escaping (no command then)."""
+    full = f"{rel}/{path}"
+    if _PLAIN.fullmatch(full) is None or shown(full) != full or len(full) > MAX_SHOWN:
+        return None
+    return shlex.quote(full)
+
+
 def _seam(stage: str, name: str) -> None:
     """A no-op hook between two steps; a test replaces it to swap an entry at the exact moment that matters."""
 
@@ -80,9 +115,9 @@ def _verify(fd: int, parent_fd: int, name: str, walked: str) -> None:
     try:
         there = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except OSError:
-        raise TreeError(f"{walked}: changed while it was being opened") from None
+        raise TreeError(f"{shown(walked)}: changed while it was being opened") from None
     if not stat.S_ISDIR(here.st_mode) or (here.st_dev, here.st_ino) != (there.st_dev, there.st_ino):
-        raise TreeError(f"{walked}: changed while it was being opened")
+        raise TreeError(f"{shown(walked)}: changed while it was being opened")
 
 
 def open_out(root: Path, rel: str, create: bool) -> int | None:
@@ -112,11 +147,13 @@ def open_out(root: Path, rel: str, create: bool) -> int | None:
                     os.mkdir(part, 0o755, dir_fd=fd)
                     nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
                 except OSError as err:
-                    raise TreeError(f"{walked}: cannot be created ({err.strerror})") from None
+                    raise TreeError(f"{shown(walked)}: cannot be created ({err.strerror})") from None
             except OSError as err:
                 if err.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise TreeError(f"{walked}: a symbolic link or not a directory, so it is not followed") from None
-                raise TreeError(f"{walked}: cannot be opened ({err.strerror})") from None
+                    raise TreeError(
+                        f"{shown(walked)}: a symbolic link or not a directory, so it is not followed"
+                    ) from None
+                raise TreeError(f"{shown(walked)}: cannot be opened ({err.strerror})") from None
             try:
                 _seam("after-open", walked)
                 _verify(nxt, fd, part, walked)
@@ -180,19 +217,20 @@ def _walk(fd: int, rel: str, depth: int, tree: Tree) -> None:
                 tree.problems.append(f"the tree has more than {MAX_ENTRIES} entries; the walk stopped")
             return
         path = f"{rel}/{entry.name}" if rel else entry.name
+        sp = shown(path)
         try:
             mode = entry.stat(follow_symlinks=False).st_mode
         except OSError:
-            tree.problems.append(f"{path}: cannot be inspected")
+            tree.problems.append(f"{sp}: cannot be inspected")
             continue
         if stat.S_ISDIR(mode):
             if depth >= MAX_DEPTH:
-                tree.problems.append(f"{path}: the tree is deeper than {MAX_DEPTH} levels; the walk stopped here")
+                tree.problems.append(f"{sp}: the tree is deeper than {MAX_DEPTH} levels; the walk stopped here")
                 continue
             try:
                 sub = os.open(entry.name, _DIR_FLAGS, dir_fd=fd)
             except OSError:
-                tree.problems.append(f"{path}: a directory that cannot be opened without following a link")
+                tree.problems.append(f"{sp}: a directory that cannot be opened without following a link")
                 continue
             try:
                 tree.dirs.add(path)
@@ -202,14 +240,14 @@ def _walk(fd: int, rel: str, depth: int, tree: Tree) -> None:
         elif stat.S_ISREG(mode):
             got = _read_file(fd, entry.name)
             if got is None:
-                tree.problems.append(f"{path}: changed while it was being read, or is not a regular file")
+                tree.problems.append(f"{sp}: changed while it was being read, or is not a regular file")
             elif len(got[0]) > MAX_FILE:
-                tree.problems.append(f"{path}: larger than {MAX_FILE // 1024} KiB")
+                tree.problems.append(f"{sp}: larger than {MAX_FILE // 1024} KiB")
             else:
                 tree.files[path] = got[0]
                 tree.ids[path] = (got[1], got[2])
         else:
-            tree.problems.append(f"{path}: {_kind(mode)}, which a generated tree never holds")
+            tree.problems.append(f"{sp}: {_kind(mode)}, which a generated tree never holds")
 
 
 def scan(root: Path, rel: str) -> Tree:
@@ -254,15 +292,27 @@ def check_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> list[s
     expected_dirs = _parents(expected)
     for path, rendered in expected.items():
         if path in tree.dirs:
-            problems.append(f"{path}: a directory where a generated file belongs")
+            problems.append(f"{shown(path)}: a directory where a generated file belongs")
         elif path not in tree.files:
-            if not any(p.startswith(path + ":") for p in tree.problems):  # a link or FIFO there is already named
-                problems.append(f"{path}: missing")
+            if not any(p.startswith(shown(path) + ":") for p in tree.problems):  # a link or FIFO there is already named
+                problems.append(f"{shown(path)}: missing")
         else:
             problems += compare(rendered, tree.files[path])
     for d in sorted(expected_dirs & set(tree.files)):
-        problems.append(f"{d}: a file where a directory belongs")
+        problems.append(f"{shown(d)}: a file where a directory belongs")
     return problems + _unexpected(tree, expected, rel)
+
+
+def _file_hint(rel: str, path: str) -> str:
+    q = _quoted(rel, path)
+    return f"remove it with: git rm -- {q}" if q else f"remove it by hand: {shown(f'{rel}/{path}')}"
+
+
+def _dir_hint(rel: str, path: str) -> str:
+    q = _quoted(rel, path)
+    if q is None:
+        return f"remove it by hand: {shown(f'{rel}/{path}')}"
+    return f"remove it with: git rm -r -- {q} (an empty untracked directory: rmdir -- {q})"
 
 
 def _unexpected(tree: Tree, expected: Mapping[str, Rendered], rel: str) -> list[str]:
@@ -271,14 +321,9 @@ def _unexpected(tree: Tree, expected: Mapping[str, Rendered], rel: str) -> list[
     out = []
     for path in sorted(set(tree.files) - set(expected) - expected_dirs):
         what = "looks generated but is not expected" if has_header(tree.files[path]) else "not a generated file"
-        out.append(
-            f"{path}: unexpected file ({what}); it is never deleted for you, remove it with: git rm {rel}/{path}"
-        )
+        out.append(f"{shown(path)}: unexpected file ({what}); it is never deleted for you; {_file_hint(rel, path)}")
     for d in sorted(tree.dirs - expected_dirs - set(expected)):
-        out.append(
-            f"{d}: unexpected directory; it is never deleted for you, remove it with: git rm -r {rel}/{d} "
-            f"(or rmdir {rel}/{d} when it is empty and untracked)"
-        )
+        out.append(f"{shown(d)}: unexpected directory; it is never deleted for you; {_dir_hint(rel, d)}")
     return out
 
 
@@ -290,9 +335,9 @@ def _blocking(expected: Mapping[str, Rendered], tree: Tree) -> list[str]:
     problems = list(tree.problems)
     for path in expected:
         if path in tree.dirs:
-            problems.append(f"{path}: a directory where a generated file belongs; it is never replaced")
+            problems.append(f"{shown(path)}: a directory where a generated file belongs; it is never replaced")
     for d in sorted(_parents(expected) & set(tree.files)):
-        problems.append(f"{d}: a file where a directory belongs; it is never replaced")
+        problems.append(f"{shown(d)}: a file where a directory belongs; it is never replaced")
     return problems
 
 

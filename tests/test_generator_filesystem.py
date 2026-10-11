@@ -215,7 +215,7 @@ def test_a_stale_file_without_the_header_survives_and_is_reported_while_the_expe
     (out / "local" / "ollama.wrapper.txt").write_text("edited\n")
     code, err = run(script, "--write", capsys)
     assert code == 1 and "claude/notes.md: unexpected file (not a generated file)" in err
-    assert "git rm examples/harness/claude/notes.md" in err
+    assert "git rm -- examples/harness/claude/notes.md" in err
     assert mine.read_text() == "# my notes\n"
     assert (out / "local" / "ollama.wrapper.txt").read_text() != "edited\n", "the expected files are still written"
 
@@ -239,7 +239,7 @@ def test_a_non_empty_unexpected_directory_survives_and_is_reported(
     before = snapshot(tmp_path)
     code, err = run(script, "--write", capsys)
     assert code == 1 and "unexpected/inner/mine.txt: unexpected file" in err
-    assert "unexpected: unexpected directory" in err and "git rm -r examples/harness/unexpected" in err
+    assert "unexpected: unexpected directory" in err and "git rm -r -- examples/harness/unexpected" in err
     assert snapshot(tmp_path) == before
 
 
@@ -251,7 +251,7 @@ def test_an_empty_unexpected_directory_is_reported_by_check_and_write_and_never_
     code, err = run(script, "--check", capsys)
     assert code == 1 and "hollow" in err and "unexpected" in err
     code, err = run(script, "--write", capsys)
-    assert code == 1 and "hollow: unexpected directory" in err and "rmdir examples/harness/hollow" in err
+    assert code == 1 and "hollow: unexpected directory" in err and "rmdir -- examples/harness/hollow" in err
     assert (out / "hollow").is_dir()
 
 
