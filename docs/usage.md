@@ -101,8 +101,19 @@ checked, never its verdicts.
 
 One JSON line per finished task: `date`, `card` (a GitHub URL or null), `agent`, `shape`, `review_rounds` (review passes, the
 passing one included), `findings` by severity (`critical`, `important`, `minor`, `unrated`), `tokens` and `requests` when
-known, and a one-line `note`. `safo outcome add` appends one after checking it. `safo usage --report` summarises a month per
-agent: tasks, how many needed fixes, review rounds, findings, tokens. [Lessons](lessons.md) cite it.
+known, and a one-line `note`. Two optional fields make agents comparable on cost against rework: `model`, the underlying
+model of the run (for example `claude-sonnet-5-5` or `gpt-5.4`; letters, digits and `. _ -`, at most 64), and
+`credits_used`, the whole number of credits or premium requests the run consumed (0 to 10^12). Leave either out, or use
+null, when it is not known: records without a model or credits stay valid, and the seed file has none. They are written
+only when set, so an older line is unchanged. Any other key is refused.
+
+`safo outcome add` appends one after checking it; add `--model gpt-5.4 --credits-used 12` for the two optional fields.
+`safo usage --report` summarises a month per agent: tasks, how many needed fixes, review rounds, findings, tokens. It then
+adds a table per agent and model: runs, review rounds per run, the share of runs that needed fixes, findings by severity,
+credits used in total, and credits per run, per run that needed no fixes and per run that needed fixes. Rows without a
+model are grouped as `unknown`, sorted by agent and then model. The credit averages count only runs with credits recorded
+and show `unknown` when there are none, so a missing figure is never read as zero. `--json` carries the same table under
+`models`. [Lessons](lessons.md) cite it.
 
 The seed, [examples/outcomes-2026-10.jsonl](../examples/outcomes-2026-10.jsonl), is one measured day.
 

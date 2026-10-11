@@ -31,6 +31,8 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
         args.tokens,
         args.requests,
         args.note,
+        args.model,
+        args.credits_used,
     )
     outcomes.validate(json.loads(record.to_json()), "outcome")
     path: Path = outcomes_path(ctx, args)
@@ -53,6 +55,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--findings", default="", help="critical=0,important=1,minor=2,unrated=0")
     parser.add_argument("--tokens", type=int, default=None)
     parser.add_argument("--requests", type=int, default=None)
+    parser.add_argument(
+        "--model", default=None, help="the underlying model of the run, e.g. gpt-5.4 (default: unknown)"
+    )
+    parser.add_argument(
+        "--credits-used", type=int, default=None, help="credits or premium requests the run consumed, when known"
+    )
     parser.add_argument("--note", default="")
     parser.add_argument(
         "--log", default="", help="the outcomes log (default: $SAFO_OUTCOMES, else ~/.local/state/safo/outcomes.jsonl)"
