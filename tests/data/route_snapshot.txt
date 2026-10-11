@@ -1,0 +1,173 @@
+## adversarial-review  exit=0
+shape: adversarial-review
+recommended: codex (put Agent = Codex on the card)
+why: first in the chain with headroom (codex, claude-sonnet)
+required review: claude-lead: ready (independent reviewer)
+reviewer: claude-lead (a fresh reviewer: not the author, with headroom)
+headroom unknown for: five_hour, weekly (not blocking)
+chain: codex -> claude-sonnet
+safo route only recommends: the lead sets the card and hands the work out.
+## adversarial-review --json exit=0
+{"shape":"adversarial-review","agent":"codex","why":"first in the chain with headroom (codex, claude-sonnet)","skipped":[],"reviewer":"claude-lead","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":["five_hour","weekly"],"endpoint":"","model":"","note":"","card_label":"Codex","fallback_chain":["codex","claude-sonnet"],"reviews":[{"reviewer":"claude-lead","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
+## changelog-draft  exit=0
+shape: changelog-draft
+recommended: claude-haiku (put Agent = Claude on the card)
+why: ollama (instance-a: unreachable); ollama (instance-b: not a general endpoint)
+required review: claude-sonnet: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+chain: ollama -> claude-haiku
+safo route only recommends: the lead sets the card and hands the work out.
+## changelog-draft --json exit=0
+{"shape":"changelog-draft","agent":"claude-haiku","why":"ollama (instance-a: unreachable); ollama (instance-b: not a general endpoint)","skipped":["ollama (instance-a: unreachable)","ollama (instance-b: not a general endpoint)"],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"","card_label":"Claude","fallback_chain":["ollama","claude-haiku"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"}],"local_role":"general","warnings":[]}
+## ci-log-summary  exit=0
+shape: ci-log-summary
+recommended: claude-haiku (put Agent = Claude on the card)
+why: ollama (instance-a: unreachable); ollama (instance-b: not a general endpoint)
+required review: claude-sonnet: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+chain: ollama -> claude-haiku
+safo route only recommends: the lead sets the card and hands the work out.
+## ci-log-summary --json exit=0
+{"shape":"ci-log-summary","agent":"claude-haiku","why":"ollama (instance-a: unreachable); ollama (instance-b: not a general endpoint)","skipped":["ollama (instance-a: unreachable)","ollama (instance-b: not a general endpoint)"],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"","card_label":"Claude","fallback_chain":["ollama","claude-haiku"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"}],"local_role":"general","warnings":[]}
+## decision  exit=0
+shape: decision
+recommended: maintainer (put Agent = You on the card)
+why: first in the chain with headroom (maintainer)
+reviewer: nobody (no review is defined for this shape)
+note: The lead frames the options and recommends; the maintainer decides. Opus only with the maintainer's OK and the reason stated.
+chain: maintainer
+safo route only recommends: the lead sets the card and hands the work out.
+## decision --json exit=0
+{"shape":"decision","agent":"maintainer","why":"first in the chain with headroom (maintainer)","skipped":[],"reviewer":null,"reviewer_why":"no review is defined for this shape","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"The lead frames the options and recommends; the maintainer decides. Opus only with the maintainer's OK and the reason stated.","card_label":"You","fallback_chain":["maintainer"],"reviews":[],"local_role":"","warnings":[]}
+## docs-proofread  exit=0
+shape: docs-proofread
+recommended: claude-haiku (put Agent = Claude on the card)
+why: ollama (instance-a: unreachable); ollama (instance-b: not a general endpoint)
+required review: claude-sonnet: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+chain: ollama -> claude-haiku
+safo route only recommends: the lead sets the card and hands the work out.
+## docs-proofread --json exit=0
+{"shape":"docs-proofread","agent":"claude-haiku","why":"ollama (instance-a: unreachable); ollama (instance-b: not a general endpoint)","skipped":["ollama (instance-a: unreachable)","ollama (instance-b: not a general endpoint)"],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"","card_label":"Claude","fallback_chain":["ollama","claude-haiku"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"}],"local_role":"general","warnings":[]}
+## duplicate-issue-search  exit=0
+shape: duplicate-issue-search
+recommended: claude-haiku (put Agent = Claude on the card)
+why: ollama (instance-a: not a embedding endpoint); ollama (instance-b: unreachable)
+required review: claude-sonnet: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+chain: ollama -> claude-haiku
+safo route only recommends: the lead sets the card and hands the work out.
+## duplicate-issue-search --json exit=0
+{"shape":"duplicate-issue-search","agent":"claude-haiku","why":"ollama (instance-a: not a embedding endpoint); ollama (instance-b: unreachable)","skipped":["ollama (instance-a: not a embedding endpoint)","ollama (instance-b: unreachable)"],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"","card_label":"Claude","fallback_chain":["ollama","claude-haiku"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"}],"local_role":"embedding","warnings":[]}
+## integration-code  exit=0
+shape: integration-code
+recommended: claude-sonnet (put Agent = Claude on the card)
+why: first in the chain with headroom (claude-sonnet, codex)
+required review: codex: ready (independent reviewer)
+required review: claude-sonnet: unavailable (required gate unavailable: ask for a fresh identity or wait)
+reviewer: codex (a fresh reviewer: not the author, with headroom)
+chain: claude-sonnet -> codex
+safo route only recommends: the lead sets the card and hands the work out.
+## integration-code --json exit=0
+{"shape":"integration-code","agent":"claude-sonnet","why":"first in the chain with headroom (claude-sonnet, codex)","skipped":[],"reviewer":"codex","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"","card_label":"Claude","fallback_chain":["claude-sonnet","codex"],"reviews":[{"reviewer":"codex","available":true,"reason":"independent reviewer"},{"reviewer":"claude-sonnet","available":false,"reason":"required gate unavailable: ask for a fresh identity or wait"}],"local_role":"","warnings":[]}
+## issue-triage  exit=0
+shape: issue-triage
+recommended: claude-haiku (put Agent = Claude on the card)
+why: ollama (instance-a: unreachable); ollama (instance-b: not a general endpoint)
+required review: claude-sonnet: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+note: Only field values a reviewer checked are applied, never the draft's verdicts.
+chain: ollama -> claude-haiku
+safo route only recommends: the lead sets the card and hands the work out.
+## issue-triage --json exit=0
+{"shape":"issue-triage","agent":"claude-haiku","why":"ollama (instance-a: unreachable); ollama (instance-b: not a general endpoint)","skipped":["ollama (instance-a: unreachable)","ollama (instance-b: not a general endpoint)"],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Only field values a reviewer checked are applied, never the draft's verdicts.","card_label":"Claude","fallback_chain":["ollama","claude-haiku"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"}],"local_role":"general","warnings":[]}
+## ops-runbook  exit=0
+shape: ops-runbook
+recommended: claude-sonnet (put Agent = Claude on the card)
+why: first in the chain with headroom (claude-sonnet)
+required review: claude-lead: ready (independent reviewer)
+reviewer: claude-lead (a fresh reviewer: not the author, with headroom)
+chain: claude-sonnet
+safo route only recommends: the lead sets the card and hands the work out.
+## ops-runbook --json exit=0
+{"shape":"ops-runbook","agent":"claude-sonnet","why":"first in the chain with headroom (claude-sonnet)","skipped":[],"reviewer":"claude-lead","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"","card_label":"Claude","fallback_chain":["claude-sonnet"],"reviews":[{"reviewer":"claude-lead","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
+## plan-writing  exit=0
+shape: plan-writing
+recommended: codex (put Agent = Codex on the card)
+why: first in the chain with headroom (codex, claude-sonnet, claude-lead)
+required review: claude-sonnet: ready (independent reviewer)
+required review: codex: unavailable (required gate unavailable: ask for a fresh identity or wait)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+headroom unknown for: five_hour, weekly (not blocking)
+chain: codex -> claude-sonnet -> claude-lead
+safo route only recommends: the lead sets the card and hands the work out.
+## plan-writing --json exit=0
+{"shape":"plan-writing","agent":"codex","why":"first in the chain with headroom (codex, claude-sonnet, claude-lead)","skipped":[],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":["five_hour","weekly"],"endpoint":"","model":"","note":"","card_label":"Codex","fallback_chain":["codex","claude-sonnet","claude-lead"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"},{"reviewer":"codex","available":false,"reason":"required gate unavailable: ask for a fresh identity or wait"}],"local_role":"","warnings":[]}
+## research  exit=0
+shape: research
+recommended: codex (put Agent = Codex on the card)
+why: first in the chain with headroom (codex, claude-sonnet)
+required review: claude-sonnet: ready (independent reviewer)
+required review: codex: unavailable (required gate unavailable: ask for a fresh identity or wait)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+headroom unknown for: five_hour, weekly (not blocking)
+chain: codex -> claude-sonnet
+safo route only recommends: the lead sets the card and hands the work out.
+## research --json exit=0
+{"shape":"research","agent":"codex","why":"first in the chain with headroom (codex, claude-sonnet)","skipped":[],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":["five_hour","weekly"],"endpoint":"","model":"","note":"","card_label":"Codex","fallback_chain":["codex","claude-sonnet"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"},{"reviewer":"codex","available":false,"reason":"required gate unavailable: ask for a fresh identity or wait"}],"local_role":"","warnings":[]}
+## security-sensitive-code  exit=0
+shape: security-sensitive-code
+recommended: claude-sonnet (put Agent = Claude on the card)
+why: first in the chain with headroom (claude-sonnet)
+required review: codex: ready (independent reviewer)
+required review: claude-sonnet: unavailable (required gate unavailable: ask for a fresh identity or wait)
+reviewer: codex (a fresh reviewer: not the author, with headroom)
+note: Both reviews are required before merge, a Sonnet review of the diff and a Codex adversarial review; space Codex's jobs, because its five-hour window is the binding limit.
+chain: claude-sonnet
+safo route only recommends: the lead sets the card and hands the work out.
+## security-sensitive-code --json exit=0
+{"shape":"security-sensitive-code","agent":"claude-sonnet","why":"first in the chain with headroom (claude-sonnet)","skipped":[],"reviewer":"codex","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Both reviews are required before merge, a Sonnet review of the diff and a Codex adversarial review; space Codex's jobs, because its five-hour window is the binding limit.","card_label":"Claude","fallback_chain":["claude-sonnet"],"reviews":[{"reviewer":"codex","available":true,"reason":"independent reviewer"},{"reviewer":"claude-sonnet","available":false,"reason":"required gate unavailable: ask for a fresh identity or wait"}],"local_role":"","warnings":[]}
+## security-sensitive-design  exit=0
+shape: security-sensitive-design
+recommended: claude-lead (put Agent = Claude on the card)
+why: first in the chain with headroom (claude-lead)
+required review: codex: ready (independent reviewer)
+reviewer: codex (a fresh reviewer: not the author, with headroom)
+note: Opus only with the maintainer's OK and the reason stated.
+chain: claude-lead
+safo route only recommends: the lead sets the card and hands the work out.
+## security-sensitive-design --json exit=0
+{"shape":"security-sensitive-design","agent":"claude-lead","why":"first in the chain with headroom (claude-lead)","skipped":[],"reviewer":"codex","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Opus only with the maintainer's OK and the reason stated.","card_label":"Claude","fallback_chain":["claude-lead"],"reviews":[{"reviewer":"codex","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
+## small-mechanical-pr  exit=0
+shape: small-mechanical-pr
+recommended: copilot (put Agent = Copilot on the card)
+why: first in the chain with headroom (copilot, claude-haiku)
+required review: claude-sonnet: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+headroom unknown for: monthly_percent (not blocking)
+chain: copilot -> claude-haiku
+safo route only recommends: the lead sets the card and hands the work out.
+## small-mechanical-pr --json exit=0
+{"shape":"small-mechanical-pr","agent":"copilot","why":"first in the chain with headroom (copilot, claude-haiku)","skipped":[],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":["monthly_percent"],"endpoint":"","model":"","note":"","card_label":"Copilot","fallback_chain":["copilot","claude-haiku"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
+## status-headline  exit=0
+shape: status-headline
+recommended: nobody (every agent in the chain is short of headroom: wait for a reset or ask the maintainer)
+skipped: ollama (instance-a: unreachable)
+skipped: ollama (instance-b: not a general endpoint)
+note: Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted.
+chain: ollama
+safo route only recommends: the lead sets the card and hands the work out.
+## status-headline --json exit=0
+{"shape":"status-headline","agent":null,"why":"every agent in the chain is short of headroom: wait for a reset or ask the maintainer","skipped":["ollama (instance-a: unreachable)","ollama (instance-b: not a general endpoint)"],"reviewer":null,"reviewer_why":"","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted.","card_label":"","fallback_chain":["ollama"],"reviews":[],"local_role":"","warnings":[]}
+## well-specified-code  exit=0
+shape: well-specified-code
+recommended: claude-haiku (put Agent = Claude on the card)
+why: first in the chain with headroom (claude-haiku, claude-sonnet)
+required review: claude-sonnet: ready (independent reviewer)
+required review: codex: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+note: Haiku transcribes the plan's code exactly, its bugs included, so the review reads the plan's code as well.
+chain: claude-haiku -> claude-sonnet
+safo route only recommends: the lead sets the card and hands the work out.
+## well-specified-code --json exit=0
+{"shape":"well-specified-code","agent":"claude-haiku","why":"first in the chain with headroom (claude-haiku, claude-sonnet)","skipped":[],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Haiku transcribes the plan's code exactly, its bugs included, so the review reads the plan's code as well.","card_label":"Claude","fallback_chain":["claude-haiku","claude-sonnet"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"},{"reviewer":"codex","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}

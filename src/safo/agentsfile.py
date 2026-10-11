@@ -18,7 +18,7 @@ import yaml
 
 from safo import netguard
 from safo.errors import ConfigError
-from safo.profile import Budget, Profile, check_profiles, parse_profile
+from safo.profile import Budget, Profile, check_profiles, parse_profile, template_path_problem
 from safo.schema import Reader, _safe_load
 from safo.trust import read_trusted_regular_file
 
@@ -127,6 +127,14 @@ class Promotion:
 
 
 @dataclass(frozen=True)
+class EvidenceSources:
+    """Where the evidence pointers of the profiles are resolved: paths relative to the directory of agents.yaml."""
+
+    lessons: str = "docs/lessons.md"
+    outcomes: str = ""  # empty: no outcomes source, so an `outcomes:` pointer cannot resolve
+
+
+@dataclass(frozen=True)
 class AgentsFile:
     agents: tuple[Agent, ...]
     shapes: tuple[Shape, ...]
@@ -136,6 +144,7 @@ class AgentsFile:
     hooks: Hooks = field(default_factory=Hooks)
     promotion: Promotion = field(default_factory=Promotion)
     profile_migration: tuple[str, ...] = ()  # the cohort members still allowed to have no profile
+    evidence_sources: EvidenceSources = field(default_factory=EvidenceSources)
 
     def agent(self, agent_id: str) -> Agent:
         found = next((a for a in self.agents if a.id == agent_id), None)
@@ -313,6 +322,17 @@ def _promotion(r: Reader, value: object) -> Promotion:
     return Promotion(**out)
 
 
+def _evidence_sources(r: Reader, value: object) -> EvidenceSources:
+    m = r.mapping(value if value is not None else {}, "evidence_sources", {"lessons", "outcomes"})
+    out: dict[str, str] = {}
+    for key in m:
+        problem = template_path_problem(m[key])
+        if problem:
+            raise r.fail(f"evidence_sources.{key}", problem)
+        out[key] = m[key]
+    return EvidenceSources(**out)
+
+
 def _migration(r: Reader, value: object, today: dt.date) -> tuple[str, ...]:
     m = r.mapping(value, "profile_migration", {"agents"}, {"agents"})
     listed: list[str] = []
@@ -336,7 +356,17 @@ def parse_agents(
     top = r.mapping(
         data,
         "",
-        {"version", "agents", "shapes", "thresholds", "rules_of_thumb", "hooks", "profile_migration", "promotion"},
+        {
+            "version",
+            "agents",
+            "shapes",
+            "thresholds",
+            "rules_of_thumb",
+            "hooks",
+            "profile_migration",
+            "promotion",
+            "evidence_sources",
+        },
         {"version", "agents", "shapes"},
     )
     budget = Budget(r)
@@ -474,6 +504,7 @@ def parse_agents(
         _hooks(r, top.get("hooks")),
         _promotion(r, top.get("promotion")),
         migrating,
+        _evidence_sources(r, top.get("evidence_sources")),
     )
 
 
@@ -491,14 +522,14 @@ def merge(base: Any, over: Any) -> Any:
     return over
 
 
-LOCAL_FORBIDDEN = "the local override may not carry profile, profile_migration or promotion"
+LOCAL_FORBIDDEN = "the local override may not carry profile, profile_migration, promotion or evidence_sources"
 
 
 def _carries_profile(data: Any) -> bool:
     if not isinstance(data, dict):
         return False
     agents = data.get("agents")
-    return "profile_migration" in data or (
+    return "profile_migration" in data or "evidence_sources" in data or (
         isinstance(agents, dict) and any(isinstance(a, dict) and "profile" in a for a in agents.values())
     )
 
@@ -511,16 +542,22 @@ def load_agents_merged(path: str | Path, local: str | Path | None, *, trusted: b
     comes from the local override: it would change what is rendered without a reviewed diff. `trusted=False` is for a
     repository checkout read through this function (a test of the shipped file), where review is the control.
     """
+    return load_with_base(path, local, trusted=trusted)[0]
+
+
+def load_with_base(path: str | Path, local: str | Path | None, *, trusted: bool = True) -> tuple[AgentsFile, Any]:
+    """The merged document, and the base file's own data (never the merge) for `config:` evidence pointers."""
     base = Path(path)
-    data = _read_yaml(base, trusted=trusted)
+    base_data = _read_yaml(base, trusted=trusted)
+    data = base_data
     source = str(base)
     if local is not None and Path(local).exists():
         over = _read_yaml(Path(local), trusted=trusted)
         if isinstance(over, dict) and ("promotion" in over or _carries_profile(over)):
             raise ConfigError(f"{Path(local).name}: {LOCAL_FORBIDDEN}")
-        data = merge(data, over)
+        data = merge(base_data, over)
         source = f"{base} (merged with {Path(local).name})"
-    return parse_agents(data, source, base_dir=base.parent)
+    return parse_agents(data, source, base_dir=base.parent), base_data
 
 
 def _read_yaml(p: Path, *, trusted: bool = False) -> Any:
