@@ -241,6 +241,19 @@ def test_a_utf8_bom_is_refused_because_it_is_not_printable_text(tmp_path: Path) 
         ("<!--\n\n{{task}}\n", r"inside a raw HTML block"),
         ("<!-- a comment\nmore\n\n{{task}}\n", r"inside a raw HTML block"),
         ("<pre>\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<pre>\n</script>\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<script>\n</pre>\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<style>\n</textarea>\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<textarea>\n</style>\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<!--\n</pre>\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<pre>\n-->\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<?php\n-->\n\n{{task}}\n", r"inside a raw HTML block"),
+        ("<![CDATA[\n?>\n\n{{task}}\n", r"inside a raw HTML block"),
+        (
+            "Open &#32;and entity-encoded: " + BOUNDARY_PARAGRAPH[30:75].replace(" ", "&#32;") + "\n\n{{task}}\n",
+            r"policy-boundary",
+        ),
+        ("Read %2Fhome%2Fsomeone\n\n{{task}}\n", r"private path"),
         ("<PRE class=x>\n\n{{task}}\n", r"inside a raw HTML block"),
         ("<script>\n\n{{task}}\n", r"inside a raw HTML block"),
         ("<style>\n\n{{task}}\n", r"inside a raw HTML block"),
@@ -267,6 +280,8 @@ def test_template_content_and_placement_rules(tmp_path: Path, text: str, pattern
         "<!--\nx\n-->\n\n{{task}}\n",
         "<pre>x</pre>\n\n{{task}}\n",
         "<pre>\nx\n</PRE>\n\n{{task}}\n",
+        "<style>\nx\n</STYLE>\n\n{{task}}\n",
+        "<textarea>\nx\n</textarea>\n\n{{task}}\n",
         "<script>\nx\n</script>\n\n{{task}}\n",
         "<?php x ?>\n\n{{task}}\n",
         "<![CDATA[ x ]]>\n\n{{task}}\n",
@@ -280,6 +295,81 @@ def test_closed_fences_and_comments_and_blank_line_ended_html_leave_the_placehol
     tmp_path: Path, text: str
 ) -> None:
     assert load_template(tmp_path, text).brief.template_text == text
+
+
+def test_a_template_referenced_by_several_profiles_is_checked_once_per_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import safo.profile as profile_module
+
+    calls: list[str] = []
+    real = profile_module.check_template
+
+    def spy(r: Any, text: str, path: str) -> None:
+        calls.append(path)
+        real(r, text, path)
+
+    monkeypatch.setattr(profile_module, "check_template", spy)
+    put(tmp_path, "templates/brief.md", GOOD)
+    put(tmp_path, "templates/other.md", GOOD + "\nExtra.\n")
+    d = template_doc()
+    profile(d, "ollama")["brief"] = {"template": "templates/brief.md"}
+    profile(d, "claude-haiku")["brief"] = {"template": "templates/brief.md"}
+    loads(tmp_path, d)
+    assert len(calls) == 1
+    calls.clear()
+    profile(d, "claude-haiku")["brief"] = {"template": "templates/other.md"}
+    loads(tmp_path, d)
+    assert len(calls) == 2, "another template is checked, and a second load starts a fresh cache"
+
+
+def test_a_cache_hit_still_requires_the_same_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import safo.profile as profile_module
+
+    calls: list[str] = []
+    real = profile_module.check_template
+
+    def spy(r: Any, text: str, path: str) -> None:
+        calls.append(text)
+        real(r, text, path)
+
+    monkeypatch.setattr(profile_module, "check_template", spy)
+    put(tmp_path, "a/brief.md", GOOD)
+    put(tmp_path, "b/brief.md", "Different.\n\n{{task}}\n")
+    d = template_doc("a/brief.md")
+    profile(d, "ollama")["brief"] = {"template": "b/brief.md"}
+    loads(tmp_path, d)
+    assert len(calls) == 2
+
+
+def test_twenty_loads_of_a_maximum_size_template_are_fast(tmp_path: Path) -> None:
+    import time
+
+    words = [
+        "alpha",
+        "beta",
+        "gamma",
+        "tool",
+        "access",
+        "secrecy",
+        "rules",
+        "approvals",
+        "briefing",
+        "guidance",
+        "only",
+    ]
+    text = ""
+    n = 0
+    while len(text) < 16_000:
+        text += " ".join(words[(n + k * 7) % len(words)] for k in range(12)) + "\n"
+        n += 5
+    text = text[:16_384].rsplit("\n", 1)[0] + "\n"
+    put(tmp_path, "templates/brief.md", text)
+    path = write(tmp_path / "agents.yaml", template_doc())
+    start = time.perf_counter()
+    for _ in range(20):
+        load_agents(path)
+    assert time.perf_counter() - start < 10, "a linear scan takes well under a second for all twenty"
 
 
 def test_a_tab_and_unicode_are_allowed_in_a_template(tmp_path: Path) -> None:
@@ -353,6 +443,7 @@ def test_a_persona_goes_through_the_same_file_rules(tmp_path: Path) -> None:
         ("home", lambda p: p.write_text("see /home/someone/x")),
         ("fullhome", lambda p: p.write_text("see \uff0fhome\uff0fsomeone")),
         ("fullmail", lambda p: p.write_text("mail someone\uff20corp\uff0etest")),
+        ("pct", lambda p: p.write_text("see %2Fhome%2Fsomeone")),
         ("mail", lambda p: p.write_text("mail someone@corp.test")),
     ):
         base.mkdir(parents=True, exist_ok=True)
