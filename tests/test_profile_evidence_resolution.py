@@ -367,3 +367,27 @@ def test_slugify_keeps_the_text_of_a_link() -> None:
     assert slugify("[a](b)[c](d)") == "ac"
     assert slugify("[unclosed](") == "unclosed"
     assert slugify("[" * 5000 + "x") == "x"
+
+
+@pytest.mark.parametrize(
+    ("line", "text"),
+    [
+        ("# One", "One"),
+        ("###### Six", "Six"),
+        ("####### Seven", ""),
+        ("#NoSpace", ""),
+        ("#", ""),
+        ("   ### Three spaces", "Three spaces"),
+        ("    ### Four spaces", ""),
+        ("## Foo#", "Foo#"),
+        ("## Foo ##", "Foo"),
+        ("## Foo ## x", "Foo ## x"),
+        ("## ###", ""),
+        ("##\tTab", "Tab"),
+        ("not a heading", ""),
+    ],
+)
+def test_heading_text(line: str, text: str) -> None:
+    from safo.evidence import heading_text
+
+    assert heading_text(line) == text

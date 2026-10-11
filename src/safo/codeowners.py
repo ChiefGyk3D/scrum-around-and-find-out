@@ -103,8 +103,9 @@ def _translate(pattern: str) -> re.Pattern[str]:
 
     Understood: literal characters, `\\` + a punctuation character or space (that character, literally), `*` and `?`
     (never a slash), and `**` as a whole path segment: leading `**/`, middle `/**/`, trailing `/**`. Any other run of
-    stars acts as one `*`. Not understood, so refused: `[...]` classes and section headers, a leading `!`, other
-    backslash escapes, and patterns that are long or have many wildcards (the match cost is bounded).
+    stars acts as one `*`, except `**/` glued to a character before it, which git reads differently (refused). Not
+    understood, so refused: `[...]` classes and section headers, a leading `!`, other backslash escapes, and patterns
+    that are long or have many wildcards (the match cost is bounded).
     """
     if len(pattern) > MAX_PATTERN or sum(pattern.count(c) for c in "*?") > MAX_WILDCARDS:
         raise _Unsupported("the pattern is too long or has too many wildcards")
@@ -137,6 +138,10 @@ def _translate(pattern: str) -> re.Pattern[str]:
             elif run >= 2 and before and raw.startswith("/", j):
                 out.append("(?:.*/)?")
                 j += 1
+            elif run >= 2 and not before and raw.startswith("/", j):
+                # git skips a literal prefix and then reads `**/` as a whole segment (x**/z matches x/y/z); other
+                # implementations may not, so an anchored pattern with this shape is not evaluated at all
+                raise _Unsupported("`**` glued to other characters in a pattern with a slash is ambiguous")
             else:
                 out.append("[^/]*")
             i = j

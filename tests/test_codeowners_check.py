@@ -214,3 +214,9 @@ def test_a_directory_is_probed_with_a_file_inside_it() -> None:
     assert uncovered(parse_rules("/agents/?????.md @o\n"), ["agents/"]) != []
     assert uncovered(parse_rules("/agents/**  @o\n"), ["agents/"]) == []
     assert uncovered(parse_rules("/agents/** @o\n"), ["agents"]) == ["agents"]
+
+
+def test_a_removal_one_directory_deep_is_seen() -> None:
+    from safo.codeowners import uncovered
+
+    assert uncovered(parse_rules("* @o\n/examples/harness/*/*.md\n"), ["examples/harness/"]) == ["examples/harness/"]
