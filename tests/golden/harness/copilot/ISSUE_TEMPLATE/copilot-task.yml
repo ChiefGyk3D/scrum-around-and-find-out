@@ -1,4 +1,5 @@
 HEADER
+# SPDX-License-Identifier: MIT
 name: Copilot task
 description: A fully specified task for the Copilot coding agent.
 labels:

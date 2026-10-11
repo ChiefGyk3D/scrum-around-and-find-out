@@ -522,7 +522,8 @@ def _copilot_form(agent: Agent, p: Profile) -> tuple[str, str]:
         "labels": ["copilot"],
         "body": body,
     }
-    return "", _dump(form)
+    # the SPDX line keeps the repository's licence-header rule true for a generated YAML file; both lines are comments
+    return "", "# SPDX-License-Identifier: MIT\n" + _dump(form)
 
 
 def _assemble(path: str, front: str, text: str, manifest: str) -> bytes:
