@@ -28,7 +28,7 @@ Its only network requests are the two it cannot avoid, both made with your own l
 | Agent | Source | Gives |
 |---|---|---|
 | Codex | `~/.codex/sessions/**/*.jsonl`, the `token_count` rows | `plan_type`, the 5-hour window (`primary`) and the weekly one (`secondary`) as percent used with `resets_at`, and per-session token totals |
-| Claude Code | `~/.claude/projects/**/*.jsonl`, subagent transcripts included | Messages and tokens per model family (Opus, Sonnet, Haiku), de-duplicated by message id |
+| Claude Code | `~/.claude/projects/**/*.jsonl`, subagent transcripts included | Messages and tokens per model family (Opus, Sonnet, Haiku, and "other" for any other model), de-duplicated by message id; only the four token counters are read, so new fields in the usage object are ignored |
 | Copilot | `gh agent-task list`; optionally the billing endpoint | Sessions this month; exact premium requests only if the token may read billing |
 | Ollama | `GET /api/tags`, `GET /api/ps` | Reachable or not, installed models, loaded models |
 
