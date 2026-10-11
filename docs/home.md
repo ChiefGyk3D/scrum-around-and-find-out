@@ -8,6 +8,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Why](why.md): the problem, and the idea that the board is the one place work is visible.
 - [Roles](roles.md) and [Routing](routing.md): who does what, and which agent a task goes to (routing is generated from `agents.yaml`).
 - [Personas](personas.md): the four roles (implementer, reviewer, adversarial reviewer, transcriber) and six packs defined in the Department of Internal Arguments, how SAFO relates to them, and how to install and update them.
+- [Agent profiles](profiles.md): how to brief each agent, with every claim tied to a pointer at a measurement (the loader is built; rendering is not yet).
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
 - [Handoff](handoff.md): how work moves from a card to a merged pull request without losing the thread.

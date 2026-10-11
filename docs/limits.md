@@ -67,3 +67,18 @@ takes it for a bug that was hidden.
   `gh`, and the only credentials are the App or the token you pass in.
 - **Local modes are not allowed in the Action.** `usage`, `route`, `outcome`, `local` and `hooks` read files and logins on
   a person's machine; the Action refuses them before it mints anything.
+- **A profile-less agents file keeps the version 0.1 loader.** The trust policy for a private file (a regular file you own,
+  no group or world write, no symbolic link on the way) applies to a file that carries a `profile`, `profile_migration` or
+  `promotion` block. One that carries none is read as before. See [Agent profiles](profiles.md).
+- **A repository checkout is trusted by review, not by ownership.** Its files belong to the runner, so no ownership check
+  means anything there. The control is that `agents.yaml`, the personas and the templates change only by a pull request
+  with a visible diff, and that the maintainer is the code owner. A repository without that gets no protection from
+  profiles against a hostile pull request.
+- **The phrase list in profile text is a tripwire, not a filter.** It catches accidents and the lazy attack. A well-formed,
+  plausibly cited, harmful instruction passes it, and whether a citation is relevant to its claim is a person's judgement.
+- **Promotion counts are a speed bump, not proof.** Outcomes are self-reported by the lead into a file you own. The
+  `promotion` settings make a thin sample visible and slow an honest mistake. They do not stop anyone who can append to
+  the log from adding ten plausible records, and `safo` does not fetch the card URLs. Status stays declared in
+  `agents.yaml`, a reviewed file, and the maintainer reads the evidence before accepting a change of status.
+- **The migration cohort and deadline are code.** The three agents allowed to have no profile, and the date that ends the
+  allowance, are constants in `src/safo/agentsfile.py`. Changing them is a pull request to that file.
