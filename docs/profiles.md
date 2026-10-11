@@ -178,12 +178,15 @@ entries, and rejects an output path that is absolute or has an empty, `.` or `..
 FIFO, socket, device or oversized file anywhere under it, or the output directory itself being a link, is an error for
 `--check` and `--write` alike. The comparison is of exact path sets, so a missing, unexpected or stale file fails. Writes
 go to a temporary file created exclusively in the destination directory, then rename, with `fsync` of the file and the
-directory. A directory or a link is never replaced or removed; a stale file is removed only when it carries a well-formed
-generated header AND its body matches the body digest in that header (a user's file with a copied header but different text
-is reported as not generated and kept); the manifest digest need not resolve, since a stale file's sources are gone. The
-file is opened without following a link, checked from that descriptor, and looked up again by inode just before the unlink,
-which is refused if the name now names something else. Then the directories left empty are removed bottom-up. Anything else stops the whole write before the first
-change, with an error naming the entry. A race between the inventory and the write (another process swapping an entry in
+directory. A directory or a link is never replaced. **The generator never deletes a file or a directory.** `--write` writes and updates
+the expected files only. A stale generated file, a file without the header, and an empty or non-empty unexpected directory
+are each reported by name with the `git rm` command that removes them, and `--write` exits 1 after writing the expected
+files, so a renamed output takes two steps: write, then remove the old one yourself. A header and its digests are tamper
+evidence for a reader, not authorization to remove anything; `--check` only uses them to say "looks generated but is not
+expected" or "not a generated file". An entry that blocks a write (a link, a FIFO, a directory where a file belongs) stops
+the whole write before the first change, with an error naming it. Before each write and at the end the path from the root is
+resolved again and must name the directory the run holds open, or the run fails with "the output directory moved during the
+run". A race between the inventory and the write (another process swapping an entry in
 that window) is narrowed by the exclusive, no-follow opens but not closed.
 
 **Known limitation: who reads the generated text.** The Codex and local-model files are sent to a model, but a few lines

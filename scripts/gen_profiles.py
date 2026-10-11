@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Write or check examples/harness/, the instruction files generated from the profiles in agents.yaml.
 
-scripts/gen_profiles.py --write     make examples/harness/ exactly what agents.yaml renders
+scripts/gen_profiles.py --write     write the files agents.yaml renders; an unexpected entry is reported, never deleted
 scripts/gen_profiles.py --check     exit 1 if it is not (a missing, unexpected, stale or hand-edited file)
 
 Only the repository's agents.yaml is read, never a local override or anything under ~/.config/safo. Unresolved evidence
@@ -50,12 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.write:
         problems, changes = write_tree(ROOT, rel, files)
-        if problems:
-            for problem in problems:
-                print(f"error: {problem}", file=sys.stderr)
-            return 1
         for change in changes:
             print(change)
+        for problem in problems:
+            print(f"error: {problem}", file=sys.stderr)
+        if problems:
+            return 1
         print(f"ok: {shown} is {len(files)} generated files")
         return 0
     problems = check_tree(ROOT, rel, files)

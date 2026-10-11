@@ -189,33 +189,35 @@ def test_a_file_where_a_directory_belongs_is_refused(
     code, err = run(script, "--check", capsys)
     assert code == 1 and "claude: a file where a directory belongs" in err
     code, err = run(script, "--write", capsys)
-    assert code == 1 and "claude: not a generated file" in err
+    assert code == 1 and "claude: a file where a directory belongs" in err
     assert snapshot(tmp_path) == before
 
 
-def test_a_generated_file_where_a_directory_belongs_is_replaced_because_it_is_a_stale_generated_file(
+def test_a_generated_file_where_a_directory_belongs_is_not_deleted_either(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     script, out = good(tmp_path, monkeypatch)
     (out / "local" / "ollama.wrapper.txt").unlink()
     (out / "local").rmdir()
     (out / "local").write_bytes((out / "codex" / "codex.prompt.md").read_bytes())
-    assert run(script, "--write", capsys)[0] == 0
-    assert (out / "local" / "ollama.wrapper.txt").is_file()
-    assert run(script, "--check", capsys)[0] == 0
+    before = snapshot(tmp_path)
+    code, err = run(script, "--write", capsys)
+    assert code == 1 and "local: a file where a directory belongs" in err
+    assert snapshot(tmp_path) == before
 
 
-def test_a_stale_file_without_the_header_is_not_removed_and_blocks_the_write(
+def test_a_stale_file_without_the_header_survives_and_is_reported_while_the_expected_files_are_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     script, out = good(tmp_path, monkeypatch)
     mine = out / "claude" / "notes.md"
     mine.write_text("# my notes\n")
     (out / "local" / "ollama.wrapper.txt").write_text("edited\n")
-    before = snapshot(tmp_path)
     code, err = run(script, "--write", capsys)
-    assert code == 1 and "claude/notes.md" in err and "generated header" in err
-    assert snapshot(tmp_path) == before and mine.read_text() == "# my notes\n"
+    assert code == 1 and "claude/notes.md: unexpected file (not a generated file)" in err
+    assert "git rm examples/harness/claude/notes.md" in err
+    assert mine.read_text() == "# my notes\n"
+    assert (out / "local" / "ollama.wrapper.txt").read_text() != "edited\n", "the expected files are still written"
 
 
 def test_a_stale_file_that_only_mentions_the_header_text_is_not_a_generated_file(
@@ -227,7 +229,7 @@ def test_a_stale_file_that_only_mentions_the_header_text_is_not_a_generated_file
     assert run(script, "--write", capsys)[0] == 1 and notes.exists()
 
 
-def test_a_non_empty_unexpected_directory_is_refused_and_left_alone(
+def test_a_non_empty_unexpected_directory_survives_and_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     script, out = good(tmp_path, monkeypatch)
@@ -236,29 +238,21 @@ def test_a_non_empty_unexpected_directory_is_refused_and_left_alone(
     keep.write_text("mine\n")
     before = snapshot(tmp_path)
     code, err = run(script, "--write", capsys)
-    assert code == 1 and "unexpected/inner/mine.txt" in err
+    assert code == 1 and "unexpected/inner/mine.txt: unexpected file" in err
+    assert "unexpected: unexpected directory" in err and "git rm -r examples/harness/unexpected" in err
     assert snapshot(tmp_path) == before
 
 
-def test_a_stale_generated_file_inside_an_unexpected_directory_is_removed_with_the_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    script, out = good(tmp_path, monkeypatch)
-    old = out / "gone" / "a" / "b.prompt.md"
-    old.parent.mkdir(parents=True)
-    old.write_bytes((out / "codex" / "codex.prompt.md").read_bytes())
-    assert run(script, "--write", capsys)[0] == 0
-    assert not (out / "gone").exists()
-
-
-def test_an_empty_unexpected_directory_is_an_error_for_check_and_is_removed_by_write(
+def test_an_empty_unexpected_directory_is_reported_by_check_and_write_and_never_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     script, out = good(tmp_path, monkeypatch)
     (out / "hollow").mkdir()
     code, err = run(script, "--check", capsys)
     assert code == 1 and "hollow" in err and "unexpected" in err
-    assert run(script, "--write", capsys)[0] == 0 and not (out / "hollow").exists()
+    code, err = run(script, "--write", capsys)
+    assert code == 1 and "hollow: unexpected directory" in err and "rmdir examples/harness/hollow" in err
+    assert (out / "hollow").is_dir()
 
 
 def test_write_creates_a_missing_output_tree(
@@ -512,7 +506,7 @@ def test_no_descriptor_is_leaked_by_a_scan_a_check_a_write_or_a_failure(
     (out / "claude" / "stray.md").write_bytes((out / "codex" / "codex.prompt.md").read_bytes())
     (out / "gone" / "deep").mkdir(parents=True)
     (out / "local" / "ollama.wrapper.txt").write_text("edited\n")
-    assert script.main(["--write"]) == 0
+    assert script.main(["--write"]) == 1  # the stray entries are reported, the edited file is repaired
     os.mkfifo(out / "pipe")
     capsys.readouterr()
     with bounded():
@@ -530,9 +524,12 @@ def test_the_changes_are_printed_one_per_line(
     assert "wrote claude/claude-haiku.md" in first and first[-1] == "ok: examples/harness is 6 generated files"
     (out / "gone" / "deep").mkdir(parents=True)
     (out / "gone" / "deep" / "x.md").write_bytes((out / "codex" / "codex.prompt.md").read_bytes())
-    assert script.main(["--write"]) == 0
-    second = capsys.readouterr().out.splitlines()
-    assert second[:3] == ["removed gone/deep/x.md", "removed directory gone/deep", "removed directory gone"]
+    (out / "local" / "ollama.wrapper.txt").write_text("edited\n")
+    assert script.main(["--write"]) == 1
+    seen = capsys.readouterr()
+    assert seen.out.splitlines() == ["wrote local/ollama.wrapper.txt"]
+    assert "gone/deep/x.md: unexpected file (looks generated but is not expected)" in seen.err
+    assert (out / "gone" / "deep" / "x.md").is_file(), "nothing is deleted"
 
 
 def test_the_script_runs_as_a_program() -> None:

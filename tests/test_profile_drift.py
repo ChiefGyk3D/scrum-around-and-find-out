@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 from types import ModuleType
 
@@ -117,23 +118,25 @@ def test_a_changed_source_makes_the_check_fail_with_a_stale_manifest(
     assert "body digest" not in err  # the files were not edited, only their sources moved
 
 
-def test_a_renamed_output_leaves_no_stale_file_or_empty_directory_after_write(
+def test_a_renamed_output_is_reported_never_deleted_and_the_tree_is_clean_once_the_owner_removes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     script, out = written(tmp_path, monkeypatch)
     old = out / "legacy" / "deep" / "old-name.prompt.md"
     old.parent.mkdir(parents=True)
-    old.write_bytes(
-        (out / "codex" / "codex.prompt.md").read_bytes()
-    )  # a header-bearing generated file at a retired path
+    old.write_bytes((out / "codex" / "codex.prompt.md").read_bytes())  # a header-bearing generated file, retired path
     (out / "emptied").mkdir()
     capsys.readouterr()
     assert check(script, capsys)[0] == 1
-    assert script.main(["--write"]) == 0
-    assert not (out / "legacy").exists() and not (out / "emptied").exists()
-    assert check(script, capsys)[0] == 0
+    assert script.main(["--write"]) == 1
+    err = capsys.readouterr().err
+    assert "legacy/deep/old-name.prompt.md: unexpected file (looks generated but is not expected)" in err
+    assert "git rm examples/harness/legacy/deep/old-name.prompt.md" in err and "emptied: unexpected directory" in err
+    assert old.is_file() and (out / "emptied").is_dir(), "the generator deletes nothing"
+    shutil.rmtree(out / "legacy")  # what `git rm -r` does
+    (out / "emptied").rmdir()
+    assert script.main(["--write"]) == 0 and check(script, capsys)[0] == 0
     assert sorted(str(p.relative_to(out)) for p in out.rglob("*") if p.is_file()) == sorted(RENDER_PATHS)
-    assert not [p for p in out.rglob("*") if p.is_dir() and not any(p.iterdir())]
 
 
 def test_write_repairs_an_edited_file_and_is_a_no_op_on_a_clean_tree(

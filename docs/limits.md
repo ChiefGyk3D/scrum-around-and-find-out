@@ -95,14 +95,18 @@ takes it for a bug that was hidden.
   and a body digest. They are not secret: anyone who can rewrite `agents.yaml`, the persona, the template and the generated
   files together produces a consistent set. They show a reader holding the sources that a file was edited or is stale; the
   controls are the generated diff and CODEOWNERS. See [Agent profiles](profiles.md).
-- **Stale-file removal narrows the race, it does not close it.** The stale file is opened without following a link, its
-  header and both digests are checked from the descriptor, and its inode is compared again just before the unlink. POSIX has
-  no conditional unlink, so a rename that lands between that last lookup and the unlink can still win.
+- **The generator never deletes, so a stale file stays until its owner removes it.** `--write` reports a stale or
+  unexpected file or directory with the `git rm` command and exits 1; `--check` reports it as drift. A header or a digest
+  in a generated file is tamper evidence for a reader, not authorization to remove anything.
 - **The generated files mix two audiences.** The header, the `think=false` comment and some `do`/`dont` lines address the
   caller, but the Codex and local-model files are sent whole to the model (see [Agent profiles](profiles.md)).
 - **The generator narrows the output-tree race, it does not close it.** Files are opened without following links and written
   through directory descriptors with an exclusive temporary file and a rename, but another process with write access to
-  `examples/harness/` can still swap an entry between the inventory and the write.
+  `examples/harness/` can still swap an entry between the inventory and the write. The run re-resolves the output path
+  from the repository root before each write and at the end and fails with "the output directory moved during the run",
+  but descriptor confinement cannot stop a concurrent process of the same user from renaming the repository tree itself
+  while the generator runs; that is outside the threat model. Run the generator on a checkout you control. CI runs it on
+  a fresh checkout.
 - **The privacy scan proves only the generic patterns.** CI checks home paths, e-mail addresses, private addresses and
   callsign-shaped tokens in `examples/harness/`. A private handle, an employer term or an internal hostname is caught only
   where `SAFO_PRIVACY_EXTRA_FILE` is applied, which a release that publishes the files must do ([Privacy check](privacy.md)).

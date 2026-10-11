@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import ast
 import os
+import shutil
 import stat
 from collections.abc import Iterator
 from dataclasses import replace
@@ -113,72 +115,147 @@ def test_an_output_path_outside_the_root_is_refused(
     assert code == 1 and "inside the repository" in err and not (tmp_path / "elsewhere").exists()
 
 
-# -- stale files ------------------------------------------------------------------------------------------------------
+# -- nothing is ever deleted -----------------------------------------------------------------------------------------
 
 
-def stale_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, Path, Path, bytes]:
+def test_write_deletes_nothing_and_reports_every_entry_that_is_not_in_the_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     script, out = scratch(tmp_path, monkeypatch)
     assert script.main(["--write"]) == 0
     good = (out / "codex" / "codex.prompt.md").read_bytes()
-    old = out / "legacy" / "old.prompt.md"
-    old.parent.mkdir()
-    old.write_bytes(good)
-    return script, out, old, good
-
-
-def test_a_file_with_a_valid_looking_header_and_wrong_digests_is_a_users_file_and_is_kept(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    script, _, old, good = stale_setup(tmp_path, monkeypatch)
-    old.write_bytes(good.replace(b"Prepend", b"My own words"))  # the header is intact, the body no longer matches
-    before = snapshot(tmp_path)
+    precious = out / "claude" / "notes.md"
+    precious.write_text("my own notes\n")
+    forged = out / "legacy" / "forged.prompt.md"
+    forged.parent.mkdir()
+    forged.write_bytes(good.replace(b"Prepend", b"My own words"))  # a valid-looking header over different text
+    stale = out / "legacy" / "old.prompt.md"
+    stale.write_bytes(good)  # a real generated file at a retired path
+    hollow = out / "hollow"
+    hollow.mkdir()
+    (out / "local" / "ollama.wrapper.txt").write_text("edited\n")
+    keep = snapshot(tmp_path)
+    keep = {k: v for k, v in keep.items() if "ollama.wrapper.txt" not in k}
     code, err = run(script, "--write", capsys)
-    assert code == 1 and "legacy/old.prompt.md: not a generated file" in err
-    assert snapshot(tmp_path) == before
+    assert code == 1
+    assert "claude/notes.md: unexpected file (not a generated file)" in err
+    assert "legacy/forged.prompt.md: unexpected file (not a generated file)" in err
+    assert "legacy/old.prompt.md: unexpected file (looks generated but is not expected)" in err
+    assert "hollow: unexpected directory" in err and "legacy: unexpected directory" in err
+    for hint in (
+        "git rm examples/harness/claude/notes.md",
+        "git rm -r examples/harness/legacy",
+        "rmdir examples/harness/hollow",
+    ):
+        assert hint in err
+    after = snapshot(tmp_path)
+    assert all(after.get(k) == v for k, v in keep.items()), "every unexpected entry survived byte for byte"
+    assert (out / "local" / "ollama.wrapper.txt").read_bytes() != b"edited\n", "the expected files were still written"
+    # once the owner removes them (as `git rm` would), the run is clean
+    precious.unlink()
+    shutil.rmtree(out / "legacy")
+    hollow.rmdir()
+    assert script.main(["--write"]) == 0 and script.main(["--check"]) == 0
 
 
-def test_a_stale_file_whose_manifest_no_longer_resolves_but_whose_body_digest_holds_is_removed(
+def test_the_generator_has_no_way_to_delete() -> None:
+    """The module has no call that removes a file or directory, except the writer's own temporary file."""
+    tree = ast.parse(Path(ht.__file__).read_text())
+    removers = {"unlink", "rmdir", "remove", "removedirs", "rmtree", "rename", "replace"}
+    found = []
+    for func in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        for call in [n for n in ast.walk(func) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]:
+            if isinstance(call.func, ast.Attribute) and call.func.attr in removers:
+                found.append((func.name, call.func.attr))
+    assert sorted(set(found)) == [("_write_file", "rename"), ("_write_file", "unlink")], found
+
+
+def test_a_failed_write_still_unlinks_only_its_own_temporary_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    script, out, _, _ = stale_setup(tmp_path, monkeypatch)
-    assert run(script, "--write", capsys)[0] == 0 and not (out / "legacy").exists()
+    script, out = scratch(tmp_path, monkeypatch)
+    assert script.main(["--write"]) == 0
+    mine = out / "codex" / "keep.md"
+    mine.write_text("mine\n")
+    monkeypatch.setattr(os, "write", lambda fd, data: (_ for _ in ()).throw(OSError(28, "no space left")))
+    (out / "local" / "ollama.wrapper.txt").write_text("edited\n")
+    assert run(script, "--write", capsys)[0] == 1
+    assert mine.read_text() == "mine\n" and not [p for p in out.rglob(".*.tmp")]
 
 
-@pytest.mark.parametrize("stage", ["before-open", "after-read"])
-def test_a_stale_file_swapped_for_another_inode_is_not_removed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str
+# -- the output directory moving during the run -----------------------------------------------------------------------
+
+
+def test_an_output_directory_moved_outside_the_root_before_the_first_write_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    script, _, old, good = stale_setup(tmp_path, monkeypatch)
-    seen: list[str] = []
+    script, out = scratch(tmp_path, monkeypatch)
+    away = tmp_path / "away"
+    moves: list[str] = []
 
-    def swap(where: str, name: str) -> None:
-        if where == f"stale:{stage}" and name == "legacy/old.prompt.md" and not seen:
-            seen.append(where)
-            replacement = old.parent / "replacement"
-            replacement.write_bytes(good)  # a new file, so a new inode
-            os.rename(replacement, old)
+    def move(stage: str, name: str) -> None:
+        if stage == "write" and not moves:
+            moves.append(name)
+            out.rename(away)
+
+    monkeypatch.setattr(ht, "_seam", move)
+    out.mkdir(parents=True)
+    code, err = run(script, "--write", capsys)
+    assert moves and code == 1 and "the output directory moved during the run" in err
+    assert list(away.rglob("*")) == [], "nothing was written before the move was seen"
+
+
+def test_an_output_directory_moved_after_some_writes_fails_the_run_and_the_early_files_went_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script, out = scratch(tmp_path, monkeypatch)
+    away = tmp_path / "away"
+    calls: list[str] = []
+
+    def move(stage: str, name: str) -> None:
+        if stage == "write":
+            calls.append(name)
+            if len(calls) == 3:
+                out.rename(away)
+
+    monkeypatch.setattr(ht, "_seam", move)
+    code, err = run(script, "--write", capsys)
+    assert code == 1 and "the output directory moved during the run" in err
+    written = sorted(str(p.relative_to(away)) for p in away.rglob("*") if p.is_file())
+    assert len(written) == 2 and not out.exists(), "two files landed in the directory that was moved; none after"
+
+
+def test_an_output_directory_moved_at_the_very_end_is_still_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script, out = scratch(tmp_path, monkeypatch)
+    away = tmp_path / "away"
+
+    def move(stage: str, name: str) -> None:
+        if stage == "end":
+            out.rename(away)
+
+    monkeypatch.setattr(ht, "_seam", move)
+    code, err = run(script, "--write", capsys)
+    assert code == 1 and "the output directory moved during the run" in err
+    assert len([p for p in away.rglob("*") if p.is_file()]) == 6
+
+
+def test_an_ancestor_replaced_by_a_link_to_the_same_place_during_the_run_is_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script, out = scratch(tmp_path, monkeypatch)
+    examples = out.parent
+    real = tmp_path / "examples-real"
+
+    def swap(stage: str, name: str) -> None:
+        if stage == "end":
+            examples.rename(real)
+            examples.symlink_to(real)
 
     monkeypatch.setattr(ht, "_seam", swap)
     code, err = run(script, "--write", capsys)
-    assert seen and code == 1 and "legacy/old.prompt.md: changed since the inventory, so it is not removed" in err
-    assert old.exists()
-
-
-def test_a_stale_file_swapped_for_a_symlink_is_not_followed_or_removed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    script, _, old, _ = stale_setup(tmp_path, monkeypatch)
-    target = tmp_path / "precious.txt"
-    target.write_text("precious\n")
-
-    def swap(where: str, name: str) -> None:
-        if where == "stale:before-open" and not old.is_symlink():
-            old.unlink()
-            old.symlink_to(target)
-
-    monkeypatch.setattr(ht, "_seam", swap)
-    code, err = run(script, "--write", capsys)
-    assert code == 1 and "not removed" in err and old.is_symlink() and target.read_text() == "precious\n"
+    assert code == 1 and "the output directory moved during the run" in err
 
 
 # -- work caps and path rules -----------------------------------------------------------------------------------------
@@ -326,17 +403,3 @@ def test_no_descriptor_leaks_when_the_path_is_refused(tmp_path: Path, monkeypatc
     with pytest.raises(ht.TreeError, match="changed while"):
         ht.open_out(tmp_path, "real/sub", False)
     assert len(os.listdir("/proc/self/fd")) == before
-
-
-def test_a_stale_file_edited_in_place_after_the_inventory_is_not_removed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    script, _, old, _ = stale_setup(tmp_path, monkeypatch)
-
-    def edit(stage: str, name: str) -> None:
-        if stage == "stale:before-open":
-            old.write_text("my own notes now\n")  # same inode, no longer generated
-
-    monkeypatch.setattr(ht, "_seam", edit)
-    code, err = run(script, "--write", capsys)
-    assert code == 1 and "changed since the inventory" in err and old.read_text() == "my own notes now\n"

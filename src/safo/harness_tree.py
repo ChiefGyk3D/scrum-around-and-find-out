@@ -10,9 +10,14 @@ agents obey, and the directory is one a contributor's pull request can fill, so 
   `O_NOFOLLOW | O_NONBLOCK` and checked with `fstat` on the descriptor, so a swap between the two cannot hang the read;
 - the comparison is of EXACT path sets: a missing file, an unexpected file and a stale file all fail;
 - WRITES go through directory descriptors: a temporary file created `O_EXCL | O_NOFOLLOW` in the destination directory,
-  `fsync`, rename, `fsync` of the directory. A directory or a link is never replaced or removed. A stale file is removed
-  only when it is a regular file that carries the generated header; then the directories left empty and no longer
-  expected are removed bottom-up. Anything else stops the whole write, before the first change, with an error naming it.
+  `fsync`, rename, `fsync` of the directory. Before each write, and at the end, the path from the repository root is
+  resolved again component by component and must name the directory the descriptor holds, else the run fails with "the
+  output directory moved during the run";
+- NOTHING IS EVER DELETED. `--write` writes and updates the expected files only. A stale file (with a generated header
+  or without), an unexpected directory (empty or not) and anything else not in the render is reported by name with the
+  `git rm` command to run, and the exit status is 1. A header or a digest is tamper evidence for a reader, never the
+  authority to remove a file. An entry that blocks a write (a link, a FIFO, a directory where a file belongs) stops the
+  whole write before the first change.
 
 POSIX only (descriptors and `dir_fd`). The walk is capped at 8 levels and 500 entries, and a file at 64 KiB, so a
 hostile tree cannot make it expensive.
@@ -257,33 +262,38 @@ def check_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> list[s
             problems += compare(rendered, tree.files[path])
     for d in sorted(expected_dirs & set(tree.files)):
         problems.append(f"{d}: a file where a directory belongs")
+    return problems + _unexpected(tree, expected, rel)
+
+
+def _unexpected(tree: Tree, expected: Mapping[str, Rendered], rel: str) -> list[str]:
+    """The entries that are not in the render, each with the command that removes it. Nothing here deletes anything."""
+    expected_dirs = _parents(expected)
+    out = []
     for path in sorted(set(tree.files) - set(expected) - expected_dirs):
-        problems.append(f"{path}: unexpected file (a stale output or a stray)")
+        what = "looks generated but is not expected" if has_header(tree.files[path]) else "not a generated file"
+        out.append(
+            f"{path}: unexpected file ({what}); it is never deleted for you, remove it with: git rm {rel}/{path}"
+        )
     for d in sorted(tree.dirs - expected_dirs - set(expected)):
-        problems.append(f"{d}: unexpected directory")
-    return problems
+        out.append(
+            f"{d}: unexpected directory; it is never deleted for you, remove it with: git rm -r {rel}/{d} "
+            f"(or rmdir {rel}/{d} when it is empty and untracked)"
+        )
+    return out
 
 
 # -- writing -----------------------------------------------------------------------------------------------------------
 
 
-def _plan(expected: Mapping[str, Rendered], tree: Tree) -> tuple[list[str], list[str], list[str]]:
-    """(problems that stop the write, stale files to remove, unexpected directories to remove)."""
+def _blocking(expected: Mapping[str, Rendered], tree: Tree) -> list[str]:
+    """What stops a write before its first change: a link or special entry, or an entry in the way of a file."""
     problems = list(tree.problems)
-    expected_dirs = _parents(expected)
-    stale: list[str] = []
-    for path in sorted(set(tree.files) - set(expected)):
-        if has_header(tree.files[path]):
-            stale.append(path)
-        else:
-            problems.append(
-                f"{path}: not a generated file (no generated header whose body digest matches), so it is not removed"
-            )
     for path in expected:
         if path in tree.dirs:
             problems.append(f"{path}: a directory where a generated file belongs; it is never replaced")
-    stale_dirs = sorted(tree.dirs - expected_dirs - set(expected), key=lambda d: (-d.count("/"), d))
-    return problems, stale, stale_dirs
+    for d in sorted(_parents(expected) & set(tree.files)):
+        problems.append(f"{d}: a file where a directory belongs; it is never replaced")
+    return problems
 
 
 def _open_dir(root_fd: int, rel: str, create: bool) -> int:
@@ -330,41 +340,35 @@ def _write_file(root_fd: int, rel: str, data: bytes) -> None:
         os.close(dir_fd)
 
 
-def _remove_stale(root_fd: int, path: str, ident: tuple[int, int]) -> None:
-    """Unlink the stale generated file `path` only if it is still the inode that was inventoried and still generated.
-
-    The leaf is opened O_NOFOLLOW | O_NONBLOCK, its header and both digests are checked from that descriptor, and the
-    name is looked up again in its directory just before the unlink. Between that lookup and the unlink a rename can
-    still win (POSIX has no conditional unlink); docs/limits.md says so.
-    """
-    head, _, name = path.rpartition("/")
-    changed = TreeError(f"{path}: changed since the inventory, so it is not removed")
-    dir_fd = _open_dir(root_fd, head, False)
+def _reverify(root: Path, rel: str, ident: tuple[int, int]) -> None:
+    """The path from the root still resolves, with no link followed, to the directory the run holds open."""
+    moved = TreeError("the output directory moved during the run")
     try:
-        _seam("stale:before-open", path)
-        got = _read_file(dir_fd, name)
-        if got is None or (got[1], got[2]) != ident or not has_header(got[0]):
-            raise changed
-        _seam("stale:after-read", path)
-        now = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        if not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != ident:
-            raise changed
-        os.unlink(name, dir_fd=dir_fd)
+        fd = open_out(root, rel, False)
+    except TreeError:
+        raise moved from None
+    if fd is None:
+        raise moved
+    try:
+        here = os.fstat(fd)
     finally:
-        os.close(dir_fd)
+        os.close(fd)
+    if (here.st_dev, here.st_ino) != ident:
+        raise moved
 
 
 def write_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> tuple[list[str], list[str]]:
-    """Make the tree exactly the render. Returns (problems, changes); with problems, nothing was changed."""
+    """Write the expected files. Returns (problems, changes). A problem is an entry that is not in the render (never
+    deleted: the problem names the git command) or a failure. If an entry blocks the write, nothing is changed."""
     try:
         components(rel)
         _check_expected(expected)
     except TreeError as err:
         return [str(err)], []
     tree = scan(root, rel)
-    problems, stale, stale_dirs = _plan(expected, tree)
-    if problems:
-        return problems, []
+    blocking = _blocking(expected, tree)
+    if blocking:
+        return blocking + _unexpected(tree, expected, rel), []
     changes: list[str] = []
     try:
         root_fd = open_out(root, rel, True)
@@ -373,28 +377,21 @@ def write_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> tuple[
     if root_fd is None:
         return [f"{rel}: could not be created"], []
     try:
-        for path in stale:
-            _remove_stale(root_fd, path, tree.ids[path])
-            changes.append(f"removed {path}")
+        held = os.fstat(root_fd)
+        ident = (held.st_dev, held.st_ino)
         for path, rendered in expected.items():
             if tree.files.get(path) == rendered.data:
                 continue
+            _seam("write", path)
+            _reverify(root, rel, ident)
             _write_file(root_fd, path, rendered.data)
             changes.append(f"wrote {path}")
-        for path in stale_dirs:
-            head, _, name = path.rpartition("/")
-            dir_fd = _open_dir(root_fd, head, False)
-            try:
-                os.rmdir(name, dir_fd=dir_fd)
-            except OSError as err:
-                return [f"{path}: not removed ({err.strerror})"], changes
-            finally:
-                os.close(dir_fd)
-            changes.append(f"removed directory {path}")
+        _seam("end", "")
+        _reverify(root, rel, ident)
     except TreeError as err:
         return [str(err)], changes
     except OSError as err:
         return [f"{rel}: the write stopped ({err.strerror})"], changes
     finally:
         os.close(root_fd)
-    return [], changes
+    return _unexpected(tree, expected, rel), changes
