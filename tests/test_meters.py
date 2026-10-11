@@ -316,7 +316,7 @@ def test_a_billing_login_that_is_not_a_login_is_never_put_in_a_path() -> None:
     assert not any("evil" in part for call in called for part in call)
 
 
-def _real_shaped(msg_id: str, model: str, out: int = 325) -> dict:
+def _real_shaped(msg_id: str, model: str, out: int = 325) -> dict[str, Any]:
     """A current Claude Code transcript line: nested objects sit beside the four counters."""
     return {
         "type": "assistant",
