@@ -328,3 +328,59 @@ def test_a_symlink_in_the_unpublished_tree_is_refused_too(tmp_path: Path) -> Non
     (repo / "docs" / "superpowers" / "l.md").symlink_to("/etc/passwd")
     with pytest.raises(gw.WikiError, match="symbolic link"):
         gw.generate(repo, repo / "wiki-out", SHA)
+
+
+# Commit, names, sidebar labels.
+
+
+@pytest.mark.parametrize("bad", ["abcd", "0123456", "a" * 39, "a" * 41, "", "g" * 40, "main"])
+def test_commit_must_be_exactly_forty_hex_characters(tmp_path: Path, bad: str) -> None:
+    repo = make_repo(tmp_path)
+    with pytest.raises(gw.WikiError, match="40"):
+        gw.generate(repo, repo / "wiki-out", bad)
+    assert not (repo / "wiki-out").exists()
+
+
+def test_no_commit_is_a_local_run(tmp_path: Path) -> None:
+    got = run(make_repo(tmp_path), commit=None)
+    assert got["Home.md"].startswith("> Generated from docs/home.md at an unknown commit.")
+
+
+def test_an_uppercase_commit_is_written_in_lower_case(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, {"home.md": "# H\n[e](../examples/x.yaml)\n"})
+    (repo / "examples").mkdir()
+    (repo / "examples" / "x.yaml").write_text("a: 1\n")
+    upper = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+    text = run(repo, commit=upper)["Home.md"]
+    assert f"/blob/{upper.lower()}/examples/x.yaml" in text
+    assert upper not in text and "at abcdef0." in text
+
+
+@pytest.mark.parametrize("name", ["my page.md", "a#b.md", "a?b.md", "a%20b.md", "_side.md", ".hidden.md", "é.md"])
+def test_unsafe_file_names_are_refused(tmp_path: Path, name: str) -> None:
+    repo = make_repo(tmp_path)
+    (repo / "docs" / name).write_text("# X\n")
+    with pytest.raises(gw.WikiError, match="file name"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_names_that_differ_only_in_case_collide(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, {"home.md": "# H\n", "foo.md": "# a\n", "Foo.md": "# b\n"})
+    with pytest.raises(gw.WikiError, match="already uses"):
+        gw.generate(repo, repo / "wiki-out", SHA)
+
+
+def test_a_page_listed_twice_in_the_reading_order_appears_once(tmp_path: Path) -> None:
+    home = "# H\n\n## Read in this order\n\n- [Z](zed.md)\n- [Z again](zed.md#x)\n- [A](alpha.md)\n"
+    repo = make_repo(tmp_path, {"home.md": home, "zed.md": "# Zed\n", "alpha.md": "# Alpha\n"})
+    assert re.findall(r"\]\((\S+)\)", run(repo)["_Sidebar.md"]) == ["Home", "Zed", "Alpha"]
+
+
+def test_a_hostile_heading_cannot_forge_a_sidebar_link(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, {"home.md": "# H\n", "zed.md": "# Safe](https://attacker.invalid) <b>`x`|y\n"})
+    sidebar = run(repo)["_Sidebar.md"]
+    line = sidebar.splitlines()[1]
+    shape = re.fullmatch(r"- \[((?:\\.|[^\]\\])*)\]\(Zed\)", line)
+    assert shape, line
+    assert "<b>" not in line and "\\]" in line
+    assert [m for m in re.findall(r"(?<!\\)\]\(([^)]*)\)", line)] == ["Zed"]

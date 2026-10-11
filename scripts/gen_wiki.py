@@ -31,7 +31,9 @@ _SCHEME = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:|//)")
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
 _CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-_SHA = re.compile(r"^[0-9a-fA-F]{4,40}$")
+_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
+_LABEL_META = re.compile(r"([\\\[\]<>`|*_&])")
 _HEADING = re.compile(r"^#\s+(.+?)\s*#*\s*$")
 
 
@@ -140,6 +142,11 @@ def _title(text: str, fallback: str) -> str:
     return fallback
 
 
+def _escape_label(text: str) -> str:
+    """Backslash-escape what could close the label or start markup, so a heading is only ever text."""
+    return _LABEL_META.sub(lambda m: "\\" + m[1], text)
+
+
 def _reading_order(home: str, pages: dict[str, str]) -> list[str]:
     """Page names linked from home.md's 'Read in this order' section, in list order."""
     section = re.split(r"^## ", home, flags=re.MULTILINE)
@@ -156,11 +163,15 @@ def _reading_order(home: str, pages: dict[str, str]) -> list[str]:
 def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL) -> dict[str, str]:
     """Return {wiki filename: text} for every page and the sidebar."""
     if commit is not None and not _SHA.match(commit):
-        raise WikiError(f"--commit must be a hex commit id, not {commit!r}")
+        raise WikiError(f"--commit must be the full 40 hex character commit id, not {commit!r}")
     short = commit[:7].lower() if commit else "an unknown commit"
     texts = _read_docs(docs)
     pages: dict[str, str] = {}
     for filename in texts:
+        if not _FILE.match(filename):
+            raise WikiError(
+                f"docs/{filename}: file name must match [A-Za-z0-9][A-Za-z0-9._-]*.md to become a wiki page"
+            )
         name = page_name(filename)
         if name in pages.values():
             raise WikiError(f"docs/{filename} maps to the page name {name}, which another file already uses")
@@ -176,7 +187,7 @@ def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL)
         titles[name] = _title(text, name)
     ordered = ["Home", *[n for n in _reading_order(texts["home.md"], pages) if n != "Home"]]
     ordered += sorted(n for n in pages.values() if n not in ordered)
-    result["_Sidebar.md"] = "".join(f"- [{titles[n]}]({n})\n" for n in ordered)
+    result["_Sidebar.md"] = "".join(f"- [{_escape_label(titles[n])}]({n})\n" for n in ordered)
     return result
 
 
