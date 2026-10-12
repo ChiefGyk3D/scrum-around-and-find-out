@@ -366,9 +366,10 @@ def _write_file(root_fd: int, rel: str, data: bytes) -> None:
     dir_fd = _open_dir(root_fd, head, True)
     tmp = f".{name}.{secrets.token_hex(8)}.tmp"
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=dir_fd)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
         try:
             try:
+                os.fchmod(fd, 0o644)  # generated docs are committed files: a fixed mode, whatever the umask
                 view = memoryview(data)
                 while view:
                     view = view[os.write(fd, view) :]

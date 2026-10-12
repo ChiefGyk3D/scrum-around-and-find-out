@@ -454,7 +454,7 @@ def test_the_temporary_name_is_hidden_random_and_created_exclusively(
     seen: list[tuple[str, int]] = []
     real = os.open
 
-    def spy(path: Any, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+    def spy(path: Any, flags: int, mode: int = 0o600, *, dir_fd: int | None = None) -> int:
         if isinstance(path, str) and path.endswith(".tmp"):
             seen.append((path, flags))
         return real(path, flags, mode, dir_fd=dir_fd)
