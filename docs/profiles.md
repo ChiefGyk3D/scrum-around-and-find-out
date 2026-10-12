@@ -186,8 +186,11 @@ evidence for a reader, not authorization to remove anything; `--check` only uses
 expected" or "not a generated file". An entry that blocks a write (a link, a FIFO, a directory where a file belongs) stops
 the whole write before the first change, with an error naming it. Before each write and at the end the path from the root is
 resolved again and must name the directory the run holds open, or the run fails with "the output directory moved during the
-run". A race between the inventory and the write (another process swapping an entry in
-that window) is narrowed by the exclusive, no-follow opens but not closed.
+run"; that detects a rename of the output directory by a process with write access to its parent, it cannot prevent
+one, and such a process is outside the threat model. Generated files must be regular files of mode 0644 (`--check`
+reports another mode, `--write` rewrites the file); after the writes a fresh inventory is compared with the render. A race
+between the inventory and the write (another process swapping an entry in that window) is narrowed by the exclusive,
+no-follow opens and caught by the final inventory, but not prevented.
 
 **Known limitation: who reads the generated text.** The Codex and local-model files are sent to a model, but a few lines
 are written for the caller: the header line and the generated-by comment, the `think=false` comment that tells the caller to

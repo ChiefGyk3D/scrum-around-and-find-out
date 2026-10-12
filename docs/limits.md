@@ -104,8 +104,10 @@ takes it for a bug that was hidden.
   through directory descriptors with an exclusive temporary file and a rename, but another process with write access to
   `examples/harness/` can still swap an entry between the inventory and the write. The run re-resolves the output path
   from the repository root before each write and at the end and fails with "the output directory moved during the run",
-  but descriptor confinement cannot stop a concurrent process of the same user from renaming the repository tree itself
-  while the generator runs; that is outside the threat model. Run the generator on a checkout you control. CI runs it on
+  but this detects a rename, it cannot prevent one: a concurrent process with write access to the parent of the output
+  directory (or of the repository tree itself) can move it while the generator runs, and a write in that window lands in
+  the moved directory. That is an explicitly unsupported threat boundary; no lock is built. After the writes a fresh
+  inventory is compared with the render before success is reported. Run the generator on a checkout you control. CI runs it on
   a fresh checkout.
 - **The privacy scan proves only the generic patterns.** CI checks home paths, e-mail addresses, private addresses and
   callsign-shaped tokens in `examples/harness/`. A private handle, an employer term or an internal hostname is caught only

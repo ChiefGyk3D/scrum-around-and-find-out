@@ -321,7 +321,15 @@ can monkeypatch them, as `test_routing_doc.py` does. It does **not** inherit `ge
   before the first change. A renamed output is therefore repaired in two steps: `--write`, then the owner removes the
   old file. A header or digest is tamper evidence, never authorization to remove. Before each write and at the end the
   path from the repository root is resolved again, component by component without following a link, and must name the
-  directory the run holds open; otherwise the run fails with "the output directory moved during the run".
+  directory the run holds open; otherwise the run fails with "the output directory moved during the run". This
+  re-resolution DETECTS a rename of the output directory (or of a parent) by an actor with write access to its parent; it
+  cannot PREVENT one, because a write that follows the held descriptor lands in the moved directory. No lock is built:
+  such a concurrent actor is an explicitly unsupported threat boundary (maintainer ruling, review of PR 37), reported
+  after the fact, not confined. The other guarantees are enforced: after the writes a fresh non-following inventory is
+  compared with the render, and success is reported only if it matches (a file replaced by a link or special entry
+  after the first scan, or an inode swapped under an untouched file, is a problem). Every expected file must be a
+  regular file of mode 0644 (check reports any other mode; write rewrites the file). The temporary file is created
+  0600, stays 0600 while written and synced, and is made 0644 immediately before the rename.
 - It calls `load_verified_agents` (1.5): unresolved evidence is a render failure.
 - `make check` and the CI job that runs `gen_routing.py --check` gain a second line for `gen_profiles.py --check`.
 

@@ -12,7 +12,12 @@ agents obey, and the directory is one a contributor's pull request can fill, so 
 - WRITES go through directory descriptors: a temporary file created `O_EXCL | O_NOFOLLOW` in the destination directory,
   `fsync`, rename, `fsync` of the directory. Before each write, and at the end, the path from the repository root is
   resolved again component by component and must name the directory the descriptor holds, else the run fails with "the
-  output directory moved during the run";
+  output directory moved during the run". That DETECTS a rename by an actor with write access to the output directory's
+  parent; it cannot PREVENT one (a write between the check and the rename lands in the moved directory). Such an actor
+  is outside the threat model. After the writes a fresh inventory is taken and compared with the render, so success is
+  reported only for the tree as it is then (spec 2.6);
+- an expected file is regular and mode 0644. The temporary file stays 0600 while it is written and synced, and is made
+  0644 just before the rename; an existing file with the right bytes and another mode is rewritten;
 - NOTHING IS EVER DELETED. `--write` writes and updates the expected files only. A stale file (with a generated header
   or without), an unexpected directory (empty or not) and anything else not in the render is reported by name with the
   `git rm` command to run, and the exit status is 1. A header or a digest is tamper evidence for a reader, never the
@@ -42,6 +47,7 @@ from safo.errors import ConfigError
 from safo.profile_render import Rendered, compare, has_header
 
 MAX_FILE = 64 * 1024
+FILE_MODE = 0o644  # the one mode a generated file may have: committed docs, never group/world writable or executable
 MAX_DEPTH = 8
 MAX_ENTRIES = 500
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -60,6 +66,7 @@ class Tree:
     exists: bool = False
     files: dict[str, bytes] = field(default_factory=dict)
     ids: dict[str, tuple[int, int]] = field(default_factory=dict)  # (st_dev, st_ino) of each file as it was read
+    modes: dict[str, int] = field(default_factory=dict)  # permission bits (S_IMODE) of each file as it was read
     dirs: set[str] = field(default_factory=set)
     problems: list[str] = field(default_factory=list)
     entries: int = 0
@@ -181,8 +188,8 @@ def _kind(mode: int) -> str:
     return "a special entry"
 
 
-def _read_file(dir_fd: int, name: str) -> tuple[bytes, int, int] | None:
-    """(at most MAX_FILE + 1 bytes, st_dev, st_ino) of the regular file `name`; None when it is not one."""
+def _read_file(dir_fd: int, name: str) -> tuple[bytes, int, int, int] | None:
+    """(at most MAX_FILE + 1 bytes, st_dev, st_ino, mode bits) of the regular file `name`; None when it is not one."""
     try:
         fd = os.open(name, _FILE_FLAGS, dir_fd=dir_fd)
     except OSError:
@@ -199,7 +206,7 @@ def _read_file(dir_fd: int, name: str) -> tuple[bytes, int, int] | None:
                 break
             chunks.append(chunk)
             total += len(chunk)
-        return b"".join(chunks), info.st_dev, info.st_ino
+        return b"".join(chunks), info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode)
     finally:
         os.close(fd)
 
@@ -246,6 +253,7 @@ def _walk(fd: int, rel: str, depth: int, tree: Tree) -> None:
             else:
                 tree.files[path] = got[0]
                 tree.ids[path] = (got[1], got[2])
+                tree.modes[path] = got[3]
         else:
             tree.problems.append(f"{sp}: {_kind(mode)}, which a generated tree never holds")
 
@@ -287,7 +295,11 @@ def check_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> list[s
         _check_expected(expected)
     except TreeError as err:
         return [str(err)]
-    tree = scan(root, rel)
+    return _diff(scan(root, rel), rel, expected)
+
+
+def _diff(tree: Tree, rel: str, expected: Mapping[str, Rendered]) -> list[str]:
+    """Every difference between an inventory and the render: problems, missing, stale, wrong mode, unexpected."""
     problems = list(tree.problems)
     expected_dirs = _parents(expected)
     for path, rendered in expected.items():
@@ -298,6 +310,8 @@ def check_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> list[s
                 problems.append(f"{shown(path)}: missing")
         else:
             problems += compare(rendered, tree.files[path])
+            if tree.modes.get(path) != FILE_MODE:
+                problems.append(f"{shown(path)}: mode is {tree.modes.get(path, 0):04o}, not {FILE_MODE:04o}")
     for d in sorted(expected_dirs & set(tree.files)):
         problems.append(f"{shown(d)}: a file where a directory belongs")
     return problems + _unexpected(tree, expected, rel)
@@ -369,11 +383,11 @@ def _write_file(root_fd: int, rel: str, data: bytes) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
         try:
             try:
-                os.fchmod(fd, 0o644)  # generated docs are committed files: a fixed mode, whatever the umask
                 view = memoryview(data)
-                while view:
+                while view:  # the file stays 0600 while it is incomplete
                     view = view[os.write(fd, view) :]
                 os.fsync(fd)
+                os.fchmod(fd, FILE_MODE)  # generated docs are committed files: a fixed mode, whatever the umask
             finally:
                 os.close(fd)
             os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
@@ -426,18 +440,25 @@ def write_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> tuple[
         held = os.fstat(root_fd)
         ident = (held.st_dev, held.st_ino)
         for path, rendered in expected.items():
-            if tree.files.get(path) == rendered.data:
-                continue
+            if tree.files.get(path) == rendered.data and tree.modes.get(path) == FILE_MODE:
+                continue  # a file with the right bytes and a wrong mode is rewritten: a new 0600 -> 0644 inode
             _seam("write", path)
             _reverify(root, rel, ident)
             _write_file(root_fd, path, rendered.data)
             changes.append(f"wrote {path}")
         _seam("end", "")
         _reverify(root, rel, ident)
+        # fresh and non-following: success is judged on what is there now, not on the first scan
+        final = scan(root, rel)
+        for path in expected:
+            untouched = f"wrote {path}" not in changes and path in tree.ids and path in final.ids
+            if untouched and final.ids[path] != tree.ids[path]:
+                final.problems.append(f"{shown(path)}: replaced during the run")
+        tree = final
     except TreeError as err:
         return [str(err)], changes
     except OSError as err:
         return [f"{rel}: the write stopped ({err.strerror})"], changes
     finally:
         os.close(root_fd)
-    return _unexpected(tree, expected, rel), changes
+    return _diff(tree, rel, expected), changes
