@@ -202,3 +202,31 @@ def test_every_shape_the_personas_page_names_exists_in_agents_yaml() -> None:
     named = shapes_named(page)
     assert named and named <= real, named - real
     assert shapes_named(page.replace("`adversarial-review`", "`no-such-shape`")) - real == {"no-such-shape"}
+
+
+def test_the_profiles_page_describes_the_rendering_and_the_other_pages_link_to_it() -> None:
+    page = squash((ROOT / "docs" / "profiles.md").read_text(encoding="utf-8"))
+    for phrase in (
+        "examples/harness/",
+        "scripts/gen_profiles.py --check",
+        "manifest",
+        "body digest",
+        "policy boundary",
+        "not a signature",
+        "make check",
+        "never follows a symbolic link",
+    ):
+        assert phrase in page, phrase
+    assert (
+        "rendering profiles into instruction files" not in page
+        and "not built yet" not in page.split("safo profiles brief")[0]
+    )
+    for name in ("personas", "limits", "routing", "home"):
+        text = (ROOT / "docs" / f"{name}.md").read_text(encoding="utf-8")
+        assert "(profiles.md)" in text, name
+
+
+def test_the_release_checklist_runs_the_privacy_supplement() -> None:
+    for name in ("privacy", "profiles"):
+        text = squash((ROOT / "docs" / f"{name}.md").read_text(encoding="utf-8"))
+        assert "safo_privacy_extra_file" in text and "examples/harness" in text, name

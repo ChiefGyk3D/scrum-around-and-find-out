@@ -5,7 +5,7 @@
 PY ?= .venv/bin/python
 BIN := $(dir $(PY))
 
-.PHONY: help venv lint format typecheck test check build clean
+.PHONY: help venv lint format typecheck test generated check build clean
 
 help:
 	@echo "make venv       - create .venv from the hash-pinned dev lock and install safo editable"
@@ -13,7 +13,8 @@ help:
 	@echo "make format     - apply ruff format"
 	@echo "make typecheck  - mypy --strict over src and tests"
 	@echo "make test       - pytest (loopback only; see tests/conftest.py)"
-	@echo "make check      - lint, typecheck and test: run before pushing"
+	@echo "make generated  - the generated files match agents.yaml, and the profiles verify"
+	@echo "make check      - lint, typecheck, test and generated: run before pushing"
 	@echo "make build      - sdist and wheel"
 
 venv:
@@ -35,7 +36,13 @@ typecheck:
 test:
 	$(BIN)pytest
 
-check: lint typecheck test
+# the same drift checks the test suite runs, named so a failure says which generated file is stale
+generated:
+	$(PY) scripts/gen_routing.py --check
+	$(PY) scripts/gen_profiles.py --check
+	$(BIN)safo profiles verify --agents agents.yaml
+
+check: lint typecheck test generated
 
 build:
 	$(PY) -m build

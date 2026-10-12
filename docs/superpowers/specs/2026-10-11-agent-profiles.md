@@ -313,11 +313,25 @@ can monkeypatch them, as `test_routing_doc.py` does. It does **not** inherit `ge
   `--write` alike. The comparison is of exact path sets: a missing file, an unexpected file and a stale file all fail.
 - **Reads:** each file opened `O_NOFOLLOW | O_NONBLOCK`, `fstat` must be a regular file, size capped at 64 KiB.
 - **Writes:** temp file created `O_EXCL | O_NOFOLLOW` in the destination directory, `fsync`, rename, then `fsync` of the
-  directory. It refuses to replace a directory or link and never removes a link or special file. It removes a stale file only
-  when it is a regular file that carries the generated header, then removes directories left empty and no longer
-  expected, bottom-up, refusing any that are non-empty. Anything else stops with an error naming it. So a renamed
-  output is repaired by `--write`, and `--write` followed by `--check` passes on every tree that contains only
-  header-bearing generated files and empty directories.
+  directory. The generator **never deletes a file or a directory** (maintainer ruling, group 3 round 3). It refuses to
+  replace a directory or link. `--write` writes and updates the expected files only; every unexpected entry (a stale
+  generated file, a file without the header, an empty or non-empty unexpected directory) is reported by name with the
+  `git rm` command that removes it, and `--write` exits 1 after writing the expected files. An entry that blocks a write
+  (a link or special file, a directory where a file belongs, a file where a directory belongs) stops the whole write
+  before the first change. A renamed output is therefore repaired in two steps: `--write`, then the owner removes the
+  old file. A header or digest is tamper evidence, never authorization to remove. Before each write and at the end the
+  path from the repository root is resolved again, component by component without following a link, and must name the
+  directory the run holds open; otherwise the run fails with "the output directory moved during the run". The
+  last check runs after the final fresh inventory. This re-resolution is best-effort DETECTION of a rename of the output
+  directory (or of a parent), completed before a check, by an actor with write access to its parent; it cannot PREVENT
+  one, because a write that follows the held descriptor lands in the moved directory, and a rename racing the very last
+  instructions of a run can still go unreported. No lock is built:
+  such a concurrent actor is an explicitly unsupported threat boundary (maintainer ruling, review of PR 37), reported
+  after the fact, not confined. The other guarantees are enforced: after the writes a fresh non-following inventory is
+  compared with the render, and success is reported only if it matches (a file replaced by a link or special entry
+  after the first scan, or an inode swapped under an untouched file, is a problem). Every expected file must be a
+  regular file of mode 0644 (check reports any other mode; write rewrites the file). The temporary file is created
+  0600, stays 0600 while written and synced, and is made 0644 immediately before the rename.
 - It calls `load_verified_agents` (1.5): unresolved evidence is a render failure.
 - `make check` and the CI job that runs `gen_routing.py --check` gain a second line for `gen_profiles.py --check`.
 
@@ -582,10 +596,10 @@ Each item includes the failing case that proves the guard bites.
     profile text: each changes the manifest digest. Edit the body of a rendered file keeping its header, and edit only a Claude
     file's front-matter tools list: `--check` reports a body-digest failure in both.
 14. `test_profile_drift` (mirrors `test_routing_doc.py`): tree equals render; `--check` passes, then fails on a hand
-    edit, a deleted file, a stray file and a stale digest; `--write` then `--check` passes; a renamed output leaves no stale file or empty directory after `--write`.
+    edit, a deleted file, a stray file and a stale digest; `--write` then `--check` passes; a renamed output is reported by `--write` (exit 1) with its `git rm` hint and is never deleted, and the tree is clean once the owner removes it.
 15. `test_generator_filesystem`: output tree containing a symlink, a FIFO, a directory where a file belongs, a file where
     a directory belongs, and `OUT` itself a symlink: `--check` reports each as an error without hanging, `--write`
-    refuses without deleting or following; a stale file without the header is not removed; a non-empty unexpected directory is refused.
+    refuses without deleting or following; a precious user file, a file with a forged header, a stale header-bearing file and an empty unexpected directory all survive `--write` and are reported with exit 1; the output directory moved outside the root during the run fails the run.
 16. `test_brief_fill`: fence ids differ per call; a value containing the delimiter text, a NUL, or over 64 KiB is
     refused; line endings normalised; a value with headings and front matter stays inside the fence; unknown
     placeholder refused; placeholders that are inline, in a list item, quote, heading, table, HTML line or code fence,
@@ -680,7 +694,7 @@ Eight findings from the second adversarial review, mostly contradictions the rew
 | 5 | Medium | Template placement defeats fencing | Fixed: a placeholder is the whole line, blank-line separated, once, outside fences and Markdown constructs, enforced at load (1.4, 8.16). |
 | 6 | Medium | Evidence table contradicts allowlist | Fixed: `output_cap` has its own row, `lessons` and `outcomes` only; one rule (1.5). |
 | 7 | Medium | `thinking: default` vs endpoint booleans | Fixed: `off` = false, `on` = true, `default` forbidden for Ollama, all three tested (1.6 rule 7, 8.7). |
-| 8 | Low | `--write` cannot repair stale directories | Fixed: after removing header-bearing stale files it removes empty unexpected directories bottom-up, refusing non-empty ones and never touching links (2.6, 8.14, 8.15). |
+| 8 | Low | `--write` cannot repair stale directories | Fixed in round 2, superseded in group 3 round 3: the generator never deletes; `--write` reports stale entries with a `git rm` hint and exits 1 (2.6, 8.14, 8.15). |
 
 ## 12. Build plan
 

@@ -35,8 +35,13 @@ PATTERNS: dict[str, str] = {
     "machine identifier": r"(?i)\b(?:serial(?: number)?|service tag|asset tag)\s*[:#=]\s*[A-Z0-9]{6,}\b",
     "Maidenhead grid square": r"\b[A-R]{2}[0-9]{2}(?:[a-x]{2})?\b",
     "callsign-shaped token": CALLSIGN,
-    "home-directory path": r"/home/[a-z][a-z0-9_-]*/",
+    "home-directory path": r"(?i)/home/[a-z][a-z0-9._-]*/|/Users/[a-z][a-z0-9._ -]*/|\b[a-z]:\\Users\\|\\Users\\[a-z]",
+    "file URL": r"(?i)\bfile://",
 }
+
+# An e-mail address: a local part, an @ and a host whose last label is letters (so pkg@v1.2.3 is not one).
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}\b")
+ALLOWED_EMAIL_DOMAINS = {"example.com", "example.org"}  # spec 2.5: the reserved documentation domains, any local part
 
 # A domain-like token must be one of these; anything else is a hostname that does not belong in a public document.
 HOST = re.compile(r"(?i)\b(?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,63}\b")
@@ -64,6 +69,8 @@ ALLOWED_HOSTS = {
     "files.pythonhosted.org",
     "anthropic.com",
     "claude.com",
+    "example.com",  # the reserved documentation domains: the only e-mail hosts a public file may use
+    "example.org",
     "shellcheck.net",
     "ollama.lan",  # the placeholder endpoint host in agents.yaml; real ones live in a git-ignored local file
 }
@@ -110,6 +117,9 @@ def findings(text: str) -> list[str]:
             if kind == "Maidenhead grid square" and token in ALLOWED_GRIDS:
                 continue
             record(kind, m.start())
+    for m in EMAIL.finditer(text):
+        if m.group(0).rpartition("@")[2].lower() not in ALLOWED_EMAIL_DOMAINS:
+            record("e-mail address", m.start())
     for m in HOST.finditer(text):
         host = m.group(0).lower()
         if host not in ALLOWED_HOSTS and host not in DOCUMENT_KEYS and host.rsplit(".", 1)[-1] not in FILE_SUFFIXES:
