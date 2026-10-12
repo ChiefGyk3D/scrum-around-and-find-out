@@ -12,10 +12,11 @@ agents obey, and the directory is one a contributor's pull request can fill, so 
 - WRITES go through directory descriptors: a temporary file created `O_EXCL | O_NOFOLLOW` in the destination directory,
   `fsync`, rename, `fsync` of the directory. Before each write, and at the end, the path from the repository root is
   resolved again component by component and must name the directory the descriptor holds, else the run fails with "the
-  output directory moved during the run". That DETECTS a rename by an actor with write access to the output directory's
-  parent; it cannot PREVENT one (a write between the check and the rename lands in the moved directory). Such an actor
-  is outside the threat model. After the writes a fresh inventory is taken and compared with the render, so success is
-  reported only for the tree as it is then (spec 2.6);
+  output directory moved during the run". A rename completed before one of those checks is detected and reported
+  (best effort). It cannot be PREVENTED, and a rename racing the very last instructions of a run, after the final check,
+  can still go unreported: an actor with write access to the output directory's parent is outside the threat model.
+  After the writes a fresh inventory is taken, and the identity check runs once more after it, so success is reported
+  only for the tree as it is then (spec 2.6);
 - an expected file is regular and mode 0644. The temporary file stays 0600 while it is written and synced, and is made
   0644 just before the rename; an existing file with the right bytes and another mode is rewritten;
 - NOTHING IS EVER DELETED. `--write` writes and updates the expected files only. A stale file (with a generated header
@@ -448,8 +449,10 @@ def write_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> tuple[
             changes.append(f"wrote {path}")
         _seam("end", "")
         _reverify(root, rel, ident)
-        # fresh and non-following: success is judged on what is there now, not on the first scan
+        # fresh and non-following: success is judged on what is there now, not on the first scan; the identity
+        # check comes after that scan so a move completed before it is reported (best effort: see spec 2.6)
         final = scan(root, rel)
+        _reverify(root, rel, ident)
         for path in expected:
             untouched = f"wrote {path}" not in changes and path in tree.ids and path in final.ids
             if untouched and final.ids[path] != tree.ids[path]:

@@ -321,9 +321,11 @@ can monkeypatch them, as `test_routing_doc.py` does. It does **not** inherit `ge
   before the first change. A renamed output is therefore repaired in two steps: `--write`, then the owner removes the
   old file. A header or digest is tamper evidence, never authorization to remove. Before each write and at the end the
   path from the repository root is resolved again, component by component without following a link, and must name the
-  directory the run holds open; otherwise the run fails with "the output directory moved during the run". This
-  re-resolution DETECTS a rename of the output directory (or of a parent) by an actor with write access to its parent; it
-  cannot PREVENT one, because a write that follows the held descriptor lands in the moved directory. No lock is built:
+  directory the run holds open; otherwise the run fails with "the output directory moved during the run". The
+  last check runs after the final fresh inventory. This re-resolution is best-effort DETECTION of a rename of the output
+  directory (or of a parent), completed before a check, by an actor with write access to its parent; it cannot PREVENT
+  one, because a write that follows the held descriptor lands in the moved directory, and a rename racing the very last
+  instructions of a run can still go unreported. No lock is built:
   such a concurrent actor is an explicitly unsupported threat boundary (maintainer ruling, review of PR 37), reported
   after the fact, not confined. The other guarantees are enforced: after the writes a fresh non-following inventory is
   compared with the render, and success is reported only if it matches (a file replaced by a link or special entry

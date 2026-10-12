@@ -36,10 +36,59 @@ def repo(tmp_path: Path) -> tuple[Path, Path]:
 # -- finding 1: a rename of the output directory is an unsupported boundary; the detection still fires --
 
 
-def test_a_rename_after_the_last_check_is_still_detected_and_reported(
+def _conforming_replacement(out: Path, moved: Path) -> None:
+    os.rename(out, moved)
+    out.mkdir()
+    os.link(moved / "p.txt", out / "p.txt")  # same inode: the replacement conforms to the render and the first scan
+
+
+def test_a_rename_right_after_the_reverify_that_precedes_the_final_scan_is_reported(
     repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Documents the boundary: the post-write re-resolution reports the move, it cannot prevent it (spec 2.6)."""
+    """Best effort (spec 2.6): a move completed before the identity check that follows the final scan is reported."""
+    root, out = repo
+    item = rendered()
+    (out / "p.txt").write_bytes(item.data)
+    os.chmod(out / "p.txt", ht.FILE_MODE)
+    moved = root.parent / "moved"
+    real = ht._reverify
+    calls: list[int] = []
+
+    def race(r: Path, rel: str, ident: tuple[int, int]) -> None:
+        real(r, rel, ident)
+        calls.append(1)
+        if len(calls) == 1:  # nothing to write, so this is the reverify that precedes the final scan
+            _conforming_replacement(out, moved)
+
+    monkeypatch.setattr(ht, "_reverify", race)
+    problems, _ = ht.write_tree(root, "out", {"p.txt": item})
+    assert problems == ["the output directory moved during the run"]
+
+
+def test_a_rename_between_the_first_reverify_and_the_scan_is_reported(
+    repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, out = repo
+    item = rendered()
+    (out / "p.txt").write_bytes(item.data)
+    os.chmod(out / "p.txt", ht.FILE_MODE)
+    moved = root.parent / "moved"
+    real_scan = ht.scan
+    n: list[int] = []
+
+    def racing_scan(r: Path, rel: str) -> ht.Tree:
+        n.append(1)
+        if len(n) == 2:  # the final scan, after the held descriptor is open
+            _conforming_replacement(out, moved)
+        return real_scan(r, rel)
+
+    monkeypatch.setattr(ht, "scan", racing_scan)
+    problems, _ = ht.write_tree(root, "out", {"p.txt": item})
+    assert len(n) == 2
+    assert problems == ["the output directory moved during the run"]
+
+
+def test_a_rename_before_a_write_is_reported(repo: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     root, out = repo
     moved = root.parent / "moved"
     real = ht._reverify

@@ -184,10 +184,11 @@ are each reported by name with the `git rm` command that removes them, and `--wr
 files, so a renamed output takes two steps: write, then remove the old one yourself. A header and its digests are tamper
 evidence for a reader, not authorization to remove anything; `--check` only uses them to say "looks generated but is not
 expected" or "not a generated file". An entry that blocks a write (a link, a FIFO, a directory where a file belongs) stops
-the whole write before the first change, with an error naming it. Before each write and at the end the path from the root is
+the whole write before the first change, with an error naming it. Before each write and at the end (after the final inventory) the path from the root is
 resolved again and must name the directory the run holds open, or the run fails with "the output directory moved during the
-run"; that detects a rename of the output directory by a process with write access to its parent, it cannot prevent
-one, and such a process is outside the threat model. Generated files must be regular files of mode 0644 (`--check`
+run"; that is best-effort detection of a rename completed before a check by a process with write access to its parent. It
+cannot prevent one, and a rename racing the very last instructions of a run can still go unreported: such a process is
+outside the threat model, the stated unsupported boundary. Generated files must be regular files of mode 0644 (`--check`
 reports another mode, `--write` rewrites the file); after the writes a fresh inventory is compared with the render. A race
 between the inventory and the write (another process swapping an entry in that window) is narrowed by the exclusive,
 no-follow opens and caught by the final inventory, but not prevented.
