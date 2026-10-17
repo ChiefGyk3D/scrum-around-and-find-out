@@ -15,7 +15,7 @@ Find the shape of the task, then take the first agent that has headroom. The rev
 | `plan-writing` | Turn a spec into a plan another agent can build from. | Codex, Claude Sonnet | Claude lead | Claude Sonnet, Codex |
 | `integration-code` | Code that touches several files of an existing codebase. | Claude Sonnet | Codex | Codex, Claude Sonnet |
 | `well-specified-code` | Code from a complete plan with the files, the change and the test all named. Haiku transcribes the plan's code exactly, its bugs included, so the review reads the plan's code as well. | Claude Haiku | Claude Sonnet | Claude Sonnet, Codex |
-| `small-mechanical-pr` | A small pull request with an exact change. | Copilot coding agent | Claude Haiku | Claude Sonnet |
+| `small-mechanical-pr` | A small pull request with an exact change. | Claude Haiku | Claude Sonnet | Claude Sonnet |
 | `security-sensitive-design` | A design whose mistakes expose a secret or widen access. Opus only with the maintainer's OK and the reason stated. | Claude lead | none | Codex |
 | `security-sensitive-code` | Code whose mistakes expose a secret, widen access or replay a mutation, including security code transcribed from a plan. Both reviews are required before merge, a Sonnet review of the diff and a Codex adversarial review; space Codex's jobs, because its five-hour window is the binding limit. | Claude Sonnet | none | Codex, Claude Sonnet |
 | `ops-runbook` | A runbook or operational procedure someone will follow on a live system. | Claude Sonnet | none | Claude lead |
@@ -32,7 +32,7 @@ Find the shape of the task, then take the first agent that has headroom. The rev
 
 - Codex above 80% of the 5-hour window: use Claude Sonnet instead.
 - Codex above 90% of the weekly window: use Claude Sonnet instead.
-- Copilot coding agent above 70% of the month's AI credits: use Claude Haiku instead.
+- Copilot (pull request review) above 70% of the month's AI credits: use Claude Haiku instead.
 
 ## The agents
 
@@ -127,21 +127,24 @@ Constraints:
 - Its sandbox cannot commit inside a git worktree or open sockets, so the lead runs the full suite and commits.
 - Cannot resume a thread across git worktrees: hand it a self-contained prompt that reads state from files.
 
-### Copilot coding agent
+### Copilot (pull request review)
 
-Small, fully specified issues and deferred minor items.
+Reviews pull requests, and only pull requests: a second reader on the diff before merge. It does not take issues or write code.
 
 Limits:
 
-- monthly ai credits: 7000
+- monthly ai credits: 20000
 
 Strengths:
 
-- Runs on its own and returns a pull request.
+- Runs on its own on every pull request and comments on the diff.
 
 Constraints:
 
-- Measured burn about 400 a day early in the month: spend it on small single-repo PRs.
+- Measured burn about 400 a day early in the month, when it also wrote pull requests: it is no longer asked to.
+- Every pull request it authored needed a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup.
+- Pull requests only: no coding-agent issues, no chat or CLI use, so its credits last the month. The 7,000 credit plan ran out about ten days into the cycle (2026-10-10) with automatic review on every pull request; the plan is now 20,000 and review is set to lite.
+- Its comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex adversarial review still decide.
 - Every pull request needs a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup.
 
 ### Local LLM (Ollama)
@@ -192,10 +195,11 @@ Constraints:
 ## Rules of thumb
 
 - Routing order 1: text-in/text-out work (summaries, triage, classification, first drafts, log and CI digests) goes to the local LLM first, and a Claude model checks anything that will be applied.
-- Routing order 2: mechanical code from a complete spec goes to Haiku, or to Copilot when it is a small single-repo PR and credits allow.
+- Routing order 2: mechanical code from a complete spec goes to Haiku. Copilot reviews pull requests and nothing else.
 - Routing order 3: code from prose, every task review, and ops runbooks go to Sonnet.
 - Routing order 4: security-sensitive or risky code is built by Sonnet, and Codex attacks it before merge.
 - Routing order 5: decisions go to the lead and the maintainer; Opus only with the maintainer's OK.
+- Copilot reviews pull requests and nothing else: it is an extra reader on the diff, never the reviewer of record and never a merge gate.
 - Write the brief before choosing the agent. If you cannot write a complete one, the task is a decision or research.
 - The reviewer is a different agent or model from the author, and starts with no memory of the work.
 - Run agents in parallel only when their work is independent.

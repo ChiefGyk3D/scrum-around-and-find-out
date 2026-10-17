@@ -49,7 +49,7 @@ def test_the_shipped_file_loads_with_every_agent_and_shape_the_playbook_names() 
         "ops-runbook",
         "status-headline",
     }
-    assert agents.monthly_allowance() == 7000
+    assert agents.monthly_allowance() == 20000
 
 
 def test_the_measured_routes() -> None:
@@ -57,7 +57,7 @@ def test_the_measured_routes() -> None:
     assert a.shape("research").chain == ("codex", "claude-sonnet")
     assert a.shape("integration-code").chain == ("claude-sonnet", "codex")
     assert a.shape("well-specified-code").chain == ("claude-haiku", "claude-sonnet")
-    assert a.shape("small-mechanical-pr").chain == ("copilot", "claude-haiku")
+    assert a.shape("small-mechanical-pr").chain == ("claude-haiku", "claude-sonnet")
     assert a.shape("small-mechanical-pr").reviewer == ("claude-sonnet",)
     assert a.shape("security-sensitive-design").prefer == ("claude-lead",)
     assert a.shape("security-sensitive-code").prefer == ("claude-sonnet",)

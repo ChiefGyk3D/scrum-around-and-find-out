@@ -74,11 +74,11 @@ def test_route_cli_uses_validated_ai_credit_meter_above_threshold(_private_home:
                 "sku": "Copilot AI credits",
                 "unit": "ai_credits",
                 "month": "2026-10",
-                "used": 6500,
+                "used": 15000,
             }
         )
     )
-    agents = write_agents(tmp_path / "agents.yaml")
+    agents = write_agents(tmp_path / "agents.yaml", copilot_authors=True)
     code, out, _ = cli(
         "route",
         "small-mechanical-pr",

@@ -89,14 +89,17 @@ agents:
         - text: Expect it to commit inside a git worktree or open sockets; the lead runs the full suite and commits.
           evidence: "lessons:codexs-sandbox-cannot-commit-inside-a-git-worktree"
   copilot:
-    name: Copilot coding agent
+    name: Copilot (pull request review)
     kind: copilot
-    role: Small, fully specified issues and deferred minor items.
-    limits: {monthly_ai_credits: 7000}
+    role: "Reviews pull requests, and only pull requests: a second reader on the diff before merge. It does not take issues or write code."
+    limits: {monthly_ai_credits: 20000}
     strengths:
-      - Runs on its own and returns a pull request.
+      - Runs on its own on every pull request and comments on the diff.
     constraints:
-      - "Measured burn about 400 a day early in the month: spend it on small single-repo PRs."
+      - "Measured burn about 400 a day early in the month, when it also wrote pull requests: it is no longer asked to."
+      - "Every pull request it authored needed a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup."
+      - "Pull requests only: no coding-agent issues, no chat or CLI use, so its credits last the month. The 7,000 credit plan ran out about ten days into the cycle (2026-10-10) with automatic review on every pull request; the plan is now 20,000 and review is set to lite."
+      - "Its comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex adversarial review still decide."
       - "Every pull request needs a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup."
     profile:
       status: profiled
@@ -202,8 +205,8 @@ shapes:
     note: Haiku transcribes the plan's code exactly, its bugs included, so the review reads the plan's code as well.
   small-mechanical-pr:
     description: A small pull request with an exact change.
-    prefer: [copilot]
-    fallback: [claude-haiku]
+    prefer: [claude-haiku]
+    fallback: [claude-sonnet]
     reviewer: [claude-sonnet]
   security-sensitive-design:
     description: A design whose mistakes expose a secret or widen access.
@@ -298,10 +301,11 @@ hooks:
 
 rules_of_thumb:
   - "Routing order 1: text-in/text-out work (summaries, triage, classification, first drafts, log and CI digests) goes to the local LLM first, and a Claude model checks anything that will be applied."
-  - "Routing order 2: mechanical code from a complete spec goes to Haiku, or to Copilot when it is a small single-repo PR and credits allow."
+  - "Routing order 2: mechanical code from a complete spec goes to Haiku. Copilot reviews pull requests and nothing else."
   - "Routing order 3: code from prose, every task review, and ops runbooks go to Sonnet."
   - "Routing order 4: security-sensitive or risky code is built by Sonnet, and Codex attacks it before merge."
   - "Routing order 5: decisions go to the lead and the maintainer; Opus only with the maintainer's OK."
+  - "Copilot reviews pull requests and nothing else: it is an extra reader on the diff, never the reviewer of record and never a merge gate."
   - Write the brief before choosing the agent. If you cannot write a complete one, the task is a decision or research.
   - The reviewer is a different agent or model from the author, and starts with no memory of the work.
   - Run agents in parallel only when their work is independent.
