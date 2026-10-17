@@ -88,8 +88,15 @@ def make_fifo(out: Path) -> Path:
 def make_socket(out: Path) -> Path:
     path = out / "codex" / "sock"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.bind(str(path))
-    s.close()
+    # AF_UNIX rejects pathnames over ~108 bytes, and a deep TMPDIR blows that budget. Bcwd to the
+    # folder and bind the bare name so the test exercises a socket wherever the suite is checked out.
+    cwd = os.getcwd()
+    try:
+        os.chdir(path.parent)
+        s.bind(path.name)
+    finally:
+        os.chdir(cwd)
+        s.close()
     return path
 
 
