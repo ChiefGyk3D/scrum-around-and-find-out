@@ -15,7 +15,9 @@ A_MODELS = ["resident-12b-thinking", "small-4b-agent"]
 B_MODELS = ["resident-safety", "embed-small"]
 
 
-def agents_dict(a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.1:9") -> dict[str, Any]:
+def agents_dict(
+    a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.1:9", *, copilot_authors: bool = False
+) -> dict[str, Any]:
     data = yaml.safe_load((ROOT / "agents.yaml").read_text())
     local = yaml.safe_load((ROOT / "examples/agents.local.example.yaml").read_text())
     data["agents"]["ollama"]["endpoints"] = local["agents"]["ollama"]["endpoints"]
@@ -24,16 +26,22 @@ def agents_dict(a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.
     endpoints = {e["id"]: e for e in data["agents"]["ollama"]["endpoints"]}
     endpoints["instance-a"]["url"] = a_url
     endpoints["instance-b"]["url"] = b_url
+    if copilot_authors:  # shipped routing only has Copilot review PRs; the credit meter still needs a chain
+        data["shapes"]["small-mechanical-pr"].update(prefer=["copilot"], fallback=["claude-haiku"])
     assert isinstance(data, dict)
     return data
 
 
-def agents_with(a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.1:9") -> AgentsFile:
-    return parse_agents(agents_dict(a_url, b_url))
+def agents_with(
+    a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.1:9", *, copilot_authors: bool = False
+) -> AgentsFile:
+    return parse_agents(agents_dict(a_url, b_url, copilot_authors=copilot_authors))
 
 
-def write_agents(path: Path, a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.1:9") -> Path:
-    path.write_text(yaml.safe_dump(agents_dict(a_url, b_url)))
+def write_agents(
+    path: Path, a_url: str = "http://127.0.0.1:9", b_url: str = "http://127.0.0.1:9", *, copilot_authors: bool = False
+) -> Path:
+    path.write_text(yaml.safe_dump(agents_dict(a_url, b_url, copilot_authors=copilot_authors)))
     lessons = path.parent / "docs" / "lessons.md"  # the evidence the profiles point at, beside the file like a checkout
     lessons.parent.mkdir(exist_ok=True)
     lessons.write_bytes((ROOT / "docs" / "lessons.md").read_bytes())

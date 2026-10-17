@@ -15,6 +15,7 @@ from safo.routing import recommend
 
 ROOT = Path(__file__).parent.parent
 DOC = agents_with()
+DOC_COPILOT = agents_with(copilot_authors=True)
 
 
 def probe(endpoint_id: str, *, loaded: tuple[str, ...] = (), up: bool = True) -> Probe:
@@ -42,9 +43,9 @@ def test_codex_above_80_percent_of_its_5_hour_window_goes_to_sonnet_and_says_why
 
 def test_the_weekly_threshold_and_the_copilot_month_threshold() -> None:
     assert recommend(DOC, "research", {"weekly": 95.0}).agent == "claude-sonnet"
-    r = recommend(DOC, "small-mechanical-pr", {"monthly_percent": 75.0})
+    r = recommend(DOC_COPILOT, "small-mechanical-pr", {"monthly_percent": 75.0})
     assert r.agent == "claude-haiku" and r.reviewer == "claude-sonnet"
-    assert recommend(DOC, "small-mechanical-pr", {"monthly_percent": 70.0}).agent == "copilot"
+    assert recommend(DOC_COPILOT, "small-mechanical-pr", {"monthly_percent": 70.0}).agent == "copilot"
 
 
 def test_unknown_headroom_never_blocks_and_is_reported() -> None:

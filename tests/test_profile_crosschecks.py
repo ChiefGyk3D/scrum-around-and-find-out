@@ -110,6 +110,7 @@ def test_a_non_ollama_agent_is_not_bound_by_endpoint_rules() -> None:
 
 def test_a_gated_agent_in_a_shape_needs_a_reviewer_that_is_not_itself() -> None:
     d = doc()
+    d["shapes"]["small-mechanical-pr"].update(prefer=["copilot"], fallback=["claude-haiku"])  # not shipped
     profile(d, "copilot")["review_gate"] = gate()
     parsed = parse_agents(d)
     assert need(prof(parsed, "copilot").review_gate).required is True
