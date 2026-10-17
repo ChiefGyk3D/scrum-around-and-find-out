@@ -215,3 +215,19 @@ the rule is broken.
 - **Rule now.** Local LLM for text-in/text-out work, Haiku or Copilot for mechanical code from a complete spec, Sonnet for code
   from prose, every task review and ops runbooks, Sonnet plus Codex for security-sensitive code, and the lead and the
   maintainer for decisions, with Opus only with the maintainer's OK. It is in `agents.yaml` and [Routing](routing.md).
+
+### The Ollama plugin's stop gate fails without `--model` (2026-10-17)
+
+- **What happened.** With the gate on, every stop was blocked with `status: 1` and an empty `rawOutput`.
+- **Evidence.** The hook runs `task --json <prompt>` with no model, and `handleTask` ignores `OLLAMA_PLUGIN_DEFAULT_MODEL`,
+  so Ollama returned `400 model is required`. The error was swallowed. A direct `/api/chat` call to the same server worked.
+  Reported as `darrylmorley/ollama-plugin-cc` issue 1.
+- **Rule now.** Test a gate by running its hook by hand with the gate on before relying on it, and read the underlying error,
+  not the wrapper's. See [Plugins](plugins.md).
+
+### Codex's plugin cannot select an access tier for a security review (2026-10-08)
+
+- **What happened.** A security re-review run through the default model was cut off by a cybersecurity filter.
+- **Evidence.** The default model offered only the standard access tier; the plugin's `task` takes no `-c` setting.
+- **Rule now.** Run security and adversarial reviews with `codex exec` directly, on a model that offers the tier, with
+  `< /dev/null` so a backgrounded run does not wait on stdin and exit with an empty review. See [Plugins](plugins.md).

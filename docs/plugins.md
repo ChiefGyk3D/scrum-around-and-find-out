@@ -38,7 +38,9 @@ Where it fits here:
 
 - **Adversarial review of security-relevant code before merge.** This is the plugin's job in the measured workload: it found
   what green CI and a Sonnet review had missed ([lesson](lessons.md)). Use `/codex:adversarial-review` with focus text naming
-  the risk, such as trust boundaries or credential handling.
+  the risk, such as trust boundaries or credential handling. The plugin's `task` cannot pass `-c`, so it cannot select an
+  access tier a security review may need; if your plan has one and the default model's filter cuts a review off, run
+  `codex exec` directly with the model and `-c` setting that tier asks for ([lesson](lessons.md)).
 - **Research and plan writing**, per [routing](routing.md).
 - **Not for work that must commit inside a git worktree.** Codex's sandbox could not, and `--resume-last` finds threads per
   repository path. Hand it self-contained prompts, and let the lead commit ([lesson](lessons.md)).
@@ -90,7 +92,17 @@ The points that matter for a quick read:
    ```
 
    The marketplace registers as `darrylmorley-ollama`, which is the name `/plugin install` takes. `/ollama:setup` checks the
-   server, pulls a model if there is none and sets a default. Leave the review gate off at first, for the reason above.
+   server, pulls a model if there is none and sets a default. Leave the review gate off at first, for the reason above, and
+   see the next section before turning it on.
+
+### The review gate needs a fix in v0.11.0
+
+With a default model set but no `--model`, the plugin's `task` command sends a request with no model, Ollama answers `400
+model is required`, and the `Stop` hook blocks every stop with an empty `status: 1`. `/ollama:setup` reports the default
+correctly, so nothing looks wrong until the first stop. It is reported upstream
+([issue 1](https://github.com/darrylmorley/ollama-plugin-cc/issues/1)). Until a release fixes it, `handleTask` in the
+companion script needs to resolve the model through `resolveRoleModel`, the way the planner commands do, instead of using
+only the `--model` flag. A plugin update overwrites a local patch, so check the gate again after one.
 
 What you get: `/ollama:review`, `/ollama:adversarial-review`, `/ollama:rescue`, `/ollama:status`, `/ollama:result`,
 `/ollama:cancel`, a plan, execute and review pipeline (`/ollama:plan`, `/ollama:execute-plan`) and an `ollama:ollama-rescue`
