@@ -2,6 +2,9 @@
 # Keeps a user-owned board current from your own gh login. Install under ~/.config/systemd/user/ and edit the paths:
 #   systemctl --user daemon-reload && systemctl --user enable --now safo-reconcile.timer
 # No token is stored: safo asks `gh auth token` each run. Check the active account first (`gh auth status`).
+# WorkingDirectory must not contain gh (safo refuses a gh inside the current directory, and a service starts in $HOME,
+# where ~/.local/bin/gh lives); `/` is no good either, since every path is inside it. PATH is set because a user
+# service does not see ~/.local/bin. Edit the PATH line if gh is installed elsewhere.
 [Unit]
 Description=Keep the SAFO project board current (safo reconcile)
 Wants=network-online.target
@@ -9,4 +12,6 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+WorkingDirectory=%t
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/safo --board %h/.config/safo/board.yaml reconcile
