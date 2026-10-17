@@ -145,7 +145,6 @@ Constraints:
 - Every pull request it authored needed a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup.
 - Pull requests only: no coding-agent issues, no chat or CLI use, so its credits last the month. The 7,000 credit plan ran out about ten days into the cycle (2026-10-10) with automatic review on every pull request; the plan is now 20,000 and review is set to lite.
 - Its comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex adversarial review still decide.
-- Every pull request needs a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup.
 
 ### Local LLM (Ollama)
 
