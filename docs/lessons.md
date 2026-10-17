@@ -215,3 +215,13 @@ the rule is broken.
 - **Rule now.** Local LLM for text-in/text-out work, Haiku or Copilot for mechanical code from a complete spec, Sonnet for code
   from prose, every task review and ops runbooks, Sonnet plus Codex for security-sensitive code, and the lead and the
   maintainer for decisions, with Opus only with the maintainer's OK. It is in `agents.yaml` and [Routing](routing.md).
+
+### A user service cannot find the gh that safo will accept (2026-10-17)
+
+- **What happened.** The example reconcile unit, installed as written, exited with "no token" while `gh auth token` worked
+  from the same account.
+- **Evidence.** A systemd user service starts in `$HOME` with a PATH that lacks `~/.local/bin`. `find_gh` refuses a `gh`
+  whose real path is inside the working directory, so a `gh` under the home directory is rejected, and `WorkingDirectory=/`
+  rejects every `gh`.
+- **Rule now.** The unit sets `WorkingDirectory=%t` and a PATH that includes `%h/.local/bin`. The test that forbids
+  `Environment` lines now allows only `PATH`, so a token still cannot be put in the unit.
