@@ -21,7 +21,7 @@ from typing import Any
 from safo.bounded import DuplicateKeyError, loads
 from safo.bounded import month as valid_month
 from safo.errors import ConfigError
-from safo.guardlog import bounded_read, file_lock, write_text
+from safo.guardlog import APPEND_LOCK_TIMEOUT, bounded_read, file_lock, write_text
 
 SEVERITIES = ("critical", "important", "minor", "unrated")
 CARD = re.compile(r"https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:issues|pull)/[0-9]{1,9}")
@@ -161,7 +161,7 @@ def append(path: Path, outcome: Outcome, check_dir: bool = False) -> None:
     validate(json.loads(outcome.to_json()))
     line = (outcome.to_json() + "\n").encode("utf-8")
     try:
-        with file_lock(path.with_name(path.name + ".lock"), check_dir=check_dir):
+        with file_lock(path.with_name(path.name + ".lock"), check_dir=check_dir, timeout=APPEND_LOCK_TIMEOUT):
             try:
                 existing = _read(path)
             except ConfigError:
