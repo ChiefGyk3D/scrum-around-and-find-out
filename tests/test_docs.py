@@ -19,6 +19,7 @@ PAGES = (
     "handoff",
     "review-loop",
     "local-llm",
+    "plugins",
     "limits",
     "board",
     "agents-status",

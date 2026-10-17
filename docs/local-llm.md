@@ -5,6 +5,8 @@ the dispatch guard are built; this page is the reasoning behind them and the fai
 measurements were taken on one home Ollama server with two GPUs on 2026-10-07 and are the maintainer's, not general
 results. The commands are in [Usage](usage.md) and the rules in [Routing](routing.md).
 
+The Claude Code plugin for Ollama is covered on [Claude Code plugins](plugins.md).
+
 ## Why have one
 
 On 2026-10-07 the maintainer noticed the local server had sat idle all day while paid quotas were burning. The rule that

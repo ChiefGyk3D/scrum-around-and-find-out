@@ -74,6 +74,11 @@ Pin by commit with the version in a comment; Dependabot moves both. Pull request
 `reconcile`. To react to pull-request events as well, use `pull_request_target` and read the trust boundary below first:
 the board-less inputs (`project-url` and the status inputs, no `board-file`) exist for that job, which needs no checkout.
 
+## 5. Optional: the agent plugins
+
+To hand work to Codex or a local Ollama model from inside Claude Code, add the two plugins. The steps, including pointing
+the Ollama plugin at your server, are on [Claude Code plugins](plugins.md). Nothing in the Action needs them.
+
 ## The trust boundary
 
 Never run untrusted code (a PR checkout, a build, a script) in the same job before the SAFO Action. With
