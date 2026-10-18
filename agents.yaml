@@ -102,6 +102,7 @@ agents:
       - "Its comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex adversarial review still decide."
     profile:
       status: profiled
+      harness_mode: review
       review_gate:
         required: true
         reviewer_differs: true
