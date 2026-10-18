@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """How many of an agent's recorded outcomes count toward measured status (spec 6.1). Nothing in selection reads this.
 
 `qualify` returns a typed result, not a number, so the reader can see why a record did not count. The rules are chosen

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Support for the hooks tests: run `safo hooks` in-process against a private HOME, and build the files it reads."""
 
 from __future__ import annotations

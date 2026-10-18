@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The renderer (spec 8.12): golden output for all four harnesses, headers, digests, the policy boundary, structure."""
 
 from __future__ import annotations

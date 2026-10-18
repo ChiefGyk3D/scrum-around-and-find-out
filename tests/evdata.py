@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Fixtures for the evidence tests: a repository-shaped directory (agents.yaml, a lessons file, an outcomes log)."""
 
 from __future__ import annotations

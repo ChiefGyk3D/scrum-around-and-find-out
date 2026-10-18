@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The generator's filesystem rules (spec 2.6, 8.15): non-following inventory, exact path sets, no-follow writes."""
 
 from __future__ import annotations

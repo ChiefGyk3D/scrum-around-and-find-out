@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """scripts/apply-baseline.sh against a fake gh: plan mode touches nothing, --apply makes exactly the baseline calls."""
 
 from __future__ import annotations

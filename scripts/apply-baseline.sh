@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Apply GYST's BASELINE.md settings to this repository: branch protection (a pull request and both CI
 # gates required), the tag ruleset, private vulnerability reporting, fork-PR approval for every outside
 # contributor, the Actions allow-list from GYST's baseline/selected-actions.json, and auto-merge.

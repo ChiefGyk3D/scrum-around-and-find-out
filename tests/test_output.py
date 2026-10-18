@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """One output path: every line safo prints goes through safo.output, and a test walks the source to keep it so."""
 
 from __future__ import annotations

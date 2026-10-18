@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Everything the Action can refuse before it mints a token, fetches a key or sends a request.
 
 Runs as `python -m safo.action_preflight` with the inputs in the environment (never in argv or a template). It is

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # The GitHub wiki is a generated mirror of docs/: scripts/gen_wiki.py writes the pages and
 # ChiefGyk3D/git-your-ship-together's wiki-publish.yml replaces the wiki's contents with them. It generates
 # on a manual run too, and publishes only from the default branch. The generator is stdlib only, so there is

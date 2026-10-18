@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Rendering the verified profiles into the instruction file each harness reads (spec section 2).
 
 Pure functions from a `VerifiedAgents` (the profiles, with the persona and template text the loader already read and
@@ -570,7 +570,7 @@ def _copilot_form(agent: Agent, p: Profile) -> tuple[str, str]:
         "body": body,
     }
     # the SPDX line keeps the repository's licence-header rule true for a generated YAML file; both lines are comments
-    return "", "# SPDX-License-Identifier: MIT\n" + _dump(form)
+    return "", "# SPDX-License-Identifier: Apache-2.0\n" + _dump(form)
 
 
 def _assemble(path: str, front: str, text: str, manifest: str) -> bytes:

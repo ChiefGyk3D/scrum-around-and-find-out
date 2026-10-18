@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Read operations: project meta, fields, views, board items and a repository's issues and pull requests."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # The generic legs (ruff, mypy, the pytest matrix, the smoke test, the workflow lint, and for the one shell
 # script shellcheck and shfmt) are ChiefGyk3D/git-your-ship-together's python-ci.yml and bash-ci.yml; each
 # reports its gate as `CI green`, here `ci / CI green` and `shell / CI green`. Nothing project-specific

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Write operations bootstrap uses, with the API's real restrictions."""
 
 from __future__ import annotations

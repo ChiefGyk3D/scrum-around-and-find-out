@@ -38,7 +38,7 @@ a playbook for running the agent team, with the lessons that shaped it.
    existing single-select field's options through the API.
 6. **This repository's own board** is user-owned: it stays on scheduled
    `reconcile` run from the maintainer's own `gh` login. No PAT in CI (SAFO #1).
-7. **Licence: MIT**, matching GYST, its delivery sibling (SAFO #1).
+7. **Licence: MIT** at the time (SAFO #1); changed to Apache-2.0 on 2026-10-17 together with GYST, the Clouds Against Humanity repository and the Department of Internal Arguments.
 8. **Agent routing and optimization is in v0.1.0:** routing rules as data (`agents.yaml`), measured headroom
    (`safo usage`), recommendations (`safo route`), and an outcomes log, built from the maintainer's own measured
    workload (2026-10-07).

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 9: text that is rendered into files agents obey keeps its structure and carries no private path."""
 
 from __future__ import annotations

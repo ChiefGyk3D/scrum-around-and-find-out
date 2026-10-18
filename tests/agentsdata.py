@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The optional two-GPU deployment example pointed at fake loopback servers."""
 
 from __future__ import annotations

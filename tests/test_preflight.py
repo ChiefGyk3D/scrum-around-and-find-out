@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The checks that run before any token is minted: every refusal here costs no request and no secret."""
 
 from __future__ import annotations

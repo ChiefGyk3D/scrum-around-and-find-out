@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """profiles verify and profiles brief.
 
 `verify`: every profile claim beside what its evidence says, the CODEOWNERS check and promotion information.

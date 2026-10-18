@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The `profile` block of agents.yaml: how to brief an agent, every behavioural claim tied to a pointer to evidence.
 
 This module is the loader half of docs/superpowers/specs/2026-10-11-agent-profiles.md (sections 1 and 7.3). It parses

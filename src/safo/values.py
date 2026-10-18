@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Parsing what GitHub sent: a bad value is a MalformedDataError naming the field, never a bare ValueError."""
 
 from __future__ import annotations

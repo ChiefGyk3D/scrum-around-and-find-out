@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """action.yml: structural rules the Action must keep. A change that breaks one is a security regression."""
 
 from __future__ import annotations

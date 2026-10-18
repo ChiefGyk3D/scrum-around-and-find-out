@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The filesystem half of `scripts/gen_profiles.py`: inventory, check and write of the output tree (spec 2.6).
 
 `scripts/gen_routing.py` reads and writes one file with `Path.read_text` and `write_text`. This tree holds files that

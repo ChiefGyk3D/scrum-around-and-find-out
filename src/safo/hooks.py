@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Claude Code hooks that enforce the routing rules: a session probe and a dispatch guard.
 
 The probe runs when a session starts. It asks every Ollama endpoint in agents.yaml which models are loaded (two short

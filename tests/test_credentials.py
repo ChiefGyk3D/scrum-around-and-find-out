@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Which token may write which board, decided before any request is made."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 25: under Actions a profile-bearing agents file inside the workspace is never loaded."""
 
 from __future__ import annotations

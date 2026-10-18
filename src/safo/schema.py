@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """board.yaml: the schema, the loader and a validator that names the offending key.
 
 PyYAML is the one runtime dependency and is loaded through a custom SafeLoader subclass

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Static rules over every GraphQL document in the package (module constants named Q_* and M_*)."""
 
 from __future__ import annotations

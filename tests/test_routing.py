@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """safo.routing: rules plus headroom give an agent and a reason; a local agent never evicts a protected model."""
 
 from __future__ import annotations

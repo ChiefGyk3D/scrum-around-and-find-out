@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Operations sync and status use. (ItemLookup and ContentExists are in item_ops.)"""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 16: `safo profiles brief` fills a template with fenced task data that cannot close or forge the fence.
 
 The claim under test is about structure only: where a value starts and ends in the output. Nothing here (or in the code)

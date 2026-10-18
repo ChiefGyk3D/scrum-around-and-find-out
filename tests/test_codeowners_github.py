@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Where GitHub's CODEOWNERS differs from gitignore, and what GitHub does with the file itself.
 
 The gitignore differential test (test_codeowners_differential.py) cannot see these; they are written from GitHub's

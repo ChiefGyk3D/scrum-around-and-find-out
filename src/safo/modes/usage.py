@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """usage: what each agent has used and has left, from local meters only. Read-only; nothing leaves the machine."""
 
 from __future__ import annotations

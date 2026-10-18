@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Credentials on the command line: refusals before any request, no token in the output, the board-less path."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Keeps a user-owned board current from your own gh login. Install under ~/.config/systemd/user/ and edit the paths:
 #   systemctl --user daemon-reload && systemctl --user enable --now safo-reconcile.timer
 # No token is stored: safo asks `gh auth token` each run. Check the active account first (`gh auth status`).

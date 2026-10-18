@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Check that the venv the Action runs credentials through holds only what it should.
 
 Run by the install step as `python -I src/safo/venv_check.py <phase> <venv>` with the interpreter that made the venv,

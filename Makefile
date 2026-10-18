@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Everything CI runs, runnable here. `make check` is the pipeline minus the version matrix.
 # Capture its exit code before you trust it:   make check > check.log 2>&1; echo "exit=$$?"
 

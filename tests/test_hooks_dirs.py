@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """SAFO's own directories: made private, and not trusted when another user could have changed them.
 
 A lock is a pathname's current inode, so a directory another user can write to lets them unlink a held lock and make

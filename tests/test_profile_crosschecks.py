@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 7: a profile is checked against the shapes, the endpoints and the kind it sits on."""
 
 from __future__ import annotations

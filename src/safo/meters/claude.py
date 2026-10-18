@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Claude Code: token use per model family from ~/.claude/projects/**/*.jsonl, subagent transcripts included.
 
 An assistant message is written to the transcript once per content block, each row repeating the message id and

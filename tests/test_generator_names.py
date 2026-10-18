@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Names from the output tree are untrusted: escaped when printed, and a command is built only for safe ones."""
 
 from __future__ import annotations

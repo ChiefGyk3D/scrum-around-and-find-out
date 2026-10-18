@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # A small, generic board for the tests: an organization, two repositories, no real names.
 version: 1
 project:

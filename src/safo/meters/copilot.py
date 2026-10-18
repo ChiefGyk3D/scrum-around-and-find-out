@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Copilot coding agent: sessions this month from `gh agent-task list`; premium requests only if billing can be read.
 
 Exact premium-request use comes from the billing endpoint, which needs a token that may read it. That read is opt-in

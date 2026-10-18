@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Write or check docs/routing.md, which is generated from agents.yaml.
 
 scripts/gen_routing.py --write     regenerate docs/routing.md

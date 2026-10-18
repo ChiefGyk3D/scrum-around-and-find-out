@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Scrum Around and Find Out as a composite Action.
 #
 # Put step-security/harden-runner FIRST in the job that calls this: a composite action cannot be the first step of

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Build, on the fake, the live project a board.yaml describes, so a test starts from zero drift."""
 
 from __future__ import annotations

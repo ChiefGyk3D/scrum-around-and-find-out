@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """reconcile: discover identities before adding; repair blanks without resetting manual values.
 
 Exit codes: 0 the board is current (or the changes were applied), 1 changes are needed or something was left

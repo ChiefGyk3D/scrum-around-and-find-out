@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """What must never appear in anything public: docs/, examples/ and README.md.
 
 Generic patterns only. Terms that cannot be written into a public repository (an employer's name, a callsign, a

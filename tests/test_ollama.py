@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The Ollama client against a fake on loopback: the probe only reads, generate sends think and the context cap."""
 
 from __future__ import annotations

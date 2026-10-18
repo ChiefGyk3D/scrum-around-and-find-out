@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Offline board validation. The command line answers it before any credential is looked for; registering it keeps
 it in `--help` and the Action's mode list."""
 

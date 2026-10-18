@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """usage: every meter from local files, read-only, exit 0."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """status: post an update from a body file, or build one from the board with the cards grouped and counted in code."""
 
 from __future__ import annotations

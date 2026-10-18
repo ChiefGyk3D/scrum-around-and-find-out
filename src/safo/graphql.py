@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """GraphQL over urllib: retries, backoff, pagination through `$endCursor`.
 
 The token stays inside this object. It is never put in a message, a log line or

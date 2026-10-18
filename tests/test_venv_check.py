@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The venv the Action runs credentials through holds only what venv, ensurepip and the locked install put in it."""
 
 from __future__ import annotations

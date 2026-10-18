@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # The worked example: the Renegade-Penguin suite board, as safo will read it after bootstrap.
 # Colours and descriptions below are best guesses until they are checked against the live board; an
 # option that differs only in colour or description is a NOTE, never drift, because safo cannot edit

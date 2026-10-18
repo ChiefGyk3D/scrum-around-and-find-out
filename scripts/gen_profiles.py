@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Write or check examples/harness/, the instruction files generated from the profiles in agents.yaml.
 
 scripts/gen_profiles.py --write     write the files agents.yaml renders; an unexpected entry is reported, never deleted

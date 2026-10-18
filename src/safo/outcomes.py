@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The outcomes log: one JSON line per finished task, so routing can be judged by what happened, not by feeling.
 
 A record: date, card (a GitHub URL or null), agent, shape, review_rounds (review passes, the passing one included),

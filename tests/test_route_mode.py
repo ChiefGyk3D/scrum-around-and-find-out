@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """route: rules plus live headroom, through the command line."""
 
 from __future__ import annotations

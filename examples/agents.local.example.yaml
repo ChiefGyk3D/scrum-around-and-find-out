@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copy to ~/.config/safo/agents.local.yaml (git-ignored) and put your real endpoints there. It is merged over
 # agents.yaml key by key; a list replaces the example's list. Never commit the real file: an address, a hostname
 # or a VPN name does not belong in a public repository, and tests/test_privacy.py fails on them.

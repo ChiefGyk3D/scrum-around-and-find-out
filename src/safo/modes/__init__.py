@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Modes register themselves on import; `load_all()` imports every module in this package."""
 
 from __future__ import annotations

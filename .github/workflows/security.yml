@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # CodeQL, gitleaks, a dependency audit of the Action's one runtime dependency, dependency review on pull
 # requests, Semgrep and OpenSSF Scorecard. The jobs live in ChiefGyk3D/git-your-ship-together.
 name: Security

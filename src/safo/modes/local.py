@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """local run: send one prompt to the local LLM that routing picks, print the answer, log the outcome.
 
 Routing decides first (`resolve_endpoint`): a reachable endpoint, an allowed model, a context size under the cap, and

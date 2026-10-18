@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The shared reads (audit and reconcile) refuse an answer that is not shaped as asked: exit 2, never a clean audit."""
 
 from __future__ import annotations

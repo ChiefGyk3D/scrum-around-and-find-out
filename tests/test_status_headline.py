@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """status --post: counts rendered in code, optional exact validated model prose."""
 
 from __future__ import annotations

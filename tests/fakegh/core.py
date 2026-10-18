@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The server, the in-memory model and the fault injection.
 
 The model mirrors what the real API does where safo has been bitten: a listing that lags behind
