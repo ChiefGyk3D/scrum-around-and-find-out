@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """sync: one issue or pull request event in, that one card brought in line. Same rules as reconcile.
 
 Ported from GYST's project_sync.py. The event payload is only a pointer: its node id says which issue or pull request

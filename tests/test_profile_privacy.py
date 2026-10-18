@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Privacy of the rendered files (spec 8.18): hostile values never reach a file, and the files pass the public scan."""
 
 from __future__ import annotations

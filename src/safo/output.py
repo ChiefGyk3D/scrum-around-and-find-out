@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The one place safo writes to a stream.
 
 Everything printed in a run can carry text that GitHub or an event payload sent: a title, a view name, a filter, an

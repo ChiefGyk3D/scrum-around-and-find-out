@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Local meters: what each agent has used, read from files and commands on this machine.
 
 Read-only, and nothing leaves the machine: no network call is made here (the one optional Copilot billing read

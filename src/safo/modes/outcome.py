@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """outcome add: append one finished task to the outcomes log."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Item writes: add (idempotent), set a select or date by item node id, clear."""
 
 from __future__ import annotations

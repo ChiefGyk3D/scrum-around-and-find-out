@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """sync: one event, one card. Ported from GYST's project_sync tests, plus the adopter mistakes and hostile payloads."""
 
 from __future__ import annotations

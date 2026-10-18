@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # This project's own board: a user-owned GitHub Project, created by `safo bootstrap` (the first real use) and
 # kept current by a scheduled `safo reconcile` run from the maintainer's own gh login (examples/systemd/).
 # No App can write a user-owned board and no token is kept in CI.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Shared fixtures and one guard that applies to every test: nothing leaves this machine.
 
 Sockets to anywhere but loopback raise, naming the host. There is no opt-out fixture on

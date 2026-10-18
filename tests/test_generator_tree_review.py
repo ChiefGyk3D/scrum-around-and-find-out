@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Codex review of PR 37: final inventory, file modes, temp-file mode, and the documented rename boundary (spec 2.6)."""
 
 from __future__ import annotations

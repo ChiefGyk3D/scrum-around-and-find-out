@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 19, the degradation part: route reads the verified document; one dangling pointer degrades one agent."""
 
 from __future__ import annotations

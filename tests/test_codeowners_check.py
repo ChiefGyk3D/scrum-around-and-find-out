@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 22: `safo profiles verify` fails when CODEOWNERS misses a path the profiles are rendered from."""
 
 from __future__ import annotations

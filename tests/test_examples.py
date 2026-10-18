@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The project's own board and its scheduled reconcile: user-owned, no token in CI, run from the maintainer's login."""
 
 from __future__ import annotations

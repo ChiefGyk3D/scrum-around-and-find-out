@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """agents-status: the board by agent, Codex sessions and limits from files, Copilot from gh."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The repository's own workflows follow GYST's rules: pinned by commit, read-only by default, one pin."""
 
 from __future__ import annotations

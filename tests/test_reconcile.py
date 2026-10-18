@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """reconcile: add the missing, finish the closed, fill the blank; idempotent; survives the failures adopters hit."""
 
 from __future__ import annotations

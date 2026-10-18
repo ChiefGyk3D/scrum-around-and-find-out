@@ -1,5 +1,5 @@
 HEADER
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 name: Copilot task
 description: A fully specified task for the Copilot coding agent.
 labels:

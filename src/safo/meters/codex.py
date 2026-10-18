@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Codex: plan windows and token totals from ~/.codex/sessions/**/*.jsonl.
 
 A `token_count` row carries `rate_limits` (`plan_type`, `primary` the 5-hour window, `secondary` the weekly one,

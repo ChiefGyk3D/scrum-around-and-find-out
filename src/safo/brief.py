@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Fill a profile's brief template with task data that cannot close or forge the fence it sits in (spec 1.4).
 
 Each value goes between a start line and an end line that carry a 128-bit random id drawn per call:

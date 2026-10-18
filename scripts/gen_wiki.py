@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Write a flat GitHub wiki tree that mirrors docs/.
 
 scripts/gen_wiki.py --out DIR [--commit SHA]

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The shipped agents.yaml: profiles only for what docs/lessons.md supports, in pointer form, and the slug function."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """What the agent team is doing, read-only: Codex sessions and plan limits, Copilot agent tasks.
 
 Ported from the maintainer's `agents-status` shell script. Claude subagents live inside a Claude Code

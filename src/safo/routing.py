@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Rules plus live headroom: which agent a task shape should go to, and why.
 
 Pure functions. `safo route` prints the answer for the lead to put on the card's Agent field; nothing here

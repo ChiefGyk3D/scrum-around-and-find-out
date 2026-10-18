@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """bootstrap: create what board.yaml names and the project lacks; refuse to edit what exists.
 
 `updateProjectV2Field` with `singleSelectOptions` replaces every option with a new id and wipes each

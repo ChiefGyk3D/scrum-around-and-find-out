@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Fixtures for the profile tests: a document whose profiles are written here, so they do not depend on shipped text."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The client against the fake: retries, rate limits, pagination, dry run, and what it must never send."""
 
 from __future__ import annotations

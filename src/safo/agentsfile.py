@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """agents.yaml: who does what, how much room each has, and which agent a task shape goes to.
 
 Validated like board.yaml (every error names the key) and read with `yaml.safe_load` only. `docs/routing.md` is

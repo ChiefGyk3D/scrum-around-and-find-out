@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Who does what, how much room each has, and which agent a task shape goes to. docs/routing.md is GENERATED from this
 # file (python scripts/gen_routing.py --write); `safo route <shape>` reads it with the live headroom `safo usage` measures.
 # The numbers are one maintainer's measured workload, not a vendor's published limits: replace them with your own.

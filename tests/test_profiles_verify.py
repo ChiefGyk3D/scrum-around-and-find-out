@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """`safo profiles verify`: the side-by-side table, the exit codes and the promotion information."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Loading scripts/gen_profiles.py as a module with its paths pointed at a scratch repository."""
 
 from __future__ import annotations

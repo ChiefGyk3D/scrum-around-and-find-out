@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 1: the profile block's shape, types, bounds, requiredness and counts."""
 
 from __future__ import annotations

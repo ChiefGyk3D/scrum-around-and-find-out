@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 5: query_outcomes aggregates across months; a metric with no data is unsupported, never zero."""
 
 from __future__ import annotations

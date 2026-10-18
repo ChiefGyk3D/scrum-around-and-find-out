@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """safo.routing against the hostile list: each case is a configuration or request that must not loosen a rule."""
 
 from __future__ import annotations

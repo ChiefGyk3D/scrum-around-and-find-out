@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Does CODEOWNERS cover the files an agent's instructions are made from? (spec 7.2, rule 1)
 
 The profile text, the evidence it cites, the personas and templates it renders and the source that holds the profile

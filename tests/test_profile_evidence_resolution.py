@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 4: load_verified_agents resolves every pointer; strict callers fail on the same inputs."""
 
 from __future__ import annotations

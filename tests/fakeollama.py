@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """A fake Ollama on a loopback port. It records every request so a test can prove what was and was not asked."""
 
 from __future__ import annotations

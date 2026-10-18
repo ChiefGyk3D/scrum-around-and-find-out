@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """hooks: install, run and inspect the Claude Code hooks that enforce the routing rules in agents.yaml.
 
     safo hooks install [--settings PATH] [--mode warn|block]   add the probe and the guard to a settings.json

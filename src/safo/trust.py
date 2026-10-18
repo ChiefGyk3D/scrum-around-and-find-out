@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The trust policy for a local private file that carries a profile (spec section 7.2, rule 2).
 
 This is not `guardlog.trusted_dir`. That function judges one directory, follows a symlink to it and never looks at the

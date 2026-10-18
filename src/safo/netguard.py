@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Where an endpoint may point: loopback and the private LAN, never link-local, unspecified, multicast or metadata.
 
 A local model lives on loopback or a LAN address, so those stay allowed. The ranges a hostile `agents.yaml` would aim

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """What reconcile would change, as data. `audit` prints it; `reconcile` applies it."""
 
 from __future__ import annotations

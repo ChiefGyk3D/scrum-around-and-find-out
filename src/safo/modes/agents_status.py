@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """agents-status: one read-only view of what Claude, Codex and Copilot are doing for the board."""
 
 from __future__ import annotations

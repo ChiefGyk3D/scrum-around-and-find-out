@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """scripts/gen_wiki.py mirrors docs/ into a flat wiki tree, and refuses anything that could damage the result."""
 
 from __future__ import annotations

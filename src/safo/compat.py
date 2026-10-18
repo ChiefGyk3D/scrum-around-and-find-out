@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """A board without a board.yaml: the inputs of GYST's project-sync.yml, so its callers need not change.
 
 `board_from_env` turns SAFO_PROJECT_URL and the status/area inputs into the one-repository Board that GYST's script

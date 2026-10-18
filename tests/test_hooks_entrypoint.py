@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The real module entrypoint (`python -m safo`) of the hooks: argument errors must fail open, never exit 2.
 
 A host reads exit 2 from a hook as "block this tool call", so a hook that cannot parse its own command line (a changed

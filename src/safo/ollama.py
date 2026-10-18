@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """A small Ollama client: a read-only probe, and one native generate call.
 
 The probe asks `GET /api/tags` (what is installed) and `GET /api/ps` (what is loaded) and nothing else, with a short

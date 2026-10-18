@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """What a mode receives: the validated board, an authenticated client and the streams."""
 
 from __future__ import annotations

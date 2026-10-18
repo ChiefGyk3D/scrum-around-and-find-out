@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Duplicate JSON keys are refused at every nesting level, by the shared loader and by each caller of it."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Dependabot's own pull requests, merged once `ci / CI green` passes. A major bump is left for a person.
 name: Dependabot auto-merge
 

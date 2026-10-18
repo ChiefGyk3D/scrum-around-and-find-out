@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 17: the policy for local private files that carry a profile (7.2), separate from guardlog.trusted_dir."""
 
 from __future__ import annotations

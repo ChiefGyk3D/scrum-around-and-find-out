@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The README's table of modes and the modes that exist cannot drift apart, and the docs keep their promises."""
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def test_the_mode_check_bites_in_both_directions() -> None:
 
 
 def test_the_readme_names_the_licence_and_where_the_playbook_starts() -> None:
-    assert "MIT" in README and "docs/why.md" in README and "docs/adoption.md" in README
+    assert "Apache-2.0" in README and "docs/why.md" in README and "docs/adoption.md" in README
 
 
 def test_the_status_table_matches_what_is_built() -> None:

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Where the routing guard keeps its files, and what its log says. Read here by `agents-status`; written by `hooks`.
 
 One JSON object per line in `log.jsonl`, appended by the dispatch guard on every decision. A record holds

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Group a board's cards for a status update. Code groups and counts; a model never does.
 
 The rule this module exists to keep: the grouping and every number in a status update are computed here, from the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """safo hooks: the session probe, the dispatch guard, the settings merge and the mode.
 
 Every rule of the guard has a test that fails when the rule is removed, and a hook that meets garbage fails open.

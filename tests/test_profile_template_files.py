@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 10 and the placement rules of 1.4: template and persona reads are confined and typed."""
 
 from __future__ import annotations

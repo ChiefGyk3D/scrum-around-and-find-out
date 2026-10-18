@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """docs/routing.md is generated from agents.yaml, and a test keeps the two from drifting."""
 
 from __future__ import annotations

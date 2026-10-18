@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Issues, pull requests and board items: the read side shared by audit, reconcile and sync.
 
 Every answer is read strictly. A key that is missing, an empty object where a field value was asked for, a

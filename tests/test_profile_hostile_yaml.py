@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 11: the hardened reader covers the profile subtree (aliases, anchors, merge keys, depth, size)."""
 
 from __future__ import annotations

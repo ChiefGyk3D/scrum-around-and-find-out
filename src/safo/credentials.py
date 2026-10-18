@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Where the token comes from. The token itself is only ever held by the Client."""
 
 from __future__ import annotations

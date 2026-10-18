@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """audit: compare the live board with board.yaml and the listed repositories' open work."""
 
 from __future__ import annotations

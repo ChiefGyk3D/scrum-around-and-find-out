@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # One live, read-only `safo audit` of the Renegade-Penguin suite board against examples/renegade-penguin.yaml.
 # Run by hand (Actions, Live audit, Run workflow). Never on a pull request: it needs the App's key, and a
 # pull request must never receive a secret. Exit 0 means the example still matches the live board.

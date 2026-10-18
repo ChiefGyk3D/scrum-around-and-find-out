@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Delegate mutation classification to the client, and refuse a success that carries no object.
 
 The client already treats a null payload as an unknown outcome. `returns` goes one step further for a

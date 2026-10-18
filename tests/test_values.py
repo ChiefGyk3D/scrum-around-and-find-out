@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """values: a malformed live value is an error that names the field, never a bare ValueError."""
 
 from __future__ import annotations
