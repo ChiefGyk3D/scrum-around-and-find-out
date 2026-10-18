@@ -642,7 +642,7 @@ def render_harness(v: VerifiedAgents) -> dict[str, Rendered]:
         elif agent.kind == "copilot":
             if copilot is not None:
                 raise RenderError(
-                    f"{agent.id}: {copilot} is the copilot agent that renders; the issue form has one path"
+                    f"{agent.id}: {copilot} is the copilot agent that renders; the copilot harness files (instructions and, in issue mode, the issue form) have one path"
                 )
             copilot = agent.id
             if p.harness_mode != "review":
