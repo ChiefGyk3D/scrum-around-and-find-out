@@ -20,8 +20,10 @@ from safo.profile_render import (
     MAX_RENDERED,
     RENDER_FORMAT,
     UNMEASURED_LINE,
+    Rendered,
     RenderError,
     manifest_digest,
+    profile_data,
     render_harness,
     split_header,
 )
@@ -541,3 +543,49 @@ def test_terminated_blocks_in_a_persona_or_template_are_fine(tmp_path: Path) -> 
     out = render_harness(with_profile(v, "codex", brief=replace(brief, template_text=text)))
     assert "<!-- note -->" in out["codex/codex.prompt.md"].data.decode()
     assert "```\ncode\n```" in render_persona(tmp_path / "p", PERSONA + "\n```\ncode\n```\n")
+
+
+def _review_files(tmp_path: Path) -> dict[str, Rendered]:
+    return render_harness(with_profile(verified(tmp_path), "copilot", harness_mode="review"))
+
+
+def test_a_review_mode_copilot_renders_review_guidance_and_no_issue_form(tmp_path: Path) -> None:
+    files = _review_files(tmp_path)
+    assert "copilot/ISSUE_TEMPLATE/copilot-task.yml" not in files
+    text = files["copilot/copilot-instructions.md"].data.decode()
+    assert "reviewing a pull request" in text
+    assert "## Review rules" in text
+    assert "Comment on the diff" in text and "second opinion, not a gate" in text
+    # the review checks, the do and the do-not lists and the model layers still come from the profile
+    assert "stated acceptance criteria first" in text and "- Trust its tests." in text
+    assert "### Do not\n" in text and "### Review gate\n" in text
+    # nothing tells it to work an issue
+    for gone in ("working on an issue", "copilot-task", "Scope rules", "files listed as in scope", "test command"):
+        assert gone not in text
+    assert text.count(BOUNDARY_PARAGRAPH) == 1
+
+
+def test_the_default_mode_still_renders_the_issue_form(tmp_path: Path) -> None:
+    files = render_harness(verified(tmp_path))
+    assert "copilot/ISSUE_TEMPLATE/copilot-task.yml" in files
+    assert "working on an issue" in files["copilot/copilot-instructions.md"].data.decode()
+
+
+def test_a_review_mode_copilot_still_has_one_renderer(tmp_path: Path) -> None:
+    v = with_profile(verified(tmp_path), "copilot", harness_mode="review")
+    extra = replace(v.agents.agent("copilot"), id="copilot-two")
+    with pytest.raises(RenderError, match="copilot"):
+        render_harness(replace(v, agents=replace(v.agents, agents=(*v.agents.agents, extra))))
+
+
+def test_the_mode_is_in_the_manifest_so_a_change_makes_the_files_stale(tmp_path: Path) -> None:
+    v = verified(tmp_path)
+    before = render_harness(v)["copilot/copilot-instructions.md"].manifest
+    after = _review_files(tmp_path)["copilot/copilot-instructions.md"].manifest
+    assert before != after
+
+
+def test_the_default_mode_leaves_every_manifest_as_it_was(tmp_path: Path) -> None:
+    p = profile_of(verified(tmp_path), "copilot")
+    assert "harness_mode" not in profile_data(p)
+    assert profile_data(replace(p, harness_mode="review"))["harness_mode"] == "review"

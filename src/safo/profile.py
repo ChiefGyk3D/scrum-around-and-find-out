@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 STATUSES = ("unmeasured", "profiled")
 LAYERED_KINDS = ("copilot",)  # kinds whose profile has a harness layer and per-model layers
+HARNESS_MODES = ("issue", "review")  # issue: Copilot works an issue form; review: pull request review only
 GATED_KINDS = ("copilot",)  # kinds that may carry a review_gate (a harness that opens pull requests)
 REVIEW_CODES = ("test_vs_behaviour", "workflow_permissions")
 THINKING = ("off", "default", "on")
@@ -158,6 +159,7 @@ class Profile:
     must_not_get: tuple[ShapeClaim, ...] = ()
     review_gate: ReviewGateSpec | None = None
     models: tuple[tuple[str, ModelLayer], ...] = ()
+    harness_mode: str = "issue"
 
 
 class Budget:
@@ -562,6 +564,7 @@ _PROFILE_KEYS = {
     "must_not_get",
     "review_gate",
     "models",
+    "harness_mode",
 }
 _LAYER_KEYS = {"status", "thinking", "do", "dont", "must_not_get"}
 _SETTING = {"value", "evidence"}
@@ -752,6 +755,12 @@ def parse_profile(r: Reader, raw: object, path: str, *, kind: str, base_dir: Pat
             raise r.fail(f"{path}.review_gate", f"only {', '.join(GATED_KINDS)} has a review gate")
         gate = _gate(r, m["review_gate"], f"{path}.review_gate", budget)
 
+    mode = "issue"
+    if "harness_mode" in m:
+        if kind != "copilot":
+            raise r.fail(f"{path}.harness_mode", "only copilot has a harness mode")
+        mode = r.choice(m["harness_mode"], f"{path}.harness_mode", HARNESS_MODES)
+
     models: tuple[tuple[str, ModelLayer], ...] = ()
     if "models" in m:
         if status == "unmeasured":
@@ -760,7 +769,7 @@ def parse_profile(r: Reader, raw: object, path: str, *, kind: str, base_dir: Pat
             raise r.fail(f"{path}.models", f"only {', '.join(LAYERED_KINDS)} has model layers")
         models = _models(r, m["models"], f"{path}.models", budget)
 
-    return Profile(status, persona, persona_text, brief, ceiling, cap, thinking, do, dont, must, gate, models)
+    return Profile(status, persona, persona_text, brief, ceiling, cap, thinking, do, dont, must, gate, models, mode)
 
 
 # -- cross-checks against the rest of the file ------------------------------------------------------------------

@@ -46,6 +46,7 @@ so a pointer is always attached to the one claim it supports.
 | `thinking` | `{value, evidence}` | `value` is `off`, `default` or `on`. |
 | `do`, `dont` | lists of `{text, evidence}` | At most 8 each. Evidence kinds: `lessons` or `outcomes` only. |
 | `must_not_get` | list of `{shape, evidence}` | At most 8. `shape` must exist in `shapes`. Evidence: `lessons` or `outcomes` only. |
+| `harness_mode` | `issue` or `review` | Optional, `copilot` only, default `issue`. `review` renders pull request review guidance in `copilot-instructions.md` and no issue form (SAFO #45). |
 | `review_gate` | mapping | Harness agents only (section 3). |
 | `models` | mapping of model id to model layer | `copilot` only (section 3). |
 
@@ -232,7 +233,7 @@ bytes (passed in, so the renderer does no file access), to a mapping of relative
 |---|---|---|
 | `claude/<agent-id>.md` | Claude subagent | Frontmatter (`name`, `description`, `model` from the agent's `model`; `tools` and `disallowedTools` copied only from the persona's own frontmatter), the persona body when set, then the generated "Model profile" section |
 | `codex/<agent-id>.prompt.md` | Codex | A prompt preamble to prepend to a self-contained prompt (Codex cannot resume across worktrees, so the preamble is the whole standing context) |
-| `copilot/ISSUE_TEMPLATE/copilot-task.yml` | Copilot coding agent | A GitHub issue form (3.3) |
+| `copilot/ISSUE_TEMPLATE/copilot-task.yml` | Copilot coding agent | A GitHub issue form (3.3); not written when the profile's `harness_mode` is `review` |
 | `copilot/copilot-instructions.md` | Copilot coding agent | Repository-level instructions for the agent, harness layer only |
 | `local/<agent-id>.wrapper.txt` | Local models | A prompt wrapper with `{{task}}`, a strict output-format line, ceilings in prose |
 
@@ -359,7 +360,7 @@ On the `copilot` agent:
 
 ### 3.3 The issue template
 
-A GitHub issue form (`.yml`) built with `yaml.safe_dump` from a fixed structure, never by string concatenation. All
+In `harness_mode: issue` (the default) a GitHub issue form (`.yml`) built with `yaml.safe_dump` from a fixed structure, never by string concatenation. All
 fields are required by the form:
 
 1. Acceptance criteria, in prose, as observable behaviour.

@@ -95,3 +95,8 @@ def test_the_codex_and_haiku_and_copilot_and_ollama_claims_are_the_ones_the_less
     assert ollama is not None and ollama.thinking is not None and ollama.thinking.value == "off"
     haiku = a.agent("claude-haiku").profile
     assert haiku is not None and any("security" in c.text.lower() for c in (*haiku.do, *haiku.dont))
+
+
+def test_the_shipped_copilot_is_review_only_so_its_harness_is_review_guidance() -> None:
+    copilot = shipped().agent("copilot").profile
+    assert copilot is not None and copilot.harness_mode == "review"

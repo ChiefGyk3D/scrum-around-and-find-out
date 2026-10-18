@@ -276,3 +276,19 @@ def test_the_promotion_block_defaults_validates_and_has_bounds() -> None:
 def test_the_loaded_file_carries_the_same_profile_as_the_parsed_dict(tmp_path: Any) -> None:
     from_file = loads(tmp_path, doc())
     assert from_file.agent("codex").profile == parse_agents(doc()).agent("codex").profile
+
+
+def test_harness_mode_defaults_to_issue_and_takes_review_only_on_a_copilot_profile() -> None:
+    assert prof(parse_agents(doc()), "copilot").harness_mode == "issue"
+    d = doc()
+    profile(d, "copilot")["harness_mode"] = "review"
+    assert prof(parse_agents(d), "copilot").harness_mode == "review"
+
+
+def test_harness_mode_is_validated() -> None:
+    d = doc()
+    profile(d, "copilot")["harness_mode"] = "write"
+    rejects(d, r"agents\.copilot\.profile\.harness_mode: 'write' is not one of issue, review")
+    d = doc()
+    profile(d, "codex")["harness_mode"] = "review"
+    rejects(d, r"agents\.codex\.profile\.harness_mode: only copilot has a harness mode")
