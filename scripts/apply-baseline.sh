@@ -17,7 +17,7 @@
 set -euo pipefail
 
 GYST="ChiefGyk3D/git-your-ship-together"
-GYST_SHA="faba0b7d1ab65e9033bef1acfa93d6d57b5808c0" # v1.21.0, the pin .github/workflows/ci.yml uses
+GYST_SHA="e5c6ec3251cf3a6eea100a1c21736f1818d5efc7" # v1.23.0, the pin .github/workflows/ci.yml uses
 repo="ChiefGyk3D/scrum-around-and-find-out"
 branch="main"
 apply=false
