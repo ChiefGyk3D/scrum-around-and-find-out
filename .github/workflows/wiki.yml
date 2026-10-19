@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   wiki:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/wiki-publish.yml@e5c6ec3251cf3a6eea100a1c21736f1818d5efc7 # v1.23.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/wiki-publish.yml@8fdb8d106b11aae0f37e893bb57e9bd8e8b0e7b7 # v1.24.0
     permissions:
       contents: write # the publish job only: the reusable workflow's generate job stays read-only
     with:
