@@ -26,6 +26,9 @@ Find the shape of the task, then take the first agent that has headroom. The rev
 | `docs-proofread` | A proofreading pass over documentation: typos, broken sentences, inconsistent terms. | Local LLM (Ollama) | Claude Haiku | Claude Sonnet |
 | `duplicate-issue-search` | Recommend an embedding-search route; local run does not execute embedding or similarity search. | Local LLM (Ollama) | Claude Haiku | Claude Sonnet |
 | `status-headline` | An optional fixed prose clause for a status update; code renders the groups and the entire count sentence. Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted. | Local LLM (Ollama) | none | The maintainer |
+| `prose-in-voice` | Non-technical, public-facing language that must sound human and in the maintainer's voice (greetings, jokes and roast copy, social posts, captions, scripts). The maintainer's judgment from his own use, not a benchmark. The voice skill is a Claude Code skill, so its text and rules must be supplied to ChatGPT (setup NOT YET DONE); Claude Sonnet with the skill is the fallback. A draft until the maintainer approves it. | ChatGPT (general models) | Claude Sonnet | The maintainer |
+| `prompt-language-for-local-llm` | The language and patterns that steer a local model (system-prompt wording, angle pools, formats, few-shot exemplars, banned phrases, fallback banks). Ollama runs the generation, ChatGPT authors the wording, Claude integrates it as data and measures the local output (repetition, adherence), and the maintainer approves public copy. | ChatGPT (general models) | Claude Sonnet | Claude Sonnet, The maintainer |
+| `technical-docs` | Technical documentation, runbooks and reference pages. | Claude Sonnet | Claude lead | Claude lead |
 | `decision` | A trade-off, or anything that touches hardware. The lead frames the options and recommends; the maintainer decides. Opus only with the maintainer's OK and the reason stated. | The maintainer | none | none |
 
 ## When an agent is short of headroom
@@ -146,6 +149,27 @@ Constraints:
 - Pull requests only: no coding-agent issues, no chat or CLI use, so its credits last the month. The 7,000 credit plan ran out about ten days into the cycle (2026-10-10) with automatic review on every pull request; the plan is now 20,000 and review is set to lite.
 - Its comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex adversarial review still decide.
 
+### ChatGPT (general models)
+
+Authors non-technical, public-facing language in the maintainer's voice, and the wording and patterns that steer a local model. Its output is a draft.
+
+Limits:
+
+- plan: ChatGPT Plus; the allowance is read in the client
+
+Strengths:
+
+- The maintainer's judgment on 2026-10-20, from his own use and not a benchmark: its general (non-cybersecurity) models sound markedly more natural for greetings, jokes and roast copy, social posts, captions and scripts.
+- It heavily improved a Discord bot's welcome-greeter copy (Penguin Overlord pull request 319, merged 2026-10-18).
+- Authors the language that steers a local model: system-prompt wording, angle pools, formats, few-shot exemplars, banned phrases and fallback banks.
+
+Constraints:
+
+- Everything it writes is a draft: the maintainer reviews anything public.
+- No repository access in this workflow: it works through briefs and pasted text, and Claude integrates its output into the project.
+- Not for technical documentation, runbooks, code or reviews: those stay with Claude.
+- The maintainer's voice skill is a Claude Code skill and ChatGPT cannot load it, so its text and rules must be supplied as a ChatGPT Project file or instructions. Setup status: NOT YET DONE.
+
 ### Local LLM (Ollama)
 
 The cheapest agent: models on machines you own, and the first stop for text-in/text-out work. Cost is zero; a Claude model checks anything that will be applied.
@@ -198,6 +222,7 @@ Constraints:
 - Routing order 3: code from prose, every task review, and ops runbooks go to Sonnet.
 - Routing order 4: security-sensitive or risky code is built by Sonnet, and Codex attacks it before merge.
 - Routing order 5: decisions go to the lead and the maintainer; Opus only with the maintainer's OK.
+- Routing order for language work: non-technical, public-facing language is authored by ChatGPT's general models (the maintainer's judgment from his own use, not a benchmark) and the maintainer reviews it; technical documentation, runbooks, code and reviews stay with Claude. For a local model, ChatGPT authors the steering language and Claude integrates it as data and measures the output.
 - Copilot reviews pull requests and nothing else: it is an extra reader on the diff, never the reviewer of record and never a merge gate.
 - Write the brief before choosing the agent. If you cannot write a complete one, the task is a decision or research.
 - The reviewer is a different agent or model from the author, and starts with no memory of the work.
