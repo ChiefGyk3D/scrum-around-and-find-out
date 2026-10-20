@@ -11,6 +11,7 @@ import pytest
 from profiledata import prof
 from safo.agentsfile import MIGRATION_COHORT, AgentsFile, load_agents
 from safo.profile import Evidence, slugify
+from safo.routing import recommend
 
 ROOT = Path(__file__).parent.parent
 LESSONS = (ROOT / "docs" / "lessons.md").read_text(encoding="utf-8")
@@ -48,7 +49,7 @@ def test_the_cohort_agents_have_no_profile_and_the_four_measured_agents_do() -> 
     a = shipped()
     for agent_id in MIGRATION_COHORT:
         assert a.agent(agent_id).profile is None
-    for agent_id in ("claude-haiku", "copilot", "codex", "ollama"):
+    for agent_id in ("claude-haiku", "copilot", "codex", "ollama", "chatgpt"):
         assert a.agent(agent_id).profile is not None, agent_id
     assert a.agent("maintainer").profile is None
     assert a.warnings == ()
@@ -56,7 +57,8 @@ def test_the_cohort_agents_have_no_profile_and_the_four_measured_agents_do() -> 
 
 def test_the_measured_status_per_agent() -> None:
     a = shipped()
-    assert {x: prof(a, x).status for x in ("claude-haiku", "copilot", "codex", "ollama")} == {
+    assert {x: prof(a, x).status for x in ("claude-haiku", "copilot", "codex", "ollama", "chatgpt")} == {
+        "chatgpt": "profiled",
         "claude-haiku": "profiled",
         "copilot": "profiled",
         "codex": "profiled",
@@ -100,3 +102,37 @@ def test_the_codex_and_haiku_and_copilot_and_ollama_claims_are_the_ones_the_less
 def test_the_shipped_copilot_is_review_only_so_its_harness_is_review_guidance() -> None:
     copilot = shipped().agent("copilot").profile
     assert copilot is not None and copilot.harness_mode == "review"
+
+
+def test_chatgpt_authors_public_language_and_the_voice_skill_setup_step_is_recorded_as_not_done() -> None:
+    a = shipped()
+    chatgpt = a.agent("chatgpt")
+    assert chatgpt.kind == "chatgpt"
+    p = chatgpt.profile
+    assert p is not None and p.brief is not None and p.brief.inline
+    assert any("draft" in c.text.lower() for c in (*p.do, *p.dont))
+    assert any("NOT YET DONE" in c for c in chatgpt.constraints)
+    assert all(e.evidence.ref.startswith("chatgpt-") for e in (*p.do, *p.dont))
+
+
+def test_language_shapes_prefer_chatgpt_and_the_maintainer_or_a_claude_reviews_it() -> None:
+    a = shipped()
+    voice = a.shape("prose-in-voice")
+    assert (voice.prefer, voice.fallback, voice.reviewer) == (("chatgpt",), ("claude-sonnet",), ("maintainer",))
+    prompts = a.shape("prompt-language-for-local-llm")
+    assert (prompts.prefer, prompts.fallback, prompts.reviewer) == (
+        ("chatgpt",),
+        ("claude-sonnet",),
+        ("claude-sonnet", "maintainer"),
+    )
+    docs = a.shape("technical-docs")
+    assert (docs.prefer, docs.fallback, docs.reviewer) == (("claude-sonnet",), ("claude-lead",), ("claude-lead",))
+
+
+def test_route_picks_chatgpt_for_language_work_without_a_meter_and_needs_no_meter() -> None:
+    a = shipped()
+    r = recommend(a, "prose-in-voice", {})
+    assert (r.agent, r.card_label, r.reviewer, r.unknown) == ("chatgpt", "ChatGPT", "maintainer", ())
+    r = recommend(a, "prompt-language-for-local-llm", {})
+    assert (r.agent, r.reviewer) == ("chatgpt", "claude-sonnet")
+    assert recommend(a, "technical-docs", {}).agent == "claude-sonnet"
