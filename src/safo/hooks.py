@@ -13,6 +13,7 @@ fails open. The log records the verdict and never the brief, the description or 
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -152,22 +153,36 @@ def repo_path(path: Path) -> Path:
     return path.with_name(path.name + ".repo")
 
 
-def bind_repo(path: Path, repo: str | None) -> bool:
-    """Record the session's repository once, at SessionStart. False when a different value was bound already.
+def touch(path: Path) -> None:
+    """Mark a file as used now, so pruning by age never removes the state of a session that is still running."""
+    with contextlib.suppress(OSError):
+        os.utime(path)
 
-    The bound value is never replaced and never re-derived later: the guard reads it back, so a `git remote set-url`
-    or a `.git/config` edit made after the session began changes nothing.
+
+def bind_repo(path: Path, repo: str | None, source: object) -> str:
+    """Bind the session's repository, only at a fresh start. Returns bound, same, changed or unbound.
+
+    A binding is created only when SessionStart says `source` is `startup`; the Claude Code hooks reference
+    (https://code.claude.com/docs/en/hooks, SessionStart: `source` is one of startup, resume, clear, compact, fork)
+    gives that field. For any other source, or none, an existing binding is found or the answer is `unbound`, which
+    the caller treats as fail closed: a binding lost to pruning is never re-derived from the working tree, which an
+    agent can rewrite. An existing binding is never replaced, and reading it refreshes its age.
     """
     target = repo_path(path)
     with file_lock(target.with_name(target.name + ".lock")):
         try:
             bound = loads(bounded_read(target))
         except FileNotFoundError:
+            if source != "startup":
+                return "unbound"
             write_text(target, json.dumps({"repo": repo}, sort_keys=True))
-            return True
+            return "bound"
         except (OSError, ValueError, UnicodeError):
-            return False  # an unreadable binding is treated as a change: it is never silently replaced
-        return isinstance(bound, dict) and bound.get("repo") == repo
+            return "changed"  # an unreadable binding is treated as a change: it is never silently replaced
+        if isinstance(bound, dict) and bound.get("repo") == repo:
+            touch(target)
+            return "same"
+        return "changed"
 
 
 def read_bound_repo(path: Path | None) -> str | None:
@@ -179,6 +194,7 @@ def read_bound_repo(path: Path | None) -> str | None:
     except (OSError, ValueError, UnicodeError):
         return None
     value = bound.get("repo") if isinstance(bound, dict) else None
+    touch(repo_path(path))  # the session is alive: keep its binding out of the age-based prune
     return value if isinstance(value, str) else None
 
 

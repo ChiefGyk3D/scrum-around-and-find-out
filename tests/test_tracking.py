@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,11 +17,11 @@ import pytest
 import yaml
 
 from agentsdata import agents_dict
-from hooksdata import agents_file, dispatch, hooks, read_log, set_mode, set_probe
+from hooksdata import agents_file, dispatch, hooks, probe_file, read_log, set_mode, set_probe, state_folder
 from safo import tracking
 from safo.agentsfile import parse_agents
 from safo.errors import ConfigError
-from safo.hooks import check_dispatch
+from safo.hooks import check_dispatch, prune_state, repo_path
 from safo.tracking import Ref, State
 
 GOOD = "acme/widgets#12"
@@ -473,10 +475,15 @@ def stand_in_git(bin_dir: Path, url: str) -> None:
 
 
 def start_session(
-    home: Path, agents: Path, cwd: Path, bin_dir: Path | None = None, session: str = "session-a"
+    home: Path,
+    agents: Path,
+    cwd: Path,
+    bin_dir: Path | None = None,
+    session: str = "session-a",
+    source: str = "startup",
 ) -> tuple[int, str, str]:
     """The SessionStart probe, which is where the session's repository is bound."""
-    event = json.dumps({"hook_event_name": "SessionStart", "session_id": session, "cwd": str(cwd)})
+    event = json.dumps({"hook_event_name": "SessionStart", "session_id": session, "cwd": str(cwd), "source": source})
     env = {"PATH": str(bin_dir)} if bin_dir else None
     result = hooks("probe", "--agents", str(agents), home=home, stdin=event, env=env)
     set_probe(home, reachable=False, agents=agents, session=session)  # the test clock is fixed: make the state fresh
@@ -538,6 +545,57 @@ def test_a_binding_is_written_once_and_a_later_change_is_refused_and_logged(
     assert code == 0 and "degraded" in out
     assert read_log(_private_home)[-1]["diagnostic"] == "repo-changed"
     assert denied(run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0])
+
+
+def repo_file(home: Path, agents: Path, session: str = "session-a") -> Path:
+    return repo_path(probe_file(home, agents, session))
+
+
+def test_the_guard_keeps_an_active_sessions_binding_out_of_the_prune(_private_home: Path, tmp_path: Path) -> None:
+    exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
+    set_mode(_private_home, "block")
+    bin_dir = stand_in_gh(tmp_path, {})
+    stand_in_git(bin_dir, "https://github.com/acme/scratch.git")
+    here = tmp_path / "work"
+    here.mkdir()
+    start_session(_private_home, exempt, here, bin_dir)
+    binding = repo_file(_private_home, exempt)
+    week_old = time.time() - 30 * 86400
+    os.utime(binding, (week_old, week_old))
+    assert run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0] == ""
+    assert binding.stat().st_mtime > time.time() - 600, "reading the binding refreshes it"
+    prune_state(state_folder(_private_home), time.time())
+    assert binding.exists(), "an active session's binding is not pruned"
+    assert run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0] == ""
+
+
+@pytest.mark.parametrize("source", ["resume", "clear", "compact", "fork", "", "other"])
+def test_only_a_fresh_start_creates_a_binding(_private_home: Path, tmp_path: Path, source: str) -> None:
+    """A binding lost to pruning is not re-derived from a working tree the agent may have rewritten."""
+    exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
+    set_mode(_private_home, "block")
+    bin_dir = stand_in_gh(tmp_path, {})
+    stand_in_git(bin_dir, "https://github.com/acme/scratch.git")  # forged: this is what a hostile agent would set
+    here = tmp_path / "work"
+    here.mkdir()
+    code, out, _ = start_session(_private_home, exempt, here, bin_dir, source=source)
+    assert code == 0 and "degraded" in out and read_log(_private_home)[-1]["diagnostic"] == "repo-unbound"
+    assert not repo_file(_private_home, exempt).exists()
+    assert denied(run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0])
+
+
+def test_a_resumed_session_finds_the_binding_made_at_startup(_private_home: Path, tmp_path: Path) -> None:
+    exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
+    set_mode(_private_home, "block")
+    bin_dir = stand_in_gh(tmp_path, {})
+    stand_in_git(bin_dir, "https://github.com/acme/scratch.git")
+    here = tmp_path / "work"
+    here.mkdir()
+    start_session(_private_home, exempt, here, bin_dir)
+    for source in ("resume", "compact", "clear"):
+        code, out, _ = start_session(_private_home, exempt, here, bin_dir, source=source)
+        assert code == 0 and "degraded" not in out
+    assert run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0] == ""
 
 
 def test_a_session_started_again_with_the_same_repository_is_fine(_private_home: Path, tmp_path: Path) -> None:

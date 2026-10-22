@@ -175,9 +175,13 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
         found = None
         if isinstance(cwd, str):
             found = ctx.repo_lookup(cwd) if ctx.repo_lookup else tracking.cwd_repo(ctx.run, ctx.env, cwd)
-        code = "repo-changed"
-        if not bind_repo(path, found):
+        bound = bind_repo(path, found, payload.get("source"))
+        if bound == "changed":
+            code = "repo-changed"
             raise ValueError("the session's repository changed after it was bound")
+        if bound == "unbound" and doc.hooks.tracking_exempt_repos:
+            code = "repo-unbound"  # a resumed session whose binding is gone: no exemption until a fresh startup
+            raise ValueError("the session has no bound repository")
         code = "state-write"
         prune_state(folder, ctx.now.timestamp())
         ctx.say(session_output(session_message(doc, state)))

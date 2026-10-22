@@ -49,7 +49,7 @@ issue: ChiefGyk3D/example#123
   the session's working directory (a read of the git configuration, no network) and bound in the guard's private state
   directory. The bound value is compared in full, owner and name, without case, and is never re-derived afterwards: a
   later `git remote set-url` or `.git/config` edit changes nothing. A second SessionStart for the same session that
-  derives a different value is refused (the old binding stays) and logged as `repo-changed`. A repository that could
+  derives a different value is refused (the old binding stays) and logged as `repo-changed`. Only a SessionStart whose `source` is `startup` (the field the Claude Code hooks reference defines, with `resume`, `clear`, `compact` and `fork`) creates a binding; any other source must find the existing one or the session stays unbound and is logged as `repo-unbound`, so a binding lost to pruning is never rebuilt from a working tree the agent may have rewritten. The guard refreshes the binding's age each time it reads it, so a session that is still running is never pruned. A repository that could
   not be determined is bound as unknown and is never exempt, and so is a session that was never bound. A brief cannot
   grant the opt-out to itself. Use it for a throwaway repository, not to get past the rule.
 
