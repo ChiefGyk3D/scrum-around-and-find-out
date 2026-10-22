@@ -8,8 +8,9 @@ import datetime as dt
 from dataclasses import dataclass, field
 
 from safo.context import Context
+from safo.coverage import card_findings, not_configured, read_tracked, unlinked_pulls
 from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, MalformedDataError, NotFoundError
-from safo.items import collect_work, list_board_items
+from safo.items import ItemState, collect_work, list_board_items
 from safo.live import LiveBoard, LiveField, load_live
 from safo.modes import Mode, register
 from safo.plan import build_plan
@@ -94,6 +95,19 @@ def compare_structure(board: Board, live: LiveBoard, out: Findings) -> None:
             out.notes.append(f"view {name!r} exists on the project but not in board.yaml")
 
 
+def check_tracking(ctx: Context, board: Board, live: LiveBoard, items: list[ItemState], out: Findings) -> None:
+    """The no-hidden-work checks: a linked issue on every pull request, and Kind, Epic, Effort and Area on every card.
+
+    An unreadable repository is already reported as UNKNOWN by `collect_work`, so it is not repeated here.
+    """
+    unlinked, _ = unlinked_pulls(ctx.client, board, ctx.today)
+    out.drift += [f"PULL {name} has no linked issue (add `Refs #n` or `Closes #n`)" for name in unlinked]
+    repos = {r.full_name.lower(): r for r in board.repositories}
+    held = read_tracked(ctx.client, board, live)
+    out.drift += card_findings(board, items, held, repos)
+    out.notes += not_configured(board)
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
     board = ctx.board
     findings = Findings()
@@ -117,6 +131,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             findings.unknown.append(f"card {item.id} has inaccessible content")
     plan = build_plan(board, items, work, unreachable, ctx.today)
     findings.drift += plan.lines() + plan.anomalies
+    check_tracking(ctx, board, live, items, findings)
     ctx.say(
         f"audit {board.project.owner}/{board.project.number}: "
         f"{len(live.fields)} fields, {len(live.views)} views, {live.items_total} items"

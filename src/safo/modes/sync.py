@@ -26,6 +26,7 @@ from typing import Any
 from safo.apply import Applier
 from safo.bounded import MAX_BYTES, NotRegularFileError, loads, read_bounded
 from safo.context import Context
+from safo.coverage import pull_is_linked
 from safo.errors import (
     EXIT_DRIFT,
     EXIT_OK,
@@ -206,7 +207,19 @@ def follow_pointer(ctx: Context, pointer: Pointer) -> int:
     except NotFoundError:
         say(ctx, f"{label}: the card could not be read, though the issue or pull request exists")
         return EXIT_UNKNOWN
-    return apply_event(ctx, live, repo, content, pointer.action, item, label)
+    code = apply_event(ctx, live, repo, content, pointer.action, item, label)
+    return needs_link(ctx, repo, content, label, code)
+
+
+def needs_link(ctx: Context, repo: Repository, content: Content, label: str, code: int) -> int:
+    """A pull request with no linked issue is hidden work: say so, and leave a clean run red. Nothing is written."""
+    exempt = {r.lower() for r in ctx.board.rules.tracking.exempt_repos}
+    if content.kind != "pr" or code not in (EXIT_OK, EXIT_DRIFT) or repo.full_name.lower() in exempt:
+        return code
+    if pull_is_linked(ctx.client, content.id) is False:
+        say(ctx, f"HUMAN {label} is a pull request with no linked issue: add `Refs #n` or `Closes #n`")
+        return EXIT_DRIFT
+    return code
 
 
 @dataclass

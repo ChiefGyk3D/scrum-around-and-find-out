@@ -667,7 +667,7 @@ def test_wrong_types_in_the_input_are_treated_as_a_missing_model_and_brief(_priv
     payload = json.loads(dispatch())
     payload["tool_input"] = {"prompt": 7, "model": 7}
     payload = json.dumps(payload)
-    assert read_after(_private_home, agents, payload)["rules"] == ["no-model"]
+    assert read_after(_private_home, agents, payload)["rules"] == ["no-model", "no-issue"]
 
 
 @pytest.mark.parametrize("broken", ["missing", "garbage"])

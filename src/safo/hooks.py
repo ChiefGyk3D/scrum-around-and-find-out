@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from safo import tracking
 from safo.agentsfile import Agent, AgentsFile, Endpoint
 from safo.bounded import loads
 from safo.errors import ConfigError
@@ -56,7 +57,10 @@ NO_MODEL = "no-model"
 APPROVAL = "approval"
 NO_LOCAL_STEP = "no-local-step"
 UNKNOWN_MODEL = "unknown-model"
-RULES = (NO_MODEL, UNKNOWN_MODEL, APPROVAL, NO_LOCAL_STEP)
+NO_ISSUE = "no-issue"  # the brief names no tracking item (or an unusable one)
+ISSUE_UNUSABLE = "issue-unusable"  # the item does not exist or is closed
+ISSUE_UNVERIFIED = "issue-unverified"  # the item could not be looked up
+RULES = (NO_MODEL, UNKNOWN_MODEL, APPROVAL, NO_LOCAL_STEP, NO_ISSUE, ISSUE_UNUSABLE, ISSUE_UNVERIFIED)
 
 
 # -- the probe -------------------------------------------------------------------------------------
@@ -269,8 +273,18 @@ def needs_approval(doc: AgentsFile, model: str) -> bool:
     return any(a.approval_required for a in known_agents(doc, model))
 
 
-def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bool) -> Verdict:
-    """Apply the routing rules to one Agent tool call."""
+def check_dispatch(
+    doc: AgentsFile,
+    tool_input: Mapping[str, Any],
+    reachable: bool,
+    resolve: tracking.Resolver | None = None,
+    cwd: str = "",
+) -> Verdict:
+    """Apply the routing rules to one Agent tool call.
+
+    With a `resolve`, the no-hidden-work rule applies too: the brief must name an open tracking item. The guard always
+    passes one; a caller that leaves it out checks the routing rules alone.
+    """
     raw_prompt, raw_model = tool_input.get("prompt"), tool_input.get("model")
     prompt = raw_prompt if isinstance(raw_prompt, str) else ""
     raw = raw_model.strip() if isinstance(raw_model, str) else ""
@@ -308,6 +322,11 @@ def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bo
     if reachable and not local_step and not na:
         rules.append(NO_LOCAL_STEP)
         reasons.append("the local LLM is reachable but the brief names no local step and gives no reason for none")
+    if resolve is not None and not tracking.exempt(cwd, hooks.tracking_exempt_repos):
+        broken = tracking.check(prompt, resolve)
+        if broken:
+            rules.append(broken[0])
+            reasons.append("no hidden work: " + broken[1])
     return Verdict(tuple(rules), tuple(reasons), model, local_step, na)
 
 

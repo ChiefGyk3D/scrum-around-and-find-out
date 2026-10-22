@@ -97,6 +97,8 @@ class FContent:
     closed_at: str | None = None
     draft: bool = False
     labels: list[str] = field(default_factory=list)
+    body: str = "Closes #900001"  # a pull request links an issue unless a test says otherwise
+    closing: int = 0  # how many issues GitHub itself counts as closed by a pull request
 
 
 @dataclass

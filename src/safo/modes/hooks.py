@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from safo import guardlog
+from safo import guardlog, tracking
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
@@ -203,7 +203,9 @@ def guard(ctx: LocalContext, args: argparse.Namespace) -> None:
             state, health = fresh, "healthy"
     # A stale (not refreshed) or unknown state disables ONLY the local-step rule, keeping model/approval checks.
     reachable = health == "healthy" and state is not None and state["reachable"] is True
-    verdict = check_dispatch(doc, payload["tool_input"], reachable)
+    resolve = ctx.issue_lookup or tracking.gh_resolver(ctx.run, ctx.which, ctx.env)
+    cwd = payload.get("cwd")
+    verdict = check_dispatch(doc, payload["tool_input"], reachable, resolve, cwd if isinstance(cwd, str) else "")
     decision = decide(verdict, mode)
     # One visible notice per session for a probe that cannot be trusted; every dispatch is still logged with its health.
     notice = health != "healthy" and (path is None or first_notice(path))
