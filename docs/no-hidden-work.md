@@ -31,10 +31,9 @@ issue: ChiefGyk3D/example#123
   to file one; in `warn` mode it is reported and allowed.
 - A lookup that cannot answer (no `gh`, not logged in, a timeout) fails closed in `block` mode and is reported in `warn`
   mode. The log records the rule name (`no-issue`, `issue-unusable`, `issue-unverified`), never the brief.
-- A GitHub reference must name the session's own repository (the owner/name of its `origin` remote, read with git
-  config, no network) or one listed in `hooks.tracking_repos` in `agents.yaml`; any other repository is
-  `issue-unusable` and the message lists the accepted ones. An unrelated open issue cannot satisfy the rule. When the
-  session's repository cannot be determined, only `tracking_repos` is accepted.
+- A GitHub reference must name a repository the operator listed in `hooks.tracking_repos` in `agents.yaml`; any other
+  repository is `issue-unusable`, the message lists the accepted ones, and nothing is looked up. Nothing is accepted
+  because of where the session happens to be running, so an unrelated open issue cannot satisfy the rule.
 - The guard has a time budget. It computes a deadline two seconds before the host's 10 second hook timeout, and the
   `git` and `gh` reads get only the time left. Out of time counts as a failed lookup (`issue-unverified`), so `block`
   mode denies, and the decision is still written before the host gives up.
@@ -46,9 +45,18 @@ issue: ChiefGyk3D/example#123
     tracking_repos: [owner/other-repo]   # extra repositories a brief may cite
   ```
 
-  The session's repository (full owner/name, compared without case, from its `origin` remote) must be on the opt-out
-  list. A directory's name proves nothing, and a repository that cannot be determined is never exempt. A brief cannot
+  The exemption applies to the session's repository, which is read once, at SessionStart, from the `origin` remote of
+  the session's working directory (a read of the git configuration, no network) and bound in the guard's private state
+  directory. The bound value is compared in full, owner and name, without case, and is never re-derived afterwards: a
+  later `git remote set-url` or `.git/config` edit changes nothing. A second SessionStart for the same session that
+  derives a different value is refused (the old binding stays) and logged as `repo-changed`. A repository that could
+  not be determined is bound as unknown and is never exempt, and so is a session that was never bound. A brief cannot
   grant the opt-out to itself. Use it for a throwaway repository, not to get past the rule.
+
+  **The opt-out is advisory against a hostile agent with shell access.** Such an agent can edit the bound state file or
+  the configuration itself, as the same user. The guard is a speed bump and an audit trail, like the approval token. What
+  would close it is a second hook on the Bash and Edit tools that denies writes to the guard's state and config
+  directories, `git remote` changes and `.git/config` edits; that hook does not exist yet.
 
 How the issue lookup is injected in a test: `LocalContext.issue_lookup` takes a function `Ref -> "open" | "closed" |
 "missing" | "error"`; by default it is the `gh_resolver` function of the tracking module.

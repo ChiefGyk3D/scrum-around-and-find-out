@@ -148,6 +148,40 @@ def state_path(folder: Path, session: str, doc: AgentsFile) -> Path:
     return folder / ("probe-" + state_key(session, doc) + ".json")
 
 
+def repo_path(path: Path) -> Path:
+    return path.with_name(path.name + ".repo")
+
+
+def bind_repo(path: Path, repo: str | None) -> bool:
+    """Record the session's repository once, at SessionStart. False when a different value was bound already.
+
+    The bound value is never replaced and never re-derived later: the guard reads it back, so a `git remote set-url`
+    or a `.git/config` edit made after the session began changes nothing.
+    """
+    target = repo_path(path)
+    with file_lock(target.with_name(target.name + ".lock")):
+        try:
+            bound = loads(bounded_read(target))
+        except FileNotFoundError:
+            write_text(target, json.dumps({"repo": repo}, sort_keys=True))
+            return True
+        except (OSError, ValueError, UnicodeError):
+            return False  # an unreadable binding is treated as a change: it is never silently replaced
+        return isinstance(bound, dict) and bound.get("repo") == repo
+
+
+def read_bound_repo(path: Path | None) -> str | None:
+    """The repository bound at SessionStart, or None (not bound, unreadable, untrusted folder): never exempt."""
+    if path is None or not trusted_dir(path.parent):
+        return None
+    try:
+        bound = loads(bounded_read(repo_path(path)))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    value = bound.get("repo") if isinstance(bound, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def save_state(path: Path, state: dict[str, Any]) -> bool:
     with file_lock(path.with_name(path.name + ".lock")):
         previous = read_state(path)
@@ -162,7 +196,7 @@ def save_state(path: Path, state: dict[str, Any]) -> bool:
     return True
 
 
-STATE_FILE = re.compile(r"probe-[0-9a-f]{64}\.json(?:\.lock|\.attempt|\.attempt\.lock|\.notice)?")
+STATE_FILE = re.compile(r"probe-[0-9a-f]{64}\.json(?:\.lock|\.attempt|\.attempt\.lock|\.notice|\.repo|\.repo\.lock)?")
 STATE_KEEP_SECONDS = 7 * 86400  # a probe file nobody has touched for a week belongs to a session that is long over
 PRUNE_SCAN_LIMIT = 2000  # entries looked at per call, so a folder full of files cannot make a session start slow
 
@@ -326,9 +360,8 @@ def check_dispatch(
     if resolve is not None and not tracking.exempt(
         repo() if hooks.tracking_exempt_repos else None, hooks.tracking_exempt_repos
     ):
-        here = repo()  # the session's own repository (origin remote); None when it cannot be told
-        accepted = {*hooks.tracking_repos, *([here] if here else [])}
-        broken = tracking.check(prompt, resolve, accepted)
+        # Which repositories a brief may cite is operator configuration alone: nothing derived from the session counts.
+        broken = tracking.check(prompt, resolve, set(hooks.tracking_repos))
         if broken:
             rules.append(broken[0])
             reasons.append("no hidden work: " + broken[1])

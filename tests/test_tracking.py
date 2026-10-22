@@ -319,13 +319,17 @@ def test_an_undetermined_repository_is_not_exempt_in_check_dispatch() -> None:
     assert dispatch_rules("no item", repo=None, tracking_exempt_repos=["acme/widgets"]) == ("no-issue",)
 
 
-def test_a_brief_may_only_cite_the_sessions_repository_or_a_listed_one() -> None:
-    assert dispatch_rules(f"issue: {GOOD}", repo="acme/widgets") == ()
-    assert dispatch_rules(f"issue: {GOOD}", repo="ACME/Widgets") == ()
-    assert dispatch_rules(f"issue: {GOOD}", repo="acme/other") == ("issue-unusable",)
-    assert dispatch_rules(f"issue: {GOOD}", repo=None) == ("issue-unusable",), "fail closed when it cannot be told"
-    assert dispatch_rules(f"issue: {GOOD}", repo="acme/other", tracking_repos=["acme/widgets"]) == ()
-    assert dispatch_rules("issue: SAFO-1", repo=None) == (), "a Jira key is not tied to a repository"
+def test_a_brief_may_only_cite_a_repository_the_operator_listed() -> None:
+    listed = ["acme/widgets"]
+    assert dispatch_rules(f"issue: {GOOD}", tracking_repos=listed) == ()
+    assert dispatch_rules(f"issue: {GOOD}", tracking_repos=["ACME/Widgets"]) == ()
+    assert dispatch_rules(f"issue: {GOOD}", tracking_repos=["acme/other"]) == ("issue-unusable",)
+    assert dispatch_rules(f"issue: {GOOD}") == ("issue-unusable",), "nothing listed, nothing accepted"
+    assert dispatch_rules("issue: SAFO-1") == (), "a Jira key is not tied to a repository"
+
+
+def test_the_sessions_own_repository_is_not_accepted_just_for_being_the_sessions() -> None:
+    assert dispatch_rules(f"issue: {GOOD}", repo="acme/widgets") == ("issue-unusable",)
 
 
 def test_an_unaccepted_repository_is_refused_before_any_lookup() -> None:
@@ -468,48 +472,119 @@ def stand_in_git(bin_dir: Path, url: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def test_the_configured_opt_out_lets_that_repository_dispatch_without_an_item(
+def start_session(
+    home: Path, agents: Path, cwd: Path, bin_dir: Path | None = None, session: str = "session-a"
+) -> tuple[int, str, str]:
+    """The SessionStart probe, which is where the session's repository is bound."""
+    event = json.dumps({"hook_event_name": "SessionStart", "session_id": session, "cwd": str(cwd)})
+    env = {"PATH": str(bin_dir)} if bin_dir else None
+    result = hooks("probe", "--agents", str(agents), home=home, stdin=event, env=env)
+    set_probe(home, reachable=False, agents=agents, session=session)  # the test clock is fixed: make the state fresh
+    return result
+
+
+def as_session(payload: str, session: str) -> str:
+    data = json.loads(payload)
+    data["session_id"] = session
+    return json.dumps(data)
+
+
+def denied(out: str) -> bool:
+    return bool(out) and json.loads(out)["hookSpecificOutput"].get("permissionDecision") == "deny"
+
+
+def test_the_configured_opt_out_lets_the_bound_repository_dispatch_without_an_item(
     _private_home: Path, tmp_path: Path
 ) -> None:
     exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
     set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=False, agents=exempt)
     bin_dir = stand_in_gh(tmp_path, {})
     stand_in_git(bin_dir, "git@github.com:Acme/Scratch.git")
     here = tmp_path / "scratch"
     here.mkdir()
+    assert start_session(_private_home, exempt, here, bin_dir)[0] == 0
     assert run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0] == ""
-    stand_in_git(bin_dir, "https://github.com/evil/scratch.git")  # same directory name, another repository
-    out = run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0]
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    stand_in_git(bin_dir, "https://github.com/evil/scratch.git")  # a namesake directory, another repository
+    assert start_session(_private_home, exempt, here, bin_dir, "session-b")[0] == 0
+    other = as_session(with_cwd(dispatch(tracked=False), str(here)), "session-b")
+    assert denied(run_guard(_private_home, exempt, other, bin_dir)[0])
+
+
+def test_the_guard_never_re_reads_the_working_tree(_private_home: Path, tmp_path: Path) -> None:
+    """An agent that runs `git remote set-url` after the session began gains no exemption."""
+    exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
+    set_mode(_private_home, "block")
+    bin_dir = stand_in_gh(tmp_path, {})
+    stand_in_git(bin_dir, "https://github.com/evil/other.git")
+    here = tmp_path / "work"
+    here.mkdir()
+    start_session(_private_home, exempt, here, bin_dir)
+    stand_in_git(bin_dir, "https://github.com/acme/scratch.git")  # forged after the binding
+    assert denied(run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0])
+
+
+def test_a_binding_is_written_once_and_a_later_change_is_refused_and_logged(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
+    set_mode(_private_home, "block")
+    bin_dir = stand_in_gh(tmp_path, {})
+    stand_in_git(bin_dir, "https://github.com/evil/other.git")
+    here = tmp_path / "work"
+    here.mkdir()
+    assert start_session(_private_home, exempt, here, bin_dir)[0] == 0
+    stand_in_git(bin_dir, "https://github.com/acme/scratch.git")
+    code, out, _ = start_session(_private_home, exempt, here, bin_dir)  # the same session starts again
+    assert code == 0 and "degraded" in out
+    assert read_log(_private_home)[-1]["diagnostic"] == "repo-changed"
+    assert denied(run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0])
+
+
+def test_a_session_started_again_with_the_same_repository_is_fine(_private_home: Path, tmp_path: Path) -> None:
+    exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
+    bin_dir = stand_in_gh(tmp_path, {})
+    stand_in_git(bin_dir, "https://github.com/acme/scratch.git")
+    here = tmp_path / "work"
+    here.mkdir()
+    for _ in range(2):
+        code, out, _ = start_session(_private_home, exempt, here, bin_dir)
+        assert code == 0 and "degraded" not in out
 
 
 def test_the_opt_out_fails_closed_when_the_repository_cannot_be_determined(_private_home: Path, tmp_path: Path) -> None:
     exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
     set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=False, agents=exempt)
     here = tmp_path / "scratch"
     here.mkdir()
-    out = run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)))[0]  # no git on PATH
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert denied(run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)))[0])  # never bound
+    start_session(_private_home, exempt, here)  # bound to "undetermined": no git on PATH
+    assert denied(run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)))[0])
 
 
 def test_a_brief_citing_an_unrelated_open_issue_is_denied_without_a_lookup(_private_home: Path, tmp_path: Path) -> None:
-    only_here = agents_file(tmp_path / "a.yaml")  # no tracking_repos
+    listed = agents_file(tmp_path / "a.yaml", tracking_repos=["acme/widgets"])
     set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=False, agents=only_here)
+    set_probe(_private_home, reachable=False, agents=listed)
+    bin_dir = stand_in_gh(tmp_path, {"7": '{"state":"OPEN"}'})
+    foreign = dispatch(prompt="issue: other/elsewhere#7", tracked=False)
+    out, log = run_guard(_private_home, listed, foreign, bin_dir)
+    assert denied(out) and log[-1]["rules"] == ["issue-unusable"]
+    assert "accepted: acme/widgets" in out and not (tmp_path / "gh.log").exists()
+    assert run_guard(_private_home, listed, dispatch(prompt="issue: acme/widgets#7", tracked=False), bin_dir)[0] == ""
+
+
+def test_a_session_repository_that_is_not_listed_is_not_accepted_for_citing(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    unlisted = agents_file(tmp_path / "a.yaml")
+    set_mode(_private_home, "block")
     bin_dir = stand_in_gh(tmp_path, {"7": '{"state":"OPEN"}'})
     stand_in_git(bin_dir, "https://github.com/acme/widgets.git")
     here = tmp_path / "work"
     here.mkdir()
-    foreign = with_cwd(dispatch(prompt="issue: other/elsewhere#7", tracked=False), str(here))
-    out, log = run_guard(_private_home, only_here, foreign, bin_dir)
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" and log[-1]["rules"] == [
-        "issue-unusable"
-    ]
-    assert "accepted: acme/widgets" in out and not (tmp_path / "gh.log").exists()
+    start_session(_private_home, unlisted, here, bin_dir)
     own = with_cwd(dispatch(prompt="issue: acme/widgets#7", tracked=False), str(here))
-    assert run_guard(_private_home, only_here, own, bin_dir)[0] == ""
+    assert denied(run_guard(_private_home, unlisted, own, bin_dir)[0]) and not (tmp_path / "gh.log").exists()
 
 
 def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
@@ -537,7 +612,6 @@ def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
         run=run,
         which_override=lambda n: "/usr/bin/gh",
         stdin=io.StringIO(dispatch(prompt=f"issue: {GOOD}", tracked=False)),
-        repo_lookup=lambda cwd: "acme/widgets",
     )
     import time
 

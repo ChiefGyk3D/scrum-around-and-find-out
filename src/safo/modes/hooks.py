@@ -49,6 +49,7 @@ from safo.hooks import (
     GUARD_MARGIN_SECONDS,
     GUARD_TIMEOUT_SECONDS,
     append_log,
+    bind_repo,
     check_dispatch,
     decide,
     first_notice,
@@ -59,6 +60,7 @@ from safo.hooks import (
     probe_all,
     probe_state,
     prune_state,
+    read_bound_repo,
     read_state,
     reprobe,
     save_state,
@@ -167,7 +169,16 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
         if folder is None:
             raise OSError("state unavailable")
         code = "state-write"
-        save_state(state_path(folder, session, doc), state)
+        path = state_path(folder, session, doc)
+        save_state(path, state)
+        cwd = payload.get("cwd")
+        found = None
+        if isinstance(cwd, str):
+            found = ctx.repo_lookup(cwd) if ctx.repo_lookup else tracking.cwd_repo(ctx.run, ctx.env, cwd)
+        code = "repo-changed"
+        if not bind_repo(path, found):
+            raise ValueError("the session's repository changed after it was bound")
+        code = "state-write"
         prune_state(folder, ctx.now.timestamp())
         ctx.say(session_output(session_message(doc, state)))
     except TimeoutError:
@@ -213,15 +224,10 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         return deadline - time.monotonic()
 
     resolve = ctx.issue_lookup or tracking.gh_resolver(ctx.run, ctx.which, ctx.env, remaining)
-    raw_cwd = payload.get("cwd")
-    cwd = raw_cwd if isinstance(raw_cwd, str) else ""
-    asked: list[str | None] = []
+    bound = read_bound_repo(path)  # bound at SessionStart; never read from the working tree here
 
     def repo() -> str | None:
-        if not asked:
-            found = ctx.repo_lookup(cwd) if ctx.repo_lookup else tracking.cwd_repo(ctx.run, ctx.env, cwd, remaining)
-            asked.append(found)
-        return asked[0]
+        return bound
 
     verdict = check_dispatch(doc, payload["tool_input"], reachable, resolve, repo)
     decision = decide(verdict, mode)
