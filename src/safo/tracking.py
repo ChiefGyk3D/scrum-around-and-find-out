@@ -25,8 +25,9 @@ LINE = re.compile(r"^[ \t]*issue:[ \t]*(\S+)[ \t]*\r?$", re.IGNORECASE | re.MULT
 GITHUB_REF = re.compile(r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,8})")
 JIRA_KEY = re.compile(r"([A-Z][A-Z0-9]{1,9})-([1-9][0-9]{0,8})")
 LOOKUP_TIMEOUT_SECONDS = 5
+ISSUE_URL = re.compile(r"https://[^/\s]+/[^/\s]+/[^/\s]+/(issues|pull)/[0-9]+")
 
-State = Literal["open", "closed", "missing", "error"]
+State = Literal["open", "closed", "missing", "pull_request", "error"]
 
 HOW_TO_FILE = (
     "file the work first: `gh issue create --repo OWNER/REPO --title ... --body ...`, put it on the board "
@@ -144,7 +145,7 @@ def gh_resolver(
         left = min(float(LOOKUP_TIMEOUT_SECONDS), remaining())
         if gh is None or left < MIN_LOOKUP_SECONDS:
             return "error"
-        argv = [gh, "issue", "view", str(ref.number), "--repo", ref.repo, "--json", "state"]
+        argv = [gh, "issue", "view", str(ref.number), "--repo", ref.repo, "--json", "state,url"]
         try:
             done = run(  # argument list, no shell; the reference already fullmatched GITHUB_REF
                 argv,
@@ -161,9 +162,17 @@ def gh_resolver(
             stderr = done.stderr if isinstance(done.stderr, str) else ""
             return "missing" if "could not resolve" in stderr.lower() or "not found" in stderr.lower() else "error"
         try:
-            state = loads(done.stdout)["state"]
+            answer = loads(done.stdout)
+            state, url = answer["state"], answer["url"]
         except (ValueError, KeyError, TypeError):
             return "error"
+        # `gh issue view` also resolves a pull request. Its field list has no type discriminator, but `url` carries
+        # one (https://cli.github.com/manual/gh_issue_view): /issues/N for an issue, /pull/N for a pull request.
+        kind = ISSUE_URL.fullmatch(url) if isinstance(url, str) else None
+        if kind is None:
+            return "error"
+        if kind.group(1) == "pull":
+            return "pull_request"
         if state == "OPEN":
             return "open"
         return "closed" if state == "CLOSED" else "error"
@@ -200,5 +209,5 @@ def check(text: str, resolve: Resolver, accepted: Collection[str] | None = None)
             "issue-unverified",
             f"could not confirm that {ref.text} exists and is open (is gh installed and logged in?)",
         )
-    why = "does not exist" if state == "missing" else "is closed"
+    why = {"missing": "does not exist", "pull_request": "is a pull request, not an issue"}.get(state, "is closed")
     return "issue-unusable", f"{ref.text} {why}; reopen it or file a new one, then name that in the brief"

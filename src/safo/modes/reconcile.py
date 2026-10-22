@@ -321,14 +321,17 @@ def _refuse_future(today: dt.date, contents: list[Content]) -> None:
             raise MalformedDataError("a closedAt from GitHub is more than a day in the future")
 
 
-def needs_a_human(ctx: Context, live: LiveBoard, items: list[ItemState]) -> list[str]:
+def needs_a_human(ctx: Context, live: LiveBoard, items: list[ItemState], plan: Plan) -> list[str]:
     """What the no-hidden-work rule finds that no rule can repair: a pull request with no linked issue, a card with no
     Kind, Epic, Effort or hand-picked Area. Reconcile lists these and writes nothing for them."""
     board = ctx.board
     unlinked, _ = unlinked_pulls(ctx.client, board, ctx.today)
     lines = [f"{name} is a pull request with no linked issue: add `Refs #n` or `Closes #n`" for name in unlinked]
     repos = {r.full_name.lower(): r for r in board.repositories}
-    return lines + card_findings(board, items, read_tracked(ctx.client, board, live), repos)
+    # The listing was read before the adds. A card this run adds holds only what the plan gives it, so it is checked as
+    # the card it is about to be (also in a dry run, where it does not exist yet).
+    added = [ItemState(f"new:{a.content.id}", a.content, a.status, a.done_on, a.area) for a in plan.adds]
+    return lines + card_findings(board, [*items, *added], read_tracked(ctx.client, board, live), repos)
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
@@ -366,7 +369,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             plan.anomalies.append(
                 f"{labels[content_id]} is on the board {n} times; safo repairs one card and leaves the rest"
             )
-    human = needs_a_human(ctx, live, items)
+    human = needs_a_human(ctx, live, items, plan)
     out = apply_plan(ctx, live, plan, work, items)
     problem = verify_adds(ctx, live, out)
     # The listing lags behind items.totalCount, and a lookup by content id covers only the work this run knows about.

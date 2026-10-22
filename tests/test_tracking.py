@@ -25,6 +25,9 @@ from safo.hooks import check_dispatch, prune_state, repo_path
 from safo.tracking import Ref, State
 
 GOOD = "acme/widgets#12"
+OPEN_ISSUE = '{"state":"OPEN","url":"https://github.com/acme/widgets/issues/12"}'
+CLOSED_ISSUE = '{"state":"CLOSED","url":"https://github.com/acme/widgets/issues/12"}'
+OPEN_PULL = '{"state":"OPEN","url":"https://github.com/acme/widgets/pull/12"}'
 
 
 def resolver(state: State = "open") -> tuple[tracking.Resolver, list[Ref]]:
@@ -119,6 +122,7 @@ def test_a_brief_without_a_reference_says_how_to_file_one() -> None:
     [
         ("closed", "issue-unusable", "is closed"),
         ("missing", "issue-unusable", "does not exist"),
+        ("pull_request", "issue-unusable", "is a pull request, not an issue"),
         ("error", "issue-unverified", "could not confirm"),
     ],
 )
@@ -143,7 +147,7 @@ def test_a_jira_key_is_checked_by_shape_and_never_run_through_gh() -> None:
 # -- the read-only GitHub lookup -------------------------------------------------------------------------
 
 
-def fake_run(stdout: str = '{"state":"OPEN"}', code: int = 0, stderr: str = "") -> tuple[Any, list[Any]]:
+def fake_run(stdout: str = OPEN_ISSUE, code: int = 0, stderr: str = "") -> tuple[Any, list[Any]]:
     calls: list[Any] = []
 
     def run(argv: list[str], **kwargs: Any) -> Any:
@@ -163,7 +167,7 @@ def test_the_lookup_is_an_argument_list_with_no_shell_and_only_reads() -> None:
     run, calls = fake_run()
     assert lookup(run) == "open"
     argv, kwargs = calls[0]
-    assert argv == ["/usr/bin/gh", "issue", "view", "12", "--repo", "acme/widgets", "--json", "state"]
+    assert argv == ["/usr/bin/gh", "issue", "view", "12", "--repo", "acme/widgets", "--json", "state,url"]
     assert not kwargs.get("shell") and kwargs["stdin"] == subprocess.DEVNULL and kwargs["timeout"] > 0
     assert not {"create", "edit", "close", "comment", "reopen", "delete"} & set(argv)
 
@@ -171,14 +175,19 @@ def test_the_lookup_is_an_argument_list_with_no_shell_and_only_reads() -> None:
 @pytest.mark.parametrize(
     ("stdout", "code", "stderr", "state"),
     [
-        ('{"state":"CLOSED"}', 0, "", "closed"),
+        (CLOSED_ISSUE, 0, "", "closed"),
         ("", 1, "GraphQL: Could not resolve to an issue or pull request with the number of 12.", "missing"),
         ("", 1, "issue not found", "missing"),
         ("", 1, "HTTP 502", "error"),
         ("", 4, "auth required", "error"),
         ("not json", 0, "", "error"),
         ("{}", 0, "", "error"),
-        ('{"state":"MERGED"}', 0, "", "error"),
+        ('{"state":"MERGED","url":"https://github.com/acme/widgets/issues/12"}', 0, "", "error"),
+        ('{"state":"OPEN"}', 0, "", "error"),  # no url: the kind of thing it is cannot be told
+        ('{"state":"OPEN","url":"https://github.com/acme/widgets/discussions/12"}', 0, "", "error"),
+        ('{"state":"OPEN","url":7}', 0, "", "error"),
+        ('{"state":"OPEN","url":"https://github.com/acme/widgets/pull/12"}', 0, "", "pull_request"),
+        ('{"state":"CLOSED","url":"https://github.com/acme/widgets/pull/12"}', 0, "", "pull_request"),
         ('{"state":7}', 0, "", "error"),
         ("[]", 0, "", "error"),
     ],
@@ -415,17 +424,17 @@ def test_an_open_github_item_passes_after_one_read_only_lookup(
 ) -> None:
     set_mode(_private_home, "block")
     set_probe(_private_home, reachable=False, agents=agents)
-    bin_dir = stand_in_gh(tmp_path, {"12": '{"state":"OPEN"}'})
+    bin_dir = stand_in_gh(tmp_path, {"12": OPEN_ISSUE})
     payload = dispatch(prompt=f"issue: {GOOD}\nwork", tracked=False)
     out, log = run_guard(_private_home, agents, payload, bin_dir)
     assert out == "" and log[-1]["decision"] == "allow"
-    assert (tmp_path / "gh.log").read_text().splitlines() == ["issue view 12 --repo acme/widgets --json state"]
+    assert (tmp_path / "gh.log").read_text().splitlines() == ["issue view 12 --repo acme/widgets --json state,url"]
 
 
 @pytest.mark.parametrize(
     ("answers", "number", "rule"),
     [
-        ({"12": '{"state":"CLOSED"}'}, 12, "issue-unusable"),
+        ({"12": CLOSED_ISSUE}, 12, "issue-unusable"),
         ({}, 12, "issue-unusable"),
         ({"12": "garbage"}, 12, "issue-unverified"),
     ],
@@ -460,7 +469,7 @@ def test_warn_mode_reports_a_lookup_that_failed_and_allows(_private_home: Path, 
 def test_a_hostile_reference_runs_nothing(_private_home: Path, agents: Path, tmp_path: Path) -> None:
     set_mode(_private_home, "block")
     set_probe(_private_home, reachable=False, agents=agents)
-    bin_dir = stand_in_gh(tmp_path, {"1": '{"state":"OPEN"}'})
+    bin_dir = stand_in_gh(tmp_path, {"1": OPEN_ISSUE})
     marker = tmp_path / "pwned"
     payload = dispatch(prompt=f"issue: acme/widgets#1;touch${{IFS}}{marker}\nissue: $(touch {marker})-1", tracked=False)
     out, log = run_guard(_private_home, agents, payload, bin_dir)
@@ -623,7 +632,7 @@ def test_a_brief_citing_an_unrelated_open_issue_is_denied_without_a_lookup(_priv
     listed = agents_file(tmp_path / "a.yaml", tracking_repos=["acme/widgets"])
     set_mode(_private_home, "block")
     set_probe(_private_home, reachable=False, agents=listed)
-    bin_dir = stand_in_gh(tmp_path, {"7": '{"state":"OPEN"}'})
+    bin_dir = stand_in_gh(tmp_path, {"7": OPEN_ISSUE})
     foreign = dispatch(prompt="issue: other/elsewhere#7", tracked=False)
     out, log = run_guard(_private_home, listed, foreign, bin_dir)
     assert denied(out) and log[-1]["rules"] == ["issue-unusable"]
@@ -636,7 +645,7 @@ def test_a_session_repository_that_is_not_listed_is_not_accepted_for_citing(
 ) -> None:
     unlisted = agents_file(tmp_path / "a.yaml")
     set_mode(_private_home, "block")
-    bin_dir = stand_in_gh(tmp_path, {"7": '{"state":"OPEN"}'})
+    bin_dir = stand_in_gh(tmp_path, {"7": OPEN_ISSUE})
     stand_in_git(bin_dir, "https://github.com/acme/widgets.git")
     here = tmp_path / "work"
     here.mkdir()
@@ -660,7 +669,7 @@ def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
 
     def run(*a: Any, **k: Any) -> Any:
         calls.append(a)
-        return SimpleNamespace(returncode=0, stdout='{"state":"OPEN"}', stderr="")
+        return SimpleNamespace(returncode=0, stdout=OPEN_ISSUE, stderr="")
 
     out = io.StringIO()
     ctx = LocalContext(
@@ -682,3 +691,13 @@ def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
 def test_the_shipped_agents_file_exempts_nothing() -> None:
     doc = parse_agents(yaml.safe_load((Path(__file__).parent.parent / "agents.yaml").read_text()))
     assert doc.hooks.tracking_exempt_repos == ()
+
+
+def test_a_pull_request_reference_is_refused_even_though_gh_issue_view_resolves_it(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=False, agents=agents)
+    bin_dir = stand_in_gh(tmp_path, {"12": OPEN_PULL})
+    out, log = run_guard(_private_home, agents, dispatch(prompt=f"issue: {GOOD}", tracked=False), bin_dir)
+    assert denied(out) and log[-1]["rules"] == ["issue-unusable"] and "pull request" in out

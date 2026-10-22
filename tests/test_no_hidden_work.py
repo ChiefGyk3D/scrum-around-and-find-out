@@ -304,3 +304,94 @@ def test_sync_does_not_flag_an_exempt_repository(fake: FakeGitHub, client: Clien
     board = with_tracking(board, Tracking(exempt_repos=("acme/widgets",)))
     pr = fake.add_content("acme/widgets", "PullRequest", 5, body="no link")
     assert run_sync(fake, client, pull_event(tmp_path, 5, pr.id), board)[0] == 0
+
+
+# -- the shapes GitHub sends, and the cards a run adds ---------------------------------------------------
+
+
+@pytest.mark.parametrize("state", ["MERGED", "CLOSED"])
+def test_a_merged_pull_request_is_checked_whichever_way_its_state_is_spelled(
+    fake: FakeGitHub, client: Client, state: str
+) -> None:
+    """`merged` is the boolean that decides; a CLOSED state beside merged=true is still a merged pull request."""
+    board, project = build_world(fake)
+    board = dataclasses.replace(board, rules=dataclasses.replace(board.rules, add_closed_days=7))
+    pr = fake.add_content("acme/widgets", "PullRequest", 2, state="MERGED", closed_at="2026-10-05T00:00:00Z", body="")
+    fake.add_item(project, pr, Status="Done", Area="Core", Priority="P2 later", Done_on="2026-10-05")
+
+    def pulls(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        row = {
+            "id": pr.id, "number": 2, "state": state, "merged": True, "closedAt": pr.closed_at, "body": "",
+            "repository": {"nameWithOwner": "acme/widgets"}, "closingIssuesReferences": {"totalCount": 0},
+        }  # fmt: skip
+        return {"repository": {"pullRequests": f.connection([row], v)}}
+
+    fake.handlers["RepoPullRefs"] = pulls
+    code, text = run_audit(fake, client, board)
+    assert code == 1 and "PULL acme/widgets#2 has no linked issue" in text
+
+
+def test_a_pull_request_closed_without_merging_is_not_a_finding(fake: FakeGitHub, client: Client) -> None:
+    board, _ = build_world(fake)
+    board = dataclasses.replace(board, rules=dataclasses.replace(board.rules, add_closed_days=7))
+
+    def pulls(f: FakeGitHub, v: dict[str, Any]) -> dict[str, Any]:
+        row = {
+            "id": "x", "number": 2, "state": "CLOSED", "merged": False, "closedAt": "2026-10-05T00:00:00Z",
+            "body": "", "repository": {"nameWithOwner": "acme/widgets"}, "closingIssuesReferences": {"totalCount": 0},
+        }  # fmt: skip
+        return {"repository": {"pullRequests": f.connection([row], v)}}
+
+    fake.handlers["RepoPullRefs"] = pulls
+    assert "has no linked issue" not in run_audit(fake, client, board)[1]
+
+
+def test_a_first_reconcile_reports_the_cards_it_adds(fake: FakeGitHub, client: Client) -> None:
+    board, _ = build_world(fake, full_board())
+    fake.add_content("acme/widgets", "Issue", 1)  # not on the board: this run adds it
+    code, text = run_reconcile(fake, client, board)
+    assert code == 1
+    for name in ("Kind", "Epic", "Effort"):
+        assert f"HUMAN MISSING {name} on acme/widgets#1" in text
+
+
+def test_a_dry_run_reports_the_cards_it_would_add(fake: FakeGitHub) -> None:
+    board, _ = build_world(fake, full_board())
+    fake.add_content("acme/widgets", "Issue", 1)
+    dry = Client(fake.token, fake.url, dry_run=True)
+    code, text = run_reconcile(fake, dry, board)
+    assert code == 1 and "HUMAN MISSING Kind on acme/widgets#1" in text
+
+
+def test_sync_reports_a_new_card_with_no_kind_epic_or_effort(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    board, project = build_world(fake, full_board())
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    payload = {
+        "action": "opened",
+        "issue": {"number": 1, "node_id": issue.id, "state": "open", "closed_at": None},
+        "repository": {"full_name": "acme/widgets"},
+    }
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(payload))
+    ctx, out = make_context(fake, board, client)
+    code = sync.run(ctx, argparse.Namespace(event_path=str(path), event_name="issues"))
+    text = out.getvalue()
+    assert code == 1 and len(project.items) == 1
+    for name in ("Kind", "Epic", "Effort"):
+        assert f"HUMAN MISSING {name} on acme/widgets#1" in text
+
+
+def test_sync_is_clean_for_a_card_that_holds_every_field(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    board, project = build_world(fake, full_board())
+    issue = fake.add_content("acme/widgets", "Issue", 1)
+    fake.add_item(project, issue, **CARD, Kind="Bug", Epic="E", Effort="1")
+    payload = {
+        "action": "edited",
+        "issue": {"number": 1, "node_id": issue.id, "state": "open", "closed_at": None},
+        "repository": {"full_name": "acme/widgets"},
+    }
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(payload))
+    ctx, out = make_context(fake, board, client)
+    assert sync.run(ctx, argparse.Namespace(event_path=str(path), event_name="issues")) == 0
+    assert "HUMAN" not in out.getvalue()

@@ -480,12 +480,12 @@ def _check_template(agent: Agent, p: Profile) -> None:
 
 def _claude(agent: Agent, p: Profile) -> tuple[str, str]:
     tools: Mapping[str, str | list[str]] = {}
-    out = [""]
+    out = ["", TRACKING_RULE, ""]  # the hard rule comes first, ahead of the persona's own text
     if p.persona:
         tools, body = split_persona(p.persona_text, agent.id)
         if body:
             out += [body, ""]
-    out += [TRACKING_RULE, "", BOUNDARY_PARAGRAPH, "", *section_lines(agent, p)]
+    out += [BOUNDARY_PARAGRAPH, "", *section_lines(agent, p)]
     return _front_matter(agent, p, tools), "\n".join(out) + "\n"
 
 

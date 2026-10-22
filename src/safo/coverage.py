@@ -129,9 +129,10 @@ def _pull(node: JSON, repo: str, since: dt.date | None) -> Pull | None:
     state, merged = node.get("state"), node.get("merged")
     if state not in ("OPEN", "MERGED", "CLOSED") or not isinstance(merged, bool):
         raise MalformedDataError(f"a pull request of {repo}: state or merged is missing or malformed")
-    if state == "CLOSED":
+    # The boolean `merged` decides, not the spelling of `state`: a merged pull request counts either way.
+    if state == "CLOSED" and not merged:
         return None  # closed without merging: no work shipped
-    if state == "MERGED":
+    if merged or state == "MERGED":
         closed = node.get("closedAt")
         if since is None or not isinstance(closed, str) or closed[:10] < since.isoformat():
             return None  # merged before the window: history, not a finding
