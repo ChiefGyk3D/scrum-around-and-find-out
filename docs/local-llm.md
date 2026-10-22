@@ -93,7 +93,7 @@ Measured on one 700-page book (about 1,000 chunks) with a Qwen3 embedding model 
 the other:
 
 - Embedding the whole book took minutes. A cited answer took about 5 seconds and a five-question quiz about 20.
-- Keyword search (BM25) fused with the vector ranking finds acronyms that vectors alone miss. Run both.
+- Keyword search (BM-25) fused with the vector ranking finds acronyms that vectors alone miss. Run both.
 - **Size the embedder to coexist.** On the 8 GB card that holds the safety model, a 4B embedding model evicted it; the 0.6B
   model loaded beside it and both stayed fully on the GPU (about 1.4 GB plus 5.8 GB). Check `/api/ps` before and after the
   first run, and send the embedder its own small `num_ctx`.
