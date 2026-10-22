@@ -8,11 +8,11 @@ approval token, and that includes a model that a prompt injection has talked int
 |---|---|---|
 | `safo hooks install [--settings PATH] [--mode warn\|block] [--command safo]` | none | Merges the two hooks into a `settings.json` (default `~/.claude/settings.json`). Keeps every other hook and setting, is a no-op when run again, keeps a private backup before it replaces the file, and refuses to overwrite a file that changed while it worked (bytes, or the file itself: device, inode, size and modification time are checked again just before the replace, so a rename-over with identical bytes is caught too, with `settings changed while installing`). `--dry-run` writes nothing. |
 | `safo hooks probe` | SessionStart | Asks each Ollama endpoint in `agents.yaml` which models are loaded (two bounded GETs, never a generate), saves the answer and tells the session whether the local LLM is reachable. |
-| `safo hooks guard` | PreToolUse, matcher `Agent\|Task` | Checks each subagent brief against three rules (below). |
+| `safo hooks guard` | PreToolUse, matcher `Agent\|Task` | Checks each subagent brief against four rules (below). |
 | `safo hooks mode warn\|block` | none | `warn` reports a broken rule and allows the dispatch (the default); `block` denies it. |
 | `safo hooks status [--session ID --agents PATH]` | none | The mode, the retained counts, the health of the hooks and of the last probe. |
 
-## The three rules
+## The four rules
 
 1. **An explicit, known model.** A brief with no `model` is flagged (`no-model`). A model counts as explicit only when it
    is an exact id or model name of an agent in `agents.yaml` (or a full `claude-<family>-<version>` id of one). `inherit`,
@@ -26,6 +26,10 @@ approval token, and that includes a model that a prompt injection has talked int
    yes; it only makes forgetting visible.
 3. **A local step or a reason for none**, while the last probe is fresh and found the local LLM reachable: a marker from
    `hooks.local_step_markers`, or `hooks.na_marker` followed by a reason.
+4. **No hidden work.** A brief carries a line of its own, `issue: owner/repo#N` or `issue: KEY-N`, naming an issue that
+   exists and is open (`no-issue`, `issue-unusable`, `issue-unverified`). A GitHub issue is checked with a read-only `gh issue
+   view`; in `block` mode a lookup that fails denies. Nothing is exempt unless `hooks.tracking_exempt_repos` lists the
+   repository. See [No hidden work](no-hidden-work.md).
 
 ## Failing safe
 

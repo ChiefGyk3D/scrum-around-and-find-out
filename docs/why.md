@@ -1,5 +1,8 @@
 # Why
 
+**The hard rule: no hidden work.** Every task, human or agent, has an issue and a board card before work starts, and every
+pull request links its issue. See [No hidden work](no-hidden-work.md).
+
 One maintainer with evenings and weekends, a dozen repositories, and a team of AI agents: a Claude lead with Claude
 subagents, OpenAI Codex, and GitHub Copilot's coding agent. Agents multiply output. Without a lead, review gates and one
 place to see the work, they multiply unverified churn instead.

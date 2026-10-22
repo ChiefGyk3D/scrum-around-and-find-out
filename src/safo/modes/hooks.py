@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from safo import guardlog
+from safo import guardlog, tracking
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
@@ -46,7 +46,10 @@ from safo.guardlog import (
 from safo.hooks import (
     AGENT_TOOLS,
     COMMAND,
+    GUARD_MARGIN_SECONDS,
+    GUARD_TIMEOUT_SECONDS,
     append_log,
+    bind_repo,
     check_dispatch,
     decide,
     first_notice,
@@ -57,6 +60,7 @@ from safo.hooks import (
     probe_all,
     probe_state,
     prune_state,
+    read_bound_repo,
     read_state,
     reprobe,
     save_state,
@@ -165,7 +169,20 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
         if folder is None:
             raise OSError("state unavailable")
         code = "state-write"
-        save_state(state_path(folder, session, doc), state)
+        path = state_path(folder, session, doc)
+        save_state(path, state)
+        cwd = payload.get("cwd")
+        found = None
+        if isinstance(cwd, str):
+            found = ctx.repo_lookup(cwd) if ctx.repo_lookup else tracking.cwd_repo(ctx.run, ctx.env, cwd)
+        bound = bind_repo(path, found, payload.get("source"))
+        if bound == "changed":
+            code = "repo-changed"
+            raise ValueError("the session's repository changed after it was bound")
+        if bound == "unbound" and doc.hooks.tracking_exempt_repos:
+            code = "repo-unbound"  # a resumed session whose binding is gone: no exemption until a fresh startup
+            raise ValueError("the session has no bound repository")
+        code = "state-write"
         prune_state(folder, ctx.now.timestamp())
         ctx.say(session_output(session_message(doc, state)))
     except TimeoutError:
@@ -175,7 +192,10 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def guard(ctx: LocalContext, args: argparse.Namespace) -> None:
+def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = None) -> None:
+    # The hook's whole budget is GUARD_TIMEOUT_SECONDS from the start of the process; lookups get what is left of it
+    # less a margin, so the decision is always written before the host gives up on the hook.
+    deadline = (time.monotonic() if started is None else started) + GUARD_TIMEOUT_SECONDS - GUARD_MARGIN_SECONDS
     payload = event_input(ctx)
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
@@ -203,7 +223,17 @@ def guard(ctx: LocalContext, args: argparse.Namespace) -> None:
             state, health = fresh, "healthy"
     # A stale (not refreshed) or unknown state disables ONLY the local-step rule, keeping model/approval checks.
     reachable = health == "healthy" and state is not None and state["reachable"] is True
-    verdict = check_dispatch(doc, payload["tool_input"], reachable)
+
+    def remaining() -> float:
+        return deadline - time.monotonic()
+
+    resolve = ctx.issue_lookup or tracking.gh_resolver(ctx.run, ctx.which, ctx.env, remaining)
+    bound = read_bound_repo(path)  # bound at SessionStart; never read from the working tree here
+
+    def repo() -> str | None:
+        return bound
+
+    verdict = check_dispatch(doc, payload["tool_input"], reachable, resolve, repo)
     decision = decide(verdict, mode)
     # One visible notice per session for a probe that cannot be trusted; every dispatch is still logged with its health.
     notice = health != "healthy" and (path is None or first_notice(path))
@@ -235,7 +265,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace) -> None:
 
 def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
     try:
-        guard(ctx, args)
+        guard(ctx, args, time.monotonic())
     except TimeoutError:
         diagnostic(ctx, "timeout")
     except (ValueError, UnicodeError):

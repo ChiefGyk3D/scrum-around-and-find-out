@@ -115,6 +115,10 @@ class Hooks:
     max_state_age_seconds: int = 300  # how long a probe is trusted; past it the guard re-probes lazily, bounded
     local_step_markers: tuple[str, ...] = ("safo local run", "llm-local")  # any one names the brief's local step
     na_marker: str = "local-llm: n/a -"  # followed by a reason, it says why the brief has no local step
+    # owner/name of repositories whose sessions need no `issue:` line in a brief; nothing is exempt by default
+    tracking_exempt_repos: tuple[str, ...] = ()
+    # owner/name of repositories whose issues a brief may cite, besides the session's own repository (its origin remote)
+    tracking_repos: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -289,7 +293,14 @@ def _hooks(r: Reader, value: object) -> Hooks:
     m = r.mapping(
         value if value is not None else {},
         "hooks",
-        {"approval_token", "max_state_age_seconds", "local_step_markers", "na_marker"},
+        {
+            "approval_token",
+            "max_state_age_seconds",
+            "local_step_markers",
+            "na_marker",
+            "tracking_exempt_repos",
+            "tracking_repos",
+        },
     )
     token = r.string(m.get("approval_token", default.approval_token), "hooks.approval_token")
     if len(token) < 8 or token != token.strip() or any(c.isspace() for c in token):
@@ -303,7 +314,21 @@ def _hooks(r: Reader, value: object) -> Hooks:
     if not markers:
         raise r.fail("hooks.local_step_markers", "needs at least one marker")
     na = r.string(m.get("na_marker", default.na_marker), "hooks.na_marker")
-    return Hooks(token, age, tuple(x.lower() for x in markers), na.strip().lower())
+    named: dict[str, tuple[str, ...]] = {}
+    for key in ("tracking_exempt_repos", "tracking_repos"):
+        names = _strings(r, m.get(key, []), f"hooks.{key}")
+        for i, name in enumerate(names):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", name):
+                raise r.fail(f"hooks.{key}[{i}]", "expected owner/name")
+        named[key] = tuple(names)
+    return Hooks(
+        token,
+        age,
+        tuple(x.lower() for x in markers),
+        na.strip().lower(),
+        named["tracking_exempt_repos"],
+        named["tracking_repos"],
+    )
 
 
 def _today() -> dt.date:

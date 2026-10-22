@@ -212,6 +212,16 @@ def test_the_codex_file_names_what_it_is(tmp_path: Path) -> None:
     assert "Prepend this preamble to a self-contained prompt." in text
 
 
+def test_the_hard_rule_comes_before_the_persona_text_in_a_claude_profile(tmp_path: Path) -> None:
+    from safo.profile_render import TRACKING_RULE
+
+    text = render_harness(with_profile(verified(tmp_path), "claude-sonnet", persona_text=PERSONA))
+    body = text["claude/claude-sonnet.md"].data.decode()
+    persona_line = "Find what is wrong. Do not fix it."
+    assert TRACKING_RULE in body and persona_line in body
+    assert body.index(TRACKING_RULE) < body.index(persona_line) and body.count(TRACKING_RULE) == 1
+
+
 def test_nothing_renders_for_an_agent_without_a_profile(tmp_path: Path) -> None:
     ids = {r.agent_id for r in render_harness(verified(tmp_path)).values()}
     assert ids == {"claude-haiku", "claude-sonnet", "codex", "copilot", "ollama"}

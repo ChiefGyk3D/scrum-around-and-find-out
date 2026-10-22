@@ -13,6 +13,7 @@ fails open. The log records the verdict and never the brief, the description or 
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from safo import tracking
 from safo.agentsfile import Agent, AgentsFile, Endpoint
 from safo.bounded import loads
 from safo.errors import ConfigError
@@ -48,6 +50,7 @@ AGENT_TOOLS = ("Agent", "Task")  # the tool is Agent today and was called Task b
 FORK_TYPES = ("fork",)  # a fork inherits its parent's model, so it has none to name
 LOG_LIMIT_BYTES = 4 * 1024 * 1024  # past this the log moves to log.jsonl.1 and starts again
 PROBE_TIMEOUT_SECONDS = 15
+GUARD_MARGIN_SECONDS = 2  # the guard's own deadline falls this much before the host's, so its decision is written
 GUARD_TIMEOUT_SECONDS = 10  # room for one lazy re-probe: two requests per endpoint at REPROBE_TIMEOUT_SECONDS
 REPROBE_INTERVAL_SECONDS = 60  # a stale state is refreshed at most this often per session and configuration
 REPROBE_TIMEOUT_SECONDS = 1.5  # per request; the guard sits in front of every dispatch, so this stays short
@@ -56,7 +59,10 @@ NO_MODEL = "no-model"
 APPROVAL = "approval"
 NO_LOCAL_STEP = "no-local-step"
 UNKNOWN_MODEL = "unknown-model"
-RULES = (NO_MODEL, UNKNOWN_MODEL, APPROVAL, NO_LOCAL_STEP)
+NO_ISSUE = "no-issue"  # the brief names no tracking item (or an unusable one)
+ISSUE_UNUSABLE = "issue-unusable"  # the item does not exist or is closed
+ISSUE_UNVERIFIED = "issue-unverified"  # the item could not be looked up
+RULES = (NO_MODEL, UNKNOWN_MODEL, APPROVAL, NO_LOCAL_STEP, NO_ISSUE, ISSUE_UNUSABLE, ISSUE_UNVERIFIED)
 
 
 # -- the probe -------------------------------------------------------------------------------------
@@ -143,6 +149,55 @@ def state_path(folder: Path, session: str, doc: AgentsFile) -> Path:
     return folder / ("probe-" + state_key(session, doc) + ".json")
 
 
+def repo_path(path: Path) -> Path:
+    return path.with_name(path.name + ".repo")
+
+
+def touch(path: Path) -> None:
+    """Mark a file as used now, so pruning by age never removes the state of a session that is still running."""
+    with contextlib.suppress(OSError):
+        os.utime(path)
+
+
+def bind_repo(path: Path, repo: str | None, source: object) -> str:
+    """Bind the session's repository, only at a fresh start. Returns bound, same, changed or unbound.
+
+    A binding is created only when SessionStart says `source` is `startup`; the Claude Code hooks reference
+    (https://code.claude.com/docs/en/hooks, SessionStart: `source` is one of startup, resume, clear, compact, fork)
+    gives that field. For any other source, or none, an existing binding is found or the answer is `unbound`, which
+    the caller treats as fail closed: a binding lost to pruning is never re-derived from the working tree, which an
+    agent can rewrite. An existing binding is never replaced, and reading it refreshes its age.
+    """
+    target = repo_path(path)
+    with file_lock(target.with_name(target.name + ".lock")):
+        try:
+            bound = loads(bounded_read(target))
+        except FileNotFoundError:
+            if source != "startup":
+                return "unbound"
+            write_text(target, json.dumps({"repo": repo}, sort_keys=True))
+            return "bound"
+        except (OSError, ValueError, UnicodeError):
+            return "changed"  # an unreadable binding is treated as a change: it is never silently replaced
+        if isinstance(bound, dict) and bound.get("repo") == repo:
+            touch(target)
+            return "same"
+        return "changed"
+
+
+def read_bound_repo(path: Path | None) -> str | None:
+    """The repository bound at SessionStart, or None (not bound, unreadable, untrusted folder): never exempt."""
+    if path is None or not trusted_dir(path.parent):
+        return None
+    try:
+        bound = loads(bounded_read(repo_path(path)))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    value = bound.get("repo") if isinstance(bound, dict) else None
+    touch(repo_path(path))  # the session is alive: keep its binding out of the age-based prune
+    return value if isinstance(value, str) else None
+
+
 def save_state(path: Path, state: dict[str, Any]) -> bool:
     with file_lock(path.with_name(path.name + ".lock")):
         previous = read_state(path)
@@ -157,7 +212,7 @@ def save_state(path: Path, state: dict[str, Any]) -> bool:
     return True
 
 
-STATE_FILE = re.compile(r"probe-[0-9a-f]{64}\.json(?:\.lock|\.attempt|\.attempt\.lock|\.notice)?")
+STATE_FILE = re.compile(r"probe-[0-9a-f]{64}\.json(?:\.lock|\.attempt|\.attempt\.lock|\.notice|\.repo|\.repo\.lock)?")
 STATE_KEEP_SECONDS = 7 * 86400  # a probe file nobody has touched for a week belongs to a session that is long over
 PRUNE_SCAN_LIMIT = 2000  # entries looked at per call, so a folder full of files cannot make a session start slow
 
@@ -269,8 +324,18 @@ def needs_approval(doc: AgentsFile, model: str) -> bool:
     return any(a.approval_required for a in known_agents(doc, model))
 
 
-def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bool) -> Verdict:
-    """Apply the routing rules to one Agent tool call."""
+def check_dispatch(
+    doc: AgentsFile,
+    tool_input: Mapping[str, Any],
+    reachable: bool,
+    resolve: tracking.Resolver | None = None,
+    repo: Callable[[], str | None] = lambda: None,
+) -> Verdict:
+    """Apply the routing rules to one Agent tool call.
+
+    With a `resolve`, the no-hidden-work rule applies too: the brief must name an open tracking item. The guard always
+    passes one; a caller that leaves it out checks the routing rules alone.
+    """
     raw_prompt, raw_model = tool_input.get("prompt"), tool_input.get("model")
     prompt = raw_prompt if isinstance(raw_prompt, str) else ""
     raw = raw_model.strip() if isinstance(raw_model, str) else ""
@@ -308,6 +373,14 @@ def check_dispatch(doc: AgentsFile, tool_input: Mapping[str, Any], reachable: bo
     if reachable and not local_step and not na:
         rules.append(NO_LOCAL_STEP)
         reasons.append("the local LLM is reachable but the brief names no local step and gives no reason for none")
+    if resolve is not None and not tracking.exempt(
+        repo() if hooks.tracking_exempt_repos else None, hooks.tracking_exempt_repos
+    ):
+        # Which repositories a brief may cite is operator configuration alone: nothing derived from the session counts.
+        broken = tracking.check(prompt, resolve, set(hooks.tracking_repos))
+        if broken:
+            rules.append(broken[0])
+            reasons.append("no hidden work: " + broken[1])
     return Verdict(tuple(rules), tuple(reasons), model, local_step, na)
 
 
