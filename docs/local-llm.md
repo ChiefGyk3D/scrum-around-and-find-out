@@ -83,5 +83,27 @@ can push a resident out of memory. The guard exists so a convenience call can ne
 - **Multi-GPU NVIDIA hosts:** Ollama's Vulkan backend ignored `CUDA_VISIBLE_DEVICES` and spilled models onto the wrong card
   until `OLLAMA_VULKAN=0` was set. Check `/api/ps` on each instance to see where models actually live.
 
+## Retrieval (RAG) on the free endpoint
+
+Retrieval-augmented generation fits the endpoint that is not shared with production: embed a body of text once, find the
+passages nearest a question, and have a chat model write from only those passages. It earns its place when an answer has
+to trace to a source: documentation, runbooks, a decisions log, a study book, long issue and pull request history.
+
+Measured on one 700-page book (about 1,000 chunks) with a Qwen3 embedding model on the free card and a 12B chat model on
+the other:
+
+- Embedding the whole book took minutes. A cited answer took about 5 seconds and a five-question quiz about 20.
+- Keyword search (BM-25) fused with the vector ranking finds acronyms that vectors alone miss. Run both.
+- **Size the embedder to coexist.** On the 8 GB card that holds the safety model, a 4B embedding model evicted it; the 0.6B
+  model loaded beside it and both stayed fully on the GPU (about 1.4 GB plus 5.8 GB). Check `/api/ps` before and after the
+  first run, and send the embedder its own small `num_ctx`.
+- Code checks, the model writes prose. Citations must point at a passage that was retrieved, quoted evidence must appear
+  word for word in the passage, and a second, independent call must pick the same quiz answer before anyone sees the
+  question. The first version trusted the model's own answer index and marked two of three questions wrong, with real
+  evidence quoted. Ask for the correct answer and the distractors as separate fields and let code build and shuffle the
+  choices.
+- A copyrighted source is indexed locally and never committed. Index the project's own documents as a separate, labeled
+  source so every answer says which one it came from.
+
 A local answer is always a draft. It is logged with zero review rounds and a Claude model reviews it before anything lands.
 See also [Lessons](lessons.md).
