@@ -12,9 +12,10 @@ list with no shell. A rejected reference is never echoed back.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -61,25 +62,87 @@ def has_issue_line(text: str) -> bool:
     return LINE.search(text) is not None
 
 
-def exempt(cwd: str, repos: tuple[str, ...]) -> bool:
-    """True when a listed repository's name is a component of the session's working directory.
+REMOTE = re.compile(
+    r"(?:https?://(?:[^/@\s]+@)?github\.com/|ssh://git@github\.com/|git@github\.com:)"
+    r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?"
+)
+MIN_LOOKUP_SECONDS = 0.5  # less time than this left, and a lookup is not attempted: it would outlive the hook
 
-    The opt-out is deliberate and per repository; a brief cannot grant it to itself.
+
+def repo_from_remote(url: str) -> str | None:
+    """owner/name from a github.com remote URL, else None (another host, a path, anything not recognized)."""
+    found = REMOTE.fullmatch(url.strip())
+    return f"{found.group(1)}/{found.group(2)}" if found else None
+
+
+def cwd_repo(
+    run: Callable[..., Any],
+    env: Mapping[str, str],
+    cwd: str,
+    remaining: Callable[[], float] = lambda: float(LOOKUP_TIMEOUT_SECONDS),
+) -> str | None:
+    """The owner/name of the repository a session works in, from its `origin` remote, or None when it cannot be told.
+
+    `git config --get` reads a file and runs nothing from the repository. A relative or missing directory, no git,
+    no remote, a remote on another host, a timeout: all None, and the caller treats None as "not this repository".
     """
-    parts = {p for p in cwd.replace("\\", "/").split("/") if p}
-    return any(repo.rpartition("/")[2] in parts for repo in repos)
+    if not cwd or not os.path.isabs(cwd) or "\x00" in cwd or not os.path.isdir(cwd):
+        return None
+    git = next(
+        (
+            c
+            for e in env.get("PATH", "").split(os.pathsep)
+            if os.path.isabs(e) and os.path.isfile(c := os.path.join(e, "git")) and os.access(c, os.X_OK)
+        ),
+        None,
+    )
+    left = min(float(LOOKUP_TIMEOUT_SECONDS), remaining())
+    if git is None or left < MIN_LOOKUP_SECONDS:
+        return None
+    try:
+        done = run(  # argument list, no shell
+            [git, "-C", cwd, "config", "--get", "remote.origin.url"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=left,
+            env=dict(env),
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        return None
+    if done.returncode != 0 or not isinstance(done.stdout, str):
+        return None
+    return repo_from_remote(done.stdout)
+
+
+def exempt(repo: str | None, repos: tuple[str, ...]) -> bool:
+    """True when the session's repository (owner/name, compared without case) is on the opt-out list.
+
+    An undetermined repository (None) is never exempt. The opt-out is deliberate and per repository; a brief cannot
+    grant it to itself, and the name of a directory proves nothing.
+    """
+    return repo is not None and repo.lower() in {r.lower() for r in repos}
 
 
 def gh_resolver(
-    run: Callable[..., Any], which: Callable[[str], str | None], env: Mapping[str, str] | None = None
+    run: Callable[..., Any],
+    which: Callable[[str], str | None],
+    env: Mapping[str, str] | None = None,
+    remaining: Callable[[], float] = lambda: float(LOOKUP_TIMEOUT_SECONDS),
 ) -> Resolver:
-    """Resolve a GitHub reference with `gh issue view`, a read. A Jira key is accepted on its shape alone."""
+    """Resolve a GitHub reference with `gh issue view`, a read. A Jira key is accepted on its shape alone.
+
+    The lookup gets only the time `remaining()` says is left before the hook's own deadline; with too little left it is
+    not attempted and the answer is "error".
+    """
 
     def resolve(ref: Ref) -> State:
         if ref.tracker != "github":
             return "open"
         gh = which("gh")
-        if gh is None:
+        left = min(float(LOOKUP_TIMEOUT_SECONDS), remaining())
+        if gh is None or left < MIN_LOOKUP_SECONDS:
             return "error"
         argv = [gh, "issue", "view", str(ref.number), "--repo", ref.repo, "--json", "state"]
         try:
@@ -89,7 +152,7 @@ def gh_resolver(
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=LOOKUP_TIMEOUT_SECONDS,
+                timeout=left,
                 **({"env": dict(env)} if env is not None else {}),
             )
         except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
@@ -108,8 +171,12 @@ def gh_resolver(
     return resolve
 
 
-def check(text: str, resolve: Resolver) -> tuple[str, str] | None:
-    """(rule id, reason) for a brief that breaks the rule, or None. Reasons never repeat unvalidated brief text."""
+def check(text: str, resolve: Resolver, accepted: Collection[str] | None = None) -> tuple[str, str] | None:
+    """(rule id, reason) for a brief that breaks the rule, or None. Reasons never repeat unvalidated brief text.
+
+    With `accepted` (owner/name values), a GitHub reference outside those repositories is refused before any lookup,
+    so an unrelated open issue cannot satisfy the rule. A Jira key is not tied to a repository.
+    """
     ref = parse(text)
     if ref is None:
         invalid = has_issue_line(text)
@@ -122,6 +189,9 @@ def check(text: str, resolve: Resolver) -> tuple[str, str] | None:
             )
             + HOW_TO_FILE,
         )
+    if accepted is not None and ref.tracker == "github" and ref.repo.lower() not in {a.lower() for a in accepted}:
+        where = ", ".join(sorted(accepted)) or "none (set hooks.tracking_repos, or run in a repository with an origin)"
+        return "issue-unusable", f"{ref.text} is not in an accepted repository; accepted: {where}"
     state = resolve(ref)
     if state == "open":
         return None

@@ -46,6 +46,8 @@ from safo.guardlog import (
 from safo.hooks import (
     AGENT_TOOLS,
     COMMAND,
+    GUARD_MARGIN_SECONDS,
+    GUARD_TIMEOUT_SECONDS,
     append_log,
     check_dispatch,
     decide,
@@ -175,7 +177,10 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def guard(ctx: LocalContext, args: argparse.Namespace) -> None:
+def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = None) -> None:
+    # The hook's whole budget is GUARD_TIMEOUT_SECONDS from the start of the process; lookups get what is left of it
+    # less a margin, so the decision is always written before the host gives up on the hook.
+    deadline = (time.monotonic() if started is None else started) + GUARD_TIMEOUT_SECONDS - GUARD_MARGIN_SECONDS
     payload = event_input(ctx)
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
@@ -203,9 +208,22 @@ def guard(ctx: LocalContext, args: argparse.Namespace) -> None:
             state, health = fresh, "healthy"
     # A stale (not refreshed) or unknown state disables ONLY the local-step rule, keeping model/approval checks.
     reachable = health == "healthy" and state is not None and state["reachable"] is True
-    resolve = ctx.issue_lookup or tracking.gh_resolver(ctx.run, ctx.which, ctx.env)
-    cwd = payload.get("cwd")
-    verdict = check_dispatch(doc, payload["tool_input"], reachable, resolve, cwd if isinstance(cwd, str) else "")
+
+    def remaining() -> float:
+        return deadline - time.monotonic()
+
+    resolve = ctx.issue_lookup or tracking.gh_resolver(ctx.run, ctx.which, ctx.env, remaining)
+    raw_cwd = payload.get("cwd")
+    cwd = raw_cwd if isinstance(raw_cwd, str) else ""
+    asked: list[str | None] = []
+
+    def repo() -> str | None:
+        if not asked:
+            found = ctx.repo_lookup(cwd) if ctx.repo_lookup else tracking.cwd_repo(ctx.run, ctx.env, cwd, remaining)
+            asked.append(found)
+        return asked[0]
+
+    verdict = check_dispatch(doc, payload["tool_input"], reachable, resolve, repo)
     decision = decide(verdict, mode)
     # One visible notice per session for a probe that cannot be trusted; every dispatch is still logged with its health.
     notice = health != "healthy" and (path is None or first_notice(path))
@@ -237,7 +255,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace) -> None:
 
 def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
     try:
-        guard(ctx, args)
+        guard(ctx, args, time.monotonic())
     except TimeoutError:
         diagnostic(ctx, "timeout")
     except (ValueError, UnicodeError):

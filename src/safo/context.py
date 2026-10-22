@@ -50,6 +50,7 @@ class LocalContext:
     which_override: Callable[[str], str | None] | None = None
     dry_run: bool = False
     stdin: TextIO | None = None  # what a hook reads its event from; None means the process's own standard input
+    repo_lookup: Callable[[str], str | None] | None = None  # working directory -> owner/name; None means origin's URL
     issue_lookup: Resolver | None = None  # how the dispatch guard checks a brief's issue; None means `gh issue view`
 
     @property

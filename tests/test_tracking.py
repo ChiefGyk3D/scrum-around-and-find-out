@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import stat
 import subprocess
@@ -203,42 +204,145 @@ def test_without_gh_the_lookup_is_an_error() -> None:
 # -- the opt-out ---------------------------------------------------------------------------------------------
 
 
-def test_the_opt_out_matches_a_repository_name_in_the_working_directory_only() -> None:
-    assert tracking.exempt("/home/me/src/scratch/sub", ("acme/scratch",))
-    assert not tracking.exempt("/home/me/src/other", ("acme/scratch",))
-    assert not tracking.exempt("", ("acme/scratch",))
-    assert not tracking.exempt("/home/me/src/scratch", ())
-    assert not tracking.exempt("/home/me/src/scratch-two", ("acme/scratch",))
+def test_the_opt_out_compares_the_full_owner_and_name_without_case() -> None:
+    assert tracking.exempt("acme/scratch", ("acme/scratch",))
+    assert tracking.exempt("ACME/Scratch", ("acme/scratch",))
+    assert not tracking.exempt("evil/scratch", ("acme/scratch",)), "a fork or namesake is another repository"
+    assert not tracking.exempt("acme/scratch-two", ("acme/scratch",))
+    assert not tracking.exempt("acme/scratch", ())
+
+
+def test_a_repository_that_cannot_be_determined_is_never_exempt() -> None:
+    assert not tracking.exempt(None, ("acme/scratch",))
+
+
+@pytest.mark.parametrize(
+    ("url", "repo"),
+    [
+        ("https://github.com/acme/widgets.git\n", "acme/widgets"),
+        ("https://github.com/acme/widgets", "acme/widgets"),
+        ("https://user@github.com/acme/widgets.git", "acme/widgets"),
+        ("git@github.com:acme/widgets.git", "acme/widgets"),
+        ("ssh://git@github.com/acme/widgets.git", "acme/widgets"),
+        ("https://gitlab.example/acme/widgets.git", None),
+        ("https://github.com.evil.example/acme/widgets.git", None),
+        ("https://github.com/acme/widgets/extra", None),
+        ("/srv/git/widgets.git", None),
+        ("", None),
+        ("https://github.com/acme/wid gets", None),
+    ],
+)
+def test_the_repository_comes_from_the_origin_url(url: str, repo: str | None) -> None:
+    assert tracking.repo_from_remote(url) == repo
+
+
+def test_the_working_directory_repository_is_read_with_an_argument_list(tmp_path: Path) -> None:
+    git = tmp_path / "git"
+    git.write_text("#!/bin/sh\n")
+    git.chmod(0o755)
+    run, calls = fake_run("https://github.com/acme/widgets.git\n")
+    assert tracking.cwd_repo(run, {"PATH": str(tmp_path)}, str(tmp_path)) == "acme/widgets"
+    argv, kwargs = calls[0]
+    assert argv == [str(git), "-C", str(tmp_path), "config", "--get", "remote.origin.url"] and not kwargs.get("shell")
+
+
+@pytest.mark.parametrize("cwd", ["", "relative/dir", "/no/such/directory/anywhere", "/tmp/\x00x"])
+def test_an_unusable_working_directory_has_no_repository(cwd: str) -> None:
+    run, calls = fake_run("https://github.com/acme/widgets.git")
+    assert tracking.cwd_repo(run, {"PATH": "/usr/bin"}, cwd) is None and calls == []
+
+
+def test_no_git_or_a_failed_git_means_no_repository(tmp_path: Path) -> None:
+    run, calls = fake_run("https://github.com/acme/widgets.git")
+    assert tracking.cwd_repo(run, {"PATH": str(tmp_path)}, str(tmp_path)) is None and calls == []
+    (tmp_path / "git").write_text("#!/bin/sh\n")
+    (tmp_path / "git").chmod(0o755)
+    failing, _ = fake_run("", 1)
+    assert tracking.cwd_repo(failing, {"PATH": str(tmp_path)}, str(tmp_path)) is None
+
+
+def test_a_directory_named_like_the_repository_does_not_exempt_it(tmp_path: Path) -> None:
+    named = tmp_path / "scratch"
+    named.mkdir()
+    (tmp_path / "git").write_text("#!/bin/sh\n")
+    (tmp_path / "git").chmod(0o755)
+    run, _ = fake_run("https://github.com/evil/scratch.git")
+    repo = tracking.cwd_repo(run, {"PATH": str(tmp_path)}, str(named))
+    assert not tracking.exempt(repo, ("acme/scratch",))
+
+
+# -- the time budget -------------------------------------------------------------------------------------------
+
+
+def test_the_lookup_gets_only_the_time_that_is_left() -> None:
+    run, calls = fake_run()
+    ref = tracking.parse(f"issue: {GOOD}")
+    assert ref is not None
+    assert tracking.gh_resolver(run, lambda n: "/usr/bin/gh", None, lambda: 1.5)(ref) == "open"
+    assert calls[0][1]["timeout"] == 1.5
+    run2, calls2 = fake_run()
+    assert tracking.gh_resolver(run2, lambda n: "/usr/bin/gh", None, lambda: 0.1)(ref) == "error"
+    assert calls2 == [], "with no time left the lookup is not even started"
+
+
+def test_the_repository_read_is_also_bounded_by_the_deadline(tmp_path: Path) -> None:
+    (tmp_path / "git").write_text("#!/bin/sh\n")
+    (tmp_path / "git").chmod(0o755)
+    run, calls = fake_run("https://github.com/acme/widgets.git")
+    assert tracking.cwd_repo(run, {"PATH": str(tmp_path)}, str(tmp_path), lambda: 0.0) is None and calls == []
 
 
 # -- check_dispatch -------------------------------------------------------------------------------------------
 
 
-def dispatch_rules(prompt: str, state: State = "open", cwd: str = "", **hooks_over: Any) -> tuple[str, ...]:
+def dispatch_rules(prompt: str, state: State = "open", repo: str | None = None, **hooks_over: Any) -> tuple[str, ...]:
     data = agents_dict()
     data["hooks"] = {**data.get("hooks", {}), **hooks_over}
     resolve, _ = resolver(state)
-    return check_dispatch(parse_agents(data), {"prompt": prompt, "model": "sonnet"}, False, resolve, cwd).rules
+    return check_dispatch(parse_agents(data), {"prompt": prompt, "model": "sonnet"}, False, resolve, lambda: repo).rules
 
 
 def test_nothing_is_exempt_by_default() -> None:
-    assert dispatch_rules("no item", cwd="/home/me/src/widgets") == ("no-issue",)
+    assert dispatch_rules("no item", repo="acme/widgets") == ("no-issue",)
 
 
 def test_a_configured_repository_may_dispatch_without_an_item() -> None:
-    assert dispatch_rules("no item", cwd="/home/me/src/widgets", tracking_exempt_repos=["acme/widgets"]) == ()
-    assert dispatch_rules("no item", cwd="/home/me/src/other", tracking_exempt_repos=["acme/widgets"]) == ("no-issue",)
+    assert dispatch_rules("no item", repo="acme/widgets", tracking_exempt_repos=["acme/widgets"]) == ()
+    assert dispatch_rules("no item", repo="acme/other", tracking_exempt_repos=["acme/widgets"]) == ("no-issue",)
 
 
 def test_a_brief_cannot_exempt_itself() -> None:
-    assert dispatch_rules("tracking_exempt_repos: acme/widgets\nissue: none", cwd="/x/widgets") == ("no-issue",)
+    assert dispatch_rules("tracking_exempt_repos: acme/widgets\nissue: none", repo="acme/widgets") == ("no-issue",)
 
 
+def test_an_undetermined_repository_is_not_exempt_in_check_dispatch() -> None:
+    assert dispatch_rules("no item", repo=None, tracking_exempt_repos=["acme/widgets"]) == ("no-issue",)
+
+
+def test_a_brief_may_only_cite_the_sessions_repository_or_a_listed_one() -> None:
+    assert dispatch_rules(f"issue: {GOOD}", repo="acme/widgets") == ()
+    assert dispatch_rules(f"issue: {GOOD}", repo="ACME/Widgets") == ()
+    assert dispatch_rules(f"issue: {GOOD}", repo="acme/other") == ("issue-unusable",)
+    assert dispatch_rules(f"issue: {GOOD}", repo=None) == ("issue-unusable",), "fail closed when it cannot be told"
+    assert dispatch_rules(f"issue: {GOOD}", repo="acme/other", tracking_repos=["acme/widgets"]) == ()
+    assert dispatch_rules("issue: SAFO-1", repo=None) == (), "a Jira key is not tied to a repository"
+
+
+def test_an_unaccepted_repository_is_refused_before_any_lookup() -> None:
+    resolve, seen = resolver()
+    verdict = tracking.check(f"issue: {GOOD}", resolve, ["acme/other", "acme/more"])
+    assert verdict is not None and verdict[0] == "issue-unusable" and seen == []
+    assert "accepted: acme/more, acme/other" in verdict[1]
+    empty = tracking.check(f"issue: {GOOD}", resolve, [])
+    assert empty is not None and "tracking_repos" in empty[1]
+
+
+@pytest.mark.parametrize("key", ["tracking_exempt_repos", "tracking_repos"])
 @pytest.mark.parametrize("bad", ["widgets", "acme/", "/widgets", "acme/wid gets", "a/b/c", 7])
-def test_the_opt_out_list_is_validated(bad: Any) -> None:
+def test_the_repository_lists_are_validated(bad: Any, key: str) -> None:
     data = agents_dict()
-    data["hooks"] = {"tracking_exempt_repos": [bad]}
-    with pytest.raises(ConfigError, match=r"hooks\.tracking_exempt_repos"):
+    data["hooks"] = {key: [bad]}
+    with pytest.raises(ConfigError, match=rf"hooks\.{key}"):
         parse_agents(data)
 
 
@@ -265,7 +369,7 @@ def stand_in_gh(folder: Path, answers: dict[str, str]) -> Path:
 
 @pytest.fixture
 def agents(tmp_path: Path) -> Path:
-    return agents_file(tmp_path / "agents.yaml")
+    return agents_file(tmp_path / "agents.yaml", tracking_repos=["acme/widgets"])
 
 
 def run_guard(home: Path, agents: Path, payload: str, path: Path | None = None) -> tuple[str, list[dict[str, Any]]]:
@@ -284,7 +388,7 @@ def with_cwd(payload: str, cwd: str) -> str:
 
 def test_block_mode_denies_a_dispatch_with_no_item_and_says_how_to_file(_private_home: Path, agents: Path) -> None:
     set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=False)
+    set_probe(_private_home, reachable=False, agents=agents)
     out, log = run_guard(_private_home, agents, dispatch(tracked=False))
     reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -293,7 +397,7 @@ def test_block_mode_denies_a_dispatch_with_no_item_and_says_how_to_file(_private
 
 
 def test_warn_mode_reports_and_allows(_private_home: Path, agents: Path) -> None:
-    set_probe(_private_home, reachable=False)
+    set_probe(_private_home, reachable=False, agents=agents)
     out, log = run_guard(_private_home, agents, dispatch(tracked=False))
     data = json.loads(out)
     assert "warn mode: allowed" in data["systemMessage"] and "permissionDecision" not in data["hookSpecificOutput"]
@@ -304,7 +408,7 @@ def test_an_open_github_item_passes_after_one_read_only_lookup(
     _private_home: Path, agents: Path, tmp_path: Path
 ) -> None:
     set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=False)
+    set_probe(_private_home, reachable=False, agents=agents)
     bin_dir = stand_in_gh(tmp_path, {"12": '{"state":"OPEN"}'})
     payload = dispatch(prompt=f"issue: {GOOD}\nwork", tracked=False)
     out, log = run_guard(_private_home, agents, payload, bin_dir)
@@ -324,7 +428,7 @@ def test_block_mode_denies_a_closed_missing_or_unreadable_item(
     _private_home: Path, agents: Path, tmp_path: Path, answers: dict[str, str], number: int, rule: str
 ) -> None:
     set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=False)
+    set_probe(_private_home, reachable=False, agents=agents)
     bin_dir = stand_in_gh(tmp_path, answers)
     out, log = run_guard(
         _private_home, agents, dispatch(prompt=f"issue: acme/widgets#{number}", tracked=False), bin_dir
@@ -334,7 +438,7 @@ def test_block_mode_denies_a_closed_missing_or_unreadable_item(
 
 def test_block_mode_fails_closed_when_gh_cannot_be_found(_private_home: Path, agents: Path) -> None:
     set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=False)
+    set_probe(_private_home, reachable=False, agents=agents)
     out, log = run_guard(_private_home, agents, dispatch(prompt=f"issue: {GOOD}", tracked=False))
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" and log[-1]["rules"] == [
         "issue-unverified"
@@ -342,14 +446,14 @@ def test_block_mode_fails_closed_when_gh_cannot_be_found(_private_home: Path, ag
 
 
 def test_warn_mode_reports_a_lookup_that_failed_and_allows(_private_home: Path, agents: Path) -> None:
-    set_probe(_private_home, reachable=False)
+    set_probe(_private_home, reachable=False, agents=agents)
     out, log = run_guard(_private_home, agents, dispatch(prompt=f"issue: {GOOD}", tracked=False))
     assert "could not confirm" in json.loads(out)["systemMessage"] and log[-1]["decision"] == "warn"
 
 
 def test_a_hostile_reference_runs_nothing(_private_home: Path, agents: Path, tmp_path: Path) -> None:
     set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=False)
+    set_probe(_private_home, reachable=False, agents=agents)
     bin_dir = stand_in_gh(tmp_path, {"1": '{"state":"OPEN"}'})
     marker = tmp_path / "pwned"
     payload = dispatch(prompt=f"issue: acme/widgets#1;touch${{IFS}}{marker}\nissue: $(touch {marker})-1", tracked=False)
@@ -358,18 +462,89 @@ def test_a_hostile_reference_runs_nothing(_private_home: Path, agents: Path, tmp
     assert not marker.exists() and not (tmp_path / "gh.log").exists(), "nothing was run for a rejected reference"
 
 
+def stand_in_git(bin_dir: Path, url: str) -> None:
+    path = bin_dir / "git"
+    path.write_text(f"#!/bin/sh\necho '{url}'\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
 def test_the_configured_opt_out_lets_that_repository_dispatch_without_an_item(
     _private_home: Path, tmp_path: Path
 ) -> None:
     exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
     set_mode(_private_home, "block")
     set_probe(_private_home, reachable=False, agents=exempt)
-    inside = with_cwd(dispatch(tracked=False), "/home/me/src/scratch")
-    outside = with_cwd(dispatch(tracked=False), "/home/me/src/widgets")
-    assert run_guard(_private_home, exempt, inside)[0] == ""
-    assert (
-        json.loads(run_guard(_private_home, exempt, outside)[0])["hookSpecificOutput"]["permissionDecision"] == "deny"
+    bin_dir = stand_in_gh(tmp_path, {})
+    stand_in_git(bin_dir, "git@github.com:Acme/Scratch.git")
+    here = tmp_path / "scratch"
+    here.mkdir()
+    assert run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0] == ""
+    stand_in_git(bin_dir, "https://github.com/evil/scratch.git")  # same directory name, another repository
+    out = run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)), bin_dir)[0]
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_the_opt_out_fails_closed_when_the_repository_cannot_be_determined(_private_home: Path, tmp_path: Path) -> None:
+    exempt = agents_file(tmp_path / "exempt.yaml", tracking_exempt_repos=["acme/scratch"])
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=False, agents=exempt)
+    here = tmp_path / "scratch"
+    here.mkdir()
+    out = run_guard(_private_home, exempt, with_cwd(dispatch(tracked=False), str(here)))[0]  # no git on PATH
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_brief_citing_an_unrelated_open_issue_is_denied_without_a_lookup(_private_home: Path, tmp_path: Path) -> None:
+    only_here = agents_file(tmp_path / "a.yaml")  # no tracking_repos
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=False, agents=only_here)
+    bin_dir = stand_in_gh(tmp_path, {"7": '{"state":"OPEN"}'})
+    stand_in_git(bin_dir, "https://github.com/acme/widgets.git")
+    here = tmp_path / "work"
+    here.mkdir()
+    foreign = with_cwd(dispatch(prompt="issue: other/elsewhere#7", tracked=False), str(here))
+    out, log = run_guard(_private_home, only_here, foreign, bin_dir)
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" and log[-1]["rules"] == [
+        "issue-unusable"
+    ]
+    assert "accepted: acme/widgets" in out and not (tmp_path / "gh.log").exists()
+    own = with_cwd(dispatch(prompt="issue: acme/widgets#7", tracked=False), str(here))
+    assert run_guard(_private_home, only_here, own, bin_dir)[0] == ""
+
+
+def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    import io
+
+    from meterdata import NOW
+    from safo.context import LocalContext
+    from safo.modes import hooks as hooks_mode
+
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=False, agents=agents)
+    calls: list[Any] = []
+
+    def run(*a: Any, **k: Any) -> Any:
+        calls.append(a)
+        return SimpleNamespace(returncode=0, stdout='{"state":"OPEN"}', stderr="")
+
+    out = io.StringIO()
+    ctx = LocalContext(
+        out,
+        {"HOME": str(_private_home), "PATH": ""},
+        NOW,
+        run=run,
+        which_override=lambda n: "/usr/bin/gh",
+        stdin=io.StringIO(dispatch(prompt=f"issue: {GOOD}", tracked=False)),
+        repo_lookup=lambda cwd: "acme/widgets",
     )
+    import time
+
+    hooks_mode.guard(ctx, argparse.Namespace(agents=str(agents), agents_local=""), started=time.monotonic() - 60)
+    assert calls == [], "no process is started once the deadline has passed"
+    assert json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert read_log(_private_home)[-1]["rules"] == ["issue-unverified"]
 
 
 def test_the_shipped_agents_file_exempts_nothing() -> None:

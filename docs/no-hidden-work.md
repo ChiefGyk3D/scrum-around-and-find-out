@@ -31,14 +31,23 @@ issue: ChiefGyk3D/example#123
   to file one; in `warn` mode it is reported and allowed.
 - A lookup that cannot answer (no `gh`, not logged in, a timeout) fails closed in `block` mode and is reported in `warn`
   mode. The log records the rule name (`no-issue`, `issue-unusable`, `issue-unverified`), never the brief.
+- A GitHub reference must name the session's own repository (the owner/name of its `origin` remote, read with git
+  config, no network) or one listed in `hooks.tracking_repos` in `agents.yaml`; any other repository is
+  `issue-unusable` and the message lists the accepted ones. An unrelated open issue cannot satisfy the rule. When the
+  session's repository cannot be determined, only `tracking_repos` is accepted.
+- The guard has a time budget. It computes a deadline two seconds before the host's 10 second hook timeout, and the
+  `git` and `gh` reads get only the time left. Out of time counts as a failed lookup (`issue-unverified`), so `block`
+  mode denies, and the decision is still written before the host gives up.
 - Nothing is exempt by default. A repository can opt out, deliberately, in `agents.yaml`:
 
   ```yaml
   hooks:
     tracking_exempt_repos: [owner/scratch-repo]
+    tracking_repos: [owner/other-repo]   # extra repositories a brief may cite
   ```
 
-  A session whose working directory has a component named like a listed repository needs no `issue:` line. A brief cannot
+  The session's repository (full owner/name, compared without case, from its `origin` remote) must be on the opt-out
+  list. A directory's name proves nothing, and a repository that cannot be determined is never exempt. A brief cannot
   grant the opt-out to itself. Use it for a throwaway repository, not to get past the rule.
 
 How the issue lookup is injected in a test: `LocalContext.issue_lookup` takes a function `Ref -> "open" | "closed" |

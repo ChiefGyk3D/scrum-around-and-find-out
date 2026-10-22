@@ -49,6 +49,7 @@ AGENT_TOOLS = ("Agent", "Task")  # the tool is Agent today and was called Task b
 FORK_TYPES = ("fork",)  # a fork inherits its parent's model, so it has none to name
 LOG_LIMIT_BYTES = 4 * 1024 * 1024  # past this the log moves to log.jsonl.1 and starts again
 PROBE_TIMEOUT_SECONDS = 15
+GUARD_MARGIN_SECONDS = 2  # the guard's own deadline falls this much before the host's, so its decision is written
 GUARD_TIMEOUT_SECONDS = 10  # room for one lazy re-probe: two requests per endpoint at REPROBE_TIMEOUT_SECONDS
 REPROBE_INTERVAL_SECONDS = 60  # a stale state is refreshed at most this often per session and configuration
 REPROBE_TIMEOUT_SECONDS = 1.5  # per request; the guard sits in front of every dispatch, so this stays short
@@ -278,7 +279,7 @@ def check_dispatch(
     tool_input: Mapping[str, Any],
     reachable: bool,
     resolve: tracking.Resolver | None = None,
-    cwd: str = "",
+    repo: Callable[[], str | None] = lambda: None,
 ) -> Verdict:
     """Apply the routing rules to one Agent tool call.
 
@@ -322,8 +323,12 @@ def check_dispatch(
     if reachable and not local_step and not na:
         rules.append(NO_LOCAL_STEP)
         reasons.append("the local LLM is reachable but the brief names no local step and gives no reason for none")
-    if resolve is not None and not tracking.exempt(cwd, hooks.tracking_exempt_repos):
-        broken = tracking.check(prompt, resolve)
+    if resolve is not None and not tracking.exempt(
+        repo() if hooks.tracking_exempt_repos else None, hooks.tracking_exempt_repos
+    ):
+        here = repo()  # the session's own repository (origin remote); None when it cannot be told
+        accepted = {*hooks.tracking_repos, *([here] if here else [])}
+        broken = tracking.check(prompt, resolve, accepted)
         if broken:
             rules.append(broken[0])
             reasons.append("no hidden work: " + broken[1])
