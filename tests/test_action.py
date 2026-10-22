@@ -141,7 +141,7 @@ def test_the_pins_match_the_ones_gyst_runs() -> None:
     pins = dict(re.findall(r"uses:\s+(\S+)@([0-9a-f]{40})", TEXT))
     assert pins == {
         "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
-        "actions/create-github-app-token": "bcd2ba49218906704ab6" + "c1aa796996da409d3eb1",
+        "actions/create-github-app-token": "64ab729a6294000f5aa4" + "a4bc0b73d1f32bc45510",
         "dopplerhq/secrets-fetch-action": "451892f16195" + "f9ac360e1a5bcbf0b5fd0e957534",
     }
 
