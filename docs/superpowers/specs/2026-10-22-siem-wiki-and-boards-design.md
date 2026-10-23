@@ -160,6 +160,22 @@ Ranked. Each has a default; silence means the default applies.
 12. Approve the four board drafts, including the guessed area-to-repo assignments and area keywords? They are created from your login after you say yes.
 13. Add `pfsense-siem-stack` and `siem-docker-stack` to the dispatch guard's `tracking_repos` so briefs can cite issues in those repos? (An edit to your `agents.yaml`, which only you make.) Until then briefs cite the Scrum Around issues.
 
+## 15a. Answers received (2026-10-22) and what changed
+
+The maintainer reviewed section 15 and the verification results and answered as follows. Everything not mentioned proceeds on its stated default.
+
+- **Q2 (real network).** Checked read-only against the live firewall: counts only, no values stored. The LAN-monitoring guide is an example topology (none of its subnets or names exist; its VLAN numbers 10, 20, 30 are common numbers that happen to be in use). The traffic-shaping guide is partly real (four of five VLAN IDs and five of 22 names exist; it contains no real addresses). Result: public pages use generic segment names and VLAN numbers, and example subnets come from documentation ranges; the maintainer's real names live under "Our settings" as placeholders.
+- **Q7 (licenses).** netpulse is Apache-2.0: add the license file and correct the README. The bridge is already Apache-2.0 (its roadmap line saying MIT is stale).
+- **Q8 (Wazuh dashboards guide).** Replace instance-specific UIDs and the password-shaped example with placeholders.
+- **Q9 (JumpCloud rules).** The stack owns the detections; the bridge's own 100300-100350 set is documented as standalone-only.
+- **Q10 (netpulse bucket).** `netpulse` is the canonical bucket and org; fix the compose defaults, the dashboard queries and the README (a code change with its own issue and review).
+- **Q11 (bridge lint).** Blocking. The prose that says advisory is corrected.
+- **Q12 (boards).** The four drafts are approved. Created from the maintainer's `gh` login: projects 9 (SIEM Stack), 10 (SIEM and CAH) and 11 (All Projects), all empty when created; `reconcile` fills them next. The CAH definition file gets the Agent-field correction in its own pull request. The Status options were set through the API on the three empty boards only, because the tool refuses to rewrite that field on a populated board.
+- **Q13.** `pfsense-siem-stack` and `siem-docker-stack` were added to the dispatch guard's `tracking_repos` (backup of the previous file kept).
+- **Approval.** These answers, with "drafts approved", are taken as approval of this design. Anything the maintainer disagrees with is corrected through this pull request before the plan is written.
+
+Still to do by hand (no API can set them): board view grouping and the roadmap date fields on projects 9, 10 and 11, and the project workflows (item closed to Done; pull request merged to Done). The exact steps print in each board's bootstrap output.
+
 ## 16. Left to the builder
 
 Exact page names inside the registry, section-level splits, the wording of "change before use" notes, the order of pull requests inside each package, test design for the move tool and the leak check, and how the shared builder reaches the runner in GYST (spike on the pinned workflow commit, composite action, or an inline script).
