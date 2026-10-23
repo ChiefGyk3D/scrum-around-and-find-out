@@ -1,0 +1,289 @@
+# SPDX-License-Identifier: Apache-2.0
+# Project board for the SIEM group together with Clouds Against Humanity, defined as code for Scrum Around and Find Out (SAFO).
+# A user-owned GitHub Project: no App can write one, so it is kept current from the maintainer's own
+# `gh` login with `safo --board siem-and-cah.board.yaml reconcile` (no token is stored in CI).
+# `number:` is the project `safo bootstrap` created.
+version: 1
+project:
+  owner: ChiefGyk3D
+  owner_type: user
+  number: 10
+  title: "SIEM and CAH"
+repositories:
+  - owner: ChiefGyk3D
+    name: pfsense-siem-stack
+    default_area: "Suricata"
+    area_rules:
+      - {match: "cah", area: "Cross-link work"}
+      - {match: "clouds against", area: "Cross-link work"}
+      - {match: "cross-link", area: "Cross-link work"}
+      - {match: "suricata", area: "Suricata"}
+      - {match: "pfblocker", area: "pfBlockerNG"}
+      - {match: "dnsbl", area: "pfBlockerNG"}
+      - {match: "eve", area: "EVE forwarder"}
+      - {match: "forwarder", area: "EVE forwarder"}
+      - {match: "telegraf", area: "Telegraf"}
+      - {match: "wazuh", area: "SIEM backends"}
+      - {match: "elastic", area: "SIEM backends"}
+      - {match: "graylog", area: "SIEM backends"}
+      - {match: "opensearch", area: "SIEM backends"}
+      - {match: "docker", area: "Docker stack"}
+      - {match: "compose", area: "Docker stack"}
+      - {match: "n8n", area: "SOAR and n8n"}
+      - {match: "soar", area: "SOAR and n8n"}
+      - {match: "wiki", area: "Wiki and docs"}
+      - {match: "readme", area: "Wiki and docs"}
+      - {match: "docs", area: "Wiki and docs"}
+      - {match: "codeql", area: "Security and scanning"}
+      - {match: "dependabot", area: "Security and scanning"}
+      - {match: "secret", area: "Security and scanning"}
+      - {match: "security", area: "Security and scanning"}
+      - {match: "ci ", area: "Process"}
+      - {match: "release", area: "Process"}
+  - owner: ChiefGyk3D
+    name: siem-docker-stack
+    default_area: "Docker stack"
+    area_rules:
+      - {match: "cah", area: "Cross-link work"}
+      - {match: "clouds against", area: "Cross-link work"}
+      - {match: "cross-link", area: "Cross-link work"}
+      - {match: "suricata", area: "Suricata"}
+      - {match: "pfblocker", area: "pfBlockerNG"}
+      - {match: "dnsbl", area: "pfBlockerNG"}
+      - {match: "eve", area: "EVE forwarder"}
+      - {match: "forwarder", area: "EVE forwarder"}
+      - {match: "telegraf", area: "Telegraf"}
+      - {match: "wazuh", area: "SIEM backends"}
+      - {match: "elastic", area: "SIEM backends"}
+      - {match: "graylog", area: "SIEM backends"}
+      - {match: "opensearch", area: "SIEM backends"}
+      - {match: "docker", area: "Docker stack"}
+      - {match: "compose", area: "Docker stack"}
+      - {match: "n8n", area: "SOAR and n8n"}
+      - {match: "soar", area: "SOAR and n8n"}
+      - {match: "wiki", area: "Wiki and docs"}
+      - {match: "readme", area: "Wiki and docs"}
+      - {match: "docs", area: "Wiki and docs"}
+      - {match: "codeql", area: "Security and scanning"}
+      - {match: "dependabot", area: "Security and scanning"}
+      - {match: "secret", area: "Security and scanning"}
+      - {match: "security", area: "Security and scanning"}
+      - {match: "ci ", area: "Process"}
+      - {match: "release", area: "Process"}
+  - owner: ChiefGyk3D
+    name: jumpcloud-wazuh-bridge
+    default_area: "SIEM backends"
+    area_rules:
+      - {match: "cah", area: "Cross-link work"}
+      - {match: "clouds against", area: "Cross-link work"}
+      - {match: "cross-link", area: "Cross-link work"}
+      - {match: "suricata", area: "Suricata"}
+      - {match: "pfblocker", area: "pfBlockerNG"}
+      - {match: "dnsbl", area: "pfBlockerNG"}
+      - {match: "eve", area: "EVE forwarder"}
+      - {match: "forwarder", area: "EVE forwarder"}
+      - {match: "telegraf", area: "Telegraf"}
+      - {match: "wazuh", area: "SIEM backends"}
+      - {match: "elastic", area: "SIEM backends"}
+      - {match: "graylog", area: "SIEM backends"}
+      - {match: "opensearch", area: "SIEM backends"}
+      - {match: "docker", area: "Docker stack"}
+      - {match: "compose", area: "Docker stack"}
+      - {match: "n8n", area: "SOAR and n8n"}
+      - {match: "soar", area: "SOAR and n8n"}
+      - {match: "wiki", area: "Wiki and docs"}
+      - {match: "readme", area: "Wiki and docs"}
+      - {match: "docs", area: "Wiki and docs"}
+      - {match: "codeql", area: "Security and scanning"}
+      - {match: "dependabot", area: "Security and scanning"}
+      - {match: "secret", area: "Security and scanning"}
+      - {match: "security", area: "Security and scanning"}
+      - {match: "ci ", area: "Process"}
+      - {match: "release", area: "Process"}
+  - owner: ChiefGyk3D
+    name: mother-ticker
+    default_area: "Process"
+    area_rules:
+      - {match: "cah", area: "Cross-link work"}
+      - {match: "clouds against", area: "Cross-link work"}
+      - {match: "cross-link", area: "Cross-link work"}
+      - {match: "suricata", area: "Suricata"}
+      - {match: "pfblocker", area: "pfBlockerNG"}
+      - {match: "dnsbl", area: "pfBlockerNG"}
+      - {match: "eve", area: "EVE forwarder"}
+      - {match: "forwarder", area: "EVE forwarder"}
+      - {match: "telegraf", area: "Telegraf"}
+      - {match: "wazuh", area: "SIEM backends"}
+      - {match: "elastic", area: "SIEM backends"}
+      - {match: "graylog", area: "SIEM backends"}
+      - {match: "opensearch", area: "SIEM backends"}
+      - {match: "docker", area: "Docker stack"}
+      - {match: "compose", area: "Docker stack"}
+      - {match: "n8n", area: "SOAR and n8n"}
+      - {match: "soar", area: "SOAR and n8n"}
+      - {match: "wiki", area: "Wiki and docs"}
+      - {match: "readme", area: "Wiki and docs"}
+      - {match: "docs", area: "Wiki and docs"}
+      - {match: "codeql", area: "Security and scanning"}
+      - {match: "dependabot", area: "Security and scanning"}
+      - {match: "secret", area: "Security and scanning"}
+      - {match: "security", area: "Security and scanning"}
+      - {match: "ci ", area: "Process"}
+      - {match: "release", area: "Process"}
+  - owner: ChiefGyk3D
+    name: netpulse
+    default_area: "Process"
+    area_rules:
+      - {match: "cah", area: "Cross-link work"}
+      - {match: "clouds against", area: "Cross-link work"}
+      - {match: "cross-link", area: "Cross-link work"}
+      - {match: "suricata", area: "Suricata"}
+      - {match: "pfblocker", area: "pfBlockerNG"}
+      - {match: "dnsbl", area: "pfBlockerNG"}
+      - {match: "eve", area: "EVE forwarder"}
+      - {match: "forwarder", area: "EVE forwarder"}
+      - {match: "telegraf", area: "Telegraf"}
+      - {match: "wazuh", area: "SIEM backends"}
+      - {match: "elastic", area: "SIEM backends"}
+      - {match: "graylog", area: "SIEM backends"}
+      - {match: "opensearch", area: "SIEM backends"}
+      - {match: "docker", area: "Docker stack"}
+      - {match: "compose", area: "Docker stack"}
+      - {match: "n8n", area: "SOAR and n8n"}
+      - {match: "soar", area: "SOAR and n8n"}
+      - {match: "wiki", area: "Wiki and docs"}
+      - {match: "readme", area: "Wiki and docs"}
+      - {match: "docs", area: "Wiki and docs"}
+      - {match: "codeql", area: "Security and scanning"}
+      - {match: "dependabot", area: "Security and scanning"}
+      - {match: "secret", area: "Security and scanning"}
+      - {match: "security", area: "Security and scanning"}
+      - {match: "ci ", area: "Process"}
+      - {match: "release", area: "Process"}
+  - owner: ChiefGyk3D
+    name: Clouds-Against-Humanity
+    default_area: "Learning and wiki"
+    area_rules:
+      - {match: "cross-link", area: "Cross-link work"}
+      - {match: "siem", area: "Cross-link work"}
+      - {match: "wazuh", area: "Cross-link work"}
+      - {match: "suricata", area: "Cross-link work"}
+      - {match: "stage ", area: "CAH stages"}
+      - {match: "telemetry", area: "CAH stages"}
+      - {match: "wiki", area: "Learning and wiki"}
+      - {match: "security", area: "Security and scanning"}
+      - {match: "codeql", area: "Security and scanning"}
+      - {match: "dependabot", area: "Security and scanning"}
+fields:
+  - name: Status
+    type: single_select
+    options:
+      - {name: "Backlog", color: GRAY, description: "Not scheduled"}
+      - {name: "Next", color: BLUE, description: "Scheduled for a sprint"}
+      - {name: "In progress", color: YELLOW, description: "Being worked, or a draft pull request"}
+      - {name: "In review", color: PURPLE, description: "Pull request open, checks and reviews running"}
+      - {name: "Blocked", color: RED, description: "Needs the maintainer or an outside answer"}
+      - {name: "Done", color: GREEN, description: "Closed or merged"}
+  - name: Area
+    type: single_select
+    options:
+      - {name: "Suricata", color: BLUE, description: "Suricata rules, tuning, EVE output"}
+      - {name: "pfBlockerNG", color: ORANGE, description: "pfBlockerNG feeds, DNSBL, alerts"}
+      - {name: "EVE forwarder", color: GREEN, description: "Shipping EVE JSON off the firewall"}
+      - {name: "Telegraf", color: PINK, description: "Telegraf inputs and metrics"}
+      - {name: "SIEM backends", color: PURPLE, description: "Wazuh, Elastic, Graylog and similar backends"}
+      - {name: "Docker stack", color: RED, description: "The Docker Compose SIEM stack"}
+      - {name: "SOAR and n8n", color: YELLOW, description: "Automation, enrichment, n8n workflows"}
+      - {name: "Wiki and docs", color: GRAY, description: "Wiki pages, READMEs, screenshots"}
+      - {name: "Security and scanning", color: ORANGE, description: "Scanners, secrets, dependency alerts"}
+      - {name: "Process", color: GRAY, description: "How the project is run"}
+      - {name: "Learning and wiki", color: GRAY, description: "Lessons, labs, screenshots"}
+      - {name: "Cross-link work", color: PINK, description: "Work that ties the SIEM stack to the CAH lessons"}
+      - {name: "CAH stages", color: BLUE, description: "Clouds Against Humanity stage infrastructure"}
+  - name: Size
+    type: single_select
+    options:
+      - {name: "S", color: GRAY, description: "About 2 hours"}
+      - {name: "M", color: BLUE, description: "About 5 hours"}
+      - {name: "L", color: ORANGE, description: "About 12 hours"}
+      - {name: "XL", color: RED, description: "About 30 hours: split before scheduling"}
+  - name: Priority
+    type: single_select
+    options:
+      - {name: "P0 now", color: RED, description: "Drop other work"}
+      - {name: "P1 soon", color: ORANGE, description: ""}
+      - {name: "P2 later", color: YELLOW, description: ""}
+      - {name: "P3 someday", color: GRAY, description: ""}
+  - name: Agent
+    type: single_select
+    options:
+      - {name: "Claude", color: ORANGE, description: "Claude lead or a Claude subagent"}
+      - {name: "Codex", color: GREEN, description: "OpenAI Codex"}
+      - {name: "Copilot", color: BLUE, description: "GitHub Copilot coding agent"}
+      - {name: "You", color: PURPLE, description: "The maintainer"}
+      - {name: "ChatGPT", color: PINK, description: "ChatGPT general models: non-technical and public copy"}
+      - {name: "Ollama", color: YELLOW, description: "Local model on the lab server"}
+      - {name: "RAG", color: GRAY, description: "Local retrieval over the project docs"}
+  - name: Kind
+    type: single_select
+    options:
+      - {name: "Feature", color: BLUE, description: ""}
+      - {name: "Bug", color: RED, description: ""}
+      - {name: "Decision", color: PURPLE, description: ""}
+      - {name: "Lesson", color: GREEN, description: ""}
+      - {name: "Chore", color: GRAY, description: ""}
+      - {name: "Docs", color: YELLOW, description: ""}
+      - {name: "Release", color: ORANGE, description: ""}
+      - {name: "Epic", color: PINK, description: ""}
+  - name: Epic
+    type: single_select
+    options:
+      - {name: "Suricata", color: BLUE, description: "Suricata rules, tuning, EVE output"}
+      - {name: "pfBlockerNG", color: ORANGE, description: "pfBlockerNG feeds, DNSBL, alerts"}
+      - {name: "EVE forwarder", color: GREEN, description: "Shipping EVE JSON off the firewall"}
+      - {name: "Telegraf", color: PINK, description: "Telegraf inputs and metrics"}
+      - {name: "SIEM backends", color: PURPLE, description: "Wazuh, Elastic, Graylog and similar backends"}
+      - {name: "Docker stack", color: RED, description: "The Docker Compose SIEM stack"}
+      - {name: "SOAR and n8n", color: YELLOW, description: "Automation, enrichment, n8n workflows"}
+      - {name: "Wiki and docs", color: GRAY, description: "Wiki pages, READMEs, screenshots"}
+      - {name: "Security and scanning", color: BLUE, description: "Scanners, secrets, dependency alerts"}
+      - {name: "Process", color: ORANGE, description: "How the project is run"}
+      - {name: "Learning and wiki", color: GREEN, description: "Lessons, labs, screenshots"}
+      - {name: "Cross-link work", color: PINK, description: "Work that ties the SIEM stack to the CAH lessons"}
+      - {name: "CAH stages", color: PURPLE, description: "Clouds Against Humanity stage infrastructure"}
+  - {name: Effort, type: number}
+  - {name: Sprint, type: iteration, start: 2026-10-20, duration_days: 14, count: 8, title_prefix: "S"}
+  - {name: Start date, type: date}
+  - {name: Target date, type: date}
+  - {name: Done on, type: date}
+views:
+  - {name: Sprint board, layout: board, filter: "-status:Done"}
+  - {name: Sprint plan, layout: table, filter: "-status:Done"}
+  - {name: Roadmap, layout: roadmap, filter: ""}
+  - {name: Backlog, layout: table, filter: "status:Backlog"}
+  - {name: Agents at work, layout: table, filter: 'status:"In progress","In review",Next'}
+rules:
+  status:
+    opened: Backlog
+    opened_pr: In review
+    draft_pr: In progress
+    reopened: Backlog
+    closed: Done
+    merged: Done
+  done_date_field: Done on
+  new_item_defaults:
+    Priority: P2 later
+  tracking:
+    kind_field: Kind
+    epic_field: Epic
+    effort_field: Effort
+    exempt_repos: []
+agents:
+  field: Agent
+  working: [In progress, In review, Next]
+  waiting: [Blocked]
+ui_only:
+  - "Sprint board: Group by = Status, Sort by Priority"
+  - "Roadmap view: Date fields = Start date and Target date, Group by = Area, zoom = Quarter"
+  - "Sprint plan view: Group by = Sprint; show Size, Agent, Area"
+  - "Project workflows: Item closed -> Done; Pull request merged -> Done; Auto-add is not needed (reconcile adds)"
