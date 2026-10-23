@@ -123,7 +123,7 @@ Four new user-owned projects, defined as code in this repo and kept current from
 - **SIEM Stack**: the five repos; areas for Suricata, pfBlockerNG, EVE forwarder, Telegraf, SIEM backends, Docker stack, SOAR and n8n, Wiki and docs, Security and scanning, Process.
 - **SIEM and CAH**: the same plus CAH, with a cross-link area.
 - **All Projects**: a read-friendly portfolio of every tracked repo (25 repositories drafted), grouped by project.
-- CAH keeps project 4; its definition file is corrected so the Agent field lists all seven live options (Claude, Codex, Copilot, You, ChatGPT, Ollama, RAG).
+- CAH keeps project 4. Its definition file on `main` already lists all seven live Agent options (Claude, Codex, Copilot, You, ChatGPT, Ollama, RAG); the new boards use the same seven.
 The drafts exist and pass SAFO's offline validator. Area-to-repo assignments and area-matching keywords are the lead's guesses and are reviewed before creation. Creating a project, and its view settings that no API can set, are the maintainer's steps. Every item needs a status, area, kind, epic and effort for `safo audit` to pass.
 
 ## 12. Clouds Against Humanity
@@ -170,7 +170,7 @@ The maintainer reviewed section 15 and the verification results and answered as 
 - **Q9 (JumpCloud rules).** The stack owns the detections; the bridge's own 100300-100350 set is documented as standalone-only.
 - **Q10 (netpulse bucket).** `netpulse` is the canonical bucket and org; fix the compose defaults, the dashboard queries and the README (a code change with its own issue and review).
 - **Q11 (bridge lint).** Blocking. The prose that says advisory is corrected.
-- **Q12 (boards).** The four drafts are approved. Created from the maintainer's `gh` login: projects 9 (SIEM Stack), 10 (SIEM and CAH) and 11 (All Projects), all empty when created; `reconcile` fills them next. The CAH definition file gets the Agent-field correction in its own pull request. The Status options were set through the API on the three empty boards only, because the tool refuses to rewrite that field on a populated board.
+- **Q12 (boards).** The four drafts are approved. Created from the maintainer's `gh` login: projects 9 (SIEM Stack), 10 (SIEM and CAH) and 11 (All Projects), all empty when created; `reconcile` fills them next. CAH's definition file needed no change (it already lists all seven Agent options on `main`). The Status options were set through the API on the three empty boards only, because the tool refuses to rewrite that field on a populated board.
 - **Q13.** `pfsense-siem-stack` and `siem-docker-stack` were added to the dispatch guard's `tracking_repos` (backup of the previous file kept).
 - **Approval.** These answers, with "drafts approved", are taken as approval of this design. Anything the maintainer disagrees with is corrected through this pull request before the plan is written.
 
