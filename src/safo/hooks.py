@@ -32,6 +32,7 @@ from safo.agentsfile import Agent, AgentsFile, Endpoint
 from safo.bounded import loads
 from safo.errors import ConfigError
 from safo.guardlog import (
+    APPEND_LOCK_TIMEOUT,
     FILE_CAP,
     RECORD_CAP,
     bounded_read,
@@ -445,7 +446,7 @@ def append_log(path: Path, record: dict[str, Any], limit: int = LOG_LIMIT_BYTES)
     raw = (json.dumps(record, sort_keys=True) + "\n").encode()
     if not valid_record(record) or len(raw) > RECORD_CAP or len(raw) > limit:
         raise ValueError("invalid or oversized record")
-    with file_lock(path.with_name(path.name + ".lock")):
+    with file_lock(path.with_name(path.name + ".lock"), timeout=APPEND_LOCK_TIMEOUT):
         try:
             old = bounded_read(path, FILE_CAP)
         except FileNotFoundError:
