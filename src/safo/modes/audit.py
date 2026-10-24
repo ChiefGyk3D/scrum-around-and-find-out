@@ -15,6 +15,7 @@ from safo.live import LiveBoard, LiveField, load_live
 from safo.modes import Mode, register
 from safo.plan import build_plan
 from safo.schema import Board, Field
+from safo.threatmodel import unthreatened_issues
 from safo.values import iso_day
 
 
@@ -96,12 +97,15 @@ def compare_structure(board: Board, live: LiveBoard, out: Findings) -> None:
 
 
 def check_tracking(ctx: Context, board: Board, live: LiveBoard, items: list[ItemState], out: Findings) -> None:
-    """The no-hidden-work checks: a linked issue on every pull request, and Kind, Epic, Effort and Area on every card.
+    """The no-hidden-work checks: a linked issue on every pull request, a threat-model line on every AI-surface
+    issue, and Kind, Epic, Effort and Area on every card.
 
     An unreadable repository is already reported as UNKNOWN by `collect_work`, so it is not repeated here.
     """
     unlinked, _ = unlinked_pulls(ctx.client, board, ctx.today)
     out.drift += [f"PULL {name} has no linked issue (add `Refs #n` or `Closes #n`)" for name in unlinked]
+    threats, _ = unthreatened_issues(ctx.client, board, ctx.today)
+    out.drift += [f"THREAT {name} is labeled {board.rules.threat_model.label!r} and {why}" for name, why in threats]
     repos = {r.full_name.lower(): r for r in board.repositories}
     held = read_tracked(ctx.client, board, live)
     out.drift += card_findings(board, items, held, repos)

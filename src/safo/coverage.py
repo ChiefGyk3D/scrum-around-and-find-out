@@ -68,6 +68,8 @@ def not_configured(board: Board) -> list[str]:
         notes.append("Done-on check not configured: rules.done_date_field is empty")
     if board.field_named(board.rules.area_field) is None:
         notes.append(f"Area check not configured: board.yaml defines no {board.rules.area_field!r} field")
+    if not board.rules.threat_model.label:
+        notes.append("Threat-model check not configured: rules.threat_model.label is empty")
     return notes
 
 

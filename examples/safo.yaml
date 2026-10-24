@@ -66,6 +66,8 @@ rules:
     closed: Done
     merged: Done
   done_date_field: Done on
+  threat_model:
+    label: ai-surface
   new_item_defaults:
     Priority: P2 later
 agents:
