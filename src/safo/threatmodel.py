@@ -30,8 +30,10 @@ Q_THREAT_ISSUES = """query RepoThreatIssues($owner: String!, $name: String!, $la
   }
 }"""
 
-# The line is anchored to its own line: a sentence that mentions it, or a quote, does not count.
-LINE = re.compile(r"^[ \t]*threat-model:[ \t]*(\S.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+# The line is anchored to its own line: a sentence that mentions it, or a quote, does not count. The value is trimmed in
+# code, not in the pattern: a lazy group followed by optional trailing space is quadratic on a hostile line.
+LINE = re.compile(r"^[ \t]*threat-model:(.*)$", re.IGNORECASE | re.MULTILINE)
+LONGEST = 300  # a path, a URL or a reason this long is not one; the cap also bounds every match below
 NOT_APPLICABLE = re.compile(r"n/a[ \t]*[-\u2013\u2014][ \t]*(\S.{6,})", re.IGNORECASE)
 URL = re.compile(r"https://[^\s<>\"']+")
 # A repository-relative path: no leading slash, no `..` segment, and it has to look like a file or a directory.
@@ -41,6 +43,8 @@ PLACEHOLDERS = frozenset({"tbd", "todo", "none", "n/a", "na", "pending", "later"
 
 def judge(value: str) -> str | None:
     """None when the value after `threat-model:` is usable, else why it is not."""
+    if len(value) > LONGEST:
+        return f"the value is longer than {LONGEST} characters"
     if NOT_APPLICABLE.fullmatch(value):
         return None
     if value.lower().startswith("n/a"):
@@ -54,7 +58,7 @@ def judge(value: str) -> str | None:
 
 def verdict(body: str) -> str | None:
     """None when the body carries a usable threat-model line; else a sentence saying what is wrong."""
-    found = [m.group(1) for m in LINE.finditer(body)]
+    found = [value for m in LINE.finditer(body) if (value := m.group(1).strip())]
     if not found:
         return "has no `threat-model:` line"
     problems = [judge(value) for value in found]

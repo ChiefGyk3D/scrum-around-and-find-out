@@ -94,6 +94,29 @@ def test_an_unusable_line_is_refused_with_a_reason(body: str, reason: str) -> No
     assert got is not None and reason in got
 
 
+def test_a_hostile_body_is_judged_in_linear_time() -> None:
+    import time
+
+    bodies = [
+        "threat-model: a" + " " * 60000 + "b",
+        "threat-model:" + "\t" * 60000 + "x" * 3,
+        ("threat-model: n/a - " + "- " * 30000),
+        "threat-model: " + "../" * 20000,
+        "threat-model: " + "a/" * 30000 + "\x00",
+        "\n".join("threat-model:" + " " * 50 for _ in range(1500)),
+    ]
+    start = time.monotonic()
+    for body in bodies:
+        verdict(body)
+    assert time.monotonic() - start < 1.0, "judging a hostile body must not take noticeable time"
+
+
+def test_an_overlong_value_is_unusable() -> None:
+    got = verdict("threat-model: " + "a" * 400 + ".json")
+    assert got is not None and "longer than 300" in got
+    assert verdict("threat-model: " + "a" * 280 + ".json") is None
+
+
 def test_a_single_word_without_a_dot_or_slash_is_not_a_path() -> None:
     assert judge("model") is not None and judge("model.json") is None and judge("docs/model") is None
 
