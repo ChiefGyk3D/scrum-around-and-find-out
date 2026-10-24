@@ -61,6 +61,11 @@ issue: ChiefGyk3D/example#123
 How the issue lookup is injected in a test: `LocalContext.issue_lookup` takes a function `Ref -> "open" | "closed" |
 "missing" | "error"`; by default it is the `gh_resolver` function of the tracking module.
 
+## The threat-model line
+
+The same shape of rule, for AI-facing work: an issue with the configured label carries a `threat-model:` line, and `audit`
+names the ones that do not. See [Threat model before build](threat-model.md).
+
 ## The audit and `board.yaml`
 
 The checks read their field names from `board.yaml`:

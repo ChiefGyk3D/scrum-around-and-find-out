@@ -214,6 +214,12 @@ shapes:
     fallback: []
     reviewer: [codex]
     note: Opus only with the maintainer's OK and the reason stated.
+  threat-model:
+    description: "A threat model for an AI-facing change: assets, actors, trust boundaries, ranked risks, a mitigation and a verification for each, and the Threat Dragon file. The draft is evidence for the maintainer to read, not a verdict."
+    prefer: [claude-sonnet]
+    fallback: [codex]
+    reviewer: [codex]
+    note: Opus only with the maintainer's OK and the reason stated. The file's shape is checked by git-your-ship-together's threat-model workflow; whether it is true of the system is a person's call.
   security-sensitive-code:
     description: "Code whose mistakes expose a secret, widen access or replay a mutation, including security code transcribed from a plan."
     prefer: [claude-sonnet]
