@@ -162,14 +162,14 @@ safo route only recommends: the lead sets the card and hands the work out.
 ## threat-model  exit=0
 shape: threat-model
 recommended: claude-sonnet (put Agent = Claude on the card)
-why: first in the chain with headroom (claude-sonnet, codex)
+why: first in the chain with headroom (claude-sonnet)
 required review: codex: ready (independent reviewer)
 reviewer: codex (a fresh reviewer: not the author, with headroom)
-note: Opus only with the maintainer's OK and the reason stated. The file's shape is checked by git-your-ship-together's threat-model workflow; whether it is true of the system is a person's call.
-chain: claude-sonnet -> codex
+note: Opus only with the maintainer's OK and the reason stated. Codex reviews, so it never drafts. The file's shape is checked by git-your-ship-together's threat-model workflow; whether it is true of the system is a person's call.
+chain: claude-sonnet
 safo route only recommends: the lead sets the card and hands the work out.
 ## threat-model --json exit=0
-{"shape":"threat-model","agent":"claude-sonnet","why":"first in the chain with headroom (claude-sonnet, codex)","skipped":[],"reviewer":"codex","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Opus only with the maintainer's OK and the reason stated. The file's shape is checked by git-your-ship-together's threat-model workflow; whether it is true of the system is a person's call.","card_label":"Claude","fallback_chain":["claude-sonnet","codex"],"reviews":[{"reviewer":"codex","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
+{"shape":"threat-model","agent":"claude-sonnet","why":"first in the chain with headroom (claude-sonnet)","skipped":[],"reviewer":"codex","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Opus only with the maintainer's OK and the reason stated. Codex reviews, so it never drafts. The file's shape is checked by git-your-ship-together's threat-model workflow; whether it is true of the system is a person's call.","card_label":"Claude","fallback_chain":["claude-sonnet"],"reviews":[{"reviewer":"codex","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
 ## well-specified-code  exit=0
 shape: well-specified-code
 recommended: claude-haiku (put Agent = Claude on the card)

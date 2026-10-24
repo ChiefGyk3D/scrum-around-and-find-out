@@ -94,6 +94,25 @@ def test_an_unusable_line_is_refused_with_a_reason(body: str, reason: str) -> No
     assert got is not None and reason in got
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "threat-model: docs/tm.json\r\n",
+        "Intro\r\n\r\nthreat-model: n/a - reviewed, nothing new crosses a boundary\r\nMore\r\n",
+        "threat-model: https://example.com/m\r",
+    ],
+)
+def test_a_windows_line_ending_is_not_part_of_the_value(body: str) -> None:
+    assert verdict(body) is None
+
+
+def test_the_threat_model_shape_never_lets_the_reviewer_draft() -> None:
+    from safo.agentsfile import parse_agents
+
+    shape = parse_agents(yaml.safe_load((DATA.parent.parent / "agents.yaml").read_text())).shape("threat-model")
+    assert shape.reviewer[0] not in (*shape.prefer, *shape.fallback)
+
+
 def test_a_hostile_body_is_judged_in_linear_time() -> None:
     import time
 
