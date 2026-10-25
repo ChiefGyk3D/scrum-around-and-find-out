@@ -462,9 +462,9 @@ def run_install(ctx: LocalContext, args: argparse.Namespace) -> int:
     if not changed:
         ctx.say(f"already installed in {given}: nothing changed")
     elif ctx.dry_run:
-        ctx.say(f"dry run: would add the SessionStart probe and the PreToolUse (Agent) guard to {given}")
+        ctx.say(f"dry run: would add the SessionStart probe and the PreToolUse (Agent and Bash) guard to {given}")
     else:
-        ctx.say(f"installed the SessionStart probe and the PreToolUse (Agent) guard in {given}")
+        ctx.say(f"installed the SessionStart probe and the PreToolUse (Agent and Bash) guard in {given}")
     if args.guard_mode and not ctx.dry_run:
         ctx.say(f"guard mode: {args.guard_mode}")
     ctx.say(
@@ -539,7 +539,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     probe = sub.add_parser("probe", help="SessionStart hook: is the local LLM reachable?")
     add_agents_arguments(probe)
-    guard_parser = sub.add_parser("guard", help="PreToolUse hook on the Agent tool: check the brief (JSON on stdin)")
+    guard_help = "PreToolUse hook on the Agent and Bash tools: check the brief, or a foreground wait (JSON on stdin)"
+    guard_parser = sub.add_parser("guard", help=guard_help, description=guard_help)
     add_agents_arguments(guard_parser)
     mode = sub.add_parser("mode", help="warn (report) or block (deny) a dispatch that breaks a rule")
     mode.add_argument("value", choices=MODES)

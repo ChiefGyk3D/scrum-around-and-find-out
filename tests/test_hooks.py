@@ -64,7 +64,7 @@ def reason(output: str) -> str:
 def test_install_adds_the_session_probe_and_the_agent_guard_to_a_new_settings_file(_private_home: Path) -> None:
     settings = _private_home / "settings.json"
     code, out, _ = hooks("install", "--settings", str(settings), home=_private_home)
-    assert code == 0 and "installed the SessionStart probe and the PreToolUse (Agent) guard" in out
+    assert code == 0 and "installed the SessionStart probe and the PreToolUse (Agent and Bash) guard" in out
     data = json.loads(settings.read_text())
     assert data["hooks"]["SessionStart"] == [
         {

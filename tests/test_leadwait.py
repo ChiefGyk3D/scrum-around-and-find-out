@@ -313,6 +313,204 @@ def test_the_install_matcher_covers_bash_and_an_older_install_is_migrated(_priva
     assert len(groups[0]["hooks"]) == 1
 
 
+# -- PR #77 review: command data is not code, and a marker is a real comment ----------------------------------
+
+REASON = "waiting out a 45 s DNS TTL before the next check, nothing to delegate"
+
+
+def denied(home: Path, agents: Path, command: str) -> bool:
+    """Block mode: True when the hook denies the call, False when it lets it through with no output at all."""
+    set_mode(home, "block")
+    out = guard(home, agents, bash(command))[1]
+    return bool(out) and json.loads(out)["hookSpecificOutput"].get("permissionDecision") == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # thread 1 and 4, verbatim: the marker is data in a quoted argument, not an inline comment
+        "sleep 45; echo 'lead-wait: ok - this is a sufficiently long reason'",
+        'sleep 45; git commit -m "lead-wait: ok - approved by maintainer for this one"',
+        # adversarial: heredoc body, double quotes around $(...), a # inside a quoted string, an argument
+        f"sleep 45; cat <<EOF\n# lead-wait: ok - {REASON}\nEOF",
+        f"sleep 45; cat <<'EOF'\n# lead-wait: ok - {REASON}\nEOF",
+        f'sleep 45; echo "$(date) # lead-wait: ok - {REASON}"',
+        f"sleep 45; echo 'x # lead-wait: ok - {REASON}'",
+        f'sleep 45; echo "x # lead-wait: ok - {REASON}"',
+        f"sleep 45; echo lead-wait: ok - {REASON}",
+        f"sleep 45; echo \\# lead-wait: ok - {REASON}",  # an escaped # is a word, not a comment
+    ],
+)
+def test_a_marker_that_is_only_data_does_not_exempt(_private_home: Path, agents: Path, command: str) -> None:
+    assert leadwait.marker_reason(command) == ""
+    assert denied(_private_home, agents, command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"sleep 45  # lead-wait: ok - {REASON}",
+        f"sleep 45 # lead-wait: ok - {REASON}\necho done",
+        f"# lead-wait: ok - {REASON}\nsleep 45",  # the call is one decision: any real comment counts
+        f"echo 'a # b'; sleep 45 # lead-wait: ok - {REASON}",
+        f'echo "$(date)"; sleep 45 # lead-wait: ok - {REASON}',
+        f"cat <<EOF\nbody\nEOF\nsleep 45 # lead-wait: ok - {REASON}",
+    ],
+)
+def test_a_real_comment_marker_with_a_real_reason_exempts(_private_home: Path, agents: Path, command: str) -> None:
+    assert leadwait.marker_reason(command) == REASON
+    assert not denied(_private_home, agents, command)
+    assert read_log(_private_home)[-1]["decision"] == "allow"
+
+
+def test_a_real_comment_marker_with_a_short_reason_is_refused_and_says_a_reason_is_required(
+    _private_home: Path, agents: Path
+) -> None:
+    set_mode(_private_home, "block")
+    out = guard(_private_home, agents, bash("sleep 45 # lead-wait: ok - fine"))[1]
+    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "reason is required" in reason and "lead-wait: ok - <reason>" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo gh run watch",  # thread 2, verbatim
+        "echo sleep 60",  # thread 2, verbatim
+        "echo gh pr checks 12 --watch",
+        "printf '%s' sleep 600",
+        "git log --grep sleep 600",
+        "man sleep 600",
+        "echo gh run watch && ls",
+        "echo start; echo sleep 60 | cat",
+    ],
+)
+def test_plain_text_arguments_are_not_waits(_private_home: Path, agents: Path, command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+    assert not denied(_private_home, agents, command)
+
+
+def test_a_loop_is_a_poll_only_when_the_sleep_is_in_its_body() -> None:
+    thread3 = 'while read line; do echo "$line"; done < file; sleep 1'  # thread 3, verbatim
+    assert leadwait.find_waits(thread3, THRESHOLD) == ()  # the sleep is after the loop, and under the threshold
+    assert leadwait.find_waits("sleep 1", THRESHOLD) == ()
+    assert leadwait.find_waits(thread3.replace("sleep 1", "sleep 12"), THRESHOLD) == ("long-sleep",)
+    assert leadwait.find_waits("sleep 1; while true; do echo x; done", THRESHOLD) == ()
+    assert leadwait.find_waits("for f in a b; do echo $f; done; sleep 2", THRESHOLD) == ()
+    assert leadwait.find_waits("for i in 1 2 3; do echo $i; done", THRESHOLD) == ()
+    # a sleep in a later loop is a poll, one after the first loop is not
+    assert leadwait.find_waits("for f in a; do echo $f; done; while true; do sleep 1; done", THRESHOLD) == (
+        "sleep-loop",
+    )
+    # a nested loop: the sleep sits inside the inner body, which is inside the outer one
+    assert leadwait.find_waits("while a; do for i in 1; do sleep 1; done; done", THRESHOLD) == ("sleep-loop",)
+    assert leadwait.find_waits("while a; do for i in 1; do echo; done; done; sleep 1", THRESHOLD) == ()
+
+
+def test_the_thread_3_command_is_allowed_in_block_mode(_private_home: Path, agents: Path) -> None:
+    assert not denied(_private_home, agents, 'while read line; do echo "$line"; done < file; sleep 1')
+
+
+POSITIONS = [
+    ("ls && gh run watch 1", "gh-run-watch"),
+    ("ls; gh run watch 1", "gh-run-watch"),
+    ("ls || gh run watch 1", "gh-run-watch"),
+    ("ls | gh run watch 1", "gh-run-watch"),
+    ("ls &\ngh run watch 1", "gh-run-watch"),
+    ("(gh run watch 1)", "gh-run-watch"),
+    ('echo "$(gh run watch 1)"', "gh-run-watch"),  # code inside double quotes still runs
+    ('echo "`gh run watch 1`"', "gh-run-watch"),
+    ("x=$(gh run watch 1)", "gh-run-watch"),
+    ("diff <(gh run watch 1) file", "gh-run-watch"),
+    ("time gh run watch", "gh-run-watch"),
+    ("FOO=1 sleep 60", "long-sleep"),
+    ("FOO=1 BAR='a b' gh pr checks 3 -w", "gh-pr-checks-watch"),
+    ("nohup sleep 60 &", "long-sleep"),  # a shell `&` is not run_in_background: the payload flag is what exempts
+    ("sudo -u build nice -n 5 sleep 60", "long-sleep"),
+    ("env -u HOME FOO=1 gh run watch 2", "gh-run-watch"),
+    ("timeout 600 gh run watch 2", "gh-run-watch"),
+    ("command sleep 60", "long-sleep"),
+    ("/usr/bin/gh run watch", "gh-run-watch"),
+    ("sleep 60 > /dev/null 2>&1", "long-sleep"),
+    ("sleep 5 &>/dev/null; sleep 6", "long-sleep"),
+    ("while true; do gh pr checks 1 -w; sleep 5; done", "sleep-loop"),
+    ("while true; do\n  sleep 1 # poll\ndone", "sleep-loop"),
+    ("until gh run view 9; do\\\n  sleep 1; done", "sleep-loop"),
+    ("sleep 1; sleep 2; while true; do sleep 1; done &", "sleep-loop"),
+]
+
+
+@pytest.mark.parametrize(("command", "kind"), POSITIONS)
+def test_a_wait_at_command_position_is_found_however_it_is_reached(command: str, kind: str) -> None:
+    assert kind in leadwait.find_waits(command, THRESHOLD)
+
+
+def test_the_loop_with_a_poll_and_a_watch_reports_both() -> None:
+    kinds = leadwait.find_waits("while true; do gh pr checks 1 -w; sleep 5; done", THRESHOLD)
+    assert kinds == ("gh-pr-checks-watch", "sleep-loop")
+
+
+NOT_AT_POSITION = [
+    "echo 'ls; gh run watch 1'",  # single quotes are data
+    'echo "ls; gh run watch 1"',
+    "echo '$(gh run watch 1)'",
+    "cat <<'EOF'\n$(gh run watch 1)\nEOF",
+    "for i in a b; do echo gh run watch; done",  # a for loop that only echoes
+    "for i in 1 2 3; do echo sleep 5; done",
+    "for sleep in a b; do echo $sleep; done",
+    "command -v sleep",
+    "FOO=sleep echo 60",
+    "echo $(( 1 << 2 )) gh run watch",
+    "gh pr view 1 --comments 'sleep 600' --json body",
+    "echo gh run watch # real comment",
+    "ssh host 'sleep 600'",  # runs elsewhere
+    "echo foo | xargs -I{} sleep 600",  # documented limit: the sleep is xargs's argument, not a command here
+]
+
+
+@pytest.mark.parametrize("command", NOT_AT_POSITION)
+def test_text_that_is_not_a_command_is_not_a_wait(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+def test_shell_string_bodies_and_eval_are_scanned_and_echoing_them_is_not() -> None:
+    """Decision: `bash -c '...'`, `sh -c`, `-lc` and `eval` run their string as code, so the string is scanned (to a
+    depth of MAX_DEPTH); the same words as arguments to anything else are data."""
+    assert leadwait.find_waits("bash -c 'gh run watch 1'", THRESHOLD) == ("gh-run-watch",)
+    assert leadwait.find_waits('sh -c "sleep 60"', THRESHOLD) == ("long-sleep",)
+    assert leadwait.find_waits("bash -lc 'while true; do sleep 1; done'", THRESHOLD) == ("sleep-loop",)
+    assert leadwait.find_waits("eval 'gh pr checks 1 --watch'", THRESHOLD) == ("gh-pr-checks-watch",)
+    assert leadwait.find_waits("while true; do bash -c 'sleep 1'; done", THRESHOLD) == ("sleep-loop",)
+    assert leadwait.find_waits("echo bash -c 'gh run watch 1'", THRESHOLD) == ()
+    assert leadwait.find_waits("bash script.sh", THRESHOLD) == ()  # the script file is not read
+    deep = 'bash -c \'bash -c "bash -c \\"bash -c \\\\\\"sleep 600\\\\\\"\\""\''
+    assert leadwait.find_waits(deep, THRESHOLD) == ()  # past MAX_DEPTH it stops looking, and does not crash
+
+
+def test_deeply_nested_substitutions_do_not_crash_the_scanner() -> None:
+    command = "echo " + "$(" * 500 + "sleep 600" + ")" * 500
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+    assert leadwait.find_waits("echo " + "`" * 5000, THRESHOLD) == ()
+
+
+# -- thread 5: the install and guard text says Bash as well ----------------------------------------------------
+
+
+def test_the_install_messages_and_the_guard_help_say_the_guard_covers_bash(
+    _private_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = tmp_path / "settings.json"
+    dry = hooks("install", "--settings", str(settings), home=_private_home, dry_run=True)[1]
+    assert "PreToolUse (Agent and Bash) guard" in dry
+    done = hooks("install", "--settings", str(settings), home=_private_home)[1]
+    assert "installed the SessionStart probe and the PreToolUse (Agent and Bash) guard" in done
+    for argv in (("guard", "--help"), ("--help",)):  # the guard's own help, and the list of hooks subcommands
+        with pytest.raises(SystemExit):
+            hooks(*argv, home=_private_home)
+        helped = " ".join(capsys.readouterr().out.split())
+        assert "Agent and Bash tools" in helped, argv
+
+
 # -- the docs keep their promises ----------------------------------------------------------------------------
 
 DOCS = Path(__file__).parent.parent / "docs"
