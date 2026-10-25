@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The lead never waits: find the Bash commands whose job is to wait.
 
 The lead session is the project manager. A wait (a CI run, a runner, a deploy, a review) goes to `run_in_background`
