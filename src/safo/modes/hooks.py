@@ -3,7 +3,7 @@
 
     safo hooks install [--settings PATH] [--mode warn|block]   add the probe and the guard to a settings.json
     safo hooks probe                                           SessionStart: is the local LLM reachable?
-    safo hooks guard                                           PreToolUse (Agent): check the brief, read from stdin
+    safo hooks guard                                           PreToolUse (Agent, Bash): check the brief, or the wait
     safo hooks mode warn|block                                 warn reports; block denies a dispatch that breaks a rule
     safo hooks status                                          the mode and the counts
 
@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from safo import guardlog, tracking
+from safo import guardlog, leadwait, tracking
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
@@ -45,9 +45,12 @@ from safo.guardlog import (
 )
 from safo.hooks import (
     AGENT_TOOLS,
+    BASH_TOOL,
     COMMAND,
     GUARD_MARGIN_SECONDS,
     GUARD_TIMEOUT_SECONDS,
+    LEAD_WAITS,
+    Verdict,
     append_log,
     bind_repo,
     check_dispatch,
@@ -199,6 +202,9 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     payload = event_input(ctx)
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
+    if payload.get("tool_name") == BASH_TOOL:
+        lead_wait(ctx, args, payload)
+        return
     if payload.get("tool_name") not in AGENT_TOOLS:
         return
     if payload.get("hook_event_name") != "PreToolUse" or not isinstance(payload.get("tool_input"), dict):
@@ -255,6 +261,65 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     data: dict[str, Any] = json.loads(output) if output else {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
     if degraded:
         # Keep any rule denial. A persistence failure cannot erase a computed denial.
+        data["systemMessage"] = WARNING + (" " + data.get("systemMessage", "") if output else "")
+        data["hookSpecificOutput"]["additionalContext"] = (
+            WARNING + " " + json.dumps({"health": "degraded", "diagnostic": code})
+        )
+    if output or degraded:
+        ctx.say(json.dumps(data))
+
+
+def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    """The lead-never-waits rule for one Bash call. Quiet and cheap for the usual call: nothing is read, logged or
+    printed unless the command could wait, it is not run in the background and the session is the lead's."""
+    if payload.get("agent_id") is not None:
+        return  # the host adds agent_id to events raised inside a sub-agent; a monitor agent is allowed to watch
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(tool_input, dict) or not isinstance(command, str):
+        raise ValueError("invalid command")
+    if tool_input.get("run_in_background") is True or not leadwait.may_wait(command):
+        return
+    if payload.get("hook_event_name") != "PreToolUse":
+        raise ValueError("invalid command event")
+    try:
+        doc = load_agents_for(ctx, args)
+    except Exception:
+        diagnostic(ctx, "config")
+        return
+    setting = doc.hooks.lead_wait
+    if setting.mode == "off":
+        return
+    kinds = leadwait.find_waits(command, setting.sleep_threshold_seconds)
+    if not kinds:
+        return
+    session = session_id(payload)
+    mode, mode_state = mode_health(ctx.env)
+    effective = mode if setting.mode == "follow" else setting.mode
+    folder = state_dir(ctx.env)
+    path = state_path(folder, session, doc) if folder else None
+    # Two exemptions, both with a stated reason: a comment on the call itself, or a repository listed with its reason in
+    # agents.yaml (matched against the repository bound at SessionStart, never the working tree).
+    exempt = bool(leadwait.marker_reason(command)) or tracking.exempt(
+        read_bound_repo(path), tuple(e.repo for e in setting.exempt_repos)
+    )
+    verdict = Verdict((LEAD_WAITS,), (leadwait.message(kinds),), "", False, False)
+    decision = "allow" if exempt else decide(verdict, effective)
+    degraded = mode_state != "healthy"
+    code = "mode" if degraded else ""
+    try:
+        if folder is None:
+            raise OSError("log unavailable")
+        when = ctx.now.strftime("%Y-%m-%dT%H:%M:%S")
+        append_log(
+            folder / guardlog.LOG_NAME,
+            log_record(when, decision, effective, verdict, False, "degraded" if degraded else "healthy", code),
+        )
+    except (OSError, ValueError):
+        degraded, code = True, "log-write"
+    output = guard_output(decision, verdict, "Delegate the wait; do not hold the lead's thread.")
+    data: dict[str, Any] = json.loads(output) if output else {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+    if degraded:
         data["systemMessage"] = WARNING + (" " + data.get("systemMessage", "") if output else "")
         data["hookSpecificOutput"]["additionalContext"] = (
             WARNING + " " + json.dumps({"health": "degraded", "diagnostic": code})

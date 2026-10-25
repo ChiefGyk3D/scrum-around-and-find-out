@@ -79,7 +79,7 @@ def test_install_adds_the_session_probe_and_the_agent_guard_to_a_new_settings_fi
         }
     ]
     assert data["hooks"]["PreToolUse"] == [
-        {"matcher": "Agent|Task", "hooks": [{"type": "command", "command": "safo hooks guard", "timeout": 10}]}
+        {"matcher": "Agent|Task|Bash", "hooks": [{"type": "command", "command": "safo hooks guard", "timeout": 10}]}
     ]
     assert "Start with warn" in out and not (_private_home / ".config" / "safo" / "mode").exists()
 
@@ -770,7 +770,7 @@ def test_false_hook_ownership_is_preserved(command: str) -> None:
     existing = {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]}
     data, _ = merge_settings({"hooks": {"PreToolUse": [existing]}}, "safo hooks probe", "safo hooks guard")
     assert existing in data["hooks"]["PreToolUse"]
-    assert data["hooks"]["PreToolUse"][-1]["matcher"] == "Agent|Task"
+    assert data["hooks"]["PreToolUse"][-1]["matcher"] == "Agent|Task|Bash"
 
 
 @pytest.mark.parametrize("matcher,kind", [("Bash", "command"), ("Agent|Task", "prompt"), ("Agent", "command")])
@@ -788,12 +788,12 @@ def test_owned_duplicates_are_collapsed_and_all_required_fields_normalized() -> 
     from safo.hooks import merge_settings
 
     group = {
-        "matcher": "Agent|Task",
+        "matcher": "Agent|Task|Bash",
         "hooks": [{"type": "command", "command": "safo hooks guard", "timeout": 999, "async": True}],
     }
     data, _ = merge_settings({"hooks": {"PreToolUse": [group, group]}}, "safo hooks probe", "safo hooks guard")
     assert data["hooks"]["PreToolUse"] == [
-        {"matcher": "Agent|Task", "hooks": [{"type": "command", "command": "safo hooks guard", "timeout": 10}]}
+        {"matcher": "Agent|Task|Bash", "hooks": [{"type": "command", "command": "safo hooks guard", "timeout": 10}]}
     ]
 
 
