@@ -8,7 +8,7 @@ approval token, and that includes a model that a prompt injection has talked int
 |---|---|---|
 | `safo hooks install [--settings PATH] [--mode warn\|block] [--command safo]` | none | Merges the two hooks into a `settings.json` (default `~/.claude/settings.json`). Keeps every other hook and setting, is a no-op when run again, keeps a private backup before it replaces the file, and refuses to overwrite a file that changed while it worked (bytes, or the file itself: device, inode, size and modification time are checked again just before the replace, so a rename-over with identical bytes is caught too, with `settings changed while installing`). `--dry-run` writes nothing. |
 | `safo hooks probe` | SessionStart | Asks each Ollama endpoint in `agents.yaml` which models are loaded (two bounded GETs, never a generate), saves the answer and tells the session whether the local LLM is reachable. |
-| `safo hooks guard` | PreToolUse, matcher `Agent\|Task` | Checks each subagent brief against four rules (below). |
+| `safo hooks guard` | PreToolUse, matcher `Agent\|Task\|Bash` | Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
 | `safo hooks mode warn\|block` | none | `warn` reports a broken rule and allows the dispatch (the default); `block` denies it. |
 | `safo hooks status [--session ID --agents PATH]` | none | The mode, the retained counts, the health of the hooks and of the last probe. |
 
@@ -30,6 +30,59 @@ approval token, and that includes a model that a prompt injection has talked int
    exists and is open (`no-issue`, `issue-unusable`, `issue-unverified`). A GitHub issue is checked with a read-only `gh issue
    view`; in `block` mode a lookup that fails denies. Nothing is exempt unless `hooks.tracking_exempt_repos` lists the
    repository. See [No hidden work](no-hidden-work.md).
+
+## The fifth rule: the lead never waits
+
+The lead session is a project manager; every wait is delegated ([The orchestrator](orchestrator.md)). A Bash call in the
+lead session that waits in the foreground is flagged (`warn`) or denied (`block`) with `lead-waits` in the log and a
+message that says to rerun it with `run_in_background` or hand it to a Sonnet monitor agent. The message and the log carry
+the rule name only, never the command.
+
+What waits, after quoted strings, heredoc bodies and comments are removed:
+
+| Found | Example |
+|---|---|
+| `gh run watch` | `gh run watch 123 --exit-status` |
+| `gh pr checks` with `--watch` or `-w` | `gh pr checks 12 --watch` |
+| a `while`, `until` or `for` loop that contains a `sleep`, of any length | `until gh run view 9 \| grep -q completed; do sleep 10; done` |
+| `sleep` at or above the **threshold** (10 seconds by default; the sleeps of one command add up; an argument the hook cannot read, such as `sleep $n`, counts as over) | `sleep 120`, `sleep 5; sleep 6` |
+
+Not flagged: `sleep 1` or `sleep 9` in a one-shot command (below the threshold, a pause and not a wait); the words
+`gh run watch` in a commit message, a quoted string, a comment or a `cat <<'EOF'` heredoc body.
+
+What the hook reads from the event, and what it does not:
+
+- **Lead or sub-agent.** An event raised inside a sub-agent carries an `agent_id`; the event of the lead's own thread does
+  not. The rule skips any event with an `agent_id`, because a monitor agent is allowed to watch. This relies on the host
+  adding the field. Evidence that it does: an official Claude Code plugin's hook skips sub-agent events with
+  `"agent_id" in data`. It was not observed from a live SAFO session here (see Known limits).
+- **Background or not.** The Bash tool's input carries `run_in_background`, which the hook reads from `tool_input`. Only the
+  boolean `true` counts: `"true"`, `1` and `"yes"` do not. A command that backgrounds itself in the shell (`sleep 60 &`) is
+  not the same thing and is not treated as background.
+
+Configuration, in `agents.yaml` (everything is optional):
+
+```yaml
+hooks:
+  lead_wait:
+    mode: follow                 # follow (use `safo hooks mode`), off, warn or block, for this rule alone
+    sleep_threshold_seconds: 10  # 1 to 3600
+    exempt_repos:                # a repository whose lead may wait, with the reason it may
+      - repo: owner/scratch-repo
+        reason: a throwaway repository where nobody waits on the lead
+```
+
+Exemptions are never silent:
+
+- A repository entry without a `reason` (at least 12 characters after trimming) makes `agents.yaml` fail to load, so a
+  reasonless exemption is refused outright. It applies to the repository bound at SessionStart, the same binding the
+  tracking opt-out uses, and to no other.
+- A single call can carry a comment, `# lead-wait: ok - <reason>`, with a reason of at least 12 characters. A marker with
+  no reason, or a placeholder, is ignored and the call is flagged; the message says the reason is required. An exempted call
+  is allowed and logged as `allow` with the `lead-waits` rule, so exemptions can be counted. The reason itself stays in the
+  transcript and is never written to the log.
+- Like the approval token, both are speed bumps: an agent with shell access can type a marker. Their job is to make a
+  deliberate wait a written decision.
 
 ## Failing safe
 
@@ -86,6 +139,13 @@ checked address with the original `Host` header, so a DNS answer that changes be
 no effect.
 
 ## Known limits
+
+- The lead-never-waits rule is a scanner, not a shell parser. It does not see a wait built by a variable or an `eval`, a
+  loop in a script file the call merely runs, `watch`, `timeout ... tail -f`, a `$(...)` in an unquoted heredoc body, or
+  `sleep` inside a function defined earlier. It would rather miss these than flag text. Whether a given Claude Code
+  version puts `agent_id` on sub-agent events was not verified in a live SAFO session; if it did not, a sub-agent's
+  watch would be flagged as the lead's (a warning in `warn` mode, a denial in `block`). Test that in a disposable session
+  before `block`.
 
 - The approval token is forgeable (see rule 2). A channel the model cannot write to, such as a signed or
   session-bound approval the maintainer issues outside the conversation, is future work; v0.1.0 has none, and nothing in

@@ -306,6 +306,12 @@ hooks:
   max_state_age_seconds: 300
   local_step_markers: [safo local run, llm-local]
   na_marker: "local-llm: n/a -"
+  # The lead never waits (docs/orchestrator.md): a lead-session Bash call that is `gh run watch`, `gh pr checks --watch`,
+  # a sleep loop or a sleep of sleep_threshold_seconds or more, and is not run in the background, is flagged (follow the
+  # guard mode) or denied. A repository may be exempted only with a stated reason under exempt_repos.
+  lead_wait:
+    mode: follow
+    sleep_threshold_seconds: 10
 
 rules_of_thumb:
   - "Routing order 1: text-in/text-out work (summaries, triage, classification, first drafts, log and CI digests) goes to the local LLM first, and a Claude model checks anything that will be applied."

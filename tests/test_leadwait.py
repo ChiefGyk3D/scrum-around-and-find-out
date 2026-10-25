@@ -311,3 +311,34 @@ def test_the_install_matcher_covers_bash_and_an_older_install_is_migrated(_priva
     groups = json.loads(settings.read_text())["hooks"]["PreToolUse"]
     assert [g["matcher"] for g in groups] == ["Agent|Task|Bash"]
     assert len(groups[0]["hooks"]) == 1
+
+
+# -- the docs keep their promises ----------------------------------------------------------------------------
+
+DOCS = Path(__file__).parent.parent / "docs"
+
+
+def test_the_docs_state_the_threshold_the_code_uses_and_the_shipped_file_sets_it() -> None:
+    hooks_page = (DOCS / "hooks.md").read_text(encoding="utf-8")
+    assert f"{leadwait.DEFAULT_SLEEP_THRESHOLD_SECONDS} seconds by default" in hooks_page
+    shipped = load_agents(DOCS.parent / "agents.yaml").hooks.lead_wait
+    assert shipped.sleep_threshold_seconds == leadwait.DEFAULT_SLEEP_THRESHOLD_SECONDS and shipped.mode == "follow"
+
+
+def test_the_orchestrator_page_carries_the_rules_the_incident_and_the_monitor_brief() -> None:
+    page = " ".join((DOCS / "orchestrator.md").read_text(encoding="utf-8").split())
+    for needle in (
+        "The lead never waits",
+        "Independent steps go in one response",
+        "answer in the turn it arrives",
+        "A hung step is reported after 5 minutes, not 20",
+        "2026-10-25",
+        "about **10 minutes**",
+        "**2 more minutes**",
+        "read-only",
+        "quoted verbatim",
+        "no progress for 5 minutes",
+        'model: "sonnet"',
+        "issue: <owner/repo#N>",
+    ):
+        assert needle in page, needle
