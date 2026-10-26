@@ -359,7 +359,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   (SAFO #130) and is a settings decision for the maintainer; this document does not change it. Anything this page says
   about what the host does after a flushed decision and a later kill is therefore subject to that rule.
 - A log that is not valid UTF-8 anywhere (a complete line or the incomplete tail) is corruption. `append_log` moves it to
-  `log.jsonl.corrupt-<UTC timestamp>-<pid>` (mode 0600, same folder, same trusted-directory rules) and starts a fresh
+  the log's file name plus `.corrupt-<UTC timestamp>-<pid>` (mode 0600, same folder, same trusted-directory rules) and starts a fresh
   log. It never touches `log.jsonl.1`, the real archive. At most 5 such files are kept; the oldest names are deleted
   beyond that, so repeated corruption cannot fill the disk. It does not raise. The same-user residual (#61) still holds
   here: an actor running as the same user can damage, replace or delete the log and these files; the log is advisory
