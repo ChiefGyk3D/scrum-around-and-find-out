@@ -17,7 +17,8 @@ def _pull(fake: FakeGitHub, v: JSON) -> FPull:
 
 @handler("HandoffPr")
 def pr_head(fake: FakeGitHub, v: JSON) -> JSON:
-    return {"repository": {"pullRequest": {"headRefOid": _pull(fake, v).head}}}
+    found = _pull(fake, v)
+    return {"repository": {"pullRequest": {"headRefOid": found.head, "state": found.state, "isDraft": found.draft}}}
 
 
 @handler("HandoffComments")

@@ -29,17 +29,24 @@ LATER = "2026-10-21T10:00:00Z"
 HOME = Path("/nonexistent-home")
 
 
-def report(head: str, role: str = "reviewer") -> str:
+def report(head: str, role: str = "reviewer", verdict: str | None = None) -> str:
     return (
         f"ROLE: {role}   MODEL: n0tst-model\n"
-        f"HEAD: {head}   BASE: 1234567\n"
-        "GATE: make check  exit=0\n"
+        f"HEAD: {head}   BASE: 1234567\n" + (f"VERDICT: {verdict}\n" if verdict else "") + "GATE: make check  exit=0\n"
         "NOT VERIFIED: none\n"
     )
 
 
-def comment(body: str, when: str = LATE, assoc: str = "OWNER") -> dict[str, Any]:
-    return {"authorAssociation": assoc, "createdAt": when, "body": body}
+def comment(
+    body: str, when: str = LATE, assoc: str = "OWNER", minimized: Any = False, edited: Any = None
+) -> dict[str, Any]:
+    return {
+        "authorAssociation": assoc,
+        "createdAt": when,
+        "body": body,
+        "isMinimized": minimized,
+        "lastEditedAt": edited,
+    }
 
 
 def env_for(fake: FakeGitHub, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -54,9 +61,12 @@ def run(
     extra_env: dict[str, str] | None = None,
     number: str = "7",
     repo: str = REPO,
+    state: Any = "OPEN",
+    draft: Any = False,
+    options: tuple[str, ...] = (),
 ) -> tuple[int, str, str]:
-    fake.pulls[(REPO, 7)] = FPull(head=head, comments=comments, commits=commits or [])
-    return cli("handoff", "check", repo, number, home=HOME, extra_env=env_for(fake, extra_env))
+    fake.pulls[(REPO, 7)] = FPull(head=head, comments=comments, commits=commits or [], state=state, draft=draft)
+    return cli("handoff", "check", *options, repo, number, home=HOME, extra_env=env_for(fake, extra_env))
 
 
 # -- the three verdicts ----------------------------------------------------------------------------------------
@@ -163,7 +173,10 @@ def test_a_full_sha_needs_no_commit_list(fake: FakeGitHub) -> None:
 
 def test_a_malformed_commit_list_is_unknown(fake: FakeGitHub) -> None:
     for bad in ([None], ["not-a-sha"], [7]):
-        assert run(fake, [comment(report("aaaaaaa"))], commits=bad)[0] == 2
+        code, out, _ = run(fake, [comment(report("aaaaaaa"))], commits=bad)
+        assert code == 2
+    code, out, _ = run(fake, [comment(report("aaaaaaa"))], commits=["aaaaaaa"], head=A)
+    assert code == 2 and "no full oid" in out
 
 
 # -- what counts as a report -----------------------------------------------------------------------------------------
@@ -173,8 +186,8 @@ def test_a_head_line_without_a_role_line_before_it_is_not_a_header(fake: FakeGit
     assert run(fake, [comment("note\nHEAD: " + A + "   BASE: 1234567\n")])[0] == 2
 
 
-def test_a_report_with_carriage_returns_and_a_fence_is_read(fake: FakeGitHub) -> None:
-    body = "```\r\nROLE: reviewer   MODEL: m\r\nHEAD: " + A + "   BASE: 1234567\r\n```\r\n"
+def test_a_report_with_carriage_returns_is_read(fake: FakeGitHub) -> None:
+    body = "Review done.\r\nROLE: reviewer   MODEL: m\r\nHEAD: " + A + "   BASE: 1234567\r\n"
     assert run(fake, [comment(body)])[0] == 0
 
 
@@ -214,6 +227,12 @@ def test_a_null_or_mistyped_or_short_pull_request_head_is_unknown(fake: FakeGitH
         "text",
         7,
         {"authorAssociation": "OWNER", "createdAt": LATE},  # no body
+        {**comment("x"), "isMinimized": None},
+        {**comment("x"), "isMinimized": "false"},
+        {**comment("x"), "lastEditedAt": 5},
+        {**comment("x"), "lastEditedAt": "yesterday"},
+        {"authorAssociation": "OWNER", "createdAt": LATE, "body": "x", "lastEditedAt": None},  # no isMinimized
+        {"authorAssociation": "OWNER", "createdAt": LATE, "body": "x", "isMinimized": False},  # no lastEditedAt
         {"authorAssociation": "OWNER", "createdAt": LATE, "body": None},
         {"authorAssociation": "OWNER", "createdAt": LATE, "body": 5},
         {"authorAssociation": None, "createdAt": LATE, "body": "x"},

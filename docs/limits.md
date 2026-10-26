@@ -57,7 +57,10 @@ takes it for a bug that was hidden.
 - **`safo handoff check` proves staleness, not authorship.** Every agent comments through the maintainer's account, so a
   forged report header posted from that account reads as fresh. The check reads only comments from an owner, member or
   collaborator, so a fork contributor cannot fake one, and it catches the ordinary failure (a push after the review). It
-  does not prove who wrote the report. It is a speed bump like the approval token. See [Handoff](handoff.md).
+  does not prove who wrote the report, or that the review approved: FRESH means the report names the current head, and a
+  `FINDINGS` verdict at that head is still FRESH. Only reports by a reviewing role count (`reviewer`,
+  `adversarial-reviewer`; `--roles` changes it), and the role is read from the header the same account wrote. It is a
+  speed bump like the approval token. See [Handoff](handoff.md).
 - **An explicit `--agents`, `--log` or `$SAFO_AGENTS` path in the current directory is the user's own choice.** Outside
   Actions it is allowed, because the person typed it. SAFO never searches the current directory for these files on its own.
   Under Actions an explicit path inside the workspace is refused.

@@ -36,6 +36,7 @@ GRAPHQL_URL = "https://api.github.com/graphql"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _OPERATION = re.compile(r"^\s*(query|mutation)\s+(\w+)")
 MAX_PAGES = 1000
+MAX_BODY = 32 * 1024 * 1024  # an answer bigger than this is refused unread: json.loads on it could exhaust memory
 
 
 def operation_name(document: str) -> str:
@@ -107,6 +108,20 @@ def _https_handler(state: _Connected) -> urllib.request.HTTPSHandler:
             )
 
     return Handler()
+
+
+def _read(response: Any) -> bytes:
+    """The body, at most MAX_BODY + 1 bytes, so an oversized answer is seen without being held in memory.
+
+    `read(n)` returns a short body quietly where `read()` raises; a body shorter than its Content-Length is still
+    an IncompleteRead, as before.
+    """
+    data: bytes = response.read(MAX_BODY + 1)
+    declared = response.headers.get("Content-Length", "")
+    bodiless = getattr(response, "status", 200) in (204, 304)  # these carry no body whatever Content-Length says
+    if not bodiless and declared.isdigit() and len(data) <= MAX_BODY and len(data) < int(declared):
+        raise http.client.IncompleteRead(data, int(declared) - len(data))
+    return data
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -289,13 +304,19 @@ class Client:
                 continue
             if status != 200:
                 raise ApiError(f"GitHub answered {status} to {op}")
+            if len(raw) > MAX_BODY:
+                raise ApiError(f"GitHub answered {op} with more than {MAX_BODY} bytes")
             try:
                 body: JSON = json.loads(raw)
             except json.JSONDecodeError as err:
                 raise ApiError(f"GitHub answered {op} with invalid JSON: {err}") from None
+            except RecursionError:
+                raise ApiError(f"GitHub answered {op} with JSON nested too deeply") from None
             if not isinstance(body, dict):
                 raise ApiError(f"GitHub answered {op} with non-object JSON: {type(body).__name__}")
             errors: list[dict[str, Any]] = body.get("errors") or []
+            if not isinstance(errors, list) or not all(isinstance(e, dict) for e in errors):
+                raise ApiError(f"GitHub answered {op} with errors that are not a list of objects")
             if not errors:
                 if "data" not in body:
                     raise ApiError(f"GitHub answered {op} with neither errors nor data")
@@ -336,9 +357,9 @@ class Client:
             try:
                 response = opener.open(request, timeout=self._timeout)
                 with response as resp:
-                    return resp.status, _lower(resp.headers.items()), resp.read()
+                    return resp.status, _lower(resp.headers.items()), _read(resp)
             except urllib.error.HTTPError as err:
-                return err.code, _lower(err.headers.items()), err.read()
+                return err.code, _lower(err.headers.items()), _read(err)
         except (OSError, http.client.HTTPException) as err:
             raise _Transport(err, before_send=not connected.done) from None
 

@@ -129,6 +129,8 @@ class FPull:
     head: Any = None  # headRefOid
     comments: list[Any] = field(default_factory=list)  # comment nodes, each a dict (or garbage on purpose)
     commits: list[Any] = field(default_factory=list)  # commit oids, oldest first
+    state: Any = "OPEN"
+    draft: Any = False
 
 
 @dataclass
