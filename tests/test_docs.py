@@ -215,14 +215,21 @@ def test_the_doia_tag_guard_bites() -> None:
     assert set(GEN_WIKI.doia_tag_refs(stale)) == {"v0.2.0"} != {DOIA_TAG}
     mixed = page.replace(DOIA_TAG, "v0.2.0", 1)
     assert set(GEN_WIKI.doia_tag_refs(mixed)) == {DOIA_TAG, "v0.2.0"}
-    with pytest.raises(GEN_WIKI.WikiError, match="v0.2.0"):
+    with pytest.raises(GEN_WIKI.WikiError, match=r"v0\.2\.0"):
         GEN_WIKI.check_doia_tag({"personas.md": mixed}, DOIA_TAG)
     GEN_WIKI.check_doia_tag({"personas.md": page}, DOIA_TAG)
 
 
 def test_personas_describe_the_pinned_release() -> None:
     page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
-    for phrase in ("claude-sonnet-5-5", "claude-haiku-5-5", "--layout user", "--overlay", "--list-managed", "--force-edited"):
+    for phrase in (
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "--layout user",
+        "--overlay",
+        "--list-managed",
+        "--force-edited",
+    ):
         assert phrase in page, phrase
 
 
