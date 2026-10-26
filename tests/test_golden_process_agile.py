@@ -12,10 +12,11 @@ clock and the machine's agents. A test runs everything again with a different da
 The agents-status goldens hold a literal `\\x0a` where a blank line would be: modes/agents_status.py passes
 "\\nBoard: ..." to ctx.say, and safo.output escapes the newline today. That is current behavior, pinned as it is.
 
-What the run date reaches: only code that reads ctx.today (the Done date of a closed card with no close time, which only
-audit prints, and the look-back window). The shared fixture has no such card, so the date-independence test alone would pass even if
-a mode read the real clock; test_the_run_date_reaches_only_where_the_code_reads_ctx_today adds one and asserts
-each run prints exactly its own date.
+What the run date reaches: only code that reads ctx.today (the Done date of a closed card with no close time,
+which only audit prints, and the look-back window). The shared fixture has no such card, so the date-independence
+test alone would pass even if a mode read the real clock;
+test_the_run_date_reaches_only_where_the_code_reads_ctx_today adds one and asserts each run prints exactly its own
+date.
 
 Both reconcile paths are pinned: `--dry-run reconcile` builds the Client with dry_run=True like the real command
 line (it prints "dry run: would ..." and "WOULD ..." and sends nothing), and plain `reconcile` applies to the fake.
@@ -151,7 +152,7 @@ def test_a_different_fake_date_gives_identical_bytes(board: str, mode: str, tmp_
 
 @pytest.mark.parametrize("board", BOARDS)
 def test_the_run_date_reaches_only_where_the_code_reads_ctx_today(board: str, tmp_path: Path) -> None:
-    """Positive control for the test above: audit prints the run's date as the Done date of a closed card with no close time.
+    """Positive control for the test above: audit prints the run's date as the Done date of an undated closed card.
 
     Each run shows exactly its own date, so a mode that read the real clock would show a different one; and with the
     date substituted the outputs are identical, so nothing else depends on it.
