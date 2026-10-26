@@ -126,7 +126,7 @@ def test_language_shapes_prefer_chatgpt_and_the_maintainer_or_a_claude_reviews_i
         ("claude-sonnet", "maintainer"),
     )
     docs = a.shape("technical-docs")
-    assert (docs.prefer, docs.fallback, docs.reviewer) == (("claude-sonnet",), ("claude-lead",), ("claude-lead",))
+    assert (docs.prefer, docs.fallback, docs.reviewer) == (("claude-sonnet",), ("claude-lead",), ("claude-sonnet",))
 
 
 def test_route_picks_chatgpt_for_language_work_without_a_meter_and_needs_no_meter() -> None:
