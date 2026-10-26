@@ -87,9 +87,22 @@ any flagged call. All the kinds the rule emits: `gh-run-watch`, `gh-pr-checks-wa
 - `unscannable-brace`: an unquoted brace expansion (`{a,b}` with a comma, or `{1..3}`) in a COMMAND word builds the
   command at run time (`{sleep,60}`, `sl{e..e}ep 60`). In an argument (`echo {a,b}`), a group (`{ cmd; }`), `${var}` or
   quotes it is not an expansion of the command and is fine.
+  A brace expansion in a wrapper's option, option value or operand counts too, because it changes how many words the
+  wrapper takes and so which word is the wrapped command: `timeout {1,sleep} 60`, `sudo -u {root,sleep} 60`,
+  `flock {f,sleep} 60`, `taskset {1,sleep} 60`, `stdbuf -i {0,1} sleep 60`, through any chain of wrappers. A brace
+  word AFTER the wrapped command (`timeout 5 ls {a,b}`) is just its argument and is fine, as are quoted or escaped
+  braces.
 - `unscannable-indirect`: the call defines a function AND runs a variable- or substitution-expanded word at command
   position (`f() { sleep 60; }; x=f; $x`). A call that defines no function and uses `$x` stays a documented limit.
-- `unscannable-timeout`: the scan ran past the guard's own deadline (the same budget as the other lookups). Inputs of
+  `parallel` is also unscannable-indirect when its template is empty (the commands come from the `:::` arguments or
+  from input), when its first word is a replacement string (`parallel {} ::: 'sleep 60'`), or when it has an option
+  the scanner does not know (`-I`, `--replace`, `--arg-sep`, `-X`, `-S` / `--sshlogin` / `--ssh`...), because an
+  unknown option may take a value that hides the command. The ordinary shapes (`parallel -j 4 sleep 60 ::: 1 2`)
+  are scanned.
+- `unscannable-timeout`: the scan ran past the guard's own deadline (the same budget as the other lookups); every
+  unbounded scanning loop checks it, including the quote, substitution and continuation helpers and the reason check.
+  After a timeout a marker is never honored (the reason check also honors the deadline), so the call is judged as the
+  wait or `unscannable-timeout` it is. Inputs of
   at most 8 KiB are cached (16 entries); a larger input is scanned once per call and not kept.
 - `unscannable-depth`: see next.
 
@@ -213,13 +226,16 @@ no effect.
   - [limit: script file] `bash poll.sh`: the file is not read, so a loop in it is not seen.
   - [limit: alias] `alias w='sleep 60'; w`: an alias defined earlier or in a startup file.
   - [limit: remote command] `ssh host 'sleep 60'`: the wait runs elsewhere (and still holds the thread).
+  - [limit: variable behind eval] `x="sleep 60"; eval "$x"` with no function defined in the call.
+  - [limit: variable behind command] `x=sleep; command $x 60`: the word after a wrapper is a variable.
+  - [limit: variable behind exec] `x=sleep; exec $x 60`.
+  (When the same call also defines a function, a variable-expanded command word is `unscannable-indirect` instead.)
   Also not seen: `timeout ... tail -f`, a function defined in an earlier call, and a wait inside a function body that
   is not a brace group. Shell grammar is approximated: `case` arms are read as plain commands, and `${...}` is read for
-  its substitutions only. `parallel` options are a fixed list: an option this scanner does not know that takes a
-  value hides the command behind it. Executable syntax nested deeper than 3 levels, a brace-built command, an
+  its substitutions only. `parallel` options are a fixed list, and an option outside it is `unscannable-indirect`. Executable syntax nested deeper than 3 levels, a brace-built command, an
   indirect call next to a function definition and a scan that runs out of time are reported as `unscannable-*`
   rather than guessed at. The cheap pre-check tokenizes any call that contains a quote, backslash, `$`, backtick or
-  `{`, so a word built from pieces (`sl''eep 60`, `sl{e,e}p`) is not missed; a call with none of those and
+  `{` (or the word `parallel`), so a word built from pieces (`sl''eep 60`, `sl{e,e}p`) is not missed; a call with none of those and
   none of `sleep`, `watch`, `checks` reads no configuration and logs nothing. It would rather miss the cases above
   than flag text. Whether a given Claude Code version puts `agent_id` on sub-agent events was not verified in a live
   SAFO session; if it did not, a sub-agent's watch would be flagged as the lead's (a warning in `warn` mode, a denial in

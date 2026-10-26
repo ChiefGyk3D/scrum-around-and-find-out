@@ -110,8 +110,6 @@ WRAPPERS: dict[str, frozenset[str]] = {
             "--max-lines",
             "-a",
             "--arg-file",
-            "-S",
-            "--sshlogin",
             "-d",
             "--delimiter",
             "-E",
@@ -159,6 +157,37 @@ WRAPPERS: dict[str, frozenset[str]] = {
 }
 # Operands that come between a wrapper's options and the command it runs: `timeout 5 cmd`, `flock file cmd`.
 WRAPPER_OPERANDS = {"timeout": 1, "flock": 1, "taskset": 1, "chrt": 1}
+_PARALLEL_FLAGS = frozenset(
+    {
+        "-k",
+        "-v",
+        "-t",
+        "-u",
+        "-q",
+        "-m",
+        "-g",
+        "--keep-order",
+        "--verbose",
+        "--tag",
+        "--ungroup",
+        "--group",
+        "--pipe",
+        "--bar",
+        "--eta",
+        "--progress",
+        "--link",
+        "--dry-run",
+        "--shuf",
+        "--plus",
+        "--no-notice",
+        "--quote",
+        "--citation",
+        "--silent",
+        "--lb",
+        "--line-buffer",
+    }
+)  # parallel options that take no value; any other option makes the command unknowable here
+_REPLACEMENT_STRING = re.compile(r"\{[^{}]*\}")
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _SHELL_C = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
@@ -180,10 +209,18 @@ _ANSI_SIMPLE = {
 }
 
 
+def _no_tick() -> None:
+    """The default deadline check: none."""
+
+
+_tick: Callable[[], None] = _no_tick  # set by `_build` to the running scan's deadline check; the helper loops call it
+
+
 def _find_dq(text: str, i: int) -> int:
     """Index just past the `"` that closes a double quoted string whose body begins at `i`."""
     n = len(text)
     while i < n:
+        _tick()
         c = text[i]
         if c == "\\":
             i += 2
@@ -204,6 +241,7 @@ def _find_backtick(text: str, i: int) -> int:
     """Index just past the closing backtick of a body that begins at `i`."""
     n = len(text)
     while i < n and text[i] != "`":
+        _tick()
         i += 2 if text[i] == "\\" else 1
     return min(i + 1, n)
 
@@ -214,6 +252,7 @@ def _find_close(text: str, i: int, close: str) -> int:
     opener = {")": "(", "}": "{", "]": "["}[close]
     level, n = 1, len(text)
     while i < n:
+        _tick()
         c = text[i]
         if c == "\\":
             i += 2
@@ -244,6 +283,7 @@ def _ansi_c(text: str, i: int) -> tuple[str, int]:
     out: list[str] = []
     n = len(text)
     while i < n and text[i] != "'":
+        _tick()
         c = text[i]
         if c != "\\" or i + 1 >= n:
             out.append(c)
@@ -276,6 +316,7 @@ def _heredoc_word(text: str, i: int) -> tuple[str, bool, int] | None:
     n = len(text)
     j = i
     while j < n and text[j] not in " \t\n;&|()<>":
+        _tick()
         c = text[j]
         if c == "\\":
             if j + 1 < n and text[j + 1] != "\n":  # backslash-newline is removed before bash tokenizes
@@ -294,6 +335,7 @@ def _heredoc_word(text: str, i: int) -> tuple[str, bool, int] | None:
         elif c == '"' or text.startswith('$"', j):
             j += 1 if c == '"' else 2
             while j < n and text[j] != '"':
+                _tick()
                 if text[j] == "\\" and j + 1 < n and text[j + 1] == "\n":
                     j += 2
                     continue
@@ -316,6 +358,7 @@ def _drop_continuations(span: str) -> str:
     out: list[str] = []
     i, n = 0, len(span)
     while i < n:
+        _tick()
         if span[i] == "\\" and i + 1 < n:
             if span[i + 1] != "\n":
                 out.append(span[i : i + 2])
@@ -361,6 +404,7 @@ def _join_continuations(text: str, tick: Callable[[], None]) -> str:
         elif text.startswith("$'", i):
             j = i + 2
             while j < n and text[j] != "'":
+                tick()
                 j += 2 if text[j] == "\\" else 1
             put(text[i : j + 1])
             i = j + 1
@@ -388,6 +432,7 @@ def _join_continuations(text: str, tick: Callable[[], None]) -> str:
             strip_tabs = text.startswith("-", j)
             j += 1 if strip_tabs else 0
             while j < n and text[j] in " \t":
+                tick()
                 j += 1
             word = _heredoc_word(text, j)
             if word is None:
@@ -402,11 +447,13 @@ def _join_continuations(text: str, tick: Callable[[], None]) -> str:
             i += 1
             for delimiter, strip_tabs, was_quoted in pending:
                 while i < n:
+                    tick()
                     end = text.find("\n", i)
                     line = text[i : n if end < 0 else end]
                     had_newline = end >= 0
                     i = n if end < 0 else end + 1
                     while not was_quoted and had_newline and (len(line) - len(line.rstrip("\\"))) % 2 == 1:
+                        tick()
                         end = text.find("\n", i)  # an unquoted body: a trailing backslash joins the next line
                         line = line[:-1] + text[i : n if end < 0 else end]
                         had_newline = end >= 0
@@ -428,6 +475,27 @@ class Word(NamedTuple):
     quoted: bool  # any part of it was quoted or escaped
     brace: bool = False  # it holds an UNQUOTED brace expansion: `{a,b}` or `{1..3}`
     expands: bool = False  # it holds a `$` expansion (a variable or a substitution): its value is unknown
+
+
+class _Clock:
+    """The deadline check shared by a scan's loops: every 256th call it gives up when the deadline has passed."""
+
+    def __init__(self, deadline: float | None) -> None:
+        self.deadline = deadline
+        self.ticks = 0
+
+    def tick(self) -> None:
+        if self.deadline is not None and self.ticks % 256 == 0 and time.monotonic() > self.deadline:
+            raise _Timeout
+        self.ticks += 1
+
+
+class _Unscannable(Exception):
+    """A wrapper's words cannot be resolved with confidence; `kind` is the verdict."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind)
+        self.kind = kind
 
 
 class _Timeout(Exception):
@@ -457,8 +525,7 @@ class _Scan:
     """One pass over a command: what waits it holds and which real comments it carries."""
 
     def __init__(self, deadline: float | None = None) -> None:
-        self.deadline = deadline
-        self.ticks = 0
+        self.clock = _Clock(deadline)
         self.found: set[str] = set()
         self.sleeps: list[float | None] = []
         self.comments: list[str] = []
@@ -474,10 +541,8 @@ class _Scan:
         return self.caps[-1] if self.caps else None
 
     def tick(self) -> None:
-        """Called from every scanning loop: every 256th call it checks the deadline and gives up when it has passed."""
-        if self.deadline is not None and self.ticks % 256 == 0 and time.monotonic() > self.deadline:
-            raise _Timeout
-        self.ticks += 1
+        """Called from every scanning loop; see `_Clock`."""
+        self.clock.tick()
 
     def run(self, command: str) -> None:
         self.walk(_join_continuations(command, self.tick), 0, False, 0, True)
@@ -524,6 +589,7 @@ class _Scan:
             return end if text[end - 1 : end] == "]" else -1
         j, n, level = i + 3, len(text), 0
         while j < n:
+            _tick()
             c = text[j]
             if c == "\\":
                 j += 2
@@ -632,6 +698,7 @@ class _Scan:
                 has = quoted = True
                 i += 1 if c == '"' else 2
                 while i < n and text[i] != '"':
+                    self.tick()
                     ch = text[i]
                     if ch == "\\" and i + 1 < n:
                         if text[i + 1] != "\n":
@@ -854,7 +921,11 @@ class _Scan:
         while i < len(kept) and _ASSIGNMENT.match(kept[i][0]):
             i += 1
         while i < len(kept) and kept[i][0].rsplit("/", 1)[-1] in WRAPPERS:
-            i, script = self.unwrap(kept, i)
+            try:
+                i, script = self.unwrap(kept, i)
+            except _Unscannable as unresolved:
+                self.found.add(unresolved.kind)
+                return
             if script is not None:
                 self.nested(script, depth)  # `env -S 'sleep 60'`: the split string is a command line
                 return
@@ -893,38 +964,86 @@ class _Scan:
             self.nested(" ".join(args), depth)
         elif name == "find":
             k = 0
+            rest = kept[i + 1 :]
             while k < len(args):
                 if args[k] in _FIND_EXEC:
                     run: list[Word] = []
                     k += 1
                     while k < len(args) and args[k] not in (";", "+"):
-                        run.append(Word(args[k], False))
+                        run.append(rest[k])  # keeps the quoted and brace flags of each word
                         k += 1
                     if run:
                         self.simple(tuple(run), depth)
                 k += 1
 
     @staticmethod
+    def parallel(kept: list[Word], i: int) -> tuple[int, str | None]:
+        """`parallel [options] template ::: arguments`: the template is the command line to scan. When it is empty or
+        its first word is a replacement string (`{}`), the commands come from the arguments or from input, and an option
+        that is not in the recognized lists may take a value that hides the command: fail closed."""
+        valued = WRAPPERS["parallel"]
+        j = i + 1
+        while j < len(kept):
+            word = kept[j]
+            text = word.text
+            if word.brace:
+                raise _Unscannable(UNSCANNABLE_BRACE)
+            if text.startswith(":::") or not text.startswith("-") or text == "-":
+                break
+            if text == "--":
+                j += 1
+                break
+            name = text.split("=", 1)[0] if text.startswith("--") else text
+            if name in valued:
+                takes_next = not (text.startswith("--") and "=" in text)
+                if takes_next and j + 1 < len(kept) and kept[j + 1].brace:
+                    raise _Unscannable(UNSCANNABLE_BRACE)
+                j += 2 if takes_next else 1
+            elif name in _PARALLEL_FLAGS or (not text.startswith("--") and text[:2] in valued and len(text) > 2):
+                j += 1
+            else:
+                raise _Unscannable(UNSCANNABLE_INDIRECT)
+        template: list[Word] = []
+        while j < len(kept) and not kept[j].text.startswith(":::"):
+            template.append(kept[j])
+            j += 1
+        if not template or _REPLACEMENT_STRING.search(template[0].text):
+            raise _Unscannable(UNSCANNABLE_INDIRECT)
+        return len(kept), " ".join(w.text for w in template)
+
+    @staticmethod
     def unwrap(kept: list[Word], i: int) -> tuple[int, str | None]:
         """Index of the command a wrapper at `i` runs (len(kept) when it runs none). For `env -S 'string'` the second
         value is the string (with the words after it), which is a command line to scan."""
         wrapper = kept[i][0].rsplit("/", 1)[-1]
+        if wrapper == "parallel":
+            return _Scan.parallel(kept, i)
         valued = WRAPPERS[wrapper]
         j = i + 1
         operands = WRAPPER_OPERANDS.get(wrapper, 0)
         while j < len(kept):
             text = kept[j][0]
+            if kept[j].brace and not (wrapper in ("env", "sudo") and _ASSIGNMENT.match(text)):
+                # A brace expansion in an option, an option value or an operand changes how many words the wrapper
+                # takes, so which word is the wrapped command is unknown: fail closed.
+                raise _Unscannable(UNSCANNABLE_BRACE)
             if wrapper == "command" and text in ("-v", "-V"):
                 return len(kept), None  # `command -v sleep` looks a name up; it runs nothing
             if wrapper == "env" and (text in ("-S", "--split-string") or text.startswith(("--split-string=", "-S"))):
                 if text in ("-S", "--split-string"):
+                    if j + 1 < len(kept) and kept[j + 1].brace:
+                        raise _Unscannable(UNSCANNABLE_BRACE)
                     split, j = (kept[j + 1][0] if j + 1 < len(kept) else ""), j + 2
                 else:
                     split, j = (text.split("=", 1)[1] if text.startswith("--") else text[2:]), j + 1
                 return len(kept), " ".join([split, *(w.text for w in kept[j:])])
             if wrapper == "flock" and text in ("-c", "--command"):
+                if j + 1 < len(kept) and kept[j + 1].brace:
+                    raise _Unscannable(UNSCANNABLE_BRACE)
                 return len(kept), kept[j + 1].text if j + 1 < len(kept) else ""  # flock FILE -c 'command line'
             if text.startswith("-") and text != "-":
+                if text in valued and j + 1 < len(kept) and kept[j + 1].brace:
+                    raise _Unscannable(UNSCANNABLE_BRACE)
                 j += 2 if text in valued else 1
             elif wrapper in ("env", "sudo") and _ASSIGNMENT.match(text):
                 j += 1
@@ -933,12 +1052,6 @@ class _Scan:
                 j += 1
             else:
                 break
-        if wrapper == "parallel":
-            command_line = []
-            while j < len(kept) and not kept[j].text.startswith(":::"):
-                command_line.append(kept[j].text)
-                j += 1
-            return len(kept), " ".join(command_line)  # `parallel [options] command ::: arguments`
         return j, None
 
 
@@ -947,7 +1060,9 @@ _last_large: list[tuple[str, _Scan]] = []  # the one large input of the current 
 
 
 def _build(command: str, deadline: float | None) -> _Scan:
+    global _tick
     scan = _Scan(deadline)
+    _tick = scan.tick  # the module-level helper loops check the same deadline
     try:
         scan.run(command)
         scan.finish()
@@ -955,6 +1070,8 @@ def _build(command: str, deadline: float | None) -> _Scan:
         scan.too_deep()  # pathological nesting that outruns even the depth limit: an explicit verdict, not a crash
     except _Timeout:
         scan.found.add(UNSCANNABLE_TIMEOUT)  # out of time: fail closed
+    finally:
+        _tick = _no_tick
     return scan
 
 
@@ -977,15 +1094,24 @@ def _scan(command: str, deadline: float | None = None) -> _Scan:
     return scan
 
 
-def real_reason(text: str) -> bool:
+def real_reason(text: str, tick: Callable[[], None] = _no_tick) -> bool:
     """Is this a stated reason?
 
     With combining marks and zero-width or other format characters removed, it must be MIN_REASON_CHARS long, and at
     least MIN_REASON_ALNUM of its characters must be Unicode letters (category L*) or ASCII digits. Combining marks,
-    zero-width padding, non-ASCII digits (full-width, Arabic-Indic, circled) and punctuation do not count.
+    zero-width padding, non-ASCII digits (full-width, Arabic-Indic, circled) and punctuation do not count. `tick` is
+    called once per character so a huge reason cannot outrun the deadline.
     """
-    cleaned = "".join(ch for ch in text if unicodedata.category(ch) not in ("Mn", "Mc", "Me", "Cf")).strip()
-    counted = sum(unicodedata.category(ch).startswith("L") or ch in "0123456789" for ch in cleaned)
+    kept: list[str] = []
+    for ch in text:
+        tick()
+        if unicodedata.category(ch) not in ("Mn", "Mc", "Me", "Cf"):
+            kept.append(ch)
+    cleaned = "".join(kept).strip()
+    counted = 0
+    for ch in cleaned:
+        tick()
+        counted += unicodedata.category(ch).startswith("L") or ch in "0123456789"
     return len(cleaned) >= MIN_REASON_CHARS and counted >= MIN_REASON_ALNUM
 
 
@@ -993,13 +1119,22 @@ def marker_reason(command: str, deadline: float | None = None) -> str:
     """The stated reason of a `lead-wait: ok - <reason>` marker in a real comment of the command, or "" when there
     is none, it is a placeholder, or the text only sits inside a string, a heredoc body or an argument.
 
-    The marker may be in any comment of the call, on the wait's line or another; the call is one decision.
+    The marker may be in any comment of the call, on the wait's line or another; the call is one decision. Out of
+    time (the scan timed out, or checking a reason ran past the deadline) it returns "": a marker that was not
+    verified never exempts anything, so the call is judged as the wait or unscannable-timeout it is.
     """
-    for comment in _scan(command, deadline).comments:
-        found = _MARKER.search(comment)
-        reason = found.group(1).strip() if found else ""
-        if real_reason(reason):
-            return reason
+    scan = _scan(command, deadline)
+    if UNSCANNABLE_TIMEOUT in scan.found:
+        return ""
+    clock = _Clock(deadline)
+    try:
+        for comment in scan.comments:
+            found = _MARKER.search(comment)
+            reason = found.group(1).strip() if found else ""
+            if real_reason(reason, clock.tick):
+                return reason
+    except _Timeout:
+        return ""
     return ""
 
 
@@ -1044,7 +1179,9 @@ def may_wait(command: str, deadline: float | None = None) -> bool:
     A command with none of the three words and no character that can build a word out of pieces (a quote, a
     backslash, `$` or a backtick: `sl''eep 60`) cannot. Anything else is tokenized, which reads no configuration.
     """
-    if not any(w in command for w in ("sleep", "watch", "checks")) and not any(c in command for c in "'\"\\$`{"):
+    if not any(w in command for w in ("sleep", "watch", "checks", "parallel")) and not any(
+        c in command for c in "'\"\\$`{"
+    ):
         return False
     scan = _scan(command, deadline)
     return bool(scan.found or scan.sleeps)

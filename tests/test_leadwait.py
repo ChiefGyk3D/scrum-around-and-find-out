@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -714,6 +715,9 @@ KNOWN_LIMITS = {
     "script file": "bash poll.sh",
     "alias": "alias w='sleep 60'; w",
     "remote command": "ssh host 'sleep 60'",
+    "variable behind eval": 'x="sleep 60"; eval "$x"',
+    "variable behind command": "x=sleep; command $x 60",
+    "variable behind exec": "x=sleep; exec $x 60",
 }
 
 
@@ -1335,6 +1339,339 @@ def test_the_docs_name_every_verdict_kind_the_rule_can_emit() -> None:
     page = (DOCS / "hooks.md").read_text(encoding="utf-8")
     for kind in leadwait.KINDS:
         assert f"`{kind}`" in page, kind
+
+
+# Round 4, HIGH: a brace expansion in a wrapper's option, option value or operand shifts which word is the wrapped
+# command (`timeout {1,sleep} 60` runs `timeout 1 60` and `timeout sleep 60`...). Fail closed, whatever the wrapper.
+
+WRAPPER_BRACE_SHIFT = [
+    # an operand
+    "timeout {1,sleep} 60",
+    "flock {file,sleep} 60",
+    "taskset {1,sleep} 60",
+    "chrt {1,sleep} 60",
+    "stdbuf -i 0 timeout {1,sleep} 60",
+    "sudo -u {root,sleep} 60",
+    # an option value
+    "sudo -u {root,build} sleep 60",
+    "env -u {A,B} sleep 60",
+    "nice -n {1,2} sleep 60",
+    "stdbuf -i {0,1} sleep 60",
+    "timeout -k {1,2} 5 sleep 60",
+    "flock -w {1,2} /tmp/lock sleep 60",
+    "taskset -c {0,1} sleep 60",
+    "chrt -r {1,2} sleep 60",
+    "ionice -c {1,2} sleep 60",
+    "xargs -n {1,2} sleep 60",
+    "time -f {a,b} sleep 60",
+    "exec -a {x,y} sleep 60",
+    "parallel -j {1,2} sleep 60 ::: a",
+    # an option or the command word itself
+    "nohup {-i,sleep} 60",
+    "setsid {-f,sleep} 60",
+    "unbuffer {-p,sleep} 60",
+    "command {-p,sleep} 60",
+    "env {-i,sleep} 60",
+    "parallel {-j,sleep} 60 ::: 1",
+    # nested chains
+    "sudo timeout {1,sleep} 60",
+    "nice flock {f,sleep} 60",
+    "env timeout -k {1,2} 5 sleep 60",
+    "nohup nice -n 5 stdbuf -oL setsid timeout {1,sleep} 60",
+    # the same through find -exec
+    "find . -exec {sleep,60} \\;",
+    "find . -exec timeout {1,sleep} 60 \\;",
+]
+WRAPPER_BRACE_FINE = [
+    "timeout 5 ls {a,b}",  # braces in the wrapped command's own arguments
+    "sudo -u root ls {a,b}.txt",
+    "nice -n 5 echo {a,b}",
+    "flock /tmp/lock echo {1..3}",
+    "stdbuf -oL echo {a,b}",
+    "taskset -c 0 echo {a,b}",
+    "env FOO=1 echo {a,b}",
+    "env FOO={a,b} sleep 1",  # an assignment is not brace expanded at the command word's position
+    "timeout '{1,sleep}' 60",  # a quoted brace is data
+    "timeout \\{1,sleep\\} 60",  # an escaped one too
+    "sudo -u '{root,build}' echo hi",
+    "xargs -I{} echo {a,b}",
+    "parallel echo {a,b} ::: x",
+]
+ROUND3_FIXTURES += WRAPPER_BRACE_SHIFT + WRAPPER_BRACE_FINE
+
+
+@pytest.mark.parametrize("command", WRAPPER_BRACE_SHIFT)
+def test_r4_a_brace_in_a_wrapper_word_is_unscannable_brace(_private_home: Path, agents: Path, command: str) -> None:
+    assert "unscannable-brace" in leadwait.find_waits(command, THRESHOLD)
+    assert leadwait.may_wait(command)
+    assert denied(_private_home, agents, command)
+
+
+@pytest.mark.parametrize("command", WRAPPER_BRACE_FINE)
+def test_r4_braces_after_the_wrapped_command_and_quoted_braces_are_fine(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+# Round 4, MEDIUM 2: `parallel` takes its commands from the template, or from the `:::` arguments when the template is
+# empty or a replacement string. An option this scanner does not know hides the command. Fail closed.
+
+PARALLEL_UNSCANNABLE = [
+    "parallel {} ::: 'sleep 60'",  # the commands are the arguments
+    "parallel {.} ::: 'sleep 60'",
+    "parallel {/} ::: x",
+    "parallel ::: 'sleep 60'",  # an empty template
+    "parallel -j 4 ::: 'sleep 60'",
+    "cat commands | parallel -j4",  # no template and no :::
+    "parallel -I @@ sleep 60 ::: 1",  # an option that takes a value and is not in the recognized list
+    "parallel -I{} sleep 60 ::: 1",
+    "parallel --replace sleep 60 ::: 1",
+    "parallel --arg-sep ,, sleep 60 ,, 1",
+    "parallel --arg-file-sep // sleep 60 // x",
+    "parallel -X sleep 60 ::: 1 2",
+    "parallel -S host sleep 60 ::: 1",
+    "parallel --sshlogin host sleep 60 ::: 1",
+    "parallel --ssh ssh sleep 60 ::: 1",
+    "parallel --some-future-option sleep 60 ::: 1",
+]
+PARALLEL_FINE = [
+    ("parallel sleep 60 ::: 1", "long-sleep"),
+    ("parallel -j 4 sleep 60 ::: 1 2", "long-sleep"),
+    ("parallel -j4 sleep 60 ::: 1 2", "long-sleep"),
+    ("parallel --jobs=4 gh run watch ::: 1", "gh-run-watch"),
+    ("parallel -k --halt now,fail=1 sleep 60 :::: file", "long-sleep"),
+    ("parallel 'sleep 60' ::: x", "long-sleep"),
+    ("parallel echo {} ::: a b", ""),  # the replacement string is an ARGUMENT of echo
+    ("parallel -j 2 echo sleep ::: a", ""),
+]
+ROUND3_FIXTURES += PARALLEL_UNSCANNABLE + [c for c, _ in PARALLEL_FINE]
+
+
+@pytest.mark.parametrize("command", PARALLEL_UNSCANNABLE)
+def test_r4_parallel_with_no_template_a_replacement_template_or_an_unknown_option_is_unscannable(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert "unscannable-indirect" in leadwait.find_waits(command, THRESHOLD)
+    assert denied(_private_home, agents, command)
+
+
+@pytest.mark.parametrize(("command", "kind"), PARALLEL_FINE)
+def test_r4_the_ordinary_parallel_shapes_still_work(command: str, kind: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ((kind,) if kind else ())
+
+
+# Round 4, MEDIUM 1: every unbounded loop checks the deadline, and a marker is never honored after a timeout.
+
+SHORT_SHAPES = {
+    "very long double-quoted string": 'echo "' + "a" * BIG + '"',
+    "long ${ span": "echo ${a:-" + "x" * BIG + "}",
+    "long backtick span": "echo `" + "a" * BIG + "`",
+    "many continuations in a quoted string": '"' + "\\\n" * (BIG // 2) + '"',
+    "huge heredoc body": "cat <<EOF\n" + "x\n" * (BIG // 2) + "EOF",
+    "huge unquoted heredoc body with continuations": "cat <<EOF\n" + "x\\\n" * (BIG // 2) + "y\nEOF",
+    "long ansi-c string": "echo $'" + "a" * BIG + "'",
+    "long arithmetic": "echo $((" + "1+" * (BIG // 2) + "1))",
+}
+
+
+@pytest.mark.parametrize("shape", list(SHORT_SHAPES))
+def test_r4_each_pathological_shape_with_an_expired_or_short_deadline_is_unscannable_timeout(shape: str) -> None:
+    command = SHORT_SHAPES[shape]
+    assert leadwait.find_waits(command, THRESHOLD, deadline=time.monotonic() - 1) == ("unscannable-timeout",)
+    assert leadwait.find_waits(command, THRESHOLD, deadline=time.monotonic() + 0.002) == ("unscannable-timeout",)
+
+
+def test_r4_a_timed_out_scan_is_flagged_by_the_precheck_not_passed() -> None:
+    assert leadwait.may_wait("sleep 1 " + "a " * BIG, deadline=time.monotonic() - 1)
+
+
+def test_r4_a_huge_comment_with_a_marker_never_exempts_after_the_deadline() -> None:
+    command = "sleep 60 # lead-wait: ok - " + "a" * BIG
+    assert leadwait.marker_reason(command) != ""  # with time to look, it is a real marker
+    # The scan is cached by now; only the reason check is left, and it must honor the deadline too: no exemption, so
+    # the call is judged as the wait it is (long-sleep here) and is never excused by a marker that was not checked.
+    assert leadwait.marker_reason(command, deadline=time.monotonic() - 1) == ""
+    fresh = "sleep 60 # lead-wait: ok - waiting out the dns ttl, nothing to delegate " + "b" * 64
+    assert leadwait.marker_reason(fresh, deadline=time.monotonic() - 1) == ""  # the scan itself timed out
+    assert leadwait.find_waits(fresh, THRESHOLD, deadline=time.monotonic() - 1) == ("unscannable-timeout",)
+    assert leadwait.find_waits(fresh, THRESHOLD) == ("long-sleep",)  # and that timeout was not remembered
+
+
+def test_r4_a_marker_recorded_before_a_timeout_is_never_honored() -> None:
+    """The comment is read early, then the scan runs out of time on the filler. Defense in depth: a scan that timed
+    out returns no marker (the reason check's own deadline would also refuse it)."""
+    command = f"sleep 60 # lead-wait: ok - {REASON}\n" + "echo a\n" * BIG
+    assert leadwait.marker_reason(command) == REASON
+    assert leadwait.marker_reason(command + " ", deadline=time.monotonic() + 0.002) == ""
+
+
+def test_r4_the_hook_does_not_honor_a_marker_after_its_deadline(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo.modes import hooks as hooks_mode
+
+    monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)
+    assert denied(_private_home, agents, f"sleep 60 # lead-wait: ok - {REASON}")
+
+
+class Ticks:
+    """Counts calls to a tick function, standing in for the deadline check."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def __call__(self) -> None:
+        self.count += 1
+
+
+LONG = 5000
+
+HELPER_CALLS: dict[str, Callable[[], object]] = {
+    "_find_dq": lambda: leadwait._find_dq("a" * LONG + '"', 0),
+    "_find_backtick": lambda: leadwait._find_backtick("a" * LONG + "`", 0),
+    "_find_close": lambda: leadwait._find_close("a" * LONG + ")", 0, ")"),
+    "_drop_continuations": lambda: leadwait._drop_continuations("ab" * LONG),
+    "_ansi_c": lambda: leadwait._ansi_c("a" * LONG + "'", 0),
+    "_heredoc_word": lambda: leadwait._heredoc_word("A" * LONG, 0),
+    "_heredoc_word in double quotes": lambda: leadwait._heredoc_word('"' + "A" * LONG + '"', 0),
+    "arithmetic_end": lambda: leadwait._Scan.arithmetic_end("$((" + "1+" * LONG + "1))", 0),
+}
+
+
+@pytest.mark.parametrize("name", list(HELPER_CALLS))
+def test_r4_every_helper_loop_ticks_at_least_once_per_two_characters(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ticks = Ticks()
+    monkeypatch.setattr(leadwait, "_tick", ticks)
+    HELPER_CALLS[name]()
+    assert ticks.count >= LONG // 2, name
+
+
+PREPASS_INPUTS = {
+    "plain words": "a " * LONG,
+    "heredoc body lines": "cat <<A\n" + "x\n" * LONG + "A",
+    "heredoc continuation joins": "cat <<A\n" + "x\\\n" * LONG + "y\nA",
+    "ansi-c span": "$'" + "a" * LONG + "'",
+    "blanks after <<": "cat <<" + " " * LONG + "A",
+}
+
+
+@pytest.mark.parametrize("name", list(PREPASS_INPUTS))
+def test_r4_every_prepass_loop_ticks(name: str) -> None:
+    ticks = Ticks()
+    leadwait._join_continuations(PREPASS_INPUTS[name], ticks)
+    assert ticks.count >= LONG // 2, name
+
+
+WALKER_CALLS: dict[str, Callable[[leadwait._Scan], object]] = {
+    "main loop": lambda scan: scan.walk("a " * LONG, 0, False, 0, True),
+    "double-quoted loop": lambda scan: scan.walk('"' + "a" * LONG + '"', 0, False, 0, True),
+    "scan_data": lambda scan: scan.scan_data("a" * LONG, 0, True),
+    "heredoc_body": lambda scan: scan.heredoc_body("x\n" * LONG + "EOF\n", 0, "EOF", False, True, 0),
+}
+
+
+@pytest.mark.parametrize("name", list(WALKER_CALLS))
+def test_r4_every_walker_loop_ticks(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = Ticks()
+    monkeypatch.setattr(leadwait._Scan, "tick", lambda self: ticks())
+    WALKER_CALLS[name](leadwait._Scan())
+    assert ticks.count >= LONG // 2, name
+
+
+def test_r4_real_reason_ticks_over_the_whole_reason() -> None:
+    ticks = Ticks()
+    assert leadwait.real_reason("a" * LONG, ticks)
+    assert ticks.count >= 2 * LONG  # once per character in each of its two passes
+
+
+# Round 4, test gaps: content-freeness for EVERY verdict kind, and a cache that never changes a verdict.
+
+SENTINEL = "sentinel-arg-xyz"
+KIND_COMMANDS = {
+    "gh-run-watch": f"gh run watch 1 {SENTINEL}",
+    "gh-pr-checks-watch": f"gh pr checks 1 -w {SENTINEL}",
+    "watch": f"watch -n 5 echo {SENTINEL}",
+    "sleep-loop": f"while true; do sleep 1; echo {SENTINEL}; done",
+    "long-sleep": f"sleep 60 {SENTINEL}",
+    "unscannable-depth": f"echo $(echo $(echo $(echo $(sleep 60 {SENTINEL}))))",
+    "unscannable-brace": f"{{sleep,60}} {SENTINEL}",
+    "unscannable-indirect": f"f() {{ :; }}; x=f; $x {SENTINEL}",
+    "unscannable-timeout": f"sleep 1 {SENTINEL}",  # the test shrinks the guard's budget to nothing
+}
+ROUND3_FIXTURES += [c for k, c in KIND_COMMANDS.items() if k != "unscannable-timeout"]
+
+
+def test_r4_the_content_free_test_covers_every_verdict_kind() -> None:
+    assert set(KIND_COMMANDS) == set(leadwait.KINDS)
+
+
+@pytest.mark.parametrize("mode", ["warn", "block"])
+@pytest.mark.parametrize("kind", list(KIND_COMMANDS))
+def test_r4_neither_the_hook_output_nor_the_log_carries_the_command_for_any_kind(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, kind: str, mode: str
+) -> None:
+    from safo.modes import hooks as hooks_mode
+
+    command = KIND_COMMANDS[kind]
+    if kind == "unscannable-timeout":
+        monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)
+    else:
+        assert kind in leadwait.find_waits(command, THRESHOLD), kind
+    set_mode(_private_home, mode)
+    out = guard(_private_home, agents, bash(command))[1]
+    assert out, kind
+    log_text = (_private_home / ".local/state/safo/hooks/log.jsonl").read_text()
+    assert SENTINEL not in out and SENTINEL not in log_text, kind
+    assert "sentinel-description" not in out and "sentinel-description" not in log_text, kind
+    assert read_log(_private_home)[-1]["rules"] == ["lead-waits"]
+    if kind.startswith("unscannable-"):
+        assert kind in out  # the message names the kind, nothing else of the call
+
+
+CACHE_COMMANDS = [
+    "sleep 60",
+    "ls -la",
+    "{sleep,60}",
+    f"sleep 45 # lead-wait: ok - {REASON}",
+    "while true; do gh run view 9; sleep 5; done",
+    "f() { sleep 60; }; f",
+    "echo " + "a " * 6000 + "; sleep 60",  # over CACHE_MAX_CHARS: kept by identity for the call only
+    "echo " + "a " * 6000 + f"; sleep 60 # lead-wait: ok - {REASON}",
+]
+
+
+def hook_questions(command: str, deadline: float | None = None) -> tuple[bool, tuple[str, ...], str]:
+    """The three questions the hook asks about one input, in its order."""
+    return (
+        leadwait.may_wait(command, deadline),
+        leadwait.find_waits(command, THRESHOLD, deadline),
+        leadwait.marker_reason(command, deadline),
+    )
+
+
+@pytest.mark.parametrize("command", CACHE_COMMANDS)
+def test_r4_the_cache_never_changes_a_verdict_between_the_hooks_three_calls(command: str) -> None:
+    fresh = leadwait._build(command, None)  # no cache involved
+    expected_kinds = tuple(k for k in leadwait.KINDS if k in fresh.found)
+    first = hook_questions(command)
+    assert first == hook_questions(command) == hook_questions(command)
+    assert first[1] == leadwait.find_waits(command, THRESHOLD) and set(expected_kinds) <= set(first[1])
+    assert first[2] == (REASON if "lead-wait" in command else "")
+
+
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_r4_an_expired_result_is_never_cached(size: str) -> None:
+    command = f"sleep 60 # unique {size} {time.monotonic()} " + ("x" * (20000 if size == "large" else 10))
+    expired = time.monotonic() - 1
+    assert leadwait.find_waits(command, THRESHOLD, expired) == ("unscannable-timeout",)
+    assert command not in leadwait._SMALL_CACHE
+    assert not leadwait._last_large or leadwait._last_large[0][0] is not command
+    # the next call, with time, gets the real verdict (not the remembered timeout)
+    assert leadwait.find_waits(command, THRESHOLD) == ("long-sleep",)
+    assert leadwait.marker_reason(command) == ""
+    # ...and a call that comes back with an expired deadline after a completed scan keeps the completed verdict
+    assert leadwait.find_waits(command, THRESHOLD, expired) == ("long-sleep",)
 
 
 # -- the docs keep their promises ----------------------------------------------------------------------------
