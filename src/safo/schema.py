@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +35,8 @@ DEPENDENCIES = ("none", "blocked_by")
 REF = re.compile(r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,8})")
 _PLAIN_KEY = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _MAX_VALUE_SHOWN = 40
+_MAX_NAME = 100
+_MAX_LISTED = 8
 # caps, so a hostile file cannot turn one audit into many API calls (spec 2.5)
 MAX_PHASES = 16
 MAX_GATES = 32
@@ -295,6 +298,20 @@ def show(value: object) -> str:
     return f"a {type(value).__name__}"
 
 
+def plain_name(name: str) -> bool:
+    """An option name that may be listed in a log: printable (no control, bidi, format or separator characters),
+    already NFKC-normalized, and at most 100 characters."""
+    return len(name) <= _MAX_NAME and name.isprintable() and unicodedata.normalize("NFKC", name) == name
+
+
+def options_text(names: list[str]) -> str:
+    """Option names for an error message, bounded. Up to 8 plain names are listed as written; anything else is
+    escaped by show(), and more than 8 are cut with a count."""
+    shown = names[:_MAX_LISTED]
+    text = ", ".join(shown) if all(plain_name(n) for n in shown) else ", ".join(show(n)[1:-1] for n in shown)
+    return text if len(names) <= _MAX_LISTED else f"{text}, ... and {len(names) - _MAX_LISTED} more"
+
+
 class Reader:
     def __init__(self, source: str) -> None:
         self.source = source
@@ -303,13 +320,13 @@ class Reader:
         return ConfigError(f"{self.source}: {path}: {message}")
 
     def mapping(
-        self, value: object, path: str, allowed: set[str], required: set[str] | None = None
+        self, value: object, path: str, allowed: set[str], required: set[str] | None = None, *, bounded: bool = False
     ) -> Mapping[str, Any]:
         if not isinstance(value, Mapping):
             raise self.fail(path, f"expected a mapping, got {type(value).__name__}")
         for key in value:
             if key not in allowed:
-                shown = key if _PLAIN_KEY.fullmatch(key) else show(key)
+                shown = show(key) if bounded and not _PLAIN_KEY.fullmatch(key) else key
                 allowed_text = ", ".join(sorted(allowed))
                 raise self.fail(f"{path}.{shown}" if path else shown, f"unknown key (allowed: {allowed_text})")
         for key in sorted(required or set()):
@@ -333,6 +350,12 @@ class Reader:
         return value
 
     def choice(self, value: object, path: str, choices: tuple[str, ...]) -> str:
+        if not isinstance(value, str) or value not in choices:
+            raise self.fail(path, f"{value!r} is not one of {', '.join(choices)}")
+        return value
+
+    def choice_bounded(self, value: object, path: str, choices: tuple[str, ...]) -> str:
+        """`choice` for the process keys: the offending value is shown through show(), never as a raw repr."""
         if not isinstance(value, str) or value not in choices:
             raise self.fail(path, f"{show(value)} is not one of {', '.join(choices)}")
         return value
@@ -398,7 +421,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
             r.string(m["name"], f"{path}.name"),
             None if m.get("default_area") is None else r.string(m["default_area"], f"{path}.default_area"),
             tuple(area_rules),
-            r.choice(m["method"], f"{path}.method", METHODS) if "method" in m else None,
+            r.choice_bounded(m["method"], f"{path}.method", METHODS) if "method" in m else None,
         )
         if not LOGIN.fullmatch(repo.owner) or not REPO_NAME.fullmatch(repo.name):
             raise r.fail(path, f"{repo.full_name!r} is not an owner/name pair")
@@ -554,9 +577,12 @@ def _parse_threat_model(r: Reader, raw: object) -> ThreatModel:
 
 def _parse_process(r: Reader, raw: object, repos: tuple[Repository, ...], rules: Rules) -> Process:
     """The `process` block: its structure and the references that need no `fields` (those are in _cross_check)."""
-    m = r.mapping(raw, "process", {"method", "active_statuses", "dependencies", "phase_field", "approvers", "gates"})
-    method = r.choice(m["method"], "process.method", METHODS) if "method" in m else "agile"
-    dependencies = r.choice(m["dependencies"], "process.dependencies", DEPENDENCIES) if "dependencies" in m else "none"
+    allowed = {"method", "active_statuses", "dependencies", "phase_field", "approvers", "gates"}
+    m = r.mapping(raw, "process", allowed, bounded=True)
+    method = r.choice_bounded(m["method"], "process.method", METHODS) if "method" in m else "agile"
+    dependencies = "none"
+    if "dependencies" in m:
+        dependencies = r.choice_bounded(m["dependencies"], "process.dependencies", DEPENDENCIES)
     if method != "waterfall" and not any(repo.method == "waterfall" for repo in repos):
         for key in ("active_statuses", "phase_field", "approvers", "gates"):
             if key in m:
@@ -604,7 +630,7 @@ def _parse_process(r: Reader, raw: object, repos: tuple[Repository, ...], rules:
     gates: list[Gate] = []
     for i, item in enumerate(_capped(r, m.get("gates", []), "process.gates", MAX_GATES)):
         path = f"process.gates[{i}]"
-        g = r.mapping(item, path, {"phase", "issue"}, {"phase", "issue"})
+        g = r.mapping(item, path, {"phase", "issue"}, {"phase", "issue"}, bounded=True)
         phase = r.string(g["phase"], f"{path}.phase")
         issue = r.string(g["issue"], f"{path}.issue")
         match = REF.fullmatch(issue)
@@ -653,7 +679,8 @@ def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
             raise r.fail(path, f"field {field_name!r} is {f.type}, not single_select")
         if option not in {o.name for o in f.options}:
             raise r.fail(
-                path, f"{option!r} is not an option of {field_name!r} (options: {', '.join(o.name for o in f.options)})"
+                path,
+                f"{option!r} is not an option of {field_name!r} (options: {options_text([o.name for o in f.options])})",
             )
 
     s = rules.status
@@ -712,6 +739,14 @@ def _cross_check_process(r: Reader, board: Board) -> None:
         raise r.fail("process.phase_field", f"field {shown} has {count} options, at most {MAX_PHASES} phases")
     status = board.field_named(rules.status_field)
     status_options = {o.name for o in status.options} if status and status.type == "single_select" else set()
+    for owner, field_ in (("process.phase_field", phase), ("rules.status_field", status)):
+        for i, option in enumerate(field_.options if field_ else ()):
+            if not plain_name(option.name):
+                raise r.fail(
+                    owner,
+                    f"option {i} of {show(field_.name if field_ else '')} must be plain text"
+                    f" (printable, NFKC-normalized, at most {_MAX_NAME} characters) on a waterfall board",
+                )
     done = {rules.status.closed, rules.status.merged}
     for i, name in enumerate(process.active_statuses):
         path = f"process.active_statuses[{i}]"
@@ -723,7 +758,9 @@ def _cross_check_process(r: Reader, board: Board) -> None:
     for i, gate in enumerate(process.gates):
         path = f"process.gates[{i}].phase"
         if gate.phase not in names:
-            listed = ", ".join(names)
+            listed = ", ".join(show(n)[1:-1] for n in names[:_MAX_LISTED])
+            if len(names) > _MAX_LISTED:
+                listed += f", ... and {len(names) - _MAX_LISTED} more"
             raise r.fail(path, f"{show(gate.phase)} is not an option of {show(phase.name)} (options: {listed})")
         if gate.phase == names[-1]:
             raise r.fail(path, f"{show(gate.phase)} is the last phase, so its gate would gate nothing")
