@@ -103,6 +103,13 @@ read 2026-10-26). A pattern whose meaning GitHub does not document is **cannot t
 `~` variable other than `~ALL` and `~DEFAULT_BRANCH`, and a wildcard against a branch segment that starts with a dot
 (UNVERIFIED: Ruby does not match it by default; GitHub does not say).
 
+**What is not evaluated is said.** A repository in `gate_exempt_repos` prints `NOTE    NO-GATE owner/name: exempt by
+rules.gate_exempt_repos (not evaluated)`. An archived repository and an empty one (no default branch yet) print a note and
+are not judged; their clean verdict is not durable evidence, because an archive can be unarchived and an empty repository
+gets its first branch unprotected. An empty `gate_check` turns the rule off: the audit prints the "not configured" note
+and ends its summary line with `(branch gate NOT checked: rules.gate_check is empty)`, so exit 0 then does not mean the
+gate was checked.
+
 **Bypass.** A rule that someone can get around does not hold the gate. The audit reports `can be bypassed` when the only
 rules carrying the check (or the force-push block) are bypassable: a classic rule that does not apply to administrators
 (`enforce_admins` off), a force-push bypass allowance, or a ruleset with any bypass actor, in any mode (`ALWAYS`,
@@ -110,6 +117,8 @@ rules carrying the check (or the force-push block) are bypassable: a classic rul
 nobody can bypass is enough; a second, bypassable one adds no finding. Pull-request bypass allowances on a classic rule
 skip the review requirement, not required checks, and are not reported. A bypass list cut short by the page size is
 **cannot tell**, and an answer without the bypass fields is **cannot tell**, never a pass.
+
+"Gated" here means: the check cannot be bypassed by anyone except an administrator, unless `gate_require_admin_enforced` is on. A repository that passes only because administrators are accepted is clean, and the audit says so with one line each: `NOTE    NO-GATE owner/name: gated for everyone except administrators (rules.gate_require_admin_enforced is off)` (or `... (accepted by rules.gate_admin_exempt_repos)` when the requirement is on). The exit code is unchanged by the note; read the notes before trusting a clean board.
 
 `enforce_admins` off (a classic rule that does not apply to administrators) is **not** a finding by default
 (`gate_require_admin_enforced: false`). The maintainer's GYST repository baseline sets `enforce_admins` to false on
@@ -144,6 +153,17 @@ with `str()`, so a null name cannot be credited with a `~DEFAULT_BRANCH` ruleset
 or a repository that is missing or not an object, is cannot tell for that repository alone: the other repositories are
 still judged, and any unexpected error while judging one repository is reported as `UNKNOWN NO-GATE <repo>: ... (unexpected
 answer)` with fixed text, never the error text.
+
+**Every field is typed, relevant or not.** The audit checks the type of every field the query asks for in every record it
+reads before it judges any of them: relevance decides only whether a value counts. A disabled or evaluate-only ruleset,
+a tag ruleset, a rule that is not a status-check rule (its `parameters` must be null or an object), a classic rule with
+status checks turned off (its `requiredStatusChecks` must still be a list of objects with text contexts), an archived
+repository and an empty one are all validated, and a wrongly typed field in any of them is cannot tell. The booleans
+(`requiresStatusChecks`, `allowsForcePushes`, `isAdminEnforced`, `isArchived`) must be real booleans: the string `"false"`
+or the number `1` is not true or false. `viewerPermission` must be one of ADMIN, MAINTAIN, WRITE, TRIAGE, READ, NONE;
+a ruleset's `name` must be text; `nameWithOwner` must be text and name the repository that was asked for (compared without
+regard to case). One deliberate exception: push and repository rulesets have no ref condition, so a null `conditions`
+or `refName` is normal for those targets; if present there it must still be well-formed.
 
 **GitHub-supplied text is escaped.** Error messages from GitHub, ruleset names, bypass modes and branch names pass
 through the same escaping as the CLI's other output (control and format characters written as `\xNN` or `\uNNNN`, `::`

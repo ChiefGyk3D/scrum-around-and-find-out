@@ -36,7 +36,13 @@ def clean_raw() -> Raw:
 
 
 def serve(fake: FakeGitHub, raw: Raw) -> None:
-    fake.handlers["RepoBranchGate"] = lambda f, v: {"repository": copy.deepcopy(raw)}
+    def answer(f: FakeGitHub, v: dict[str, Any]) -> Any:
+        data = copy.deepcopy(raw)
+        if data.get("nameWithOwner") == WIDGETS:  # the baseline: name whichever repository was asked for
+            data["nameWithOwner"] = f"{v['owner']}/{v['name']}"
+        return {"repository": data}
+
+    fake.handlers["RepoBranchGate"] = answer
 
 
 def exit_code(fake: FakeGitHub, client: Client, raw: Raw) -> int:

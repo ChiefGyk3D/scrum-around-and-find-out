@@ -7,6 +7,12 @@ and the repository's rulesets, and report a repository whose default branch has 
 bypassed. Everything here only reads: nothing writes protection (`scripts/apply-baseline.sh` does that, for the
 maintainer to run).
 
+"Gated" means: the check cannot be bypassed by anyone except an administrator, unless
+`rules.gate_require_admin_enforced` is on, in which case an administrator who can bypass is a finding too (a repository
+can be accepted with `rules.gate_admin_exempt_repos`). A repository that passes only because administrators are accepted
+gets a NOTE saying so. A repository exempt from the rule, an archived one and an empty one are not evaluated; each says
+so in a NOTE, and none of those is durable evidence.
+
 Both mechanisms are read because a repository may be protected by either. A read that cannot see the rules is never a
 pass. GitHub shows protection and rulesets in full only to a token that can administer the repository (the
 Administration: read permission of an App; `repo` scope of a user token), and GraphQL answers "none" rather than
@@ -81,6 +87,7 @@ class GateResult:
     problems: list[str] = field(default_factory=list)  # clauses of one sentence about the default branch: drift
     unknown: str = ""  # why it cannot be told
     note: str = ""  # why the repository was not judged, which is not an error
+    admins_open: bool = False  # the gate holds only because administrators are accepted as an exception
 
 
 class Unclear(Exception):
@@ -308,12 +315,90 @@ def _applies(rs: JSON, branch: str) -> bool:
     return True
 
 
+VIEWER_PERMISSIONS = frozenset({"ADMIN", "MAINTAIN", "WRITE", "TRIAGE", "READ", "NONE"})  # RepositoryPermission
+
+
+def _bool(value: Any, what: str) -> bool:
+    if not isinstance(value, bool):
+        raise MalformedDataError(f"{what}: GitHub's answer is not true or false")
+    return value
+
+
+def _patterns(ref: Any, what: str) -> None:
+    ref = _obj(ref, what)
+    for key in ("include", "exclude"):
+        for p in _list(ref.get(key), f"{what} {key}"):
+            _text(p, f"{what} {key} pattern")
+
+
+def _validate_ruleset(rs: JSON) -> None:
+    """The type of every field asked for in one ruleset, whether or not the ruleset counts for the default branch."""
+    name = _s(_text(rs.get("name"), "ruleset name"))
+    _text(rs.get("enforcement"), "ruleset enforcement")
+    target = _text(rs.get("target"), "ruleset target")
+    cond = rs.get("conditions")
+    if target in ("BRANCH", "TAG"):
+        _patterns(_obj(cond, "ruleset conditions").get("refName"), "ruleset refName")
+    elif cond is not None:  # push and repository rulesets have no ref condition: null is normal there
+        ref = _obj(cond, "ruleset conditions").get("refName")
+        if ref is not None:
+            _patterns(ref, "ruleset refName")
+    for actor in _connection(rs.get("bypassActors"), f"ruleset {name!r} bypassActors"):
+        _text(actor.get("bypassMode"), "bypassMode")
+    for rule in _connection(rs.get("rules"), f"ruleset {name!r} rules"):
+        kind = _text(rule.get("type"), "rule type")
+        if "parameters" not in rule:
+            raise MalformedDataError("rule parameters: GitHub's answer lacks them")
+        params = rule["parameters"]
+        if kind == "REQUIRED_STATUS_CHECKS":
+            _contexts(_obj(params, "rule parameters").get("requiredStatusChecks"), "requiredStatusChecks")
+        elif params is not None:
+            _obj(params, "rule parameters")
+
+
+def _validate_classic(classic: JSON) -> None:
+    _bool(classic.get("requiresStatusChecks"), "requiresStatusChecks")
+    _contexts(classic.get("requiredStatusChecks"), "requiredStatusChecks")
+    _bool(classic.get("allowsForcePushes"), "allowsForcePushes")
+    _bool(classic.get("isAdminEnforced"), "isAdminEnforced")
+    _allowance_count(classic, "bypassForcePushAllowances")
+    _allowance_count(classic, "bypassPullRequestAllowances")
+
+
+def _validate_repository(repo: JSON, requested: str | None) -> None:
+    """The type of every field the query asks for, in every record read, before any of it is judged.
+
+    Relevance decides only whether a value counts, never whether it is checked: a disabled ruleset, a rule that is
+    not a status-check rule, a classic rule with checks off, an archived or empty repository are all validated.
+    """
+    name = _text(repo.get("nameWithOwner"), "nameWithOwner")
+    if requested is not None and name.lower() != requested.lower():
+        raise MalformedDataError(f"{_s(requested)}: GitHub answered for a different repository")
+    _bool(repo.get("isArchived"), "isArchived")
+    if _text(repo.get("viewerPermission"), "viewerPermission") not in VIEWER_PERMISSIONS:
+        raise MalformedDataError("viewerPermission: GitHub's answer is not a known permission")
+    if "defaultBranchRef" not in repo:
+        raise MalformedDataError("defaultBranchRef: GitHub's answer lacks it")
+    for rs in _connection(repo.get("rulesets"), "rulesets"):
+        _validate_ruleset(rs)
+    ref = repo["defaultBranchRef"]
+    if ref is None:
+        return
+    ref = _obj(ref, "defaultBranchRef")
+    _branch_name(ref.get("name"))
+    if "branchProtectionRule" not in ref:
+        raise MalformedDataError("branchProtectionRule: GitHub's answer lacks it")
+    if ref["branchProtectionRule"] is not None:
+        _validate_classic(_obj(ref["branchProtectionRule"], "branchProtectionRule"))
+
+
 @dataclass
 class Source:
     """One rule that holds a requirement; `bypass` says how someone gets around it, or None when nobody can."""
 
     label: str
     bypass: str | None
+    admin_open: bool = False  # `bypass` is None only because administrators are accepted as an exception
 
 
 def _bypass_actors(rs: JSON) -> str | None:
@@ -326,16 +411,29 @@ def _bypass_actors(rs: JSON) -> str | None:
     return f"ruleset {name!r} has {len(nodes)} bypass actor{plural} ({', '.join(modes)})"
 
 
+def _admin_only(sources: list[Source]) -> bool:
+    """Held, but only by rules whose administrator exception was accepted."""
+    return any(s.bypass is None for s in sources) and not any(s.bypass is None and not s.admin_open for s in sources)
+
+
 def _holds(sources: list[Source]) -> tuple[bool, list[str]]:
     """(held by a source nobody can bypass, the ways round the others)."""
     return any(s.bypass is None for s in sources), [s.bypass for s in sources if s.bypass]
 
 
-def judge_repository(raw: JSON, gate: str, forbid_force: bool, *, admins_accepted: bool = False) -> GateResult:
-    """Pure: one repository's facts in GitHub's GraphQL shape, the verdict out."""
+def judge_repository(
+    raw: JSON, gate: str, forbid_force: bool, *, admins_accepted: bool = False, requested: str | None = None
+) -> GateResult:
+    """Pure: one repository's facts in GitHub's GraphQL shape, the verdict out.
+
+    "Gated" means: the check cannot be bypassed by anyone except, when `admins_accepted`, an administrator. Such a pass
+    sets `admins_open` so the caller can say so; it is never silent.
+    """
     res = GateResult()
     try:
-        return _judge(_obj(raw, "repository"), gate, forbid_force, admins_accepted, res)
+        repo = _obj(raw, "repository")
+        _validate_repository(repo, requested)
+        return _judge(repo, gate, forbid_force, admins_accepted, res)
     except Unclear as err:
         res.problems = []
         res.unknown = _s(f"default branch {res.branch!r}: {err}")
@@ -343,18 +441,17 @@ def judge_repository(raw: JSON, gate: str, forbid_force: bool, *, admins_accepte
 
 
 def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res: GateResult) -> GateResult:
-    archived = repo.get("isArchived")
-    if not isinstance(archived, bool):
-        raise MalformedDataError("isArchived: GitHub's answer is not true or false")
     permission = _text(repo.get("viewerPermission"), "viewerPermission")
-    if archived:
-        res.note = "is archived (read-only, nothing can merge); the gate is not checked"
+    if repo.get("isArchived") is True:
+        res.note = (
+            "is archived (read-only, nothing can merge); the gate is not checked, and this is not durable evidence"
+        )
         return res
-    if "defaultBranchRef" not in repo:
-        raise MalformedDataError("defaultBranchRef: GitHub's answer lacks it")
     ref = repo["defaultBranchRef"]
     if ref is None:
-        res.note = "has no default branch yet (empty repository); the gate is not checked"
+        res.note = (
+            "has no default branch yet (empty repository); the gate is not checked, and this is not durable evidence"
+        )
         return res
     ref = _obj(ref, "defaultBranchRef")
     branch = res.branch = _branch_name(ref.get("name"))
@@ -363,8 +460,6 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
     check_sources: list[Source] = []
     force_sources: list[Source] = []
     protected = False
-    if "branchProtectionRule" not in ref:
-        raise MalformedDataError("branchProtectionRule: GitHub's answer lacks it")
     classic = ref["branchProtectionRule"]
     if classic is not None:
         classic = _obj(classic, "branchProtectionRule")
@@ -374,15 +469,16 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
         # absent or null count is "cannot tell" (MalformedDataError), never zero. Only an integer 0 means none.
         allowances = _allowance_count(classic, "bypassForcePushAllowances")
         _allowance_count(classic, "bypassPullRequestAllowances")
-        if classic.get("requiresStatusChecks") and any(
-            names_gate(c, gate) for c in _contexts(classic.get("requiredStatusChecks"), "requiredStatusChecks")
+        admin_open = classic["isAdminEnforced"] is False and admins_accepted
+        if classic["requiresStatusChecks"] is True and any(
+            names_gate(c, gate) for c in _contexts(classic["requiredStatusChecks"], "requiredStatusChecks")
         ):
-            check_sources.append(Source("classic", bypass))
+            check_sources.append(Source("classic", bypass, admin_open))
         if classic.get("allowsForcePushes") is False:
             reasons = [bypass] if bypass else []
             if allowances:
                 reasons.append(f"{allowances} actor{'' if allowances == 1 else 's'} may bypass the block")
-            force_sources.append(Source("classic", "; ".join(reasons) or None))
+            force_sources.append(Source("classic", "; ".join(reasons) or None, admin_open))
     for rs in nodes:
         if not _applies(rs, branch):
             continue
@@ -411,12 +507,16 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
             res.problems.append(f"is protected but does not require the check {gate!r}")
         elif not held:
             res.problems.append(_s(f"requires the check {gate!r} but it can be bypassed ({'; '.join(ways)})"))
+        elif _admin_only(check_sources):
+            res.admins_open = True
     if forbid_force:
         held, ways = _holds(force_sources)
         if not force_sources:
             res.problems.append("allows force pushes")
         elif not held:
             res.problems.append(_s(f"force pushes are blocked but {'; '.join(ways)}"))
+        elif _admin_only(force_sources):
+            res.admins_open = True
     return res
 
 
@@ -457,6 +557,7 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
     for repo in board.repositories:
         name = repo.full_name
         if name.lower() in exempt:
+            notes.append(f"NO-GATE {name}: exempt by rules.gate_exempt_repos (not evaluated)")
             continue
         try:
             result = judge_repository(
@@ -464,6 +565,7 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
                 rules.gate_check,
                 rules.gate_forbid_force_push,
                 admins_accepted=not rules.gate_require_admin_enforced or name.lower() in admins,
+                requested=name,
             )
         except NotFoundError:
             unknown.append(
@@ -483,6 +585,13 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
             unknown.append(_s(f"NO-GATE {name}: {result.unknown}"))
         if result.note:
             notes.append(_s(f"NO-GATE {name} {result.note}"))
+        if result.admins_open and not result.problems:
+            why = (
+                "rules.gate_require_admin_enforced is off"
+                if not rules.gate_require_admin_enforced
+                else "accepted by rules.gate_admin_exempt_repos"
+            )
+            notes.append(f"NO-GATE {name}: gated for everyone except administrators ({why})")
         if result.problems:
             drift.append(_s(f"NO-GATE {name}: default branch {result.branch!r} {' and '.join(result.problems)}"))
     return drift, unknown, notes

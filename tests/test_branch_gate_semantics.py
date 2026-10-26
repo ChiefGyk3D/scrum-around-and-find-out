@@ -134,7 +134,7 @@ def test_admins_not_enforced_is_not_a_finding_by_default(fake: FakeGitHub, clien
     build_world(fake)
     unenforced(fake)
     code, text = gate(fake, client)
-    assert code == 0 and not [t for t in text if "NO-GATE" in t]
+    assert code == 0 and not [t for t in text if t.startswith(("DRIFT", "UNKNOWN")) and "NO-GATE" in t]
 
 
 def test_admins_not_enforced_is_a_finding_when_asked_for(fake: FakeGitHub, client: Client) -> None:
@@ -382,6 +382,7 @@ def test_the_reported_false_pass_is_now_unknown(fake: FakeGitHub, client: Client
     code, text = gate(fake, client)
     assert code == 2 and any(t.startswith("UNKNOWN") and WIDGETS in t and "pattern" in t for t in text)
     raw = {
+        "nameWithOwner": WIDGETS,
         "isArchived": False,
         "viewerPermission": "READ",
         "defaultBranchRef": {"name": "a", "branchProtectionRule": None},

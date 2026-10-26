@@ -155,9 +155,12 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         ctx.say("UI-only settings (no API can read or set these; check by eye):")
         for text in board.ui_only:
             ctx.say(f"  - {text}")
-    ctx.say(
+    summary = (
         "clean" if findings.exit_code == EXIT_OK else f"{len(findings.drift)} drift, {len(findings.unknown)} unknown"
     )
+    if not board.rules.gate_check:
+        summary += " (branch gate NOT checked: rules.gate_check is empty)"
+    ctx.say(summary)
     return findings.exit_code
 
 
