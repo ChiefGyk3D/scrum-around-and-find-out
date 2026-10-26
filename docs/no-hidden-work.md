@@ -99,7 +99,7 @@ rules:
 ([branch protection rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule),
 [rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository),
 read 2026-10-26). A pattern whose meaning GitHub does not document is **cannot tell** (exit 2) when it decides the answer:
-`**` that is not a whole directory (`release**`, a trailing `**`), `[^...]` or `[!...]`, a backslash, an unterminated `[`, a
+`**` that is not a whole directory (`release**`, a trailing `**`), any bracket expression that is not a plain set of letters, digits and a few plain characters or an ascending range of letters or digits (`[a-c]` and `[ab]` are read; `[]a]`, `[]`, `[a-]`, `[-a]`, `[z-a]`, `[^a]`, `[!a]`, `[[:alpha:]]` and `[a\]]` are cannot tell, because Ruby and Python's regex engine read several of them differently), a backslash, an unterminated `[`, a
 `~` variable other than `~ALL` and `~DEFAULT_BRANCH`, and a wildcard against a branch segment that starts with a dot
 (UNVERIFIED: Ruby does not match it by default; GitHub does not say).
 
@@ -131,7 +131,7 @@ for a GitHub App the **Administration: read** repository permission, for a user 
 Issues permissions the rest of the audit uses are not enough, and the token may well lack Administration: read. Without it
 GitHub answers "none" instead of "forbidden", so the audit never reads an empty answer as "unprotected" unless the token
 reports ADMIN on the repository; otherwise, and on any refused or failed read, it prints `UNKNOWN NO-GATE ...` naming the
-permission and exits 2. A rule that is found is trusted whatever the permission. Cannot tell is never a pass.
+permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero; only an integer `0` means none. Reading it reliably needs `viewerPermission` ADMIN. Cannot tell is never a pass.
 
 The read uses the same GraphQL client as the rest of the audit (a second REST transport would duplicate its redirect,
 retry and loopback hardening). It never writes protection: setting it is `scripts/apply-baseline.sh`, run by the maintainer.

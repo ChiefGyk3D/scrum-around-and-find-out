@@ -92,7 +92,8 @@ class Unclear(Exception):
 # `*` does not match `/`; `qa/**/*` spans directories; `[set]` is allowed but not `[^set]`; no backslash quoting.
 # Python's fnmatch lets `*` cross `/`, so a pattern like `release/*` would wrongly cover `release/1/2`.
 # Not documented, so answered None ("cannot tell") rather than guessed: `**` that is not a whole directory (as in
-# `release**` or a trailing `**`), `[^...]` and `[!...]`, a backslash, an unterminated `[`, a `~` variable other than
+# `release**` or a trailing `**`), a bracket expression that is not a plain set or ascending letter/digit range (see
+# `_bracket`), a backslash, an unterminated `[`, a `~` variable other than
 # ~ALL and ~DEFAULT_BRANCH, and whether a wildcard matches a segment's leading dot (Ruby does not, unless told; GitHub
 # does not say).
 
@@ -112,7 +113,43 @@ def _regex(pattern: str, wide: bool) -> re.Pattern[str] | None:
         if piece is None:
             return None
         out.append(piece if last else piece + "/")
-    return re.compile("".join(out))
+    try:
+        return re.compile("".join(out))
+    except re.error:  # belt and braces: whatever the parser emitted, a bad regex is "cannot tell", never a crash
+        return None
+
+
+# A bracket expression is read only when it is unambiguous: literal letters, digits and a few plain characters, and
+# ordinary ascending ranges of letters or of digits (a-z, A-Z, 0-9). Anything else is "cannot tell": an empty set, a
+# leading `]`, a leading or trailing `-`, `^` and `!` (GitHub does not support complementing), POSIX `[:alpha:]`, a
+# backslash, a nested `[`, a special character (`* ? / .`) as a member or range end, a range that is descending or spans
+# kinds, an unterminated set. Python's re and Ruby's fnmatch read several of these differently (`[]a]`, `[c-a]`).
+_RANGE = re.compile(r"[a-z]-[a-z]|[A-Z]-[A-Z]|[0-9]-[0-9]")
+_MEMBER = re.compile(r"[A-Za-z0-9_+@=,%]")
+
+
+def _bracket(part: str, i: int) -> tuple[str, int] | None:
+    """(regex, index after the set) for the bracket expression at part[i], or None when it is not unambiguous."""
+    end = part.find("]", i + 1)
+    if end == -1:
+        return None
+    body = part[i + 1 : end]
+    if not body:
+        return None
+    out: list[str] = []
+    k = 0
+    while k < len(body):
+        if _RANGE.fullmatch(body[k : k + 3]):
+            if body[k] > body[k + 2]:
+                return None
+            out.append(f"{re.escape(body[k])}-{re.escape(body[k + 2])}")
+            k += 3
+        elif _MEMBER.fullmatch(body[k]):
+            out.append(re.escape(body[k]))
+            k += 1
+        else:
+            return None
+    return "(?!/)[" + "".join(out) + "]", end + 1
 
 
 def _segment(part: str, wide: bool) -> str | None:
@@ -130,14 +167,11 @@ def _segment(part: str, wide: bool) -> str | None:
         if c == "?":
             out.append("[^/]")
         elif c == "[":
-            end = part.find("]", i + 2)
-            if end == -1 or part[i + 1] in "^!":
+            klass = _bracket(part, i)
+            if klass is None:
                 return None
-            body = part[i + 1 : end]
-            if "[" in body:
-                return None
-            out.append("(?!/)[" + body + "]")
-            i = end + 1
+            out.append(klass[0])
+            i = klass[1]
             continue
         else:
             out.append(re.escape(c))
@@ -281,15 +315,15 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
         classic = _obj(classic, "branchProtectionRule")
         protected = True
         bypass = _classic_bypass(classic, admins_accepted)
+        # Allowance data is withheld from a token that cannot administer the repository, possibly without an error: an
+        # absent or null count is "cannot tell" (MalformedDataError), never zero. Only an integer 0 means none.
+        allowances = _allowance_count(classic, "bypassForcePushAllowances")
+        _allowance_count(classic, "bypassPullRequestAllowances")
         if classic.get("requiresStatusChecks") and any(
             names_gate(c, gate) for c in _contexts(classic.get("requiredStatusChecks"), "requiredStatusChecks")
         ):
             check_sources.append(Source("classic", bypass))
         if classic.get("allowsForcePushes") is False:
-            allowances = _count(
-                _obj(classic.get("bypassForcePushAllowances"), "bypassForcePushAllowances").get("totalCount"),
-                "bypassForcePushAllowances totalCount",
-            )
             reasons = [bypass] if bypass else []
             if allowances:
                 reasons.append(f"{allowances} actor{'' if allowances == 1 else 's'} may bypass the block")
@@ -332,6 +366,10 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
         elif not held:
             res.problems.append(f"force pushes are blocked but {'; '.join(ways)}")
     return res
+
+
+def _allowance_count(classic: JSON, key: str) -> int:
+    return _count(_obj(classic.get(key), key).get("totalCount"), f"{key} totalCount")
 
 
 def _classic_bypass(classic: JSON, admins_accepted: bool) -> str | None:

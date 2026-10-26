@@ -92,13 +92,33 @@ def test_protected_with_the_check_is_clean(fake: FakeGitHub, client: Client) -> 
 
 def test_a_workflow_prefix_does_not_matter_and_a_different_check_does(fake: FakeGitHub, client: Client) -> None:
     build_world(fake)
-    repo(fake).protection = classic("CI green")
+    repo(fake).protection = classic("ci / CI green")
     repo(fake, "acme/manuals").protection = classic("lint")
     code, text = gate(fake, client)
     assert code == 1
     assert not lines(text, "acme/widgets")
     (found,) = lines(text, "acme/manuals")
     assert "default branch 'main' is protected but does not require the check 'CI green'" in found
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        "CI green ",  # trailing space
+        " CI green",
+        "\u0421I green",  # a Cyrillic capital Es for the C
+        "ci green",  # case
+        "CI Green",
+        "ci /CI green",  # the prefix separator is exactly " / "
+        "x/ CI green",
+        "CI green / extra",
+    ],
+)
+def test_a_lookalike_context_does_not_satisfy_the_check(fake: FakeGitHub, client: Client, context: str) -> None:
+    build_world(fake)
+    repo(fake).protection = classic(context)
+    code, text = gate(fake, client)
+    assert code == 1 and "does not require the check" in lines(text, WIDGETS)[0]
 
 
 def test_a_name_that_only_ends_the_same_way_is_not_the_gate(fake: FakeGitHub, client: Client) -> None:

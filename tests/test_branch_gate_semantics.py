@@ -312,3 +312,128 @@ def test_classic_bypass_a_missing_or_non_bool_answer_fails_closed(bad: object) -
         _classic_bypass({"isAdminEnforced": bad}, True)
     with pytest.raises(MalformedDataError):
         _classic_bypass({}, True)
+
+
+# -- bracket expressions: only unambiguous plain sets are read; everything else is cannot tell ------------------------
+# Oracle: Ruby 3.3.8 File.fnmatch("refs/heads/" + pattern, "refs/heads/" + name, File::FNM_PATHNAME), run locally; the
+# results are written out below as literals. Ruby is the oracle for the plain sets only. For everything else Ruby either
+# differs from what GitHub documents (`[!a]` and `[^a]` complement the set in Ruby, but GitHub's docs say "you cannot
+# currently complement a set with the ^ operator"), or Python's re reads the text differently (`[]a]` is the set `]` or
+# `a` in Python but matches nothing in Ruby; `[c-a]` and `[z-a]` match their two ends in Ruby and raise in Python), or
+# the docs are silent (empty class, a leading or trailing `-`, POSIX `[[:alpha:]]`, a backslash). Silence is "cannot
+# tell", never a guess. Docs relied on: the two pages cited above ("You can specify character sets within square
+# brackets ([]), but you cannot currently complement a set with the ^ operator"; "You cannot use the backslash (\)
+# character as a quoting character").
+
+PLAIN_SETS = [
+    ("[a]", {"a": True, "b": False, "]": False, "-": False}),
+    ("[ab]", {"a": True, "b": True, "c": False, "]": False}),
+    ("[a-c]", {"a": True, "b": True, "c": True, "z": False, "-": False, "1": False}),
+    ("[0-9]", {"1": True, "a": False, "-": False}),
+    ("[a-c0-9]", {"a": True, "c": True, "1": True, "z": False, "-": False}),
+]
+
+
+@pytest.mark.parametrize(("pattern", "name", "want"), [(p, n, w) for p, cases in PLAIN_SETS for n, w in cases.items()])
+def test_plain_bracket_sets_match_like_ruby(pattern: str, name: str, want: bool) -> None:
+    assert ref_matches(f"refs/heads/{pattern}", f"refs/heads/{name}") is want
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "[]a]",  # Ruby: matches nothing; Python re: `]` or `a`. The reported false pass.
+        "[]",
+        "[",
+        "[!a]",
+        "[^a]",
+        "[[:alpha:]]",
+        "[a-]",
+        "[-a]",
+        "[c-a]",  # Ruby: a and c
+        "[z-a]",  # Ruby: a and z; Python re: error
+        "[a\\]]",
+        "[a-c-e]",
+        "[*]",
+        "[?]",
+        "[/]",
+        "[a/b]",
+        "[.-z]",  # a range whose end is not a letter or digit
+        "[0-z]",  # a range across kinds
+        "[a-Z]",
+        "[a[b]",
+        "[a-c",
+        "[:alpha:]",
+    ],
+)
+@pytest.mark.parametrize("name", ["a", "b", "]", "z"])
+def test_every_other_bracket_expression_is_cannot_tell(pattern: str, name: str) -> None:
+    assert ref_matches(f"refs/heads/{pattern}", f"refs/heads/{name}") is None
+
+
+def test_the_reported_false_pass_is_now_unknown(fake: FakeGitHub, client: Client) -> None:
+    """A default branch `a` and the include `[]a]`: Python's re would cover it, Ruby does not. Never a clean verdict."""
+    from safo.gate import judge_repository
+
+    build_world(fake)
+    repo(fake).default_branch = "a"
+    repo(fake).protection = None
+    repo(fake).rulesets = [ruleset("CI green", include=("refs/heads/[]a]",))]
+    code, text = gate(fake, client)
+    assert code == 2 and any(t.startswith("UNKNOWN") and WIDGETS in t and "pattern" in t for t in text)
+    raw = {
+        "isArchived": False,
+        "viewerPermission": "READ",
+        "defaultBranchRef": {"name": "a", "branchProtectionRule": None},
+        "rulesets": {"totalCount": 1, "nodes": [ruleset("CI green", include=("refs/heads/[]a]",))]},
+    }
+    got = judge_repository(raw, "CI green", True)
+    assert got.unknown and not got.problems
+
+
+def test_a_regex_compile_error_is_cannot_tell_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeGitHub, client: Client
+) -> None:
+    import safo.gate as g
+
+    monkeypatch.setattr(g, "_segment", lambda part, wide: "[z-a]")  # what the old parser emitted for `[z-a]`
+    assert ref_matches("refs/heads/x*", "refs/heads/z") is None
+    build_world(fake)
+    repo(fake).protection = None
+    repo(fake).rulesets = [ruleset("CI green", include=("refs/heads/x*",))]
+    code, text = gate(fake, client)
+    assert code == 2 and any(t.startswith("UNKNOWN") and "pattern" in t for t in text)
+
+
+# -- allowance data: only an integer count means "none" ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", ["bypassForcePushAllowances", "bypassPullRequestAllowances"])
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("hide", ["absent", "null", "count_null", "count_text", "count_negative", "count_bool"])
+def test_an_absent_or_null_allowance_count_is_cannot_tell_not_zero(
+    fake: FakeGitHub, client: Client, key: str, force: bool, hide: str
+) -> None:
+    build_world(fake)
+    rule = classic("CI green", force=force)
+    if hide == "absent":
+        del rule[key]
+    else:
+        rule[key] = {
+            "null": None,
+            "count_null": {"totalCount": None},
+            "count_text": {"totalCount": "0"},
+            "count_negative": {"totalCount": -1},
+            "count_bool": {"totalCount": False},
+        }[hide]
+    repo(fake).protection = rule
+    repo(fake).viewer_permission = "READ"
+    code, text = gate(fake, client)
+    assert code == 2 and any(t.startswith("UNKNOWN") and WIDGETS in t for t in text)
+
+
+def test_an_integer_zero_allowance_count_from_a_non_admin_is_a_pass(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    repo(fake).viewer_permission = "READ"
+    code, _ = gate(fake, client)
+    assert code == 0
