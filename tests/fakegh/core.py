@@ -33,10 +33,11 @@ def handler(name: str) -> Callable[[Handler], Handler]:
 
 
 class GqlError(Exception):
-    def __init__(self, kind: str, message: str, data: JSON | None = None) -> None:
+    def __init__(self, kind: str, message: str, data: JSON | None = None, paths: list[list[str]] | None = None) -> None:
         super().__init__(message)
         self.kind = kind
         self.data = data
+        self.paths = paths  # one error per path, as GitHub reports a null field it could not resolve
 
 
 @dataclass
@@ -140,6 +141,7 @@ class FakeGitHub:
         self.requests: list[str] = []
         self.faults: list[Fault] = []
         self.listing_lag = 0
+        self.approval_issues: dict[tuple[str, int], JSON] = {}  # (repo lowercased, number) -> GraphQL-shaped node
         self.vanished: set[str] = set()  # item ids that answer NOT_FOUND to any edit
         self.handlers: dict[str, Handler] = {}  # per-test overrides of the registered handlers
         self._seq = 0
@@ -319,8 +321,8 @@ class FakeGitHub:
         try:
             data = fn(self, variables | {"__document__": document})
         except GqlError as err:
-            error = {"type": err.kind, "message": str(err)}
-            return 200, {}, json.dumps({"data": err.data, "errors": [error]}).encode(), False
+            errors = [{"type": err.kind, "message": str(err), **({"path": p} if p else {})} for p in err.paths or [[]]]
+            return 200, {}, json.dumps({"data": err.data, "errors": errors}).encode(), False
         return 200, {}, json.dumps({"data": data}).encode(), False
 
     def _next_fault(self, op: str) -> Fault | None:
