@@ -221,8 +221,8 @@ def test_the_check_name_is_configurable_and_empty_turns_the_rule_off_with_a_note
     code, text = gate(fake, client, with_rules(load_test_board(), gate_check="build"))
     assert code == 0
     code, text = gate(fake, client, with_rules(load_test_board(), gate_check=""))
-    assert code == 0 and not [t for t in text if "NO-GATE" in t]
-    assert any(t.startswith("NOTE") and "Branch gate check not configured" in t for t in text)
+    assert code == 0 and not [t for t in text if t.startswith(("DRIFT", "UNKNOWN")) and "NO-GATE" in t]
+    assert any(t.startswith("NOTE") and "NO-GATE (all repositories)" in t for t in text)
 
 
 def test_a_default_branch_other_than_main_is_read_and_named(fake: FakeGitHub, client: Client) -> None:

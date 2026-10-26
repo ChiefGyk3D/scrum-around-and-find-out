@@ -76,22 +76,64 @@ rulesets (a repository may be protected by either), and reports one finding per 
 ```text
 DRIFT   NO-GATE acme/widgets: default branch 'main' has no branch protection and no active ruleset
 DRIFT   NO-GATE acme/manuals: default branch 'main' is protected but does not require the check 'CI green' and allows force pushes
+DRIFT   NO-GATE acme/tools: default branch 'main' requires the check 'CI green' and blocks force pushes, but both can be bypassed (ruleset 'protect' has 1 bypass actor (ALWAYS))
 ```
 
 A ruleset counts when it is active (not disabled, not evaluate-only), targets branches, and its include patterns match the
-default branch without an exclude pattern removing it (`~DEFAULT_BRANCH`, `~ALL` and `refs/heads/...` globs). A required
-check matches by its own name or after a workflow prefix: `CI green` matches `ci / CI green` and `shell / CI green`, which
-are the names `scripts/apply-baseline.sh` requires. Force pushes are blocked by a classic rule that disallows them or a
-ruleset with the non-fast-forward rule.
+default branch without an exclude pattern removing it. A required check matches by its own name or after a workflow
+prefix: `CI green` matches `ci / CI green` and `shell / CI green`, which are the names `scripts/apply-baseline.sh`
+requires. Force pushes are blocked by a classic rule that disallows them or a ruleset with the non-fast-forward rule.
+A rule that someone can get around does not hold the gate: a ruleset with any bypass actor, a force-push bypass allowance,
+and (only when asked for, see below) a classic rule that does not apply to administrators. One rule nobody can bypass is
+enough.
 
 ```yaml
 rules:
-  gate_check: CI green            # the check name; empty turns the rule off and the audit says "not configured"
-  gate_forbid_force_push: true    # also report a default branch that allows force pushes
-  gate_exempt_repos: []           # owner/name list that is not audited for the gate
+  gate_check: CI green                # the check name; empty turns the rule off
+  gate_forbid_force_push: true        # also report a default branch that allows force pushes
+  gate_exempt_repos: []               # owner/name list, each listed in repositories, not evaluated for the gate
   gate_require_admin_enforced: false  # true also reports a rule that does not apply to administrators
-  gate_admin_exempt_repos: []     # with the line above on: owner/name list where that is accepted
+  gate_admin_exempt_repos: []         # with the line above on: owner/name list where that is accepted
 ```
+
+The rule applies only to repositories listed in `board.yaml`. It is on by default with `CI green`, because it is the
+standing rule and a repository without it is what the audit exists to find; force pushes are on because a gate that
+history can be rewritten around is not a gate.
+
+**Exit codes and notes.** Exit 1 for a finding. Exit 2, `UNKNOWN NO-GATE ...`, when the protection cannot be read or the
+answer cannot be trusted (a refused read, a token that cannot see the rules, a malformed or inconsistent answer, a ref
+pattern GitHub does not document); cannot tell is never a pass. What was not evaluated is said in a `NOTE`, always in the
+form `NO-GATE <who>: <text>`, and notes never change the exit code:
+
+```text
+NOTE    NO-GATE acme/widgets: exempt by rules.gate_exempt_repos (not evaluated)
+NOTE    NO-GATE acme/widgets: gated for everyone except administrators (rules.gate_require_admin_enforced is off)
+NOTE    NO-GATE acme/widgets: the repository is archived (read-only, nothing can merge); the gate was not checked, and this is not durable evidence
+NOTE    NO-GATE (all repositories): the gate check is not configured, rules.gate_check is empty
+```
+
+An archived repository and an empty one (no default branch yet) are not judged, and their clean verdict is not durable
+evidence: an archive can be unarchived and an empty repository gets its first branch unprotected. An empty `gate_check`
+turns the rule off and the summary line ends with `(branch gate NOT checked: rules.gate_check is empty)`, so exit 0 then
+does not mean the gate was checked.
+
+**Administrators.** "Gated" means: the check cannot be bypassed by anyone except an administrator, unless
+`gate_require_admin_enforced` is on. A classic rule that does not apply to administrators (`enforce_admins` off) is not a
+finding by default: the shipped baseline (`scripts/apply-baseline.sh`) sets `enforce_admins` to false and requires no
+approvals, so a default that reported it would flag every repository that follows the baseline. A repository that passes
+only because administrators are accepted is clean and gets the `gated for everyone except administrators` note, so the
+exception is visible. Set `gate_require_admin_enforced: true` to report it (`administrators are not included
+(enforce_admins is off)`); `gate_admin_exempt_repos` then accepts it per repository, still with a note. Everything else
+that makes a rule bypassable stays a finding by default.
+
+**What the token needs.** GitHub shows protection and rulesets in full only to a token that can administer the
+repository: for a GitHub App the **Administration: read** repository permission, for a user token the `repo` scope. The
+Projects and Issues permissions the rest of the audit uses are not enough, and the token may lack Administration: read.
+Without it the audit exits 2 rather than read an empty answer as "unprotected". Details are under the implementation notes.
+
+### Implementation notes
+
+These describe how the read stays honest. None of it changes what the section above promises.
 
 **Ref patterns** are matched the way GitHub does, not as Python's `fnmatch`: GitHub uses Ruby's `fnmatch` with
 `FNM_PATHNAME`, so `*` never matches `/` (`release/*` does not cover `release/1/2`), `**/` spans directories
@@ -103,44 +145,7 @@ read 2026-10-26). A pattern whose meaning GitHub does not document is **cannot t
 `~` variable other than `~ALL` and `~DEFAULT_BRANCH`, and a wildcard against a branch segment that starts with a dot
 (UNVERIFIED: Ruby does not match it by default; GitHub does not say).
 
-**What is not evaluated is said.** A repository in `gate_exempt_repos` prints `NOTE    NO-GATE owner/name: exempt by
-rules.gate_exempt_repos (not evaluated)`. An archived repository and an empty one (no default branch yet) print a note and
-are not judged; their clean verdict is not durable evidence, because an archive can be unarchived and an empty repository
-gets its first branch unprotected. An empty `gate_check` turns the rule off: the audit prints the "not configured" note
-and ends its summary line with `(branch gate NOT checked: rules.gate_check is empty)`, so exit 0 then does not mean the
-gate was checked.
-
-**Bypass.** A rule that someone can get around does not hold the gate. The audit reports `can be bypassed` when the only
-rules carrying the check (or the force-push block) are bypassable: a classic rule that does not apply to administrators
-(`enforce_admins` off), a force-push bypass allowance, or a ruleset with any bypass actor, in any mode (`ALWAYS`,
-`PULL_REQUEST` and `EXEMPT` all let the actor merge past a red check; `PULL_REQUEST` only avoids a direct push). One rule
-nobody can bypass is enough; a second, bypassable one adds no finding. Pull-request bypass allowances on a classic rule
-skip the review requirement, not required checks, and are not reported. A bypass list cut short by the page size is
-**cannot tell**, and an answer without the bypass fields is **cannot tell**, never a pass.
-
-"Gated" here means: the check cannot be bypassed by anyone except an administrator, unless `gate_require_admin_enforced` is on. A repository that passes only because administrators are accepted is clean, and the audit says so with one line each: `NOTE    NO-GATE owner/name: gated for everyone except administrators (rules.gate_require_admin_enforced is off)` (or `... (accepted by rules.gate_admin_exempt_repos)` when the requirement is on). The exit code is unchanged by the note; read the notes before trusting a clean board.
-
-`enforce_admins` off (a classic rule that does not apply to administrators) is **not** a finding by default
-(`gate_require_admin_enforced: false`). The maintainer's GYST repository baseline sets `enforce_admins` to false on
-purpose, with no required approvals, so the owner can merge his own green pull requests; a default that reported it would
-flag every tracked repository, this one included. Set `gate_require_admin_enforced: true` to report it for a board that
-wants administrators held to the gate too; the finding then says `administrators are not included (enforce_admins is
-off)`, and `gate_admin_exempt_repos` accepts it per repository. Everything else that makes a rule bypassable (a ruleset
-bypass actor, a force-push bypass allowance) stays a finding by default. Whether the field is readable is still checked
-either way: an answer without `isAdminEnforced` is cannot tell, never a pass.
-
-Defaults and why: the rule is **on** with `CI green`, because it is the standing rule and a repository without it is
-exactly what the audit exists to find; force pushes are **on** because a gate that history can be rewritten around is not a
-gate. It applies only to repositories listed in `board.yaml`, never to the rest of an owner's repositories. An archived
-repository is skipped with a `NOTE` (nothing can merge into it); a repository with no default branch yet (empty) is
-skipped with a `NOTE`.
-
-**What the token needs.** GitHub shows protection and rulesets in full only to a token that can administer the repository:
-for a GitHub App the **Administration: read** repository permission, for a user token the `repo` scope. The Projects and
-Issues permissions the rest of the audit uses are not enough, and the token may well lack Administration: read. Without it
-GitHub answers "none" instead of "forbidden", so the audit never reads an empty answer as "unprotected" unless the token
-reports ADMIN on the repository; otherwise, and on any refused or failed read, it prints `UNKNOWN NO-GATE ...` naming the
-permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero; only an integer `0` means none. Reading it reliably needs `viewerPermission` ADMIN. Cannot tell is never a pass.
+**Bypass details.** A ruleset bypass actor counts in any mode (`ALWAYS`, `PULL_REQUEST` and `EXEMPT` all let the actor merge past a red check; `PULL_REQUEST` only avoids a direct push). Pull-request bypass allowances on a classic rule skip the review requirement, not required checks, and are not reported. A bypass list cut short by the page size is **cannot tell**, and an answer without the bypass fields is **cannot tell**, never a pass.
 
 **Strict reading.** The audit trusts GitHub's answer only when it is complete and consistent. A connection, list or
 object field that is null, absent, the wrong type or an element of the wrong type is **cannot tell** (exit 2), never an
@@ -168,8 +173,16 @@ or `refName` is normal for those targets; if present there it must still be well
 through the same escaping as the CLI's other output (control and format characters written as `\xNN` or `\uNNNN`, `::`
 broken), so a finding is always one physical line and cannot forge a `DRIFT` line or a workflow command.
 
+**Token permissions in detail.** GitHub shows protection and rulesets in full only to a token that can administer the repository:
+for a GitHub App the **Administration: read** repository permission, for a user token the `repo` scope. The Projects and
+Issues permissions the rest of the audit uses are not enough, and the token may well lack Administration: read. Without it
+GitHub answers "none" instead of "forbidden", so the audit never reads an empty answer as "unprotected" unless the token
+reports ADMIN on the repository; otherwise, and on any refused or failed read, it prints `UNKNOWN NO-GATE ...` naming the
+permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero; only an integer `0` means none. Reading it reliably needs `viewerPermission` ADMIN. Cannot tell is never a pass.
+
 The read uses the same GraphQL client as the rest of the audit (a second REST transport would duplicate its redirect,
-retry and loopback hardening). It never writes protection: setting it is `scripts/apply-baseline.sh`, run by the maintainer.
+retry and loopback hardening). It never writes protection: setting it is `scripts/apply-baseline.sh`, run by a repository
+administrator.
 
 ## The audit and `board.yaml`
 

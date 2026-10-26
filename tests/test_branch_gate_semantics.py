@@ -130,7 +130,7 @@ def unenforced(fake: FakeGitHub) -> None:
 
 
 def test_admins_not_enforced_is_not_a_finding_by_default(fake: FakeGitHub, client: Client) -> None:
-    """The maintainer's baseline sets enforce_admins=false on purpose, so the default must not flag it."""
+    """The shipped baseline sets enforce_admins to false, so the default must not flag it."""
     build_world(fake)
     unenforced(fake)
     code, text = gate(fake, client)
@@ -168,7 +168,10 @@ def test_a_force_push_bypass_allowance_is_a_finding_only_when_force_pushes_are_f
     build_world(fake)
     repo(fake).protection = classic("CI green") | {"bypassForcePushAllowances": {"totalCount": 2}}
     code, text = gate(fake, client)
-    assert code == 1 and "force pushes are blocked but 2 actors may bypass the block" in lines(text, WIDGETS)[0]
+    assert (
+        code == 1
+        and "blocks force pushes, but it can be bypassed (2 actors may bypass the block)" in lines(text, WIDGETS)[0]
+    )
     code, _ = gate(fake, client, with_rules(load_test_board(), gate_forbid_force_push=False))
     assert code == 0
 
@@ -229,7 +232,7 @@ def test_a_force_push_block_held_by_a_bypassable_ruleset_is_reported(fake: FakeG
     repo(fake).protection = classic("CI green", force=True)
     repo(fake).rulesets = [ruleset(no_force=True) | {"bypassActors": actors("ALWAYS")}]
     code, text = gate(fake, client)
-    assert code == 1 and "force pushes are blocked but" in lines(text, WIDGETS)[0]
+    assert code == 1 and "blocks force pushes, but it can be bypassed" in lines(text, WIDGETS)[0]
 
 
 def test_a_truncated_bypass_list_is_cannot_tell(fake: FakeGitHub, client: Client) -> None:

@@ -4,8 +4,8 @@
 For every repository in board.yaml (less `rules.gate_exempt_repos`), read the default branch's classic protection rule
 and the repository's rulesets, and report a repository whose default branch has no rule requiring `rules.gate_check`
 (matched by its name alone or after a workflow prefix, `ci / CI green`), that allows force pushes, or whose rule can be
-bypassed. Everything here only reads: nothing writes protection (`scripts/apply-baseline.sh` does that, for the
-maintainer to run).
+bypassed. Everything here only reads: nothing writes protection (`scripts/apply-baseline.sh` does that, run by a
+repository administrator).
 
 "Gated" means: the check cannot be bypassed by anyone except an administrator, unless
 `rules.gate_require_admin_enforced` is on, in which case an administrator who can bypass is a finding too (a repository
@@ -463,13 +463,14 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
     permission = _text(repo.get("viewerPermission"), "viewerPermission")
     if repo.get("isArchived") is True:
         res.note = (
-            "is archived (read-only, nothing can merge); the gate is not checked, and this is not durable evidence"
+            "the repository is archived (read-only, nothing can merge); the gate was not checked, "
+            "and this is not durable evidence"
         )
         return res
     ref = repo["defaultBranchRef"]
     if ref is None:
         res.note = (
-            "has no default branch yet (empty repository); the gate is not checked, and this is not durable evidence"
+            "the repository has no default branch yet; the gate was not checked, and this is not durable evidence"
         )
         return res
     ref = _obj(ref, "defaultBranchRef")
@@ -520,23 +521,49 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
             raise Unclear(f"nothing was visible, and {NEEDS_ADMIN}")
         res.problems.append("has no branch protection and no active ruleset")
         return res
+    clauses: list[tuple[str, list[str]]] = []  # ("text", []), or ("check" | "force", the ways round it)
     if gate:
         held, ways = _holds(check_sources)
         if not check_sources:
-            res.problems.append(f"is protected but does not require the check {gate!r}")
+            clauses.append((f"is protected but does not require the check {gate!r}", []))
         elif not held:
-            res.problems.append(_s(f"requires the check {gate!r} but it can be bypassed ({'; '.join(ways)})"))
+            clauses.append(("check", list(dict.fromkeys(ways))))
         elif _admin_only(check_sources):
             res.admins_open = True
     if forbid_force:
         held, ways = _holds(force_sources)
         if not force_sources:
-            res.problems.append("allows force pushes")
+            clauses.append(("allows force pushes", []))
         elif not held:
-            res.problems.append(_s(f"force pushes are blocked but {'; '.join(ways)}"))
+            clauses.append(("force", list(dict.fromkeys(ways))))
         elif _admin_only(force_sources):
             res.admins_open = True
+    res.problems = _sentences(clauses, gate)
     return res
+
+
+def _sentences(clauses: list[tuple[str, list[str]]], gate: str) -> list[str]:
+    """The clauses as text about the default branch. One way round both requirements is named once, not twice."""
+    by_kind = dict(clauses)
+    if "check" in by_kind and "force" in by_kind and by_kind["check"] == by_kind["force"]:
+        joined = "; ".join(by_kind["check"])
+        merged = f"requires the check {gate!r} and blocks force pushes, but both can be bypassed ({joined})"
+        out: list[str] = []
+        for kind, _ in clauses:
+            if kind == "check":
+                out.append(_s(merged))
+            elif kind != "force":
+                out.append(kind)
+        return out
+    out = []
+    for kind, ways in clauses:
+        if kind == "check":
+            out.append(_s(f"requires the check {gate!r}, but it can be bypassed ({'; '.join(ways)})"))
+        elif kind == "force":
+            out.append(_s(f"blocks force pushes, but it can be bypassed ({'; '.join(ways)})"))
+        else:
+            out.append(kind)
+    return out
 
 
 def _allowance_count(classic: JSON, key: str) -> int:
@@ -567,7 +594,7 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
     """(drift, unknown, notes) for the branch gate. An empty `rules.gate_check` turns it off, with a note."""
     rules = board.rules
     if not rules.gate_check:
-        return [], [], ["Branch gate check not configured: rules.gate_check is empty"]
+        return [], [], ["NO-GATE (all repositories): the gate check is not configured, rules.gate_check is empty"]
     exempt = {x.lower() for x in rules.gate_exempt_repos}
     admins = {x.lower() for x in rules.gate_admin_exempt_repos}
     drift: list[str] = []
@@ -603,7 +630,7 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
         if result.unknown:
             unknown.append(_s(f"NO-GATE {name}: {result.unknown}"))
         if result.note:
-            notes.append(_s(f"NO-GATE {name} {result.note}"))
+            notes.append(_s(f"NO-GATE {name}: {result.note}"))
         if result.admins_open and not result.problems:
             why = (
                 "rules.gate_require_admin_enforced is off"

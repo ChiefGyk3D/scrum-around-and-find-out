@@ -184,8 +184,18 @@ def test_a_tag_ruleset_is_still_validated(fake: FakeGitHub, client: Client, what
     assert exit_code(fake, client, with_second(clean_raw(), node)) == 2
 
 
-def test_a_good_ruleset_that_does_not_count_is_clean(fake: FakeGitHub, client: Client) -> None:
+def test_control_a_well_formed_ruleset_that_does_not_count_changes_nothing(fake: FakeGitHub, client: Client) -> None:
+    """A control, not a guard: it shows the fixtures for the guards below are themselves valid."""
     assert exit_code(fake, client, with_second(clean_raw(), disabled())) == 0
+
+
+@pytest.mark.parametrize("enforcement", ["DISABLED", "EVALUATE"])
+def test_a_ruleset_that_is_not_active_is_never_the_only_source_of_the_gate(
+    fake: FakeGitHub, client: Client, enforcement: str
+) -> None:
+    node = ruleset("CI green", enforcement=enforcement)
+    raw = clean_raw() | {"viewerPermission": "ADMIN", "rulesets": {"totalCount": 1, "nodes": [node]}}
+    assert exit_code(fake, client, raw) == 1  # unprotected, a finding
 
 
 @pytest.mark.parametrize("target", ["PUSH", "REPOSITORY"])
@@ -252,7 +262,7 @@ def test_an_empty_gate_check_says_so_on_the_summary_line(fake: FakeGitHub, clien
     assert code == 0
     assert text[-1] != "clean"
     assert "branch gate NOT checked" in text[-1] and "rules.gate_check is empty" in text[-1]
-    assert any(t.startswith("NOTE") and "Branch gate check not configured" in t for t in text)
+    assert any(t.startswith("NOTE") and "NO-GATE (all repositories)" in t for t in text)
 
 
 # -- identity, ruleset targets, permission enum, intersections ----------------------------------------------
