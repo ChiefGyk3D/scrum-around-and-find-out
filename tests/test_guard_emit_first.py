@@ -23,7 +23,9 @@ import pytest
 from hooksdata import agents_file, dispatch, read_log, set_mode, set_probe, state_folder
 from meterdata import NOW
 from safo.context import LocalContext
-from safo.guardlog import file_lock
+from safo.guardlog import APPEND_LOCK_TIMEOUT, file_lock
+from safo.hooks import append_log, log_record
+from safo.localfiles import load_agents_for
 from safo.modes import hooks as mod
 
 GOOD = "acme/widgets#12"
@@ -82,7 +84,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 
 
 def denied(text: str) -> bool:
-    return json.loads(text)["hookSpecificOutput"].get("permissionDecision") == "deny"
+    return bool(json.loads(text)["hookSpecificOutput"].get("permissionDecision") == "deny")
 
 
 def test_a_config_load_that_uses_the_whole_budget_still_prints_the_decision_and_names_the_skipped_lookups(
@@ -90,7 +92,7 @@ def test_a_config_load_that_uses_the_whole_budget_still_prints_the_decision_and_
 ) -> None:
     set_mode(_private_home, "block")
     set_probe(_private_home, reachable=False, agents=agents)
-    real_load = mod.load_agents_for
+    real_load = load_agents_for
 
     def slow_load(*a: Any, **k: Any) -> Any:
         clock.now += 10.1  # more than the whole hook budget; loading is not interruptible, so it just takes this long
@@ -118,7 +120,7 @@ def test_the_next_dispatch_says_the_previous_log_write_failed_once(
     _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     set_probe(_private_home, reachable=True, agents=agents)
-    real = mod.append_log
+    real = append_log
     monkeypatch.setattr(mod, "append_log", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
     first = io.StringIO()
     mod.run_guard(context(_private_home, dispatch(model=None), first), namespace(agents))
@@ -198,17 +200,15 @@ def test_a_computed_deny_is_printed_when_the_append_raises_is_skipped_or_hangs(
     if how == "skipped":
         clock = Clock()
         monkeypatch.setattr(mod, "time", types.SimpleNamespace(monotonic=clock.monotonic, sleep=time.sleep))
-        real_append = mod.append_log
         monkeypatch.setattr(
             mod, "append_log", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be attempted"))
         )
-        assert real_append is not None
     else:
         monkeypatch.setattr(mod, "append_log", append)
     out = io.StringIO()
     ctx = context(_private_home, bash("sleep 60"), out)
     if clock is not None:
-        real_load = mod.load_agents_for
+        real_load = load_agents_for
 
         def slow(*a: Any, **k: Any) -> Any:
             clock.now += 60
@@ -247,13 +247,13 @@ def test_the_append_wait_is_the_setting_or_what_is_left_and_nothing_past_the_har
     monkeypatch.setattr(mod, "append_log", lambda p, r, limit=0, lock_timeout=0.0: waits.append(lock_timeout))
     folder = state_folder(_private_home)
     folder.mkdir(parents=True, exist_ok=True)
-    record = mod.log_record("2026-01-01T00:00:00", "allow", "warn", None, False, "healthy", "")
+    record = log_record("2026-01-01T00:00:00", "allow", "warn", None, False, "healthy", "")
     ctx = context(_private_home, "", io.StringIO())
     mod.emit_then_persist(ctx, None, folder, record, clock.now + 100)
     mod.emit_then_persist(ctx, None, folder, record, clock.now + 0.4)
     mod.emit_then_persist(ctx, None, folder, record, clock.now - 0.01)  # past hard: no attempt, no floor
     mod.emit_then_persist(ctx, None, folder, record, clock.now + 0.01)  # under the small floor: no attempt
-    assert waits == [mod.APPEND_LOCK_TIMEOUT, pytest.approx(0.4)]
+    assert waits == [APPEND_LOCK_TIMEOUT, pytest.approx(0.4)]
     assert (folder / mod.LOG_FAILED_NAME).exists()
 
 
