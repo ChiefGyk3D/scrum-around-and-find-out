@@ -201,7 +201,7 @@ def test_a_blockquoted_report_is_not_a_report(fake: FakeGitHub) -> None:
 
 def test_the_head_is_read_again_after_the_comments(fake: FakeGitHub) -> None:
     run(fake, [comment(report(A))])
-    assert fake.requests == ["HandoffPr", "HandoffComments", "HandoffPr"]
+    assert fake.requests == ["HandoffPr", "HandoffComments", "HandoffTimeline", "HandoffPr"]
 
 
 def test_a_head_that_moves_while_reading_is_unknown(fake: FakeGitHub) -> None:

@@ -26,6 +26,20 @@ def pr_comments(fake: FakeGitHub, v: JSON) -> JSON:
     return {"repository": {"pullRequest": {"comments": fake.connection(_pull(fake, v).comments, v)}}}
 
 
+@handler("HandoffTimeline")
+def pr_timeline(fake: FakeGitHub, v: JSON) -> JSON:
+    found = _pull(fake, v)
+    commit = found.last_commit if found.last_commit is not None else {"oid": found.head, "committedDate": found.pushed}
+    return {
+        "repository": {
+            "pullRequest": {
+                "timelineItems": {"pageInfo": {"hasPreviousPage": found.more_events}, "nodes": found.events},
+                "commits": {"nodes": [{"commit": commit}]},
+            }
+        }
+    }
+
+
 @handler("HandoffCommits")
 def pr_commits(fake: FakeGitHub, v: JSON) -> JSON:
     nodes = [{"commit": {"oid": oid}} for oid in _pull(fake, v).commits]

@@ -60,7 +60,9 @@ takes it for a bug that was hidden.
   does not prove who wrote the report, or that the review approved: FRESH means the report names the current head, and a
   `FINDINGS` verdict at that head is still FRESH. Only reports by a reviewing role count (`reviewer`,
   `adversarial-reviewer`; `--roles` changes it), and the role is read from the header the same account wrote. It is a
-  speed bump like the approval token. See [Handoff](handoff.md).
+  speed bump like the approval token. A report must also be no older than the moment its commit became the head; with
+  no force-push that moment is the commit's own `committedDate`, which its author sets, so it is a floor, not proof.
+  See [Handoff](handoff.md).
 - **An explicit `--agents`, `--log` or `$SAFO_AGENTS` path in the current directory is the user's own choice.** Outside
   Actions it is allowed, because the person typed it. SAFO never searches the current directory for these files on its own.
   Under Actions an explicit path inside the workspace is refused.

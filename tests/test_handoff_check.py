@@ -15,6 +15,7 @@ import pytest
 
 from fakegh import FakeGitHub
 from fakegh.core import Fault, FPull, GqlError
+from handoff_render import render
 from localcli import cli
 from safo import graphql
 from safo.modes import handoff
@@ -38,12 +39,19 @@ def report(head: str, role: str = "reviewer", verdict: str | None = None) -> str
 
 
 def comment(
-    body: str, when: str = LATE, assoc: str = "OWNER", minimized: Any = False, edited: Any = None
+    body: str,
+    when: str = LATE,
+    assoc: str = "OWNER",
+    minimized: Any = False,
+    edited: Any = None,
+    html: Any = None,
 ) -> dict[str, Any]:
+    """A comment node. `body` is Markdown, rendered by the stand-in renderer unless `html` is given outright."""
     return {
         "authorAssociation": assoc,
         "createdAt": when,
         "body": body,
+        "bodyHTML": render(body) if html is None else html,
         "isMinimized": minimized,
         "lastEditedAt": edited,
     }
@@ -64,8 +72,11 @@ def run(
     state: Any = "OPEN",
     draft: Any = False,
     options: tuple[str, ...] = (),
+    pull: dict[str, Any] | None = None,
 ) -> tuple[int, str, str]:
-    fake.pulls[(REPO, 7)] = FPull(head=head, comments=comments, commits=commits or [], state=state, draft=draft)
+    fake.pulls[(REPO, 7)] = FPull(
+        head=head, comments=comments, commits=commits or [], state=state, draft=draft, **(pull or {})
+    )
     return cli("handoff", "check", *options, repo, number, home=HOME, extra_env=env_for(fake, extra_env))
 
 
@@ -344,7 +355,7 @@ def test_only_read_queries_are_sent(fake: FakeGitHub) -> None:
     run(fake, [comment(report("aaaaaaa"))], head=A, commits=[A])
     assert fake.kinds and set(fake.kinds) == {"query"}
     assert fake.mutations == []
-    assert set(fake.requests) == {"HandoffPr", "HandoffComments", "HandoffCommits"}
+    assert set(fake.requests) == {"HandoffPr", "HandoffComments", "HandoffCommits", "HandoffTimeline"}
 
 
 def test_the_documents_are_queries_with_no_mutation_keyword() -> None:

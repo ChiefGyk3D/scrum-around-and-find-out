@@ -111,15 +111,18 @@ def _https_handler(state: _Connected) -> urllib.request.HTTPSHandler:
 
 
 def _read(response: Any) -> bytes:
-    """The body, at most MAX_BODY + 1 bytes, so an oversized answer is seen without being held in memory.
+    """The whole body, or ApiError when it is larger than MAX_BODY. The one place a response body is read.
 
-    `read(n)` returns a short body quietly where `read()` raises; a body shorter than its Content-Length is still
-    an IncompleteRead, as before.
+    At most MAX_BODY + 1 bytes are taken, so an oversized answer is seen without being held in memory, and it is
+    refused here, so no caller (a query, a mutation, an error body) can forget the check. `read(n)` returns a short
+    body quietly where `read()` raises; a body shorter than its Content-Length is still an IncompleteRead.
     """
     data: bytes = response.read(MAX_BODY + 1)
+    if len(data) > MAX_BODY:
+        raise ApiError(f"GitHub's response was too large (more than {MAX_BODY} bytes)")
     declared = response.headers.get("Content-Length", "")
     bodiless = getattr(response, "status", 200) in (204, 304)  # these carry no body whatever Content-Length says
-    if not bodiless and declared.isdigit() and len(data) <= MAX_BODY and len(data) < int(declared):
+    if not bodiless and declared.isdigit() and len(data) < int(declared):
         raise http.client.IncompleteRead(data, int(declared) - len(data))
     return data
 
@@ -201,6 +204,8 @@ class Client:
                 if err.before_send:
                     raise ApiError(f"could not reach GitHub for {op}: {err.error.__class__.__name__}") from None
                 raise self._unknown(op, "the connection failed after the request was sent", cause=err.error) from None
+            except ApiError as err:  # the response was refused unread (too large): the request had gone out
+                raise self._unknown(op, "the response was too large to read", cause=err) from None
             self.requests += 1
             if status == 401:
                 raise AuthError(f"GitHub refused the token (401) on {op}")
@@ -304,14 +309,14 @@ class Client:
                 continue
             if status != 200:
                 raise ApiError(f"GitHub answered {status} to {op}")
-            if len(raw) > MAX_BODY:
-                raise ApiError(f"GitHub answered {op} with more than {MAX_BODY} bytes")
             try:
                 body: JSON = json.loads(raw)
             except json.JSONDecodeError as err:
                 raise ApiError(f"GitHub answered {op} with invalid JSON: {err}") from None
             except RecursionError:
                 raise ApiError(f"GitHub answered {op} with JSON nested too deeply") from None
+            except ValueError:  # not UTF-8 (an encoded body that was not decoded, say)
+                raise ApiError(f"GitHub answered {op} with a body that is not text") from None
             if not isinstance(body, dict):
                 raise ApiError(f"GitHub answered {op} with non-object JSON: {type(body).__name__}")
             errors: list[dict[str, Any]] = body.get("errors") or []

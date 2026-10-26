@@ -21,8 +21,8 @@ carries: a `ROLE:` line, then `HEAD: <sha>   BASE: <sha>`) with the pull request
 
 | Exit | Output starts with | Meaning |
 |---|---|---|
-| 0 | `FRESH` | the latest review report names the current head |
-| 1 | `STALE` | it names an older head; both short SHAs are printed. Exit 1 means only this: a crash is exit 2 |
+| 0 | `FRESH` | the latest review report names the current head and was posted no earlier than the head arrived |
+| 1 | `STALE` | it names an older head (both short SHAs are printed), predates the head, or predates a base change. Exit 1 means only this: a crash is exit 2 |
 | 2 | `UNKNOWN` | no report, an unusable SHA, an internal error, or an answer from GitHub that could not be read in full |
 
 The one-line result names the role that wrote the report and its `VERDICT:` line when it has a recognized one, for
@@ -41,29 +41,57 @@ What it reads, and how strictly:
 - The newest report counts, read as of its current (edited) body. A comment is dated by the later of its creation and
   its last edit, so an old comment edited after a newer one now reads as the newest. Two reports with the same date
   that differ in role, head or verdict, or one comment holding two different heads, are unknown.
-- A report header inside a fenced code block (```` ``` ```` or `~~~`) or an HTML comment (`<!-- ... -->`) is a quotation
-  and does not count, and neither does a blockquote. An unclosed fence or comment hides the rest of the comment.
+- **The report is read from the HTML GitHub rendered (`bodyHTML`), never from the raw Markdown**, and only from the text
+  of a top-level `<p>` (lines separated by `<br>` or a newline). The check does not parse Markdown, so it cannot
+  disagree with GitHub about what is code. What a person sees as a fenced or indented code block, a `<pre>` block, a
+  quotation, a list item (`li`, decided: no), a table, a collapsed `<details>` block, a heading, a script, a style, a
+  template, an HTML comment, an element with `hidden`, or anything inside an element it does not recognize is not a
+  report. Inside a paragraph, text under a plain inline element (`a`, `strong`, `em`, `b`, `i`, `del`, `s`) is read; text
+  under any other element (`code`, `span`, an unknown tag) is dropped. A header needs its `ROLE:` and `HEAD:` lines in the
+  same paragraph, one after the other.
+- A comment whose HTML is over 200,000 characters, nested over 50 elements deep, or not well formed (a mismatched or
+  unclosed tag) cannot be read. If it mentions `ROLE` and its author is trusted, the whole answer is unknown; a comment
+  that does not mention `ROLE`, or comes from anyone else, is ignored. The HTML is never copied into the output.
 - The head is read before the comments and again after them. If it moved, the answer is unknown ("head moved while
   reading"), not a comparison against a stale read.
+- **A report is fresh only if it was posted no earlier than the moment its commit became the head.** The head's time is
+  the latest force-push event (`HeadRefForcePushedEvent`, from the pull request timeline, the last 50 events) whose
+  result is the head; with none, it is the head commit's `committedDate`. The commit date is set by its author, so
+  that second case is a floor, not proof. The report's time is the later of its creation and its last edit, so editing
+  an old report after a push counts as a new report. A report posted before that time is STALE ("posted before it
+  became the head"); a report posted exactly at that time is fresh. This closes the replay: a report naming `aaaa`
+  written while the head was `bbbb`, then a force-push to `aaaa`, reads STALE, as does a force-push back to an earlier
+  reviewed commit. A timeline too long to read in full, a head commit that cannot be found or dated, or any event it
+  cannot read is unknown.
+- **A base branch change after the report is STALE** (`BaseRefChangedEvent`; a change at the same second as the report
+  is not). This is how the `BASE:` line of the header is covered: it is parsed but not compared with anything, and the
+  timeline is the evidence instead.
 - A full 40-hex head is compared as is. A shorter one (7 to 39 hex characters) is looked up among the pull request's own
   commits and counts only when exactly one commit starts with it; no match, several matches or a commit list too long to read in full is
   unknown. Fewer than 7 characters, or anything that is not hex (a left-over `<short sha>`), is unknown.
-- Anything null, absent, mistyped or truncated in GitHub's answer is unknown, never an empty list: a comment without a
-  text body or author association, a head that is not a full SHA, more than 1,000 comments (the cap on what it reads).
+- Anything null, absent, mistyped or truncated in GitHub's answer is unknown, never an empty list: a comment without
+  its rendered HTML or author association, a head that is not a full SHA, more than 1,000 comments (the cap on what it
+  reads).
 - Nothing from a comment reaches the output except the validated SHAs, a role from the fixed list and a verdict from
   the fixed list (`SHIP`, `SHIP WITH CHANGES`, `DO NOT SHIP`, `FINDINGS`, `APPROVE`, `NOT ATTACKED`; anything else is
   left out), and everything printed is escaped. An internal error prints only its class name.
-- An answer from GitHub over 32 MiB, JSON nested too deeply to parse, or `errors` that is not a list of objects is an
-  error of the client, so it ends as unknown like any other.
+- The client refuses any answer from GitHub over 32 MiB at the one place a body is read, for a query and for a
+  mutation alike (an oversized mutation answer is an unknown outcome, never a success), and it does not ask for or
+  decode a compressed answer. JSON nested too deeply, text that is not UTF-8, or `errors` that is not a list of
+  objects is an error of the client, so it ends as unknown like any other.
+- **The exit code is the answer.** The verdict is computed first and printed after. If printing fails (a closed
+  stream, a broken pipe), the exit code is unchanged. If the verdict cannot be computed for any reason, including an
+  exception that is not an `Exception` such as `SystemExit` from a dependency, the exit code is 2 and the line names
+  only the class of the error. Only Ctrl-C passes through.
 
 Known limits:
 
-- It compares heads, not bases. `BASE:` is parsed but not compared, so a pull request retargeted to another base with
-  the same head stays FRESH.
 - Review bodies (`gh pr review`) and review-thread comments are not read. A report posted only there reads as no
   report. This is tracked in [#160](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/160).
-- A report indented as a Markdown code block (four spaces) is not told apart from a header; only fences and HTML
-  comments are.
+- The time of a head with no force-push is the commit's own `committedDate`, which its author controls; the check
+  proves the report is not older than that claim, not that the commit arrived then. A trusted commenter can also still
+  post a forged report after a push: the check cannot tell who wrote it (see below).
+- A list item is never read as a report. A report posted as a Markdown list is therefore unknown.
 - It sends read queries only (the repository's GraphQL client; GraphQL travels over POST, but no mutation is ever sent).
 
 It proves staleness, not authorship: every agent comments through the maintainer's account, so a forged header from
