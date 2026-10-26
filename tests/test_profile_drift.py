@@ -46,6 +46,29 @@ def test_the_check_flag_passes_on_the_repository() -> None:
     assert load_script().main(["--check"]) == 0
 
 
+@pytest.mark.parametrize("umask", [0o022, 0o002, 0o077])
+def test_the_check_passes_on_a_tree_whose_modes_come_from_the_checkout_umask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, umask: int
+) -> None:
+    script, out = written(tmp_path, monkeypatch)
+    files = [p for p in out.rglob("*") if p.is_file()]
+    assert files
+    for p in files:
+        p.chmod(0o666 & ~umask)
+    assert script.main(["--check"]) == 0
+
+
+@pytest.mark.parametrize("bad", [0o666, 0o646, 0o645, 0o674, 0o755, 0o4644, 0o2644, 0o1644, 0o400])
+def test_the_check_still_refuses_an_unsafe_generated_file_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], bad: int
+) -> None:
+    script, out = written(tmp_path, monkeypatch)
+    target = next(p for p in sorted(out.rglob("*")) if p.is_file())
+    target.chmod(bad)
+    code, err = check(script, capsys)
+    assert code == 1 and f"mode is {bad:04o}" in err, err
+
+
 def test_profiles_verify_passes_on_the_repository_with_its_codeowners(_private_home: Path) -> None:
     code, out, err = cli("profiles", "verify", "--agents", str(ROOT / "agents.yaml"), home=_private_home)
     assert code == 0, out + err

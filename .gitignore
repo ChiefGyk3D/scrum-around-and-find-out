@@ -18,3 +18,4 @@ agents.local.yaml
 privacy-terms*
 *.privacy-terms
 .*.gen_wiki
+.claude/worktrees/

@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -144,6 +146,43 @@ def test_the_usage_page_records_that_code_counts_and_the_model_writes_prose() ->
     assert "code does the grouping and the counting" in usage
 
 
+DOCTRINE_PAGES = ("look-before-instructing", "done-means-verified", "access-planning", "act-then-report")
+FOLLOW_UP_FOOTER = "Linked from the orchestrator and lessons pages in a follow-up"
+
+
+def links_to(text: str, page: str) -> bool:
+    return re.search(rf"\]\({re.escape(page)}\.md(?:#[^)]*)?\)", text) is not None
+
+
+def test_each_doctrine_page_is_linked_from_the_orchestrator_and_lessons_pages() -> None:
+    for page in DOCTRINE_PAGES:
+        for host in ("orchestrator", "lessons"):
+            text = (ROOT / "docs" / f"{host}.md").read_text(encoding="utf-8")
+            assert links_to(text, page), f"docs/{host}.md does not link {page}.md"
+
+
+def test_the_link_check_bites() -> None:
+    assert not links_to("see [x](done-means-verified-not.md)", "done-means-verified")
+    assert not links_to("see done-means-verified.md", "done-means-verified")
+    assert links_to("see [x](done-means-verified.md#why)", "done-means-verified")
+
+
+def test_the_doctrine_pages_carry_no_follow_up_footer_and_no_process_commentary() -> None:
+    for page in DOCTRINE_PAGES:
+        text = (ROOT / "docs" / f"{page}.md").read_text(encoding="utf-8")
+        assert FOLLOW_UP_FOOTER not in text, page
+        assert "eneralized" not in text and "tracking issue records" not in text, page
+    rule4 = section((ROOT / "docs" / "act-then-report.md").read_text(encoding="utf-8"), "Rule 4 of the orchestrator")
+    assert rule4.strip() and max(len(line) for line in rule4.splitlines()) <= 120
+
+
+def test_the_monitor_brief_template_carries_a_prior_art_grep_line() -> None:
+    text = (ROOT / "docs" / "orchestrator.md").read_text(encoding="utf-8")
+    template = text.split("## The monitor-agent brief", 1)[1].split("```", 2)[1]
+    line = next(x for x in template.splitlines() if x.startswith("prior-art:"))
+    assert "grep -ril" in line
+
+
 DOIA = "https://github.com/ChiefGyk3D/department-of-internal-arguments"
 DOIA_ROLES = ("implementer", "reviewer", "adversarial-reviewer", "transcriber")
 DOIA_PACKS = (
@@ -154,6 +193,18 @@ DOIA_PACKS = (
     "linux-platform",
     "local-llm-routing",
 )
+
+
+def load_gen_wiki() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("gen_wiki_docs", ROOT / "scripts" / "gen_wiki.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+GEN_WIKI = load_gen_wiki()
+DOIA_TAG = GEN_WIKI.read_doia_tag()
 
 
 def doia_links(text: str) -> list[str]:
@@ -172,7 +223,7 @@ def shapes_named(text: str) -> set[str]:
 
 def test_personas_reference_doia_at_a_tag_and_carry_no_copies() -> None:
     page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
-    assert doia_links(page) and f"{DOIA}/tree/v0.2.0" in page
+    assert doia_links(page) and f"{DOIA}/tree/{DOIA_TAG}" in page
     assert moving_doia_links(page) == []
     assert not (ROOT / "examples" / "personas").exists()
     assert "examples/personas" not in "\n".join(p.read_text(encoding="utf-8") for p in public_pages())
@@ -187,13 +238,192 @@ def test_the_tag_guard_bites() -> None:
     assert moving_doia_links(f"[x]({DOIA}/blob/v0.2.0/templates/lead.md)") == []
 
 
+def test_the_pinned_doia_tag_is_one_value_and_the_page_uses_only_it() -> None:
+    assert re.fullmatch(r"v\d+\.\d+\.\d+", DOIA_TAG)
+    page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
+    refs = GEN_WIKI.doia_tag_refs(page)
+    assert refs, "the page names no DoIA tag at all"
+    assert set(refs) == {DOIA_TAG}
+
+
+def test_the_doia_tag_guard_bites() -> None:
+    page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
+    stale = page.replace(DOIA_TAG, "v0.2.0")
+    assert set(GEN_WIKI.doia_tag_refs(stale)) == {"v0.2.0"}
+    assert DOIA_TAG not in GEN_WIKI.doia_tag_refs(stale)
+    mixed = page.replace(DOIA_TAG, "v0.2.0", 1)
+    assert set(GEN_WIKI.doia_tag_refs(mixed)) == {DOIA_TAG, "v0.2.0"}
+    with pytest.raises(GEN_WIKI.WikiError, match=r"v0\.2\.0"):
+        GEN_WIKI.check_doia_tag({"personas.md": mixed}, DOIA_TAG)
+    GEN_WIKI.check_doia_tag({"personas.md": page}, DOIA_TAG)
+
+
+DOIA_URL = "https://github.com/ChiefGyk3D/department-of-internal-arguments"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DoIA v0.3.1-rc1 is out.",
+        "DoIA v0.3.1.2 is out.",
+        "DoIA xv0.2.0 is out.",
+        "DoIA v0.3.1+build5 is out.",
+        f"[x]({DOIA_URL}/tree/v0.3.1-rc1)",
+        "clone --branch v0.3.1.2 here",
+        "then checkout v0.2.0",
+        f"[x]({DOIA_URL}/blob/v0.2.0/templates/lead.md)",
+        "This page describes Department of Internal Arguments v0.2.0.",
+        "DoIA **v0.2.0** is out.",
+        "DoIA (v0.2.0) is out.",
+        "DoIA, v0.2.0 is out.",
+        "DoIA at v0.2.0 is out.",
+        "DoIA@v0.2.0 is out.",
+        "doia v0.2.0 is out.",
+        "department-of-internal-arguments v0.2.0 is out.",
+        "DoIA v0.2.0-based notes.",
+        "DoIA v0.3.1_x is out.",
+        "git clone -b v0.2.0 url",
+        "git clone --branch=v0.2.0 url",
+        "git clone --branch='v0.2.0' url",
+        "git checkout -f v0.2.0",
+        "git switch --detach v0.2.0",
+        "git checkout 'v0.2.0'",
+        'git checkout "v0.2.0"',
+        f"[x]({DOIA_URL}/archive/refs/tags/v0.2.0.zip)",
+        f"[x]({DOIA_URL}/releases/download/v0.2.0/file.tar.gz)",
+        f"[x]({DOIA_URL}/compare/v0.2.0...v0.3.1)",
+        f"[x]({DOIA_URL}/compare/v0.3.1...v0.2.0)",
+        f"[x]({DOIA_URL}/commits/v0.2.0)",
+        f"[x]({DOIA_URL}/raw/v0.2.0/README.md)",
+        f"[x]({DOIA_URL}/tree/V0.2.0)",
+        f"[x]({DOIA_URL}/tree/refs/tags/v0.2.0)",
+        "DoIA tag: v0.2.0",
+        "DoIA release tag v0.2.0",
+        "DoIA releases v0.2.0",
+        "DoIA is v0.2.0",
+        "DoIA — v0.2.0",
+        "DoIA release: v0.2.0",
+        "git checkout tags/v0.2.0",
+        "git checkout refs/tags/v0.2.0",
+        "git switch -c x v0.2.0",
+        "git checkout -B x v0.2.0",
+        f"[x]({DOIA_URL}/compare/main...v0.2.0)",
+        f"[x]({DOIA_URL}/zipball/v0.2.0)",
+        f"[x]({DOIA_URL}/tarball/v0.2.0)",
+        "https://raw.githubusercontent.com/ChiefGyk3D/department-of-internal-arguments/v0.2.0/README.md",
+        "https://api.github.com/repos/ChiefGyk3D/department-of-internal-arguments/zipball/v0.2.0",
+        "https://api.github.com/repos/ChiefGyk3D/department-of-internal-arguments/contents/x.md?ref=v0.2.0",
+    ],
+)
+def test_a_doia_reference_that_is_not_exactly_the_pin_fails(text: str) -> None:
+    with pytest.raises(GEN_WIKI.WikiError, match=r"scripts/doia-tag\.txt"):
+        GEN_WIKI.check_doia_tag({"personas.md": text}, "v0.3.1")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DoIA v0.3.1 is out.",
+        "DoIA v0.3.1, then more.",
+        "(DoIA v0.3.1) is out.",
+        "DoIA v0.3.1.",
+        f"[x]({DOIA_URL}/tree/v0.3.1)",
+        "clone --branch v0.3.1 url",
+        "-C dir checkout v0.3.1",
+        "DoIA v0.3.1 needs Python v3.12.1 and uses actions/checkout@v4.1.0 from another project.",
+        "Python v3.12.1 here.\n\nAnd actions/checkout@v4.1.0 there.",
+        "See [other](https://github.com/example/other/tree/v9.9.9) for the other project.",
+        "DoIA **v0.3.1** and DoIA (v0.3.1), DoIA, v0.3.1, DoIA at v0.3.1, DoIA@v0.3.1, doia v0.3.1.",
+        "DoIA v0.3.1-based personas are listed here.",
+        "git clone -b v0.3.1 url && git checkout -f v0.3.1 && git switch --detach v0.3.1 && git checkout 'v0.3.1'",
+        "git clone --branch=v0.3.1 url",
+        f"[x]({DOIA_URL}/compare/v0.3.1...v0.3.1) and [y]({DOIA_URL}/archive/refs/tags/v0.3.1.zip)",
+        f"[x]({DOIA_URL}/releases/download/v0.3.1/a) [y]({DOIA_URL}/commits/v0.3.1) [z]({DOIA_URL}/raw/v0.3.1/a)",
+        "See [other](https://github.com/example/other/archive/refs/tags/v9.9.9.zip) and Python v3.12.1.",
+        "DoIA needs Python v3.12.1; DoIA, with actions/checkout@v4.1.0, runs there.",
+        "DoIA is great with Python v3.12.1.",
+        "DoIA tag: v0.3.1 and DoIA release tag v0.3.1 and DoIA releases v0.3.1 and DoIA is v0.3.1.",
+        "DoIA — v0.3.1, DoIA release: v0.3.1.",
+        "git checkout tags/v0.3.1 && git switch -c x v0.3.1 && git checkout -B x v0.3.1",
+        f"[x]({DOIA_URL}/compare/main...v0.3.1) [y]({DOIA_URL}/zipball/v0.3.1) [z]({DOIA_URL}/tarball/v0.3.1)",
+        "https://raw.githubusercontent.com/ChiefGyk3D/department-of-internal-arguments/v0.3.1/README.md",
+        "https://api.github.com/repos/ChiefGyk3D/department-of-internal-arguments/contents/x.md?ref=v0.3.1",
+        "https://api.github.com/repos/example/other/contents/x.md?ref=v9.9.9 and /example/other/zipball/v9.9.9",
+    ],
+)
+def test_other_versions_and_the_exact_pin_pass(text: str) -> None:
+    GEN_WIKI.check_doia_tag({"personas.md": text}, "v0.3.1")
+
+
+def test_a_missing_personas_page_fails_loudly_when_required() -> None:
+    with pytest.raises(GEN_WIKI.WikiError, match=r"personas\.md"):
+        GEN_WIKI.check_doia_tag({"home.md": "# H\n"}, "v0.3.1", require_page=True)
+    GEN_WIKI.check_doia_tag({"home.md": "# H\n"}, "v0.3.1")
+
+
+def test_a_renamed_page_is_still_checked() -> None:
+    with pytest.raises(GEN_WIKI.WikiError, match=r"scripts/doia-tag\.txt"):
+        GEN_WIKI.check_doia_tag({"people.md": "DoIA v0.2.0."}, "v0.3.1")
+
+
+def test_the_build_of_this_repository_requires_the_personas_page(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "home.md").write_text("# H\n", encoding="utf-8")
+    with pytest.raises(GEN_WIKI.WikiError, match=r"personas\.md"):
+        GEN_WIKI.render(docs, ROOT, None)
+
+
+def test_personas_describe_the_pinned_release() -> None:
+    page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
+    for phrase in (
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "--layout user",
+        "--overlay",
+        "--list-managed",
+        "--force-edited",
+        "measured notes on context-change evictions",
+    ):
+        assert phrase in page, phrase
+    # A historical sentence carries no version, or a bump of the pin would falsify it or fail the build.
+    # Whole sentences, split where a period is followed by whitespace, so the dots inside a version never end one.
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", page) if "measured notes on context-change evictions" in s]
+    assert len(sentences) == 1
+    assert not re.search(r"v\d+\.\d+", sentences[0]), sentences[0]
+    assert "CHANGELOG" in sentences[0]
+
+
+def test_the_pin_is_single_sourced_so_a_bump_needs_no_other_edit() -> None:
+    page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
+    bumped = page.replace(DOIA_TAG, "v0.99.0")
+    GEN_WIKI.check_doia_tag({"personas.md": bumped}, "v0.99.0")
+    with pytest.raises(GEN_WIKI.WikiError, match=r"scripts/doia-tag\.txt"):
+        GEN_WIKI.check_doia_tag({"personas.md": bumped}, DOIA_TAG)
+    # A hardcoded historical version left in the page fails the bump, which is what the rephrasing avoids.
+    hardcoded = bumped + f"\nDoIA release {DOIA_TAG} added measured notes.\n"
+    with pytest.raises(GEN_WIKI.WikiError, match=DOIA_TAG.replace(".", r"\.")):
+        GEN_WIKI.check_doia_tag({"personas.md": hardcoded}, "v0.99.0")
+
+
+@pytest.mark.parametrize("filler", [" ", "\n", " \n", "\t ", "*", ",", "( "])
+def test_the_doia_reference_scan_is_linear_on_long_separator_runs(filler: str) -> None:
+    import time
+
+    for text in ("DoIA" + filler * 20_000 + "x", "DoIA" + filler * 20_000 + "v0.2.0", "DoIA release" + filler * 20_000):
+        start = time.perf_counter()
+        GEN_WIKI.doia_tag_refs(text)
+        assert time.perf_counter() - start < 0.5, repr(text[:20])
+    assert GEN_WIKI.doia_tag_refs("DoIA" + filler * 1_000 + "v0.2.0") == ["v0.2.0"]
+
+
 def test_personas_name_every_role_pack_and_the_shared_rules() -> None:
     page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
     for name in (*DOIA_ROLES, *DOIA_PACKS):
         assert f"`{name}`" in page, name
     for phrase in ("`MODEL:`", "blocking", "important", "minor", "never push", "templates/lead.md", "--update"):
         assert phrase in page, phrase
-    assert "install.py" in page and "--branch v0.2.0" in page
+    assert "install.py" in page and f"--branch {DOIA_TAG}" in page
 
 
 def test_every_shape_the_personas_page_names_exists_in_agents_yaml() -> None:

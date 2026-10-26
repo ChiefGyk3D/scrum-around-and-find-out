@@ -131,6 +131,8 @@ def test_a_file_owned_by_root_is_refused_for_an_ordinary_user(safe: Path, monkey
         return info
 
     monkeypatch.setattr(os, "fstat", as_root)
+    # A suite running as root would otherwise compare root with root and see no mismatch.
+    monkeypatch.setattr(trust, "effective_uid", lambda: os.geteuid() + 12345)
     with pytest.raises(ConfigError, match="not owned by this user"):
         trusted_regular_file(safe)
 
@@ -153,8 +155,27 @@ def test_a_group_writable_parent_is_refused(safe: Path) -> None:
         safe.parent.chmod(0o700)
 
 
-def test_a_sticky_world_writable_parent_owned_by_the_user_is_still_refused(safe: Path) -> None:
-    # only a root-owned sticky directory (like /tmp) is tolerated
+def test_a_sticky_world_writable_parent_owned_by_the_user_is_still_refused(
+    safe: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only a root-owned sticky directory (like /tmp) is tolerated. A suite running as root sees a
+    # root-owned parent, so report it as belonging to a simulated ordinary user; otherwise the
+    # directory already belongs to the ordinary user running the suite.
+    if os.geteuid() == 0:
+        simulated = 12345
+        parent_inode = os.stat(safe.parent).st_ino
+        real = os.fstat
+
+        def as_user(fd: int) -> os.stat_result:
+            info = real(fd)
+            if stat.S_ISDIR(info.st_mode) and info.st_ino == parent_inode:
+                fields = list(info)
+                fields[4] = simulated
+                return os.stat_result(fields)
+            return info
+
+        monkeypatch.setattr(trust, "effective_uid", lambda: simulated)
+        monkeypatch.setattr(os, "fstat", as_user)
     safe.parent.chmod(0o1777)
     try:
         with pytest.raises(ConfigError, match=r"directory .* writable by its group or by others"):

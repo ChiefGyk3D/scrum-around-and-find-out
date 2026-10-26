@@ -38,6 +38,9 @@ lead session that waits in the foreground is flagged (`warn`) or denied (`block`
 message that says to rerun it with `run_in_background` or hand it to a Sonnet monitor agent. The message and the log carry
 the rule name only, never the command.
 
+What the guard does not decide is what to do about a hung step. That is orchestrator rule 4, in [The orchestrator](orchestrator.md): if a
+standing ruling covers it, act on it and report; otherwise report it with evidence and a recommendation.
+
 A small tokenizer splits the call into simple commands, and a wait counts only at **command position**: the first word
 after leading `VAR=value` assignments, the shell keywords `do`, `then`, `else`, `if`, `!` and `{`, and these transparent
 wrappers (with their options and operands): `time`, `nohup`, `command`, `exec`, `nice`, `env`, `sudo`, `timeout`,
@@ -212,6 +215,24 @@ addresses (including IPv4-mapped IPv6 and decimal, octal and hex spellings) are 
 and again at connect time. A name is resolved once, every address it returns is checked, and the connection goes to the
 checked address with the original `Host` header, so a DNS answer that changes between the check and the connection has
 no effect.
+
+## Log append wait
+
+`SAFO_APPEND_LOCK_TIMEOUT` is how many seconds a log append waits for another writer's lock. Default `3.0`; the value
+is read once when `safo` starts. A value that is not a number, not finite (`nan`, `inf`, `1e999`) or not above 0 is
+ignored: the default is used and one line naming the variable goes to stderr (stdout stays the hook's JSON). A value above
+the maximum of `5` is clamped to 5. A bad value never stops `safo` from starting.
+
+The value is read with Python's `float` syntax, so `1_0`, non-ASCII digits and tiny values such as `1e-5` count as
+numbers; anything above 5 (including the underscore forms) is clamped.
+
+Budget: the host gives the guard 10 s. Its lookups stop 2 s earlier, at 8 s, and the append can then wait up to the
+setting, so the worst case is 8 s plus the wait: 11 s at the 3 s default and 13 s at the 5 s clamp, both past the host's
+10 s. The clamp bounds the setting; it does not fix the budget. The guard currently writes its decision after the
+append, so a denial computed in `block` mode is lost if the host kills the hook during the wait (a late failure is
+different: the timeout is an error and degrades visibly). Writing the decision before the log is being done in PR #116
+(issue #97), and the budget will be restated there. Whether Claude Code allows or blocks a hook it kills at the timeout is
+not verified. The other lock users (mode, probe state) keep their 0.5 s wait.
 
 ## Known limits
 
