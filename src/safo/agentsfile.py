@@ -18,7 +18,7 @@ import yaml
 
 from safo import netguard
 from safo.errors import ConfigError
-from safo.leadwait import MAX_SLEEP_THRESHOLD_SECONDS, MIN_REASON_CHARS
+from safo.leadwait import MAX_SLEEP_THRESHOLD_SECONDS, MIN_REASON_ALNUM, MIN_REASON_CHARS, real_reason
 from safo.profile import Budget, Profile, check_profiles, parse_profile, template_path_problem
 from safo.schema import Reader, _safe_load
 from safo.trust import read_trusted_regular_file
@@ -376,9 +376,11 @@ def _lead_wait(r: Reader, value: object) -> LeadWait:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", repo):
             raise r.fail(f"{path}.repo", "expected owner/name")
         reason = item.get("reason")
-        if not isinstance(reason, str) or len(reason.strip()) < MIN_REASON_CHARS:
+        if not isinstance(reason, str) or not real_reason(reason):
             raise r.fail(
-                f"{path}.reason", f"an exemption needs a stated reason of at least {MIN_REASON_CHARS} characters"
+                f"{path}.reason",
+                f"an exemption needs a stated reason: at least {MIN_REASON_CHARS} characters, "
+                f"{MIN_REASON_ALNUM} of them letters or digits",
             )
         exemptions.append(LeadWaitExemption(repo, reason.strip()))
     return LeadWait(mode, seconds, tuple(exemptions))

@@ -54,10 +54,26 @@ and `echo sleep 60` are not waits.
 A sleep counts for a loop only when it is in that loop's body: `while read l; do echo "$l"; done < f; sleep 1` is a
 one-second pause after a loop, not a poll.
 
-Quoting decides what is code. Single-quoted text, double-quoted text, heredoc bodies and comments are data. Code inside
-`$(...)` and backticks is scanned, also inside double quotes (`echo "$(sleep 300)"` waits). The string given to
-`bash -c`, `sh -c`, `zsh -c` (also `-lc`) and the arguments of `eval` are code the call runs, so they are scanned too
-(to a depth of 3). The same words as arguments to any other command are data.
+Quoting decides what is code. Single-quoted text, double-quoted text, quoted heredoc bodies and comments are data.
+Code inside `$(...)`, backticks, `${...}` (for example `${value:-$(sleep 60)}`) and the body of an unquoted heredoc
+(`cat <<EOF` followed by a line `$(sleep 60)`) is scanned, also inside double quotes. A heredoc delimiter is read as the
+complete shell word, quote-removed, the way bash reads it: `<<EOF`, `<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<E'OF'`,
+`<<$'EOF'` and `<<-EOF` all end at a line that is exactly `EOF`. If any part of the delimiter is quoted the body is
+opaque data; otherwise its substitutions run and are scanned. The following also count as code the call runs, so they
+are scanned: the string given to `bash -c`, `sh -c`, `zsh -c` (also `-lc`), the arguments of `eval`, the split string
+of `env -S` / `env --split-string`, and the command that `xargs` and `find -exec` (also `-execdir`, `-ok`, `-okdir`)
+run. The same words as arguments to any other command are data.
+
+A function defined in the call (`name() { ... }`, `function name { ... }`) does not wait by being defined. Its body is
+scanned only if the same call later invokes the name at command position; `echo name` does not. A function body that is
+not a brace group, such as `name() ( ... )`, is read as live code.
+
+**Nesting beyond three levels is its own verdict.** Executable syntax (`$(...)`, backticks, `${...}`, `bash -c` and
+`eval` strings) nested deeper than 3 cannot be checked here, so the hook does not pass it silently: it reports
+`unscannable-depth`, which `block` mode denies and `warn` mode shows as a warning. The message names the rule and the
+limit and never echoes the command. The same applies to a call so deeply nested that the scanner runs out of stack. A
+`# lead-wait: ok - <reason>` marker can exempt it, like any other flagged call. Simplify the command, or run it with
+`run_in_background`.
 
 Not flagged: `sleep 1` or `sleep 9` in a one-shot command (below the threshold, a pause and not a wait); the words
 `gh run watch` in a commit message, a quoted string, a comment, an `echo` or a `cat <<'EOF'` heredoc body.
@@ -89,15 +105,20 @@ Exemptions are never silent:
 - A repository entry without a `reason` (at least 12 characters after trimming) makes `agents.yaml` fail to load, so a
   reasonless exemption is refused outright. It applies to the repository bound at SessionStart, the same binding the
   tracking opt-out uses, and to no other.
-- A single call can carry a comment, `# lead-wait: ok - <reason>`, with a reason of at least 12 characters. The marker
-  counts only in a real shell comment: a `#` that begins a word outside quotes. The same text inside a quoted string
-  (`echo 'lead-wait: ok - ...'`, a commit message), a heredoc body, after an escaped `\#`, or as plain arguments is data
-  and exempts nothing. The call is one decision, so the comment may sit on the wait's line or on another line of the
-  same call. A marker with no reason, or a placeholder, is ignored and the call is flagged; the message says a reason is
-  required. An exempted call is allowed and logged as `allow` with the `lead-waits` rule, so exemptions can be counted.
-  The reason itself stays in the transcript and is never written to the log.
+- A single call can carry a comment, `# lead-wait: ok - <reason>`, with a stated reason: at least 12 characters, of
+  which at least 8 are letters or digits (Unicode letters and digits count). `!!!!!!!!!!!!` is twelve characters and
+  no reason. The marker counts only in a real shell comment: a `#` that begins a word outside quotes. The same text
+  inside a quoted string (`echo 'lead-wait: ok - ...'`, a commit message), inside any heredoc body whatever the
+  spelling of its delimiter, after an escaped `\#`, or as plain arguments is data and exempts nothing. The call is one
+  decision, so the comment may sit on the wait's line or on another line of the same call. A marker with no reason, or a
+  placeholder, is ignored and the call is flagged; the message says a reason is required. An exempted call is allowed
+  and logged as `allow` with the `lead-waits` rule, so exemptions can be counted. The reason itself stays in the
+  transcript and is never written to the log.
+- A repository exemption in `agents.yaml` follows the same reason rule (12 characters, 8 of them letters or digits), or
+  the file fails to load.
 - Like the approval token, both are speed bumps: an agent with shell access can type a marker. Their job is to make a
-  deliberate wait a written decision.
+  deliberate wait a written decision. The rule is a speed bump against accidents, not a sandbox: an actor who can
+  already run arbitrary Bash as the same user can also edit the guard's config, mode file and logs.
 
 ## Failing safe
 
@@ -155,17 +176,26 @@ no effect.
 
 ## Known limits
 
-- The lead-never-waits rule is a tokenizer, not a shell parser. It does not see a wait built by a variable
-  (`cmd="sleep 60"; $cmd`), a loop or `sleep` in a script file the call merely runs (`bash poll.sh`), a function defined
-  earlier in the session, `xargs sleep` or `find -exec` (the command is an argument, not at command position), `watch`,
-  `timeout ... tail -f`, or code in an unquoted heredoc body (`$(...)` there). It does not follow `ssh host 'sleep 60'`
-  (the wait is remote) or a string assembled at run time and piped to a shell. It scans `bash -c '...'`, `eval`,
-  `$(...)` and backticks only to a depth of 3. Shell grammar is approximated: `case` arms, `{ ...; }` and function
-  bodies are read as plain commands, so a `sleep` in a function body written in the same call is flagged although the
-  call may never run it; a here-string `<<<`, `${...}` and `$((...))` are skipped as opaque words. It would rather miss
-  these than flag text. Whether a given Claude Code version puts `agent_id` on sub-agent events was not verified in a
-  live SAFO session; if it did not, a sub-agent's watch would be flagged as the lead's (a warning in `warn` mode, a
-  denial in `block`). Test that in a disposable session before `block`.
+- The lead-never-waits rule is a tokenizer, not a shell parser. It is a speed bump against accidents, not a sandbox:
+  an actor who can already run arbitrary Bash as the same user can also edit the guard's config, mode file and logs.
+  These cannot be decided from the text of one call. Each is allowed, and each has a test that asserts exactly that, so
+  the docs and the code cannot drift:
+  - [limit: variable-built command] `cmd='sleep 60'; $cmd`.
+  - [limit: variable passed to a shell] `c='sleep 60'; bash -c "$c"`: the string is a variable, not text.
+  - [limit: encoded payload piped to a shell] `echo c2xlZXAgNjA= | base64 -d | sh`.
+  - [limit: interpreter] `python3 -c 'import time; time.sleep(60)'` and any other language's sleep or poll.
+  - [limit: script file] `bash poll.sh`: the file is not read, so a loop in it is not seen.
+  - [limit: alias] `alias w='sleep 60'; w`: an alias defined earlier or in a startup file.
+  - [limit: remote command] `ssh host 'sleep 60'`: the wait runs elsewhere (and still holds the thread).
+  Also not seen: `watch`, `timeout ... tail -f`, a function defined in an earlier call, and a wait inside a function
+  body that is not a brace group. Shell grammar is approximated: `case` arms are read as plain commands, a here-string
+  `<<<` is skipped, and `${...}` is read for its substitutions only. Executable syntax nested deeper than 3 levels is
+  reported as `unscannable-depth` rather than guessed at. The cheap pre-check tokenizes any call that contains a quote,
+  backslash, `$` or backtick, so a word built from pieces (`sl''eep 60`) is not missed; a call with none of those and
+  none of `sleep`, `watch`, `checks` reads no configuration and logs nothing. It would rather miss the cases above
+  than flag text. Whether a given Claude Code version puts `agent_id` on sub-agent events was not verified in a live
+  SAFO session; if it did not, a sub-agent's watch would be flagged as the lead's (a warning in `warn` mode, a denial in
+  `block`). Test that in a disposable session before `block`.
 
 - The approval token is forgeable (see rule 2). A channel the model cannot write to, such as a signed or
   session-bound approval the maintainer issues outside the conversation, is future work; v0.1.0 has none, and nothing in

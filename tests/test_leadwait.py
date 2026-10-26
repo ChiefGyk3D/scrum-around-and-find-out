@@ -67,7 +67,10 @@ LOOKALIKES = [
     'git commit -m "docs: never run gh run watch in the lead session"',
     "git commit -m 'use gh pr checks --watch only in a monitor agent'",
     "cat <<'EOF'\ngh run watch 1\nsleep 600\nwhile true; do sleep 5; done\nEOF",
-    "cat <<EOF > docs/note.md\nthe lead never runs `gh run watch`\nEOF\ngit add docs/note.md",
+    # Round 2: this lookalike had an UNQUOTED delimiter, but bash really runs `gh run watch` in backticks there
+    # (finding 3), so the old expectation encoded the bug. The delimiter is quoted now; the unquoted form is flagged
+    # in BODY_EXPANSION.
+    "cat <<'EOF' > docs/note.md\nthe lead never runs `gh run watch`\nEOF\ngit add docs/note.md",
     "cat <<-EOF\n\tgh pr checks --watch\n\tEOF\necho ok",
     "echo 'sleep 600'",
     "# gh run watch is forbidden here\nls",
@@ -464,7 +467,7 @@ NOT_AT_POSITION = [
     "gh pr view 1 --comments 'sleep 600' --json body",
     "echo gh run watch # real comment",
     "ssh host 'sleep 600'",  # runs elsewhere
-    "echo foo | xargs -I{} sleep 600",  # documented limit: the sleep is xargs's argument, not a command here
+    # (round 2: `xargs sleep 600` used to be listed here as a limit; xargs is now a wrapper, see the INDIRECTION cases)
 ]
 
 
@@ -484,13 +487,15 @@ def test_shell_string_bodies_and_eval_are_scanned_and_echoing_them_is_not() -> N
     assert leadwait.find_waits("echo bash -c 'gh run watch 1'", THRESHOLD) == ()
     assert leadwait.find_waits("bash script.sh", THRESHOLD) == ()  # the script file is not read
     deep = 'bash -c \'bash -c "bash -c \\"bash -c \\\\\\"sleep 600\\\\\\"\\""\''
-    assert leadwait.find_waits(deep, THRESHOLD) == ()  # past MAX_DEPTH it stops looking, and does not crash
+    # Round 2: this used to assert (), which blessed a fail-open (a depth-four wait was silently allowed). Past
+    # MAX_DEPTH the verdict is now explicit: unscannable-depth, which block mode denies.
+    assert leadwait.find_waits(deep, THRESHOLD) == ("unscannable-depth",)
 
 
 def test_deeply_nested_substitutions_do_not_crash_the_scanner() -> None:
     command = "echo " + "$(" * 500 + "sleep 600" + ")" * 500
-    assert leadwait.find_waits(command, THRESHOLD) == ()
-    assert leadwait.find_waits("echo " + "`" * 5000, THRESHOLD) == ()
+    assert leadwait.find_waits(command, THRESHOLD) == ("unscannable-depth",)  # round 2: was (), a fail-open
+    leadwait.find_waits("echo " + "`" * 5000, THRESHOLD)  # only has to return
 
 
 # -- thread 5: the install and guard text says Bash as well ----------------------------------------------------
@@ -509,6 +514,324 @@ def test_the_install_messages_and_the_guard_help_say_the_guard_covers_bash(
             hooks(*argv, home=_private_home)
         helped = " ".join(capsys.readouterr().out.split())
         assert "Agent and Bash tools" in helped, argv
+
+
+# -- round 2: an adversarial review of the tokenizer -------------------------------------------------------------
+
+# Every way bash accepts to spell the delimiter EOF. The scanner must read the COMPLETE word and remove its quotes.
+DELIMITER_SPELLINGS = ["EOF", "'EOF'", '"EOF"', "\\EOF", "E'OF'", 'E"O"F', "EO\\F", "$'EOF'", '$"EOF"', "E$'O'F"]
+QUOTED_SPELLINGS = [d for d in DELIMITER_SPELLINGS if d != "EOF"]
+
+HEREDOC_LATER_WAIT = [f"cat <<{d}\nharmless body\nEOF\nsleep 60" for d in DELIMITER_SPELLINGS] + [
+    f"cat <<-{d}\n\tharmless body\n\tEOF\nsleep 60" for d in DELIMITER_SPELLINGS
+]
+HEREDOC_FORGED_MARKER = [
+    f"sleep 45\ncat <<{d}\n# lead-wait: ok - waiting for an intentionally approved operation\nEOF"
+    for d in DELIMITER_SPELLINGS
+] + [
+    f"sleep 45\ncat <<-{d}\n\t# lead-wait: ok - waiting for an intentionally approved operation\n\tEOF"
+    for d in DELIMITER_SPELLINGS
+]
+
+
+@pytest.mark.parametrize("command", HEREDOC_LATER_WAIT)
+def test_finding_1_a_quoted_or_concatenated_heredoc_delimiter_does_not_hide_a_later_wait(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ("long-sleep",)
+    assert denied(_private_home, agents, command)
+
+
+def test_finding_1_the_review_repro_is_denied(_private_home: Path, agents: Path) -> None:
+    assert denied(_private_home, agents, "cat <<E'OF'\nharmless body\nEOF\nsleep 60")
+
+
+@pytest.mark.parametrize("command", HEREDOC_FORGED_MARKER)
+def test_finding_2_heredoc_data_cannot_forge_the_exemption_marker(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert leadwait.marker_reason(command) == ""
+    assert denied(_private_home, agents, command)
+
+
+def test_finding_2_the_review_repro_is_denied(_private_home: Path, agents: Path) -> None:
+    command = "sleep 45\ncat <<\\EOF\n# lead-wait: ok - waiting for an intentionally approved operation\nEOF"
+    assert denied(_private_home, agents, command)
+
+
+def test_the_delimiter_word_must_match_whole_not_by_prefix() -> None:
+    # <<EOFX ends at a line that is exactly EOFX; the line EOF and the sleep before it are body
+    assert leadwait.find_waits("cat <<EOFX\nEOF\nsleep 60\nEOFX", THRESHOLD) == ()
+    assert leadwait.find_waits("cat <<E\nbody\nE\nsleep 60", THRESHOLD) == ("long-sleep",)
+    assert (
+        leadwait.find_waits("cat <<EOF\nsleep 60\n EOF\nEOF\necho ok", THRESHOLD) == ()
+    )  # a space is not a terminator
+    assert leadwait.find_waits("cat <<-EOF\n\tsleep 60\n\tEOF\necho ok", THRESHOLD) == ()
+
+
+BODY_EXPANSION = [
+    ("cat <<EOF\n$(sleep 60)\nEOF", "long-sleep"),
+    ("cat <<EOF\nnow: `sleep 60`\nEOF", "long-sleep"),
+    ("cat <<EOF\nvalue ${x:-$(sleep 60)}\nEOF", "long-sleep"),
+    ("cat <<-EOF\n\t$(gh run watch 1)\n\tEOF", "gh-run-watch"),
+    ('cat <<EOF\n"$(sleep 60)"\nEOF', "long-sleep"),  # quotes are literal in a body, the substitution still runs
+    ("cat <<EOF\n$(sleep 60)\nEOF\necho after", "long-sleep"),
+]
+BODY_OPAQUE = [
+    "cat <<'EOF'\n$(sleep 60)\nEOF",
+    'cat <<"EOF"\n$(sleep 60)\nEOF',
+    "cat <<\\EOF\n$(sleep 60)\nEOF",
+    "cat <<E'OF'\n`sleep 60`\nEOF",
+    "cat <<EOF\n\\$(sleep 60)\nEOF",  # an escaped $ is text even in an unquoted body
+    "cat <<EOF\n\\`sleep 60\\`\nEOF",
+    "cat <<EOF\nsleep 60 is just text\nEOF",
+    "cat <<EOF\n$((1 + 2)) and $HOME and ${HOME}\nEOF",
+]
+
+
+@pytest.mark.parametrize(("command", "kind"), BODY_EXPANSION)
+def test_finding_3_an_unquoted_heredoc_body_runs_its_substitutions(command: str, kind: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == (kind,)
+
+
+@pytest.mark.parametrize("command", BODY_OPAQUE)
+def test_finding_3_a_quoted_heredoc_body_and_escaped_text_stay_data(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+PARAMETER_EXPANSION = [
+    ("echo ${value:-$(sleep 60)}", "long-sleep"),
+    ('echo "${value:-$(sleep 60)}"', "long-sleep"),
+    ("echo ${value:-`sleep 60`}", "long-sleep"),
+    ('echo ${value:-"$(sleep 60)"}', "long-sleep"),
+    ("echo ${a:-${b:-$(gh run watch 1)}}", "gh-run-watch"),
+    ("echo $(( $(sleep 60) + 1 ))", "long-sleep"),  # arithmetic can run a substitution too
+    ("echo $(( a[$(sleep 60)] ))", "long-sleep"),
+]
+PARAMETER_PLAIN = [
+    "echo ${value:-default}",
+    "echo ${#value} ${value%%a*} ${value/sleep 60/x}",
+    "echo ${value:-'$(sleep 60)'}",  # single quotes inside ${} keep the text literal
+    "echo ${value:-\\$(sleep 60)}",
+    'echo $(( 1 + 2 )) ${x:-} "${y}"',
+]
+
+
+@pytest.mark.parametrize(("command", "kind"), PARAMETER_EXPANSION)
+def test_finding_4_substitutions_inside_parameter_and_arithmetic_expansion_are_scanned(command: str, kind: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == (kind,)
+
+
+@pytest.mark.parametrize("command", PARAMETER_PLAIN)
+def test_finding_4_plain_parameter_expansions_are_not_waits(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+# Executable syntax nested deeper than MAX_DEPTH cannot be checked, so it is its own verdict: never silently allowed.
+TOO_DEEP = [
+    "echo $(echo $(echo $(echo $(sleep 60))))",  # the review repro: depth four
+    "echo $(echo $(echo $(echo $(echo ok))))",  # nothing waits in it, but it cannot be known: still unscannable
+    "echo `echo $(echo $(echo $(sleep 60)))`",
+    'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"sleep 600\\\\\\"\\"\'"',
+    "echo ${a:-${b:-${c:-${d:-$(sleep 60)}}}}",
+    "cat <<EOF\n$(echo $(echo $(echo $(sleep 60))))\nEOF",
+    "echo " + "$(" * 500 + "sleep 600" + ")" * 500,
+]
+
+
+@pytest.mark.parametrize("command", TOO_DEEP)
+def test_finding_5_nesting_beyond_the_limit_is_an_explicit_verdict_not_a_pass(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ("unscannable-depth",)
+    assert denied(_private_home, agents, command)
+
+
+def test_finding_5_the_deny_text_names_the_rule_and_not_the_command(_private_home: Path, agents: Path) -> None:
+    set_mode(_private_home, "block")
+    out = guard(_private_home, agents, bash("echo $(echo $(echo $(echo $(sleep 60)))) sentinel-arg-xyz"))[1]
+    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "unscannable-depth" in reason and "sentinel-arg-xyz" not in out
+    assert read_log(_private_home)[-1]["rules"] == ["lead-waits"]
+
+
+def test_finding_5_warn_mode_shows_a_visible_warning(_private_home: Path, agents: Path) -> None:
+    out = guard(_private_home, agents, bash("echo $(echo $(echo $(echo $(sleep 60))))"))[1]
+    data = json.loads(out)
+    assert "unscannable-depth" in data["systemMessage"] and "warn mode: allowed" in data["systemMessage"]
+
+
+def test_finding_5_nesting_at_the_limit_is_still_scanned() -> None:
+    assert leadwait.find_waits("echo $(echo $(echo $(sleep 60)))", THRESHOLD) == ("long-sleep",)
+    assert leadwait.find_waits("echo $(echo $(echo $(echo $(echo ok))))", THRESHOLD) == ("unscannable-depth",)
+    assert leadwait.find_waits("echo $(echo $(echo $(echo ok)))", THRESHOLD) == ()
+
+
+INDIRECTION = [
+    ("env -S 'sleep 60'", "long-sleep"),
+    ("env --split-string='sleep 60'", "long-sleep"),
+    ("env --split-string 'gh run watch 1'", "gh-run-watch"),
+    ("env -S'gh pr checks 1 --watch'", "gh-pr-checks-watch"),
+    ("env -i FOO=1 -S 'sleep 60'", "long-sleep"),
+    ("sudo env -S 'sleep 60'", "long-sleep"),
+    ("xargs sleep 60", "long-sleep"),
+    ("xargs -n1 sleep 60", "long-sleep"),
+    ("echo foo | xargs -I{} sleep 600", "long-sleep"),
+    ("echo foo | xargs -I {} -P 4 gh run watch {}", "gh-run-watch"),
+    ("echo foo | xargs --max-args=1 sleep 60", "long-sleep"),
+    ("find . -exec sleep 60 \\;", "long-sleep"),
+    ("find . -name x -execdir gh run watch {} +", "gh-run-watch"),
+    ("find . -exec sh -c 'sleep 60' \\;", "long-sleep"),
+]
+INDIRECTION_QUIET = [
+    "xargs echo sleep 60",  # xargs runs echo
+    "xargs",  # runs echo
+    "env -S 'echo sleep 60'",
+    "find . -name sleep -print",
+    "find . -exec echo sleep 60 \\;",
+    "find . -name '*.md' -exec grep -l 'gh run watch' {} +",
+]
+
+
+@pytest.mark.parametrize(("command", "kind"), INDIRECTION)
+def test_finding_6_env_split_string_xargs_and_find_exec_are_followed(command: str, kind: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == (kind,)
+
+
+@pytest.mark.parametrize("command", INDIRECTION_QUIET)
+def test_finding_6_the_command_that_xargs_env_and_find_run_decides(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+# What a tokenizer cannot decide. Each of these is documented in docs/hooks.md "Known limits" and ALLOWED today; if
+# one starts being detected, update the docs in the same change.
+KNOWN_LIMITS = {
+    "variable-built command": "cmd='sleep 60'; $cmd",
+    "variable passed to a shell": "c='sleep 60'; bash -c \"$c\"",
+    "encoded payload piped to a shell": "echo c2xlZXAgNjA= | base64 -d | sh",
+    "interpreter": "python3 -c 'import time; time.sleep(60)'",
+    "script file": "bash poll.sh",
+    "alias": "alias w='sleep 60'; w",
+    "remote command": "ssh host 'sleep 60'",
+}
+
+
+@pytest.mark.parametrize("name", list(KNOWN_LIMITS))
+def test_finding_6_each_documented_limit_is_allowed_and_named_in_the_docs(name: str) -> None:
+    assert leadwait.find_waits(KNOWN_LIMITS[name], THRESHOLD) == ()
+    page = " ".join((DOCS / "hooks.md").read_text(encoding="utf-8").split())
+    assert f"[limit: {name}]" in page
+
+
+def test_finding_6_the_docs_say_this_is_a_speed_bump_and_not_a_sandbox() -> None:
+    page = " ".join((DOCS / "hooks.md").read_text(encoding="utf-8").split())
+    assert "speed bump against accidents, not a sandbox" in page
+    assert "edit the guard's config, mode file and logs" in page
+
+
+DORMANT = [
+    "poll_later() { sleep 60; }",
+    "poll_later() {\n  sleep 60\n}",
+    "function poll_later { sleep 60; }",
+    "function poll_later() { sleep 60; }",
+    "poll_later() { gh run watch 1; }; echo poll_later",  # the name as an argument is not a call
+    "poll_later() { gh run watch 1; }; cat poll_later",
+    "poll_later() { if true; then { sleep 60; }; fi; }",
+    "poll_later() { while true; do sleep 1; done; }",
+]
+CALLED = [
+    ("poll_later() { sleep 60; }; poll_later", "long-sleep"),
+    ("poll_later() {\n  sleep 60\n}\npoll_later", "long-sleep"),
+    ("function poll_later { sleep 60; }\npoll_later", "long-sleep"),
+    ("function poll_later() { gh run watch 1; }; ls && poll_later", "gh-run-watch"),
+    ("poll_later() { while true; do sleep 1; done; }; poll_later", "sleep-loop"),
+    ("poll_later() { sleep 1; }; while true; do poll_later; done", "sleep-loop"),
+    ("inner() { sleep 60; }; outer() { inner; }; outer", "long-sleep"),
+    ("poll_later() { sleep 60; }; poll_later() { echo hi; }; echo ok", ""),
+]
+
+
+@pytest.mark.parametrize("command", DORMANT)
+def test_finding_7_a_function_that_is_defined_and_never_called_does_not_wait(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+    assert not denied(_private_home, agents, command)
+
+
+@pytest.mark.parametrize(("command", "kind"), CALLED)
+def test_finding_7_a_function_that_is_called_waits(command: str, kind: str) -> None:
+    expected = (kind,) if kind else ()
+    assert leadwait.find_waits(command, THRESHOLD) == expected
+
+
+PLACEHOLDER_REASONS = ["!!!!!!!!!!!!", "............", "- - - - - - - -", "a1 !!!!!!!!!", "abc de !!!!!!!!!!!"]
+
+
+@pytest.mark.parametrize("reason", PLACEHOLDER_REASONS)
+def test_finding_8_a_punctuation_padded_inline_reason_is_refused(
+    _private_home: Path, agents: Path, reason: str
+) -> None:
+    command = f"sleep 60 # lead-wait: ok - {reason}"
+    assert leadwait.marker_reason(command) == ""
+    set_mode(_private_home, "block")
+    out = guard(_private_home, agents, bash(command))[1]
+    assert "reason is required" in json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_finding_8_eight_letters_or_digits_in_twelve_characters_is_enough_and_unicode_counts() -> None:
+    assert leadwait.marker_reason("sleep 60 # lead-wait: ok - dns ttl: 60s!!") == "dns ttl: 60s!!"
+    assert leadwait.marker_reason("sleep 60 # lead-wait: ok - 12345678 ....")
+    assert leadwait.marker_reason("sleep 60 # lead-wait: ok - 待機中のため問題なし確認済み")
+    assert not leadwait.marker_reason("sleep 60 # lead-wait: ok - 1234567 ....")  # seven alphanumerics
+
+
+@pytest.mark.parametrize("reason", PLACEHOLDER_REASONS)
+def test_finding_8_a_punctuation_padded_repository_exemption_refuses_to_load(tmp_path: Path, reason: str) -> None:
+    path = agents_file(tmp_path / "bad.yaml", lead_wait={"exempt_repos": [{"repo": "acme/scratch", "reason": reason}]})
+    with pytest.raises(ConfigError, match=r"lead_wait\.exempt_repos\[0\]\.reason"):
+        load_agents(path)
+
+
+def test_finding_8_a_real_repository_exemption_reason_still_loads(tmp_path: Path) -> None:
+    entry = {"repo": "acme/scratch", "reason": "a throwaway repo where nobody is waiting on the lead"}
+    path = agents_file(tmp_path / "ok.yaml", lead_wait={"exempt_repos": [entry]})
+    assert load_agents(path).hooks.lead_wait.exempt_repos[0].repo == "acme/scratch"
+
+
+@pytest.mark.parametrize(
+    "command", ["sl''eep 60", 's"l"eep 60', "sle\\ep 60", "gh run w''atch 1", "g''h pr checks 1 -w", "$'sleep' 60"]
+)
+def test_a_word_spelled_with_quotes_is_still_found_and_passes_the_cheap_precheck(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    """The cheap pre-check used to look for the raw words, so `sl''eep 60` never reached the scanner."""
+    assert leadwait.may_wait(command)
+    assert denied(_private_home, agents, command)
+
+
+def test_the_cheap_precheck_still_skips_a_plain_command() -> None:
+    assert not leadwait.may_wait("ls -la && git status")
+    assert not leadwait.may_wait("echo 'hello' \"world\" $HOME")  # quotes make it tokenize, but nothing waits
+    assert not leadwait.may_wait("gh pr checks 12")
+
+
+# Every fixture above is valid Bash (tests/test_leadwait_bash.py runs `bash -n` over these lists).
+SYNTAX_FIXTURES = (
+    HEREDOC_LATER_WAIT
+    + HEREDOC_FORGED_MARKER
+    + [c for c, _ in BODY_EXPANSION]
+    + BODY_OPAQUE
+    + [c for c, _ in PARAMETER_EXPANSION]
+    + PARAMETER_PLAIN
+    + TOO_DEEP[:6]  # the 500-deep one is a stress input; bash itself copes, but -n of it is slow to read
+    + [c for c, _ in INDIRECTION]
+    + INDIRECTION_QUIET
+    + list(KNOWN_LIMITS.values())
+    + DORMANT
+    + [c for c, _ in CALLED]
+    + ["sl''eep 60", 's"l"eep 60', "sle\\ep 60", "gh run w''atch 1", "g''h pr checks 1 -w", "$'sleep' 60"]
+)
 
 
 # -- the docs keep their promises ----------------------------------------------------------------------------
