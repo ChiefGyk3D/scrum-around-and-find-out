@@ -5,6 +5,9 @@
 scripts/gen_profiles.py --write     write the files agents.yaml renders; an unexpected entry is reported, never deleted
 scripts/gen_profiles.py --check     exit 1 if it is not (a missing, unexpected, stale or hand-edited file)
 
+Each profiled agent renders a model file and a caller file (examples/harness/caller/) from the same source, and both are
+written and checked together; src/safo/profile_compose.py checks that they compose, in --write and in --check.
+
 Only the repository's agents.yaml is read, never a local override or anything under ~/.config/safo. Unresolved evidence
 fails the build. The tree is read and written without following a link (src/safo/harness_tree.py, spec 2.6).
 """
@@ -21,6 +24,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from safo.errors import SafoError  # noqa: E402
 from safo.evidence import load_verified_agents  # noqa: E402
 from safo.harness_tree import check_tree, write_tree  # noqa: E402
+from safo.profile_compose import composition_problems  # noqa: E402
 from safo.profile_render import render_harness  # noqa: E402
 
 AGENTS = ROOT / "agents.yaml"
@@ -45,8 +49,14 @@ def main(argv: list[str] | None = None) -> int:
         for warning in verified.agents.warnings:
             print(f"warning: {warning}", file=sys.stderr)
         files = render_harness(verified)
+        composition = composition_problems(verified, files)
     except SafoError as err:
         print(f"error: {err}", file=sys.stderr)
+        return 1
+    if composition:  # the model file and the caller file must compose; nothing is written or accepted otherwise
+        for problem in composition:
+            print(f"error: {problem}", file=sys.stderr)
+        print("error: the model and caller files do not compose", file=sys.stderr)
         return 1
     if args.write:
         problems, changes = write_tree(ROOT, rel, files)

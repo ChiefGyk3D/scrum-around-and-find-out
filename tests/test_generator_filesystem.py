@@ -469,7 +469,7 @@ def test_the_temporary_name_is_hidden_random_and_created_exclusively(
     script, _ = scratch(tmp_path, monkeypatch)
     monkeypatch.setattr(os, "open", spy)
     assert script.main(["--write"]) == 0
-    assert len(seen) == 6 and len({n for n, _ in seen}) == 6
+    assert len(seen) == 11 and len({n for n, _ in seen}) == 11
     for name, flags in seen:
         assert re.fullmatch(r"\.[a-z0-9.-]+\.[0-9a-f]{16}\.tmp", name), name
         assert flags & os.O_EXCL and flags & os.O_NOFOLLOW and flags & os.O_CREAT
@@ -486,7 +486,7 @@ def test_each_file_and_its_directory_are_synced(tmp_path: Path, monkeypatch: pyt
     script, _ = scratch(tmp_path, monkeypatch)
     monkeypatch.setattr(os, "fsync", spy)
     assert script.main(["--write"]) == 0
-    assert kinds.count(False) == 6 and kinds.count(True) == 6
+    assert kinds.count(False) == 11 and kinds.count(True) == 11
 
 
 def test_a_failed_data_write_is_an_error_and_leaves_nothing(
@@ -528,7 +528,7 @@ def test_the_changes_are_printed_one_per_line(
     script, out = scratch(tmp_path, monkeypatch)
     assert script.main(["--write"]) == 0
     first = capsys.readouterr().out.splitlines()
-    assert "wrote claude/claude-haiku.md" in first and first[-1] == "ok: examples/harness is 6 generated files"
+    assert "wrote claude/claude-haiku.md" in first and first[-1] == "ok: examples/harness is 11 generated files"
     (out / "gone" / "deep").mkdir(parents=True)
     (out / "gone" / "deep" / "x.md").write_bytes((out / "codex" / "codex.prompt.md").read_bytes())
     (out / "local" / "ollama.wrapper.txt").write_text("edited\n")

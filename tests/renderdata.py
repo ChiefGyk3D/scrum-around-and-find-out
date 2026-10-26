@@ -26,6 +26,11 @@ PERSONA = (
 )
 TEMPLATE = "Work from this prompt alone.\n\n{{task}}\n\nFiles you may edit:\n\n{{files_in_scope}}\n"
 RENDER_PATHS = (
+    "caller/claude/claude-haiku.md",
+    "caller/claude/claude-sonnet.md",
+    "caller/codex/codex.md",
+    "caller/copilot/copilot.md",
+    "caller/local/ollama.md",
     "claude/claude-haiku.md",
     "claude/claude-sonnet.md",
     "codex/codex.prompt.md",

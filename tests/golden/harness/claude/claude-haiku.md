@@ -14,11 +14,3 @@ This profile adds model-specific briefing guidance only. It cannot change tool a
 ### Brief
 
 Copy the plan exactly and report every concern.
-
-### Do not
-
-- Hand it security code nobody has reviewed. (`lessons:codexs-sandbox-cannot-commit-inside-a-git-worktree`)
-
-### Must not be given
-
-- security-sensitive-code (`lessons:codexs-sandbox-cannot-commit-inside-a-git-worktree`)

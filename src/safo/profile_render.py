@@ -16,6 +16,11 @@ the profile's own lines in fixed slots. Two digests are in the header (spec 2.4)
 The digests are traceability and tamper-evidence for a reader who holds the sources. They are not a signature: they are
 not secret and do not stop someone who can rewrite the sources and the files together (docs/limits.md).
 
+Each profiled agent renders TWO files from the same verified source (issue #107): the MODEL file, which is the only
+text a model reads (persona, brief, the harness's own rules), and the CALLER file under `caller/`, which is guidance for
+whoever briefs the model (limits, do and do not, shapes not to hand it, the review gate, the evidence pointers). No
+sentence is in both. `safo.profile_compose` checks that composition wherever the files are generated or checked.
+
 The renderer refuses; it never repairs or truncates. A persona or template that tries to impersonate a generated
 section, a front matter that is not plain tools, a path-shaped agent id and a file over 64 KiB are all `RenderError`s.
 """
@@ -49,7 +54,7 @@ from safo.profile import (
 )
 from safo.schema import _safe_load
 
-RENDER_FORMAT = 1  # bumped on any change to what the renderer writes
+RENDER_FORMAT = 2  # bumped on any change to what the renderer writes
 MAX_RENDERED = 64 * 1024
 AGENT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 MAX_MODEL = 64
@@ -86,12 +91,24 @@ REVIEW_RULES = (
     "Your comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex "
     "adversarial review still decide.",
 )
-THINK_COMMENT = "# think={flag}: a setting for the caller, who removes this line before sending the prompt."
+CALL_SETTING = "Send `think={flag}` with the request. It is a setting of the call, not part of the prompt."
+CALLER_DIR = "caller"
+# what the caller does with the model file, by harness; `{model}` is the path of the model file
+CALLER_USE = {
+    "claude": "Install `{model}` as a subagent file where your harness looks. The subagent reads that file and never "
+    "this page.",
+    "codex": "Prepend `{model}` to a self-contained prompt. Codex cannot resume a thread across git worktrees, so the "
+    "preamble and the prompt are the whole standing context.",
+    "local": "Send `{model}` with the task in its task slot. The model reads that file and never this page.",
+    "copilot": "Install `{model}` where Copilot reads repository instructions. Copilot reads that file and never this "
+    "page.",
+}
 
 # headings the renderer owns: a template may not reuse them, and no persona may open a second Model profile
-_GENERATED_HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+model profile[ \t]*#*[ \t]*$", re.IGNORECASE)
+_GENERATED_HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+(?:model profile|briefing guidance)[ \t]*#*[ \t]*$", re.IGNORECASE)
 _OWNED_HEADINGS = re.compile(
-    r"^ {0,3}#{1,6}[ \t]+(?:model profile|brief|limits|do|do not|must not be given|review gate|task|scope rules"
+    r"^ {0,3}#{1,6}[ \t]+(?:model profile|briefing guidance|brief|review focus|limits|do|do not|must not be given"
+    r"|review gate|task|scope rules"
     r"|model layer:.*)[ \t]*#*[ \t]*$",
     re.IGNORECASE,
 )
@@ -100,6 +117,8 @@ _OWNED_HEADINGS = re.compile(
 _SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 _OWNED_NAMES = {
     "model profile",
+    "briefing guidance",
+    "review focus",
     "brief",
     "limits",
     "do",
@@ -114,7 +133,7 @@ _OWNED_NAMES = {
 def _owned(name: str, only_generated: bool) -> bool:
     name = name.strip().lower()
     if only_generated:
-        return name == "model profile"
+        return name in ("model profile", "briefing guidance")
     return name in _OWNED_NAMES or name.startswith("model layer:")
 
 
@@ -148,6 +167,7 @@ class Rendered:
     data: bytes
     manifest: str  # sha256 hex of the manifest
     body: str  # sha256 hex of the file without its header line
+    role: str = "model"  # "model": text a model reads; "caller": guidance for whoever briefs it
 
 
 # -- the manifest ------------------------------------------------------------------------------------------------------
@@ -349,13 +369,32 @@ def _limit_lines(p: Profile, where: str) -> list[str]:
     return out
 
 
-def _gate_lines(p: Profile, where: str) -> list[str]:
+def model_reads_gate(p: Profile) -> bool:
+    """True when the gate's check wording is an instruction to the model: a Copilot scoped to pull request review.
+
+    In every other mode the gate describes how the caller reviews the agent's work, so the wording is caller guidance.
+    """
+    return p.review_gate is not None and p.harness_mode == "review"
+
+
+def _gate_lines(p: Profile, where: str, model_path: str) -> list[str]:
     g = p.review_gate
     if g is None:
         return []
     out = ["### Review gate", "", "- Review is required, and the reviewer must differ from the author."]
-    out += [f"- {REVIEW_WORDING[c.code]} {_pointer(c.evidence, where)}" for c in g.checks]
+    for c in g.checks:
+        if model_reads_gate(p):  # the wording is the model's; the caller sees which check it is and what backs it
+            out.append(f"- Check `{c.code}`: its wording is in `{model_path}`. {_pointer(c.evidence, where)}")
+        else:
+            out.append(f"- {REVIEW_WORDING[c.code]} {_pointer(c.evidence, where)}")
     return [*out, ""]
+
+
+def _focus_lines(p: Profile) -> list[str]:
+    """What a review-mode Copilot is told to look for: the gate's check wording, with no evidence pointer."""
+    if not model_reads_gate(p) or p.review_gate is None:
+        return []
+    return ["### Review focus", "", *[f"- {REVIEW_WORDING[c.code]}" for c in p.review_gate.checks], ""]
 
 
 def _layer_lines(model: str, layer: ModelLayer, where: str) -> list[str]:
@@ -367,23 +406,55 @@ def _layer_lines(model: str, layer: ModelLayer, where: str) -> list[str]:
     return out + _traits(layer, where, "####")
 
 
+def _trim(out: list[str]) -> list[str]:
+    while out and out[-1] == "":
+        out.pop()
+    return out
+
+
 def section_lines(agent: Agent, p: Profile) -> list[str]:
-    """The fixed Model profile section: slot order and wording are code, the profile fills the slots."""
+    """The fixed Model profile section of the MODEL file: what the model is told. Empty when there is nothing to say.
+
+    Only the brief and, for a review-mode Copilot, the review focus. Everything that is about the model, for the person
+    briefing it, is in `caller_section_lines`; no evidence pointer is here.
+    """
+    body = [*_brief_lines(p), *_focus_lines(p)]
+    return ["## Model profile", "", *_trim(body)] if body else []
+
+
+def caller_section_lines(agent: Agent, p: Profile, model_path: str) -> list[str]:
+    """The fixed CALLER section: slot order and wording are code, the profile fills them."""
     where = f"agents.{agent.id}.profile"
-    out = ["## Model profile", ""]
+    out: list[str] = []
     if p.status == "unmeasured":
         out += [UNMEASURED_LINE, ""]
-    out += _brief_lines(p)
     limits = _limit_lines(p, where)
     if limits:
         out += ["### Limits", "", *limits, ""]
     out += _traits(p, where, "###")
-    out += _gate_lines(p, where)
+    out += _gate_lines(p, where, model_path)
     for model, layer in p.models:
         out += _layer_lines(model, layer, f"{where}.models.{model}")
-    while out and out[-1] == "":
-        out.pop()
-    return out
+    return ["## Briefing guidance", "", *_trim(out)] if out else []
+
+
+def caller_doc(agent: Agent, p: Profile, harness: str, model_path: str) -> str:
+    """The CALLER file: how to use the model file, then the briefing guidance. Nothing here is sent to the model."""
+    out = [
+        f"# Caller guidance: {agent.id}",
+        "",
+        f"This page is for whoever briefs {agent.id}. The model does not read it.",
+        "",
+        "## Use",
+        "",
+        f"- {CALLER_USE[harness].format(model=model_path)}",
+    ]
+    if harness == "local" and p.thinking is not None and p.thinking.value in ("off", "on"):
+        out.append(f"- {CALL_SETTING.format(flag='false' if p.thinking.value == 'off' else 'true')}")
+    section = caller_section_lines(agent, p, model_path)
+    if section:
+        out += ["", *section]
+    return "\n".join(out) + "\n"
 
 
 # -- persona and front matter ------------------------------------------------------------------------------------------
@@ -486,15 +557,12 @@ def _claude(agent: Agent, p: Profile) -> tuple[str, str]:
         if body:
             out += [body, ""]
     out += [BOUNDARY_PARAGRAPH, "", *section_lines(agent, p)]
-    return _front_matter(agent, p, tools), "\n".join(out) + "\n"
+    return _front_matter(agent, p, tools), "\n".join(_trim(out)) + "\n"
 
 
 def _codex(agent: Agent, p: Profile) -> tuple[str, str]:
     out = [
         f"# Codex preamble: {agent.id}",
-        "",
-        "Prepend this preamble to a self-contained prompt. Codex cannot resume a thread across git worktrees, so the "
-        "preamble and the prompt are the whole standing context.",
         "",
         TRACKING_RULE,
         "",
@@ -502,14 +570,11 @@ def _codex(agent: Agent, p: Profile) -> tuple[str, str]:
         "",
         *section_lines(agent, p),
     ]
-    return "", "\n".join(out) + "\n"
+    return "", "\n".join(_trim(out)) + "\n"
 
 
 def _local(agent: Agent, p: Profile) -> tuple[str, str]:
-    out: list[str] = []
-    if p.thinking is not None and p.thinking.value in ("off", "on"):
-        out.append(THINK_COMMENT.format(flag="false" if p.thinking.value == "off" else "true"))
-    out += [
+    out = [
         "You are a local model working on one task.",
         "Reply in exactly the format the task asks for, and nothing else.",
         "Code does the grouping and the counting; do not group, count or total anything yourself.",
@@ -520,7 +585,7 @@ def _local(agent: Agent, p: Profile) -> tuple[str, str]:
     ]
     if not (p.brief and "{{task}}" in p.brief.template_text):
         out += ["", "## Task", "", "{{task}}"]
-    return "", "\n".join(out) + "\n"
+    return "", "\n".join(_trim(out)) + "\n"
 
 
 def _copilot_review_instructions(agent: Agent, p: Profile) -> tuple[str, str]:
@@ -538,7 +603,7 @@ def _copilot_review_instructions(agent: Agent, p: Profile) -> tuple[str, str]:
         "",
         *section_lines(agent, p),
     ]
-    return "", "\n".join(out) + "\n"
+    return "", "\n".join(_trim(out)) + "\n"
 
 
 def _copilot_instructions(agent: Agent, p: Profile) -> tuple[str, str]:
@@ -558,7 +623,7 @@ def _copilot_instructions(agent: Agent, p: Profile) -> tuple[str, str]:
         "",
         *section_lines(agent, p),
     ]
-    return "", "\n".join(out) + "\n"
+    return "", "\n".join(_trim(out)) + "\n"
 
 
 def _form_notice(p: Profile) -> str:
@@ -616,7 +681,9 @@ def _assemble(path: str, front: str, text: str, manifest: str) -> bytes:
     return (front + header_line(path, manifest, body_digest) + "\n" + text).encode("utf-8")
 
 
-def _render_one(v: VerifiedAgents, agent: Agent, path: str, harness: str, parts: tuple[str, str]) -> Rendered:
+def _render_one(
+    v: VerifiedAgents, agent: Agent, path: str, harness: str, parts: tuple[str, str], role: str = "model"
+) -> Rendered:
     front, text = parts
     manifest = manifest_digest(path, harness, agent, v.resolutions)
     data = _assemble(path, front, text, manifest)
@@ -625,7 +692,7 @@ def _render_one(v: VerifiedAgents, agent: Agent, path: str, harness: str, parts:
             f"{path}: {len(data)} bytes is over the 64 KiB cap ({MAX_RENDERED} bytes); nothing is truncated"
         )
     _, _, body_digest = split_header(path, data)
-    return Rendered(path, harness, agent.id, data, manifest, body_digest)
+    return Rendered(path, harness, agent.id, data, manifest, body_digest, role)
 
 
 def render_harness(v: VerifiedAgents) -> dict[str, Rendered]:
@@ -660,4 +727,9 @@ def render_harness(v: VerifiedAgents) -> dict[str, Rendered]:
             files.append(("copilot/copilot-instructions.md", "copilot", _copilot_instructions(agent, p)))
         for path, harness, parts in files:
             out[path] = _render_one(v, agent, path, harness, parts)
+            if path.endswith((".md", ".txt")):  # the issue form is for the person filing, so it has no pair
+                caller = f"{CALLER_DIR}/{harness}/{agent.id}.md"
+                out[caller] = _render_one(
+                    v, agent, caller, harness, ("", caller_doc(agent, p, harness, path)), "caller"
+                )
     return out

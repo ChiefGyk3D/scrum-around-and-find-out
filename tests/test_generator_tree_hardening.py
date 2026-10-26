@@ -128,7 +128,7 @@ def test_write_deletes_nothing_and_reports_every_entry_that_is_not_in_the_render
     precious.write_text("my own notes\n")
     forged = out / "legacy" / "forged.prompt.md"
     forged.parent.mkdir()
-    forged.write_bytes(good.replace(b"Prepend", b"My own words"))  # a valid-looking header over different text
+    forged.write_bytes(good.replace(b"No hidden work", b"My own words"))  # a valid-looking header over different text
     stale = out / "legacy" / "old.prompt.md"
     stale.write_bytes(good)  # a real generated file at a retired path
     hollow = out / "hollow"
@@ -238,7 +238,7 @@ def test_an_output_directory_moved_at_the_very_end_is_still_an_error(
     monkeypatch.setattr(ht, "_seam", move)
     code, err = run(script, "--write", capsys)
     assert code == 1 and "the output directory moved during the run" in err
-    assert len([p for p in away.rglob("*") if p.is_file()]) == 6
+    assert len([p for p in away.rglob("*") if p.is_file()]) == 11
 
 
 def test_an_ancestor_replaced_by_a_link_to_the_same_place_during_the_run_is_caught(
