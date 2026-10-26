@@ -219,6 +219,30 @@ def pull_links(fake: FakeGitHub, v: JSON) -> JSON:
     return {"repository": {"pullRequests": fake.connection(rows, v)}}
 
 
+@handler("RepoThreatIssues")
+def threat_issues(fake: FakeGitHub, v: JSON) -> JSON:
+    """Issues of one repository that carry the label asked for, open and closed, with their bodies."""
+    repo = fake.repos.get(f"{v['owner']}/{v['name']}".lower())
+    if repo is None or not repo.installed:
+        raise GqlError(
+            "NOT_FOUND",
+            f"Could not resolve to a Repository with the name '{v['owner']}/{v['name']}'.",
+            {"repository": None},
+        )
+    rows = [
+        {
+            "number": c.number,
+            "state": c.state,
+            "closedAt": c.closed_at,
+            "body": c.body,
+            "repository": {"nameWithOwner": c.repo},
+        }
+        for c in repo.contents
+        if c.kind == "Issue" and v["label"] in c.labels
+    ]
+    return {"repository": {"issues": fake.connection(rows, v)}}
+
+
 @handler("PullRefs")
 def pull_link(fake: FakeGitHub, v: JSON) -> JSON:
     content = fake.content(str(v["id"]))

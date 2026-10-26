@@ -18,6 +18,7 @@ import yaml
 
 from safo import netguard
 from safo.errors import ConfigError
+from safo.leadwait import MAX_SLEEP_THRESHOLD_SECONDS, MIN_REASON_ALNUM, MIN_REASON_CHARS, real_reason
 from safo.profile import Budget, Profile, check_profiles, parse_profile, template_path_problem
 from safo.schema import Reader, _safe_load
 from safo.trust import read_trusted_regular_file
@@ -106,6 +107,26 @@ class Threshold:
     then: str
 
 
+LEAD_WAIT_MODES = ("follow", "off", "warn", "block")
+
+
+@dataclass(frozen=True)
+class LeadWaitExemption:
+    """A repository whose lead sessions may wait in the foreground, and the reason it is allowed to. Never silent."""
+
+    repo: str  # owner/name
+    reason: str
+
+
+@dataclass(frozen=True)
+class LeadWait:
+    """The lead-never-waits rule of the Bash guard (docs/hooks.md)."""
+
+    mode: str = "follow"  # follow: use the guard mode (`safo hooks mode`); off, warn, block: this rule alone
+    sleep_threshold_seconds: int = 10  # a sleep, or the sleeps of one command added, at or above this is a wait
+    exempt_repos: tuple[LeadWaitExemption, ...] = ()
+
+
 @dataclass(frozen=True)
 class Hooks:
     """What the Claude Code hooks (`safo hooks`) enforce. All of it is configuration; nothing here is a secret."""
@@ -119,6 +140,7 @@ class Hooks:
     tracking_exempt_repos: tuple[str, ...] = ()
     # owner/name of repositories whose issues a brief may cite, besides the session's own repository (its origin remote)
     tracking_repos: tuple[str, ...] = ()
+    lead_wait: LeadWait = field(default_factory=LeadWait)
 
 
 @dataclass(frozen=True)
@@ -300,6 +322,7 @@ def _hooks(r: Reader, value: object) -> Hooks:
             "na_marker",
             "tracking_exempt_repos",
             "tracking_repos",
+            "lead_wait",
         },
     )
     token = r.string(m.get("approval_token", default.approval_token), "hooks.approval_token")
@@ -328,7 +351,39 @@ def _hooks(r: Reader, value: object) -> Hooks:
         na.strip().lower(),
         named["tracking_exempt_repos"],
         named["tracking_repos"],
+        _lead_wait(r, m.get("lead_wait")),
     )
+
+
+def _lead_wait(r: Reader, value: object) -> LeadWait:
+    default = LeadWait()
+    m = r.mapping(
+        value if value is not None else {}, "hooks.lead_wait", {"mode", "sleep_threshold_seconds", "exempt_repos"}
+    )
+    mode = r.choice(m.get("mode", default.mode), "hooks.lead_wait.mode", LEAD_WAIT_MODES)
+    seconds = r.integer(
+        m.get("sleep_threshold_seconds", default.sleep_threshold_seconds),
+        "hooks.lead_wait.sleep_threshold_seconds",
+        minimum=1,
+    )
+    if seconds > MAX_SLEEP_THRESHOLD_SECONDS:
+        raise r.fail("hooks.lead_wait.sleep_threshold_seconds", f"expected at most {MAX_SLEEP_THRESHOLD_SECONDS}")
+    exemptions: list[LeadWaitExemption] = []
+    for i, raw in enumerate(r.seq(m.get("exempt_repos", []), "hooks.lead_wait.exempt_repos")):
+        path = f"hooks.lead_wait.exempt_repos[{i}]"
+        item = r.mapping(raw, path, {"repo", "reason"})
+        repo = r.string(item.get("repo"), f"{path}.repo")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", repo):
+            raise r.fail(f"{path}.repo", "expected owner/name")
+        reason = item.get("reason")
+        if not isinstance(reason, str) or not real_reason(reason):
+            raise r.fail(
+                f"{path}.reason",
+                f"an exemption needs a stated reason: at least {MIN_REASON_CHARS} characters, "
+                f"{MIN_REASON_ALNUM} of them letters or digits",
+            )
+        exemptions.append(LeadWaitExemption(repo, reason.strip()))
+    return LeadWait(mode, seconds, tuple(exemptions))
 
 
 def _today() -> dt.date:

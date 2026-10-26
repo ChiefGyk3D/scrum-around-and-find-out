@@ -49,6 +49,7 @@ from safo.modes import Mode, register
 from safo.plan import Plan, build_plan
 from safo.rules import area_for, done_day, target_status
 from safo.schema import Board, Repository
+from safo.threatmodel import unthreatened_issues
 
 SHOWN = 20  # how many cards a "not attempted" line names before it counts the rest
 
@@ -322,11 +323,16 @@ def _refuse_future(today: dt.date, contents: list[Content]) -> None:
 
 
 def needs_a_human(ctx: Context, live: LiveBoard, items: list[ItemState], plan: Plan) -> list[str]:
-    """What the no-hidden-work rule finds that no rule can repair: a pull request with no linked issue, a card with no
-    Kind, Epic, Effort or hand-picked Area. Reconcile lists these and writes nothing for them."""
+    """What the no-hidden-work rule finds that no rule can repair: a pull request with no linked issue, an AI-surface
+    issue with no usable threat-model line, a card with no Kind, Epic, Effort or hand-picked Area. Reconcile lists these
+    and writes nothing for them."""
     board = ctx.board
     unlinked, _ = unlinked_pulls(ctx.client, board, ctx.today)
     lines = [f"{name} is a pull request with no linked issue: add `Refs #n` or `Closes #n`" for name in unlinked]
+    threats, _ = unthreatened_issues(ctx.client, board, ctx.today)
+    lines += [
+        f"{name} {why}: add `threat-model: <path or URL>` or `threat-model: n/a - <reason>`" for name, why in threats
+    ]
     repos = {r.full_name.lower(): r for r in board.repositories}
     # The listing was read before the adds. A card this run adds holds only what the plan gives it, so it is checked as
     # the card it is about to be (also in a dry run, where it does not exist yet).

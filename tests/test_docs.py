@@ -29,6 +29,7 @@ PAGES = (
     "adoption",
     "personas",
     "profiles",
+    "orchestrator",
 )
 EM_DASH = "\N{EM DASH}"
 
