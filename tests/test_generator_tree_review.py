@@ -178,7 +178,7 @@ def test_a_clean_run_still_reports_nothing(repo: tuple[Path, Path]) -> None:
 # -- finding 3: expected files are mode 0644 -----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad", [0o600, 0o666, 0o755, 0o664, 0o4644])
+@pytest.mark.parametrize("bad", [0o666, 0o646, 0o755, 0o744, 0o4644, 0o1644, 0o2644, 0o674, 0o645, 0o400])
 def test_an_identical_file_with_another_mode_fails_check_and_is_repaired_by_write(
     repo: tuple[Path, Path], bad: int
 ) -> None:
@@ -187,11 +187,37 @@ def test_an_identical_file_with_another_mode_fails_check_and_is_repaired_by_writ
     assert ht.write_tree(root, "out", {"p.txt": item}) == ([], ["wrote p.txt"])
     os.chmod(out / "p.txt", bad)
     problems = ht.check_tree(root, "out", {"p.txt": item})
-    assert any("p.txt" in p and "0644" in p for p in problems), problems
+    assert any("p.txt" in p and "mode is" in p for p in problems), problems
     assert ht.write_tree(root, "out", {"p.txt": item}) == ([], ["wrote p.txt"])
     assert mode_of(out / "p.txt") == 0o644
     assert (out / "p.txt").read_bytes() == item.data
     assert ht.check_tree(root, "out", {"p.txt": item}) == []
+
+
+@pytest.mark.parametrize("bad", [0o200, 0o000, 0o060])
+def test_a_file_the_owner_cannot_read_and_write_fails_check(repo: tuple[Path, Path], bad: int) -> None:
+    """Owner read and write are required; an unreadable file is refused by the reader or by the mode check."""
+    root, out = repo
+    item = rendered()
+    assert ht.write_tree(root, "out", {"p.txt": item}) == ([], ["wrote p.txt"])
+    os.chmod(out / "p.txt", bad)
+    try:
+        problems = ht.check_tree(root, "out", {"p.txt": item})
+    finally:
+        os.chmod(out / "p.txt", 0o600)
+    assert any("p.txt" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o002, 0o077, 0o027, 0o007])
+def test_a_checkout_mode_made_by_any_umask_passes_check_and_is_left_alone(repo: tuple[Path, Path], umask: int) -> None:
+    """The VCS records only the executable bit, so a clean checkout's file modes are 0666 & ~umask. None may fail."""
+    root, out = repo
+    item = rendered()
+    assert ht.write_tree(root, "out", {"p.txt": item}) == ([], ["wrote p.txt"])
+    os.chmod(out / "p.txt", 0o666 & ~umask)
+    assert ht.check_tree(root, "out", {"p.txt": item}) == []
+    assert ht.write_tree(root, "out", {"p.txt": item}) == ([], [])
+    assert mode_of(out / "p.txt") == 0o666 & ~umask, "a conforming file is not rewritten"
 
 
 # -- finding 4: the temporary file is 0600 until the data is synced --
