@@ -1,7 +1,8 @@
 # Process methods: Agile and Waterfall on one board-as-code core, and a tracker seam for Jira: design
 
-**Status:** draft, revision 2, for the maintainer's review, 2026-10-26. Revision 2 applies the independent adversarial
-review of revision 1 (5 blocking and 14 important or minor findings); nothing in it is built.
+**Status:** draft, revision 3, for the maintainer's review, 2026-10-26. Revision 2 applied the independent adversarial
+review of revision 1 (5 blocking and 14 important or minor findings); revision 3 applies the re-review of revision 2 and
+records four decisions the maintainer made on 2026-10-26 (M7, M8, M12, M13: section 9). Nothing in it is built.
 **Scope:** SAFO #108 (the issue title says "process profiles" and stays). The maintainer's ruling, 2026-10-26: "allow
 flexibility for both Agile and Waterfall work, and eventually look at working with Jira too." The shape-only Jira key
 acceptance, documented in `docs/no-hidden-work.md:29` and tracked on #108, is folded into sections 7 and 8.
@@ -49,7 +50,7 @@ tracker would later plug into.
 | Statuses and options | VERIFIED `schema.py:351-392` | Any single-select field, any options; iteration, date, text, number fields |
 | Tracking fields | VERIFIED `schema.py:97-106`, `coverage.py:53-57` | Kind, Epic and Effort are names; any type; empty turns a check off |
 | The no-hidden-work audit | VERIFIED `modes/audit.py:99-112`, `coverage.py:152-207` | Linked issue, card presence, field presence: none of it knows about sprints |
-| The dispatch guard | VERIFIED `hooks.py:381-387`, `tracking.py:183-213` | Reads a brief's `issue:` line and an issue's open state only |
+| The dispatch guard | VERIFIED `hooks.py:381-388`, `tracking.py:183-213` | Reads a brief's `issue:` line and an issue's open state only |
 | Routing | INFERRED from `docs/routing.md` and the absence of any board read in `routing.py` | Picks an agent by task shape; never reads the board |
 | `agents-status` | VERIFIED `modes/agents_status.py:43-59` | Groups by `agents.working` and `agents.waiting`, both from `board.yaml` |
 
@@ -79,9 +80,9 @@ tracker would later plug into.
   REVIEWERS, LABELS, MILESTONE, REPOSITORY, TITLE, TEXT, SINGLE_SELECT, MULTI_SELECT, NUMBER, DATE, ITERATION, TRACKS,
   TRACKED_BY, ISSUE_TYPE, PARENT_ISSUE, SUB_ISSUES_PROGRESS, CREATED, UPDATED, CLOSED` (VERIFIED, introspection of
   2026-10-26 12:37 EDT): there is no blocked-by **project field**, so a dependency is read from issues, not the board.
-  That `blockedBy` can point across repositories and owners, and that creating one needs triage on the repository being
-  edited, were reported by the review; I could not re-verify them (INFERRED, section 6.2). The schema is consistent with
-  it (a blocked-by event carries a `blockingIssue`, which has a `repository`).
+  That `blockedBy` can point across repositories and owners, and that creating one needs at least triage on the
+  repository being edited, is VERIFIED by the independent re-review (read-only, 2026-10-26; not repeated by me, section
+  6.2). The schema is consistent with it (a blocked-by event carries a `blockingIssue`, which has a `repository`).
 - A Roadmap view's date fields, zoom and grouping cannot be set by any API (VERIFIED `docs/lessons.md:46-50`); SAFO
   lists them under `ui_only` (VERIFIED `modes/audit.py:149-152`).
 - The live field reader keeps types it does not map as GitHub's raw data type (VERIFIED `live.py:63-69`, `live.py:206-207`),
@@ -149,31 +150,31 @@ process:
   method: waterfall             # agile (default) | waterfall
   active_statuses: [In progress, In review]   # required on a waterfall board; no default (3.2)
   dependencies: none            # none (default) | blocked_by; not `off`, which YAML reads as false
-  phase_field: Phase            # a single_select in fields; its option order is the phase order (6.1, 3.5)
+  phase_field: Phase            # a single_select in fields; its option order is the phase order (3.2, 3.5)
   approvers:                    # required, at least one: people whose manual close of a gate or change issue counts
     - {login: maintainer-login, id: 1234567}   # id is the user's immutable databaseId; the login alone is never enough
   gates:                        # the exit gate of a phase: work in a later phase waits for it
-    - {phase: Requirements, issue: acme/program#1}
-    - {phase: Design, issue: acme/program#2}
-    - {phase: Build, issue: acme/program#3}
-    - {phase: Verify, issue: acme/program#4}   # Release is the last phase: a gate there would gate nothing (refused)
+    - {phase: Requirements, issue: acme/gates#1}
+    - {phase: Design, issue: acme/gates#2}
+    - {phase: Build, issue: acme/gates#3}
+    - {phase: Verify, issue: acme/gates#4}   # Release is the last phase: a gate there would gate nothing (refused)
   baseline:
     frozen: 2026-11-02          # the day scope was frozen
-    approved_in: acme/program#5 # a freeze issue of its own (not a gate), closed on or before `frozen`
+    approved_in: acme/gates#5 # a freeze issue of its own (not a gate), closed on or before `frozen`
     intake: [Backlog]           # statuses that are not "in scope" yet; default [rules.status.opened]
     items:
       - {ref: acme/app#12, phase: Design}
       - {ref: acme/app#13, phase: Build}
     changes:
-      - {add: acme/app#55, phase: Build, approved_in: acme/program#21}
-      - {remove: acme/app#13, approved_in: acme/program#22}
+      - {add: acme/app#55, phase: Build, approved_in: acme/gates#21}
+      - {remove: acme/app#13, approved_in: acme/gates#22}
 ```
 
 Per repository, for mixed mode (section 5):
 
 ```yaml
 repositories:
-  - {owner: acme, name: program, default_area: Program}
+  - {owner: acme, name: gates, default_area: Gates}   # the dedicated gates repository (M7)
   - {owner: acme, name: app, default_area: App}
   - {owner: acme, name: mobile, default_area: Mobile, method: agile}   # an agile team inside the program
 ```
@@ -249,9 +250,9 @@ every existing one (VERIFIED `schema.py:245-246`). The messages, exactly:
 | bad reference | `board.yaml: process.gates[0].issue: expected owner/repo#N` |
 | any reference outside the board's repositories | `board.yaml: <path>: acme/elsewhere is not in repositories` (applies to **every** reference in `process`: gate `issue`, `baseline.approved_in`, `baseline.items[i].ref`, `baseline.changes[i].add`, `.remove` and `.approved_in`) |
 | a reference listed twice | `board.yaml: process.baseline.items[4].ref: acme/app#12 is listed twice` |
-| an approval issue cited twice | `board.yaml: process.baseline.changes[1].approved_in: acme/program#21 is cited already (process.baseline.changes[0].approved_in)` |
-| an approval issue that is a gate | `board.yaml: process.baseline.changes[0].approved_in: acme/program#2 is a gate issue (process.gates[1].issue)` |
-| a freeze issue that is a gate | `board.yaml: process.baseline.approved_in: acme/program#1 is a gate issue (process.gates[0].issue)` |
+| an approval issue cited twice | `board.yaml: process.baseline.changes[1].approved_in: acme/gates#21 is cited already (process.baseline.changes[0].approved_in)` |
+| an approval issue that is a gate | `board.yaml: process.baseline.changes[0].approved_in: acme/gates#2 is a gate issue (process.gates[1].issue)` |
+| a freeze issue that is a gate | `board.yaml: process.baseline.approved_in: acme/gates#1 is a gate issue (process.gates[0].issue)` |
 | a change with both or neither | `board.yaml: process.baseline.changes[0]: expected exactly one of add, remove` |
 | an add with no phase | `board.yaml: process.baseline.changes[0].phase: required with add` |
 | intake names a done status | `board.yaml: process.baseline.intake[0]: 'Done' is a done status` |
@@ -300,6 +301,13 @@ for the schedule (3.4), never as the gate. Gates are listed in `board.yaml`, not
 with triage rights can add or remove would let a fake gate in or a real gate out, while the list changes only through a
 reviewed change to the file (section 8, R2).
 
+**Where gates live and who may close them (decided by the maintainer, M7, 2026-10-26).** Gate, freeze and change issues
+live in a **dedicated repository** (`acme/gates` in the examples), which is listed in `repositories` so every reference to
+it passes the load check. Agents run on a fine-grained token that has no `issues:write` on that repository; **only the
+maintainer closes** gate, freeze and change issues, and the maintainer files them. A manual experiment on a scratch
+repository (unit U-exp) confirms what that token can and cannot do before any real board relies on it; that experiment
+and the protection read-back (unit U-prereq) are hard prerequisites for adopting waterfall.
+
 **The approval test.** One test, used for a gate, a change issue and the freeze issue. An issue `I` is **approved**
 only when every line holds; it is **open** (for the gate rule, "not passed") when it is readable and a line fails; it is
 **UNKNOWN** when it cannot be read or a required piece is missing.
@@ -313,8 +321,18 @@ only when every line holds; it is **open** (for the gate rule, "not passed") whe
 4. **`closer` is null: a manual close.** A close caused by merging a pull request whose body says `Closes
    owner/repo#N`, by a commit, or by a project workflow has `closer` set (`PullRequest`, `Commit`, `ProjectV2`), and its
    `actor` is whoever merged or moved the card, who may be an approver without having approved anything. Such a close
-   never counts. That `closer` is null for a manual close and set otherwise is INFERRED from the field description and
-   the union's members; the U3 fixtures pin it, and the first live check is part of U3's acceptance (section 6.2).
+   never counts. VERIFIED on public issues, read-only, 2026-10-26: `cli/cli#14708`, closed by hand as not planned, has
+   `closer` null; `cli/cli#14749` and `cli/cli#14718`, closed by merged pull requests, have `closer` `PullRequest`, with
+   the merger as `actor` (a `User`) and `COMPLETED` (section 6.2). That a project workflow close has `closer`
+   `ProjectV2` stays INFERRED (the union has the member; no such close was found to read). The U3 fixtures pin all
+   three.
+4b. **No App in the REST event (the cross-check).** GraphQL shows a GitHub App acting for a user as that `User` (no app
+   field on `ClosedEvent`), but the REST issue events carry `performed_via_github_app` (VERIFIED: the key is present on
+   every event of `cli/cli#14749`, 2026-10-26; whether it is non-null for a user-to-server close is the reviewer's
+   finding, INFERRED). So for each approving close audit also reads the REST `closed` event of that issue and treats
+   `performed_via_github_app != null` as not manual: the close does not count, with the line `DRIFT   GATE ... was closed
+   through a GitHub App; it counts as open`. This is M2 option 1b; it costs one REST read per approval issue and runs
+   inside the same read-only token.
 5. The actor's type is `User` **and** its `databaseId` equals the `id` of an entry in `process.approvers`. The login is
    shown but is not the identity: a login can be renamed or, once released, taken by another person. A matching id with
    a different login counts and prints `NOTE   GATE ... closed by @new-login, who is approver @old-login (renamed)`; a
@@ -323,6 +341,13 @@ only when every line holds; it is **open** (for the gate rule, "not passed") whe
    says what was approved, so it counts as open with the line below; re-approving means reopening and closing it again.
 7. For a change issue only: `I.createdAt` is on or after the start (UTC) of `baseline.frozen`, and `I` is not a gate. For
    the freeze issue: the close is on or before the end of the `frozen` day (UTC).
+8. **The approval is bound to its entry.** For a change issue, the issue's title or body contains the entry's reference
+   (`add` or `remove`, such as `acme/app#55`) as a whole token: found by exact string comparison with a boundary on
+   each side, nothing more. Without it, one approval of "something" could be cited for any entry. This is a search for a
+   string the file already holds; no text from the issue is parsed, becomes scope, or reaches output (the line names the
+   entry only). A title or body edit after the close is already refused by line 6. Failing it:
+   `DRIFT   SCOPE the change adding acme/app#55 cites acme/gates#21, which does not mention acme/app#55; the approval is not for this change`
+   (decision M13).
 
 Every actor case has a verdict and a test (U3):
 
@@ -342,14 +367,15 @@ duplicate, closed with a `closer`, closed by anyone but an approver, or edited a
 
 **The gate rule, exactly.** Phases `P1 .. Pn` in order; `G(k)` the gate of `Pk`, if one is listed. A card's **phase** is
 defined in G3 below (its own Phase, or the latest of that and its linked issues'). For each card `c` on the board
-(archived cards included, 3.3) whose phase is `Pj`, and for every `k < j` with `G(k)` listed and not passed:
+(archived cards included, see "Archived cards" below) whose phase is `Pj`, and for every `k < j` with `G(k)` listed and not passed:
 
 - **G1 (active ahead of a gate).** If `c`'s status is in `active_statuses` and `c` is not closed:
-  `DRIFT   GATE acme/app#41 is In progress in phase Build while the Design gate acme/program#2 is open`
+  `DRIFT   GATE acme/app#41 is In progress in phase Build while the Design gate acme/gates#2 is open`
 - **G2 (finished ahead of a gate).** If `c` is an issue closed as completed, or a merged pull request, and its close
   day is on or after `today - rules.add_closed_days` (the window audit already reads, VERIFIED `coverage.py:157-161`),
   and either `G(k)` is not passed or `c` closed before `G(k)`'s **newest** approving close:
-  `DRIFT   GATE acme/app#38 was done on 2026-11-02 in phase Build before the Design gate acme/program#2 passed`
+  `DRIFT   GATE acme/app#38 was done on 2026-11-02 in phase Build before the Design gate acme/gates#2 passed on 2026-11-05`
+  (when the gate is still open: `... in phase Build while the Design gate acme/gates#2 is open`)
 
 Definitions the review required:
 
@@ -370,8 +396,11 @@ Definitions the review required:
   card read (U4).
 - **Draft cards.** A draft issue has no repository (VERIFIED `coverage.py:204-206`, `items.py:213`: `content` is
   None for a draft). It is checked by G1 when it holds a Phase and an active status (the Phase is the declaration), and
-  its line names the card id: `DRIFT   GATE card PVTI_x is In progress in phase Build while the Design gate acme/program#2
-  is open`. G2 does not apply (a draft has no close).
+  its line names the card id: `DRIFT   GATE card PVTI_x is In progress in phase Build while the Design gate acme/gates#2
+  is open`. G2 does not apply (a draft has no close). On a board whose **default** method (`process.method`) is
+  waterfall, a draft in a status that is neither `baseline.intake` nor a done status and with no Phase is
+  `MISSING Phase on card PVTI_x` (a draft belongs to no repository, so only the board's default can say which rule
+  applies; on an agile default drafts are not presence-checked, as today).
 - **Statuses the rule does not see.** G1 reads `active_statuses` only. Because the list is required and explicit, a
   status outside `active_statuses`, `baseline.intake` and the done statuses (for example "In review" left out by mistake)
   prints `NOTE    GATE status 'In review' is neither active, intake nor done; its cards are not gate-checked`.
@@ -385,14 +414,14 @@ one line, not three.
 | Situation | Line | Exit |
 |---|---|---|
 | Closed by an actor the approval test refuses | the actor table above | 1 |
-| Closed as not planned or duplicate | `DRIFT   GATE acme/program#2 (Design gate) was closed as not planned; it counts as open` | 1 |
-| Closed with a `closer` | `DRIFT   GATE acme/program#2 (Design gate) was closed through a pull request (acme/app#60), not by hand; it counts as open` (`through a commit` and `by a project workflow` for the other two) | 1 |
-| Edited after approval | `DRIFT   GATE acme/program#2 (Design gate) was edited on 2026-11-09 after it was approved on 2026-11-02; it counts as open` | 1 |
-| A pull request, not an issue | `DRIFT   GATE acme/program#2 (Design gate) is a pull request; a gate is an issue` | 1 |
-| Not found, or not readable with the token | `UNKNOWN GATE acme/program#2 (Design gate) cannot be read with this token, so no card's gate order can be told` | 2 |
-| Transferred (canonical repository differs) | `UNKNOWN GATE acme/program#2 (Design gate) now answers as acme/other#9; update process.gates` | 2 |
-| A card's live Phase is not one of the file's options | `UNKNOWN PHASE acme/app#41 has Phase 'Beta', which board.yaml does not list; its gate order cannot be told` | 2 |
-| The gate issue's own Phase differs from its gate's phase | `NOTE    GATE acme/program#2 is the Design gate but its Phase is Build` | 0 |
+| Closed as not planned or duplicate | `DRIFT   GATE acme/gates#2 (Design gate) was closed as not planned; it counts as open` | 1 |
+| Closed with a `closer` | `DRIFT   GATE acme/gates#2 (Design gate) was closed through a pull request (acme/app#60), not by hand; it counts as open` (`through a commit` and `by a project workflow` for the other two) | 1 |
+| Edited after approval | `DRIFT   GATE acme/gates#2 (Design gate) was edited on 2026-11-09 after it was approved on 2026-11-02; it counts as open` | 1 |
+| A pull request, not an issue | `DRIFT   GATE acme/gates#2 (Design gate) is a pull request; a gate is an issue` | 1 |
+| Not found, or not readable with the token | `UNKNOWN GATE acme/gates#2 (Design gate) cannot be read with this token, so no card's gate order can be told` | 2 |
+| Transferred (canonical repository differs) | `UNKNOWN GATE acme/gates#2 (Design gate) now answers as acme/other#9; update process.gates` | 2 |
+| A card's live Phase is not one of the file's options | `UNKNOWN PHASE acme/app#41 has Phase 'Beta', which board.yaml does not list; its gate order cannot be told` (only for a card G1 or G2 actually reads: an active card, or one closed inside the `add_closed_days` window; an old closed card holding a renamed option is history and is silent, or one rename would exit 2 forever) | 2 |
+| The gate issue's own Phase differs from its gate's phase | `NOTE    GATE acme/gates#2 is the Design gate but its Phase is Build` | 0 |
 | `gates` empty on a waterfall board | `NOTE    Gate check not configured: process.gates is empty` | 0 |
 | The phase field's live type differs | `UNKNOWN GATE the Phase field is text on the project, not single_select; gate order cannot be told` | 2 |
 
@@ -427,13 +456,38 @@ wins", never "own wins".
   `Refs`-only pull request that links an issue with a Phase is fine: it inherits it.
 - **Own Phase earlier than inherited.** `NOTE    PHASE acme/app#77 carries Design but links acme/app#41 in Build; the later phase is
   used`. The check uses the later phase either way.
+- **Residual: the author chooses the links.** "Latest wins" only ever raises a pull request's phase. A pull request that
+  does Build work but links only an early-phase issue, and carries an early own Phase, is derived as early, and no rule
+  here sees it. What limits it: the no-hidden-work audit still requires a linked issue, S1-S4 pin baselined issues, and
+  review of the pull request. An optional, not-built NOTE could flag a pull request in an active status whose linked
+  issues are all in a phase earlier than the latest phase with a passed gate; it is listed as optional under U7, with
+  no rule text promised.
 
 **The frozen-scope baseline and change control.** The baseline is `process.baseline` in `board.yaml`: a date, the
 freeze issue, the items with the phase each was baselined in, and a list of changes. A change is one entry plus one
 approval issue, and the order matters (the review found a pre-closed issue could be reused): (1) open an issue ("Change:
-add acme/app#55 to Build"); (2) open a pull request that adds the `changes` entry citing it; (3) an approver closes the
-issue as completed, by hand; (4) the required check re-runs and passes; (5) merge. Nothing reads change lines out of
-issue bodies, so no free text from an issue becomes scope. The pull request's review is the second record.
+add acme/app#55 to Build", which must name the entry, line 8 of the approval test); (2) open a pull request that adds
+the `changes` entry citing it; (3) an approver closes the issue as completed, by hand; (4) the required check is run
+again and passes; (5) merge. Nothing reads change lines out of issue bodies, so no free text from an issue becomes
+scope. The pull request's review is the second record.
+
+**Closing an issue does not re-run a pull request's checks** (INFERRED from how GitHub triggers workflows: a check
+belongs to a pull request event, and an issue event is a different trigger). Step 4 therefore needs a named mechanism.
+Options, cheapest first: (a) the approver re-runs the failed check from the pull request page after closing (manual;
+the documented first-cut path); (b) the approver or the author pushes a commit (any commit re-triggers the checks); (c)
+the GYST workflow also listens to `issues: closed` and re-runs the check for the open pull requests whose diff cites
+that issue (automatic, more moving parts, run from the default branch, and the check result must land on the pull
+request's head commit; INFERRED feasible, not tested). The first cut documents (a) and (b); (c) is U8c's optional
+extra.
+
+**The ordering check and its clock (`--verify`), decided in M12.** "The approval was closed after the change was
+proposed" is checked against the **pull request's creation time**, read from the API, and not against a commit date:
+commit dates are set by the author and change under rebase and squash, while a pull request's creation time is set by
+GitHub. The rule: the approval's closing time is later than the creation time of the pull request that adds the entry.
+The check is `safo process diff --verify` (U8b), which needs a read token. **It is mandatory on same-repository pull
+requests**: the GYST workflow (U8c) runs it whenever a token exists. A pull request from a fork gets no token, so it
+gets the offline check only, and its result is labeled **advisory**; it cannot be merged on that check alone because the
+protection of M8 still requires a code-owner review.
 
 Audit reads (scope set = `items` + `add`s − `remove`s, each change counted only when its `approved_in` is approved by
 the approval test; every `approved_in` is cited **once** across the baseline, and is never a gate: both are load-time
@@ -443,9 +497,9 @@ errors, 2.5):
 |---|---|
 | **S1** an **open** issue of a waterfall repository, in a status that is neither `intake` nor a done status, and outside the scope set | `DRIFT   SCOPE acme/app#55 is In progress but not in the baseline of 2026-11-02; record an approved change (process.baseline.changes)` |
 | **S2** a scope-set issue closed as not planned with no approved `remove` | `DRIFT   SCOPE acme/app#13 is in the baseline and was closed as not planned; record the removal as an approved change` |
-| **S3** a change whose approval is not approved (including: created before `frozen`, closed with a `closer`, closed by a non-approver) | `DRIFT   SCOPE the change adding acme/app#55 cites acme/program#21, which is open; the change is not approved` (the reason names the failed line of the approval test) |
+| **S3** a change whose approval is not approved (including: created before `frozen`, closed with a `closer`, closed by a non-approver) | `DRIFT   SCOPE the change adding acme/app#55 cites acme/gates#21, which is open; the change is not approved` (the reason names the failed line of the approval test) |
 | **S4** baseline phase pinning: a scope-set issue whose board Phase differs from its baselined phase | `DRIFT   PHASE acme/app#12 is in Build on the board but Design in the baseline; move it back or record a change` |
-| **S5** `baseline.approved_in` itself not approved | `DRIFT   SCOPE the baseline cites acme/program#5, which is not approved; the baseline is not frozen` |
+| **S5** `baseline.approved_in` itself not approved | `DRIFT   SCOPE the baseline cites acme/gates#5, which is not approved; the baseline is not frozen` |
 | an item or change names a pull request | `DRIFT   SCOPE acme/app#60 is a pull request; the baseline lists issues` |
 | an item or change cannot be read | `UNKNOWN SCOPE acme/app#12 cannot be read with this token` |
 
@@ -460,12 +514,15 @@ passed phase. A change entry may carry a new `phase` for an item already in scop
 introspection 2026-10-26 13:10 EDT), and SAFO's board walk does not pass it (VERIFIED `items.py:63`: `items(first: 100,
 after: $endCursor)`), so an archived card is invisible to every rule today. For a waterfall board, archiving an
 In-progress Build card would hide it from G1, G2, presence and S1-S4. So a waterfall board reads
-`archivedStates: [ARCHIVED, NOT_ARCHIVED]` (U4; `ProjectV2Item.isArchived` exists, VERIFIED), marks each card
+`archivedStates: [ARCHIVED, NOT_ARCHIVED]` (the argument's type is the enum `ProjectV2ItemArchivedState`, values
+`ARCHIVED` and `NOT_ARCHIVED`, VERIFIED 2026-10-26; U4; `ProjectV2Item.isArchived` exists, VERIFIED), marks each card
 `archived`, and:
 
 - an archived card that holds a Phase and whose issue is open or not in a done status is a finding:
   `DRIFT   ARCHIVED acme/app#41 is archived while open in phase Build; unarchive it or close the issue`;
-- G1, G2, S1-S4 read archived cards like any other (so the dodge gains nothing);
+- G1, G2, S1-S4 read archived cards like any other (so the dodge gains nothing), and **phase presence applies to
+  archived cards too**: an archived open issue in a non-intake status with no Phase is `MISSING Phase`, so archiving
+  cannot hide a card by itself;
 - the existing checks (a missing Kind or Epic, Done-on, the reconcile plan) keep ignoring archived cards, so a waterfall
   board does not suddenly grow findings about old archived work;
 - whether `items_total` counts archived items, and so whether the "read N of M" check still agrees, is INFERRED; the
@@ -492,8 +549,8 @@ the token cannot read. The docs say so in those words.
 
 ```
 **Phases and gates**
-- Requirements: gate acme/program#1 passed 2026-11-02 (0 active, 14 done)
-- Design: gate acme/program#2 open (3 active, 5 done)
+- Requirements: gate acme/gates#1 passed 2026-11-02 (0 active, 14 done)
+- Design: gate acme/gates#2 open (3 active, 5 done)
 - Build: no gate (2 active, 0 done) - 1 card ahead of an open gate
 ```
 
@@ -526,8 +583,8 @@ with a check at each step. It is documented in `docs/process-methods.md` (U11) a
 
 | Change | What happens | Rule |
 |---|---|---|
-| Append a phase at the end | Add the option in the project (Settings, the field, Add option; SAFO reports a missing option, VERIFIED `modes/audit.py:52-57`), then append it to the field's `options` in `board.yaml` | Allowed by the diff (U8 allowlist) |
-| Insert or reorder | Moves which phases sit behind which gate, so it can move a card ahead of an open gate. A pure reorder **is** a weakening | Denied by the diff; needs code-owner review and a fresh `safo audit` |
+| Append a phase at the end | Add the option in the project (Settings, the field, Add option; SAFO reports a missing option, VERIFIED `modes/audit.py:52-57`), then append it to the field's `options` in `board.yaml` | Allowed by the diff (U8a allowlist) |
+| Insert or reorder | Moves which phases sit behind which gate, so it can move a card ahead of an open gate. A pure reorder **is** a weakening | Exits 1 in the diff; needs code-owner review and a fresh `safo audit` |
 | Remove a phase | Live cards may still hold the value | Their gate order cannot be told: `UNKNOWN PHASE` (above) until they are moved |
 | Rename | Same as remove plus append | Same |
 | A gate on the last phase | Would gate nothing | Refused at load (2.5) |
@@ -591,16 +648,20 @@ The one guard change here is about trackers, not methods: section 7.3.
 | `ClosedEvent` fields `actor, closable, closer, createdAt, duplicateOf, id, intent, resourcePath, stateReason, url`; `Closer` = `Commit \| ProjectV2 \| PullRequest` | VERIFIED, introspection 2026-10-26 13:10 EDT |
 | `Actor` implementers `Bot, EnterpriseUserAccount, Mannequin, Organization, User`; `User.databaseId` and `User.id` exist; `Actor` itself has only `avatarUrl, login, resourcePath, url` | VERIFIED, same |
 | `Issue.lastEditedAt`, `createdAt`, `stateReason`, `blockedBy`, `blocking`, `timelineItems(itemTypes, first, last, after, before, since, skip)` | VERIFIED, same |
-| `ProjectV2.items(archivedStates: [ProjectV2ItemState!] = [NOT_ARCHIVED])`; `ProjectV2Item.isArchived` | VERIFIED, same (the enum's type name was not found under that spelling; the argument default is what was read) |
+| `ProjectV2.items(archivedStates: [ProjectV2ItemArchivedState!] = [NOT_ARCHIVED])`, the enum having `ARCHIVED` and `NOT_ARCHIVED`; `ProjectV2Item.isArchived` | VERIFIED, same, re-read in round 3 |
+| `ISSUE_FIELD_CHANGED_EVENT` is in the issue and pull request timeline enums (organization issue fields, a different feature from project fields); `closingIssuesReferences` takes `userLinkedOnly` and `excludeUserLinked` | VERIFIED, same |
 | Project card history exists for the **Status** field only: `PROJECT_V2_ITEM_STATUS_CHANGED_EVENT` (`actor, createdAt, previousStatus, status, project, wasAutomated`), `ADDED_TO_PROJECT_V2_EVENT`, `REMOVED_FROM_PROJECT_V2_EVENT`, on both issue and pull request timelines; no event exists for a Phase (or any other field) change | VERIFIED, same |
 | No GraphQL mutation names Milestone | VERIFIED, same (mutation list) |
 | `addBlockedBy`, `removeBlockedBy` and four blocked-by timeline events exist | VERIFIED, same |
-| Cross-repository and cross-owner `blockedBy` works; creating a dependency needs triage on the repository being edited | INFERRED: reported by the review, not re-verified (no docs fetch tool in this run; a mutation test would write) |
-| `ClosedEvent.closer` is null for a manual close; a project workflow can close an issue when its card reaches Done and then has `closer` ProjectV2 | INFERRED; pinned by U3 fixtures and a live check |
-| `Refs #n` is not in `closingIssuesReferences` | INFERRED (the review's finding; G3 does not depend on it because it reads both sources) |
+| Cross-repository and cross-owner `blockedBy` exists; creating a dependency needs at least triage on the repository being edited | VERIFIED by the independent re-review (read-only, 2026-10-26); I did not repeat it (no docs fetch tool here, and a mutation test would write) |
+| `ClosedEvent.closer` is null for a manual close and `PullRequest` for a close by a merged pull request, whose `actor` is the merger | VERIFIED, read-only, 2026-10-26, re-run by me: `cli/cli#14708` (NOT_PLANNED by hand, `closer` null, actor a `User`); `cli/cli#14749` and `cli/cli#14718` (closed by merged pull requests: `closer` `PullRequest`, actor a `User`, `COMPLETED`) |
+| A project workflow close has `closer` `ProjectV2` | INFERRED (the union member exists; no such close was read); pinned by U3 fixtures |
+| `Refs #n` is not in `closingIssuesReferences` | VERIFIED by the independent re-review: 4 of 4 public merged pull requests whose body had only `Refs #N` returned `totalCount` 0. I did not repeat the four; one merged pull request I sampled also returned 0 but proves nothing about `Refs`. G3 reads both sources regardless |
+| A GitHub App acting for a user appears as that `User` in the GraphQL `ClosedEvent` (it has no app field); REST issue events carry `performed_via_github_app` | PARTLY settled: the missing app field is VERIFIED by introspection; the REST key is present (VERIFIED on the events of `cli/cli#14749`, value null there); that it is non-null for a user-to-server close is the re-review's finding, not re-run. Used by M2 option 1b |
+| `Issue.lastEditedAt` semantics (does a title edit, a checkbox toggle, or a comment move it) | INFERRED; the U3 fixtures cannot settle it, a live experiment on a scratch issue can |
+| `items_total` counts archived items or not | INFERRED; pinned by the U4 test |
 | SAFO `main` has no branch protection and no rulesets | VERIFIED: REST `branches/main/protection` returned 404 "Branch not protected", `rulesets` returned `[]`, `rules/branches/main` returned `[]`, 2026-10-26 13:10 EDT |
-| A GitHub App user-to-server token appears as the `User` in a `ClosedEvent` | SPECULATIVE |
-| A fine-grained token without `issues:write` cannot close an issue | INFERRED; U-prereq verifies it against a scratch repository |
+| A fine-grained token without `issues:write` cannot close an issue | INFERRED; the manual scratch-repository experiment (unit U-exp, 11) settles it before any adoption, by decision M7 |
 | Jira project keys may contain an underscore; Jira keys' exact shape | INFERRED, from memory of Atlassian behavior; verify against Atlassian docs before the Jira build |
 
 ## 7. The tracker interface, and Jira later
@@ -714,7 +775,7 @@ dependency in the Action's job; a model reading attacker-written issue text; a f
 
 | Id | Abuse case | Impact | Prerequisite | Rank |
 |---|---|---|---|---|
-| R1 | An agent holding the maintainer's token closes a gate or change issue; the close event says the maintainer approved | High: every gate and change is forgeable | None beyond normal agent operation in a single-identity setup | 1 |
+| R1 | An agent holding the maintainer's token closes a gate or change issue; the close event says the maintainer approved | High: every gate and change is forgeable | None beyond normal agent operation while agents run on the maintainer's own login (the dedicated gates repository with a restricted agent token, decided in M7, removes it for the gates repository) | 1 |
 | R12 | A pull request containing `Closes owner/repo#N` for a gate or change issue is merged; GitHub closes the issue and the close event's actor is the merger, a `User` with `COMPLETED` | High: any merge approves a gate; approvers approve without knowing | Write access to open a pull request that gets merged; or a commit on the default branch | 2 |
 | R2 | A pull request edits `board.yaml`, the caller workflow that runs the diff, or CODEOWNERS: drops a gate, switches the method, widens who approves, empties `approvers`, swaps a gate's `issue` to an already-closed issue, widens `baseline.intake`, drops a repository, changes `add_closed_days`, `rules.status` or `agents.working` (which moves the default active set), swaps the phase field, or reorders Phase options (which moves a gate relative to phases). A PR-time audit reads the edited file and passes. **Today nothing enforces review**: SAFO `main` has no protection and no rulesets (VERIFIED, 6.2), so CODEOWNERS is advisory and a direct push skips every check | High | Repository write | 3 |
 | R3 | An agent moves its card's Phase back, clears it, or parks the issue in Backlog while a pull request does the work | Medium: gate rule dodged | Project write (every agent has it) | 4 |
@@ -740,13 +801,13 @@ Every row names the verification that proves the mitigation bites (delete the mi
 
 | Id | Mitigation | Verification |
 |---|---|---|
-| R1 | An approval by a `Bot` never counts. `approvers` lists people by immutable id. Doctrine, stated in the docs and the agent briefs: agents never close gate or change issues. Audit prints each gate's approver login and close time in the `PROCESS` header line so a person sees who approved. Beyond that, the cheap separations of 8.6 are listed in order of cost, and M2 asks the maintainer to pick | Test: a gate closed `COMPLETED` by a `Bot` actor is open, with the bot line. Test: the header names the approver. The separations in 8.6 are verified when adopted (a scratch-repository check that the agent token cannot close the gate issue) |
+| R1 | An approval by a `Bot` never counts. `approvers` lists people by immutable id. **M7 (decided): gate and change issues live in a dedicated repository; agents run on a fine-grained token without `issues:write` there and only the maintainer closes them.** The REST cross-check (approval test line 4b) refuses a close performed through a GitHub App. Doctrine, stated in the docs and the agent briefs: agents never close gate or change issues. Audit prints each gate's approver login and close time in the `PROCESS` header line so a person sees who approved | Test: a gate closed `COMPLETED` by a `Bot` actor is open, with the bot line; a close whose REST event has `performed_via_github_app` set is open; the header names the approver. **U-exp** (manual, scratch repository) shows the restricted token cannot close, reopen, edit or create an issue in the gates repository; it is a hard prerequisite before any real board |
 | R12 | The approval test requires `closer == null`, `stateReason == COMPLETED` and `duplicateOf == null`; it reads the newest close with `timelineItems(itemTypes: CLOSED_EVENT, last: 1)` | Fixture: a merged pull request closes the gate, the actor is an approver `User` with `COMPLETED`, the gate stays open with the `closer` line. Fixtures for `Commit` and `ProjectV2` closers. Fixture: a gate reopened and closed again reads the newest close, not the oldest |
-| R2 | (a) **Prerequisite (a stage before U8, 11):** a branch protection rule or ruleset on the default branch requiring review from code owners, a pull request for every change, and the `CI green` check, with CODEOWNERS entries for `board.yaml`, `.github/CODEOWNERS` and `.github/workflows/`, and a verification step that reads the setting back (REST `branches/main/protection` returns `required_pull_request_reviews.require_code_owner_reviews: true`, or `rules/branches/main` lists a `pull_request` rule with `require_code_owner_review: true`). `.github/CODEOWNERS:1` (`* @ChiefGyk3D`) is VERIFIED as a file only, **not** as enforcement. (b) A **deny-by-default** offline mode, `safo process diff BASE HEAD`: it passes only a change on an explicit allowlist (U8, 11) and exits 1 on anything else, including every case in the R2 row. It also flags any change under `.github/workflows/`, `.github/CODEOWNERS` or `board.yaml` itself as a protected path. (c) The diff runs from a reusable workflow pinned by commit, and its caller is under the same protected paths, because a pull request can edit the caller that runs the diff. (d) Scheduled audits read the default branch's file; a PR-time audit must read the base branch's file, never the PR's | Prerequisite check: a script (U-prereq) that exits non-zero when the REST read does not show code-owner review required; today it would exit 1 against SAFO `main` (VERIFIED 404). One diff test per weakening in the R2 row (each goes red with that comparison removed); a test that an unlisted change kind exits 1 (the deny-by-default bite); a test that a change under `.github/workflows` exits 1; tests that each allowlisted change passes; a test that diff reads nothing from the network (the fake GitHub sees no request) |
+| R2 | (a) **Prerequisite, decided in M8 (hard):** U8 does not ship until a branch protection rule or ruleset on the default branch is in place and a read-only script reads it back: code-owner review required; the `CI green` check required; the branch required to be up to date (or a merge queue); administrators included; no bypass allowance or bypass actor for the agent account, and none for administrators the agents may use; force pushes off; CODEOWNERS entries for `board.yaml`, `.github/CODEOWNERS` and `.github/workflows/`. `.github/CODEOWNERS:1` (`* @ChiefGyk3D`) is VERIFIED as a file only, **not** as enforcement; the up-to-date requirement also stops two pull requests from citing one approval issue and both merging. (b) A **deny-by-default** offline mode, `safo process diff BASE HEAD` (U8a), applied only to a board with a waterfall repository: on the keys it governs it passes only an explicit allowlist and exits 1 on anything else, including every case in the R2 row; a change under `.github/workflows/`, `.github/CODEOWNERS` or `board.yaml` is reported as `protected path changed` and needs code-owner review but does not exit 1 by itself (otherwise every Dependabot bump would fail). (c) The diff runs from a reusable workflow pinned by commit (U8c), and its caller is under the protected paths, because a pull request can edit the caller that runs the diff. (d) Scheduled audits read the default branch's file; a PR-time audit must read the base branch's file, never the PR's | Prerequisite check (U-prereq): a read-only script that exits non-zero for each missing condition above; today it would exit 1 against SAFO `main` (VERIFIED 404). One diff test per weakening in the R2 row (each goes red with that comparison removed); a test that an unlisted change kind exits 1 (the deny-by-default bite); a test that a workflow-only change exits 0 with the NOTE; tests that each allowlisted change passes; a test that the offline diff reads nothing from the network (the fake GitHub sees no request) |
 | R3 | S4 pins baselined items to their phase; phase presence makes a cleared Phase a finding in waterfall repositories; G3 gives a pull request its linked issues' phase, so parking the issue in Backlog does not hide an active pull request; the status update counts cards with no phase | Tests for each: re-phased baselined item, cleared Phase, PR in Build linked to a Backlog issue behind an open gate |
 | R13 | G3 takes the **latest** of the card's own Phase and the linked issues' Phases, from `closingIssuesReferences` and from `Refs` in the body | U7 tests: an own early Phase on a pull request linked to a Build issue behind an open gate still yields DRIFT; a `Refs`-only pull request inherits; a `Refs`-only pull request with no phase anywhere is `MISSING Phase`; a linked issue with a cleared Phase contributes nothing; an issue parked in Backlog with a Build Phase still contributes Build |
 | R14 | A waterfall board reads `archivedStates: [ARCHIVED, NOT_ARCHIVED]`; an archived card with a Phase and an open or non-done issue is a finding; G1-S4 read archived cards | U4/U5a tests: an archived In-progress Build card behind an open gate yields both the gate line and the archived line; an agile board's query still has no `archivedStates` (golden) |
-| R15 | Load-time errors: every `approved_in` cited once, never a gate, a gate's `issue` cited once (2.5); the approval test requires a change issue created on or after `frozen` and a freeze issue closed on or before it; `safo process diff --verify` (read-only token, an explicit option) checks a new `approved_in` was closed after the pull request's first commit that carries the entry; swapping a gate's `issue` is not on the diff allowlist | Tests: the two load errors; a change issue created before `frozen` is S3; a pre-closed issue cited in a new entry fails `--verify`; a gate-`issue` swap exits 1 |
+| R15 | Load-time errors: every `approved_in` cited once, never a gate, a gate's `issue` cited once (2.5); the approval test requires a change issue created on or after `frozen`, a freeze issue closed on or before it, and (line 8, M13) a title or body that contains the entry's reference; `safo process diff --verify` (read-only token; mandatory on same-repository pull requests, M12) checks that a new `approved_in` was closed after the **pull request's creation time**, which the author cannot set and a rebase or squash does not change; a fork pull request has no token, runs the offline diff only and is labeled advisory; swapping a gate's `issue` is not on the diff allowlist; the up-to-date branch rule (R2) stops two pull requests both citing one approval issue | Tests: the two load errors; a change issue created before `frozen` is S3; an approval that does not mention its entry is S3; a pre-closed issue cited in a new entry fails `--verify`; the clock is the PR creation time (a rebase does not move it); a gate-`issue` swap exits 1 |
 | R16 | Approvers carry the immutable `databaseId`; a matching login with another id is not an approver; a matching id with a new login counts and prints a NOTE | Tests: same login different id, same id different login, and null actor |
 | R17 | A gate edited after its approval counts as open with a line. A reopened gate shows as open in the status update and the audit (recoverable, availability only). The blocked-by weakness is stated in "what audit cannot enforce" and in the docs | Tests: `lastEditedAt` later than the close; the docs test that the sentence is present |
 | R4 | `hooks.jira_projects`, default empty: every Jira key is `issue-unusable` and block mode denies | Tests: `issue: FAKE-1` with the default is `issue-unusable` and denied in block mode, and **allowed with a warning in warn mode and with a corrupt mode file**; a listed project is accepted; an unlisted project is `issue-unusable` with no lookup (the fake resolver records zero calls) |
@@ -754,49 +815,56 @@ Every row names the verification that proves the mitigation bites (delete the mi
 | R5 | Jira text is never rendered; only keys and status names cross; a test fixture with a sentinel title proves it never appears in any output | Sentinel-title test over every mode's output (stage 5, before any Jira build) |
 | R6 | Separate read and write credentials; the write one only in CI via Doppler OIDC; https only; destination pinned; no redirect carries the credential; the token never reaches a log | Redirect-to-other-host test drops the header; log scan test with a sentinel token (stage 5) |
 | R7 | Unreadable, missing, transferred or pull-request gates and approvals are UNKNOWN or DRIFT, never a pass; UNKNOWN outranks DRIFT | One test per case, each asserting exit 2 or 1 and never 0 |
-| R19 | A live Phase the file does not list is `UNKNOWN PHASE`; a gate on the last phase is refused at load; insert, reorder and remove are denied by the diff; append is allowed; the change procedure is documented (3.5) | Tests: unknown live phase exits 2; last-phase gate load error; the diff denies an insert and a reorder and allows an append |
+| R19 | A live Phase the file does not list is `UNKNOWN PHASE` for a card G1 or G2 reads (an old closed card outside the window is silent); a gate on the last phase is refused at load; insert, reorder and remove exit 1 in the diff; append is allowed; the change procedure is documented (3.5) | Tests: unknown live phase on an active card exits 2 and on an old closed card does not; last-phase gate load error; the diff exits 1 for an insert and a reorder and passes an append |
 | R8 | Caps (2.5); gate and approval reads batched (aliased issue reads, at most 50 per query, distinct references deduplicated); `blockedBy(first: 20)` with a count | Cap+1 tests for each list; a query-count test for a board at the caps |
 | R9 | A live phase field of the wrong type is UNKNOWN for the gate rule (extending `mismatched_fields`, VERIFIED `items.py:369-386`); every waterfall check not configured is a NOTE | Type-drift test asserting exit 2; not-configured note tests |
 | R10 | Every line goes through `ctx.say` (VERIFIED `context.py:29-31`) | A login with `::` and control characters is escaped (extends the existing output tests) |
 | R11 | Methods are built in and named; `board.yaml` cannot point at another file | The schema refuses any path-valued key under `process` (a test that `process.method: ./mine.yaml` is refused by the choice check) |
 
-### 8.6 Residual risk, and the cheap mitigations to try before accepting it
+### 8.6 Residual risk, and the separations chosen for R1
 
 **R1 is not accepted as written.** When agents act through the maintainer's own login, the close event cannot tell the
-maintainer from an agent (INFERRED: both are the same `User`). In order of cost, the options to take before the residual
-is accepted:
+maintainer from an agent (INFERRED: both are the same `User`). The options, in order of cost, and what the maintainer
+decided on 2026-10-26 (M7, "Dedicated gates repo, restricted agent token"):
 
-1. **`closer == null`, `COMPLETED`, no `duplicateOf` (cost: in the design already).** Removes the merge-and-keyword,
-   commit and project-workflow routes (R12). It does **not** separate an agent's `gh issue close` from the
-   maintainer's click: both are a manual close by the same user.
-2. **Gate and change issues in a dedicated repository, with agents on a fine-grained token that lacks `issues:write`
-   on it.** This is the cheapest real separation when agents run on the maintainer's `gh` login: the maintainer's own
-   login keeps the right to close; the agents' token cannot. Whether a fine-grained token without that permission
-   cannot close an issue is INFERRED; the prerequisite stage proves it on a scratch repository before relying on it.
-   The cost: the board's `repositories` lists the dedicated repository, and gates live outside the code repositories.
-3. **A second signal by the approver, such as a signed tag or a signed commit** naming the gate (for example a tag
-   `gate/design` signed by a key only the approver holds). Audit would read the tag's signature through the API.
-   Higher cost (a key, a verification path); it separates a person from any token. Not in the first cut; the audit
-   reads only the close.
-4. **Agents on an App or bot identity that is not an approver.** The strongest, and the largest change to how agents run.
-   Whether a GitHub App user-to-server token appears as the `User` in a `ClosedEvent` is SPECULATIVE; if it does, this
-   option would not separate anything for that token type.
+1. **`closer == null`, `COMPLETED`, no `duplicateOf` (in the design already).** Removes the merge-and-keyword, commit and
+   project-workflow routes (R12). It does **not** separate an agent's `gh issue close` from the maintainer's click:
+   both are a manual close by the same user.
+   **1b. The REST cross-check (approval test line 4b).** Also read the REST `closed` event and treat
+   `performed_via_github_app != null` as not manual. It closes the case of a GitHub App acting for a user, which GraphQL
+   shows as that `User` (PARTLY settled, 6.2). It does not separate a person from a personal token.
+2. **DECIDED: gate and change issues live in a dedicated repository, and agents run on a fine-grained token without
+   `issues:write` there; only the maintainer closes gates.** This is the cheapest real separation when agents otherwise
+   run on the maintainer's `gh` login: the maintainer's own login keeps the right to close; the agents' token cannot.
+   Whether a fine-grained token without that permission cannot close, reopen, edit or create an issue there is INFERRED;
+   **a manual experiment on a scratch repository (unit U-exp) settles it first and is a hard prerequisite for adopting
+   waterfall.** Consequences: the dedicated repository is listed in `repositories` (so every reference to it passes the
+   load check); the maintainer files the gate and change issues (agents cannot); agents may still read them.
+3. **A second signal by the approver, such as a signed tag or a signed commit** naming the gate. Higher cost (a key, a
+   verification path); it separates a person from any token. Not in the first cut.
+4. **Agents on an App or bot identity that is not an approver.** The strongest and the largest change to how agents run.
+   Not needed while option 2 holds.
 5. **The reopen signal, honestly worded.** Any gate or change issue closed in a session where an agent was running can be
    found by reading the issue's timeline against the guard log. That comparison is a **manual timestamp match**: the
    guard log records the rule names per dispatch and never the brief or the issue, so no tool joins the two. The
    timeline is a record to read after the fact, not a control.
 
-What stays residual after the chosen options is stated in the docs: audit proves a close by an approver identity, not that
-a person decided.
+What stays residual after options 1, 1b and 2: the maintainer's own account, and a token with write access to the gates
+repository. Audit proves a close by an approver identity, not that a person decided.
 
 Other residuals:
 
 - **R3 partly.** Work that has neither a card in an active status nor a pull request is invisible to every rule here;
   that is the no-hidden-work rule's residual, unchanged.
+- **R13: the author chooses the links** (3.2, G3). "Latest wins" only raises a phase.
 - **R4, while a project is listed, and in warn mode:** a number in a listed Jira project is not checked until a resolver
   exists, and warn mode reports without blocking.
-- **R2 until the prerequisite lands.** Without enforced code-owner review, every diff check is advisory.
+- **R2 until the prerequisite lands.** Without enforced protection read back by the check, every diff check is advisory.
+  A fork pull request gets the offline diff only, labeled advisory (M12).
+- **The audit finds breaches after the fact** (M14): the gate rule reads the board on a schedule; nothing blocks a card
+  from moving, and nothing is read at dispatch (6.1).
 - **R16:** an account takeover of an approver is not stopped by id pinning; it needs the account's own protections.
+  Enterprise-managed approvers cannot be named in the first cut (M15).
 - **Approval is not judgment.** Audit proves an approver closed the gate, not that the gate's criteria were met.
 - **The guard's own residual** (an agent with shell access can edit the guard's state) is unchanged (VERIFIED
   `docs/no-hidden-work.md:56-59`).
@@ -806,32 +874,40 @@ Other residuals:
 | Question | Answer | Why |
 |---|---|---|
 | Method granularity (board, repo, Area) | Repository, with the board's method as the default | Section 5: the repository is a fact GitHub returns; Area is writable by the card's own worker |
-| Where gates live (card, field, milestone) | An issue per gate, listed in `board.yaml`; a milestone optionally carries the date | 3.2: only the issue records who approved, readable by audit; listing beats label discovery |
-| Baseline changes without heavy process | One approval issue plus one `changes` entry per change, in `board.yaml`, with the order in 3.2 | 3.2: no new file, no body parsing, the PR review is the second record, audit checks the approval |
+| Where gates live (card, field, milestone) | An issue per gate, in a dedicated repository, listed in `board.yaml`; a milestone optionally carries the date | 3.2: only the issue records who approved, readable by audit; listing beats label discovery; the dedicated repository is the separation of M7 |
+| Baseline changes without heavy process | One approval issue plus one `changes` entry per change, in `board.yaml`, with the order in 3.2 | 3.2: no new file, no body parsing for scope, the PR review is the second record, audit checks the approval |
 | Do routing and hooks need method awareness | No | Section 6.1 |
 
 ### Decisions for the maintainer
 
-| Id | Decision | Recommendation |
+M7, M8, M12 and M13 are **DECIDED** by the maintainer on 2026-10-26, answering a multiple-choice question; his option
+label is quoted. Every other row is a **recommendation awaiting the maintainer unless he objects**. Each row says whose
+call it is.
+
+| Id | Decision | Status and recommendation |
 |---|---|---|
-| M1 | Jira keys by default: `issue-unusable` (denied in **block** mode only; reported and allowed in warn mode and with a corrupt mode file) unless their project is in `hooks.jira_projects` | Yes, and ship it first (U1): it closes the shape-only acceptance in block mode, and nobody uses Jira keys today. The underscore limit of `JIRA_KEY` is documented and left to the Jira build |
-| M2 | Approval integrity: adopt, in order, `closer == null` with `COMPLETED` (already in the design), then a cheap separation before accepting that an agent on your login can approve: a dedicated gates repository with agent tokens lacking `issues:write` there (8.6, option 2), a signed tag or commit as a second signal, or an agent identity that is not an approver (8.6) | Adopt option 1 now. Prefer option 2 as soon as waterfall is used for real; it is the cheapest separation. Do not accept the residual until you have chosen. The reopen signal is a manual timestamp match and is not a control |
-| M3 | `safo process diff` on pull requests: a reusable workflow (or an input of `python-ci`) in git-your-ship-together, which this repository then calls, **after** the branch-protection prerequisite (M8) | Yes, in GYST: every adopter needs the same step, which is the consolidation rule. Without M8 it is advisory |
-| M4 | G2 (finished ahead of a gate) as DRIFT or as a NOTE, with the window defined as `rules.add_closed_days` (at least 1 on a waterfall board) and the newest approving close used for a reopened gate | DRIFT, conditional on the `add_closed_days` definition in 3.2: a merged pull request ahead of an open gate is the breach the rule exists for |
-| M5 | This project's own board | Stays agile; the waterfall board ships only as an example file |
-| M6 | Names: the word *method* (`process.method`, `repositories[i].method`, `docs/process-methods.md`, "Choose a process method") instead of *profile*, which SAFO already uses for agent profiles (`docs/profiles.md`, `safo profiles verify\|brief`); the `process` key, the values `agile` and `waterfall`, and `safo process diff` stay. The issue title stays "process profiles" | Adopt *method*. A third method is added only with a rule that differs. Alternative words if you prefer: `approach`, `discipline` |
-| M7 | Which identity do agents use today for gate and change issues: your own `gh` login, a fine-grained token, or an App? And is a dedicated gates repository acceptable? | Needed before M2 can be settled. If agents use your login, a dedicated repository with a restricted agent token is the recommendation |
-| M8 | Is branch protection (or a ruleset) with code-owner review on `board.yaml`, CODEOWNERS and `.github/workflows` a hard prerequisite of U8? SAFO `main` has none today (VERIFIED) | Yes: without it the diff and CODEOWNERS are advice. For a one-person repository GitHub does not let an author approve their own pull request (INFERRED), so decide the bypass or a second reviewer identity at the same time |
-| M9 | Archived cards on a waterfall board: read them (`archivedStates: [ARCHIVED, NOT_ARCHIVED]`), apply the gate rules to them, and treat an archived open card with a Phase as a finding | Yes, for waterfall boards only; agile boards keep today's query |
-| M10 | `rules.add_closed_days` must be at least 1 on a waterfall board, and the waterfall example sets 30 | Yes: with 0, G2 cannot see finished work, and the pull request check sees open pull requests only |
-| M11 | The diff is deny-by-default (only an explicit allowlist passes) rather than a list of known weakenings | Deny-by-default. It will sometimes block a harmless edit; that edit then needs a code-owner review, which is the intended friction |
+| M1 | Jira keys by default: `issue-unusable` (denied in **block** mode only; reported and allowed in warn mode and with a corrupt mode file) unless their project is in `hooks.jira_projects` | Recommended: yes, ship first (U1). It closes the shape-only acceptance in block mode; nobody uses Jira keys today. The underscore limit of `JIRA_KEY` is documented and left to the Jira build. Maintainer's call |
+| M2 | Approval integrity: `closer == null` with `COMPLETED` and no `duplicateOf` (option 1), the REST `performed_via_github_app` cross-check (option 1b), and the separation of M7 (option 2) | Recommended: adopt 1 and 1b in U3 and 2 through M7 (decided). Options 3 and 4 wait for a reason. The reopen signal is a manual timestamp match and not a control. Maintainer's call on 1b (one REST read per approval issue) |
+| M3 | `safo process diff` on pull requests as a reusable workflow (or an input of `python-ci`) in git-your-ship-together, which this repository then calls | Recommended: yes, in GYST (unit U8c, an issue in that repository), after M8. Every adopter needs the same step, which is the consolidation rule |
+| M4 | G2 (finished ahead of a gate) as DRIFT or as a NOTE, with the window `rules.add_closed_days` (at least 1 on a waterfall board) and the newest approving close for a reopened gate | Recommended: DRIFT, conditional on that definition: a merged pull request ahead of an open gate is the breach the rule exists for. Maintainer's call |
+| M5 | This project's own board | Recommended: stays agile; the waterfall board ships as an example file only |
+| M6 | Names: *method* (`process.method`, `repositories[i].method`, `docs/process-methods.md`, "Choose a process method") instead of *profile*, which SAFO already uses for agent profiles (`docs/profiles.md`, `safo profiles verify\|brief`); the `process` key, the values `agile` and `waterfall`, and `safo process diff` stay; the issue title stays | Recommended: adopt *method*. Alternatives: `approach`, `discipline`. Maintainer's call |
+| M7 | **DECIDED 2026-10-26, "Dedicated gates repo, restricted agent token".** Gate and change issues live in a separate repository where agents run on a fine-grained token without `issues:write`; only the maintainer closes gates. A manual scratch-repository experiment verifies the token behavior first | Decided. It becomes unit U-exp and a **hard prerequisite for waterfall adoption**. The board lists the gates repository; the maintainer files gate and change issues |
+| M8 | **DECIDED 2026-10-26, "Yes, hard prerequisite".** U8 does not ship until branch protection with required checks, code-owner review on `board.yaml`, CODEOWNERS and the workflows, no bypass for the agent account, and an up-to-date branch are in place and read back by the read-only script | Decided. Unit U-prereq is the script; U8a, U8b and U8c are ordered after it. SAFO `main` has none of this today (VERIFIED, 6.2). Applying the setting is the maintainer's |
+| M9 | Archived cards on a waterfall board: read them (`archivedStates: [ARCHIVED, NOT_ARCHIVED]`), apply the gate rules and phase presence to them, and treat an archived open card with a Phase as a finding | Recommended: yes, for waterfall boards only; agile boards keep today's query |
+| M10 | `rules.add_closed_days` must be at least 1 on a waterfall board; the waterfall example sets 30 | Recommended: yes. With 0, G2 cannot see finished work and the pull request check sees open pull requests only |
+| M11 | The diff is deny-by-default on the keys it governs (an explicit allowlist passes; anything else on a governed key exits 1), applies only to a board with a waterfall repository, and reports a protected-path change without failing on it | Recommended: yes. It will sometimes block a harmless edit of a governed key; that edit then needs code-owner review, which is the intended friction |
+| M12 | **DECIDED 2026-10-26, "--verify mandatory on same-repo PRs, PR creation time as the clock".** The GYST workflow runs `--verify` whenever a token exists; fork pull requests get the offline check only and are labeled advisory | Decided. The clock is the pull request's creation time, read from the API, not a commit date |
+| M13 | **DECIDED 2026-10-26, "Yes, required".** An approval issue's title or body must contain the entry's add or remove reference, checked by exact string comparison with no free-text scope parsing | Decided. One adjustment for the maintainer to confirm: the issue text is not available offline, so the check runs in audit and in `--verify`; the load-time part only requires that an `approved_in` is cited for each entry |
+| M14 | Audit cadence: gate, scope and phase rules find a breach after the fact, on the next audit; nothing blocks a card from moving | Recommended: run the audit on a schedule of at least daily, and on demand after a gate is closed or reopened; say in the docs that it is detection, not prevention. Dispatch-time gating stays out of scope (6.1). Maintainer's call on the cadence |
+| M15 | Enterprise Managed User approvers: an `EnterpriseUserAccount` actor cannot be named in `process.approvers` in the first cut, so such a close counts as open with an explicit line | Recommended: accept for now; revisit when an enterprise-managed organization adopts the method. Maintainer's call |
 
 ## 10. Non-goals, compatibility and migration
 
 **Non-goals.** A Jira implementation (only its seam and threat model are here). A Gantt or schedule computation, a
 critical path, earned value, resource planning. Transition tables. Gate enforcement at dispatch time. Methods defined in
 files outside `board.yaml`. Automatic baselining (`safo` never writes `board.yaml`). Reading change requests from issue
-bodies. Any write by `reconcile` or `sync` driven by a gate, scope or dependency finding.
+bodies for scope. Any write by `reconcile` or `sync` driven by a gate, scope or dependency finding.
 
 **Compatibility.** A valid board without a waterfall repository behaves and prints exactly as today (2.4, with golden
 tests captured on `main` first); the one change is the text of the `unknown key (allowed: ...)` error for an invalid
@@ -839,45 +915,55 @@ board. `version` stays 1. An older `safo` refuses a file with `process` (fails c
 Action's inputs do not change in the first cut. `agents.yaml` gains one optional key, `hooks.jira_projects`; its stricter
 default changes the guard's answer only for Jira-style keys.
 
-**Migration.** None for existing boards. A team adopting waterfall copies `examples/process-waterfall.yaml`, runs
-`safo validate`, then `safo bootstrap` (which creates the Phase field like any other), applies the branch-protection
-prerequisite, files the gate issues (in a dedicated repository if M2 option 2 is taken), lists them, and adds the
-baseline once the Requirements gate is approved. The docs page "Choose a process method" walks it, including the
-phase-list procedure (3.5).
+**Migration.** None for existing boards. A team adopting waterfall: (1) completes the experiment U-exp and applies the
+protection read back by U-prereq (both hard prerequisites); (2) copies `examples/process-waterfall.yaml`, runs `safo
+validate`, then `safo bootstrap` (which creates the Phase field like any other); (3) files, in the dedicated gates
+repository, one issue per gate **and a freeze issue of its own (not a gate)** for the baseline; (4) lists the gates and
+the freeze issue; (5) adds the baseline once the Requirements gate is approved and the freeze issue is closed by an
+approver on or before `frozen`. Each later scope change is a change issue in the gates repository naming its entry, a
+pull request, a manual close, a re-run check, and a merge (3.2). The docs page "Choose a process method" walks it,
+including the phase-list procedure (3.5).
 
 ## 11. Build plan
 
 Units are issue-sized, each one pull request, test first, for a Sonnet implementer. "Codex" means an adversarial Codex
-pass on the cyber tier before merge, required wherever approval logic, untrusted parsing, the guard, or a security
-control is touched. Every unit's issue links #108; the maintainer merges.
+pass on the cyber tier before merge, required wherever approval logic, untrusted parsing, the guard, a token path or a
+security control is touched. Every unit's issue links #108; the maintainer merges. U8c lives in another repository
+(git-your-ship-together) and has its own issue there, linked to #108.
 
 | Unit | Title | Scope and files | Tests | Code vs doctrine | Review |
 |---|---|---|---|---|---|
-| U0 | Capture golden outputs on `main` | `tests/golden/process-agile/` (new): the outputs of `audit`, `reconcile --dry-run`, `status --post --print`, `agents-status` against `tests/fakegh` for `examples/safo.yaml` and `examples/renegade-penguin.yaml`; no source change | The files exist and a test compares fresh output to them; a deliberate one-character change to output goes red | Code (tests only) | Sonnet |
+| U0 | Capture golden outputs on `main` | `tests/golden/process-agile/` (new): the outputs of `audit`, `reconcile --dry-run`, `status --post --print`, `agents-status` against `tests/fakegh` for `examples/safo.yaml` and `examples/renegade-penguin.yaml`; no source change. **The clock is frozen**: audit takes `ctx.today` (VERIFIED `modes/audit.py:106`), and the golden harness sets a fixed date, so the files do not change with the day | The files exist and a test compares fresh output to them; a deliberate one-character change to output goes red; the same run on another date gives the same bytes | Code (tests only) | Sonnet |
 | U1 | Guard: accept Jira keys only from `hooks.jira_projects` | `agentsfile.py` (`Hooks.jira_projects`, parse, cap 64), `tracking.py` (`check` takes the list; `gh_resolver` stops answering `open` for Jira), `hooks.py` (pass it), `docs/no-hidden-work.md`, `docs/hooks.md`, `examples/agents.local.example.yaml` comment | The three table rows of 7.3, all with the one rule name `issue-unusable`; default denies in block mode; **warn mode and a corrupt or missing mode file allow with a warning**; no lookup for an unlisted project; parse errors with key paths; `MY_PROJ-1` stays unparseable | Code | Sonnet + Codex |
-| U2 | Schema: the `process` block | `schema.py` (`Process`, `Gate`, `Approver`, `Baseline`, `Change` dataclasses; `_parse_process`; per-repository `method`; cross-checks including every-reference-in-repositories, one-to-one approvals, no gate as approval, last-phase gate, `add_closed_days` >= 1; caps), `docs/board-yaml.md` | Every message of 2.5; caps at N and N+1; hostile YAML in the subtree; a load error per reference kind with no request made; U0 golden equality for both examples with and without `process: {method: agile}`; the changed `unknown key` text | Code | Sonnet + Codex (untrusted input) |
-| U3 | Approval reader | new `src/safo/approvals.py`: batched aliased reads of issues by reference (state, `createdAt`, `lastEditedAt`, canonical repository, `timelineItems(itemTypes: CLOSED_EVENT, last: 1)` with `stateReason`, `closer { __typename }`, `duplicateOf { id }`, actor typename, login, `databaseId`, time); a pure `verdict()` implementing the seven-line approval test; fake GitHub fixtures; first live read-only check of `closer` | Passed, open, reopened and re-closed (newest close), not planned, duplicate, **merged pull request closes the gate and it stays open**, `Commit` and `ProjectV2` closers, every actor row (approver, same login other id, other login same id, non-approver, Bot, Mannequin, Organization, EnterpriseUserAccount, null), edited after approval, change issue created before `frozen`, missing, transferred, pull request, batching at 50, malformed nodes | Code | Sonnet + Codex (identity) |
-| U4 | Read the phase field, `stateReason` and archived cards | `items.py` (`ItemState.phase`, `archived`, `_read_variables`, `mismatched_fields`, `archivedStates` only on a waterfall board; `stateReason` for closed issues), `live.py` unchanged | Read, blank, wrong live type is not asked for and is reported; an archived card is returned and flagged on a waterfall board and absent on an agile one (query text golden); the `items_total` agreement pinned | Code | Sonnet |
-| U5a | Audit: phase presence and the gate rule G1, G2 | new `src/safo/gates.py` (pure: cards, gates, verdicts to lines), `modes/audit.py` wiring, `coverage.not_configured` notes, `UNKNOWN PHASE`, the archived-card finding, drafts, the unused-status NOTE | Every line of the gate tables; earliest gate only; window edges for G2 and `add_closed_days` 1; reopened gate uses the newest close; not-planned closure is not G2; draft card; archived In-progress card; `In review` not in `active_statuses`; unknown outranks drift; U0 golden no-change for agile boards | Code (audit); "do not start" stays doctrine | Sonnet + Codex |
-| U5b | Reconcile prints gate findings as `HUMAN` lines | `modes/reconcile.py` (`needs_a_human` reads gates through the read path only), `docs/no-hidden-work.md` | The `HUMAN` line appears and the exit code stays 1; a test that no write is issued for a gate finding; a test that the gate read in reconcile cannot reach the applier | Code | Sonnet + Codex (a read path inside a write-capable mode) |
+| U2a | Schema: method, phase field, gates, approvers | `schema.py` (`Process`, `Gate`, `Approver`; `_parse_process` for `method`, `active_statuses`, `dependencies`, `phase_field`, `approvers`, `gates`; per-repository `method`; cross-checks: phase field, last-phase gate, `add_closed_days` >= 1, reference-in-repositories for gates; caps), `docs/board-yaml.md` | The messages of 2.5 for these keys; caps at N and N+1; hostile YAML in the subtree; a load error per gate reference with no request made; U0 golden equality for both examples with and without `process: {method: agile}`; the changed `unknown key` text | Code | Sonnet + Codex (untrusted input) |
+| U2b | Schema: the baseline and its changes | `schema.py` (`Baseline`, `Change`; reference-in-repositories for `approved_in`, `items`, `add`, `remove`; each `approved_in` cited once and never a gate; the freeze issue not a gate; caps 5,000 and 500) | The remaining messages of 2.5; a load error per reference kind with no request; duplicate and gate-as-approval errors; cap+1 | Code | Sonnet + Codex (untrusted input) |
+| U3 | Approval reader | new `src/safo/approvals.py`: batched aliased reads of issues by reference (state, `createdAt`, `lastEditedAt`, title and body for the entry-binding check only, canonical repository, `timelineItems(itemTypes: CLOSED_EVENT, last: 1)` with `stateReason`, `closer { __typename }`, `duplicateOf { id }`, actor typename, login, `databaseId`, time) plus the REST `closed` event read for `performed_via_github_app`; a pure `verdict()` implementing the eight-line approval test (and 4b); fake GitHub fixtures; first live read-only check of `closer` | Passed, open, reopened and re-closed (newest close), not planned, duplicate, **merged pull request closes the gate and it stays open**, `Commit` and `ProjectV2` closers, closed through an App (REST), every actor row, edited after approval, change issue created before `frozen`, **an approval that does not mention its entry**, missing, transferred, pull request, batching at 50, malformed nodes | Code | Sonnet + Codex (identity) |
+| U4 | Read the phase field, `stateReason` and archived cards (waterfall only) | `items.py` (`ItemState.phase`, `archived`, `_read_variables`, `mismatched_fields`, `archivedStates` only on a waterfall board; `stateReason` for closed issues), `live.py` unchanged | Read, blank, wrong live type is not asked for and is reported; an archived card is returned and flagged on a waterfall board and absent on an agile one (query text golden); the `items_total` agreement pinned (INFERRED until then) | Code | Sonnet |
+| U5a | Audit core: phase presence, G1, G2, integrity lines | new `src/safo/gates.py` (pure: cards, gates, verdicts to lines), `modes/audit.py` wiring, `coverage.not_configured` notes, `UNKNOWN PHASE` (only for cards G1 or G2 read) | Every line of the gate tables; earliest gate only; window edges for G2 and `add_closed_days` 1; reopened gate uses the newest close; not-planned closure is not G2; unknown outranks drift; an old closed card with a renamed Phase option is silent; U0 golden no-change for agile boards | Code (audit); "do not start" stays doctrine | Sonnet + Codex |
+| U5a2 | Audit extras: drafts, archived cards, unused statuses | `gates.py`, `modes/audit.py`: G1 and `MISSING Phase` for draft cards on a waterfall default; the archived-card finding and presence for archived cards; the NOTE for statuses nobody checks | A draft in an active status behind an open gate; a draft with no Phase on a waterfall default and none on an agile default; an archived In-progress Build card gives the gate and the archived line; an archived open issue with no Phase is `MISSING Phase`; `In review` left out of `active_statuses` gives the NOTE | Code | Sonnet |
+| U5b | Reconcile prints gate findings as `HUMAN` lines | `modes/reconcile.py` (`needs_a_human` reads gates through the read path only), `docs/no-hidden-work.md` | The `HUMAN` line appears and the exit code stays 1; no write is issued for a gate finding; the gate read in reconcile cannot reach the applier | Code | Sonnet + Codex (a read path inside a write-capable mode) |
 | U5c | The `PROCESS` header line | `modes/audit.py`: printed only for a non-agile method, naming each gate's approver and close time | Absent for an absent block and for `process: {method: agile}` (byte equal to U0); present and correct for waterfall | Code | Sonnet |
-| U6 | Audit: baseline, scope and phase pinning (S1-S5) | new `src/safo/baseline.py`, audit wiring | Every row of the scope table; approval reuse and one-to-one from U3 and U2; S1 bounded to open non-intake non-done issues; process records excluded; intake default | Code | Sonnet + Codex |
-| U7 | Audit: the phase of a pull request (G3) | `coverage.py` (a new query for waterfall boards only: `closingIssuesReferences(first: 10)` with ids and count; the body references via the existing `LINK` pattern; `Q_PULL_LINKS` untouched), `gates.py` | Latest of own and inherited; **own early Phase on a pull request linked to a Build issue behind an open gate still yields DRIFT**; a `Refs`-only pull request inherits; a `Refs`-only pull request with no phase is `MISSING Phase`; cleared Phase on the issue; issue parked in Backlog; more than 10 is UNKNOWN | Code (a security control) | Sonnet + Codex |
-| U-prereq | Branch protection prerequisite and its verification | A script and a docs section; no `src` change. The script reads REST protection or rules for the default branch and exits non-zero unless code-owner review is required and CODEOWNERS covers `board.yaml`, `.github/CODEOWNERS` and `.github/workflows/`; it also proves, on a scratch repository, whether a fine-grained token without `issues:write` can close an issue (M2 option 2) | The script goes red against a repository without protection (SAFO `main` today) and green against one with it; the script is read-only | Code and doctrine | Sonnet; the setting itself is the maintainer's to apply |
-| U8 | `safo process diff BASE HEAD` | new `src/safo/modes/process.py`, `docs/board-yaml.md`; then a GYST workflow or input (M3) in git-your-ship-together and this repository's caller. **Deny-by-default**: passes only these changes: append a `changes` entry with a fresh `approved_in`; add a gate for a phase that has none, with a fresh issue; remove an approver while one remains; narrow `baseline.intake`; widen `active_statuses`; set `dependencies` from `none` to `blocked_by`; append a phase option; raise `rules.add_closed_days`; turn a repository to waterfall; a parsed-equal edit (comments, order of keys). Everything else exits 1 as "not on the allowlist: <path>", including every case in the R2 row, a change to any file under `.github/workflows/`, `.github/CODEOWNERS` or `board.yaml` outside the allowlist, and a gate-`issue` swap. `--verify` (opt-in, read-only token) adds the closed-after-the-entry check | One test per R2 weakening and one for an unlisted change kind; one per allowlisted change passing; non-allowlisted edit exits 1; no network in the default mode; invalid input exits 2 | Code (a security control) | Sonnet + Codex |
+| U6 | Audit: baseline, scope and phase pinning (S1-S5) | new `src/safo/baseline.py`, audit wiring | Every row of the scope table; approval reuse and one-to-one from U3 and U2b; S1 bounded to open non-intake non-done issues; process records excluded; intake default | Code | Sonnet + Codex |
+| U7 | Audit: the phase of a pull request (G3), waterfall only | `coverage.py` (a new query for waterfall boards only: `closingIssuesReferences(first: 10)` with ids and count; the body references via the existing `LINK` pattern; `Q_PULL_LINKS` untouched), `gates.py`; optional, unspecified NOTE for a pull request whose linked issues are all earlier than its status implies | Latest of own and inherited; **own early Phase on a pull request linked to a Build issue behind an open gate still yields DRIFT**; a `Refs`-only pull request inherits; a `Refs`-only pull request with no phase is `MISSING Phase`; cleared Phase on the issue; issue parked in Backlog; more than 10 is UNKNOWN | Code (a security control) | Sonnet + Codex |
+| U-exp | **Manual** scratch-repository experiment (a human performs the writes) | A scratch repository and a fine-grained token without `issues:write`. Record, in a docs page, whether that token can create, comment on, edit, close or reopen an issue there; whether the maintainer's own token can; and what `ClosedEvent` and the REST event show for each. No `src` change, no automation | The recorded results, with dates; the spec's INFERRED claims in 6.2 are updated to VERIFIED or struck | Doctrine and evidence | The maintainer runs it; Sonnet writes the page. A **hard prerequisite for waterfall adoption** (M7) |
+| U-prereq | Protection read-back (read-only) | A read-only check, no `src` change beyond the script and its docs: it reads REST branch protection or rules for the default branch and exits non-zero unless **all** hold: code-owner review required; the `CI green` check required and the branch required to be up to date (or a merge queue); administrators included (`enforce_admins`); no bypass allowance or bypass actor for the agent account (given as `--agent-login`) and none for administrators the agents may use; force pushes and deletions off; CODEOWNERS covers `board.yaml`, `.github/CODEOWNERS` and `.github/workflows/`. **Why up to date**: without it two pull requests citing one approval issue can both go green and both merge, leaving a duplicate `approved_in` on `main`, which is a load error and makes every audit exit 2 (a self-inflicted outage). It never writes (no mutation, no issue created, no token scope beyond read) | Red against a repository without protection (SAFO `main` today, VERIFIED 404); one fixture per failing condition (no code-owner review, no up-to-date requirement, `enforce_admins` off, a bypass actor, a missing CODEOWNERS path); green against a fully protected fixture; a test that the script issues only GET requests. REST field names are INFERRED until the fixtures are checked against a live protected scratch repository | Code and doctrine | Sonnet + Codex (a security control). The setting itself is the maintainer's to apply (M8) |
+| U8a | `safo process diff BASE HEAD` (offline) | new `src/safo/modes/process.py`, `docs/board-yaml.md`. **Scope**: runs only when BASE or HEAD has a waterfall repository; an all-agile pair is untouched (exit 0, one line saying so). **Protected paths** (`.github/workflows/`, `.github/CODEOWNERS`, `board.yaml`): a change prints `NOTE    protected path changed: <path>; code-owner review required` and does **not** exit 1 by itself, so a Dependabot action bump and an ordinary board edit pass; the code-owner review is what holds them. **Governed keys** (`process.*`, `repositories` membership and `method`, `rules.add_closed_days`, `rules.status`, `agents.working`, the phase field's options): deny-by-default, so only these pass: append a `changes` entry with a fresh `approved_in`; add a gate for a phase that has none, with a fresh issue; remove an approver while one remains; narrow `baseline.intake`; widen `active_statuses`; set `dependencies` from `none` to `blocked_by`; append a phase option; raise `add_closed_days`; turn a repository to waterfall; a parsed-equal edit. Everything else on a governed key exits 1 as `DENY <path>: not on the allowlist`, including every case in the R2 row and a gate-`issue` swap. **First creation** is intentional friction, defined: the first appearance of `process` with a waterfall repository, and the first appearance of `baseline` (with its `items`), pass with `NOTE    waterfall introduced (or baseline created); review it as a whole`; they are stricter than before, and the audit (S5) still needs the freeze issue approved. Once a baseline exists, `frozen`, `items` and `approved_in` are fixed except through `changes`, and removing `process` or `baseline` exits 1 | One test per R2 weakening and one for an unlisted change kind; one per allowlisted change passing; a Dependabot-style workflow-only change exits 0 with the NOTE; an all-agile pair exits 0; first creation of `process` and `baseline` passes with the NOTE; removal exits 1; no network; invalid input exits 2 | Code (a security control) | Sonnet + Codex |
+| U8b | `--verify` (token path) | `modes/process.py`: an opt-in flag that needs a read token. It checks, for each new `approved_in`, the approval test through U3 (so it **depends on U3**), that the issue was closed after the **pull request's creation time** (read from the API; the clock source is the PR, not a commit date, M12), and the entry-binding of line 8. A fork pull request has no token and cannot run it | Closed before the PR was created fails; closed after passes; a rebase or squash does not change the clock; the check is not run without a token and says so; no token value in any output | Code (a token path) | Sonnet + Codex |
+| U8c | The GYST workflow (in git-your-ship-together; its own issue there) | A reusable workflow, or an input of `python-ci`, that runs U8a on every pull request touching the board files, **runs U8b whenever a token exists** (same-repository pull requests; mandatory, M12), and for a fork pull request runs the offline check only and labels the result advisory; optional `issues: closed` re-run (3.2, option c); this repository's caller is pinned by commit | A same-repository run executes `--verify`; a fork run does not and is labeled; the caller is under the protected paths | Code (workflow) | Sonnet + Codex |
 | U9 | Audit: the dependency rule D1 | new `src/safo/dependencies.py`, audit wiring | Open blocker, closed blocker, over 20, unreadable blocker, rule off reads nothing | Code | Sonnet |
-| U10 | Status update: the Phases and gates section | `statusgroups.py` (`Row.phase`, a pure section builder), `modes/status.py` (query adds the phase field) | Golden body for a waterfall fixture; agile body unchanged; no titles in the section; counts | Code | Sonnet |
-| U11 | Docs and examples | new `docs/process-methods.md` ("Choose a process method", the phase-list procedure, what audit cannot enforce, the order of a change), links in `README.md` and `docs/home.md` (required by `tests/test_readme_links.py`), `docs/why.md` and `docs/board.md` wording ("the fields are a choice; the rule is the constant"), `examples/process-waterfall.yaml` with `ui_only` for the Roadmap and `add_closed_days: 30` | `test_examples.py` loads the new example; link tests | Doctrine (the docs) | Sonnet, or Haiku for the link edits |
+| U10 | Status update: the Phases and gates section (waterfall only) | `statusgroups.py` (`Row.phase`, a pure section builder), `modes/status.py` (the query adds the phase field **only on a waterfall board**) | Golden body for a waterfall fixture; agile body and query unchanged; no titles in the section; counts | Code | Sonnet |
+| U11 | Docs and examples | new `docs/process-methods.md` ("Choose a process method", the phase-list procedure, the order of a change, the freeze issue, the gates repository, what audit cannot enforce), links in `README.md` and `docs/home.md` (required by `tests/test_readme_links.py`), `docs/why.md` and `docs/board.md` wording ("the fields are a choice; the rule is the constant"), `examples/process-waterfall.yaml` with `ui_only` for the Roadmap and `add_closed_days: 30` | `test_examples.py` loads the new example; link tests | Doctrine (the docs) | Sonnet, or Haiku for the link edits |
 | U12 | Tracker protocol with GitHub as its implementation | `src/safo/trackers/` (protocol, GitHub wrapper), modes call through it; no behavior change | U0 golden outputs unchanged; protocol conformance tests | Code | Sonnet; **stage 5, not the first cut** |
 | U13 | NOTE: an open gate past its milestone's due date | `gates.py`, the gate read adds `milestone { dueOn }` | Overdue, not overdue, no milestone | Code | Sonnet; optional |
 
-**Order.** Stage 0: U0 (before any change to `src/`). Stage 1: U1 (independent; ship first) and U2. Stage 2: U3 (needs
-nothing but the fake GitHub) and U4 (needs U2). Stage 3: U5a (needs U2, U3, U4), then U5b and U5c. Stage 4: U6 and U7
-(need U5a), **U-prereq** (any time, but before U8), U8 (needs U2, U6 and U-prereq; the baseline weakening cases exist
-after U6), U9 (needs U2), U10 (needs U4 and U5a), U11 (last, documents what merged). U13 after U5a, optional. Stage 5,
-not committed to a date: U12, then a Jira resolver, which needs its own threat-model update (8, R5 and R6 made concrete
-against Atlassian's documentation), the maintainer's decision on credentials, and a Codex pass.
+**Order.** Stage 0: U0 (before any change to `src/`). Stage 1: U1 (independent; ship first) and U2a, then U2b. Stage 2: U3
+(needs nothing but the fake GitHub) and U4 (needs U2a). Stage 3: U5a (needs U2a, U3, U4), then U5a2, U5b and U5c. Stage
+4: U6 (needs U2b, U3, U5a) and U7 (needs U5a); **U-exp and U-prereq** (any time, both before U8 and before any real
+waterfall board); U8a (needs U2a, U2b, U6 and U-prereq, per M8), then U8b (needs U3, U8a), then U8c (needs U8a and U8b;
+a different repository); U9 (needs U2a); U10 (needs U4 and U5a); U11 (last, documents what merged). U13 after U5a,
+optional. Stage 5, not committed to a date: U12, then a Jira resolver, which needs its own threat-model update (8, R5 and
+R6 made concrete against Atlassian's documentation), the maintainer's decision on credentials, and a Codex pass.
 
 **Review gates.** Every unit: Sonnet review against its tests and `make check` exit 0. Codex adversarial pass before
-merge: U1, U2, U3, U5a, U5b, U6, U7, U8. A whole-branch review after stage 4, before the docs unit, that reads the gate,
-scope, G3 and diff code together, because the bypasses in R2, R3 and R13 cross units.
+merge: U1, U2a, U2b, U3, U5a, U5b, U6, U7, U-prereq, U8a, U8b, U8c. A whole-branch review after stage 4, before the docs
+unit, that reads the gate, scope, G3 and diff code together, because the bypasses in R2, R3 and R13 cross units.
