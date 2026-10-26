@@ -146,6 +146,43 @@ def test_the_usage_page_records_that_code_counts_and_the_model_writes_prose() ->
     assert "code does the grouping and the counting" in usage
 
 
+DOCTRINE_PAGES = ("look-before-instructing", "done-means-verified", "access-planning", "act-then-report")
+FOLLOW_UP_FOOTER = "Linked from the orchestrator and lessons pages in a follow-up"
+
+
+def links_to(text: str, page: str) -> bool:
+    return re.search(rf"\]\({re.escape(page)}\.md(?:#[^)]*)?\)", text) is not None
+
+
+def test_each_doctrine_page_is_linked_from_the_orchestrator_and_lessons_pages() -> None:
+    for page in DOCTRINE_PAGES:
+        for host in ("orchestrator", "lessons"):
+            text = (ROOT / "docs" / f"{host}.md").read_text(encoding="utf-8")
+            assert links_to(text, page), f"docs/{host}.md does not link {page}.md"
+
+
+def test_the_link_check_bites() -> None:
+    assert not links_to("see [x](done-means-verified-not.md)", "done-means-verified")
+    assert not links_to("see done-means-verified.md", "done-means-verified")
+    assert links_to("see [x](done-means-verified.md#why)", "done-means-verified")
+
+
+def test_the_doctrine_pages_carry_no_follow_up_footer_and_no_process_commentary() -> None:
+    for page in DOCTRINE_PAGES:
+        text = (ROOT / "docs" / f"{page}.md").read_text(encoding="utf-8")
+        assert FOLLOW_UP_FOOTER not in text, page
+        assert "eneralized" not in text and "tracking issue records" not in text, page
+    rule4 = section((ROOT / "docs" / "act-then-report.md").read_text(encoding="utf-8"), "Rule 4 of the orchestrator")
+    assert rule4.strip() and max(len(line) for line in rule4.splitlines()) <= 120
+
+
+def test_the_monitor_brief_template_carries_a_prior_art_grep_line() -> None:
+    text = (ROOT / "docs" / "orchestrator.md").read_text(encoding="utf-8")
+    template = text.split("## The monitor-agent brief", 1)[1].split("```", 2)[1]
+    line = next(x for x in template.splitlines() if x.startswith("prior-art:"))
+    assert "grep -ril" in line
+
+
 DOIA = "https://github.com/ChiefGyk3D/department-of-internal-arguments"
 DOIA_ROLES = ("implementer", "reviewer", "adversarial-reviewer", "transcriber")
 DOIA_PACKS = (

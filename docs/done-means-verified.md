@@ -30,8 +30,8 @@ A delete, a revocation, a visibility change or a force-cancel adds five things:
 - Five watcher reports that day were stale.
 - A state read was treated as current after the maintainer reported a different result.
 
-(Generalized: this lists only what the tracking issue records.) A false "done" costs the maintainer a broken page and a
-second debugging round, and it spends the trust that lets an agent work unattended.
+A false "done" costs the maintainer a broken page and a second debugging round, and it spends the trust that lets an
+agent work unattended.
 
 ## How it is enforced
 
@@ -50,6 +50,4 @@ Destructive step: fresh read of target and dependents; export; stop at first err
 ```
 
 Related: [Look before instructing](look-before-instructing.md), [Access planning](access-planning.md),
-[The review loop](review-loop.md).
-
-Linked from the orchestrator and lessons pages in a follow-up after PR #112 merges.
+[The review loop](review-loop.md), [The orchestrator](orchestrator.md), [Lessons](lessons.md).

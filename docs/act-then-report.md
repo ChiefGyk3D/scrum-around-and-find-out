@@ -26,16 +26,16 @@ Anything else is work.
 
 ## Rule 4 of the orchestrator
 
-[The orchestrator](orchestrator.md) says a hung step is reported after 5 minutes. That does not conflict with this page.
-Reporting the hang is the report; it is not a pause. If a standing ruling already covers the case (re-run it, cancel it),
-act on it and report that you did. If no ruling covers it, report it with evidence and a recommendation; the choice between real alternatives is the
-maintainer's, which is the fourth reason above. Either way the report opens with the state and the evidence.
+[The orchestrator](orchestrator.md) says a hung step is reported after 5 minutes. That does not conflict with this
+page. Reporting the hang is the report; it is not a pause. If a standing ruling already covers the case (re-run it,
+cancel it), act on it and report that you did. If no ruling covers it, report it with evidence and a recommendation; the
+choice between real alternatives is the maintainer's, which is the fourth reason above. Either way the report opens
+with the state and the evidence.
 
 ## Why: 2026-10-25
 
 The lead asked for decisions on known fixes that were within the maintainer's existing approvals, re-suggested options he
-had rejected, and opened reports with process instead of the result. (Generalized: this states only what the tracking
-issue records.)
+had rejected, and opened reports with process instead of the result.
 
 A re-suggested option tells him the lead is not acting on his decision.
 
@@ -61,6 +61,5 @@ One line that opens with the result, then the evidence:
 - [ ] Not working around a denial.
 - [ ] The report opens with the result.
 
-Related: [Look before instructing](look-before-instructing.md), [Access planning](access-planning.md).
-
-Linked from the orchestrator and lessons pages in a follow-up after PR #112 merges.
+Related: [Look before instructing](look-before-instructing.md), [Access planning](access-planning.md),
+[The orchestrator](orchestrator.md), [Lessons](lessons.md).
