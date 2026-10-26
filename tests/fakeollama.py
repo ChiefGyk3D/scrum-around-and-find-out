@@ -11,7 +11,6 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-
 OMIT = object()  # set as FakeOllama.answer_model to leave the model key out of the answer
 
 
