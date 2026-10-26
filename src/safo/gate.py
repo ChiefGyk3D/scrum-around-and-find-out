@@ -371,7 +371,7 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
                 read_repository(client, name),
                 rules.gate_check,
                 rules.gate_forbid_force_push,
-                admins_accepted=name.lower() in admins,
+                admins_accepted=not rules.gate_require_admin_enforced or name.lower() in admins,
             )
         except NotFoundError:
             unknown.append(

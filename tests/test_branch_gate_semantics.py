@@ -124,23 +124,42 @@ def actors(*modes: str) -> dict[str, Any]:
     return {"totalCount": len(modes), "nodes": [{"bypassMode": m} for m in modes]}
 
 
-def test_admins_not_enforced_is_a_finding_with_a_clear_wording(fake: FakeGitHub, client: Client) -> None:
-    build_world(fake)
-    repo(fake).protection = classic("CI green") | {"isAdminEnforced": False}
-    code, text = gate(fake, client)
-    assert code == 1
-    (found,) = lines(text, WIDGETS)
-    assert "can be bypassed" in found and "administrators are not included (enforce_admins is off)" in found
-
-
-def test_admins_not_enforced_can_be_accepted_per_repository(fake: FakeGitHub, client: Client) -> None:
-    build_world(fake)
+def unenforced(fake: FakeGitHub) -> None:
     repo(fake).protection = classic("CI green") | {"isAdminEnforced": False}
     repo(fake, "acme/manuals").protection = classic("CI green") | {"isAdminEnforced": False}
-    board = with_rules(load_test_board(), gate_admin_exempt_repos=(WIDGETS,))
+
+
+def test_admins_not_enforced_is_not_a_finding_by_default(fake: FakeGitHub, client: Client) -> None:
+    """The maintainer's baseline sets enforce_admins=false on purpose, so the default must not flag it."""
+    build_world(fake)
+    unenforced(fake)
+    code, text = gate(fake, client)
+    assert code == 0 and not [t for t in text if "NO-GATE" in t]
+
+
+def test_admins_not_enforced_is_a_finding_when_asked_for(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    unenforced(fake)
+    code, text = gate(fake, client, with_rules(load_test_board(), gate_require_admin_enforced=True))
+    assert code == 1
+    found = lines(text, WIDGETS)[0]
+    assert "can be bypassed" in found and "administrators are not included (enforce_admins is off)" in found
+    assert lines(text, "acme/manuals")
+
+
+def test_admins_not_enforced_can_be_accepted_per_repository_when_asked_for(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    unenforced(fake)
+    board = with_rules(load_test_board(), gate_require_admin_enforced=True, gate_admin_exempt_repos=(WIDGETS,))
     code, text = gate(fake, client, board)
     assert code == 1
     assert not lines(text, WIDGETS) and lines(text, "acme/manuals")
+
+
+def test_the_default_for_admin_enforcement_is_off() -> None:
+    from safo.schema import Rules
+
+    assert Rules().gate_require_admin_enforced is False
 
 
 def test_a_force_push_bypass_allowance_is_a_finding_only_when_force_pushes_are_forbidden(
@@ -250,6 +269,13 @@ def test_the_admin_exempt_rule_parses(tmp_path: Any) -> None:
         src.replace("\nrules:\n", "\nrules:\n  gate_admin_exempt_repos: [acme/widgets]\n", 1), encoding="utf-8"
     )
     assert load_board(ok).rules.gate_admin_exempt_repos == ("acme/widgets",)
+    ok.write_text(src.replace("\nrules:\n", "\nrules:\n  gate_require_admin_enforced: true\n", 1), encoding="utf-8")
+    assert load_board(ok).rules.gate_require_admin_enforced is True
+    ok.write_text(
+        src.replace("\nrules:\n", "\nrules:\n  gate_require_admin_enforced: yes please\n", 1), encoding="utf-8"
+    )
+    with pytest.raises(ConfigError):
+        load_board(ok)
     ok.write_text(src.replace("\nrules:\n", "\nrules:\n  gate_admin_exempt_repos: [nope]\n", 1), encoding="utf-8")
     with pytest.raises(ConfigError):
         load_board(ok)

@@ -89,7 +89,8 @@ rules:
   gate_check: CI green            # the check name; empty turns the rule off and the audit says "not configured"
   gate_forbid_force_push: true    # also report a default branch that allows force pushes
   gate_exempt_repos: []           # owner/name list that is not audited for the gate
-  gate_admin_exempt_repos: []     # owner/name list where "administrators may bypass" is accepted
+  gate_require_admin_enforced: false  # true also reports a rule that does not apply to administrators
+  gate_admin_exempt_repos: []     # with the line above on: owner/name list where that is accepted
 ```
 
 **Ref patterns** are matched the way GitHub does, not as Python's `fnmatch`: GitHub uses Ruby's `fnmatch` with
@@ -110,10 +111,14 @@ nobody can bypass is enough; a second, bypassable one adds no finding. Pull-requ
 skip the review requirement, not required checks, and are not reported. A bypass list cut short by the page size is
 **cannot tell**, and an answer without the bypass fields is **cannot tell**, never a pass.
 
-`enforce_admins` off is on by default as a finding, because on a personal repository the owner is the administrator and
-can merge a red check, which is what the gate exists to stop. It will make such repositories red until you turn the
-setting on or accept it per repository with `gate_admin_exempt_repos`, which is a visible, reviewed decision and not a
-silent pass. The finding says: `administrators are not included (enforce_admins is off)`.
+`enforce_admins` off (a classic rule that does not apply to administrators) is **not** a finding by default
+(`gate_require_admin_enforced: false`). The maintainer's GYST repository baseline sets `enforce_admins` to false on
+purpose, with no required approvals, so the owner can merge his own green pull requests; a default that reported it would
+flag every tracked repository, this one included. Set `gate_require_admin_enforced: true` to report it for a board that
+wants administrators held to the gate too; the finding then says `administrators are not included (enforce_admins is
+off)`, and `gate_admin_exempt_repos` accepts it per repository. Everything else that makes a rule bypassable (a ruleset
+bypass actor, a force-push bypass allowance) stays a finding by default. Whether the field is readable is still checked
+either way: an answer without `isAdminEnforced` is cannot tell, never a pass.
 
 Defaults and why: the rule is **on** with `CI green`, because it is the standing rule and a repository without it is
 exactly what the audit exists to find; force pushes are **on** because a gate that history can be rewritten around is not a

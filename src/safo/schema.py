@@ -131,7 +131,9 @@ class Rules:
     gate_check: str = "CI green"
     gate_forbid_force_push: bool = True  # a default branch that allows force pushes is also reported
     gate_exempt_repos: tuple[str, ...] = ()  # owner/name: not audited for the gate
-    gate_admin_exempt_repos: tuple[str, ...] = ()  # owner/name: administrators may bypass the rule here, accepted
+    # Off by default: the GYST baseline sets enforce_admins=false on purpose, so the owner can merge his own green PRs.
+    gate_require_admin_enforced: bool = False
+    gate_admin_exempt_repos: tuple[str, ...] = ()  # owner/name: with the above on, admins may bypass here, accepted
 
 
 @dataclass(frozen=True)
@@ -434,6 +436,7 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
             "gate_check",
             "gate_forbid_force_push",
             "gate_exempt_repos",
+            "gate_require_admin_enforced",
             "gate_admin_exempt_repos",
         },
     )
@@ -469,6 +472,7 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
         _parse_gate_check(r, m.get("gate_check", "CI green")),
         _parse_gate_force(r, m.get("gate_forbid_force_push", True)),
         _parse_gate_exempt(r, m.get("gate_exempt_repos", []), "gate_exempt_repos"),
+        _parse_gate_admin(r, m.get("gate_require_admin_enforced", False)),
         _parse_gate_exempt(r, m.get("gate_admin_exempt_repos", []), "gate_admin_exempt_repos"),
     )
 
@@ -483,6 +487,12 @@ def _parse_gate_check(r: Reader, raw: object) -> str:
 def _parse_gate_force(r: Reader, raw: object) -> bool:
     if not isinstance(raw, bool):
         raise r.fail("rules.gate_forbid_force_push", "expected true or false")
+    return raw
+
+
+def _parse_gate_admin(r: Reader, raw: object) -> bool:
+    if not isinstance(raw, bool):
+        raise r.fail("rules.gate_require_admin_enforced", "expected true or false")
     return raw
 
 
