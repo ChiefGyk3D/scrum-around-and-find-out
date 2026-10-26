@@ -1,8 +1,29 @@
 # Lessons
 
 Each entry: what happened, the evidence, and the rule the code or the playbook holds now. Dates are when it was learned.
-Add one whenever something costs more than ten minutes to find out. An entry marked **test** has a test that fails if
+Add one whenever something costs more than ten minutes to find out. Where an entry belongs is covered by the first
+entry below: a vendor's lessons go on a vendor page, not here alone. An entry marked **test** has a test that fails if
 the rule is broken.
+
+## 2026-10-24..26 (doctrine from the first audit)
+
+### A lesson that is written down but not found costs the same as one never learned (2026-10-26)
+
+- **What happened.** A Cloudflare lesson from 2026-10-24 was written down, but on 2026-10-25 it was not found, because it
+  lived in a project file the next session did not search.
+- **Evidence.** Issue 92 (from audit issue 78) records that the lesson existed and was missed.
+- **Rule now.** Where a lesson goes decides whether it is found:
+  1. **A vendor lesson goes on a vendor page, one per vendor** (`<vendor>-lessons`, for example `cloudflare-lessons`), in the
+     maintainer's memory (the agent's memory or notes store) or in a docs page every project can reach. Not in the project file of the project that learned it.
+  2. **The project links to it.** The project memory or README points at the vendor page by name, so a reader of either
+     finds both.
+  3. **The memory index line is updated the same day**, so the vendor page is listed where a new session reads first.
+  4. **Look before you start.** When a task involves a vendor, the brief (the `prior-art:` line in the
+     [monitor-agent template](orchestrator.md)) or the lead greps memory and `~/src/*/docs` (your agent's memory or notes store, and your own projects' docs) for the vendor's name before
+     giving any step for it. A silent grep means read the next source (the vendor's own docs), not "I don't know".
+  5. **A vendor page lists each fact with how it was checked** (a docs page and its date, an API response, an error text),
+     and marks what was not checked.
+- **Enforcement.** Doctrine only. The nearest enforcement is the brief line and the grep step above.
 
 ## 2026-10-05..07 (the first week of running a board with agents)
 
