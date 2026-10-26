@@ -516,7 +516,16 @@ def append_log(
         # Recover only the incomplete tail; preserve complete retained records.
         complete = old[: old.rfind(b"\n") + 1]
         if complete != old:
-            write_text(path, complete.decode("utf-8"))
+            try:
+                text = complete.decode("utf-8")
+            except UnicodeDecodeError:
+                # Undecodable retained bytes are corruption, not something to repair: keep them in the one private
+                # archive (replacing an older archive, as a size rotation does) and start a fresh log.
+                os.replace(path, path.with_name(path.name + ".1"))
+                path.with_name(path.name + ".1").chmod(0o600)
+                complete = b""
+            else:
+                write_text(path, text)
         if len(complete) + len(raw) > limit:
             archive = path.with_name(path.name + ".1")
             os.replace(path, archive)  # one private archive; oldest retained history is deliberately discarded
