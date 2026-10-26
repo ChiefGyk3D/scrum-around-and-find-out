@@ -37,6 +37,8 @@ METHODS = ("GET",)  # the only verb this module can send
 API_URL = "https://api.github.com"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 CHECK_NAME = "CI green"
+ACTIONS_APP = 15368  # GitHub Actions: the app that reports a workflow job as a check
+UNPINNED = "required check is not pinned to an app (any source can satisfy it)"
 MAX_RULESETS = 100  # one page; a full page might hide more, so it is "cannot tell"
 CODEOWNERS_PLACES = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")  # GitHub's order of precedence
 NAME = re.compile(r"[A-Za-z0-9_.-]+")
@@ -53,7 +55,9 @@ class Condition:
     id: str
     text: str
     ok: bool
-    note: str = ""
+    note: str = ""  # shown on a FAIL line
+    warn: str = ""  # a NOTE line that never changes the exit code on its own
+    matched: str = ""  # the required context that satisfied the condition
 
 
 # -- reading -------------------------------------------------------------------------------------------------------
@@ -143,7 +147,36 @@ def _strings(parent: dict[str, Any], key: str, where: str) -> list[str]:
 
 
 def _names_check(context: str) -> bool:
-    return context == CHECK_NAME or context.endswith(" / " + CHECK_NAME)  # "<caller job> / CI green" in a reusable run
+    """The exact name, or one workflow-name prefix and ` / `: what a reusable workflow's job is called in a caller.
+
+    The prefix must be plain text with no control characters and no further ` / ` segment, so a lookalike context
+    ("a / b / CI green", "x\\n / CI green") does not satisfy the condition.
+    """
+    if context == CHECK_NAME:
+        return True
+    prefix, sep, tail = context.partition(" / ")
+    return (
+        sep == " / "
+        and tail == CHECK_NAME
+        and 0 < len(prefix) <= 100
+        and prefix == prefix.strip()
+        and prefix.isprintable()
+    )
+
+
+Check = tuple[str, int | None]  # a matching required check: its context and the app it is pinned to (None = unpinned)
+
+
+def _required_check(entry: Any, pin_key: str) -> Check | None:
+    """The check if its context names `CI green`, else None. The pin must be null, absent, -1 or a positive integer."""
+    row = _obj(entry, "a required check")
+    context = _str(row, "context", "a required check")
+    pin = row.get(pin_key)
+    if pin is not None and (not isinstance(pin, int) or isinstance(pin, bool) or pin == 0 or pin < -1):
+        raise CannotTell(f"cannot tell: a required check's {pin_key} is not null, -1 or a positive integer")
+    if not _names_check(context):
+        return None
+    return context, (pin if pin is not None and pin > 0 else None)
 
 
 # -- the sources ---------------------------------------------------------------------------------------------------
@@ -154,7 +187,7 @@ class Source:
     """What one protection mechanism provides. `bypass` counts the users, teams and apps that may skip it."""
 
     code_owner: bool
-    ci_green: bool
+    ci: tuple[Check, ...]
     up_to_date: bool
     admins_included: bool
     bypass: int
@@ -165,14 +198,16 @@ class Source:
 
 def parse_classic(body: Any, agent: str) -> Source:
     top = _obj(body, "the branch protection answer")
-    owner = ci = strict = False
+    owner = strict = False
+    ci: list[Check] = []
     if "required_status_checks" in top:
         checks = _obj(top["required_status_checks"], "required_status_checks")
         strict = _bool(checks, "strict", "required_status_checks")
         if "contexts" in checks:
             _strings(checks, "contexts", "required_status_checks")
         for entry in _list(checks, "checks", "required_status_checks"):
-            ci = ci or _names_check(_str(_obj(entry, "a required check"), "context", "a required check"))
+            if (found := _required_check(entry, "app_id")) is not None:
+                ci.append(found)
     bypass, agent_hit = 0, False
     if "required_pull_request_reviews" in top:
         reviews = _obj(top["required_pull_request_reviews"], "required_pull_request_reviews")
@@ -187,7 +222,7 @@ def parse_classic(body: Any, agent: str) -> Source:
     admins = _bool(_obj(top.get("enforce_admins"), "enforce_admins"), "enabled", "enforce_admins")
     force = _bool(_obj(top.get("allow_force_pushes"), "allow_force_pushes"), "enabled", "allow_force_pushes")
     delete = _bool(_obj(top.get("allow_deletions"), "allow_deletions"), "enabled", "allow_deletions")
-    return Source(owner, ci, strict, admins, bypass, agent_hit, not force, not delete)
+    return Source(owner, tuple(ci), strict, admins, bypass, agent_hit, not force, not delete)
 
 
 def _applies(detail: dict[str, Any], branch: str) -> bool:
@@ -214,7 +249,8 @@ def parse_ruleset(detail: Any, listed: dict[str, Any], branch: str) -> Source | 
     bypass = len(_list(body, "bypass_actors", "a ruleset"))
     if not all(isinstance(a, dict) for a in body["bypass_actors"]):
         raise CannotTell("cannot tell: a ruleset's bypass_actors holds something that is not an object")
-    owner = ci = strict = queue = force = delete = False
+    owner = strict = queue = force = delete = False
+    ci: list[Check] = []
     for rule in _list(body, "rules", "a ruleset"):
         entry = _obj(rule, "a ruleset rule")
         kind = _str(entry, "type", "a ruleset rule")
@@ -225,11 +261,12 @@ def parse_ruleset(detail: Any, listed: dict[str, Any], branch: str) -> Source | 
             params = _obj(entry.get("parameters"), "the required_status_checks rule's parameters")
             strict = strict or _bool(params, "strict_required_status_checks_policy", "the required_status_checks rule")
             for check in _list(params, "required_status_checks", "the required_status_checks rule"):
-                ci = ci or _names_check(_str(_obj(check, "a required check"), "context", "a required check"))
+                if (found := _required_check(check, "integration_id")) is not None:
+                    ci.append(found)
         queue = queue or kind == "merge_queue"
         force = force or kind == "non_fast_forward"
         delete = delete or kind == "deletion"
-    return Source(owner, ci, strict or queue, bypass == 0, bypass, False, force, delete)
+    return Source(owner, tuple(ci), strict or queue, bypass == 0, bypass, False, force, delete)
 
 
 # -- the questions -------------------------------------------------------------------------------------------------
@@ -311,7 +348,22 @@ PATHS = (
 )
 
 
-def evaluate(sources: list[Source], rules: list[Rule]) -> list[Condition]:
+def ci_condition(sources: list[Source], require_app: int | None) -> Condition:
+    """`CI green` is required. By name it passes, with a NOTE when a source other than GitHub Actions could satisfy it;
+    with `require_app` every matching check must be pinned to that app or the condition fails."""
+    checks = [c for s in sources for c in s.ci]
+    expected = require_app or ACTIONS_APP
+    warn = ""
+    if any(app is None for _, app in checks):
+        warn = UNPINNED
+    elif any(app != expected for _, app in checks):
+        warn = f"required check is pinned to an app, not the expected app {expected}"
+    ok = bool(checks) and (require_app is None or all(app == require_app for _, app in checks))
+    text = f"the `{CHECK_NAME}` check is required" + (f" and pinned to app {require_app}" if require_app else "")
+    return Condition("ci-green", text, ok, warn=warn, matched=", ".join(dict.fromkeys(c for c, _ in checks)))
+
+
+def evaluate(sources: list[Source], rules: list[Rule], require_app: int | None = None) -> list[Condition]:
     def some(test: Callable[[Source], bool]) -> bool:
         return any(test(s) for s in sources)
 
@@ -321,7 +373,7 @@ def evaluate(sources: list[Source], rules: list[Rule]) -> list[Condition]:
     agent = some(lambda s: s.agent_bypass)
     conditions = [
         Condition("code-owner-review", "code-owner review is required", some(lambda s: s.code_owner)),
-        Condition("ci-green", f"the `{CHECK_NAME}` check is required", some(lambda s: s.ci_green)),
+        ci_condition(sources, require_app),
         Condition(
             "up-to-date",
             "the branch must be up to date before merging (or a merge queue)",
@@ -343,9 +395,9 @@ def evaluate(sources: list[Source], rules: list[Rule]) -> list[Condition]:
     return conditions
 
 
-def check(rest: Rest, repo: str, agent: str = "") -> tuple[str, int, list[Condition]]:
+def check(rest: Rest, repo: str, agent: str = "", require_app: int | None = None) -> tuple[str, int, list[Condition]]:
     """(default branch, number of protection sources found, conditions). Raises CannotTell, never guesses."""
     base = _repo_path(repo)
     branch = default_branch(rest, base)
     sources = read_sources(rest, base, branch, agent)
-    return branch, len(sources), evaluate(sources, read_codeowners(rest, base, branch))
+    return branch, len(sources), evaluate(sources, read_codeowners(rest, base, branch), require_app)

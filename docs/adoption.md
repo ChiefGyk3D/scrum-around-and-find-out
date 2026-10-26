@@ -145,7 +145,7 @@ active branch rulesets (a ruleset in `evaluate` or `disabled` mode, or for tags,
 | Condition | Meaning |
 | --- | --- |
 | `code-owner-review` | code-owner review is required |
-| `ci-green` | the `CI green` check is required (`CI green`, or `<caller job> / CI green`) |
+| `ci-green` | the `CI green` check is required: the exact name, or one plain-text prefix and ` / ` (`<caller job> / CI green`); the matched context is printed |
 | `up-to-date` | the branch must be up to date before merging, or a merge queue is on |
 | `admins-included` | administrators are included (`enforce_admins`; no ruleset bypass) |
 | `no-bypass` | no bypass allowance or bypass actor; `--agent-login` is named if that account holds one |
@@ -156,6 +156,15 @@ Exit 1 prints a `FAIL <condition>` line for each one that does not hold; an unpr
 protected", no rulesets) fails them all. Exit 2 means it could not tell: a 403 or a rate limit, a response that is not
 JSON, or any field it reads that is absent, null or the wrong type. It is never read as "nothing is set", and it is never
 exit 0. The token goes to `https://api.github.com` only (`--api-url` is for a loopback test server).
+
+Name-only matching lets another source satisfy the check. A required check that is not pinned to an app (GitHub's
+`app_id` or `integration_id` is null, absent or -1: "any app") can be reported by any app or token that can write commit
+statuses, unless branch protection pins it. The default stays name-only, because the shared baseline sets required
+checks by name, but the read-back never reports that silently: it prints `NOTE ci-green: required check is not pinned to
+an app (any source can satisfy it)` (or says the check is pinned to an app other than the expected GitHub Actions app
+15368) and the exit code is unchanged. To make the pin a condition, pass `--require-app-id 15368`: then every matching
+check must be pinned to exactly that app, or `ci-green` fails with exit 1. An `app_id` or `integration_id` that is not
+null, -1 or a positive integer is exit 2.
 
 This is a local mode, not part of the Action. Shared logic with the GraphQL default-branch gate read (#129) is for a
 later change; the two read different APIs and share no code today.

@@ -321,8 +321,37 @@ def test_error_answers_anywhere_are_cannot_tell(route: str) -> None:
 
 
 def test_a_duplicate_key_is_cannot_tell() -> None:
-    body = b'{"enforce_admins": {"enabled": false}, "enforce_admins": {"enabled": true}}'
+    good = json.dumps(classic())  # a complete, passing answer in which enforce_admins is then repeated
+    body = ('{"enforce_admins": {"enabled": false}, ' + good[1:]).encode()
     cannot_tell({**good_routes(), f"{REPO}/branches/main/protection": (200, {}, body)})
+
+
+@pytest.mark.parametrize("status", [201, 202, 403, 500])
+@pytest.mark.parametrize(
+    "route", [REPO, f"{REPO}/branches/main/protection", f"{REPO}/rulesets", f"{REPO}/contents{OWNERS}"]
+)
+def test_only_200_and_404_are_read_even_with_a_good_looking_body(route: str, status: int) -> None:
+    body = good_routes()[route][2]
+    cannot_tell({**good_routes(), route: (status, {}, body)})
+
+
+def test_a_redirect_is_not_followed_to_a_good_answer() -> None:
+    routes = good_routes()
+    good = routes[f"{REPO}/branches/main/protection"]
+    routes["/elsewhere"] = good
+    routes[f"{REPO}/branches/main/protection"] = (302, {"Location": "/elsewhere"}, b"")
+    cannot_tell(routes)
+
+
+def test_codeowners_404_with_another_message_is_cannot_tell() -> None:
+    cannot_tell({**good_routes(), f"{REPO}/contents{OWNERS}": j({"message": "Repository access blocked"}, 404)})
+
+
+def test_a_branch_name_with_dot_dot_is_never_put_in_a_request() -> None:
+    routes = {**good_routes(), REPO: j({"default_branch": "a/../b"})}
+    with server(routes) as (url, seen):
+        code, _, _ = run_cli("protection", "--repo", "o/r", "--api-url", url, env=ENV)
+    assert code == 2 and seen == [("GET", REPO)]
 
 
 BAD_FIELDS: list[tuple[str, Edit]] = [
@@ -517,6 +546,117 @@ def test_github_text_is_never_echoed() -> None:
     hostile = "::error::pwned\n::add-mask::x"
     code, out, err, _ = check(with_classic(put([{"context": hostile}], "required_status_checks", "checks")))
     assert code == 1 and "pwned" not in out + err
+
+
+UNPINNED = "required check is not pinned to an app (any source can satisfy it)"
+
+
+def checks_with(entry: dict[str, Any]) -> dict[str, Route]:
+    return with_classic(put([{"context": "ci / CI green", **entry}], "required_status_checks", "checks"))
+
+
+def test_a_pinned_check_prints_no_note() -> None:
+    code, out, _, _ = check(good_routes())
+    assert code == 0 and "NOTE" not in out and "matched: ci / CI green" in out
+
+
+@pytest.mark.parametrize("entry", [{}, {"app_id": None}, {"app_id": -1}], ids=str)
+def test_an_unpinned_check_passes_by_default_with_a_note(entry: dict[str, Any]) -> None:
+    code, out, _, _ = check(checks_with(entry))
+    assert code == 0 and "NOTE ci-green" in out and UNPINNED in out
+
+
+def test_a_check_pinned_to_another_app_passes_by_default_with_a_note() -> None:
+    code, out, _, _ = check(checks_with({"app_id": 99}))
+    assert code == 0 and "NOTE ci-green" in out and "not the expected app 15368" in out
+
+
+@pytest.mark.parametrize(
+    ("entry", "flag", "code"),
+    [
+        ({}, "15368", 1),
+        ({"app_id": -1}, "15368", 1),
+        ({"app_id": 99}, "15368", 1),
+        ({"app_id": 15368}, "99", 1),
+        ({"app_id": 15368}, "15368", 0),
+        ({"app_id": 99}, "99", 0),
+    ],
+    ids=str,
+)
+def test_require_app_id_makes_the_pin_a_condition(entry: dict[str, Any], flag: str, code: int) -> None:
+    got, out, _, _ = check(checks_with(entry), "--require-app-id", flag)
+    assert got == code, out
+    failed = [line.split()[1].rstrip(":") for line in out.splitlines() if line.startswith("FAIL")]
+    assert failed == (["ci-green"] if code else [])
+    assert ("NOTE" in out) == bool(code)
+
+
+def test_every_matching_check_must_be_pinned_under_the_flag() -> None:
+    checks = [{"context": "ci / CI green", "app_id": 15368}, {"context": "shell / CI green"}]
+    routes = with_classic(put(checks, "required_status_checks", "checks"))
+    assert check(routes)[0] == 0 and "NOTE" in check(routes)[1]
+    assert check(routes, "--require-app-id", "15368")[0] == 1
+
+
+@pytest.mark.parametrize("value", ["15368", True, 0, -2, 1.5, [], {}, "-1"], ids=repr)
+def test_a_bad_app_id_type_is_cannot_tell(value: Any) -> None:
+    cannot_tell(checks_with({"app_id": value}))
+
+
+@pytest.mark.parametrize("value", ["15368", True, 0, -2, 1.5, []], ids=repr)
+def test_a_bad_integration_id_type_is_cannot_tell(value: Any) -> None:
+    detail = ruleset()
+    detail["rules"][3]["parameters"]["required_status_checks"] = [{"context": "CI green", "integration_id": value}]
+    cannot_tell(ruleset_routes(detail))
+
+
+def test_a_ruleset_check_pin_is_read_from_integration_id() -> None:
+    detail = ruleset()
+    detail["rules"][3]["parameters"]["required_status_checks"] = [{"context": "CI green", "integration_id": 15368}]
+    code, out, _, _ = check(ruleset_routes(detail), "--require-app-id", "15368")
+    assert code == 0 and "NOTE" not in out
+    detail["rules"][3]["parameters"]["required_status_checks"] = [{"context": "CI green"}]
+    code, out, _, _ = check(ruleset_routes(detail))
+    assert code == 0 and UNPINNED in out
+    assert check(ruleset_routes(detail), "--require-app-id", "15368")[0] == 1
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        "a / b / CI green",
+        "x\n / CI green",
+        "x\x07 / CI green",
+        " / CI green",
+        "xCI green",
+        "CI green ",
+        "ci/CI green",
+        "ci /CI green",
+        "ci / CI green / x",
+        "CI  green",
+        "ci / ci green",
+    ],
+    ids=repr,
+)
+def test_lookalike_contexts_do_not_satisfy_ci_green(context: str) -> None:
+    code, out, _, _ = check(
+        with_classic(put([{"context": context, "app_id": 15368}], "required_status_checks", "checks"))
+    )
+    assert code == 1 and "FAIL ci-green" in out
+
+
+@pytest.mark.parametrize("context", ["CI green", "ci / CI green", "My workflow / CI green"])
+def test_the_exact_name_and_one_prefix_segment_match(context: str) -> None:
+    code, out, _, _ = check(
+        with_classic(put([{"context": context, "app_id": 15368}], "required_status_checks", "checks"))
+    )
+    assert code == 0 and f"matched: {context}" in out
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "1.5", " 5", "5\n", "9" * 30])
+def test_a_bad_require_app_id_value_is_exit_two(value: str) -> None:
+    code, _, err, seen = check(good_routes(), "--require-app-id=" + value)
+    assert code == 2 and seen == [] and "app id" in err
 
 
 def test_the_client_can_only_issue_get() -> None:

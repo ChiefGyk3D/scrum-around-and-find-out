@@ -8,6 +8,7 @@ Spec 8.5 row R2(a); the maintainer applies the protection, this only reads it.
 from __future__ import annotations
 
 import argparse
+import re
 
 from safo import credentials
 from safo.context import LocalContext
@@ -19,12 +20,19 @@ from safo.protection import API_URL, CannotTell, Rest, check
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", required=True, help="owner/name of the repository to read")
     parser.add_argument("--agent-login", default="", help="the agent account; named if it may bypass the rule")
+    parser.add_argument(
+        "--require-app-id",
+        default="",
+        help="fail ci-green unless every `CI green` check is pinned to this app id (GitHub Actions is 15368)",
+    )
     parser.add_argument("--api-url", default=API_URL, help="the REST API (https; plain http for loopback only)")
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if args.agent_login and not credentials.LOGIN.fullmatch(args.agent_login):
         raise ConfigError("agent-login is not a GitHub login")
+    if args.require_app_id and not re.fullmatch(r"[1-9][0-9]{0,15}", args.require_app_id):
+        raise ConfigError("require-app-id must be a positive app id")
     creds = credentials.from_env(ctx.env) or credentials.from_gh(ctx.env, ctx.env.get("SAFO_GH_USER", "").strip())
     if creds is None:
         raise credentials.NoTokenError(
@@ -33,13 +41,21 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if creds.kind == credentials.GH and args.api_url != API_URL:
         raise ConfigError(f"a gh token is only sent to {API_URL}; --api-url cannot redirect it")
     try:
-        branch, found, conditions = check(Rest(creds.token, args.api_url), args.repo, args.agent_login)
+        branch, found, conditions = check(
+            Rest(creds.token, args.api_url),
+            args.repo,
+            args.agent_login,
+            int(args.require_app_id) if args.require_app_id else None,
+        )
     except CannotTell as err:
         ctx.say(f"UNKNOWN {err}")
         return EXIT_UNKNOWN
     ctx.say(f"default branch: {branch}; protection found: {found if found else 'none (not protected)'}")
     for c in conditions:
-        ctx.say(f"{'PASS' if c.ok else 'FAIL'} {c.id}: {c.text}" + (f" ({c.note})" if c.note and not c.ok else ""))
+        shown = f" (matched: {c.matched})" if c.matched else (f" ({c.note})" if c.note and not c.ok else "")
+        ctx.say(f"{'PASS' if c.ok else 'FAIL'} {c.id}: {c.text}{shown}")
+        if c.warn:
+            ctx.say(f"NOTE {c.id}: {c.warn}")  # never changes the exit code on its own
     failed = [c for c in conditions if not c.ok]
     ctx.say(
         f"protection: all {len(conditions)} conditions hold"
