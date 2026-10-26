@@ -7,12 +7,10 @@ an exception, and a dry run sends no mutation at all.
 
 from __future__ import annotations
 
-import functools
 import http.client
 import json
 import math
 import re
-import ssl
 import sys
 import time
 import urllib.error
@@ -101,13 +99,6 @@ def _http_handler(state: _Connected) -> urllib.request.HTTPHandler:
     return Handler()
 
 
-@functools.cache
-def _tls_context() -> ssl.SSLContext:
-    """The default context (certificate and hostname verification on), built once: loading the system CA store
-    costs about 10 ms, and a handler built without a context loads it again for every request."""
-    return ssl.create_default_context()
-
-
 def _https_handler(state: _Connected) -> urllib.request.HTTPSHandler:
     class Handler(urllib.request.HTTPSHandler):
         def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
@@ -115,7 +106,7 @@ def _https_handler(state: _Connected) -> urllib.request.HTTPSHandler:
                 _tracking(http.client.HTTPSConnection, state), req, context=getattr(self, "_context", None)
             )
 
-    return Handler(context=_tls_context())
+    return Handler()
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

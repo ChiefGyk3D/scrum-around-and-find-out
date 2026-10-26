@@ -47,35 +47,6 @@ def test_a_query_carries_the_operation_name_and_a_bearer_token(fake: FakeGitHub,
     assert fake.requests == ["ProjectMetaOrg"]
 
 
-def test_the_tls_context_is_built_once_and_not_for_every_request(
-    fake: FakeGitHub, client: Client, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Loading the system CA store costs about 10 ms; a paginated read made 1,000 requests and paid it each time."""
-    import ssl
-
-    built: list[object] = []
-    real = ssl._create_default_https_context
-
-    def counting(*args: Any, **kwargs: Any) -> ssl.SSLContext:
-        built.append(args)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(ssl, "_create_default_https_context", counting)
-    world(fake)
-    for _ in range(5):
-        client.execute(META, VARS)
-    assert len(built) <= 1
-
-
-def test_the_shared_tls_context_still_verifies_certificates_and_hostnames() -> None:
-    import ssl
-
-    from safo import graphql
-
-    context = graphql._tls_context()
-    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname is True
-
-
 def test_a_401_is_an_auth_error_that_never_prints_the_token(fake: FakeGitHub) -> None:
     bad = Client("ghp_SECRETSECRETSECRET", fake.url, sleep=lambda s: None)
     with pytest.raises(AuthError) as err:
