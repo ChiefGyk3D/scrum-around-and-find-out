@@ -45,8 +45,57 @@ _FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
 _LABEL_META = re.compile(r"([\\\[\]<>`|*_&])")
 
 
+DOIA_TAG_FILE = ROOT / "scripts" / "doia-tag.txt"
+_DOIA_TAG = re.compile(r"^v\d+\.\d+\.\d+$")
+# A whole version token, so v0.3.1-rc1, v0.3.1.2 and xv0.2.0 are read as themselves and never as a prefix of the pin.
+_VERSION = r"(?<![\w.])\w*v\d+\.\d+\.\d+(?:\.\d+|[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)*"
+_DOIA_REF = re.compile(
+    r"department-of-internal-arguments/(?:tree|blob|releases/tag)/(" + _VERSION + r")"
+    r"|(?:--branch|\bcheckout)[ \t]+(" + _VERSION + r")"
+    r"|(?:\bDoIA|Department of Internal Arguments)(?:'s)?\s+(?:(?:release|version|tag)\s+)?`?(" + _VERSION + r")"
+)
+
+
 class WikiError(Exception):
     """A problem with the docs or the arguments; the message says what to fix."""
+
+
+def read_doia_tag(path: Path = DOIA_TAG_FILE) -> str:
+    """The one DoIA release tag docs/personas.md is written against (scripts/doia-tag.txt)."""
+    try:
+        tag = path.read_text(encoding="utf-8").strip()
+    except OSError as err:
+        raise WikiError(f"cannot read the DoIA tag file {path}: {err.strerror or err}") from err
+    if not _DOIA_TAG.match(tag):
+        raise WikiError(f"{path.name} must hold one release tag like v1.2.3, not {tag!r}")
+    return tag
+
+
+def doia_tag_refs(text: str) -> list[str]:
+    """The whole version tokens that refer to a DoIA release, and only those.
+
+    The rule is deliberately narrow, so another project's version (a Python v3.12.1, an action pin) never fails the
+    build. A token counts when it is (1) the path after tree/, blob/ or releases/tag/ in a link under
+    github.com/ChiefGyk3D/department-of-internal-arguments, (2) the argument of --branch or checkout, or (3) directly
+    after the name DoIA or Department of Internal Arguments (optionally 's, and release, version or tag). Write the
+    version right after "DoIA" in prose, or it is not checked.
+    """
+    return [next(g for g in m.groups() if g) for m in _DOIA_REF.finditer(text)]
+
+
+def check_doia_tag(texts: dict[str, str], tag: str, require_page: bool = False) -> None:
+    """Every page may name only the pinned DoIA tag, compared as a whole token; a stale, mixed or suffixed one fails.
+
+    With require_page, docs/personas.md must exist, so renaming it cannot silently turn the check off.
+    """
+    if require_page and "personas.md" not in texts:
+        raise WikiError("docs/personas.md is missing: it is the page pinned by scripts/doia-tag.txt")
+    for name, page in sorted(texts.items()):
+        stray = sorted(set(doia_tag_refs(page)) - {tag})
+        if stray:
+            raise WikiError(
+                f"docs/{name} names DoIA {', '.join(stray)} but scripts/doia-tag.txt pins {tag}; make them agree"
+            )
 
 
 def page_name(filename: str) -> str:
@@ -481,6 +530,7 @@ def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL)
         raise WikiError(f"--commit must be the full 40 hex character commit id, not {commit!r}")
     short = commit[:7].lower() if commit else "an unknown commit"
     texts = _read_docs(docs)
+    check_doia_tag(texts, read_doia_tag(), require_page=root.resolve() == ROOT)
     pages: dict[str, str] = {}
     for filename in texts:
         if not _FILE.match(filename):
