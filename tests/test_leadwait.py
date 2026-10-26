@@ -1699,6 +1699,10 @@ def test_the_orchestrator_page_carries_the_rules_the_incident_and_the_monitor_br
         "read-only",
         "quoted verbatim",
         "no progress for 5 minutes",
+        "completion notice arrives without its report",
+        "re-dispatches a fresh agent with the same brief within five minutes",
+        "not retried by continuing it",
+        "(INFERRED, from one session:",
         'model: "sonnet"',
         "issue: <owner/repo#N>",
     ):
