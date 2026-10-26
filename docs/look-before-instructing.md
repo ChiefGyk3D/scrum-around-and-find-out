@@ -24,17 +24,12 @@ Then:
 
 ## Why: 2026-10-24 and 2026-10-25
 
-The lead gave Cloudflare Pages setup instructions from memory and from a search summary it had itself called stale. The
-dashboard path it described led the maintainer to create a Worker, not a Pages project, and about an hour went. Several
-versions of the token setup followed, one built on a template name taken from that same summary. At one point the lead
-answered "I don't know" for something the docs answered on one page.
-
-The lesson had been recorded the day before, in the maintainer's notes and in the project's deploy docs. Only the first 40
-lines of the notes file were read. The tool's own error text, a few hours in, already named the API fix.
+The lead gave instructions for setting up Cloudflare Pages versus a Worker from memory and from a search summary. The
+lesson had been recorded the day before, but only the first 40 lines of that file were read. (This section is
+generalized; it states only what the tracking issue records.)
 
 Vendor dashboards change often, and recall of them is a guess that reads like an instruction. A wrong click path costs the
-maintainer far more than a minute of reading costs the lead. The first sign of being wrong should have been "let me check
-the documentation".
+maintainer far more than a minute of reading costs the lead.
 
 ## How it is enforced
 
@@ -60,3 +55,5 @@ Prior art first: grep -ril <vendor> <notes dir> <sibling repos' docs>, and read 
 - [ ] A silent source led to the next source, not to "I don't know".
 
 Related: [Done means verified](done-means-verified.md), [The orchestrator](orchestrator.md), [Lessons](lessons.md).
+
+Linked from the orchestrator and lessons pages in a follow-up after PR #112 merges.

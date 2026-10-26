@@ -21,11 +21,9 @@ Approving a task includes planning its access ([Act, then report](act-then-repor
 
 ## Why: 2026-10-25
 
-The lead recommended a read-only OAuth grant to a cloud account and said more access was not needed that day. Eleven
-minutes later a DELETE call returned 403, for a fix the lead already knew was coming, and the maintainer had to authorize a
-second time. Twice the lead offered "choose full access for this session" as the fallback for a scope name it had not
-confirmed. Earlier the same day it tried to list secret names in a secrets manager to reuse an existing token; the
-classifier denied that and the lead left it. After the job, the write grant stayed in place.
+The Cloudflare work needed two consent trips, because the first request asked for too little. A "Full access" fallback was
+then offered. The write OAuth grant was left standing afterward. (Generalized: this states only what the tracking issue
+records.)
 
 Every extra consent screen costs the maintainer time. A broad fallback or a reused credential undoes the least privilege he
 sets for the account.
@@ -47,3 +45,5 @@ The end-of-job item below is the check.
 
 Related: [Act, then report](act-then-report.md), [Done means verified](done-means-verified.md),
 [The orchestrator](orchestrator.md).
+
+Linked from the orchestrator and lessons pages in a follow-up after PR #112 merges.

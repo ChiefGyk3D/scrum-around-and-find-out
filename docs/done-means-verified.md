@@ -25,18 +25,13 @@ A delete, a revocation, a visibility change or a force-cancel adds five things:
 
 ## Why: 2026-10-25
 
-- The lead reported a Cloudflare fix as done. The Pages custom domain was still pending and no CNAME record existed; two
-  minutes later the maintainer hit error 1016. The API call that attached the domain had succeeded, and it creates no DNS
-  record.
-- The maintainer said a subdomain was already set up on both a Worker and Pages. The lead re-read with a narrower query,
-  missed the Worker's domain, and called its record a leftover. The record was live.
-- The lead told the maintainer three times to unmount a share that was not mounted.
-- Five times that day a CI watcher reported a run as clean or completed when the run it read was stale.
-- A note saying a deploy pipeline was live end to end was written while the lead's own check of the public hostname was
-  still pending.
+- A Pages custom domain was attached through the API with no CNAME record. The site returned error 1016 while the lead
+  called the work done.
+- Five watcher reports that day were stale.
+- A state read was treated as current after the maintainer reported a different result.
 
-A false "done" costs the maintainer a broken page and a second debugging round, and it spends the trust that lets an agent
-work unattended.
+(Generalized: this lists only what the tracking issue records.) A false "done" costs the maintainer a broken page and a
+second debugging round, and it spends the trust that lets an agent work unattended.
 
 ## How it is enforced
 
@@ -56,3 +51,5 @@ Destructive step: fresh read of target and dependents; export; stop at first err
 
 Related: [Look before instructing](look-before-instructing.md), [Access planning](access-planning.md),
 [The review loop](review-loop.md).
+
+Linked from the orchestrator and lessons pages in a follow-up after PR #112 merges.
