@@ -183,7 +183,7 @@ no effect.
   - [limit: variable-built command] `cmd='sleep 60'; $cmd`.
   - [limit: variable passed to a shell] `c='sleep 60'; bash -c "$c"`: the string is a variable, not text.
   - [limit: encoded payload piped to a shell] `echo c2xlZXAgNjA= | base64 -d | sh`.
-  - [limit: interpreter] `python3 -c 'import time; time.sleep(60)'` and any other language's sleep or poll.
+  - [limit: interpreter] `python3 -c` or `perl -e` with a sleep call inside, and any other language's sleep or poll.
   - [limit: script file] `bash poll.sh`: the file is not read, so a loop in it is not seen.
   - [limit: alias] `alias w='sleep 60'; w`: an alias defined earlier or in a startup file.
   - [limit: remote command] `ssh host 'sleep 60'`: the wait runs elsewhere (and still holds the thread).
