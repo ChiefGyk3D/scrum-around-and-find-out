@@ -52,11 +52,14 @@ fields:
       - {name: Codex, color: GREEN, description: "OpenAI Codex"}
       - {name: Copilot, color: BLUE, description: "GitHub Copilot coding agent"}
       - {name: You, color: PURPLE, description: "The maintainer"}
+      - {name: ChatGPT, color: PINK, description: "ChatGPT general models: non-technical and public copy"}
+      - {name: Ollama, color: YELLOW, description: "Local model on the lab server"}
+      - {name: RAG, color: GRAY, description: "Local retrieval over the project docs"}
   - {name: Sprint, type: iteration, start: 2026-10-20, duration_days: 14, count: 6}
   - {name: Done on, type: date}
 views:
   - {name: Board, layout: board, filter: "-status:Done"}
-  - {name: Agents at work, layout: table, filter: 'status:"In progress",Next'}
+  - {name: Agents at work, layout: table, filter: 'status:"In progress","In review",Next,Blocked'}
 rules:
   status:
     opened: Backlog

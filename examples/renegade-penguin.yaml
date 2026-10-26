@@ -112,6 +112,9 @@ fields:
       - {name: Codex, color: GREEN, description: "ChatGPT Codex via the codex plugin"}
       - {name: Copilot, color: BLUE, description: "GitHub Copilot coding agent"}
       - {name: You, color: PURPLE, description: "The maintainer: decisions, bench, merges"}
+      - {name: ChatGPT, color: PINK, description: "ChatGPT general models: non-technical and public copy"}
+      - {name: Ollama, color: YELLOW, description: "Local model on the lab server"}
+      - {name: RAG, color: GRAY, description: "Local retrieval over the project docs"}
   - {name: Sprint, type: iteration, start: 2026-10-06, duration_days: 14, count: 11}
   - {name: Decision, type: text}
   - {name: Start date, type: date}
@@ -121,7 +124,7 @@ fields:
 views:
   - {name: Board, layout: board, filter: "-status:Done"}
   - {name: Roadmap, layout: roadmap, filter: "-status:Done"}
-  - {name: Agents at work, layout: table, filter: 'status:"In progress",Next'}
+  - {name: Agents at work, layout: table, filter: 'status:"In progress","In review",Next,Blocked'}
 
 rules:
   status:
