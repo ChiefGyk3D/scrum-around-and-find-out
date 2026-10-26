@@ -48,7 +48,19 @@ from safo.errors import ConfigError
 from safo.profile_render import Rendered, compare, has_header
 
 MAX_FILE = 64 * 1024
-FILE_MODE = 0o644  # the one mode a generated file may have: committed docs, never group/world writable or executable
+FILE_MODE = (
+    0o644  # the mode the writer gives a generated file: committed docs, never group/world writable or executable
+)
+# What the check accepts. The VCS records only the executable bit, so a clean checkout's modes are 0666 & ~umask (0644,
+# 0664, 0640, 0600, ...) and the check must not depend on the umask. It still refuses any execute, setuid, setgid or
+# sticky bit, any world-write bit, and an owner without read and write.
+_OK_MODE_BITS = 0o664
+
+
+def mode_ok(mode: int) -> bool:
+    return mode & ~_OK_MODE_BITS == 0 and mode & 0o600 == 0o600
+
+
 MAX_DEPTH = 8
 MAX_ENTRIES = 500
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -311,8 +323,10 @@ def _diff(tree: Tree, rel: str, expected: Mapping[str, Rendered]) -> list[str]:
                 problems.append(f"{shown(path)}: missing")
         else:
             problems += compare(rendered, tree.files[path])
-            if tree.modes.get(path) != FILE_MODE:
-                problems.append(f"{shown(path)}: mode is {tree.modes.get(path, 0):04o}, not {FILE_MODE:04o}")
+            if not mode_ok(tree.modes.get(path, -1)):
+                problems.append(
+                    f"{shown(path)}: mode is {tree.modes.get(path, 0):04o}, not {FILE_MODE:04o} or a umask variant"
+                )
     for d in sorted(expected_dirs & set(tree.files)):
         problems.append(f"{shown(d)}: a file where a directory belongs")
     return problems + _unexpected(tree, expected, rel)
@@ -441,8 +455,8 @@ def write_tree(root: Path, rel: str, expected: Mapping[str, Rendered]) -> tuple[
         held = os.fstat(root_fd)
         ident = (held.st_dev, held.st_ino)
         for path, rendered in expected.items():
-            if tree.files.get(path) == rendered.data and tree.modes.get(path) == FILE_MODE:
-                continue  # a file with the right bytes and a wrong mode is rewritten: a new 0600 -> 0644 inode
+            if tree.files.get(path) == rendered.data and mode_ok(tree.modes.get(path, -1)):
+                continue  # a file with the right bytes and an unsafe mode is rewritten: a new 0600 -> 0644 inode
             _seam("write", path)
             _reverify(root, rel, ident)
             _write_file(root_fd, path, rendered.data)
