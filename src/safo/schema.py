@@ -28,6 +28,18 @@ LAYOUTS = ("board", "table", "roadmap")
 OWNER_TYPES = ("organization", "user")
 LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 REPO_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+METHODS = ("agile", "waterfall")
+DEPENDENCIES = ("none", "blocked_by")
+# `owner/repo#N`, the guard's own pattern (tracking.GITHUB_REF); fullmatch only, every quantifier bounded, none nested
+REF = re.compile(r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,8})")
+_PLAIN_KEY = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+_MAX_VALUE_SHOWN = 40
+# caps, so a hostile file cannot turn one audit into many API calls (spec 2.5)
+MAX_PHASES = 16
+MAX_GATES = 32
+MAX_APPROVERS = 32
+MAX_ACTIVE_STATUSES = 16
+_MAX_USER_ID = 2**63 - 1
 _MAX_YAML_SIZE = 1024 * 1024  # 1 MiB
 _MAX_YAML_DEPTH = 64
 
@@ -52,6 +64,7 @@ class Repository:
     name: str
     default_area: str | None = None
     area_rules: tuple[AreaRule, ...] = ()
+    method: str | None = None  # None: the board's process.method
 
     @property
     def full_name(self) -> str:
@@ -130,6 +143,34 @@ class Rules:
 
 
 @dataclass(frozen=True)
+class Approver:
+    """A person whose manual close of a gate counts: the login is for people, the immutable id is what is compared."""
+
+    login: str
+    id: int
+
+
+@dataclass(frozen=True)
+class Gate:
+    """The exit gate of a phase: `issue` is `owner/repo#N`, a repository of the board."""
+
+    phase: str
+    issue: str
+
+
+@dataclass(frozen=True)
+class Process:
+    """The process method. The default is what an absent `process` key means: agile, and nothing else is read."""
+
+    method: str = "agile"
+    active_statuses: tuple[str, ...] = ()  # waterfall only
+    dependencies: str = "none"
+    phase_field: str = ""  # waterfall only
+    approvers: tuple[Approver, ...] = ()  # waterfall only
+    gates: tuple[Gate, ...] = ()  # waterfall only
+
+
+@dataclass(frozen=True)
 class AgentsView:
     field: str = "Agent"
     working: tuple[str, ...] = ("In progress", "Next")
@@ -145,6 +186,7 @@ class Board:
     rules: Rules
     agents: AgentsView
     ui_only: tuple[str, ...] = ()
+    process: Process = field(default_factory=Process)
 
     def field_named(self, name: str) -> Field | None:
         return next((f for f in self.fields if f.name == name), None)
@@ -238,6 +280,21 @@ def _safe_load(text: str, source: str = "board.yaml") -> object:
 # -- validation helpers ------------------------------------------------------------
 
 
+def show(value: object) -> str:
+    """Text for a value in an error message: ASCII only, cut short, and a foreign value named by its type.
+
+    Nothing from the file reaches a log line unescaped or unbounded (the log may be public).
+    """
+    if isinstance(value, str):
+        text = ascii(value[:_MAX_VALUE_SHOWN])
+        return text if len(value) <= _MAX_VALUE_SHOWN else f"{text[:-1]}...{text[-1]}"
+    if value is None or isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, int) and abs(value) < 10**15:
+        return repr(value)
+    return f"a {type(value).__name__}"
+
+
 class Reader:
     def __init__(self, source: str) -> None:
         self.source = source
@@ -252,9 +309,9 @@ class Reader:
             raise self.fail(path, f"expected a mapping, got {type(value).__name__}")
         for key in value:
             if key not in allowed:
-                raise self.fail(
-                    f"{path}.{key}" if path else str(key), f"unknown key (allowed: {', '.join(sorted(allowed))})"
-                )
+                shown = key if _PLAIN_KEY.fullmatch(key) else show(key)
+                allowed_text = ", ".join(sorted(allowed))
+                raise self.fail(f"{path}.{shown}" if path else shown, f"unknown key (allowed: {allowed_text})")
         for key in sorted(required or set()):
             if key not in value:
                 raise self.fail(f"{path}.{key}" if path else key, "required")
@@ -277,7 +334,7 @@ class Reader:
 
     def choice(self, value: object, path: str, choices: tuple[str, ...]) -> str:
         if not isinstance(value, str) or value not in choices:
-            raise self.fail(path, f"{value!r} is not one of {', '.join(choices)}")
+            raise self.fail(path, f"{show(value)} is not one of {', '.join(choices)}")
         return value
 
     def date(self, value: object, path: str) -> dt.date:
@@ -299,7 +356,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
     top = r.mapping(
         data,
         "",
-        {"version", "project", "repositories", "fields", "views", "rules", "agents", "ui_only"},
+        {"version", "project", "repositories", "fields", "views", "rules", "agents", "ui_only", "process"},
         {"version", "project", "repositories"},
     )
 
@@ -325,7 +382,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
     repos: list[Repository] = []
     for i, raw in enumerate(r.seq(top["repositories"], "repositories")):
         path = f"repositories[{i}]"
-        m = r.mapping(raw, path, {"owner", "name", "default_area", "area_rules"}, {"owner", "name"})
+        m = r.mapping(raw, path, {"owner", "name", "default_area", "area_rules", "method"}, {"owner", "name"})
         rules_raw = r.seq(m.get("area_rules", []), f"{path}.area_rules")
         area_rules = []
         for j, rule in enumerate(rules_raw):
@@ -341,6 +398,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
             r.string(m["name"], f"{path}.name"),
             None if m.get("default_area") is None else r.string(m["default_area"], f"{path}.default_area"),
             tuple(area_rules),
+            r.choice(m["method"], f"{path}.method", METHODS) if "method" in m else None,
         )
         if not LOGIN.fullmatch(repo.owner) or not REPO_NAME.fullmatch(repo.name):
             raise r.fail(path, f"{repo.full_name!r} is not an owner/name pair")
@@ -407,7 +465,8 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
     rules = _parse_rules(r, top.get("rules", {}))
     agents = _parse_agents(r, top.get("agents", {}))
     ui_only = tuple(r.string(s, f"ui_only[{i}]") for i, s in enumerate(r.seq(top.get("ui_only", []), "ui_only")))
-    board = Board(project, tuple(repos), tuple(fields), tuple(views), rules, agents, ui_only)
+    process = _parse_process(r, top.get("process", {}), tuple(repos), rules)
+    board = Board(project, tuple(repos), tuple(fields), tuple(views), rules, agents, ui_only, process)
     if check_fields:
         _cross_check(r, board, agents_present="agents" in top)
     return board
@@ -493,6 +552,82 @@ def _parse_threat_model(r: Reader, raw: object) -> ThreatModel:
     return ThreatModel(label, tuple(exempt))
 
 
+def _parse_process(r: Reader, raw: object, repos: tuple[Repository, ...], rules: Rules) -> Process:
+    """The `process` block: its structure and the references that need no `fields` (those are in _cross_check)."""
+    m = r.mapping(raw, "process", {"method", "active_statuses", "dependencies", "phase_field", "approvers", "gates"})
+    method = r.choice(m["method"], "process.method", METHODS) if "method" in m else "agile"
+    dependencies = r.choice(m["dependencies"], "process.dependencies", DEPENDENCIES) if "dependencies" in m else "none"
+    if method != "waterfall" and not any(repo.method == "waterfall" for repo in repos):
+        for key in ("active_statuses", "phase_field", "approvers", "gates"):
+            if key in m:
+                raise r.fail(f"process.{key}", "only used when the method or a repository is waterfall")
+        return Process(method, dependencies=dependencies)
+
+    if "phase_field" not in m:
+        raise r.fail("process.phase_field", "required when a repository is waterfall")
+    phase_field = r.string(m["phase_field"], "process.phase_field")
+    if rules.add_closed_days < 1:
+        raise r.fail(
+            "rules.add_closed_days",
+            "must be at least 1 when a repository is waterfall (the gate rule reads recently closed cards)",
+        )
+
+    active: list[str] = []
+    if "active_statuses" not in m or m["active_statuses"] == []:
+        raise r.fail("process.active_statuses", "required when a repository is waterfall")
+    for i, name in enumerate(_capped(r, m["active_statuses"], "process.active_statuses", MAX_ACTIVE_STATUSES)):
+        status = r.string(name, f"process.active_statuses[{i}]")
+        if status in active:
+            raise r.fail(f"process.active_statuses[{i}]", f"{show(status)} is listed twice")
+        active.append(status)
+
+    if "approvers" not in m or m["approvers"] == []:
+        raise r.fail("process.approvers", "required (at least one) when the method or a repository is waterfall")
+    approvers: list[Approver] = []
+    for i, item in enumerate(_capped(r, m["approvers"], "process.approvers", MAX_APPROVERS)):
+        path = f"process.approvers[{i}]"
+        if not isinstance(item, Mapping) or set(item) != {"login", "id"}:
+            raise r.fail(path, "expected {login, id}")
+        login = r.string(item["login"], f"{path}.login")
+        if not LOGIN.fullmatch(login):
+            raise r.fail(f"{path}.login", f"{show(login)} is not a GitHub login")
+        uid = item["id"]
+        if isinstance(uid, bool) or not isinstance(uid, int) or not 0 < uid <= _MAX_USER_ID:
+            raise r.fail(f"{path}.id", "expected a positive integer (the user's databaseId)")
+        if any(a.login.lower() == login.lower() for a in approvers):
+            raise r.fail(f"{path}.login", f"{show(login)} is listed twice")
+        if any(a.id == uid for a in approvers):
+            raise r.fail(f"{path}.id", f"{uid} is listed twice")
+        approvers.append(Approver(login, uid))
+
+    in_repositories = {repo.full_name.lower() for repo in repos}
+    gates: list[Gate] = []
+    for i, item in enumerate(_capped(r, m.get("gates", []), "process.gates", MAX_GATES)):
+        path = f"process.gates[{i}]"
+        g = r.mapping(item, path, {"phase", "issue"}, {"phase", "issue"})
+        phase = r.string(g["phase"], f"{path}.phase")
+        issue = r.string(g["issue"], f"{path}.issue")
+        match = REF.fullmatch(issue)
+        if match is None:
+            raise r.fail(f"{path}.issue", "expected owner/repo#N")
+        if f"{match[1]}/{match[2]}".lower() not in in_repositories:
+            raise r.fail(f"{path}.issue", f"{match[1]}/{match[2]} is not in repositories")
+        for j, earlier in enumerate(gates):
+            if earlier.phase == phase:
+                raise r.fail(f"{path}.phase", f"phase {show(phase)} has a gate already (gates[{j}])")
+            if earlier.issue.lower() == issue.lower():
+                raise r.fail(f"{path}.issue", f"{issue} is a gate already (gates[{j}])")
+        gates.append(Gate(phase, issue))
+    return Process(method, tuple(active), dependencies, phase_field, tuple(approvers), tuple(gates))
+
+
+def _capped(r: Reader, value: object, path: str, limit: int) -> list[Any]:
+    items = r.seq(value, path)
+    if len(items) > limit:
+        raise r.fail(path, f"at most {limit} entries")
+    return items
+
+
 def _parse_agents(r: Reader, raw: object) -> AgentsView:
     m = r.mapping(raw, "agents", {"field", "working", "waiting"})
     d = AgentsView()
@@ -538,6 +673,9 @@ def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
         for j, rule in enumerate(repo.area_rules):
             option_exists(rules.area_field, rule.area, f"repositories[{i}].area_rules[{j}].area")
 
+    if board.process.phase_field:  # only a waterfall board has one (_parse_process)
+        _cross_check_process(r, board)
+
     # Cross-check agents only when agents key is present in the document
     if agents_present:
         agents_field = board.field_named(board.agents.field)
@@ -556,6 +694,39 @@ def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
             for i, ws in enumerate(board.agents.waiting):
                 if ws not in status_options:
                     raise r.fail(f"agents.waiting[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
+
+
+def _cross_check_process(r: Reader, board: Board) -> None:
+    process, rules = board.process, board.rules
+    phase = board.field_named(process.phase_field)
+    if phase is None:
+        raise r.fail("process.phase_field", f"names field {show(process.phase_field)}, which is not in fields")
+    if phase.type != "single_select":
+        raise r.fail("process.phase_field", f"field {show(phase.name)} is {phase.type}, not single_select")
+    for role, name in (("status", rules.status_field), ("area", rules.area_field)):
+        if phase.name == name:
+            raise r.fail("process.phase_field", f"{show(name)} is the {role} field, not a phase field")
+    if len(phase.options) > MAX_PHASES:
+        count = len(phase.options)
+        shown = show(phase.name)
+        raise r.fail("process.phase_field", f"field {shown} has {count} options, at most {MAX_PHASES} phases")
+    status = board.field_named(rules.status_field)
+    status_options = {o.name for o in status.options} if status and status.type == "single_select" else set()
+    done = {rules.status.closed, rules.status.merged}
+    for i, name in enumerate(process.active_statuses):
+        path = f"process.active_statuses[{i}]"
+        if name not in status_options:
+            raise r.fail(path, f"{show(name)} is not an option of {show(rules.status_field)}")
+        if name in done:
+            raise r.fail(path, f"{show(name)} is a done status (rules.status.closed or merged)")
+    names = [o.name for o in phase.options]
+    for i, gate in enumerate(process.gates):
+        path = f"process.gates[{i}].phase"
+        if gate.phase not in names:
+            listed = ", ".join(names)
+            raise r.fail(path, f"{show(gate.phase)} is not an option of {show(phase.name)} (options: {listed})")
+        if gate.phase == names[-1]:
+            raise r.fail(path, f"{show(gate.phase)} is the last phase, so its gate would gate nothing")
 
 
 def load_board(path: str | Path, *, check_fields: bool = True) -> Board:

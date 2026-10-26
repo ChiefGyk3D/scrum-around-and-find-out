@@ -23,6 +23,7 @@ The top-level mapping is required and must contain:
 | `rules` | mapping | no | Automation and field cross-references |
 | `agents` | mapping | no | Agent status tracking |
 | `ui_only` | list | no | Manual settings not readable via the API |
+| `process` | mapping | no | The [process method](#process); absent means `{method: agile}` |
 
 Unknown keys are refused with the key path.
 
@@ -44,6 +45,7 @@ A list; every repository whose open issues and pull requests belong on the board
 | `owner`, `name` | The repository. It may belong to a different account than the project |
 | `default_area` | The `Area` option given to an item from this repository when nothing more specific matches |
 | `area_rules` | Optional list of `{match, area}`; the first rule whose `match` (case-insensitive) occurs in the title or a label wins. Used by `reconcile` only: an event never reads a title |
+| `method` | Optional, `agile` or `waterfall`: this repository's process method. Default: `process.method`. A `null` is refused |
 
 ## fields
 
@@ -97,6 +99,39 @@ Used by `agents-status`. All keys are optional.
 | `waiting` | `Blocked` | Status options that mean the agent is blocked |
 
 All values in `working` and `waiting` must be options of the status field.
+
+## process
+
+Optional. Absent, `process: {}` and `process: {method: agile}` mean the same thing, and an all-agile board behaves and
+prints exactly as it did before this key existed. This release only reads and checks the block; no audit rule uses it yet.
+Every error names the key path and is raised at load time, before any request. A value that is `null`, the wrong type or
+not on a list is refused, never replaced by a default. Text echoed in an error is ASCII, cut to 40 characters.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `method` | `agile` | `agile` or `waterfall`: the default for every repository |
+| `dependencies` | `none` | `none` or `blocked_by`. Do not write `off`: YAML reads it as `false`, which is refused |
+| `phase_field` | none | Waterfall only, required. A `single_select` in `fields` (not the status or area field); its option order is the phase order; at most 16 options |
+| `active_statuses` | none | Waterfall only, required, at most 16. Options of the status field that mean "being worked", none of them `rules.status.closed` or `merged` |
+| `approvers` | none | Waterfall only, required, 1 to 32 entries of `{login, id}`: a valid GitHub login and the user's positive `databaseId`. Neither may repeat |
+| `gates` | `[]` | Waterfall only, at most 32 entries of `{phase, issue}`: a phase option, one gate per phase, none on the last phase, and `issue` as `owner/repo#N` in one of `repositories` (checked offline) |
+
+"Waterfall" means `process.method` or some `repositories[i].method` is `waterfall`. Waterfall-only keys on any other board
+are refused with `only used when the method or a repository is waterfall`, and a waterfall board needs
+`rules.add_closed_days` of at least 1. Unknown keys inside `process` are refused (`baseline` arrives with a later release).
+
+```yaml
+rules:
+  add_closed_days: 30
+process:
+  method: waterfall
+  phase_field: Phase
+  active_statuses: [In progress]
+  approvers:
+    - {login: maintainer-login, id: 1234567}
+  gates:
+    - {phase: Requirements, issue: acme/gates#1}
+```
 
 ## ui_only
 
