@@ -121,11 +121,11 @@ recommended: chatgpt (put Agent = ChatGPT on the card)
 why: first in the chain with headroom (chatgpt, claude-sonnet)
 required review: maintainer: ready (independent reviewer)
 reviewer: maintainer (a fresh reviewer: not the author, with headroom)
-note: The maintainer's judgment from his own use, not a benchmark. The voice skill is a Claude Code skill, so its text and rules must be supplied to ChatGPT (setup NOT YET DONE); Claude Sonnet with the skill is the fallback. A draft until the maintainer approves it.
+note: The maintainer's judgment from his own use, not a benchmark. The voice skill is a Claude Code skill, so its text and rules must be supplied to ChatGPT (setup NOT YET DONE); Claude Sonnet with the skill is the fallback. A draft until the maintainer approves it. For public README or docs prose, technical-docs owns the technical correctness and only the voice pass is this shape.
 chain: chatgpt -> claude-sonnet
 safo route only recommends: the lead sets the card and hands the work out.
 ## prose-in-voice --json exit=0
-{"shape":"prose-in-voice","agent":"chatgpt","why":"first in the chain with headroom (chatgpt, claude-sonnet)","skipped":[],"reviewer":"maintainer","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"The maintainer's judgment from his own use, not a benchmark. The voice skill is a Claude Code skill, so its text and rules must be supplied to ChatGPT (setup NOT YET DONE); Claude Sonnet with the skill is the fallback. A draft until the maintainer approves it.","card_label":"ChatGPT","fallback_chain":["chatgpt","claude-sonnet"],"reviews":[{"reviewer":"maintainer","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
+{"shape":"prose-in-voice","agent":"chatgpt","why":"first in the chain with headroom (chatgpt, claude-sonnet)","skipped":[],"reviewer":"maintainer","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"The maintainer's judgment from his own use, not a benchmark. The voice skill is a Claude Code skill, so its text and rules must be supplied to ChatGPT (setup NOT YET DONE); Claude Sonnet with the skill is the fallback. A draft until the maintainer approves it. For public README or docs prose, technical-docs owns the technical correctness and only the voice pass is this shape.","card_label":"ChatGPT","fallback_chain":["chatgpt","claude-sonnet"],"reviews":[{"reviewer":"maintainer","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
 ## research  exit=0
 shape: research
 recommended: codex (put Agent = Codex on the card)
@@ -177,21 +177,22 @@ shape: status-headline
 recommended: nobody (every agent in the chain is short of headroom: wait for a reset or ask the maintainer)
 skipped: ollama (instance-a: unreachable)
 skipped: ollama (instance-b: not a general endpoint)
-note: Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted.
+note: Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted. It stays local; if it is posted publicly under the maintainer's name it becomes prose-in-voice work instead.
 chain: ollama
 safo route only recommends: the lead sets the card and hands the work out.
 ## status-headline --json exit=0
-{"shape":"status-headline","agent":null,"why":"every agent in the chain is short of headroom: wait for a reset or ask the maintainer","skipped":["ollama (instance-a: unreachable)","ollama (instance-b: not a general endpoint)"],"reviewer":null,"reviewer_why":"","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted.","card_label":"","fallback_chain":["ollama"],"reviews":[],"local_role":"","warnings":[]}
+{"shape":"status-headline","agent":null,"why":"every agent in the chain is short of headroom: wait for a reset or ask the maintainer","skipped":["ollama (instance-a: unreachable)","ollama (instance-b: not a general endpoint)"],"reviewer":null,"reviewer_why":"","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted. It stays local; if it is posted publicly under the maintainer's name it becomes prose-in-voice work instead.","card_label":"","fallback_chain":["ollama"],"reviews":[],"local_role":"","warnings":[]}
 ## technical-docs  exit=0
 shape: technical-docs
 recommended: claude-sonnet (put Agent = Claude on the card)
-why: first in the chain with headroom (claude-sonnet, claude-lead)
-required review: claude-sonnet: unavailable (required gate unavailable: ask for a fresh identity or wait)
-reviewer: nobody (no other reviewer has headroom: ask the maintainer or wait for a reset)
-chain: claude-sonnet -> claude-lead
+why: first in the chain with headroom (claude-sonnet)
+required review: claude-lead: ready (independent reviewer)
+reviewer: claude-lead (a fresh reviewer: not the author, with headroom)
+note: When the page is a runbook or procedure someone follows on a live system, ops-runbook wins; it has the same chain. For public README or docs prose, this shape owns the technical correctness with Claude, and only the voice pass is prose-in-voice language work.
+chain: claude-sonnet
 safo route only recommends: the lead sets the card and hands the work out.
 ## technical-docs --json exit=0
-{"shape":"technical-docs","agent":"claude-sonnet","why":"first in the chain with headroom (claude-sonnet, claude-lead)","skipped":[],"reviewer":null,"reviewer_why":"no other reviewer has headroom: ask the maintainer or wait for a reset","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"","card_label":"Claude","fallback_chain":["claude-sonnet","claude-lead"],"reviews":[{"reviewer":"claude-sonnet","available":false,"reason":"required gate unavailable: ask for a fresh identity or wait"}],"local_role":"","warnings":[]}
+{"shape":"technical-docs","agent":"claude-sonnet","why":"first in the chain with headroom (claude-sonnet)","skipped":[],"reviewer":"claude-lead","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"When the page is a runbook or procedure someone follows on a live system, ops-runbook wins; it has the same chain. For public README or docs prose, this shape owns the technical correctness with Claude, and only the voice pass is prose-in-voice language work.","card_label":"Claude","fallback_chain":["claude-sonnet"],"reviews":[{"reviewer":"claude-lead","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
 ## threat-model  exit=0
 shape: threat-model
 recommended: claude-sonnet (put Agent = Claude on the card)

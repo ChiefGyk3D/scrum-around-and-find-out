@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from agentsdata import agents_dict
 from profiledata import prof
-from safo.agentsfile import MIGRATION_COHORT, AgentsFile, load_agents
+from safo.agentsfile import MIGRATION_COHORT, AgentsFile, load_agents, parse_agents
 from safo.profile import Evidence, slugify
 from safo.routing import recommend
 
@@ -126,7 +127,7 @@ def test_language_shapes_prefer_chatgpt_and_the_maintainer_or_a_claude_reviews_i
         ("claude-sonnet", "maintainer"),
     )
     docs = a.shape("technical-docs")
-    assert (docs.prefer, docs.fallback, docs.reviewer) == (("claude-sonnet",), ("claude-lead",), ("claude-sonnet",))
+    assert (docs.prefer, docs.fallback, docs.reviewer) == (("claude-sonnet",), (), ("claude-lead",))
 
 
 def test_route_picks_chatgpt_for_language_work_without_a_meter_and_needs_no_meter() -> None:
@@ -136,3 +137,58 @@ def test_route_picks_chatgpt_for_language_work_without_a_meter_and_needs_no_mete
     r = recommend(a, "prompt-language-for-local-llm", {})
     assert (r.agent, r.reviewer) == ("chatgpt", "claude-sonnet")
     assert recommend(a, "technical-docs", {}).agent == "claude-sonnet"
+
+
+TECHNICAL_SHAPES = (
+    "research",
+    "plan-writing",
+    "integration-code",
+    "well-specified-code",
+    "small-mechanical-pr",
+    "security-sensitive-design",
+    "threat-model",
+    "security-sensitive-code",
+    "ops-runbook",
+    "adversarial-review",
+    "technical-docs",
+)
+
+
+def chatgpt_in_technical_shapes(a: AgentsFile) -> list[str]:
+    """Every technical shape that names ChatGPT as author, fallback or reviewer, or would route to it."""
+    found = []
+    for name in TECHNICAL_SHAPES:
+        shape = a.shape(name)
+        if "chatgpt" in (*shape.prefer, *shape.fallback, *shape.reviewer) or recommend(a, name, {}).agent == "chatgpt":
+            found.append(name)
+    return found
+
+
+def test_technical_text_shapes_never_route_to_chatgpt() -> None:
+    a = shipped()
+    assert len(TECHNICAL_SHAPES) >= 11 and all(a.shape(n) for n in TECHNICAL_SHAPES)  # the guard collected something
+    assert chatgpt_in_technical_shapes(a) == []
+
+
+def test_the_chatgpt_guard_bites_when_a_technical_shape_is_given_to_it() -> None:
+    d = agents_dict()
+    d["shapes"]["ops-runbook"]["fallback"] = ["chatgpt"]
+    d["shapes"]["technical-docs"]["prefer"] = ["chatgpt"]
+    assert chatgpt_in_technical_shapes(parse_agents(d)) == ["ops-runbook", "technical-docs"]
+
+
+def test_the_technical_docs_reviewer_is_not_its_author_and_matches_the_runbook_reviewer() -> None:
+    docs = shipped().shape("technical-docs")
+    assert docs.reviewer and not set(docs.reviewer) & {*docs.prefer, *docs.fallback}
+    assert docs.reviewer == shipped().shape("ops-runbook").reviewer
+
+
+def test_precedence_between_the_overlapping_shapes_is_stated_in_the_shapes_and_in_rule_6() -> None:
+    a = shipped()
+    docs_note = a.shape("technical-docs").note
+    assert "ops-runbook" in docs_note and "prose-in-voice" in docs_note
+    assert "technical-docs" in a.shape("prose-in-voice").note
+    headline = a.shape("status-headline").note
+    assert "stays local" in headline and "prose-in-voice" in headline
+    rule = next(r for r in a.rules_of_thumb if r.startswith("Routing order 6"))
+    assert "ChatGPT" in rule and "local" in rule and "Claude" in rule
