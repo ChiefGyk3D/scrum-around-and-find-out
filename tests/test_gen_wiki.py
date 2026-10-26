@@ -944,3 +944,22 @@ def test_heading_titles_are_read_correctly(tmp_path: Path) -> None:
     sidebar = run(repo)["_Sidebar.md"]
     assert "- [Spaced   title](Home)" in sidebar and "- [C\\#](A)" not in sidebar and "- [C#](A)" in sidebar
     assert "- [Tabbed](B)" in sidebar and "- [C](C)" in sidebar
+
+
+def test_the_wiki_build_refuses_a_personas_page_at_another_doia_tag(tmp_path: Path) -> None:
+    tag = gw.read_doia_tag()
+    ok = make_repo(tmp_path / "ok", {"home.md": "# H\n", "personas.md": f"# P\n\nDoIA {tag}.\n"})
+    assert "Personas.md" in run(ok)
+    stale = make_repo(tmp_path / "stale", {"home.md": "# H\n", "personas.md": f"# P\n\nDoIA {tag} and v0.0.1.\n"})
+    with pytest.raises(gw.WikiError, match=r"v0\.0\.1"):
+        gw.generate(stale, stale / "wiki-out", SHA)
+
+
+def test_the_doia_tag_file_must_hold_one_tag(tmp_path: Path) -> None:
+    f = tmp_path / "tag.txt"
+    for bad in ("", "main\n", "0.3.1\n", "v0.3.1 v0.3.0\n"):
+        f.write_text(bad, encoding="utf-8")
+        with pytest.raises(gw.WikiError, match="release tag"):
+            gw.read_doia_tag(f)
+    f.write_text("v1.2.3\n", encoding="utf-8")
+    assert gw.read_doia_tag(f) == "v1.2.3"

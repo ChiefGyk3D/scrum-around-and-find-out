@@ -45,8 +45,41 @@ _FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
 _LABEL_META = re.compile(r"([\\\[\]<>`|*_&])")
 
 
+DOIA_TAG_FILE = ROOT / "scripts" / "doia-tag.txt"
+_DOIA_TAG = re.compile(r"^v\d+\.\d+\.\d+$")
+_TAG_REF = re.compile(r"\bv\d+\.\d+\.\d+\b")
+
+
 class WikiError(Exception):
     """A problem with the docs or the arguments; the message says what to fix."""
+
+
+def read_doia_tag(path: Path = DOIA_TAG_FILE) -> str:
+    """The one DoIA release tag docs/personas.md is written against (scripts/doia-tag.txt)."""
+    try:
+        tag = path.read_text(encoding="utf-8").strip()
+    except OSError as err:
+        raise WikiError(f"cannot read the DoIA tag file {path}: {err.strerror or err}") from err
+    if not _DOIA_TAG.match(tag):
+        raise WikiError(f"{path.name} must hold one release tag like v1.2.3, not {tag!r}")
+    return tag
+
+
+def doia_tag_refs(text: str) -> list[str]:
+    """Every vX.Y.Z token in the page: links, install commands and prose all pin the same release."""
+    return _TAG_REF.findall(text)
+
+
+def check_doia_tag(texts: dict[str, str], tag: str) -> None:
+    """docs/personas.md may name only the pinned DoIA tag; a stale or mixed reference fails the build."""
+    page = texts.get("personas.md")
+    if page is None:
+        return
+    stray = sorted(set(doia_tag_refs(page)) - {tag})
+    if stray:
+        raise WikiError(
+            f"docs/personas.md names DoIA {', '.join(stray)} but scripts/doia-tag.txt pins {tag}; make them agree"
+        )
 
 
 def page_name(filename: str) -> str:
@@ -481,6 +514,7 @@ def render(docs: Path, root: Path, commit: str | None, repo_url: str = REPO_URL)
         raise WikiError(f"--commit must be the full 40 hex character commit id, not {commit!r}")
     short = commit[:7].lower() if commit else "an unknown commit"
     texts = _read_docs(docs)
+    check_doia_tag(texts, read_doia_tag())
     pages: dict[str, str] = {}
     for filename in texts:
         if not _FILE.match(filename):
