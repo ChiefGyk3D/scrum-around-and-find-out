@@ -191,7 +191,7 @@ run"; that is best-effort detection of a rename completed before a check by a pr
 cannot prevent one, and a rename racing the very last instructions of a run can still go unreported: such a process is
 outside the threat model, the stated unsupported boundary. Generated files must be regular files, written 0644; `--check`
 accepts any mode a checkout umask makes of a plain file (0600 to 0664, since the VCS records only the executable bit) and
-reports an execute, setuid, setgid, sticky or world-write bit, which `--write` repairs (`--write` rewrites the file); after the writes a fresh inventory is compared with the render. A race
+reports an execute, setuid, setgid, sticky or world-write bit, and `--write` rewrites such a file; after the writes a fresh inventory is compared with the render. A race
 between the inventory and the write (another process swapping an entry in that window) is narrowed by the exclusive,
 no-follow opens and caught by the final inventory, but not prevented.
 

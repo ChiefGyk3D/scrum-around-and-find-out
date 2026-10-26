@@ -58,14 +58,15 @@ def test_the_check_passes_on_a_tree_whose_modes_come_from_the_checkout_umask(
     assert script.main(["--check"]) == 0
 
 
-def test_the_check_still_refuses_a_world_writable_generated_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("bad", [0o666, 0o646, 0o645, 0o674, 0o755, 0o4644, 0o2644, 0o1644, 0o400])
+def test_the_check_still_refuses_an_unsafe_generated_file_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], bad: int
 ) -> None:
     script, out = written(tmp_path, monkeypatch)
     target = next(p for p in sorted(out.rglob("*")) if p.is_file())
-    target.chmod(0o666)
+    target.chmod(bad)
     code, err = check(script, capsys)
-    assert code == 1 and "mode is 0666" in err, err
+    assert code == 1 and f"mode is {bad:04o}" in err, err
 
 
 def test_profiles_verify_passes_on_the_repository_with_its_codeowners(_private_home: Path) -> None:
