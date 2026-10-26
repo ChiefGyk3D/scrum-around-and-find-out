@@ -10,6 +10,7 @@ usage: guard_child.py MODE HOME AGENTS FIFO PAYLOAD_FILE
   MODE pre-read-state / pre-claim / pre-save-state / pre-touch
                         a state READ or WRITE before the verdict (probe state, re-probe lock and .attempt, probe-state
                         save, the bound-repository utime) blocks for 30 s; a 6 s budget leaves room for a re-probe
+  MODE pre-mode         the mode-file read wedges (the real function stays reachable); a 6 s budget
   MODE die-at-claim / die-at-clear
                         the process kills itself (SIGKILL) at the claim of the probe notice / the clear of the marker
   MODE plain            nothing patched
@@ -23,11 +24,14 @@ import io
 import os
 import signal
 import sys
+import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import safo.hooks as core
 from safo.cli import main
+from safo.guardlog import mode_health as real_mode_health
 from safo.modes import hooks as mod
 
 mode, home, agents, fifo, payload_file = sys.argv[1:6]
@@ -49,6 +53,11 @@ def sleeps(*a: object, **k: object) -> None:
     time.sleep(30)
 
 
+def slow_mode_health(env: Mapping[str, str]) -> tuple[str, str]:
+    threading.Event().wait(30)  # wedged: nothing releases this
+    return real_mode_health(env)
+
+
 def die(*a: object, **k: object) -> None:
     os.kill(os.getpid(), signal.SIGKILL)
 
@@ -63,6 +72,8 @@ elif mode == "slow-first-notice":
     mod.__dict__["notice_unclaimed"] = sleeps
 elif mode == "slow-marker-dir":
     mod.__dict__["marker_dir"] = sleeps
+elif mode == "pre-mode":
+    mod.__dict__["mode_health"] = slow_mode_health
 elif mode == "pre-read-state":
     mod.__dict__["read_state"] = sleeps
 elif mode == "pre-claim":

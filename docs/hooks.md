@@ -327,19 +327,30 @@ A hook sits inside someone's session, so every error lets the work through, visi
   never fails open); any other undelivered line exits 1, a non-blocking error. This is the one case where the guard
   exits 2. That the host treats exit 2 as a block and exit 1 as non-blocking is the host's documented hook contract,
   not verified by a test here. A failure in the diagnostic path is caught and becomes the same exit code.
+- The invariant for background work, stated exactly: no abandoned worker writes AUDIT or DECISION state (the log, the
+  log-failed marker, the first-notice flag, the quarantine of a corrupt log); those are written only by the calling
+  thread, after the decision is delivered. Probe and health caches (the re-probe's lock file, its `.attempt` marker, the
+  saved probe state, the `.repo` modification time) are hints: they can only change the NEXT dispatch's notice or
+  health, never a verdict. Every abandonable worker has an `abandoned` flag that the guard sets when it gives up on it,
+  and each write the re-probe makes (the `.attempt` marker, the probe-state save, a clean-up unlink) re-checks the flag
+  immediately before it happens, so a worker released late writes nothing. A write already in flight at the moment of
+  abandonment still completes; that is the residual. The `.repo` modification-time refresh is not done by a worker at
+  all: it is made by the calling thread after the line is delivered, best effort.
 - The verdict never depends on state writes. Everything that touches the state folder before the verdict (the saved
-  probe state, the re-probe's lock and `.attempt` marker, the probe, the save of the probe state, and the read of the
-  bound repository, which also refreshes that file's modification time) runs under a bound, in a daemon worker thread
+  probe state, the re-probe's lock and `.attempt` marker, the probe, the save of the probe state, and the pure read of
+  the bound repository) runs under a bound, in a daemon worker thread
   that is abandoned if it does not finish: a read batch gets at most 1.0 s (at least 0.25 s, and not past the hard
   limit), and the re-probe gets its own total (twice the per-request time plus its slack) plus 1.0 s for its file work,
   never past the deadline. If any of it does not finish, probe health is `unknown` (the local-step rule is off, as for
   any unknown state), the repository counts as NOT BOUND (the existing fallback: no `tracking_exempt_repos` or
   `lead_wait` exemption, so a brief without an open issue, or a wait, is judged by the rule), no further state work
   is done in that dispatch, and the verdict is computed from the configuration alone. The line carries the fixed
-  notice `state folder slow: probe state skipped`. A re-probe worker that finishes late may still write the probe
-  state, which is what the re-probe is for; it changes no decision. Still unbounded and read on the calling thread:
-  the mode file (it decides warn or block); a state folder that
-  wedges there holds the line back until the host's timeout.
+  notice `state folder slow: probe state skipped`.
+- The mode file read is bounded the same way (at most 1.0 s, at least 0.25 s, not past the hard limit). The documented
+  fallback for an unreadable mode file is `warn`, which would let a violation of an explicit rule through as a warning,
+  so on a TIMEOUT the verdict is computed in `block` mode: fail closed on a slow mode file. The line says `state folder
+  slow: mode file skipped`. (A mode file that is merely unreadable or invalid still falls back to `warn` with the
+  `mode` notice, as before.) `lead_wait.mode` set explicitly to `warn` in `agents.yaml` stays what it says.
 - Between a computed decision and its emit, the only other state-folder work is a READ-ONLY check of the first-notice
   flag (when the probe is not healthy) and a READ-ONLY inspection of the log-failed marker, under the same bound (at most
   1.0 s, at least 0.25 s, not past the hard limit). The worker changes nothing. The flag is claimed, and any junk at the
@@ -350,8 +361,10 @@ A hook sits inside someone's session, so every error lets the work through, visi
   were; an abandoned worker that finishes later creates nothing and leaves no descriptor open. The once-per-session
   probe notice appears only while it is unclaimed: another notice in the same line does not bring it back.
 - Standard error: no line is written to it before the decision is out, and a line written afterwards never blocks. The
-  descriptor is made non-blocking for the write (and restored), and a line that would block, because the reader is
-  gone or the pipe is full, is dropped. A computed denial is recorded when the verdict is computed, so an unexpected
+  descriptor's flags are never touched (an inherited pipe shares its open file description with the host). The
+  descriptor is polled for POLLOUT with a zero timeout, and one write of at most 512 bytes (below PIPE_BUF, which a
+  writable pipe takes whole) is made only if it is writable; a full pipe, a gone reader, a short count or an error
+  drops the line, with no retry. A descriptor that cannot be polled (a file, some terminals) is written normally. A computed denial is recorded when the verdict is computed, so an unexpected
   failure anywhere between the verdict and the emit exits 2 (block) instead of falling through to a generic
   diagnostic and exit 0.
 - Because the decision is printed before the log is touched, a failed or skipped log write can no longer appear in the
@@ -364,17 +377,23 @@ A hook sits inside someone's session, so every error lets the work through, visi
   inode, mode, modification time in ns, size) and removes the marker only if it still has that identity, so a failure
   written by another run in between is kept and reported next. If the rename fails because a directory is in the way,
   only that observed blocker is removed; only if the removal really happened is the install retried, and then with a
-  hard link, which never overwrites. If the blocker was replaced meanwhile, the newer marker is left alone, this run's
+  hard link, which never overwrites. Where the filesystem has no hard links (EPERM, EOPNOTSUPP, ENOTSUP, EXDEV or
+  ENOSYS) the retry is a checked rename instead: nothing may be at the name just before, and the name must hold a marker
+  afterwards; that keeps a tiny race (a marker created between the check and the rename is overwritten) on such
+  filesystems only. If the blocker was replaced meanwhile, the newer marker is left alone, this run's
   temp file is dropped, and the failure counts as recorded because a marker exists. Junk at the name (directory, FIFO,
   link, foreign or loose-mode file) is removed after the line is delivered, by one look, an atomic rename to a unique
   side name, and a second look at the MOVED object: only an object that still has the observed identity is deleted
-  (rmdir or unlink chosen from that same look). Anything else that was moved is put back with a hard link (which cannot
-  overwrite a newer marker) or, if it cannot be put back, left under its side name; a non-matching object is never
-  deleted. It is reported once as `log-failed marker unusable` (in that line, and on stderr). Remaining windows,
+  (rmdir or unlink chosen from that same look). The answer is True only if the object is really gone: a directory that
+  is not empty stays under its side name and the answer is False. At most 8 side objects (`.log-failed.junk.*`) are
+  kept: empty directories and our own regular files among them are pruned first, and at the cap nothing more is moved
+  aside, so repeated planting cannot grow the folder without bound. Anything else that was moved is put back without
+  overwriting (a hard link, or the checked rename above) or, if it cannot be put back, left under its side name; a
+  non-matching object is never deleted. It is reported once as `log-failed marker unusable` (in that line, and on stderr). Remaining windows,
   all inside the same-user residual (#61): between the first look and the rename a replacement is briefly moved aside,
-  so a concurrent reader can miss a marker for a moment; the identity tuple is best effort (a recycled inode could
-  repeat it); and a failure landing between a marker's identity check and its removal by a clear can still be lost. A
-  line carries every applicable notice, highest priority first (`mode`, `state folder slow`, `notices skipped`, the
+  so a concurrent reader can miss a marker for a moment; the five-field identity tuple is best effort (a recycled inode, or a
+  filesystem with coarse timestamps, could repeat it); and a failure landing between a marker's identity check and its removal by a clear can still be lost. A
+  line carries every applicable notice, highest priority first (`mode` or `mode file skipped`, `state folder slow`, `notices skipped`, the
   marker's notice, `budget exceeded`, the probe notice), and the marker is deleted only after a line that shows its
   notice was delivered. The marker is same-user writable like the rest of the state: it can only add a notice and
   never grants anything.

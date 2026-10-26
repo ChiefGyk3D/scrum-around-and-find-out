@@ -231,8 +231,10 @@ def bind_repo(path: Path, repo: str | None, source: object) -> str:
         return "changed"
 
 
-def read_bound_repo(path: Path | None) -> str | None:
-    """The repository bound at SessionStart, or None (not bound, unreadable, untrusted folder): never exempt."""
+def read_bound_repo(path: Path | None, refresh: bool = True) -> str | None:
+    """The repository bound at SessionStart, or None (not bound, unreadable, untrusted folder): never exempt. With
+    `refresh` the file's modification time is also refreshed; the guard passes False (its read may run in an abandonable
+    worker) and calls refresh_bound_repo itself, after its decision is delivered."""
     if path is None or not trusted_dir(path.parent):
         return None
     try:
@@ -240,20 +242,39 @@ def read_bound_repo(path: Path | None) -> str | None:
     except (OSError, ValueError, UnicodeError):
         return None
     value = bound.get("repo") if isinstance(bound, dict) else None
-    touch(repo_path(path))  # the session is alive: keep its binding out of the age-based prune
+    if refresh:
+        touch(repo_path(path))  # the session is alive: keep its binding out of the age-based prune
     return value if isinstance(value, str) else None
 
 
-def save_state(path: Path, state: dict[str, Any]) -> bool:
+def refresh_bound_repo(path: Path | None) -> None:
+    """Keep a live session's binding out of the age-based prune (a utime). A health hint: best effort, never part of a
+    verdict."""
+    if path is not None and trusted_dir(path.parent):
+        touch(repo_path(path))
+
+
+def abandoned_now(abandoned: threading.Event | None) -> bool:
+    """True once the guard has given up on the worker that is running this: it must not write any more. Each mutation
+    re-checks this immediately before it happens; a mutation already in flight at that moment still completes."""
+    return abandoned is not None and abandoned.is_set()
+
+
+def save_state(path: Path, state: dict[str, Any], abandoned: threading.Event | None = None) -> bool:
+    if abandoned_now(abandoned):
+        return False
     with file_lock(path.with_name(path.name + ".lock")):
         previous = read_state(path)
         if previous and previous["ts"] > state["ts"]:
+            return False
+        if abandoned_now(abandoned):  # the write itself
             return False
         try:
             write_text(path, json.dumps(state, sort_keys=True))
         except (OSError, ValueError):
             # Never leave a formerly reachable result active after a failed refresh.
-            path.unlink(missing_ok=True)
+            if not abandoned_now(abandoned):
+                path.unlink(missing_ok=True)
             raise
     return True
 
@@ -288,11 +309,13 @@ def notice_path(path: Path) -> Path:
     return path.with_name(path.name + ".notice")
 
 
-def claim_reprobe(path: Path, now: float) -> bool:
+def claim_reprobe(path: Path, now: float, abandoned: threading.Event | None = None) -> bool:
     """True when this call may re-probe: once per REPROBE_INTERVAL_SECONDS for a session and configuration, whether or
     not the previous attempt worked. The attempt is recorded before the probe runs, so a slow or failing endpoint is
     asked once a minute and not once per dispatch."""
     marker = attempt_path(path)
+    if abandoned_now(abandoned):
+        return False
     with file_lock(marker.with_name(marker.name + ".lock")):
         try:
             recorded = loads(bounded_read(marker, 64))
@@ -301,22 +324,30 @@ def claim_reprobe(path: Path, now: float) -> bool:
         last = recorded.get("ts") if isinstance(recorded, dict) else None
         if isinstance(last, (int, float)) and finite_time(last) and 0 <= now - last < REPROBE_INTERVAL_SECONDS:
             return False
+        if abandoned_now(abandoned):  # the write itself
+            return False
         write_text(marker, json.dumps({"ts": now}))
     return True
 
 
-def reprobe(doc: AgentsFile, path: Path, now: float, timeout: float = REPROBE_TIMEOUT_SECONDS) -> dict[str, Any] | None:
+def reprobe(
+    doc: AgentsFile,
+    path: Path,
+    now: float,
+    timeout: float = REPROBE_TIMEOUT_SECONDS,
+    abandoned: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Refresh a state in place, bounded and rate limited. `timeout` is per request and the whole probe is cut off at
     twice that, so a server that answers a byte at a time cannot hold the hook. Never raises: None means the state
     could not be refreshed (rate limited, a probe or storage failure, or a newer result already stored), and the caller
     treats local reachability as unknown."""
     try:
-        if not claim_reprobe(path, now):
+        if not claim_reprobe(path, now, abandoned):
             return None
         started = time.monotonic()
         results = probe_all(doc, lambda endpoint: probe(endpoint, timeout), wait=2 * timeout + REPROBE_SLACK_SECONDS)
         state = probe_state(results, now + time.monotonic() - started)  # completion time, as at SessionStart
-        return state if save_state(path, state) else None
+        return state if save_state(path, state, abandoned) else None
     except Exception:
         return None
 

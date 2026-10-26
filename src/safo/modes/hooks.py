@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import contextlib
+import errno
 import itertools
 import json
 import os
@@ -78,6 +79,7 @@ from safo.hooks import (
     prune_state,
     read_bound_repo,
     read_state,
+    refresh_bound_repo,
     reprobe,
     save_state,
     session_message,
@@ -98,8 +100,13 @@ LOG_FAILED_NOTICE = "previous log write failed"
 LOG_MARKER_UNUSABLE = "log-failed marker unusable"  # a directory, FIFO, link or foreign file sat where the marker goes
 CONFIG_TIMEOUT_NOTICE = "budget exceeded: configuration load timed out, rules disabled"
 NOTICES_SKIPPED = "notices skipped: state folder slow"  # fixed text: learning it needs no filesystem call
+MODE_SLOW_NOTICE = "state folder slow: mode file skipped"  # the mode read did not finish: fail closed (block)
 STATE_SLOW_NOTICE = "state folder slow: probe state skipped"  # a pre-decision state operation did not finish
 NOTICE_IO_CAP_SECONDS = 1.0  # first-notice flag and marker inspection together get at most this long before the emit
+MAX_SIDE_OBJECTS = 8  # `.log-failed.junk.*` entries kept in the state folder; at the cap nothing more is moved aside
+SIDE_PREFIX = ".log-failed.junk."
+NO_HARDLINKS = (errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EXDEV, errno.ENOSYS)  # link() unsupported
+STDERR_MAX_BYTES = 512  # below PIPE_BUF: a pipe that polls writable takes the whole line
 NOTICE_IO_MIN_SECONDS = 0.25  # and at least this long, even when the clock is already past its limit
 _T = TypeVar("_T")
 Ident = tuple[int, int, int, int, int]  # st_dev, st_ino, st_mode, st_mtime_ns, st_size: what sat at the name
@@ -338,8 +345,12 @@ class Run:
 
 
 def stderr_line(text: str) -> None:
-    """One line on standard error, best effort and NEVER blocking: on a real descriptor the write is made non-blocking
-    (restored afterwards) and a line that would block is dropped. The guard writes these only AFTER its decision."""
+    """One short line on standard error, best effort and NEVER blocking. The descriptor's flags are not touched (an
+    inherited pipe shares its open file description with the host). A real descriptor is polled for POLLOUT with a zero
+    timeout and written only if writable, with ONE write of at most STDERR_MAX_BYTES (a writable pipe takes a line below
+    PIPE_BUF whole); a full pipe, a gone reader, a short count or any error means the line is dropped, with no retry. A
+    descriptor that cannot be polled (a file, some terminals) is written normally. The guard writes these only AFTER
+    its decision."""
     with contextlib.suppress(Exception):
         stream = sys.stderr
         if stream is None:
@@ -350,12 +361,19 @@ def stderr_line(text: str) -> None:
             output.write(stream, text)  # a captured or in-memory stream has no descriptor to block on
             return
         data = (output.line(text) + "\n").encode("utf-8", "replace")
-        was_blocking = os.get_blocking(fd)
-        os.set_blocking(fd, False)
+        if len(data) > STDERR_MAX_BYTES:
+            data = data[: STDERR_MAX_BYTES - 1] + b"\n"
         try:
-            os.write(fd, data)
-        finally:
-            os.set_blocking(fd, was_blocking)
+            poller = select.poll()
+            poller.register(fd, select.POLLOUT)
+            ready = poller.poll(0)
+        except (AttributeError, OSError, ValueError):
+            ready = None
+        if ready is not None:
+            bad = select.POLLERR | select.POLLHUP | select.POLLNVAL
+            if not any(events & select.POLLOUT and not events & bad for _, events in ready):
+                return
+        os.write(fd, data)
 
 
 def exit_code(run: Run) -> int:
@@ -418,6 +436,7 @@ def emit_then_persist(
     clear_marker: Ident | None = None,
     claim: Path | None = None,
     report: str = "",
+    refresh: Path | None = None,
 ) -> None:
     """The one tail of every guard path. The decision (`data`, or nothing to say) is written and flushed FIRST. If that
     fails nothing else is done (no append, no second line); the caller turns it into the exit code. Otherwise the log
@@ -435,6 +454,9 @@ def emit_then_persist(
         if claim is not None:  # the probe notice was in the delivered line: only now is it used up
             with contextlib.suppress(Exception):
                 claim_notice(claim)
+        if refresh is not None:  # keep the session's repository binding out of the prune: a hint, after the decision
+            with contextlib.suppress(Exception):
+                refresh_bound_repo(refresh)
     try:
         if folder is None:
             raise OSError("log unavailable")
@@ -477,19 +499,68 @@ def marker_ident(info: os.stat_result) -> Ident:
     return (info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns, info.st_size)
 
 
+def side_objects(dfd: int) -> list[str]:
+    return [name for name in os.listdir(dfd) if name.startswith(SIDE_PREFIX)]
+
+
+def prune_side_objects(dfd: int) -> None:
+    """Cheap, safe clean-up of what earlier removals left aside: empty directories and regular files that are ours.
+    Looked at with lstat only (never followed); anything else, and any directory that is not empty, stays."""
+    for name in side_objects(dfd):
+        with contextlib.suppress(OSError):
+            info = os.lstat(name, dir_fd=dfd)
+            if stat.S_ISDIR(info.st_mode):
+                os.rmdir(name, dir_fd=dfd)  # fails (and is kept) unless empty
+            elif stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid():
+                os.unlink(name, dir_fd=dfd)
+
+
+def install_no_clobber(dfd: int, source: str, *, follow_symlinks: bool = True) -> bool:
+    """Put `source` at the marker name without overwriting anything, then drop the source name. A hard link never
+    overwrites. Where the filesystem has none (EPERM, EOPNOTSUPP, ENOTSUP, EXDEV, ENOSYS) it falls back to a CHECKED
+    rename: nothing may be at the name immediately before, and the name must hold a marker afterwards. That fallback
+    keeps a tiny race (a marker created between the check and the rename is overwritten); it exists only on
+    filesystems that cannot do better. True if a valid marker is at the name afterwards."""
+    try:
+        os.link(source, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=follow_symlinks)
+    except OSError as error:
+        if error.errno not in NO_HARDLINKS:
+            with contextlib.suppress(OSError):
+                os.unlink(source, dir_fd=dfd)
+            return marker_present(dfd)  # EEXIST: a newer marker won
+        try:
+            os.lstat(LOG_FAILED_NAME, dir_fd=dfd)
+        except FileNotFoundError:
+            with contextlib.suppress(OSError):
+                os.rename(source, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd)
+        else:
+            with contextlib.suppress(OSError):
+                os.unlink(source, dir_fd=dfd)
+        return marker_present(dfd)
+    with contextlib.suppress(OSError):
+        os.unlink(source, dir_fd=dfd)
+    return marker_present(dfd)
+
+
 def remove_junk(dfd: int, seen: Ident) -> bool:
-    """Remove whatever sits at the marker name (a directory, FIFO, link or file) ONLY if it is what was observed.
+    """Remove whatever sits at the marker name (a directory, FIFO, link or file) ONLY if it is what was observed, and
+    return True ONLY if it really is gone.
 
     One look (lstat) compares it with `seen`. A match is then renamed to a unique side name inside the state folder
     (atomic: it moves whatever is at the name at that instant), and the MOVED object is looked at once more: only if it
     still has the observed identity is it deleted, by its side name, with rmdir or unlink chosen from that same lstat.
-    If something else was moved (a replacement slipped in between the look and the rename), it is put back with a
-    hard link, which never overwrites a newer marker; if it cannot be put back it stays under its side name. A
-    non-matching object is never deleted. Remaining window: between the look and the rename, a replacement can be
-    moved aside briefly, so a concurrent reader may see no marker for a moment; the identity tuple can in principle
-    repeat for a recycled inode. Both are inside the same-user residual (#61)."""
-    side = f".{LOG_FAILED_NAME}.junk.{os.urandom(6).hex()}"
+    If the deletion fails (a directory that is not empty) the object stays under its side name and the answer is
+    False. At most MAX_SIDE_OBJECTS side objects are kept: empty ones are pruned first, and at the cap nothing more is
+    moved aside (False). If something else was moved (a replacement slipped in between the look and the rename), it is
+    put back with install_no_clobber; if it cannot be put back it stays under its side name. A non-matching object is
+    never deleted. Remaining window: between the look and the rename a replacement is briefly moved aside, so a
+    concurrent reader can miss a marker for a moment; the identity tuple is best effort (a recycled inode, or a
+    coarse-timestamp filesystem, can repeat it). Both are inside the same-user residual (#61)."""
+    side = f"{SIDE_PREFIX}{os.urandom(6).hex()}"
     try:
+        prune_side_objects(dfd)
+        if len(side_objects(dfd)) >= MAX_SIDE_OBJECTS:
+            return False
         if marker_ident(os.lstat(LOG_FAILED_NAME, dir_fd=dfd)) != seen:
             return False
         os.rename(LOG_FAILED_NAME, side, src_dir_fd=dfd, dst_dir_fd=dfd)
@@ -497,15 +568,15 @@ def remove_junk(dfd: int, seen: Ident) -> bool:
     except OSError:
         return False
     if marker_ident(moved) != seen:
-        with contextlib.suppress(OSError):
-            os.link(side, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=False)
-            os.unlink(side, dir_fd=dfd)
+        install_no_clobber(dfd, side, follow_symlinks=False)
         return False
-    with contextlib.suppress(OSError):
+    try:
         if stat.S_ISDIR(moved.st_mode):
             os.rmdir(side, dir_fd=dfd)
         else:
             os.unlink(side, dir_fd=dfd)
+    except OSError:
+        return False
     return True
 
 
@@ -521,8 +592,8 @@ def write_log_failed(folder: Path | None) -> bool:
     so every failure has its own identity and an older run's clear cannot erase it. The marker name itself is never
     opened for writing. If the rename fails because something (a directory) is in the way, only that observed blocker is
     removed, and only if that removal really happened is the install retried, and then with a hard link, which
-    never overwrites: if a newer marker arrived meanwhile it wins, this run's temp file is dropped, and the failure
-    counts as recorded because a marker exists."""
+    never overwrites (or, where the filesystem has no hard links, with a checked rename): if a newer marker arrived
+    meanwhile it wins, this run's temp file is dropped, and the failure counts as recorded because a marker exists."""
     if folder is not None:
         guardlog.ensure_dir(folder)  # a fresh install whose first append failed has no folder yet
     dfd = marker_dir(folder)
@@ -534,18 +605,14 @@ def write_log_failed(folder: Path | None) -> bool:
                 os.write(fd, f"{os.getpid()} {os.urandom(8).hex()}\n".encode())
             finally:
                 os.close(fd)
+            if attempt:  # the retry never overwrites: a newer marker wins; no hard links: a checked rename
+                return install_no_clobber(dfd, temp)
             try:
-                if attempt == 0:
-                    os.rename(temp, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd)
-                else:
-                    os.link(temp, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd)  # no clobber
-                    os.unlink(temp, dir_fd=dfd)
+                os.rename(temp, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd)
                 return True
             except OSError:
                 with contextlib.suppress(OSError):
                     os.unlink(temp, dir_fd=dfd)
-                if attempt:
-                    return marker_present(dfd)  # EEXIST: a newer marker won
                 try:
                     blocker = marker_ident(os.lstat(LOG_FAILED_NAME, dir_fd=dfd))
                 except OSError:
@@ -598,16 +665,24 @@ def clear_log_failure(folder: Path | None, seen: Ident) -> None:
         os.close(dfd)
 
 
-def run_bounded(work: Callable[[], _T], timeout: float) -> tuple[bool, _T | None]:
-    """Run `work` in a daemon thread and wait at most `timeout` seconds. (True, result), or (False, None), thread
-    ABANDONED (it dies with the process); an exception in `work` is re-raised. This is the one way the guard bounds
-    filesystem calls that cannot be interrupted (a wedged mount, a kernel read). Threads work the same on Linux and
-    macOS and in any thread; a signal timer would not."""
+def run_bounded(work: Callable[[threading.Event], _T], timeout: float) -> tuple[bool, _T | None]:
+    """Run `work(abandoned)` in a daemon thread and wait at most `timeout` seconds. (True, result), or (False, None)
+    with the thread ABANDONED: `abandoned` is set at that moment, and the thread dies with the process. An exception in
+    `work` is re-raised. This is the one way the guard bounds filesystem calls that cannot be interrupted (a wedged
+    mount, a kernel read). Threads work the same on Linux and macOS and in any thread; a signal timer would not.
+
+    The invariant: no abandoned worker writes AUDIT or DECISION state (the log, the log-failed marker, the notice
+    flag, the quarantine): those are written only by the calling thread, after the decision is delivered. Probe and
+    health caches (the re-probe's lock, its .attempt marker, the saved probe state) are hints that can only change the
+    NEXT dispatch's notice or health, never a verdict. Workers that write them re-check `abandoned` immediately
+    before each write, so a worker that is released late writes nothing; a write already in flight at the moment of
+    abandonment still completes (that is the residual)."""
     box: list[tuple[_T | None, BaseException | None]] = []
+    abandoned = threading.Event()
 
     def target() -> None:
         try:
-            box.append((work(), None))
+            box.append((work(abandoned), None))
         except BaseException as error:
             box.append((None, error))
 
@@ -615,6 +690,7 @@ def run_bounded(work: Callable[[], _T], timeout: float) -> tuple[bool, _T | None
     worker.start()
     worker.join(max(0.0, timeout))
     if worker.is_alive() or not box:
+        abandoned.set()
         return False, None
     value, error = box[0]
     if error is not None:
@@ -638,6 +714,15 @@ def io_budget(run: Run) -> float:
     return max(NOTICE_IO_MIN_SECONDS, min(NOTICE_IO_CAP_SECONDS, hard - time.monotonic() - 0.5))
 
 
+def read_mode_bounded(ctx: LocalContext, run: Run) -> tuple[str, str]:
+    """(mode, state) with the mode-file read under a bound. If it does not finish, the mode is unknown. The documented
+    fallback for an unreadable mode file is warn, and warn would let a violation of an explicit rule through as a
+    warning; so for a TIMEOUT the verdict is computed in BLOCK mode (fail closed on a slow mode file), and the line says
+    so with MODE_SLOW_NOTICE."""
+    done, got = run_bounded(lambda abandoned: mode_health(ctx.env), io_budget(run))
+    return got if done and got is not None else ("block", "slow")
+
+
 def bounded_reprobe(
     doc: AgentsFile, path: Path, now: float, timeout: float, deadline: float
 ) -> tuple[dict[str, Any] | None, bool]:
@@ -649,7 +734,7 @@ def bounded_reprobe(
         NOTICE_IO_MIN_SECONDS,
         min(2 * timeout + REPROBE_SLACK_SECONDS + NOTICE_IO_CAP_SECONDS, deadline - time.monotonic()),
     )
-    done, fresh = run_bounded(lambda: reprobe(doc, path, now, timeout), budget)
+    done, fresh = run_bounded(lambda abandoned: reprobe(doc, path, now, timeout, abandoned), budget)
     return (fresh if done else None), not done
 
 
@@ -661,7 +746,7 @@ def read_notices(folder: Path | None, path: Path | None, wants_first: bool, run:
     flag and the marker are left as they were."""
     budget = io_budget(run)
 
-    def work() -> Seen:
+    def work(abandoned: threading.Event) -> Seen:
         first = bool(wants_first and (path is None or notice_unclaimed(path)))
         return Seen(first, log_failure_pending(folder))
 
@@ -676,7 +761,7 @@ def load_config(ctx: LocalContext, args: argparse.Namespace, deadline: float) ->
     filesystem or kernel read: the production reader opens with O_NONBLOCK and refuses a non-regular file, so a planted
     FIFO is rejected at once and does not reach this timeout."""
     done, doc = run_bounded(
-        lambda: load_agents_for(ctx, args), max(CONFIG_MIN_WAIT_SECONDS, deadline - time.monotonic())
+        lambda abandoned: load_agents_for(ctx, args), max(CONFIG_MIN_WAIT_SECONDS, deadline - time.monotonic())
     )
     if not done or doc is None:
         raise TimeoutError("configuration load exceeded the budget")
@@ -716,6 +801,7 @@ def finish(
     note: str = "",
     clear: Ident | None = None,
     claim: Path | None = None,
+    refresh: Path | None = None,
 ) -> None:
     """The shared tail of the Agent and Bash paths: build the one line (the decision plus every applicable notice, in
     priority order) and hand it to emit_then_persist. `notices` are (visible text, log code)."""
@@ -731,7 +817,9 @@ def finish(
         context = data["hookSpecificOutput"].get("additionalContext")
         data["hookSpecificOutput"]["additionalContext"] = f"{context} {note}" if context else note
     report = "safo: " + LOG_MARKER_UNUSABLE if any(text == LOG_MARKER_UNUSABLE for text, _ in notices) else ""
-    emit_then_persist(ctx, run, data if out_text or notices or note else None, folder, record, clear, claim, report)
+    emit_then_persist(
+        ctx, run, data if out_text or notices or note else None, folder, record, clear, claim, report, refresh
+    )
 
 
 def hook_event(argv: Sequence[str] | None) -> str | None:
@@ -913,7 +1001,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     if payload.get("hook_event_name") != "PreToolUse" or not isinstance(payload.get("tool_input"), dict):
         raise ValueError("invalid dispatch")
     session = session_id(payload)
-    mode, mode_state = mode_health(ctx.env)
+    mode, mode_state = read_mode_bounded(ctx, run)
     when = ctx.now.strftime("%Y-%m-%dT%H:%M:%S")
     folder = state_dir(ctx.env)
     doc = load_or_degrade(ctx, args, deadline, run, payload["tool_input"])  # None after the visible degraded allow
@@ -930,9 +1018,9 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     # state, and the bound-repository read (with its utime) only decide HEALTH and the repository binding. They run
     # under a bound; if one does not finish, health is unknown, the binding is "not bound" (the existing fallback: no
     # exemption), no more state work is done in this dispatch, and the verdict is computed from the config alone.
-    def read_phase() -> tuple[dict[str, Any] | None, bool, str | None]:
+    def read_phase(abandoned: threading.Event) -> tuple[dict[str, Any] | None, bool, str | None]:
         attempted_before = path is not None and os.path.lexists(attempt_path(path))
-        return read_state(path), attempted_before, read_bound_repo(path)
+        return read_state(path), attempted_before, read_bound_repo(path, refresh=False)  # a pure read
 
     done, got = run_bounded(read_phase, io_budget(run))
     slow = not done or got is None
@@ -1004,7 +1092,9 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     # Every applicable notice goes in the line, highest priority first; the marker is cleared only once its notice is
     # in a delivered line, so a higher-priority notice never consumes it.
     notices: list[tuple[str, str]] = []
-    if mode_state != "healthy":
+    if mode_state == "slow":
+        notices.append((MODE_SLOW_NOTICE, "timeout"))
+    elif mode_state != "healthy":
         notices.append(("mode", "mode"))
     if slow:
         notices.append((STATE_SLOW_NOTICE, "timeout"))
@@ -1029,7 +1119,18 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     record = log_record(
         when, decision, mode, verdict, reachable, "degraded" if mode_state != "healthy" else health, code
     )
-    finish(ctx, run, folder, output, notices, record, note, marker[1] if marker else None, path if seen.first else None)
+    finish(
+        ctx,
+        run,
+        folder,
+        output,
+        notices,
+        record,
+        note,
+        marker[1] if marker else None,
+        path if seen.first else None,
+        path if bound else None,
+    )
 
 
 def lead_wait(
@@ -1061,7 +1162,7 @@ def lead_wait(
     if not kinds:
         return
     session = session_id(payload)
-    mode, mode_state = mode_health(ctx.env)
+    mode, mode_state = read_mode_bounded(ctx, run)
     effective = mode if setting.mode == "follow" else setting.mode
     folder = state_dir(ctx.env)
     path = state_path(folder, session, doc) if folder else None
@@ -1069,7 +1170,7 @@ def lead_wait(
     # agents.yaml (matched against the repository bound at SessionStart, never the working tree).
     # The bound-repository read (it also touches the file) runs under a bound. If it does not finish the repository
     # counts as not bound, the existing fallback: no exemption, so the wait is judged by the rule.
-    done, bound_repo = run_bounded(lambda: read_bound_repo(path), io_budget(run))
+    done, bound_repo = run_bounded(lambda abandoned: read_bound_repo(path, refresh=False), io_budget(run))
     slow = not done
     exempt = bool(leadwait.marker_reason(command, deadline)) or tracking.exempt(
         bound_repo if done else None, tuple(e.repo for e in setting.exempt_repos)
@@ -1080,7 +1181,9 @@ def lead_wait(
     seen = Seen() if slow else read_notices(folder, path, False, run)  # bounded; none after a slow state folder
     marker = seen.marker
     notices: list[tuple[str, str]] = []
-    if mode_state != "healthy":
+    if mode_state == "slow":
+        notices.append((MODE_SLOW_NOTICE, "timeout"))
+    elif mode_state != "healthy":
         notices.append(("mode", "mode"))
     if slow:
         notices.append((STATE_SLOW_NOTICE, "timeout"))
@@ -1092,7 +1195,9 @@ def lead_wait(
     when = ctx.now.strftime("%Y-%m-%dT%H:%M:%S")
     health = "degraded" if mode_state != "healthy" else "healthy"
     record = log_record(when, decision, effective, verdict, False, health, notices[0][1] if notices else "")
-    finish(ctx, run, folder, output, notices, record, "", marker[1] if marker else None)
+    finish(
+        ctx, run, folder, output, notices, record, "", marker[1] if marker else None, None, path if bound_repo else None
+    )
 
 
 def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:

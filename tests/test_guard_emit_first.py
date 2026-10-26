@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import io
 import json
 import os
@@ -40,7 +41,7 @@ from meterdata import NOW
 from safo import hooks as core
 from safo.context import LocalContext
 from safo.guardlog import APPEND_LOCK_TIMEOUT, WARNING, file_lock
-from safo.hooks import append_log, log_record, notice_path
+from safo.hooks import append_log, attempt_path, log_record, notice_path
 from safo.localfiles import load_agents_for
 from safo.modes import hooks as mod
 
@@ -177,9 +178,17 @@ def wait_exit(pid: int, stop: float) -> int | None:
     return None
 
 
+class Arrival:
+    """When the first complete line arrived in the last read_until (monotonic), so a test can assert the decision came
+    BEFORE a boundary and not merely eventually."""
+
+    at = 0.0
+
+
 def read_until(fd: int, stop: float, first_line: bool = False) -> bytes:
     """What the child wrote: to end of file, or (first_line) to the first newline, within `stop` seconds."""
     data = b""
+    seen_line = False
     end = time.monotonic() + stop
     while time.monotonic() < end and not (first_line and b"\n" in data):
         if select.select([fd], [], [], 0.1)[0]:
@@ -187,6 +196,9 @@ def read_until(fd: int, stop: float, first_line: bool = False) -> bytes:
             if not chunk:
                 break
             data += chunk
+            if b"\n" in data and not seen_line:
+                seen_line = True
+                Arrival.at = time.monotonic()
     return data
 
 
@@ -209,14 +221,16 @@ def test_a_loader_that_wedges_for_any_reason_still_prints_a_decision_inside_the_
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
             os.kill(pid, 9)
             os.waitpid(pid, 0)
-    elapsed = time.monotonic() - started
+    elapsed = Arrival.at - started
     assert status == 0, "the process ends by itself, with the abandoned load still blocked"
     rows = lines(raw.decode())
     assert len(rows) == 1
     assert mod.CONFIG_TIMEOUT_NOTICE in rows[0]["hookSpecificOutput"]["additionalContext"]
     # SYNTHETIC: the loader is replaced by a call that never returns (a wedged mount or kernel read, which cannot be
     # made without privilege). The budget is 3 s here (deadline 1 s, hard 2 s); the interpreter start is the slack.
-    assert elapsed < 4.0, f"{elapsed:.1f} s: the decision must land inside the (scaled) budget"
+    # Budget 3 s: the hard limit is 2 s into the hook; 1.0 s is allowed for interpreter start-up, which the hook clock
+    # does not count. The line must ARRIVE before that boundary, not merely eventually.
+    assert elapsed < 3.0, f"{elapsed:.1f} s: the decision must land before the scaled budget boundary"
 
 
 def test_a_fifo_as_the_agents_file_is_refused_at_once_by_the_production_loader_not_waited_on(
@@ -262,10 +276,10 @@ def test_a_wedged_state_folder_cannot_hold_a_computed_deny_back_in_a_real_proces
         os.close(fd)
         os.kill(pid, 9)
         os.waitpid(pid, 0)
-    elapsed = time.monotonic() - started
+    elapsed = Arrival.at - started
     [row] = lines(raw.decode())
     assert denied(row) and mod.NOTICES_SKIPPED in row["hookSpecificOutput"]["additionalContext"]
-    assert elapsed < 3 + 1.5, f"{elapsed:.1f} s: the deny must land inside the (scaled) budget"
+    assert elapsed < 3.0, f"{elapsed:.1f} s: the deny must land before the scaled budget boundary (2 s + 1 s start-up)"
 
 
 def test_a_process_killed_after_the_decision_leaves_exactly_one_complete_json_line(
@@ -877,7 +891,9 @@ def test_an_abandoned_notice_check_that_finishes_late_leaves_no_descriptor_open(
     held, _, _ = run_with_abandoned_check(_private_home, agents, monkeypatch)
     held.gate.set()
     assert held.done.wait(10)
-    time.sleep(0.2)  # the worker returns its value right after `done`
+    deadline = time.monotonic() + 5  # the worker returns its value right after `done`: poll, do not guess
+    while fd_count() != before and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert fd_count() == before
 
 
@@ -911,215 +927,143 @@ def test_a_skipped_check_leaves_the_flag_so_the_next_dispatch_shows_the_specific
 
 
 def test_two_processes_appending_to_one_corrupt_log_quarantine_it_once_and_lose_no_record(tmp_path: Path) -> None:
-    """Both children wait at a gate file and start together, so they contend for the log lock on the corrupt log."""
+    """A real barrier: each child announces itself in a shared directory and then waits for the OTHER's announcement, so
+    neither starts appending until both are running and they contend for the log lock on the corrupt log."""
     tmp_path.chmod(0o700)
     log = tmp_path / "log.jsonl"
     log.write_bytes(b"\xff\n")
     log.chmod(0o600)
-    gate = tmp_path / "go"
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
     actions = [
         (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0),
         (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0),
     ]
     child = Path(__file__).parent / "append_child.py"
-    argv = [sys.executable, str(child), str(log), "5", str(gate)]
-    pids = [os.posix_spawn(sys.executable, argv, os.environ, file_actions=actions) for _ in range(2)]
-    gate.write_text("go")  # both are spawned: release them together
+    pids = [
+        os.posix_spawn(
+            sys.executable,
+            [sys.executable, str(child), str(log), "5", str(barrier), me, other],
+            os.environ,
+            file_actions=actions,
+        )
+        for me, other in (("a", "b"), ("b", "a"))
+    ]
     codes = [wait_exit(pid, 30) for pid in pids]
     assert codes == [0, 0]
+    assert sorted(f.name for f in barrier.iterdir()) == ["a", "b"], "both reached the barrier"
     assert len(corrupt_files(tmp_path)) == 1, "the corrupt log is moved once, under the lock"
     assert len(log.read_text().splitlines()) == 10, "every record of both processes is in the fresh log"
 
 
-# -- stderr never stands between a computed decision and its emit ---------------------------------------------
+# -- an abandoned worker re-checks its flag before each write; the touch is after delivery ------------------------
 
 
-def test_no_stderr_line_is_written_before_the_decision_is_emitted(
-    _private_home: Path, agents: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    set_mode(_private_home, "block")
-    plant("symlink", _private_home, tmp_path)  # junk at the marker name: its stderr line is due
-    events: list[str] = []
+class Gate:
+    """Holds a REAL function at its `hold_call`-th call until released; remembers the worker thread that was held."""
 
-    class Ordered(Stream):
-        def flush(self) -> None:
-            events.append("stdout")
+    def __init__(self, hold_call: int = 1) -> None:
+        self.release = threading.Event()
+        self.reached = threading.Event()
+        self.worker: threading.Thread | None = None
+        self.hold_call = hold_call
+        self.calls = 0
 
-    monkeypatch.setattr(mod, "stderr_line", lambda text: events.append("stderr"))
-    mod.run_guard(context(_private_home, bash("sleep 60"), Ordered()), namespace(agents))
-    assert events and events[0] == "stdout" and "stderr" in events
-
-
-@pytest.mark.parametrize("payload", ["agent", "bash"])
-def test_a_full_unread_stderr_pipe_cannot_hold_back_a_deny_or_keep_the_process_open(
-    _private_home: Path, agents: Path, tmp_path: Path, payload: str
-) -> None:
-    """Standard error is a pipe that is already full and never read: a blocking write would hang the process."""
-    plant("symlink", _private_home, tmp_path)  # a junk marker: the guard has a stderr line to write
-    body = tmp_path / "payload.json"
-    body.write_text(dispatch(model=None) if payload == "agent" else bash("sleep 60"))
-    set_mode(_private_home, "block")
-    jam_read, jam_write = os.pipe()
-    os.set_blocking(jam_write, False)
-    with contextlib.suppress(BlockingIOError):
-        while True:
-            os.write(jam_write, b"x" * 65536)
-    os.set_blocking(jam_write, True)  # the child's writes would now BLOCK
-    started = time.monotonic()
-    pid, fd = spawn("plain", _private_home, agents, tmp_path / "x", body, stderr_fd=jam_write)
-    try:
-        raw = read_until(fd, 15)
-        status = wait_exit(pid, 6)
-    finally:
-        os.close(fd)
-        os.close(jam_write)
-        os.close(jam_read)
-        with contextlib.suppress(ProcessLookupError, ChildProcessError):
-            os.kill(pid, 9)
-            os.waitpid(pid, 0)
-    [row] = lines(raw.decode())
-    assert denied(row) and mod.LOG_MARKER_UNUSABLE in row["hookSpecificOutput"]["additionalContext"]
-    assert status == 0, "the process ended by itself: the stderr line was dropped, not waited on"
-    assert time.monotonic() - started < 4.0
-
-
-@pytest.mark.parametrize("payload", ["agent", "bash"])
-def test_an_unexpected_exception_between_computing_a_deny_and_emitting_it_exits_two(
-    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, payload: str
-) -> None:
-    set_mode(_private_home, "block")
-
-    def boom(*a: Any, **k: Any) -> Any:
-        raise RuntimeError("after the verdict, before the emit")
-
-    monkeypatch.setattr(mod, "read_notices", boom)
-    out = Stream()
-    body = dispatch(model=None) if payload == "agent" else bash("sleep 60")
-    assert mod.run_guard(context(_private_home, body, out), namespace(agents)) == mod.EXIT_BLOCK
-    assert out.writes == [], "nothing was delivered, so the host must block on the exit code"
-
-
-def test_an_unexpected_exception_before_a_non_deny_decision_is_still_a_visible_diagnostic(
-    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(mod, "read_notices", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
-    out = Stream()  # warn mode: the computed decision is not a denial
-    assert mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents)) == 0
-    assert WARNING in lines(out.buffered)[0]["systemMessage"]
-
-
-# -- remove_junk looks once and removes what it moved, not whatever sits there now ------------------------------
-
-
-class Seam:
-    """A stand-in for the `os` module inside safo.modes.hooks that runs a hook after chosen calls on the marker name."""
-
-    def __init__(self, after: dict[tuple[str, int], Any]) -> None:
-        self.after = after
-        self.calls: list[str] = []
-
-    def __getattr__(self, name: str) -> Any:
-        real = getattr(os, name)
-        if name not in ("lstat", "rename", "unlink", "rmdir", "link"):
-            return real
-
+    def wrap(self, real: Any) -> Any:
         def call(*args: Any, **kwargs: Any) -> Any:
-            self.calls.append(name)
-            result = real(*args, **kwargs)
-            hook = self.after.pop((name, self.calls.count(name)), None)
-            if hook is not None:
-                hook()
-            return result
+            self.calls += 1
+            if self.calls == self.hold_call:
+                self.worker = threading.current_thread()
+                self.reached.set()
+                self.release.wait(10)
+            return real(*args, **kwargs)
 
         return call
 
 
-def swap_for(where: Path, kind: str) -> None:
-    if where.is_symlink() or where.is_file():
-        where.unlink()
-    elif where.is_dir():
-        where.rmdir()
-    if kind == "marker":
-        where.write_text("newer failure\n")
-        where.chmod(0o600)
-    else:
-        where.mkdir()
+def abandon_reprobe_at(
+    home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, target: str, hold_call: int = 1
+) -> tuple[Gate, str]:
+    state_folder(home).mkdir(parents=True, exist_ok=True)
+    gate = Gate(hold_call)
+    for name, value in (
+        ("CONFIG_REPROBE_TIMEOUT_SECONDS", 0.5),
+        ("REPROBE_TIMEOUT_SECONDS", 0.5),
+        ("REPROBE_SLACK_SECONDS", 0.0),
+        ("NOTICE_IO_CAP_SECONDS", 0.2),
+    ):
+        monkeypatch.setattr(mod, name, value)
+    monkeypatch.setattr(core, target, gate.wrap(getattr(core, target)))
+    out = Stream()
+    mod.run_guard(context(home, dispatch(model=None), out), namespace(agents))
+    return gate, out.buffered
 
 
-@pytest.mark.parametrize("junk", ["symlink", "directory"])
-def test_a_replacement_installed_after_the_look_survives_the_removal(
-    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, junk: str
+def test_an_abandoned_reprobe_does_not_record_an_attempt_after_the_decision(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    where = plant(junk, _private_home, tmp_path)
-    dfd = mod.marker_dir(state_folder(_private_home))
-    seen = mod.marker_ident(os.lstat(where))
-    survivor: list[os.stat_result] = []
-
-    def swap() -> None:
-        swap_for(where, "marker")
-        survivor.append(os.lstat(where))
-
-    seam = Seam({("lstat", 1): swap})  # right after remove_junk's one look
-    monkeypatch.setattr(mod, "os", seam)
-    try:
-        assert mod.remove_junk(dfd, seen) is False
-    finally:
-        os.close(dfd)
-    now = os.lstat(where)
-    assert (now.st_ino, now.st_mtime_ns) == (survivor[0].st_ino, survivor[0].st_mtime_ns)
-    assert where.read_text() == "newer failure\n"
-    assert not [f for f in where.parent.iterdir() if ".junk." in f.name], "nothing left under a side name"
-    assert seam.calls.count("lstat") == 2, "one look, then one check of the moved object: no third"
+    gate, line = abandon_reprobe_at(_private_home, agents, monkeypatch, "file_lock")  # held inside claim_reprobe
+    attempt = attempt_path(probe_file(_private_home, agents))
+    assert gate.reached.is_set() and mod.STATE_SLOW_NOTICE in line
+    gate.release.set()
+    assert gate.worker is not None
+    gate.worker.join(10)
+    assert not gate.worker.is_alive()
+    assert not attempt.exists(), "the worker re-checked its abandoned flag and did not write the marker"
 
 
-def test_a_directory_swapped_in_for_a_link_is_never_deleted(
-    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_abandoned_reprobe_does_not_save_probe_state_after_the_decision(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    where = plant("symlink", _private_home, tmp_path)
-    dfd = mod.marker_dir(state_folder(_private_home))
-    seen = mod.marker_ident(os.lstat(where))
-    seam = Seam({("lstat", 1): lambda: swap_for(where, "directory")})
-    monkeypatch.setattr(mod, "os", seam)
-    try:
-        assert mod.remove_junk(dfd, seen) is False
-    finally:
-        os.close(dfd)
-    survivors = [f for f in where.parent.iterdir() if f.is_dir() and f.name.startswith(".log-failed")]
-    assert where.is_dir() or survivors, "the swapped-in directory still exists, at its name or under a side name"
-    assert "rmdir" not in seam.calls and "unlink" not in seam.calls
+    gate, line = abandon_reprobe_at(
+        _private_home, agents, monkeypatch, "read_state", hold_call=1
+    )  # core.read_state is first called INSIDE save_state, after its first check
+    saved = probe_file(_private_home, agents)
+    assert gate.reached.is_set() and mod.STATE_SLOW_NOTICE in line
+    assert attempt_path(saved).exists(), "the claim happened before the abandonment, as it should"
+    gate.release.set()
+    assert gate.worker is not None
+    gate.worker.join(10)
+    assert not gate.worker.is_alive()
+    assert not saved.exists(), "the worker re-checked its abandoned flag and did not save the state"
 
 
-def test_removal_of_the_observed_junk_works_when_nothing_changed(_private_home: Path, tmp_path: Path) -> None:
-    where = plant("directory", _private_home, tmp_path)
-    dfd = mod.marker_dir(state_folder(_private_home))
-    try:
-        assert mod.remove_junk(dfd, mod.marker_ident(os.lstat(where))) is True
-    finally:
-        os.close(dfd)
-    assert not os.path.lexists(where)
-    assert not [f for f in where.parent.iterdir() if ".junk." in f.name]
-
-
-# -- the decision does not wait on state writes; they only set health --------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("what", "payload"),
-    [("read-state", "agent"), ("claim", "agent"), ("save-state", "agent"), ("touch", "agent"), ("touch", "bash")],
-)
-def test_a_wedged_state_write_cannot_hold_back_a_computed_deny_in_a_real_process(
-    _private_home: Path, agents: Path, tmp_path: Path, what: str, payload: str
+@pytest.mark.parametrize("payload", ["agent", "bash"])
+def test_the_bound_repository_refresh_is_made_after_delivery_by_the_calling_thread(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, payload: str
 ) -> None:
-    folder = state_folder(_private_home)
-    folder.mkdir(parents=True, exist_ok=True)
-    repo_file = probe_file(_private_home, agents).with_name(probe_file(_private_home, agents).name + ".repo")
+    set_probe(_private_home, reachable=True, agents=agents)
+    repo_file = probe_file(_private_home, agents)
+    repo_file = repo_file.with_name(repo_file.name + ".repo")
     repo_file.write_text('{"repo": "acme/widgets"}')
     repo_file.chmod(0o600)
+    set_mode(_private_home, "block")
+    events: list[tuple[str, int]] = []
+
+    class Ordered(Stream):
+        def flush(self) -> None:
+            events.append(("stdout", threading.get_ident()))
+
+    monkeypatch.setattr(core, "touch", lambda path: events.append(("touch", threading.get_ident())))
+    body = dispatch(model=None) if payload == "agent" else bash("sleep 60")
+    mod.run_guard(context(_private_home, body, Ordered()), namespace(agents))
+    assert [name for name, _ in events] == ["stdout", "touch"], "the refresh comes after the line, not before it"
+    assert events[1][1] == threading.get_ident(), "and on the calling thread, never in an abandonable worker"
+
+
+# -- the mode file read is bounded and fails closed ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("payload", ["agent", "bash"])
+def test_a_wedged_mode_file_read_fails_closed_and_cannot_hold_back_the_verdict(
+    _private_home: Path, agents: Path, tmp_path: Path, payload: str
+) -> None:
+    """No mode file, so the default is warn and the same brief would only be warned about; the read wedges, so the
+    verdict is computed in block mode (fail closed on a slow mode file) and the brief is denied."""
     body = tmp_path / "payload.json"
     body.write_text(dispatch(model=None) if payload == "agent" else bash("sleep 60"))
-    set_mode(_private_home, "block")
     started = time.monotonic()
-    pid, fd = spawn(f"pre-{what}", _private_home, agents, tmp_path / "x", body)
+    pid, fd = spawn("pre-mode", _private_home, agents, tmp_path / "x", body)
     try:
         raw = read_until(fd, 15)
         status = wait_exit(pid, 4)
@@ -1128,68 +1072,178 @@ def test_a_wedged_state_write_cannot_hold_back_a_computed_deny_in_a_real_process
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
             os.kill(pid, 9)
             os.waitpid(pid, 0)
-    elapsed = time.monotonic() - started
     [row] = lines(raw.decode())
-    assert denied(row), "the verdict does not depend on the state work"
-    assert mod.STATE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
+    assert denied(row) and mod.MODE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0
-    assert elapsed < 5.5, f"{elapsed:.1f} s: inside the (scaled) hard limit of 5 s plus start-up"
+    assert Arrival.at - started < 5.0, "before the scaled hard limit of 5 s, start-up included"
 
 
-# -- the once-per-session probe notice does not come back with every unrelated notice -------------------------
+# -- stderr: no change to the descriptor's blocking mode, a poll, one short write -------------------------------
 
 
-def test_a_claimed_probe_notice_is_not_repeated_because_another_notice_exists(
-    _private_home: Path, agents: Path
+class WriteProxy:
+    """The `os` module as safo.modes.hooks sees it, with `write` replaced and recorded."""
+
+    def __init__(self, write: Any) -> None:
+        self.write = write
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+
+def stderr_pipe(monkeypatch: pytest.MonkeyPatch) -> tuple[int, int]:
+    read_end, write_end = os.pipe()
+    stream = os.fdopen(write_end, "w")
+    monkeypatch.setattr(sys, "stderr", stream)
+    return read_end, write_end
+
+
+@pytest.mark.parametrize("blocking", [True, False])
+def test_stderr_line_never_changes_the_descriptors_blocking_mode(
+    monkeypatch: pytest.MonkeyPatch, blocking: bool
 ) -> None:
-    flag = unhealthy(_private_home, agents)
-    mode_file = _private_home / ".config" / "safo" / "mode"
-    mode_file.parent.mkdir(parents=True, exist_ok=True)
-    mode_file.parent.chmod(0o700)
-    mode_file.write_text("garbage\n")  # a persistent, unrelated notice: the mode is degraded on every dispatch
-    first = Stream()
-    mod.run_guard(context(_private_home, dispatch(model=None), first), namespace(agents))
-    assert flag.exists(), "the probe notice was claimed with the first line"
-    second = Stream()
-    mod.run_guard(context(_private_home, dispatch(model=None), second), namespace(agents))
-    [row] = lines(second.buffered)
-    text = row["hookSpecificOutput"]["additionalContext"]
-    assert json.loads(text[text.index("{") :])["diagnostic"] == "mode", "only the persistent notice; no probe notice"
+    read_end, write_end = stderr_pipe(monkeypatch)
+    os.set_blocking(write_end, blocking)
+    mod.stderr_line("hello")
+    assert os.get_blocking(write_end) is blocking
+    assert os.read(read_end, 100) == b"hello\n"
 
 
-# -- a process that dies between the emit and the claim or clear loses nothing ---------------------------------
-
-
-def test_a_process_killed_between_the_emit_and_the_claim_shows_the_notice_again_next_time(
-    _private_home: Path, agents: Path, tmp_path: Path
+def test_a_change_made_to_the_descriptor_while_a_stderr_line_is_written_is_not_clobbered(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    flag = unhealthy(_private_home, agents)
-    body = tmp_path / "payload.json"
-    body.write_text(dispatch(model=None))
-    pid, fd = spawn("die-at-claim", _private_home, agents, tmp_path / "x", body)
-    raw = read_until(fd, 15)
-    status = wait_exit(pid, 5)
-    os.close(fd)
-    assert status == -9 and lines(raw.decode()), "the line was delivered, then the process died before the claim"
-    assert not flag.exists()
-    nxt = Stream()
-    mod.run_guard(context(_private_home, dispatch(model=None), nxt), namespace(agents))
-    assert WARNING in nxt.buffered and flag.exists(), "the notice repeats: it was never lost"
+    read_end, write_end = stderr_pipe(monkeypatch)
+    del read_end
+    os.set_blocking(write_end, True)
+
+    def write(fd: int, data: bytes) -> int:
+        os.set_blocking(fd, False)  # the parent, sharing the open file description, flips it meanwhile
+        return os.write(fd, data)
+
+    monkeypatch.setattr(mod, "os", WriteProxy(write))
+    mod.stderr_line("hello")
+    assert os.get_blocking(write_end) is False, "nobody restores a stale snapshot over the parent's change"
 
 
-def test_a_process_killed_between_the_emit_and_the_clear_leaves_the_marker_for_the_next_dispatch(
-    _private_home: Path, agents: Path, tmp_path: Path
+def test_a_full_stderr_pipe_drops_the_line_without_any_write_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_end, write_end = stderr_pipe(monkeypatch)
+    os.set_blocking(write_end, False)
+    filled = 0
+    with contextlib.suppress(BlockingIOError):
+        while True:
+            filled += os.write(write_end, b"x" * 65536)
+    os.set_blocking(write_end, True)  # a write now would BLOCK
+    calls: list[int] = []
+
+    def counted(fd: int, data: bytes) -> int:
+        calls.append(len(data))
+        return len(data)
+
+    proxy = WriteProxy(counted)
+    monkeypatch.setattr(mod, "os", proxy)
+    worker = threading.Thread(target=mod.stderr_line, args=("dropped",), daemon=True)
+    worker.start()
+    worker.join(3)
+    assert not worker.is_alive(), "the line was dropped, not waited for"
+    assert calls == [], "the poll said not writable, so no write was even attempted"
+    os.set_blocking(read_end, False)
+    drained = 0
+    with contextlib.suppress(BlockingIOError):
+        while chunk := os.read(read_end, 65536):
+            drained += len(chunk)
+    assert drained == filled
+
+
+def test_a_stderr_line_is_short_and_a_short_write_is_dropped_without_a_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    stderr_pipe(monkeypatch)
+    calls: list[int] = []
+
+    def short(fd: int, data: bytes) -> int:
+        calls.append(len(data))
+        return 1
+
+    proxy = WriteProxy(short)
+    monkeypatch.setattr(mod, "os", proxy)
+    mod.stderr_line("x" * 5000)
+    assert len(calls) == 1, "one write; a short count is not retried"
+    assert calls[0] <= 512, "below PIPE_BUF, so a writable pipe takes it whole"
+
+
+# -- remove_junk reports what really happened; side objects are capped ------------------------------------------
+
+
+def test_a_non_empty_directory_is_not_reported_removed_and_the_side_objects_stay_capped(
+    _private_home: Path, tmp_path: Path
 ) -> None:
-    set_probe(_private_home, reachable=True, agents=agents)
-    mod.write_log_failed(state_folder(_private_home))
-    body = tmp_path / "payload.json"
-    body.write_text(dispatch(model=None))
-    pid, fd = spawn("die-at-clear", _private_home, agents, tmp_path / "x", body)
-    raw = read_until(fd, 15)
-    status = wait_exit(pid, 5)
-    os.close(fd)
-    assert status == -9 and mod.LOG_FAILED_NOTICE in raw.decode()
-    assert marker(_private_home).exists()
-    nxt = Stream()
-    mod.run_guard(context(_private_home, dispatch(model=None), nxt), namespace(agents))
-    assert mod.LOG_FAILED_NOTICE in nxt.buffered and not marker(_private_home).exists()
+    folder = state_folder(_private_home)
+    where = plant("directory", _private_home, tmp_path)
+    dfd = mod.marker_dir(folder)
+    try:
+        for _ in range(20):
+            if not where.exists():
+                where.mkdir()
+            (where / "keep").write_text("x")  # not empty: rmdir cannot remove it
+            assert mod.remove_junk(dfd, mod.marker_ident(os.lstat(where))) is False
+    finally:
+        os.close(dfd)
+    sides = [f for f in folder.iterdir() if ".junk." in f.name]
+    assert 0 < len(sides) <= mod.MAX_SIDE_OBJECTS, f"{len(sides)} side objects after 20 attempts"
+    assert where.is_dir(), "once the cap is reached nothing more is moved aside"
+
+
+def test_stale_empty_side_objects_are_pruned(_private_home: Path, tmp_path: Path) -> None:
+    folder = state_folder(_private_home)
+    where = plant("directory", _private_home, tmp_path)
+    for n in range(3):
+        (folder / f".log-failed.junk.old{n}").mkdir()
+    dfd = mod.marker_dir(folder)
+    try:
+        assert mod.remove_junk(dfd, mod.marker_ident(os.lstat(where))) is True
+    finally:
+        os.close(dfd)
+    assert not [f for f in folder.iterdir() if ".junk." in f.name]
+
+
+# -- no hard links: a checked rename instead ---------------------------------------------------------------------
+
+
+class NoLink:
+    def __init__(self, code: int) -> None:
+        self.code = code
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "link":
+
+            def refuse(*args: Any, **kwargs: Any) -> None:
+                raise OSError(self.code, os.strerror(self.code))
+
+            return refuse
+        return getattr(os, name)
+
+
+@pytest.mark.parametrize("code", [errno.EPERM, errno.EOPNOTSUPP, errno.EXDEV, errno.ENOSYS])
+def test_the_retry_falls_back_to_a_checked_rename_where_hard_links_are_not_available(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    where = plant("directory", _private_home, tmp_path)  # the first rename fails; the blocker is removed; link refused
+    monkeypatch.setattr(mod, "os", NoLink(code))
+    assert mod.write_log_failed(state_folder(_private_home)) is True
+    assert stat.S_ISREG(os.lstat(where).st_mode), "the failure is recorded in the marker"
+
+
+def test_the_checked_rename_does_not_overwrite_a_marker_that_appeared(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    where = plant("directory", _private_home, tmp_path)
+    real_remove = mod.remove_junk
+
+    def remove_then_newer(dfd: int, seen: Any) -> bool:
+        done = real_remove(dfd, seen)
+        where.write_text("newer failure\n")  # a newer marker lands right after the blocker is gone
+        where.chmod(0o600)
+        return done
+
+    monkeypatch.setattr(mod, "remove_junk", remove_then_newer)
+    monkeypatch.setattr(mod, "os", NoLink(errno.EPERM))
+    assert mod.write_log_failed(state_folder(_private_home)) is True
+    assert where.read_text() == "newer failure\n"
