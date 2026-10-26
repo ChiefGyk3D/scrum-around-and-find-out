@@ -297,6 +297,22 @@ DOIA_URL = "https://github.com/ChiefGyk3D/department-of-internal-arguments"
         f"[x]({DOIA_URL}/raw/v0.2.0/README.md)",
         f"[x]({DOIA_URL}/tree/V0.2.0)",
         f"[x]({DOIA_URL}/tree/refs/tags/v0.2.0)",
+        "DoIA tag: v0.2.0",
+        "DoIA release tag v0.2.0",
+        "DoIA releases v0.2.0",
+        "DoIA is v0.2.0",
+        "DoIA — v0.2.0",
+        "DoIA release: v0.2.0",
+        "git checkout tags/v0.2.0",
+        "git checkout refs/tags/v0.2.0",
+        "git switch -c x v0.2.0",
+        "git checkout -B x v0.2.0",
+        f"[x]({DOIA_URL}/compare/main...v0.2.0)",
+        f"[x]({DOIA_URL}/zipball/v0.2.0)",
+        f"[x]({DOIA_URL}/tarball/v0.2.0)",
+        "https://raw.githubusercontent.com/ChiefGyk3D/department-of-internal-arguments/v0.2.0/README.md",
+        "https://api.github.com/repos/ChiefGyk3D/department-of-internal-arguments/zipball/v0.2.0",
+        "https://api.github.com/repos/ChiefGyk3D/department-of-internal-arguments/contents/x.md?ref=v0.2.0",
     ],
 )
 def test_a_doia_reference_that_is_not_exactly_the_pin_fails(text: str) -> None:
@@ -325,6 +341,14 @@ def test_a_doia_reference_that_is_not_exactly_the_pin_fails(text: str) -> None:
         f"[x]({DOIA_URL}/releases/download/v0.3.1/a) [y]({DOIA_URL}/commits/v0.3.1) [z]({DOIA_URL}/raw/v0.3.1/a)",
         "See [other](https://github.com/example/other/archive/refs/tags/v9.9.9.zip) and Python v3.12.1.",
         "DoIA needs Python v3.12.1; DoIA, with actions/checkout@v4.1.0, runs there.",
+        "DoIA is great with Python v3.12.1.",
+        "DoIA tag: v0.3.1 and DoIA release tag v0.3.1 and DoIA releases v0.3.1 and DoIA is v0.3.1.",
+        "DoIA — v0.3.1, DoIA release: v0.3.1.",
+        "git checkout tags/v0.3.1 && git switch -c x v0.3.1 && git checkout -B x v0.3.1",
+        f"[x]({DOIA_URL}/compare/main...v0.3.1) [y]({DOIA_URL}/zipball/v0.3.1) [z]({DOIA_URL}/tarball/v0.3.1)",
+        "https://raw.githubusercontent.com/ChiefGyk3D/department-of-internal-arguments/v0.3.1/README.md",
+        "https://api.github.com/repos/ChiefGyk3D/department-of-internal-arguments/contents/x.md?ref=v0.3.1",
+        "https://api.github.com/repos/example/other/contents/x.md?ref=v9.9.9 and /example/other/zipball/v9.9.9",
     ],
 )
 def test_other_versions_and_the_exact_pin_pass(text: str) -> None:
@@ -363,17 +387,34 @@ def test_personas_describe_the_pinned_release() -> None:
     ):
         assert phrase in page, phrase
     # A historical sentence carries no version, or a bump of the pin would falsify it or fail the build.
-    sentence = re.search(r"measured notes on context-change evictions[^.]*\.", page)
-    assert sentence and not re.search(r"v\d+\.\d+", sentence.group(0))
-    assert "CHANGELOG" in sentence.group(0)
+    # Whole sentences, split where a period is followed by whitespace, so the dots inside a version never end one.
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", page) if "measured notes on context-change evictions" in s]
+    assert len(sentences) == 1
+    assert not re.search(r"v\d+\.\d+", sentences[0]), sentences[0]
+    assert "CHANGELOG" in sentences[0]
 
 
-def test_a_bump_of_the_pin_keeps_the_page_valid() -> None:
+def test_the_pin_is_single_sourced_so_a_bump_needs_no_other_edit() -> None:
     page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
     bumped = page.replace(DOIA_TAG, "v0.99.0")
     GEN_WIKI.check_doia_tag({"personas.md": bumped}, "v0.99.0")
     with pytest.raises(GEN_WIKI.WikiError, match=r"scripts/doia-tag\.txt"):
         GEN_WIKI.check_doia_tag({"personas.md": bumped}, DOIA_TAG)
+    # A hardcoded historical version left in the page fails the bump, which is what the rephrasing avoids.
+    hardcoded = bumped + f"\nDoIA release {DOIA_TAG} added measured notes.\n"
+    with pytest.raises(GEN_WIKI.WikiError, match=DOIA_TAG.replace(".", r"\.")):
+        GEN_WIKI.check_doia_tag({"personas.md": hardcoded}, "v0.99.0")
+
+
+@pytest.mark.parametrize("filler", [" ", "\n", " \n", "\t ", "*", ",", "( "])
+def test_the_doia_reference_scan_is_linear_on_long_separator_runs(filler: str) -> None:
+    import time
+
+    for text in ("DoIA" + filler * 20_000 + "x", "DoIA" + filler * 20_000 + "v0.2.0", "DoIA release" + filler * 20_000):
+        start = time.perf_counter()
+        GEN_WIKI.doia_tag_refs(text)
+        assert time.perf_counter() - start < 0.5, repr(text[:20])
+    assert GEN_WIKI.doia_tag_refs("DoIA" + filler * 1_000 + "v0.2.0") == ["v0.2.0"]
 
 
 def test_personas_name_every_role_pack_and_the_shared_rules() -> None:

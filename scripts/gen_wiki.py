@@ -56,16 +56,25 @@ _VERSION = (
 )
 _DOIA_REPO = r"department-of-internal-arguments/"
 _DOIA_NAME = r"(?:\bDoIA|Department of Internal Arguments|department-of-internal-arguments)"
+_VERSION_BARE = _VERSION.replace(r"(?<![\w.])", "")  # the second end of a compare range follows dots
 _DOIA_REF = re.compile(
-    # (1) a link into the DoIA repository; a compare link carries two tags
-    r"(?i:" + _DOIA_REPO + r")(?:(?:tree|blob|raw|commits|releases/tag|releases/download|archive)/(?:refs/tags/)?"
+    # (1) a link into the DoIA repository: the tag as a path part (or straight after the repository name, as on the
+    # raw host), a compare range with a tag at either end, or ?ref=
+    r"(?i:" + _DOIA_REPO + r")(?:"
+    r"(?:(?:tree|blob|raw|commits|releases/tag|releases/download|archive|zipball|tarball)/)?(?:refs/tags/)?"
     r"(" + _VERSION + r")"
-    r"|compare/(" + _VERSION + r")(?:\.{2,3}(" + _VERSION.replace(r"(?<![\w.])", "") + r"))?)"
-    # (2) the argument of a clone or checkout: --branch, --branch=, -b, checkout and switch with any flags, maybe quoted
-    r"|(?:--branch(?:[ \t]+|=)|(?<![\w-])-b[ \t]+|\b(?:checkout|switch)[ \t]+(?:-{1,2}[A-Za-z][\w-]*[ \t]+)*)"
-    r"['\"]?(" + _VERSION + r")"
-    # (3) a version after the name, in prose: DoIA v1, DoIA **v1**, DoIA (v1), DoIA, v1, DoIA at v1, DoIA@v1, doia v1
-    r"|(?i:" + _DOIA_NAME + r")(?:'s)?[\s,:;(*_`@\[]*(?i:(?:release|version|tag|at)\s+)?[\s(*_`]*(" + _VERSION + r")"
+    r"|compare/(?:(" + _VERSION + r")|[\w-]+)(?:\.{2,3}(" + _VERSION_BARE + r"))?"
+    r"|[^\s)]*?\?ref=(" + _VERSION + r"))"
+    # (2) the argument of a clone or checkout: --branch, --branch=, -b, checkout and switch with any flags (and the
+    # new branch name that -b, -B, -c and -C take), tags/ or refs/tags/ in front, maybe quoted
+    r"|(?:--branch(?:[ \t]+|=)|(?<![\w-])-b[ \t]+"
+    r"|\b(?:checkout|switch)[ \t]+(?:-{1,2}[A-Za-z][\w-]*[ \t]+(?:[\w./][\w./-]*[ \t]+)?){0,6})"
+    r"['\"]?(?:refs/)?(?:tags/)?(" + _VERSION + r")"
+    # (3) a version after the name, in prose: DoIA v1, DoIA **v1**, DoIA (v1), DoIA, v1, DoIA at v1, DoIA@v1, doia v1,
+    # DoIA tag: v1, DoIA release tag v1, DoIA is v1. The separator is ONE repeated alternation of a single punctuation
+    # character or a whole word, so no two quantifiers compete for the same characters and a long run is scanned once.
+    r"|(?i:" + _DOIA_NAME + r")(?:'s)?"
+    r"(?:[\s,:;(*_`@\[\u2013\u2014-]|(?i:\b(?:releases?|versions?|tags?|is|at)\b))*(" + _VERSION + r")"
 )
 
 
@@ -94,6 +103,12 @@ def doia_tag_refs(text: str) -> list[str]:
     switch (flags and quotes allowed), or (3) directly after the name DoIA, doia or Department of Internal Arguments
     (optionally 's, a bracket, bold or backtick mark, a comma, "at", "@", or release, version or tag). Write the version
     right after "DoIA" in prose, or it is not checked. A trailing "-based" is not part of the token.
+
+    Also read: tags/ and refs/tags/ before a tag, the new-branch name that -b, -B, -c and -C take, a compare range
+    with a tag at either end, zipball, tarball, the raw host and ?ref= in a DoIA link, and the words release, version,
+    tag, is and at (or a dash or colon) between the name and the tag. Out of scope on purpose, so they pass: a version
+    with no leading v, a tag written before the name ("at v0.2.0 DoIA"), and commands such as git reset --hard or git
+    archive. A clone of another project with -b or --branch is still read, which is the accepted trade-off.
     """
     return [g for m in _DOIA_REF.finditer(text) for g in m.groups() if g]
 
