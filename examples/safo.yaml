@@ -59,7 +59,7 @@ fields:
   - {name: Done on, type: date}
 views:
   - {name: Board, layout: board, filter: "-status:Done"}
-  - {name: Agents at work, layout: table, filter: 'status:"In progress","In review",Next,Blocked'}
+  - {name: Agents at work, layout: table, filter: 'status:"In progress",Next,Blocked'}
 rules:
   status:
     opened: Backlog

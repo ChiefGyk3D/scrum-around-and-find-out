@@ -52,3 +52,36 @@ def test_dropping_blocked_from_a_boards_view_is_caught(tmp_path: Path) -> None:
     assert ",Blocked'" in text
     copy.write_text(text.replace(",Blocked'", "'", 1))
     assert missing(load_board(copy)) == {"Blocked"}
+
+
+TERM = re.compile(r'-?status:((?:"[^"]+"|[^\s,"]+)(?:,(?:"[^"]+"|[^\s,"]+))*)')
+
+
+def named_statuses(board: Board) -> set[str]:
+    names: set[str] = set()
+    for view in board.views:
+        for term in TERM.findall(view.filter):
+            names |= {a or b for a, b in re.findall(r'"([^"]+)"|([^,"]+)', term)}
+    return names
+
+
+def unknown_statuses(board: Board) -> set[str]:
+    field = board.field_named(board.rules.status_field)
+    assert field is not None
+    return named_statuses(board) - {o.name for o in field.options}
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_a_view_filter_names_only_statuses_the_board_can_hold(path: Path) -> None:
+    board = load_board(path)
+    assert named_statuses(board), "the board's views must name at least one status or this guard proves nothing"
+    assert unknown_statuses(board) == set()
+
+
+def test_naming_in_review_in_an_example_that_has_no_such_status_is_caught(tmp_path: Path) -> None:
+    copy = tmp_path / "board.yaml"
+    shutil.copy(ROOT / "examples" / "safo.yaml", copy)
+    text = copy.read_text()
+    assert 'status:"In progress",Next,Blocked' in text
+    copy.write_text(text.replace('status:"In progress",', 'status:"In progress","In review",', 1))
+    assert unknown_statuses(load_board(copy)) == {"In review"}
