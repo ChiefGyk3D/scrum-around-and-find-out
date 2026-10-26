@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -380,3 +381,75 @@ def test_model_summary_is_deterministic_under_input_order() -> None:
     assert outcomes.summarise_models([], "2026-10") == []
     with pytest.raises(ConfigError, match="YYYY-MM"):
         outcomes.summarise_models([], "2026-1")
+
+
+# ---- outcome, attempts, intervention_minutes, defects_after_approval (issue #103, unit 1) ----
+
+NEW_KEYS = ("outcome", "attempts", "intervention_minutes", "defects_after_approval")
+
+
+def test_a_record_without_the_new_keys_is_byte_identical_to_today() -> None:
+    golden = (
+        '{"agent": "copilot", "card": "https://github.com/acme/widgets/pull/9", "credits_used": 4, '
+        '"date": "2026-10-07", "findings": {"important": 1}, "model": "gpt-5.4", "note": "Needed fixes.", '
+        '"requests": 3, "review_rounds": 2, "shape": "small-mechanical-pr", "tokens": null}'
+    )
+    record = outcomes.validate(json.loads(golden))
+    assert record.to_json() == golden
+    assert not any(k in json.loads(record.to_json()) for k in NEW_KEYS)
+    assert outcomes.validate({**GOOD, **dict.fromkeys(NEW_KEYS)}).to_json() == outcomes.validate(GOOD).to_json()
+
+
+def test_the_new_fields_round_trip_when_set(tmp_path: Path) -> None:
+    extra = {"outcome": "abandoned", "attempts": 3, "intervention_minutes": 25, "defects_after_approval": 2}
+    record = outcomes.validate({**GOOD, **extra})
+    log = tmp_path / "o.jsonl"
+    outcomes.append(log, record)
+    assert outcomes.load(log) == [record]
+    assert {k: json.loads(log.read_text())[k] for k in NEW_KEYS} == extra
+
+
+@pytest.mark.parametrize(
+    ("key", "good"),
+    [("outcome", ["accepted", "abandoned"]), ("attempts", [1, 100]),
+     ("intervention_minutes", [0, 10080]), ("defects_after_approval", [0, 10**12])],
+)  # fmt: skip
+def test_boundary_values_are_accepted(key: str, good: list[object]) -> None:
+    for value in good:
+        assert getattr(outcomes.validate({**GOOD, key: value}), key) == value
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("outcome", ["", "Accepted", "done", "abandoned ", "abandoned\n", 1, True, ["accepted"], {"a": 1}, 1.5]),
+        ("attempts", [0, -1, 101, 1.0, 1.5, True, False, "2", "", [1], {"n": 1}, 10**30]),
+        ("intervention_minutes", [-1, 10081, 1.5, 2.0, True, False, "5", "", [1], {"n": 1}]),
+        ("defects_after_approval", [-1, 10**12 + 1, 1.5, 2.0, True, False, "1", "", [1], {"n": 1}]),
+    ],
+)  # fmt: skip
+def test_bad_new_values_are_refused_and_nothing_is_appended(key: str, bad: list[object], tmp_path: Path) -> None:
+    for value in bad:
+        with pytest.raises(ConfigError, match=f"{key}: expected"):
+            outcomes.validate({**GOOD, key: value})
+    log = tmp_path / "o.jsonl"
+    log.write_bytes(b"")
+    before = log.read_bytes()
+    for value in bad:
+        fields: dict[str, Any] = {key: value}
+        with pytest.raises(ConfigError):
+            outcomes.append(log, outcomes.Outcome("2026-10-07", None, "codex", "research", 1, **fields))
+    assert log.read_bytes() == before
+
+
+def test_a_bad_new_value_in_a_log_names_the_line(tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    log.write_text(json.dumps(GOOD) + "\n" + json.dumps({**GOOD, "attempts": "3"}) + "\n")
+    with pytest.raises(ConfigError, match=r"o.jsonl:2.attempts: expected"):
+        outcomes.load(log)
+
+
+def test_model_names_may_carry_an_ollama_tag() -> None:
+    assert outcomes.validate({**GOOD, "model": "gemma4:12b"}).model == "gemma4:12b"
+    with pytest.raises(ConfigError, match="model: expected"):
+        outcomes.validate({**GOOD, "model": ":12b"})

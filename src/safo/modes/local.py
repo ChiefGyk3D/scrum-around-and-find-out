@@ -78,6 +78,8 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     except EndpointUnreachableError as err:
         ctx.say(f"{err}: hand it to {fallback} instead")
         return EXIT_DRIFT
+    if not outcomes.MODEL.fullmatch(result.model):  # never invent one: the answer is dropped and nothing is logged
+        raise ConfigError("the endpoint did not name a usable model in its answer; nothing was logged")
     output.block(ctx.out, result.response.rstrip("\n").split("\n"))  # untrusted text: inside a stop-commands block
     speed = f"{result.tokens_per_second:g} tok/s" if result.tokens_per_second else "speed unknown"
     note = (
@@ -97,6 +99,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             result.eval_count + result.prompt_eval_count,
             1,
             note,
+            result.model,
         ),
         check_dir=outcomes_is_default(ctx, args),
     )

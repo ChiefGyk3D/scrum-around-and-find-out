@@ -33,6 +33,10 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
         args.note,
         args.model,
         args.credits_used,
+        args.outcome,
+        args.attempts,
+        args.intervention_minutes,
+        args.defects_after_approval,
     )
     outcomes.validate(json.loads(record.to_json()), "outcome")
     path: Path = outcomes_path(ctx, args)
@@ -60,6 +64,21 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--credits-used", type=int, default=None, help="credits or premium requests the run consumed, when known"
+    )
+    parser.add_argument(
+        "--outcome",
+        default=None,
+        help="accepted or abandoned (default: not recorded, which reads as accepted); an abandoned task still counts",
+    )
+    parser.add_argument("--attempts", type=int, default=None, help="how many tries the task took, 1 to 100")
+    parser.add_argument(
+        "--intervention-minutes",
+        type=int,
+        default=None,
+        help="minutes you spent steering or fixing it, self-reported at acceptance (0 to 10080)",
+    )
+    parser.add_argument(
+        "--defects-after-approval", type=int, default=None, help="defects found after the work was approved"
     )
     parser.add_argument("--note", default="")
     parser.add_argument(

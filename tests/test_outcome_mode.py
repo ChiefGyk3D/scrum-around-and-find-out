@@ -170,3 +170,52 @@ def test_hostile_model_and_credits_flags_never_reach_the_log(_private_home: Path
     with pytest.raises(SystemExit):
         cli(*base, "--credits-used", "1.5", home=_private_home)
     assert not log.exists()
+
+
+def _add(log: Path, home: Path, *extra: str) -> tuple[int, str, str]:
+    return cli("outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log), *extra, home=home)
+
+
+def test_the_new_flags_are_written_when_given(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    code, _, _ = _add(
+        log, _private_home, "--outcome", "abandoned", "--attempts", "3", "--intervention-minutes", "25",
+        "--defects-after-approval", "2",
+    )  # fmt: skip
+    row = json.loads(log.read_text())
+    assert code == 0 and row["outcome"] == "abandoned" and row["attempts"] == 3
+    assert row["intervention_minutes"] == 25 and row["defects_after_approval"] == 2
+
+
+def test_without_the_new_flags_no_new_key_is_written(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    assert _add(log, _private_home)[0] == 0
+    new = {"outcome", "attempts", "intervention_minutes", "defects_after_approval"}
+    assert not new & set(json.loads(log.read_text()))
+
+
+def test_bad_new_flag_values_write_nothing_and_exit_nonzero(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    assert _add(log, _private_home)[0] == 0
+    before = log.read_bytes()
+    for extra in (
+        ["--outcome", "done"], ["--outcome", "Accepted"], ["--attempts", "0"], ["--attempts", "101"],
+        ["--attempts", "-1"], ["--intervention-minutes", "-1"], ["--intervention-minutes", "10081"],
+        ["--defects-after-approval", "-1"], ["--defects-after-approval", "1000000000001"],
+    ):  # fmt: skip
+        code, _, err = _add(log, _private_home, *extra)
+        assert code != 0 and "expected" in err, extra
+        assert log.read_bytes() == before, extra
+    for extra in (["--attempts", "x"], ["--attempts", "1.5"], ["--intervention-minutes", ""]):
+        with pytest.raises(SystemExit):
+            _add(log, _private_home, *extra)
+        assert log.read_bytes() == before, extra
+
+
+def test_dry_run_with_the_new_flags_writes_nothing(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    base = ["--dry-run", "outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log)]
+    code, out, _ = cli(*base, "--attempts", "2", home=_private_home)
+    assert code == 0 and "nothing written" in out and not log.exists()
+    code, _, _ = cli(*base, "--attempts", "0", home=_private_home)
+    assert code != 0 and not log.exists()

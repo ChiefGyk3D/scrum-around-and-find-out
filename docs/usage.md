@@ -102,7 +102,7 @@ checked, never its verdicts.
 One JSON line per finished task: `date`, `card` (a GitHub URL or null), `agent`, `shape`, `review_rounds` (review passes, the
 passing one included), `findings` by severity (`critical`, `important`, `minor`, `unrated`), `tokens` and `requests` when
 known, and a one-line `note`. Two optional fields make agents comparable on cost against rework: `model`, the underlying
-model of the run (for example `claude-sonnet-5-5` or `gpt-5.4`; letters, digits and `. _ -`, at most 64), and
+model of the run (for example `claude-sonnet-5-5` or `gpt-5.4`; letters, digits and `. _ : -`, at most 64), and
 `credits_used`, the whole number of credits or premium requests the run consumed (0 to 10^12). Leave either out, or use
 null, when it is not known: records without a model or credits stay valid, and the seed file has none. They are written
 only when set, so an older line is unchanged. Any other key is refused, and so is a key repeated in any object of a
@@ -110,6 +110,17 @@ line (JSON would silently keep the last one); the error names the key and the li
 meters and hooks with a repeated key is treated like any other malformed line: skipped, not guessed at.
 
 `safo outcome add` appends one after checking it; add `--model gpt-5.4 --credits-used 12` for the two optional fields.
+
+Four more optional fields record how the task went, all whole numbers or a fixed word, never free text:
+`outcome` (`accepted` or `abandoned`; absent reads as accepted, because the log used to hold only finished tasks),
+`attempts` (1 to 100), `intervention_minutes` (0 to 10080) and `defects_after_approval` (0 to 10^12). Flags:
+`--outcome`, `--attempts`, `--intervention-minutes`, `--defects-after-approval`. A task that was dropped is logged with
+`--outcome abandoned`; a task with no record at all stays invisible, because SAFO cannot see it from a local file.
+`intervention_minutes` is **self-reported by the maintainer at acceptance**; it is never derived from timestamps, which
+measure elapsed time, not attention. Any report built on it has to say how many records carry it. A bad value writes
+nothing and exits non-zero; a line without these keys is unchanged. (`model` also accepts the `:` of an Ollama tag, for
+example `gemma4:12b`.) `safo local run` writes the model the endpoint answered with into the `model` field; if the
+answer names no usable model, nothing is logged.
 `safo usage --report` summarises a month per agent: tasks, how many needed fixes, review rounds, findings, tokens. It then
 adds a table per agent and model: runs, review rounds per run, the share of runs that needed fixes, findings by severity,
 credits used in total, and credits per run, per run that needed no fixes and per run that needed fixes. Rows without a

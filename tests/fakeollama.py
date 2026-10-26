@@ -26,6 +26,7 @@ class FakeOllama:
             "prompt_eval_count": 40,
             "eval_duration": 2_000_000_000,
         }
+        self.answer_model: object = self  # the model field of the answer; `self` means echo the requested model
         self.url = ""
         self.hosts: list[str] = []  # the Host header of every request
         self.stall_seconds = 0.0  # hold every GET this long before answering: a reachable host that is hung
@@ -88,7 +89,8 @@ class FakeOllama:
                 elif fake.generate_status != 200:
                     self._send(fake.generate_status, {"error": "boom"})
                 else:
-                    self._send(200, {**fake.reply, "model": body.get("model", "")})
+                    echoed = body.get("model", "") if fake.answer_model is fake else fake.answer_model
+                    self._send(200, {**fake.reply, "model": echoed})
 
             def log_message(self, format: str, *args: Any) -> None:
                 return

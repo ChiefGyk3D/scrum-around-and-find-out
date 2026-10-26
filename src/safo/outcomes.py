@@ -4,7 +4,10 @@
 A record: date, card (a GitHub URL or null), agent, shape, review_rounds (review passes, the passing one included),
 findings by severity, tokens and requests when known, and a note. Optional `model` (the underlying model of the
 run) and `credits_used` (credits or premium requests consumed) make agents comparable on cost against rework; a record
-without them stays valid and is written without those keys. Appended one line at a time.
+without them stays valid and is written without those keys. Four more optional keys record how a task went: `outcome`
+(`accepted` or `abandoned`; absent means accepted), `attempts` (1 to 100), `intervention_minutes` (whole minutes the
+maintainer spent, self-reported at acceptance, 0 to 10080) and `defects_after_approval` (a count). All are whole
+numbers or a fixed word, never free text. Appended one line at a time.
 """
 
 from __future__ import annotations
@@ -26,13 +29,24 @@ from safo.guardlog import APPEND_LOCK_TIMEOUT, bounded_read, file_lock, write_te
 SEVERITIES = ("critical", "important", "minor", "unrated")
 CARD = re.compile(r"https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:issues|pull)/[0-9]{1,9}")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")  # an identifier, plus the `:` of an Ollama tag (gemma4:12b)
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 COUNT = re.compile(r"[0-9]{1,9}")
 NOTE_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")  # any control or line-break character
 NOTE_LIMIT = 500
 MAX_COUNT = 10**12
 MAX_ROUNDS = 1000
-OPTIONAL_KEYS = ("model", "credits_used")
+OUTCOME_VALUES = ("accepted", "abandoned")
+MAX_ATTEMPTS = 100
+MAX_INTERVENTION_MINUTES = 7 * 24 * 60  # one week
+OPTIONAL_KEYS = (
+    "model",
+    "credits_used",
+    "outcome",
+    "attempts",
+    "intervention_minutes",
+    "defects_after_approval",
+)
 MAX_LOG_BYTES = 4 * 1024 * 1024
 
 
@@ -49,6 +63,10 @@ class Outcome:
     note: str = ""
     model: str | None = None
     credits_used: int | None = None
+    outcome: str | None = None
+    attempts: int | None = None
+    intervention_minutes: int | None = None
+    defects_after_approval: int | None = None
 
     def to_json(self) -> str:
         data = {k: v for k, v in self.__dict__.items() if v is not None or k not in OPTIONAL_KEYS}  # unset: no key
@@ -121,13 +139,24 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_COUNT):
             raise ConfigError(f"{where}.{key}: expected an integer >= 0 or null")
     model = raw.get("model")
-    if model is not None and not (isinstance(model, str) and IDENTIFIER.fullmatch(model)):
-        raise ConfigError(f"{where}.model: expected a string of letters, digits, . _ - (at most 64), or null")
+    if model is not None and not (isinstance(model, str) and MODEL.fullmatch(model)):
+        raise ConfigError(f"{where}.model: expected a string of letters, digits, . _ : - (at most 64), or null")
     credits = raw.get("credits_used")
     if credits is not None and (
         isinstance(credits, bool) or not isinstance(credits, int) or not 0 <= credits <= MAX_COUNT
     ):
         raise ConfigError(f"{where}.credits_used: expected an integer >= 0 or null")
+    outcome = raw.get("outcome")
+    if outcome is not None and not (isinstance(outcome, str) and outcome in OUTCOME_VALUES):
+        raise ConfigError(f"{where}.outcome: expected one of {', '.join(OUTCOME_VALUES)}, or null")
+    for key, low, high in (
+        ("attempts", 1, MAX_ATTEMPTS),
+        ("intervention_minutes", 0, MAX_INTERVENTION_MINUTES),
+        ("defects_after_approval", 0, MAX_COUNT),
+    ):
+        value = raw.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high):
+            raise ConfigError(f"{where}.{key}: expected an integer from {low} to {high}, or null")
     note = raw.get("note", "")
     if not isinstance(note, str) or NOTE_FORBIDDEN.search(note) or len(note) > NOTE_LIMIT:
         raise ConfigError(f"{where}.note: expected one line of text (printable, at most 500 characters)")
@@ -143,6 +172,10 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         note,
         model,
         credits,
+        outcome,
+        raw.get("attempts"),
+        raw.get("intervention_minutes"),
+        raw.get("defects_after_approval"),
     )
 
 

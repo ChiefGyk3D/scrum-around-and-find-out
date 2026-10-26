@@ -39,6 +39,7 @@ def test_local_run_sends_one_prompt_with_think_off_and_logs_the_outcome(_private
         140,
     )
     assert "a draft until a Claude model reviews it" in row["note"]
+    assert row["model"] == "small-4b-agent", "the model is a field, not only words in the note"
 
 
 def test_local_run_honours_an_explicit_think_flag(_private_home: Path, tmp_path: Path) -> None:
@@ -212,3 +213,18 @@ def test_local_run_under_actions_refuses_an_outcomes_log_in_the_workspace(_priva
             "--log", str(ws / "o.jsonl"), home=_private_home, extra_env=env,
         )  # fmt: skip
         assert code == 2 and "GITHUB_WORKSPACE" in err and a.generates == []
+
+
+@pytest.mark.parametrize("answered", ["", None, 5, "two words", "x\ny"])
+def test_local_run_fails_closed_when_the_model_cannot_be_determined(
+    _private_home: Path, tmp_path: Path, answered: object
+) -> None:
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x")
+    log = tmp_path / "o.jsonl"
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS).serve() as b:
+        agents = write_agents(tmp_path / "agents.yaml", a.url, b.url)
+        a.answer_model = answered
+        code, out, err = local_run("ci-log-summary", prompt, agents, log, _private_home)
+    assert code != 0 and "model" in err and "A short answer." not in out
+    assert not log.exists(), "no outcome is written with a model SAFO had to invent"
