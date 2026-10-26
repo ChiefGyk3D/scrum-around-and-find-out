@@ -61,6 +61,10 @@ def close_with(**over: object) -> JSON:
     return issue_node(timelineItems={"totalCount": 1, "nodes": [closed_event(**over)]})
 
 
+def newest(kind: str, at: str) -> JSON:
+    return {"totalCount": 1, "nodes": [{"__typename": kind, "createdAt": at}]}
+
+
 class Spy:
     """A client that records every document and variables it is asked to send."""
 
@@ -208,7 +212,9 @@ def test_an_issue_edited_after_its_approval_is_open_and_an_edit_at_the_close_is_
     assert v.lines == (
         f"DRIFT   {GATE} was edited on 2026-11-09 after it was approved on 2026-11-05; it counts as open",
     )
-    assert judge(fake, client, issue_node(lastEditedAt="2026-11-05T12:00:00Z"), gate()).approved
+    at_close = judge(fake, client, issue_node(lastEditedAt="2026-11-05T12:00:00Z"), gate())
+    assert at_close.state == "open" and "was edited on 2026-11-05" in at_close.lines[0]  # one-second resolution
+    assert judge(fake, client, issue_node(lastEditedAt="2026-11-05T11:59:59Z"), gate()).approved
     assert judge(fake, client, issue_node(lastEditedAt="2026-11-04T12:00:00Z"), gate()).approved
 
 
@@ -333,6 +339,17 @@ MALFORMED: dict[str, Callable[[JSON], JSON]] = {
     "two nodes for last 1": _timeline(2, [closed_event(), closed_event()]),
     "nodes null": _timeline(1, None),
     "null node": _timeline(1, [None]),
+    "changes missing": _without("changes"),
+    "changes null": _field(changes=None),
+    "changes count above nodes (truncated)": _field(changes={"totalCount": 2, "nodes": []}),
+    "changes two nodes": _field(
+        changes={"totalCount": 2, "nodes": [newest("ReopenedEvent", "2026-11-09T10:00:00Z")["nodes"][0]] * 2}
+    ),
+    "changes node with no time": _field(changes={"totalCount": 1, "nodes": [{"__typename": "ReopenedEvent"}]}),
+    "changes node of another type": _field(changes=newest("LabeledEvent", "2026-11-09T10:00:00Z")),
+    "changes count without node": _field(
+        changes={"totalCount": 0, "nodes": newest("ReopenedEvent", "2026-11-09T10:00:00Z")["nodes"]}
+    ),
     "reason number": _event(stateReason=1),
     "reason unknown word": _event(stateReason="DONE"),
     "reason null": _event(stateReason=None),
@@ -375,8 +392,8 @@ def test_a_verdict_that_crashes_is_unknown_with_only_the_class_name(fake: FakeGi
 
 
 M13 = (
-    "DRIFT   SCOPE the change adding acme/app#55 cites acme/gates#21, which does not mention acme/app#55; "
-    "the approval is not for this change"
+    "DRIFT   SCOPE the change adding acme/app#55 cites acme/gates#21, which does not mention "
+    "acme/app#55 on its own `Entry:` line; the approval is not for this change"
 )
 
 
@@ -385,25 +402,73 @@ def test_an_approval_that_does_not_name_its_entry_is_not_for_this_change(fake: F
     assert v.state == "open" and v.lines == (M13,)
 
 
-@pytest.mark.parametrize(
-    ("title", "body", "counts"),
-    [
-        ("add acme/app#55", "", True),
-        ("x", "see acme/app#55.", True),
-        ("x", "(acme/app#55)", True),
-        ("x", "acme/app#555", False),
-        ("x", "acme/app#5", False),
-        ("x", "other-acme/app#55", False),
-        ("x", "acme/app#55/extra", False),
-        ("x", "ACME/APP#55", False),
-        ("x", "acme/app\uff03" + "55", False),
-    ],
-)
-def test_the_entry_must_appear_as_a_whole_token(
-    fake: FakeGitHub, client: Client, title: str, body: str, counts: bool
+E = "Entry: acme/app#55"
+ENTRY_BODIES: dict[str, tuple[str, bool]] = {
+    "structured line": (f"Approved.\n\n{E}\n", True),
+    "line only, no newline": (E, True),
+    "crlf": (f"Approved.\r\n{E}\r\n", True),
+    "ascii fold of the repo": ("Entry: ACME/App#55", True),
+    "html comment": (f"<!-- {E} -->", False),
+    "multi-line html comment": (f"<!--\n{E}\n-->", False),
+    "unterminated html comment": (f"x\n<!-- {E}", False),
+    "raw html block": (f"<div hidden>\n{E}\n</div>", False),
+    "link target": ("[Entry: acme/app#55](acme/app#55)", False),
+    "image url": ("![x](https://example.test/acme/app#55)\nsee acme/app#55", False),
+    "code fence": (f"```\n{E}\n```", False),
+    "tilde fence": (f"~~~\n{E}\n~~~", False),
+    "unterminated fence": (f"```\n{E}\n", False),
+    "quoted reply": (f"> {E}", False),
+    "indented": (f"    {E}", False),
+    "prose mention": ("this approves acme/app#55", False),
+    "trailing garbage letter": ("Entry: acme/app#55x", False),
+    "longer number": ("Entry: acme/app#555", False),
+    "shorter number": ("Entry: acme/app#5", False),
+    "trailing text": ("Entry: acme/app#55 please", False),
+    "trailing space": (f"{E} ", False),
+    "other repo": ("Entry: other-acme/app#55", False),
+    "wide hash": ("Entry: acme/app\uff03" + "55", False),
+    "no entry line": ("Approve the thing.", False),
+    "two different entries": (f"{E}\nEntry: acme/app#56", False),
+    "the same entry twice": (f"{E}\n{E}", False),
+    "valid line plus a quoted other entry": (f"{E}\n> Entry: acme/app#56\n    Entry: acme/app#57", True),
+    "after a closed fence and comment": (f"```\nx\n```\n<!-- c -->\n{E}", True),
+}
+
+
+@pytest.mark.parametrize("name", list(ENTRY_BODIES))
+def test_only_a_structured_entry_line_in_the_body_names_the_entry(fake: FakeGitHub, client: Client, name: str) -> None:
+    body, counts = ENTRY_BODIES[name]
+    v = judge(fake, client, issue_node(title="t", body=body))
+    assert v.approved is counts, name
+    assert counts or v.lines == (M13,)
+
+
+def test_the_title_never_names_the_entry(fake: FakeGitHub, client: Client) -> None:
+    v = judge(fake, client, issue_node(title="Change: add acme/app#55", body="Approved."))
+    assert v.state == "open" and v.lines == (M13,)
+
+
+def test_a_rename_or_reopen_at_or_after_the_close_is_refused_and_one_before_is_not(
+    fake: FakeGitHub, client: Client
 ) -> None:
-    v = judge(fake, client, issue_node(title=title, body=body))
-    assert v.approved is counts, (title, body)
+    after = judge(fake, client, issue_node(changes=newest("RenamedTitleEvent", "2026-11-09T10:00:00Z")), gate())
+    assert after.state == "open"
+    assert after.lines == (
+        f"DRIFT   {GATE} was renamed on 2026-11-09 after it was approved on 2026-11-05; it counts as open",
+    )
+    same = judge(fake, client, issue_node(changes=newest("RenamedTitleEvent", "2026-11-05T12:00:00Z")), gate())
+    assert same.state == "open"
+    reopened = judge(fake, client, issue_node(changes=newest("ReopenedEvent", "2026-11-06T10:00:00Z")), gate())
+    assert reopened.lines == (
+        f"DRIFT   {GATE} was reopened on 2026-11-06 after it was approved on 2026-11-05; it counts as open",
+    )
+    before = judge(fake, client, issue_node(changes=newest("RenamedTitleEvent", "2026-11-05T11:59:59Z")), gate())
+    assert before.approved
+
+
+def test_a_rename_after_the_close_is_refused_for_a_change_approval_too(fake: FakeGitHub, client: Client) -> None:
+    v = judge(fake, client, issue_node(changes=newest("RenamedTitleEvent", "2026-11-08T10:00:00Z")))
+    assert v.state == "open" and "was renamed on 2026-11-08" in v.lines[0]
 
 
 def test_a_removal_names_its_verb(fake: FakeGitHub, client: Client) -> None:

@@ -30,12 +30,13 @@ def issue_node(repo: str = "acme/gates", number: int = 21, **over: object) -> JS
         "number": number,
         "state": "CLOSED",
         "title": f"Change: add acme/app#55 to Build ({number})",
-        "body": "Approve acme/app#55.",
+        "body": "Approved.\n\nEntry: acme/app#55\n",
         "createdAt": "2026-11-03T09:00:00Z",
         "lastEditedAt": None,
         "authorAssociation": "OWNER",
         "repository": {"nameWithOwner": repo},
         "timelineItems": {"totalCount": 1, "nodes": [closed_event()]},
+        "changes": {"totalCount": 0, "nodes": []},  # the newest rename or reopen
     }
     node.update(over)
     return node

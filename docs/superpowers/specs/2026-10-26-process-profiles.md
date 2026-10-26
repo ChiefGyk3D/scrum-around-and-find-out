@@ -348,6 +348,10 @@ only when every line holds; it is **open** (for the gate rule, "not passed") whe
    entry only). A title or body edit after the close is already refused by line 6. Failing it:
    `DRIFT   SCOPE the change adding acme/app#55 cites acme/gates#21, which does not mention acme/app#55; the approval is not for this change`
    (decision M13).
+   **Amended by the U3 review (see `docs/approvals.md`):** the match is not a token search on the raw title and body.
+   The body must hold exactly one line `Entry: owner/repo#N` (outside comments, code fences, raw HTML and quotes),
+   the title is never used, and line 6 also refuses a rename or reopen at or after the close and an edit in the same
+   second as the close (`>=`).
 
 Every actor case has a verdict and a test (U3):
 

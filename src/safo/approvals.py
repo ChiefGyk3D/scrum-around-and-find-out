@@ -52,8 +52,10 @@ _CLOSE_FIELDS = """createdAt stateReason
 closer { __typename ... on PullRequest { number repository { nameWithOwner } } }
 duplicateOf { id } actor { __typename login ... on User { databaseId } }"""
 _ISSUE_FIELDS = f"""number state title body createdAt lastEditedAt authorAssociation repository {{ nameWithOwner }}
-timelineItems(itemTypes: [CLOSED_EVENT], last: 1) {{
-totalCount nodes {{ ... on ClosedEvent {{ {_CLOSE_FIELDS} }} }} }}"""
+timelineItems: timelineItems(itemTypes: [CLOSED_EVENT], last: 1) {{
+totalCount nodes {{ ... on ClosedEvent {{ {_CLOSE_FIELDS} }} }} }}
+changes: timelineItems(itemTypes: [RENAMED_TITLE_EVENT, REOPENED_EVENT], last: 1) {{
+totalCount nodes {{ __typename ... on RenamedTitleEvent {{ createdAt }} ... on ReopenedEvent {{ createdAt }} }} }}"""
 
 
 class Executes(Protocol):
@@ -130,6 +132,7 @@ class Read:
     edited_at: dt.datetime | None = None
     association: str = ""
     close: Close | None = None
+    changed: tuple[str, dt.datetime] | None = None  # the newest rename or reopen: (`renamed`|`reopened`, when)
 
 
 @dataclass(frozen=True)
@@ -188,6 +191,15 @@ def _count(value: Any) -> int:
     if type(value) is not int or value < 0:
         raise _Malformed("totalCount is not a count")
     return value
+
+
+def _last_one(connection: JSON, what: str) -> list[Any]:
+    """The nodes of a `last: 1` connection: one exactly when totalCount says any exist. Anything else is truncation
+    or inconsistency, which cannot be told."""
+    nodes = _need(connection, "nodes")
+    if not isinstance(nodes, list) or len(nodes) != min(_count(_need(connection, "totalCount")), 1):
+        raise _Malformed(f"{what}: totalCount disagrees with its nodes")
+    return nodes
 
 
 def _close(node: JSON) -> Close:
@@ -249,15 +261,19 @@ def parse_node(node: Any) -> Read:
         raise _Malformed("authorAssociation is not a known value")
     edited = _need(node, "lastEditedAt")
     timeline = _obj(_need(node, "timelineItems"), "timelineItems")
-    nodes = _need(timeline, "nodes")
-    if not isinstance(nodes, list):
-        raise _Malformed("timelineItems has no list of nodes")
-    if len(nodes) != min(_count(_need(timeline, "totalCount")), 1):  # last: 1, so one node exactly when any exist
-        raise _Malformed("timelineItems totalCount disagrees with its nodes")
+    nodes = _last_one(timeline, "timelineItems")
+    changes = _last_one(_obj(_need(node, "changes"), "changes"), "changes")
+    changed: tuple[str, dt.datetime] | None = None
+    if changes:
+        event = _obj(changes[0], "a rename or reopen event")
+        word = {"RenamedTitleEvent": "renamed", "ReopenedEvent": "reopened"}.get(str(_need(event, "__typename")))
+        if word is None:
+            raise _Malformed("a change event is neither a rename nor a reopen")
+        changed = (word, _ts(_need(event, "createdAt")))
     return Read(
         "Issue", _repo_name(node), number, str(state), _str(_need(node, "title"), "title"),
         _str(_need(node, "body"), "body"), _ts(_need(node, "createdAt")), None if edited is None else _ts(edited),
-        association, _close(_obj(nodes[0], "a close event")) if nodes else None,
+        association, _close(_obj(nodes[0], "a close event")) if nodes else None, changed,
     )  # fmt: skip
 
 
@@ -431,25 +447,75 @@ def _verdict(chk: Check, read: Read | Unread, via_app: bool | None) -> Verdict:
         return refuse(f"was closed by {login}, who is not in process.approvers")
     if fold(login) != fold(match.login) or fold(login) is None:
         note = (f"NOTE    {s} closed by @{login}, who is approver @{match.login} (renamed)",)
-    if read.edited_at is not None and read.edited_at > close.at:
+    # timestamps have one-second resolution, so an edit in the same second as the close cannot be ordered: refuse it
+    if read.edited_at is not None and read.edited_at >= close.at:
         return refuse(f"was edited on {read.edited_at.date()} after it was approved on {close.at.date()}")
+    if read.changed is not None and read.changed[1] >= close.at:
+        word, when = read.changed
+        return refuse(f"was {word} on {when.date()} after it was approved on {close.at.date()}")
     if chk.frozen is not None:
         start = dt.datetime.combine(chk.frozen, dt.time(), tzinfo=dt.UTC)
         if chk.kind == "change" and read.created_at < start:
             return refuse(f"was created before the baseline froze on {chk.frozen}")
         if chk.kind == "freeze" and close.at >= start + dt.timedelta(days=1):
             return refuse(f"was closed after the baseline froze on {chk.frozen}")
-    if chk.kind == "change":
-        token = re.compile(r"(?<![A-Za-z0-9_./#-])" + re.escape(str(chk.entry)) + r"(?![A-Za-z0-9_/#-])")
-        if not (token.search(read.title) or token.search(read.body)):
-            return Verdict(
-                "open",
-                (
-                    f"DRIFT   SCOPE the change {chk.action} {chk.entry} cites {chk.ref}, which does not mention "
-                    f"{chk.entry}; the approval is not for this change",
-                ),
-            )
+    if chk.kind == "change" and not _names_entry(read.body, str(chk.entry)):
+        return Verdict(
+            "open",
+            (
+                f"DRIFT   SCOPE the change {chk.action} {chk.entry} cites {chk.ref}, which does not mention "
+                f"{chk.entry} on its own `Entry:` line; the approval is not for this change",
+            ),
+        )
     return Verdict("approved", note, close.at, login)
+
+
+_ENTRY_LINE = re.compile(r"Entry: ([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}#[1-9][0-9]{0,9})")
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+
+
+def entry_lines(body: str) -> list[str]:
+    """The lines of `body` that start `Entry:` and could be shown as plain text: not inside an HTML comment, a fenced
+    code block or a raw HTML block, not quoted, not indented. (The title is never used.)"""
+    text = re.sub(r"<!--.*?(?:-->|\Z)", " ", body.replace("\r\n", "\n").replace("\r", "\n"), flags=re.DOTALL)
+    found: list[str] = []
+    fence = ""
+    html = False
+    for line in text.split("\n"):
+        opener = _FENCE.match(line)
+        if fence:
+            if opener and opener.group(1)[0] == fence[0] and len(opener.group(1)) >= len(fence):
+                fence = ""
+            continue
+        if opener:
+            fence = opener.group(1)
+            continue
+        if not line.strip():
+            html = False
+        elif html or re.match(r" {0,3}<[A-Za-z/!?]", line):
+            html = True
+        elif line.startswith("Entry:"):
+            found.append(line)
+    return found
+
+
+def _names_entry(body: str, entry: str) -> bool:
+    """M13: the body holds exactly one `Entry:` line, it is exactly `Entry: owner/repo#N`, and it is this entry. The
+    repository is compared after the ASCII-only fold; the number as an integer."""
+    lines = entry_lines(body)
+    want = parse_ref(entry)
+    match = _ENTRY_LINE.fullmatch(lines[0]) if len(lines) == 1 else None
+    got = parse_ref(match.group(1)) if match else None
+    return (
+        got is not None
+        and want is not None
+        and (got[0].translate(_UPPER), got[1].translate(_UPPER), got[2])
+        == (
+            want[0].translate(_UPPER),
+            want[1].translate(_UPPER),
+            want[2],
+        )
+    )
 
 
 class Says(Protocol):
