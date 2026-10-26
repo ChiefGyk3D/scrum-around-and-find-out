@@ -48,9 +48,12 @@ _LABEL_META = re.compile(r"([\\\[\]<>`|*_&])")
 DOIA_TAG_FILE = ROOT / "scripts" / "doia-tag.txt"
 _DOIA_TAG = re.compile(r"^v\d+\.\d+\.\d+$")
 # A whole version token, so v0.3.1-rc1, v0.3.1.2, v0.3.1_x and xv0.2.0 are read as themselves and never as a prefix of
-# the pin. A trailing "-based" is the one suffix left off the token: "DoIA v0.3.1-based" reads as v0.3.1, so it passes on
-# the pin and fails on a stale tag. Any other suffix makes a different token, which fails.
-_VERSION = r"(?<![\w.])\w*[vV]\d+\.\d+\.\d+(?:\.\d+|[-+_](?!based\b)[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)*"
+# the pin. A trailing "-based" is the one suffix left off the token: "DoIA v0.3.1-based" reads as v0.3.1, so it passes
+# on the pin and fails on a stale tag. Any other suffix makes a different token, which fails.
+_VERSION = (
+    r"(?<![\w.])\w*[vV]\d+\.\d+\.\d+"
+    r"(?:\.\d+|[-+_](?!based\b)[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)*"
+)
 _DOIA_REPO = r"department-of-internal-arguments/"
 _DOIA_NAME = r"(?:\bDoIA|Department of Internal Arguments|department-of-internal-arguments)"
 _DOIA_REF = re.compile(
