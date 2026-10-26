@@ -6,10 +6,14 @@ Every rule of the guard has a test that fails when the rule is removed, and a ho
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import http.server
 import io
 import json
 import os
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,8 +39,8 @@ from safo import hooks as safo_hooks
 from safo.agentsfile import Endpoint
 from safo.cli import main
 from safo.errors import ConfigError
+from safo.guardlog import file_lock, summarise
 from safo.guardlog import read_log as read_guard_log
-from safo.guardlog import summarise
 from safo.hooks import append_log
 from safo.ollama import Probe
 from safo.ollama import probe as ollama_probe
@@ -607,9 +611,8 @@ def test_an_unreachable_endpoint_after_a_config_edit_is_still_reported_degraded(
     assert row["health"] == "unknown" and row["local_reachable"] is False and row["rules"] == []
 
 
-def test_a_state_file_written_for_the_new_key_grants_no_tracking_exemption(_private_home: Path, tmp_path: Path) -> None:
-    """The state is the local-step rule's input only. The exemption comes from the binding made at SessionStart, which
-    a config edit does not carry over, and nothing a model writes into a state file creates one."""
+def test_a_forged_probe_state_alone_grants_no_tracking_exemption(_private_home: Path, tmp_path: Path) -> None:
+    """The probe state feeds the local-step rule only. Exemptions come from the .repo binding, a separate file."""
     path = agents_file(tmp_path / "agents.yaml", tracking_exempt_repos=["example/exempt"])
     edit_agents_file(path)
     set_probe(_private_home, agents=path)  # what a model could write: a fresh, reachable state under the new key
@@ -618,28 +621,148 @@ def test_a_state_file_written_for_the_new_key_grants_no_tracking_exemption(_priv
     assert safo_hooks.read_bound_repo(probe_file(_private_home, path)) is None
 
 
-def test_hooks_probe_on_a_terminal_prints_usage_and_logs_nothing(_private_home: Path, agents: Path) -> None:
-    class Terminal(io.StringIO):
-        def isatty(self) -> bool:
-            return True
+def test_residual_a_forged_repo_binding_grants_the_exemption(_private_home: Path, tmp_path: Path) -> None:
+    """PINS A KNOWN LIMIT, not a feature (#61, Guard the guard). The binding is a file under the same user id as the
+    governed model, and read_bound_repo trusts any valid JSON at that path, so an agent that can write the state
+    directory can forge an exemption. SAFO does not carry a binding to a new key; it cannot stop a forged one. If a
+    later change makes this fail, update the test and docs/hooks.md together."""
+    path = agents_file(tmp_path / "agents.yaml", tracking_exempt_repos=["example/exempt"])
+    set_probe(_private_home, agents=path)
+    safo_hooks.repo_path(probe_file(_private_home, path)).write_text(json.dumps({"repo": "example/exempt"}))
+    row = read_after(_private_home, path, dispatch(tracked=False, prompt=NO_STEP))
+    assert "no-issue" not in row["rules"]
 
+
+SESSION_START = json.dumps({"hook_event_name": "SessionStart", "session_id": "session-a", "source": "startup"})
+
+
+def run_probe_on(home: Path, agents: Path, stdin: Any) -> tuple[int, str]:
     out = io.StringIO()
     code = main(
         ["hooks", "probe", "--agents", str(agents)],
-        env={"HOME": str(_private_home), "PATH": ""},
+        env={"HOME": str(home), "PATH": ""},
         out=out,
         err=io.StringIO(),
         now=NOW,
-        stdin=Terminal(),
+        stdin=stdin,
     )
-    assert code == 0 and "no payload to read, so nothing was probed" in out.getvalue()
-    assert "SAFO routing guard degraded" not in out.getvalue()
+    return code, out.getvalue()
+
+
+def test_hooks_probe_on_an_idle_terminal_prints_usage_and_logs_nothing(_private_home: Path, agents: Path) -> None:
+    master, slave = os.openpty()
+    try:
+        with os.fdopen(slave, "r", closefd=False) as terminal:
+            code, out = run_probe_on(_private_home, agents, terminal)
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert code == 0 and "no payload to read, so nothing was probed" in out
+    assert "SAFO routing guard degraded" not in out
     assert read_log(_private_home) == [], "no error entry: it would count toward degraded health"
+    assert not probe_file(_private_home, agents).exists()
+
+
+def test_hooks_probe_processes_a_valid_event_that_arrives_on_a_terminal(_private_home: Path, agents: Path) -> None:
+    master, slave = os.openpty()
+    try:
+        os.write(master, SESSION_START.encode() + b"\n\x04")  # the line, then end of input
+        with os.fdopen(slave, "r", closefd=False) as terminal:
+            code, out = run_probe_on(_private_home, agents, terminal)
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert code == 0 and "Local LLM" in out and "nothing was probed" not in out
+    assert probe_file(_private_home, agents).exists(), "the event was processed: the state was saved"
+
+
+def test_hooks_probe_with_a_closed_or_empty_stdin_behaves_as_before(_private_home: Path, agents: Path) -> None:
+    closed = io.StringIO()
+    closed.close()
+    with open(os.devnull) as null:
+        for stream in (closed, null):
+            code, out = run_probe_on(_private_home, agents, stream)
+            assert code == 0 and "SAFO routing guard degraded" in out and "nothing was probed" not in out
+    assert [r["diagnostic"] for r in read_log(_private_home)] == ["input", "input"]
 
 
 def test_hooks_probe_with_a_piped_payload_is_unchanged(_private_home: Path, agents: Path) -> None:
     code, out, _ = hooks("probe", "--agents", str(agents), home=_private_home)
     assert code == 0 and "Local LLM" in out and "nothing was probed" not in out
+
+
+class SlowOllama:
+    """A loopback server whose /api/tags answers after `tags_delay` and whose /api/ps never answers in time."""
+
+    def __init__(self, tags_delay: float) -> None:
+        delay = tags_delay
+        self.requests: list[str] = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                outer.requests.append(self.path)
+                time.sleep(delay if self.path == "/api/tags" else 30)
+                body = b'{"models": []}'
+                with contextlib.suppress(OSError):
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def __enter__(self) -> SlowOllama:
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_a_slow_endpoint_and_a_held_log_lock_still_leave_a_decision_inside_the_hook_budget(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget is scaled down (6 s for the host, 1 s of log wait) so the test is quick; the code uses one clock for
+    the re-probe, the lookup and the log wait, so a scaled budget exercises the same arithmetic."""
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 6)
+    monkeypatch.setattr("safo.modes.hooks.APPEND_LOCK_TIMEOUT", 1.0)
+    set_mode(_private_home, "block")
+    with SlowOllama(tags_delay=2.5) as slow:
+        path = agents_file(tmp_path / "agents.yaml", slow.url, slow.url)
+        edit_agents_file(path)
+        folder = state_folder(_private_home)
+        folder.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        with file_lock(folder / "log.jsonl.lock"):
+            code, out, _ = guard(_private_home, path, dispatch(model=None))
+        elapsed = time.monotonic() - started
+    assert code == 0 and slow.requests, "the slow endpoint was really asked"
+    assert elapsed < 6 - 0.5, f"{elapsed:.1f} s: the decision must be written before the host's timeout"
+    data = json.loads(out)
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny", "the decision is emitted, the log skipped"
+    assert "SAFO routing guard degraded" in data["systemMessage"]
+
+
+def test_a_re_probe_with_too_little_budget_is_skipped_and_the_notice_says_so(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 3)  # 1 s to the deadline: no room for two requests
+    set_mode(_private_home, "block")
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        code, out, _ = guard(_private_home, path, dispatch(model=None))
+        assert code == 0 and a.requests == [] and b.requests == [], "nothing was asked of the endpoints"
+    data = json.loads(out)
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "reprobe-skipped" in data["hookSpecificOutput"]["additionalContext"]
+    assert not safo_hooks.attempt_path(probe_file(_private_home, path)).exists(), "a skipped re-probe claims nothing"
 
 
 def test_a_configured_age_above_five_minutes_is_honoured(

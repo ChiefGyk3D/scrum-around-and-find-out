@@ -500,11 +500,13 @@ def log_record(
     }
 
 
-def append_log(path: Path, record: dict[str, Any], limit: int = LOG_LIMIT_BYTES) -> None:
+def append_log(
+    path: Path, record: dict[str, Any], limit: int = LOG_LIMIT_BYTES, lock_timeout: float = APPEND_LOCK_TIMEOUT
+) -> None:
     raw = (json.dumps(record, sort_keys=True) + "\n").encode()
     if not valid_record(record) or len(raw) > RECORD_CAP or len(raw) > limit:
         raise ValueError("invalid or oversized record")
-    with file_lock(path.with_name(path.name + ".lock"), timeout=APPEND_LOCK_TIMEOUT):
+    with file_lock(path.with_name(path.name + ".lock"), timeout=lock_timeout):
         try:
             old = bounded_read(path, FILE_CAP)
         except FileNotFoundError:

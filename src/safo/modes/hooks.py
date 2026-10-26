@@ -37,6 +37,7 @@ from safo.errors import EXIT_OK, ConfigError
 from safo.gemini import approval_problem
 from safo.geminibrief import ApprovalCheck, findings
 from safo.guardlog import (
+    APPEND_LOCK_TIMEOUT,
     MODES,
     WARNING,
     bounded_read,
@@ -55,6 +56,7 @@ from safo.hooks import (
     GUARD_MARGIN_SECONDS,
     GUARD_TIMEOUT_SECONDS,
     LEAD_WAITS,
+    REPROBE_TIMEOUT_SECONDS,
     Verdict,
     append_log,
     bind_repo,
@@ -82,6 +84,11 @@ from safo.hooks import (
 from safo.localfiles import add_agents_arguments, load_agents_for
 from safo.modes import LocalMode, register_local
 
+LOOKUP_RESERVE_SECONDS = 2.0  # a re-probe leaves at least this much of the hook's budget for the issue lookup
+MIN_REPROBE_TIMEOUT_SECONDS = 0.5  # below this per request a re-probe is skipped, not attempted
+LOG_MARGIN_SECONDS = 1.0  # the log wait ends this long before the host's timeout
+MIN_LOG_WAIT_SECONDS = 0.05
+TERMINAL_WAIT_SECONDS = 0.25  # how long a terminal on standard input gets to deliver an event before it is a person
 STDIN_TIMEOUT_SECONDS = 5.0  # a host writes the event at once; a silent standard input is a hung host, not a slow one
 
 
@@ -343,18 +350,28 @@ PROBE_USAGE = (
 )
 
 
-def stdin_is_terminal(ctx: LocalContext) -> bool:
-    """True only when standard input is a terminal. A host pipes the event, so a terminal means a person typed the
-    command; anything that cannot answer (no isatty, a closed stream) is treated as a pipe and read as before."""
+def terminal_without_event(ctx: LocalContext) -> bool:
+    """True when standard input is a terminal and no event arrives on it within a moment: a person ran the command.
+
+    A terminal alone proves nothing (a wrapper may give the hook a pty and write the event to it), so a terminal gets a
+    short wait first, and anything that does arrive is read as an event. A stream that cannot answer (no isatty, a
+    closed one, no descriptor) is read as before.
+    """
     stream = ctx.stdin if ctx.stdin is not None else sys.stdin
     try:
-        return bool(stream.isatty())
+        if not stream.isatty():
+            return False
+        fd = stream.fileno()
     except (AttributeError, OSError, ValueError):
+        return False
+    try:
+        return not select.select([fd], [], [], TERMINAL_WAIT_SECONDS)[0]
+    except (OSError, ValueError):
         return False
 
 
 def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
-    if stdin_is_terminal(ctx):
+    if terminal_without_event(ctx):
         ctx.say(PROBE_USAGE)  # a usage line, not a fault: no log entry, so it cannot count toward degraded health
         return EXIT_OK
     code = "input"
@@ -450,7 +467,16 @@ def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: floa
 def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = None) -> None:
     # The hook's whole budget is GUARD_TIMEOUT_SECONDS from the start of the process; lookups get what is left of it
     # less a margin, so the decision is always written before the host gives up on the hook.
-    deadline = (time.monotonic() if started is None else started) + GUARD_TIMEOUT_SECONDS - GUARD_MARGIN_SECONDS
+    begun = time.monotonic() if started is None else started
+    deadline = begun + GUARD_TIMEOUT_SECONDS - GUARD_MARGIN_SECONDS
+    # One clock for the whole hook: the re-probe, the lookup and the log wait all draw on it, and the log wait ends
+    # before the host's own timeout, so a decision is written however slow the endpoint, the tracker or the lock is.
+    hard = begun + GUARD_TIMEOUT_SECONDS - LOG_MARGIN_SECONDS
+
+    def probe_timeout(wanted: float) -> float:
+        """Per request: what is wanted, or less when two requests and the lookup would not fit in what is left."""
+        return min(wanted, (deadline - time.monotonic() - LOOKUP_RESERVE_SECONDS) / 2)
+
     source = EventStream(ctx)
     raw = b""
     try:
@@ -503,9 +529,14 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     health = state_health(state, doc.hooks.max_state_age_seconds, now)
     config_changed = False  # no state for this configuration, so the first dispatch under it probed at once
     probe_code = "probe"  # what the visible notice says; the log keeps its fixed enum
-    if health == "stale" and path is not None:
+    needs_probe = path is not None and (health == "stale" or state is None)
+    if needs_probe and probe_timeout(REPROBE_TIMEOUT_SECONDS) < MIN_REPROBE_TIMEOUT_SECONDS:
+        # Too little of the hook's budget is left to ask an endpoint: skip the re-probe (nothing is claimed, so the
+        # next dispatch may still try) and say so in the notice rather than risk the host killing the hook.
+        probe_code = "reprobe-skipped"
+    elif health == "stale" and path is not None:
         # The configured age ran out mid-session: ask again, bounded and at most once a minute, and keep the answer.
-        fresh = reprobe(doc, path, now)
+        fresh = reprobe(doc, path, now, probe_timeout(REPROBE_TIMEOUT_SECONDS))
         if fresh is not None:
             state, health = fresh, "healthy"
     elif state is None and path is not None:
@@ -513,9 +544,9 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         # asks at once and for longer, without the one-a-minute limit; a later one retries at the usual rate.
         config_changed = claim_first_reprobe(path, now)
         if config_changed:
-            fresh = reprobe(doc, path, now, CONFIG_REPROBE_TIMEOUT_SECONDS, claimed=True)
+            fresh = reprobe(doc, path, now, probe_timeout(CONFIG_REPROBE_TIMEOUT_SECONDS), claimed=True)
         else:
-            fresh = reprobe(doc, path, now)
+            fresh = reprobe(doc, path, now, probe_timeout(REPROBE_TIMEOUT_SECONDS))
         if fresh is not None and not (config_changed and not fresh["reachable"]):
             state, health = fresh, "healthy"
         elif config_changed:
@@ -560,11 +591,15 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     try:
         if folder is None:
             raise OSError("log unavailable")
+        wait = min(APPEND_LOCK_TIMEOUT, hard - time.monotonic())
+        if wait < MIN_LOG_WAIT_SECONDS:
+            raise TimeoutError("no time left to write the log")  # skipped, reported as log-write; the decision stands
         append_log(
             folder / guardlog.LOG_NAME,
             log_record(
                 when, decision, mode, verdict, reachable, "degraded" if mode_state != "healthy" else health, code
             ),
+            lock_timeout=wait,
         )
     except (OSError, ValueError):
         degraded = True

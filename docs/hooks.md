@@ -293,14 +293,28 @@ A hook sits inside someone's session, so every error lets the work through, visi
   falls back to `warn`.
 - Editing `agents.yaml` mid-session changes the name of the session's probe file (it hashes the merged configuration), so
   the saved probe no longer applies. The first dispatch after the edit probes again at once, without the one-a-minute
-  limit and with a 3 s timeout per request (a stale state's re-probe uses 1.5 s), and the guard adds one line saying
+  limit and with up to 3 s per request (a stale state's re-probe uses 1.5 s), and the guard adds one line saying
   the configuration changed and the local LLM was re-probed. That is not a degraded state. If the re-probe finds the
   endpoint unreachable, the dispatch is degraded and the notice's diagnostic is `reprobe-timeout`, so an outage is
   told apart from an edit; later dispatches retry at the usual one-a-minute rate. The log keeps its fixed diagnostic
-  list, so that record says `probe`. A repository exemption (`tracking_exempt_repos`) is bound per configuration at
-  session start and is not carried over by an edit: until the next `startup` it fails closed and exempts nothing.
-- `safo hooks probe` run by hand on a terminal prints a usage line and exits 0, with no log entry; a host pipes the
-  event, so a piped payload is read as before.
+  list, so that record says `probe`. SAFO does not carry the session's repository binding (`tracking_exempt_repos`) to
+  the new file name, so after an edit the exemption does not apply until the next `startup`; this is bookkeeping, not
+  protection (see the same-user limit below).
+- The guard has one clock: 10 s from the start of the process, less a margin. A re-probe gets at most what leaves two
+  requests per endpoint and 2 s for the issue lookup; if less than 0.5 s per request is left it is skipped (nothing is
+  claimed, so a later dispatch may try) and the notice names `reprobe-skipped`. The log wait ends 1 s before the host's
+  timeout; a log that could not be written in time is reported as `log-write`. Neither changes the decision.
+- `safo hooks probe` run by hand on a terminal waits a quarter of a second for an event; if none arrives it prints a
+  usage line and exits 0, with no log entry. An event that does arrive (a wrapper that gives the hook a pty) is
+  processed as usual, and so is a piped payload.
+- Same-user limit, tracked in #61 (Guard the guard). The probe state, the `.repo` binding, the `.attempt` marker and the
+  log are files under the same user id as the model the guard governs. An actor that can write the state directory can
+  forge a fresh `{reachable: false}` state (which switches the local-step rule off), forge a `<probe>.repo` file (which
+  grants a repository exemption: a test pins this), pre-create `.attempt` (which suppresses a re-probe for a minute),
+  delete the state and `.attempt` before each dispatch (which forces the slow re-probe every time), or append a valid
+  record to the log (which can make `safo hooks status` read healthy). The log is advisory telemetry, not evidence.
+  SAFO does not try to stop this here, and none of the above is a security boundary; the guard stays a speed bump
+  against accidents.
 - A denial that was computed survives a log failure.
 - stdout is exactly one JSON line or nothing. `probe` and `guard` never exit 2 (a host reads that as a denial), even for a bad flag.
 - The host's own timeout (15 s for the probe, 10 s for the guard in the installed settings) is the last backstop. How a
