@@ -13,8 +13,8 @@ Exit 1 means one thing only: a report was read in full and it is not current. An
 exit 2, and a failure to print the answer never changes the exit code.
 
 A report is read from the HTML GitHub rendered from the comment (`bodyHTML`), never from the raw Markdown, and only
-from the text of a top-level paragraph. What a person sees as code, a quotation, a list, a table or a collapsed block
-is not a report.
+out of the text of a top-level paragraph. What a person sees as code, a quotation, a list, a table or a collapsed
+block is not a report.
 
 This proves staleness, not authorship: every agent comments through the maintainer's account, so a forged line from
 that account reads as fresh. Only comments by an OWNER, MEMBER or COLLABORATOR are read, so a fork contributor's
