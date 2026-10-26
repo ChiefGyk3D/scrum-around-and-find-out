@@ -31,5 +31,5 @@ ordered, so it does not pass. Re-approving means reopening and closing the issue
 ## Who counts
 
 The close must be manual (no `closer`), completed, not a duplicate, not performed through a GitHub App (the REST
-cross-check, given to `verdict()` as `via_app`), made by a `User` whose `databaseId` is in `process.approvers`,
+cross-check, given to `verdict()` as `via_app`), made by a `User` whose `databaseId` is in the board file's approver list,
 on an issue opened by an owner, member or collaborator. A login is never the identity; it only words the line.
