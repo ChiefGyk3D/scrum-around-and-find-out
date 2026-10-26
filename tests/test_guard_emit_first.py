@@ -582,3 +582,19 @@ def test_the_next_dispatch_says_the_previous_log_write_failed_once(
     third = Stream()
     mod.run_guard(context(_private_home, dispatch(model=None), third), namespace(agents))
     assert mod.LOG_FAILED_NOTICE not in third.buffered
+
+
+def test_an_exception_after_the_decision_was_attempted_adds_no_diagnostic_line(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_mode(_private_home, "block")
+    real = mod.emit_then_persist
+
+    def then_raise(*a: Any, **k: Any) -> None:
+        real(*a, **k)
+        raise RuntimeError("after the line was written")
+
+    monkeypatch.setattr(mod, "emit_then_persist", then_raise)
+    out = Stream()
+    assert mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents)) == 0
+    assert len(out.writes) == 1 and denied(lines(out.buffered)[0]), "the decision, and nothing after it"

@@ -307,16 +307,38 @@ A hook sits inside someone's session, so every error lets the work through, visi
   byte at a time would otherwise hold it); an endpoint still silent then counts as unreachable. If less than 0.5 s per
   request is left, the re-probe is skipped (nothing is claimed, so a later dispatch may try) and the notice names
   `reprobe-skipped`. The event read on standard input also stops at the clock (the lesser of 5 s and what is left).
-- Loading `agents.yaml` cannot be interrupted portably. That is a residual: a load that takes the whole budget leaves
-  no time, and the decision is then made from what is available. If the clock is past its deadline after the load,
-  the re-probe and the issue lookup are skipped and the notice says `budget exceeded: lookups skipped`; a brief whose
-  issue could not be verified then follows the usual rules (denied in block mode, flagged in warn mode). A hook the
-  host has already killed prints nothing; that case is only reduced, not removed.
+- Loading `agents.yaml` runs under a wall-clock bound: a daemon worker thread is joined for the time left until the
+  guard's deadline (at least 0.25 s) and ABANDONED if it is still going. A thread works the same on Linux and macOS and
+  in any thread; a signal timer would not. On expiry there is no configuration, so every rule is off, as for an
+  unreadable `agents.yaml`: a visible degraded allow (log diagnostic `timeout`) with the notice `budget exceeded:
+  configuration load timed out, rules disabled`. That is fail-open and is stated as such; it needs a read that blocks
+  (a FIFO, a dead mount) to happen. What stays unbounded: the abandoned read keeps blocking until the process exits
+  (it only reads), a state-file read or `fsync` that blocks is not interrupted, and a host that kills the hook before
+  the line is out prints nothing. If the load finishes but the clock is past its deadline, the re-probe and the issue
+  lookup are skipped and the notice says `budget exceeded: lookups skipped`; a brief whose issue could not be verified
+  then follows the usual rules (denied in block mode, flagged in warn mode).
+- Delivery is an explicit step: the whole line is one write, then a flush. If either fails (a closed or broken pipe)
+  nothing else is done: no log append, no second line, no diagnostic, because once any byte of a decision was attempted
+  nothing else is ever written to standard output. The failure goes to stderr as a fixed line, and the exit code says
+  what was lost: a denial that could not be delivered exits 2, which Claude Code reads as "block this call" (so it
+  never fails open); any other undelivered line exits 1, a non-blocking error. This is the one case where the guard
+  exits 2. That the host treats exit 2 as a block and exit 1 as non-blocking is the host's documented hook contract,
+  not verified by a test here. A failure in the diagnostic path is caught and becomes the same exit code.
 - Because the decision is printed before the log is touched, a failed or skipped log write can no longer appear in the
-  same JSON line. It is reported on standard error, and by a small marker file (`log-failed` in the state folder) that
-  the NEXT guard run reads, clears and reports as `previous log write failed` in its own line (log diagnostic
-  `log-write`). The marker is same-user writable like the rest of the state; it can only add a notice and never grants
-  anything. What Claude Code does after a hook has flushed its decision and then runs past its timeout is UNVERIFIED.
+  same JSON line. Persistence is best effort and catches any exception (not only I/O errors). It is reported on standard
+  error, and by a small marker file (`log-failed` in the state folder) that the NEXT guard run reads and reports as
+  `previous log write failed` in its own line (log diagnostic `log-write`). The marker is opened relative to a
+  descriptor of the state folder (checked on the descriptor: ours, not writable by others), never blocks, never follows
+  a link, and must be a regular file of ours. A directory, FIFO, link or loose-mode file at its name is removed and
+  reported once as `log-failed marker unusable` (in the next line, and on stderr); if it cannot be removed it is
+  reported on every dispatch. A line carries every applicable notice, highest priority first (`mode`, the marker's
+  notice, `budget exceeded`, the probe notice), and the marker is deleted only after a line that shows its notice was
+  delivered. The marker is same-user writable like the rest of the state: it can only add a notice and never grants
+  anything (inside the same-user residual, #61). What Claude Code does after a hook has flushed its decision and then
+  runs past its timeout is UNVERIFIED.
+- `append_log` treats retained bytes that are not valid UTF-8 (found while recovering an incomplete tail) as
+  corruption: the file is moved to the one private archive, `log.jsonl.1`, replacing an older archive as a size
+  rotation does, and a fresh log is started. It does not raise.
 - A re-probe that times out stores an unreachable state for `max_state_age_seconds` (300 s by default), so later
   dispatches log health `healthy` and `local_reachable` false with no notice, as after a stale-state re-probe.
 - The line shown after the first probe under a new configuration says there was no saved probe for it (an edit, or a
@@ -333,7 +355,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   SAFO does not try to stop this here, and none of the above is a security boundary; the guard stays a speed bump
   against accidents.
 - A denial that was computed survives a log failure.
-- stdout is exactly one JSON line or nothing. `probe` and `guard` never exit 2 (a host reads that as a denial), even for a bad flag.
+- stdout is exactly one JSON line or nothing. `probe` and `guard` never exit 2 (a host reads that as a denial), even for a bad flag. The one exception: a guard denial whose line could not be delivered exits 2 so the host blocks (see Failing safe).
 - The host's own timeout (15 s for the probe, 10 s for the guard in the installed settings) is the last backstop. How a
   given Claude Code version treats a timed-out or crashed hook is not verified here.
 
@@ -388,10 +410,10 @@ Budget: the host gives the guard 10 s, and the guard runs on one clock from the 
 is written and flushed first. The append then waits for the lock for the setting or for what is left until 9 s,
 whichever is less. If less than 0.05 s is left, or the clock is already past 9 s, the append is skipped: it is never
 started late and never stretched past 9 s. A longer setting therefore does not extend the hook. A skipped or failed
-append is reported on stderr and, on the next guard run, as `previous log write failed` (see Failing safe). Config
-loading cannot be interrupted, so a slow load still delays the line (residual); once the line is out, the host's
-behavior if it then kills the hook is UNVERIFIED. The append itself is not interruptible once it holds the lock
-(fsync can block). The other lock users (mode, probe state) keep their 0.5 s wait.
+append is reported on stderr and, on the next guard run, as `previous log write failed` (see Failing safe). The
+configuration load is bounded in wall time (see Failing safe); once the line is out, the host's behavior if it then
+kills the hook is UNVERIFIED. The append itself is not interruptible once it holds the lock (fsync can block). The
+other lock users (mode, probe state) keep their 0.5 s wait.
 
 ## Known limits
 
