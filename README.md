@@ -52,7 +52,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 |---|---|
 | `validate` | Validates `board.yaml` offline; reads nothing from GitHub and makes no claim about the live board |
 | `bootstrap` | Creates the fields, options, iterations and views `board.yaml` names and the project lacks. Never edits an existing field's options |
-| `audit` | Compares the live board and the repositories' open work with `board.yaml`. Exit 0 clean, 1 drift, 2 cannot tell |
+| `audit` | Compares the live board and the repositories' open work with `board.yaml`, and checks that each listed repository's default branch requires the gate check (see [the branch gate](docs/no-hidden-work.md#the-branch-gate)). Exit 0 clean, 1 drift, 2 cannot tell |
 | `sync` | Brings the card of one issue or pull request event in line |
 | `reconcile` | Adds every missing open issue and pull request, marks closed ones Done with the date, fills Area. Idempotent |
 | `status` | Posts a project status update from a Markdown file, or builds it from the board with `--post`: the cards are grouped and counted in code, with an optional one-line headline on top |
