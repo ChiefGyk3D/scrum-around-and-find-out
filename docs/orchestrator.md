@@ -18,10 +18,10 @@ message gets an answer in the turn it arrives.
    fits "act, then report": a ruling the maintainer already made is acted on, and a choice the maintainer has not made is
    reported, not guessed.
 5. **The lead does not implement.** Code changes go to an implementer agent; the lead verifies. (2026-10-25: the lead implemented
-   code itself. Hook issue 80 tracks a warning for it.)
+   code itself. Hook issue [#80](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/80) tracks a warning for it.)
 6. **Never start a second watch on something already watched.** One run, one watcher. If a monitor or a background command
    already covers it, read its result when it exits. (2026-10-25: a second watch was started on something already
-   watched. Hook issue 79 tracks flagging duplicate watches.)
+   watched. Hook issue [#79](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/79) tracks flagging duplicate watches.)
 
 Sub-agents are not covered. A monitor agent is allowed to watch, because watching is its whole job; the rules are about the
 lead's main thread.
@@ -45,7 +45,7 @@ What the rules say to do instead:
   look at the runner). Do not keep watching.
 
 The three additions (rules 4, 5 and 6) come from the 2026-10-25 session. Rules 5 and 6 are doctrine only: no guard
-enforces them yet, and the hook issues above are where that would be built.
+enforces them yet, and the hook issues linked in those rules (#80, #79) are where that would be built.
 
 ## What flags it
 
