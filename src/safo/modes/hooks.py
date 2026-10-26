@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import codecs
 import contextlib
-import errno
 import itertools
 import json
 import os
@@ -31,6 +30,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from time import time as wall_clock  # immune to the monotonic-clock stand-in some tests install
 from typing import Any, TypeVar
 
 from safo import gemini, geminibrief, guardlog, leadwait, output, tracking
@@ -105,13 +105,13 @@ STATE_SLOW_NOTICE = "state folder slow: probe state skipped"  # a pre-decision s
 NOTICE_IO_CAP_SECONDS = 1.0  # first-notice flag and marker inspection together get at most this long before the emit
 MAX_SIDE_OBJECTS = 8  # `.log-failed.junk.*` entries kept in the state folder; at the cap nothing more is moved aside
 SIDE_PREFIX = ".log-failed.junk."
-NO_HARDLINKS = (errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EXDEV, errno.ENOSYS)  # link() unsupported
-STDERR_MAX_BYTES = 512  # below PIPE_BUF: a pipe that polls writable takes the whole line
+SIDE_NAME = re.compile(re.escape(SIDE_PREFIX) + r"[0-9]+-[0-9a-f]{12}")  # exactly what remove_junk names a side object
+SIDE_PRUNE_AGE_SECONDS = 300.0  # an object younger than this (by ctime, which a rename updates) is never pruned
+POST_GRACE_SECONDS = 0.5  # after the hard limit the post-delivery work gets this long, still inside the host timeout
 NOTICE_IO_MIN_SECONDS = 0.25  # and at least this long, even when the clock is already past its limit
 _T = TypeVar("_T")
 Ident = tuple[int, int, int, int, int]  # st_dev, st_ino, st_mode, st_mtime_ns, st_size: what sat at the name
 CONFIG_MIN_WAIT_SECONDS = 0.25  # a load is always given this long, even when the clock is already past its deadline
-EMIT_FAILED_TEXT = "safo: the guard could not deliver its decision on standard output"
 EXIT_BLOCK = 2  # the host reads exit 2 from a PreToolUse hook as "block this call"
 EXIT_NOT_DELIVERED = 1  # any other non-zero exit is a non-blocking error to the host
 BUDGET_NOTICE = "budget exceeded: lookups skipped"
@@ -344,38 +344,6 @@ class Run:
     deny: bool = False  # the decision that was attempted was a denial
 
 
-def stderr_line(text: str) -> None:
-    """One short line on standard error, best effort and NEVER blocking. The descriptor's flags are not touched (an
-    inherited pipe shares its open file description with the host). A real descriptor is polled for POLLOUT with a zero
-    timeout and written only if writable, with ONE write of at most STDERR_MAX_BYTES (a writable pipe takes a line below
-    PIPE_BUF whole); a full pipe, a gone reader, a short count or any error means the line is dropped, with no retry. A
-    descriptor that cannot be polled (a file, some terminals) is written normally. The guard writes these only AFTER
-    its decision."""
-    with contextlib.suppress(Exception):
-        stream = sys.stderr
-        if stream is None:
-            return
-        try:
-            fd = stream.fileno()
-        except (AttributeError, OSError, ValueError):
-            output.write(stream, text)  # a captured or in-memory stream has no descriptor to block on
-            return
-        data = (output.line(text) + "\n").encode("utf-8", "replace")
-        if len(data) > STDERR_MAX_BYTES:
-            data = data[: STDERR_MAX_BYTES - 1] + b"\n"
-        try:
-            poller = select.poll()
-            poller.register(fd, select.POLLOUT)
-            ready = poller.poll(0)
-        except (AttributeError, OSError, ValueError):
-            ready = None
-        if ready is not None:
-            bad = select.POLLERR | select.POLLHUP | select.POLLNVAL
-            if not any(events & select.POLLOUT and not events & bad for _, events in ready):
-                return
-        os.write(fd, data)
-
-
 def exit_code(run: Run) -> int:
     """0 normally. A decision that could not be delivered must not look like an allow: a denial then exits 2, which the
     host treats as a block; anything else exits 1, a non-blocking error."""
@@ -384,20 +352,34 @@ def exit_code(run: Run) -> int:
     return EXIT_BLOCK if run.deny else EXIT_NOT_DELIVERED
 
 
+def write_all(stream: Any, text: str) -> bool:
+    """Write every character of `text`, however the stream chops it. A text stream's write() returns the number of
+    characters taken: a short count is written again from where it stopped, and no progress (0, a negative or larger
+    count, None or anything that is not an int) is a failure. Text streams only; the guard's output is one JSON line."""
+    view = text
+    while view:
+        taken = stream.write(view)
+        if not isinstance(taken, int) or isinstance(taken, bool) or not 0 < taken <= len(view):
+            return False
+        view = view[taken:]
+    return True
+
+
 def emit(ctx: LocalContext, run: Run, data: dict[str, Any]) -> bool:
-    """Write the whole line in ONE write, then flush. True only if both worked. After the first attempt nothing else is
-    ever written to the host, so a truncated line is never followed by a second object."""
+    """Write the whole line, then flush. True only if both worked. After the first attempt nothing else is ever written
+    to the host, so a truncated line is never followed by a second object. The guard writes nothing to standard error:
+    what a failure means is in the exit code and in the next dispatch's notice."""
     text = output.line(json.dumps(data)) + "\n"
     run.attempted = True
     run.deny = data.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
     try:
-        ctx.out.write(text)
+        delivered = write_all(ctx.out, text)
         ctx.out.flush()
     except Exception:
+        delivered = False
+    if not delivered:
         run.failed = True
-        stderr_line(EMIT_FAILED_TEXT)
-        return False
-    return True
+    return delivered
 
 
 def diagnostic(
@@ -435,42 +417,44 @@ def emit_then_persist(
     record: dict[str, Any],
     clear_marker: Ident | None = None,
     claim: Path | None = None,
-    report: str = "",
     refresh: Path | None = None,
 ) -> None:
     """The one tail of every guard path. The decision (`data`, or nothing to say) is written and flushed FIRST. If that
-    fails nothing else is done (no append, no second line); the caller turns it into the exit code. Otherwise the log
-    is appended, best effort: waiting no longer than the setting and never past `run.hard` on the guard's clock
-    (skipped when less than MIN_LOG_WAIT_SECONDS is left). ANY failure there (not only OSError) leaves a marker that
-    the next guard run reports, and a line on stderr; it can never change or follow the line already written."""
-    if data is not None:
-        if not emit(ctx, run, data):
-            return
-        if clear_marker is not None:  # its notice is in the line just delivered; clear that marker, not a newer one
+    fails nothing else is done; the caller turns it into the exit code. Everything after the line is out (clear the
+    marker whose notice was in it, claim the probe notice, refresh the binding's age, append the log, record a failed
+    append) runs in ONE post-delivery worker that is joined only until just past the hard limit and then left behind:
+    the host's timeout would discard a decision from a hook that has not exited, so a wedged filesystem call here must
+    not keep the process alive (a daemon thread does not delay interpreter exit). The append waits no longer than the
+    setting and never past `run.hard` (skipped when less than MIN_LOG_WAIT_SECONDS is left). A failed or skipped append
+    leaves a marker that the next guard run reports; it can never change or follow the line already written."""
+    if data is not None and not emit(ctx, run, data):
+        return
+    delivered = data is not None
+
+    def after(abandoned: threading.Event) -> None:
+        if delivered and clear_marker is not None:  # its notice is in the line just delivered; clear that marker only
             with contextlib.suppress(Exception):
                 clear_log_failure(folder, clear_marker)
-        if report:  # standard error, and only after the decision is out
-            stderr_line(report)
-        if claim is not None:  # the probe notice was in the delivered line: only now is it used up
+        if delivered and claim is not None:  # the probe notice was in the delivered line: only now is it used up
             with contextlib.suppress(Exception):
                 claim_notice(claim)
-    if refresh is not None:  # keep the session's repository binding out of the prune: a hint, after any decision
-        with contextlib.suppress(Exception):
-            refresh_bound_repo(refresh)
-    try:
-        if folder is None:
-            raise OSError("log unavailable")
-        wait = APPEND_LOCK_TIMEOUT if run.hard is None else min(APPEND_LOCK_TIMEOUT, run.hard - time.monotonic())
-        if wait < MIN_LOG_WAIT_SECONDS:
-            raise TimeoutError("out of time")
-        append_log(folder / guardlog.LOG_NAME, record, lock_timeout=wait)
-    except Exception:
-        stderr_line("safo: the guard's log write failed or was skipped; the next dispatch says so")
-        ok = False
-        with contextlib.suppress(Exception):
-            ok = write_log_failed(folder)
-        if not ok:
-            stderr_line("safo: the log-failed marker could not be written; the next dispatch cannot say so")
+        if refresh is not None:  # keep the session's repository binding out of the prune: a hint
+            with contextlib.suppress(Exception):
+                refresh_bound_repo(refresh)
+        try:
+            if folder is None:
+                raise OSError("log unavailable")
+            wait = APPEND_LOCK_TIMEOUT if run.hard is None else min(APPEND_LOCK_TIMEOUT, run.hard - time.monotonic())
+            if wait < MIN_LOG_WAIT_SECONDS:
+                raise TimeoutError("out of time")
+            append_log(folder / guardlog.LOG_NAME, record, lock_timeout=wait)
+        except Exception:
+            with contextlib.suppress(Exception):
+                write_log_failed(folder)
+
+    left = (run.hard - time.monotonic()) if run.hard is not None else APPEND_LOCK_TIMEOUT + 1.0
+    with contextlib.suppress(Exception):
+        run_bounded(after, max(0.0, left) + POST_GRACE_SECONDS)
 
 
 # -- the log-failed marker: opened relative to the state folder's descriptor, never by a second path lookup -----------
@@ -504,42 +488,39 @@ def side_objects(dfd: int) -> list[str]:
 
 
 def prune_side_objects(dfd: int) -> None:
-    """Cheap, safe clean-up of what earlier removals left aside: empty directories and regular files that are ours.
-    Looked at with lstat only (never followed); anything else, and any directory that is not empty, stays."""
+    """Clean up what earlier removals left aside, and only that: an object named exactly as remove_junk names them
+    (pid, a random id), older than SIDE_PRUNE_AGE_SECONDS by ctime (a rename updates it, so an object a live run has
+    just moved aside and is about to put back is never old), and either an empty directory or a regular file that is
+    ours. Looked at with lstat only, never followed; links, FIFOs, other names and directories with content stay."""
     for name in side_objects(dfd):
+        if not SIDE_NAME.fullmatch(name):
+            continue
         with contextlib.suppress(OSError):
             info = os.lstat(name, dir_fd=dfd)
+            if wall_clock() - info.st_ctime < SIDE_PRUNE_AGE_SECONDS:
+                continue
             if stat.S_ISDIR(info.st_mode):
                 os.rmdir(name, dir_fd=dfd)  # fails (and is kept) unless empty
             elif stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid():
                 os.unlink(name, dir_fd=dfd)
 
 
-def install_no_clobber(dfd: int, source: str, *, follow_symlinks: bool = True) -> bool:
-    """Put `source` at the marker name without overwriting anything, then drop the source name. A hard link never
-    overwrites. Where the filesystem has none (EPERM, EOPNOTSUPP, ENOTSUP, EXDEV, ENOSYS) it falls back to a CHECKED
-    rename: nothing may be at the name immediately before, and the name must hold a marker afterwards. That fallback
-    keeps a tiny race (a marker created between the check and the rename is overwritten); it exists only on
-    filesystems that cannot do better. True if a valid marker is at the name afterwards."""
+def install_no_clobber(dfd: int, source: str, *, keep_on_failure: bool, follow_symlinks: bool = True) -> bool:
+    """Give `source` the marker name WITHOUT overwriting anything: a hard link, then drop the source name. Any failure
+    (the name is taken: EEXIST; the filesystem has no hard links: EPERM, EOPNOTSUPP, EXDEV, ENOSYS, ...) means it was
+    not installed, and nothing else is tried: there is no rename fallback, because a rename would overwrite a newer
+    marker. With `keep_on_failure` the source stays where it is (it is somebody's object); otherwise it is removed
+    (it is this run's own temp file). True if installed."""
     try:
         os.link(source, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=follow_symlinks)
-    except OSError as error:
-        if error.errno not in NO_HARDLINKS:
+    except OSError:
+        if not keep_on_failure:
             with contextlib.suppress(OSError):
                 os.unlink(source, dir_fd=dfd)
-            return marker_present(dfd)  # EEXIST: a newer marker won
-        try:
-            os.lstat(LOG_FAILED_NAME, dir_fd=dfd)
-        except FileNotFoundError:
-            with contextlib.suppress(OSError):
-                os.rename(source, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd)
-        else:
-            with contextlib.suppress(OSError):
-                os.unlink(source, dir_fd=dfd)
-        return marker_present(dfd)
+        return False
     with contextlib.suppress(OSError):
         os.unlink(source, dir_fd=dfd)
-    return marker_present(dfd)
+    return True
 
 
 def remove_junk(dfd: int, seen: Ident) -> bool:
@@ -556,7 +537,7 @@ def remove_junk(dfd: int, seen: Ident) -> bool:
     never deleted. Remaining window: between the look and the rename a replacement is briefly moved aside, so a
     concurrent reader can miss a marker for a moment; the identity tuple is best effort (a recycled inode, or a
     coarse-timestamp filesystem, can repeat it). Both are inside the same-user residual (#61)."""
-    side = f"{SIDE_PREFIX}{os.urandom(6).hex()}"
+    side = f"{SIDE_PREFIX}{os.getpid()}-{os.urandom(6).hex()}"
     try:
         prune_side_objects(dfd)
         if len(side_objects(dfd)) >= MAX_SIDE_OBJECTS:
@@ -568,7 +549,7 @@ def remove_junk(dfd: int, seen: Ident) -> bool:
     except OSError:
         return False
     if marker_ident(moved) != seen:
-        install_no_clobber(dfd, side, follow_symlinks=False)
+        install_no_clobber(dfd, side, keep_on_failure=True, follow_symlinks=False)
         return False
     try:
         if stat.S_ISDIR(moved.st_mode):
@@ -592,8 +573,9 @@ def write_log_failed(folder: Path | None) -> bool:
     so every failure has its own identity and an older run's clear cannot erase it. The marker name itself is never
     opened for writing. If the rename fails because something (a directory) is in the way, only that observed blocker is
     removed, and only if that removal really happened is the install retried, and then with a hard link, which
-    never overwrites (or, where the filesystem has no hard links, with a checked rename): if a newer marker arrived
-    meanwhile it wins, this run's temp file is dropped, and the failure counts as recorded because a marker exists."""
+    never overwrites: if a newer marker arrived meanwhile it wins, this run's temp file is dropped, and the failure
+    counts as recorded because a marker exists. On a filesystem without hard links the retry cannot install: the
+    failure is then not recorded (False) until the blocker is gone; the decision is unaffected."""
     if folder is not None:
         guardlog.ensure_dir(folder)  # a fresh install whose first append failed has no folder yet
     dfd = marker_dir(folder)
@@ -605,8 +587,8 @@ def write_log_failed(folder: Path | None) -> bool:
                 os.write(fd, f"{os.getpid()} {os.urandom(8).hex()}\n".encode())
             finally:
                 os.close(fd)
-            if attempt:  # the retry never overwrites: a newer marker wins; no hard links: a checked rename
-                return install_no_clobber(dfd, temp)
+            if attempt:  # the retry never overwrites: a newer marker wins; no hard links: not recorded
+                return install_no_clobber(dfd, temp, keep_on_failure=False) or marker_present(dfd)
             try:
                 os.rename(temp, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd)
                 return True
@@ -816,10 +798,7 @@ def finish(
     elif note:
         context = data["hookSpecificOutput"].get("additionalContext")
         data["hookSpecificOutput"]["additionalContext"] = f"{context} {note}" if context else note
-    report = "safo: " + LOG_MARKER_UNUSABLE if any(text == LOG_MARKER_UNUSABLE for text, _ in notices) else ""
-    emit_then_persist(
-        ctx, run, data if out_text or notices or note else None, folder, record, clear, claim, report, refresh
-    )
+    emit_then_persist(ctx, run, data if out_text or notices or note else None, folder, record, clear, claim, refresh)
 
 
 def hook_event(argv: Sequence[str] | None) -> str | None:
@@ -1218,13 +1197,11 @@ def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
     if code and not run.attempted:  # once any byte of a decision was attempted, nothing else is ever written
         if run.deny:
             run.failed = True  # a denial was computed but cannot be delivered: block on the exit code, say nothing else
-            stderr_line(EMIT_FAILED_TEXT)
         else:
             try:
                 diagnostic(ctx, code, run=run, deny=deny)
             except Exception:
                 run.failed = True
-                stderr_line(EMIT_FAILED_TEXT)
     return exit_code(run)
 
 

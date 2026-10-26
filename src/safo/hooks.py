@@ -263,7 +263,7 @@ def abandoned_now(abandoned: threading.Event | None) -> bool:
 def save_state(path: Path, state: dict[str, Any], abandoned: threading.Event | None = None) -> bool:
     if abandoned_now(abandoned):
         return False
-    with file_lock(path.with_name(path.name + ".lock")):
+    with file_lock(path.with_name(path.name + ".lock"), abandoned=abandoned):
         previous = read_state(path)
         if previous and previous["ts"] > state["ts"]:
             return False
@@ -316,7 +316,7 @@ def claim_reprobe(path: Path, now: float, abandoned: threading.Event | None = No
     marker = attempt_path(path)
     if abandoned_now(abandoned):
         return False
-    with file_lock(marker.with_name(marker.name + ".lock")):
+    with file_lock(marker.with_name(marker.name + ".lock"), abandoned=abandoned):
         try:
             recorded = loads(bounded_read(marker, 64))
         except (OSError, ValueError, UnicodeError):
