@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+- Threat model before build (`docs/threat-model.md`, #71): n/a for this work. The rule covers AI-facing parts of a system, and the wiki generator, move tool and leak scan are deterministic code that parse repository files and do not feed a model; read `docs/threat-model.md` on 2026-10-26 before claiming this. If a task later adds code whose input reaches a model, that task's issue needs its own `threat-model:` line.
+- Inputs not versioned: this plan cites scratchpad-only inputs (`wave1/report-A-*`, the `verified-facts-*.md` ledgers, the tool spikes under `wave1/tools/`) that are not in the repository, so the plan cannot be re-run from the repository alone.
 - American English everywhere (defense, behavior, color). mother-ticker docs: no em dashes (test-enforced there).
 - Never publish or commit: secrets, private or CGNAT addresses, MACs, emails, hostnames, serials, a callsign or grid square, an employer name. Placeholders: 203.0.113.0/24, 198.51.100.0/24, 192.0.2.0/24, `example.com`, `N0CALL`, `N0TST`, `FN31pr`, `<SIEM_IP>`.
 - Nothing is deleted. A moved or merged file loses no non-blank line; superseded material goes to an `Archive-` page.

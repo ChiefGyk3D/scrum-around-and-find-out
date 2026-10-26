@@ -1,6 +1,6 @@
 # SIEM stack wiki and project boards: design
 
-Status: draft for the maintainer's approval. Date: 2026-10-22. Epic: ChiefGyk3D/scrum-around-and-find-out#63.
+Status: approved by the maintainer on 2026-10-26 ("Approved on both"); the answers recorded in section 15a stand. Date: 2026-10-22. Epic: ChiefGyk3D/scrum-around-and-find-out#63.
 Work packages: #64 (pfsense-siem-stack), #65 (siem-docker-stack), #66 (bridge, mother-ticker, netpulse), #67 (Clouds Against Humanity cross-links).
 Written by the lead (Claude) from the maintainer's decisions and from ten read-only research reports. Statements marked **(my call)** are the lead's and were not decided by the maintainer.
 
@@ -12,7 +12,7 @@ The goal is a wiki a stranger can learn from, build from, and (for the maintaine
 
 ## 2. Scope
 
-Repos in the SIEM group: `pfsense-siem-stack`, `siem-docker-stack`, `jumpcloud-wazuh-bridge`, `mother-ticker`, `netpulse`. Related: `Clouds-Against-Humanity` (CAH), which links to the SIEM wikis and which they link back to. Tooling: the shared repo `git-your-ship-together` (GYST) for publishing and checks. Boards: four new user-owned GitHub Projects plus the existing ones.
+Repos in the SIEM group: `pfsense-siem-stack`, `siem-docker-stack`, `jumpcloud-wazuh-bridge`, `mother-ticker`, `netpulse`. Related: `Clouds-Against-Humanity` (CAH), which links to the SIEM wikis and which they link back to. Tooling: the shared repo `git-your-ship-together` (GYST) for publishing and checks. Boards: three new user-owned GitHub Projects plus CAH's existing project, four boards in all.
 
 ## 3. Goals, non-goals, anti-goals
 
@@ -93,7 +93,7 @@ Moves and merges are mechanical and checked; splits are writing and are reviewed
 
 What exists today: GYST already has a reusable `wiki-publish.yml`. It is a transport, not a builder. The caller supplies a `generate-command` that writes the page tree; the workflow runs it with read-only permissions, then a second job with write permission pushes the tree to the wiki. It has a `publish` input that, when false, builds and uploads the tree without publishing. CAH and Scrum Around already use it with their own generators. So "call GYST" means: supply a generator and let GYST publish.
 
-- `pfsense-siem-stack` drops its local `wiki.yml` and `build-wiki.py` PAGES map and calls GYST `wiki-publish`; `siem-docker-stack` adopts it. Callers are pinned by commit with the version comment; they currently pin v1.21.0 and GYST is at v1.23.0, so the move includes a re-pin. The local GYST checkout on this machine is 80 commits behind and is not used as a source of truth.
+- `pfsense-siem-stack` drops its local `wiki.yml` and `build-wiki.py` PAGES map and calls GYST `wiki-publish`; `siem-docker-stack` adopts it. Callers are pinned by commit with the version comment; when this was drafted they pinned v1.21.0 and GYST was at v1.23.0, so the move includes a re-pin. As of 2026-10-26 this repo's own workflows pin v1.25.1 (read from the version comments in `.github/workflows`); the other repos' pins were not checked again and must be read before the re-pin. The local GYST checkout on this machine is 80 commits behind and is not used as a source of truth.
 - GYST gains, in order: a hardened builder (lift SAFO's `gen_wiki.py`, which survived four adversarial rounds), a tree gate in the publish job (regular `.md` and image files only; no hidden files, no `.git` content, no symlinks), and a build-time **identifier leak check** that prints `file:line:class` and never the value. The research found the current publish step copies hidden files and follows symlinks by path. These are potential exposures, not demonstrated leaks.
 - The leak check covers what gitleaks does not: private and CGNAT addresses, MACs, emails, internal-looking hostnames, callsign and grid shapes (context-gated), webhook URLs. Documentation ranges (203.0.113.0/24, 198.51.100.0/24, 192.0.2.0/24), example domains and the standard placeholders pass. Waivers need a reason.
 - Any generator that reads untrusted files and writes a public wiki gets a Codex adversarial review before merge, as the SAFO rules require.
@@ -119,7 +119,7 @@ More than 40 conflicts were found (watchdog location, retention default, OpenSea
 
 ## 11. Boards
 
-Four new user-owned projects, defined as code in this repo and kept current from the maintainer's own `gh` login (no App can write a user-owned project):
+Three new user-owned projects (four boards in all, with CAH's existing project 4 below), defined as code in this repo and kept current from the maintainer's own `gh` login (no App can write a user-owned project):
 - **SIEM Stack**: the five repos; areas for Suricata, pfBlockerNG, EVE forwarder, Telegraf, SIEM backends, Docker stack, SOAR and n8n, Wiki and docs, Security and scanning, Process.
 - **SIEM and CAH**: the same plus CAH, with a cross-link area.
 - **All Projects**: a read-friendly portfolio of every tracked repo (25 repositories drafted), grouped by project.
