@@ -35,6 +35,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent and Bash tools that enforce `agents.yaml` and the rule that the lead never waits (see [`docs/orchestrator.md`](docs/orchestrator.md)): warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main`. The guard and probe were released in v0.1.0; the lead-waits rule is on `main` since #77 and unreleased. The Agent-tool guard has run on real dispatches in warn mode (53 since 2026-10-09; see [Measurements](docs/measurements.md)), but the lead-waits rule has no measured hit rate yet and the disposable real-session smoke test that [`docs/hooks.md`](docs/hooks.md) asks for before `block` is not recorded as done |
 | No hidden work (the guard needs an open `issue:` in every brief; `audit` finds pull requests with no linked issue and cards missing Kind, Epic, Effort or Area; `reconcile` and `sync` list what needs a human; see [`docs/no-hidden-work.md`](docs/no-hidden-work.md)). The pull request check that fails a pull request with no `Refs #n` is a reusable workflow in git-your-ship-together and is not built here | Built and merged on `main` (#60, issue #54); unreleased, after v0.1.2 |
 | Threat model before build (`audit` and `reconcile` find issues labeled `ai-surface` with no usable `threat-model:` line; a `threat-model` routing shape; see [`docs/threat-model.md`](docs/threat-model.md)). The check that the Threat Dragon file is well formed and moves with the AI surface is a reusable workflow in git-your-ship-together and is not built here | Built and merged on `main` (#71, issue #70); unreleased, after v0.1.2 |
+| `protection` (the read-only branch-protection read-back, spec 8.5 R2(a); GET only, exit 2 when it cannot tell) | Built for #139. Not yet checked against a fully protected live repository: the field names were compared only with this repository's own (partly protected) `main`, see the pull request |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
 | Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
@@ -62,10 +63,11 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `outcome add` | Appends a finished task to the outcomes log |
 | `local run` | Sends one prompt to the local model (Ollama) that routing picks, never one that would evict a protected model |
 | `profiles verify` | Resolves every evidence pointer of the agent profiles in `agents.yaml` and prints each claim beside what it cites; checks CODEOWNERS covers the files the profiles are made from. Read-only |
+| `protection --repo OWNER/NAME` | Reads the default branch's protection back with GET requests only and exits 0 only when code-owner review, the `CI green` check, an up-to-date branch, administrators, no bypass, no force push or deletion and CODEOWNERS coverage all hold. Exit 1 names each condition that does not; exit 2 when a response cannot be read. See [Adoption](docs/adoption.md) |
 | `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard` |
 
-The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`) read
-files on a person's machine and are not allowed in the Action.
+The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `protection`) read
+files on a person's machine, or `protection` the repository's settings, and are not allowed in the Action.
 
 ## Trust boundary
 

@@ -129,6 +129,37 @@ If your repositories already call the shared workflows in
 [git-your-ship-together](https://github.com/ChiefGyk3D/git-your-ship-together), its `project-sync.yml` is a thin wrapper
 around this Action with the same inputs it always had; bump the pin.
 
+## Check the default branch's protection
+
+A code owner file is only a file until branch protection makes GitHub enforce it. `safo protection` reads the default
+branch's protection back and says which required condition does not hold. It sends GET requests only, needs read access,
+and changes nothing; you apply the protection yourself.
+
+```bash
+safo protection --repo OWNER/NAME [--agent-login AGENT]      # exit 0, 1 or 2
+```
+
+It exits 0 only when all ten conditions hold for the default branch, from the classic branch protection rule or from
+active branch rulesets (a ruleset in `evaluate` or `disabled` mode, or for tags, does not count):
+
+| Condition | Meaning |
+| --- | --- |
+| `code-owner-review` | code-owner review is required |
+| `ci-green` | the `CI green` check is required (`CI green`, or `<caller job> / CI green`) |
+| `up-to-date` | the branch must be up to date before merging, or a merge queue is on |
+| `admins-included` | administrators are included (`enforce_admins`; no ruleset bypass) |
+| `no-bypass` | no bypass allowance or bypass actor; `--agent-login` is named if that account holds one |
+| `no-force-push`, `no-deletion` | force pushes and branch deletion are off |
+| `codeowners-board-yaml`, `codeowners-codeowners-file`, `codeowners-workflows` | CODEOWNERS (read from the default branch) names an owner for `board.yaml`, `.github/CODEOWNERS` and `.github/workflows/` |
+
+Exit 1 prints a `FAIL <condition>` line for each one that does not hold; an unprotected branch (404 "Branch not
+protected", no rulesets) fails them all. Exit 2 means it could not tell: a 403 or a rate limit, a response that is not
+JSON, or any field it reads that is absent, null or the wrong type. It is never read as "nothing is set", and it is never
+exit 0. The token goes to `https://api.github.com` only (`--api-url` is for a loopback test server).
+
+This is a local mode, not part of the Action. Shared logic with the GraphQL default-branch gate read (#129) is for a
+later change; the two read different APIs and share no code today.
+
 ## A public repository on a personal account, a board in an organization
 
 Set `app-owner` to the organization and the token is minted from the organization's App installation, so a public
