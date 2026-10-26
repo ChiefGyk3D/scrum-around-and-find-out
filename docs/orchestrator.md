@@ -13,7 +13,15 @@ message gets an answer in the turn it arrives.
 3. **The maintainer's message gets an answer in the turn it arrives.** A message that lands while an agent or a background
    command runs is answered now, from what is known, not after the wait.
 4. **A hung step is reported after 5 minutes, not 20.** A step that has shown no progress for 5 minutes is a finding, not
-   something to keep watching. Say so, with the evidence, and let the maintainer decide.
+   something to keep watching. If a standing ruling covers a hung step (for example GYST issue 194, option A), act on it
+   and report; otherwise report it with evidence and a recommendation, and let the maintainer decide. This is how the rule
+   fits "act, then report": a ruling the maintainer already made is acted on, and a choice the maintainer has not made is
+   reported, not guessed.
+5. **The lead does not implement.** Code changes go to an implementer agent; the lead verifies. (2026-10-25: the lead implemented
+   code itself. Hook issue 80 tracks a warning for it.)
+6. **Never start a second watch on something already watched.** One run, one watcher. If a monitor or a background command
+   already covers it, read its result when it exits. (2026-10-25: a second watch was started on something already
+   watched. Hook issue 79 tracks flagging duplicate watches.)
 
 Sub-agents are not covered. A monitor agent is allowed to watch, because watching is its whole job; the rules are about the
 lead's main thread.
@@ -36,6 +44,9 @@ What the rules say to do instead:
 - If the run shows no progress after 5 minutes, report that and the evidence, then ask for a decision (re-run, cancel,
   look at the runner). Do not keep watching.
 
+The three additions (rules 4, 5 and 6) come from the 2026-10-25 session. Rules 5 and 6 are doctrine only: no guard
+enforces them yet, and the hook issues above are where that would be built.
+
 ## What flags it
 
 The `lead-waits` rule of `safo hooks guard` looks at the lead's Bash calls. It flags `gh run watch`, `gh pr checks` with
@@ -51,6 +62,8 @@ answer. Copy the template, fill in the angle-bracket parts, and send it with `mo
 ```
 issue: <owner/repo#N>
 local-llm: n/a - waiting on and reading a run; code and shell, no text drafting
+prior-art: <what you grepped before the task, or "n/a - no vendor involved">
+findings: any unfixed security finding stays out of public issues and synced trees (see security-findings.md)
 
 Task: watch <exact run URL or id, or exact PR number in owner/repo> and report when it finishes. Read only.
 
@@ -80,6 +93,11 @@ Why each part is there:
 - **Verbatim quotes** because a paraphrase of a failure hides the line that explains it, and the lead has to trust the
   report without re-reading the log.
 - **Hung after 5 minutes** because the failure on 2026-10-25 was watching a stuck step instead of reporting it.
+- **The `prior-art:` line** because a lesson that was written down but not searched for costs the same as one never
+  learned. When the task touches a vendor, grep memory and `~/src/*/docs` for it first and say what you found
+  ([Lessons](lessons.md)).
+- **The `findings:` line** because an agent that reads a log may meet an unfixed security finding, and where it writes it
+  down matters ([Where unfixed security findings live](security-findings.md)).
 - **Read only** because a watcher that can re-run or cancel will eventually do it unasked.
 
 ## Measured: does the guard fire?

@@ -150,6 +150,7 @@ replaced are gone.
 - [Measurements](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Measurements)
 - [Adoption](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Adoption)
 - [Privacy](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Privacy)
+- [Security-findings](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Security-findings)
 
 ## Licence
 

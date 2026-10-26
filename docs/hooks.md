@@ -38,6 +38,9 @@ lead session that waits in the foreground is flagged (`warn`) or denied (`block`
 message that says to rerun it with `run_in_background` or hand it to a Sonnet monitor agent. The message and the log carry
 the rule name only, never the command.
 
+What the guard does not decide is what to do about a hung step. That is rule 4 of [The orchestrator](orchestrator.md): if a
+standing ruling covers it, act on it and report; otherwise report it with evidence and a recommendation.
+
 A small tokenizer splits the call into simple commands, and a wait counts only at **command position**: the first word
 after leading `VAR=value` assignments, the shell keywords `do`, `then`, `else`, `if`, `!` and `{`, and these transparent
 wrappers (with their options and operands): `time`, `nohup`, `command`, `exec`, `nice`, `env`, `sudo`, `timeout`,
