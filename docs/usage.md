@@ -103,7 +103,7 @@ checked, never its verdicts.
 One JSON line per finished task: `date`, `card` (a GitHub URL or null), `agent`, `shape`, `review_rounds` (review passes, the
 passing one included), `findings` by severity (`critical`, `important`, `minor`, `unrated`), `tokens` and `requests` when
 known, and a one-line `note`. Two optional fields make agents comparable on cost against rework: `model`, the underlying
-model of the run (for example `claude-sonnet-5-5` or `gpt-5.4`; a model label: letters, digits and `. _ : -`, with single `/` between parts, at most 128, so `hf.co/org/m:Q4_K_M` is fine; it is a label and never used as a path), and
+model of the run (for example `claude-sonnet-5-5` or `gpt-5.4`; a model label: letters, digits and `. _ : -`, with single `/` between parts, at most 128, so `org/model:Q4_K_M` is fine; it is a label and never used as a path), and
 `credits_used`, the whole number of credits or premium requests the run consumed (0 to 10^12). Leave either out, or use
 null, when it is not known: records without a model or credits stay valid, and the seed file has none. They are written
 only when set, so an older line is unchanged. Any other key is refused, and so is a key repeated in any object of a
