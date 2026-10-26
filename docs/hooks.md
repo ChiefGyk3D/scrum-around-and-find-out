@@ -320,22 +320,36 @@ A hook sits inside someone's session, so every error lets the work through, visi
   the line is out prints nothing. If the load finishes but the clock is past its deadline, the re-probe and the issue
   lookup are skipped and the notice says `budget exceeded: lookups skipped`; a brief whose issue could not be verified
   then follows the usual rules (denied in block mode, flagged in warn mode).
-- Delivery is an explicit step: the whole line is one write, then a flush. If either fails (a closed or broken pipe)
-  nothing else is done: no log append, no second line, no diagnostic, because once any byte of a decision was attempted
-  nothing else is ever written to standard output. The failure goes to stderr as a fixed line, and the exit code says
-  what was lost: a denial that could not be delivered exits 2, which Claude Code reads as "block this call" (so it
+- Delivery is an explicit step: every character of the line is written (a text stream's `write()` returns how many it
+  took; a short count is written again from where it stopped, and no progress, or a return that is not a count, is a
+  failure), then it is flushed. If that fails (a closed or broken pipe) nothing else is done: no log append, no second
+  line, no diagnostic, because once any byte of a decision was attempted nothing else is ever written to standard
+  output. The guard's decision path writes NOTHING to standard error (a stderr write cannot be made safe against a
+  second writer sharing the pipe, and it was advisory; the exit code and the next dispatch's notice carry the
+  information). The one exception is the start-up warning for an invalid `SAFO_APPEND_LOCK_TIMEOUT`, an operator
+  misconfiguration, written once at import. The tests that run the guard as a real process use `posix_spawn` (POSIX
+  only); none of them needs `/proc`. The exit code says what was lost: a denial that could not be delivered exits 2, which Claude Code reads as "block this call" (so it
   never fails open); any other undelivered line exits 1, a non-blocking error. This is the one case where the guard
   exits 2. That the host treats exit 2 as a block and exit 1 as non-blocking is the host's documented hook contract,
   not verified by a test here. A failure in the diagnostic path is caught and becomes the same exit code.
-- The invariant for background work, stated exactly: no abandoned worker writes AUDIT or DECISION state (the log, the
-  log-failed marker, the first-notice flag, the quarantine of a corrupt log); those are written only by the calling
-  thread, after the decision is delivered. Probe and health caches (the re-probe's lock file, its `.attempt` marker, the
-  saved probe state, the `.repo` modification time) are hints: they can only change the NEXT dispatch's notice or
-  health, never a verdict. Every abandonable worker has an `abandoned` flag that the guard sets when it gives up on it,
-  and each write the re-probe makes (the `.attempt` marker, the probe-state save, a clean-up unlink) re-checks the flag
-  immediately before it happens, so a worker released late writes nothing. A write already in flight at the moment of
-  abandonment still completes; that is the residual. The `.repo` modification-time refresh is not done by a worker at
-  all: it is made by the calling thread after the line is delivered, best effort.
+- The invariant for background work, stated exactly. Two kinds of worker thread exist, and both have an `abandoned`
+  flag that the guard sets when it gives up waiting for them. (1) Pre-decision workers (the config load, the state and
+  mode reads, the re-probe) may write only probe and health caches: the re-probe's lock file, its `.attempt` marker and
+  the saved probe state. Those are hints that can change the NEXT dispatch's notice or health, never a verdict. Each of
+  those writes, and the creation of the lock file and its directory, re-checks the flag immediately before it
+  happens, so a worker released late creates and writes nothing. (2) The single post-delivery worker does the audit
+  and decision writes, and only after the line is out: the refresh of the `.repo` modification time (a hint), the
+  clear of the log-failed marker whose notice was in the line, the claim of the probe notice, the log append and the
+  recording of a failed append. It is joined until just past the hard limit (so a wedged call cannot keep the
+  process alive past the host's timeout, which would discard the delivered decision) and is then abandoned; it
+  re-checks its flag before each step, so once it is abandoned no further audit or decision write begins. A step
+  already in flight at the moment of abandonment completes, or dies with the process, which is about to exit; that
+  is the residual. A wedged append therefore leaves no log-failed marker: the next dispatch cannot report it.
+  The full inventory of writes: BEFORE the decision, only the hint writes of the re-probe (lock file, attempt marker,
+  probe-state lock and replace, and its clean-up unlink); AFTER the delivered line, in the post-delivery worker:
+  the `.repo` utime, the marker clear or junk removal (rename to a side name, delete, put back), the side-object
+  pruning, the notice claim, the log lock, the append and any quarantine of a corrupt log, and the log-failed temp
+  file, install and blocker removal.
 - The verdict never depends on state writes. Everything that touches the state folder before the verdict (the saved
   probe state, the re-probe's lock and `.attempt` marker, the probe, the save of the probe state, and the pure read of
   the bound repository) runs under a bound, in a daemon worker thread
@@ -354,22 +368,17 @@ A hook sits inside someone's session, so every error lets the work through, visi
 - Between a computed decision and its emit, the only other state-folder work is a READ-ONLY check of the first-notice
   flag (when the probe is not healthy) and a READ-ONLY inspection of the log-failed marker, under the same bound (at most
   1.0 s, at least 0.25 s, not past the hard limit). The worker changes nothing. The flag is claimed, and any junk at the
-  marker name removed, by the calling thread only after the line that carries that notice was delivered; an undelivered
+  marker name removed, by the post-delivery worker only after the line that carries that notice was delivered; an undelivered
   line, or a process killed between the emit and the claim, leaves both as they were, so the notice or the marker
   comes back on the next dispatch. If the check does not finish it is skipped: the decision goes out WITHOUT those
   notices, with the fixed text `notices skipped: state folder slow`, and the flag and the marker are left as they
   were; an abandoned worker that finishes later creates nothing and leaves no descriptor open. The once-per-session
   probe notice appears only while it is unclaimed: another notice in the same line does not bring it back.
-- Standard error: no line is written to it before the decision is out, and a line written afterwards never blocks. The
-  descriptor's flags are never touched (an inherited pipe shares its open file description with the host). The
-  descriptor is polled for POLLOUT with a zero timeout, and one write of at most 512 bytes (below PIPE_BUF, which a
-  writable pipe takes whole) is made only if it is writable; a full pipe, a gone reader, a short count or an error
-  drops the line, with no retry. A descriptor that cannot be polled (a file, some terminals) is written normally. A computed denial is recorded when the verdict is computed, so an unexpected
-  failure anywhere between the verdict and the emit exits 2 (block) instead of falling through to a generic
-  diagnostic and exit 0.
+- A computed denial is recorded when the verdict is computed, so an unexpected failure anywhere between the verdict and
+  the emit exits 2 (block) instead of falling through to a generic diagnostic and exit 0.
 - Because the decision is printed before the log is touched, a failed or skipped log write can no longer appear in the
-  same JSON line. Persistence is best effort and catches any exception (not only I/O errors). It is reported on standard
-  error, and by a small marker file (`log-failed` in the state folder) that the NEXT guard run reads and reports as
+  same JSON line. Persistence is best effort and catches any exception (not only I/O errors). It is reported by a small
+  marker file (`log-failed` in the state folder) that the NEXT guard run reads and reports as
   `previous log write failed` in its own line (log diagnostic `log-write`). The marker is opened relative to a
   descriptor of the state folder (checked on the descriptor: ours, not writable by others), never blocks, never follows
   a link, and must be a regular file of ours. The first install of a failure is an atomic rename of a fresh file (new
@@ -377,10 +386,10 @@ A hook sits inside someone's session, so every error lets the work through, visi
   inode, mode, modification time in ns, size) and removes the marker only if it still has that identity, so a failure
   written by another run in between is kept and reported next. If the rename fails because a directory is in the way,
   only that observed blocker is removed; only if the removal really happened is the install retried, and then with a
-  hard link, which never overwrites. Where the filesystem has no hard links (EPERM, EOPNOTSUPP, ENOTSUP, EXDEV or
-  ENOSYS) the retry is a checked rename instead: nothing may be at the name just before, and the name must hold a marker
-  afterwards; that keeps a tiny race (a marker created between the check and the rename is overwritten) on such
-  filesystems only. If the blocker was replaced meanwhile, the newer marker is left alone, this run's
+  hard link, which never overwrites. There is NO rename fallback: where the filesystem has no hard links (EPERM,
+  EOPNOTSUPP, ENOTSUP, EXDEV, ENOSYS) or the name is taken (EEXIST) the retry installs nothing, this run's temp file is
+  dropped, and the failure is not recorded until the blocker is gone by hand (the decision is unaffected); a rename
+  would overwrite a newer marker, and a look at the name before it is a race. If the blocker was replaced meanwhile, the newer marker is left alone, this run's
   temp file is dropped, and the failure counts as recorded because a marker exists. Junk at the name (directory, FIFO,
   link, foreign or loose-mode file) is removed after the line is delivered, by one look, an atomic rename to a unique
   side name, and a second look at the MOVED object: only an object that still has the observed identity is deleted
@@ -388,8 +397,12 @@ A hook sits inside someone's session, so every error lets the work through, visi
   is not empty stays under its side name and the answer is False. At most 8 side objects (hidden entries named after the marker, with a random suffix) are
   kept: empty directories and our own regular files among them are pruned first, and at the cap nothing more is moved
   aside, so repeated planting cannot grow the folder without bound. Anything else that was moved is put back without
-  overwriting (a hard link, or the checked rename above) or, if it cannot be put back, left under its side name; a
-  non-matching object is never deleted. It is reported once as `log-failed marker unusable` (in that line, and on stderr). Remaining windows,
+  overwriting (a hard link) and, if it cannot be put back (the name is taken, or there are no hard links), it is KEPT
+  under its side name, never deleted. Side objects are pruned only when they are older than five minutes (by ctime,
+  which a rename updates, so one a live run has just moved aside is never old) and are named exactly as the guard names
+  them (pid and a random id), and then only an empty directory or a regular file that is ours; links, FIFOs, other
+  names and directories with content are never pruned (they still count toward the cap). The junk is reported once as
+  `log-failed marker unusable` (in that line). Remaining windows,
   all inside the same-user residual (#61): between the first look and the rename a replacement is briefly moved aside,
   so a concurrent reader can miss a marker for a moment; the five-field identity tuple is best effort (a recycled inode, or a
   filesystem with coarse timestamps, could repeat it); and a failure landing between a marker's identity check and its removal by a clear can still be lost. A
@@ -481,7 +494,7 @@ Budget: the host gives the guard 10 s, and the guard runs on one clock from the 
 is written and flushed first. The append then waits for the lock for the setting or for what is left until 9 s,
 whichever is less. If less than 0.05 s is left, or the clock is already past 9 s, the append is skipped: it is never
 started late and never stretched past 9 s. A longer setting therefore does not extend the hook. A skipped or failed
-append is reported on stderr and, on the next guard run, as `previous log write failed` (see Failing safe). The
+append is reported, on the next guard run, as `previous log write failed` (see Failing safe). The
 configuration load and the notice I/O are bounded in wall time (see Failing safe). A hook killed at the host's
 timeout is fail-open and its output is discarded unless the hook entry sets `onFailure: "block"` (SAFO #130). The append itself is not interruptible once it holds the lock (fsync can block). The
 other lock users (mode, probe state) keep their 0.5 s wait.

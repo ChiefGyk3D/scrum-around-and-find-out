@@ -990,16 +990,16 @@ def test_the_older_task_tool_name_is_guarded_too(_private_home: Path, agents: Pa
 
 
 def test_a_log_that_cannot_be_written_does_not_change_the_decision(
-    _private_home: Path, agents: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    _private_home: Path, agents: Path, tmp_path: Path
 ) -> None:
     set_mode(_private_home, "block")
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("x")
     code, out, _ = guard(_private_home, agents, dispatch(model=None), env={"XDG_STATE_HOME": str(blocker)})
-    err = capsys.readouterr().err
     assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-    # The decision is printed before the append, so a failed append is no longer in the same line: stderr says it.
-    assert "log write failed" in err and "log-write" not in out
+    # The decision is printed before the append, so a failed append is no longer in the same line (and the guard
+    # writes nothing to stderr); with no usable state folder there is no marker either.
+    assert "log-write" not in out
 
 
 def test_the_log_moves_aside_when_it_grows_past_its_limit(tmp_path: Path) -> None:

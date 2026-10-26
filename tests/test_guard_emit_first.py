@@ -1570,3 +1570,42 @@ def test_side_entries_that_are_links_or_fifos_count_toward_the_cap_and_are_never
         os.close(dfd)
     assert where.is_dir(), "at the cap nothing more is moved aside"
     assert not (tmp_path / "elsewhere").exists()
+
+
+# -- the post-delivery worker is abandonable too: once abandoned it starts no audit or decision write ---------------
+
+
+def test_an_abandoned_post_delivery_worker_starts_no_audit_or_decision_write(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flag = unhealthy(_private_home, agents)  # an unclaimed probe notice: a claim is due after the line
+    mod.write_log_failed(state_folder(_private_home))  # a pending marker: a clear is due after the line
+    repo_file = probe_file(_private_home, agents)
+    repo_file = repo_file.with_name(repo_file.name + ".repo")
+    repo_file.write_text('{"repo": "acme/widgets"}')  # a bound repository: the hint step is due, and is held
+    repo_file.chmod(0o600)
+    monkeypatch.setattr(mod, "GUARD_TIMEOUT_SECONDS", 3)
+    monkeypatch.setattr(mod, "POST_GRACE_SECONDS", 0.1)
+    gate = Gate()
+    monkeypatch.setattr(mod, "refresh_bound_repo", gate.wrap(core.refresh_bound_repo))
+    started: list[str] = []
+    for name in ("append_log", "claim_notice", "clear_log_failure", "write_log_failed"):
+        real = getattr(mod, name)
+
+        def recorded(*args: Any, _name: str = name, _real: Any = real, **kwargs: Any) -> Any:
+            started.append(_name)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(mod, name, recorded)
+    out = Stream()
+    mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents))
+    assert gate.reached.is_set(), "the post-delivery worker was held at its first step"
+    assert mod.LOG_FAILED_NOTICE in out.buffered, "so the clear and the claim were due"
+    before = tree(state_folder(_private_home))
+    gate.release.set()
+    assert gate.worker is not None
+    gate.worker.join(10)
+    assert not gate.worker.is_alive()
+    assert started == [], "after abandonment: no append, no marker write or clear, no notice claim"
+    assert tree(state_folder(_private_home)) == before, "and no file or directory changed"
+    assert marker(_private_home).exists() and not flag.exists()

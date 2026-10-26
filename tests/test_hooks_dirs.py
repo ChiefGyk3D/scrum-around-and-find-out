@@ -43,20 +43,18 @@ def test_the_state_and_config_directories_are_made_private_whatever_the_umask(
 
 @pytest.mark.parametrize("bad", [0o775, 0o757, 0o777, 0o770])
 def test_a_group_or_world_writable_state_folder_degrades_the_guard_visibly_and_is_not_used(
-    _private_home: Path, bad: int, capsys: pytest.CaptureFixture[str]
+    _private_home: Path, bad: int
 ) -> None:
     set_probe(_private_home, reachable=True)
     state_folder(_private_home).chmod(bad)
     code, out, _ = guard(_private_home)
-    err = capsys.readouterr().err
     data = json.loads(out)
     assert code == 0 and WARNING in data["systemMessage"]
     assert not (state_folder(_private_home) / "log.jsonl").exists(), "nothing is written into an untrusted folder"
     assert not list(state_folder(_private_home).glob("*.lock")), "no lock is made there either"
     assert not (state_folder(_private_home) / "log-failed").exists(), "no marker either: the folder is not trusted"
-    # The state is distrusted (unknown health), which is what the line shows; the failed append is reported on stderr,
-    # after the line, because the decision is written before the log is touched.
-    assert "log write failed" in err
+    # The state is distrusted (unknown health), which is what the line shows; the failed append cannot be reported
+    # (the guard writes nothing to stderr and an untrusted folder holds no marker).
 
 
 def test_an_untrusted_state_folder_is_not_read_for_the_probe_state_or_the_log(_private_home: Path) -> None:

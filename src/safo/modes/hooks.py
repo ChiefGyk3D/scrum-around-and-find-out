@@ -420,27 +420,34 @@ def emit_then_persist(
     refresh: Path | None = None,
 ) -> None:
     """The one tail of every guard path. The decision (`data`, or nothing to say) is written and flushed FIRST. If that
-    fails nothing else is done; the caller turns it into the exit code. Everything after the line is out (clear the
-    marker whose notice was in it, claim the probe notice, refresh the binding's age, append the log, record a failed
-    append) runs in ONE post-delivery worker that is joined only until just past the hard limit and then left behind:
+    fails nothing else is done; the caller turns it into the exit code. Everything after the line is out (refresh the
+    binding's age, clear the marker whose notice was in it, claim the probe notice, append the log, record a failed
+    append) runs in ONE post-delivery worker that is joined only until just past the hard limit and then abandoned:
     the host's timeout would discard a decision from a hook that has not exited, so a wedged filesystem call here must
-    not keep the process alive (a daemon thread does not delay interpreter exit). The append waits no longer than the
-    setting and never past `run.hard` (skipped when less than MIN_LOG_WAIT_SECONDS is left). A failed or skipped append
-    leaves a marker that the next guard run reports; it can never change or follow the line already written."""
+    not keep the process alive (a daemon thread does not delay interpreter exit). The worker re-checks its abandoned
+    flag before each step, so once it is abandoned no further audit or decision write begins. The append waits no
+    longer than the setting and never past `run.hard` (skipped when less than MIN_LOG_WAIT_SECONDS is left). A failed
+    or skipped append leaves a marker that the next guard run reports; it can never change or follow the line already
+    written."""
     if data is not None and not emit(ctx, run, data):
         return
     delivered = data is not None
 
     def after(abandoned: threading.Event) -> None:
-        if delivered and clear_marker is not None:  # its notice is in the line just delivered; clear that marker only
-            with contextlib.suppress(Exception):
-                clear_log_failure(folder, clear_marker)
-        if delivered and claim is not None:  # the probe notice was in the delivered line: only now is it used up
-            with contextlib.suppress(Exception):
-                claim_notice(claim)
-        if refresh is not None:  # keep the session's repository binding out of the prune: a hint
+        # Every step re-checks the abandoned flag just before it starts (the hint first, so a wedged hint cannot hold
+        # the audit and decision writes hostage and a late release writes none of them). A step already in flight at
+        # abandonment completes, or dies with the process, which is about to exit.
+        if refresh is not None and not abandoned.is_set():  # keep the binding out of the prune: a hint
             with contextlib.suppress(Exception):
                 refresh_bound_repo(refresh)
+        if delivered and clear_marker is not None and not abandoned.is_set():  # its notice was in the line
+            with contextlib.suppress(Exception):
+                clear_log_failure(folder, clear_marker)
+        if delivered and claim is not None and not abandoned.is_set():  # the probe notice was in the delivered line
+            with contextlib.suppress(Exception):
+                claim_notice(claim)
+        if abandoned.is_set():
+            return
         try:
             if folder is None:
                 raise OSError("log unavailable")
@@ -449,8 +456,9 @@ def emit_then_persist(
                 raise TimeoutError("out of time")
             append_log(folder / guardlog.LOG_NAME, record, lock_timeout=wait)
         except Exception:
-            with contextlib.suppress(Exception):
-                write_log_failed(folder)
+            if not abandoned.is_set():
+                with contextlib.suppress(Exception):
+                    write_log_failed(folder)
 
     left = (run.hard - time.monotonic()) if run.hard is not None else APPEND_LOCK_TIMEOUT + 1.0
     with contextlib.suppress(Exception):
