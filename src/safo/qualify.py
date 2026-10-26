@@ -6,9 +6,11 @@ so the result does not depend on the order of the log:
 
 - scope: with no model, all of the agent's records, deduplicated on (agent, card); with a model, only that model's
   records, deduplicated on (agent, model, card);
-- records of one key that agree on every material field (date, shape, review rounds, findings, model) collapse to
+- records of one key that agree on every material field (date, shape, review rounds, findings, model, outcome) collapse to
   one; if they disagree on any, the key is a conflict and none of its records counts. Duplicates are judged before
   the other rules, so a copy that differs only in its review rounds still voids the key;
+- an abandoned record (outcome `abandoned`) never counts; its outcome is a material field, so it never collapses
+  with an accepted record of the same card (that pair is a conflict);
 - a surviving record counts when it has a review round and a date within the window, today included, no later than
   today.
 
@@ -35,6 +37,7 @@ FUTURE = "future date"
 OUTSIDE_WINDOW = "outside the window"
 DUPLICATE = "duplicate of a counted record"
 CONFLICT = "conflicting duplicates"
+ABANDONED = "abandoned task"
 
 
 @dataclass(frozen=True)
@@ -47,7 +50,7 @@ class Qualification:
 
 
 def _material(o: Outcome) -> tuple[object, ...]:
-    return (o.date, o.shape, o.review_rounds, tuple(sorted(o.findings.items())), o.model)
+    return (o.date, o.shape, o.review_rounds, tuple(sorted(o.findings.items())), o.model, o.outcome)
 
 
 def qualify(
@@ -95,7 +98,9 @@ def qualify(
     counted: list[Outcome] = []
     for o in survivors:
         day = dt.date.fromisoformat(o.date)
-        if o.review_rounds < 1:
+        if o.abandoned:
+            rejected[ABANDONED] += 1
+        elif o.review_rounds < 1:
             rejected[NO_REVIEW] += 1
         elif day > today:
             rejected[FUTURE] += 1

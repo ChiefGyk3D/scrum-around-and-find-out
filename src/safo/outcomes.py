@@ -29,7 +29,21 @@ from safo.guardlog import APPEND_LOCK_TIMEOUT, bounded_read, file_lock, write_te
 SEVERITIES = ("critical", "important", "minor", "unrated")
 CARD = re.compile(r"https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:issues|pull)/[0-9]{1,9}")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")  # an identifier, plus the `:` of an Ollama tag (gemma4:12b)
+# A model LABEL, never used as a path: segments of letters, digits and . _ : - joined by single `/` (an Ollama tag
+# `gemma4:12b`, a registry name `hf.co/org/m:Q4_K_M`); starts alphanumeric, no `..` and no `.` segment, at most 128.
+MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*(?:/[A-Za-z0-9._:-]+)*")
+MAX_MODEL = 128
+
+
+def valid_model(name: object) -> bool:
+    """True when `name` can be recorded as the `model` field."""
+    return (
+        isinstance(name, str)
+        and len(name) <= MAX_MODEL
+        and MODEL.fullmatch(name) is not None
+        and ".." not in name
+        and "." not in name.split("/")
+    )
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 COUNT = re.compile(r"[0-9]{1,9}")
 NOTE_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")  # any control or line-break character
@@ -71,6 +85,11 @@ class Outcome:
     def to_json(self) -> str:
         data = {k: v for k, v in self.__dict__.items() if v is not None or k not in OPTIONAL_KEYS}  # unset: no key
         return json.dumps(data, sort_keys=True)  # ASCII only: no Unicode line break can split a record
+
+    @property
+    def abandoned(self) -> bool:
+        """A task that was dropped. Until a report defines them, no measure counts it as a finished task."""
+        return self.outcome == "abandoned"
 
     @property
     def finding_count(self) -> int:
@@ -139,8 +158,10 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_COUNT):
             raise ConfigError(f"{where}.{key}: expected an integer >= 0 or null")
     model = raw.get("model")
-    if model is not None and not (isinstance(model, str) and MODEL.fullmatch(model)):
-        raise ConfigError(f"{where}.model: expected a string of letters, digits, . _ : - (at most 64), or null")
+    if model is not None and not (valid_model(model)):
+        raise ConfigError(
+            f"{where}.model: expected a label of letters, digits, . _ : - with single / between parts (at most 128), or null"
+        )
     credits = raw.get("credits_used")
     if credits is not None and (
         isinstance(credits, bool) or not isinstance(credits, int) or not 0 <= credits <= MAX_COUNT
@@ -249,7 +270,7 @@ def summarise(outcomes: list[Outcome], month: str) -> list[AgentSummary]:
         raise ConfigError("month: expected YYYY-MM") from None
     groups: dict[str, list[Outcome]] = defaultdict(list)
     for o in outcomes:
-        if o.date.startswith(month):
+        if o.date.startswith(month) and not o.abandoned:
             groups[o.agent].append(o)
     out = []
     for agent, rows in sorted(groups.items()):
@@ -272,6 +293,19 @@ def summarise(outcomes: list[Outcome], month: str) -> list[AgentSummary]:
 
 
 UNKNOWN_MODEL = "unknown"
+
+
+def count_abandoned(outcomes: list[Outcome], month: str) -> dict[str, int]:
+    """Abandoned records dated in `month`, per agent: shown apart, never mixed into a measure."""
+    try:
+        valid_month(month)
+    except ValueError:
+        raise ConfigError("month: expected YYYY-MM") from None
+    counts: dict[str, int] = defaultdict(int)
+    for o in outcomes:
+        if o.abandoned and o.date.startswith(month):
+            counts[o.agent] += 1
+    return dict(sorted(counts.items()))
 
 
 @dataclass(frozen=True)
@@ -306,7 +340,7 @@ def summarise_models(outcomes: list[Outcome], month: str) -> list[ModelSummary]:
         raise ConfigError("month: expected YYYY-MM") from None
     groups: dict[tuple[str, str], list[Outcome]] = defaultdict(list)
     for o in outcomes:
-        if o.date.startswith(month):
+        if o.date.startswith(month) and not o.abandoned:
             groups[(o.agent, o.model or UNKNOWN_MODEL)].append(o)
     out = []
     for (agent, model), rows in sorted(groups.items()):
@@ -403,7 +437,9 @@ def query_outcomes(outcomes: list[Outcome], span: str, agent: str, model: str | 
     """
     first, last = month_span(span)
     rows = [
-        o for o in outcomes if o.agent == agent and (model is None or o.model == model) and first <= o.date[:7] <= last
+        o
+        for o in outcomes
+        if o.agent == agent and not o.abandoned and (model is None or o.model == model) and first <= o.date[:7] <= last
     ]
     values: dict[str, Fraction | None] = dict.fromkeys(METRICS)
     if rows:

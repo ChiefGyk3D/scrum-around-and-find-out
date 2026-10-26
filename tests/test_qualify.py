@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import itertools
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -168,3 +169,21 @@ def test_every_rejection_is_reported_with_a_count_in_a_stable_order() -> None:
     rows = [rec(1, card=None), rec(2, rounds=0), rec(3, date=days_ago(400)), rec(4, date=days_ago(-5))]
     r = run(rows)
     assert r.rejected == tuple(sorted(r.rejected)) and sum(n for _, n in r.rejected) == 4
+
+
+def _abandon(o: Outcome) -> Outcome:
+    return replace(o, outcome="abandoned", review_rounds=0)
+
+
+def test_abandoned_records_never_count_toward_promotion() -> None:
+    rows = [*spread(9, 9), _abandon(rec(40)), _abandon(rec(41)), replace(rec(42), outcome="accepted")]
+    r = run(rows)
+    assert r.counted == 10 and reasons(r) == {q.ABANDONED: 2}
+    assert not run([*spread(8, 8), _abandon(rec(40)), _abandon(rec(41))]).qualified
+
+
+def test_an_abandoned_record_on_the_same_card_never_collapses_with_an_accepted_one() -> None:
+    both = [rec(1, date=days_ago(2)), replace(rec(1, date=days_ago(2)), outcome="abandoned")]
+    r = run(both)
+    assert r.counted == 0 and reasons(r) == {q.CONFLICT: 2}, "different outcomes are not duplicates"
+    assert all(run(list(p)).counted == 0 for p in itertools.permutations(both))

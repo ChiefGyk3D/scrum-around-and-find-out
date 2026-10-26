@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -296,7 +297,7 @@ def test_good_model_names(model: str) -> None:
     "model",
     [
         "", "two words", "line\nbreak", "line\rbreak", "tab\there", "sep\u2028arator", "para\u2029graph", "nel\x85x",
-        "nul\x00", "caf\u00e9", "\uff47pt", "x" * 65, ".leading-dot", "-dash", "a/b", "a;b", 'q"uote', 5, 1.5, True,
+        "nul\x00", "caf\u00e9", "\uff47pt", "x" * 129, ".leading-dot", "-dash", "a;b", 'q"uote', 5, 1.5, True,
         ["a"], {"a": 1},
     ],
 )  # fmt: skip
@@ -453,3 +454,50 @@ def test_model_names_may_carry_an_ollama_tag() -> None:
     assert outcomes.validate({**GOOD, "model": "gemma4:12b"}).model == "gemma4:12b"
     with pytest.raises(ConfigError, match="model: expected"):
         outcomes.validate({**GOOD, "model": ":12b"})
+
+
+# ---- round 2: model labels, and abandoned records stay out of every measure ----
+
+def test_the_closed_set_of_outcome_values() -> None:
+    assert outcomes.OUTCOME_VALUES == ("accepted", "abandoned")
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["hf.co/org/m:Q4_K_M", "a/b", "registry.example/ns/model:7b-q4", "m" * 128, "a" + "/b" * 63],
+)
+def test_a_model_label_may_have_single_slashes(label: str) -> None:
+    assert outcomes.validate({**GOOD, "model": label}).model == label
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["/a", "a/", "a//b", "a/../b", "..", "a..b", "a/./b", "a@sha256", "m" * 129, "a/" + "b" * 127, "a b/c", "a\\b",
+     "a/b\n", "caf\u00e9/x", "-a/b", ".a/b"],
+)  # fmt: skip
+def test_a_model_label_is_never_a_path_or_free_text(label: str) -> None:
+    with pytest.raises(ConfigError, match="model: expected"):
+        outcomes.validate({**GOOD, "model": label})
+    assert outcomes.valid_model(label) is False
+
+
+def _ab(n: int, outcome: str | None, rounds: int = 1) -> outcomes.Outcome:
+    return outcomes.validate(
+        {**GOOD, "card": f"https://github.com/acme/widgets/pull/{n}", "review_rounds": rounds, "findings": {},
+         "outcome": outcome, "model": "m", "credits_used": 10}
+    )  # fmt: skip
+
+
+def test_abandoned_records_are_excluded_from_every_measure() -> None:
+    rows = [_ab(1, "abandoned", 0), _ab(2, "abandoned", 0), _ab(3, None, 3), _ab(4, "accepted", 1)]
+    q = outcomes.query_outcomes(rows, "2026-10", "copilot")
+    assert q.records == 2 and q.value("runs") == 2 and q.value("rounds_per_run") == 2
+    assert q.value("credits_per_run") == 10 and q.value("fix_share") == Fraction(1, 2)
+    [s] = outcomes.summarise(rows, "2026-10")
+    assert s.tasks == 2 and s.review_rounds == 4
+    [m] = outcomes.summarise_models(rows, "2026-10")
+    assert m.runs == 2 and m.credits_total == 20
+    only = [_ab(1, "abandoned", 0)]
+    assert outcomes.query_outcomes(only, "2026-10", "copilot").value("runs") is None
+    assert outcomes.summarise(only, "2026-10") == [] and outcomes.summarise_models(only, "2026-10") == []
+    assert outcomes.count_abandoned(rows, "2026-10") == {"copilot": 2}

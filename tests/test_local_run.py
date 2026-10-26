@@ -259,3 +259,49 @@ def test_a_hostile_reported_name_is_escaped_and_capped_in_the_error(_private_hom
     assert out.count("\n") == 1, "one line only"
     assert "\x1b" not in out and "\u2028" not in out and "::set-output" not in out and "z" * 100 not in out
     assert "\\x0a" in out or "\\n" in out  # repr or escape: never a raw newline inside the line
+
+
+def _run_with_routed(home: Path, tmp_path: Path, routed: str, answered: object = None) -> tuple[int, str, Path, str]:
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x")
+    log = tmp_path / "o.jsonl"
+    models = ["resident-12b-thinking", routed]
+    with FakeOllama(models, models).serve() as a, FakeOllama(B_MODELS, B_MODELS).serve() as b:
+        agents = write_agents(tmp_path / "agents.yaml", a.url, b.url)
+        agents.write_text(agents.read_text().replace("small-4b-agent", json.dumps(routed)))
+        a.answer_model = routed if answered is None else answered
+        code, out, _ = local_run("ci-log-summary", prompt, agents, log, home)
+        sent = a.generates[0]["model"] if a.generates else ""
+    return code, out, log, sent
+
+
+@pytest.mark.parametrize("routed", ["hf.co/org/m:Q4_K_M", "m" * 129, "a/b/" + "c" * 200])
+def test_a_routed_model_that_cannot_be_a_label_is_recorded_as_null_with_the_name_in_the_note(
+    _private_home: Path, tmp_path: Path, routed: str
+) -> None:
+    code, out, log, sent = _run_with_routed(_private_home, tmp_path, routed)
+    row = json.loads(log.read_text())
+    assert code == 0 and sent == routed and "A short answer." in out and "error" not in out
+    if routed.startswith("hf.co"):
+        assert row["model"] == routed, "a slashed label is recordable"
+    else:
+        assert "model" not in row and routed[:60] in row["note"] and routed not in row["note"], "capped"
+
+
+def test_a_non_recordable_name_with_control_characters_is_escaped_in_the_note(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    routed = "bad\x1b[0m::name"
+    code, out, log, _ = _run_with_routed(_private_home, tmp_path, routed)
+    row = json.loads(log.read_text())
+    assert code == 0 and "model" not in row and "\\x1b" in row["note"] and "\x1b" not in row["note"]
+    assert "::name" not in row["note"] and "A short answer." in out
+
+
+def test_the_latest_tag_is_ignored_in_both_directions(_private_home: Path, tmp_path: Path) -> None:
+    for answered in ("m1:latest", "m1"):
+        code, _, log, _ = _run_with_routed(_private_home, tmp_path, "m1:latest", answered)
+        assert code == 0 and json.loads(log.read_text())["model"] == "m1:latest"
+        log.unlink()
+    code, _, log, _ = _run_with_routed(_private_home, tmp_path, "m1:latest", "m1:7b")
+    assert code == 3 and not log.exists()

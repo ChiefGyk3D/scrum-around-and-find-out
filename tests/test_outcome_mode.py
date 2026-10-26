@@ -162,7 +162,7 @@ def test_hostile_model_and_credits_flags_never_reach_the_log(_private_home: Path
     log = tmp_path / "o.jsonl"
     base = ["outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log)]
     for extra in (
-        ["--model", "two words"], ["--model", "a\nb"], ["--model", "a\u2028b"], ["--model", "x" * 65], ["--model", ""],
+        ["--model", "two words"], ["--model", "a\nb"], ["--model", "a\u2028b"], ["--model", "x" * 129], ["--model", ""],
         ["--credits-used", "-1"], ["--credits-used", str(10**13)],
     ):  # fmt: skip
         code, _, err = cli(*base, *extra, home=_private_home)
@@ -219,3 +219,35 @@ def test_dry_run_with_the_new_flags_writes_nothing(_private_home: Path, tmp_path
     assert code == 0 and "nothing written" in out and not log.exists()
     code, _, _ = cli(*base, "--attempts", "0", home=_private_home)
     assert code != 0 and not log.exists()
+
+
+def test_an_abandoned_record_gets_no_fabricated_review_round(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    assert _add(log, _private_home, "--outcome", "abandoned")[0] == 0
+    assert _add(log, _private_home, "--outcome", "abandoned", "--review-rounds", "2")[0] == 0
+    assert _add(log, _private_home, "--outcome", "accepted")[0] == 0
+    assert _add(log, _private_home)[0] == 0
+    rounds = [json.loads(x)["review_rounds"] for x in log.read_text().splitlines()]
+    assert rounds == [0, 2, 1, 1]
+
+
+def test_a_model_label_with_slashes_is_accepted_by_outcome_add(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    assert _add(log, _private_home, "--model", "hf.co/org/m:Q4_K_M")[0] == 0
+    assert json.loads(log.read_text())["model"] == "hf.co/org/m:Q4_K_M"
+    assert _add(log, _private_home, "--model", "a//b")[0] == 2
+
+
+def test_usage_report_excludes_abandoned_and_shows_them_apart(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    for extra in (["--outcome", "abandoned"], ["--outcome", "abandoned"], ["--review-rounds", "2"]):
+        assert _add(log, _private_home, "--date", "2026-10-07", *extra)[0] == 0
+    code, out, _ = cli("usage", "--report", "--month", "2026-10", "--log", str(log), home=_private_home)
+    assert code == 0 and "1 tasks, 1 needed fixes, 2 review rounds" in out and "abandoned: codex 2" in out
+    code, out, _ = cli("usage", "--report", "--json", "--month", "2026-10", "--log", str(log), home=_private_home)
+    data = json.loads(out)
+    assert data["agents"][0]["tasks"] == 1 and data["abandoned"] == {"codex": 2}
+    only = tmp_path / "only.jsonl"
+    assert _add(only, _private_home, "--date", "2026-10-07", "--outcome", "abandoned")[0] == 0
+    code, out, _ = cli("usage", "--report", "--month", "2026-10", "--log", str(only), home=_private_home)
+    assert "nothing recorded" in out and "abandoned: codex 1" in out

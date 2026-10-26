@@ -72,6 +72,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             ctx.say(f"skipped: {line}")
         ctx.say(f"no local endpoint can take this: hand it to {fallback} instead (nothing was sent)")
         return EXIT_DRIFT
+    label = model if outcomes.valid_model(model) else None  # decided before anything is sent; never fail after the answer
     think = endpoint.think if args.think is None else args.think
     num_ctx = args.num_ctx or endpoint.ctx_for(model)
     try:
@@ -99,8 +100,11 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
         return EXIT_MODEL_MISMATCH
     output.block(ctx.out, result.response.rstrip("\n").split("\n"))  # untrusted text: inside a stop-commands block
     speed = f"{result.tokens_per_second:g} tok/s" if result.tokens_per_second else "speed unknown"
+    shown = output.line(model)[:MAX_SHOWN]  # the routed name in the note: escaped and capped
+    if label is None:
+        shown = f"{shown} (not recordable as a model label)"
     note = (
-        f"{endpoint.id} {model} think={str(think).lower()} num_ctx={num_ctx}: "
+        f"{endpoint.id} {shown} think={str(think).lower()} num_ctx={num_ctx}: "
         f"{result.eval_count} eval tokens, {speed}; "
         "a draft until a Claude model reviews it"
     )
@@ -116,7 +120,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             result.eval_count + result.prompt_eval_count,
             1,
             note,
-            model,
+            label,
         ),
         check_dir=outcomes_is_default(ctx, args),
     )
