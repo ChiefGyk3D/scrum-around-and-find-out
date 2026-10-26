@@ -1623,10 +1623,14 @@ def test_r4_neither_the_hook_output_nor_the_log_carries_the_command_for_any_kind
     set_mode(_private_home, mode)
     out = guard(_private_home, agents, bash(command))[1]
     assert out, kind
-    log_text = (_private_home / ".local/state/safo/hooks/log.jsonl").read_text()
+    log_file = _private_home / ".local/state/safo/hooks/log.jsonl"
+    skipped = kind == "unscannable-timeout"  # out of time at once: the decision is printed, the append is skipped
+    log_text = log_file.read_text() if log_file.exists() else ""
+    assert skipped == (not log_file.exists()), kind
     assert SENTINEL not in out and SENTINEL not in log_text, kind
     assert "sentinel-description" not in out and "sentinel-description" not in log_text, kind
-    assert read_log(_private_home)[-1]["rules"] == ["lead-waits"]
+    if not skipped:
+        assert read_log(_private_home)[-1]["rules"] == ["lead-waits"]
     if kind.startswith("unscannable-"):
         assert kind in out  # the message names the kind, nothing else of the call
 

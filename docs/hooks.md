@@ -300,13 +300,23 @@ A hook sits inside someone's session, so every error lets the work through, visi
   list, so that record says `probe`. SAFO does not carry the session's repository binding (`tracking_exempt_repos`) to
   the new file name, so after an edit the exemption does not apply until the next `startup`; this is bookkeeping, not
   protection (see the same-user limit below).
-- The guard has one clock: 10 s from the start of the process, less a margin. A re-probe gets at most what leaves two
-  requests per endpoint and 2 s for the issue lookup, and is cut off in total at twice that per-request time (a
-  socket timeout is per read, so a server that sends a byte at a time would otherwise hold it); an endpoint still
-  silent then counts as unreachable. If less than 0.5 s per request is left, the re-probe is skipped (nothing is
-  claimed, so a later dispatch may try) and the notice names `reprobe-skipped`. The log wait ends about 1 s before the
-  host's timeout, and is never shorter than 0.5 s; a log that could not be written in time is reported as `log-write`.
-  Neither changes the decision.
+- The guard has one clock: 10 s from the start of the process, less a margin. The decision is computed and then written
+  and flushed to standard output FIRST, on both the Agent and the Bash path (one shared function); only then is the
+  log appended, best effort. A re-probe gets at most what leaves two requests per endpoint and 2 s for the issue
+  lookup, and is cut off in total at twice that per-request time (a socket timeout is per read, so a server that sends a
+  byte at a time would otherwise hold it); an endpoint still silent then counts as unreachable. If less than 0.5 s per
+  request is left, the re-probe is skipped (nothing is claimed, so a later dispatch may try) and the notice names
+  `reprobe-skipped`. The event read on standard input also stops at the clock (the lesser of 5 s and what is left).
+- Loading `agents.yaml` cannot be interrupted portably. That is a residual: a load that takes the whole budget leaves
+  no time, and the decision is then made from what is available. If the clock is past its deadline after the load,
+  the re-probe and the issue lookup are skipped and the notice says `budget exceeded: lookups skipped`; a brief whose
+  issue could not be verified then follows the usual rules (denied in block mode, flagged in warn mode). A hook the
+  host has already killed prints nothing; that case is only reduced, not removed.
+- Because the decision is printed before the log is touched, a failed or skipped log write can no longer appear in the
+  same JSON line. It is reported on standard error, and by a small marker file (`log-failed` in the state folder) that
+  the NEXT guard run reads, clears and reports as `previous log write failed` in its own line (log diagnostic
+  `log-write`). The marker is same-user writable like the rest of the state; it can only add a notice and never grants
+  anything. What Claude Code does after a hook has flushed its decision and then runs past its timeout is UNVERIFIED.
 - A re-probe that times out stores an unreachable state for `max_state_age_seconds` (300 s by default), so later
   dispatches log health `healthy` and `local_reachable` false with no notice, as after a stale-state re-probe.
 - The line shown after the first probe under a new configuration says there was no saved probe for it (an edit, or a
@@ -374,15 +384,14 @@ the maximum of `5` is clamped to 5. A bad value never stops `safo` from starting
 The value is read with Python's `float` syntax, so `1_0`, non-ASCII digits and tiny values such as `1e-5` count as
 numbers; anything above 5 (including the underscore forms) is clamped.
 
-Budget: the host gives the guard 10 s, and the guard runs on one clock from the start of the process. Its lookups
-and any re-probe stop by 8 s (a re-probe leaves 2 s for the lookup and is cut off in total). The append waits for
-the lock for the setting or until 9 s, whichever is sooner, and never less than 0.5 s, so it ends by about 9 s, or
-by 9.5 s at the latest if the process is already past 9 s when it gets there. A longer setting therefore does not extend
-the hook past that. A log that could not be written in that time is reported as `log-write` (degraded). The decision is
-still printed after the append, not before it, so that a failed append can appear in the same single JSON line; a
-denial is therefore lost only if the host kills the hook before about 9.5 s, which the clock is meant to prevent. What
-Claude Code does with a hook it kills at the timeout is not verified. The other lock users (mode, probe state) keep
-their 0.5 s wait.
+Budget: the host gives the guard 10 s, and the guard runs on one clock from the start of the process. The decision
+is written and flushed first. The append then waits for the lock for the setting or for what is left until 9 s,
+whichever is less. If less than 0.05 s is left, or the clock is already past 9 s, the append is skipped: it is never
+started late and never stretched past 9 s. A longer setting therefore does not extend the hook. A skipped or failed
+append is reported on stderr and, on the next guard run, as `previous log write failed` (see Failing safe). Config
+loading cannot be interrupted, so a slow load still delays the line (residual); once the line is out, the host's
+behavior if it then kills the hook is UNVERIFIED. The append itself is not interruptible once it holds the lock
+(fsync can block). The other lock users (mode, probe state) keep their 0.5 s wait.
 
 ## Known limits
 

@@ -8,7 +8,7 @@
     safo hooks status                                          the mode and the counts
 
 `probe` and `guard` fail open on hook errors. A fixed warning and bounded diagnostic visibly report degradation.
-A computed block-mode denial is retained if only logging fails.
+The guard writes its decision first and persists afterwards (best effort, bounded), so a logging failure cannot lose it.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from safo import gemini, geminibrief, guardlog, leadwait, tracking
+from safo import gemini, geminibrief, guardlog, leadwait, output, tracking
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
@@ -86,8 +86,11 @@ from safo.modes import LocalMode, register_local
 
 LOOKUP_RESERVE_SECONDS = 2.0  # a re-probe leaves at least this much of the hook's budget for the issue lookup
 MIN_REPROBE_TIMEOUT_SECONDS = 0.5  # below this per request a re-probe is skipped, not attempted
-LOG_MARGIN_SECONDS = 1.0  # the log wait is meant to end this long before the host's timeout
-MIN_LOG_WAIT_SECONDS = 0.5  # but a decision is always offered this long a try at the log, even out of time
+LOG_MARGIN_SECONDS = 1.0  # the log wait ends this long before the host's timeout
+MIN_LOG_WAIT_SECONDS = 0.05  # with less than this left before that, the append is skipped, never stretched past it
+LOG_FAILED_NAME = "log-failed"  # presence marker: the last best-effort log write failed; the next guard run reports it
+LOG_FAILED_NOTICE = "previous log write failed"
+BUDGET_NOTICE = "budget exceeded: lookups skipped"
 TERMINAL_WAIT_SECONDS = 0.25  # how long a terminal on standard input gets to deliver an event before it is a person
 STDIN_TIMEOUT_SECONDS = 5.0  # a host writes the event at once; a silent standard input is a hung host, not a slow one
 
@@ -237,10 +240,12 @@ class EventScan:
         )
 
 
-def read_event(source: EventStream) -> tuple[bytes, bool]:
+def read_event(source: EventStream, until: float | None = None) -> tuple[bytes, bool]:
     """(the event as read, whether it is over the cap). At most MAX_BYTES + 1 bytes are kept; EventTimeout when the
-    event stalls for STDIN_TIMEOUT_SECONDS."""
+    event stalls for STDIN_TIMEOUT_SECONDS, or sooner at the monotonic time `until` (the guard's shared clock)."""
     deadline = time.monotonic() + STDIN_TIMEOUT_SECONDS if source.fd is not None else 0.0
+    if until is not None and source.fd is not None:
+        deadline = min(deadline, until)
     chunks: list[bytes] = []
     total = 0
     while total <= MAX_BYTES:
@@ -304,23 +309,14 @@ def session_id(payload: dict[str, Any]) -> str:
     return value
 
 
-def diagnostic(ctx: LocalContext, code: str, event: str = "PreToolUse", deny: str = "") -> None:
-    """Fixed visible warning plus a bounded enum-only record; no exception text or input values."""
+def diagnostic(
+    ctx: LocalContext, code: str, event: str = "PreToolUse", deny: str = "", hard: float | None = None
+) -> None:
+    """Fixed visible warning plus a bounded enum-only record; no exception text or input values. The warning is written
+    first; the record is best effort (see emit_then_persist)."""
     folder = state_dir(ctx.env)
-    if folder is not None:
-        with contextlib.suppress(OSError, ValueError):
-            append_log(
-                folder / guardlog.LOG_NAME,
-                log_record(
-                    ctx.now.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "error",
-                    read_mode(ctx.env),
-                    None,
-                    False,
-                    "degraded",
-                    code,
-                ),
-            )
+    when = ctx.now.strftime("%Y-%m-%dT%H:%M:%S")
+    record = log_record(when, "error", read_mode(ctx.env), None, False, "degraded", code)
     data: dict[str, Any] = {
         "systemMessage": WARNING,
         "hookSpecificOutput": {
@@ -331,7 +327,46 @@ def diagnostic(ctx: LocalContext, code: str, event: str = "PreToolUse", deny: st
     if deny:  # the Gemini rules deny even when the rest is degraded; the diagnostic stays in the same answer
         data["hookSpecificOutput"]["permissionDecision"] = "deny"
         data["hookSpecificOutput"]["permissionDecisionReason"] = "safo hooks guard: " + deny
-    ctx.say(json.dumps(data))
+    emit_then_persist(ctx, data, folder, record, hard)
+
+
+def emit_then_persist(
+    ctx: LocalContext, data: dict[str, Any] | None, folder: Path | None, record: dict[str, Any], hard: float | None
+) -> None:
+    """The one tail of every guard path. The decision (`data`, or nothing to say) is written and flushed FIRST; only
+    then is the log appended, best effort, waiting no longer than the setting and never past `hard` on the guard's
+    clock (skipped when less than MIN_LOG_WAIT_SECONDS is left). A failed or skipped append leaves a marker that the
+    next guard run reports, and a line on stderr; it can no longer change the line already written."""
+    if data is not None:
+        ctx.say(json.dumps(data))
+        with contextlib.suppress(Exception):
+            ctx.out.flush()
+    try:
+        if folder is None:
+            raise OSError("log unavailable")
+        wait = APPEND_LOCK_TIMEOUT if hard is None else min(APPEND_LOCK_TIMEOUT, hard - time.monotonic())
+        if wait < MIN_LOG_WAIT_SECONDS:
+            raise TimeoutError("out of time")
+        append_log(folder / guardlog.LOG_NAME, record, lock_timeout=wait)
+    except (OSError, ValueError):
+        with contextlib.suppress(Exception):
+            if folder is not None and guardlog.trusted_dir(folder):
+                os.close(os.open(folder / LOG_FAILED_NAME, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
+        with contextlib.suppress(Exception):
+            if sys.stderr is not None:
+                output.write(sys.stderr, "safo: the guard's log write failed or was skipped; the next dispatch says so")
+
+
+def take_log_failure(folder: Path | None) -> bool:
+    """True once after a failed log write. The marker is same-user writable like the rest of the state: it can only
+    add a notice, never grant anything."""
+    if folder is None:
+        return False
+    try:
+        os.unlink(folder / LOG_FAILED_NAME)
+    except OSError:
+        return False
+    return True
 
 
 def hook_event(argv: Sequence[str] | None) -> str | None:
@@ -480,7 +515,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     source = EventStream(ctx)
     raw = b""
     try:
-        raw, oversize = read_event(source)
+        raw, oversize = read_event(source, deadline)
         if oversize:
             raise ValueError("oversized event")
         payload = loads(raw)
@@ -504,7 +539,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
     if payload.get("tool_name") == BASH_TOOL:
-        lead_wait(ctx, args, payload, deadline)
+        lead_wait(ctx, args, payload, deadline, hard)
         return
     if payload.get("tool_name") not in AGENT_TOOLS:
         return
@@ -521,8 +556,12 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         reasons = gemini_reasons(ctx, payload["tool_input"], deadline)
         if reasons:
             raise GeminiEventDeny("config", reasons) from None
-        diagnostic(ctx, "config")
+        diagnostic(ctx, "config", hard=hard)  # all rules disabled, visible degraded allow
         return
+    # Loading the configuration cannot be interrupted, so it may have used the budget. Then the optional lookups are
+    # skipped (the re-probe and the issue lookup both refuse to start with no time left) and the notice says so; the
+    # decision still follows the usual rules for a brief that could not be verified.
+    over_budget = time.monotonic() > deadline
     path = state_path(folder, session, doc) if folder else None
     state = read_state(path)
     now = ctx.now.timestamp()
@@ -585,28 +624,23 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     decision = decide(verdict, mode)
     # One visible notice per session for a probe that cannot be trusted; every dispatch is still logged with its health.
     notice = health != "healthy" and (path is None or first_notice(path))
-    degraded = mode_state != "healthy" or notice
-    code = "mode" if mode_state != "healthy" else ("probe" if health != "healthy" else "")
-    try:
-        if folder is None:
-            raise OSError("log unavailable")
-        wait = min(APPEND_LOCK_TIMEOUT, max(MIN_LOG_WAIT_SECONDS, hard - time.monotonic()))
-        append_log(
-            folder / guardlog.LOG_NAME,
-            log_record(
-                when, decision, mode, verdict, reachable, "degraded" if mode_state != "healthy" else health, code
-            ),
-            lock_timeout=wait,
-        )
-    except (OSError, ValueError):
-        degraded = True
-        code = "log-write"
+    previous_failed = take_log_failure(folder)
+    degraded = mode_state != "healthy" or notice or previous_failed or over_budget
+    if mode_state != "healthy":
+        code, shown = "mode", "mode"
+    elif previous_failed:
+        code, shown = "log-write", LOG_FAILED_NOTICE
+    elif over_budget:
+        code, shown = "timeout", BUDGET_NOTICE
+    elif health != "healthy":
+        code, shown = "probe", probe_code  # the log's enum has one probe code; the notice is specific
+    else:
+        code, shown = "", ""
     output = guard_output(decision, verdict)
     data: dict[str, Any] = json.loads(output) if output else {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
     if degraded:
         # Keep any rule denial. A persistence failure cannot erase a computed denial.
         data["systemMessage"] = WARNING + (" " + data.get("systemMessage", "") if output else "")
-        shown = probe_code if code == "probe" else code  # the log's enum has one probe code; the notice is specific
         data["hookSpecificOutput"]["additionalContext"] = (
             WARNING + " " + json.dumps({"health": "degraded", "diagnostic": shown})
         )
@@ -619,11 +653,19 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         )
         context = data["hookSpecificOutput"].get("additionalContext")
         data["hookSpecificOutput"]["additionalContext"] = f"{context} {note}" if context else note
-    if output or degraded or first_probe:
-        ctx.say(json.dumps(data))
+    record = log_record(
+        when, decision, mode, verdict, reachable, "degraded" if mode_state != "healthy" else health, code
+    )
+    emit_then_persist(ctx, data if output or degraded or first_probe else None, folder, record, hard)
 
 
-def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, Any], deadline: float) -> None:
+def lead_wait(
+    ctx: LocalContext,
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    deadline: float,
+    hard: float | None = None,
+) -> None:
     """The lead-never-waits rule for one Bash call. Quiet and cheap for the usual call: nothing is read, logged or
     printed unless the command could wait, it is not run in the background and the session is the lead's."""
     if payload.get("agent_id") is not None:
@@ -639,7 +681,7 @@ def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, An
     try:
         doc = load_agents_for(ctx, args)
     except Exception:
-        diagnostic(ctx, "config")
+        diagnostic(ctx, "config", hard=hard)
         return
     setting = doc.hooks.lead_wait
     if setting.mode == "off":
@@ -659,40 +701,36 @@ def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, An
     )
     verdict = Verdict((LEAD_WAITS,), (leadwait.message(kinds),), "", False, False)
     decision = "allow" if exempt else decide(verdict, effective)
-    degraded = mode_state != "healthy"
-    code = "mode" if degraded else ""
-    try:
-        if folder is None:
-            raise OSError("log unavailable")
-        when = ctx.now.strftime("%Y-%m-%dT%H:%M:%S")
-        append_log(
-            folder / guardlog.LOG_NAME,
-            log_record(when, decision, effective, verdict, False, "degraded" if degraded else "healthy", code),
-        )
-    except (OSError, ValueError):
-        degraded, code = True, "log-write"
+    previous_failed = take_log_failure(folder)
+    degraded = mode_state != "healthy" or previous_failed
+    code = "mode" if mode_state != "healthy" else ("log-write" if previous_failed else "")
     output = guard_output(decision, verdict, "Delegate the wait; do not hold the lead's thread.")
     data: dict[str, Any] = json.loads(output) if output else {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
     if degraded:
+        shown = LOG_FAILED_NOTICE if code == "log-write" else code
         data["systemMessage"] = WARNING + (" " + data.get("systemMessage", "") if output else "")
         data["hookSpecificOutput"]["additionalContext"] = (
-            WARNING + " " + json.dumps({"health": "degraded", "diagnostic": code})
+            WARNING + " " + json.dumps({"health": "degraded", "diagnostic": shown})
         )
-    if output or degraded:
-        ctx.say(json.dumps(data))
+    when = ctx.now.strftime("%Y-%m-%dT%H:%M:%S")
+    health = "degraded" if mode_state != "healthy" else "healthy"
+    record = log_record(when, decision, effective, verdict, False, health, code)
+    emit_then_persist(ctx, data if output or degraded else None, folder, record, hard)
 
 
 def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
+    begun = time.monotonic()
+    hard = begun + GUARD_TIMEOUT_SECONDS - LOG_MARGIN_SECONDS
     try:
-        guard(ctx, args, time.monotonic())
+        guard(ctx, args, begun)
     except GeminiEventDeny as err:
-        diagnostic(ctx, err.code, deny=err.reason)
+        diagnostic(ctx, err.code, deny=err.reason, hard=hard)
     except TimeoutError:
-        diagnostic(ctx, "timeout")
+        diagnostic(ctx, "timeout", hard=hard)
     except (ValueError, UnicodeError):
-        diagnostic(ctx, "input")
+        diagnostic(ctx, "input", hard=hard)
     except Exception:
-        diagnostic(ctx, "unexpected")
+        diagnostic(ctx, "unexpected", hard=hard)
     return EXIT_OK
 
 

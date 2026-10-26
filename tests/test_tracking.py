@@ -654,7 +654,7 @@ def test_a_session_repository_that_is_not_listed_is_not_accepted_for_citing(
     assert denied(run_guard(_private_home, unlisted, own, bin_dir)[0]) and not (tmp_path / "gh.log").exists()
 
 
-def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
+def test_a_guard_out_of_time_denies_in_block_mode_and_skips_the_append_and_the_next_dispatch_says_so(
     _private_home: Path, agents: Path, tmp_path: Path
 ) -> None:
     import io
@@ -685,7 +685,10 @@ def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
     hooks_mode.guard(ctx, argparse.Namespace(agents=str(agents), agents_local=""), started=time.monotonic() - 60)
     assert calls == [], "no process is started once the deadline has passed"
     assert json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert read_log(_private_home)[-1]["rules"] == ["issue-unverified"]
+    # New contract: out of time, the append is skipped (it is never stretched past the hook's budget), and the
+    # next dispatch reports the gap through the marker.
+    assert read_log(_private_home) == [], "the decision is printed; the log write was skipped, not attempted late"
+    assert hooks_mode.take_log_failure(state_folder(_private_home)) is True
 
 
 def test_the_shipped_agents_file_exempts_nothing() -> None:
