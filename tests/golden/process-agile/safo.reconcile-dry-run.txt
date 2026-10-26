@@ -1,11 +1,31 @@
-exit=0
+exit=1
 --- stdout ---
-UPDATED ChiefGyk3D/scrum-around-and-find-out#1: Area = Core; Priority = P2 later
-ADDED ChiefGyk3D/scrum-around-and-find-out#2: Status = Backlog; Area = Core; Priority = P2 later
-UPDATED ChiefGyk3D/scrum-around-and-find-out#5: Area = Core; Priority = P2 later
-UPDATED ChiefGyk3D/scrum-around-and-find-out#6: Area = Core; Priority = P2 later
-ADDED ChiefGyk3D/scrum-around-and-find-out#7: Status = In progress; Area = Core; Priority = P2 later
-UPDATED ChiefGyk3D/scrum-around-and-find-out#3: Status = Done; Done date filled; Area = Core; Priority = P2 later
-UPDATED ChiefGyk3D/scrum-around-and-find-out#4: Done date filled; Area = Core; Priority = P2 later
-items.totalCount after verified adds: 8
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0038", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0018", "itemId": "PVTI_0038", "optionId": "OPT_0020", "projectId": "PVT_0002"}
+WOULD UPDATE ChiefGyk3D/scrum-around-and-find-out#1: Area = Core; Priority = P2 later
+dry run: would AddItem {"contentId": "ISSUE_0039", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0007", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0018", "itemId": "DRY_RUN", "optionId": "OPT_0020", "projectId": "PVT_0002"}
+WOULD ADD ChiefGyk3D/scrum-around-and-find-out#2: Status = Backlog; Area = Core; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0045", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0018", "itemId": "PVTI_0045", "optionId": "OPT_0020", "projectId": "PVT_0002"}
+WOULD UPDATE ChiefGyk3D/scrum-around-and-find-out#5: Area = Core; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0047", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0018", "itemId": "PVTI_0047", "optionId": "OPT_0020", "projectId": "PVT_0002"}
+WOULD UPDATE ChiefGyk3D/scrum-around-and-find-out#6: Area = Core; Priority = P2 later
+dry run: would AddItem {"contentId": "PR_0048", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0009", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0018", "itemId": "DRY_RUN", "optionId": "OPT_0020", "projectId": "PVT_0002"}
+WOULD ADD ChiefGyk3D/scrum-around-and-find-out#7: Status = In progress; Area = Core; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "PVTI_0041", "optionId": "OPT_0011", "projectId": "PVT_0002"}
+dry run: would SetDate {"date": "2026-10-20", "fieldId": "PVTF_0034", "itemId": "PVTI_0041", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0041", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0018", "itemId": "PVTI_0041", "optionId": "OPT_0020", "projectId": "PVT_0002"}
+WOULD UPDATE ChiefGyk3D/scrum-around-and-find-out#3: Status = Done; Done date filled; Area = Core; Priority = P2 later
+dry run: would SetDate {"date": "2026-10-22", "fieldId": "PVTF_0034", "itemId": "PVTI_0043", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0043", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0018", "itemId": "PVTI_0043", "optionId": "OPT_0020", "projectId": "PVT_0002"}
+WOULD UPDATE ChiefGyk3D/scrum-around-and-find-out#4: Done date filled; Area = Core; Priority = P2 later
 --- stderr ---

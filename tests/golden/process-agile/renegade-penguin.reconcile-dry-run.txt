@@ -1,41 +1,145 @@
 exit=1
 --- stdout ---
-UPDATED Renegade-Penguin/Hammunition#1: Area = Engine; Priority = P2 later
-ADDED Renegade-Penguin/Hammunition#2: Status = Backlog; Area = Engine; Priority = P2 later
-UPDATED Renegade-Penguin/Hammunition#5: Area = Engine; Priority = P2 later
-UPDATED Renegade-Penguin/Hammunition#6: Area = Engine; Priority = P2 later
-ADDED Renegade-Penguin/Hammunition#7: Status = In progress; Area = Engine; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-hill#11: Area = Hill; Priority = P2 later
-ADDED Renegade-Penguin/hammunition-hill#12: Status = Backlog; Area = Hill; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-hill#15: Area = Hill; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-hill#16: Area = Hill; Priority = P2 later
-ADDED Renegade-Penguin/hammunition-hill#17: Status = In progress; Area = Hill; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-tray#21: Area = Tray; Priority = P2 later
-ADDED Renegade-Penguin/hammunition-tray#22: Status = Backlog; Area = Tray; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-tray#25: Area = Tray; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-tray#26: Area = Tray; Priority = P2 later
-ADDED Renegade-Penguin/hammunition-tray#27: Status = In progress; Area = Tray; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-bunker#31: Area = Bunker; Priority = P2 later
-ADDED Renegade-Penguin/hammunition-bunker#32: Status = Backlog; Area = Bunker; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-bunker#35: Area = Bunker; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-bunker#36: Area = Bunker; Priority = P2 later
-ADDED Renegade-Penguin/hammunition-bunker#37: Status = In progress; Area = Bunker; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-gps-tether#41: Area = GPS tether; Priority = P2 later
-ADDED Renegade-Penguin/hammunition-gps-tether#42: Status = Backlog; Area = GPS tether; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-gps-tether#45: Area = GPS tether; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-gps-tether#46: Area = GPS tether; Priority = P2 later
-ADDED Renegade-Penguin/hammunition-gps-tether#47: Status = In progress; Area = GPS tether; Priority = P2 later
-UPDATED Renegade-Penguin/Hammunition#3: Status = Done; Done date filled; Area = Engine; Priority = P2 later
-UPDATED Renegade-Penguin/Hammunition#4: Done date filled; Area = Engine; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-hill#13: Status = Done; Done date filled; Area = Hill; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-hill#14: Done date filled; Area = Hill; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-tray#23: Status = Done; Done date filled; Area = Tray; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-tray#24: Done date filled; Area = Tray; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-bunker#33: Status = Done; Done date filled; Area = Bunker; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-bunker#34: Done date filled; Area = Bunker; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-gps-tether#43: Status = Done; Done date filled; Area = GPS tether; Priority = P2 later
-UPDATED Renegade-Penguin/hammunition-gps-tether#44: Done date filled; Area = GPS tether; Priority = P2 later
-items.totalCount after verified adds: 36
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0085", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0085", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/Hammunition#1: Area = Engine; Priority = P2 later
+dry run: would AddItem {"contentId": "ISSUE_0086", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0007", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/Hammunition#2: Status = Backlog; Area = Engine; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0092", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0092", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/Hammunition#5: Area = Engine; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0094", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0094", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/Hammunition#6: Area = Engine; Priority = P2 later
+dry run: would AddItem {"contentId": "PR_0095", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0009", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/Hammunition#7: Status = In progress; Area = Engine; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0097", "optionId": "OPT_0022", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0097", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-hill#11: Area = Hill; Priority = P2 later
+dry run: would AddItem {"contentId": "ISSUE_0098", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0007", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0022", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/hammunition-hill#12: Status = Backlog; Area = Hill; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0104", "optionId": "OPT_0022", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0104", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-hill#15: Area = Hill; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0106", "optionId": "OPT_0022", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0106", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-hill#16: Area = Hill; Priority = P2 later
+dry run: would AddItem {"contentId": "PR_0107", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0009", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0022", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/hammunition-hill#17: Status = In progress; Area = Hill; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0109", "optionId": "OPT_0021", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0109", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-tray#21: Area = Tray; Priority = P2 later
+dry run: would AddItem {"contentId": "ISSUE_0110", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0007", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0021", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/hammunition-tray#22: Status = Backlog; Area = Tray; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0116", "optionId": "OPT_0021", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0116", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-tray#25: Area = Tray; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0118", "optionId": "OPT_0021", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0118", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-tray#26: Area = Tray; Priority = P2 later
+dry run: would AddItem {"contentId": "PR_0119", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0009", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0021", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/hammunition-tray#27: Status = In progress; Area = Tray; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0121", "optionId": "OPT_0023", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0121", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-bunker#31: Area = Bunker; Priority = P2 later
+dry run: would AddItem {"contentId": "ISSUE_0122", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0007", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0023", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/hammunition-bunker#32: Status = Backlog; Area = Bunker; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0128", "optionId": "OPT_0023", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0128", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-bunker#35: Area = Bunker; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0130", "optionId": "OPT_0023", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0130", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-bunker#36: Area = Bunker; Priority = P2 later
+dry run: would AddItem {"contentId": "PR_0131", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0009", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0023", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/hammunition-bunker#37: Status = In progress; Area = Bunker; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0133", "optionId": "OPT_0024", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0133", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-gps-tether#41: Area = GPS tether; Priority = P2 later
+dry run: would AddItem {"contentId": "ISSUE_0134", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0007", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0024", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/hammunition-gps-tether#42: Status = Backlog; Area = GPS tether; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0140", "optionId": "OPT_0024", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0140", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-gps-tether#45: Area = GPS tether; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0142", "optionId": "OPT_0024", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0142", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-gps-tether#46: Area = GPS tether; Priority = P2 later
+dry run: would AddItem {"contentId": "PR_0143", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "DRY_RUN", "optionId": "OPT_0009", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "DRY_RUN", "optionId": "OPT_0024", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "DRY_RUN", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD ADD Renegade-Penguin/hammunition-gps-tether#47: Status = In progress; Area = GPS tether; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "PVTI_0088", "optionId": "OPT_0011", "projectId": "PVT_0002"}
+dry run: would SetDate {"date": "2026-10-20", "fieldId": "PVTF_0080", "itemId": "PVTI_0088", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0088", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0088", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/Hammunition#3: Status = Done; Done date filled; Area = Engine; Priority = P2 later
+dry run: would SetDate {"date": "2026-10-22", "fieldId": "PVTF_0080", "itemId": "PVTI_0090", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0090", "optionId": "OPT_0013", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0090", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/Hammunition#4: Done date filled; Area = Engine; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "PVTI_0100", "optionId": "OPT_0011", "projectId": "PVT_0002"}
+dry run: would SetDate {"date": "2026-10-20", "fieldId": "PVTF_0080", "itemId": "PVTI_0100", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0100", "optionId": "OPT_0022", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0100", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-hill#13: Status = Done; Done date filled; Area = Hill; Priority = P2 later
+dry run: would SetDate {"date": "2026-10-22", "fieldId": "PVTF_0080", "itemId": "PVTI_0102", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0102", "optionId": "OPT_0022", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0102", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-hill#14: Done date filled; Area = Hill; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "PVTI_0112", "optionId": "OPT_0011", "projectId": "PVT_0002"}
+dry run: would SetDate {"date": "2026-10-20", "fieldId": "PVTF_0080", "itemId": "PVTI_0112", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0112", "optionId": "OPT_0021", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0112", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-tray#23: Status = Done; Done date filled; Area = Tray; Priority = P2 later
+dry run: would SetDate {"date": "2026-10-22", "fieldId": "PVTF_0080", "itemId": "PVTI_0114", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0114", "optionId": "OPT_0021", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0114", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-tray#24: Done date filled; Area = Tray; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "PVTI_0124", "optionId": "OPT_0011", "projectId": "PVT_0002"}
+dry run: would SetDate {"date": "2026-10-20", "fieldId": "PVTF_0080", "itemId": "PVTI_0124", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0124", "optionId": "OPT_0023", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0124", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-bunker#33: Status = Done; Done date filled; Area = Bunker; Priority = P2 later
+dry run: would SetDate {"date": "2026-10-22", "fieldId": "PVTF_0080", "itemId": "PVTI_0126", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0126", "optionId": "OPT_0023", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0126", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-bunker#34: Done date filled; Area = Bunker; Priority = P2 later
+dry run: would SetSelect {"fieldId": "PVTSSF_0006", "itemId": "PVTI_0136", "optionId": "OPT_0011", "projectId": "PVT_0002"}
+dry run: would SetDate {"date": "2026-10-20", "fieldId": "PVTF_0080", "itemId": "PVTI_0136", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0136", "optionId": "OPT_0024", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0136", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-gps-tether#43: Status = Done; Done date filled; Area = GPS tether; Priority = P2 later
+dry run: would SetDate {"date": "2026-10-22", "fieldId": "PVTF_0080", "itemId": "PVTI_0138", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0012", "itemId": "PVTI_0138", "optionId": "OPT_0024", "projectId": "PVT_0002"}
+dry run: would SetSelect {"fieldId": "PVTSSF_0037", "itemId": "PVTI_0138", "optionId": "OPT_0040", "projectId": "PVT_0002"}
+WOULD UPDATE Renegade-Penguin/hammunition-gps-tether#44: Done date filled; Area = GPS tether; Priority = P2 later
 HUMAN MISSING Kind on Renegade-Penguin/Hammunition#1
 HUMAN MISSING Epic on Renegade-Penguin/Hammunition#1
 HUMAN MISSING Effort on Renegade-Penguin/Hammunition#1

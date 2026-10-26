@@ -9,6 +9,17 @@ The clock and the random stop-commands token are frozen: `today` is passed to `s
 explicit `--since`, and the Codex and Copilot sections of agents-status are switched off because they read the wall
 clock and the machine's agents. A test runs everything again with a different date and requires identical bytes.
 
+The agents-status goldens hold a literal `\\x0a` where a blank line would be: modes/agents_status.py passes
+"\\nBoard: ..." to ctx.say, and safo.output escapes the newline today. That is current behavior, pinned as it is.
+
+What the run date reaches: only code that reads ctx.today (the Done date of a closed card with no close time, which only
+audit prints, and the look-back window). The shared fixture has no such card, so the date-independence test alone would pass even if
+a mode read the real clock; test_the_run_date_reaches_only_where_the_code_reads_ctx_today adds one and asserts
+each run prints exactly its own date.
+
+Both reconcile paths are pinned: `--dry-run reconcile` builds the Client with dry_run=True like the real command
+line (it prints "dry run: would ..." and "WOULD ..." and sends nothing), and plain `reconcile` applies to the fake.
+
 Fail-closed: a missing golden file fails the test. A test run never writes a golden file. To regenerate them after
 an intended change in output, run this module as a script, then review `git diff tests/golden/process-agile/`:
 
@@ -23,6 +34,7 @@ import datetime as dt
 import io
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from unittest import mock
 
@@ -43,6 +55,7 @@ BOARDS = ("safo", "renegade-penguin")
 MODES: dict[str, tuple[str, ...]] = {
     "audit": ("audit",),
     "reconcile-dry-run": ("--dry-run", "reconcile"),
+    "reconcile-apply": ("reconcile",),
     "status-post-print": ("status", "--post", "--print", "--no-local", "--since", "2026-10-01"),
     "agents-status": ("agents-status", "--no-codex", "--no-copilot"),
 }
@@ -64,7 +77,7 @@ def board_copy(board: str, folder: Path) -> Path:
     return copy
 
 
-def populate(fake: FakeGitHub, board: Board, project: FProject) -> None:
+def populate(fake: FakeGitHub, board: Board, project: FProject, undated: bool = False) -> None:
     """A few cards per repository in every state the four modes tell apart; the same on every run."""
     fields = {f.name for f in board.fields}
     statuses = {o.name for f in board.fields if f.name == board.rules.status_field for o in f.options}
@@ -90,25 +103,33 @@ def populate(fake: FakeGitHub, board: Board, project: FProject) -> None:
         put(fake.add_content(name, "Issue", base + 6, "Queued for next"), Status="Next")
         fake.add_content(name, "PullRequest", base + 7, "Open pull request not on the board")
     put(None, Status="Backlog")
+    if undated:  # a closed card with no close time: the Done date falls back to the run's own date
+        first = board.repositories[0].full_name
+        put(fake.add_content(first, "Issue", 99, "Closed without a close time", state="CLOSED"), Status="Backlog")
 
 
-def render(board_name: str, mode: str, today: dt.date, client: Client, fake: FakeGitHub, home: Path) -> str:
+def render(board_name: str, mode: str, today: dt.date, fake: FakeGitHub, home: Path, undated: bool = False) -> str:
     """One mode against one example board, as the stored text."""
     path = board_copy(board_name, home)
     board = load_board(path)
     _, project = build_world(fake, board)
-    populate(fake, board, project)
+    populate(fake, board, project, undated)
     out, err = io.StringIO(), io.StringIO()
+
+    def client_factory(_board: Board, _env: Mapping[str, str], dry_run: bool) -> Client:
+        # as safo.cli.default_client: --dry-run reaches the Client, which sends no mutation; out is its default, stdout
+        return Client(fake.token, fake.url, sleep=lambda s: None, dry_run=dry_run, out=out)
+
     argv = ["--board", str(path), *MODES[mode]]
     # output.block draws a random token for every stop-commands block; freeze it like the clock
     with mock.patch("safo.output.secrets.token_hex", return_value="0" * 32):
-        code = main(argv, env={"HOME": str(home)}, client_factory=lambda b, e, d: client, out=out, err=err, today=today)
+        code = main(argv, env={"HOME": str(home)}, client_factory=client_factory, out=out, err=err, today=today)
     return f"exit={code}\n--- stdout ---\n{out.getvalue()}--- stderr ---\n{err.getvalue()}"
 
 
-def fresh(board_name: str, mode: str, today: dt.date, home: Path) -> str:
+def fresh(board_name: str, mode: str, today: dt.date, home: Path, undated: bool = False) -> str:
     with FakeGitHub().serve() as fake:
-        return render(board_name, mode, today, Client(fake.token, fake.url, sleep=lambda s: None), fake, home)
+        return render(board_name, mode, today, fake, home, undated)
 
 
 def compare(path: Path, actual: str) -> None:
@@ -128,8 +149,31 @@ def test_a_different_fake_date_gives_identical_bytes(board: str, mode: str, tmp_
     assert fresh(board, mode, OTHER_DAY, tmp_path) == fresh(board, mode, FROZEN, tmp_path)
 
 
-def test_the_golden_directory_holds_exactly_the_eight_files() -> None:
-    assert len(CASES) == 8
+@pytest.mark.parametrize("board", BOARDS)
+def test_the_run_date_reaches_only_where_the_code_reads_ctx_today(board: str, tmp_path: Path) -> None:
+    """Positive control for the test above: audit prints the run's date as the Done date of a closed card with no close time.
+
+    Each run shows exactly its own date, so a mode that read the real clock would show a different one; and with the
+    date substituted the outputs are identical, so nothing else depends on it.
+    """
+    days = (FROZEN, OTHER_DAY, dt.date(2028, 1, 2))
+    texts = {d: fresh(board, "audit", d, tmp_path, undated=True) for d in days}
+    for day, text in texts.items():
+        assert f"Done on {day.isoformat()}" in text
+        assert all(o.isoformat() not in text for o in days if o != day)
+        assert text.replace(day.isoformat(), "DAY") == texts[FROZEN].replace(FROZEN.isoformat(), "DAY")
+
+
+@pytest.mark.parametrize("board", BOARDS)
+def test_dry_run_reaches_the_client_and_apply_does_not_dry_run(board: str, tmp_path: Path) -> None:
+    dry = (GOLDEN / golden_name(board, "reconcile-dry-run")).read_text(encoding="utf-8")
+    assert "dry run: would " in dry and "WOULD " in dry and "\nUPDATED " not in dry
+    applied = (GOLDEN / golden_name(board, "reconcile-apply")).read_text(encoding="utf-8")
+    assert "\nUPDATED " in applied and "dry run" not in applied and "WOULD " not in applied
+
+
+def test_the_golden_directory_holds_exactly_the_ten_files() -> None:
+    assert len(CASES) == 10
     assert sorted(p.name for p in GOLDEN.iterdir()) == sorted(golden_name(b, m) for b, m in CASES)
 
 
