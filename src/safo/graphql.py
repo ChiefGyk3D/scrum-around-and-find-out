@@ -302,6 +302,8 @@ class Client:
                 data: JSON = body["data"]
                 if data is None:
                     raise ApiError(f"GitHub answered {op} with null data and no errors")
+                if not isinstance(data, dict):
+                    raise ApiError(f"GitHub answered {op} with data that is not an object: {type(data).__name__}")
                 return data
             types = {str(e.get("type", "")) for e in errors}
             message = "; ".join(str(e.get("message", e)) for e in errors)
