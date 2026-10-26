@@ -16,7 +16,7 @@ places:
    later `git add -A` can pick up.
 2. **A draft GitHub security advisory on the affected repository.** It is private to the maintainers and any collaborators
    added to it, and it is where a fix can be developed before it is public. The reporting route for outsiders is
-   described in [SECURITY.md](../SECURITY.md).
+   described in [SECURITY.md](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/SECURITY.md).
 
 Pick the advisory when the finding belongs to one repository and someone else may need to read it. Pick the local path when
 it is a working note for the person fixing it. Either way, the detail moves to the public record only after the fix has
