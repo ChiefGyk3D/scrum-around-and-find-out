@@ -236,6 +236,30 @@ DOIA_URL = "https://github.com/ChiefGyk3D/department-of-internal-arguments"
         "then checkout v0.2.0",
         f"[x]({DOIA_URL}/blob/v0.2.0/templates/lead.md)",
         "This page describes Department of Internal Arguments v0.2.0.",
+        "DoIA **v0.2.0** is out.",
+        "DoIA (v0.2.0) is out.",
+        "DoIA, v0.2.0 is out.",
+        "DoIA at v0.2.0 is out.",
+        "DoIA@v0.2.0 is out.",
+        "doia v0.2.0 is out.",
+        "department-of-internal-arguments v0.2.0 is out.",
+        "DoIA v0.2.0-based notes.",
+        "DoIA v0.3.1_x is out.",
+        "git clone -b v0.2.0 url",
+        "git clone --branch=v0.2.0 url",
+        "git clone --branch='v0.2.0' url",
+        "git checkout -f v0.2.0",
+        "git switch --detach v0.2.0",
+        "git checkout 'v0.2.0'",
+        'git checkout "v0.2.0"',
+        f"[x]({DOIA_URL}/archive/refs/tags/v0.2.0.zip)",
+        f"[x]({DOIA_URL}/releases/download/v0.2.0/file.tar.gz)",
+        f"[x]({DOIA_URL}/compare/v0.2.0...v0.3.1)",
+        f"[x]({DOIA_URL}/compare/v0.3.1...v0.2.0)",
+        f"[x]({DOIA_URL}/commits/v0.2.0)",
+        f"[x]({DOIA_URL}/raw/v0.2.0/README.md)",
+        f"[x]({DOIA_URL}/tree/V0.2.0)",
+        f"[x]({DOIA_URL}/tree/refs/tags/v0.2.0)",
     ],
 )
 def test_a_doia_reference_that_is_not_exactly_the_pin_fails(text: str) -> None:
@@ -256,6 +280,14 @@ def test_a_doia_reference_that_is_not_exactly_the_pin_fails(text: str) -> None:
         "DoIA v0.3.1 needs Python v3.12.1 and uses actions/checkout@v4.1.0 from another project.",
         "Python v3.12.1 here.\n\nAnd actions/checkout@v4.1.0 there.",
         "See [other](https://github.com/example/other/tree/v9.9.9) for the other project.",
+        "DoIA **v0.3.1** and DoIA (v0.3.1), DoIA, v0.3.1, DoIA at v0.3.1, DoIA@v0.3.1, doia v0.3.1.",
+        "DoIA v0.3.1-based personas are listed here.",
+        "git clone -b v0.3.1 url && git checkout -f v0.3.1 && git switch --detach v0.3.1 && git checkout 'v0.3.1'",
+        "git clone --branch=v0.3.1 url",
+        f"[x]({DOIA_URL}/compare/v0.3.1...v0.3.1) and [y]({DOIA_URL}/archive/refs/tags/v0.3.1.zip)",
+        f"[x]({DOIA_URL}/releases/download/v0.3.1/a) [y]({DOIA_URL}/commits/v0.3.1) [z]({DOIA_URL}/raw/v0.3.1/a)",
+        "See [other](https://github.com/example/other/archive/refs/tags/v9.9.9.zip) and Python v3.12.1.",
+        "DoIA needs Python v3.12.1; DoIA, with actions/checkout@v4.1.0, runs there.",
     ],
 )
 def test_other_versions_and_the_exact_pin_pass(text: str) -> None:
@@ -290,9 +322,21 @@ def test_personas_describe_the_pinned_release() -> None:
         "--overlay",
         "--list-managed",
         "--force-edited",
-        "DoIA release v0.3.1 added measured notes",
+        "measured notes on context-change evictions",
     ):
         assert phrase in page, phrase
+    # A historical sentence carries no version, or a bump of the pin would falsify it or fail the build.
+    sentence = re.search(r"measured notes on context-change evictions[^.]*\.", page)
+    assert sentence and not re.search(r"v\d+\.\d+", sentence.group(0))
+    assert "CHANGELOG" in sentence.group(0)
+
+
+def test_a_bump_of_the_pin_keeps_the_page_valid() -> None:
+    page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
+    bumped = page.replace(DOIA_TAG, "v0.99.0")
+    GEN_WIKI.check_doia_tag({"personas.md": bumped}, "v0.99.0")
+    with pytest.raises(GEN_WIKI.WikiError, match=r"scripts/doia-tag\.txt"):
+        GEN_WIKI.check_doia_tag({"personas.md": bumped}, DOIA_TAG)
 
 
 def test_personas_name_every_role_pack_and_the_shared_rules() -> None:
