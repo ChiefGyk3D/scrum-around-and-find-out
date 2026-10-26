@@ -47,12 +47,34 @@ _LABEL_META = re.compile(r"([\\\[\]<>`|*_&])")
 
 DOIA_TAG_FILE = ROOT / "scripts" / "doia-tag.txt"
 _DOIA_TAG = re.compile(r"^v\d+\.\d+\.\d+$")
-# A whole version token, so v0.3.1-rc1, v0.3.1.2 and xv0.2.0 are read as themselves and never as a prefix of the pin.
-_VERSION = r"(?<![\w.])\w*v\d+\.\d+\.\d+(?:\.\d+|[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)*"
+# A whole version token, so v0.3.1-rc1, v0.3.1.2, v0.3.1_x and xv0.2.0 are read as themselves and never as a prefix of
+# the pin. A trailing "-based" is the one suffix left off the token: "DoIA v0.3.1-based" reads as v0.3.1, so it passes
+# on the pin and fails on a stale tag. Any other suffix makes a different token, which fails.
+_VERSION = (
+    r"(?<![\w.])\w*[vV]\d+\.\d+\.\d+"
+    r"(?:\.\d+|[-+_](?!based\b)[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)*"
+)
+_DOIA_REPO = r"department-of-internal-arguments/"
+_DOIA_NAME = r"(?:\bDoIA|Department of Internal Arguments|department-of-internal-arguments)"
+_VERSION_BARE = _VERSION.replace(r"(?<![\w.])", "")  # the second end of a compare range follows dots
 _DOIA_REF = re.compile(
-    r"department-of-internal-arguments/(?:tree|blob|releases/tag)/(" + _VERSION + r")"
-    r"|(?:--branch|\bcheckout)[ \t]+(" + _VERSION + r")"
-    r"|(?:\bDoIA|Department of Internal Arguments)(?:'s)?\s+(?:(?:release|version|tag)\s+)?`?(" + _VERSION + r")"
+    # (1) a link into the DoIA repository: the tag as a path part (or straight after the repository name, as on the
+    # raw host), a compare range with a tag at either end, or ?ref=
+    r"(?i:" + _DOIA_REPO + r")(?:"
+    r"(?:(?:tree|blob|raw|commits|releases/tag|releases/download|archive|zipball|tarball)/)?(?:refs/tags/)?"
+    r"(" + _VERSION + r")"
+    r"|compare/(?:(" + _VERSION + r")|[\w-]+)(?:\.{2,3}(" + _VERSION_BARE + r"))?"
+    r"|[^\s)]*?\?ref=(" + _VERSION + r"))"
+    # (2) the argument of a clone or checkout: --branch, --branch=, -b, checkout and switch with any flags (and the
+    # new branch name that -b, -B, -c and -C take), tags/ or refs/tags/ in front, maybe quoted
+    r"|(?:--branch(?:[ \t]+|=)|(?<![\w-])-b[ \t]+"
+    r"|\b(?:checkout|switch)[ \t]+(?:-{1,2}[A-Za-z][\w-]*[ \t]+(?:[\w./][\w./-]*[ \t]+)?){0,6})"
+    r"['\"]?(?:refs/)?(?:tags/)?(" + _VERSION + r")"
+    # (3) a version after the name, in prose: DoIA v1, DoIA **v1**, DoIA (v1), DoIA, v1, DoIA at v1, DoIA@v1, doia v1,
+    # DoIA tag: v1, DoIA release tag v1, DoIA is v1. The separator is ONE repeated alternation of a single punctuation
+    # character or a whole word, so no two quantifiers compete for the same characters and a long run is scanned once.
+    r"|(?i:" + _DOIA_NAME + r")(?:'s)?"
+    r"(?:[\s,:;(*_`@\[\u2013\u2014-]|(?i:\b(?:releases?|versions?|tags?|is|at)\b))*(" + _VERSION + r")"
 )
 
 
@@ -74,13 +96,21 @@ def read_doia_tag(path: Path = DOIA_TAG_FILE) -> str:
 def doia_tag_refs(text: str) -> list[str]:
     """The whole version tokens that refer to a DoIA release, and only those.
 
-    The rule is deliberately narrow, so another project's version (a Python v3.12.1, an action pin) never fails the
-    build. A token counts when it is (1) the path after tree/, blob/ or releases/tag/ in a link under
-    github.com/ChiefGyk3D/department-of-internal-arguments, (2) the argument of --branch or checkout, or (3) directly
-    after the name DoIA or Department of Internal Arguments (optionally 's, and release, version or tag). Write the
-    version right after "DoIA" in prose, or it is not checked.
+    The rule is deliberately narrow, so another project's version (a Python v3.12.1, an action pin, a link into another
+    repository) never fails the build. A token counts when it is (1) the tag after tree/, blob/, raw/, commits/,
+    releases/tag/, releases/download/, archive/ or compare/ (both ends) in a link under
+    github.com/ChiefGyk3D/department-of-internal-arguments, (2) the argument of --branch, --branch=, -b, checkout or
+    switch (flags and quotes allowed), or (3) directly after the name DoIA, doia or Department of Internal Arguments
+    (optionally 's, a bracket, bold or backtick mark, a comma, "at", "@", or release, version or tag). Write the version
+    right after "DoIA" in prose, or it is not checked. A trailing "-based" is not part of the token.
+
+    Also read: tags/ and refs/tags/ before a tag, the new-branch name that -b, -B, -c and -C take, a compare range
+    with a tag at either end, zipball, tarball, the raw host and ?ref= in a DoIA link, and the words release, version,
+    tag, is and at (or a dash or colon) between the name and the tag. Out of scope on purpose, so they pass: a version
+    with no leading v, a tag written before the name ("at v0.2.0 DoIA"), and commands such as git reset --hard or git
+    archive. A clone of another project with -b or --branch is still read, which is the accepted trade-off.
     """
-    return [next(g for g in m.groups() if g) for m in _DOIA_REF.finditer(text)]
+    return [g for m in _DOIA_REF.finditer(text) for g in m.groups() if g]
 
 
 def check_doia_tag(texts: dict[str, str], tag: str, require_page: bool = False) -> None:

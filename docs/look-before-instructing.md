@@ -25,8 +25,7 @@ Then:
 ## Why: 2026-10-24 and 2026-10-25
 
 The lead gave instructions for setting up Cloudflare Pages versus a Worker from memory and from a search summary. The
-lesson had been recorded the day before, but only the first 40 lines of that file were read. (This section is
-generalized; it states only what the tracking issue records.)
+lesson had been recorded the day before, but only the first 40 lines of that file were read.
 
 Vendor dashboards change often, and recall of them is a guess that reads like an instruction. A wrong click path costs the
 maintainer far more than a minute of reading costs the lead.
@@ -55,5 +54,3 @@ Prior art first: grep -ril <vendor> <notes dir> <sibling repos' docs>, and read 
 - [ ] A silent source led to the next source, not to "I don't know".
 
 Related: [Done means verified](done-means-verified.md), [The orchestrator](orchestrator.md), [Lessons](lessons.md).
-
-Linked from the orchestrator and lessons pages in a follow-up after PR #112 merges.

@@ -22,8 +22,7 @@ Approving a task includes planning its access ([Act, then report](act-then-repor
 ## Why: 2026-10-25
 
 The Cloudflare work needed two consent trips, because the first request asked for too little. A "Full access" fallback was
-then offered. The write OAuth grant was left standing afterward. (Generalized: this states only what the tracking issue
-records.)
+then offered. The write OAuth grant was left standing afterward.
 
 Every extra consent screen costs the maintainer time. A broad fallback or a reused credential undoes the least privilege he
 sets for the account.
@@ -44,6 +43,4 @@ The end-of-job item below is the check.
 - [ ] End of job: write scopes dropped, or an issue and card say they remain and why.
 
 Related: [Act, then report](act-then-report.md), [Done means verified](done-means-verified.md),
-[The orchestrator](orchestrator.md).
-
-Linked from the orchestrator and lessons pages in a follow-up after PR #112 merges.
+[The orchestrator](orchestrator.md), [Lessons](lessons.md).
