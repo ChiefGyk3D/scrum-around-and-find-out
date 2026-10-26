@@ -59,6 +59,7 @@ GUARD_MARGIN_SECONDS = 2  # the guard's own deadline falls this much before the 
 GUARD_TIMEOUT_SECONDS = 10  # room for one lazy re-probe: two requests per endpoint at REPROBE_TIMEOUT_SECONDS
 REPROBE_INTERVAL_SECONDS = 60  # a stale state is refreshed at most this often per session and configuration
 REPROBE_TIMEOUT_SECONDS = 1.5  # per request; the guard sits in front of every dispatch, so this stays short
+CONFIG_REPROBE_TIMEOUT_SECONDS = 3.0  # per request, once per new configuration: two requests fit the guard's deadline
 
 NO_MODEL = "no-model"
 APPROVAL = "approval"
@@ -279,15 +280,38 @@ def claim_reprobe(path: Path, now: float) -> bool:
     return True
 
 
-def reprobe(doc: AgentsFile, path: Path, now: float) -> dict[str, Any] | None:
-    """Refresh a stale state in place, bounded and rate limited. Never raises: None means the state could not be
-    refreshed (rate limited, a probe or storage failure, or a newer result already stored), and the caller treats local
-    reachability as unknown."""
+def claim_first_reprobe(path: Path, now: float) -> bool:
+    """True for the first re-probe of a session and configuration, whatever the clock says about the last attempt.
+
+    An edit of agents.yaml changes the state key, so there is no earlier state or attempt for the new key to wait on.
+    The attempt is recorded in the same marker the rate limit reads, so later retries are limited from this moment.
+    """
+    marker = attempt_path(path)
     try:
-        if not claim_reprobe(path, now):
+        with file_lock(marker.with_name(marker.name + ".lock")):
+            if os.path.lexists(marker):
+                return False
+            write_text(marker, json.dumps({"ts": now}))
+    except Exception:
+        return False  # storage that cannot hold the marker cannot hold the state either: no probe, state stays unknown
+    return True
+
+
+def reprobe(
+    doc: AgentsFile,
+    path: Path,
+    now: float,
+    timeout: float = REPROBE_TIMEOUT_SECONDS,
+    claimed: bool = False,
+) -> dict[str, Any] | None:
+    """Refresh a stale state in place, bounded and rate limited unless the caller already holds the first claim for
+    this configuration. Never raises: None means the state could not be refreshed (rate limited, a probe or storage
+    failure, or a newer result already stored), and the caller treats local reachability as unknown."""
+    try:
+        if not claimed and not claim_reprobe(path, now):
             return None
         started = time.monotonic()
-        results = probe_all(doc, lambda endpoint: probe(endpoint, REPROBE_TIMEOUT_SECONDS))
+        results = probe_all(doc, lambda endpoint: probe(endpoint, timeout))
         state = probe_state(results, now + time.monotonic() - started)  # completion time, as at SessionStart
         return state if save_state(path, state) else None
     except Exception:

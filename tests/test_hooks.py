@@ -7,6 +7,7 @@ Every rule of the guard has a test that fails when the rule is removed, and a ho
 from __future__ import annotations
 
 import datetime as dt
+import io
 import json
 import os
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from hooksdata import (
     state_folder,
 )
 from meterdata import NOW
+from safo import hooks as safo_hooks
 from safo.agentsfile import Endpoint
 from safo.cli import main
 from safo.errors import ConfigError
@@ -37,6 +39,7 @@ from safo.guardlog import read_log as read_guard_log
 from safo.guardlog import summarise
 from safo.hooks import append_log
 from safo.ollama import Probe
+from safo.ollama import probe as ollama_probe
 
 
 @pytest.fixture
@@ -537,6 +540,106 @@ def test_reprobe_is_rate_limited_and_a_failed_one_is_unknown_with_one_notice(
     third = guard(_private_home, agents, brief, now=later)[1]
     assert len(calls) == 2, "a minute later it tries again"
     assert "SAFO routing guard degraded" not in third, "one notice per session, however many dispatches"
+
+
+def edit_agents_file(path: Path) -> None:
+    """A real edit mid-session: the merged configuration changes, so the session's state key changes with it."""
+    data = yaml.safe_load(path.read_text())
+    data["hooks"]["tracking_repos"] = [*data["hooks"].get("tracking_repos", []), "example/added-mid-session"]
+    path.write_text(yaml.safe_dump(data))
+    path.chmod(0o600)
+
+
+def test_editing_agents_yaml_mid_session_is_reprobed_not_reported_as_degraded(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        assert hooks("probe", "--agents", str(path), home=_private_home)[0] == 0
+        before = state_folder(_private_home)
+        later = NOW + dt.timedelta(minutes=2)  # the probe's completion time is a moment after NOW
+        guard(_private_home, path, dispatch(prompt=NO_STEP), now=later)
+        first = read_log(_private_home)[-1]
+        assert first["health"] == "healthy" and first["diagnostic"] == ""
+        edit_agents_file(path)
+        seen: list[float] = []
+        real = ollama_probe
+
+        def spy(endpoint: Endpoint, timeout: float = 15) -> Probe:
+            seen.append(timeout)
+            return real(endpoint, timeout)
+
+        monkeypatch.setattr("safo.hooks.probe", spy)
+        code, out, _ = guard(_private_home, path, dispatch(prompt=NO_STEP), now=later)
+        row = read_log(_private_home)[-1]
+        assert code == 0 and "SAFO routing guard degraded" not in out, out
+        assert row["health"] == "healthy" and row["local_reachable"] is True and row["diagnostic"] == ""
+        assert row["rules"] == ["no-local-step"], "the local-step rule is enforced: the endpoint answered"
+        assert "config changed" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert seen and min(seen) > 1.5, "a config edit gets a longer timeout than the per-dispatch 1.5 s"
+        assert len(list(before.glob("probe-*.json"))) == 2, "one state per configuration; the old one is left to prune"
+        asked = len(a.requests)
+        again = guard(_private_home, path, dispatch(prompt=NO_STEP), now=later)[1]
+        assert len(a.requests) == asked and "config changed" not in again, "once per new key, then trusted"
+
+
+def test_two_edits_in_a_minute_are_each_reprobed(_private_home: Path, tmp_path: Path) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        for _ in range(2):  # each edit is a new key, so the 60 s limit of the stale path does not apply
+            edit_agents_file(path)
+            out = guard(_private_home, path, dispatch(prompt=NO_STEP), now=NOW)[1]
+            assert "SAFO routing guard degraded" not in out and read_log(_private_home)[-1]["health"] == "healthy"
+        assert len(a.requests) == 4  # /api/tags and /api/ps, once per edit
+
+
+def test_an_unreachable_endpoint_after_a_config_edit_is_still_reported_degraded(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    path = agents_file(tmp_path / "agents.yaml")  # both endpoints on a closed port
+    set_probe(_private_home, agents=path)
+    edit_agents_file(path)
+    code, out, _ = guard(_private_home, path, dispatch(prompt=NO_STEP))
+    row = read_log(_private_home)[-1]
+    assert code == 0 and "SAFO routing guard degraded" in out
+    context = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert '"diagnostic": "reprobe-timeout"' in context, "a real outage is told apart from a config edit"
+    assert row["health"] == "unknown" and row["local_reachable"] is False and row["rules"] == []
+
+
+def test_a_state_file_written_for_the_new_key_grants_no_tracking_exemption(_private_home: Path, tmp_path: Path) -> None:
+    """The state is the local-step rule's input only. The exemption comes from the binding made at SessionStart, which
+    a config edit does not carry over, and nothing a model writes into a state file creates one."""
+    path = agents_file(tmp_path / "agents.yaml", tracking_exempt_repos=["example/exempt"])
+    edit_agents_file(path)
+    set_probe(_private_home, agents=path)  # what a model could write: a fresh, reachable state under the new key
+    row = read_after(_private_home, path, dispatch(tracked=False, prompt=NO_STEP))
+    assert "no-issue" in row["rules"]
+    assert safo_hooks.read_bound_repo(probe_file(_private_home, path)) is None
+
+
+def test_hooks_probe_on_a_terminal_prints_usage_and_logs_nothing(_private_home: Path, agents: Path) -> None:
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    out = io.StringIO()
+    code = main(
+        ["hooks", "probe", "--agents", str(agents)],
+        env={"HOME": str(_private_home), "PATH": ""},
+        out=out,
+        err=io.StringIO(),
+        now=NOW,
+        stdin=Terminal(),
+    )
+    assert code == 0 and "no payload to read, so nothing was probed" in out.getvalue()
+    assert "SAFO routing guard degraded" not in out.getvalue()
+    assert read_log(_private_home) == [], "no error entry: it would count toward degraded health"
+
+
+def test_hooks_probe_with_a_piped_payload_is_unchanged(_private_home: Path, agents: Path) -> None:
+    code, out, _ = hooks("probe", "--agents", str(agents), home=_private_home)
+    assert code == 0 and "Local LLM" in out and "nothing was probed" not in out
 
 
 def test_a_configured_age_above_five_minutes_is_honoured(

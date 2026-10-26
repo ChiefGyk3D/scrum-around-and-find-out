@@ -291,6 +291,16 @@ A hook sits inside someone's session, so every error lets the work through, visi
 - What a failure switches off: input or configuration failures switch off every rule except those two; a state failure (missing, invalid,
   future-dated or other-session state, or a re-probe that failed) switches off only the local-step rule; a mode failure
   falls back to `warn`.
+- Editing `agents.yaml` mid-session changes the name of the session's probe file (it hashes the merged configuration), so
+  the saved probe no longer applies. The first dispatch after the edit probes again at once, without the one-a-minute
+  limit and with a 3 s timeout per request (a stale state's re-probe uses 1.5 s), and the guard adds one line saying
+  the configuration changed and the local LLM was re-probed. That is not a degraded state. If the re-probe finds the
+  endpoint unreachable, the dispatch is degraded and the notice's diagnostic is `reprobe-timeout`, so an outage is
+  told apart from an edit; later dispatches retry at the usual one-a-minute rate. The log keeps its fixed diagnostic
+  list, so that record says `probe`. A repository exemption (`tracking_exempt_repos`) is bound per configuration at
+  session start and is not carried over by an edit: until the next `startup` it fails closed and exempts nothing.
+- `safo hooks probe` run by hand on a terminal prints a usage line and exits 0, with no log entry; a host pipes the
+  event, so a piped payload is read as before.
 - A denial that was computed survives a log failure.
 - stdout is exactly one JSON line or nothing. `probe` and `guard` never exit 2 (a host reads that as a denial), even for a bad flag.
 - The host's own timeout (15 s for the probe, 10 s for the guard in the installed settings) is the last backstop. How a

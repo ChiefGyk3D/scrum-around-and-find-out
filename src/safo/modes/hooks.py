@@ -51,6 +51,7 @@ from safo.hooks import (
     AGENT_TOOLS,
     BASH_TOOL,
     COMMAND,
+    CONFIG_REPROBE_TIMEOUT_SECONDS,
     GUARD_MARGIN_SECONDS,
     GUARD_TIMEOUT_SECONDS,
     LEAD_WAITS,
@@ -58,6 +59,7 @@ from safo.hooks import (
     append_log,
     bind_repo,
     check_dispatch,
+    claim_first_reprobe,
     decide,
     first_notice,
     guard_output,
@@ -334,7 +336,27 @@ def hook_event(argv: Sequence[str] | None) -> str | None:
     return None
 
 
+PROBE_USAGE = (
+    "safo hooks probe is the SessionStart hook: Claude Code pipes the event (JSON) to it on standard input. "
+    "Run by hand there is no payload to read, so nothing was probed. Try: "
+    'echo \'{"session_id": "test"}\' | safo hooks probe'
+)
+
+
+def stdin_is_terminal(ctx: LocalContext) -> bool:
+    """True only when standard input is a terminal. A host pipes the event, so a terminal means a person typed the
+    command; anything that cannot answer (no isatty, a closed stream) is treated as a pipe and read as before."""
+    stream = ctx.stdin if ctx.stdin is not None else sys.stdin
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
+    if stdin_is_terminal(ctx):
+        ctx.say(PROBE_USAGE)  # a usage line, not a fault: no log entry, so it cannot count toward degraded health
+        return EXIT_OK
     code = "input"
     try:
         payload = event_input(ctx)
@@ -479,11 +501,27 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     state = read_state(path)
     now = ctx.now.timestamp()
     health = state_health(state, doc.hooks.max_state_age_seconds, now)
+    config_changed = False  # no state for this configuration, so the first dispatch under it probed at once
+    probe_code = "probe"  # what the visible notice says; the log keeps its fixed enum
     if health == "stale" and path is not None:
         # The configured age ran out mid-session: ask again, bounded and at most once a minute, and keep the answer.
         fresh = reprobe(doc, path, now)
         if fresh is not None:
             state, health = fresh, "healthy"
+    elif state is None and path is not None:
+        # Editing agents.yaml changes the state key and orphans the saved state. The first dispatch under a new key
+        # asks at once and for longer, without the one-a-minute limit; a later one retries at the usual rate.
+        config_changed = claim_first_reprobe(path, now)
+        if config_changed:
+            fresh = reprobe(doc, path, now, CONFIG_REPROBE_TIMEOUT_SECONDS, claimed=True)
+        else:
+            fresh = reprobe(doc, path, now)
+        if fresh is not None and not (config_changed and not fresh["reachable"]):
+            state, health = fresh, "healthy"
+        elif config_changed:
+            # The re-probe found nothing: a real outage or a miss, never reported as the edit it followed.
+            probe_code = "reprobe-timeout"
+            config_changed = False
     # A stale (not refreshed) or unknown state disables ONLY the local-step rule, keeping model/approval checks.
     reachable = health == "healthy" and state is not None and state["reachable"] is True
 
@@ -536,10 +574,15 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     if degraded:
         # Keep any rule denial. A persistence failure cannot erase a computed denial.
         data["systemMessage"] = WARNING + (" " + data.get("systemMessage", "") if output else "")
+        shown = probe_code if code == "probe" else code  # the log's enum has one probe code; the notice is specific
         data["hookSpecificOutput"]["additionalContext"] = (
-            WARNING + " " + json.dumps({"health": "degraded", "diagnostic": code})
+            WARNING + " " + json.dumps({"health": "degraded", "diagnostic": shown})
         )
-    if output or degraded:
+    elif config_changed:
+        note = "SAFO: agents.yaml changed mid-session (config changed); the local LLM was re-probed."
+        context = data["hookSpecificOutput"].get("additionalContext")
+        data["hookSpecificOutput"]["additionalContext"] = f"{context} {note}" if context else note
+    if output or degraded or config_changed:
         ctx.say(json.dumps(data))
 
 
