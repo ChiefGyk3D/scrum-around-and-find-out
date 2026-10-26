@@ -54,6 +54,10 @@ takes it for a bug that was hidden.
 - **The approval token is a speed bump, not proof.** It travels in text a model writes, so a prompt-injected model can
   forge it. `safo hooks` in `block` mode makes forgetting visible; it does not prove a person said yes. See
   [safo hooks](hooks.md), rule 2 and Known limits.
+- **`safo handoff check` proves staleness, not authorship.** Every agent comments through the maintainer's account, so a
+  forged report header posted from that account reads as fresh. The check reads only comments from an owner, member or
+  collaborator, so a fork contributor cannot fake one, and it catches the ordinary failure (a push after the review). It
+  does not prove who wrote the report. It is a speed bump like the approval token. See [Handoff](handoff.md).
 - **An explicit `--agents`, `--log` or `$SAFO_AGENTS` path in the current directory is the user's own choice.** Outside
   Actions it is allowed, because the person typed it. SAFO never searches the current directory for these files on its own.
   Under Actions an explicit path inside the workspace is refused.
@@ -65,7 +69,7 @@ takes it for a bug that was hidden.
   check and the rename.
 - **The `gh` fallback is off under Actions.** On a laptop SAFO may use `gh auth token`; under GitHub Actions it never runs
   `gh`, and the only credentials are the App or the token you pass in.
-- **Local modes are not allowed in the Action.** `usage`, `route`, `outcome`, `local`, `hooks` and `profiles` read files and logins on
+- **Local modes are not allowed in the Action.** `usage`, `route`, `outcome`, `local`, `hooks`, `profiles` and `handoff` read files and logins on
   a person's machine; the Action refuses them before it mints anything.
 - **The trust policy covers every private agents file.** A file read from a private path (the `agents.yaml` and its local
   override) must be a regular file you own, not writable by its group or by others, with no symbolic link on the way and

@@ -123,6 +123,15 @@ class FProject:
 
 
 @dataclass
+class FPull:
+    """A pull request as the handoff check reads it. Every field is raw, so a test can send a null or a wrong type."""
+
+    head: Any = None  # headRefOid
+    comments: list[Any] = field(default_factory=list)  # comment nodes, each a dict (or garbage on purpose)
+    commits: list[Any] = field(default_factory=list)  # commit oids, oldest first
+
+
+@dataclass
 class FRepo:
     full_name: str
     installed: bool = True
@@ -138,6 +147,8 @@ class FakeGitHub:
         self.repos: dict[str, FRepo] = {}
         self.mutations: list[Mutation] = []
         self.requests: list[str] = []
+        self.kinds: list[str] = []  # `query` or `mutation`, one per request that reached a handler, in order
+        self.pulls: dict[tuple[str, int], FPull] = {}  # (lower-case owner/name, number) -> pull request
         self.faults: list[Fault] = []
         self.listing_lag = 0
         self.vanished: set[str] = set()  # item ids that answer NOT_FOUND to any edit
@@ -290,6 +301,7 @@ class FakeGitHub:
             return 401, {}, b'{"message": "Bad credentials"}', False
         fault = self._next_fault(op)
         self.requests.append(op)
+        self.kinds.append(match.group(1))
         variables: JSON = body.get("variables") or {}
 
         if fault and fault.delay:

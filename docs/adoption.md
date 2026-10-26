@@ -122,7 +122,7 @@ variables. It cannot defend against a step that already runs as the same user in
 change the venv after it is created or read the environment of the steps that hold the key. Keep the job that holds the
 App key free of anything you do not trust. The Action accepts only the modes that talk to the board (`validate`,
 `bootstrap`, `audit`, `sync`, `reconcile`, `status`; its preflight also lets `agents-status` through, which has nothing
-to read on a runner). The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`) are not allowed in the Action. See
+to read on a runner). The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`) are not allowed in the Action. See
 [Limits](limits.md) for the rest of what is accepted.
 
 If your repositories already call the shared workflows in
