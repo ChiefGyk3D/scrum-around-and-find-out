@@ -118,7 +118,7 @@ not on a list is refused, never replaced by a default. Text echoed in an error i
 
 "Waterfall" means `process.method` or some `repositories[i].method` is `waterfall`. Waterfall-only keys on any other board
 are refused with `only used when the method or a repository is waterfall`, and a waterfall board needs
-`rules.add_closed_days` of at least 1. On a waterfall board the option names of the phase field and of the status field must be plain text: printable (no control, bidi or separator characters), already NFKC-normalized, at most 100 characters. A name that is not is refused by option number, never echoed. Unknown keys inside `process` are refused (`baseline` arrives with a later release).
+`rules.add_closed_days` of at least 1. On a waterfall board the option names of the phase field and of the status field must be printable, NFKC-stable text of at most 100 characters. That stops control and bidi injection and keeps names short; it does not stop look-alike letters. A name that is not is refused by option number, never echoed. Unknown keys inside `process` are refused (`baseline` arrives with a later release).
 
 ```yaml
 rules:

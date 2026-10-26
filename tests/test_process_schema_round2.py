@@ -196,17 +196,49 @@ def test_the_unknown_phase_listing_is_escaped_and_bounded() -> None:
     )
 
 
-def test_a_legacy_option_listing_is_bounded_and_escaped_too() -> None:
+LISTING_PINS = {
+    9: ("15b2ab1762ac5292043bbba6b636dfe1a331beca1729f865afc57a4e7c02697c", 137),
+    10: ("907f2710f87df3814a858c5ea33eb0386725d834ad980104ddd31b1dd1c1dc49", 141),
+    11: ("be1c4e68359c24e89dab104d3e09337141d6683eb80e72533cec4f65792b1949", 145),
+    12: ("613ec688e50a492ee7726e5b4d8e4621aefaceada2e87cfee96fbc3c73d2d836", 149),
+    13: ("84e455b4c7ae8d71356c00a6cdba48c49ae03dd811cdb5de076bb39453956738", 153),
+    14: ("8ac292e9bf3fe5f7ab2c65d4664f8112fb9982b171e42fbbfbba4c66cf922c99", 157),
+    15: ("e33aff71203c717314f5c7132b3f5e2fe38d86b0426d1960cff9c1c3d0e862e0", 161),
+    16: ("6bb7ba1818ae883ee3480d3d6e929d2b9671c3732dbc4087f06eca655cbc6a6b", 166),
+}
+# printable but not NFKC-stable: listed as written, as on origin/main
+NON_NFKC_PIN = ("32458f3d2937358daf0911a3254328d83ef37c98505658ab6879e1ad0c1ec4d8", 139)
+
+
+def legacy_listing_error(extra: list[str]) -> str:
     d = base()
-    d["fields"][0]["options"].append({"name": "Back\x1blog\u202e"})
+    d["fields"][0]["options"] += [{"name": n} for n in extra]
     d["rules"]["status"] = {"opened": "Nope"}
     with pytest.raises(ConfigError) as err:
         parse_board(d)
-    assert no_raw_control(str(err.value)) and "... and " not in str(err.value)
-    d["fields"][0]["options"] += [{"name": f"S{i}"} for i in range(9)]
-    with pytest.raises(ConfigError, match=r"\.\.\. and 7 more\)$") as capped:
-        parse_board(d)
-    assert "S2" not in str(capped.value) and "S1," in str(capped.value)
+    return str(err.value)
+
+
+def digest(message: str) -> tuple[str, int]:
+    return hashlib.sha256(message.encode()).hexdigest(), len(message)
+
+
+@pytest.mark.parametrize("total", sorted(LISTING_PINS))
+def test_a_legacy_option_listing_is_printed_in_full_as_on_main(total: int) -> None:
+    message = legacy_listing_error([f"S{i}" for i in range(total - 5)])
+    assert digest(message) == LISTING_PINS[total]
+    assert "more" not in message and message.endswith(f"S{total - 6})")
+
+
+def test_a_printable_non_nfkc_legacy_name_is_listed_as_written() -> None:
+    message = legacy_listing_error(["Cafe\u0301", "\ufb01nal", "\uff21BC"])
+    assert digest(message) == NON_NFKC_PIN
+
+
+def test_a_non_printable_legacy_name_is_escaped_and_the_rest_stay_as_written() -> None:
+    message = legacy_listing_error(["Back\x1blog\u202e", "Caf\u00e9"])
+    assert no_raw_control(message.replace("Caf\u00e9", "Cafe"))
+    assert message.endswith("Done, Back\\x1blog\\u202e, Caf\u00e9)")
 
 
 def test_a_short_clean_legacy_listing_keeps_its_bytes() -> None:
@@ -255,3 +287,52 @@ def test_every_mode_exits_2_on_a_bad_process_block_with_no_request(fake: FakeGit
     code, _, err = run_cli("--board", str(path), mode, env=env)
     assert code == 2 and "process.gates[0].issue: acme/elsewhere is not in repositories" in err
     assert fake.requests == []
+
+
+# -- round 3 ---------------------------------------------------------------------------------------------
+
+
+def test_a_non_string_key_in_the_process_block_is_a_named_error_not_a_type_error() -> None:
+    d = base()
+    d["process"] = {1: "x"}
+    refuses(d, "process: mapping key must be a string, not int")
+    d = waterfall()
+    d["process"]["gates"] = [{1: 2}]
+    refuses(d, "process.gates[0]: mapping key must be a string, not int")
+
+
+def test_a_legacy_mapping_still_echoes_a_non_string_key_without_a_type_error() -> None:
+    d = base()
+    d["project"][1] = "x"
+    with pytest.raises(ConfigError, match=r"project\.1: unknown key"):
+        parse_board(d)
+
+
+EMOJI = "\U0001f600" * 40
+
+
+def test_the_unknown_phase_listing_has_a_real_total_bound_with_astral_names() -> None:
+    d = phase_options([f"{i}" + "\U0001f600" * 30 for i in range(12)])
+    d["process"]["gates"] = gates(("Missing", "acme/widgets#1"))
+    with pytest.raises(ConfigError) as err:
+        parse_board(d)
+    message = str(err.value)
+    assert len(message) < 600 and message.isascii() and message.endswith("...)")
+    assert "(options: 0" in message
+
+
+def test_the_total_bound_applies_to_a_single_astral_value_too() -> None:
+    d = base()
+    d["process"] = {"method": EMOJI}
+    with pytest.raises(ConfigError) as err:
+        parse_board(d)
+    assert len(str(err.value)) < 250 and str(err.value).isascii()
+
+
+def test_a_short_listing_is_not_cut() -> None:
+    d = phase_options(["Requirements", "Design", "Release"])
+    d["process"]["gates"] = gates(("Missing", "acme/widgets#1"))
+    refuses(
+        d,
+        "process.gates[0].phase: 'Missing' is not an option of 'Phase' (options: Requirements, Design, Release)",
+    )
