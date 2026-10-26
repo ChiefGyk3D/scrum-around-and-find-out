@@ -579,12 +579,12 @@ def test_editing_agents_yaml_mid_session_is_reprobed_not_reported_as_degraded(
         assert code == 0 and "SAFO routing guard degraded" not in out, out
         assert row["health"] == "healthy" and row["local_reachable"] is True and row["diagnostic"] == ""
         assert row["rules"] == ["no-local-step"], "the local-step rule is enforced: the endpoint answered"
-        assert "config changed" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "probed now" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
         assert seen and min(seen) > 1.5, "a config edit gets a longer timeout than the per-dispatch 1.5 s"
         assert len(list(before.glob("probe-*.json"))) == 2, "one state per configuration; the old one is left to prune"
         asked = len(a.requests)
         again = guard(_private_home, path, dispatch(prompt=NO_STEP), now=later)[1]
-        assert len(a.requests) == asked and "config changed" not in again, "once per new key, then trusted"
+        assert len(a.requests) == asked and "probed now" not in again, "once per new key, then trusted"
 
 
 def test_two_edits_in_a_minute_are_each_reprobed(_private_home: Path, tmp_path: Path) -> None:
@@ -679,11 +679,13 @@ def test_hooks_probe_processes_a_valid_event_that_arrives_on_a_terminal(_private
 def test_hooks_probe_with_a_closed_or_empty_stdin_behaves_as_before(_private_home: Path, agents: Path) -> None:
     closed = io.StringIO()
     closed.close()
-    with open(os.devnull) as null:
-        for stream in (closed, null):
+    read_end, write_end = os.pipe()
+    os.close(write_end)  # an empty pipe: end of input at once
+    with open(os.devnull) as null, os.fdopen(read_end) as empty_pipe:
+        for stream in (closed, null, empty_pipe):
             code, out = run_probe_on(_private_home, agents, stream)
             assert code == 0 and "SAFO routing guard degraded" in out and "nothing was probed" not in out
-    assert [r["diagnostic"] for r in read_log(_private_home)] == ["input", "input"]
+    assert [r["diagnostic"] for r in read_log(_private_home)] == ["input"] * 3
 
 
 def test_hooks_probe_with_a_piped_payload_is_unchanged(_private_home: Path, agents: Path) -> None:
@@ -748,6 +750,71 @@ def test_a_slow_endpoint_and_a_held_log_lock_still_leave_a_decision_inside_the_h
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny", "the decision is emitted, the log skipped"
     assert "SAFO routing guard degraded" in data["systemMessage"]
+
+
+class DripOllama(SlowOllama):
+    """A loopback server that sends its headers, then one byte of a long body every `gap` seconds: each read is quick,
+    so a per-read socket timeout never fires and only a total bound stops the wait."""
+
+    def __init__(self, gap: float) -> None:
+        super().__init__(0.0)
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                outer.requests.append(self.path)
+                with contextlib.suppress(OSError):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "40")
+                    self.end_headers()
+                    for _ in range(40):
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                        time.sleep(gap)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.server.server_close()
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_a_drip_feeding_endpoint_cannot_hold_the_guard_past_its_budget(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale: bool
+) -> None:
+    """A socket timeout is per read, so a body sent a byte at a time never trips it; the probe is cut off in total."""
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 6)
+    set_mode(_private_home, "block")
+    with DripOllama(gap=0.2) as slow:
+        path = agents_file(tmp_path / "agents.yaml", slow.url, slow.url)
+        if stale:
+            set_probe(_private_home, age=900, agents=path)
+        else:
+            edit_agents_file(path)
+        started = time.monotonic()
+        code, out, _ = guard(_private_home, path, dispatch(model=None))
+        elapsed = time.monotonic() - started
+    assert code == 0 and slow.requests, "the endpoint was really asked"
+    assert elapsed < 6 - 0.5, f"{elapsed:.1f} s: the guard must answer before the host's timeout"
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_claimed_attempt_for_the_new_key_means_no_re_probe_and_an_unknown_health(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        edit_agents_file(path)
+        state_folder(_private_home).mkdir(parents=True, exist_ok=True)
+        block_reprobe(_private_home, path, age=1.0)  # an attempt a second ago under the new key, from any source
+        code, out, _ = guard(_private_home, path, dispatch(prompt=NO_STEP))
+        assert code == 0 and a.requests == [] and b.requests == []
+    row = read_log(_private_home)[-1]
+    assert row["health"] == "unknown" and row["local_reachable"] is False and row["rules"] == []
+    assert "SAFO routing guard degraded" in out and "probed now" not in out
 
 
 def test_a_re_probe_with_too_little_budget_is_skipped_and_the_notice_says_so(

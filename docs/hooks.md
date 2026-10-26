@@ -294,16 +294,23 @@ A hook sits inside someone's session, so every error lets the work through, visi
 - Editing `agents.yaml` mid-session changes the name of the session's probe file (it hashes the merged configuration), so
   the saved probe no longer applies. The first dispatch after the edit probes again at once, without the one-a-minute
   limit and with up to 3 s per request (a stale state's re-probe uses 1.5 s), and the guard adds one line saying
-  the configuration changed and the local LLM was re-probed. That is not a degraded state. If the re-probe finds the
+  the local LLM was probed now. That is not a degraded state. If the re-probe finds the
   endpoint unreachable, the dispatch is degraded and the notice's diagnostic is `reprobe-timeout`, so an outage is
   told apart from an edit; later dispatches retry at the usual one-a-minute rate. The log keeps its fixed diagnostic
   list, so that record says `probe`. SAFO does not carry the session's repository binding (`tracking_exempt_repos`) to
   the new file name, so after an edit the exemption does not apply until the next `startup`; this is bookkeeping, not
   protection (see the same-user limit below).
 - The guard has one clock: 10 s from the start of the process, less a margin. A re-probe gets at most what leaves two
-  requests per endpoint and 2 s for the issue lookup; if less than 0.5 s per request is left it is skipped (nothing is
-  claimed, so a later dispatch may try) and the notice names `reprobe-skipped`. The log wait ends 1 s before the host's
-  timeout; a log that could not be written in time is reported as `log-write`. Neither changes the decision.
+  requests per endpoint and 2 s for the issue lookup, and is cut off in total at twice that per-request time (a
+  socket timeout is per read, so a server that sends a byte at a time would otherwise hold it); an endpoint still
+  silent then counts as unreachable. If less than 0.5 s per request is left, the re-probe is skipped (nothing is
+  claimed, so a later dispatch may try) and the notice names `reprobe-skipped`. The log wait ends about 1 s before the
+  host's timeout, and is never shorter than 0.5 s; a log that could not be written in time is reported as `log-write`.
+  Neither changes the decision.
+- A re-probe that times out stores an unreachable state for `max_state_age_seconds` (300 s by default), so later
+  dispatches log health `healthy` and `local_reachable` false with no notice, as after a stale-state re-probe.
+- The line shown after the first probe under a new configuration says there was no saved probe for it (an edit, or a
+  session with no probe yet; SAFO cannot tell which) and that no `tracking_exempt_repos` binding carries over.
 - `safo hooks probe` run by hand on a terminal waits a quarter of a second for an event; if none arrives it prints a
   usage line and exits 0, with no log entry. An event that does arrive (a wrapper that gives the hook a pty) is
   processed as usual, and so is a piped payload.

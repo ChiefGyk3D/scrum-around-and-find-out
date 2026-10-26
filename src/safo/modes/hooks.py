@@ -59,9 +59,9 @@ from safo.hooks import (
     REPROBE_TIMEOUT_SECONDS,
     Verdict,
     append_log,
+    attempt_path,
     bind_repo,
     check_dispatch,
-    claim_first_reprobe,
     decide,
     first_notice,
     guard_output,
@@ -86,8 +86,8 @@ from safo.modes import LocalMode, register_local
 
 LOOKUP_RESERVE_SECONDS = 2.0  # a re-probe leaves at least this much of the hook's budget for the issue lookup
 MIN_REPROBE_TIMEOUT_SECONDS = 0.5  # below this per request a re-probe is skipped, not attempted
-LOG_MARGIN_SECONDS = 1.0  # the log wait ends this long before the host's timeout
-MIN_LOG_WAIT_SECONDS = 0.05
+LOG_MARGIN_SECONDS = 1.0  # the log wait is meant to end this long before the host's timeout
+MIN_LOG_WAIT_SECONDS = 0.5  # but a decision is always offered this long a try at the log, even out of time
 TERMINAL_WAIT_SECONDS = 0.25  # how long a terminal on standard input gets to deliver an event before it is a person
 STDIN_TIMEOUT_SECONDS = 5.0  # a host writes the event at once; a silent standard input is a hung host, not a slow one
 
@@ -527,7 +527,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     state = read_state(path)
     now = ctx.now.timestamp()
     health = state_health(state, doc.hooks.max_state_age_seconds, now)
-    config_changed = False  # no state for this configuration, so the first dispatch under it probed at once
+    first_probe = False  # no state for this configuration, so the first dispatch under it probed at once
     probe_code = "probe"  # what the visible notice says; the log keeps its fixed enum
     needs_probe = path is not None and (health == "stale" or state is None)
     if needs_probe and probe_timeout(REPROBE_TIMEOUT_SECONDS) < MIN_REPROBE_TIMEOUT_SECONDS:
@@ -540,19 +540,18 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         if fresh is not None:
             state, health = fresh, "healthy"
     elif state is None and path is not None:
-        # Editing agents.yaml changes the state key and orphans the saved state. The first dispatch under a new key
-        # asks at once and for longer, without the one-a-minute limit; a later one retries at the usual rate.
-        config_changed = claim_first_reprobe(path, now)
-        if config_changed:
-            fresh = reprobe(doc, path, now, probe_timeout(CONFIG_REPROBE_TIMEOUT_SECONDS), claimed=True)
-        else:
-            fresh = reprobe(doc, path, now, probe_timeout(REPROBE_TIMEOUT_SECONDS))
-        if fresh is not None and not (config_changed and not fresh["reachable"]):
+        # Editing agents.yaml changes the state key and orphans the saved state. With no attempt recorded for the new
+        # key, the claim succeeds at once (the one-a-minute limit has nothing to count from) and the probe gets longer;
+        # a key that already has an attempt, however it got there, is retried only at the usual rate.
+        first_probe = not os.path.lexists(attempt_path(path))
+        wanted = CONFIG_REPROBE_TIMEOUT_SECONDS if first_probe else REPROBE_TIMEOUT_SECONDS
+        fresh = reprobe(doc, path, now, probe_timeout(wanted))
+        if fresh is not None and not (first_probe and not fresh["reachable"]):
             state, health = fresh, "healthy"
-        elif config_changed:
+        elif first_probe:
             # The re-probe found nothing: a real outage or a miss, never reported as the edit it followed.
             probe_code = "reprobe-timeout"
-            config_changed = False
+            first_probe = False
     # A stale (not refreshed) or unknown state disables ONLY the local-step rule, keeping model/approval checks.
     reachable = health == "healthy" and state is not None and state["reachable"] is True
 
@@ -591,9 +590,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     try:
         if folder is None:
             raise OSError("log unavailable")
-        wait = min(APPEND_LOCK_TIMEOUT, hard - time.monotonic())
-        if wait < MIN_LOG_WAIT_SECONDS:
-            raise TimeoutError("no time left to write the log")  # skipped, reported as log-write; the decision stands
+        wait = min(APPEND_LOCK_TIMEOUT, max(MIN_LOG_WAIT_SECONDS, hard - time.monotonic()))
         append_log(
             folder / guardlog.LOG_NAME,
             log_record(
@@ -613,11 +610,16 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         data["hookSpecificOutput"]["additionalContext"] = (
             WARNING + " " + json.dumps({"health": "degraded", "diagnostic": shown})
         )
-    elif config_changed:
-        note = "SAFO: agents.yaml changed mid-session (config changed); the local LLM was re-probed."
+    elif first_probe:
+        note = (
+            "SAFO: no saved probe for this configuration (agents.yaml was edited mid-session, or this session has no "
+            "probe yet), so the local LLM was probed now. A tracking_exempt_repos binding does not carry over to a new "
+            "configuration: until the next session start no repository is exempt, and a brief without an open issue "
+            "line is flagged."
+        )
         context = data["hookSpecificOutput"].get("additionalContext")
         data["hookSpecificOutput"]["additionalContext"] = f"{context} {note}" if context else note
-    if output or degraded or config_changed:
+    if output or degraded or first_probe:
         ctx.say(json.dumps(data))
 
 

@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -59,6 +60,7 @@ GUARD_MARGIN_SECONDS = 2  # the guard's own deadline falls this much before the 
 GUARD_TIMEOUT_SECONDS = 10  # room for one lazy re-probe: two requests per endpoint at REPROBE_TIMEOUT_SECONDS
 REPROBE_INTERVAL_SECONDS = 60  # a stale state is refreshed at most this often per session and configuration
 REPROBE_TIMEOUT_SECONDS = 1.5  # per request; the guard sits in front of every dispatch, so this stays short
+REPROBE_SLACK_SECONDS = 0.25  # a re-probe is cut off at twice its per-request timeout plus this
 CONFIG_REPROBE_TIMEOUT_SECONDS = 3.0  # per request, once per new configuration: two requests fit the guard's deadline
 
 NO_MODEL = "no-model"
@@ -89,13 +91,35 @@ ALWAYS_BLOCK = (GEMINI_PAID, GEMINI_MATERIAL)
 # -- the probe -------------------------------------------------------------------------------------
 
 
-def probe_all(doc: AgentsFile, probe_one: Callable[[Endpoint], Probe] = probe) -> list[tuple[Endpoint, Probe]]:
-    """Every endpoint asked at once, so a session start waits for the slowest one and not for the sum."""
+def probe_all(
+    doc: AgentsFile, probe_one: Callable[[Endpoint], Probe] = probe, wait: float | None = None
+) -> list[tuple[Endpoint, Probe]]:
+    """Every endpoint asked at once, so a session start waits for the slowest one and not for the sum.
+
+    With `wait`, the call returns after that many seconds in all: an endpoint still unanswered then counts as
+    unreachable, and its worker (a daemon thread, which a socket timeout per read cannot bound in total) is left behind.
+    """
     endpoints = [e for a in doc.agents for e in a.endpoints]
     if not endpoints:
         return []
-    with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
-        return list(zip(endpoints, pool.map(probe_one, endpoints), strict=True))
+    if wait is None:
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
+            return list(zip(endpoints, pool.map(probe_one, endpoints), strict=True))
+    answers: list[Probe | None] = [None] * len(endpoints)
+
+    def work(index: int) -> None:
+        try:
+            answers[index] = probe_one(endpoints[index])
+        except Exception:
+            answers[index] = Probe(endpoints[index].id, endpoints[index].url, False, error="error")
+
+    workers = [threading.Thread(target=work, args=(i,), daemon=True) for i in range(len(endpoints))]
+    for worker in workers:
+        worker.start()
+    end = time.monotonic() + wait
+    for worker in workers:
+        worker.join(max(0.0, end - time.monotonic()))
+    return [(e, a or Probe(e.id, e.url, False, error="timeout")) for e, a in zip(endpoints, answers, strict=True)]
 
 
 def probe_state(results: list[tuple[Endpoint, Probe]], when: float) -> dict[str, Any]:
@@ -280,38 +304,16 @@ def claim_reprobe(path: Path, now: float) -> bool:
     return True
 
 
-def claim_first_reprobe(path: Path, now: float) -> bool:
-    """True for the first re-probe of a session and configuration, whatever the clock says about the last attempt.
-
-    An edit of agents.yaml changes the state key, so there is no earlier state or attempt for the new key to wait on.
-    The attempt is recorded in the same marker the rate limit reads, so later retries are limited from this moment.
-    """
-    marker = attempt_path(path)
+def reprobe(doc: AgentsFile, path: Path, now: float, timeout: float = REPROBE_TIMEOUT_SECONDS) -> dict[str, Any] | None:
+    """Refresh a state in place, bounded and rate limited. `timeout` is per request and the whole probe is cut off at
+    twice that, so a server that answers a byte at a time cannot hold the hook. Never raises: None means the state
+    could not be refreshed (rate limited, a probe or storage failure, or a newer result already stored), and the caller
+    treats local reachability as unknown."""
     try:
-        with file_lock(marker.with_name(marker.name + ".lock")):
-            if os.path.lexists(marker):
-                return False
-            write_text(marker, json.dumps({"ts": now}))
-    except Exception:
-        return False  # storage that cannot hold the marker cannot hold the state either: no probe, state stays unknown
-    return True
-
-
-def reprobe(
-    doc: AgentsFile,
-    path: Path,
-    now: float,
-    timeout: float = REPROBE_TIMEOUT_SECONDS,
-    claimed: bool = False,
-) -> dict[str, Any] | None:
-    """Refresh a stale state in place, bounded and rate limited unless the caller already holds the first claim for
-    this configuration. Never raises: None means the state could not be refreshed (rate limited, a probe or storage
-    failure, or a newer result already stored), and the caller treats local reachability as unknown."""
-    try:
-        if not claimed and not claim_reprobe(path, now):
+        if not claim_reprobe(path, now):
             return None
         started = time.monotonic()
-        results = probe_all(doc, lambda endpoint: probe(endpoint, timeout))
+        results = probe_all(doc, lambda endpoint: probe(endpoint, timeout), wait=2 * timeout + REPROBE_SLACK_SECONDS)
         state = probe_state(results, now + time.monotonic() - started)  # completion time, as at SessionStart
         return state if save_state(path, state) else None
     except Exception:
