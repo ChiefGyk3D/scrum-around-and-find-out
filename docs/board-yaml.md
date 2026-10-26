@@ -82,6 +82,11 @@ filter is set in a second call. An existing view with another layout is refused;
 | `add_closed_days` | `0` | `reconcile` also adds items closed or merged within this many days, as Done |
 | `tracking` | see below | The [no-hidden-work](no-hidden-work.md) checks: `kind_field` (`Kind`), `epic_field` (`Epic`), `effort_field` (`Effort`), and `exempt_repos` (`owner/name` list whose pull requests need no linked issue). A field name that is empty, or not in `fields`, turns that check off and the audit says "not configured" |
 | `threat_model` | off | The [threat model before build](threat-model.md) check: `label` (empty turns it off and the audit says "not configured"; `ai-surface` is the usual name) and `exempt_repos` (`owner/name` list whose issues need no threat-model line) |
+| `gate_check` | `CI green` | The [branch gate](no-hidden-work.md#the-branch-gate): the status check the default branch of each listed repository must require, matched by its own name or after a workflow prefix (`ci / CI green`). Empty turns the rule off; the audit then says "not configured" and its summary line says the gate was not checked |
+| `gate_forbid_force_push` | `true` | Also report a default branch that allows force pushes, or whose force-push block can be bypassed |
+| `gate_exempt_repos` | none | `owner/name` list, each entry listed in `repositories`, that is not evaluated for the gate; the audit prints a `NOTE` for each |
+| `gate_require_admin_enforced` | `false` | `true` also reports a classic protection rule that does not apply to administrators (`enforce_admins` off). Off by default because the shipped baseline (`scripts/apply-baseline.sh`) sets `enforce_admins` to false; a repository that is gated only for non-administrators then gets a `NOTE` |
+| `gate_admin_exempt_repos` | none | With `gate_require_admin_enforced` on: `owner/name` list, each entry listed in `repositories`, where administrators may bypass, accepted |
 
 Every status name must be an option of the status field; `safo` checks that against `fields` when it loads the file and
 against the live project before it changes anything.
