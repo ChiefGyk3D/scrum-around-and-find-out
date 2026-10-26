@@ -14,13 +14,14 @@ Rules this module holds to:
 - The issue must come from an owner, member or collaborator, and a change approval must name its entry (M13).
 - No text from the issue reaches a line, except logins, which `emit` writes through `ctx.say` (escaped).
 
-The REST cross-check (4b) is split: `verdict` takes its result as `via_app`, and `via_app_from_events` reads the REST
+The REST cross-check (4b) is split: `verdict` takes a `CrossCheck`, and `cross_check_from_events` reads the REST
 events strictly; the REST transport is a follow-up unit (the 400-line budget of #136).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import enum
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -347,17 +348,29 @@ def read_issues(client: Executes, refs: Iterable[str]) -> dict[str, Read | Unrea
     return out
 
 
-def via_app_from_events(events: Any, close_at: dt.datetime) -> bool | None:
-    """From the REST issue events: did a GitHub App perform the newest `closed` event (4b)? None when it cannot be told:
-    no such event, a field missing or mistyped, or the event is not the close GraphQL showed (`close_at`)."""
+class CrossCheck(enum.Enum):
+    """The REST cross-check (4b). A type, not a boolean: it has no default and no truthiness, so no falsey value (0, "",
+    [], False) can stand for "checked and manual". Only VERIFIED_MANUAL, from a complete matching REST read, passes."""
+
+    VERIFIED_MANUAL = "verified_manual"
+    VERIFIED_APP = "verified_app"
+    UNCHECKED = "unchecked"
+
+    def __bool__(self) -> bool:
+        raise TypeError("a CrossCheck is not a boolean")
+
+
+def cross_check_from_events(events: Any, close_at: dt.datetime) -> CrossCheck:
+    """From the REST issue events: did a GitHub App perform the newest `closed` event (4b)? UNCHECKED when it cannot be
+    told: no such event, a field missing or mistyped, or the event is not the close GraphQL showed (`close_at`)."""
     if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
-        return None
+        return CrossCheck.UNCHECKED
     try:
         closed = [(_ts(e.get("created_at")), e) for e in events if e.get("event") == "closed"]
     except _Malformed:
-        return None
+        return CrossCheck.UNCHECKED
     if not closed:
-        return None
+        return CrossCheck.UNCHECKED
     newest = max(at for at, _ in closed)
     flags = {
         ("performed_via_github_app" in e, e.get("performed_via_github_app") is not None)
@@ -365,23 +378,26 @@ def via_app_from_events(events: Any, close_at: dt.datetime) -> bool | None:
         if at == newest
     }
     if newest != close_at or len(flags) != 1 or not next(iter(flags))[0]:
-        return None
+        return CrossCheck.UNCHECKED
     app = next(e for at, e in closed if at == newest)["performed_via_github_app"]
-    return None if app is not None and not isinstance(app, dict) else app is not None
+    if app is None:
+        return CrossCheck.VERIFIED_MANUAL
+    return CrossCheck.VERIFIED_APP if isinstance(app, dict) else CrossCheck.UNCHECKED
 
 
 # -- judging ---------------------------------------------------------------------------------------------------------
 
 
-def verdict(chk: Check, read: Read | Unread, via_app: bool | None) -> Verdict:
-    """The approval test. `via_app` is the 4b result (`via_app_from_events`); None makes an approval unknown."""
+def verdict(chk: Check, read: Read | Unread, cross_check: CrossCheck) -> Verdict:
+    """The approval test. `cross_check` is the 4b result (`cross_check_from_events`), required: anything but
+    CrossCheck.VERIFIED_MANUAL cannot approve."""
     try:
-        return _verdict(chk, read, via_app)
+        return _verdict(chk, read, cross_check)
     except Exception as err:  # a crash is never an approval and never "stale"; the class name only
         return Verdict("unknown", (f"UNKNOWN {chk.subject} could not be judged ({type(err).__name__})",))
 
 
-def _verdict(chk: Check, read: Read | Unread, via_app: bool | None) -> Verdict:
+def _verdict(chk: Check, read: Read | Unread, cross_check: CrossCheck) -> Verdict:
     s = chk.subject
 
     def unknown(text: str) -> Verdict:
@@ -410,6 +426,10 @@ def _verdict(chk: Check, read: Read | Unread, via_app: bool | None) -> Verdict:
     close = read.close
     if close is None or read.created_at is None:
         return unknown("is closed but has no close event; its approval cannot be told")
+    created = read.created_at
+    later = [t for t in (read.edited_at, read.changed[1] if read.changed else None) if t is not None]
+    if close.at < created or any(t < created for t in later):  # an event before the issue existed cannot be true
+        return unknown("has timestamps that cannot be true; its approval cannot be told")
     if close.reason == "NOT_PLANNED":
         return refuse("was closed as not planned")
     if close.reason == "DUPLICATE" or close.duplicate:
@@ -420,10 +440,10 @@ def _verdict(chk: Check, read: Read | Unread, via_app: bool | None) -> Verdict:
                 "through a project workflow", "by a project workflow"
             )
         )
-    if via_app is None:
-        return unknown("close could not be cross-checked against the REST event, so it cannot be told")
-    if via_app:
+    if cross_check is CrossCheck.VERIFIED_APP:
         return refuse("was closed through a GitHub App")
+    if cross_check is not CrossCheck.VERIFIED_MANUAL:  # UNCHECKED, or not a CrossCheck at all
+        return unknown("close could not be cross-checked against the REST event, so it cannot be told")
     if read.association not in TRUSTED_ASSOCIATIONS:
         return refuse("was opened by an account that is not an owner, member or collaborator")
     note: tuple[str, ...] = ()
@@ -459,63 +479,76 @@ def _verdict(chk: Check, read: Read | Unread, via_app: bool | None) -> Verdict:
             return refuse(f"was created before the baseline froze on {chk.frozen}")
         if chk.kind == "freeze" and close.at >= start + dt.timedelta(days=1):
             return refuse(f"was closed after the baseline froze on {chk.frozen}")
-    if chk.kind == "change" and not _names_entry(read.body, str(chk.entry)):
-        return Verdict(
-            "open",
-            (
-                f"DRIFT   SCOPE the change {chk.action} {chk.entry} cites {chk.ref}, which does not mention "
-                f"{chk.entry} on its own `Entry:` line; the approval is not for this change",
-            ),
-        )
+    if chk.kind == "change":
+        found = _entry_state(read.body, str(chk.entry))
+        if found == "html":
+            return unknown("has raw HTML in its body; an approval body must be plain text, so its entry cannot be told")
+        if found != "named":
+            return Verdict(
+                "open",
+                (
+                    f"DRIFT   SCOPE the change {chk.action} {chk.entry} cites {chk.ref}, which does not mention "
+                    f"{chk.entry} on its own `Entry:` line; the approval is not for this change",
+                ),
+            )
     return Verdict("approved", note, close.at, login)
 
 
 _ENTRY_LINE = re.compile(r"Entry: ([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}#[1-9][0-9]{0,9})")
-_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+_OPEN_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_CLOSE_FENCE = re.compile(r" {0,3}(`+|~+)[ \t]*")
+_CONTAINER = re.compile(r" {0,3}(?:>|[-*+](?: |$)|[0-9]{1,9}[.)](?: |$))")
+_HTML = re.compile(r"<[A-Za-z/!?]")
 
 
-def entry_lines(body: str) -> list[str]:
-    """The lines of `body` that start `Entry:` and could be shown as plain text: not inside an HTML comment, a fenced
-    code block or a raw HTML block, not quoted, not indented. (The title is never used.)"""
-    text = re.sub(r"<!--.*?(?:-->|\Z)", " ", body.replace("\r\n", "\n").replace("\r", "\n"), flags=re.DOTALL)
-    found: list[str] = []
+def visible_lines(body: str) -> list[str]:
+    """The lines of `body` that are not inside fenced code, by CommonMark's fence grammar. An opening fence is three or
+    more backticks or tildes after at most three spaces (a backtick fence's info string may not hold a backtick). A
+    closing fence is the same character, at least as long, after at most three spaces, followed only by spaces or tabs.
+    An unterminated fence runs to the end and hides everything after it."""
+    lines: list[str] = []
     fence = ""
-    html = False
-    for line in text.split("\n"):
-        opener = _FENCE.match(line)
+    for line in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if fence:
-            if opener and opener.group(1)[0] == fence[0] and len(opener.group(1)) >= len(fence):
+            close = _CLOSE_FENCE.fullmatch(line)
+            if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= len(fence):
                 fence = ""
             continue
-        if opener:
+        opener = _OPEN_FENCE.fullmatch(line)
+        if opener and not (opener.group(1)[0] == "`" and "`" in opener.group(2)):
             fence = opener.group(1)
             continue
+        lines.append(line)
+    return lines
+
+
+def _folded(parts: tuple[str, str, int]) -> tuple[str, str, int]:
+    return parts[0].translate(_UPPER), parts[1].translate(_UPPER), parts[2]
+
+
+def _entry_state(body: str, entry: str) -> str:
+    """`html` when the body holds any raw HTML (any `<` that begins a tag, comment, declaration or autolink, even inside
+    an inline code span; only fenced code is literal), else `named` when exactly one `Entry:` line, not a quote or list
+    continuation, is exactly `Entry: owner/repo#N` for `entry`, else `missing`. The repository is compared after the
+    ASCII-only fold, the number as an integer."""
+    lines = visible_lines(body)
+    if any(_HTML.search(line) for line in lines):
+        return "html"
+    found: list[str] = []
+    lazy = False  # inside a quote or list item until a blank line: a following line is its lazy continuation
+    for line in lines:
         if not line.strip():
-            html = False
-        elif html or re.match(r" {0,3}<[A-Za-z/!?]", line):
-            html = True
-        elif line.startswith("Entry:"):
+            lazy = False
+        elif _CONTAINER.match(line):
+            lazy = True
+        elif line.startswith("Entry:") and not lazy:
             found.append(line)
-    return found
-
-
-def _names_entry(body: str, entry: str) -> bool:
-    """M13: the body holds exactly one `Entry:` line, it is exactly `Entry: owner/repo#N`, and it is this entry. The
-    repository is compared after the ASCII-only fold; the number as an integer."""
-    lines = entry_lines(body)
-    want = parse_ref(entry)
-    match = _ENTRY_LINE.fullmatch(lines[0]) if len(lines) == 1 else None
+    match = _ENTRY_LINE.fullmatch(found[0]) if len(found) == 1 else None
     got = parse_ref(match.group(1)) if match else None
-    return (
-        got is not None
-        and want is not None
-        and (got[0].translate(_UPPER), got[1].translate(_UPPER), got[2])
-        == (
-            want[0].translate(_UPPER),
-            want[1].translate(_UPPER),
-            want[2],
-        )
-    )
+    want = parse_ref(entry)
+    if got is None or want is None:
+        return "missing"
+    return "named" if _folded(got) == _folded(want) else "missing"
 
 
 class Says(Protocol):
