@@ -454,9 +454,9 @@ def emit_then_persist(
         if claim is not None:  # the probe notice was in the delivered line: only now is it used up
             with contextlib.suppress(Exception):
                 claim_notice(claim)
-        if refresh is not None:  # keep the session's repository binding out of the prune: a hint, after the decision
-            with contextlib.suppress(Exception):
-                refresh_bound_repo(refresh)
+    if refresh is not None:  # keep the session's repository binding out of the prune: a hint, after any decision
+        with contextlib.suppress(Exception):
+            refresh_bound_repo(refresh)
     try:
         if folder is None:
             raise OSError("log unavailable")

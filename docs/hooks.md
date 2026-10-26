@@ -385,7 +385,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   link, foreign or loose-mode file) is removed after the line is delivered, by one look, an atomic rename to a unique
   side name, and a second look at the MOVED object: only an object that still has the observed identity is deleted
   (rmdir or unlink chosen from that same look). The answer is True only if the object is really gone: a directory that
-  is not empty stays under its side name and the answer is False. At most 8 side objects (`.log-failed.junk.*`) are
+  is not empty stays under its side name and the answer is False. At most 8 side objects (the files whose names start with `.log-failed.junk`) are
   kept: empty directories and our own regular files among them are pruned first, and at the cap nothing more is moved
   aside, so repeated planting cannot grow the folder without bound. Anything else that was moved is put back without
   overwriting (a hard link, or the checked rename above) or, if it cannot be put back, left under its side name; a
