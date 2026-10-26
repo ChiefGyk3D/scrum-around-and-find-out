@@ -28,7 +28,31 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-url", default=API_URL, help="the REST API (https; plain http for loopback only)")
 
 
+EXIT_INTERRUPTED = 130  # the shell's code for SIGINT: stopped by the operator, nothing decided
+
+
+def emit(ctx: LocalContext, lines: list[str], code: int) -> int:
+    """Write the report; the decision `code` was computed before any output and does not depend on it.
+
+    If the output cannot be written (a closed pipe), a failure (1) or an unknown (2) stays as it was, and a pass (0)
+    becomes 2: a pass that nobody could read is not reported as one.
+    """
+    try:
+        for line in lines:
+            ctx.say(line)
+    except (OSError, ValueError):
+        return code or EXIT_UNKNOWN
+    return code
+
+
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
+    try:
+        return _run(ctx, args)
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+
+
+def _run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if args.agent_login and not credentials.LOGIN.fullmatch(args.agent_login):
         raise ConfigError("agent-login is not a GitHub login")
     if args.require_app_id and not re.fullmatch(r"[1-9][0-9]{0,15}", args.require_app_id):
@@ -48,21 +72,21 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             int(args.require_app_id) if args.require_app_id else None,
         )
     except CannotTell as err:
-        ctx.say(f"UNKNOWN {err}")
-        return EXIT_UNKNOWN
-    ctx.say(f"default branch: {branch}; protection found: {found if found else 'none (not protected)'}")
+        return emit(ctx, [f"UNKNOWN {err}"], EXIT_UNKNOWN)
+    failed = [c for c in conditions if not c.ok]
+    code = EXIT_DRIFT if failed else EXIT_OK
+    lines = [f"default branch: {branch}; protection found: {found if found else 'none (not protected)'}"]
     for c in conditions:
         shown = f" (matched: {c.matched})" if c.matched else (f" ({c.note})" if c.note and not c.ok else "")
-        ctx.say(f"{'PASS' if c.ok else 'FAIL'} {c.id}: {c.text}{shown}")
+        lines.append(f"{'PASS' if c.ok else 'FAIL'} {c.id}: {c.text}{shown}")
         if c.warn:
-            ctx.say(f"NOTE {c.id}: {c.warn}")  # never changes the exit code on its own
-    failed = [c for c in conditions if not c.ok]
-    ctx.say(
+            lines.append(f"NOTE {c.id}: {c.warn}")  # never changes the exit code on its own
+    lines.append(
         f"protection: all {len(conditions)} conditions hold"
         if not failed
         else f"protection: {len(failed)} of {len(conditions)} conditions do not hold"
     )
-    return EXIT_DRIFT if failed else EXIT_OK
+    return emit(ctx, lines, code)
 
 
 register_local(

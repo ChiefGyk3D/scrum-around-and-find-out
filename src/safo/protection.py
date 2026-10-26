@@ -23,6 +23,8 @@ import binascii
 import dataclasses
 import http.client
 import re
+import secrets
+import string
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,7 +32,7 @@ from collections.abc import Callable
 from typing import Any
 
 from safo import __version__, bounded
-from safo.codeowners import CodeownersError, Rule, covered, parse_rules
+from safo.codeowners import CodeownersError, Rule, _tokens, covered, parse_rules
 from safo.errors import SafoError
 
 METHODS = ("GET",)  # the only verb this module can send
@@ -43,6 +45,7 @@ MAX_RULESETS = 100  # one page; a full page might hide more, so it is "cannot te
 CODEOWNERS_PLACES = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")  # GitHub's order of precedence
 NAME = re.compile(r"[A-Za-z0-9_.-]+")
 BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/+@=-]{0,254}")
+SHA = re.compile(r"[0-9a-f]{40}")
 GLOB = re.compile(r"[*?\[]")
 
 
@@ -68,8 +71,25 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None  # the token never follows a redirect
 
 
+def _body(response: Any) -> bytes:
+    """The body, at most one byte over the cap. Two different Content-Length values are a response to distrust."""
+    if len(set(response.headers.get_all("Content-Length") or [])) > 1:
+        raise CannotTell("cannot tell: a response carried conflicting Content-Length headers")
+    data: bytes = response.read(bounded.MAX_BYTES + 1)
+    declared = response.headers.get("Content-Length")
+    # http.client hands back what arrived when a connection closes early; a body that merely parses is not a whole one
+    if declared is not None and (
+        not declared.isdigit() or (len(data) != int(declared) and len(data) <= bounded.MAX_BYTES)
+    ):
+        raise CannotTell("cannot tell: a response body is shorter or longer than its Content-Length")
+    return data
+
+
 class Rest:
-    """GET-only client. `get` returns (status, parsed JSON or None); only 200 and 404 are ever returned."""
+    """GET-only client. `get` returns (status, parsed JSON or None, lower-cased headers); only 200 and 404 are returned.
+
+    Reads are bounded: one request, no retry, no redirect, a read timeout, and a body of at most 1 MiB.
+    """
 
     def __init__(self, token: str, base: str = API_URL, timeout: float = 30.0) -> None:
         parts = urllib.parse.urlsplit(base)
@@ -80,7 +100,7 @@ class Rest:
     def __repr__(self) -> str:
         return f"Rest(base={self._base!r})"
 
-    def get(self, path: str, what: str) -> tuple[int, Any]:
+    def get(self, path: str, what: str) -> tuple[int, Any, dict[str, str]]:
         request = urllib.request.Request(  # noqa: S310 - the URL is https or loopback, checked in __init__
             self._base + path,
             method=METHODS[0],
@@ -94,19 +114,26 @@ class Rest:
         try:
             try:
                 with urllib.request.build_opener(_NoRedirect).open(request, timeout=self._timeout) as response:
-                    status, raw = response.status, response.read(bounded.MAX_BYTES + 1)
+                    status, raw, head = response.status, _body(response), response.headers
             except urllib.error.HTTPError as err:
-                status, raw = err.code, err.read(bounded.MAX_BYTES + 1)
+                status, raw, head = err.code, _body(err), err.headers
         except (OSError, http.client.HTTPException):
             raise CannotTell(f"cannot tell: the request for {what} did not complete") from None
         if status not in (200, 404):
             raise CannotTell(f"cannot tell: GitHub answered {status} to the request for {what}")
+        headers = {"link": ",".join(head.get_all("Link") or [])}
         try:
-            return status, bounded.loads(raw)
-        except (ValueError, RecursionError):
+            return status, bounded.loads(raw), headers
+        except (ValueError, RecursionError):  # includes UnicodeDecodeError
             if status == 404:
-                return status, None
+                return status, None, headers
             raise CannotTell(f"cannot tell: the answer for {what} is not usable JSON") from None
+
+
+def _no_next_page(headers: dict[str, str], what: str) -> None:
+    """A list answered with a `rel="next"` link has more pages than were read: the read is incomplete."""
+    if re.search(r"rel\s*=\s*\"?[^\",;]*\bnext\b", headers.get("link", ""), re.IGNORECASE):
+        raise CannotTell(f"cannot tell: {what} has another page that was not read")
 
 
 # -- strict field access -------------------------------------------------------------------------------------------
@@ -279,24 +306,56 @@ def _repo_path(repo: str) -> str:
     return f"/repos/{owner}/{name}"
 
 
-def default_branch(rest: Rest, base: str) -> str:
-    _, body = rest.get(base, "the repository")
-    name = _str(_obj(body, "the repository answer"), "default_branch", "the repository")
+@dataclasses.dataclass(frozen=True)
+class Repo:
+    """The repository document fields the read is bound to; read twice, the two must be identical."""
+
+    id: int
+    full_name: str
+    default_branch: str
+
+
+def read_repo(rest: Rest, base: str, repo: str) -> Repo:
+    status, body, _ = rest.get(base, "the repository")
+    top = _obj(body, "the repository answer")
+    ident = top.get("id")
+    if status != 200 or not isinstance(ident, int) or isinstance(ident, bool) or ident < 1:
+        raise CannotTell("cannot tell: the repository answer has no positive numeric id")
+    full_name = _str(top, "full_name", "the repository")
+    if full_name.lower() != repo.lower():
+        raise CannotTell("cannot tell: the repository answer is for a different repository than was asked for")
+    name = _str(top, "default_branch", "the repository")
     if not BRANCH.fullmatch(name) or ".." in name or name.endswith(("/", ".lock")) or "//" in name:
         raise CannotTell("cannot tell: the default branch name is not one this check will put in a request")
-    return name
+    return Repo(ident, full_name, name)
+
+
+def branch_head(rest: Rest, base: str, branch: str) -> str:
+    """The commit the default branch points at now: CODEOWNERS and the workflow tree are read at exactly this commit."""
+    status, body, _ = rest.get(f"{base}/branches/{urllib.parse.quote(branch, safe='/')}", "the default branch")
+    top = _obj(body, "the branch answer")
+    commit = _obj(top.get("commit"), "the branch's commit")
+    sha = _str(commit, "sha", "the branch's commit")
+    if status != 200 or top.get("name") != branch or not SHA.fullmatch(sha):
+        raise CannotTell("cannot tell: the branch answer is not for the default branch or has no commit sha")
+    return sha
 
 
 def read_sources(rest: Rest, base: str, branch: str, agent: str) -> list[Source]:
     sources: list[Source] = []
-    status, body = rest.get(f"{base}/branches/{urllib.parse.quote(branch, safe='/')}/protection", "branch protection")
+    status, body, _ = rest.get(
+        f"{base}/branches/{urllib.parse.quote(branch, safe='/')}/protection", "branch protection"
+    )
     if status == 200:
         sources.append(parse_classic(body, agent))
     elif not (isinstance(body, dict) and body.get("message") == "Branch not protected"):
         raise CannotTell("cannot tell: branch protection answered 404 with something other than 'Branch not protected'")
-    _, listing = rest.get(f"{base}/rulesets?per_page={MAX_RULESETS}&includes_parents=true", "the rulesets")
-    if not isinstance(listing, list):
+    status, listing, headers = rest.get(
+        f"{base}/rulesets?per_page={MAX_RULESETS}&includes_parents=true", "the rulesets"
+    )
+    if status != 200 or not isinstance(listing, list):
         raise CannotTell("cannot tell: the ruleset listing is not a list")
+    _no_next_page(headers, "the ruleset listing")
     if len(listing) >= MAX_RULESETS:
         raise CannotTell("cannot tell: a full page of rulesets may hide more")
     for item in listing:
@@ -309,7 +368,7 @@ def read_sources(rest: Rest, base: str, branch: str, agent: str) -> list[Source]
             raise CannotTell("cannot tell: a listed ruleset has an enforcement this check does not know")
         if target != "branch" or enforcement != "active":
             continue
-        status, detail = rest.get(f"{base}/rulesets/{ident}", "a ruleset")
+        status, detail, _ = rest.get(f"{base}/rulesets/{ident}", "a ruleset")
         if status != 200:
             raise CannotTell("cannot tell: a listed ruleset could not be read")
         source = parse_ruleset(detail, entry, branch)
@@ -318,33 +377,222 @@ def read_sources(rest: Rest, base: str, branch: str, agent: str) -> list[Source]
     return sources
 
 
-def read_codeowners(rest: Rest, base: str, branch: str) -> list[Rule]:
-    """The rules of the first CODEOWNERS GitHub would use; no file at all is no rules (nothing covered)."""
+# -- CODEOWNERS ----------------------------------------------------------------------------------------------------
+
+_LOGIN = r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*"  # no leading, trailing or doubled hyphen
+_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+def strict_owner(token: str) -> bool:
+    """A CODEOWNERS owner by GitHub's own naming rules: @login (39 characters), @org/team, or an email address.
+
+    This is the second layer. Whether the user or team exists, and can review, is GitHub's answer (the CODEOWNERS
+    errors endpoint), read separately.
+    """
+    if len(token) > 256:
+        return False
+    if token.startswith("@"):
+        owner, slash, team = token[1:].partition("/")
+        if not (re.fullmatch(_LOGIN, owner) and len(owner) <= 39):
+            return False
+        return not slash or bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", team))
+    return bool(_EMAIL.fullmatch(token))
+
+
+def read_codeowners(rest: Rest, base: str, ref: str) -> tuple[str, str] | None:
+    """(location, text) of the first CODEOWNERS GitHub would use at commit `ref`; None when there is no file."""
     for place in CODEOWNERS_PLACES:
-        status, body = rest.get(f"{base}/contents/{place}?ref={urllib.parse.quote(branch, safe='')}", "CODEOWNERS")
+        status, body, _ = rest.get(f"{base}/contents/{place}?ref={ref}", "CODEOWNERS")
         if status == 404:
             if not (isinstance(body, dict) and body.get("message") == "Not Found"):
                 raise CannotTell("cannot tell: CODEOWNERS answered 404 with something other than 'Not Found'")
             continue
         file = _obj(body, "the CODEOWNERS answer")
-        if _str(file, "type", "CODEOWNERS") != "file" or _str(file, "encoding", "CODEOWNERS") != "base64":
-            raise CannotTell("cannot tell: CODEOWNERS is not a file with base64 content")
+        if (
+            _str(file, "path", "CODEOWNERS") != place
+            or _str(file, "type", "CODEOWNERS") != "file"
+            or _str(file, "encoding", "CODEOWNERS") != "base64"
+            or not SHA.fullmatch(_str(file, "sha", "CODEOWNERS"))
+        ):
+            raise CannotTell("cannot tell: the CODEOWNERS answer is not the base64 file that was asked for")
         try:
-            text = base64.b64decode("".join(_str(file, "content", "CODEOWNERS").split()), validate=True).decode()
-            return parse_rules(text)
+            return place, base64.b64decode("".join(_str(file, "content", "CODEOWNERS").split()), validate=True).decode()
         except (binascii.Error, ValueError):
             raise CannotTell("cannot tell: CODEOWNERS content cannot be decoded") from None
-        except CodeownersError:
-            raise CannotTell("cannot tell: CODEOWNERS has a rule this check cannot evaluate") from None
-    return []
+    return None
 
 
-# a directory is probed with the kinds of file that live in it (workflows are .yml), at two depths
-PROBES = ("probe.yml", "probe.yaml", "probe.md", "probe", "sub/probe.yml")
+def codeowners_error_lines(rest: Rest, base: str, ref: str, place: str) -> set[int]:
+    """The lines of `place` GitHub reports an error on (an owner that does not exist, a bad pattern, ...)."""
+    status, body, headers = rest.get(f"{base}/codeowners/errors?ref={ref}", "the CODEOWNERS errors")
+    if status != 200:
+        raise CannotTell("cannot tell: the CODEOWNERS errors could not be read")
+    _no_next_page(headers, "the CODEOWNERS errors")
+    lines: set[int] = set()
+    for item in _list(_obj(body, "the CODEOWNERS errors answer"), "errors", "the CODEOWNERS errors answer"):
+        row = _obj(item, "a CODEOWNERS error")
+        line = row.get("line")
+        if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+            raise CannotTell("cannot tell: a CODEOWNERS error has no line number")
+        if _str(row, "path", "a CODEOWNERS error") == place:
+            lines.add(line)
+    return lines
+
+
+def trusted_rules(text: str, bad_lines: set[int]) -> tuple[list[Rule], int]:
+    """The rules, with every line GitHub reports an error on, or that names an owner failing `strict_owner`, left with
+    its pattern and no owner (so it clears ownership of what it matches, the strict reading). Also how many were."""
+    kept: list[str] = []
+    downgraded = 0
+    for number, line in enumerate(text.splitlines(), 1):
+        tokens = _tokens(line)
+        if tokens and (number in bad_lines or not all(strict_owner(t) for t in tokens[1:])):
+            if tokens[1:]:
+                downgraded += 1
+            line = tokens[0]
+        kept.append(line)
+    try:
+        return parse_rules("\n".join(kept)), downgraded
+    except CodeownersError:
+        raise CannotTell("cannot tell: CODEOWNERS has a rule this check cannot evaluate") from None
+
+
+def _tree(
+    rest: Rest, base: str, sha: str, what: str, *, recursive: bool, expect: str | None
+) -> list[tuple[str, str, str]]:
+    status, body, _ = rest.get(f"{base}/git/trees/{sha}" + ("?recursive=1" if recursive else ""), what)
+    top = _obj(body, what)
+    if status != 200 or (expect is not None and top.get("sha") != expect):
+        raise CannotTell(f"cannot tell: {what} is not the tree that was asked for")
+    if top.get("truncated") is not False:
+        raise CannotTell(f"cannot tell: {what} is truncated or does not say whether it is")
+    rows: list[tuple[str, str, str]] = []
+    for item in _list(top, "tree", what):
+        row = _obj(item, "a tree entry")
+        path = _str(row, "path", "a tree entry")
+        kind = _str(row, "type", "a tree entry")
+        entry = _str(row, "sha", "a tree entry")
+        if kind not in ("blob", "tree", "commit") or not SHA.fullmatch(entry):
+            raise CannotTell("cannot tell: a tree entry is not one this check understands")
+        if not path or not path.isprintable() or path.startswith("/"):
+            raise CannotTell("cannot tell: a tree entry has a path this check will not use")
+        rows.append((path, kind, entry))
+    return rows
+
+
+def workflow_files(rest: Rest, base: str, head: str) -> list[str]:
+    """Every file under `.github/workflows/` at commit `head`, nested ones included. None at all is an empty list.
+
+    The tree is walked one level at a time (root, `.github`, `workflows` recursively), so a large repository's root
+    listing is the only big read, and a truncated listing at any step is "cannot tell".
+    """
+    current, expect = head, None
+    for step in (".github", "workflows"):
+        entries = _tree(rest, base, current, f"the tree holding {step}", recursive=False, expect=expect)
+        match = [e for e in entries if e[0] == step]
+        if not match:
+            return []
+        if match[0][1] != "tree":
+            raise CannotTell(f"cannot tell: {step} is not a directory")
+        current = expect = match[0][2]
+    listed = _tree(rest, base, current, "the workflows tree", recursive=True, expect=expect)
+    return [".github/workflows/" + path for path, kind, _ in listed if kind != "tree"]
+
+
+FRESH_NAMES = 3  # rounds of random paths per run, each in every shape below
+FRESH_SHAPES = ("{}.yml", "{}.yaml", "{}", "{}/{}.yml", "{}/{}.yaml", "{}/{}", "{}/{}/{}.yml")
+
+
+_ALNUM = string.ascii_letters + string.digits
+_ALPHABET = _ALNUM + "_.-"
+
+
+def _random_token() -> str:
+    """A path component of 6 to 24 characters from letters, digits, `_`, `.` and `-`, any of them first (so a leading
+    dot, digit, dash or capital is as likely as a lowercase letter) and never made only of dots. Not hexadecimal: a
+    class like `[0-9a-f]*` or `[a-z]*` must not own it by construction."""
+    chars = [secrets.choice(_ALPHABET) for _ in range(6 + secrets.randbelow(19))]
+    if not any(c in _ALNUM for c in chars):
+        chars[-1] = secrets.choice(_ALNUM)
+    return "".join(chars)
+
+
+fresh_token: Callable[[], str] = _random_token  # replaced by a test only, to make the names reproducible
+
+
+def fresh_workflow_paths() -> list[str]:
+    """Paths that do not exist yet, under `.github/workflows/`, in the shapes a new workflow could take.
+
+    Second layer behind `directory_wide_owned`. Every name and every directory component is a fresh random token (no
+    fixed prefix to own), at one to three levels, with `.yml`, `.yaml` or no extension. A rule file cannot have
+    anticipated them, so a rule that owns these has to own the whole directory. It is a sample, not a proof: a pattern
+    that owns most but not all names can pass one run.
+    """
+    return [
+        ".github/workflows/" + shape.format(*(fresh_token() for _ in range(shape.count("{}"))))
+        for _ in range(FRESH_NAMES)
+        for shape in FRESH_SHAPES
+    ]
+
+
+# Patterns that cover .github/workflows/ and everything that could ever be added under it, whatever it is called.
+DIRECTORY_WIDE = frozenset(
+    {
+        "*",
+        "**",
+        "/**",
+        ".github",
+        "/.github",
+        ".github/",
+        "/.github/",
+        ".github/**",
+        "/.github/**",
+        ".github/workflows",
+        "/.github/workflows",
+        ".github/workflows/",
+        "/.github/workflows/",
+        ".github/workflows/**",
+        "/.github/workflows/**",
+    }
+)
+_WILD = re.compile(r"[*?\[\\]")
+
+
+def _may_touch(pattern: str) -> bool:
+    """True unless the pattern's literal leading directories prove it cannot match anything under `.github/workflows`.
+
+    Conservative: a pattern with no slash matches names at any depth, and a wildcard in one of the first two
+    segments could match `.github` or `workflows`; both count as touching.
+    """
+    if not (pattern.startswith("/") or "/" in pattern.rstrip("/")):
+        return True
+    for want, segment in zip((".github", "workflows"), pattern.strip("/").split("/"), strict=False):
+        if _WILD.search(segment):
+            return True
+        if segment != want:
+            return False
+    return True
+
+
+def directory_wide_owned(rules: list[Rule]) -> bool:
+    """The structural proof that a file added anywhere under `.github/workflows/` has an owner, whatever its name.
+
+    The last directory-wide rule (see `DIRECTORY_WIDE`; `*` and `/.github/` count, they cover the rest of the
+    repository too) must name an owner, and no later rule that could touch the directory may name none. Then for any
+    path under it the last matching rule is either that rule or a later one that has an owner.
+    """
+    state = False
+    for rule in rules:
+        if rule.pattern in DIRECTORY_WIDE:
+            state = rule.owned
+        elif state and not rule.owned and _may_touch(rule.pattern):
+            state = False
+    return state
+
+
 PATHS = (
     ("codeowners-board-yaml", "board.yaml"),
     ("codeowners-codeowners-file", ".github/CODEOWNERS"),
-    ("codeowners-workflows", ".github/workflows/"),
 )
 
 
@@ -363,7 +611,16 @@ def ci_condition(sources: list[Source], require_app: int | None) -> Condition:
     return Condition("ci-green", text, ok, warn=warn, matched=", ".join(dict.fromkeys(c for c, _ in checks)))
 
 
-def evaluate(sources: list[Source], rules: list[Rule], require_app: int | None = None) -> list[Condition]:
+def evaluate(
+    sources: list[Source],
+    rules: list[Rule],
+    require_app: int | None = None,
+    workflows: list[str] | None = None,
+    downgraded: int = 0,
+) -> list[Condition]:
+    """`workflows` is the real file list (None when there is no CODEOWNERS, so nothing is covered); an empty list is
+    vacuously covered: with no workflow files there is nothing a pull request could add."""
+
     def some(test: Callable[[Source], bool]) -> bool:
         return any(test(s) for s in sources)
 
@@ -389,15 +646,41 @@ def evaluate(sources: list[Source], rules: list[Rule], require_app: int | None =
         Condition("no-force-push", "force pushes are off", some(lambda s: s.force_push_off)),
         Condition("no-deletion", "deleting the branch is off", some(lambda s: s.deletion_off)),
     ]
+    warn = (
+        f"{downgraded} CODEOWNERS line(s) name an owner GitHub or this check rejects: treated as unowned"
+        if downgraded
+        else ""
+    )
     for ident, path in PATHS:
-        files = [path + probe for probe in PROBES] if path.endswith("/") else [path]
-        conditions.append(Condition(ident, f"CODEOWNERS covers {path}", all(covered(rules, f) for f in files)))
+        conditions.append(Condition(ident, f"CODEOWNERS covers {path}", covered(rules, path), warn=warn))
+        warn = ""
+    files = workflows if workflows is not None else []
+    fresh = fresh_workflow_paths()
+    ok = workflows is not None and directory_wide_owned(rules) and all(covered(rules, f) for f in [*files, *fresh])
+    conditions.append(
+        Condition(
+            "codeowners-workflows",
+            f"CODEOWNERS covers every file under .github/workflows/ ({len(files)} now, and new ones of any name)",
+            ok,
+        )
+    )
     return conditions
 
 
 def check(rest: Rest, repo: str, agent: str = "", require_app: int | None = None) -> tuple[str, int, list[Condition]]:
     """(default branch, number of protection sources found, conditions). Raises CannotTell, never guesses."""
     base = _repo_path(repo)
-    branch = default_branch(rest, base)
-    sources = read_sources(rest, base, branch, agent)
-    return branch, len(sources), evaluate(sources, read_codeowners(rest, base, branch), require_app)
+    first = read_repo(rest, base, repo)
+    head = branch_head(rest, base, first.default_branch)
+    sources = read_sources(rest, base, first.default_branch, agent)
+    found = read_codeowners(rest, base, head)
+    rules: list[Rule] = []
+    workflows: list[str] | None = None
+    downgraded = 0
+    if found is not None:
+        place, text = found
+        rules, downgraded = trusted_rules(text, codeowners_error_lines(rest, base, head, place))
+        workflows = workflow_files(rest, base, head)
+    if read_repo(rest, base, repo) != first:  # the default branch (or the repository) changed under the read
+        raise CannotTell("cannot tell: the repository or its default branch changed while it was being read")
+    return first.default_branch, len(sources), evaluate(sources, rules, require_app, workflows, downgraded)

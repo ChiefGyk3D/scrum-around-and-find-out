@@ -150,7 +150,8 @@ active branch rulesets (a ruleset in `evaluate` or `disabled` mode, or for tags,
 | `admins-included` | administrators are included (`enforce_admins`; no ruleset bypass) |
 | `no-bypass` | no bypass allowance or bypass actor; `--agent-login` is named if that account holds one |
 | `no-force-push`, `no-deletion` | force pushes and branch deletion are off |
-| `codeowners-board-yaml`, `codeowners-codeowners-file`, `codeowners-workflows` | CODEOWNERS (read from the default branch) names an owner for `board.yaml`, `.github/CODEOWNERS` and `.github/workflows/` |
+| `codeowners-board-yaml`, `codeowners-codeowners-file` | the CODEOWNERS file (read at the default branch's head commit) names an owner for `board.yaml` and for `.github/CODEOWNERS` |
+| `codeowners-workflows` | every file that is under `.github/workflows/` now, and any file a pull request could add there under any name or depth, has an owner (see below) |
 
 Exit 1 prints a `FAIL <condition>` line for each one that does not hold; an unprotected branch (404 "Branch not
 protected", no rulesets) fails them all. Exit 2 means it could not tell: a 403 or a rate limit, a response that is not
@@ -165,6 +166,43 @@ an app (any source can satisfy it)` (or says the check is pinned to an app other
 15368) and the exit code is unchanged. To make the pin a condition, pass `--require-app-id 15368`: then every matching
 check must be pinned to exactly that app, or `ci-green` fails with exit 1. An `app_id` or `integration_id` that is not
 null, -1 or a positive integer is exit 2.
+
+### How CODEOWNERS is judged
+
+The file is read at the default branch's head commit (the commit is read once, and CODEOWNERS, the CODEOWNERS errors
+and the workflow tree are all read at it). Last matching rule wins. An owner counts only if it passes two layers: GitHub's
+naming rules (`@login` of at most 39 characters with no leading, trailing or doubled hyphen, `@org/team`, or an email), and
+GitHub's own answer from `GET /repos/{owner}/{repo}/codeowners/errors?ref=<commit>` (the endpoint exists and returned
+`{"errors":[]}` on a live read; the shape of a non-empty list, `line` and `path` per entry, is INFERRED from the REST
+docs and not yet observed). A line that fails either layer is treated as having no owner. If the errors endpoint cannot
+be read, that is exit 2.
+
+`codeowners-workflows` is judged three ways, and all must pass:
+
+1. **Real files.** The workflow directory is listed from the git tree at that commit (root, `.github`, then
+   `workflows` recursively, so nested files count; a truncated listing is exit 2). Every file must have an owner.
+2. **Structure (the proof).** The last directory-wide rule (`/.github/workflows/`, `.../**`, a parent such as
+   `/.github/`, `/.github/**`, or `*`) must name an owner, and no later rule that could touch the directory may name none.
+   Then every path under it, whatever it is called, ends at an owner. A rule for `*` passes this, and it also covers the
+   rest of the repository. File-specific owners (`/.github/workflows/ci.yml @o`) and partial globs (`*.yml`) do not pass: a
+   new `release.yml` would have no owner.
+3. **Sampling (a second layer, not a proof).** About twenty paths with random names and random directory names (`.yml`,
+   `.yaml` or none, one to three levels), generated at run time, are asked of the rules. A rule file cannot have
+   anticipated them. It is a sample, so a pattern engineered to own most names can pass one run; the structure check above
+   is what stops it.
+
+An empty or absent `.github/workflows/` is **not** vacuously covered: checks 2 and 3 still apply, so it passes only
+when a directory-wide rule is in place.
+
+### Exit codes and output
+
+0 all conditions hold; 1 at least one does not; 2 cannot tell; 130 interrupted (nothing was decided). The decision is
+computed before anything is printed. If the report cannot be written (a closed pipe), a 1 or a 2 stays as it was, and a 0
+becomes 2: a pass nobody could read is not reported as one. The repository document is read at the start and again at the
+end (`id`, `full_name` and `default_branch` must be identical, and `full_name` must be the repository asked for); a
+change in between is exit 2. A list with a `rel="next"` link is exit 2 whether or not it is short. Each response is read
+once, with no redirect, a read timeout and a 1 MiB cap; a body shorter than its Content-Length, or two different
+Content-Length headers, is exit 2.
 
 This is a local mode, not part of the Action. Shared logic with the GraphQL default-branch gate read (#129) is for a
 later change; the two read different APIs and share no code today.
