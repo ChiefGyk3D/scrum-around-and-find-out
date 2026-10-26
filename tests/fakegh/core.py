@@ -137,6 +137,9 @@ class FRepo:
             "requiresStatusChecks": True,
             "requiredStatusChecks": [{"context": "ci / CI green"}],
             "allowsForcePushes": False,
+            "isAdminEnforced": True,
+            "bypassForcePushAllowances": {"totalCount": 0},
+            "bypassPullRequestAllowances": {"totalCount": 0},
         }
     )
     rulesets: list[dict[str, Any]] = field(default_factory=list)

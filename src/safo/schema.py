@@ -131,6 +131,7 @@ class Rules:
     gate_check: str = "CI green"
     gate_forbid_force_push: bool = True  # a default branch that allows force pushes is also reported
     gate_exempt_repos: tuple[str, ...] = ()  # owner/name: not audited for the gate
+    gate_admin_exempt_repos: tuple[str, ...] = ()  # owner/name: administrators may bypass the rule here, accepted
 
 
 @dataclass(frozen=True)
@@ -433,6 +434,7 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
             "gate_check",
             "gate_forbid_force_push",
             "gate_exempt_repos",
+            "gate_admin_exempt_repos",
         },
     )
     s = r.mapping(
@@ -466,7 +468,8 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
         _parse_threat_model(r, m.get("threat_model", {})),
         _parse_gate_check(r, m.get("gate_check", "CI green")),
         _parse_gate_force(r, m.get("gate_forbid_force_push", True)),
-        _parse_gate_exempt(r, m.get("gate_exempt_repos", [])),
+        _parse_gate_exempt(r, m.get("gate_exempt_repos", []), "gate_exempt_repos"),
+        _parse_gate_exempt(r, m.get("gate_admin_exempt_repos", []), "gate_admin_exempt_repos"),
     )
 
 
@@ -483,13 +486,13 @@ def _parse_gate_force(r: Reader, raw: object) -> bool:
     return raw
 
 
-def _parse_gate_exempt(r: Reader, raw: object) -> tuple[str, ...]:
+def _parse_gate_exempt(r: Reader, raw: object, key: str) -> tuple[str, ...]:
     exempt: list[str] = []
-    for i, name in enumerate(r.seq(raw, "rules.gate_exempt_repos")):
-        text = r.string(name, f"rules.gate_exempt_repos[{i}]")
+    for i, name in enumerate(r.seq(raw, f"rules.{key}")):
+        text = r.string(name, f"rules.{key}[{i}]")
         owner, _, repo = text.partition("/")
         if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
-            raise r.fail(f"rules.gate_exempt_repos[{i}]", "expected owner/name")
+            raise r.fail(f"rules.{key}[{i}]", "expected owner/name")
         exempt.append(text)
     return tuple(exempt)
 

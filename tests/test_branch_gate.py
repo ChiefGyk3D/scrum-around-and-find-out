@@ -31,6 +31,9 @@ def classic(*contexts: str, force: bool = False) -> dict[str, Any]:
         "requiresStatusChecks": bool(contexts),
         "requiredStatusChecks": [{"context": c} for c in contexts],
         "allowsForcePushes": force,
+        "isAdminEnforced": True,
+        "bypassForcePushAllowances": {"totalCount": 0},
+        "bypassPullRequestAllowances": {"totalCount": 0},
     }
 
 
@@ -56,6 +59,7 @@ def ruleset(
         "name": "protect",
         "enforcement": enforcement,
         "target": target,
+        "bypassActors": {"totalCount": 0, "nodes": []},
         "conditions": {"refName": {"include": list(include), "exclude": list(exclude)}},
         "rules": {"totalCount": len(rules), "nodes": rules},
     }
@@ -106,7 +110,7 @@ def test_a_name_that_only_ends_the_same_way_is_not_the_gate(fake: FakeGitHub, cl
 
 def test_protection_without_the_check_is_named(fake: FakeGitHub, client: Client) -> None:
     build_world(fake)
-    repo(fake).protection = {"requiresStatusChecks": False, "requiredStatusChecks": [], "allowsForcePushes": False}
+    repo(fake).protection = classic()
     code, text = gate(fake, client)
     assert code == 1
     (found,) = lines(text, WIDGETS)
@@ -326,13 +330,13 @@ def test_the_rule_defaults_and_parses(tmp_path: Any) -> None:
     ok.write_text(src + "\n", encoding="utf-8")  # unchanged board: defaults apply
     assert load_board(ok).rules.gate_check == "CI green"
     bad = tmp_path / "bad.yaml"
-    bad.write_text(src.replace("rules:\n", "rules:\n  gate_forbid_force_push: maybe\n", 1), encoding="utf-8")
+    bad.write_text(src.replace("\nrules:\n", "\nrules:\n  gate_forbid_force_push: maybe\n", 1), encoding="utf-8")
     with pytest.raises(ConfigError):
         load_board(bad)
-    bad.write_text(src.replace("rules:\n", "rules:\n  gate_exempt_repos: [nope]\n", 1), encoding="utf-8")
+    bad.write_text(src.replace("\nrules:\n", "\nrules:\n  gate_exempt_repos: [nope]\n", 1), encoding="utf-8")
     with pytest.raises(ConfigError):
         load_board(bad)
-    bad.write_text(src.replace("rules:\n", "rules:\n  gate_check: ' CI green'\n", 1), encoding="utf-8")
+    bad.write_text(src.replace("\nrules:\n", "\nrules:\n  gate_check: ' CI green'\n", 1), encoding="utf-8")
     with pytest.raises(ConfigError):
         load_board(bad)
 

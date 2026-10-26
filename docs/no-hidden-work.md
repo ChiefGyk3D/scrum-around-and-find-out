@@ -89,7 +89,31 @@ rules:
   gate_check: CI green            # the check name; empty turns the rule off and the audit says "not configured"
   gate_forbid_force_push: true    # also report a default branch that allows force pushes
   gate_exempt_repos: []           # owner/name list that is not audited for the gate
+  gate_admin_exempt_repos: []     # owner/name list where "administrators may bypass" is accepted
 ```
+
+**Ref patterns** are matched the way GitHub does, not as Python's `fnmatch`: GitHub uses Ruby's `File.fnmatch` with
+`FNM_PATHNAME`, so `*` never matches `/` (`release/*` does not cover `release/1/2`), `**/` spans directories
+(`release/**/*` does), `[set]` works and `[^set]` does not
+([branch protection rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule),
+[rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository),
+read 2026-10-26). A pattern whose meaning GitHub does not document is **cannot tell** (exit 2) when it decides the answer:
+`**` that is not a whole directory (`release**`, a trailing `**`), `[^...]` or `[!...]`, a backslash, an unterminated `[`, a
+`~` variable other than `~ALL` and `~DEFAULT_BRANCH`, and a wildcard against a branch segment that starts with a dot
+(UNVERIFIED: Ruby does not match it by default; GitHub does not say).
+
+**Bypass.** A rule that someone can get around does not hold the gate. The audit reports `can be bypassed` when the only
+rules carrying the check (or the force-push block) are bypassable: a classic rule that does not apply to administrators
+(`enforce_admins` off), a force-push bypass allowance, or a ruleset with any bypass actor, in any mode (`ALWAYS`,
+`PULL_REQUEST` and `EXEMPT` all let the actor merge past a red check; `PULL_REQUEST` only avoids a direct push). One rule
+nobody can bypass is enough; a second, bypassable one adds no finding. Pull-request bypass allowances on a classic rule
+skip the review requirement, not required checks, and are not reported. A bypass list cut short by the page size is
+**cannot tell**, and an answer without the bypass fields is **cannot tell**, never a pass.
+
+`enforce_admins` off is on by default as a finding, because on a personal repository the owner is the administrator and
+can merge a red check, which is what the gate exists to stop. It will make such repositories red until you turn the
+setting on or accept it per repository with `gate_admin_exempt_repos`, which is a visible, reviewed decision and not a
+silent pass. The finding says: `administrators are not included (enforce_admins is off)`.
 
 Defaults and why: the rule is **on** with `CI green`, because it is the standing rule and a repository without it is
 exactly what the audit exists to find; force pushes are **on** because a gate that history can be rewritten around is not a
