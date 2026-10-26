@@ -30,6 +30,15 @@ def fallback_of(doc: AgentsFile, shape_name: str) -> str:
     return next((a for a in chain if doc.agent(a).kind != "ollama"), "the lead")
 
 
+EXIT_MODEL_MISMATCH = 3  # the endpoint reported a different model than routing chose, or none: nothing is logged
+MAX_SHOWN = 80  # characters of a model name echoed in a message
+
+
+def _bare(name: str) -> str:
+    """Ollama's implicit `:latest` tag removed, nothing else: `m` and `m:latest` are the same model, `m:7b` is not."""
+    return name[: -len(":latest")] if name.endswith(":latest") else name
+
+
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if args.action != "run":
         raise ConfigError("the only local action is `run`")
@@ -78,8 +87,16 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     except EndpointUnreachableError as err:
         ctx.say(f"{err}: hand it to {fallback} instead")
         return EXIT_DRIFT
-    if not outcomes.MODEL.fullmatch(result.model):  # never invent one: the answer is dropped and nothing is logged
-        raise ConfigError("the endpoint did not name a usable model in its answer; nothing was logged")
+    if not result.model or _bare(result.model) != _bare(model):  # endpoint data is untrusted: never log what it claims
+        reported = result.model[:MAX_SHOWN] + ("..." if len(result.model) > MAX_SHOWN else "")
+        ctx.say(
+            f"model mismatch: asked for {model[:MAX_SHOWN]!r}, the endpoint reported "
+            f"{reported!r}: the answer is dropped and no outcome was written"
+            if result.model
+            else f"the endpoint reported no model (asked for {model[:MAX_SHOWN]!r}): "
+            "the answer is dropped and no outcome was written"
+        )
+        return EXIT_MODEL_MISMATCH
     output.block(ctx.out, result.response.rstrip("\n").split("\n"))  # untrusted text: inside a stop-commands block
     speed = f"{result.tokens_per_second:g} tok/s" if result.tokens_per_second else "speed unknown"
     note = (
@@ -99,7 +116,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             result.eval_count + result.prompt_eval_count,
             1,
             note,
-            result.model,
+            model,
         ),
         check_dir=outcomes_is_default(ctx, args),
     )

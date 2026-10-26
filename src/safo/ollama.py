@@ -135,12 +135,10 @@ def generate(
         raise ApiError(f"{endpoint.id} sent invalid generation metrics") from None
     if not isinstance(answer["response"], str):
         raise ApiError(f"{endpoint.id} sent invalid response type")
-    answered = answer.get("model", model)
-    if not isinstance(answered, str):
-        raise ApiError(f"{endpoint.id} sent an invalid model field")
+    answered = answer.get("model")  # what the endpoint says ran; "" when it says nothing usable (never the request)
     return Generation(
         answer["response"],
-        answered,
+        answered if isinstance(answered, str) else "",
         metrics[0],
         metrics[1],
         metrics[2],

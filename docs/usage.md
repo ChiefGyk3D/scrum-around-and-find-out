@@ -119,8 +119,10 @@ Four more optional fields record how the task went, all whole numbers or a fixed
 `intervention_minutes` is **self-reported by the maintainer at acceptance**; it is never derived from timestamps, which
 measure elapsed time, not attention. Any report built on it has to say how many records carry it. A bad value writes
 nothing and exits non-zero; a line without these keys is unchanged. (`model` also accepts the `:` of an Ollama tag, for
-example `gemma4:12b`.) `safo local run` writes the model the endpoint answered with into the `model` field; if the
-answer names no usable model, nothing is logged.
+example `gemma4:12b`.) `safo local run` writes the routed model into the `model` field, but only after the endpoint's
+answer reports that same model (an implicit `:latest` tag is ignored; any other difference in name, tag or size is a
+mismatch). A mismatch, or an answer that reports no model, drops the answer, prints one escaped line naming both
+models, writes no record and exits 3.
 `safo usage --report` summarises a month per agent: tasks, how many needed fixes, review rounds, findings, tokens. It then
 adds a table per agent and model: runs, review rounds per run, the share of runs that needed fixes, findings by severity,
 credits used in total, and credits per run, per run that needed no fixes and per run that needed fixes. Rows without a

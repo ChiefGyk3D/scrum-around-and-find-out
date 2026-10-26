@@ -215,16 +215,47 @@ def test_local_run_under_actions_refuses_an_outcomes_log_in_the_workspace(_priva
         assert code == 2 and "GITHUB_WORKSPACE" in err and a.generates == []
 
 
-@pytest.mark.parametrize("answered", ["", None, 5, "two words", "x\ny"])
-def test_local_run_fails_closed_when_the_model_cannot_be_determined(
-    _private_home: Path, tmp_path: Path, answered: object
-) -> None:
+def _run_answering(home: Path, tmp_path: Path, answered: object) -> tuple[int, str, Path]:
     prompt = tmp_path / "p.txt"
     prompt.write_text("x")
     log = tmp_path / "o.jsonl"
     with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS).serve() as b:
         agents = write_agents(tmp_path / "agents.yaml", a.url, b.url)
         a.answer_model = answered
-        code, out, err = local_run("ci-log-summary", prompt, agents, log, _private_home)
-    assert code != 0 and "model" in err and "A short answer." not in out
-    assert not log.exists(), "no outcome is written with a model SAFO had to invent"
+        code, out, _ = local_run("ci-log-summary", prompt, agents, log, home)
+    return code, out, log
+
+
+def test_the_implicit_latest_tag_is_the_same_model(_private_home: Path, tmp_path: Path) -> None:
+    code, _, log = _run_answering(_private_home, tmp_path, "small-4b-agent:latest")
+    assert code == 0 and json.loads(log.read_text())["model"] == "small-4b-agent", "the routed name is recorded"
+
+
+@pytest.mark.parametrize(
+    "answered",
+    ["other-model", "small-4b-agent:7b", "small-4b-agent-8b", "resident-12b-thinking", "SMALL-4B-AGENT",
+     "small-4b-agent:latest:latest", "small-4b-agent:Latest", ":latest", "latest"],
+)  # fmt: skip
+def test_a_different_reported_model_fails_closed_and_writes_nothing(
+    _private_home: Path, tmp_path: Path, answered: str
+) -> None:
+    code, out, log = _run_answering(_private_home, tmp_path, answered)
+    assert code == 3 and "model mismatch" in out and "small-4b-agent" in out
+    assert "A short answer." not in out and not log.exists()
+
+
+@pytest.mark.parametrize("answered", ["", None, 5, ["small-4b-agent"], {"n": 1}, True])
+def test_no_usable_reported_model_fails_closed_and_is_never_replaced_by_the_request(
+    _private_home: Path, tmp_path: Path, answered: object
+) -> None:
+    code, out, log = _run_answering(_private_home, tmp_path, answered)
+    assert code == 3 and "reported no model" in out and "A short answer." not in out and not log.exists()
+
+
+def test_a_hostile_reported_name_is_escaped_and_capped_in_the_error(_private_home: Path, tmp_path: Path) -> None:
+    hostile = "x\ny\x1b[31m::set-output name=a::b\u2028" + "z" * 500
+    code, out, log = _run_answering(_private_home, tmp_path, hostile)
+    assert code == 3 and not log.exists()
+    assert out.count("\n") == 1, "one line only"
+    assert "\x1b" not in out and "\u2028" not in out and "::set-output" not in out and "z" * 100 not in out
+    assert "\\x0a" in out or "\\n" in out  # repr or escape: never a raw newline inside the line
