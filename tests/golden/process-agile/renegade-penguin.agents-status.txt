@@ -1,11 +1,11 @@
 exit=0
 --- stdout ---
 Waiting on you (Status = Blocked)
-  Renegade-Penguin/Hammunition#5  Waiting on the maintainer  https://example.invalid/5
-  Renegade-Penguin/hammunition-bunker#35  Waiting on the maintainer  https://example.invalid/35
-  Renegade-Penguin/hammunition-gps-tether#45  Waiting on the maintainer  https://example.invalid/45
-  Renegade-Penguin/hammunition-hill#15  Waiting on the maintainer  https://example.invalid/15
-  Renegade-Penguin/hammunition-tray#25  Waiting on the maintainer  https://example.invalid/25
+  You          Renegade-Penguin/Hammunition#5  Waiting on the maintainer  https://example.invalid/5
+  You          Renegade-Penguin/hammunition-bunker#35  Waiting on the maintainer  https://example.invalid/35
+  You          Renegade-Penguin/hammunition-gps-tether#45  Waiting on the maintainer  https://example.invalid/45
+  You          Renegade-Penguin/hammunition-hill#15  Waiting on the maintainer  https://example.invalid/15
+  You          Renegade-Penguin/hammunition-tray#25  Waiting on the maintainer  https://example.invalid/25
 \x0aBoard: In progress, Next, by agent (Renegade-Penguin/1)
   Claude       In progress  Renegade-Penguin/Hammunition#1  Open work on the board
   Claude       In progress  Renegade-Penguin/hammunition-bunker#31  Open work on the board

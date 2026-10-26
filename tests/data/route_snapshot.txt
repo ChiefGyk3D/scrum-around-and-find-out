@@ -103,6 +103,17 @@ chain: codex -> claude-sonnet -> claude-lead
 safo route only recommends: the lead sets the card and hands the work out.
 ## plan-writing --json exit=0
 {"shape":"plan-writing","agent":"codex","why":"first in the chain with headroom (codex, claude-sonnet, claude-lead)","skipped":[],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":["five_hour","weekly"],"endpoint":"","model":"","note":"","card_label":"Codex","fallback_chain":["codex","claude-sonnet","claude-lead"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"},{"reviewer":"codex","available":false,"reason":"required gate unavailable: ask for a fresh identity or wait"}],"local_role":"","warnings":[]}
+## project-retrieval  exit=0
+shape: project-retrieval
+recommended: rag (put Agent = RAG on the card)
+why: first in the chain with headroom (rag, claude-haiku)
+required review: claude-sonnet: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+note: RAG returns sources, not verdicts. Claude reads the passages and answers; the answer is checked against the source, never taken from the retrieval alone.
+chain: rag -> claude-haiku
+safo route only recommends: the lead sets the card and hands the work out.
+## project-retrieval --json exit=0
+{"shape":"project-retrieval","agent":"rag","why":"first in the chain with headroom (rag, claude-haiku)","skipped":[],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"RAG returns sources, not verdicts. Claude reads the passages and answers; the answer is checked against the source, never taken from the retrieval alone.","card_label":"RAG","fallback_chain":["rag","claude-haiku"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
 ## prompt-language-for-local-llm  exit=0
 shape: prompt-language-for-local-llm
 recommended: chatgpt (put Agent = ChatGPT on the card)

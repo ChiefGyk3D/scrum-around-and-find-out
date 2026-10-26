@@ -19,7 +19,8 @@ CARD_LABELS = {
     "codex": "Codex",
     "copilot": "Copilot",
     "chatgpt": "ChatGPT",
-    "ollama": "Claude",
+    "ollama": "Ollama",
+    "rag": "RAG",
     "human": "You",
 }
 METER_NAMES = {
