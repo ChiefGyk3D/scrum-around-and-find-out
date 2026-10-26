@@ -1454,3 +1454,64 @@ def test_may_touch_is_conservative_but_not_everything() -> None:
         _may_touch(p)
         for p in ["/docs/x", "/src/*.py", "/.gitignore", "/.github/actions/x", "/.github/CODEOWNERS", "/board.yaml"]
     )
+
+
+# -- line numbering: only "\n" ends a line --------------------------------------------------------------------------
+
+ODD = [
+    "\x0b",
+    "\x0c",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    "\u2028",
+    "\u2029",
+    "\r",
+    "\x00",
+    "\x07",
+    "\x7f",
+    "\ufeff",
+    "\u200b",
+]
+
+
+@pytest.mark.parametrize("char", ODD, ids=[f"U+{ord(c):04X}" for c in ODD])
+def test_an_odd_line_break_or_control_character_inside_a_rule_line_is_cannot_tell(char: str) -> None:
+    cannot_tell(with_owners(GOOD_OWNERS.replace("/board.yaml @owner", f"/board.yaml{char}@owner")))
+
+
+@pytest.mark.parametrize("char", ODD, ids=[f"U+{ord(c):04X}" for c in ODD])
+def test_an_odd_line_break_between_two_rules_is_cannot_tell(char: str) -> None:
+    cannot_tell(with_owners(GOOD_OWNERS.replace("@owner\n/.github/CODEOWNERS", f"@owner{char}/.github/CODEOWNERS", 1)))
+
+
+def test_a_byte_order_mark_at_the_start_is_cannot_tell() -> None:
+    cannot_tell(with_owners("\ufeff" + GOOD_OWNERS))
+
+
+def test_a_crlf_file_works() -> None:
+    assert check(with_owners(GOOD_OWNERS.replace("\n", "\r\n")))[0] == 0
+
+
+def test_tabs_and_a_last_line_without_a_newline_work() -> None:
+    assert check(with_owners(GOOD_OWNERS.replace("/board.yaml @owner", "/board.yaml\t@owner").rstrip("\n")))[0] == 0
+
+
+def test_an_error_line_number_means_the_nth_newline_separated_line() -> None:
+    text = "# header\r\n\r\n/board.yaml @ghost\r\n/.github/CODEOWNERS @owner\r\n/.github/workflows/ @owner\r\n"
+    routes = {**with_owners(text), f"{REPO}/codeowners/errors": errors_for(3)}
+    code, out, _, _ = check(routes)
+    assert code == 1 and failed_ids(out) == ["codeowners-board-yaml"]
+    routes = {**with_owners(text), f"{REPO}/codeowners/errors": errors_for(2)}  # the blank line: nothing to hide
+    assert check(routes)[0] == 0
+
+
+def test_codeowners_lines_splits_on_newline_only() -> None:
+    from safo.protection import codeowners_lines
+
+    assert codeowners_lines("a\r\nb\n\nc") == ["a", "b", "", "c"]
+    assert codeowners_lines("a\n") == ["a"] and codeowners_lines("") == []
+    for char in ODD:
+        with pytest.raises(Exception, match="cannot tell"):
+            codeowners_lines(f"a{char}b\n")

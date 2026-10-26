@@ -25,6 +25,7 @@ import http.client
 import re
 import secrets
 import string
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -439,12 +440,32 @@ def codeowners_error_lines(rest: Rest, base: str, ref: str, place: str) -> set[i
     return lines
 
 
+def codeowners_lines(text: str) -> list[str]:
+    """The lines of a CODEOWNERS file, split on `\\n` only (one trailing `\\r` of a CRLF dropped), so the numbers match
+    the ones GitHub's errors endpoint reports. `str.splitlines` also breaks on a lone `\\r`, `\\v`, `\\f`,
+    `\\x1c`-`\\x1e`, `\\x85`, U+2028 and U+2029, and a parser that does not would number lines differently and
+    attribute an error to the wrong rule; so any of those, any other control or format character (NUL, a BOM
+    anywhere) is "cannot tell" rather than a guess about what GitHub does with it (INFERRED, not observed)."""
+    for index, char in enumerate(text):
+        if char in "\n\t":
+            continue
+        if char == "\r":
+            if text[index + 1 : index + 2] != "\n":
+                raise CannotTell("cannot tell: CODEOWNERS has a carriage return that is not part of a CRLF line end")
+        elif unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp"):
+            raise CannotTell("cannot tell: CODEOWNERS has a control, format or line-separator character")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # the newline that ends the last line
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
 def trusted_rules(text: str, bad_lines: set[int]) -> tuple[list[Rule], int]:
     """The rules, with every line GitHub reports an error on, or that names an owner failing `strict_owner`, left with
     its pattern and no owner (so it clears ownership of what it matches, the strict reading). Also how many were."""
     kept: list[str] = []
     downgraded = 0
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in enumerate(codeowners_lines(text), 1):
         tokens = _tokens(line)
         if tokens and (number in bad_lines or not all(strict_owner(t) for t in tokens[1:])):
             if tokens[1:]:
