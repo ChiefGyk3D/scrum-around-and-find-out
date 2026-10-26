@@ -5,9 +5,9 @@ Four modes (audit, reconcile --dry-run, status --post --print, agents-status) ru
 against tests/fakegh for the two shipped example boards. Each run's exit code, standard output and standard error
 are stored under tests/golden/process-agile/ (spec 2026-10-26-process-profiles.md, sections 2.4 and 11, unit U0).
 
-The clock and the random stop-commands token are frozen: `today` is passed to `safo.cli.main`, `status` gets an explicit `--since`, and the Codex and
-Copilot sections of agents-status are switched off because they read the wall clock and the machine's agents. A test
-runs everything again with a different date and requires identical bytes.
+The clock and the random stop-commands token are frozen: `today` is passed to `safo.cli.main`, `status` gets an
+explicit `--since`, and the Codex and Copilot sections of agents-status are switched off because they read the wall
+clock and the machine's agents. A test runs everything again with a different date and requires identical bytes.
 
 Fail-closed: a missing golden file fails the test. A test run never writes a golden file. To regenerate them after
 an intended change in output, run this module as a script, then review `git diff tests/golden/process-agile/`:
@@ -102,9 +102,7 @@ def render(board_name: str, mode: str, today: dt.date, client: Client, fake: Fak
     argv = ["--board", str(path), *MODES[mode]]
     # output.block draws a random token for every stop-commands block; freeze it like the clock
     with mock.patch("safo.output.secrets.token_hex", return_value="0" * 32):
-        code = main(
-            argv, env={"HOME": str(home)}, client_factory=lambda b, e, d: client, out=out, err=err, today=today
-        )
+        code = main(argv, env={"HOME": str(home)}, client_factory=lambda b, e, d: client, out=out, err=err, today=today)
     return f"exit={code}\n--- stdout ---\n{out.getvalue()}--- stderr ---\n{err.getvalue()}"
 
 
@@ -115,7 +113,8 @@ def fresh(board_name: str, mode: str, today: dt.date, home: Path) -> str:
 
 def compare(path: Path, actual: str) -> None:
     """Fail closed: a missing golden file is a failure, never a file the test run creates."""
-    assert path.is_file(), f"{path.name} is missing; regenerate deliberately: python tests/{Path(__file__).name} --regenerate"
+    hint = f"python tests/{Path(__file__).name} --regenerate"
+    assert path.is_file(), f"{path.name} is missing; regenerate deliberately: {hint}"
     assert actual == path.read_text(encoding="utf-8"), f"{path.name} differs from today's output"
 
 
