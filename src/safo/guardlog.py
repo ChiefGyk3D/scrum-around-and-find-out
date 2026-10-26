@@ -14,6 +14,7 @@ import fcntl
 import math
 import os
 import stat
+import sys
 import tempfile
 import time
 from collections import Counter
@@ -22,12 +23,44 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from safo import output
 from safo.bounded import MAX_BYTES, loads, read_bounded
 
 MODES = ("warn", "block")
 DEFAULT_MODE = "warn"
+DEFAULT_APPEND_LOCK_TIMEOUT = 3.0
+# The guard hook has GUARD_TIMEOUT_SECONDS (10 s, safo.hooks) from the host, its own lookups stop 2 s earlier, and the
+# log append runs after the decision. A wait of half the host budget is the most an append may take before it risks the
+# host killing the hook mid-write, so the clamp is 5 s. A failed append already fails open, so a smaller wait only
+# loses a log row under contention. (safo.hooks cannot be imported here; a test pins MAX < GUARD_TIMEOUT_SECONDS.)
+MAX_APPEND_LOCK_TIMEOUT = 5.0
+
+
+def parse_append_lock_timeout(raw: str | None) -> tuple[float, str | None]:
+    """Return (seconds, warning). Never raises: this runs at import, on the path before every dispatch."""
+    name = "SAFO_APPEND_LOCK_TIMEOUT"
+    if raw is None:
+        return DEFAULT_APPEND_LOCK_TIMEOUT, None
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return DEFAULT_APPEND_LOCK_TIMEOUT, f"{name} is not a number; using {DEFAULT_APPEND_LOCK_TIMEOUT:g} s"
+    if not math.isfinite(value) or value <= 0:
+        return (
+            DEFAULT_APPEND_LOCK_TIMEOUT,
+            f"{name} must be finite and above 0; using {DEFAULT_APPEND_LOCK_TIMEOUT:g} s",
+        )
+    if value > MAX_APPEND_LOCK_TIMEOUT:
+        return MAX_APPEND_LOCK_TIMEOUT, f"{name} is above the {MAX_APPEND_LOCK_TIMEOUT:g} s maximum; using the maximum"
+    return value, None
+
+
 # Appends queue behind a writer instead of failing in half a second; interactive state keeps the short default.
-APPEND_LOCK_TIMEOUT = float(os.environ.get("SAFO_APPEND_LOCK_TIMEOUT", "3.0"))
+# A bad value warns on stderr (stdout stays exactly the hook's JSON) and falls back; it never stops the import.
+APPEND_LOCK_TIMEOUT, _lock_timeout_warning = parse_append_lock_timeout(os.environ.get("SAFO_APPEND_LOCK_TIMEOUT"))
+if _lock_timeout_warning and sys.stderr is not None:  # print(file=None) would fall back to stdout, the hook's JSON
+    with contextlib.suppress(OSError, ValueError):
+        output.write(sys.stderr, f"safo: {_lock_timeout_warning}")
 LOG_NAME = "log.jsonl"
 PROBE_NAME = "probe.json"
 MODE_NAME = "mode"
