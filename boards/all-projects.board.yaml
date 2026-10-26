@@ -1,0 +1,171 @@
+# SPDX-License-Identifier: Apache-2.0
+# Project board for every tracked repository (a scanning board, not a planning board), defined as code for Scrum Around and Find Out (SAFO).
+# A user-owned GitHub Project: no App can write one, so it is kept current from the maintainer's own
+# `gh` login with `safo --board all-projects.board.yaml reconcile` (no token is stored in CI).
+# `number:` is the project `safo bootstrap` created.
+version: 1
+project:
+  owner: ChiefGyk3D
+  owner_type: user
+  number: 11
+  title: "All Projects"
+repositories:
+  - owner: ChiefGyk3D
+    name: scrum-around-and-find-out
+    default_area: "Scrum Around and Find Out"
+  - owner: ChiefGyk3D
+    name: Clouds-Against-Humanity
+    default_area: "Clouds Against Humanity"
+  - owner: ChiefGyk3D
+    name: penguin-overlord
+    default_area: "Penguin Overlord"
+  - owner: ChiefGyk3D
+    name: LLMFAO
+    default_area: "LLMFAO"
+  - owner: ChiefGyk3D
+    name: Skid-Finder
+    default_area: "Skid Finder"
+  - owner: Renegade-Penguin
+    name: Hammunition
+    default_area: "Hammunition suite"
+  - owner: Renegade-Penguin
+    name: hammunition-bunker
+    default_area: "Hammunition suite"
+  - owner: Renegade-Penguin
+    name: hammunition-console
+    default_area: "Hammunition suite"
+  - owner: Renegade-Penguin
+    name: hammunition-gps-tether
+    default_area: "Hammunition suite"
+  - owner: Renegade-Penguin
+    name: hammunition-hill
+    default_area: "Hammunition suite"
+  - owner: Renegade-Penguin
+    name: hammunition-tray
+    default_area: "Hammunition suite"
+  - owner: Renegade-Penguin
+    name: .github
+    default_area: "Hammunition suite"
+  - owner: ChiefGyk3D
+    name: FrankenLLM
+    default_area: "Hammunition suite"
+  - owner: ChiefGyk3D
+    name: git-your-ship-together
+    default_area: "Git Your Ship Together"
+  - owner: ChiefGyk3D
+    name: Boon-Tube-Daemon
+    default_area: "Bots and socials"
+  - owner: ChiefGyk3D
+    name: Star-Daemon
+    default_area: "Bots and socials"
+  - owner: ChiefGyk3D
+    name: Stream-Daemon
+    default_area: "Bots and socials"
+  - owner: ChiefGyk3D
+    name: hypeman
+    default_area: "Bots and socials"
+  - owner: ChiefGyk3D
+    name: solarstorm_scout
+    default_area: "Bots and socials"
+  - owner: ChiefGyk3D
+    name: yomama-as-a-service
+    default_area: "Bots and socials"
+  - owner: ChiefGyk3D
+    name: pfsense-siem-stack
+    default_area: "SIEM Stack"
+  - owner: ChiefGyk3D
+    name: siem-docker-stack
+    default_area: "SIEM Stack"
+  - owner: ChiefGyk3D
+    name: jumpcloud-wazuh-bridge
+    default_area: "SIEM Stack"
+  - owner: ChiefGyk3D
+    name: mother-ticker
+    default_area: "SIEM Stack"
+  - owner: ChiefGyk3D
+    name: netpulse
+    default_area: "SIEM Stack"
+fields:
+  - name: Status
+    type: single_select
+    options:
+      - {name: "Backlog", color: GRAY, description: "Not scheduled"}
+      - {name: "Next", color: BLUE, description: "Scheduled for a sprint"}
+      - {name: "In progress", color: YELLOW, description: "Being worked, or a draft pull request"}
+      - {name: "In review", color: PURPLE, description: "Pull request open, checks and reviews running"}
+      - {name: "Blocked", color: RED, description: "Needs the maintainer or an outside answer"}
+      - {name: "Done", color: GREEN, description: "Closed or merged"}
+  - name: Area
+    type: single_select
+    options:
+      - {name: "Scrum Around and Find Out", color: BLUE, description: "SAFO and its playbook"}
+      - {name: "Clouds Against Humanity", color: ORANGE, description: "CAH learner project"}
+      - {name: "Penguin Overlord", color: GREEN, description: "Discord bot"}
+      - {name: "LLMFAO", color: PINK, description: "LLMFAO engine and hypeman integration"}
+      - {name: "Skid Finder", color: PURPLE, description: "Skid Finder"}
+      - {name: "Hammunition suite", color: RED, description: "Hammunition and its separable repos"}
+      - {name: "Git Your Ship Together", color: YELLOW, description: "Reusable workflows"}
+      - {name: "Bots and socials", color: GRAY, description: "Stream, Star, Boon-Tube daemons, hypeman, Yo Mama"}
+      - {name: "SIEM Stack", color: BLUE, description: "pfSense SIEM stack and the Docker stack"}
+  - name: Priority
+    type: single_select
+    options:
+      - {name: "P0 now", color: RED, description: "Drop other work"}
+      - {name: "P1 soon", color: ORANGE, description: ""}
+      - {name: "P2 later", color: YELLOW, description: ""}
+      - {name: "P3 someday", color: GRAY, description: ""}
+  - name: Agent
+    type: single_select
+    options:
+      - {name: "Claude", color: ORANGE, description: "Claude lead or a Claude subagent"}
+      - {name: "Codex", color: GREEN, description: "OpenAI Codex"}
+      - {name: "Copilot", color: BLUE, description: "GitHub Copilot coding agent"}
+      - {name: "You", color: PURPLE, description: "The maintainer"}
+      - {name: "ChatGPT", color: PINK, description: "ChatGPT general models: non-technical and public copy"}
+      - {name: "Ollama", color: YELLOW, description: "Local model on the lab server"}
+      - {name: "RAG", color: GRAY, description: "Local retrieval over the project docs"}
+  - name: Kind
+    type: single_select
+    options:
+      - {name: "Feature", color: BLUE, description: ""}
+      - {name: "Bug", color: RED, description: ""}
+      - {name: "Decision", color: PURPLE, description: ""}
+      - {name: "Lesson", color: GREEN, description: ""}
+      - {name: "Chore", color: GRAY, description: ""}
+      - {name: "Docs", color: YELLOW, description: ""}
+      - {name: "Release", color: ORANGE, description: ""}
+      - {name: "Epic", color: PINK, description: ""}
+  - {name: Epic, type: text}
+  - {name: Effort, type: number}
+  - {name: Sprint, type: iteration, start: 2026-10-20, duration_days: 14, count: 8, title_prefix: "S"}
+  - {name: Done on, type: date}
+views:
+  - {name: By project, layout: table, filter: "-status:Done"}
+  - {name: Board, layout: board, filter: "-status:Done"}
+  - {name: Roadmap, layout: roadmap, filter: ""}
+  - {name: Agents at work, layout: table, filter: 'status:"In progress","In review",Next'}
+rules:
+  status:
+    opened: Backlog
+    opened_pr: In review
+    draft_pr: In progress
+    reopened: Backlog
+    closed: Done
+    merged: Done
+  done_date_field: Done on
+  new_item_defaults:
+    Priority: P2 later
+  tracking:
+    kind_field: Kind
+    epic_field: Epic
+    effort_field: Effort
+    exempt_repos: []
+agents:
+  field: Agent
+  working: [In progress, In review, Next]
+  waiting: [Blocked]
+ui_only:
+  - "By project view: Group by = Area, show Status, Priority, Agent, Sprint"
+  - "Roadmap view: Group by = Area, zoom = Quarter; this board has no Start or Target date fields, so set the Sprint field as the roadmap's date source"
+  - "Board view: Group by = Status"
+  - "Project workflows: Item closed -> Done; Pull request merged -> Done"
