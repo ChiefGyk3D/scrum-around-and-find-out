@@ -14,6 +14,10 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
 - [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
+- [Look before instructing](look-before-instructing.md): prior art, then the vendor's docs page, then the live system; never a click path from memory.
+- [Done means verified](done-means-verified.md): "done" needs an observation this turn through the user's path, plus the destructive-step checklist.
+- [Access planning](access-planning.md): plan the whole job, ask once for the union of scopes, no broader fallback, drop write scopes at the end.
+- [Act, then report](act-then-report.md): a known fix inside approval is done this turn; the four reasons to ask; reports open with the result.
 - [Handoff](handoff.md): how work moves from a card to a merged pull request without losing the thread.
 - [The review loop](review-loop.md): the implement, review, fix and adversarial cycle, with what the build showed.
 - [Claude Code plugins](plugins.md): set up the Codex and Ollama plugins, and where each one fits.
