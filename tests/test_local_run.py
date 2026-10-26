@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from agentsdata import A_MODELS, B_MODELS, write_agents
-from fakeollama import FakeOllama
+from fakeollama import OMIT, FakeOllama
 from localcli import cli, local_run
 
 
@@ -244,7 +244,7 @@ def test_a_different_reported_model_fails_closed_and_writes_nothing(
     assert "A short answer." not in out and not log.exists()
 
 
-@pytest.mark.parametrize("answered", ["", None, 5, ["small-4b-agent"], {"n": 1}, True])
+@pytest.mark.parametrize("answered", ["", None, OMIT, 5, ["small-4b-agent"], {"n": 1}, True])
 def test_no_usable_reported_model_fails_closed_and_is_never_replaced_by_the_request(
     _private_home: Path, tmp_path: Path, answered: object
 ) -> None:
