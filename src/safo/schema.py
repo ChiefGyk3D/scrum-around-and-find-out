@@ -127,6 +127,10 @@ class Rules:
     add_closed_days: int = 0  # reconcile also adds items closed or merged within this many days, as Done
     tracking: Tracking = field(default_factory=Tracking)
     threat_model: ThreatModel = field(default_factory=ThreatModel)
+    # The branch gate: the default branch of every listed repository must require this check (empty turns it off).
+    gate_check: str = "CI green"
+    gate_forbid_force_push: bool = True  # a default branch that allows force pushes is also reported
+    gate_exempt_repos: tuple[str, ...] = ()  # owner/name: not audited for the gate
 
 
 @dataclass(frozen=True)
@@ -426,6 +430,9 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
             "add_closed_days",
             "tracking",
             "threat_model",
+            "gate_check",
+            "gate_forbid_force_push",
+            "gate_exempt_repos",
         },
     )
     s = r.mapping(
@@ -457,7 +464,34 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
         r.integer(m.get("add_closed_days", 0), "rules.add_closed_days"),
         _parse_tracking(r, m.get("tracking", {})),
         _parse_threat_model(r, m.get("threat_model", {})),
+        _parse_gate_check(r, m.get("gate_check", "CI green")),
+        _parse_gate_force(r, m.get("gate_forbid_force_push", True)),
+        _parse_gate_exempt(r, m.get("gate_exempt_repos", [])),
     )
+
+
+def _parse_gate_check(r: Reader, raw: object) -> str:
+    name = r.string(raw, "rules.gate_check", empty=True)
+    if name != name.strip() or len(name) > 100 or any(ord(c) < 32 for c in name):
+        raise r.fail("rules.gate_check", "expected a status check name: at most 100 characters, no control characters")
+    return name
+
+
+def _parse_gate_force(r: Reader, raw: object) -> bool:
+    if not isinstance(raw, bool):
+        raise r.fail("rules.gate_forbid_force_push", "expected true or false")
+    return raw
+
+
+def _parse_gate_exempt(r: Reader, raw: object) -> tuple[str, ...]:
+    exempt: list[str] = []
+    for i, name in enumerate(r.seq(raw, "rules.gate_exempt_repos")):
+        text = r.string(name, f"rules.gate_exempt_repos[{i}]")
+        owner, _, repo = text.partition("/")
+        if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
+            raise r.fail(f"rules.gate_exempt_repos[{i}]", "expected owner/name")
+        exempt.append(text)
+    return tuple(exempt)
 
 
 def _parse_tracking(r: Reader, raw: object) -> Tracking:

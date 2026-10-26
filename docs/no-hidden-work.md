@@ -12,6 +12,7 @@ File the issue first. Put it on the board. Then start. Link it from the pull req
 |---|---|---|
 | `safo hooks guard` | A subagent brief must carry a line of its own, `issue: owner/repo#123` (or `issue: KEY-123`). The reference is checked read-only: it must exist and be open. | `warn` reports, `block` denies |
 | `safo audit` | Exits 1 for a pull request that links no issue, a pull request or issue that is not on the board, a card with no Status, Area, Kind, Epic or Effort, a closed issue that is not Done, a Done card with no Done-on date. Each finding names the item. | read-only |
+| `safo audit` (branch gate) | Exits 1 with `NO-GATE owner/name` for a listed repository whose default branch has no protection or active ruleset, is protected without the gate check (`CI green`), or allows force pushes. Exits 2 when the protection cannot be read. See [The branch gate](#the-branch-gate). | read-only |
 | `safo reconcile` and `safo sync` | Add the missing cards and set Status and Done-on. What no rule can decide is printed as `HUMAN ...` and leaves the exit code at 1: a pull request with no linked issue, a missing Kind, Epic, Effort, or an Area no rule fills. | writes only what is mechanical |
 | A pull request check | Fails a pull request with no `Refs #n` or `Closes #n`. Not built here: it is a reusable workflow in git-your-ship-together. | CI |
 
@@ -65,6 +66,46 @@ How the issue lookup is injected in a test: `LocalContext.issue_lookup` takes a 
 
 The same shape of rule, for AI-facing work: an issue with the configured label carries a `threat-model:` line, and `audit`
 names the ones that do not. See [Threat model before build](threat-model.md).
+
+## The branch gate
+
+The standing rule is that every repository's default branch requires `CI green` before its first merge. `safo audit`
+reads, for each repository listed in `board.yaml`, the default branch's classic protection rule and the repository's
+rulesets (a repository may be protected by either), and reports one finding per repository:
+
+```text
+DRIFT   NO-GATE acme/widgets: default branch 'main' has no branch protection and no active ruleset
+DRIFT   NO-GATE acme/manuals: default branch 'main' is protected but does not require the check 'CI green' and allows force pushes
+```
+
+A ruleset counts when it is active (not disabled, not evaluate-only), targets branches, and its include patterns match the
+default branch without an exclude pattern removing it (`~DEFAULT_BRANCH`, `~ALL` and `refs/heads/...` globs). A required
+check matches by its own name or after a workflow prefix: `CI green` matches `ci / CI green` and `shell / CI green`, which
+are the names `scripts/apply-baseline.sh` requires. Force pushes are blocked by a classic rule that disallows them or a
+ruleset with the non-fast-forward rule.
+
+```yaml
+rules:
+  gate_check: CI green            # the check name; empty turns the rule off and the audit says "not configured"
+  gate_forbid_force_push: true    # also report a default branch that allows force pushes
+  gate_exempt_repos: []           # owner/name list that is not audited for the gate
+```
+
+Defaults and why: the rule is **on** with `CI green`, because it is the standing rule and a repository without it is
+exactly what the audit exists to find; force pushes are **on** because a gate that history can be rewritten around is not a
+gate. It applies only to repositories listed in `board.yaml`, never to the rest of an owner's repositories. An archived
+repository is skipped with a `NOTE` (nothing can merge into it); a repository with no default branch yet (empty) is
+skipped with a `NOTE`.
+
+**What the token needs.** GitHub shows protection and rulesets in full only to a token that can administer the repository:
+for a GitHub App the **Administration: read** repository permission, for a user token the `repo` scope. The Projects and
+Issues permissions the rest of the audit uses are not enough, and the token may well lack Administration: read. Without it
+GitHub answers "none" instead of "forbidden", so the audit never reads an empty answer as "unprotected" unless the token
+reports ADMIN on the repository; otherwise, and on any refused or failed read, it prints `UNKNOWN NO-GATE ...` naming the
+permission and exits 2. A rule that is found is trusted whatever the permission. Cannot tell is never a pass.
+
+The read uses the same GraphQL client as the rest of the audit (a second REST transport would duplicate its redirect,
+retry and loopback hardening). It never writes protection: setting it is `scripts/apply-baseline.sh`, run by the maintainer.
 
 ## The audit and `board.yaml`
 
