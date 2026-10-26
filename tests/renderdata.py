@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """A repository-shaped fixture whose profiles cover all four harnesses, for the renderer, digest and drift tests."""
 
 from __future__ import annotations

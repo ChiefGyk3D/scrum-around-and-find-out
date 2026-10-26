@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 8, the schema part: review_gate is {required, reviewer_differs, checks:[{code, evidence}]}."""
 
 from __future__ import annotations

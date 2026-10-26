@@ -28,6 +28,7 @@ profile that lists traits is a load error, and so is a profiled one that lists n
 | `must_not_get` | Up to 8 entries, a `shape` from `shapes` and `evidence`. |
 | `review_gate` | A pull-request harness only (today the Copilot coding agent): `required: true`, `reviewer_differs: true` and `checks`, each a `code` with its own `evidence`. |
 | `models` | A Copilot agent only: one layer per underlying model. |
+| `harness_mode` | A Copilot agent only: `issue` (the default) renders the issue form and the scope rules for the coding agent; `review` is for a Copilot scoped to pull request review, and renders review guidance and no issue form. |
 
 Whether a brief is required depends on the agent. A Claude profile needs a `brief` unless it names a `persona`; Codex and
 local models always need one; the Copilot form is owned by the renderer, so its brief is optional. A human takes no
@@ -143,8 +144,8 @@ them into a repository for you.
 |---|---|---|
 | `claude/<agent>.md` | Claude subagent | Front matter (`name`, `description`, `model` from the agent, `tools` and `disallowedTools` only if the persona's own front matter has them), the persona body when there is one, then the generated section |
 | `codex/<agent>.prompt.md` | Codex | A preamble to prepend to a self-contained prompt |
-| `copilot/ISSUE_TEMPLATE/copilot-task.yml` | Copilot coding agent | An issue form with the acceptance criteria, the files in scope, one test command and a scope checkbox, all required |
-| `copilot/copilot-instructions.md` | Copilot coding agent | The three scope rules and the generated section |
+| `copilot/ISSUE_TEMPLATE/copilot-task.yml` | Copilot coding agent (`harness_mode: issue` only) | An issue form with the acceptance criteria, the files in scope, one test command and a scope checkbox, all required |
+| `copilot/copilot-instructions.md` | Copilot | `harness_mode: issue`: the three scope rules and the generated section. `harness_mode: review`: the review rules (comment on the diff, a second opinion and not a gate) and the generated section, with the review gate checks as the things to look for |
 | `local/<agent>.wrapper.txt` | Local models | A prompt wrapper with a `{{task}}` slot, a strict output-format line and the ceilings in prose; `think=false` is a comment line for the caller to remove |
 
 Only an agent with a profile renders. An `unmeasured` profile renders its brief, ceilings and review gate and says on the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """bootstrap: create only what is missing, never edit an existing field's options, filter after create."""
 
 from __future__ import annotations

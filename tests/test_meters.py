@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The local meters, against synthetic files under a temporary home. Never the real home directory."""
 
 from __future__ import annotations

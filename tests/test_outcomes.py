@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The outcomes log: validated records, one line each, and a monthly summary."""
 
 from __future__ import annotations

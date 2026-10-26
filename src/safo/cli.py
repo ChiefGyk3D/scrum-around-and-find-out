@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The `safo` command line, and the entry point `python -m safo` shares with the Action."""
 
 from __future__ import annotations

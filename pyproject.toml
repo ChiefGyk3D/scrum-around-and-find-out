@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
@@ -9,8 +9,8 @@ dynamic = ["version"]
 description = "Scrum Around and Find Out: a GitHub Project defined as code, kept current by an Action."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "ChiefGyk3D" }]
 dependencies = ["PyYAML==6.0.3"]
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 3: the claim-by-evidence-kind table, cell by cell, at parse time and again when the pointer is resolved."""
 
 from __future__ import annotations

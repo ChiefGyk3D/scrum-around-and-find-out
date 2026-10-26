@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # A tag v* builds the sdist and wheel, checks the tag against safo.__version__, records build provenance and
 # attaches the files to a GitHub release. safo is an Action, so nothing goes to PyPI. A pull request builds
 # and checks but never publishes.
@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   package:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@faba0b7d1ab65e9033bef1acfa93d6d57b5808c0 # v1.21.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@6f40107c2e05483f485452991e422f7f63886000 # v1.25.1
     permissions:
       contents: write       # the GitHub release and its assets
       id-token: write       # build provenance

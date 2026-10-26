@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Bound untrusted JSON before parsing; never include input values in errors."""
 
 from __future__ import annotations

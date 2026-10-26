@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """route: rules plus live headroom give a recommended agent and the reason. It dispatches nothing."""
 
 from __future__ import annotations

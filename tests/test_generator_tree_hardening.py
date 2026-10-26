@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Ancestors, stale deletion, work caps and path rules of the output tree (the fix round after the Codex review)."""
 
 from __future__ import annotations

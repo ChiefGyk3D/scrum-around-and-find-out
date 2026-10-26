@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """status: post a project status update, from a body file or built from the board.
 
 `--body-file FILE` posts the Markdown you wrote. `--post` builds the update: the cards are grouped and counted in

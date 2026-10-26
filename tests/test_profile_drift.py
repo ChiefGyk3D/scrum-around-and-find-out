@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The drift check (spec 8.14): the tree equals the render; an edit, a deletion, a stray file, a stale digest fails."""
 
 from __future__ import annotations

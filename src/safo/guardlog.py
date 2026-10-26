@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Where the routing guard keeps its files, and what its log says. Read here by `agents-status`; written by `hooks`.
 
 One JSON object per line in `log.jsonl`, appended by the dispatch guard on every decision. A record holds
@@ -53,8 +53,28 @@ def config_dir(env: Mapping[str, str]) -> Path | None:
 
 WARNING = "SAFO routing guard degraded: enforcement may be incomplete; inspect safo hooks status."
 MODEL_IDS = ("sonnet", "haiku", "opus", "unknown")
-RULE_IDS = ("no-model", "unknown-model", "approval", "no-local-step")
-DIAGNOSTICS = ("mode", "config", "input", "timeout", "probe", "state-write", "log-write", "unexpected")
+RULE_IDS = (
+    "no-model",
+    "unknown-model",
+    "approval",
+    "no-local-step",
+    "no-issue",
+    "issue-unusable",
+    "issue-unverified",
+    "lead-waits",
+)
+DIAGNOSTICS = (
+    "mode",
+    "config",
+    "input",
+    "timeout",
+    "probe",
+    "state-write",
+    "log-write",
+    "unexpected",
+    "repo-changed",
+    "repo-unbound",
+)
 HEALTH = ("healthy", "degraded", "stale", "unknown")
 RECORD_CAP = 2048
 FILE_CAP = 4 * 1024 * 1024

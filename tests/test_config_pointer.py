@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 6: RFC 6901 config pointers address the base agents.yaml only, through a per-setting allowlist."""
 
 from __future__ import annotations

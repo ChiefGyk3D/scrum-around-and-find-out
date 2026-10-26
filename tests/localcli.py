@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Run the safo command line in-process against a private HOME, with an empty PATH so no real program is reached."""
 
 from __future__ import annotations

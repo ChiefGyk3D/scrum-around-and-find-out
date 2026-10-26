@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Support for the hooks tests: run `safo hooks` in-process against a private HOME, and build the files it reads."""
 
 from __future__ import annotations
@@ -51,10 +51,20 @@ def agents_file(
     return path
 
 
+# A Jira-style key is checked by shape alone, so most tests need no lookup. It goes first, so a brief that ends in a
+# marker still ends in it.
+TRACKED = "issue: TEST-1\n"
+
+
 def dispatch(
-    model: str | None = "sonnet", prompt: str = "Summarise it. safo local run --shape ci-log-summary", **extra: Any
+    model: str | None = "sonnet",
+    prompt: str = "Summarise it. safo local run --shape ci-log-summary",
+    *,
+    tracked: bool = True,
+    **extra: Any,
 ) -> str:
-    """The PreToolUse event Claude Code sends for an Agent tool call."""
+    """The PreToolUse event Claude Code sends for an Agent tool call. `tracked` adds the issue line the guard wants."""
+    prompt = (TRACKED if tracked else "") + prompt
     tool_input: dict[str, Any] = {
         "description": "sentinel-description",
         "prompt": prompt,

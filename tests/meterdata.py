@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Synthetic session files for the meter tests. Nothing here is read from, or shaped by, a real home directory."""
 
 from __future__ import annotations

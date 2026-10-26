@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # One live, read-only `safo audit` of the Renegade-Penguin suite board against examples/renegade-penguin.yaml.
 # Run by hand (Actions, Live audit, Run workflow). Never on a pull request: it needs the App's key, and a
 # pull request must never receive a secret. Exit 0 means the example still matches the live board.
@@ -22,7 +22,7 @@ jobs:
       contents: read
       id-token: write   # the Doppler OIDC fetch of the App key
     steps:
-      - uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: block
           allowed-endpoints: >-

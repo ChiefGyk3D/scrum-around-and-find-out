@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The manifest and body digests (spec 8.13): each input moves the manifest, and a hand edit moves the body digest."""
 
 from __future__ import annotations

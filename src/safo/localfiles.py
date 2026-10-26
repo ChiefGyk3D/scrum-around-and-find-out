@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Where the local-only files are: agents.yaml, its git-ignored local override, and the outcomes log.
 
 None of them is ever found in the current directory: a checkout can plant an `agents.yaml` naming endpoints to probe.

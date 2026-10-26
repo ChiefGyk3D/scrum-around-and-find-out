@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The Action never imports code from the caller's workspace.
 
 The workspace is the caller's checkout, so anything in it (a `safo` package, a `yaml.py`, a `sitecustomize.py`) is

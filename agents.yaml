@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Who does what, how much room each has, and which agent a task shape goes to. docs/routing.md is GENERATED from this
 # file (python scripts/gen_routing.py --write); `safo route <shape>` reads it with the live headroom `safo usage` measures.
 # The numbers are one maintainer's measured workload, not a vendor's published limits: replace them with your own.
@@ -89,17 +89,20 @@ agents:
         - text: Expect it to commit inside a git worktree or open sockets; the lead runs the full suite and commits.
           evidence: "lessons:codexs-sandbox-cannot-commit-inside-a-git-worktree"
   copilot:
-    name: Copilot coding agent
+    name: Copilot (pull request review)
     kind: copilot
-    role: Small, fully specified issues and deferred minor items.
-    limits: {monthly_ai_credits: 7000}
+    role: "Reviews pull requests, and only pull requests: a second reader on the diff before merge. It does not take issues or write code."
+    limits: {monthly_ai_credits: 20000}
     strengths:
-      - Runs on its own and returns a pull request.
+      - Runs on its own on every pull request and comments on the diff.
     constraints:
-      - "Measured burn about 400 a day early in the month: spend it on small single-repo PRs."
-      - "Every pull request needs a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup."
+      - "Measured burn about 400 a day early in the month, when it also wrote pull requests: it is no longer asked to."
+      - "Every pull request it authored needed a review gate: in the measured month every one needed fixes, one of them a functional bug its own test hid, and a reviewer caught a missing `id-token: write` that would have failed every run at startup."
+      - "Pull requests only: no coding-agent issues, no chat or CLI use, so its credits last the month. The 7,000 credit plan ran out about ten days into the cycle (2026-10-10) with automatic review on every pull request; the plan is now 20,000 and review is set to lite."
+      - "Its comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex adversarial review still decide."
     profile:
       status: profiled
+      harness_mode: review
       review_gate:
         required: true
         reviewer_differs: true
@@ -202,8 +205,8 @@ shapes:
     note: Haiku transcribes the plan's code exactly, its bugs included, so the review reads the plan's code as well.
   small-mechanical-pr:
     description: A small pull request with an exact change.
-    prefer: [copilot]
-    fallback: [claude-haiku]
+    prefer: [claude-haiku]
+    fallback: [claude-sonnet]
     reviewer: [claude-sonnet]
   security-sensitive-design:
     description: A design whose mistakes expose a secret or widen access.
@@ -211,6 +214,12 @@ shapes:
     fallback: []
     reviewer: [codex]
     note: Opus only with the maintainer's OK and the reason stated.
+  threat-model:
+    description: "A threat model for an AI-facing change: assets, actors, trust boundaries, ranked risks, a mitigation and a verification for each, and the Threat Dragon file. The draft is evidence for the maintainer to read, not a verdict."
+    prefer: [claude-sonnet]
+    fallback: []
+    reviewer: [codex]
+    note: Opus only with the maintainer's OK and the reason stated. Codex reviews, so it never drafts. The file's shape is checked by git-your-ship-together's threat-model workflow; whether it is true of the system is a person's call.
   security-sensitive-code:
     description: "Code whose mistakes expose a secret, widen access or replay a mutation, including security code transcribed from a plan."
     prefer: [claude-sonnet]
@@ -290,18 +299,27 @@ thresholds:
 # start (the probe is trusted for max_state_age_seconds; after that the guard asks again, at most once a minute), a brief
 # must name a local step (any marker) or say why it has none: the n/a marker followed by a reason, for example
 # `local-llm: n/a - a one-line rename`.
+# Every brief also needs a line of its own, `issue: owner/repo#N` (or `issue: KEY-N`), naming an open issue: no hidden work.
+# Nothing is exempt. A throwaway repository can opt out by listing it under tracking_exempt_repos (owner/name).
 hooks:
   approval_token: OPUS-APPROVED
   max_state_age_seconds: 300
   local_step_markers: [safo local run, llm-local]
   na_marker: "local-llm: n/a -"
+  # The lead never waits (docs/orchestrator.md): a lead-session Bash call that is `gh run watch`, `gh pr checks --watch`,
+  # a sleep loop or a sleep of sleep_threshold_seconds or more, and is not run in the background, is flagged (follow the
+  # guard mode) or denied. A repository may be exempted only with a stated reason under exempt_repos.
+  lead_wait:
+    mode: follow
+    sleep_threshold_seconds: 10
 
 rules_of_thumb:
   - "Routing order 1: text-in/text-out work (summaries, triage, classification, first drafts, log and CI digests) goes to the local LLM first, and a Claude model checks anything that will be applied."
-  - "Routing order 2: mechanical code from a complete spec goes to Haiku, or to Copilot when it is a small single-repo PR and credits allow."
+  - "Routing order 2: mechanical code from a complete spec goes to Haiku. Copilot reviews pull requests and nothing else."
   - "Routing order 3: code from prose, every task review, and ops runbooks go to Sonnet."
   - "Routing order 4: security-sensitive or risky code is built by Sonnet, and Codex attacks it before merge."
   - "Routing order 5: decisions go to the lead and the maintainer; Opus only with the maintainer's OK."
+  - "Copilot reviews pull requests and nothing else: it is an extra reader on the diff, never the reviewer of record and never a merge gate."
   - Write the brief before choosing the agent. If you cannot write a complete one, the task is a decision or research.
   - The reviewer is a different agent or model from the author, and starts with no memory of the work.
   - Run agents in parallel only when their work is independent.

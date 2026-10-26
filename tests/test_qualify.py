@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 21 (the item 4 seam): qualify() returns a typed Qualification and does not depend on log order."""
 
 from __future__ import annotations

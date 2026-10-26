@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 7: a profile is checked against the shapes, the endpoints and the kind it sits on."""
 
 from __future__ import annotations
@@ -110,6 +110,7 @@ def test_a_non_ollama_agent_is_not_bound_by_endpoint_rules() -> None:
 
 def test_a_gated_agent_in_a_shape_needs_a_reviewer_that_is_not_itself() -> None:
     d = doc()
+    d["shapes"]["small-mechanical-pr"].update(prefer=["copilot"], fallback=["claude-haiku"])  # not shipped
     profile(d, "copilot")["review_gate"] = gate()
     parsed = parse_agents(d)
     assert need(prof(parsed, "copilot").review_gate).required is True

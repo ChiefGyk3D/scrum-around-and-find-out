@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The shared Markdown block scanner: which lines are inside a fence or an HTML block (CommonMark types 1 to 7)."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Errors, each carrying the exit code the command line returns for it."""
 
 from __future__ import annotations

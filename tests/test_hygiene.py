@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Repository rules that are cheap to check and expensive to rediscover."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from pathlib import Path
 import safo
 
 ROOT = Path(__file__).parent.parent
-SPDX = "SPDX-License-Identifier: MIT"
+SPDX = "SPDX-License-Identifier: Apache-2.0"
 CODE_SUFFIXES = {".py", ".sh", ".yml", ".yaml"}
 SKIP_DIRS = {
     ".git",
@@ -76,5 +76,7 @@ def test_the_version_is_one_number() -> None:
     assert 'dynamic = ["version"]' in (ROOT / "pyproject.toml").read_text()
 
 
-def test_the_licence_is_mit() -> None:
-    assert (ROOT / "LICENSE").read_text().startswith("MIT License")
+def test_the_licence_is_apache() -> None:
+    assert "Apache License" in (ROOT / "LICENSE").read_text().split("\n", 3)[0]
+    assert "Version 2.0" in (ROOT / "LICENSE").read_text()[:200]
+    assert (ROOT / "NOTICE").read_text().startswith("Scrum Around and Find Out")

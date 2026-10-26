@@ -132,6 +132,8 @@ tells the session whether it is reachable. A guard runs before every Agent dispa
   `hooks` section of `agents.yaml` in the brief, which the maintainer adds only after saying yes.
 - While the local LLM was reachable at session start, the brief names a local step (`safo local run` or `llm-local`) or
   says `local-llm: n/a - <reason>`.
+- The brief has a line of its own, `issue: owner/repo#123` (or a Jira-style `issue: KEY-123`), naming an issue that exists and
+  is open. No hidden work: file the issue and put it on the board first ([No hidden work](no-hidden-work.md)).
 
 Start in warn mode, the default: the guard reports a broken rule and lets the dispatch go. After a few days of reading
 `safo hooks status` and `safo agents-status`, switch with `safo hooks mode block`, and the guard denies a dispatch that breaks

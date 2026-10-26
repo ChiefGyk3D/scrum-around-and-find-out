@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The workspace boundary: lexical and resolved forms, symlinked parents, a missing GITHUB_WORKSPACE under Actions."""
 
 from __future__ import annotations

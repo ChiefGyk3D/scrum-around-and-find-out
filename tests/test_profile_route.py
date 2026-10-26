@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 19, the degradation part: route reads the verified document; one dangling pointer degrades one agent."""
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def snapshot(home: Path, agents: Path) -> str:
 
 
 def broken(tmp_path: Path, agent: str = "copilot") -> Path:
-    d = agents_dict()
+    d = agents_dict(copilot_authors=True)
     d["agents"][agent]["profile"]["dont"] = [claim("Merge it without a review.", "lessons:no-such-lesson")]
     path = tmp_path / "agents.yaml"
     path.write_text(yaml.safe_dump(d))
@@ -39,7 +39,7 @@ def broken(tmp_path: Path, agent: str = "copilot") -> Path:
 def test_route_output_for_resolved_profiles_is_what_it_was_before_this_work(
     _private_home: Path, tmp_path: Path
 ) -> None:
-    assert snapshot(_private_home, write_agents(tmp_path / "agents.yaml")) == SNAPSHOT.read_text()
+    assert snapshot(_private_home, write_agents(tmp_path / "agents.yaml", copilot_authors=True)) == SNAPSHOT.read_text()
 
 
 def test_a_dangling_pointer_routes_that_agent_as_unmeasured_with_the_reason(
@@ -56,7 +56,7 @@ def test_a_dangling_pointer_routes_that_agent_as_unmeasured_with_the_reason(
 def test_an_unrelated_shape_still_gets_its_normal_recommendation(_private_home: Path, tmp_path: Path) -> None:
     path = broken(tmp_path)
     (tmp_path / "good").mkdir()
-    good = write_agents(tmp_path / "good" / "agents.yaml")
+    good = write_agents(tmp_path / "good" / "agents.yaml", copilot_authors=True)
     for shape in ("research", "adversarial-review", "integration-code"):
         _, got, _ = cli("route", shape, "--agents", str(path), "--no-usage", home=_private_home)
         _, want, _ = cli("route", shape, "--agents", str(good), "--no-usage", home=_private_home)
@@ -84,7 +84,7 @@ def test_json_gains_a_key_only_when_an_agent_is_degraded(_private_home: Path, tm
 def test_a_missing_lessons_file_degrades_every_agent_that_cites_it_and_nothing_else(
     _private_home: Path, tmp_path: Path
 ) -> None:
-    path = write_agents(tmp_path / "agents.yaml")
+    path = write_agents(tmp_path / "agents.yaml", copilot_authors=True)
     (tmp_path / "docs" / "lessons.md").unlink()
     code, out, _ = cli("route", "research", "--agents", str(path), "--no-usage", home=_private_home)
     assert code == 0 and "profile: codex is treated as unmeasured" in out
@@ -103,7 +103,7 @@ def test_a_form_error_is_still_global(_private_home: Path, tmp_path: Path) -> No
 
 
 def test_route_holds_the_agents_file_to_the_private_file_policy(_private_home: Path, tmp_path: Path) -> None:
-    path = write_agents(tmp_path / "agents.yaml")
+    path = write_agents(tmp_path / "agents.yaml", copilot_authors=True)
     path.chmod(0o664)
     code, _, err = cli("route", "research", "--agents", str(path), "--no-usage", home=_private_home)
     assert code == 2 and "writable by its group" in err

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """What a mode receives: the validated board, an authenticated client and the streams."""
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from safo.credentials import find_gh
 from safo.errors import ConfigError
 from safo.graphql import Client
 from safo.schema import Board
+from safo.tracking import Resolver
 
 
 @dataclass
@@ -49,6 +50,8 @@ class LocalContext:
     which_override: Callable[[str], str | None] | None = None
     dry_run: bool = False
     stdin: TextIO | None = None  # what a hook reads its event from; None means the process's own standard input
+    repo_lookup: Callable[[str], str | None] | None = None  # working directory -> owner/name; None means origin's URL
+    issue_lookup: Resolver | None = None  # how the dispatch guard checks a brief's issue; None means `gh issue view`
 
     @property
     def which(self) -> Callable[[str], str | None]:

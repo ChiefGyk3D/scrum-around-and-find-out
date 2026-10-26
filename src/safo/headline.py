@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """An optional approved prose clause for a status update. It sees four counts and nothing else.
 
 `safo status --post` groups and counts the cards in code. Here a local model (the `status-headline` shape in

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """audit: exit 0 clean, 1 drift, 2 cannot tell; and it never changes anything."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Resolving the evidence pointers of the profiles (spec 1.5): `load_verified_agents` and what it returns.
 
 `parse_agents` checks the FORM of every pointer and which claim it may support, and reads no evidence file. This module

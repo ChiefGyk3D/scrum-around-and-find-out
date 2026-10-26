@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Secrets are masked before anything can print them, and masking itself is the one place a command is written."""
 
 from __future__ import annotations

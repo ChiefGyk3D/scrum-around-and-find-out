@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The server, the in-memory model and the fault injection.
 
 The model mirrors what the real API does where safo has been bitten: a listing that lags behind
@@ -97,6 +97,8 @@ class FContent:
     closed_at: str | None = None
     draft: bool = False
     labels: list[str] = field(default_factory=list)
+    body: str = "Closes #900001"  # a pull request links an issue unless a test says otherwise
+    closing: int = 0  # how many issues GitHub itself counts as closed by a pull request
 
 
 @dataclass

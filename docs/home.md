@@ -10,9 +10,13 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Personas](personas.md): the four roles (implementer, reviewer, adversarial reviewer, transcriber) and six packs defined in the Department of Internal Arguments, how SAFO relates to them, and how to install and update them.
 - [Agent profiles](profiles.md): how to brief each agent, with every claim tied to a pointer at a measurement (the loader, the evidence check and the rendering into `examples/harness/` are built).
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
+- [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
+- [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
+- [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
 - [Handoff](handoff.md): how work moves from a card to a merged pull request without losing the thread.
 - [The review loop](review-loop.md): the implement, review, fix and adversarial cycle, with what the build showed.
+- [Claude Code plugins](plugins.md): set up the Codex and Ollama plugins, and where each one fits.
 - [Local LLM](local-llm.md): what a local model is good and bad at, and the guard that keeps it from evicting a resident model.
 - [Limits](limits.md): reading each tool's real usage and deciding when to switch.
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.

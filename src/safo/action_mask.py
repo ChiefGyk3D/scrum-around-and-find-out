@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Mask the credentials the Action was handed, before anything else in the job can print them.
 
 Runs as `python -m safo.action_mask` with the secret in the environment (never in argv): PRIVATE_KEY (the App's PEM),

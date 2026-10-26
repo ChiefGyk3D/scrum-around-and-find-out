@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # The GitHub wiki is a generated mirror of docs/: scripts/gen_wiki.py writes the pages and
 # ChiefGyk3D/git-your-ship-together's wiki-publish.yml replaces the wiki's contents with them. It generates
 # on a manual run too, and publishes only from the default branch. The generator is stdlib only, so there is
@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   wiki:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/wiki-publish.yml@faba0b7d1ab65e9033bef1acfa93d6d57b5808c0 # v1.21.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/wiki-publish.yml@6f40107c2e05483f485452991e422f7f63886000 # v1.25.1
     permissions:
       contents: write # the publish job only: the reusable workflow's generate job stays read-only
     with:

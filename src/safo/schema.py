@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """board.yaml: the schema, the loader and a validator that names the offending key.
 
 PyYAML is the one runtime dependency and is loaded through a custom SafeLoader subclass
@@ -94,6 +94,30 @@ class StatusRules:
 
 
 @dataclass(frozen=True)
+class Tracking:
+    """The no-hidden-work rule: which fields every card must hold, and the repositories that opt out of it.
+
+    A field name left empty, or one board.yaml does not define, is "not configured": audit skips that check and says so.
+    """
+
+    kind_field: str = "Kind"
+    epic_field: str = "Epic"
+    effort_field: str = "Effort"
+    exempt_repos: tuple[str, ...] = ()  # owner/name: pull requests there need no linked issue
+
+
+@dataclass(frozen=True)
+class ThreatModel:
+    """The threat-model-before-build rule: issues with `label` must name a threat model or say why none applies.
+
+    An empty label is "not configured": audit skips the check and says so.
+    """
+
+    label: str = ""
+    exempt_repos: tuple[str, ...] = ()  # owner/name: issues there need no threat-model line
+
+
+@dataclass(frozen=True)
 class Rules:
     status_field: str = "Status"
     area_field: str = "Area"
@@ -101,6 +125,8 @@ class Rules:
     done_date_field: str = ""  # empty disables the date
     new_item_defaults: tuple[tuple[str, str], ...] = ()  # (field, option) set on items safo adds
     add_closed_days: int = 0  # reconcile also adds items closed or merged within this many days, as Done
+    tracking: Tracking = field(default_factory=Tracking)
+    threat_model: ThreatModel = field(default_factory=ThreatModel)
 
 
 @dataclass(frozen=True)
@@ -391,7 +417,16 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
     m = r.mapping(
         raw,
         "rules",
-        {"status_field", "area_field", "status", "done_date_field", "new_item_defaults", "add_closed_days"},
+        {
+            "status_field",
+            "area_field",
+            "status",
+            "done_date_field",
+            "new_item_defaults",
+            "add_closed_days",
+            "tracking",
+            "threat_model",
+        },
     )
     s = r.mapping(
         m.get("status", {}), "rules.status", {"opened", "reopened", "closed", "merged", "opened_pr", "draft_pr"}
@@ -420,7 +455,42 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
         r.string(m.get("done_date_field", ""), "rules.done_date_field", empty=True),
         tuple((str(k), v) for k, v in nid.items()),
         r.integer(m.get("add_closed_days", 0), "rules.add_closed_days"),
+        _parse_tracking(r, m.get("tracking", {})),
+        _parse_threat_model(r, m.get("threat_model", {})),
     )
+
+
+def _parse_tracking(r: Reader, raw: object) -> Tracking:
+    m = r.mapping(raw, "rules.tracking", {"kind_field", "epic_field", "effort_field", "exempt_repos"})
+    d = Tracking()
+    exempt: list[str] = []
+    for i, name in enumerate(r.seq(m.get("exempt_repos", []), "rules.tracking.exempt_repos")):
+        text = r.string(name, f"rules.tracking.exempt_repos[{i}]")
+        owner, _, repo = text.partition("/")
+        if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
+            raise r.fail(f"rules.tracking.exempt_repos[{i}]", "expected owner/name")
+        exempt.append(text)
+    return Tracking(
+        r.string(m.get("kind_field", d.kind_field), "rules.tracking.kind_field", empty=True),
+        r.string(m.get("epic_field", d.epic_field), "rules.tracking.epic_field", empty=True),
+        r.string(m.get("effort_field", d.effort_field), "rules.tracking.effort_field", empty=True),
+        tuple(exempt),
+    )
+
+
+def _parse_threat_model(r: Reader, raw: object) -> ThreatModel:
+    m = r.mapping(raw, "rules.threat_model", {"label", "exempt_repos"})
+    label = r.string(m.get("label", ""), "rules.threat_model.label", empty=True)
+    if label != label.strip() or len(label) > 50 or any(ord(c) < 32 or c == "," for c in label):
+        raise r.fail("rules.threat_model.label", "expected a GitHub label name: at most 50 characters, no comma")
+    exempt: list[str] = []
+    for i, name in enumerate(r.seq(m.get("exempt_repos", []), "rules.threat_model.exempt_repos")):
+        text = r.string(name, f"rules.threat_model.exempt_repos[{i}]")
+        owner, _, repo = text.partition("/")
+        if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
+            raise r.fail(f"rules.threat_model.exempt_repos[{i}]", "expected owner/name")
+        exempt.append(text)
+    return ThreatModel(label, tuple(exempt))
 
 
 def _parse_agents(r: Reader, raw: object) -> AgentsView:

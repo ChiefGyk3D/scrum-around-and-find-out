@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The decisions: which status an item should hold, which area it belongs to.
 
 Pure functions over the board.yaml rules; no GitHub access. Ported from GYST's

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """A fake GitHub GraphQL server for the tests: loopback only, records every mutation.
 
 `core` holds the server and the in-memory board; every other module in this package adds the

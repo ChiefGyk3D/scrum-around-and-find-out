@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 20: the migration cohort and deadline are pinned in code; the file can only shrink the list."""
 
 from __future__ import annotations

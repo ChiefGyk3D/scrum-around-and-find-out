@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Spec test 2 and the evidence rules of 1.6: an unmeasured agent has no traits; a profiled one has at least one."""
 
 from __future__ import annotations

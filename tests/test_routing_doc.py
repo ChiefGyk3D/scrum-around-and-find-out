@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """docs/routing.md is generated from agents.yaml, and a test keeps the two from drifting."""
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def test_the_rendering_names_shapes_agents_thresholds_and_says_it_is_generated()
     assert "Generated from `agents.yaml`" in text
     assert "| `research` |" in text and "Codex" in text
     assert "Codex above 80% of the 5-hour window: use Claude Sonnet instead." in text
-    assert "Copilot coding agent above 70% of the month's AI credits: use Claude Haiku instead." in text
+    assert "Copilot (pull request review) above 70% of the month's AI credits: use Claude Haiku instead." in text
     assert "send exactly the loaded num_ctx (small-4b-agent=8192)" in text
     assert "resident-safety" not in text and "11435" not in text
     assert "Routing order 1:" in text and "Routing order 5:" in text

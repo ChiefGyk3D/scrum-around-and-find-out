@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The CODEOWNERS matcher against git itself: the same pattern as a .gitignore, `git check-ignore --no-index`.
 
 CODEOWNERS patterns follow gitignore, so for every pattern we support, a path is covered exactly when git says the

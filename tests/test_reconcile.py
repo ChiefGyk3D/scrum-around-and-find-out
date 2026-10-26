@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """reconcile: add the missing, finish the closed, fill the blank; idempotent; survives the failures adopters hit."""
 
 from __future__ import annotations
@@ -1492,7 +1492,7 @@ def test_a_default_never_fills_the_area_when_no_area_rule_applies(fake: FakeGitH
     _, project = build_world(fake, board)
     fake.add_content("acme/widgets", "Issue", 1, "Plain")
     code, text = reconcile(fake, client, board)
-    assert code == 0, text
+    assert code == 1 and "HUMAN MISSING Area on acme/widgets#1: no area rule or default applies" in text, text
     assert snapshot(fake, project)["acme/widgets#1"]["Area"] is None
     assert not any(m.variables.get("optionId") == fake.field(project, "Area").options[1].id for m in fake.mutations)
 

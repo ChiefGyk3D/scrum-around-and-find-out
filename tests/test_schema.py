@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """board.yaml: what loads, and the sentence that names the key when it does not."""
 
 from __future__ import annotations

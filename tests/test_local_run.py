@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """local run: one prompt to the local LLM routing picks, never one that would evict a protected model."""
 
 from __future__ import annotations

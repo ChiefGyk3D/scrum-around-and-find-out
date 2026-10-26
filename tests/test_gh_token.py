@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The command line's token source: the caller's `gh auth token`, through a fake gh on a private PATH."""
 
 from __future__ import annotations

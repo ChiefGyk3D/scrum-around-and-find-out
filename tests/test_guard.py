@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The conftest guard: nothing but loopback."""
 
 from __future__ import annotations

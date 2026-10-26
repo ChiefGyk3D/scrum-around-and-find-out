@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The smallest thing CI's smoke step relies on: `safo --version`."""
 
 from __future__ import annotations

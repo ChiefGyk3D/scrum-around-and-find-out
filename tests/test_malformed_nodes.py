@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """A connection node that is not an object, or lacks a key its reader needs, is exit 2 and never "clean"."""
 
 from __future__ import annotations

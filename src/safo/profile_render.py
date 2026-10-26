@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Rendering the verified profiles into the instruction file each harness reads (spec section 2).
 
 Pure functions from a `VerifiedAgents` (the profiles, with the persona and template text the loader already read and
@@ -69,10 +69,22 @@ REVIEW_WORDING = {
     ),
     "workflow_permissions": "Read the workflow files the change touches for missing or excess permissions.",
 }
+# The hard rule, stated first in every playbook an agent reads: no work without an issue and a board card.
+TRACKING_RULE = (
+    "No hidden work: file the issue and put it on the board before you start, and link it from your pull request "
+    "(`Refs #n` or `Closes #n`). If you were handed work with no issue, stop and ask for one."
+)
 SCOPE_RULES = (
     "Edit only the files listed as in scope.",
     "Run the one test command the issue states, exactly as written.",
     "Add no new dependencies, workflow permissions or secrets.",
+)
+REVIEW_RULES = (
+    "Comment on the diff. Do not push commits, open pull requests or take issues.",
+    "Say so when the pull request links no issue (`Refs #n` or `Closes #n`): work without an issue is hidden work.",
+    "Judge the change against what the pull request says it does, and say what you could not check.",
+    "Your comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex "
+    "adversarial review still decide.",
 )
 THINK_COMMENT = "# think={flag}: a setting for the caller, who removes this line before sending the prompt."
 
@@ -149,6 +161,8 @@ def profile_data(p: Profile) -> dict[str, Any]:
     """The profile as plain data, without the persona and template text (their digests are in the manifest)."""
     data = dataclasses.asdict(p)
     data.pop("persona_text", None)
+    if data.get("harness_mode") == "issue":
+        data.pop("harness_mode")  # the default is not written, so an adopter's existing files stay current
     if data.get("brief"):
         data["brief"].pop("template_text", None)
     return data
@@ -466,7 +480,7 @@ def _check_template(agent: Agent, p: Profile) -> None:
 
 def _claude(agent: Agent, p: Profile) -> tuple[str, str]:
     tools: Mapping[str, str | list[str]] = {}
-    out = [""]
+    out = ["", TRACKING_RULE, ""]  # the hard rule comes first, ahead of the persona's own text
     if p.persona:
         tools, body = split_persona(p.persona_text, agent.id)
         if body:
@@ -481,6 +495,8 @@ def _codex(agent: Agent, p: Profile) -> tuple[str, str]:
         "",
         "Prepend this preamble to a self-contained prompt. Codex cannot resume a thread across git worktrees, so the "
         "preamble and the prompt are the whole standing context.",
+        "",
+        TRACKING_RULE,
         "",
         BOUNDARY_PARAGRAPH,
         "",
@@ -507,7 +523,27 @@ def _local(agent: Agent, p: Profile) -> tuple[str, str]:
     return "", "\n".join(out) + "\n"
 
 
+def _copilot_review_instructions(agent: Agent, p: Profile) -> tuple[str, str]:
+    out = [
+        "# Copilot instructions",
+        "",
+        "These instructions are for the Copilot agent reviewing a pull request in this project. It reviews pull "
+        "requests and nothing else.",
+        "",
+        "## Review rules",
+        "",
+        *[f"- {rule}" for rule in REVIEW_RULES],
+        "",
+        BOUNDARY_PARAGRAPH,
+        "",
+        *section_lines(agent, p),
+    ]
+    return "", "\n".join(out) + "\n"
+
+
 def _copilot_instructions(agent: Agent, p: Profile) -> tuple[str, str]:
+    if p.harness_mode == "review":
+        return _copilot_review_instructions(agent, p)
     out = [
         "# Copilot instructions",
         "",
@@ -515,6 +551,7 @@ def _copilot_instructions(agent: Agent, p: Profile) -> tuple[str, str]:
         "",
         "## Scope rules",
         "",
+        f"- {TRACKING_RULE}",
         *[f"- {rule}" for rule in SCOPE_RULES],
         "",
         BOUNDARY_PARAGRAPH,
@@ -570,7 +607,7 @@ def _copilot_form(agent: Agent, p: Profile) -> tuple[str, str]:
         "body": body,
     }
     # the SPDX line keeps the repository's licence-header rule true for a generated YAML file; both lines are comments
-    return "", "# SPDX-License-Identifier: MIT\n" + _dump(form)
+    return "", "# SPDX-License-Identifier: Apache-2.0\n" + _dump(form)
 
 
 def _assemble(path: str, front: str, text: str, manifest: str) -> bytes:
@@ -614,10 +651,12 @@ def render_harness(v: VerifiedAgents) -> dict[str, Rendered]:
         elif agent.kind == "copilot":
             if copilot is not None:
                 raise RenderError(
-                    f"{agent.id}: {copilot} is the copilot agent that renders; the issue form has one path"
+                    f"{agent.id}: {copilot} is the copilot agent that renders; "
+                    "the copilot harness files (instructions and, in issue mode, the issue form) have one path"
                 )
             copilot = agent.id
-            files.append(("copilot/ISSUE_TEMPLATE/copilot-task.yml", "copilot", _copilot_form(agent, p)))
+            if p.harness_mode != "review":
+                files.append(("copilot/ISSUE_TEMPLATE/copilot-task.yml", "copilot", _copilot_form(agent, p)))
             files.append(("copilot/copilot-instructions.md", "copilot", _copilot_instructions(agent, p)))
         for path, harness, parts in files:
             out[path] = _render_one(v, agent, path, harness, parts)

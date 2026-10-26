@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """The writes: add an item, set a field by the item's node id, clear a field.
 
 Fields are always set by the node id `addProjectV2ItemById` returned, never by looking the item up in a

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """sync: one issue or pull request event in, that one card brought in line. Same rules as reconcile.
 
 Ported from GYST's project_sync.py. The event payload is only a pointer: its node id says which issue or pull request
@@ -26,6 +26,7 @@ from typing import Any
 from safo.apply import Applier
 from safo.bounded import MAX_BYTES, NotRegularFileError, loads, read_bounded
 from safo.context import Context
+from safo.coverage import card_findings, pull_is_linked, read_tracked
 from safo.errors import (
     EXIT_DRIFT,
     EXIT_OK,
@@ -206,7 +207,32 @@ def follow_pointer(ctx: Context, pointer: Pointer) -> int:
     except NotFoundError:
         say(ctx, f"{label}: the card could not be read, though the issue or pull request exists")
         return EXIT_UNKNOWN
-    return apply_event(ctx, live, repo, content, pointer.action, item, label)
+    code = apply_event(ctx, live, repo, content, pointer.action, item, label)
+    return needs_a_human(ctx, live, repo, content, label, code)
+
+
+def needs_a_human(ctx: Context, live: LiveBoard, repo: Repository, content: Content, label: str, code: int) -> int:
+    """What no rule can fill, said aloud: a pull request with no linked issue, a card with no Kind, Epic or Effort,
+    an Area nothing assigns. Nothing is written; a run that was otherwise clean ends red."""
+    if code not in (EXIT_OK, EXIT_DRIFT):
+        return code
+    board = ctx.board
+    lines: list[str] = []
+    exempt = {r.lower() for r in board.rules.tracking.exempt_repos}
+    if (
+        content.kind == "pr"
+        and repo.full_name.lower() not in exempt
+        and pull_is_linked(ctx.client, content.id) is False
+    ):
+        lines.append(f"{label} is a pull request with no linked issue: add `Refs #n` or `Closes #n`")
+    card = None if ctx.client.dry_run else find_item(ctx.client, board, live, content.id)
+    if card is not None:
+        card = dataclasses.replace(card, content=content)
+        held = read_tracked(ctx.client, board, live)
+        lines += card_findings(board, [card], held, {repo.full_name.lower(): repo})
+    for line in lines:
+        say(ctx, f"HUMAN {line}")
+    return EXIT_DRIFT if lines else code
 
 
 @dataclass

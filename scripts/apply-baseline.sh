@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Apply GYST's BASELINE.md settings to this repository: branch protection (a pull request and both CI
 # gates required), the tag ruleset, private vulnerability reporting, fork-PR approval for every outside
 # contributor, the Actions allow-list from GYST's baseline/selected-actions.json, and auto-merge.
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 GYST="ChiefGyk3D/git-your-ship-together"
-GYST_SHA="faba0b7d1ab65e9033bef1acfa93d6d57b5808c0" # v1.21.0, the pin .github/workflows/ci.yml uses
+GYST_SHA="6f40107c2e05483f485452991e422f7f63886000" # v1.24.0, the pin .github/workflows/ci.yml uses
 repo="ChiefGyk3D/scrum-around-and-find-out"
 branch="main"
 apply=false

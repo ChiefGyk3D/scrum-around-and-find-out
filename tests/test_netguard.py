@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Endpoint destinations: link-local, unspecified, multicast and cloud-metadata are refused; a LAN or loopback stays.
 
 The resolver is a fake: no test performs a DNS lookup. Rebinding is defended by resolving once and connecting to the
