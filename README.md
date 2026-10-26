@@ -154,6 +154,7 @@ replaced are gone.
 - [Done-means-verified](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Done-means-verified)
 - [Access-planning](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Access-planning)
 - [Act-then-report](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Act-then-report)
+- [Security-findings](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Security-findings)
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
 - [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)

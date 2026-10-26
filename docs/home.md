@@ -18,6 +18,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Done means verified](done-means-verified.md): "done" needs an observation this turn through the user's path, plus the destructive-step checklist.
 - [Access planning](access-planning.md): plan the whole job, ask once for the union of scopes, no broader fallback, drop write scopes at the end.
 - [Act, then report](act-then-report.md): a known fix inside approval is done this turn; the four reasons to ask; reports open with the result.
+- [Where unfixed security findings live](security-findings.md): a safe summary in public, the detail in a local ignored path or a draft advisory.
 - [Handoff](handoff.md): how work moves from a card to a merged pull request without losing the thread.
 - [The review loop](review-loop.md): the implement, review, fix and adversarial cycle, with what the build showed.
 - [Claude Code plugins](plugins.md): set up the Codex and Ollama plugins, and where each one fits.

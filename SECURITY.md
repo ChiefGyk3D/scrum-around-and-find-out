@@ -19,6 +19,9 @@ Please report security issues **privately**, not in a public issue.
 Please include the affected mode or Action input, what you expected, what happened, and the smallest
 `board.yaml` that shows it.
 
+Maintainers: where unfixed findings are tracked, and what a public issue may say about one, is in
+[docs/security-findings.md](docs/security-findings.md).
+
 ## What to expect
 
 A small, one-maintainer project: no formal SLA, but anything that could expose a token, write to a board it
