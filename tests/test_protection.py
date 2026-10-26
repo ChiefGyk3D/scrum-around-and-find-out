@@ -448,6 +448,14 @@ def test_a_bad_ruleset_listing_is_cannot_tell(listing: Any) -> None:
     cannot_tell(routes)
 
 
+def test_a_non_numeric_ruleset_id_is_never_put_in_a_request() -> None:
+    routes = ruleset_routes(ruleset())
+    routes[f"{REPO}/rulesets"] = j([{"id": "7/x", "target": "branch", "enforcement": "active"}])
+    with server(routes) as (url, seen):
+        code, _, _ = run_cli("protection", "--repo", "o/r", "--api-url", url, env=ENV)
+    assert code == 2 and not any("7/x" in path for _, path in seen)
+
+
 def test_a_full_ruleset_page_is_cannot_tell() -> None:
     routes = ruleset_routes(ruleset())
     routes[f"{REPO}/rulesets"] = j([{"id": n, "target": "tag", "enforcement": "disabled"} for n in range(100)])
@@ -633,6 +641,8 @@ def test_a_ruleset_check_pin_is_read_from_integration_id() -> None:
         "ci/CI green",
         "ci /CI green",
         "ci / CI green / x",
+        " a / CI green",
+        "a  / CI green",
         "CI  green",
         "ci / ci green",
     ],

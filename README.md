@@ -63,7 +63,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `outcome add` | Appends a finished task to the outcomes log |
 | `local run` | Sends one prompt to the local model (Ollama) that routing picks, never one that would evict a protected model |
 | `profiles verify` | Resolves every evidence pointer of the agent profiles in `agents.yaml` and prints each claim beside what it cites; checks CODEOWNERS covers the files the profiles are made from. Read-only |
-| `protection --repo OWNER/NAME` | Reads the default branch's protection back with GET requests only and exits 0 only when code-owner review, the `CI green` check, an up-to-date branch, administrators, no bypass, no force push or deletion and CODEOWNERS coverage all hold. Exit 1 names each condition that does not; exit 2 when a response cannot be read. See [Adoption](docs/adoption.md) |
+| `protection --repo OWNER/NAME` | Reads the default branch's protection back with GET requests only and exits 0 only when code-owner review, the `CI green` check, an up-to-date branch, administrators, no bypass, no force push or deletion and CODEOWNERS coverage all hold. Exit 1 names each condition that does not; exit 2 when a response cannot be read. A `CI green` check not pinned to an app prints a NOTE; `--require-app-id` makes the pin a condition. See [Adoption](docs/adoption.md) |
 | `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard` |
 
 The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `protection`) read
