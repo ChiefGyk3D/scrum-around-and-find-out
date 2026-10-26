@@ -14,12 +14,12 @@ SAFO is three things, built for one maintainer running a team of AI agents acros
    model. Commands read local usage meters and recommend an agent. They dispatch nothing.
 3. **A playbook and a lessons wiki.** Why the team is run this way, who does what, and what broke along the way.
 
-SAFO is at v0.1.2. The playbook pages start at [docs/why.md](docs/why.md); the status table below says what is
+SAFO is at v0.1.2, and `main` is ahead of it (the unreleased rows are marked below). The playbook pages start at [docs/why.md](docs/why.md); the status table below says what is
 released and what is still only specified.
 
 ## Status
 
-Checked 2026-10-11.
+Checked 2026-10-26 against `main` at cf53799.
 
 | Piece | State |
 |---|---|
@@ -32,15 +32,15 @@ Checked 2026-10-11.
 | `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built, merged on `main` and released in v0.1.0 |
 | `outcome add` and `usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built, merged on `main` and released in v0.1.0 |
 | `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built, merged on `main` and released in v0.1.0 |
-| `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent and Bash tools that enforce `agents.yaml` and the rule that the lead never waits (see [`docs/orchestrator.md`](docs/orchestrator.md)): warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main` and released in v0.1.0; not yet exercised in a real Claude Code session |
-| No hidden work (the guard needs an open `issue:` in every brief; `audit` finds pull requests with no linked issue and cards missing Kind, Epic, Effort or Area; `reconcile` and `sync` list what needs a human; see [`docs/no-hidden-work.md`](docs/no-hidden-work.md)). The pull request check that fails a pull request with no `Refs #n` is a reusable workflow in git-your-ship-together and is not built here | Built on the branch for issue #54; not yet merged |
-| Threat model before build (`audit` and `reconcile` find issues labeled `ai-surface` with no usable `threat-model:` line; a `threat-model` routing shape; see [`docs/threat-model.md`](docs/threat-model.md)). The check that the Threat Dragon file is well formed and moves with the AI surface is a reusable workflow in git-your-ship-together and is not built here | Built on the branch for issue #70; not yet merged |
+| `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent and Bash tools that enforce `agents.yaml` and the rule that the lead never waits (see [`docs/orchestrator.md`](docs/orchestrator.md)): warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main`. The guard and probe were released in v0.1.0; the lead-waits rule is on `main` since #77 and unreleased. The Agent-tool guard has run on real dispatches in warn mode (53 since 2026-10-09; see [Measurements](docs/measurements.md)), but the lead-waits rule has no measured hit rate yet and the disposable real-session smoke test that [`docs/hooks.md`](docs/hooks.md) asks for before `block` is not recorded as done |
+| No hidden work (the guard needs an open `issue:` in every brief; `audit` finds pull requests with no linked issue and cards missing Kind, Epic, Effort or Area; `reconcile` and `sync` list what needs a human; see [`docs/no-hidden-work.md`](docs/no-hidden-work.md)). The pull request check that fails a pull request with no `Refs #n` is a reusable workflow in git-your-ship-together and is not built here | Built and merged on `main` (#60, issue #54); unreleased, after v0.1.2 |
+| Threat model before build (`audit` and `reconcile` find issues labeled `ai-surface` with no usable `threat-model:` line; a `threat-model` routing shape; see [`docs/threat-model.md`](docs/threat-model.md)). The check that the Threat Dragon file is well formed and moves with the AI surface is a reusable workflow in git-your-ship-together and is not built here | Built and merged on `main` (#71, issue #70); unreleased, after v0.1.2 |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
 | Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
 | Personas (`docs/personas.md`, a description of the Department of Internal Arguments roles and how to install them, with no copies kept here) and the examples (the outcomes log, systemd units) | Built and merged on `main` |
 | [Measurements](docs/measurements.md): what the first month measured, dated and aggregated | Written; read it as a soak, not a finding |
-| Issue #23 roadmap: agent profiles, promotion of lessons into rules, and metrics from the outcomes log | Profiles are built in stages: the loader, evidence resolution, `profiles verify` and the rendering into `examples/harness/` (see [Agent profiles](docs/profiles.md)); `profiles brief`, the route surface, promotion and metrics are not built |
+| Issue #23 roadmap: agent profiles, promotion of lessons into rules, and metrics from the outcomes log | Profiles are built in stages: the loader, evidence resolution, `profiles verify` and the rendering into `examples/harness/`, and `profiles brief` (see [Agent profiles](docs/profiles.md)); the route surface, promotion that changes selection, and metrics from the outcomes log are not built |
 
 The design is in [`docs/superpowers/specs/2026-10-07-safo-design.md`](docs/superpowers/specs/2026-10-07-safo-design.md)
 and the implementation plan is split into seven pull-request groups, listed on the
@@ -151,6 +151,14 @@ replaced are gone.
 - [Adoption](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Adoption)
 - [Privacy](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Privacy)
 - [Security-findings](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Security-findings)
+- [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
+- [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
+- [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)
+- [Review-loop](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Review-loop)
+- [Personas](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Personas)
+- [Plugins](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Plugins)
+- [Local-llm](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-llm)
+- [No-hidden-work](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/No-hidden-work)
 
 ## Licence
 
