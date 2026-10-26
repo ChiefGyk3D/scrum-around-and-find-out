@@ -26,6 +26,8 @@ from safo.bounded import MAX_BYTES, loads, read_bounded
 
 MODES = ("warn", "block")
 DEFAULT_MODE = "warn"
+# Appends queue behind a writer instead of failing in half a second; interactive state keeps the short default.
+APPEND_LOCK_TIMEOUT = float(os.environ.get("SAFO_APPEND_LOCK_TIMEOUT", "3.0"))
 LOG_NAME = "log.jsonl"
 PROBE_NAME = "probe.json"
 MODE_NAME = "mode"
@@ -128,13 +130,13 @@ def ensure_dir(folder: Path, check_dir: bool = True) -> None:
 
 
 @contextlib.contextmanager
-def file_lock(path: Path, check_dir: bool = True) -> Iterator[None]:
+def file_lock(path: Path, check_dir: bool = True, timeout: float = 0.5) -> Iterator[None]:
     ensure_dir(path.parent, check_dir)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError("expected regular lock file")
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + max(0.0, timeout)
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
