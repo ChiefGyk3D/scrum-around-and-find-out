@@ -92,7 +92,7 @@ rules:
   gate_admin_exempt_repos: []     # owner/name list where "administrators may bypass" is accepted
 ```
 
-**Ref patterns** are matched the way GitHub does, not as Python's `fnmatch`: GitHub uses Ruby's `File.fnmatch` with
+**Ref patterns** are matched the way GitHub does, not as Python's `fnmatch`: GitHub uses Ruby's `fnmatch` with
 `FNM_PATHNAME`, so `*` never matches `/` (`release/*` does not cover `release/1/2`), `**/` spans directories
 (`release/**/*` does), `[set]` works and `[^set]` does not
 ([branch protection rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule),
