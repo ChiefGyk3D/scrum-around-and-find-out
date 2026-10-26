@@ -214,6 +214,12 @@ shapes:
     fallback: []
     reviewer: [codex]
     note: Opus only with the maintainer's OK and the reason stated.
+  threat-model:
+    description: "A threat model for an AI-facing change: assets, actors, trust boundaries, ranked risks, a mitigation and a verification for each, and the Threat Dragon file. The draft is evidence for the maintainer to read, not a verdict."
+    prefer: [claude-sonnet]
+    fallback: []
+    reviewer: [codex]
+    note: Opus only with the maintainer's OK and the reason stated. Codex reviews, so it never drafts. The file's shape is checked by git-your-ship-together's threat-model workflow; whether it is true of the system is a person's call.
   security-sensitive-code:
     description: "Code whose mistakes expose a secret, widen access or replay a mutation, including security code transcribed from a plan."
     prefer: [claude-sonnet]
@@ -300,6 +306,12 @@ hooks:
   max_state_age_seconds: 300
   local_step_markers: [safo local run, llm-local]
   na_marker: "local-llm: n/a -"
+  # The lead never waits (docs/orchestrator.md): a lead-session Bash call that is `gh run watch`, `gh pr checks --watch`,
+  # a sleep loop or a sleep of sleep_threshold_seconds or more, and is not run in the background, is flagged (follow the
+  # guard mode) or denied. A repository may be exempted only with a stated reason under exempt_repos.
+  lead_wait:
+    mode: follow
+    sleep_threshold_seconds: 10
 
 rules_of_thumb:
   - "Routing order 1: text-in/text-out work (summaries, triage, classification, first drafts, log and CI digests) goes to the local LLM first, and a Claude model checks anything that will be applied."

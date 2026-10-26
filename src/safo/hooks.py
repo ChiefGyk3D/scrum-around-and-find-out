@@ -47,6 +47,9 @@ from safo.guardlog import (
 from safo.ollama import Probe, probe
 
 AGENT_TOOLS = ("Agent", "Task")  # the tool is Agent today and was called Task before
+BASH_TOOL = "Bash"  # the lead-never-waits rule watches this tool
+GUARD_MATCHER = "Agent|Task|Bash"
+LEGACY_GUARD_MATCHERS = ("Agent|Task",)  # what earlier installs wrote; a rerun of install moves them to GUARD_MATCHER
 FORK_TYPES = ("fork",)  # a fork inherits its parent's model, so it has none to name
 LOG_LIMIT_BYTES = 4 * 1024 * 1024  # past this the log moves to log.jsonl.1 and starts again
 PROBE_TIMEOUT_SECONDS = 15
@@ -62,7 +65,8 @@ UNKNOWN_MODEL = "unknown-model"
 NO_ISSUE = "no-issue"  # the brief names no tracking item (or an unusable one)
 ISSUE_UNUSABLE = "issue-unusable"  # the item does not exist or is closed
 ISSUE_UNVERIFIED = "issue-unverified"  # the item could not be looked up
-RULES = (NO_MODEL, UNKNOWN_MODEL, APPROVAL, NO_LOCAL_STEP, NO_ISSUE, ISSUE_UNUSABLE, ISSUE_UNVERIFIED)
+LEAD_WAITS = "lead-waits"  # a lead session's foreground Bash call waits (gh run watch, a polling loop, a long sleep)
+RULES = (NO_MODEL, UNKNOWN_MODEL, APPROVAL, NO_LOCAL_STEP, NO_ISSUE, ISSUE_UNUSABLE, ISSUE_UNVERIFIED, LEAD_WAITS)
 
 
 # -- the probe -------------------------------------------------------------------------------------
@@ -391,7 +395,7 @@ def decide(verdict: Verdict, mode: str) -> str:
     return "deny" if mode == "block" else "warn"
 
 
-def guard_output(decision: str, verdict: Verdict) -> str:
+def guard_output(decision: str, verdict: Verdict, hint: str = "Fix the brief next time.") -> str:
     """The JSON the hook prints, or nothing for a clean dispatch."""
     if decision == "allow":
         return ""
@@ -411,7 +415,7 @@ def guard_output(decision: str, verdict: Verdict) -> str:
             "systemMessage": f"{reason} (warn mode: allowed)",
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "additionalContext": f"{reason}. Fix the brief next time.",
+                "additionalContext": f"{reason}. {hint}",
             },
         }
     )
@@ -508,7 +512,14 @@ def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
     return None
 
 
-def _ensure(hooks: dict[str, Any], event: str, matcher: str, entry: dict[str, Any], subcommand: str) -> bool:
+def _ensure(
+    hooks: dict[str, Any],
+    event: str,
+    matcher: str,
+    entry: dict[str, Any],
+    subcommand: str,
+    legacy_matchers: tuple[str, ...] = (),
+) -> bool:
     groups = hooks.setdefault(event, [])
     if not isinstance(groups, list) or not all(isinstance(g, dict) for g in groups):
         raise ConfigError("settings: invalid hook groups; fix by hand")
@@ -525,7 +536,7 @@ def _ensure(hooks: dict[str, Any], event: str, matcher: str, entry: dict[str, An
             sig = command_signature(command, subcommand) if isinstance(command, str) else None
             exact = command == entry["command"]
             if sig is not None or exact:
-                if group.get("matcher", "") != matcher or existing.get("type") != "command":
+                if group.get("matcher", "") not in (matcher, *legacy_matchers) or existing.get("type") != "command":
                     raise ConfigError("settings: ambiguous SAFO hook event/matcher/type; fix by hand")
                 if sig != expected:
                     raise ConfigError("settings: changed invocation; migrate by hand")
@@ -559,6 +570,14 @@ def merge_settings(settings: Any, probe_command: str, guard_command: str) -> tup
         "probe",
     )
     changed = (
-        _ensure(hooks, "PreToolUse", "Agent|Task", hook_entry(guard_command, GUARD_TIMEOUT_SECONDS), "guard") or changed
+        _ensure(
+            hooks,
+            "PreToolUse",
+            GUARD_MATCHER,
+            hook_entry(guard_command, GUARD_TIMEOUT_SECONDS),
+            "guard",
+            LEGACY_GUARD_MATCHERS,
+        )
+        or changed
     )
     return settings, changed

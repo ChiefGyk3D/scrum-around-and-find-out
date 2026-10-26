@@ -81,6 +81,7 @@ filter is set in a second call. An existing view with another layout is refused;
 | `new_item_defaults` | none | `{field: option}` pairs filled only when blank on any managed card, so a later run repairs partial initialization; nonblank manual values are preserved. A default never writes the status, Area or Done-date field: those follow their own rules |
 | `add_closed_days` | `0` | `reconcile` also adds items closed or merged within this many days, as Done |
 | `tracking` | see below | The [no-hidden-work](no-hidden-work.md) checks: `kind_field` (`Kind`), `epic_field` (`Epic`), `effort_field` (`Effort`), and `exempt_repos` (`owner/name` list whose pull requests need no linked issue). A field name that is empty, or not in `fields`, turns that check off and the audit says "not configured" |
+| `threat_model` | off | The [threat model before build](threat-model.md) check: `label` (empty turns it off and the audit says "not configured"; `ai-surface` is the usual name) and `exempt_repos` (`owner/name` list whose issues need no threat-model line) |
 
 Every status name must be an option of the status field; `safo` checks that against `fields` when it loads the file and
 against the live project before it changes anything.

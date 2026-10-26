@@ -53,7 +53,16 @@ def config_dir(env: Mapping[str, str]) -> Path | None:
 
 WARNING = "SAFO routing guard degraded: enforcement may be incomplete; inspect safo hooks status."
 MODEL_IDS = ("sonnet", "haiku", "opus", "unknown")
-RULE_IDS = ("no-model", "unknown-model", "approval", "no-local-step", "no-issue", "issue-unusable", "issue-unverified")
+RULE_IDS = (
+    "no-model",
+    "unknown-model",
+    "approval",
+    "no-local-step",
+    "no-issue",
+    "issue-unusable",
+    "issue-unverified",
+    "lead-waits",
+)
 DIAGNOSTICS = (
     "mode",
     "config",
