@@ -58,7 +58,7 @@ def parse_append_lock_timeout(raw: str | None) -> tuple[float, str | None]:
 # Appends queue behind a writer instead of failing in half a second; interactive state keeps the short default.
 # A bad value warns on stderr (stdout stays exactly the hook's JSON) and falls back; it never stops the import.
 APPEND_LOCK_TIMEOUT, _lock_timeout_warning = parse_append_lock_timeout(os.environ.get("SAFO_APPEND_LOCK_TIMEOUT"))
-if _lock_timeout_warning:
+if _lock_timeout_warning and sys.stderr is not None:  # print(file=None) would fall back to stdout, the hook's JSON
     with contextlib.suppress(OSError, ValueError):
         output.write(sys.stderr, f"safo: {_lock_timeout_warning}")
 LOG_NAME = "log.jsonl"

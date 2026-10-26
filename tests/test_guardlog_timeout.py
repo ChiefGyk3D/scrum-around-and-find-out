@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 
 import pytest
 
@@ -66,4 +67,42 @@ def test_reload_picks_up_the_environment(monkeypatch: pytest.MonkeyPatch) -> Non
         assert guardlog.APPEND_LOCK_TIMEOUT == DEFAULT
     finally:
         monkeypatch.delenv("SAFO_APPEND_LOCK_TIMEOUT")
+        importlib.reload(guardlog)
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("1_0", 5.0), ("٣", 3.0), ("1e-5", 1e-5)])
+def test_python_float_syntax_is_accepted_as_documented(raw: str, expected: float) -> None:
+    assert guardlog.parse_append_lock_timeout(raw)[0] == expected
+
+
+def test_a_closed_stderr_leaves_stdout_empty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SAFO_APPEND_LOCK_TIMEOUT", "abc")
+    monkeypatch.setattr(sys, "stderr", None)
+    try:
+        importlib.reload(guardlog)
+        assert guardlog.APPEND_LOCK_TIMEOUT == DEFAULT
+        assert capsys.readouterr().out == ""
+    finally:
+        monkeypatch.undo()
+        importlib.reload(guardlog)
+
+
+class _BrokenStream:
+    def write(self, _text: str) -> int:
+        raise OSError("broken pipe")
+
+    def flush(self) -> None:
+        raise OSError("broken pipe")
+
+
+def test_a_failing_stderr_write_does_not_stop_the_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SAFO_APPEND_LOCK_TIMEOUT", "abc")
+    monkeypatch.setattr(sys, "stderr", _BrokenStream())
+    try:
+        importlib.reload(guardlog)
+        assert guardlog.APPEND_LOCK_TIMEOUT == DEFAULT
+    finally:
+        monkeypatch.undo()
         importlib.reload(guardlog)
