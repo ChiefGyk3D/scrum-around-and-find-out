@@ -412,15 +412,11 @@ E = "Entry: acme/app#55"
 ENTRY_BODIES: dict[str, tuple[str, bool]] = {
     "structured line": (f"Approved.\n\n{E}\n", True),
     "line only, no newline": (E, True),
-    "crlf": (f"Approved.\r\n{E}\r\n", True),
+    "crlf": (f"Approved.\r\n\r\n{E}\r\n\r\nThanks.", True),
+    "prose around, blank lines": (f"Intro text.\n\n{E}\n\nOutro text.\n", True),
+    "entry glued to the paragraph before": (f"Intro.\n{E}", False),
+    "entry glued to the paragraph after": (f"{E}\nOutro.", False),
     "ascii fold of the repo": ("Entry: ACME/App#55", True),
-    "link target": ("[Entry: acme/app#55](acme/app#55)", False),
-    "image url": ("![x](https://example.test/acme/app#55)\nsee acme/app#55", False),
-    "code fence": (f"```\n{E}\n```", False),
-    "tilde fence": (f"~~~\n{E}\n~~~", False),
-    "unterminated fence": (f"```\n{E}\n", False),
-    "quoted reply": (f"> {E}", False),
-    "indented": (f"    {E}", False),
     "prose mention": ("this approves acme/app#55", False),
     "trailing garbage letter": ("Entry: acme/app#55x", False),
     "longer number": ("Entry: acme/app#555", False),
@@ -428,11 +424,9 @@ ENTRY_BODIES: dict[str, tuple[str, bool]] = {
     "trailing text": ("Entry: acme/app#55 please", False),
     "trailing space": (f"{E} ", False),
     "other repo": ("Entry: other-acme/app#55", False),
-    "wide hash": ("Entry: acme/app\uff03" + "55", False),
     "no entry line": ("Approve the thing.", False),
     "two different entries": (f"{E}\nEntry: acme/app#56", False),
     "the same entry twice": (f"{E}\n{E}", False),
-    "valid line plus a quoted other entry": (f"{E}\n> Entry: acme/app#56\n    Entry: acme/app#57", True),
 }
 
 

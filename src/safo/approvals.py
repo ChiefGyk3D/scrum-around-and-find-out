@@ -481,6 +481,16 @@ def _verdict(chk: Check, read: Read | Unread, cross_check: CrossCheck) -> Verdic
             return refuse(f"was closed after the baseline froze on {chk.frozen}")
     if chk.kind == "change":
         found = _entry_state(read.body, str(chk.entry))
+        if found.startswith("structure:"):
+            return unknown(
+                f"has Markdown structure in its body ({found[10:]}); an approval body must be plain paragraphs, "
+                "so its entry cannot be told"
+            )
+        if found == "unusual":
+            return unknown(
+                "has unusual characters in its body; an approval body must be printable ASCII text, "
+                "so its entry cannot be told"
+            )
         if found == "html":
             return unknown("has raw HTML in its body; an approval body must be plain text, so its entry cannot be told")
         if found != "named":
@@ -495,31 +505,47 @@ def _verdict(chk: Check, read: Read | Unread, cross_check: CrossCheck) -> Verdic
 
 
 _ENTRY_LINE = re.compile(r"Entry: ([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}#[1-9][0-9]{0,9})")
-_OPEN_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
-_CLOSE_FENCE = re.compile(r" {0,3}(`+|~+)[ \t]*")
-_CONTAINER = re.compile(r" {0,3}(?:>|[-*+](?: |$)|[0-9]{1,9}[.)](?: |$))")
 _HTML = re.compile(r"<[A-Za-z/!?]")
+# The approval body grammar is deliberately narrow: plain paragraphs only. Rather than model CommonMark containers,
+# fences and multi-line constructs (where a parser differential would hide or show a line), any Markdown structure
+# anywhere in the body makes the answer UNKNOWN. Checked per line, in this order; the first hit names the class.
+_STRUCTURE = (
+    ("fence", re.compile(r".*(```|~~~)")),
+    ("thematic break", re.compile(r" {0,3}([-*_])([ \t]*\1){2,}[ \t]*")),
+    ("heading", re.compile(r" {0,3}(#{1,6}([ \t]|$)|(=+|-+)[ \t]*$)")),
+    ("list or quote", re.compile(r"[ \t]*>|\s{0,3}([-*+]|[0-9]{1,9}[.)])([ \t]|$)")),
+    ("table", re.compile(r".*\|")),
+    ("brackets", re.compile(r".*[\[\]]")),  # links, images, reference and footnote definitions all need one
+    ("indented code", re.compile(r"( {0,3}\t| {4})[ \t]*\S")),
+    ("line continuation", re.compile(r".*\\$")),
+)
 
 
-def visible_lines(body: str) -> list[str]:
-    """The lines of `body` that are not inside fenced code, by CommonMark's fence grammar. An opening fence is three or
-    more backticks or tildes after at most three spaces (a backtick fence's info string may not hold a backtick). A
-    closing fence is the same character, at least as long, after at most three spaces, followed only by spaces or tabs.
-    An unterminated fence runs to the end and hides everything after it."""
-    lines: list[str] = []
-    fence = ""
-    for line in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if fence:
-            close = _CLOSE_FENCE.fullmatch(line)
-            if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= len(fence):
-                fence = ""
-            continue
-        opener = _OPEN_FENCE.fullmatch(line)
-        if opener and not (opener.group(1)[0] == "`" and "`" in opener.group(2)):
-            fence = opener.group(1)
-            continue
-        lines.append(line)
-    return lines
+_BLANK = re.compile(r"[ \t]*")  # CommonMark's blank line; never str.strip(), which also strips NBSP and the like
+
+
+def _lines(body: str) -> list[str] | None:
+    """The lines of `body`, or None when it holds anything but printable ASCII, tab, and \\n or \\r\\n line ends
+    (so no NBSP, bidi mark, zero-width character, NEL, LS, PS, VT, FF or lone CR can reach the matchers)."""
+    text = body.replace("\r\n", "\n")
+    if not all(c in "\t\n" or " " <= c <= "~" for c in text):
+        return None
+    return text.split("\n")
+
+
+def body_problem(body: str) -> str | None:
+    """`unusual` (a character outside printable ASCII), `html`, or the class of the first Markdown structure found in
+    `body` (never its content), or None when it is plain paragraphs. Raw HTML counts anywhere, even inside code."""
+    lines = _lines(body)
+    if lines is None:
+        return "unusual"
+    if any(_HTML.search(line) for line in lines):
+        return "html"
+    for line in lines:
+        for name, pattern in _STRUCTURE:
+            if pattern.match(line):
+                return name
+    return None
 
 
 def _folded(parts: tuple[str, str, int]) -> tuple[str, str, int]:
@@ -527,23 +553,24 @@ def _folded(parts: tuple[str, str, int]) -> tuple[str, str, int]:
 
 
 def _entry_state(body: str, entry: str) -> str:
-    """`html` when the body holds any raw HTML (any `<` that begins a tag, comment, declaration or autolink, even inside
-    an inline code span; only fenced code is literal), else `named` when exactly one `Entry:` line, not a quote or list
-    continuation, is exactly `Entry: owner/repo#N` for `entry`, else `missing`. The repository is compared after the
-    ASCII-only fold, the number as an integer."""
-    lines = visible_lines(body)
-    if any(_HTML.search(line) for line in lines):
-        return "html"
-    found: list[str] = []
-    lazy = False  # inside a quote or list item until a blank line: a following line is its lazy continuation
-    for line in lines:
-        if not line.strip():
-            lazy = False
-        elif _CONTAINER.match(line):
-            lazy = True
-        elif line.startswith("Entry:") and not lazy:
-            found.append(line)
-    match = _ENTRY_LINE.fullmatch(found[0]) if len(found) == 1 else None
+    """`html` or `structure:<class>` when the body is not plain paragraphs (see `body_problem`); else `named` when
+    exactly one line starts `Entry:` at column 0, it stands alone as a paragraph (a blank line or the start of the body
+    before it, a blank line or the end after it) and is exactly `Entry: owner/repo#N` for `entry`; else `missing`.
+    The repository is compared after the ASCII-only fold, the number as an integer."""
+    problem = body_problem(body)
+    if problem in ("html", "unusual"):
+        return problem
+    if problem:
+        return f"structure:{problem}"
+    lines = _lines(body) or []
+    at = [i for i, line in enumerate(lines) if line.startswith("Entry:")]
+    if len(at) != 1:
+        return "missing"
+    i = at[0]
+    alone = (i == 0 or bool(_BLANK.fullmatch(lines[i - 1]))) and (
+        i == len(lines) - 1 or bool(_BLANK.fullmatch(lines[i + 1]))
+    )
+    match = _ENTRY_LINE.fullmatch(lines[i]) if alone else None
     got = parse_ref(match.group(1)) if match else None
     want = parse_ref(entry)
     if got is None or want is None:

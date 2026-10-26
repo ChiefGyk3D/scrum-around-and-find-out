@@ -344,16 +344,18 @@ only when every line holds; it is **open** (for the gate rule, "not passed") whe
 8. **The approval is bound to its entry, on one structured line (M13).** For a change issue the **body** must hold
    exactly one line `Entry: owner/repo#N` (the entry's `add` or `remove` reference, such as `acme/app#55`), nothing else
    on the line, in ASCII. The repository is compared after the ASCII-only fold; the number as an integer. The title is
-   never used. The body grammar is intentionally narrow:
-   - Lines inside fenced code are not read, by CommonMark's fence grammar: an opening fence is three or more backticks
-     or tildes after at most three spaces (a backtick fence's info string holds no backtick); a closing fence is the
-     same character, at least as long, after at most three spaces, followed only by spaces or tabs; an unterminated
-     fence hides the rest of the document.
-   - A body with **any raw HTML outside fenced code** (any `<` that begins a tag, comment, declaration, processing
-     instruction or autolink, even inside an inline code span) is refused entirely: `UNKNOWN SCOPE ... has raw HTML in
-     its body; an approval body must be plain text, so its entry cannot be told`. Collapsed or hidden elements
-     (`<details>`, `<summary>`, `<div hidden>`) cannot hide an entry that way, and the rule models none of them.
-   - A line that follows a quote or list line without a blank line is that block's continuation, not an entry line.
+   never used. The body grammar is intentionally narrow, because the human approver sees plain text and the reader must see
+   exactly that; it does not model Markdown, it fails closed. The entry line starts at column 0 and stands alone as a
+   paragraph (the start of the body or a blank line before it, the end of the body or a blank line after it; a blank
+   line is only spaces and tabs). Any of the following anywhere in the body makes the answer UNKNOWN, with a fixed
+   line that names the class and never the content:
+   - characters other than printable ASCII, tab, and `\n` or `\r\n` line ends (no no-break space, bidi mark,
+     zero-width character, NEL, line or paragraph separator, vertical tab, form feed, other control character or lone
+     carriage return);
+   - raw HTML: any `<` that begins a tag, comment, declaration, processing instruction or autolink, even in code;
+   - Markdown structure: a fence (three backticks or tildes anywhere in a line), a thematic break, a heading, a list
+     or quote marker, a table (`|`), indented code (four spaces or a tab), a trailing backslash, or any square bracket
+     (links, images and reference definitions all need one).
    - Two `Entry:` lines (even equal) or any other text on the line mean the approval is not for this change.
    Without a matching line, one approval of "something" could be cited for any entry. No issue text becomes scope or
    reaches output (the line names the entry only). Failing it:
@@ -920,7 +922,7 @@ call it is.
 first wording searched the issue title or body for the reference as a whole token. The security reviews of unit U3
 found that this reads raw markdown (a hidden comment, a link target or an image URL satisfied it) and that a title
 rename after the close is not an edit. The normative rule is now line 8 of the approval test: one `Entry:` line in the
-body, a narrow body grammar, no raw HTML, the title never used. The decision itself (the approval must name its entry,
+body, a fail-closed plain-ASCII-prose body grammar (no raw HTML, no Markdown structure, no brackets), the title never used. The decision itself (the approval must name its entry,
 by exact comparison, with no free-text scope parsing) is unchanged.
 
 ## 10. Non-goals, compatibility and migration

@@ -14,20 +14,30 @@ and nothing else on that line:
 
 - `owner/repo#N` is the `add` or `remove` reference of the `changes` entry, in ASCII. The owner and repository are
   compared after an ASCII-only case fold; the number is compared as an integer.
-- The title is never used. A prose mention, a link target or an image URL is not an entry.
-- The grammar is intentionally narrow, so that what the approver saw is what is read:
-  - Lines inside fenced code are not read. A fence follows CommonMark: it opens with three or more backticks or
-    tildes after at most three spaces (a backtick fence's info string may not hold a backtick), and it closes only on
-    a line of the same character, at least as long, after at most three spaces, followed by nothing but spaces or
-    tabs. A line such as ```` ```oops ```` does not close it. An unterminated fence hides everything after it.
-  - **Any raw HTML outside fenced code refuses the whole body** (`UNKNOWN`, "has raw HTML in its body"). That is any
-    `<` that begins a tag, comment, declaration, processing instruction or autolink, even inside an inline code
-    span. A bare `<` in prose (`a < b`, `<3`) is fine. This is deliberate: `<details>` and similar elements hide
-    Markdown the approver does not see, and the reader does not try to model them.
-  - A line right after a quote (`>`) or list line, with no blank line between, is a continuation of that block and
-    is not an entry line.
-  - A second `Entry:` line (even an equal one), or any trailing text or space, means the approval is not for this
-    change.
+- The line starts at column 0 and stands alone as a paragraph: the start of the body or a blank line before it, and
+  the end of the body or a blank line after it. A blank line is only spaces and tabs.
+- The title is never used. A prose mention is not an entry. A second `Entry:` line, even an equal one, means the
+  approval is not for this change.
+
+## The body is plain ASCII prose
+
+The body grammar is deliberately narrow, because the human approver sees plain text and the reader must see exactly
+that. It does not try to model Markdown (containers, fences, link definitions and their parser differences);
+instead any construct it cannot be sure of makes the answer `UNKNOWN`, with a fixed line that names the class and
+never the content:
+
+- **Unusual characters.** Anything but printable ASCII, tab, and `\n` or `\r\n` line ends: no no-break space, bidi
+  mark, zero-width character, NEL, line or paragraph separator, vertical tab, form feed, other control character or
+  lone carriage return.
+- **Raw HTML.** Any `<` that begins a tag, comment, declaration, processing instruction or autolink, anywhere,
+  even in code. A bare `<` in prose (`a < b`, `<3`) is fine.
+- **Markdown structure.** Any of these on any line, before, around or after the Entry line: a fence (three
+  backticks or three tildes anywhere in the line); a thematic break; a heading (ATX or a setext underline); a list
+  marker or a quote marker; a table (any `|`); indented code (four spaces, or a tab, at the start of a non-blank line);
+  a line ending in a backslash; and **any square bracket** (`[` or `]`), since links, images and reference or footnote
+  definitions all need one.
+
+Write the approval as ordinary sentences, a blank line, the Entry line, a blank line, and optionally more sentences.
 
 ## Edits after the approval
 
