@@ -18,12 +18,24 @@ the rule is broken.
   2. **The project links to it.** The project memory or README points at the vendor page by name, so a reader of either
      finds both.
   3. **The memory index line is updated the same day**, so the vendor page is listed where a new session reads first.
-  4. **Look before you start.** When a task involves a vendor, the brief (the `prior-art:` line in the
-     [monitor-agent template](orchestrator.md)) or the lead greps memory and `~/src/*/docs` (your agent's memory or notes store, and your own projects' docs) for the vendor's name before
+  4. **Look before you start** ([Look before instructing](look-before-instructing.md)). When a task involves a vendor,
+     the brief (the `prior-art:` line in the [monitor-agent template](orchestrator.md)) or the lead greps memory and `~/src/*/docs` (your agent's memory or notes store, and your own projects' docs) for the vendor's name before
      giving any step for it. A silent grep means read the next source (the vendor's own docs), not "I don't know".
   5. **A vendor page lists each fact with how it was checked** (a docs page and its date, an API response, an error text),
      and marks what was not checked.
 - **Enforcement.** Doctrine only. The nearest enforcement is the brief line and the grep step above.
+
+### The lead's habits that cost the maintainer a round trip (2026-10-25)
+
+- **What happened.** On one day the lead gave vendor setup steps from memory and a search summary, called a custom domain
+  done when it returned error 1016, took two consent trips for access it could have planned once, and asked for decisions
+  that were already inside the maintainer's approval.
+- **Evidence.** The tracking issues for each rule record the day's events; the pages below carry the detail.
+- **Rule now.** One page per rule: [Look before instructing](look-before-instructing.md) (prior art, then the vendor's
+  docs, then the live system), [Done means verified](done-means-verified.md) (an observation this turn, through the
+  maintainer's path), [Access planning](access-planning.md) (the whole job's scopes, asked for once) and
+  [Act, then report](act-then-report.md) (a known fix inside the approval is done, then reported).
+- **Enforcement.** Doctrine only. No hook reads the lead's replies; each page says what review checks instead.
 
 ## 2026-10-05..07 (the first week of running a board with agents)
 
@@ -262,3 +274,21 @@ the rule is broken.
 - **Evidence.** The default model offered only the standard access tier; the plugin's `task` takes no `-c` setting.
 - **Rule now.** Run security and adversarial reviews with `codex exec` directly, on a model that offers the tier, with
   `< /dev/null` so a backgrounded run does not wait on stdin and exit with an empty review. See [Plugins](plugins.md).
+
+### ChatGPT authors public-facing language and the local model's steering text; Claude integrates and measures (2026-10-20)
+
+- **What happened.** A Discord bot's welcome-greeter copy was rewritten with ChatGPT's general models (Penguin Overlord pull
+  request 319, merged 2026-10-18), and the maintainer found it sounded markedly more natural than Claude's drafts of the same
+  kind of copy. On 2026-10-20 he turned that into a routing rule.
+- **Evidence.** The maintainer's own side-by-side judgment on one greeter rewrite, from his own use. It is not a benchmark: no
+  blind comparison, no sample beyond that rewrite, and no measurement of the local model's output has been taken yet.
+- **Rule now.** Non-technical, public-facing language (greetings, jokes and roast copy, social posts, captions, scripts,
+  anything that must sound human and in the maintainer's voice) is authored by ChatGPT's general (non-cybersecurity) models.
+  Technical documentation, runbooks, code and reviews stay with Claude. The local LLM (Ollama) still runs the text
+  generation at runtime; ChatGPT authors the language and patterns that steer it (system-prompt wording, angle pools,
+  formats, few-shot exemplars, banned phrases, fallback banks). Claude integrates those into the project as data, builds the
+  structure that rotates them, measures the local model's output (repetition, adherence) and feeds the findings back to
+  ChatGPT. ChatGPT's output is a draft: the maintainer reviews anything public, and ChatGPT has no repository access in this
+  workflow, so it works through briefs and pasted text. The maintainer's voice skill is a Claude Code skill that ChatGPT
+  cannot load, so its text and rules must be supplied to ChatGPT as a project file or instructions: that setup step is NOT
+  YET DONE. See [Routing](routing.md).

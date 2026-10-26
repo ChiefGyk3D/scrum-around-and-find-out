@@ -4,8 +4,9 @@ SAFO does not define personas. They live in a separate public repository, the
 [Department of Internal Arguments](https://github.com/ChiefGyk3D/department-of-internal-arguments/tree/v0.3.1) (DoIA),
 and this page describes DoIA release v0.3.1, linked at the tag so the text cannot drift under a moving branch. The tag is
 pinned in one place, `scripts/doia-tag.txt`, and the wiki build and a test both fail if this page names any other
-(the check reads links into DoIA, `--branch` and `checkout` arguments, and a version written right after "DoIA"). Read DoIA
-for the exact wording of a role; this page says what the roles are, how SAFO relates to them, and how to install them.
+(the check reads links into DoIA, the tag given to `--branch`, `-b`, `checkout` and `switch`, and a version written right
+after "DoIA"). Read DoIA for the exact wording of a role; this page says what the roles are, how SAFO relates to them, and
+how to install them.
 
 [Roles](roles.md) says who does what at the level of agents and models, and [Routing](routing.md) says which task shape goes
 to which agent. DoIA says what a Claude Code, Copilot, ChatGPT or local-model agent is told to do once the lead has chosen it.
@@ -94,8 +95,8 @@ says which ones were loaded. DoIA's v0.3.1 README lists these six and publishes 
   control of every live action.
 - `linux-platform`: planning and diagnosing Linux and platform changes, with a rollback named for each.
 - `local-llm-routing`: sending work to a local Ollama server and configuring one; what small local models do well and badly.
-  DoIA release v0.3.1 added measured notes on context-change evictions, fitting a second model next to a 12B one, and checking
-  multi-GPU placement.
+  An earlier release added measured notes on context-change evictions, fitting a second model next to a 12B one, and
+  checking multi-GPU placement; the DoIA CHANGELOG says which.
 
 ## Which routing shapes use each role
 

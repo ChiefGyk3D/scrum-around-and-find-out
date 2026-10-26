@@ -1,0 +1,123 @@
+exit=1
+--- stdout ---
+audit Renegade-Penguin/1: 15 fields, 3 views, 26 items
+DRIFT   ADD Renegade-Penguin/Hammunition#2 -> Backlog, Engine
+DRIFT   ADD Renegade-Penguin/Hammunition#7 -> In progress, Engine
+DRIFT   ADD Renegade-Penguin/hammunition-hill#12 -> Backlog, Hill
+DRIFT   ADD Renegade-Penguin/hammunition-hill#17 -> In progress, Hill
+DRIFT   ADD Renegade-Penguin/hammunition-tray#22 -> Backlog, Tray
+DRIFT   ADD Renegade-Penguin/hammunition-tray#27 -> In progress, Tray
+DRIFT   ADD Renegade-Penguin/hammunition-bunker#32 -> Backlog, Bunker
+DRIFT   ADD Renegade-Penguin/hammunition-bunker#37 -> In progress, Bunker
+DRIFT   ADD Renegade-Penguin/hammunition-gps-tether#42 -> Backlog, GPS tether
+DRIFT   ADD Renegade-Penguin/hammunition-gps-tether#47 -> In progress, GPS tether
+DRIFT   DONE Renegade-Penguin/Hammunition#3 Backlog -> Done on 2026-10-20
+DRIFT   DONE Renegade-Penguin/hammunition-hill#13 Backlog -> Done on 2026-10-20
+DRIFT   DONE Renegade-Penguin/hammunition-tray#23 Backlog -> Done on 2026-10-20
+DRIFT   DONE Renegade-Penguin/hammunition-bunker#33 Backlog -> Done on 2026-10-20
+DRIFT   DONE Renegade-Penguin/hammunition-gps-tether#43 Backlog -> Done on 2026-10-20
+DRIFT   DATE Renegade-Penguin/Hammunition#4 Done on 2026-10-22
+DRIFT   DATE Renegade-Penguin/hammunition-hill#14 Done on 2026-10-22
+DRIFT   DATE Renegade-Penguin/hammunition-tray#24 Done on 2026-10-22
+DRIFT   DATE Renegade-Penguin/hammunition-bunker#34 Done on 2026-10-22
+DRIFT   DATE Renegade-Penguin/hammunition-gps-tether#44 Done on 2026-10-22
+DRIFT   AREA Renegade-Penguin/Hammunition#1 -> Engine
+DRIFT   AREA Renegade-Penguin/Hammunition#5 -> Engine
+DRIFT   AREA Renegade-Penguin/Hammunition#6 -> Engine
+DRIFT   AREA Renegade-Penguin/hammunition-hill#11 -> Hill
+DRIFT   AREA Renegade-Penguin/hammunition-hill#15 -> Hill
+DRIFT   AREA Renegade-Penguin/hammunition-hill#16 -> Hill
+DRIFT   AREA Renegade-Penguin/hammunition-tray#21 -> Tray
+DRIFT   AREA Renegade-Penguin/hammunition-tray#25 -> Tray
+DRIFT   AREA Renegade-Penguin/hammunition-tray#26 -> Tray
+DRIFT   AREA Renegade-Penguin/hammunition-bunker#31 -> Bunker
+DRIFT   AREA Renegade-Penguin/hammunition-bunker#35 -> Bunker
+DRIFT   AREA Renegade-Penguin/hammunition-bunker#36 -> Bunker
+DRIFT   AREA Renegade-Penguin/hammunition-gps-tether#41 -> GPS tether
+DRIFT   AREA Renegade-Penguin/hammunition-gps-tether#45 -> GPS tether
+DRIFT   AREA Renegade-Penguin/hammunition-gps-tether#46 -> GPS tether
+DRIFT   MISSING Kind on Renegade-Penguin/Hammunition#1
+DRIFT   MISSING Epic on Renegade-Penguin/Hammunition#1
+DRIFT   MISSING Effort on Renegade-Penguin/Hammunition#1
+DRIFT   MISSING Kind on Renegade-Penguin/Hammunition#3
+DRIFT   MISSING Epic on Renegade-Penguin/Hammunition#3
+DRIFT   MISSING Effort on Renegade-Penguin/Hammunition#3
+DRIFT   MISSING Kind on Renegade-Penguin/Hammunition#4
+DRIFT   MISSING Epic on Renegade-Penguin/Hammunition#4
+DRIFT   MISSING Effort on Renegade-Penguin/Hammunition#4
+DRIFT   MISSING Kind on Renegade-Penguin/Hammunition#5
+DRIFT   MISSING Epic on Renegade-Penguin/Hammunition#5
+DRIFT   MISSING Effort on Renegade-Penguin/Hammunition#5
+DRIFT   MISSING Kind on Renegade-Penguin/Hammunition#6
+DRIFT   MISSING Epic on Renegade-Penguin/Hammunition#6
+DRIFT   MISSING Effort on Renegade-Penguin/Hammunition#6
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-hill#11
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-hill#11
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-hill#11
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-hill#13
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-hill#13
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-hill#13
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-hill#14
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-hill#14
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-hill#14
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-hill#15
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-hill#15
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-hill#15
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-hill#16
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-hill#16
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-hill#16
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-tray#21
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-tray#21
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-tray#21
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-tray#23
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-tray#23
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-tray#23
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-tray#24
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-tray#24
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-tray#24
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-tray#25
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-tray#25
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-tray#25
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-tray#26
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-tray#26
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-tray#26
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-bunker#31
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-bunker#31
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-bunker#31
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-bunker#33
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-bunker#33
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-bunker#33
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-bunker#34
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-bunker#34
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-bunker#34
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-bunker#35
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-bunker#35
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-bunker#35
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-bunker#36
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-bunker#36
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-bunker#36
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-gps-tether#41
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-gps-tether#41
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#41
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-gps-tether#43
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-gps-tether#43
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#43
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-gps-tether#44
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-gps-tether#44
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#44
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-gps-tether#45
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-gps-tether#45
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#45
+DRIFT   MISSING Kind on Renegade-Penguin/hammunition-gps-tether#46
+DRIFT   MISSING Epic on Renegade-Penguin/hammunition-gps-tether#46
+DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#46
+DRIFT   MISSING Kind on card PVTI_0144
+DRIFT   MISSING Epic on card PVTI_0144
+DRIFT   MISSING Effort on card PVTI_0144
+NOTE    Threat-model check not configured: rules.threat_model.label is empty
+UI-only settings (no API can read or set these; check by eye):
+  - Roadmap: Date fields = Start date / Target date; Zoom = Quarter
+  - By repository: Group by = Repository
+  - Workflows: Item closed -> Done; Pull request merged -> Done
+113 drift, 0 unknown
+--- stderr ---

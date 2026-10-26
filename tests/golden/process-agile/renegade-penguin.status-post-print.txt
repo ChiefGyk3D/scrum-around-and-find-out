@@ -1,0 +1,34 @@
+exit=0
+--- stdout ---
+::stop-commands::00000000000000000000000000000000
+5 done since 2026-10-01, 5 in progress, 5 waiting on the maintainer, 5 next.
+
+**Done since 2026-10-01** (5)
+- Renegade-Penguin/Hammunition#4 Merged and done
+- Renegade-Penguin/hammunition-bunker#34 Merged and done
+- Renegade-Penguin/hammunition-gps-tether#44 Merged and done
+- Renegade-Penguin/hammunition-hill#14 Merged and done
+- Renegade-Penguin/hammunition-tray#24 Merged and done
+
+**In progress** (5)
+- Renegade-Penguin/Hammunition#1 Open work on the board (Claude)
+- Renegade-Penguin/hammunition-bunker#31 Open work on the board (Claude)
+- Renegade-Penguin/hammunition-gps-tether#41 Open work on the board (Claude)
+- Renegade-Penguin/hammunition-hill#11 Open work on the board (Claude)
+- Renegade-Penguin/hammunition-tray#21 Open work on the board (Claude)
+
+**Waiting on the maintainer** (5)
+- Renegade-Penguin/Hammunition#5 Waiting on the maintainer (You)
+- Renegade-Penguin/hammunition-bunker#35 Waiting on the maintainer (You)
+- Renegade-Penguin/hammunition-gps-tether#45 Waiting on the maintainer (You)
+- Renegade-Penguin/hammunition-hill#15 Waiting on the maintainer (You)
+- Renegade-Penguin/hammunition-tray#25 Waiting on the maintainer (You)
+
+**Next** (5)
+- Renegade-Penguin/Hammunition#6 Queued for next
+- Renegade-Penguin/hammunition-bunker#36 Queued for next
+- Renegade-Penguin/hammunition-gps-tether#46 Queued for next
+- Renegade-Penguin/hammunition-hill#16 Queued for next
+- Renegade-Penguin/hammunition-tray#26 Queued for next
+::00000000000000000000000000000000::
+--- stderr ---

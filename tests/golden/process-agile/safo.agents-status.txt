@@ -1,0 +1,15 @@
+exit=0
+--- stdout ---
+Waiting on you (Status = Blocked)
+  ChiefGyk3D/scrum-around-and-find-out#5  Waiting on the maintainer  https://example.invalid/5
+\x0aBoard: In progress, Next, by agent (ChiefGyk3D/1)
+  Claude       In progress  ChiefGyk3D/scrum-around-and-find-out#1  Open work on the board
+  unassigned   Next         ChiefGyk3D/scrum-around-and-find-out#6  Queued for next
+
+Routing guard (mode: warn)
+  health: unknown; counts cover retained history
+  no dispatches logged yet
+\x0aClaude
+  Subagents run inside the Claude Code session and cannot be listed from a shell: watch its panel.
+  Their tasks are the board cards with Agent = Claude above.
+--- stderr ---
