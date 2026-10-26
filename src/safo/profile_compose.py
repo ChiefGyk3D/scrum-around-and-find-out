@@ -23,11 +23,12 @@ from collections.abc import Mapping
 from safo.agentsfile import Agent
 from safo.errors import ConfigError
 from safo.evidence import VerifiedAgents
-from safo.profile import BOUNDARY_PARAGRAPH, GENERATED_MARKER, Claim, ModelLayer, Profile
+from safo.profile import BOUNDARY_PARAGRAPH, Claim, ModelLayer, Profile
 from safo.profile_render import (
     CALL_SETTING,
     CALLER_DIR,
     CALLER_USE,
+    HARNESS_OF_KIND,
     REVIEW_RULES,
     REVIEW_WORDING,
     SCOPE_RULES,
@@ -35,6 +36,7 @@ from safo.profile_render import (
     UNMEASURED_LINE,
     Rendered,
     model_reads_gate,
+    split_header,
     split_persona,
 )
 
@@ -46,8 +48,18 @@ LOCAL_FIXED = (
 )
 # the shape of a rendered evidence pointer: no pointer is ever shown to a model
 _POINTER = re.compile(r"\(`(?:lessons:|outcomes:v1:|config:/)")
-_HEADING_CALLER = ("### Limits", "### Do", "### Do not", "### Must not be given", "### Review gate", "### Model layer:")
-_HEADING_MODEL = ("### Brief", "### Review focus", "## Scope rules", "## Review rules", "## Task")
+# Reserved section names, by whole name (lower case, one space between words), at any level and in any heading form.
+# A name that merely begins with one of these ("Done criteria") is not reserved.
+RESERVED_CALLER = frozenset(
+    {"limits", "do", "do not", "must not be given", "review gate", "briefing guidance", "model layer:"}
+)
+RESERVED_MODEL = frozenset({"brief", "review focus", "scope rules", "review rules", "task", "model profile"})
+# a model-side fragment shorter than this is not looked for in the caller file: a one-word brief is not a quotation
+MIN_LEAK = 20
+_ATX = re.compile(r"^ {0,3}#{1,6}[ \t]+(.*?)[ \t]*#*[ \t]*$")
+_SETEXT = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+_HTML_HEADING = re.compile(r"<h[1-6](?:\s[^>]*)?>(.*?)</h[1-6]\s*>", re.IGNORECASE | re.DOTALL)
+_TAG = re.compile(r"<[^>]*>")
 
 
 def caller_path(harness: str, agent_id: str) -> str:
@@ -58,14 +70,28 @@ def _norm(text: str) -> str:
     return " ".join(text.split())
 
 
-def _body(rendered: Rendered) -> str:
-    """The text of a file for comparison: the header line removed, whitespace collapsed."""
-    lines = [x for x in rendered.data.decode("utf-8").split("\n") if GENERATED_MARKER not in x]
-    return _norm("\n".join(lines))
+def _text(rendered: Rendered) -> str:
+    """The file without its one header line, which split_header identifies strictly (a second marker is an error)."""
+    body, _, _ = split_header(rendered.path, rendered.data)
+    return body.decode("utf-8")
 
 
-def _lines(rendered: Rendered) -> list[str]:
-    return [x.strip() for x in rendered.data.decode("utf-8").split("\n") if GENERATED_MARKER not in x]
+def heading_names(text: str) -> list[str]:
+    """The names of every heading in `text`, normalized: ATX (any level), setext and HTML forms."""
+    lines = text.split("\n")
+    names: list[str] = []
+    for i, line in enumerate(lines):
+        m = _ATX.match(line)
+        if m:
+            names.append(_norm(m[1]).lower())
+        if i and line.strip() and _SETEXT.match(line) and lines[i - 1].strip():
+            names.append(_norm(lines[i - 1]).lower())
+    names += [_norm(_TAG.sub("", m[1])).lower() for m in _HTML_HEADING.finditer(text)]
+    return names
+
+
+def _reserved(names: list[str], reserved: frozenset[str]) -> list[str]:
+    return [n for n in names if n in reserved or any(n.startswith(r) for r in reserved if r.endswith(":"))]
 
 
 def _claims(claims: tuple[Claim, ...]) -> list[str]:
@@ -147,16 +173,25 @@ def _has(normalized: str, needle: str) -> bool:
     return _norm(needle) in normalized
 
 
+def _quoted(normalized: str, needle: str) -> bool:
+    """True when `needle` is in the text on word boundaries, whatever spacing or line breaks sit between its words."""
+    return re.search(r"(?<!\w)" + re.escape(_norm(needle)) + r"(?!\w)", normalized) is not None
+
+
 def composition_problems(v: VerifiedAgents, files: Mapping[str, Rendered]) -> list[str]:
     """What is wrong with the model/caller pairs among `files`. [] when every pair composes."""
     problems: list[str] = []
     expected_callers: set[str] = set()
+    kinds = {a.id: a.kind for a in v.agents.agents}
+    for path, r in files.items():
+        if r.agent_id in kinds and kinds[r.agent_id] not in HARNESS_OF_KIND:
+            problems.append(
+                f"{path}: {r.agent_id} is kind {kinds[r.agent_id]!r}, which has no harness, but was rendered"
+            )
     for agent in v.agents.agents:
         p = agent.profile
-        if p is None or agent.kind == "human":
-            continue
-        harness = {"claude": "claude", "codex": "codex", "ollama": "local", "copilot": "copilot"}.get(agent.kind)
-        if harness is None:
+        harness = HARNESS_OF_KIND.get(agent.kind)
+        if p is None or harness is None:
             continue
         model = next(
             (
@@ -178,34 +213,38 @@ def composition_problems(v: VerifiedAgents, files: Mapping[str, Rendered]) -> li
         try:
             c_heads, c_parts = caller_fragments(agent, p, harness, model.path)
             m_heads, m_parts = model_fragments(agent, p, harness)
-        except ConfigError as err:
+            model_raw, caller_raw = _text(model), _text(caller)
+        except ConfigError as err:  # includes a header that is missing, doubled or not alone on its line
             problems.append(f"{agent.id}: {err}")
             continue
-        model_text, caller_text = _body(model), _body(caller)
-        model_lines, caller_lines = _lines(model), _lines(caller)
-        for what, text, lines, heads, parts in (
-            ("caller", caller_text, caller_lines, c_heads, c_parts),
-            ("model", model_text, model_lines, m_heads, m_parts),
+        model_text, caller_text = _norm(model_raw), _norm(caller_raw)
+        model_lines, caller_lines = (
+            [x.strip() for x in model_raw.split("\n")],
+            [x.strip() for x in caller_raw.split("\n")],
+        )
+        for what, file, text, lines, heads, parts in (
+            ("caller", caller.path, caller_text, caller_lines, c_heads, c_parts),
+            ("model", model.path, model_text, model_lines, m_heads, m_parts),
         ):
-            file = caller.path if what == "caller" else model.path
             for h in heads:
-                if h not in lines:
+                n = lines.count(h)
+                if n == 0:
                     problems.append(f"{file}: required {what} section {h!r} is missing")
+                elif n > 1:
+                    problems.append(f"{file}: required {what} section {h!r} appears {n} times")
             for s in parts:
                 if not _has(text, s):
                     problems.append(f"{file}: required {what} text is missing: {_short(s)}")
         for s in c_parts:
-            if _has(model_text, s):
+            if _quoted(model_text, s):
                 problems.append(f"{model.path}: caller-only text leaked into the model file: {_short(s)}")
         for s in m_parts:
-            if _has(caller_text, s):
+            if len(_norm(s)) >= MIN_LEAK and _quoted(caller_text, s):
                 problems.append(f"{caller.path}: model instruction leaked into the caller file: {_short(s)}")
-        for line in model_lines:
-            if any(line.startswith(h) for h in _HEADING_CALLER):
-                problems.append(f"{model.path}: caller section heading in the model file: {line!r}")
-        for line in caller_lines:
-            if any(line.startswith(h) for h in _HEADING_MODEL):
-                problems.append(f"{caller.path}: model section heading in the caller file: {line!r}")
+        for name in _reserved(heading_names(model_raw), RESERVED_CALLER):
+            problems.append(f"{model.path}: caller section heading in the model file: {name!r}")
+        for name in _reserved(heading_names(caller_raw), RESERVED_MODEL):
+            problems.append(f"{caller.path}: model section heading in the caller file: {name!r}")
         if _POINTER.search(model_text):
             problems.append(f"{model.path}: an evidence pointer is in the model file")
     for path, r in files.items():

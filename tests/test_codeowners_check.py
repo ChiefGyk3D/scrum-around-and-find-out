@@ -21,6 +21,7 @@ ALL = [
     "/docs/lessons.md",
     "/src/safo/agentsfile.py",
     "/src/safo/profile_render.py",
+    "/src/safo/profile_compose.py",
 ]
 
 
@@ -162,6 +163,7 @@ def test_the_required_list_is_the_one_the_spec_names() -> None:
         "agents/",
         "src/safo/agentsfile.py",
         "src/safo/profile_render.py",
+        "src/safo/profile_compose.py",
     )
     assert "docs/lessons.md" in required_paths("docs/lessons.md", ())
     assert "briefs/" in required_paths("docs/lessons.md", ("briefs/a.md",))

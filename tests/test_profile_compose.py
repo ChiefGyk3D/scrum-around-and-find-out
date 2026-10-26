@@ -15,12 +15,14 @@ import pytest
 
 from gendata import ROOT, scratch
 from renderdata import verified, with_profile
+from safo.agentsfile import Agent
 from safo.evidence import VerifiedAgents, load_verified_agents
-from safo.profile import BOUNDARY_PARAGRAPH
+from safo.profile import BOUNDARY_PARAGRAPH, Profile
 from safo.profile_compose import caller_path, composition_problems
 from safo.profile_render import (
     CALL_SETTING,
     CALLER_USE,
+    HARNESS_OF_KIND,
     REVIEW_WORDING,
     TRACKING_RULE,
     UNMEASURED_LINE,
@@ -28,7 +30,22 @@ from safo.profile_render import (
     render_harness,
 )
 
-HARNESS = {"claude": "claude", "codex": "codex", "ollama": "local", "copilot": "copilot"}
+HARNESS = HARNESS_OF_KIND  # the one table; the renderer and the composition check read it too
+
+
+def rendered_agents(v: VerifiedAgents, files: dict[str, Rendered]) -> list[tuple[Agent, Profile]]:
+    """The profiled agents whose kind renders. The others must have no file at all, so a kind that starts to render
+    (or a table that loses one) cannot be skipped here without a failure."""
+    out = []
+    for agent in v.agents.agents:
+        if agent.profile is None:
+            continue
+        if agent.kind in HARNESS:
+            out.append((agent, agent.profile))
+        else:
+            assert not [r for r in files.values() if r.agent_id == agent.id], agent.id
+    assert out
+    return out
 
 
 def text(files: dict[str, Rendered], path: str) -> str:
@@ -75,9 +92,7 @@ def test_the_fixture_composes_in_both_copilot_modes(fixture_v: VerifiedAgents, t
 
 def test_every_profiled_agent_has_exactly_one_model_file_and_one_caller_file(fixture_v: VerifiedAgents) -> None:
     files = render_harness(fixture_v)
-    for agent in fixture_v.agents.agents:
-        if agent.profile is None:
-            continue
+    for agent, _p in rendered_agents(fixture_v, files):
         mine = [r for r in files.values() if r.agent_id == agent.id and not r.path.endswith(".yml")]
         assert sorted(r.role for r in mine) == ["caller", "model"], agent.id
         assert caller_path(HARNESS[agent.kind], agent.id) in files
@@ -89,10 +104,7 @@ def test_every_profiled_agent_has_exactly_one_model_file_and_one_caller_file(fix
 def test_every_caller_section_the_profile_requires_is_in_the_caller_file(fixture_v: VerifiedAgents) -> None:
     files = render_harness(fixture_v)
     checked = 0
-    for agent in fixture_v.agents.agents:
-        p = agent.profile
-        if p is None:
-            continue
+    for agent, p in rendered_agents(fixture_v, files):
         c = text(files, caller_path(HARNESS[agent.kind], agent.id))
         for claim in (*p.do, *p.dont):
             assert claim.text in c and claim.evidence.raw in c
@@ -115,10 +127,7 @@ def test_every_caller_section_the_profile_requires_is_in_the_caller_file(fixture
 def test_every_model_instruction_the_profile_requires_is_in_the_model_file(fixture_v: VerifiedAgents) -> None:
     files = render_harness(fixture_v)
     briefs = 0
-    for agent in fixture_v.agents.agents:
-        p = agent.profile
-        if p is None:
-            continue
+    for agent, p in rendered_agents(fixture_v, files):
         m = text(files, model_path(files, agent.id))
         assert " ".join(BOUNDARY_PARAGRAPH.split()) in m
         if p.brief is not None and (p.brief.inline or p.brief.template_text).strip():
@@ -131,10 +140,7 @@ def test_every_model_instruction_the_profile_requires_is_in_the_model_file(fixtu
 
 def test_no_caller_text_is_in_a_model_file_and_no_model_text_is_in_a_caller_file(fixture_v: VerifiedAgents) -> None:
     files = render_harness(fixture_v)
-    for agent in fixture_v.agents.agents:
-        p = agent.profile
-        if p is None:
-            continue
+    for agent, p in rendered_agents(fixture_v, files):
         m, c = text(files, model_path(files, agent.id)), text(files, caller_path(HARNESS[agent.kind], agent.id))
         for claim in (*p.do, *p.dont):
             assert claim.text not in m and claim.text not in " ".join(BOUNDARY_PARAGRAPH.split()), agent.id

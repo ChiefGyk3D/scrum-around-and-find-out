@@ -93,6 +93,9 @@ REVIEW_RULES = (
 )
 CALL_SETTING = "Send `think={flag}` with the request. It is a setting of the call, not part of the prompt."
 CALLER_DIR = "caller"
+# The one table of agent kinds that render, with the harness each renders for. A profiled agent whose kind is not here
+# (a human, or a kind with no instruction file) renders nothing, and the composition check reads this same table.
+HARNESS_OF_KIND = {"claude": "claude", "codex": "codex", "ollama": "local", "copilot": "copilot"}
 # what the caller does with the model file, by harness; `{model}` is the path of the model file
 CALLER_USE = {
     "claude": "Install `{model}` as a subagent file where your harness looks. The subagent reads that file and never "
@@ -701,7 +704,7 @@ def render_harness(v: VerifiedAgents) -> dict[str, Rendered]:
     copilot: str | None = None
     for agent in v.agents.agents:
         p = agent.profile
-        if p is None or agent.kind == "human":
+        if p is None or agent.kind not in HARNESS_OF_KIND:
             continue
         if AGENT_ID.fullmatch(agent.id) is None:
             raise RenderError(
