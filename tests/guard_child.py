@@ -45,7 +45,7 @@ elif mode == "hang-append":
 elif mode == "slow-pending":
     mod.__dict__["log_failure_pending"] = sleeps
 elif mode == "slow-first-notice":
-    mod.__dict__["first_notice"] = sleeps
+    mod.__dict__["notice_unclaimed"] = sleeps
 elif mode == "slow-marker-dir":
     mod.__dict__["marker_dir"] = sleeps
 code = main(

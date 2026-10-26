@@ -25,11 +25,22 @@ from typing import Any
 
 import pytest
 
-from hooksdata import agents_file, dispatch, hooks, read_log, set_mode, set_probe, state_folder
+from hooksdata import (
+    agents_file,
+    block_reprobe,
+    dispatch,
+    hooks,
+    probe_file,
+    read_log,
+    set_mode,
+    set_probe,
+    state_folder,
+)
 from meterdata import NOW
+from safo import hooks as core
 from safo.context import LocalContext
-from safo.guardlog import APPEND_LOCK_TIMEOUT, file_lock
-from safo.hooks import append_log, log_record
+from safo.guardlog import APPEND_LOCK_TIMEOUT, WARNING, file_lock
+from safo.hooks import append_log, log_record, notice_path
 from safo.localfiles import load_agents_for
 from safo.modes import hooks as mod
 
@@ -739,3 +750,145 @@ def test_at_most_five_corrupt_files_are_kept_and_the_oldest_go_first(tmp_path: P
     assert len(names) == 5
     assert "log.jsonl.corrupt-20250101T000000-1" not in names and "log.jsonl.corrupt-20250102T000000-1" not in names
     assert "log.jsonl.corrupt-20250107T000000-1" in names
+
+
+# -- junk removal is identity-checked, on both branches ---------------------------------------------------------
+
+
+def test_junk_replaced_by_a_valid_marker_after_it_was_observed_is_not_removed(
+    _private_home: Path, agents: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_probe(_private_home, reachable=True, agents=agents)
+    folder = state_folder(_private_home)
+    plant("symlink", _private_home, tmp_path)
+    real = mod.remove_junk
+    results: list[bool] = []
+
+    def seam(dfd: int, seen: Any) -> bool:
+        mod.write_log_failed(folder)  # another run's failure lands between the observation and the removal
+        results.append(real(dfd, seen))
+        return results[-1]
+
+    monkeypatch.setattr(mod, "remove_junk", seam)
+    first = Stream()
+    mod.run_guard(context(_private_home, dispatch(model=None), first), namespace(agents))
+    assert mod.LOG_MARKER_UNUSABLE in first.buffered
+    assert results == [False], "a different thing sat there by then: nothing was removed"
+    assert stat.S_ISREG(os.lstat(marker(_private_home)).st_mode), "the newer failure's marker survived"
+    monkeypatch.setattr(mod, "remove_junk", real)
+    second = Stream()
+    mod.run_guard(context(_private_home, dispatch(model=None), second), namespace(agents))
+    assert mod.LOG_FAILED_NOTICE in second.buffered and not marker(_private_home).exists()
+
+
+def test_a_blocker_replaced_after_the_failed_rename_is_not_removed(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = state_folder(_private_home)
+    where = plant("directory", _private_home, tmp_path)
+    real = mod.remove_junk
+    results: list[bool] = []
+
+    def seam(dfd: int, seen: Any) -> bool:
+        where.rmdir()  # the blocker is replaced by a valid marker before it is removed
+        with open(where, "w") as handle:
+            handle.write("newer failure\n")
+        where.chmod(0o600)
+        results.append(real(dfd, seen))
+        return results[-1]
+
+    monkeypatch.setattr(mod, "remove_junk", seam)
+    assert mod.write_log_failed(folder) is True
+    assert results == [False]
+    assert stat.S_ISREG(os.lstat(where).st_mode)
+
+
+# -- the probe notice is claimed after delivery, by the calling thread only --------------------------------------
+
+
+def fd_count() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+def abandoned_workers() -> None:
+    for worker in threading.enumerate():
+        if worker.name == "safo-bounded":
+            worker.join(10)
+
+
+def unhealthy(home: Path, agents: Path) -> Path:
+    state_folder(home).mkdir(parents=True, exist_ok=True)
+    block_reprobe(home, agents, age=1.0)  # an attempt a second ago: no re-probe, health stays unknown
+    return notice_path(probe_file(home, agents))
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc to count descriptors (Linux)")
+def test_an_abandoned_notice_check_that_finishes_late_creates_nothing_and_leaks_no_descriptor(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flag = unhealthy(_private_home, agents)
+    gate = threading.Event()
+    monkeypatch.setattr(mod, "NOTICE_IO_CAP_SECONDS", 0.3)
+    monkeypatch.setattr(
+        mod, "notice_unclaimed", lambda p: (gate.wait(10), core.notice_unclaimed(p))[1]
+    )  # the REAL check
+    before = fd_count()
+    out = Stream()
+    mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents))
+    assert mod.NOTICES_SKIPPED in out.buffered and not flag.exists()
+    gate.set()  # the real check resumes late, in its abandoned thread
+    abandoned_workers()
+    assert not flag.exists(), "a worker that finishes late creates nothing"
+    assert fd_count() == before, "and leaves no descriptor open"
+
+
+def test_the_probe_notice_is_claimed_only_after_a_delivered_line(_private_home: Path, agents: Path) -> None:
+    flag = unhealthy(_private_home, agents)
+    lost = Stream(flush_fails=True)
+    mod.run_guard(context(_private_home, dispatch(model=None), lost), namespace(agents))
+    assert not flag.exists(), "an undelivered line leaves the notice unclaimed"
+    shown = Stream()
+    mod.run_guard(context(_private_home, dispatch(model=None), shown), namespace(agents))
+    assert WARNING in shown.buffered and flag.exists()
+    quiet = Stream()
+    mod.run_guard(context(_private_home, dispatch(model=None), quiet), namespace(agents))
+    assert WARNING not in quiet.buffered, "claimed: the notice is once per session"
+
+
+def test_a_skipped_check_leaves_the_flag_so_the_next_dispatch_shows_the_specific_notice(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flag = unhealthy(_private_home, agents)
+    with monkeypatch.context() as patch:
+        patch.setattr(mod, "NOTICE_IO_CAP_SECONDS", 0.3)
+        patch.setattr(mod, "notice_unclaimed", lambda p: time.sleep(2))
+        skipped = Stream()
+        mod.run_guard(context(_private_home, dispatch(model=None), skipped), namespace(agents))
+    assert mod.NOTICES_SKIPPED in skipped.buffered and not flag.exists()
+    abandoned_workers()
+    nxt = Stream()
+    mod.run_guard(context(_private_home, dispatch(model=None), nxt), namespace(agents))
+    assert mod.NOTICES_SKIPPED not in nxt.buffered and WARNING in nxt.buffered and flag.exists()
+
+
+# -- two real processes appending to one corrupt log ---------------------------------------------------------
+
+
+def test_two_processes_appending_to_one_corrupt_log_quarantine_it_once_and_lose_no_record(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    log = tmp_path / "log.jsonl"
+    log.write_bytes(b"\xff\n")
+    log.chmod(0o600)
+    actions = [
+        (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0),
+        (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0),
+    ]
+    child = Path(__file__).parent / "append_child.py"
+    pids = [
+        os.posix_spawn(sys.executable, [sys.executable, str(child), str(log), "5"], os.environ, file_actions=actions)
+        for _ in range(2)
+    ]
+    codes = [os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) for pid in pids]
+    assert codes == [0, 0]
+    assert len(corrupt_files(tmp_path)) == 1, "the corrupt log is moved once, under the lock"
+    assert len(log.read_text().splitlines()) == 10, "every record of both processes is in the fresh log"

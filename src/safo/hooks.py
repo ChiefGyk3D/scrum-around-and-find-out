@@ -321,10 +321,17 @@ def reprobe(doc: AgentsFile, path: Path, now: float, timeout: float = REPROBE_TI
         return None
 
 
-def first_notice(path: Path) -> bool:
-    """True once per session and configuration. Later dispatches in the same degraded state stay quiet; the decision
-    log still records every one of them. When the marker cannot be made, say it: a repeated warning beats a hidden
-    one."""
+def notice_unclaimed(path: Path) -> bool:
+    """READ-ONLY: True while the session's one probe notice has not been claimed (the flag does not exist). Safe to run
+    in an abandoned worker: it changes nothing."""
+    return not os.path.lexists(notice_path(path))
+
+
+def claim_notice(path: Path) -> bool:
+    """Claim the notice (create the flag, O_EXCL): True once per session and configuration. Later dispatches in the same
+    degraded state stay quiet; the decision log still records every one of them. When the flag cannot be made, say it:
+    a repeated warning beats a hidden one. The guard calls this only AFTER the line carrying the notice was delivered,
+    on its own thread."""
     marker = notice_path(path)
     try:
         ensure_dir(marker.parent)

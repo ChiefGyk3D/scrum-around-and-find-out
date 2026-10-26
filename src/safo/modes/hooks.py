@@ -65,12 +65,13 @@ from safo.hooks import (
     attempt_path,
     bind_repo,
     check_dispatch,
+    claim_notice,
     decide,
-    first_notice,
     guard_output,
     is_safo_path,
     log_record,
     merge_settings,
+    notice_unclaimed,
     probe_all,
     probe_state,
     prune_state,
@@ -99,7 +100,7 @@ NOTICES_SKIPPED = "notices skipped: state folder slow"  # fixed text: learning i
 NOTICE_IO_CAP_SECONDS = 1.0  # first-notice flag and marker inspection together get at most this long before the emit
 NOTICE_IO_MIN_SECONDS = 0.25  # and at least this long, even when the clock is already past its limit
 _T = TypeVar("_T")
-Ident = tuple[int, int, int, int]  # st_dev, st_ino, st_mtime_ns, st_size: which marker this was when it was read
+Ident = tuple[int, int, int, int, int]  # st_dev, st_ino, st_mode, st_mtime_ns, st_size: what sat at the name
 CONFIG_MIN_WAIT_SECONDS = 0.25  # a load is always given this long, even when the clock is already past its deadline
 EMIT_FAILED_TEXT = "safo: the guard could not deliver its decision on standard output"
 EXIT_BLOCK = 2  # the host reads exit 2 from a PreToolUse hook as "block this call"
@@ -398,6 +399,7 @@ def emit_then_persist(
     folder: Path | None,
     record: dict[str, Any],
     clear_marker: Ident | None = None,
+    claim: Path | None = None,
 ) -> None:
     """The one tail of every guard path. The decision (`data`, or nothing to say) is written and flushed FIRST. If that
     fails nothing else is done (no append, no second line); the caller turns it into the exit code. Otherwise the log
@@ -410,6 +412,9 @@ def emit_then_persist(
         if clear_marker is not None:  # its notice is in the line just delivered; clear that marker, not a newer one
             with contextlib.suppress(Exception):
                 clear_log_failure(folder, clear_marker)
+        if claim is not None:  # the probe notice was in the delivered line: only now is it used up
+            with contextlib.suppress(Exception):
+                claim_notice(claim)
     try:
         if folder is None:
             raise OSError("log unavailable")
@@ -448,16 +453,25 @@ def sane_marker(info: os.stat_result) -> bool:
     return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o022
 
 
-def remove_marker(dfd: int) -> None:
-    """Remove whatever sits at the marker name: a directory, a FIFO, a link or a file."""
-    if stat.S_ISDIR(os.lstat(LOG_FAILED_NAME, dir_fd=dfd).st_mode):
-        os.rmdir(LOG_FAILED_NAME, dir_fd=dfd)
-    else:
-        os.unlink(LOG_FAILED_NAME, dir_fd=dfd)
-
-
 def marker_ident(info: os.stat_result) -> Ident:
-    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns, info.st_size)
+
+
+def remove_junk(dfd: int, seen: Ident) -> bool:
+    """Remove whatever sits at the marker name (a directory, FIFO, link or file) ONLY if it is still what was observed.
+    A different thing there means someone replaced it (a newer failure's marker, say): it is left alone. The check and
+    the removal are two calls, so this is best effort inside the same-user residual (#61), and the identity tuple can
+    in principle repeat for a recycled inode."""
+    try:
+        if marker_ident(os.lstat(LOG_FAILED_NAME, dir_fd=dfd)) != seen:
+            return False
+        if stat.S_ISDIR(os.lstat(LOG_FAILED_NAME, dir_fd=dfd).st_mode):
+            os.rmdir(LOG_FAILED_NAME, dir_fd=dfd)
+        else:
+            os.unlink(LOG_FAILED_NAME, dir_fd=dfd)
+    except OSError:
+        return False
+    return True
 
 
 def write_log_failed(folder: Path | None) -> bool:
@@ -485,18 +499,20 @@ def write_log_failed(folder: Path | None) -> bool:
                 if attempt:
                     return False
                 with contextlib.suppress(OSError):
-                    remove_marker(dfd)
+                    blocker = marker_ident(os.lstat(LOG_FAILED_NAME, dir_fd=dfd))
+                    remove_junk(dfd, blocker)  # only that blocker; a replacement is left and the rename retried
         return False
     finally:
         os.close(dfd)
 
 
 def log_failure_pending(folder: Path | None) -> tuple[str, Ident | None] | None:
-    """(notice, identity) for the marker, or None. A usable marker gives LOG_FAILED_NOTICE and its identity, read from
-    the descriptor it was opened by (O_NONBLOCK, no link followed); it stays until a line carrying that notice is
-    delivered, and then only that identity is cleared. Junk at its name (directory, FIFO, link, foreign or loose-mode
-    file) is removed, if it is still the thing that was seen, and reported as LOG_MARKER_UNUSABLE (and on stderr).
-    The marker is same-user writable like the rest of the state: it can only add a notice, never grant anything."""
+    """READ-ONLY observation of the marker: (notice, identity) or None. A usable marker gives LOG_FAILED_NOTICE; junk at
+    its name (directory, FIFO, link, foreign or loose-mode file) gives LOG_MARKER_UNUSABLE. The identity is what was
+    observed (from the descriptor, for an opened file). Nothing is changed here, so an abandoned worker cannot
+    change anything later: the caller clears or removes it AFTER the line that carries the notice is delivered, and
+    only if it is still what was observed. The marker is same-user writable like the rest of the state: it can only add
+    a notice, never grant anything."""
     try:
         dfd = marker_dir(folder)
     except OSError:
@@ -516,25 +532,17 @@ def log_failure_pending(folder: Path | None) -> tuple[str, Ident | None] | None:
         finally:
             if fd >= 0:
                 os.close(fd)
-        if sane_marker(info):
-            return (LOG_FAILED_NOTICE, marker_ident(info))
-        with contextlib.suppress(OSError):
-            if marker_ident(os.lstat(LOG_FAILED_NAME, dir_fd=dfd)) == marker_ident(info) or fd < 0:
-                remove_marker(dfd)
-        stderr_line("safo: " + LOG_MARKER_UNUSABLE)
-        return (LOG_MARKER_UNUSABLE, None)
+        return (LOG_FAILED_NOTICE if sane_marker(info) else LOG_MARKER_UNUSABLE, marker_ident(info))
     finally:
         os.close(dfd)
 
 
 def clear_log_failure(folder: Path | None, seen: Ident) -> None:
-    """Remove the marker only if it is still the one that was read: a failure written since has another identity and
-    stays for the next dispatch to report."""
+    """Remove the marker (or the junk) only if it is still what was observed: a failure written since has another
+    identity and stays for the next dispatch to report."""
     dfd = marker_dir(folder)
     try:
-        with contextlib.suppress(OSError):
-            if marker_ident(os.lstat(LOG_FAILED_NAME, dir_fd=dfd)) == seen:
-                os.unlink(LOG_FAILED_NAME, dir_fd=dfd)
+        remove_junk(dfd, seen)
     finally:
         os.close(dfd)
 
@@ -582,7 +590,7 @@ def read_notices(folder: Path | None, path: Path | None, wants_first: bool, run:
     budget = max(NOTICE_IO_MIN_SECONDS, min(NOTICE_IO_CAP_SECONDS, hard - time.monotonic() - 0.5))
 
     def work() -> Seen:
-        first = bool(wants_first and (path is None or first_notice(path)))
+        first = bool(wants_first and (path is None or notice_unclaimed(path)))
         return Seen(first, log_failure_pending(folder))
 
     done, result = run_bounded(work, budget)
@@ -635,6 +643,7 @@ def finish(
     record: dict[str, Any],
     note: str = "",
     clear: Ident | None = None,
+    claim: Path | None = None,
 ) -> None:
     """The shared tail of the Agent and Bash paths: build the one line (the decision plus every applicable notice, in
     priority order) and hand it to emit_then_persist. `notices` are (visible text, log code)."""
@@ -649,7 +658,9 @@ def finish(
     elif note:
         context = data["hookSpecificOutput"].get("additionalContext")
         data["hookSpecificOutput"]["additionalContext"] = f"{context} {note}" if context else note
-    emit_then_persist(ctx, run, data if out_text or notices or note else None, folder, record, clear)
+    if any(text == LOG_MARKER_UNUSABLE for text, _ in notices):
+        stderr_line("safo: " + LOG_MARKER_UNUSABLE)
+    emit_then_persist(ctx, run, data if out_text or notices or note else None, folder, record, clear, claim)
 
 
 def hook_event(argv: Sequence[str] | None) -> str | None:
@@ -930,7 +941,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     record = log_record(
         when, decision, mode, verdict, reachable, "degraded" if mode_state != "healthy" else health, code
     )
-    finish(ctx, run, folder, output, notices, record, note, marker[1] if marker else None)
+    finish(ctx, run, folder, output, notices, record, note, marker[1] if marker else None, path if seen.first else None)
 
 
 def lead_wait(
