@@ -18,4 +18,4 @@ safo --board boards/siem-stack.board.yaml --gh-user YOUR_LOGIN audit     # compa
 
 `bootstrap` cannot rewrite the built-in Status field on a populated board. On a new, empty project the Status options can be set once through the API; the bootstrap output lists the other settings no API can set (view grouping, roadmap date fields, project workflows).
 
-Design: `docs/superpowers/specs/2026-10-22-siem-wiki-and-boards-design.md`, section 11.
+Design: the SIEM wiki and boards design, section 11. It lands with PR #68 (`docs/superpowers/specs/2026-10-22-siem-wiki-and-boards-design.md`).

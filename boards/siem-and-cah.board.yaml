@@ -20,7 +20,8 @@ repositories:
       - {match: "suricata", area: "Suricata"}
       - {match: "pfblocker", area: "pfBlockerNG"}
       - {match: "dnsbl", area: "pfBlockerNG"}
-      - {match: "eve", area: "EVE forwarder"}
+      - {match: "eve json", area: "EVE forwarder"}
+      - {match: "eve.json", area: "EVE forwarder"}
       - {match: "forwarder", area: "EVE forwarder"}
       - {match: "telegraf", area: "Telegraf"}
       - {match: "wazuh", area: "SIEM backends"}
@@ -50,7 +51,8 @@ repositories:
       - {match: "suricata", area: "Suricata"}
       - {match: "pfblocker", area: "pfBlockerNG"}
       - {match: "dnsbl", area: "pfBlockerNG"}
-      - {match: "eve", area: "EVE forwarder"}
+      - {match: "eve json", area: "EVE forwarder"}
+      - {match: "eve.json", area: "EVE forwarder"}
       - {match: "forwarder", area: "EVE forwarder"}
       - {match: "telegraf", area: "Telegraf"}
       - {match: "wazuh", area: "SIEM backends"}
@@ -80,7 +82,8 @@ repositories:
       - {match: "suricata", area: "Suricata"}
       - {match: "pfblocker", area: "pfBlockerNG"}
       - {match: "dnsbl", area: "pfBlockerNG"}
-      - {match: "eve", area: "EVE forwarder"}
+      - {match: "eve json", area: "EVE forwarder"}
+      - {match: "eve.json", area: "EVE forwarder"}
       - {match: "forwarder", area: "EVE forwarder"}
       - {match: "telegraf", area: "Telegraf"}
       - {match: "wazuh", area: "SIEM backends"}
@@ -110,7 +113,8 @@ repositories:
       - {match: "suricata", area: "Suricata"}
       - {match: "pfblocker", area: "pfBlockerNG"}
       - {match: "dnsbl", area: "pfBlockerNG"}
-      - {match: "eve", area: "EVE forwarder"}
+      - {match: "eve json", area: "EVE forwarder"}
+      - {match: "eve.json", area: "EVE forwarder"}
       - {match: "forwarder", area: "EVE forwarder"}
       - {match: "telegraf", area: "Telegraf"}
       - {match: "wazuh", area: "SIEM backends"}
@@ -140,7 +144,8 @@ repositories:
       - {match: "suricata", area: "Suricata"}
       - {match: "pfblocker", area: "pfBlockerNG"}
       - {match: "dnsbl", area: "pfBlockerNG"}
-      - {match: "eve", area: "EVE forwarder"}
+      - {match: "eve json", area: "EVE forwarder"}
+      - {match: "eve.json", area: "EVE forwarder"}
       - {match: "forwarder", area: "EVE forwarder"}
       - {match: "telegraf", area: "Telegraf"}
       - {match: "wazuh", area: "SIEM backends"}
