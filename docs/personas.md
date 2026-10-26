@@ -2,8 +2,9 @@
 
 SAFO does not define personas. They live in a separate public repository, the
 [Department of Internal Arguments](https://github.com/ChiefGyk3D/department-of-internal-arguments/tree/v0.3.1) (DoIA),
-and this page describes release v0.3.1 of it, linked at the tag so the text cannot drift under a moving branch. The tag is
-pinned in one place, `scripts/doia-tag.txt`, and the wiki build and a test both fail if this page names any other. Read DoIA
+and this page describes DoIA release v0.3.1, linked at the tag so the text cannot drift under a moving branch. The tag is
+pinned in one place, `scripts/doia-tag.txt`, and the wiki build and a test both fail if this page names any other
+(the check reads links into DoIA, `--branch` and `checkout` arguments, and a version written right after "DoIA"). Read DoIA
 for the exact wording of a role; this page says what the roles are, how SAFO relates to them, and how to install them.
 
 [Roles](roles.md) says who does what at the level of agents and models, and [Routing](routing.md) says which task shape goes
@@ -36,7 +37,7 @@ explicit pinned model, and a set of tool capabilities, which the generator maps 
 
 - **Tiers.** `standard` is the current Sonnet and `cheap` is the current Haiku, pinned to exact model ids in DoIA's
   `scripts/lib.py` and not to floating aliases, because an alias moves when a new model ships. Bumping a pin is a CHANGELOG
-  entry in DoIA. In v0.3.1 the pins are `claude-sonnet-5-5` and `claude-haiku-5-5`. The most capable tier is deliberately
+  entry in DoIA. In DoIA v0.3.1 the pins are `claude-sonnet-5-5` and `claude-haiku-5-5`. The most capable tier is deliberately
   assigned to no role and needs the maintainer's recorded OK with a reason. Copilot custom agents do not take a model from
   the file, so the human picks it and records it in the brief.
 - **Tools.** Only the implementer and the transcriber can edit. The reviewers have no edit tool, but they do have a shell,
@@ -93,7 +94,7 @@ says which ones were loaded. DoIA's v0.3.1 README lists these six and publishes 
   control of every live action.
 - `linux-platform`: planning and diagnosing Linux and platform changes, with a rollback named for each.
 - `local-llm-routing`: sending work to a local Ollama server and configuring one; what small local models do well and badly.
-  Release v0.3.1 added measured notes on context-change evictions, fitting a second model next to a 12B one, and checking
+  DoIA release v0.3.1 added measured notes on context-change evictions, fitting a second model next to a 12B one, and checking
   multi-GPU placement.
 
 ## Which routing shapes use each role
@@ -152,7 +153,7 @@ python3 scripts/install.py --target /path/to/project --adapter both --update
 python3 scripts/install.py --target /path/to/project --adapter both --update --apply
 ```
 
-Run both from the clone. Replace `v0.3.1` with the newer tag when there is one, after reading its CHANGELOG.
+Run both from the clone. Replace DoIA release `v0.3.1` with the newer tag when there is one, after reading its CHANGELOG.
 
 `--list-managed` is the read-only drift check. It lists every file under the target that carries the generator marker, with
 its release, its source and a status: `current`, `stale` (an older release), `differs` (this release, content changed),

@@ -212,12 +212,73 @@ def test_the_pinned_doia_tag_is_one_value_and_the_page_uses_only_it() -> None:
 def test_the_doia_tag_guard_bites() -> None:
     page = (ROOT / "docs" / "personas.md").read_text(encoding="utf-8")
     stale = page.replace(DOIA_TAG, "v0.2.0")
-    assert set(GEN_WIKI.doia_tag_refs(stale)) == {"v0.2.0"} != {DOIA_TAG}
+    assert set(GEN_WIKI.doia_tag_refs(stale)) == {"v0.2.0"}
+    assert DOIA_TAG not in GEN_WIKI.doia_tag_refs(stale)
     mixed = page.replace(DOIA_TAG, "v0.2.0", 1)
     assert set(GEN_WIKI.doia_tag_refs(mixed)) == {DOIA_TAG, "v0.2.0"}
     with pytest.raises(GEN_WIKI.WikiError, match=r"v0\.2\.0"):
         GEN_WIKI.check_doia_tag({"personas.md": mixed}, DOIA_TAG)
     GEN_WIKI.check_doia_tag({"personas.md": page}, DOIA_TAG)
+
+
+DOIA_URL = "https://github.com/ChiefGyk3D/department-of-internal-arguments"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DoIA v0.3.1-rc1 is out.",
+        "DoIA v0.3.1.2 is out.",
+        "DoIA xv0.2.0 is out.",
+        "DoIA v0.3.1+build5 is out.",
+        f"[x]({DOIA_URL}/tree/v0.3.1-rc1)",
+        "clone --branch v0.3.1.2 here",
+        "then checkout v0.2.0",
+        f"[x]({DOIA_URL}/blob/v0.2.0/templates/lead.md)",
+        "This page describes Department of Internal Arguments v0.2.0.",
+    ],
+)
+def test_a_doia_reference_that_is_not_exactly_the_pin_fails(text: str) -> None:
+    with pytest.raises(GEN_WIKI.WikiError, match=r"scripts/doia-tag\.txt"):
+        GEN_WIKI.check_doia_tag({"personas.md": text}, "v0.3.1")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DoIA v0.3.1 is out.",
+        "DoIA v0.3.1, then more.",
+        "(DoIA v0.3.1) is out.",
+        "DoIA v0.3.1.",
+        f"[x]({DOIA_URL}/tree/v0.3.1)",
+        "clone --branch v0.3.1 url",
+        "-C dir checkout v0.3.1",
+        "DoIA v0.3.1 needs Python v3.12.1 and uses actions/checkout@v4.1.0 from another project.",
+        "Python v3.12.1 here.\n\nAnd actions/checkout@v4.1.0 there.",
+        "See [other](https://github.com/example/other/tree/v9.9.9) for the other project.",
+    ],
+)
+def test_other_versions_and_the_exact_pin_pass(text: str) -> None:
+    GEN_WIKI.check_doia_tag({"personas.md": text}, "v0.3.1")
+
+
+def test_a_missing_personas_page_fails_loudly_when_required() -> None:
+    with pytest.raises(GEN_WIKI.WikiError, match=r"personas\.md"):
+        GEN_WIKI.check_doia_tag({"home.md": "# H\n"}, "v0.3.1", require_page=True)
+    GEN_WIKI.check_doia_tag({"home.md": "# H\n"}, "v0.3.1")
+
+
+def test_a_renamed_page_is_still_checked() -> None:
+    with pytest.raises(GEN_WIKI.WikiError, match=r"scripts/doia-tag\.txt"):
+        GEN_WIKI.check_doia_tag({"people.md": "DoIA v0.2.0."}, "v0.3.1")
+
+
+def test_the_build_of_this_repository_requires_the_personas_page(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "home.md").write_text("# H\n", encoding="utf-8")
+    with pytest.raises(GEN_WIKI.WikiError, match=r"personas\.md"):
+        GEN_WIKI.render(docs, ROOT, None)
 
 
 def test_personas_describe_the_pinned_release() -> None:
@@ -229,6 +290,7 @@ def test_personas_describe_the_pinned_release() -> None:
         "--overlay",
         "--list-managed",
         "--force-edited",
+        "DoIA release v0.3.1 added measured notes",
     ):
         assert phrase in page, phrase
 
