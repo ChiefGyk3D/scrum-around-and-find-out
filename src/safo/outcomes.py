@@ -161,9 +161,7 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
             raise ConfigError(f"{where}.{key}: expected an integer >= 0 or null")
     model = raw.get("model")
     if model is not None and not (valid_model(model)):
-        raise ConfigError(
-            f"{where}.model: expected a label (letters, digits, . _ : - and single /; max 128), or null"
-        )
+        raise ConfigError(f"{where}.model: expected a label (letters, digits, . _ : - and single /; max 128), or null")
     credits = raw.get("credits_used")
     if credits is not None and (
         isinstance(credits, bool) or not isinstance(credits, int) or not 0 <= credits <= MAX_COUNT
