@@ -69,6 +69,11 @@ REVIEW_WORDING = {
     ),
     "workflow_permissions": "Read the workflow files the change touches for missing or excess permissions.",
 }
+# The hard rule, stated first in every playbook an agent reads: no work without an issue and a board card.
+TRACKING_RULE = (
+    "No hidden work: file the issue and put it on the board before you start, and link it from your pull request "
+    "(`Refs #n` or `Closes #n`). If you were handed work with no issue, stop and ask for one."
+)
 SCOPE_RULES = (
     "Edit only the files listed as in scope.",
     "Run the one test command the issue states, exactly as written.",
@@ -76,6 +81,7 @@ SCOPE_RULES = (
 )
 REVIEW_RULES = (
     "Comment on the diff. Do not push commits, open pull requests or take issues.",
+    "Say so when the pull request links no issue (`Refs #n` or `Closes #n`): work without an issue is hidden work.",
     "Judge the change against what the pull request says it does, and say what you could not check.",
     "Your comments are a second opinion, not a gate: a Claude review and, for security-relevant changes, a Codex "
     "adversarial review still decide.",
@@ -474,7 +480,7 @@ def _check_template(agent: Agent, p: Profile) -> None:
 
 def _claude(agent: Agent, p: Profile) -> tuple[str, str]:
     tools: Mapping[str, str | list[str]] = {}
-    out = [""]
+    out = ["", TRACKING_RULE, ""]  # the hard rule comes first, ahead of the persona's own text
     if p.persona:
         tools, body = split_persona(p.persona_text, agent.id)
         if body:
@@ -489,6 +495,8 @@ def _codex(agent: Agent, p: Profile) -> tuple[str, str]:
         "",
         "Prepend this preamble to a self-contained prompt. Codex cannot resume a thread across git worktrees, so the "
         "preamble and the prompt are the whole standing context.",
+        "",
+        TRACKING_RULE,
         "",
         BOUNDARY_PARAGRAPH,
         "",
@@ -543,6 +551,7 @@ def _copilot_instructions(agent: Agent, p: Profile) -> tuple[str, str]:
         "",
         "## Scope rules",
         "",
+        f"- {TRACKING_RULE}",
         *[f"- {rule}" for rule in SCOPE_RULES],
         "",
         BOUNDARY_PARAGRAPH,

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from safo import output
 from safo.apply import Applier
 from safo.context import Context
+from safo.coverage import card_findings, read_tracked, unlinked_pulls
 from safo.errors import (
     EXIT_DRIFT,
     EXIT_OK,
@@ -48,6 +49,7 @@ from safo.modes import Mode, register
 from safo.plan import Plan, build_plan
 from safo.rules import area_for, done_day, target_status
 from safo.schema import Board, Repository
+from safo.threatmodel import unthreatened_issues
 
 SHOWN = 20  # how many cards a "not attempted" line names before it counts the rest
 
@@ -320,6 +322,24 @@ def _refuse_future(today: dt.date, contents: list[Content]) -> None:
             raise MalformedDataError("a closedAt from GitHub is more than a day in the future")
 
 
+def needs_a_human(ctx: Context, live: LiveBoard, items: list[ItemState], plan: Plan) -> list[str]:
+    """What the no-hidden-work rule finds that no rule can repair: a pull request with no linked issue, an AI-surface
+    issue with no usable threat-model line, a card with no Kind, Epic, Effort or hand-picked Area. Reconcile lists these
+    and writes nothing for them."""
+    board = ctx.board
+    unlinked, _ = unlinked_pulls(ctx.client, board, ctx.today)
+    lines = [f"{name} is a pull request with no linked issue: add `Refs #n` or `Closes #n`" for name in unlinked]
+    threats, _ = unthreatened_issues(ctx.client, board, ctx.today)
+    lines += [
+        f"{name} {why}: add `threat-model: <path or URL>` or `threat-model: n/a - <reason>`" for name, why in threats
+    ]
+    repos = {r.full_name.lower(): r for r in board.repositories}
+    # The listing was read before the adds. A card this run adds holds only what the plan gives it, so it is checked as
+    # the card it is about to be (also in a dry run, where it does not exist yet).
+    added = [ItemState(f"new:{a.content.id}", a.content, a.status, a.done_on, a.area) for a in plan.adds]
+    return lines + card_findings(board, [*items, *added], read_tracked(ctx.client, board, live), repos)
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
     dry = ctx.client.dry_run
     live = load_live(ctx.client, ctx.board.project)
@@ -355,6 +375,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             plan.anomalies.append(
                 f"{labels[content_id]} is on the board {n} times; safo repairs one card and leaves the rest"
             )
+    human = needs_a_human(ctx, live, items, plan)
     out = apply_plan(ctx, live, plan, work, items)
     problem = verify_adds(ctx, live, out)
     # The listing lags behind items.totalCount, and a lookup by content id covers only the work this run knows about.
@@ -371,6 +392,8 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         say(ctx, f"UNREACHABLE {name}: the token cannot read it (is the App installed on it?)")
     for line in plan.anomalies:
         say(ctx, f"NOTE {line}")
+    for line in human:
+        say(ctx, f"HUMAN {line}")
     if problem:
         say(ctx, problem)
     if unread > 0:
@@ -384,7 +407,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         )
     if out.unknown or problem or unreachable or unread > 0:
         return EXIT_UNKNOWN
-    if plan.anomalies or out.failed or (dry and out.applied):
+    if plan.anomalies or human or out.failed or (dry and out.applied):
         return EXIT_DRIFT
     if not out.applied and not out.vanished:
         say(ctx, "nothing to do: the board is current")

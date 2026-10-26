@@ -9,6 +9,8 @@ disallowedTools:
 ---
 HEADER
 
+No hidden work: file the issue and put it on the board before you start, and link it from your pull request (`Refs #n` or `Closes #n`). If you were handed work with no issue, stop and ask for one.
+
 # Adversarial reviewer
 
 Find what is wrong. Do not fix it.

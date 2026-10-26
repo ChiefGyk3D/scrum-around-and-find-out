@@ -191,3 +191,80 @@ def closed_issues(fake: FakeGitHub, v: JSON) -> JSON:
 @handler("RepoClosedPulls")
 def closed_pulls(fake: FakeGitHub, v: JSON) -> JSON:
     return _repo_read(fake, v, "pullRequests", ("PullRequest",), ("CLOSED", "MERGED"))
+
+
+def _link_json(c: FContent) -> JSON:
+    return {
+        "id": c.id,
+        "number": c.number,
+        "state": c.state,
+        "merged": c.state == "MERGED",
+        "closedAt": c.closed_at,
+        "body": c.body,
+        "repository": {"nameWithOwner": c.repo},
+        "closingIssuesReferences": {"totalCount": c.closing},
+    }
+
+
+@handler("RepoPullRefs")
+def pull_links(fake: FakeGitHub, v: JSON) -> JSON:
+    repo = fake.repos.get(f"{v['owner']}/{v['name']}".lower())
+    if repo is None or not repo.installed:
+        raise GqlError(
+            "NOT_FOUND",
+            f"Could not resolve to a Repository with the name '{v['owner']}/{v['name']}'.",
+            {"repository": None},
+        )
+    rows = [_link_json(c) for c in repo.contents if c.kind == "PullRequest"]
+    return {"repository": {"pullRequests": fake.connection(rows, v)}}
+
+
+@handler("RepoThreatIssues")
+def threat_issues(fake: FakeGitHub, v: JSON) -> JSON:
+    """Issues of one repository that carry the label asked for, open and closed, with their bodies."""
+    repo = fake.repos.get(f"{v['owner']}/{v['name']}".lower())
+    if repo is None or not repo.installed:
+        raise GqlError(
+            "NOT_FOUND",
+            f"Could not resolve to a Repository with the name '{v['owner']}/{v['name']}'.",
+            {"repository": None},
+        )
+    rows = [
+        {
+            "number": c.number,
+            "state": c.state,
+            "closedAt": c.closed_at,
+            "body": c.body,
+            "repository": {"nameWithOwner": c.repo},
+        }
+        for c in repo.contents
+        if c.kind == "Issue" and v["label"] in c.labels
+    ]
+    return {"repository": {"issues": fake.connection(rows, v)}}
+
+
+@handler("PullRefs")
+def pull_link(fake: FakeGitHub, v: JSON) -> JSON:
+    content = fake.content(str(v["id"]))
+    if content is None or content.kind != "PullRequest":
+        return {"node": {} if content is not None else None}
+    return {"node": _link_json(content)}
+
+
+@handler("TrackedItems")
+def tracked_items(fake: FakeGitHub, v: JSON) -> JSON:
+    """Presence of the fields asked for as t0, t1, ...: a typename when the card holds a value, else null."""
+    project = fake.projects.get(str(v["id"]))
+    if project is None:
+        raise GqlError("NOT_FOUND", f"Could not resolve to a node with the global id of '{v['id']}'.", {"node": None})
+    nodes: list[JSON] = []
+    for item in project.items:
+        node: JSON = {"id": item.id}
+        i = 0
+        while f"t{i}" in v:
+            f = next((x for x in project.fields if x.name == v[f"t{i}"]), None)
+            held = f is not None and f.id in item.values
+            node[f"t{i}"] = {"__typename": "ProjectV2ItemFieldValue"} if held else None
+            i += 1
+        nodes.append(node)
+    return {"node": {"items": fake.connection(nodes, v)}}

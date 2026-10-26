@@ -44,6 +44,7 @@ def test_the_shipped_file_loads_with_every_agent_and_shape_the_playbook_names() 
         "well-specified-code",
         "small-mechanical-pr",
         "security-sensitive-design",
+        "threat-model",
         "adversarial-review",
         "security-sensitive-code",
         "ops-runbook",

@@ -1,5 +1,10 @@
 # Scrum Around and Find Out
 
+> **The hard rule: no hidden work.** Every unit of work, human or agent, has an issue (or a Jira key) and a board card
+> before work starts, and every pull request links its issue (`Refs #n` or `Closes #n`). Work without a card is a defect
+> of the process. `safo hooks guard`, `safo audit`, `reconcile` and `sync` enforce it; see
+> [docs/no-hidden-work.md](docs/no-hidden-work.md).
+
 SAFO is three things, built for one maintainer running a team of AI agents across a dozen repositories:
 
 1. **A GitHub Project defined as code.** `board.yaml` names the fields, options, iterations and views. An Action and a
@@ -27,7 +32,9 @@ Checked 2026-10-11.
 | `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built, merged on `main` and released in v0.1.0 |
 | `outcome add` and `usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built, merged on `main` and released in v0.1.0 |
 | `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built, merged on `main` and released in v0.1.0 |
-| `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent tool that enforce `agents.yaml`: warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main` and released in v0.1.0; not yet exercised in a real Claude Code session |
+| `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent and Bash tools that enforce `agents.yaml` and the rule that the lead never waits (see [`docs/orchestrator.md`](docs/orchestrator.md)): warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main` and released in v0.1.0; not yet exercised in a real Claude Code session |
+| No hidden work (the guard needs an open `issue:` in every brief; `audit` finds pull requests with no linked issue and cards missing Kind, Epic, Effort or Area; `reconcile` and `sync` list what needs a human; see [`docs/no-hidden-work.md`](docs/no-hidden-work.md)). The pull request check that fails a pull request with no `Refs #n` is a reusable workflow in git-your-ship-together and is not built here | Built on the branch for issue #54; not yet merged |
+| Threat model before build (`audit` and `reconcile` find issues labeled `ai-surface` with no usable `threat-model:` line; a `threat-model` routing shape; see [`docs/threat-model.md`](docs/threat-model.md)). The check that the Threat Dragon file is well formed and moves with the AI surface is a reusable workflow in git-your-ship-together and is not built here | Built on the branch for issue #70; not yet merged |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
 | Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
