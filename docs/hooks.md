@@ -374,13 +374,15 @@ the maximum of `5` is clamped to 5. A bad value never stops `safo` from starting
 The value is read with Python's `float` syntax, so `1_0`, non-ASCII digits and tiny values such as `1e-5` count as
 numbers; anything above 5 (including the underscore forms) is clamped.
 
-Budget: the host gives the guard 10 s. Its lookups stop 2 s earlier, at 8 s, and the append can then wait up to the
-setting, so the worst case is 8 s plus the wait: 11 s at the 3 s default and 13 s at the 5 s clamp, both past the host's
-10 s. The clamp bounds the setting; it does not fix the budget. The guard currently writes its decision after the
-append, so a denial computed in `block` mode is lost if the host kills the hook during the wait (a late failure is
-different: the timeout is an error and degrades visibly). Writing the decision before the log is being done in PR #116
-(issue #97), and the budget will be restated there. Whether Claude Code allows or blocks a hook it kills at the timeout is
-not verified. The other lock users (mode, probe state) keep their 0.5 s wait.
+Budget: the host gives the guard 10 s, and the guard runs on one clock from the start of the process. Its lookups
+and any re-probe stop by 8 s (a re-probe leaves 2 s for the lookup and is cut off in total). The append waits for
+the lock for the setting or until 9 s, whichever is sooner, and never less than 0.5 s, so it ends by about 9 s, or
+by 9.5 s at the latest if the process is already past 9 s when it gets there. A longer setting therefore does not extend
+the hook past that. A log that could not be written in that time is reported as `log-write` (degraded). The decision is
+still printed after the append, not before it, so that a failed append can appear in the same single JSON line; a
+denial is therefore lost only if the host kills the hook before about 9.5 s, which the clock is meant to prevent. What
+Claude Code does with a hook it kills at the timeout is not verified. The other lock users (mode, probe state) keep
+their 0.5 s wait.
 
 ## Known limits
 
