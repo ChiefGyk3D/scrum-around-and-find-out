@@ -168,7 +168,7 @@ def read_until(fd: int, stop: float, first_line: bool = False) -> bytes:
 
 
 @pytest.mark.parametrize("payload", ["agent", "bash"])
-def test_a_config_load_blocked_on_a_fifo_still_prints_a_decision_inside_the_budget_in_a_real_process(
+def test_a_loader_that_wedges_for_any_reason_still_prints_a_decision_inside_the_budget_in_a_real_process(
     _private_home: Path, agents: Path, tmp_path: Path, payload: str
 ) -> None:
     fifo = tmp_path / "agents.fifo"
@@ -177,7 +177,7 @@ def test_a_config_load_blocked_on_a_fifo_still_prints_a_decision_inside_the_budg
     body.write_text(dispatch(model=None) if payload == "agent" else bash("sleep 60"))
     set_mode(_private_home, "block")
     started = time.monotonic()
-    pid, fd = spawn("fifo-load", _private_home, agents, fifo, body)
+    pid, fd = spawn("synthetic-wedge", _private_home, agents, fifo, body)
     try:
         raw = read_until(fd, 15)
     finally:
@@ -188,8 +188,58 @@ def test_a_config_load_blocked_on_a_fifo_still_prints_a_decision_inside_the_budg
     rows = lines(raw.decode())
     assert len(rows) == 1
     assert mod.CONFIG_TIMEOUT_NOTICE in rows[0]["hookSpecificOutput"]["additionalContext"]
-    # The budget is 3 s here (deadline 1 s, hard 2 s); the interpreter start is the slack. The load blocked for ever.
+    # SYNTHETIC: the loader is replaced by a call that never returns (a wedged mount or kernel read, which cannot be
+    # made without privilege). The budget is 3 s here (deadline 1 s, hard 2 s); the interpreter start is the slack.
     assert elapsed < 3 + 1.5, f"{elapsed:.1f} s: the decision must land inside the (scaled) budget"
+
+
+def test_a_fifo_as_the_agents_file_is_refused_at_once_by_the_production_loader_not_waited_on(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    """The REAL loader (no patch): it opens with O_NONBLOCK and refuses a non-regular file, so a planted FIFO is an
+    immediate degraded allow, not a hang and not even a timeout."""
+    fifo = tmp_path / "agents.fifo"
+    os.mkfifo(fifo)
+    body = tmp_path / "payload.json"
+    body.write_text(dispatch(model=None))
+    set_mode(_private_home, "block")
+    started = time.monotonic()
+    pid, fd = spawn("real-loader", _private_home, fifo, fifo, body)
+    try:
+        raw = read_until(fd, 15)
+    finally:
+        os.close(fd)
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+    rows = lines(raw.decode())
+    assert len(rows) == 1
+    context = rows[0]["hookSpecificOutput"]["additionalContext"]
+    assert '"diagnostic": "config"' in context and mod.CONFIG_TIMEOUT_NOTICE not in context
+    assert time.monotonic() - started < 3, "refused at once: no wait on the FIFO"
+
+
+@pytest.mark.parametrize("what", ["pending", "first-notice", "marker-dir"])
+@pytest.mark.parametrize("payload", ["agent", "bash"])
+def test_a_wedged_state_folder_cannot_hold_a_computed_deny_back_in_a_real_process(
+    _private_home: Path, agents: Path, tmp_path: Path, what: str, payload: str
+) -> None:
+    if what == "first-notice" and payload == "bash":
+        pytest.skip("the Bash path has no first-notice flag")
+    body = tmp_path / "payload.json"
+    body.write_text(dispatch(model=None) if payload == "agent" else bash("sleep 60"))
+    set_mode(_private_home, "block")
+    started = time.monotonic()
+    pid, fd = spawn(f"slow-{what}", _private_home, agents, tmp_path / "x", body)
+    try:
+        raw = read_until(fd, 15)
+    finally:
+        os.close(fd)
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+    elapsed = time.monotonic() - started
+    [row] = lines(raw.decode())
+    assert denied(row) and mod.NOTICES_SKIPPED in row["hookSpecificOutput"]["additionalContext"]
+    assert elapsed < 3 + 1.5, f"{elapsed:.1f} s: the deny must land inside the (scaled) budget"
 
 
 def test_a_process_killed_after_the_decision_leaves_exactly_one_complete_json_line(
@@ -334,20 +384,10 @@ def test_a_corrupt_log_tail_is_rotated_not_raised_and_the_deny_is_one_line(_priv
     assert code == 0
     [row] = lines(out)
     assert denied(row)
-    assert (folder / "log.jsonl.1").read_bytes() == b"\xff\npartial", "undecodable bytes are kept as corruption"
+    assert [f.read_bytes() for f in corrupt_files(folder)] == [b"\xff\npartial"], "kept as corruption"
+    assert not (folder / "log.jsonl.1").exists(), "no archive was made or overwritten"
     assert read_log(_private_home)[-1]["rules"] == ["lead-waits"]
     assert not marker(_private_home).exists(), "the append worked after the rotation"
-
-
-def test_append_log_treats_undecodable_retained_bytes_as_corruption(tmp_path: Path) -> None:
-    path = tmp_path / "log.jsonl"
-    path.write_bytes(b"\xff\npartial")
-    path.chmod(0o600)
-    tmp_path.chmod(0o700)
-    record = log_record("2026-01-01T00:00:00", "allow", "warn", None, False, "healthy", "")
-    append_log(path, record)
-    assert path.with_name("log.jsonl.1").read_bytes() == b"\xff\npartial"
-    assert json.loads(path.read_text())["decision"] == "allow"
 
 
 # -- ordering and budget on the Bash path, as before ------------------------------------------------------------
@@ -598,3 +638,104 @@ def test_an_exception_after_the_decision_was_attempted_adds_no_diagnostic_line(
     out = Stream()
     assert mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents)) == 0
     assert len(out.writes) == 1 and denied(lines(out.buffered)[0]), "the decision, and nothing after it"
+
+
+def test_notice_io_that_does_not_finish_is_skipped_and_leaves_the_marker_and_flag_untouched(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_mode(_private_home, "block")
+    folder = state_folder(_private_home)
+    folder.mkdir(parents=True, exist_ok=True)
+    mod.write_log_failed(folder)
+    before = os.lstat(folder / mod.LOG_FAILED_NAME)
+    monkeypatch.setattr(mod, "NOTICE_IO_CAP_SECONDS", 0.3)
+    monkeypatch.setattr(mod, "log_failure_pending", lambda f: time.sleep(5))
+    out = Stream()
+    started = time.monotonic()
+    assert mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents)) == 0
+    assert time.monotonic() - started < 3
+    [row] = lines(out.buffered)
+    assert denied(row) and mod.NOTICES_SKIPPED in row["hookSpecificOutput"]["additionalContext"]
+    after = os.lstat(folder / mod.LOG_FAILED_NAME)
+    assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns), "left untouched"
+
+
+# -- the marker's clear is identity-checked ------------------------------------------------------------------
+
+
+def test_a_failure_written_between_the_read_and_the_clear_survives_and_is_reported_next(
+    _private_home: Path, agents: Path
+) -> None:
+    set_probe(_private_home, reachable=True, agents=agents)
+    folder = state_folder(_private_home)
+    mod.write_log_failed(folder)
+
+    class Racy(Stream):
+        raced = False
+
+        def flush(self) -> None:
+            if not self.raced:
+                self.raced = True
+                mod.write_log_failed(folder)  # run B's failure lands after run A read the marker, before A clears
+
+    first = Racy()
+    mod.run_guard(context(_private_home, dispatch(model=None), first), namespace(agents))
+    assert mod.LOG_FAILED_NOTICE in first.buffered
+    assert marker(_private_home).exists(), "the newer failure was not erased by the older run's clear"
+    second = Stream()
+    mod.run_guard(context(_private_home, dispatch(model=None), second), namespace(agents))
+    assert mod.LOG_FAILED_NOTICE in second.buffered and not marker(_private_home).exists()
+
+
+def test_every_new_failure_gives_the_marker_a_new_identity(_private_home: Path) -> None:
+    folder = state_folder(_private_home)
+    folder.mkdir(parents=True, exist_ok=True)
+    mod.write_log_failed(folder)
+    one = os.lstat(folder / mod.LOG_FAILED_NAME)
+    mod.write_log_failed(folder)
+    two = os.lstat(folder / mod.LOG_FAILED_NAME)
+    assert (one.st_ino, one.st_mtime_ns, one.st_size) != (two.st_ino, two.st_mtime_ns, two.st_size)
+
+
+# -- the corrupt-log archive policy ----------------------------------------------------------------------------
+
+
+def corrupt_files(folder: Path) -> list[Path]:
+    return sorted(folder.glob("log.jsonl.corrupt-*"))
+
+
+def record() -> dict[str, Any]:
+    return log_record("2026-01-01T00:00:00", "allow", "warn", None, False, "healthy", "")
+
+
+@pytest.mark.parametrize("bad", [b"\xff\npartial", b"\xff\n"], ids=["bad-tail", "fully-terminated"])
+def test_a_corrupt_log_is_kept_under_a_new_name_and_the_existing_archive_is_never_touched(
+    tmp_path: Path, bad: bytes
+) -> None:
+    tmp_path.chmod(0o700)
+    path = tmp_path / "log.jsonl"
+    path.write_bytes(bad)
+    path.chmod(0o600)
+    archive = tmp_path / "log.jsonl.1"
+    archive.write_bytes(b'{"older":"history"}\n')
+    append_log(path, record())
+    assert archive.read_bytes() == b'{"older":"history"}\n', "the only archive is preserved byte for byte"
+    [kept] = corrupt_files(tmp_path)
+    assert kept.read_bytes() == bad and stat.S_IMODE(kept.stat().st_mode) == 0o600
+    assert json.loads(path.read_text())["decision"] == "allow", "a fresh log was started"
+
+
+def test_at_most_five_corrupt_files_are_kept_and_the_oldest_go_first(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    for day in range(1, 8):
+        old = tmp_path / f"log.jsonl.corrupt-2025010{day}T000000-1"
+        old.write_bytes(b"x")
+        old.chmod(0o600)
+    path = tmp_path / "log.jsonl"
+    path.write_bytes(b"\xff\n")
+    path.chmod(0o600)
+    append_log(path, record())
+    names = [f.name for f in corrupt_files(tmp_path)]
+    assert len(names) == 5
+    assert "log.jsonl.corrupt-20250101T000000-1" not in names and "log.jsonl.corrupt-20250102T000000-1" not in names
+    assert "log.jsonl.corrupt-20250107T000000-1" in names

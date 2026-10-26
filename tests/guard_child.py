@@ -2,8 +2,11 @@
 """Run `safo hooks guard` as a real process for the wall-clock tests (support file, not a test).
 
 usage: guard_child.py MODE HOME AGENTS FIFO PAYLOAD_FILE
-  MODE fifo-load    the configuration load blocks on a FIFO with no writer (a read that cannot be interrupted)
-  MODE hang-append  the log append blocks for a minute, after the decision is out
+  MODE synthetic-wedge  the loader is replaced by a call that never returns (a wedged mount or kernel read)
+  MODE real-loader      the production loader, untouched (AGENTS may be a FIFO: refused at once)
+  MODE hang-append      the log append blocks for a minute, after the decision is out
+  MODE slow-pending / slow-first-notice / slow-marker-dir
+                        that one state-folder operation blocks for 30 s, before the decision is emitted
 The budget is scaled down to 3 s (GUARD_TIMEOUT_SECONDS), so a decision is due well inside 3 s.
 """
 
@@ -31,10 +34,20 @@ def hang(*a: object, **k: object) -> None:
     time.sleep(60)
 
 
-if mode == "fifo-load":
+def sleeps(*a: object, **k: object) -> None:
+    time.sleep(30)
+
+
+if mode == "synthetic-wedge":
     mod.__dict__["load_agents_for"] = blocked  # a runtime patch of the module attribute, in a test child
 elif mode == "hang-append":
     mod.__dict__["append_log"] = hang
+elif mode == "slow-pending":
+    mod.__dict__["log_failure_pending"] = sleeps
+elif mode == "slow-first-notice":
+    mod.__dict__["first_notice"] = sleeps
+elif mode == "slow-marker-dir":
+    mod.__dict__["marker_dir"] = sleeps
 code = main(
     ["hooks", "guard", "--agents", agents],
     env={"HOME": home, "PATH": ""},

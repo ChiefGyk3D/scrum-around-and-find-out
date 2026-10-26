@@ -27,10 +27,10 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from safo import gemini, geminibrief, guardlog, leadwait, output, tracking
 from safo.agentsfile import AgentsFile
@@ -95,6 +95,11 @@ LOG_FAILED_NAME = "log-failed"  # presence marker: the last best-effort log writ
 LOG_FAILED_NOTICE = "previous log write failed"
 LOG_MARKER_UNUSABLE = "log-failed marker unusable"  # a directory, FIFO, link or foreign file sat where the marker goes
 CONFIG_TIMEOUT_NOTICE = "budget exceeded: configuration load timed out, rules disabled"
+NOTICES_SKIPPED = "notices skipped: state folder slow"  # fixed text: learning it needs no filesystem call
+NOTICE_IO_CAP_SECONDS = 1.0  # first-notice flag and marker inspection together get at most this long before the emit
+NOTICE_IO_MIN_SECONDS = 0.25  # and at least this long, even when the clock is already past its limit
+_T = TypeVar("_T")
+Ident = tuple[int, int, int, int]  # st_dev, st_ino, st_mtime_ns, st_size: which marker this was when it was read
 CONFIG_MIN_WAIT_SECONDS = 0.25  # a load is always given this long, even when the clock is already past its deadline
 EMIT_FAILED_TEXT = "safo: the guard could not deliver its decision on standard output"
 EXIT_BLOCK = 2  # the host reads exit 2 from a PreToolUse hook as "block this call"
@@ -392,7 +397,7 @@ def emit_then_persist(
     data: dict[str, Any] | None,
     folder: Path | None,
     record: dict[str, Any],
-    clear_marker: bool = False,
+    clear_marker: Ident | None = None,
 ) -> None:
     """The one tail of every guard path. The decision (`data`, or nothing to say) is written and flushed FIRST. If that
     fails nothing else is done (no append, no second line); the caller turns it into the exit code. Otherwise the log
@@ -402,9 +407,9 @@ def emit_then_persist(
     if data is not None:
         if not emit(ctx, run, data):
             return
-        if clear_marker:  # its notice is in the line that was just delivered
+        if clear_marker is not None:  # its notice is in the line just delivered; clear that marker, not a newer one
             with contextlib.suppress(Exception):
-                clear_log_failure(folder)
+                clear_log_failure(folder, clear_marker)
     try:
         if folder is None:
             raise OSError("log unavailable")
@@ -451,89 +456,150 @@ def remove_marker(dfd: int) -> None:
         os.unlink(LOG_FAILED_NAME, dir_fd=dfd)
 
 
+def marker_ident(info: os.stat_result) -> Ident:
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+
+
 def write_log_failed(folder: Path | None) -> bool:
-    """Make the marker. Never blocks (O_NONBLOCK: a FIFO with no reader fails at once), never follows a link, and
-    checks the descriptor it got is a regular file of ours. Junk in the way is removed once and the open retried."""
+    """Record a failure. EVERY failure writes a fresh file (a new token, a new inode) and renames it over the marker, so
+    a newer failure always has a different identity from the one an older run read. The marker name itself is never
+    opened for writing (nothing to block on, no link followed); a directory in the way is removed once and the rename
+    retried."""
     if folder is not None:
         guardlog.ensure_dir(folder)  # a fresh install whose first append failed has no folder yet
     dfd = marker_dir(folder)
     try:
         for attempt in (0, 1):
-            flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            temp = f".{LOG_FAILED_NAME}.{os.urandom(6).hex()}"
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
             try:
-                fd = os.open(LOG_FAILED_NAME, flags, 0o600, dir_fd=dfd)
+                os.write(fd, f"{os.getpid()} {os.urandom(8).hex()}\n".encode())
+            finally:
+                os.close(fd)
+            try:
+                os.rename(temp, LOG_FAILED_NAME, src_dir_fd=dfd, dst_dir_fd=dfd)
+                return True
             except OSError:
-                fd = -1
-            if fd >= 0:
-                try:
-                    if sane_marker(os.fstat(fd)):
-                        return True
-                finally:
-                    os.close(fd)
-            if attempt:
-                return False
-            with contextlib.suppress(OSError):
-                remove_marker(dfd)
+                with contextlib.suppress(OSError):
+                    os.unlink(temp, dir_fd=dfd)
+                if attempt:
+                    return False
+                with contextlib.suppress(OSError):
+                    remove_marker(dfd)
         return False
     finally:
         os.close(dfd)
 
 
-def log_failure_pending(folder: Path | None) -> str | None:
-    """The notice for the marker, or None. A usable marker is LOG_FAILED_NOTICE and stays until a line carrying that
-    notice is delivered. Junk at its name (directory, FIFO, link, foreign or loose-mode file) is removed and reported
-    as LOG_MARKER_UNUSABLE (and on stderr), so it can neither hide nor fake the notice. The marker is same-user
-    writable like the rest of the state: it can only add a notice, never grant anything."""
+def log_failure_pending(folder: Path | None) -> tuple[str, Ident | None] | None:
+    """(notice, identity) for the marker, or None. A usable marker gives LOG_FAILED_NOTICE and its identity, read from
+    the descriptor it was opened by (O_NONBLOCK, no link followed); it stays until a line carrying that notice is
+    delivered, and then only that identity is cleared. Junk at its name (directory, FIFO, link, foreign or loose-mode
+    file) is removed, if it is still the thing that was seen, and reported as LOG_MARKER_UNUSABLE (and on stderr).
+    The marker is same-user writable like the rest of the state: it can only add a notice, never grant anything."""
     try:
         dfd = marker_dir(folder)
     except OSError:
         return None
     try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         try:
-            info = os.lstat(LOG_FAILED_NAME, dir_fd=dfd)
+            fd = os.open(LOG_FAILED_NAME, flags, dir_fd=dfd)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            fd = -1  # a link, or something that cannot be opened: judged by lstat below
+        try:
+            info = os.fstat(fd) if fd >= 0 else os.lstat(LOG_FAILED_NAME, dir_fd=dfd)
         except OSError:
             return None
+        finally:
+            if fd >= 0:
+                os.close(fd)
         if sane_marker(info):
-            return LOG_FAILED_NOTICE
+            return (LOG_FAILED_NOTICE, marker_ident(info))
         with contextlib.suppress(OSError):
-            remove_marker(dfd)
+            if marker_ident(os.lstat(LOG_FAILED_NAME, dir_fd=dfd)) == marker_ident(info) or fd < 0:
+                remove_marker(dfd)
         stderr_line("safo: " + LOG_MARKER_UNUSABLE)
-        return LOG_MARKER_UNUSABLE
+        return (LOG_MARKER_UNUSABLE, None)
     finally:
         os.close(dfd)
 
 
-def clear_log_failure(folder: Path | None) -> None:
+def clear_log_failure(folder: Path | None, seen: Ident) -> None:
+    """Remove the marker only if it is still the one that was read: a failure written since has another identity and
+    stays for the next dispatch to report."""
     dfd = marker_dir(folder)
     try:
         with contextlib.suppress(OSError):
-            os.unlink(LOG_FAILED_NAME, dir_fd=dfd)
+            if marker_ident(os.lstat(LOG_FAILED_NAME, dir_fd=dfd)) == seen:
+                os.unlink(LOG_FAILED_NAME, dir_fd=dfd)
     finally:
         os.close(dfd)
 
 
-def load_config(ctx: LocalContext, args: argparse.Namespace, deadline: float) -> AgentsFile:
-    """Load agents.yaml under a wall-clock bound. A read can block with no way to interrupt it (a FIFO, a dead
-    network mount), so the load runs in a daemon worker thread that is joined for the time left and ABANDONED if it is
-    still going: the guard goes on without a configuration and the thread dies with the process. Threads work the same
-    on Linux and macOS and in any thread; a signal timer would not. The limit: an abandoned load keeps its blocked
-    read until the process exits (it only reads), and a load is always given CONFIG_MIN_WAIT_SECONDS."""
-    box: list[tuple[AgentsFile | None, BaseException | None]] = []
+def run_bounded(work: Callable[[], _T], timeout: float) -> tuple[bool, _T | None]:
+    """Run `work` in a daemon thread and wait at most `timeout` seconds. (True, result), or (False, None), thread
+    ABANDONED (it dies with the process); an exception in `work` is re-raised. This is the one way the guard bounds
+    filesystem calls that cannot be interrupted (a wedged mount, a kernel read). Threads work the same on Linux and
+    macOS and in any thread; a signal timer would not."""
+    box: list[tuple[_T | None, BaseException | None]] = []
 
-    def work() -> None:
+    def target() -> None:
         try:
-            box.append((load_agents_for(ctx, args), None))
+            box.append((work(), None))
         except BaseException as error:
             box.append((None, error))
 
-    worker = threading.Thread(target=work, daemon=True, name="safo-config-load")
+    worker = threading.Thread(target=target, daemon=True, name="safo-bounded")
     worker.start()
-    worker.join(max(CONFIG_MIN_WAIT_SECONDS, deadline - time.monotonic()))
+    worker.join(max(0.0, timeout))
     if worker.is_alive() or not box:
+        return False, None
+    value, error = box[0]
+    if error is not None:
+        raise error
+    return True, value
+
+
+@dataclass
+class Seen:
+    """What the notice I/O found: the first-notice flag, the marker (notice, identity), or that it was skipped."""
+
+    first: bool = False
+    marker: tuple[str, Ident | None] | None = None
+    skipped: bool = False
+
+
+def read_notices(folder: Path | None, path: Path | None, wants_first: bool, run: Run) -> Seen:
+    """The two state-folder operations that sit between a computed decision and its emit, under a bound: the
+    first-notice flag (only when the probe is not healthy) and the marker inspection. Neither may hold a deny back
+    past NOTICE_IO_CAP_SECONDS (and not past the hard limit, but never under NOTICE_IO_MIN_SECONDS). If they do not
+    finish they are skipped: the decision goes out without those notices, with NOTICES_SKIPPED in the line, and the
+    flag and the marker are left as they were."""
+    hard = run.hard if run.hard is not None else time.monotonic() + NOTICE_IO_CAP_SECONDS + 0.5
+    budget = max(NOTICE_IO_MIN_SECONDS, min(NOTICE_IO_CAP_SECONDS, hard - time.monotonic() - 0.5))
+
+    def work() -> Seen:
+        first = bool(wants_first and (path is None or first_notice(path)))
+        return Seen(first, log_failure_pending(folder))
+
+    done, result = run_bounded(work, budget)
+    return result if done and result is not None else Seen(skipped=True)
+
+
+def load_config(ctx: LocalContext, args: argparse.Namespace, deadline: float) -> AgentsFile:
+    """Load agents.yaml under a wall-clock bound (see run_bounded): the load is joined for the time left (at least
+    CONFIG_MIN_WAIT_SECONDS) and ABANDONED if it is still going; the guard goes on without a configuration. The limit:
+    an abandoned load keeps its blocked read until the process exits (it only reads). The realistic cause is a wedged
+    filesystem or kernel read: the production reader opens with O_NONBLOCK and refuses a non-regular file, so a planted
+    FIFO is rejected at once and does not reach this timeout."""
+    done, doc = run_bounded(
+        lambda: load_agents_for(ctx, args), max(CONFIG_MIN_WAIT_SECONDS, deadline - time.monotonic())
+    )
+    if not done or doc is None:
         raise TimeoutError("configuration load exceeded the budget")
-    doc, error = box[0]
-    if error is not None or doc is None:
-        raise error or TimeoutError("no configuration")
     return doc
 
 
@@ -568,6 +634,7 @@ def finish(
     notices: list[tuple[str, str]],
     record: dict[str, Any],
     note: str = "",
+    clear: Ident | None = None,
 ) -> None:
     """The shared tail of the Agent and Bash paths: build the one line (the decision plus every applicable notice, in
     priority order) and hand it to emit_then_persist. `notices` are (visible text, log code)."""
@@ -582,8 +649,7 @@ def finish(
     elif note:
         context = data["hookSpecificOutput"].get("additionalContext")
         data["hookSpecificOutput"]["additionalContext"] = f"{context} {note}" if context else note
-    marker = any(text in (LOG_FAILED_NOTICE, LOG_MARKER_UNUSABLE) for text, _ in notices)
-    emit_then_persist(ctx, run, data if out_text or notices or note else None, folder, record, marker)
+    emit_then_persist(ctx, run, data if out_text or notices or note else None, folder, record, clear)
 
 
 def hook_event(argv: Sequence[str] | None) -> str | None:
@@ -836,15 +902,17 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         raise
     decision = decide(verdict, mode)
     # One visible notice per session for a probe that cannot be trusted; every dispatch is still logged with its health.
-    notice = health != "healthy" and (path is None or first_notice(path))
-    marker = log_failure_pending(folder)
+    seen = read_notices(folder, path, health != "healthy", run)  # bounded: nothing here can hold the deny back
+    notice, marker = seen.first, seen.marker
     # Every applicable notice goes in the line, highest priority first; the marker is cleared only once its notice is
     # in a delivered line, so a higher-priority notice never consumes it.
     notices: list[tuple[str, str]] = []
     if mode_state != "healthy":
         notices.append(("mode", "mode"))
+    if seen.skipped:
+        notices.append((NOTICES_SKIPPED, "timeout"))
     if marker:
-        notices.append((marker, "log-write"))
+        notices.append((marker[0], "log-write"))
     if over_budget:
         notices.append((BUDGET_NOTICE, "timeout"))
     if health != "healthy" and (notice or notices):
@@ -862,7 +930,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     record = log_record(
         when, decision, mode, verdict, reachable, "degraded" if mode_state != "healthy" else health, code
     )
-    finish(ctx, run, folder, output, notices, record, note)
+    finish(ctx, run, folder, output, notices, record, note, marker[1] if marker else None)
 
 
 def lead_wait(
@@ -905,17 +973,20 @@ def lead_wait(
     )
     verdict = Verdict((LEAD_WAITS,), (leadwait.message(kinds),), "", False, False)
     decision = "allow" if exempt else decide(verdict, effective)
-    marker = log_failure_pending(folder)
+    seen = read_notices(folder, path, False, run)  # bounded: nothing here can hold the deny back
+    marker = seen.marker
     notices: list[tuple[str, str]] = []
     if mode_state != "healthy":
         notices.append(("mode", "mode"))
+    if seen.skipped:
+        notices.append((NOTICES_SKIPPED, "timeout"))
     if marker:
-        notices.append((marker, "log-write"))
+        notices.append((marker[0], "log-write"))
     output = guard_output(decision, verdict, "Delegate the wait; do not hold the lead's thread.")
     when = ctx.now.strftime("%Y-%m-%dT%H:%M:%S")
     health = "degraded" if mode_state != "healthy" else "healthy"
     record = log_record(when, decision, effective, verdict, False, health, notices[0][1] if notices else "")
-    finish(ctx, run, folder, output, notices, record)
+    finish(ctx, run, folder, output, notices, record, "", marker[1] if marker else None)
 
 
 def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:

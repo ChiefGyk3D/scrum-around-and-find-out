@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import datetime as dt
 import hashlib
 import json
 import os
@@ -502,6 +503,26 @@ def log_record(
     }
 
 
+CORRUPT_KEEP = 5  # corrupt logs kept beside the log; the oldest beyond this are deleted
+
+
+def quarantine_log(path: Path) -> None:
+    """Move a log that is not valid UTF-8 to `<log>.corrupt-<UTC timestamp>-<pid>` (0600, same folder). It never touches
+    `<log>.1`, the real archive. At most CORRUPT_KEEP such files are kept; the oldest names go first."""
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S")
+    target = path.with_name(f"{path.name}.corrupt-{stamp}-{os.getpid()}")
+    number = 0
+    while os.path.lexists(target):  # the same second and process: never replace an earlier one
+        number += 1
+        target = path.with_name(f"{path.name}.corrupt-{stamp}-{os.getpid()}.{number}")
+    os.rename(path, target)
+    target.chmod(0o600)
+    kept = sorted(p for p in path.parent.glob(path.name + ".corrupt-*") if p.is_file() and not p.is_symlink())
+    for extra in kept[: max(0, len(kept) - CORRUPT_KEEP)]:
+        with contextlib.suppress(OSError):
+            extra.unlink()
+
+
 def append_log(
     path: Path, record: dict[str, Any], limit: int = LOG_LIMIT_BYTES, lock_timeout: float = APPEND_LOCK_TIMEOUT
 ) -> None:
@@ -513,19 +534,17 @@ def append_log(
             old = bounded_read(path, FILE_CAP)
         except FileNotFoundError:
             old = b""
+        # Retained bytes that are not valid UTF-8, anywhere (a complete line or the incomplete tail), are corruption:
+        # keep them under a new name, never over the archive, and start a fresh log.
+        try:
+            old.decode("utf-8")
+        except UnicodeDecodeError:
+            quarantine_log(path)
+            old = b""
         # Recover only the incomplete tail; preserve complete retained records.
         complete = old[: old.rfind(b"\n") + 1]
         if complete != old:
-            try:
-                text = complete.decode("utf-8")
-            except UnicodeDecodeError:
-                # Undecodable retained bytes are corruption, not something to repair: keep them in the one private
-                # archive (replacing an older archive, as a size rotation does) and start a fresh log.
-                os.replace(path, path.with_name(path.name + ".1"))
-                path.with_name(path.name + ".1").chmod(0o600)
-                complete = b""
-            else:
-                write_text(path, text)
+            write_text(path, complete.decode("utf-8"))
         if len(complete) + len(raw) > limit:
             archive = path.with_name(path.name + ".1")
             os.replace(path, archive)  # one private archive; oldest retained history is deliberately discarded

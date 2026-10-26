@@ -688,7 +688,8 @@ def test_a_guard_out_of_time_denies_in_block_mode_and_skips_the_append_and_the_n
     # New contract: out of time, the append is skipped (it is never stretched past the hook's budget), and the
     # next dispatch reports the gap through the marker.
     assert read_log(_private_home) == [], "the decision is printed; the log write was skipped, not attempted late"
-    assert hooks_mode.log_failure_pending(state_folder(_private_home)) == hooks_mode.LOG_FAILED_NOTICE
+    pending = hooks_mode.log_failure_pending(state_folder(_private_home))
+    assert pending is not None and pending[0] == hooks_mode.LOG_FAILED_NOTICE
 
 
 def test_the_shipped_agents_file_exempts_nothing() -> None:
