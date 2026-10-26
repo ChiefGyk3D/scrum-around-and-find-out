@@ -213,6 +213,18 @@ and again at connect time. A name is resolved once, every address it returns is 
 checked address with the original `Host` header, so a DNS answer that changes between the check and the connection has
 no effect.
 
+## Log append wait
+
+`SAFO_APPEND_LOCK_TIMEOUT` is how many seconds a log append waits for another writer's lock. Default `3.0`; the value
+is read once when `safo` starts. A value that is not a number, not finite (`nan`, `inf`, `1e999`) or not above 0 is
+ignored: the default is used and one line naming the variable goes to stderr (stdout stays the hook's JSON). A value above
+the maximum of `5` is clamped to 5. Nothing in this setting can make the guard fail or hang.
+
+Budget: the host gives the guard 10 s. Its lookups stop 2 s earlier, so in the worst case (a slow re-probe plus a held
+lock) a 3 s wait can run past the host's limit. That is accepted: a lock is held for milliseconds, a log failure already
+lets the work through, and the 5 s clamp keeps the wait under the host budget. The other lock users (mode, probe state)
+keep their 0.5 s wait.
+
 ## Known limits
 
 - The lead-never-waits rule is a tokenizer, not a shell parser. It is a speed bump against accidents, not a sandbox:
