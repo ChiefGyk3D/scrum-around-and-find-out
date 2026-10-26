@@ -1319,6 +1319,10 @@ def test_l2_the_hook_passes_its_deadline_to_the_scan(
     from safo.modes import hooks as hooks_mode
 
     monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)  # the whole budget is already gone
+
+    monkeypatch.setattr(
+        hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
+    )  # the subject is the guard deadline, not the load floor on a busy machine
     set_mode(_private_home, "block")
     out = guard(_private_home, agents, bash("sleep 1"))[1]
     reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
@@ -1512,6 +1516,10 @@ def test_r4_the_hook_does_not_honor_a_marker_after_its_deadline(
     from safo.modes import hooks as hooks_mode
 
     monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)
+
+    monkeypatch.setattr(
+        hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
+    )  # the subject is the guard deadline, not the load floor on a busy machine
     assert denied(_private_home, agents, f"sleep 60 # lead-wait: ok - {REASON}")
 
 
@@ -1618,6 +1626,9 @@ def test_r4_neither_the_hook_output_nor_the_log_carries_the_command_for_any_kind
     command = KIND_COMMANDS[kind]
     if kind == "unscannable-timeout":
         monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)
+        monkeypatch.setattr(
+            hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
+        )  # the subject is the guard deadline, not the load floor on a busy machine
     else:
         assert kind in leadwait.find_waits(command, THRESHOLD), kind
     set_mode(_private_home, mode)
