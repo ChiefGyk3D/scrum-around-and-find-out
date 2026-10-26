@@ -88,7 +88,7 @@ else has. Two controls, both offline:
 1. Ignore the path in every repository that agents work in: add `.claude/worktrees/` to `.gitignore`. Nothing that
    writes a `.gitignore` for you does this yet (`scripts/apply-baseline.sh` sets repository settings, not files), so
    adopt it by hand.
-2. Fail a change that adds a gitlink anywhere under `.claude/`. [scripts/check-claude-gitlinks.sh](../scripts/check-claude-gitlinks.sh)
+2. Fail a change that adds a gitlink anywhere under `.claude/`. `scripts/check-claude-gitlinks.sh`
    reads the index of the checkout it runs in and exits 1, naming each path, when it finds one. A submodule outside
    `.claude/` is not flagged. With `--require-ignore` it also exits 1 when `.claude/worktrees/` is not ignored. It exits
    2 outside a git checkout, so a missing checkout is never a pass. Copy the script into a repository, or call it from a
