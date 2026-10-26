@@ -18,7 +18,11 @@ pass. GitHub shows protection and rulesets in full only to a token that can admi
 Administration: read permission of an App; `repo` scope of a user token), and GraphQL answers "none" rather than
 "forbidden" to a token that cannot. So an empty answer counts as "unprotected" only when the token reports ADMIN on
 the repository; otherwise it is "cannot tell" (exit 2). A rule that is found is trusted whatever the permission, except
-that a rule someone can bypass does not hold the gate.
+that a rule someone can bypass does not hold the gate. The bypass data is the exception to that: an empty bypass list or
+a zero allowance count means "nobody" only from an ADMIN token, because GitHub may hide it from a lower one.
+
+The required check must also come from the CI app (`rules.gate_check_app_id`): a check with no source restriction, or
+tied to another app, is a finding, because any app can post a status with that name.
 
 Where this module cannot be sure what GitHub means, it says "cannot tell" and the audit exits 2;
 it never guesses a pass.
@@ -38,6 +42,8 @@ from safo.errors import ApiError, AuthError, MalformedDataError, NotFoundError
 from safo.graphql import JSON, Client
 from safo.schema import LOGIN, REPO_NAME, Board
 
+GITHUB_ACTIONS_APP_ID = 15368  # the default for rules.gate_check_app_id
+
 # Lists are read 40 at a time and a longer one is "cannot tell" (never paginated: no repository has that many).
 Q_BRANCH_GATE = """query RepoBranchGate($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -48,7 +54,7 @@ Q_BRANCH_GATE = """query RepoBranchGate($owner: String!, $name: String!) {
       name
       branchProtectionRule {
         requiresStatusChecks
-        requiredStatusChecks { context }
+        requiredStatusChecks { context app { databaseId } }
         allowsForcePushes
         isAdminEnforced
         bypassForcePushAllowances(first: 1) { totalCount }
@@ -67,7 +73,7 @@ Q_BRANCH_GATE = """query RepoBranchGate($owner: String!, $name: String!) {
           totalCount
           nodes {
             type
-            parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } }
+            parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context integrationId } } }
           }
         }
       }
@@ -226,6 +232,18 @@ def names_gate(context: str, gate: str) -> bool:
     return context == gate or context.endswith(f" / {gate}")
 
 
+def _source(checks: list[tuple[str, int | None]], gate: str, app_id: int) -> tuple[bool, str]:
+    """(the gate check is required from `app_id`, else why the entries that name it do not count; "" when none does)."""
+    named = [app for context, app in checks if names_gate(context, gate)]
+    if app_id in named:
+        return True, ""
+    if not named:
+        return False, ""
+    if None in named:
+        return False, "accepts it from any app"
+    return False, "takes it from " + " and ".join(f"app {a}" for a in dict.fromkeys(named))
+
+
 def _s(text: object) -> str:
     """GitHub-supplied or exception text made safe for one log line (the CLI's own escaping); idempotent."""
     return output.line(str(text))
@@ -294,8 +312,42 @@ def _branch_name(value: Any) -> str:
     return name
 
 
-def _contexts(checks: Any, what: str) -> list[str]:
-    return [_text(_obj(c, what).get("context"), f"{what} context") for c in _list(checks, what)]
+# Where a required check may come from. GitHub Actions is app 15368 (rules.gate_check_app_id). A check with no source
+# restriction is read as `app: null` (classic) or `integrationId: null` (rulesets); -1 is the REST convention for "any
+# source" and is read the same way. Checked against GraphQL introspection 2026-10-26: `RequiredStatusCheckDescription`
+# has `app: App` (nullable) and `context: String!`; `StatusCheckConfiguration` has `integrationId: Int` (nullable) and
+# `context: String!`; `App.databaseId` is a nullable `Int`. Absent, mistyped or non-positive is cannot tell.
+ANY_SOURCE = None
+
+
+def _app_id(value: Any, what: str) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MalformedDataError(f"{what}: GitHub's answer lacks the app id")
+    if value == -1:
+        return ANY_SOURCE
+    if value < 1:
+        raise MalformedDataError(f"{what}: GitHub's answer lacks the app id")
+    return value
+
+
+def _checks(checks: Any, what: str, ruleset: bool) -> list[tuple[str, int | None]]:
+    """(context, the app it is pinned to or None for any source) of each required check, every field typed."""
+    out: list[tuple[str, int | None]] = []
+    for c in _list(checks, what):
+        c = _obj(c, what)
+        context = _text(c.get("context"), f"{what} context")
+        if ruleset:
+            if "integrationId" not in c:
+                raise MalformedDataError(f"{what}: GitHub's answer lacks integrationId")
+            raw = c["integrationId"]
+            app = ANY_SOURCE if raw is None else _app_id(raw, f"{what} integrationId")
+        else:
+            if "app" not in c:
+                raise MalformedDataError(f"{what}: GitHub's answer lacks app")
+            raw = c["app"]
+            app = ANY_SOURCE if raw is None else _app_id(_obj(raw, f"{what} app").get("databaseId"), f"{what} app")
+        out.append((context, app))
+    return out
 
 
 def _applies(rs: JSON, branch: str) -> bool:
@@ -370,14 +422,14 @@ def _validate_ruleset(rs: JSON) -> None:
             raise MalformedDataError("rule parameters: GitHub's answer lacks them")
         params = rule["parameters"]
         if kind == "REQUIRED_STATUS_CHECKS":
-            _contexts(_obj(params, "rule parameters").get("requiredStatusChecks"), "requiredStatusChecks")
+            _checks(_obj(params, "rule parameters").get("requiredStatusChecks"), "requiredStatusChecks", True)
         elif params is not None:
             _obj(params, "rule parameters")
 
 
 def _validate_classic(classic: JSON) -> None:
     _bool(classic.get("requiresStatusChecks"), "requiresStatusChecks")
-    _contexts(classic.get("requiredStatusChecks"), "requiredStatusChecks")
+    _checks(classic.get("requiredStatusChecks"), "requiredStatusChecks", False)
     _bool(classic.get("allowsForcePushes"), "allowsForcePushes")
     _bool(classic.get("isAdminEnforced"), "isAdminEnforced")
     _allowance_count(classic, "bypassForcePushAllowances")
@@ -420,10 +472,20 @@ class Source:
     admin_open: bool = False  # `bypass` is None only because administrators are accepted as an exception
 
 
-def _bypass_actors(rs: JSON) -> str | None:
+def _hidden(what: str, permission: str) -> Unclear:
+    return Unclear(
+        f"{what} is empty, but GitHub shows bypass actors and allowances only to a token that can administer the "
+        f"repository, and this one reports {permission}, not ADMIN, so a bypass may be hidden ({NEEDS_ADMIN})"
+    )
+
+
+def _bypass_actors(rs: JSON, permission: str) -> str | None:
+    """How the ruleset can be bypassed, None when nobody can. An empty list is believed only from an ADMIN token."""
     name = _s(rs.get("name"))
     nodes = _connection(rs.get("bypassActors"), f"ruleset {name!r} bypassActors")
     if not nodes:
+        if permission != "ADMIN":
+            raise _hidden(f"ruleset {name!r} lists no bypass actors: the list", permission)
         return None
     modes = sorted({_s(_text(n.get("bypassMode"), "bypassMode")) for n in nodes})
     plural = "" if len(nodes) == 1 else "s"
@@ -441,7 +503,13 @@ def _holds(sources: list[Source]) -> tuple[bool, list[str]]:
 
 
 def judge_repository(
-    raw: JSON, gate: str, forbid_force: bool, *, admins_accepted: bool = False, requested: str | None = None
+    raw: JSON,
+    gate: str,
+    forbid_force: bool,
+    *,
+    admins_accepted: bool = False,
+    requested: str | None = None,
+    app_id: int = GITHUB_ACTIONS_APP_ID,
 ) -> GateResult:
     """Pure: one repository's facts in GitHub's GraphQL shape, the verdict out.
 
@@ -452,14 +520,16 @@ def judge_repository(
     try:
         repo = _obj(raw, "repository")
         _validate_repository(repo, requested)
-        return _judge(repo, gate, forbid_force, admins_accepted, res)
+        return _judge(repo, gate, forbid_force, admins_accepted, app_id, res)
     except Unclear as err:
         res.problems = []
         res.unknown = _s(f"default branch {res.branch!r}: {err}")
         return res
 
 
-def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res: GateResult) -> GateResult:
+def _judge(
+    repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, app_id: int, res: GateResult
+) -> GateResult:
     permission = _text(repo.get("viewerPermission"), "viewerPermission")
     if repo.get("isArchived") is True:
         res.note = (
@@ -479,6 +549,7 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
 
     check_sources: list[Source] = []
     force_sources: list[Source] = []
+    wrong_source: list[str] = []  # the gate check is required, but not from the CI app
     protected = False
     classic = ref["branchProtectionRule"]
     if classic is not None:
@@ -490,31 +561,38 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
         allowances = _allowance_count(classic, "bypassForcePushAllowances")
         _allowance_count(classic, "bypassPullRequestAllowances")
         admin_open = classic["isAdminEnforced"] is False and admins_accepted
-        if classic["requiresStatusChecks"] is True and any(
-            names_gate(c, gate) for c in _contexts(classic["requiredStatusChecks"], "requiredStatusChecks")
-        ):
-            check_sources.append(Source("classic", bypass, admin_open))
+        if classic["requiresStatusChecks"] is True:
+            checks = _checks(classic["requiredStatusChecks"], "requiredStatusChecks", False)
+            pinned, why = _source(checks, gate, app_id)
+            if pinned:
+                check_sources.append(Source("classic", bypass, admin_open))
+            elif why:
+                wrong_source.append("classic protection " + why)
         if classic.get("allowsForcePushes") is False:
             reasons = [bypass] if bypass else []
             if allowances:
                 reasons.append(f"{allowances} actor{'' if allowances == 1 else 's'} may bypass the block")
+            elif forbid_force and not reasons and permission != "ADMIN":
+                raise _hidden("the force-push bypass allowance count of 0", permission)
             force_sources.append(Source("classic", "; ".join(reasons) or None, admin_open))
     for rs in nodes:
         if not _applies(rs, branch):
             continue
         listed = _connection(rs.get("rules"), f"ruleset {_s(rs.get('name'))!r} rules")
         protected = True
-        bypass = _bypass_actors(rs)
+        rs_name = _s(rs.get("name"))
         for rule in listed:
             kind = _text(rule.get("type"), "rule type")
             if kind == "REQUIRED_STATUS_CHECKS":
                 params = _obj(rule.get("parameters"), "rule parameters")
-                if any(
-                    names_gate(c, gate) for c in _contexts(params.get("requiredStatusChecks"), "requiredStatusChecks")
-                ):
-                    check_sources.append(Source(_s(rs.get("name")), bypass))
+                checks = _checks(params.get("requiredStatusChecks"), "requiredStatusChecks", True)
+                pinned, why = _source(checks, gate, app_id)
+                if pinned:
+                    check_sources.append(Source(rs_name, _bypass_actors(rs, permission)))
+                elif why:
+                    wrong_source.append(f"ruleset {rs_name!r} " + why)
             elif kind == "NON_FAST_FORWARD":
-                force_sources.append(Source(_s(rs.get("name")), bypass))
+                force_sources.append(Source(rs_name, _bypass_actors(rs, permission)))
 
     if not protected:
         if permission != "ADMIN":
@@ -524,7 +602,10 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
     clauses: list[tuple[str, list[str]]] = []  # ("text", []), or ("check" | "force", the ways round it)
     if gate:
         held, ways = _holds(check_sources)
-        if not check_sources:
+        if not check_sources and wrong_source:
+            where = "; ".join(wrong_source)
+            clauses.append((f"is protected but does not require the check {gate!r} from app {app_id} ({where})", []))
+        elif not check_sources:
             clauses.append((f"is protected but does not require the check {gate!r}", []))
         elif not held:
             clauses.append(("check", list(dict.fromkeys(ways))))
@@ -612,6 +693,7 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
                 rules.gate_forbid_force_push,
                 admins_accepted=not rules.gate_require_admin_enforced or name.lower() in admins,
                 requested=name,
+                app_id=rules.gate_check_app_id,
             )
         except NotFoundError:
             unknown.append(

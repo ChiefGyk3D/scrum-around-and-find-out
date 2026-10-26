@@ -18,6 +18,7 @@ from safo.schema import Board, Rules
 from world import build_world, load_test_board, make_context
 
 WIDGETS = "acme/widgets"
+ACTIONS = 15368  # GitHub Actions' app id, the default for rules.gate_check_app_id
 
 
 @pytest.fixture(autouse=True)
@@ -26,10 +27,11 @@ def _gate_sends_no_mutations(fake: FakeGitHub) -> Iterator[None]:
     assert fake.mutations == [], "the gate read must never mutate"
 
 
-def classic(*contexts: str, force: bool = False) -> dict[str, Any]:
+def classic(*contexts: str, force: bool = False, app: int | None = ACTIONS) -> dict[str, Any]:
+    """A classic rule; `app` is the app each required check is pinned to (None: any source)."""
     return {
         "requiresStatusChecks": bool(contexts),
-        "requiredStatusChecks": [{"context": c} for c in contexts],
+        "requiredStatusChecks": [{"context": c, "app": None if app is None else {"databaseId": app}} for c in contexts],
         "allowsForcePushes": force,
         "isAdminEnforced": True,
         "bypassForcePushAllowances": {"totalCount": 0},
@@ -44,13 +46,17 @@ def ruleset(
     enforcement: str = "ACTIVE",
     target: str = "BRANCH",
     no_force: bool = True,
+    integration: int | None = ACTIONS,
 ) -> dict[str, Any]:
+    """A ruleset; `integration` is the integration id each required check is pinned to (None: any source)."""
     rules: list[dict[str, Any]] = []
     if contexts:
         rules.append(
             {
                 "type": "REQUIRED_STATUS_CHECKS",
-                "parameters": {"requiredStatusChecks": [{"context": c} for c in contexts]},
+                "parameters": {
+                    "requiredStatusChecks": [{"context": c, "integrationId": integration} for c in contexts]
+                },
             }
         )
     if no_force:
@@ -270,11 +276,16 @@ def test_an_empty_answer_without_admin_is_cannot_tell_but_with_admin_is_unprotec
     assert code == 1 and lines(text, WIDGETS)
 
 
-def test_a_positive_read_needs_no_admin(fake: FakeGitHub, client: Client) -> None:
+def test_a_positive_finding_needs_no_admin_but_a_clean_pass_does(fake: FakeGitHub, client: Client) -> None:
+    """A bypass that is listed is evidence whoever reads it; "no bypass" is believed only from an ADMIN token (#180)."""
     build_world(fake)
     repo(fake).viewer_permission = "READ"
-    code, _ = gate(fake, client)
-    assert code == 0
+    assert gate(fake, client)[0] == 2
+    repo(fake).protection = classic("CI green") | {"bypassForcePushAllowances": {"totalCount": 1}}
+    assert gate(fake, client)[0] == 1
+    repo(fake).viewer_permission = "ADMIN"
+    repo(fake).protection = classic("CI green")
+    assert gate(fake, client)[0] == 0
 
 
 def test_an_unknown_outranks_a_finding_in_the_exit_code(fake: FakeGitHub, client: Client) -> None:

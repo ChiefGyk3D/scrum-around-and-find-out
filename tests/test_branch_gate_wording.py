@@ -17,7 +17,7 @@ REPO = r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
 FINDING = re.compile(
     rf"^DRIFT   NO-GATE {REPO}: default branch '[^']+' "
     r"(has no branch protection and no active ruleset"
-    r"|is protected but does not require the check '[^']+'"
+    r"|is protected but does not require the check '[^']+'( from app [0-9]+ \(.+\))?"
     r"|requires the check '[^']+'(, but it can be bypassed \(.+\)"
     r"| and blocks force pushes, but both can be bypassed \(.+\))"
     r"|blocks force pushes, but it can be bypassed \(.+\)"

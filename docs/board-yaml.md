@@ -87,6 +87,7 @@ filter is set in a second call. An existing view with another layout is refused;
 | `gate_exempt_repos` | none | `owner/name` list, each entry listed in `repositories`, that is not evaluated for the gate; the audit prints a `NOTE` for each |
 | `gate_require_admin_enforced` | `false` | `true` also reports a classic protection rule that does not apply to administrators (`enforce_admins` off). Off by default because the shipped baseline (`scripts/apply-baseline.sh`) sets `enforce_admins` to false; a repository that is gated only for non-administrators then gets a `NOTE` |
 | `gate_admin_exempt_repos` | none | With `gate_require_admin_enforced` on: `owner/name` list, each entry listed in `repositories`, where administrators may bypass, accepted |
+| `gate_check_app_id` | `15368` | The app (GitHub App id, a positive integer) the gate check must be pinned to; `15368` is GitHub Actions. A required check with no source restriction, or tied to another app, can be satisfied by an app other than your CI and is reported by the [branch gate](no-hidden-work.md#the-branch-gate). Set it to your CI app's id if it is not GitHub Actions |
 
 Every status name must be an option of the status field; `safo` checks that against `fields` when it loads the file and
 against the live project before it changes anything.

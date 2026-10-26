@@ -143,7 +143,7 @@ def test_viewer_permission_must_be_one_of_githubs_values(fake: FakeGitHub, clien
 
 @pytest.mark.parametrize("good", ["ADMIN", "MAINTAIN", "WRITE", "TRIAGE", "READ"])
 def test_each_documented_permission_is_accepted(fake: FakeGitHub, client: Client, good: str) -> None:
-    assert exit_code(fake, client, set_path(clean_raw(), ["viewerPermission"], good)) == 0
+    assert exit_code(fake, client, permitted(good)) == (0 if good == "ADMIN" else 1)
 
 
 def disabled(**changes: Any) -> dict[str, Any]:
@@ -353,7 +353,16 @@ def test_a_ruleset_of_another_target_is_never_the_only_source_of_the_gate(
 @pytest.mark.parametrize("good", ["ADMIN", "MAINTAIN", "WRITE", "TRIAGE_PLUS", "TRIAGE", "READ"])
 def test_each_permission_in_githubs_schema_is_accepted(fake: FakeGitHub, client: Client, good: str) -> None:
     """Checked against RepositoryPermission by read-only introspection on 2026-10-26."""
-    assert exit_code(fake, client, set_path(clean_raw(), ["viewerPermission"], good)) == 0
+    assert exit_code(fake, client, permitted(good)) == (0 if good == "ADMIN" else 1)
+
+
+def permitted(permission: str) -> dict[str, Any]:
+    """The clean answer read with `permission`; below ADMIN an empty bypass list is not believed, so one actor is listed
+    (a finding, which shows the permission value itself was accepted)."""
+    raw = set_path(clean_raw(), ["viewerPermission"], permission)
+    if permission != "ADMIN":
+        raw["rulesets"]["nodes"][0]["bypassActors"] = {"totalCount": 1, "nodes": [{"bypassMode": "ALWAYS"}]}
+    return raw
 
 
 def test_none_is_not_a_repository_permission_value(fake: FakeGitHub, client: Client) -> None:

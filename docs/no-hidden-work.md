@@ -82,7 +82,13 @@ DRIFT   NO-GATE acme/tools: default branch 'main' requires the check 'CI green' 
 A ruleset counts when it is active (not disabled, not evaluate-only), targets branches, and its include patterns match the
 default branch without an exclude pattern removing it. A required check matches by its own name or after a workflow
 prefix: `CI green` matches `ci / CI green` and `shell / CI green`, which are the names `scripts/apply-baseline.sh`
-requires. Force pushes are blocked by a classic rule that disallows them or a ruleset with the non-fast-forward rule.
+requires. The check must also come from the CI app (`rules.gate_check_app_id`, default 15368, GitHub Actions): a required
+check with no source restriction ("any app") can be satisfied by any app that posts a status with that name, and one tied
+to another app is not your CI, so both are reported (`... does not require the check 'CI green' from app 15368 (classic
+protection accepts it from any app)`). A name from another source that merely looks like the gate (`evil / CI green`) is
+never credited unless it is pinned to the CI app. Note that `scripts/apply-baseline.sh` omits `app_id`, which makes GitHub
+pick the app that most recently reported the check, so a repository set up that way is only as pinned as that choice; pin it
+explicitly. Force pushes are blocked by a classic rule that disallows them or a ruleset with the non-fast-forward rule.
 A rule that someone can get around does not hold the gate: a ruleset with any bypass actor, a force-push bypass allowance,
 and (only when asked for, see below) a classic rule that does not apply to administrators. One rule nobody can bypass is
 enough.
@@ -94,6 +100,7 @@ rules:
   gate_exempt_repos: []               # owner/name list, each listed in repositories, not evaluated for the gate
   gate_require_admin_enforced: false  # true also reports a rule that does not apply to administrators
   gate_admin_exempt_repos: []         # with the line above on: owner/name list where that is accepted
+  gate_check_app_id: 15368            # the app the gate check must be pinned to (15368: GitHub Actions)
 ```
 
 The rule applies only to repositories listed in `board.yaml`. It is on by default with `CI green`, because it is the
@@ -178,7 +185,9 @@ for a GitHub App the **Administration: read** repository permission, for a user 
 Issues permissions the rest of the audit uses are not enough, and the token may well lack Administration: read. Without it
 GitHub answers "none" instead of "forbidden", so the audit never reads an empty answer as "unprotected" unless the token
 reports ADMIN on the repository; otherwise, and on any refused or failed read, it prints `UNKNOWN NO-GATE ...` naming the
-permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero; only an integer `0` means none. Reading it reliably needs `viewerPermission` ADMIN. Cannot tell is never a pass.
+permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero. An integer `0` allowance count, or an empty `bypassActors` list, means "nobody can bypass" only when `viewerPermission` is ADMIN: from any lower permission it is cannot tell whenever the verdict depends on it (a ruleset that holds the gate check or the force-push block, or a classic rule that blocks force pushes while `gate_forbid_force_push` is on). A bypass that is listed is a finding whatever the permission, and a rule that does not decide the verdict is not asked. The classic pull-request allowances never touch a required check, so they are not asked. Cannot tell is never a pass.
+
+**Where a required check comes from.** The query reads `requiredStatusChecks { context app { databaseId } }` for a classic rule and `requiredStatusChecks { context integrationId }` for a ruleset (field names read by GraphQL introspection on 2026-10-26: the `app` field of `RequiredStatusCheckDescription` is a nullable `App` whose `databaseId` is a nullable `Int`; the `integrationId` field of `StatusCheckConfiguration` is a nullable `Int`). A null `app` or `integrationId`, and the REST convention `-1`, mean "any source". An entry counts toward the gate only if its name matches (the name alone or after a workflow prefix) and it is pinned to `rules.gate_check_app_id`; with several entries of the same name, one pinned to the CI app is enough. If the check is required but only without a source or from another app, the finding says so. The field must be present and typed: an absent `app` or `integrationId`, a non-integer or a non-positive id (other than `-1`) is cannot tell, never "any app" and never the default app. This is the same idea as the protection read-back's `--require-app-id`, which prints a NOTE when a check is unpinned; here an unpinned gate check is a finding because the audit's question is whether the gate holds.
 
 The read uses the same GraphQL client as the rest of the audit (a second REST transport would duplicate its redirect,
 retry and loopback hardening). It never writes protection: setting it is `scripts/apply-baseline.sh`, run by a repository
