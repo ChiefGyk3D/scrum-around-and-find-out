@@ -23,9 +23,18 @@ def test_the_timer_runs_reconcile_from_the_users_own_login_with_no_token_stored(
     service = (EXAMPLES / "systemd" / "safo-reconcile.service").read_text()
     exec_line = next(line for line in service.splitlines() if line.startswith("ExecStart="))
     assert exec_line.endswith(".config/safo/board.yaml reconcile")
-    assert not any(line.startswith(("Environment", "EnvironmentFile")) for line in service.splitlines())
+    env_lines = [line for line in service.splitlines() if line.startswith(("Environment", "EnvironmentFile"))]
+    assert all(line.startswith("Environment=PATH=") for line in env_lines)
     assert "SAFO_TOKEN" not in service
     assert "OnCalendar=daily" in (EXAMPLES / "systemd" / "safo-reconcile.timer").read_text()
+
+
+def test_the_service_runs_where_safo_will_accept_gh_and_can_find_it() -> None:
+    service = (EXAMPLES / "systemd" / "safo-reconcile.service").read_text().splitlines()
+    # find_gh skips a gh inside the working directory: $HOME (the default) holds ~/.local/bin, and / holds everything
+    assert "WorkingDirectory=%t" in service
+    path = next(line for line in service if line.startswith("Environment=PATH="))
+    assert "%h/.local/bin" in path.split("=", 2)[2].split(":")
 
 
 def test_no_workflow_gives_the_own_board_a_personal_access_token() -> None:
