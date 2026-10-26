@@ -203,7 +203,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
     if payload.get("tool_name") == BASH_TOOL:
-        lead_wait(ctx, args, payload)
+        lead_wait(ctx, args, payload, deadline)
         return
     if payload.get("tool_name") not in AGENT_TOOLS:
         return
@@ -269,7 +269,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         ctx.say(json.dumps(data))
 
 
-def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, Any]) -> None:
+def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, Any], deadline: float) -> None:
     """The lead-never-waits rule for one Bash call. Quiet and cheap for the usual call: nothing is read, logged or
     printed unless the command could wait, it is not run in the background and the session is the lead's."""
     if payload.get("agent_id") is not None:
@@ -278,7 +278,7 @@ def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, An
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(tool_input, dict) or not isinstance(command, str):
         raise ValueError("invalid command")
-    if tool_input.get("run_in_background") is True or not leadwait.may_wait(command):
+    if tool_input.get("run_in_background") is True or not leadwait.may_wait(command, deadline):
         return
     if payload.get("hook_event_name") != "PreToolUse":
         raise ValueError("invalid command event")
@@ -290,7 +290,7 @@ def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, An
     setting = doc.hooks.lead_wait
     if setting.mode == "off":
         return
-    kinds = leadwait.find_waits(command, setting.sleep_threshold_seconds)
+    kinds = leadwait.find_waits(command, setting.sleep_threshold_seconds, deadline)
     if not kinds:
         return
     session = session_id(payload)
@@ -300,7 +300,7 @@ def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, An
     path = state_path(folder, session, doc) if folder else None
     # Two exemptions, both with a stated reason: a comment on the call itself, or a repository listed with its reason in
     # agents.yaml (matched against the repository bound at SessionStart, never the working tree).
-    exempt = bool(leadwait.marker_reason(command)) or tracking.exempt(
+    exempt = bool(leadwait.marker_reason(command, deadline)) or tracking.exempt(
         read_bound_repo(path), tuple(e.repo for e in setting.exempt_repos)
     )
     verdict = Verdict((LEAD_WAITS,), (leadwait.message(kinds),), "", False, False)

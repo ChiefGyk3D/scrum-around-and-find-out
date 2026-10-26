@@ -26,31 +26,51 @@ a tokenizer for the common shapes, not a shell parser: see "Known limits" in doc
 
 from __future__ import annotations
 
-import functools
 import re
+import time
+import unicodedata
+from collections.abc import Callable
+from typing import NamedTuple
 
 DEFAULT_SLEEP_THRESHOLD_SECONDS = 10
 MAX_SLEEP_THRESHOLD_SECONDS = 3600
 MIN_REASON_CHARS = 12  # "lead-wait: ok - <reason>": a reason shorter than this is a placeholder, not a reason
 MIN_REASON_ALNUM = 8  # ...and so is twelve characters of punctuation: at least this many letters or digits
+CACHE_MAX_CHARS = 8192  # only inputs this small are cached
+CACHE_ENTRIES = 16
 MAX_DEPTH = 3  # substitutions, backticks, ${...}, `bash -c` bodies and `eval` are scanned this deep, then UNSCANNABLE
 
 GH_RUN_WATCH = "gh-run-watch"
 GH_PR_CHECKS_WATCH = "gh-pr-checks-watch"
 SLEEP_LOOP = "sleep-loop"
 LONG_SLEEP = "long-sleep"
-UNSCANNABLE = "unscannable-depth"
-KINDS = (GH_RUN_WATCH, GH_PR_CHECKS_WATCH, SLEEP_LOOP, LONG_SLEEP, UNSCANNABLE)
+WATCH = "watch"  # the `watch` command: it re-runs something until you stop it
+UNSCANNABLE = "unscannable-depth"  # nested deeper than MAX_DEPTH
+UNSCANNABLE_BRACE = "unscannable-brace"  # a brace expansion builds the command word
+UNSCANNABLE_TIMEOUT = "unscannable-timeout"  # the scan ran out of its deadline
+UNSCANNABLE_INDIRECT = "unscannable-indirect"  # a function exists and a variable names the command
+KINDS = (
+    GH_RUN_WATCH,
+    GH_PR_CHECKS_WATCH,
+    WATCH,
+    SLEEP_LOOP,
+    LONG_SLEEP,
+    UNSCANNABLE,
+    UNSCANNABLE_BRACE,
+    UNSCANNABLE_INDIRECT,
+    UNSCANNABLE_TIMEOUT,
+)
 
 MARKER = "lead-wait: ok -"
 _MARKER = re.compile(r"lead-wait:[ \t]*ok[ \t]*-[ \t]*(\S[^\n]*)", re.IGNORECASE)
 
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")
-_REDIRECT_OP = re.compile(r"(?:\d*|&)(?:>>?|<)&?")  # a redirection operator whose target is the NEXT word
+_REDIRECT_OP = re.compile(r"(?:\d*|&)(?:>>?|<<<|<)&?")  # a redirection operator whose target is the NEXT word
 _REDIRECT_ATTACHED = re.compile(r"(?:\d*|&)(?:>>?|<)&?\S")  # `2>&1`, `>file`: the target is part of the word
 _WATCH_FLAG = re.compile(r"--watch(?:=(?!(?:false|0)$).*)?|-[A-Za-z]*w[A-Za-z]*")
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)([smhd]?)")
 _UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+_BRACE_EXPANSION = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}")
 _FUNC_PARENS = re.compile(r"\([ \t]*\)")
 _FUNC_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.:+-]*")
 
@@ -69,6 +89,53 @@ WRAPPERS: dict[str, frozenset[str]] = {
         {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "--user", "--group", "--host", "--prompt"}
     ),
     "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
+    "setsid": frozenset(),
+    "flock": frozenset({"-w", "--timeout", "--wait", "-E", "--conflict-exit-code"}),
+    "ionice": frozenset({"-c", "--class", "-n", "--classdata"}),
+    "taskset": frozenset(),
+    "chrt": frozenset(),
+    "unbuffer": frozenset(),
+    "parallel": frozenset(
+        {
+            "-j",
+            "--jobs",
+            "-n",
+            "--max-args",
+            "-N",
+            "-P",
+            "--max-procs",
+            "-L",
+            "-l",
+            "--max-lines",
+            "-a",
+            "--arg-file",
+            "-S",
+            "--sshlogin",
+            "-d",
+            "--delimiter",
+            "-E",
+            "--eof",
+            "--halt",
+            "--joblog",
+            "--results",
+            "--colsep",
+            "--retries",
+            "--timeout",
+            "--delay",
+            "--workdir",
+            "--tmpdir",
+            "--env",
+            "--header",
+            "--load",
+            "--memfree",
+            "--nice",
+            "--trc",
+            "--return",
+            "--tag-string",
+            "--shebang-wrap",
+        }
+    ),
     "xargs": frozenset(
         {
             "-a",
@@ -90,6 +157,8 @@ WRAPPERS: dict[str, frozenset[str]] = {
         }
     ),
 }
+# Operands that come between a wrapper's options and the command it runs: `timeout 5 cmd`, `flock file cmd`.
+WRAPPER_OPERANDS = {"timeout": 1, "flock": 1, "taskset": 1, "chrt": 1}
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _SHELL_C = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
@@ -142,7 +211,7 @@ def _find_backtick(text: str, i: int) -> int:
 def _find_close(text: str, i: int, close: str) -> int:
     """Index just past the `close` ( `)` or `}` ) of a group whose body begins at `i`, skipping quoted text and nested
     substitutions; the end of the text if there is none."""
-    opener = "(" if close == ")" else "{"
+    opener = {")": "(", "}": "{", "]": "["}[close]
     level, n = 1, len(text)
     while i < n:
         c = text[i]
@@ -209,7 +278,7 @@ def _heredoc_word(text: str, i: int) -> tuple[str, bool, int] | None:
     while j < n and text[j] not in " \t\n;&|()<>":
         c = text[j]
         if c == "\\":
-            if j + 1 < n:
+            if j + 1 < n and text[j + 1] != "\n":  # backslash-newline is removed before bash tokenizes
                 out.append(text[j + 1])
                 quoted = True
             j += 2
@@ -225,6 +294,9 @@ def _heredoc_word(text: str, i: int) -> tuple[str, bool, int] | None:
         elif c == '"' or text.startswith('$"', j):
             j += 1 if c == '"' else 2
             while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n and text[j + 1] == "\n":
+                    j += 2
+                    continue
                 if text[j] == "\\" and j + 1 < n and text[j + 1] in '$`"\\':
                     j += 1
                 out.append(text[j])
@@ -239,13 +311,141 @@ def _heredoc_word(text: str, i: int) -> tuple[str, bool, int] | None:
     return "".join(out), quoted, min(j, n)
 
 
-Word = tuple[str, bool]  # (text with quotes removed and substitutions replaced, whether any part was quoted)
+def _drop_continuations(span: str) -> str:
+    """`span` without its backslash-newline pairs (an escaped backslash before a newline is not one)."""
+    out: list[str] = []
+    i, n = 0, len(span)
+    while i < n:
+        if span[i] == "\\" and i + 1 < n:
+            if span[i + 1] != "\n":
+                out.append(span[i : i + 2])
+            i += 2
+        else:
+            out.append(span[i])
+            i += 1
+    return "".join(out)
+
+
+def _join_continuations(text: str, tick: Callable[[], None]) -> str:
+    """The command as bash sees it after it removes every backslash-newline, so each later stage reads the same text.
+
+    Not removed, because bash keeps them: inside single quotes and `$'...'`, in a comment (which ends at its newline)
+    and in the body of a heredoc whose delimiter is quoted. Removed inside double quotes and in an unquoted heredoc
+    body, where a line that ends in a backslash is joined to the next one BEFORE it is compared with the delimiter.
+    """
+    out: list[str] = []
+    last = "\n"
+    i, n = 0, len(text)
+    pending: list[tuple[str, bool, bool]] = []  # heredocs whose body starts after the next newline
+
+    def put(piece: str) -> None:
+        nonlocal last
+        if piece:
+            out.append(piece)
+            last = piece[-1]
+
+    while i < n:
+        tick()
+        c = text[i]
+        if c == "\\":
+            if text.startswith("\\\n", i):
+                i += 2
+                continue
+            put(text[i : i + 2])
+            i += 2
+        elif c == "'":
+            end = text.find("'", i + 1)
+            end = n if end < 0 else end + 1
+            put(text[i:end])
+            i = end
+        elif text.startswith("$'", i):
+            j = i + 2
+            while j < n and text[j] != "'":
+                j += 2 if text[j] == "\\" else 1
+            put(text[i : j + 1])
+            i = j + 1
+        elif c == '"':
+            end = _find_dq(text, i + 1)
+            put(_drop_continuations(text[i:end]))
+            i = end
+        elif c == "#" and last in " \t\n;&|()<>":
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            put(text[i:end])  # a comment ends at its newline: a trailing backslash does not continue it
+            i = end
+        elif text.startswith("$((", i) or (text.startswith("((", i) and last in " \t\n;&|()"):
+            end = _find_close(text, i + (2 if c == "$" else 1), ")")
+            put(_drop_continuations(text[i:end]))  # arithmetic: `1 << 2` there is a shift, not a heredoc
+            i = end
+        elif text.startswith("<\\\n<", i):
+            text = text[: i + 1] + text[i + 3 :]  # `<` backslash-newline `<` is the operator `<<`
+            n = len(text)
+        elif text.startswith("<<<", i):
+            put("<<<")
+            i += 3
+        elif text.startswith("<<", i):
+            j = i + 2
+            strip_tabs = text.startswith("-", j)
+            j += 1 if strip_tabs else 0
+            while j < n and text[j] in " \t":
+                j += 1
+            word = _heredoc_word(text, j)
+            if word is None:
+                put("<<")
+                i += 2
+            else:
+                put(_drop_continuations(text[i : word[2]]))
+                pending.append((word[0], strip_tabs, word[1]))
+                i = word[2]
+        elif c == "\n":
+            put("\n")
+            i += 1
+            for delimiter, strip_tabs, was_quoted in pending:
+                while i < n:
+                    end = text.find("\n", i)
+                    line = text[i : n if end < 0 else end]
+                    had_newline = end >= 0
+                    i = n if end < 0 else end + 1
+                    while not was_quoted and had_newline and (len(line) - len(line.rstrip("\\"))) % 2 == 1:
+                        end = text.find("\n", i)  # an unquoted body: a trailing backslash joins the next line
+                        line = line[:-1] + text[i : n if end < 0 else end]
+                        had_newline = end >= 0
+                        i = n if end < 0 else end + 1
+                    put(line + ("\n" if had_newline else ""))
+                    if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        break
+            pending.clear()
+        else:
+            put(c)
+            i += 1
+    return "".join(out)
+
+
+class Word(NamedTuple):
+    """One word of a simple command, quotes removed and substitutions replaced by a placeholder."""
+
+    text: str
+    quoted: bool  # any part of it was quoted or escaped
+    brace: bool = False  # it holds an UNQUOTED brace expansion: `{a,b}` or `{1..3}`
+    expands: bool = False  # it holds a `$` expansion (a variable or a substitution): its value is unknown
+
+
+class _Timeout(Exception):
+    """The scan ran past its deadline."""
+
+
+class _Body(NamedTuple):
+    """What a function body holds, kept apart until the call invokes the function."""
+
+    found: set[str]
+    sleeps: list[float | None]
+    comments: list[str]
 
 
 class _Capture:
-    """A function body being read: its waits are kept apart until the call invokes the function."""
+    """A function body being read."""
 
-    def __init__(self, name: str, saved: tuple[set[str], list[float | None], list[bool]]) -> None:
+    def __init__(self, name: str, saved: tuple[set[str], list[float | None], list[bool], list[str]]) -> None:
         self.name = name
         self.saved = saved
         self.braces = 0
@@ -256,14 +456,31 @@ class _Capture:
 class _Scan:
     """One pass over a command: what waits it holds and which real comments it carries."""
 
-    def __init__(self) -> None:
+    def __init__(self, deadline: float | None = None) -> None:
+        self.deadline = deadline
+        self.ticks = 0
         self.found: set[str] = set()
         self.sleeps: list[float | None] = []
         self.comments: list[str] = []
         self.bodies: list[tuple[str, bool]] = []  # (heredoc body as the shell delivers it, delimiter was quoted)
         self.loops: list[bool] = []  # one entry per open loop: has its `do` been seen (are we in the body)
-        self.funcs: dict[str, tuple[set[str], list[float | None]]] = {}
-        self.cap: _Capture | None = None
+        self.funcs: dict[str, _Body] = {}
+        self.caps: list[_Capture] = []  # function bodies being read, innermost last (a function can nest in another)
+        self.defined_any = False  # the call defines a function somewhere
+        self.indirect = False  # the call runs a variable-expanded word at command position
+
+    @property
+    def cap(self) -> _Capture | None:
+        return self.caps[-1] if self.caps else None
+
+    def tick(self) -> None:
+        """Called from every scanning loop: every 256th call it checks the deadline and gives up when it has passed."""
+        if self.deadline is not None and self.ticks % 256 == 0 and time.monotonic() > self.deadline:
+            raise _Timeout
+        self.ticks += 1
+
+    def run(self, command: str) -> None:
+        self.walk(_join_continuations(command, self.tick), 0, False, 0, True)
 
     # -- expansions: code that hides in what looks like data ------------------------------------------------------
 
@@ -273,6 +490,15 @@ class _Scan:
     def expansion(self, text: str, i: int, depth: int) -> int:
         """If an expansion that can run code (`$(`, a backtick, `${`) begins at `i`, scan it and return the index past
         it; otherwise -1."""
+        if text.startswith("$((", i) or text.startswith("$[", i):
+            end = self.arithmetic_end(text, i)
+            if end >= 0:  # arithmetic: its words are not commands, but a substitution inside it runs
+                skip = 3 if text.startswith("$((", i) else 2
+                if depth >= MAX_DEPTH:
+                    self.too_deep()
+                else:
+                    self.scan_data(text[i + skip : end - (2 if skip == 3 else 1)], depth + 1, True)
+                return end
         if text.startswith("$(", i):
             if depth >= MAX_DEPTH:
                 self.too_deep()
@@ -289,12 +515,46 @@ class _Scan:
             return end
         return -1
 
+    @staticmethod
+    def arithmetic_end(text: str, i: int) -> int:
+        """Index past the end of the `$((...))` or `$[...]` at `i`, or -1 if it is not arithmetic. `$((a); (b))` is a
+        command substitution around two subshells: the first inner parenthesis closes before the pair does."""
+        if text.startswith("$[", i):
+            end = _find_close(text, i + 2, "]")
+            return end if text[end - 1 : end] == "]" else -1
+        j, n, level = i + 3, len(text), 0
+        while j < n:
+            c = text[j]
+            if c == "\\":
+                j += 2
+            elif c == "'":
+                end = text.find("'", j + 1)
+                j = n if end < 0 else end + 1
+            elif c == '"':
+                j = _find_dq(text, j + 1)
+            elif c == "`":
+                j = _find_backtick(text, j + 1)
+            elif text.startswith("$(", j):
+                j = _find_close(text, j + 2, ")")
+            elif c == "(":
+                level += 1
+                j += 1
+            elif c == ")":
+                if level == 0:
+                    return j + 2 if text.startswith("))", j) else -1
+                level -= 1
+                j += 1
+            else:
+                j += 1
+        return -1
+
     def scan_data(self, text: str, depth: int, honor_quotes: bool) -> None:
         """Scan text that is data except for its expansions: the inside of `${...}` (quotes matter: single quotes keep
         text literal) and an unquoted heredoc body (quotes are plain characters there)."""
         i, n = 0, len(text)
         in_dq = False
         while i < n:
+            self.tick()
             c = text[i]
             if c == "\\":
                 i += 2
@@ -320,7 +580,7 @@ class _Scan:
             self.too_deep()
             return
         base = len(self.loops)
-        self.walk(script, 0, False, depth + 1, False)
+        self.walk(_join_continuations(script, self.tick), 0, False, depth + 1, False)
         del self.loops[base:]  # whatever loop the string left open ends with the string
 
     # -- the tokenizer ------------------------------------------------------------------------------------------
@@ -332,15 +592,19 @@ class _Scan:
         cur: list[str] = []
         has = False  # a word is open (it may be empty: '')
         quoted = False
+        unquoted: list[str] = []  # the characters of the open word that are not quoted or escaped
+        expands = False
         pending: list[tuple[str, bool, bool]] = []  # heredocs whose body starts after the next newline
         parens = 0
 
         def flush() -> None:
-            nonlocal has, quoted
+            nonlocal has, quoted, expands
             if has:
-                words.append(("".join(cur), quoted))
+                brace = bool(_BRACE_EXPANSION.search("".join(unquoted)))
+                words.append(Word("".join(cur), quoted, brace, expands))
             cur.clear()
-            has = quoted = False
+            unquoted.clear()
+            has = quoted = expands = False
 
         def end_command() -> None:
             flush()
@@ -349,6 +613,7 @@ class _Scan:
                 words.clear()
 
         while i < n:
+            self.tick()
             c = text[i]
             if c == "\\":
                 if i + 1 < n and text[i + 1] == "\n":
@@ -374,9 +639,11 @@ class _Scan:
                         i += 2
                     elif (j := self.expansion(text, i, depth)) >= 0:
                         cur.append(_PLACEHOLDER)
+                        expands = True
                         i = j
                     else:
                         cur.append(ch)
+                        expands = expands or ch == "$"
                         i += 1
                 i += 1
             elif text.startswith("$'", i):
@@ -385,9 +652,10 @@ class _Scan:
                 has = quoted = True
             elif (c == "$" or c == "`") and (j := self.expansion(text, i, depth)) >= 0:
                 cur.append(_PLACEHOLDER)
-                has = True
+                has = expands = True
                 i = j
             elif c == "#" and not has:
+                end_command()  # whatever precedes the comment on its line is complete (`}` closes a body)
                 end = text.find("\n", i)
                 if top:
                     self.comments.append(text[i + 1 : n if end < 0 else end])
@@ -419,7 +687,11 @@ class _Scan:
                     else:
                         i = self.walk(text, i + 1, True, depth + 1, False)
                     cur.append(_PLACEHOLDER)
-                elif (m := _FUNC_PARENS.match(text, i)) and (name := self.header_name(words, cur, has)):
+                    expands = True
+                elif (m := _FUNC_PARENS.match(text, i)) and (header := self.header_name(words, cur, has)):
+                    name, lead = header
+                    if lead:
+                        self.command(tuple(words[:lead]), depth)
                     words.clear()
                     cur.clear()
                     has = quoted = False
@@ -435,7 +707,11 @@ class _Scan:
                 if parens == 0 and sub:
                     return i
                 parens = max(parens - 1, 0)
-            elif c == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
+            elif c == "<" and text.startswith("<<<", i):
+                flush()  # a here-string: the three characters are one operator, the next word is its (scanned) text
+                words.append(Word("<<<", False))
+                i += 3
+            elif c == "<" and text.startswith("<<", i):
                 j = i + 2
                 strip_tabs = text.startswith("-", j)
                 j += 1 if strip_tabs else 0
@@ -444,6 +720,7 @@ class _Scan:
                 word = _heredoc_word(text, j)
                 if word is None:
                     cur.append(c)
+                    unquoted.append(c)
                     has = True
                     i += 1
                 else:
@@ -452,7 +729,9 @@ class _Scan:
                     i = word[2]
             else:
                 cur.append(c)
+                unquoted.append(c)
                 has = True
+                expands = expands or c == "$"
                 i += 1
         end_command()
         return n
@@ -462,6 +741,7 @@ class _Scan:
         n = len(text)
         lines: list[str] = []
         while i < n:
+            self.tick()
             end = text.find("\n", i)
             line = text[i : n if end < 0 else end]
             i = n if end < 0 else end + 1
@@ -477,43 +757,50 @@ class _Scan:
     # -- functions: defined here, waiting only if invoked ---------------------------------------------------------
 
     @staticmethod
-    def header_name(words: list[Word], cur: list[str], has: bool) -> str | None:
-        """The function name if the words before a `()` are `name` or `function name`."""
-        pending = [w for w, _ in words] + (["".join(cur)] if has else [])
+    def header_name(words: list[Word], cur: list[str], has: bool) -> tuple[str, int] | None:
+        """(name, leading keyword words) if the words before a `()` are `[keywords] name` or `[keywords] function name`;
+        the keywords (`{`, `do`, `then`...) belong to the command that holds the definition."""
+        texts = [w.text for w in words] + (["".join(cur)] if has else [])
+        lead = 0
+        while lead < len(texts) - 1 and texts[lead] in (_KEYWORDS - {"}"}):
+            lead += 1
+        pending = texts[lead:]
         if len(pending) == 2 and pending[0] == "function":
             pending = pending[1:]
         if len(pending) == 1 and _FUNC_NAME.fullmatch(pending[0]) and pending[0] not in _KEYWORDS | _LOOP_HEADS:
-            return pending[0]
+            return pending[0], lead
         return None
 
     def begin_function(self, name: str) -> None:
-        if self.cap is not None:
-            return  # a function defined inside a function body: read as part of the outer body
-        self.cap = _Capture(name, (self.found, self.sleeps, self.loops))
-        self.found, self.sleeps, self.loops = set(), [], []
+        self.defined_any = True
+        self.caps.append(_Capture(name, (self.found, self.sleeps, self.loops, self.comments)))
+        self.found, self.sleeps, self.loops, self.comments = set(), [], [], []
 
     def end_function(self, register: bool) -> None:
         cap = self.cap
         if cap is None:
             return
         if register:
-            self.funcs[cap.name] = (self.found, self.sleeps)
-        self.found, self.sleeps, self.loops = cap.saved
-        self.cap = None
+            self.funcs[cap.name] = _Body(self.found, self.sleeps, self.comments)
+        self.found, self.sleeps, self.loops, self.comments = cap.saved
+        self.caps.pop()
 
     def finish(self) -> None:
         """The call ended inside a function body: it was defined and never invoked, so it is dormant."""
-        self.end_function(register=True)
+        while self.caps:
+            self.end_function(register=True)
+        if self.defined_any and self.indirect:
+            self.found.add(UNSCANNABLE_INDIRECT)  # a variable-expanded command word could name any function
 
     # -- one simple command -------------------------------------------------------------------------------------
 
     def command(self, words: tuple[Word, ...], depth: int) -> None:
-        if words[0] == ("function", False) and len(words) >= 2 and self.cap is None:
+        if words[0][:2] == ("function", False) and len(words) >= 2:
             self.begin_function(words[1][0])  # `function name { ... }`
             words = words[2:]
             if not words:
                 return
-        if self.cap is not None and not self.cap.started and words[0] != ("{", False):
+        if self.cap is not None and not self.cap.started and words[0][:2] != ("{", False):
             self.end_function(register=False)  # the body is not a brace group: read it as live code
         self.simple(words, depth)
         if self.cap is not None and self.cap.done:
@@ -535,16 +822,17 @@ class _Scan:
         # Redirections are not arguments: `sleep 5 > /dev/null 2>&1` is `sleep 5`.
         kept: list[Word] = []
         skip = False
-        for text, was_quoted in words:
+        for word in words:
+            text, was_quoted = word.text, word.quoted
             if skip:
                 skip = False
             elif was_quoted or not (_REDIRECT_OP.fullmatch(text) or _REDIRECT_ATTACHED.match(text)):
-                kept.append((text, was_quoted))
+                kept.append(word)
             elif _REDIRECT_OP.fullmatch(text):
                 skip = True
         i = 0
         while i < len(kept):
-            text, was_quoted = kept[i]
+            text, was_quoted = kept[i].text, kept[i].quoted
             if was_quoted:
                 break
             if text in _LOOP_HEADS:
@@ -572,18 +860,26 @@ class _Scan:
                 return
         if i >= len(kept):
             return
+        if kept[i].brace:
+            self.found.add(UNSCANNABLE_BRACE)  # `{sleep,60}`, `sl{e..e}ep`: the command is built at run time
+            return
         name = kept[i][0].rsplit("/", 1)[-1]
-        args = [w for w, _ in kept[i + 1 :]]
+        args = [w.text for w in kept[i + 1 :]]
+        if kept[i].expands:
+            self.indirect = True
         if name in self.funcs:
-            found, sleeps = self.funcs[name]
-            self.found |= found
-            self.sleeps += sleeps
-            if sleeps and any(self.loops):
+            body = self.funcs[name]
+            self.found |= body.found
+            self.sleeps += body.sleeps
+            self.comments += body.comments  # an invoked body's comments are part of the call
+            if body.sleeps and self.loops:
                 self.found.add(SLEEP_LOOP)
         elif name == "sleep":
             self.sleeps.append(_sleep_seconds(args))
-            if any(self.loops):
+            if self.loops:  # in a loop body OR its condition: a poll either way
                 self.found.add(SLEEP_LOOP)
+        elif name == "watch":
+            self.found.add(WATCH)
         elif name == "gh" and args[:2] == ["run", "watch"]:
             self.found.add(GH_RUN_WATCH)
         elif name == "gh" and args[:2] == ["pr", "checks"] and any(_WATCH_FLAG.fullmatch(a) for a in args[2:]):
@@ -602,7 +898,7 @@ class _Scan:
                     run: list[Word] = []
                     k += 1
                     while k < len(args) and args[k] not in (";", "+"):
-                        run.append((args[k], False))
+                        run.append(Word(args[k], False))
                         k += 1
                     if run:
                         self.simple(tuple(run), depth)
@@ -615,7 +911,7 @@ class _Scan:
         wrapper = kept[i][0].rsplit("/", 1)[-1]
         valued = WRAPPERS[wrapper]
         j = i + 1
-        duration_pending = wrapper == "timeout"
+        operands = WRAPPER_OPERANDS.get(wrapper, 0)
         while j < len(kept):
             text = kept[j][0]
             if wrapper == "command" and text in ("-v", "-V"):
@@ -625,43 +921,81 @@ class _Scan:
                     split, j = (kept[j + 1][0] if j + 1 < len(kept) else ""), j + 2
                 else:
                     split, j = (text.split("=", 1)[1] if text.startswith("--") else text[2:]), j + 1
-                return len(kept), " ".join([split, *(w for w, _ in kept[j:])])
+                return len(kept), " ".join([split, *(w.text for w in kept[j:])])
+            if wrapper == "flock" and text in ("-c", "--command"):
+                return len(kept), kept[j + 1].text if j + 1 < len(kept) else ""  # flock FILE -c 'command line'
             if text.startswith("-") and text != "-":
                 j += 2 if text in valued else 1
             elif wrapper in ("env", "sudo") and _ASSIGNMENT.match(text):
                 j += 1
-            elif duration_pending:
-                duration_pending = False
+            elif operands:
+                operands -= 1
                 j += 1
             else:
                 break
+        if wrapper == "parallel":
+            command_line = []
+            while j < len(kept) and not kept[j].text.startswith(":::"):
+                command_line.append(kept[j].text)
+                j += 1
+            return len(kept), " ".join(command_line)  # `parallel [options] command ::: arguments`
         return j, None
 
 
-@functools.lru_cache(maxsize=16)
-def _scan(command: str) -> _Scan:
-    scan = _Scan()
+_SMALL_CACHE: dict[str, _Scan] = {}  # at most CACHE_ENTRIES inputs of at most CACHE_MAX_CHARS characters
+_last_large: list[tuple[str, _Scan]] = []  # the one large input of the current call, matched by identity
+
+
+def _build(command: str, deadline: float | None) -> _Scan:
+    scan = _Scan(deadline)
     try:
-        scan.walk(command, 0, False, 0, True)
+        scan.run(command)
         scan.finish()
     except RecursionError:
         scan.too_deep()  # pathological nesting that outruns even the depth limit: an explicit verdict, not a crash
+    except _Timeout:
+        scan.found.add(UNSCANNABLE_TIMEOUT)  # out of time: fail closed
+    return scan
+
+
+def _scan(command: str, deadline: float | None = None) -> _Scan:
+    """One pass per command. Small inputs are cached (bounded); a large one is remembered for the current call only,
+    by identity, so the three questions the hook asks cost one scan. A scan that timed out is never remembered."""
+    if len(command) <= CACHE_MAX_CHARS:
+        if command in _SMALL_CACHE:
+            return _SMALL_CACHE[command]
+    elif _last_large and _last_large[0][0] is command:
+        return _last_large[0][1]
+    scan = _build(command, deadline)
+    if UNSCANNABLE_TIMEOUT not in scan.found:
+        if len(command) <= CACHE_MAX_CHARS:
+            if len(_SMALL_CACHE) >= CACHE_ENTRIES:
+                del _SMALL_CACHE[next(iter(_SMALL_CACHE))]
+            _SMALL_CACHE[command] = scan
+        else:
+            _last_large[:] = [(command, scan)]
     return scan
 
 
 def real_reason(text: str) -> bool:
-    """Is this a stated reason? Long enough AND mostly not punctuation: twelve characters of `!!!!` say nothing."""
-    stripped = text.strip()
-    return len(stripped) >= MIN_REASON_CHARS and sum(ch.isalnum() for ch in stripped) >= MIN_REASON_ALNUM
+    """Is this a stated reason?
+
+    With combining marks and zero-width or other format characters removed, it must be MIN_REASON_CHARS long, and at
+    least MIN_REASON_ALNUM of its characters must be Unicode letters (category L*) or ASCII digits. Combining marks,
+    zero-width padding, non-ASCII digits (full-width, Arabic-Indic, circled) and punctuation do not count.
+    """
+    cleaned = "".join(ch for ch in text if unicodedata.category(ch) not in ("Mn", "Mc", "Me", "Cf")).strip()
+    counted = sum(unicodedata.category(ch).startswith("L") or ch in "0123456789" for ch in cleaned)
+    return len(cleaned) >= MIN_REASON_CHARS and counted >= MIN_REASON_ALNUM
 
 
-def marker_reason(command: str) -> str:
+def marker_reason(command: str, deadline: float | None = None) -> str:
     """The stated reason of a `lead-wait: ok - <reason>` marker in a real comment of the command, or "" when there
     is none, it is a placeholder, or the text only sits inside a string, a heredoc body or an argument.
 
     The marker may be in any comment of the call, on the wait's line or another; the call is one decision.
     """
-    for comment in _scan(command).comments:
+    for comment in _scan(command, deadline).comments:
         found = _MARKER.search(comment)
         reason = found.group(1).strip() if found else ""
         if real_reason(reason):
@@ -692,9 +1026,11 @@ def _sleep_seconds(words: list[str]) -> float | None:
     return total
 
 
-def find_waits(command: str, threshold: int = DEFAULT_SLEEP_THRESHOLD_SECONDS) -> tuple[str, ...]:
+def find_waits(
+    command: str, threshold: int = DEFAULT_SLEEP_THRESHOLD_SECONDS, deadline: float | None = None
+) -> tuple[str, ...]:
     """The kinds of wait a command contains, in a fixed order; empty when it does not wait."""
-    scan = _scan(command)
+    scan = _scan(command, deadline)
     found = set(scan.found)
     # The sleeps of one command add up: `sleep 5; sleep 6` holds the thread for 11 seconds.
     if any(s is None for s in scan.sleeps) or sum(s for s in scan.sleeps if s is not None) >= threshold:
@@ -702,15 +1038,15 @@ def find_waits(command: str, threshold: int = DEFAULT_SLEEP_THRESHOLD_SECONDS) -
     return tuple(k for k in KINDS if k in found)
 
 
-def may_wait(command: str) -> bool:
+def may_wait(command: str, deadline: float | None = None) -> bool:
     """A cheap test before any configuration is read: could this command contain a wait at all?
 
     A command with none of the three words and no character that can build a word out of pieces (a quote, a
     backslash, `$` or a backtick: `sl''eep 60`) cannot. Anything else is tokenized, which reads no configuration.
     """
-    if not any(w in command for w in ("sleep", "watch", "checks")) and not any(c in command for c in "'\"\\$`"):
+    if not any(w in command for w in ("sleep", "watch", "checks")) and not any(c in command for c in "'\"\\$`{"):
         return False
-    scan = _scan(command)
+    scan = _scan(command, deadline)
     return bool(scan.found or scan.sleeps)
 
 
@@ -719,8 +1055,15 @@ def message(kinds: tuple[str, ...]) -> str:
     what = {
         GH_RUN_WATCH: "`gh run watch`",
         GH_PR_CHECKS_WATCH: "`gh pr checks --watch`",
+        WATCH: "`watch`",
         SLEEP_LOOP: "a sleep loop",
         LONG_SLEEP: "a long sleep",
+        UNSCANNABLE_BRACE: f"a command built by brace expansion ({UNSCANNABLE_BRACE}), so it cannot be shown not to "
+        "wait",
+        UNSCANNABLE_TIMEOUT: f"too large or tangled to check in time ({UNSCANNABLE_TIMEOUT}), so it cannot be shown "
+        "not to wait",
+        UNSCANNABLE_INDIRECT: f"a call that defines a function and runs a command named by a variable "
+        f"({UNSCANNABLE_INDIRECT}), so it cannot be shown not to wait",
         UNSCANNABLE: f"nested too deeply to check ({UNSCANNABLE}: more than {MAX_DEPTH} levels), so it cannot be shown "
         "not to wait",
     }

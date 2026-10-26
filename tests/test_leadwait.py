@@ -8,6 +8,7 @@ with a reason and one without, lookalike text that is not a command, and the doc
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -832,6 +833,508 @@ SYNTAX_FIXTURES = (
     + [c for c, _ in CALLED]
     + ["sl''eep 60", 's"l"eep 60', "sle\\ep 60", "gh run w''atch 1", "g''h pr checks 1 -w", "$'sleep' 60"]
 )
+
+
+# -- round 3 -----------------------------------------------------------------------------------------------------
+# H1: bash removes backslash-newline BEFORE it tokenizes (outside single quotes; also inside double quotes), except
+# that a comment ends at its newline, `$'...'` keeps it, and a QUOTED heredoc body keeps it.
+
+ROUND3_FIXTURES: list[str] = []
+
+CONTINUATION_WAITS = [
+    "cat <<E\\\nOF\nbody\nEOF\nsleep 60",  # the review repro: the delimiter is EOF
+    'cat <<"E\\\nOF"\nbody\nEOF\nsleep 60',  # a continuation inside double quotes is removed too
+    "cat <\\\n<EOF\nhi\nEOF\nsleep 60",  # an operator split by a continuation
+    "sl\\\neep 60",  # a command name split by a continuation
+    "gh run w\\\natch 1",
+    "gh \\\nrun watch 1",
+    "cat <<EOF\nx\nEO\\\nF\nsleep 60",  # an unquoted body: the terminator can be formed by a continuation
+    "cat <<EOF\nEO\\\nF\nsleep 60\nEOF",  # ...so this sleep is code and the last EOF is a command
+    "echo a # a comment ends at its newline \\\nsleep 60",  # a comment does not continue
+    "cat <<E\\\nOF\nx\nEO\\\nF\nsleep 60",  # a split delimiter is still UNQUOTED: the body joins and EO\\F ends it
+    "sleep 60 \\\n  && echo done",
+    "echo $'a\\\nb'; sleep 60",  # $'...' keeps the backslash-newline, and the sleep after it is code
+]
+CONTINUATION_DATA = [
+    "cat <<'EOF'\nEO\\\nF\nsleep 60\nEOF",  # a quoted body keeps backslash-newline: no terminator is formed
+    "echo 'a\\\nsleep 60'",  # single quotes keep it
+    "cat <<EOF\nsleep 60 \\\nis just text\nEOF",  # joined into one line of body
+]
+ROUND3_FIXTURES += CONTINUATION_WAITS + CONTINUATION_DATA
+
+
+@pytest.mark.parametrize("command", CONTINUATION_WAITS)
+def test_h1_a_wait_is_found_after_bash_removes_line_continuations(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) != ()
+    assert denied(_private_home, agents, command)
+
+
+def test_h1_the_review_repro_is_denied(_private_home: Path, agents: Path) -> None:
+    assert denied(_private_home, agents, "cat <<E\\\nOF\nbody\nEOF\nsleep 60")
+
+
+@pytest.mark.parametrize("command", CONTINUATION_DATA)
+def test_h1_text_that_bash_keeps_as_data_is_not_a_wait(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+def test_h1_a_comment_ends_at_its_newline_so_the_next_line_marker_is_real() -> None:
+    reason = "waiting out a dns ttl, nothing to delegate"
+    assert leadwait.marker_reason(f"sleep 60 # note \\\n# lead-wait: ok - {reason}") == reason
+    # the backslash does not pull the next line into the comment: the sleep on it is code, not marker text
+    assert leadwait.find_waits(f"echo a # lead-wait: ok - {reason} \\\nsleep 60", THRESHOLD) == ("long-sleep",)
+
+
+# H2: `<<<` is a here-string, not a heredoc; its word is read with the normal rules and its substitutions run.
+
+HERESTRING_WAITS = [
+    'cat <<< "$(sleep 60)"',  # the review repro
+    "cat <<< $(sleep 60)",
+    "cat <<< `sleep 60`",
+    'cat <<<"$(gh run watch 1)"',
+    'cat <<<"x" <<< "$(sleep 60)"',
+    'cat <<< "x"; sleep 60',
+    "cat <<< 'x' <<EOF\n$(sleep 60)\nEOF",  # a here-string next to an unquoted heredoc whose body runs
+]
+HERESTRING_DATA = [
+    "cat <<< '$(sleep 60)'",  # single quotes keep it data
+    "cat <<< 'sleep 60'",
+    "cat <<< sleep",
+    "cat <<<'x' <<'EOF'\n$(sleep 60)\nEOF",  # the quoted heredoc body is data
+    "grep -q x <<< 'gh run watch 1'",
+]
+ROUND3_FIXTURES += HERESTRING_WAITS + HERESTRING_DATA
+
+
+@pytest.mark.parametrize("command", HERESTRING_WAITS)
+def test_h2_a_substitution_in_a_here_string_runs(_private_home: Path, agents: Path, command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) != ()
+    assert denied(_private_home, agents, command)
+
+
+@pytest.mark.parametrize("command", HERESTRING_DATA)
+def test_h2_quoted_here_string_text_is_data(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+def test_h2_a_here_string_is_not_a_heredoc() -> None:
+    assert leadwait.heredoc_bodies('cat <<< "x"\necho y') == ()
+    assert leadwait.find_waits('cat <<< "x"\nsleep 60', THRESHOLD) == ("long-sleep",)
+    assert leadwait.find_waits("sleep 5 <<< x", THRESHOLD) == ()  # `<<< x` is a redirection, not an argument
+
+
+# H3: an unquoted brace expansion in a COMMAND-POSITION word builds the command at run time. Fail closed.
+
+BRACE_COMMANDS = [
+    "sl{e..e}ep 60",  # the review forms
+    "{sleep,60}",
+    "s{l,l}eep 60",
+    "{gh,run,watch} 1",
+    "FOO=1 {sleep,60}",
+    "sudo {sleep,60}",
+    "ls && {sleep,60}",
+    "x=$(echo hi); sl{e,e}p 1; echo {sleep,60}",
+    "{1..3}",
+]
+BRACE_FINE = [
+    "echo {a,b}",
+    "ls {a,b}.txt",
+    "echo {1..3} && ls",
+    "echo ${var} ${var:-x}",
+    "{ echo hi; }",
+    "{ sleep 1; }",
+    "'{a,b}' x",  # quoted: the program is literally named {a,b}
+    '"{sleep,60}"',
+    "{a}",  # no comma or range: not an expansion
+    "{}",
+    "git log --format={a,b}",
+    "find . -name '*.md' -exec echo {} +",
+    "echo \\{sleep,60\\}",
+]
+ROUND3_FIXTURES += BRACE_COMMANDS + BRACE_FINE
+
+
+@pytest.mark.parametrize("command", BRACE_COMMANDS)
+def test_h3_a_brace_expansion_at_command_position_is_unscannable_brace(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert "unscannable-brace" in leadwait.find_waits(command, THRESHOLD)
+    assert leadwait.may_wait(command)  # the cheap pre-check lets it through to the tokenizer
+    assert denied(_private_home, agents, command)
+
+
+@pytest.mark.parametrize("command", BRACE_FINE)
+def test_h3_brace_expansion_in_arguments_groups_and_quotes_is_fine(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+def test_h3_the_deny_text_names_only_the_kind(_private_home: Path, agents: Path) -> None:
+    set_mode(_private_home, "block")
+    out = guard(_private_home, agents, bash("{sleep,60} sentinel-arg-xyz"))[1]
+    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "unscannable-brace" in reason and "sentinel-arg-xyz" not in out
+
+
+# M1: more wrappers that run another command, and `watch`, which is itself a wait.
+
+WRAPPER_CASES = [
+    ("stdbuf -oL sleep 60", "long-sleep"),
+    ("stdbuf -o L -e0 gh run watch 1", "gh-run-watch"),
+    ("stdbuf -i0 -o0 -e0 sleep 60", "long-sleep"),
+    ("setsid sleep 60", "long-sleep"),
+    ("setsid -f sleep 60", "long-sleep"),
+    ("setsid --wait gh run watch 1", "gh-run-watch"),
+    ("flock /tmp/lock sleep 60", "long-sleep"),
+    ("flock -n /tmp/lock gh run watch 1", "gh-run-watch"),
+    ("flock -w 5 -x /tmp/lock sleep 60", "long-sleep"),
+    ("flock 9 sleep 60", "long-sleep"),
+    ("flock /tmp/lock -c 'sleep 60'", "long-sleep"),
+    ("flock -x /tmp/lock --command 'gh run watch 1'", "gh-run-watch"),
+    ("parallel sleep 60 ::: a b", "long-sleep"),
+    ("parallel -j4 gh run watch ::: 1 2", "gh-run-watch"),
+    ("parallel -j 2 --halt now,fail=1 sleep 60 ::: a", "long-sleep"),
+    ("parallel 'sleep 60' ::: x", "long-sleep"),
+    ("parallel -k sleep 60 :::: file", "long-sleep"),
+    ("ionice sleep 60", "long-sleep"),
+    ("ionice -c3 sleep 60", "long-sleep"),
+    ("ionice -c 3 -n 7 gh run watch 1", "gh-run-watch"),
+    ("taskset 0x1 sleep 60", "long-sleep"),
+    ("taskset -c 0,1 sleep 60", "long-sleep"),
+    ("taskset --cpu-list 0 gh run watch 1", "gh-run-watch"),
+    ("chrt -r 10 sleep 60", "long-sleep"),
+    ("chrt --idle 0 sleep 60", "long-sleep"),
+    ("chrt -b 0 gh run watch 1", "gh-run-watch"),
+    ("unbuffer sleep 60", "long-sleep"),
+    ("unbuffer -p gh run watch 1", "gh-run-watch"),
+    ("sudo ionice -c3 nice -n 5 flock /tmp/lock sleep 60", "long-sleep"),
+    ("FOO=1 stdbuf -oL setsid taskset -c 0 sleep 60", "long-sleep"),
+    ("watch -n 5 gh pr checks 1", "watch"),
+    ("watch ls", "watch"),
+    ("watch -g -n1 cat /proc/loadavg", "watch"),
+    ("sudo watch -n 1 date", "watch"),
+    ("ls | watch -n1 cat", "watch"),
+]
+WRAPPER_QUIET = [
+    "stdbuf -oL echo sleep 60",
+    "setsid echo sleep 60",
+    "flock /tmp/lock echo hi",
+    "flock /tmp/lock -c 'echo sleep 60'",
+    "parallel echo sleep ::: a b",
+    "ionice echo sleep 60",
+    "taskset -c 0 echo sleep",
+    "chrt -r 10 echo sleep",
+    "unbuffer echo sleep 60",
+    "echo watch",
+    "man watch",
+    "ls watch",
+    "git log --grep watch",
+]
+ROUND3_FIXTURES += [c for c, _ in WRAPPER_CASES] + WRAPPER_QUIET
+
+
+@pytest.mark.parametrize(("command", "kind"), WRAPPER_CASES)
+def test_m1_the_command_a_wrapper_runs_decides_and_watch_is_a_wait(command: str, kind: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == (kind,)
+
+
+@pytest.mark.parametrize("command", WRAPPER_QUIET)
+def test_m1_a_wrapper_around_a_harmless_command_is_not_a_wait(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+def test_m1_watch_is_denied_in_block_mode_and_the_background_form_is_allowed(_private_home: Path, agents: Path) -> None:
+    assert denied(_private_home, agents, "watch -n 5 gh pr checks 1")
+    assert guard(_private_home, agents, bash("watch -n 5 date", run_in_background=True)) == (0, "", "")
+
+
+# M2: function dormancy. (a) a function nested in another is dormant until ITS OWN name is invoked. (b) a call that
+# defines functions and then runs a variable-expanded word cannot be known not to run one: fail closed.
+
+NESTED_DORMANT = [
+    "outer() { inner() { sleep 60; }; }; outer",  # calling outer only defines inner
+    "outer() { inner() { sleep 60; }; }",
+    "outer() {\n  inner() {\n    sleep 60\n  }\n}\nouter",
+    "function outer { function inner { sleep 60; }; }; outer",
+    "outer() { inner() { sleep 60; }; sleep 1; }; outer",
+    "outer() { inner() { gh run watch 1; }; }; echo inner; outer",
+]
+NESTED_CALLED = [
+    ("outer() { inner() { sleep 60; }; inner; }; outer", "long-sleep"),
+    ("outer() { inner() { sleep 60; }; }; outer; inner", "long-sleep"),  # inner exists once outer ran
+    ("outer() { inner() { sleep 1; }; }; while true; do outer; inner; done", "sleep-loop"),
+]
+INDIRECT_FAIL_CLOSED = [
+    "f() { sleep 60; }; x=f; $x",
+    'f() { sleep 60; }; x=f; "$x"',
+    "f() { :; }; $(echo f)",
+    "function f { sleep 60; }; x=f; ${x}",
+    "f() { :; }; x=f; env $x",
+    "x=f; $x; f() { sleep 60; }",  # the call defines a function either side of the indirect word
+]
+INDIRECT_FINE = [
+    "x=sleep; $x 60",  # no function is defined: stays a documented limit
+    'c=ls; "$c" -la',
+    "f() { :; }; echo $x",  # an expansion in an ARGUMENT is data
+    "f() { :; }; f",
+    "x=1; echo $x",
+]
+ROUND3_FIXTURES += NESTED_DORMANT + [c for c, _ in NESTED_CALLED] + INDIRECT_FAIL_CLOSED + INDIRECT_FINE
+
+
+@pytest.mark.parametrize("command", NESTED_DORMANT)
+def test_m2a_a_nested_function_is_dormant_until_its_own_name_is_invoked(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+@pytest.mark.parametrize(("command", "kind"), NESTED_CALLED)
+def test_m2a_a_nested_function_waits_once_it_is_invoked(command: str, kind: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == (kind,)
+
+
+@pytest.mark.parametrize("command", INDIRECT_FAIL_CLOSED)
+def test_m2b_an_indirect_invocation_in_a_call_that_defines_functions_is_unscannable(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert "unscannable-indirect" in leadwait.find_waits(command, THRESHOLD)
+    assert denied(_private_home, agents, command)
+
+
+@pytest.mark.parametrize("command", INDIRECT_FINE)
+def test_m2b_without_a_function_definition_or_without_an_indirect_word_nothing_is_flagged(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+# L3: a marker counts in top-level code and in a function body that is actually invoked; a dormant body's does not.
+L3_REASON = "waiting out a dns ttl, nothing to delegate"
+L3_DORMANT_MARKER = [
+    f"sleep 60\nf() {{\n  echo hi # lead-wait: ok - {L3_REASON}\n}}",
+    f"sleep 60\nf() {{ echo hi; }} ; g() {{ echo # lead-wait: ok - {L3_REASON}\n}}; f",
+    f"sleep 60\nouter() {{\n  inner() {{\n    : # lead-wait: ok - {L3_REASON}\n  }}\n}}\nouter",
+    f"sleep 60\nfunction f {{\n  : # lead-wait: ok - {L3_REASON}\n}}",
+]
+L3_LIVE_MARKER = [
+    f"sleep 60 # lead-wait: ok - {L3_REASON}",
+    f"f() {{ sleep 60 # lead-wait: ok - {L3_REASON}\n}}\nf",  # the body is invoked
+    f"f() {{ :; }} # lead-wait: ok - {L3_REASON}\nsleep 60",  # after the closing brace: top level
+    f"f() {{ :; }}\nsleep 60 # lead-wait: ok - {L3_REASON}",
+    f"outer() {{\n  inner() {{ :; }}\n  : # lead-wait: ok - {L3_REASON}\n}}\nouter\nsleep 60",
+]
+ROUND3_FIXTURES += L3_DORMANT_MARKER + L3_LIVE_MARKER
+
+
+@pytest.mark.parametrize("command", L3_DORMANT_MARKER)
+def test_l3_a_marker_in_a_dormant_function_body_exempts_nothing(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert leadwait.marker_reason(command) == ""
+    assert denied(_private_home, agents, command)
+
+
+@pytest.mark.parametrize("command", L3_LIVE_MARKER)
+def test_l3_a_marker_in_top_level_code_or_an_invoked_body_still_exempts(
+    _private_home: Path, agents: Path, command: str
+) -> None:
+    assert leadwait.marker_reason(command) == L3_REASON
+    assert not denied(_private_home, agents, command)
+
+
+# M3: the body of $((...)) and $[...] is arithmetic, not commands; only substitutions nested in it run.
+
+ARITHMETIC_QUIET = [
+    "echo $((sleep 60))",  # a false positive in round 2; bash reports a syntax error and runs nothing
+    "echo $(( sleep ))",
+    "echo $[sleep 60]",
+    "x=$((60 * 5)); echo $x",
+    "echo $(( 1 << 2 )) $(( 2 > 1 ? 3 : 4 ))",
+    "(( n = 5 * 60 )); echo $n",
+]
+ARITHMETIC_WAITS = [
+    ("echo $(( $(sleep 60) + 1 ))", "long-sleep"),
+    ("echo $[ $(sleep 60) + 1 ]", "long-sleep"),
+    ("echo $(( `sleep 60` + 1 ))", "long-sleep"),
+    ("echo $(( a[$(gh run watch 1)] ))", "gh-run-watch"),
+    ("sleep $((5 * 60))", "long-sleep"),  # the argument is not a readable number
+    ("sleep $[5 * 60]", "long-sleep"),
+    # `$((` that is not arithmetic: the inner parenthesis closes before the outer pair, so it is `$(` + a subshell
+    ("echo $((echo a); (sleep 60))", "long-sleep"),
+    ("echo $( (sleep 60) )", "long-sleep"),
+]
+ROUND3_FIXTURES += ARITHMETIC_QUIET + [c for c, _ in ARITHMETIC_WAITS]
+
+
+@pytest.mark.parametrize("command", ARITHMETIC_QUIET)
+def test_m3_arithmetic_words_are_not_commands(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+@pytest.mark.parametrize(("command", "kind"), ARITHMETIC_WAITS)
+def test_m3_substitutions_inside_arithmetic_and_real_subshells_still_run(command: str, kind: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == (kind,)
+
+
+# M4: a sleep in a loop CONDITION (between the keyword and its `do`) is a poll as much as one in the body.
+
+CONDITION_POLLS = [
+    "while sleep 1; do :; done",
+    "until sleep 1; do :; done",
+    "while sleep 1 && true; do :; done",
+    "while ! sleep 1; do echo x; done",
+    "while\n  sleep 1\ndo\n  :\ndone",
+    "while true && sleep 1; do :; done",
+]
+CONDITION_NOT_POLLS = [
+    "while true; do :; done; sleep 1",
+    "for i in 1 2; do :; done; sleep 1",
+    "if sleep 1; then :; fi",
+    "sleep 1 && while true; do :; done",
+]
+ROUND3_FIXTURES += CONDITION_POLLS + CONDITION_NOT_POLLS + ["while ! gh pr checks 1 -w; do :; done"]
+
+
+@pytest.mark.parametrize("command", CONDITION_POLLS)
+def test_m4_a_sleep_in_a_loop_condition_is_a_sleep_loop(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ("sleep-loop",)
+
+
+@pytest.mark.parametrize("command", CONDITION_NOT_POLLS)
+def test_m4_a_sleep_outside_every_loop_is_still_just_a_short_sleep(command: str) -> None:
+    assert leadwait.find_waits(command, THRESHOLD) == ()
+
+
+def test_m4_a_watching_condition_is_flagged(_private_home: Path, agents: Path) -> None:
+    command = "while ! gh pr checks 1 -w; do :; done"
+    assert "gh-pr-checks-watch" in leadwait.find_waits(command, THRESHOLD)
+    assert denied(_private_home, agents, command)
+
+
+# L1: a reason is real when, with zero-width and combining characters removed, it is 12 characters long and at least 8
+# of them are Unicode letters or ASCII digits (full-width and Arabic-Indic digits are not, nor are combining marks).
+
+
+def _chars(*codes: int) -> str:
+    """Built from code points so the source stays readable (and ruff does not flag lookalike characters)."""
+    return "".join(chr(c) for c in codes)
+
+
+FULLWIDTH_DIGITS = _chars(*[0xFF11 + k % 9 for k in range(12)])
+ARABIC_INDIC_DIGITS = _chars(*[0x0660 + k % 10 for k in range(12)])
+CIRCLED_DIGITS = _chars(*[0x2460 + k for k in range(12)])
+ZWJ, ZWSP, ACUTE = _chars(0x200D), _chars(0x200B), _chars(0x0301)
+UNREAL_REASONS = [
+    FULLWIDTH_DIGITS,
+    ARABIC_INDIC_DIGITS,
+    CIRCLED_DIGITS,  # not ASCII digits
+    "abcd" + ZWJ * 12,  # letters padded with zero-width joiners
+    "abcdefgh" + ACUTE * 8,  # eight letters plus eight combining marks: 8 characters once they are removed
+    "abc" + ZWSP * 4 + "defgh!!!",  # zero-width spaces do not lengthen it: 11 characters
+    "abcdefg!!!!!",  # seven letters
+    "!!!!!!!!!!!!",
+]
+REAL_REASONS = [
+    "waiting out a dns ttl, nothing to delegate",
+    "abcdefgh!!!!",  # the boundary: twelve characters, eight letters
+    "12345678....",
+    _chars(0x43E, 0x436, 0x438, 0x434, 0x430, 0x43D, 0x438, 0x435)
+    + " dns, "
+    + _chars(0x43D, 0x435, 0x447, 0x435, 0x433, 0x43E),
+    _chars(0x5F85, 0x6A5F, 0x4E2D, 0x306E, 0x305F, 0x3081, 0x554F, 0x984C, 0x306A, 0x3057, 0x78BA, 0x8A8D),
+    # Devanagari: most of the code points are vowel signs (combining), the base letters still make eight
+    _chars(0x92F, 0x939, 0x93E, 0x901, 0x20, 0x92A, 0x94D, 0x930, 0x924, 0x940, 0x915, 0x94D, 0x937, 0x93E, 0x20)
+    + _chars(0x915, 0x930, 0x928, 0x93E, 0x20, 0x906, 0x935, 0x936, 0x94D, 0x92F, 0x915, 0x20, 0x939, 0x948),
+    "caf" + _chars(0xE9) + " renewal wait, 60 s, nothing to delegate",
+]
+
+
+@pytest.mark.parametrize("reason", UNREAL_REASONS)
+def test_l1_a_padded_or_lookalike_reason_is_refused_inline_and_in_config(
+    _private_home: Path, agents: Path, tmp_path: Path, reason: str
+) -> None:
+    assert not leadwait.real_reason(reason)
+    assert leadwait.marker_reason(f"sleep 60 # lead-wait: ok - {reason}") == ""
+    path = agents_file(tmp_path / "bad.yaml", lead_wait={"exempt_repos": [{"repo": "acme/scratch", "reason": reason}]})
+    with pytest.raises(ConfigError, match=r"lead_wait\.exempt_repos\[0\]\.reason"):
+        load_agents(path)
+
+
+@pytest.mark.parametrize("reason", REAL_REASONS)
+def test_l1_a_real_sentence_in_any_script_is_accepted_inline_and_in_config(tmp_path: Path, reason: str) -> None:
+    assert leadwait.real_reason(reason)
+    assert leadwait.marker_reason(f"sleep 60 # lead-wait: ok - {reason}") == reason
+    path = agents_file(tmp_path / "ok.yaml", lead_wait={"exempt_repos": [{"repo": "acme/scratch", "reason": reason}]})
+    assert load_agents(path).hooks.lead_wait.exempt_repos[0].repo == "acme/scratch"
+
+
+# L2: the scan runs under the guard's deadline and fails closed; the cache holds only small inputs.
+
+BIG = 1 << 20  # 1 MiB
+
+
+def test_l2_an_expired_deadline_gives_unscannable_timeout_fast() -> None:
+    started = time.monotonic()
+    command = "echo " + "a " * (BIG // 2)
+    assert leadwait.find_waits(command, THRESHOLD, deadline=started - 1) == ("unscannable-timeout",)
+    assert time.monotonic() - started < 5
+    assert leadwait.find_waits("sleep 1 " + "# x" * 10, THRESHOLD, deadline=started - 1) == ("unscannable-timeout",)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "echo " + "a " * (BIG // 2),
+        "$(" * (BIG // 2),
+        "\\\n" * (BIG // 2),
+        "cat <<A\n" * (BIG // 8),
+        "echo '" + "x" * BIG,
+        "${a:-" * (BIG // 5),
+        "f() { " * (BIG // 6),
+        "sleep 1; " * (BIG // 9),
+    ],
+    ids=[
+        "words",
+        "open-subst",
+        "continuations",
+        "heredocs",
+        "unterminated-quote",
+        "open-brace-expansion",
+        "functions",
+        "sleeps",
+    ],
+)
+def test_l2_a_pathological_one_mebibyte_input_returns_within_the_deadline(shape: str) -> None:
+    started = time.monotonic()
+    kinds = leadwait.find_waits(shape, THRESHOLD, deadline=started + 2.0)
+    assert time.monotonic() - started < 8, "the scan did not honor its deadline"
+    assert isinstance(kinds, tuple)
+
+
+def test_l2_the_hook_passes_its_deadline_to_the_scan(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo.modes import hooks as hooks_mode
+
+    monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)  # the whole budget is already gone
+    set_mode(_private_home, "block")
+    out = guard(_private_home, agents, bash("sleep 1"))[1]
+    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "unscannable-timeout" in reason
+
+
+def test_l2_only_small_inputs_are_cached_and_the_cache_is_bounded() -> None:
+    assert leadwait.CACHE_MAX_CHARS == 8192
+    for n in range(leadwait.CACHE_ENTRIES * 4):
+        leadwait.find_waits(f"sleep {n + 1}", THRESHOLD)
+    assert len(leadwait._SMALL_CACHE) <= leadwait.CACHE_ENTRIES
+    big = "echo " + "a " * (leadwait.CACHE_MAX_CHARS)
+    leadwait.find_waits(big, THRESHOLD)
+    assert big not in leadwait._SMALL_CACHE
+
+
+def test_the_docs_name_every_verdict_kind_the_rule_can_emit() -> None:
+    page = (DOCS / "hooks.md").read_text(encoding="utf-8")
+    for kind in leadwait.KINDS:
+        assert f"`{kind}`" in page, kind
 
 
 # -- the docs keep their promises ----------------------------------------------------------------------------

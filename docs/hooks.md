@@ -40,7 +40,9 @@ the rule name only, never the command.
 
 A small tokenizer splits the call into simple commands, and a wait counts only at **command position**: the first word
 after leading `VAR=value` assignments, the shell keywords `do`, `then`, `else`, `if`, `!` and `{`, and these transparent
-wrappers (with their options): `time`, `nohup`, `command`, `exec`, `nice`, `env`, `sudo`, `timeout`. Commands are
+wrappers (with their options and operands): `time`, `nohup`, `command`, `exec`, `nice`, `env`, `sudo`, `timeout`,
+`stdbuf`, `setsid`, `flock` (its lock operand, or `-c 'command line'`), `ionice`, `taskset`, `chrt`, `unbuffer`,
+`xargs` and `parallel` (its command ends at `:::`). Commands are
 separated by `;`, `&&`, `||`, `|`, `&`, a newline and subshell parentheses. Arguments are data, so `echo gh run watch`
 and `echo sleep 60` are not waits.
 
@@ -48,15 +50,21 @@ and `echo sleep 60` are not waits.
 |---|---|
 | `gh run watch` | `gh run watch 123 --exit-status` |
 | `gh pr checks` with `--watch` or `-w` | `gh pr checks 12 --watch` |
-| a `sleep`, of any length, inside the body (`do` ... `done`) of a `while`, `until` or `for` loop | `until gh run view 9 \| grep -q completed; do sleep 10; done` |
+| `watch` at command position (it re-runs a command until stopped; `watch -g` too) | `watch -n 5 gh pr checks 1` |
+| a `sleep`, of any length, in the condition or the body (`do` ... `done`) of a `while`, `until` or `for` loop | `until gh run view 9 \| grep -q completed; do sleep 10; done` |
 | `sleep` at or above the **threshold** (10 seconds by default; the sleeps of one command add up; an argument the hook cannot read, such as `sleep $n`, counts as over) | `sleep 120`, `sleep 5; sleep 6` |
 
-A sleep counts for a loop only when it is in that loop's body: `while read l; do echo "$l"; done < f; sleep 1` is a
-one-second pause after a loop, not a poll.
+A sleep counts for a loop only when it is in that loop, its condition (`while sleep 1; do :; done`) or its body:
+`while read l; do echo "$l"; done < f; sleep 1` is a one-second pause after a loop, not a poll.
 
 Quoting decides what is code. Single-quoted text, double-quoted text, quoted heredoc bodies and comments are data.
-Code inside `$(...)`, backticks, `${...}` (for example `${value:-$(sleep 60)}`) and the body of an unquoted heredoc
-(`cat <<EOF` followed by a line `$(sleep 60)`) is scanned, also inside double quotes. A heredoc delimiter is read as the
+Code inside `$(...)`, backticks, `${...}` (for example `${value:-$(sleep 60)}`), the body of an unquoted heredoc
+(`cat <<EOF` followed by a line `$(sleep 60)`) and the word of a here-string (`cat <<< "$(sleep 60)"`; `<<<'...'`
+is data) is scanned, also inside double quotes. The body of `$((...))` and `$[...]` is arithmetic and not a command;
+only a substitution nested in it runs (`$(( $(sleep 60) + 1 ))`). Before anything else the scanner removes every
+backslash-newline the way bash does: not inside single quotes or `$'...'`, not in a comment (which ends at its
+newline), not in the body of a heredoc whose delimiter is quoted; it does inside double quotes and in an unquoted
+heredoc body, where a line ending in a backslash is joined to the next one BEFORE it is compared with the delimiter. A heredoc delimiter is read as the
 complete shell word, quote-removed, the way bash reads it: `<<EOF`, `<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<E'OF'`,
 `<<$'EOF'` and `<<-EOF` all end at a line that is exactly `EOF`. If any part of the delimiter is quoted the body is
 opaque data; otherwise its substitutions run and are scanned. The following also count as code the call runs, so they
@@ -65,8 +73,25 @@ of `env -S` / `env --split-string`, and the command that `xargs` and `find -exec
 run. The same words as arguments to any other command are data.
 
 A function defined in the call (`name() { ... }`, `function name { ... }`) does not wait by being defined. Its body is
-scanned only if the same call later invokes the name at command position; `echo name` does not. A function body that is
-not a brace group, such as `name() ( ... )`, is read as live code.
+scanned only if the same call later invokes the name at command position; `echo name` does not. A function nested in
+another is dormant until ITS OWN name is invoked (`outer() { inner() { sleep 60; }; }; outer` only defines `inner`). A
+function body that is not a brace group, such as `name() ( ... )`, is read as live code. A marker comment inside a
+dormant body exempts nothing (see below).
+
+**Constructs the scanner will not guess at are their own verdicts.** Each is denied by `block` mode and shown as a
+warning by `warn` mode, with a content-free message that names only the kind, and a real marker can exempt it like
+any flagged call. All the kinds the rule emits: `gh-run-watch`, `gh-pr-checks-watch`, `watch`, `sleep-loop`,
+`long-sleep`, and the fail-closed `unscannable-depth`, `unscannable-brace`, `unscannable-indirect`,
+`unscannable-timeout`:
+
+- `unscannable-brace`: an unquoted brace expansion (`{a,b}` with a comma, or `{1..3}`) in a COMMAND word builds the
+  command at run time (`{sleep,60}`, `sl{e..e}ep 60`). In an argument (`echo {a,b}`), a group (`{ cmd; }`), `${var}` or
+  quotes it is not an expansion of the command and is fine.
+- `unscannable-indirect`: the call defines a function AND runs a variable- or substitution-expanded word at command
+  position (`f() { sleep 60; }; x=f; $x`). A call that defines no function and uses `$x` stays a documented limit.
+- `unscannable-timeout`: the scan ran past the guard's own deadline (the same budget as the other lookups). Inputs of
+  at most 8 KiB are cached (16 entries); a larger input is scanned once per call and not kept.
+- `unscannable-depth`: see next.
 
 **Nesting beyond three levels is its own verdict.** Executable syntax (`$(...)`, backticks, `${...}`, `bash -c` and
 `eval` strings) nested deeper than 3 cannot be checked here, so the hook does not pass it silently: it reports
@@ -106,16 +131,17 @@ Exemptions are never silent:
   reasonless exemption is refused outright. It applies to the repository bound at SessionStart, the same binding the
   tracking opt-out uses, and to no other.
 - A single call can carry a comment, `# lead-wait: ok - <reason>`, with a stated reason: at least 12 characters, of
-  which at least 8 are letters or digits (Unicode letters and digits count). `!!!!!!!!!!!!` is twelve characters and
-  no reason. The marker counts only in a real shell comment: a `#` that begins a word outside quotes. The same text
+  which at least 8 are letters (any script) or ASCII digits, counted after combining marks and zero-width or other
+  format characters are removed. `!!!!!!!!!!!!` is twelve characters and no reason; neither is padding with
+  zero-width joiners or combining marks, nor full-width, Arabic-Indic or circled digits. The marker counts only in a real shell comment: a `#` that begins a word outside quotes. The same text
   inside a quoted string (`echo 'lead-wait: ok - ...'`, a commit message), inside any heredoc body whatever the
   spelling of its delimiter, after an escaped `\#`, or as plain arguments is data and exempts nothing. The call is one
-  decision, so the comment may sit on the wait's line or on another line of the same call. A marker with no reason, or a
+  decision, so the comment may sit on the wait's line or on another line of the same call. A comment in a function
+  body counts only if that function is invoked in the call; in a dormant body it exempts nothing. A marker with no reason, or a
   placeholder, is ignored and the call is flagged; the message says a reason is required. An exempted call is allowed
   and logged as `allow` with the `lead-waits` rule, so exemptions can be counted. The reason itself stays in the
   transcript and is never written to the log.
-- A repository exemption in `agents.yaml` follows the same reason rule (12 characters, 8 of them letters or digits), or
-  the file fails to load.
+- A repository exemption in `agents.yaml` follows the same reason rule, or the file fails to load.
 - Like the approval token, both are speed bumps: an agent with shell access can type a marker. Their job is to make a
   deliberate wait a written decision. The rule is a speed bump against accidents, not a sandbox: an actor who can
   already run arbitrary Bash as the same user can also edit the guard's config, mode file and logs.
@@ -187,11 +213,13 @@ no effect.
   - [limit: script file] `bash poll.sh`: the file is not read, so a loop in it is not seen.
   - [limit: alias] `alias w='sleep 60'; w`: an alias defined earlier or in a startup file.
   - [limit: remote command] `ssh host 'sleep 60'`: the wait runs elsewhere (and still holds the thread).
-  Also not seen: `watch`, `timeout ... tail -f`, a function defined in an earlier call, and a wait inside a function
-  body that is not a brace group. Shell grammar is approximated: `case` arms are read as plain commands, a here-string
-  `<<<` is skipped, and `${...}` is read for its substitutions only. Executable syntax nested deeper than 3 levels is
-  reported as `unscannable-depth` rather than guessed at. The cheap pre-check tokenizes any call that contains a quote,
-  backslash, `$` or backtick, so a word built from pieces (`sl''eep 60`) is not missed; a call with none of those and
+  Also not seen: `timeout ... tail -f`, a function defined in an earlier call, and a wait inside a function body that
+  is not a brace group. Shell grammar is approximated: `case` arms are read as plain commands, and `${...}` is read for
+  its substitutions only. `parallel` options are a fixed list: an option this scanner does not know that takes a
+  value hides the command behind it. Executable syntax nested deeper than 3 levels, a brace-built command, an
+  indirect call next to a function definition and a scan that runs out of time are reported as `unscannable-*`
+  rather than guessed at. The cheap pre-check tokenizes any call that contains a quote, backslash, `$`, backtick or
+  `{`, so a word built from pieces (`sl''eep 60`, `sl{e,e}p`) is not missed; a call with none of those and
   none of `sleep`, `watch`, `checks` reads no configuration and logs nothing. It would rather miss the cases above
   than flag text. Whether a given Claude Code version puts `agent_id` on sub-agent events was not verified in a live
   SAFO session; if it did not, a sub-agent's watch would be flagged as the lead's (a warning in `warn` mode, a denial in
