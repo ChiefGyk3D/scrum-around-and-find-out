@@ -90,9 +90,10 @@ else has. Two controls, both offline:
    adopt it by hand.
 2. Fail a change that adds a gitlink anywhere under `.claude/`. `scripts/check-claude-gitlinks.sh`
    reads the index of the checkout it runs in and exits 1, naming each path, when it finds one. A submodule outside
-   `.claude/` is not flagged. With `--require-ignore` it also exits 1 when `.claude/worktrees/` is not ignored. It exits
-   2 outside a git checkout, so a missing checkout is never a pass. Copy the script into a repository, or call it from a
-   workflow step after checkout:
+   `.claude/` is not flagged; a gitlink at `.claude` itself is. With `--require-ignore` it also exits 1 when
+   `.claude/worktrees/` is not ignored. It exits 2 ("cannot tell") outside a git checkout, when the index cannot be read,
+   and on any extra argument, so none of those is ever a pass. Copy the script into a repository, and add a step after
+   checkout:
 
 ```yaml
       - uses: actions/checkout@<sha> # vX.Y.Z
@@ -101,7 +102,10 @@ else has. Two controls, both offline:
       - run: bash scripts/check-claude-gitlinks.sh --require-ignore
 ```
 
-In this repository it is part of `make check`, and its tests build throwaway repositories with a staged gitlink.
+In this repository it is part of `make check`. CI enforcement here is indirect: `tests/test_claude_gitlinks.py` runs the
+script against the CI checkout, and no workflow step calls it directly. A shared GYST workflow input is only proposed
+(GYST issue 217), and the adoption inventory has not been checked against this control. The tests build throwaway
+repositories with a staged gitlink.
 
 Not covered: a hook that blocks `git add -A` before it runs. It would need only `tool_input.command` from a PreToolUse
 Bash hook, but delivery has not been verified, so this is a CI check and a `.gitignore` line, not a hook.

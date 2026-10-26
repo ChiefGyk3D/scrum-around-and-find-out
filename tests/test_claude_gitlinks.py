@@ -66,7 +66,53 @@ def test_ignored_untracked_worktrees_pass_even_when_the_ignore_is_required(tmp_p
     nested.mkdir(parents=True)
     (nested / "f").write_text("x\n")
     git(repo, "add", "-A")  # the command that caused #86: with the ignore in place it stages nothing from there
+    staged = subprocess.run(  # noqa: S603
+        ["git", "-C", str(repo), "ls-files", "--stage", ".claude"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert staged == ""
     assert check(repo, "--require-ignore").returncode == 0
+
+
+def test_a_gitlink_named_exactly_dot_claude_fails(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    gitlink(repo, ".claude")  # what `git add -A` stages when .claude is itself a repository
+    done = check(repo)
+    assert done.returncode == 1
+    assert ".claude" in done.stderr
+
+
+def test_an_unreadable_index_is_cannot_tell_never_ok(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    (repo / ".git" / "index").write_text("garbage")
+    done = check(repo)
+    assert done.returncode == 2
+    assert "ok" not in done.stdout
+
+
+def test_help_starts_with_the_usage_text(tmp_path: Path) -> None:
+    done = check(make_repo(tmp_path), "--help")
+    assert done.returncode == 0
+    assert done.stdout.startswith("Fail when the index holds a gitlink")
+    assert "SPDX" not in done.stdout
+
+
+def test_extra_arguments_are_rejected(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    done = check(repo, "--require-ignore", "extra")
+    assert done.returncode == 2
+    assert "extra" in done.stderr
+
+
+def test_a_path_with_a_newline_and_a_tab_is_named_whole(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    weird = ".claude/worktrees/a\nb\tc"
+    gitlink(repo, weird)
+    done = check(repo)
+    assert done.returncode == 1
+    assert weird in done.stderr
 
 
 def test_a_submodule_outside_claude_is_not_flagged(tmp_path: Path) -> None:
