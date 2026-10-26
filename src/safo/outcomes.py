@@ -44,6 +44,8 @@ def valid_model(name: object) -> bool:
         and ".." not in name
         and "." not in name.split("/")
     )
+
+
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 COUNT = re.compile(r"[0-9]{1,9}")
 NOTE_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")  # any control or line-break character
@@ -160,7 +162,7 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
     model = raw.get("model")
     if model is not None and not (valid_model(model)):
         raise ConfigError(
-            f"{where}.model: expected a label of letters, digits, . _ : - with single / between parts (at most 128), or null"
+            f"{where}.model: expected a label (letters, digits, . _ : - and single /; max 128), or null"
         )
     credits = raw.get("credits_used")
     if credits is not None and (

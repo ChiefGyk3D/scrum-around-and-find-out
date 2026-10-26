@@ -109,9 +109,9 @@ def report(ctx: LocalContext, args: argparse.Namespace, month: str) -> int:
         models: list[dict[str, Any]] = [m.__dict__ for m in model_rows]
         # one line, ASCII only; `::` is written as a JSON escape so no value can start a workflow command
         ctx.say(
-            json.dumps({"month": month, "agents": data, "models": models, "abandoned": abandoned}, separators=(",", ":")).replace(
-                "::", ":\\u003a"
-            )
+            json.dumps(
+                {"month": month, "agents": data, "models": models, "abandoned": abandoned}, separators=(",", ":")
+            ).replace("::", ":\\u003a")
         )
         return EXIT_OK
     ctx.say(f"Outcomes for {month} ({path.name})")

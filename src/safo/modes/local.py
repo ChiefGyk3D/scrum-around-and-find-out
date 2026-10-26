@@ -72,7 +72,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             ctx.say(f"skipped: {line}")
         ctx.say(f"no local endpoint can take this: hand it to {fallback} instead (nothing was sent)")
         return EXIT_DRIFT
-    label = model if outcomes.valid_model(model) else None  # decided before anything is sent; never fail after the answer
+    label = model if outcomes.valid_model(model) else None  # decided before sending: never fail after the answer
     think = endpoint.think if args.think is None else args.think
     num_ctx = args.num_ctx or endpoint.ctx_for(model)
     try:

@@ -458,6 +458,7 @@ def test_model_names_may_carry_an_ollama_tag() -> None:
 
 # ---- round 2: model labels, and abandoned records stay out of every measure ----
 
+
 def test_the_closed_set_of_outcome_values() -> None:
     assert outcomes.OUTCOME_VALUES == ("accepted", "abandoned")
 

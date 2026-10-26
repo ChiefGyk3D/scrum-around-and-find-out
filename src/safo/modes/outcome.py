@@ -55,10 +55,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--shape", required=True, help="a task shape from agents.yaml")
     parser.add_argument("--card", default="", help="the issue or pull request URL")
     parser.add_argument("--date", default="", help="YYYY-MM-DD (default: today)")
-    parser.add_argument("--review-rounds",
+    parser.add_argument(
+        "--review-rounds",
         type=int,
         default=None,
-        help="review passes, the passing one included (default: 1; 0 for an abandoned task, which had no passing pass)",)
+        help="review passes, the passing one included (default: 1; 0 if abandoned: no passing pass)",
+    )
     parser.add_argument("--findings", default="", help="critical=0,important=1,minor=2,unrated=0")
     parser.add_argument("--tokens", type=int, default=None)
     parser.add_argument("--requests", type=int, default=None)

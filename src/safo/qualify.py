@@ -6,7 +6,8 @@ so the result does not depend on the order of the log:
 
 - scope: with no model, all of the agent's records, deduplicated on (agent, card); with a model, only that model's
   records, deduplicated on (agent, model, card);
-- records of one key that agree on every material field (date, shape, review rounds, findings, model, outcome) collapse to
+- records of one key that agree on every material field (date, shape, review rounds, findings, model,
+  outcome) collapse to
   one; if they disagree on any, the key is a conflict and none of its records counts. Duplicates are judged before
   the other rules, so a copy that differs only in its review rounds still voids the key;
 - an abandoned record (outcome `abandoned`) never counts; its outcome is a material field, so it never collapses
