@@ -311,8 +311,11 @@ A hook sits inside someone's session, so every error lets the work through, visi
   guard's deadline (at least 0.25 s) and ABANDONED if it is still going. A thread works the same on Linux and macOS and
   in any thread; a signal timer would not. On expiry there is no configuration, so every rule is off, as for an
   unreadable `agents.yaml`: a visible degraded allow (log diagnostic `timeout`) with the notice `budget exceeded:
-  configuration load timed out, rules disabled`. That is fail-open and is stated as such; it needs a read that blocks
-  (a FIFO, a dead mount) to happen. What stays unbounded: the abandoned read keeps blocking until the process exits
+  configuration load timed out, rules disabled`. That is fail-open and is stated as such. The realistic trigger is a
+  wedged filesystem or kernel read, which cannot be made without privilege. It is NOT an ordinary FIFO: the production
+  reader opens with `O_NONBLOCK` and refuses a non-regular file, so a planted FIFO is rejected at once as a `config`
+  failure and never reaches the timeout (a test runs the real loader on a FIFO and pins that). The timeout path itself
+  is tested with a synthetic loader that never returns, and says so. What stays unbounded: the abandoned read keeps blocking until the process exits
   (it only reads), a state-file read or `fsync` that blocks is not interrupted, and a host that kills the hook before
   the line is out prints nothing. If the load finishes but the clock is past its deadline, the re-probe and the issue
   lookup are skipped and the notice says `budget exceeded: lookups skipped`; a brief whose issue could not be verified
@@ -324,21 +327,43 @@ A hook sits inside someone's session, so every error lets the work through, visi
   never fails open); any other undelivered line exits 1, a non-blocking error. This is the one case where the guard
   exits 2. That the host treats exit 2 as a block and exit 1 as non-blocking is the host's documented hook contract,
   not verified by a test here. A failure in the diagnostic path is caught and becomes the same exit code.
+- Between a computed decision and its emit, the only state-folder work is the first-notice flag (when the probe is not
+  healthy) and the inspection of the log-failed marker, and both run under the same bounded worker-thread mechanism as
+  the config load: they get at most 1.0 s (at least 0.25 s, and not past the hard limit). If they do not finish they
+  are skipped and abandoned: the decision goes out WITHOUT those notices, with the fixed text `notices skipped: state
+  folder slow` in the line (learned without any I/O), and the flag and the marker are left as they were (if the
+  abandoned call finishes later it may still set the flag, so that session's one probe notice can be lost). After the
+  emit, persistence is best effort as before. Residual: the inputs of the decision itself (the mode file, the saved
+  probe state, the bound repository) are still read on the calling thread and are not bounded; a state folder that
+  wedges on those holds the line back until the host's timeout.
 - Because the decision is printed before the log is touched, a failed or skipped log write can no longer appear in the
   same JSON line. Persistence is best effort and catches any exception (not only I/O errors). It is reported on standard
   error, and by a small marker file (`log-failed` in the state folder) that the NEXT guard run reads and reports as
   `previous log write failed` in its own line (log diagnostic `log-write`). The marker is opened relative to a
   descriptor of the state folder (checked on the descriptor: ours, not writable by others), never blocks, never follows
-  a link, and must be a regular file of ours. A directory, FIFO, link or loose-mode file at its name is removed and
-  reported once as `log-failed marker unusable` (in the next line, and on stderr); if it cannot be removed it is
-  reported on every dispatch. A line carries every applicable notice, highest priority first (`mode`, the marker's
-  notice, `budget exceeded`, the probe notice), and the marker is deleted only after a line that shows its notice was
-  delivered. The marker is same-user writable like the rest of the state: it can only add a notice and never grants
-  anything (inside the same-user residual, #61). What Claude Code does after a hook has flushed its decision and then
-  runs past its timeout is UNVERIFIED.
-- `append_log` treats retained bytes that are not valid UTF-8 (found while recovering an incomplete tail) as
-  corruption: the file is moved to the one private archive, `log.jsonl.1`, replacing an older archive as a size
-  rotation does, and a fresh log is started. It does not raise.
+  a link, and must be a regular file of ours. Every failure writes a fresh file (new inode, new token) and renames it
+  over the marker, so each failure has its own identity. A run records the identity it read (device, inode,
+  modification time in ns, size) and clears the marker only if it still has that identity, so a failure written by
+  another run in between is kept and reported next. The check and the unlink are two calls, so a failure landing in
+  that gap can still be lost; the window is microseconds. A directory, FIFO, link or loose-mode file at its name is
+  removed (if it is still what was seen) and reported once as `log-failed marker unusable` (in the next line, and on
+  stderr); if it cannot be removed it is reported on every dispatch. A line carries every applicable notice, highest
+  priority first (`mode`, `notices skipped`, the marker's notice, `budget exceeded`, the probe notice), and the marker is
+  deleted only after a line that shows its notice was delivered. The marker is same-user writable like the rest of the
+  state: it can only add a notice and never grants anything (inside the same-user residual, #61).
+- The limit of what writing the decision first covers (vendor documentation for Claude Code hooks, fetched through a
+  summarizing tool, so taken from an extraction, not read in full): a PreToolUse command hook that reaches its timeout
+  does NOT block the call, and its output is discarded, unless the hook entry sets `onFailure: "block"`. So the
+  decision first only helps when the line is out before the host's timeout; a hook that is killed at the timeout is
+  fail-open. Whether the settings that `safo hooks install` writes should set `onFailure: "block"` is tracked separately
+  (SAFO #130) and is a settings decision for the maintainer; this document does not change it. Anything this page says
+  about what the host does after a flushed decision and a later kill is therefore subject to that rule.
+- A log that is not valid UTF-8 anywhere (a complete line or the incomplete tail) is corruption. `append_log` moves it to
+  `log.jsonl.corrupt-<UTC timestamp>-<pid>` (mode 0600, same folder, same trusted-directory rules) and starts a fresh
+  log. It never touches `log.jsonl.1`, the real archive. At most 5 such files are kept; the oldest names are deleted
+  beyond that, so repeated corruption cannot fill the disk. It does not raise. The same-user residual (#61) still holds
+  here: an actor running as the same user can damage, replace or delete the log and these files; the log is advisory
+  telemetry, not tamper-evident evidence.
 - A re-probe that times out stores an unreachable state for `max_state_age_seconds` (300 s by default), so later
   dispatches log health `healthy` and `local_reachable` false with no notice, as after a stale-state re-probe.
 - The line shown after the first probe under a new configuration says there was no saved probe for it (an edit, or a
@@ -411,8 +436,8 @@ is written and flushed first. The append then waits for the lock for the setting
 whichever is less. If less than 0.05 s is left, or the clock is already past 9 s, the append is skipped: it is never
 started late and never stretched past 9 s. A longer setting therefore does not extend the hook. A skipped or failed
 append is reported on stderr and, on the next guard run, as `previous log write failed` (see Failing safe). The
-configuration load is bounded in wall time (see Failing safe); once the line is out, the host's behavior if it then
-kills the hook is UNVERIFIED. The append itself is not interruptible once it holds the lock (fsync can block). The
+configuration load and the notice I/O are bounded in wall time (see Failing safe). A hook killed at the host's
+timeout is fail-open and its output is discarded unless the hook entry sets `onFailure: "block"` (SAFO #130). The append itself is not interruptible once it holds the lock (fsync can block). The
 other lock users (mode, probe state) keep their 0.5 s wait.
 
 ## Known limits
