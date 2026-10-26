@@ -133,6 +133,22 @@ GitHub answers "none" instead of "forbidden", so the audit never reads an empty 
 reports ADMIN on the repository; otherwise, and on any refused or failed read, it prints `UNKNOWN NO-GATE ...` naming the
 permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero; only an integer `0` means none. Reading it reliably needs `viewerPermission` ADMIN. Cannot tell is never a pass.
 
+**Strict reading.** The audit trusts GitHub's answer only when it is complete and consistent. A connection, list or
+object field that is null, absent, the wrong type or an element of the wrong type is **cannot tell** (exit 2), never an
+empty list: `bypassActors: {totalCount: 0, nodes: null}` is not "nobody can bypass". Only a real list, including `[]`,
+is a list. For every connection (`rulesets`, a ruleset's `rules`, its `bypassActors`) the `totalCount` must equal the
+number of nodes: more in the total than listed means the read was cut short, fewer means the answer contradicts itself,
+and both are cannot tell. The default branch name must be text that passes git's ref-name rules (no control character,
+space or `~^:?*[\`, no `..`, `@{`, `//`, leading or trailing `/`, trailing `.` or `.lock`); it is never turned into text
+with `str()`, so a null name cannot be credited with a `~DEFAULT_BRANCH` ruleset. A `data` value that is not an object,
+or a repository that is missing or not an object, is cannot tell for that repository alone: the other repositories are
+still judged, and any unexpected error while judging one repository is reported as `UNKNOWN NO-GATE <repo>: ... (unexpected
+answer)` with fixed text, never the error text.
+
+**GitHub-supplied text is escaped.** Error messages from GitHub, ruleset names, bypass modes and branch names pass
+through the same escaping as the CLI's other output (control and format characters written as `\xNN` or `\uNNNN`, `::`
+broken), so a finding is always one physical line and cannot forge a `DRIFT` line or a workflow command.
+
 The read uses the same GraphQL client as the rest of the audit (a second REST transport would duplicate its redirect,
 retry and loopback hardening). It never writes protection: setting it is `scripts/apply-baseline.sh`, run by the maintainer.
 

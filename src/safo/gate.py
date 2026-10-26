@@ -23,9 +23,11 @@ answer lacks.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+from safo import output
 from safo.errors import ApiError, AuthError, MalformedDataError, NotFoundError
 from safo.graphql import JSON, Client
 from safo.schema import Board
@@ -202,7 +204,7 @@ def _covers(patterns: Any, ref: str) -> bool | None:
     """True if any pattern definitely covers ref, None if none does but one may, else False."""
     unclear = False
     for p in _list(patterns, "ruleset ref patterns"):
-        verdict = ref_matches(str(p), ref)
+        verdict = ref_matches(_text(p, "ruleset ref pattern"), ref)
         if verdict:
             return True
         unclear = unclear or verdict is None
@@ -217,6 +219,11 @@ def names_gate(context: str, gate: str) -> bool:
     return context == gate or context.endswith(f" / {gate}")
 
 
+def _s(text: object) -> str:
+    """GitHub-supplied or exception text made safe for one log line (the CLI's own escaping); idempotent."""
+    return output.line(str(text))
+
+
 def _obj(value: Any, what: str) -> JSON:
     if not isinstance(value, dict):
         raise MalformedDataError(f"{what}: GitHub's answer is not shaped as expected")
@@ -224,10 +231,15 @@ def _obj(value: Any, what: str) -> JSON:
 
 
 def _list(value: Any, what: str) -> list[Any]:
-    if value is None:
-        return []
+    """A real list, including an empty one. Null, absent and every other type are malformed, never an empty list."""
     if not isinstance(value, list):
-        raise MalformedDataError(f"{what}: GitHub's answer is not shaped as expected")
+        raise MalformedDataError(f"{what}: GitHub's answer is not a list")
+    return value
+
+
+def _text(value: Any, what: str) -> str:
+    if not isinstance(value, str):
+        raise MalformedDataError(f"{what}: GitHub's answer is not text")
     return value
 
 
@@ -237,21 +249,62 @@ def _count(value: Any, what: str) -> int:
     return value
 
 
+def _connection(conn: Any, what: str) -> list[JSON]:
+    """The nodes of a connection read in full. `totalCount` must equal the number of nodes.
+
+    More in the total than listed means the read was cut short (cannot tell, `Unclear`); fewer means the answer
+    contradicts itself (`MalformedDataError`). The query asks for no further page, so either way the verdict is UNKNOWN.
+    """
+    conn = _obj(conn, what)
+    nodes = [_obj(n, f"{what} node") for n in _list(conn.get("nodes"), f"{what} nodes")]
+    total = _count(conn.get("totalCount"), f"{what} totalCount")
+    if total > len(nodes):
+        raise Unclear(f"{what}: only {len(nodes)} of {total} were listed")
+    if total < len(nodes):
+        raise MalformedDataError(f"{what}: GitHub lists {len(nodes)} nodes but a total of {total}")
+    return nodes
+
+
+_BAD_REF_CHARS = set(" ~^:?*[\\")
+
+
+def _branch_name(value: Any) -> str:
+    """The default branch name, validated like git's own ref-name rules; GitHub's text is never stringified."""
+    name = _text(value, "defaultBranchRef name")
+    bad = (
+        not name
+        or name == "@"
+        or any(unicodedata.category(c).startswith("C") or c in _BAD_REF_CHARS for c in name)
+        or name.startswith("/")
+        or name.endswith(("/", ".", ".lock"))
+        or ".." in name
+        or "//" in name
+        or "@{" in name
+        or any(seg.startswith(".") or seg.endswith(".lock") for seg in name.split("/"))
+    )
+    if bad:
+        raise MalformedDataError("defaultBranchRef name: GitHub's answer is not a plausible branch name")
+    return name
+
+
 def _contexts(checks: Any, what: str) -> list[str]:
-    return [str(_obj(c, what).get("context", "")) for c in _list(checks, what)]
+    return [_text(_obj(c, what).get("context"), f"{what} context") for c in _list(checks, what)]
 
 
 def _applies(rs: JSON, branch: str) -> bool:
     """An active branch ruleset whose conditions include the default branch and do not exclude it."""
-    if rs.get("enforcement") != "ACTIVE" or rs.get("target") != "BRANCH":
+    if (
+        _text(rs.get("enforcement"), "ruleset enforcement") != "ACTIVE"
+        or _text(rs.get("target"), "ruleset target") != "BRANCH"
+    ):
         return False
-    ref = _obj(_obj(rs.get("conditions") or {}, "ruleset conditions").get("refName") or {}, "ruleset refName")
+    ref = _obj(_obj(rs.get("conditions"), "ruleset conditions").get("refName"), "ruleset refName")
     full = f"refs/heads/{branch}"
     include, exclude = _covers(ref.get("include"), full), _covers(ref.get("exclude"), full)
     if exclude is True or include is False:
         return False
     if include is None or exclude is None:
-        raise Unclear(f"ruleset {rs.get('name')!r} has a ref pattern whose meaning GitHub does not document")
+        raise Unclear(f"ruleset {_s(rs.get('name'))!r} has a ref pattern whose meaning GitHub does not document")
     return True
 
 
@@ -264,16 +317,13 @@ class Source:
 
 
 def _bypass_actors(rs: JSON) -> str | None:
-    actors = _obj(rs.get("bypassActors"), f"ruleset {rs.get('name')!r} bypassActors")
-    nodes = _list(actors.get("nodes"), "bypassActors")
-    total = _count(actors.get("totalCount"), "bypassActors totalCount")
-    if total > len(nodes):
-        raise Unclear(f"ruleset {rs.get('name')!r} lists only {len(nodes)} of {total} bypass actors")
+    name = _s(rs.get("name"))
+    nodes = _connection(rs.get("bypassActors"), f"ruleset {name!r} bypassActors")
     if not nodes:
         return None
-    modes = sorted({str(_obj(n, "bypass actor").get("bypassMode", "?")) for n in nodes})
+    modes = sorted({_s(_text(n.get("bypassMode"), "bypassMode")) for n in nodes})
     plural = "" if len(nodes) == 1 else "s"
-    return f"ruleset {rs.get('name')!r} has {len(nodes)} bypass actor{plural} ({', '.join(modes)})"
+    return f"ruleset {name!r} has {len(nodes)} bypass actor{plural} ({', '.join(modes)})"
 
 
 def _holds(sources: list[Source]) -> tuple[bool, list[str]]:
@@ -288,29 +338,34 @@ def judge_repository(raw: JSON, gate: str, forbid_force: bool, *, admins_accepte
         return _judge(_obj(raw, "repository"), gate, forbid_force, admins_accepted, res)
     except Unclear as err:
         res.problems = []
-        res.unknown = f"default branch {res.branch!r}: {err}"
+        res.unknown = _s(f"default branch {res.branch!r}: {err}")
         return res
 
 
 def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res: GateResult) -> GateResult:
-    if repo.get("isArchived") is True:
+    archived = repo.get("isArchived")
+    if not isinstance(archived, bool):
+        raise MalformedDataError("isArchived: GitHub's answer is not true or false")
+    permission = _text(repo.get("viewerPermission"), "viewerPermission")
+    if archived:
         res.note = "is archived (read-only, nothing can merge); the gate is not checked"
         return res
-    ref = repo.get("defaultBranchRef")
+    if "defaultBranchRef" not in repo:
+        raise MalformedDataError("defaultBranchRef: GitHub's answer lacks it")
+    ref = repo["defaultBranchRef"]
     if ref is None:
         res.note = "has no default branch yet (empty repository); the gate is not checked"
         return res
     ref = _obj(ref, "defaultBranchRef")
-    branch = res.branch = str(ref.get("name", ""))
-    sets = _obj(repo.get("rulesets") or {}, "rulesets")
-    nodes = [_obj(n, "ruleset") for n in _list(sets.get("nodes"), "rulesets")]
-    if _count(sets.get("totalCount"), "rulesets totalCount") > len(nodes):
-        raise Unclear(f"only {len(nodes)} of {sets.get('totalCount')} rulesets were listed")
+    branch = res.branch = _branch_name(ref.get("name"))
+    nodes = _connection(repo.get("rulesets"), "rulesets")
 
     check_sources: list[Source] = []
     force_sources: list[Source] = []
     protected = False
-    classic = ref.get("branchProtectionRule")
+    if "branchProtectionRule" not in ref:
+        raise MalformedDataError("branchProtectionRule: GitHub's answer lacks it")
+    classic = ref["branchProtectionRule"]
     if classic is not None:
         classic = _obj(classic, "branchProtectionRule")
         protected = True
@@ -331,25 +386,22 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
     for rs in nodes:
         if not _applies(rs, branch):
             continue
-        rules = _obj(rs.get("rules") or {}, "ruleset rules")
-        listed = _list(rules.get("nodes"), "ruleset rules")
-        if _count(rules.get("totalCount"), "ruleset rules totalCount") > len(listed):
-            raise Unclear(f"ruleset {rs.get('name')!r} lists only some of its rules")
+        listed = _connection(rs.get("rules"), f"ruleset {_s(rs.get('name'))!r} rules")
         protected = True
         bypass = _bypass_actors(rs)
         for rule in listed:
-            rule = _obj(rule, "ruleset rule")
-            if rule.get("type") == "REQUIRED_STATUS_CHECKS":
-                params = _obj(rule.get("parameters") or {}, "rule parameters")
+            kind = _text(rule.get("type"), "rule type")
+            if kind == "REQUIRED_STATUS_CHECKS":
+                params = _obj(rule.get("parameters"), "rule parameters")
                 if any(
                     names_gate(c, gate) for c in _contexts(params.get("requiredStatusChecks"), "requiredStatusChecks")
                 ):
-                    check_sources.append(Source(str(rs.get("name")), bypass))
-            elif rule.get("type") == "NON_FAST_FORWARD":
-                force_sources.append(Source(str(rs.get("name")), bypass))
+                    check_sources.append(Source(_s(rs.get("name")), bypass))
+            elif kind == "NON_FAST_FORWARD":
+                force_sources.append(Source(_s(rs.get("name")), bypass))
 
     if not protected:
-        if repo.get("viewerPermission") != "ADMIN":
+        if permission != "ADMIN":
             raise Unclear(f"nothing was visible, and {NEEDS_ADMIN}")
         res.problems.append("has no branch protection and no active ruleset")
         return res
@@ -358,13 +410,13 @@ def _judge(repo: JSON, gate: str, forbid_force: bool, admins_accepted: bool, res
         if not check_sources:
             res.problems.append(f"is protected but does not require the check {gate!r}")
         elif not held:
-            res.problems.append(f"requires the check {gate!r} but it can be bypassed ({'; '.join(ways)})")
+            res.problems.append(_s(f"requires the check {gate!r} but it can be bypassed ({'; '.join(ways)})"))
     if forbid_force:
         held, ways = _holds(force_sources)
         if not force_sources:
             res.problems.append("allows force pushes")
         elif not held:
-            res.problems.append(f"force pushes are blocked but {'; '.join(ways)}")
+            res.problems.append(_s(f"force pushes are blocked but {'; '.join(ways)}"))
     return res
 
 
@@ -384,6 +436,8 @@ def _classic_bypass(classic: JSON, admins_accepted: bool) -> str | None:
 def read_repository(client: Client, full_name: str) -> JSON:
     owner, _, name = full_name.partition("/")
     data = client.execute(Q_BRANCH_GATE, {"owner": owner, "name": name})
+    if not isinstance(data, dict):
+        raise MalformedDataError(f"{full_name}: GitHub's data is not an object")
     repo = data.get("repository")
     if not isinstance(repo, dict):
         raise MalformedDataError(f"{full_name}: GitHub returned no repository")
@@ -417,15 +471,18 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
             )
             continue
         except MalformedDataError as err:
-            unknown.append(f"NO-GATE {name}: could not read the default branch's protection ({err})")
+            unknown.append(_s(f"NO-GATE {name}: could not read the default branch's protection ({err})"))
             continue
         except (AuthError, ApiError) as err:
-            unknown.append(f"NO-GATE {name}: could not read the default branch's protection ({err}); {NEEDS_ADMIN}")
+            unknown.append(_s(f"NO-GATE {name}: could not read the default branch's protection ({err}); {NEEDS_ADMIN}"))
+            continue
+        except Exception:  # one repository's odd answer must not crash the audit or skip the others
+            unknown.append(f"NO-GATE {name}: could not read the default branch's protection (unexpected answer)")
             continue
         if result.unknown:
-            unknown.append(f"NO-GATE {name}: {result.unknown}")
+            unknown.append(_s(f"NO-GATE {name}: {result.unknown}"))
         if result.note:
-            notes.append(f"NO-GATE {name} {result.note}")
+            notes.append(_s(f"NO-GATE {name} {result.note}"))
         if result.problems:
-            drift.append(f"NO-GATE {name}: default branch {result.branch!r} {' and '.join(result.problems)}")
+            drift.append(_s(f"NO-GATE {name}: default branch {result.branch!r} {' and '.join(result.problems)}"))
     return drift, unknown, notes
