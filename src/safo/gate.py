@@ -36,7 +36,7 @@ from typing import Any
 from safo import output
 from safo.errors import ApiError, AuthError, MalformedDataError, NotFoundError
 from safo.graphql import JSON, Client
-from safo.schema import Board
+from safo.schema import LOGIN, REPO_NAME, Board
 
 # Lists are read 40 at a time and a longer one is "cannot tell" (never paginated: no repository has that many).
 Q_BRANCH_GATE = """query RepoBranchGate($owner: String!, $name: String!) {
@@ -315,7 +315,24 @@ def _applies(rs: JSON, branch: str) -> bool:
     return True
 
 
-VIEWER_PERMISSIONS = frozenset({"ADMIN", "MAINTAIN", "WRITE", "TRIAGE", "READ", "NONE"})  # RepositoryPermission
+# RepositoryPermission and RepositoryRulesetTarget, read from GitHub's GraphQL schema by introspection (2026-10-26).
+# Anything else is "cannot tell": a value this code has not seen is not guessed at.
+VIEWER_PERMISSIONS = frozenset({"ADMIN", "MAINTAIN", "WRITE", "TRIAGE_PLUS", "TRIAGE", "READ"})
+RULESET_TARGETS = frozenset({"BRANCH", "TAG", "PUSH", "REPOSITORY"})
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _identity(value: Any) -> str:
+    """The returned nameWithOwner: exactly one ASCII `owner/repo` in the board's own grammar, folded A-Z only.
+
+    Python's `lower()` is Unicode-aware (the Kelvin sign lowercases to an ASCII k), so a comparison made with it could
+    credit another repository's answer. Validate the grammar first, then fold ASCII letters and nothing else.
+    """
+    name = _text(value, "nameWithOwner")
+    owner, _, repo = name.partition("/")
+    if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
+        raise MalformedDataError("nameWithOwner: GitHub's answer is not an owner/repo name")
+    return name.translate(_ASCII_FOLD)
 
 
 def _bool(value: Any, what: str) -> bool:
@@ -336,6 +353,8 @@ def _validate_ruleset(rs: JSON) -> None:
     name = _s(_text(rs.get("name"), "ruleset name"))
     _text(rs.get("enforcement"), "ruleset enforcement")
     target = _text(rs.get("target"), "ruleset target")
+    if target not in RULESET_TARGETS:
+        raise MalformedDataError("ruleset target: GitHub's answer is not a known target")
     cond = rs.get("conditions")
     if target in ("BRANCH", "TAG"):
         _patterns(_obj(cond, "ruleset conditions").get("refName"), "ruleset refName")
@@ -371,8 +390,8 @@ def _validate_repository(repo: JSON, requested: str | None) -> None:
     Relevance decides only whether a value counts, never whether it is checked: a disabled ruleset, a rule that is
     not a status-check rule, a classic rule with checks off, an archived or empty repository are all validated.
     """
-    name = _text(repo.get("nameWithOwner"), "nameWithOwner")
-    if requested is not None and name.lower() != requested.lower():
+    name = _identity(repo.get("nameWithOwner"))
+    if requested is not None and name != requested.translate(_ASCII_FOLD):
         raise MalformedDataError(f"{_s(requested)}: GitHub answered for a different repository")
     _bool(repo.get("isArchived"), "isArchived")
     if _text(repo.get("viewerPermission"), "viewerPermission") not in VIEWER_PERMISSIONS:

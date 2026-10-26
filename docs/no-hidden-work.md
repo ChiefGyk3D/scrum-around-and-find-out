@@ -160,9 +160,8 @@ a tag ruleset, a rule that is not a status-check rule (its `parameters` must be 
 status checks turned off (its `requiredStatusChecks` must still be a list of objects with text contexts), an archived
 repository and an empty one are all validated, and a wrongly typed field in any of them is cannot tell. The booleans
 (`requiresStatusChecks`, `allowsForcePushes`, `isAdminEnforced`, `isArchived`) must be real booleans: the string `"false"`
-or the number `1` is not true or false. `viewerPermission` must be one of ADMIN, MAINTAIN, WRITE, TRIAGE, READ, NONE;
-a ruleset's `name` must be text; `nameWithOwner` must be text and name the repository that was asked for (compared without
-regard to case). One deliberate exception: push and repository rulesets have no ref condition, so a null `conditions`
+or the number `1` is not true or false. `viewerPermission` must be one of ADMIN, MAINTAIN, WRITE, TRIAGE_PLUS, TRIAGE, READ (GitHub's `RepositoryPermission`, read by introspection on 2026-10-26; there is no NONE) and a ruleset's `target` one of BRANCH, TAG, PUSH, REPOSITORY (`RepositoryRulesetTarget`, same date): any other value, including a different case, is cannot tell, and only a BRANCH ruleset can ever be credited with the gate;
+a ruleset's `name` must be text; `nameWithOwner` must be exactly one ASCII `owner/repo` in the same grammar as the board's repository list and must name the repository that was asked for, compared with ASCII-only case folding (A-Z). Unicode lowercasing is not used: the Kelvin sign would otherwise fold to an ASCII `k` and credit another repository's answer. One deliberate exception: push and repository rulesets have no ref condition, so a null `conditions`
 or `refName` is normal for those targets; if present there it must still be well-formed.
 
 **GitHub-supplied text is escaped.** Error messages from GitHub, ruleset names, bypass modes and branch names pass

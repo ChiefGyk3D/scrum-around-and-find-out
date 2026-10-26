@@ -136,7 +136,7 @@ def test_an_absent_ruleset_name_is_cannot_tell(fake: FakeGitHub, client: Client)
     assert exit_code(fake, client, drop_path(clean_raw(), [*RS, "name"])) == 2
 
 
-@pytest.mark.parametrize("bad", [None, "", "SUPERUSER", "admin", 7, ["ADMIN"]], ids=repr)
+@pytest.mark.parametrize("bad", [None, "", "SUPERUSER", "admin", "NONE", 7, ["ADMIN"]], ids=repr)
 def test_viewer_permission_must_be_one_of_githubs_values(fake: FakeGitHub, client: Client, bad: Any) -> None:
     assert exit_code(fake, client, set_path(clean_raw(), ["viewerPermission"], bad)) == 2
 
@@ -253,3 +253,149 @@ def test_an_empty_gate_check_says_so_on_the_summary_line(fake: FakeGitHub, clien
     assert text[-1] != "clean"
     assert "branch gate NOT checked" in text[-1] and "rules.gate_check is empty" in text[-1]
     assert any(t.startswith("NOTE") and "Branch gate check not configured" in t for t in text)
+
+
+# -- identity, ruleset targets, permission enum, intersections ----------------------------------------------
+
+
+def _judged(name_with_owner: Any, requested: str = "acme/K") -> Any:
+    from safo.gate import judge_repository
+
+    raw = clean_raw() | {"nameWithOwner": name_with_owner}
+    return judge_repository(raw, "CI green", True, requested=requested)
+
+
+@pytest.mark.parametrize(
+    "returned",
+    [
+        "acme/" + chr(0x212A),  # Kelvin sign: lower() is an ASCII k
+        "acme/" + chr(0x0131),  # dotless i
+        "acme/" + chr(0x017F),  # long s
+        chr(0xFF41) + "cme/K",  # fullwidth a
+        "acme/" + chr(0xFF2B),  # fullwidth K
+        "acme/K ",  # trailing space
+        " acme/K",
+        "acme/K\n",
+        "acme/K/x",  # extra slash
+        "acme//K",
+        "/K",  # empty owner
+        "acme/",  # empty repo
+        "",
+        "acme",
+        "acme/other",  # a different ASCII repository
+        "other/K",
+    ],
+    ids=ascii,
+)
+def test_a_returned_identity_that_is_not_exactly_the_one_asked_for_is_malformed(returned: str) -> None:
+    from safo.errors import MalformedDataError
+
+    with pytest.raises(MalformedDataError):
+        _judged(returned)
+
+
+@pytest.mark.parametrize("returned", ["acme/K", "ACME/k", "Acme/K"])
+def test_an_ascii_case_difference_in_the_returned_identity_is_accepted(returned: str) -> None:
+    got = _judged(returned)
+    assert not got.problems and not got.unknown
+
+
+def test_the_returned_identity_is_checked_even_without_a_requested_name() -> None:
+    from safo.errors import MalformedDataError
+    from safo.gate import judge_repository
+
+    with pytest.raises(MalformedDataError):
+        judge_repository(clean_raw() | {"nameWithOwner": "acme/" + chr(0x212A)}, "CI green", True)
+
+
+@pytest.mark.parametrize(
+    "target", ["branch", "Branch", "FUTURE", "", " BRANCH", "BRANCH ", "tag", "push", "repository"]
+)
+def test_an_unknown_ruleset_target_is_cannot_tell(fake: FakeGitHub, client: Client, target: str) -> None:
+    assert exit_code(fake, client, with_second(clean_raw(), ruleset("CI green", target=target))) == 2
+
+
+@pytest.mark.parametrize("target", ["BRANCH", "TAG", "PUSH", "REPOSITORY"])
+def test_each_documented_ruleset_target_is_accepted(fake: FakeGitHub, client: Client, target: str) -> None:
+    node = ruleset("CI green", target=target)
+    if target in ("PUSH", "REPOSITORY"):
+        node["conditions"] = None
+    assert exit_code(fake, client, with_second(clean_raw(), node)) == 0
+
+
+@pytest.mark.parametrize("target", ["PUSH", "REPOSITORY", "TAG"])
+@pytest.mark.parametrize("conditions", ["refname", "none"])
+def test_a_ruleset_of_another_target_is_never_the_only_source_of_the_gate(
+    fake: FakeGitHub, client: Client, target: str, conditions: str
+) -> None:
+    """Even one that names the default branch and holds the check and the force-push block."""
+    node = ruleset("CI green", target=target)
+    if conditions == "none" and target != "TAG":
+        node["conditions"] = None
+    elif conditions == "none":
+        pytest.skip("a tag ruleset always carries a ref condition")
+    raw = clean_raw() | {"viewerPermission": "ADMIN", "rulesets": {"totalCount": 1, "nodes": [node]}}
+    assert exit_code(fake, client, raw) == 1  # unprotected: a finding, never clean
+    raw["viewerPermission"] = "READ"
+    assert exit_code(fake, client, raw) == 2  # a non-admin token sees nothing counted: cannot tell, never clean
+
+
+@pytest.mark.parametrize("good", ["ADMIN", "MAINTAIN", "WRITE", "TRIAGE_PLUS", "TRIAGE", "READ"])
+def test_each_permission_in_githubs_schema_is_accepted(fake: FakeGitHub, client: Client, good: str) -> None:
+    """Checked against RepositoryPermission by read-only introspection on 2026-10-26."""
+    assert exit_code(fake, client, set_path(clean_raw(), ["viewerPermission"], good)) == 0
+
+
+def test_none_is_not_a_repository_permission_value(fake: FakeGitHub, client: Client) -> None:
+    assert exit_code(fake, client, set_path(clean_raw(), ["viewerPermission"], "NONE")) == 2
+
+
+def test_admin_note_when_the_check_is_held_only_by_an_open_classic_rule_and_the_block_by_a_ruleset(
+    fake: FakeGitHub, client: Client
+) -> None:
+    build_world(fake)
+    for name in (WIDGETS, "acme/manuals"):
+        repo(fake, name).protection = classic("CI green", force=True) | {"isAdminEnforced": False}
+        repo(fake, name).rulesets = [ruleset(no_force=True)]  # a ruleset that blocks force pushes, nobody bypasses
+    code, text = gate(fake, client)
+    assert code == 0 and len(notes(text)) == 2
+
+
+def test_admin_note_when_the_block_is_held_only_by_an_open_classic_rule_and_the_check_by_a_ruleset(
+    fake: FakeGitHub, client: Client
+) -> None:
+    build_world(fake)
+    for name in (WIDGETS, "acme/manuals"):
+        repo(fake, name).protection = classic("lint") | {"isAdminEnforced": False}
+        repo(fake, name).rulesets = [ruleset("CI green", no_force=False)]
+    code, text = gate(fake, client)
+    assert code == 0 and len(notes(text)) == 2
+
+
+def test_one_repository_raising_does_not_hide_a_finding_or_skip_the_next(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeGitHub, client: Client
+) -> None:
+    import dataclasses
+
+    import safo.gate as g
+    from safo.schema import Repository
+
+    build_world(fake)
+    fake.add_repo("acme/third")
+    repo(fake, "acme/manuals").protection = None  # repository 2: a finding
+    board = load_test_board()
+    board = dataclasses.replace(board, repositories=(*board.repositories, Repository("acme", "third")))
+    real = g.judge_repository
+
+    def boom(raw: Any, *a: Any, **k: Any) -> Any:
+        if raw.get("nameWithOwner") == WIDGETS:  # repository 1: an unexpected error
+            raise RuntimeError("secret")
+        return real(raw, *a, **k)
+
+    monkeypatch.setattr(g, "judge_repository", boom)
+    code, text = gate(fake, client, board)
+    assert code == 2  # unknown outranks drift
+    assert any(t.startswith("UNKNOWN") and WIDGETS in t and "secret" not in t for t in text)
+    assert lines(text, "acme/manuals")
+    assert fake.requests.count("RepoBranchGate") == 3  # the third was read and judged too
+    assert not [t for t in text if "acme/third" in t and t.startswith(("DRIFT", "UNKNOWN"))]
