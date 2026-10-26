@@ -274,3 +274,21 @@ the rule is broken.
 - **Evidence.** The default model offered only the standard access tier; the plugin's `task` takes no `-c` setting.
 - **Rule now.** Run security and adversarial reviews with `codex exec` directly, on a model that offers the tier, with
   `< /dev/null` so a backgrounded run does not wait on stdin and exit with an empty review. See [Plugins](plugins.md).
+
+### ChatGPT authors public-facing language and the local model's steering text; Claude integrates and measures (2026-10-20)
+
+- **What happened.** A Discord bot's welcome-greeter copy was rewritten with ChatGPT's general models (Penguin Overlord pull
+  request 319, merged 2026-10-18), and the maintainer found it sounded markedly more natural than Claude's drafts of the same
+  kind of copy. On 2026-10-20 he turned that into a routing rule.
+- **Evidence.** The maintainer's own side-by-side judgment on one greeter rewrite, from his own use. It is not a benchmark: no
+  blind comparison, no sample beyond that rewrite, and no measurement of the local model's output has been taken yet.
+- **Rule now.** Non-technical, public-facing language (greetings, jokes and roast copy, social posts, captions, scripts,
+  anything that must sound human and in the maintainer's voice) is authored by ChatGPT's general (non-cybersecurity) models.
+  Technical documentation, runbooks, code and reviews stay with Claude. The local LLM (Ollama) still runs the text
+  generation at runtime; ChatGPT authors the language and patterns that steer it (system-prompt wording, angle pools,
+  formats, few-shot exemplars, banned phrases, fallback banks). Claude integrates those into the project as data, builds the
+  structure that rotates them, measures the local model's output (repetition, adherence) and feeds the findings back to
+  ChatGPT. ChatGPT's output is a draft: the maintainer reviews anything public, and ChatGPT has no repository access in this
+  workflow, so it works through briefs and pasted text. The maintainer's voice skill is a Claude Code skill that ChatGPT
+  cannot load, so its text and rules must be supplied to ChatGPT as a project file or instructions: that setup step is NOT
+  YET DONE. See [Routing](routing.md).
