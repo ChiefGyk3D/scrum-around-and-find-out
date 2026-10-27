@@ -143,6 +143,31 @@ process:
 A list of sentences for the settings no API can read or set (a Roadmap's date fields and zoom, a view's grouping, the
 project's built-in workflows). `bootstrap` prints them as a checklist and `audit` prints them as a reminder.
 
+## Limits
+
+Every list the loader reads has a limit, checked on the length of the raw list before any entry is read, so a hostile
+file costs one comparison. The error names the key and the limit, for example `fields: at most 100 entries`. The
+shipped boards use at most 25 repositories, 12 fields, 5 views, 15 options in a field and 27 area rules in a
+repository, well under every limit.
+
+| List | Limit |
+|---|---|
+| `repositories` | 200 |
+| `fields` | 100 |
+| options of one field | 64 (a waterfall board's phase field: 16) |
+| `views` | 50 |
+| `area_rules` of one repository | 100 |
+| `ui_only`, `rules.new_item_defaults` | 100 |
+| `exempt_repos` (tracking, threat model), `gate_exempt_repos`, `gate_admin_exempt_repos` | 200 |
+| `agents.working`, `agents.waiting` | 64 |
+| `process.active_statuses` | 16 |
+| `process.approvers`, `process.gates` | 32 |
+
+Duplicate names are found with a set, so the check is linear. A value echoed in an error is cut to 200 characters of its
+`repr` followed by `...` (a realistic value prints exactly as before). Values from the `process` block are cut harder: a
+shown value is at most 120 characters in total, quotes and ellipsis included, and a list of option names is at most 400
+characters in total, ellipsis included.
+
 ## Refused YAML
 
 The YAML loader refuses the following as hostile or ambiguous:

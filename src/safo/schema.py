@@ -36,9 +36,19 @@ REF = re.compile(r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})#(
 _PLAIN_KEY = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _MAX_VALUE_SHOWN = 40
 _MAX_NAME = 100
+_MAX_REPR = 200
+MAX_REPOSITORIES = 200
+MAX_FIELDS = 100
+MAX_VIEWS = 50
+MAX_OPTIONS = 64  # per field; a waterfall board's phase and status fields have their own, tighter caps
+MAX_AREA_RULES = 100  # per repository
+MAX_LIST = 100  # ui_only, rules.new_item_defaults
+MAX_EXEMPT = 200  # the repository exemption lists
+MAX_AGENT_STATUSES = 64
 MAX_STATUS_OPTIONS = 64  # the status field of a waterfall board
 _NAME_PUNCTUATION = frozenset(" -_.,:()/+&#")
-_MAX_SHOWN_OUTPUT = 117
+_MAX_SHOWN_TOTAL = 120
+_MAX_SHOWN_CUT = _MAX_SHOWN_TOTAL - 5  # two quotes and the ellipsis
 _MAX_LISTING = 400
 _MAX_LISTED = 8
 # caps, so a hostile file cannot turn one audit into many API calls (spec 2.5)
@@ -265,7 +275,7 @@ class _SafeLoader(yaml.SafeLoader):
             # Refuse duplicate keys
             if key in mapping:
                 line = key_node.start_mark.line + 1
-                raise ConfigError(f"{self._source}: line {line}: duplicate key {key!r}")
+                raise ConfigError(f"{self._source}: line {line}: duplicate key {rep(key)}")
 
             mapping[key] = self.construct_object(value_node, deep=deep)
 
@@ -294,6 +304,14 @@ def _safe_load(text: str, source: str = "board.yaml") -> object:
 # -- validation helpers ------------------------------------------------------------
 
 
+def rep(value: object) -> str:
+    """repr() for the legacy messages, cut to 200 characters (then "...") so a huge value cannot flood a log.
+
+    A value whose repr is at most 200 characters, which is every realistic one, prints exactly as before."""
+    text = repr(value)
+    return text if len(text) <= _MAX_REPR else f"{text[:_MAX_REPR]}..."
+
+
 def show(value: object) -> str:
     """Text for a value in an error message: ASCII only, cut short, and a foreign value named by its type.
 
@@ -302,8 +320,9 @@ def show(value: object) -> str:
     if isinstance(value, str):
         escaped = ascii(value[:_MAX_VALUE_SHOWN])
         quote, inner, cut = escaped[0], escaped[1:-1], len(value) > _MAX_VALUE_SHOWN
-        if len(inner) > _MAX_SHOWN_OUTPUT:  # non-ASCII text grows to up to ten characters each when escaped
-            inner, cut = inner[:_MAX_SHOWN_OUTPUT], True
+        if len(inner) > (_MAX_SHOWN_CUT if cut else _MAX_SHOWN_TOTAL - 2):
+            # non-ASCII text grows to up to ten characters each when escaped; total: quotes + inner + "..." <= 120
+            inner, cut = inner[:_MAX_SHOWN_CUT], True
         return f"{quote}{inner}{'...' if cut else ''}{quote}"
     if value is None or isinstance(value, bool):
         return repr(value)
@@ -331,7 +350,7 @@ def options_text(names: list[str]) -> str:
     text = ", ".join(show(n)[1:-1] for n in names[:_MAX_LISTED])
     if len(names) > _MAX_LISTED:
         text += f", ... and {len(names) - _MAX_LISTED} more"
-    return text if len(text) <= _MAX_LISTING else text[:_MAX_LISTING] + "..."
+    return text if len(text) <= _MAX_LISTING else text[: _MAX_LISTING - 3] + "..."
 
 
 def legacy_options_text(names: list[str]) -> str:
@@ -382,7 +401,7 @@ class Reader:
 
     def choice(self, value: object, path: str, choices: tuple[str, ...]) -> str:
         if not isinstance(value, str) or value not in choices:
-            raise self.fail(path, f"{value!r} is not one of {', '.join(choices)}")
+            raise self.fail(path, f"{rep(value)} is not one of {', '.join(choices)}")
         return value
 
     def choice_bounded(self, value: object, path: str, choices: tuple[str, ...]) -> str:
@@ -424,7 +443,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
     )
     owner = r.string(p["owner"], "project.owner")
     if not LOGIN.fullmatch(owner):
-        raise r.fail("project.owner", f"{owner!r} is not a GitHub login")
+        raise r.fail("project.owner", f"{rep(owner)} is not a GitHub login")
     number = None if p.get("number") is None else r.integer(p["number"], "project.number", minimum=1)
     project = Project(
         owner,
@@ -434,10 +453,11 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
     )
 
     repos: list[Repository] = []
-    for i, raw in enumerate(r.seq(top["repositories"], "repositories")):
+    seen_repos: set[str] = set()
+    for i, raw in enumerate(_capped(r, top["repositories"], "repositories", MAX_REPOSITORIES)):
         path = f"repositories[{i}]"
         m = r.mapping(raw, path, {"owner", "name", "default_area", "area_rules", "method"}, {"owner", "name"})
-        rules_raw = r.seq(m.get("area_rules", []), f"{path}.area_rules")
+        rules_raw = _capped(r, m.get("area_rules", []), f"{path}.area_rules", MAX_AREA_RULES)
         area_rules = []
         for j, rule in enumerate(rules_raw):
             rm = r.mapping(rule, f"{path}.area_rules[{j}]", {"match", "area"}, {"match", "area"})
@@ -455,22 +475,25 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
             r.choice_bounded(m["method"], f"{path}.method", METHODS) if "method" in m else None,
         )
         if not LOGIN.fullmatch(repo.owner) or not REPO_NAME.fullmatch(repo.name):
-            raise r.fail(path, f"{repo.full_name!r} is not an owner/name pair")
-        if any(x.full_name.lower() == repo.full_name.lower() for x in repos):
+            raise r.fail(path, f"{rep(repo.full_name)} is not an owner/name pair")
+        if repo.full_name.lower() in seen_repos:
             raise r.fail(path, f"{repo.full_name} is listed twice")
+        seen_repos.add(repo.full_name.lower())
         repos.append(repo)
 
     capped = _process_field_caps(top)
     fields: list[Field] = []
-    for i, raw in enumerate(r.seq(top.get("fields", []), "fields")):
+    seen_fields: set[str] = set()
+    for i, raw in enumerate(_capped(r, top.get("fields", []), "fields", MAX_FIELDS)):
         path = f"fields[{i}]"
         m = r.mapping(
             raw, path, {"name", "type", "options", "start", "duration_days", "count", "title_prefix"}, {"name", "type"}
         )
         name = r.string(m["name"], f"{path}.name")
         ftype = r.choice(m["type"], f"{path}.type", FIELD_TYPES)
-        if any(f.name == name for f in fields):
-            raise r.fail(f"{path}.name", f"field {name!r} is defined twice")
+        if name in seen_fields:
+            raise r.fail(f"{path}.name", f"field {rep(name)} is defined twice")
+        seen_fields.add(name)
         options: list[Option] = []
         if ftype == "single_select":
             raw_options = r.seq(m.get("options"), f"{path}.options") if "options" in m else []
@@ -487,6 +510,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
                     f"{path}.options",
                     f"{len(raw_options)} options, at most {limit} on the status field of a waterfall board",
                 )
+            _capped(r, raw_options, f"{path}.options", MAX_OPTIONS)
             seen: set[str] = set()
             for j, o in enumerate(raw_options):
                 opath = f"{path}.options[{j}]"
@@ -497,7 +521,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
                     r.string(om.get("description", ""), f"{opath}.description", empty=True),
                 )
                 if option.name in seen:
-                    raise r.fail(f"{opath}.name", f"option {option.name!r} is defined twice in {name!r}")
+                    raise r.fail(f"{opath}.name", f"option {rep(option.name)} is defined twice in {rep(name)}")
                 seen.add(option.name)
                 options.append(option)
         elif "options" in m:
@@ -518,7 +542,8 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
         fields.append(Field(name, ftype, tuple(options), start, duration, count, str(m.get("title_prefix", name))))
 
     views: list[View] = []
-    for i, raw in enumerate(r.seq(top.get("views", []), "views")):
+    seen_views: set[str] = set()
+    for i, raw in enumerate(_capped(r, top.get("views", []), "views", MAX_VIEWS)):
         path = f"views[{i}]"
         m = r.mapping(raw, path, {"name", "layout", "filter"}, {"name", "layout"})
         view = View(
@@ -526,14 +551,17 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
             r.choice(m["layout"], f"{path}.layout", LAYOUTS),
             r.string(m.get("filter", ""), f"{path}.filter", empty=True),
         )
-        if any(v.name == view.name for v in views):
-            raise r.fail(f"{path}.name", f"view {view.name!r} is defined twice")
+        if view.name in seen_views:
+            raise r.fail(f"{path}.name", f"view {rep(view.name)} is defined twice")
+        seen_views.add(view.name)
         views.append(view)
 
     rules = _parse_rules(r, top.get("rules", {}))
     _check_gate_repos(r, rules, repos)
     agents = _parse_agents(r, top.get("agents", {}))
-    ui_only = tuple(r.string(s, f"ui_only[{i}]") for i, s in enumerate(r.seq(top.get("ui_only", []), "ui_only")))
+    ui_only = tuple(
+        r.string(s, f"ui_only[{i}]") for i, s in enumerate(_capped(r, top.get("ui_only", []), "ui_only", MAX_LIST))
+    )
     process = _parse_process(r, top.get("process", {}), tuple(repos), rules)
     board = Board(project, tuple(repos), tuple(fields), tuple(views), rules, agents, ui_only, process)
     if check_fields:
@@ -578,6 +606,8 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
     nid_raw = m.get("new_item_defaults", {})
     if not isinstance(nid_raw, Mapping):
         raise r.fail("rules.new_item_defaults", "expected a mapping")
+    if len(nid_raw) > MAX_LIST:
+        raise r.fail("rules.new_item_defaults", f"at most {MAX_LIST} entries")
     nid: dict[str, str] = {}
     for k, v in nid_raw.items():
         if not isinstance(k, str):
@@ -631,15 +661,15 @@ def _check_gate_repos(r: Reader, rules: Rules, repos: list[Repository]) -> None:
         for i, entry in enumerate(getattr(rules, key)):
             folded = entry.lower()
             if folded in seen:
-                raise r.fail(f"rules.{key}[{i}]", f"{entry!r} is listed twice")
+                raise r.fail(f"rules.{key}[{i}]", f"{rep(entry)} is listed twice")
             seen.add(folded)
             if folded not in listed:
-                raise r.fail(f"rules.{key}[{i}]", f"{entry!r} is not listed in repositories")
+                raise r.fail(f"rules.{key}[{i}]", f"{rep(entry)} is not listed in repositories")
 
 
 def _parse_gate_exempt(r: Reader, raw: object, key: str) -> tuple[str, ...]:
     exempt: list[str] = []
-    for i, name in enumerate(r.seq(raw, f"rules.{key}")):
+    for i, name in enumerate(_capped(r, raw, f"rules.{key}", MAX_EXEMPT)):
         text = r.string(name, f"rules.{key}[{i}]")
         owner, _, repo = text.partition("/")
         if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
@@ -652,7 +682,7 @@ def _parse_tracking(r: Reader, raw: object) -> Tracking:
     m = r.mapping(raw, "rules.tracking", {"kind_field", "epic_field", "effort_field", "exempt_repos"})
     d = Tracking()
     exempt: list[str] = []
-    for i, name in enumerate(r.seq(m.get("exempt_repos", []), "rules.tracking.exempt_repos")):
+    for i, name in enumerate(_capped(r, m.get("exempt_repos", []), "rules.tracking.exempt_repos", MAX_EXEMPT)):
         text = r.string(name, f"rules.tracking.exempt_repos[{i}]")
         owner, _, repo = text.partition("/")
         if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
@@ -672,7 +702,7 @@ def _parse_threat_model(r: Reader, raw: object) -> ThreatModel:
     if label != label.strip() or len(label) > 50 or any(ord(c) < 32 or c == "," for c in label):
         raise r.fail("rules.threat_model.label", "expected a GitHub label name: at most 50 characters, no comma")
     exempt: list[str] = []
-    for i, name in enumerate(r.seq(m.get("exempt_repos", []), "rules.threat_model.exempt_repos")):
+    for i, name in enumerate(_capped(r, m.get("exempt_repos", []), "rules.threat_model.exempt_repos", MAX_EXEMPT)):
         text = r.string(name, f"rules.threat_model.exempt_repos[{i}]")
         owner, _, repo = text.partition("/")
         if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
@@ -785,7 +815,8 @@ def _parse_agents(r: Reader, raw: object) -> AgentsView:
 
     def names(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(
-            r.string(x, f"agents.{key}[{i}]") for i, x in enumerate(r.seq(m.get(key, list(default)), f"agents.{key}"))
+            r.string(x, f"agents.{key}[{i}]")
+            for i, x in enumerate(_capped(r, m.get(key, list(default)), f"agents.{key}", MAX_AGENT_STATUSES))
         )
 
     return AgentsView(
@@ -799,12 +830,12 @@ def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
     def option_exists(field_name: str, option: str, path: str) -> None:
         f = board.field_named(field_name)
         if f is None:
-            raise r.fail(path, f"names field {field_name!r}, which is not in fields")
+            raise r.fail(path, f"names field {rep(field_name)}, which is not in fields")
         if f.type != "single_select":
-            raise r.fail(path, f"field {field_name!r} is {f.type}, not single_select")
+            raise r.fail(path, f"field {rep(field_name)} is {f.type}, not single_select")
         if option not in {o.name for o in f.options}:
             listed = legacy_options_text([o.name for o in f.options])
-            raise r.fail(path, f"{option!r} is not an option of {field_name!r} (options: {listed})")
+            raise r.fail(path, f"{rep(option)} is not an option of {rep(field_name)} (options: {listed})")
 
     s = rules.status
     for key in ("opened", "reopened", "closed", "merged", "opened_pr", "draft_pr"):
@@ -814,7 +845,7 @@ def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
     if rules.done_date_field:
         f = board.field_named(rules.done_date_field)
         if f is None or f.type != "date":
-            raise r.fail("rules.done_date_field", f"{rules.done_date_field!r} must be a date field in fields")
+            raise r.fail("rules.done_date_field", f"{rep(rules.done_date_field)} must be a date field in fields")
     for name, option in rules.new_item_defaults:
         option_exists(name, option, f"rules.new_item_defaults.{name}")
     for i, repo in enumerate(board.repositories):
@@ -830,9 +861,9 @@ def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
     if agents_present:
         agents_field = board.field_named(board.agents.field)
         if agents_field is None:
-            raise r.fail("agents.field", f"field {board.agents.field!r} is not in fields")
+            raise r.fail("agents.field", f"field {rep(board.agents.field)} is not in fields")
         if agents_field.type != "single_select":
-            raise r.fail("agents.field", f"field {board.agents.field!r} is {agents_field.type}, not single_select")
+            raise r.fail("agents.field", f"field {rep(board.agents.field)} is {agents_field.type}, not single_select")
 
         # Check agents.working and agents.waiting are valid status options
         status_field = board.field_named(rules.status_field)
@@ -840,10 +871,10 @@ def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
             status_options = {o.name for o in status_field.options}
             for i, ws in enumerate(board.agents.working):
                 if ws not in status_options:
-                    raise r.fail(f"agents.working[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
+                    raise r.fail(f"agents.working[{i}]", f"{rep(ws)} is not an option of {rep(rules.status_field)}")
             for i, ws in enumerate(board.agents.waiting):
                 if ws not in status_options:
-                    raise r.fail(f"agents.waiting[{i}]", f"{ws!r} is not an option of {rules.status_field!r}")
+                    raise r.fail(f"agents.waiting[{i}]", f"{rep(ws)} is not an option of {rep(rules.status_field)}")
 
 
 def _cross_check_process(r: Reader, board: Board) -> None:
