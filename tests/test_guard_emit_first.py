@@ -27,6 +27,7 @@ from typing import Any, cast
 
 import pytest
 
+import safo as safo_package
 from hooksdata import (
     agents_file,
     block_reprobe,
@@ -2049,16 +2050,39 @@ def test_the_hand_parser_accepts_what_the_installer_writes_and_nothing_else() ->
 # -- every guard-shaped command line reaches the guard, never argparse -------------------------------------------------
 
 GUARD_SHAPED = [
-    pytest.param(["hooks", "guard"], True, id="plain"),
-    pytest.param(["hooks", "guard", "--agents", "a.yaml"], True, id="installer-line"),
-    pytest.param(["--help", "hooks", "guard"], True, id="help-before"),
-    pytest.param(["--version", "hooks", "guard"], True, id="version-before"),
-    pytest.param(["--board", "x", "hooks", "guard"], True, id="global-option-before"),
-    pytest.param(["--board", "x", "hooks", "guard", "--bogus"], False, id="global-option-and-bogus-flag"),
-    pytest.param(["--help", "hooks", "guard", "--help"], False, id="help-both-sides"),
-    pytest.param(["hooks", "--version", "guard"], False, id="non-adjacent"),
-    pytest.param(["guard", "hooks"], False, id="reversed"),
-    pytest.param(["--version", "guard", "x", "hooks"], False, id="non-adjacent-version"),
+    pytest.param(["hooks", "guard"], id="plain"),
+    pytest.param(["hooks", "guard", "--agents", "a.yaml"], id="installer-line"),
+    pytest.param(["--help", "hooks", "guard"], id="help-before"),
+    pytest.param(["--version", "hooks", "guard"], id="version-before"),
+    pytest.param(["--board", "x", "hooks", "guard"], id="global-option-before"),
+    pytest.param(["--board=x", "--dry-run", "hooks", "guard"], id="global-options-before-equals-form"),
+    pytest.param(["--gh-user", "guard", "hooks", "guard"], id="option-value-named-guard-before"),
+    pytest.param(["--board", "x", "hooks", "guard", "--bogus"], id="global-option-and-bogus-flag"),
+    pytest.param(["--help", "hooks", "guard", "--help"], id="help-both-sides"),
+    pytest.param(["hooks", "gua"], id="near-miss-truncated"),
+    pytest.param(["hooks", "--guard"], id="near-miss-flag"),
+    pytest.param(["hooks", "guard=value"], id="near-miss-equals"),
+    pytest.param(["hooks", "gua", "--agents", "a.yaml"], id="near-miss-with-installer-flags"),
+    pytest.param(["hooks", "--version", "guard"], id="hooks-then-version-then-guard"),
+    pytest.param(["hooks", "\udcff"], id="surrogate-word"),
+    pytest.param(["hooks"], id="bare-hooks"),
+]
+
+# Command lines with the words hooks and guard in them that are NOT the guard: they belong to argparse.
+NOT_GUARD = [
+    ["hooks", "probe"],
+    ["--version"],
+    ["hooks", "install", "--agents", "guard"],
+    ["hooks", "install", "--settings", "guard"],
+    ["--board", "hooks", "hooks", "status", "guard"],
+    ["--board", "hooks", "hooks", "status", "--agents", "guard"],
+    ["hooks", "mode", "guard"],
+    ["hooks", "status", "hooks", "guard"],
+    ["guard", "hooks"],
+    ["--version", "guard", "x", "hooks"],
+    ["hooks-x", "guard"],
+    ["install", "hooks", "guard"],
+    ["--gh-user", "hooks", "validate", "hooks", "guard"],
 ]
 
 
@@ -2071,6 +2095,9 @@ def entry(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
 
     def go(argv: list[str]) -> int:
+        # cli.run() arms the budget clock from the process start; a test process is not a fresh one, so each call
+        # starts its own budget now (pytest's own age would otherwise starve a run inside the first seconds).
+        monkeypatch.setattr(safo_package, "PROCESS_STARTED", time.monotonic())
         monkeypatch.setattr(sys, "argv", ["safo", *argv])
         with pytest.raises(SystemExit) as stop:
             cli.run()
@@ -2079,9 +2106,9 @@ def entry(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -
     return go
 
 
-@pytest.mark.parametrize(("argv", "parses"), GUARD_SHAPED)
+@pytest.mark.parametrize("argv", GUARD_SHAPED)
 def test_cli_run_routes_every_guard_shaped_argv_to_the_hand_parser_and_ends_once(
-    entry: Any, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int], argv: list[str], parses: bool
+    entry: Any, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int], argv: list[str]
 ) -> None:
     from safo import cli
 
@@ -2106,7 +2133,9 @@ def test_cli_run_routes_every_guard_shaped_argv_to_the_hand_parser_and_ends_once
     assert len(seen) == 1, "the hand-parser path took it"
     assert len(hard_exits) == 1, "and the process was ended exactly once"
     assert code == hard_exits[0], "the entry returns the code the guard ended with"
-    assert bool(processes) is parses, "a command line the installer could have written reaches guard_process"
+    assert processes == [True], (
+        "every guard-shaped line reaches guard_process: it reads the event, it computes a verdict"
+    )
 
 
 def test_a_guard_shaped_command_line_never_ends_with_argparse_exit_zero_silently(entry: Any, capsys: Any) -> None:
@@ -2115,10 +2144,12 @@ def test_a_guard_shaped_command_line_never_ends_with_argparse_exit_zero_silently
     assert capsys.readouterr().out != "", "the guard answered (a decision or the visible degraded notice)"
 
 
-def test_a_command_line_without_the_guard_words_still_reaches_argparse(
-    entry: Any, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int]
+@pytest.mark.parametrize("argv", NOT_GUARD, ids=lambda argv: " ".join(argv))
+def test_a_command_line_that_is_not_the_guard_reaches_argparse_even_with_the_words_in_it(
+    entry: Any, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int], argv: list[str]
 ) -> None:
-    """The negative case: the routing is not a catch-all."""
+    """The negative case: routing is by position, so an option VALUE or a later word named
+    hooks or guard is argparse's."""
     from safo import cli
 
     called: list[bool] = []
@@ -2129,10 +2160,129 @@ def test_a_command_line_without_the_guard_words_still_reaches_argparse(
 
     monkeypatch.setattr(cli, "main", fake_main)
     monkeypatch.setattr(mod, "guard_command", lambda words: pytest.fail("not a guard command line"))
-    assert entry(["hooks", "probe"]) == 0 and called == [True]
-    called.clear()
-    assert entry(["--version"]) == 0 and called == [True]
+    assert entry(argv) == 0 and called == [True]
     assert hard_exits == []
+
+
+def test_the_routing_is_decided_by_position_not_membership() -> None:
+    assert mod.guard_words(["hooks", "install", "--agents", "guard"]) is None
+    assert mod.guard_words(["--board", "hooks", "hooks", "status", "guard"]) is None
+    assert mod.guard_words(["--board", "hooks", "hooks", "guard", "--agents", "p"]) == ["--agents", "p"]
+    assert mod.guard_words(["hooks", "guard"]) == []
+    for near in (["hooks", "gua"], ["hooks", "--guard"], ["hooks", "guard=v"], ["hooks", "\udcff"], ["hooks"]):
+        words = mod.guard_words(near)
+        assert words == ["?"] and mod.guard_argv(words) is None, near
+
+
+# -- a guard-shaped line the parser refuses still gets a verdict: a denyable event is DENIED ---------------------------
+
+MALFORMED = [
+    ["hooks", "guard", "--agents"],
+    ["hooks", "guard", "--bogus"],
+    ["hooks", "guard", "--help"],
+    ["hooks", "gua"],
+    ["hooks", "--guard"],
+    ["hooks", "guard=value"],
+    ["hooks", "\udcff"],
+    ["--version", "hooks", "guard", "--bogus"],
+    ["hooks", "--version", "guard"],
+]
+
+
+@pytest.fixture
+def block_home(_private_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Default configuration discovery finds an agents file under HOME and the mode file says block."""
+    (_private_home / ".config" / "safo").mkdir(parents=True, exist_ok=True)
+    (_private_home / ".config" / "safo").chmod(0o700)
+    agents_file(_private_home / ".config" / "safo" / "agents.yaml")
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=True, agents=_private_home / ".config" / "safo" / "agents.yaml")
+    monkeypatch.setenv("HOME", str(_private_home))
+    for name in ("SAFO_AGENTS", "SAFO_AGENTS_LOCAL"):
+        monkeypatch.delenv(name, raising=False)
+    return _private_home
+
+
+@pytest.mark.parametrize("argv", MALFORMED, ids=lambda argv: " ".join(argv))
+def test_malformed_guard_argv_with_a_denyable_event_exits_two_and_never_zero(
+    entry: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, hard_exits: list[int], block_home: Path, argv: list[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(dispatch(model=None)))
+    code = entry(argv)
+    assert hard_exits == [code], "ended exactly once"
+    out = capsys.readouterr().out
+    # Delivered, a denial is the deny line (exit 0 by the host's protocol); undelivered it is exit 2. The bypass was a
+    # degraded-allow line with exit 0, which has neither.
+    assert code == 2 or (code == 0 and denied(lines(out)[-1])), (code, out)
+    assert "permissionDecision" not in out or denied(lines(out)[-1])
+
+
+@pytest.mark.parametrize("argv", MALFORMED, ids=lambda argv: " ".join(argv))
+def test_malformed_guard_argv_with_an_allowable_event_is_allowed_with_a_verdict(
+    entry: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, hard_exits: list[int], block_home: Path, argv: list[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(dispatch()))
+    assert entry(argv) == 0
+    assert hard_exits == [0]
+    data = lines(capsys.readouterr().out)
+    assert not any(denied(row) for row in data), "an allowable event is not denied"
+    assert "degraded" not in json.dumps(data), "a verdict was computed, not a cannot-tell notice"
+
+
+@pytest.mark.parametrize("stdin", ["", "not json", "{"])
+def test_malformed_guard_argv_with_no_readable_event_takes_the_cannot_tell_path(
+    entry: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, hard_exits: list[int], block_home: Path, stdin: str
+) -> None:
+    """The only case that may degrade: there is no event to judge. Visible degraded allow, exit 0, ended once."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin))
+    assert entry(["hooks", "gua"]) == 0
+    assert hard_exits == [0]
+    assert "degraded" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hooks", "gua"],
+        ["hooks", "--guard"],
+        ["hooks", "guard=value"],
+        ["hooks", "\udcff"],
+        ["hooks", "guard", "--bogus"],
+    ],
+    ids=["truncated", "flag", "equals", "non-utf8", "bogus-flag"],
+)
+def test_a_real_process_with_a_full_stderr_pipe_and_a_near_miss_denies_promptly(
+    block_home: Path, argv: list[str]
+) -> None:
+    """Argparse would print usage to the full pipe and block until the host kills it (fail-open, SAFO #130), or exit 2
+    with no verdict. The guard writes nothing to stderr, reads the event, and blocks the denyable one at once."""
+    result, untouched = run_entry(block_home, argv, payload=dispatch(model=None))
+    assert not result.killed and untouched, "nothing was written to the blocked stderr, so nothing blocked on it"
+    [row] = lines(result.raw.decode())
+    assert result.status == 0 and denied(row), "a denyable event is denied by the deny line, not a degraded allow"
+    assert result.elapsed < CHILD_BUDGET
+
+
+def test_a_real_process_with_a_full_stderr_pipe_and_a_near_miss_allows_an_allowable_event(block_home: Path) -> None:
+    result, untouched = run_entry(block_home, ["hooks", "gua"], payload=dispatch())
+    assert not result.killed and untouched and result.status == 0
+    assert WARNING not in result.raw.decode(), "a verdict, not the cannot-tell notice"
+
+
+def test_install_with_an_option_value_named_guard_is_not_swallowed(
+    block_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`safo hooks install --settings guard` with no terminal used to print guard JSON and exit 0 with nothing done."""
+    monkeypatch.chdir(tmp_path)  # a relative settings path named `guard` lands here, not in the repository
+    for argv in (
+        ["hooks", "install", "--settings", str(tmp_path / "s.json"), "--agents", "guard"],
+        ["hooks", "install", "--settings", "guard"],
+        ["--board", "hooks", "hooks", "status", "guard"],
+    ):
+        result, _ = run_entry(block_home, argv, payload=dispatch(model=None), jam_stderr=False)
+        assert b"hookSpecificOutput" not in result.raw, (argv, result.raw)
+        assert WARNING not in result.raw.decode(), argv
+    assert (tmp_path / "guard").is_file(), "`--settings guard` installed into a file named guard; it was no guard run"
 
 
 # -- no minimum wait once decide_by has passed ----------------------------------------------------------------------
@@ -2238,6 +2388,25 @@ def test_a_decision_whose_deadline_has_passed_is_not_waited_for_or_written(
     assert mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents)) == code
     assert out.writes == [], "nothing was written"
     assert time.monotonic() - started < 2.0, "and nothing was waited for"
+
+
+@pytest.mark.parametrize("mode", ["block", "warn"])
+def test_a_configuration_load_that_blocks_is_cut_at_the_limit_whatever_the_floor_says(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """The floor (CONFIG_MIN_WAIT_SECONDS) is real only when a load really blocks: it is raised far past the limit and
+    the load is held, and the guard still returns at the limit, not after the floor and not when the load ends."""
+    set_mode(_private_home, mode)
+    monkeypatch.setattr(mod, "CONFIG_MIN_WAIT_SECONDS", 10.0)
+    monkeypatch.setattr(mod, "limit_point", lambda begun: time.monotonic() + 0.6)
+    release, block = blocked_until_released()
+    monkeypatch.setattr(mod, "load_agents_for", block)
+    started = time.monotonic()
+    try:
+        assert mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents)) == 0
+        assert time.monotonic() - started < 1.5, "cut at the limit, with the load still blocked"
+    finally:
+        release.set()
 
 
 def test_no_wait_ends_after_the_limit_measured_from_the_process_start(

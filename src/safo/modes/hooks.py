@@ -17,7 +17,6 @@ import argparse
 import codecs
 import contextlib
 import datetime as dt
-import itertools
 import json
 import os
 import re
@@ -876,28 +875,51 @@ def finish(
     emit_then_persist(ctx, run, data if out_text or notices or note else None, folder, record, clear, claim, refresh)
 
 
-def hook_event(argv: Sequence[str] | None) -> str | None:
-    """The host event a command line serves (`hooks probe` is SessionStart, `hooks guard` PreToolUse), else None."""
-    words = list(argv or [])
-    for first, second in itertools.pairwise(words):
-        if first == "hooks" and second in ("probe", "guard"):
-            return "SessionStart" if second == "probe" else "PreToolUse"
+GLOBAL_VALUE_OPTIONS = ("--board", "--gh-user")  # the top-level options that take the next word as their value
+HOOKS_SUBCOMMANDS = ("install", "probe", "mode", "status")  # what argparse serves under `hooks` besides the guard
+
+
+def hooks_tail(argv: Sequence[str]) -> list[str] | None:
+    """The words after the `hooks` subcommand, found by POSITION: skip the leading global options (a flag, `--board V`,
+    `--gh-user V`, `--opt=V`, an unambiguous abbreviation of either), and the first word that is not an option must be
+    `hooks`. None when it is any other word (an option VALUE such as `install --agents guard` can therefore never
+    match) or when there is none."""
+    words = list(argv)
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if not word.startswith("-") or word == "-":
+            return words[index + 1 :] if word == "hooks" else None
+        takes = "=" not in word and len(word) > 2 and any(opt.startswith(word) for opt in GLOBAL_VALUE_OPTIONS)
+        index += 2 if takes else 1
     return None
+
+
+def hook_event(argv: Sequence[str] | None) -> str | None:
+    """The host event a command line serves (`hooks probe`: SessionStart; guard-shaped: PreToolUse), else None."""
+    tail = hooks_tail(argv or [])
+    if tail and tail[0] == "probe":
+        return "SessionStart"
+    return "PreToolUse" if guard_words(argv or []) is not None else None
 
 
 def guard_words(argv: Sequence[str]) -> list[str] | None:
-    """None when the command line has nothing to do with the guard. Otherwise the words the hand-parser judges: those
-    after the first adjacent `hooks guard`, or, when the two words are present but not together (a malformed line that
-    still names the hook), a word the parser refuses, so the line gets the guard's visible degraded allow and its
-    single hard exit. Anything before the pair (global options, --help, --version) is dropped: the guard runs, and
-    argparse never does."""
-    words = list(argv)
-    for index, (first, second) in enumerate(itertools.pairwise(words)):
-        if first == "hooks" and second == "guard":
-            return words[index + 2 :]
-    if "hooks" in words and "guard" in words:
-        return ["?"]
-    return None
+    """None when the command line is not the guard's. Otherwise the words the hand-parser judges. The decision is made
+    by position, never by membership: after the leading global options the first word is `hooks`, and what follows it
+    is either exactly `guard` (the words after it are returned) or a word that is NOT one of argparse's own hooks
+    subcommands (install, probe, mode, status): a near miss (`gua`, `--guard`, `guard=x`, a non-UTF-8 word) or a bare
+    `hooks`, which can only be a corrupted guard line, so it gets the guard's verdict path too (the sentinel ["?"],
+    which guard_argv refuses) and never argparse's usage-to-stderr and exit 2. Anything before `hooks` (global options,
+    --help, --version) is dropped: the guard runs, and argparse never does. `hooks install --agents guard` and
+    every other subcommand line go to argparse as before."""
+    tail = hooks_tail(argv)
+    if tail is None:
+        return None
+    if tail and tail[0] == "guard":
+        return tail[1:]
+    if tail and tail[0] in HOOKS_SUBCOMMANDS:
+        return None
+    return ["?"]
 
 
 PROBE_USAGE = (
@@ -1364,25 +1386,21 @@ def guard_argv(words: Sequence[str]) -> argparse.Namespace | None:
 
 def guard_command(words: Sequence[str]) -> int:
     """The real entry for `safo hooks guard WORDS` (called by `safo.cli.run` before argparse is even built). A command
-    line the installer could have written goes straight into guard_process. Any other (a stale or edited install, an
-    unknown flag, --help) is a configuration error, not a policy decision: it must not print to standard error and
-    must never end in argparse's own exit 2 (a block). It gets the same visible degraded allow as every other guard
-    failure, written through the bounded emit, and the process ends: exit 0 if the line was delivered, 1 if not."""
+    line the installer could have written goes straight into guard_process. Any other guard-shaped line (a stale or
+    edited install, an unknown flag, --help, a near-miss spelling) is a configuration error, not a policy decision, and
+    it must not print to standard error or end in argparse's exit 2. But it is also NOT a reason to skip the rules:
+    the guard still reads the event on standard input and computes its verdict with the safest defaults it has (default
+    configuration discovery, the mode the installed guard reads, no path from the bad words), so a denyable event is
+    denied (exit 2) and an allowable one allowed, through guard_process: one hard exit, inside the deadline.
+
+    Only when no verdict can be computed at all (standard input holds no readable event: empty, closed, unparseable)
+    does the guard's own cannot-tell path apply, the visible degraded allow (exit 0 if the line was delivered, 1 if
+    not), as for every other guard failure."""
     ctx = LocalContext(sys.stdout, os.environ, dt.datetime.now(dt.UTC))
     args = guard_argv(words)
-    if args is not None:
-        return guard_process(ctx, args)
-    begun = process_begun(time.monotonic())
-    run = Run()
-    _, run.decide_by, run.hard = budget_points(begun)
-    run.limit = limit_point(begun)
-    try:
-        diagnostic(ctx, "input", run=run)
-    except Exception:
-        run.failed = True
-    code = exit_code(run)
-    hard_exit(code)
-    return code
+    if args is None:
+        args = argparse.Namespace(agents="", agents_local="")
+    return guard_process(ctx, args)
 
 
 def settings_bytes(path: Path) -> bytes | None:
