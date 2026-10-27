@@ -86,14 +86,14 @@ def test_install_adds_the_session_probe_and_the_agent_guard_to_a_new_settings_fi
         }
     ]
     assert data["hooks"]["PreToolUse"] == [
-        {"matcher": "Agent|Task|Bash", "hooks": [{"type": "command", "command": "safo hooks guard", "timeout": 10}]}
+        {"matcher": "Agent|Task|Bash", "hooks": [{"type": "command", "command": "safo-guard", "timeout": 10}]}
     ]
     assert "Start with warn" in out and not (_private_home / ".config" / "safo" / "mode").exists()
 
 
 def test_install_defaults_to_the_settings_file_in_the_home_directory(_private_home: Path) -> None:
     assert hooks("install", home=_private_home)[0] == 0
-    assert "safo hooks guard" in (_private_home / ".claude" / "settings.json").read_text()
+    assert "safo-guard" in (_private_home / ".claude" / "settings.json").read_text()
 
 
 def test_install_keeps_every_existing_hook_and_setting(_private_home: Path) -> None:
@@ -121,7 +121,7 @@ def test_install_keeps_every_existing_hook_and_setting(_private_home: Path) -> N
         "~/bin/session-start",
         "safo hooks probe",
     ]
-    assert data["hooks"]["PreToolUse"][2]["hooks"][0]["command"] == "safo hooks guard"
+    assert data["hooks"]["PreToolUse"][2]["hooks"][0]["command"] == "safo-guard"
     assert len(data["hooks"]["PreToolUse"]) == 3
 
 
@@ -144,7 +144,7 @@ def test_install_with_another_agents_path_rewrites_its_own_command_and_adds_no_s
     data = json.loads(settings.read_text())
     assert len(data["hooks"]["SessionStart"]) == 1 and len(data["hooks"]["PreToolUse"]) == 1
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == f"safo hooks probe --agents {agents.resolve()}"
-    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == f"safo hooks guard --agents {agents.resolve()}"
+    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == f"safo-guard --agents {agents.resolve()}"
 
 
 def test_install_uses_the_command_it_is_given_and_refuses_one_that_is_not_a_plain_program(_private_home: Path) -> None:
@@ -163,6 +163,8 @@ def _safo_executable(tmp_path: Path) -> Path:
     exe.parent.mkdir(parents=True)
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
+    exe.with_name("safo-guard").write_text("#!/bin/sh\n")
+    exe.with_name("safo-guard").chmod(0o755)
     return exe
 
 
@@ -172,7 +174,7 @@ def test_install_accepts_the_absolute_path_of_a_safo_executable(_private_home: P
     assert hooks("install", "--settings", str(settings), "--command", str(exe), home=_private_home)[0] == 0
     data = json.loads(settings.read_text())
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == f"{exe} hooks probe"
-    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == f"{exe} hooks guard"
+    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == str(exe.with_name("safo-guard"))
     before = settings.read_bytes()
     code, out, _ = hooks("install", "--settings", str(settings), "--command", str(exe), home=_private_home)
     assert code == 0 and "already installed" in out and settings.read_bytes() == before, "ownership: a rerun is a no-op"
@@ -184,6 +186,7 @@ def test_install_accepts_the_absolute_path_of_a_safo_executable(_private_home: P
     pipx = tmp_path / "pipx" / "safo"  # pipx exposes a symlink to the venv's script
     pipx.parent.mkdir()
     pipx.symlink_to(exe)
+    pipx.with_name("safo-guard").symlink_to(exe.with_name("safo-guard"))
     other = _private_home / "pipx.json"
     assert hooks("install", "--settings", str(other), "--command", str(pipx), home=_private_home)[0] == 0
 
@@ -241,7 +244,7 @@ def test_install_writes_through_a_symlinked_settings_file_and_keeps_its_permissi
     link = _private_home / "link.json"
     link.symlink_to(target)
     assert hooks("install", "--settings", str(link), home=_private_home)[0] == 0
-    assert link.is_symlink() and "safo hooks guard" in target.read_text()
+    assert link.is_symlink() and "safo-guard" in target.read_text()
     assert target.stat().st_mode & 0o777 == 0o640
 
 

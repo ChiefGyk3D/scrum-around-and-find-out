@@ -129,4 +129,4 @@ def test_the_installer_still_works_in_a_shared_folder_such_as_a_temporary_direct
     shared.chmod(0o777)
     settings = shared / "try.json"
     assert hooks("install", "--settings", str(settings), home=tmp_path)[0] == 0
-    assert "safo hooks guard" in settings.read_text()
+    assert "safo-guard" in settings.read_text()
