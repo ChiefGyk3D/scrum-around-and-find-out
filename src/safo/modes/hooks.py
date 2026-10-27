@@ -394,8 +394,7 @@ def emit(ctx: LocalContext, run: Run, data: dict[str, Any]) -> bool:
     except Exception:
         done, delivered = True, False
     if not done:
-        run.failed = True
-        hard_exit(EXIT_BLOCK if run.deny else EXIT_NOT_DELIVERED)
+        run.failed = True  # the decision deadline passed: undelivered; the entry ends the process with its code
         return False
     if not delivered:
         run.failed = True
@@ -452,8 +451,7 @@ def emit_then_persist(
       can never change or follow the line already written."""
     if data is not None and not emit(ctx, run, data):
         return
-    if run.overran:
-        hard_exit(exit_code(run))
+    if run.overran:  # a worker was left running: no more work; the entry ends the process right away
         return
     delivered = data is not None
 
@@ -479,11 +477,8 @@ def emit_then_persist(
                 write_log_failed(folder)
 
     left = (run.hard - time.monotonic()) if run.hard is not None else APPEND_LOCK_TIMEOUT + 1.0
-    done = False
     with contextlib.suppress(Exception):
-        done, _ = run_bounded(after, max(0.0, left) + POST_GRACE_SECONDS)
-    if not done:
-        hard_exit(exit_code(run))
+        run_bounded(after, max(0.0, left) + POST_GRACE_SECONDS)  # not done by then: the entry ends the process
 
 
 # -- the log-failed marker: opened relative to the state folder's descriptor, never by a second path lookup -----------
@@ -1237,11 +1232,10 @@ def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
 def guard_process(ctx: LocalContext, args: argparse.Namespace) -> int:
     """`safo hooks guard` as a process: run the guard, then END the process through hard_exit with its exit code, even
     when everything finished normally. Interpreter shutdown would otherwise wait for any non-daemon thread and could
-    let a left-behind worker run on; os._exit cannot. (Where hard_exit is replaced, as in tests, the code is
-    returned.)"""
+    let a left-behind worker run on; os._exit cannot. Nothing here touches standard output on the main thread (the
+    decision was written and flushed by a thread with a deadline). Where hard_exit is replaced, as in tests, the code
+    is returned."""
     code = run_guard(ctx, args)
-    with contextlib.suppress(Exception):
-        ctx.out.flush()
     hard_exit(code)
     return code
 
