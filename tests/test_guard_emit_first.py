@@ -2097,6 +2097,9 @@ def entry(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -
     def go(argv: list[str]) -> int:
         # cli.run() arms the budget clock from the process start; a test process is not a fresh one, so each call
         # starts its own budget now (pytest's own age would otherwise starve a run inside the first seconds).
+        # arm_process_clock() stores the result in the module, so the test restores it: a start left armed would shorten
+        # the budget of whatever guard test runs next in this worker.
+        monkeypatch.setattr(mod, "process_started", None)
         monkeypatch.setattr(safo_package, "PROCESS_STARTED", time.monotonic())
         monkeypatch.setattr(sys, "argv", ["safo", *argv])
         with pytest.raises(SystemExit) as stop:
