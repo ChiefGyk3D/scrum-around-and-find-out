@@ -128,7 +128,7 @@ def test_the_board_sections_group_working_cards_by_agent_and_list_what_waits_on_
     )
     assert run(ctx, args) == 0
     text = out.getvalue()
-    assert "Waiting on you (Status = Blocked)\n  acme/widgets#3  Needs a decision" in text
+    assert "Waiting on you (Status = Blocked)\n  Claude       acme/widgets#3  Needs a decision" in text
     assert "Claude       In progress  acme/widgets#1  Build the thing" in text
     assert "Codex        Next         acme/widgets#2  Review me" in text
     assert "#4" not in text, "closed cards are not work in progress"
