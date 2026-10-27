@@ -315,7 +315,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   wedged filesystem or kernel read, which cannot be made without privilege. It is NOT an ordinary FIFO: the production
   reader opens with `O_NONBLOCK` and refuses a non-regular file, so a planted FIFO is rejected at once as a `config`
   failure and never reaches the timeout (a test runs the real loader on a FIFO and pins that). The timeout path itself
-  is tested with a synthetic loader that never returns, and says so. What stays unbounded: the abandoned read keeps blocking until the process exits
+  is tested with a synthetic loader that never returns, and says so. What stays unbounded: the read keeps blocking until the process ends
   (it only reads), a state-file read or `fsync` that blocks is not interrupted, and a host that kills the hook before
   the line is out prints nothing. If the load finishes but the clock is past its deadline, the re-probe and the issue
   lookup are skipped and the notice says `budget exceeded: lookups skipped`; a brief whose issue could not be verified
@@ -332,28 +332,42 @@ A hook sits inside someone's session, so every error lets the work through, visi
   never fails open); any other undelivered line exits 1, a non-blocking error. This is the one case where the guard
   exits 2. That the host treats exit 2 as a block and exit 1 as non-blocking is the host's documented hook contract,
   not verified by a test here. A failure in the diagnostic path is caught and becomes the same exit code.
-- The invariant for background work, stated exactly. Two kinds of worker thread exist, and both have an `abandoned`
-  flag that the guard sets when it gives up waiting for them. (1) Pre-decision workers (the config load, the state and
-  mode reads, the re-probe) may write only probe and health caches: the re-probe's lock file, its `.attempt` marker and
-  the saved probe state. Those are hints that can change the NEXT dispatch's notice or health, never a verdict. Each of
-  those writes, and the creation of the lock file and its directory, re-checks the flag immediately before it
-  happens, so a worker released late creates and writes nothing. (2) The single post-delivery worker does the audit
-  and decision writes, and only after the line is out: the refresh of the `.repo` modification time (a hint), the
-  clear of the log-failed marker whose notice was in the line, the claim of the probe notice, the log append and the
-  recording of a failed append. It is joined until just past the hard limit (so a wedged call cannot keep the
-  process alive past the host's timeout, which would discard the delivered decision) and is then abandoned; it
-  re-checks its flag before each step, so once it is abandoned no further audit or decision write begins. A step
-  already in flight at the moment of abandonment completes, or dies with the process, which is about to exit; that
-  is the residual. A wedged append therefore leaves no log-failed marker: the next dispatch cannot report it.
-  The full inventory of writes: BEFORE the decision, only the hint writes of the re-probe (lock file, attempt marker,
-  probe-state lock and replace, and its clean-up unlink); AFTER the delivered line, in the post-delivery worker:
-  the `.repo` utime, the marker clear or junk removal (rename to a side name, delete, put back), the side-object
-  pruning, the notice claim, the log lock, the append and any quarantine of a corrupt log, and the log-failed temp
-  file, install and blocker removal.
+- The invariant, true by construction because the guard is a short-lived PROCESS: a thread cannot be cancelled, so
+  nothing relies on cancelling one. Bounded work runs in daemon threads that the main thread waits for with a deadline.
+  When one overruns, the main thread goes on without it, delivers the decision, and the process then ENDS through
+  `os._exit` (the guard's only exit point, taken even when everything finished normally): every thread stops at
+  once, runs no clean-up, and a blocked call can never resume. In detail:
+  - The decision is written and flushed by a thread that the main thread waits for until the decision deadline (the
+    hard limit, 1 s before the host's timeout, plus 0.5 s). A reader that keeps a full pipe open and never drains it
+    cannot hold the decision back: at the deadline the line counts as undelivered and the process ends with exit 2
+    for a denial (the host then relies on exit 2) or exit 1 otherwise. Flags on the shared file description are never
+    changed. A write that returns a short count is written again until complete; no progress is a failure.
+  - If a PRE-decision worker overran (config load, state and mode reads, the re-probe), the verdict is computed from
+    what is available, the line goes out, and the process ends at once: no audit or decision write is attempted in
+    that dispatch (it is not logged; the line carries the slow-state notice). A pre-decision worker that was left
+    running can write only probe and health caches while the main thread computes and writes the line: the re-probe's
+    lock file, its `.attempt` marker and the saved probe state. Those are hints that can change the NEXT dispatch's
+    notice or health, never a verdict. That short span, from the overrun to the exit, is the only time a left-behind
+    thread can act.
+  - Otherwise, after the line is out, the audit and decision writes run in one worker that the main thread waits for
+    until the same deadline: the `.repo` modification time (a hint), the clear of the log-failed marker whose notice
+    was in the line, the claim of the probe notice, the log append, and the recording of a failed append. If it is not
+    done by the deadline the process ends. What a deadline-driven exit can still allow: a system call already
+    entered at the moment of the exit may complete; nothing is started after it. A wedged append therefore leaves no
+    log-failed marker, and the next dispatch cannot report it.
+  - Inventory of writes. BEFORE the decision: only the re-probe's (the lock file and its directory, the `.attempt`
+    marker, the probe-state lock and replace, and its clean-up unlink), each in a pre-decision worker. AFTER the
+    delivered line, in the post-delivery worker: the `.repo` utime, the marker clear or junk removal (rename to a side
+    name, delete, put back), the side-object pruning, the notice claim, the log lock, the append and any quarantine of
+    a corrupt log, and the log-failed temp file, install and blocker removal. Everything after the line is bounded by
+    the process exit.
+  - The tests run the guard as a real process with each of those steps blocked behind a barrier file, check the process
+    ended with the right exit code and the line was out in time, then release the barrier and compare a snapshot of
+    every path, mode, modification time, size and inode under the state folder: nothing changes.
 - The verdict never depends on state writes. Everything that touches the state folder before the verdict (the saved
   probe state, the re-probe's lock and `.attempt` marker, the probe, the save of the probe state, and the pure read of
   the bound repository) runs under a bound, in a daemon worker thread
-  that is abandoned if it does not finish: a read batch gets at most 1.0 s (at least 0.25 s, and not past the hard
+  that is left running if it does not finish (the process ends right after the decision): a read batch gets at most 1.0 s (at least 0.25 s, and not past the hard
   limit), and the re-probe gets its own total (twice the per-request time plus its slack) plus 1.0 s for its file work,
   never past the deadline. If any of it does not finish, probe health is `unknown` (the local-step rule is off, as for
   any unknown state), the repository counts as NOT BOUND (the existing fallback: no `tracking_exempt_repos` or
@@ -368,11 +382,11 @@ A hook sits inside someone's session, so every error lets the work through, visi
 - Between a computed decision and its emit, the only other state-folder work is a READ-ONLY check of the first-notice
   flag (when the probe is not healthy) and a READ-ONLY inspection of the log-failed marker, under the same bound (at most
   1.0 s, at least 0.25 s, not past the hard limit). The worker changes nothing. The flag is claimed, and any junk at the
-  marker name removed, by the post-delivery worker only after the line that carries that notice was delivered; an undelivered
+  marker name removed, by the post-delivery worker (see the invariant above) only after the line that carries that notice was delivered; an undelivered
   line, or a process killed between the emit and the claim, leaves both as they were, so the notice or the marker
   comes back on the next dispatch. If the check does not finish it is skipped: the decision goes out WITHOUT those
   notices, with the fixed text `notices skipped: state folder slow`, and the flag and the marker are left as they
-  were; an abandoned worker that finishes later creates nothing and leaves no descriptor open. The once-per-session
+  were (the check is read-only, so a worker that finishes later creates nothing and leaves no descriptor open). The once-per-session
   probe notice appears only while it is unclaimed: another notice in the same line does not bring it back.
 - A computed denial is recorded when the verdict is computed, so an unexpected failure anywhere between the verdict and
   the emit exits 2 (block) instead of falling through to a generic diagnostic and exit 0.
