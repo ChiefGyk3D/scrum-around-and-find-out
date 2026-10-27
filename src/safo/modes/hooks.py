@@ -30,8 +30,8 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from time import time as wall_clock  # immune to the monotonic-clock stand-in some tests install
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import safo
@@ -1689,7 +1689,8 @@ def installed_form(ctx: LocalContext, args: argparse.Namespace) -> str:
         return "unknown (settings unreadable)"
     if problems:
         also = f"; another entry is effective: {' and '.join(sorted(found))}" if found else ""
-        return f"ineffective ({', '.join(problems)}: the guard does not run{also}; fix the entry by hand, install refuses it)"
+        why = f"{', '.join(problems)}: the guard does not run{also}"
+        return f"ineffective ({why}; fix the entry by hand, install refuses it)"
     if found == {"new"}:
         return "new (safo-guard)"
     if found == {"legacy"}:

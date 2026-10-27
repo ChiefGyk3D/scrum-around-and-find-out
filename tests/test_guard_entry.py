@@ -389,7 +389,7 @@ def test_install_and_status_share_one_acceptance_rule(_private_home: Path, tmp_p
 def _modules_after_import(code: str) -> list[str]:
     import subprocess
 
-    done = subprocess.run(
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell; the only variable is a literal import line from this file
         [sys.executable, "-I", "-c", "import sys\n" + code + "\nprint(' '.join(sorted(sys.modules)))"],
         capture_output=True,
         text=True,
