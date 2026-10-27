@@ -14,6 +14,12 @@ usage: guard_child.py MODE HOME AGENTS FIFO PAYLOAD_FILE
   MODE die-at-claim / die-at-clear
                         the process kills itself (SIGKILL) at the claim of the probe notice / the clear of the marker
   MODE plain            nothing patched
+  MODE seam             nothing patched, 3 s budget: the seams below pick what blocks or fails
+  MODE pre-seam         nothing patched, 6 s budget and a 0.5 s re-probe request time (a re-probe fits)
+Seams (environment): SAFO_CHILD_BARRIER is a path; a BLOCK target waits until that file exists and then runs the real
+function. SAFO_CHILD_BLOCK / SAFO_CHILD_FAIL are comma lists of targets `mod.NAME`, `core.NAME` or `guardlog.NAME`
+(guardlog.os.open_lock blocks the creation of a lock file); FAIL raises OSError. SAFO_CHILD_NONDAEMON=1 starts a
+non-daemon thread that waits for the barrier (a library thread that would keep a normal exit from finishing).
 The budget is scaled down to 3 s (GUARD_TIMEOUT_SECONDS), so a decision is due well inside 3 s.
 """
 
@@ -26,9 +32,11 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
+import safo.guardlog as guardlog
 import safo.hooks as core
 from safo.cli import main
 from safo.guardlog import mode_health as real_mode_health
@@ -60,6 +68,56 @@ def slow_mode_health(env: Mapping[str, str]) -> tuple[str, str]:
 
 def die(*a: object, **k: object) -> None:
     os.kill(os.getpid(), signal.SIGKILL)
+
+
+BARRIER = os.environ.get("SAFO_CHILD_BARRIER", "")
+
+
+def wait_for_barrier() -> None:
+    while not os.path.exists(BARRIER):
+        time.sleep(0.01)
+
+
+def blocks(real: Callable[..., Any]) -> Callable[..., Any]:
+    def call(*a: Any, **k: Any) -> Any:
+        wait_for_barrier()
+        return real(*a, **k)
+
+    return call
+
+
+def fails(*a: Any, **k: Any) -> None:
+    raise OSError("injected failure")
+
+
+class LockCreationBlocks:
+    """The `os` module as guardlog sees it, except that creating a lock file waits for the barrier."""
+
+    def __getattr__(self, name: str) -> Any:
+        real = getattr(os, name)
+        if name != "open":
+            return real
+
+        def opened(path: Any, flags: int, *a: Any, **k: Any) -> int:
+            if flags & os.O_CREAT and str(path).endswith(".lock"):
+                wait_for_barrier()
+            return os.open(path, flags, *a, **k)
+
+        return opened
+
+
+TARGETS: dict[str, Any] = {"mod": mod, "core": core, "guardlog": guardlog}
+for target in filter(None, os.environ.get("SAFO_CHILD_BLOCK", "").split(",")):
+    if target == "guardlog.os.open_lock":
+        guardlog.__dict__["os"] = LockCreationBlocks()
+    else:
+        owner, name = target.split(".", 1)
+        TARGETS[owner].__dict__[name] = blocks(TARGETS[owner].__dict__[name])
+for target in filter(None, os.environ.get("SAFO_CHILD_FAIL", "").split(",")):
+    owner, name = target.split(".", 1)
+    TARGETS[owner].__dict__[name] = fails
+if os.environ.get("SAFO_CHILD_NONDAEMON"):
+    threading.Thread(target=wait_for_barrier, daemon=False).start()
 
 
 if mode == "synthetic-wedge":

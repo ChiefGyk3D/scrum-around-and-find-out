@@ -16,7 +16,6 @@ import os
 import stat
 import sys
 import tempfile
-import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -166,17 +165,8 @@ def ensure_dir(folder: Path, check_dir: bool = True) -> None:
 
 
 @contextlib.contextmanager
-def file_lock(
-    path: Path, check_dir: bool = True, timeout: float = 0.5, abandoned: threading.Event | None = None
-) -> Iterator[None]:
-    """Hold an exclusive lock on `path` (created if missing). `abandoned` is the guard's flag for a worker it has given
-    up on: it is checked immediately before anything is created (the directory, the lock file), so a worker released
-    late creates nothing and raises TimeoutError instead."""
-    if abandoned is not None and abandoned.is_set():
-        raise TimeoutError("abandoned")
+def file_lock(path: Path, check_dir: bool = True, timeout: float = 0.5) -> Iterator[None]:
     ensure_dir(path.parent, check_dir)
-    if abandoned is not None and abandoned.is_set():
-        raise TimeoutError("abandoned")
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):

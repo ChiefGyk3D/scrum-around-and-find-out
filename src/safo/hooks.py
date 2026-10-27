@@ -254,27 +254,16 @@ def refresh_bound_repo(path: Path | None) -> None:
         touch(repo_path(path))
 
 
-def abandoned_now(abandoned: threading.Event | None) -> bool:
-    """True once the guard has given up on the worker that is running this: it must not write any more. Each mutation
-    re-checks this immediately before it happens; a mutation already in flight at that moment still completes."""
-    return abandoned is not None and abandoned.is_set()
-
-
-def save_state(path: Path, state: dict[str, Any], abandoned: threading.Event | None = None) -> bool:
-    if abandoned_now(abandoned):
-        return False
-    with file_lock(path.with_name(path.name + ".lock"), abandoned=abandoned):
+def save_state(path: Path, state: dict[str, Any]) -> bool:
+    with file_lock(path.with_name(path.name + ".lock")):
         previous = read_state(path)
         if previous and previous["ts"] > state["ts"]:
-            return False
-        if abandoned_now(abandoned):  # the write itself
             return False
         try:
             write_text(path, json.dumps(state, sort_keys=True))
         except (OSError, ValueError):
             # Never leave a formerly reachable result active after a failed refresh.
-            if not abandoned_now(abandoned):
-                path.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
             raise
     return True
 
@@ -309,22 +298,18 @@ def notice_path(path: Path) -> Path:
     return path.with_name(path.name + ".notice")
 
 
-def claim_reprobe(path: Path, now: float, abandoned: threading.Event | None = None) -> bool:
+def claim_reprobe(path: Path, now: float) -> bool:
     """True when this call may re-probe: once per REPROBE_INTERVAL_SECONDS for a session and configuration, whether or
     not the previous attempt worked. The attempt is recorded before the probe runs, so a slow or failing endpoint is
     asked once a minute and not once per dispatch."""
     marker = attempt_path(path)
-    if abandoned_now(abandoned):
-        return False
-    with file_lock(marker.with_name(marker.name + ".lock"), abandoned=abandoned):
+    with file_lock(marker.with_name(marker.name + ".lock")):
         try:
             recorded = loads(bounded_read(marker, 64))
         except (OSError, ValueError, UnicodeError):
             recorded = None
         last = recorded.get("ts") if isinstance(recorded, dict) else None
         if isinstance(last, (int, float)) and finite_time(last) and 0 <= now - last < REPROBE_INTERVAL_SECONDS:
-            return False
-        if abandoned_now(abandoned):  # the write itself
             return False
         write_text(marker, json.dumps({"ts": now}))
     return True
@@ -335,26 +320,25 @@ def reprobe(
     path: Path,
     now: float,
     timeout: float = REPROBE_TIMEOUT_SECONDS,
-    abandoned: threading.Event | None = None,
 ) -> dict[str, Any] | None:
     """Refresh a state in place, bounded and rate limited. `timeout` is per request and the whole probe is cut off at
     twice that, so a server that answers a byte at a time cannot hold the hook. Never raises: None means the state
     could not be refreshed (rate limited, a probe or storage failure, or a newer result already stored), and the caller
     treats local reachability as unknown."""
     try:
-        if not claim_reprobe(path, now, abandoned):
+        if not claim_reprobe(path, now):
             return None
         started = time.monotonic()
         results = probe_all(doc, lambda endpoint: probe(endpoint, timeout), wait=2 * timeout + REPROBE_SLACK_SECONDS)
         state = probe_state(results, now + time.monotonic() - started)  # completion time, as at SessionStart
-        return state if save_state(path, state, abandoned) else None
+        return state if save_state(path, state) else None
     except Exception:
         return None
 
 
 def notice_unclaimed(path: Path) -> bool:
     """READ-ONLY: True while the session's one probe notice has not been claimed (the flag does not exist). Safe to run
-    in an abandoned worker: it changes nothing."""
+    in a worker that is left behind: it changes nothing."""
     return not os.path.lexists(notice_path(path))
 
 

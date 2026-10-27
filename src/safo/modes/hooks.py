@@ -342,6 +342,13 @@ class Run:
     attempted: bool = False
     failed: bool = False  # the decision could not be delivered (write or flush failed)
     deny: bool = False  # the decision that was attempted was a denial
+    overran: bool = False  # a bounded worker did not finish and was left running: leave as soon as the line is out
+
+
+hard_exit: Callable[[int], None] = os._exit
+"""How the guard process ENDS. `os._exit` stops every thread at once and runs no Python-level clean-up, so nothing that
+is blocked in a call can ever resume and nothing can be started after it. Tests replace this name (the test suite's
+conftest makes it a no-op that returns, so a pytest process is not killed)."""
 
 
 def exit_code(run: Run) -> int:
@@ -366,20 +373,33 @@ def write_all(stream: Any, text: str) -> bool:
 
 
 def emit(ctx: LocalContext, run: Run, data: dict[str, Any]) -> bool:
-    """Write the whole line, then flush. True only if both worked. After the first attempt nothing else is ever written
-    to the host, so a truncated line is never followed by a second object. The guard writes nothing to standard error:
-    what a failure means is in the exit code and in the next dispatch's notice."""
+    """Write the whole line and flush it, in a worker thread that the main thread waits for until the decision deadline
+    (the hard limit plus POST_GRACE_SECONDS). A reader that never drains a full pipe cannot hold the decision past the
+    host's timeout: at the deadline the process ENDS through hard_exit with the exit code of an undelivered decision (2
+    for a denial, which the host reads as a block; 1 otherwise). A failed or short write is the same undelivered
+    decision. After the first attempt nothing else is ever written, so a truncated line is never followed by a second
+    object. The guard writes nothing to standard error and never changes flags on a shared file description."""
     text = output.line(json.dumps(data)) + "\n"
     run.attempted = True
     run.deny = data.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
-    try:
+
+    def write() -> bool:
         delivered = write_all(ctx.out, text)
         ctx.out.flush()
+        return delivered
+
+    left = (run.hard - time.monotonic()) if run.hard is not None else APPEND_LOCK_TIMEOUT + 1.0
+    try:
+        done, delivered = run_bounded(write, max(0.0, left) + POST_GRACE_SECONDS)
     except Exception:
-        delivered = False
+        done, delivered = True, False
+    if not done:
+        run.failed = True
+        hard_exit(EXIT_BLOCK if run.deny else EXIT_NOT_DELIVERED)
+        return False
     if not delivered:
         run.failed = True
-    return delivered
+    return bool(delivered)
 
 
 def diagnostic(
@@ -420,34 +440,33 @@ def emit_then_persist(
     refresh: Path | None = None,
 ) -> None:
     """The one tail of every guard path. The decision (`data`, or nothing to say) is written and flushed FIRST. If that
-    fails nothing else is done; the caller turns it into the exit code. Everything after the line is out (refresh the
-    binding's age, clear the marker whose notice was in it, claim the probe notice, append the log, record a failed
-    append) runs in ONE post-delivery worker that is joined only until just past the hard limit and then abandoned:
-    the host's timeout would discard a decision from a hook that has not exited, so a wedged filesystem call here must
-    not keep the process alive (a daemon thread does not delay interpreter exit). The worker re-checks its abandoned
-    flag before each step, so once it is abandoned no further audit or decision write begins. The append waits no
-    longer than the setting and never past `run.hard` (skipped when less than MIN_LOG_WAIT_SECONDS is left). A failed
-    or skipped append leaves a marker that the next guard run reports; it can never change or follow the line already
-    written."""
+    fails nothing else is done; the caller turns it into the exit code. After the line is out:
+
+    - if a pre-decision worker overran and was left running (`run.overran`), the process ENDS at once through hard_exit:
+      nothing more is started, so the left-behind worker cannot resume and write anything;
+    - otherwise the audit and decision writes (refresh the binding's age, clear the marker whose notice was in the
+      line, claim the probe notice, append the log, record a failed append) run in ONE worker that the main thread waits
+      for only until just past the hard limit; if it is not done by then the process ENDS through hard_exit. A call
+      that is blocked then can never resume, and none is started after the exit. The append waits no longer than the
+      setting and never past `run.hard`. A failed or skipped append leaves a marker that the next guard run reports; it
+      can never change or follow the line already written."""
     if data is not None and not emit(ctx, run, data):
+        return
+    if run.overran:
+        hard_exit(exit_code(run))
         return
     delivered = data is not None
 
-    def after(abandoned: threading.Event) -> None:
-        # Every step re-checks the abandoned flag just before it starts (the hint first, so a wedged hint cannot hold
-        # the audit and decision writes hostage and a late release writes none of them). A step already in flight at
-        # abandonment completes, or dies with the process, which is about to exit.
-        if refresh is not None and not abandoned.is_set():  # keep the binding out of the prune: a hint
+    def after() -> None:
+        if refresh is not None:  # keep the binding out of the prune: a hint
             with contextlib.suppress(Exception):
                 refresh_bound_repo(refresh)
-        if delivered and clear_marker is not None and not abandoned.is_set():  # its notice was in the line
+        if delivered and clear_marker is not None:  # its notice was in the delivered line
             with contextlib.suppress(Exception):
                 clear_log_failure(folder, clear_marker)
-        if delivered and claim is not None and not abandoned.is_set():  # the probe notice was in the delivered line
+        if delivered and claim is not None:  # the probe notice was in the delivered line
             with contextlib.suppress(Exception):
                 claim_notice(claim)
-        if abandoned.is_set():
-            return
         try:
             if folder is None:
                 raise OSError("log unavailable")
@@ -456,13 +475,15 @@ def emit_then_persist(
                 raise TimeoutError("out of time")
             append_log(folder / guardlog.LOG_NAME, record, lock_timeout=wait)
         except Exception:
-            if not abandoned.is_set():
-                with contextlib.suppress(Exception):
-                    write_log_failed(folder)
+            with contextlib.suppress(Exception):
+                write_log_failed(folder)
 
     left = (run.hard - time.monotonic()) if run.hard is not None else APPEND_LOCK_TIMEOUT + 1.0
+    done = False
     with contextlib.suppress(Exception):
-        run_bounded(after, max(0.0, left) + POST_GRACE_SECONDS)
+        done, _ = run_bounded(after, max(0.0, left) + POST_GRACE_SECONDS)
+    if not done:
+        hard_exit(exit_code(run))
 
 
 # -- the log-failed marker: opened relative to the state folder's descriptor, never by a second path lookup -----------
@@ -655,24 +676,23 @@ def clear_log_failure(folder: Path | None, seen: Ident) -> None:
         os.close(dfd)
 
 
-def run_bounded(work: Callable[[threading.Event], _T], timeout: float) -> tuple[bool, _T | None]:
-    """Run `work(abandoned)` in a daemon thread and wait at most `timeout` seconds. (True, result), or (False, None)
-    with the thread ABANDONED: `abandoned` is set at that moment, and the thread dies with the process. An exception in
-    `work` is re-raised. This is the one way the guard bounds filesystem calls that cannot be interrupted (a wedged
-    mount, a kernel read). Threads work the same on Linux and macOS and in any thread; a signal timer would not.
+def run_bounded(work: Callable[[], _T], timeout: float, run: Run | None = None) -> tuple[bool, _T | None]:
+    """Run `work()` in a daemon thread and wait at most `timeout` seconds. (True, result), or (False, None) when it did
+    not finish: the thread is LEFT RUNNING (a thread cannot be cancelled) and `run.overran` is set, which makes the
+    guard end the process through hard_exit as soon as its decision is out. An exception in `work` is re-raised. This
+    is how the guard bounds filesystem calls that cannot be interrupted (a wedged mount, a kernel read).
 
-    The invariant: no abandoned worker writes AUDIT or DECISION state (the log, the log-failed marker, the notice
-    flag, the quarantine): those are written only by the calling thread, after the decision is delivered. Probe and
-    health caches (the re-probe's lock, its .attempt marker, the saved probe state) are hints that can only change the
-    NEXT dispatch's notice or health, never a verdict. Workers that write them re-check `abandoned` immediately
-    before each write, so a worker that is released late writes nothing; a write already in flight at the moment of
-    abandonment still completes (that is the residual)."""
+    The invariant, true by construction because the guard is a short-lived process: nothing a left-behind thread does
+    can matter after the process ends, and the process ends right after the decision is delivered. What a left-behind
+    pre-decision worker can still do in the short time between the overrun and that exit is limited to probe and
+    health caches (the re-probe's lock file, `.attempt` marker and saved probe state): hints that can change the
+    NEXT dispatch's notice or health, never a verdict. A system call already entered at the moment of the exit may
+    complete; nothing is started after it."""
     box: list[tuple[_T | None, BaseException | None]] = []
-    abandoned = threading.Event()
 
     def target() -> None:
         try:
-            box.append((work(abandoned), None))
+            box.append((work(), None))
         except BaseException as error:
             box.append((None, error))
 
@@ -680,7 +700,8 @@ def run_bounded(work: Callable[[threading.Event], _T], timeout: float) -> tuple[
     worker.start()
     worker.join(max(0.0, timeout))
     if worker.is_alive() or not box:
-        abandoned.set()
+        if run is not None:
+            run.overran = True
         return False, None
     value, error = box[0]
     if error is not None:
@@ -709,22 +730,22 @@ def read_mode_bounded(ctx: LocalContext, run: Run) -> tuple[str, str]:
     fallback for an unreadable mode file is warn, and warn would let a violation of an explicit rule through as a
     warning; so for a TIMEOUT the verdict is computed in BLOCK mode (fail closed on a slow mode file), and the line says
     so with MODE_SLOW_NOTICE."""
-    done, got = run_bounded(lambda abandoned: mode_health(ctx.env), io_budget(run))
+    done, got = run_bounded(lambda: mode_health(ctx.env), io_budget(run), run)
     return got if done and got is not None else ("block", "slow")
 
 
 def bounded_reprobe(
-    doc: AgentsFile, path: Path, now: float, timeout: float, deadline: float
+    doc: AgentsFile, path: Path, now: float, timeout: float, deadline: float, run: Run
 ) -> tuple[dict[str, Any] | None, bool]:
     """The re-probe (its lock, its .attempt marker, the probe, the save of the state) under one bound: the probe's own
     total (twice the per-request time plus its slack) plus a file-work allowance, and never past the deadline.
-    (state or None, slow): slow is True when the batch did not finish, and its worker is abandoned. A worker that
-    finishes late can still write the probe state, which is what the re-probe was for; it changes no decision."""
+    (state or None, slow): slow is True when the batch did not finish; its worker is left running and the process
+    ends right after the decision is out (see run_bounded)."""
     budget = max(
         NOTICE_IO_MIN_SECONDS,
         min(2 * timeout + REPROBE_SLACK_SECONDS + NOTICE_IO_CAP_SECONDS, deadline - time.monotonic()),
     )
-    done, fresh = run_bounded(lambda abandoned: reprobe(doc, path, now, timeout, abandoned), budget)
+    done, fresh = run_bounded(lambda: reprobe(doc, path, now, timeout), budget, run)
     return (fresh if done else None), not done
 
 
@@ -736,22 +757,22 @@ def read_notices(folder: Path | None, path: Path | None, wants_first: bool, run:
     flag and the marker are left as they were."""
     budget = io_budget(run)
 
-    def work(abandoned: threading.Event) -> Seen:
+    def work() -> Seen:
         first = bool(wants_first and (path is None or notice_unclaimed(path)))
         return Seen(first, log_failure_pending(folder))
 
-    done, result = run_bounded(work, budget)
+    done, result = run_bounded(work, budget, run)
     return result if done and result is not None else Seen(skipped=True)
 
 
-def load_config(ctx: LocalContext, args: argparse.Namespace, deadline: float) -> AgentsFile:
+def load_config(ctx: LocalContext, args: argparse.Namespace, deadline: float, run: Run) -> AgentsFile:
     """Load agents.yaml under a wall-clock bound (see run_bounded): the load is joined for the time left (at least
     CONFIG_MIN_WAIT_SECONDS) and ABANDONED if it is still going; the guard goes on without a configuration. The limit:
     an abandoned load keeps its blocked read until the process exits (it only reads). The realistic cause is a wedged
     filesystem or kernel read: the production reader opens with O_NONBLOCK and refuses a non-regular file, so a planted
     FIFO is rejected at once and does not reach this timeout."""
     done, doc = run_bounded(
-        lambda abandoned: load_agents_for(ctx, args), max(CONFIG_MIN_WAIT_SECONDS, deadline - time.monotonic())
+        lambda: load_agents_for(ctx, args), max(CONFIG_MIN_WAIT_SECONDS, deadline - time.monotonic()), run
     )
     if not done or doc is None:
         raise TimeoutError("configuration load exceeded the budget")
@@ -764,7 +785,7 @@ def load_or_degrade(
     """The configuration, or None after the visible degraded allow: every rule else is off without a configuration.
     The Gemini rules need nothing from agents.yaml, so a brief that violates them is still denied."""
     try:
-        return load_config(ctx, args, deadline)
+        return load_config(ctx, args, deadline, run)
     except TimeoutError:
         timed_out = True
     except Exception:
@@ -1005,11 +1026,11 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     # state, and the bound-repository read (with its utime) only decide HEALTH and the repository binding. They run
     # under a bound; if one does not finish, health is unknown, the binding is "not bound" (the existing fallback: no
     # exemption), no more state work is done in this dispatch, and the verdict is computed from the config alone.
-    def read_phase(abandoned: threading.Event) -> tuple[dict[str, Any] | None, bool, str | None]:
+    def read_phase() -> tuple[dict[str, Any] | None, bool, str | None]:
         attempted_before = path is not None and os.path.lexists(attempt_path(path))
         return read_state(path), attempted_before, read_bound_repo(path, refresh=False)  # a pure read
 
-    done, got = run_bounded(read_phase, io_budget(run))
+    done, got = run_bounded(read_phase, io_budget(run), run)
     slow = not done or got is None
     state, attempted, bound = got if got is not None else (None, True, None)
     health = "unknown" if slow else state_health(state, doc.hooks.max_state_age_seconds, now)
@@ -1022,7 +1043,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         probe_code = "reprobe-skipped"
     elif needs_probe and path is not None and health == "stale":
         # The configured age ran out mid-session: ask again, bounded and at most once a minute, and keep the answer.
-        fresh, slow = bounded_reprobe(doc, path, now, probe_timeout(REPROBE_TIMEOUT_SECONDS), deadline)
+        fresh, slow = bounded_reprobe(doc, path, now, probe_timeout(REPROBE_TIMEOUT_SECONDS), deadline, run)
         if fresh is not None:
             state, health = fresh, "healthy"
     elif needs_probe and path is not None:
@@ -1031,7 +1052,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         # a key that already has an attempt, however it got there, is retried only at the usual rate.
         first_probe = not attempted
         wanted = CONFIG_REPROBE_TIMEOUT_SECONDS if first_probe else REPROBE_TIMEOUT_SECONDS
-        fresh, slow = bounded_reprobe(doc, path, now, probe_timeout(wanted), deadline)
+        fresh, slow = bounded_reprobe(doc, path, now, probe_timeout(wanted), deadline, run)
         if fresh is not None and not (first_probe and not fresh["reachable"]):
             state, health = fresh, "healthy"
         elif first_probe:
@@ -1157,7 +1178,7 @@ def lead_wait(
     # agents.yaml (matched against the repository bound at SessionStart, never the working tree).
     # The bound-repository read (it also touches the file) runs under a bound. If it does not finish the repository
     # counts as not bound, the existing fallback: no exemption, so the wait is judged by the rule.
-    done, bound_repo = run_bounded(lambda abandoned: read_bound_repo(path, refresh=False), io_budget(run))
+    done, bound_repo = run_bounded(lambda: read_bound_repo(path, refresh=False), io_budget(run), run)
     slow = not done
     exempt = bool(leadwait.marker_reason(command, deadline)) or tracking.exempt(
         bound_repo if done else None, tuple(e.repo for e in setting.exempt_repos)
@@ -1211,6 +1232,18 @@ def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
             except Exception:
                 run.failed = True
     return exit_code(run)
+
+
+def guard_process(ctx: LocalContext, args: argparse.Namespace) -> int:
+    """`safo hooks guard` as a process: run the guard, then END the process through hard_exit with its exit code, even
+    when everything finished normally. Interpreter shutdown would otherwise wait for any non-daemon thread and could
+    let a left-behind worker run on; os._exit cannot. (Where hard_exit is replaced, as in tests, the code is
+    returned.)"""
+    code = run_guard(ctx, args)
+    with contextlib.suppress(Exception):
+        ctx.out.flush()
+    hard_exit(code)
+    return code
 
 
 def settings_bytes(path: Path) -> bytes | None:
@@ -1387,7 +1420,7 @@ def run_status(ctx: LocalContext, args: argparse.Namespace) -> int:
 ACTIONS = {
     "install": run_install,
     "probe": run_probe,
-    "guard": run_guard,
+    "guard": guard_process,
     "mode": run_mode,
     "status": run_status,
 }

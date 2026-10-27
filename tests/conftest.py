@@ -141,6 +141,16 @@ def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.
     return home
 
 
+@pytest.fixture(autouse=True)
+def hard_exits(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The guard ends its own process with os._exit; in a test that would end pytest. Every in-process test gets a
+    recorder instead (the codes it was asked to exit with). The real-process tests run tests/guard_child.py, which
+    keeps the real os._exit."""
+    codes: list[int] = []
+    monkeypatch.setattr("safo.modes.hooks.hard_exit", codes.append)
+    return codes
+
+
 @pytest.fixture
 def fake() -> Iterator[FakeGitHub]:
     """A fake GitHub on a loopback port, torn down with the test."""

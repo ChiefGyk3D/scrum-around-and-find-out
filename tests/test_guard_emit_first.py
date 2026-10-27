@@ -41,7 +41,7 @@ from meterdata import NOW
 from safo import hooks as core
 from safo.context import LocalContext
 from safo.guardlog import APPEND_LOCK_TIMEOUT, WARNING, file_lock
-from safo.hooks import append_log, attempt_path, log_record, notice_path
+from safo.hooks import append_log, log_record, notice_path
 from safo.localfiles import load_agents_for
 from safo.modes import hooks as mod
 
@@ -963,84 +963,7 @@ def test_two_processes_appending_to_one_corrupt_log_quarantine_it_once_and_lose_
     assert len(log.read_text().splitlines()) == 10, "every record of both processes is in the fresh log"
 
 
-# -- an abandoned worker re-checks its flag before each write; the touch is after delivery ------------------------
-
-
-class Gate:
-    """Holds a REAL function at its `hold_call`-th call until released; remembers the worker thread that was held."""
-
-    def __init__(self, hold_call: int = 1) -> None:
-        self.release = threading.Event()
-        self.reached = threading.Event()
-        self.worker: threading.Thread | None = None
-        self.hold_call = hold_call
-        self.calls = 0
-
-    def wrap(self, real: Any) -> Any:
-        def call(*args: Any, **kwargs: Any) -> Any:
-            self.calls += 1
-            if self.calls == self.hold_call:
-                self.worker = threading.current_thread()
-                self.reached.set()
-                self.release.wait(10)
-            return real(*args, **kwargs)
-
-        return call
-
-
-def abandon_reprobe_at(
-    home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, target: str, hold_call: int = 1
-) -> tuple[Gate, str]:
-    state_folder(home).mkdir(parents=True, exist_ok=True)
-    gate = Gate(hold_call)
-    for name, value in (
-        ("CONFIG_REPROBE_TIMEOUT_SECONDS", 0.5),
-        ("REPROBE_TIMEOUT_SECONDS", 0.5),
-        ("REPROBE_SLACK_SECONDS", 0.0),
-        ("NOTICE_IO_CAP_SECONDS", 0.2),
-    ):
-        monkeypatch.setattr(mod, name, value)
-    monkeypatch.setattr(core, target, gate.wrap(getattr(core, target)))
-    out = Stream()
-    mod.run_guard(context(home, dispatch(model=None), out), namespace(agents))
-    return gate, out.buffered
-
-
-def tree(folder: Path) -> list[str]:
-    return sorted(str(path.relative_to(folder)) for path in folder.rglob("*"))
-
-
-def test_an_abandoned_reprobe_does_not_record_an_attempt_after_the_decision(
-    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    gate, line = abandon_reprobe_at(_private_home, agents, monkeypatch, "file_lock")  # held inside claim_reprobe
-    attempt = attempt_path(probe_file(_private_home, agents))
-    assert gate.reached.is_set() and mod.STATE_SLOW_NOTICE in line
-    before = tree(state_folder(_private_home))
-    gate.release.set()
-    assert gate.worker is not None
-    gate.worker.join(10)
-    assert not gate.worker.is_alive()
-    assert not attempt.exists(), "the worker re-checked its abandoned flag and did not write the marker"
-    assert tree(state_folder(_private_home)) == before, "and created no file or directory (not even a lock file)"
-
-
-def test_an_abandoned_reprobe_does_not_save_probe_state_after_the_decision(
-    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    gate, line = abandon_reprobe_at(
-        _private_home, agents, monkeypatch, "read_state", hold_call=1
-    )  # core.read_state is first called INSIDE save_state, after its first check
-    saved = probe_file(_private_home, agents)
-    assert gate.reached.is_set() and mod.STATE_SLOW_NOTICE in line
-    assert attempt_path(saved).exists(), "the claim happened before the abandonment, as it should"
-    before = tree(state_folder(_private_home))
-    gate.release.set()
-    assert gate.worker is not None
-    gate.worker.join(10)
-    assert not gate.worker.is_alive()
-    assert not saved.exists(), "the worker re-checked its abandoned flag and did not save the state"
-    assert tree(state_folder(_private_home)) == before, "and created no other file or directory"
+# -- the touch is after delivery -----------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("payload", ["agent", "bash"])
@@ -1572,40 +1495,198 @@ def test_side_entries_that_are_links_or_fifos_count_toward_the_cap_and_are_never
     assert not (tmp_path / "elsewhere").exists()
 
 
-# -- the post-delivery worker is abandonable too: once abandoned it starts no audit or decision write ---------------
+# -- the guard is a short-lived process: whatever overruns is cut off by the process ENDING ---------------------------
 
 
-def test_an_abandoned_post_delivery_worker_starts_no_audit_or_decision_write(
-    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+def spawn_seam(
+    home: Path,
+    agents: Path,
+    body: Path,
+    *,
+    mode: str,
+    barrier: Path,
+    block: str = "",
+    fail: str = "",
+    nondaemon: bool = False,
+    stdout_fd: int | None = None,
+) -> tuple[int, int]:
+    """Start tests/guard_child.py with seams from its environment. Returns (pid, read end of its stdout), or (pid, -1)
+    when `stdout_fd` is given (the test then owns the child's standard output). Standard error goes to /dev/null: the
+    guard writes nothing to it."""
+    read_end = write_end = -1
+    actions: list[tuple[Any, ...]] = [(os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0)]
+    if stdout_fd is None:
+        read_end, write_end = os.pipe()
+        actions += [(os.POSIX_SPAWN_DUP2, write_end, 1), (os.POSIX_SPAWN_CLOSE, read_end)]
+    else:
+        actions.append((os.POSIX_SPAWN_DUP2, stdout_fd, 1))
+    env = {**os.environ, "SAFO_CHILD_BARRIER": str(barrier), "SAFO_CHILD_BLOCK": block, "SAFO_CHILD_FAIL": fail}
+    if nondaemon:
+        env["SAFO_CHILD_NONDAEMON"] = "1"
+    argv = [sys.executable, str(CHILD), mode, str(home), str(agents), str(barrier), str(body)]
+    pid = os.posix_spawn(sys.executable, argv, env, file_actions=actions)
+    if write_end >= 0:
+        os.close(write_end)
+    return pid, read_end
+
+
+def run_seam(
+    home: Path, agents: Path, tmp_path: Path, payload: str, **options: Any
+) -> tuple[list[dict[str, Any]], int, float, float]:
+    """Run the child to its end. Returns (lines, exit status, seconds to the first line, seconds to the exit)."""
+    body = tmp_path / "payload.json"
+    body.write_text(payload)
+    barrier = tmp_path / "barrier"
+    started = time.monotonic()
+    pid, fd = spawn_seam(home, agents, body, barrier=barrier, **options)
+    try:
+        raw = read_until(fd, 20)  # to end of file: the child's standard output closes when the process is gone
+        exited = time.monotonic() - started
+        status = wait_exit(pid, 5)
+    finally:
+        os.close(fd)
+        with contextlib.suppress(ProcessLookupError, ChildProcessError):
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+    return lines(raw.decode()), status, Arrival.at - started, exited
+
+
+def state_snapshot(folder: Path) -> dict[str, tuple[int, ...]]:
+    """Every path under the state folder (and the folder itself) with mode, mtime_ns, size, inode and link count: a
+    utime, a rewrite, a rename or a new file all change it."""
+    snapshot: dict[str, tuple[int, ...]] = {}
+    for path in [folder, *sorted(folder.rglob("*"))]:
+        info = os.lstat(path)
+        key = "." if path == folder else str(path.relative_to(folder))
+        snapshot[key] = (info.st_mode, info.st_mtime_ns, info.st_size, info.st_ino, info.st_nlink)
+    return snapshot
+
+
+def release_and_compare(folder: Path, tmp_path: Path) -> None:
+    """The process is gone. Let every blocked step go and give a would-be survivor a second: nothing may change."""
+    before = state_snapshot(folder)
+    (tmp_path / "barrier").write_text("go")
+    time.sleep(1.0)
+    assert state_snapshot(folder) == before, "something wrote to the state folder after the process ended"
+
+
+POST_STEPS = {
+    "refresh": ("mod.refresh_bound_repo", ""),
+    "clear": ("mod.clear_log_failure", ""),
+    "claim": ("mod.claim_notice", ""),
+    "append": ("mod.append_log", ""),
+    "marker-write": ("mod.write_log_failed", "mod.append_log"),
+    "quarantine": ("core.quarantine_log", ""),
+}
+
+
+@pytest.mark.parametrize("step", list(POST_STEPS))
+def test_a_blocked_post_delivery_step_ends_the_process_and_nothing_is_written_afterwards(
+    _private_home: Path, agents: Path, tmp_path: Path, step: str
 ) -> None:
-    flag = unhealthy(_private_home, agents)  # an unclaimed probe notice: a claim is due after the line
-    mod.write_log_failed(state_folder(_private_home))  # a pending marker: a clear is due after the line
-    repo_file = probe_file(_private_home, agents)
-    repo_file = repo_file.with_name(repo_file.name + ".repo")
-    repo_file.write_text('{"repo": "acme/widgets"}')  # a bound repository: the hint step is due, and is held
-    repo_file.chmod(0o600)
-    monkeypatch.setattr(mod, "GUARD_TIMEOUT_SECONDS", 3)
-    monkeypatch.setattr(mod, "POST_GRACE_SECONDS", 0.1)
-    gate = Gate()
-    monkeypatch.setattr(mod, "refresh_bound_repo", gate.wrap(core.refresh_bound_repo))
-    started: list[str] = []
-    for name in ("append_log", "claim_notice", "clear_log_failure", "write_log_failed"):
-        real = getattr(mod, name)
+    """One real process per step: the step blocks until a barrier file appears. The line is already out; the process
+    must end by itself at the deadline with the right exit code, and when the barrier is created afterwards nothing
+    (no append, marker, claim, clear, utime, quarantine) may happen, because there is no process left to do it."""
+    folder = state_folder(_private_home)
+    folder.mkdir(parents=True, exist_ok=True)
+    if step == "claim":
+        unhealthy(_private_home, agents)  # an unclaimed probe notice: a claim is due after the line
+    else:
+        set_probe(_private_home, reachable=True, agents=agents)
+    if step == "refresh":
+        repo_file = probe_file(_private_home, agents)
+        repo_file = repo_file.with_name(repo_file.name + ".repo")
+        repo_file.write_text('{"repo": "acme/widgets"}')
+        repo_file.chmod(0o600)
+    if step == "clear":
+        mod.write_log_failed(folder)
+    if step == "quarantine":
+        (folder / "log.jsonl").write_bytes(b"\xff\n")
+        (folder / "log.jsonl").chmod(0o600)
+    set_mode(_private_home, "block")
+    block, fail = POST_STEPS[step]
+    rows, status, arrived, exited = run_seam(
+        _private_home, agents, tmp_path, dispatch(model=None), mode="seam", block=block, fail=fail
+    )
+    [row] = rows
+    assert denied(row), "the decision was delivered before the blocked step"
+    assert status == 0, "and the process ended by itself with the delivered decision's exit code"
+    assert arrived < 3.0 and exited < 4.0, (
+        f"line at {arrived:.1f} s, exit at {exited:.1f} s (budget 3 s, hard limit 2 s)"
+    )
+    release_and_compare(folder, tmp_path)
 
-        def recorded(*args: Any, _name: str = name, _real: Any = real, **kwargs: Any) -> Any:
-            started.append(_name)
-            return _real(*args, **kwargs)
 
-        monkeypatch.setattr(mod, name, recorded)
-    out = Stream()
-    mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents))
-    assert gate.reached.is_set(), "the post-delivery worker was held at its first step"
-    assert mod.LOG_FAILED_NOTICE in out.buffered, "so the clear and the claim were due"
-    before = tree(state_folder(_private_home))
-    gate.release.set()
-    assert gate.worker is not None
-    gate.worker.join(10)
-    assert not gate.worker.is_alive()
-    assert started == [], "after abandonment: no append, no marker write or clear, no notice claim"
-    assert tree(state_folder(_private_home)) == before, "and no file or directory changed"
-    assert marker(_private_home).exists() and not flag.exists()
+PRE_STEPS = {
+    "ensure-dir": "guardlog.ensure_dir",
+    "lock-open": "guardlog.os.open_lock",
+    "attempt-write": "core.write_text",
+    "save-state": "core.save_state",
+}
+
+
+@pytest.mark.parametrize("step", list(PRE_STEPS))
+def test_a_blocked_pre_decision_step_does_not_delay_the_decision_and_nothing_is_written_afterwards(
+    _private_home: Path, agents: Path, tmp_path: Path, step: str
+) -> None:
+    """The re-probe's directory setup, lock-file creation, attempt marker and state save each block in a real process.
+    The decision still goes out on time (verdict from the configuration alone, with the slow-state notice), the process
+    ends at once after it, and a late release changes nothing."""
+    folder = state_folder(_private_home)
+    folder.mkdir(parents=True, exist_ok=True)
+    set_mode(_private_home, "block")
+    rows, status, arrived, exited = run_seam(
+        _private_home, agents, tmp_path, dispatch(model=None), mode="pre-seam", block=PRE_STEPS[step]
+    )
+    [row] = rows
+    assert denied(row) and mod.STATE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
+    assert status == 0
+    assert arrived < 5.0, f"{arrived:.1f} s: before the scaled hard limit of 5 s, start-up included"
+    assert exited - arrived < 1.5, "an overrun makes the process end right after the line, with no post-delivery work"
+    release_and_compare(folder, tmp_path)
+
+
+def test_a_full_stdout_pipe_with_a_reader_that_never_drains_cannot_hold_back_the_exit(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    """The decision is written in a worker thread that the main thread waits for until the deadline. A reader that keeps
+    the pipe open but never reads blocks that write for ever; the process must still end, with exit 2 for a denial
+    that could not be delivered."""
+    set_probe(_private_home, reachable=True, agents=agents)
+    set_mode(_private_home, "block")
+    body = tmp_path / "payload.json"
+    body.write_text(dispatch(model=None))
+    jam_read, jam_write = os.pipe()
+    os.set_blocking(jam_write, False)
+    with contextlib.suppress(BlockingIOError):
+        while True:
+            os.write(jam_write, b"x" * 65536)
+    os.set_blocking(jam_write, True)  # the child's write would now BLOCK
+    started = time.monotonic()
+    pid, _ = spawn_seam(_private_home, agents, body, mode="seam", barrier=tmp_path / "barrier", stdout_fd=jam_write)
+    os.close(jam_write)
+    try:
+        status = wait_exit(pid, 8)
+        elapsed = time.monotonic() - started
+    finally:
+        os.close(jam_read)
+        with contextlib.suppress(ProcessLookupError, ChildProcessError):
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+    assert status == 2, "an undelivered denial exits 2, which the host reads as a block"
+    assert elapsed < 4.0, f"{elapsed:.1f} s: the hard limit is 2 s (3 s budget), plus 0.5 s grace, plus start-up"
+
+
+def test_a_wedged_non_daemon_thread_cannot_keep_the_process_alive_after_the_decision(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    """A normal return would wait at interpreter exit for a non-daemon thread (a library's, say). The process ends
+    through os._exit instead."""
+    set_probe(_private_home, reachable=True, agents=agents)
+    set_mode(_private_home, "block")
+    rows, status, _arrived, exited = run_seam(
+        _private_home, agents, tmp_path, dispatch(model=None), mode="seam", nondaemon=True
+    )
+    [row] = rows
+    assert denied(row) and status == 0
+    assert exited < 4.0, f"{exited:.1f} s"
