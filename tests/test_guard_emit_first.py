@@ -2379,7 +2379,7 @@ def test_salvage_reads_both_options_in_both_spellings_last_one_wins_and_ignores_
         ns = mod.salvage_argv(words)
         assert (ns.agents, ns.agents_local) == ("", ""), words
     ns = mod.salvage_argv(["--agents", "--agents-local", "l"])
-    assert (ns.agents, ns.agents_local) == ("", "l"), "a flag where the value should be is absent, and still read as a flag"
+    assert (ns.agents, ns.agents_local) == ("", "l"), "a flag in the value place is absent, and read as a flag"
 
 
 def test_dropping_every_explicit_argument_when_one_word_is_malformed_is_caught(

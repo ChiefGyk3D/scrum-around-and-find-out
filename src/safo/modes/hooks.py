@@ -929,8 +929,8 @@ def corrupted_guard_words(argv: Sequence[str]) -> list[str] | None:
     global options as hooks_tail does; the first word that is not an option is W. Two shapes are a corrupted guard line:
     (1) W is empty or not valid UTF-8 (a damaged word in front of the command): the first LATER `hooks` word followed
     by `guard` or by any word that is not one of argparse's hooks subcommands, `-h` or `--help` (and not the end of the
-    line) is the guard; (2) a value option took `hooks` as its value (`--board hooks guard`: the value was lost) and W is
-    `guard` or any other word that is not an argparse top-level command nor a hooks subcommand, `-h` or `--help`. Any
+    line) is the guard; (2) a value option took `hooks` as its value (`--board hooks guard`: the value was lost) and W
+    is `guard` or any other word that is not an argparse top-level command nor a hooks subcommand, `-h` or `--help`. Any
     other W (`install hooks guard`, a known command, `--gh-user hooks validate hooks guard`) is argparse's. Returns the
     words handed to the hand-parser (["?", ...] when the guard word itself is damaged), else None."""
     words = list(argv)
@@ -1480,8 +1480,9 @@ def guard_command(words: Sequence[str]) -> int:
     edited install, an unknown flag, --help, a near-miss spelling) is a configuration error, not a policy decision, and
     it must not print to standard error or end in argparse's exit 2. But it is also NOT a reason to skip the rules:
     the guard still reads the event on standard input and computes its verdict with the safest defaults it has (default
-    configuration discovery, the mode the installed guard reads, and any explicit --agents / --agents-local path salvaged from the bad words), so a denyable event is
-    denied (exit 2) and an allowable one allowed, through guard_process: one hard exit, inside the deadline.
+    configuration discovery, the mode the installed guard reads, and any explicit --agents / --agents-local path
+    salvaged from the bad words), so a denyable event is denied (exit 2) and an allowable one allowed,
+    through guard_process: one hard exit, inside the deadline.
 
     Only when no verdict can be computed at all (standard input holds no readable event: empty, closed, unparseable)
     does the guard's own cannot-tell path apply, the visible degraded allow (exit 0 if the line was delivered, 1 if
