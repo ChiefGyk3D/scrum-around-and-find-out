@@ -1871,3 +1871,21 @@ def test_through_the_command_line_a_dependency_exit_is_two_not_zero(monkeypatch:
 def test_a_deliberate_usage_error_still_reaches_the_command_line_as_a_reported_error() -> None:
     code, _, err = run_cli("protection", "--repo", "o/r", env={})
     assert code == 2 and "token" in err  # the SafoError path is unchanged: stderr, not an internal error
+
+
+def test_a_commit_tree_sha_with_path_characters_is_never_put_in_a_request() -> None:
+    routes = {**world(), f"{REPO}/git/commits/{SHA}": j({"sha": SHA, "tree": {"sha": "../rulesets"}})}
+    code, _, _, seen = check(routes)
+    assert code == 2 and not any(".." in path for _, path in seen)
+
+
+@pytest.mark.parametrize(
+    ("sha", "rows"),
+    [(T_ROOT, ((".github", "blob"), ("board.yaml", "blob"))), (T_GH, (("workflows", "blob"), ("CODEOWNERS", "blob")))],
+    ids=["github", "workflows"],
+)
+def test_a_file_where_a_directory_belongs_is_never_fetched_as_a_tree(
+    sha: str, rows: tuple[tuple[str, str], ...]
+) -> None:
+    code, _, _, seen = check({**world(), f"{REPO}/git/trees/{sha}": j(tree(sha, *rows))})
+    assert code == 2 and f"{REPO}/git/trees/{BLOB}" not in [path for _, path in seen]
