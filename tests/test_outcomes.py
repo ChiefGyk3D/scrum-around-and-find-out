@@ -577,3 +577,49 @@ def test_append_accepts_a_complete_valid_last_line_with_or_without_its_newline(t
         outcomes.append(log, outcomes.validate(GOOD))
         assert len(outcomes.load(log)) == 3
     outcomes.check_appendable(tmp_path / "absent.jsonl")
+
+
+def _padded(pad: int) -> bytes:
+    return b" " * pad + json.dumps(GOOD).encode()
+
+
+def test_a_padded_valid_record_gets_the_same_verdict_from_load_and_the_append_check(tmp_path: Path) -> None:
+    """One per-line cap, shared: JSON allows leading whitespace, but a line past the cap is not a record anywhere."""
+    cap = outcomes.LINE_LIMIT
+    good = len(json.dumps(GOOD).encode())
+    for pad, ok in ((cap - good, True), (cap - good + 1, False), (17000, False)):
+        log = tmp_path / f"o{pad}.jsonl"
+        log.write_bytes(_padded(pad) + b"\n")
+        if ok:
+            assert len(outcomes.load(log)) == 1
+            outcomes.check_appendable(log)
+        else:
+            with pytest.raises(ConfigError, match=r":1: .*longer than"):
+                outcomes.load(log)
+            with pytest.raises(ConfigError, match="last line is not a complete valid record"):
+                outcomes.check_appendable(log)
+
+
+def test_an_oversized_line_is_named_by_load_even_in_the_middle(tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    log.write_bytes(json.dumps(GOOD).encode() + b"\n" + _padded(outcomes.LINE_LIMIT) + b"\n")
+    with pytest.raises(ConfigError, match=r"o\.jsonl:2: .*longer than"):
+        outcomes.load(log)
+
+
+def test_the_ledger_is_sole_owner_so_a_write_through_a_pre_opened_descriptor_is_lost(tmp_path: Path) -> None:
+    """Pins the documented ownership contract: append replaces the file atomically (never torn), so another writer
+    holding the old descriptor writes to an unlinked inode. The log stays valid and the stray bytes are not in it."""
+    import os
+
+    log = tmp_path / "o.jsonl"
+    outcomes.append(log, outcomes.validate(GOOD))
+    fd = os.open(log, os.O_WRONLY | os.O_APPEND)
+    try:
+        outcomes.append(log, outcomes.validate(GOOD))
+        os.write(fd, b"stray non-SAFO write\n")
+    finally:
+        os.close(fd)
+    assert b"stray" not in log.read_bytes()
+    assert len(outcomes.load(log)) == 2
+    assert oct(log.stat().st_mode & 0o777) == "0o600"

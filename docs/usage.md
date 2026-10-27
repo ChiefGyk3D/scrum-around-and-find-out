@@ -146,6 +146,12 @@ model are grouped as `unknown`, sorted by agent and then model. The credit avera
 and show `unknown` when there are none, so a missing figure is never read as zero. `--json` carries the same table under
 `models`. [Lessons](lessons.md) cite it.
 
+The log is **SAFO's private file** (mode 0600), and SAFO must be its only writer. Every append rewrites the file
+atomically under a lock (a new file replaces the old one), so a crash or kill can never leave a torn ledger. The cost: a
+program that holds the log open, or writes to it, while SAFO appends is writing to the replaced file, and **its bytes are
+silently lost**, with no error on either side. Edit or inspect it only while no `safo` command is running, and reopen the
+file afterwards. A line longer than 16 KiB is not a record: it is refused on read and on append, naming the line.
+
 The seed, [examples/outcomes-2026-10.jsonl](../examples/outcomes-2026-10.jsonl), is one measured day.
 
 ## Enforcing routing with hooks

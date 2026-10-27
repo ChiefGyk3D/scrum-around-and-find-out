@@ -298,3 +298,20 @@ def test_the_latest_tag_is_ignored_in_both_directions(_private_home: Path, tmp_p
         log.unlink()
     code, _, log, _ = _run_with_routed(_private_home, tmp_path, "m1:latest", "m1:7b")
     assert code == 3 and not log.exists()
+
+
+def test_local_run_refuses_a_torn_log_before_any_generation(_private_home: Path, tmp_path: Path) -> None:
+    """The torn-tail check runs before the model is asked: no request, no answer, log untouched."""
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("Summarise this log in one sentence.")
+    log = tmp_path / "outcomes.jsonl"
+    log.write_bytes(b'{"date": "2026-10-07", "ag')
+    before = log.read_bytes()
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS).serve() as b:
+        agents = write_agents(tmp_path / "agents.yaml", a.url, b.url)
+        code, out, err = local_run("ci-log-summary", prompt, agents, log, _private_home)
+        assert code == 2, (out, err)
+        assert a.generates == [] and b.generates == [], "nothing may be generated for a log that cannot take the record"
+    assert "last line is not a complete valid record" in err
+    assert "A short answer." not in out and "A short answer." not in err
+    assert log.read_bytes() == before

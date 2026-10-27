@@ -15,6 +15,12 @@ key must carry `accepted` or `abandoned`: `"outcome": null`, a number, an unknow
 refused like any other bad field, so "cannot tell" never counts as an accepted task. An `abandoned` record has no
 acceptance, so `intervention_minutes` (self-reported at acceptance) and `defects_after_approval` are refused on it.
 Before an append, the existing last line must be a complete valid record; a torn tail is refused, never repaired.
+No line may be longer than LINE_LIMIT bytes (16 KiB), on load or on append.
+
+Ownership: the ledger is SAFO's private file (mode 0600). An append rewrites it atomically under a sidecar lock
+(write a new file, replace the old one), so a crash can never leave a torn ledger. The price is that only cooperating
+SAFO writers are safe: any other process that holds the log open, or writes to it, is writing to the replaced (unlinked)
+file and its bytes never appear in the log. Do not hold the ledger open or write to it from anything but SAFO.
 """
 
 from __future__ import annotations
@@ -219,19 +225,21 @@ def _read(path: Path) -> bytes:
         raise ConfigError("cannot read outcomes log within resource limits (a regular file, not a link)") from None
 
 
-TAIL_LIMIT = 16 * 1024  # a valid record is far smaller (note 500 characters, ASCII on disk); a longer tail is not one
+# One line of the log, trailing whitespace aside, is at most this many bytes, for the loader and the append check alike:
+# a valid record is far smaller (note 500 characters, ASCII on disk), so a longer line is not one, padded or not.
+LINE_LIMIT = 16 * 1024
 
 
 def _check_tail(existing: bytes) -> None:
     """The last non-empty line of the log must be a complete valid record, or the append would bury the new record
     behind a line that fails every later load. Refused, never repaired or truncated: the user may want to inspect it."""
     lines = existing.rstrip().rsplit(b"\n", 1)
-    last = lines[-1][-(TAIL_LIMIT + 1) :] if lines[-1].strip() else b""
+    last = lines[-1][-(LINE_LIMIT + 1) :] if lines[-1].strip() else b""
     if not last:
         return
     try:
-        if len(last) > TAIL_LIMIT:
-            raise ValueError("tail too long")
+        if len(last) > LINE_LIMIT:
+            raise ValueError("line too long")
         validate(loads(last))
     except (ValueError, UnicodeError, ConfigError):
         raise ConfigError(
@@ -282,6 +290,8 @@ def parse_log(raw: bytes, source: str) -> list[Outcome]:
     for number, line in enumerate(raw.split(b"\n"), 1):
         if not line.strip():
             continue
+        if len(line.rstrip()) > LINE_LIMIT:
+            raise ConfigError(f"{source}:{number}: line longer than {LINE_LIMIT} bytes is not a record")
         try:
             record = loads(line)
         except DuplicateKeyError as err:
