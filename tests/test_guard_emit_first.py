@@ -16,6 +16,7 @@ import io
 import json
 import os
 import select
+import signal
 import stat
 import sys
 import threading
@@ -1510,22 +1511,31 @@ def spawn_seam(
     fail: str = "",
     nondaemon: bool = False,
     stdout_fd: int | None = None,
+    stderr_fd: int | None = None,
+    extra_env: dict[str, str] | None = None,
+    new_group: bool = False,
 ) -> tuple[int, int]:
     """Start tests/guard_child.py with seams from its environment. Returns (pid, read end of its stdout), or (pid, -1)
     when `stdout_fd` is given (the test then owns the child's standard output). Standard error goes to /dev/null: the
     guard writes nothing to it."""
     read_end = write_end = -1
-    actions: list[tuple[Any, ...]] = [(os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0)]
+    actions: list[tuple[Any, ...]] = []
+    if stderr_fd is None:
+        actions.append((os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0))
+    else:
+        actions.append((os.POSIX_SPAWN_DUP2, stderr_fd, 2))
     if stdout_fd is None:
         read_end, write_end = os.pipe()
         actions += [(os.POSIX_SPAWN_DUP2, write_end, 1), (os.POSIX_SPAWN_CLOSE, read_end)]
     else:
         actions.append((os.POSIX_SPAWN_DUP2, stdout_fd, 1))
     env = {**os.environ, "SAFO_CHILD_BARRIER": str(barrier), "SAFO_CHILD_BLOCK": block, "SAFO_CHILD_FAIL": fail}
+    env.update(extra_env or {})
     if nondaemon:
         env["SAFO_CHILD_NONDAEMON"] = "1"
     argv = [sys.executable, str(CHILD), mode, str(home), str(agents), str(barrier), str(body)]
-    pid = os.posix_spawn(sys.executable, argv, env, file_actions=actions)
+    group = 0 if new_group else os.getpgrp()  # a process group of its own, so a watchdog can kill the whole tree
+    pid = os.posix_spawn(sys.executable, argv, env, file_actions=actions, setpgroup=group)
     if write_end >= 0:
         os.close(write_end)
     return pid, read_end
@@ -1689,3 +1699,222 @@ def test_a_wedged_non_daemon_thread_cannot_keep_the_process_alive_after_the_deci
     [row] = rows
     assert denied(row) and status == 0
     assert exited < CHILD_BUDGET, f"{exited:.1f} s"
+
+
+# -- a host watchdog: the guard must have answered BEFORE the host kills it ------------------------------------------
+
+
+def jam_pipe() -> tuple[int, int]:
+    """A pipe that is already full, blocking again for its writer, with the reader held open and never read."""
+    read_end, write_end = os.pipe()
+    os.set_blocking(write_end, False)
+    with contextlib.suppress(BlockingIOError):
+        while True:
+            os.write(write_end, b"x" * 65536)
+    os.set_blocking(write_end, True)
+    return read_end, write_end
+
+
+class Watched:
+    """What happened to a guard process that a host would kill at `host_timeout` seconds after it was started."""
+
+    def __init__(self, status: int, killed: bool, elapsed: float, arrived: float, raw: bytes) -> None:
+        self.status, self.killed, self.elapsed, self.arrived, self.raw = status, killed, elapsed, arrived, raw
+
+
+def run_watched(
+    home: Path,
+    agents: Path,
+    tmp_path: Path,
+    payload: str,
+    *,
+    host_timeout: float = CHILD_BUDGET,
+    jam_stdout: bool = False,
+    jam_stderr: bool = False,
+    **options: Any,
+) -> Watched:
+    """Run the guard in its own process group. A watchdog thread SIGKILLs the whole group at EXACTLY `host_timeout`
+    seconds after the process was started, as the host would. The result says whether the guard got out in time."""
+    body = tmp_path / "payload.json"
+    body.write_text(payload)
+    jam: list[int] = []
+    stdout_fd = stderr_fd = None
+    if jam_stdout:
+        read_end, stdout_fd = jam_pipe()
+        jam += [read_end]
+    if jam_stderr:
+        read_end, stderr_fd = jam_pipe()
+        jam += [read_end]
+    done, killed = threading.Event(), threading.Event()
+    started = time.monotonic()
+    pid, fd = spawn_seam(
+        home,
+        agents,
+        body,
+        barrier=tmp_path / "barrier",
+        stdout_fd=stdout_fd,
+        stderr_fd=stderr_fd,
+        new_group=True,
+        **options,
+    )
+
+    def watchdog() -> None:
+        if not done.wait(max(0.0, host_timeout - (time.monotonic() - started))):
+            killed.set()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+
+    thread = threading.Thread(target=watchdog, daemon=True)
+    thread.start()
+    raw = b""
+    try:
+        if fd >= 0:
+            raw = read_until(fd, host_timeout + 5)
+        status = wait_exit(pid, host_timeout + 5)
+        elapsed = time.monotonic() - started
+    finally:
+        done.set()
+        thread.join(2)
+        if fd >= 0:
+            os.close(fd)
+        for number in (
+            *jam,
+            *([stdout_fd] if stdout_fd is not None else []),
+            *([stderr_fd] if stderr_fd is not None else []),
+        ):
+            with contextlib.suppress(OSError):
+                os.close(number)
+        with contextlib.suppress(ProcessLookupError, ChildProcessError):
+            os.killpg(pid, signal.SIGKILL)
+    return Watched(status, killed.is_set(), elapsed, Arrival.at - started, raw)
+
+
+def test_a_full_stdout_pipe_is_answered_with_exit_two_before_the_host_kills_the_guard(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    set_probe(_private_home, reachable=True, agents=agents)
+    set_mode(_private_home, "block")
+    result = run_watched(_private_home, agents, tmp_path, dispatch(model=None), mode="seam", jam_stdout=True)
+    assert not result.killed and result.status == 2, f"status {result.status}, killed {result.killed}"
+    assert result.elapsed < CHILD_BUDGET
+
+
+def test_an_invalid_lock_timeout_and_a_full_stderr_pipe_cannot_stop_the_guard_importing_or_deciding(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    """Importing the package used to print a warning for an invalid SAFO_APPEND_LOCK_TIMEOUT: into a full stderr pipe
+    that blocked for ever, before any deadline existed."""
+    set_probe(_private_home, reachable=True, agents=agents)
+    set_mode(_private_home, "block")
+    result = run_watched(
+        _private_home,
+        agents,
+        tmp_path,
+        dispatch(model=None),
+        mode="seam",
+        jam_stderr=True,
+        extra_env={"SAFO_APPEND_LOCK_TIMEOUT": "not-a-number"},
+    )
+    assert not result.killed, "the host would have killed a guard that was stuck at import"
+    [row] = lines(result.raw.decode())
+    assert denied(row) and result.status == 0
+    assert result.elapsed < CHILD_BUDGET
+
+
+def test_a_slow_cold_start_and_a_full_stdout_pipe_still_get_exit_two_before_the_host_kills_the_guard(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    """The child sleeps before it imports safo, as a slow disk would. The budget is counted from the start of the
+    PROCESS, so the decision deadline (3 s of 5) falls inside the host timeout; a clock that started after the imports
+    would put it past the timeout and the host would kill the guard first."""
+    set_probe(_private_home, reachable=True, agents=agents)
+    set_mode(_private_home, "block")
+    result = run_watched(
+        _private_home,
+        agents,
+        tmp_path,
+        dispatch(model=None),
+        mode="seam",
+        jam_stdout=True,
+        extra_env={"SAFO_CHILD_COLD_START": "2.2"},
+    )
+    assert not result.killed and result.status == 2, f"status {result.status}, killed {result.killed}"
+    assert result.elapsed < CHILD_BUDGET
+
+
+def test_the_process_start_is_found_early_enough_to_include_the_interpreter_and_the_cold_start(tmp_path: Path) -> None:
+    """safo.PROCESS_STARTED is the process's start on the monotonic clock: a child that sleeps before importing safo
+    sees an age that includes the sleep (Linux; elsewhere it is the import time, and the test only checks sanity)."""
+    read_end, write_end = os.pipe()
+    code = "import time; time.sleep(0.8); import safo; print(time.monotonic() - safo.PROCESS_STARTED)"
+    actions: list[tuple[Any, ...]] = [(os.POSIX_SPAWN_DUP2, write_end, 1), (os.POSIX_SPAWN_CLOSE, read_end)]
+    pid = os.posix_spawn(sys.executable, [sys.executable, "-c", code], os.environ, file_actions=actions)
+    os.close(write_end)
+    try:
+        age = float(read_until(read_end, 20).decode().strip())
+    finally:
+        os.close(read_end)
+    assert wait_exit(pid, 10) == 0
+    assert 0.0 <= age < 30.0
+    if Path("/proc/self/stat").exists():
+        assert age >= 0.7, f"{age:.2f} s: the start-up before the import is counted"
+
+
+def test_importing_everything_on_the_guard_path_writes_nothing_even_with_an_invalid_lock_timeout(
+    tmp_path: Path,
+) -> None:
+    code = (
+        "import safo.cli, safo.hooks, safo.guardlog, safo.leadwait, safo.tracking, safo.modes.hooks;"
+        " safo.cli.build_parser()"
+    )
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    actions: list[tuple[Any, ...]] = [
+        (os.POSIX_SPAWN_DUP2, out_w, 1),
+        (os.POSIX_SPAWN_DUP2, err_w, 2),
+        (os.POSIX_SPAWN_CLOSE, out_r),
+        (os.POSIX_SPAWN_CLOSE, err_r),
+    ]
+    env = {**os.environ, "SAFO_APPEND_LOCK_TIMEOUT": "not-a-number"}
+    pid = os.posix_spawn(sys.executable, [sys.executable, "-c", code], env, file_actions=actions)
+    os.close(out_w)
+    os.close(err_w)
+    try:
+        out, err = read_until(out_r, 20), read_until(err_r, 20)
+    finally:
+        os.close(out_r)
+        os.close(err_r)
+    assert wait_exit(pid, 10) == 0
+    assert out == b"" and err == b"", f"import wrote {out!r} / {err!r}"
+
+
+@pytest.mark.parametrize("route", ["allow", "deny", "crash", "interrupt", "exit", "deny-then-crash"])
+def test_guard_process_ends_the_process_exactly_once_on_every_route(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int], route: str
+) -> None:
+    if route in ("allow", "deny"):
+        set_mode(_private_home, "block" if route == "deny" else "warn")
+        out = Stream()
+        assert mod.guard_process(context(_private_home, dispatch(model=None), out), namespace(agents)) == 0
+        assert hard_exits == [0], "a delivered decision, allowed or denied, ends with 0"
+        return
+
+    def broken(ctx: Any, args: Any, begun: Any = None, run: Any = None) -> int:
+        if route == "deny-then-crash":
+            run.deny = True
+        if route == "interrupt":
+            raise KeyboardInterrupt
+        if route == "exit":
+            raise SystemExit(3)
+        raise RuntimeError("the guard itself failed")
+
+    monkeypatch.setattr(mod, "run_guard", broken)
+    expected = {
+        "crash": RuntimeError,
+        "interrupt": KeyboardInterrupt,
+        "exit": SystemExit,
+        "deny-then-crash": RuntimeError,
+    }
+    with pytest.raises(expected[route]):
+        mod.guard_process(context(_private_home, "{}", Stream()), namespace(agents))
+    assert hard_exits == [2 if route == "deny-then-crash" else 1], "once, with the code of an undelivered decision"

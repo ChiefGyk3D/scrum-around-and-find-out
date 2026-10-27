@@ -20,6 +20,7 @@ Seams (environment): SAFO_CHILD_BARRIER is a path; a BLOCK target waits until th
 function. SAFO_CHILD_BLOCK / SAFO_CHILD_FAIL are comma lists of targets `mod.NAME`, `core.NAME` or `guardlog.NAME`
 (guardlog.os.open_lock blocks the creation of a lock file); FAIL raises OSError. SAFO_CHILD_NONDAEMON=1 starts a
 non-daemon thread that waits for the barrier (a library thread that would keep a normal exit from finishing).
+SAFO_CHILD_COLD_START=SECONDS sleeps before safo is imported.
 The budget is scaled down (GUARD_TIMEOUT_SECONDS): 5 s, or 10 s (the real one) for the pre-* modes (re-probe room).
 The cold-start seam SAFO_CHILD_COLD_START=SECONDS sleeps before safo is imported, as a slow interpreter or disk would.
 """
@@ -27,6 +28,7 @@ The cold-start seam SAFO_CHILD_COLD_START=SECONDS sleeps before safo is imported
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import io
 import os
 import signal
@@ -37,11 +39,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-import safo.guardlog as guardlog
-import safo.hooks as core
-from safo.cli import main
-from safo.guardlog import mode_health as real_mode_health
-from safo.modes import hooks as mod
+# A slow cold start (a slow disk or interpreter) happens BEFORE safo is imported, as it would in the real hook; the
+# guard's clock must still count it. The imports are therefore made after the sleep.
+time.sleep(float(os.environ.get("SAFO_CHILD_COLD_START", "0")))
+guardlog = importlib.import_module("safo.guardlog")
+core = importlib.import_module("safo.hooks")
+mod = importlib.import_module("safo.modes.hooks")
+main = importlib.import_module("safo.cli").main
+real_mode_health: Callable[..., Any] = guardlog.mode_health
 
 mode, home, agents, fifo, payload_file = sys.argv[1:6]
 mod.arm_process_clock()  # what cli.run() does in the real entry: the budget counts from the start of the process
@@ -65,7 +70,8 @@ def sleeps(*a: object, **k: object) -> None:
 
 def slow_mode_health(env: Mapping[str, str]) -> tuple[str, str]:
     threading.Event().wait(30)  # wedged: nothing releases this
-    return real_mode_health(env)
+    result: tuple[str, str] = real_mode_health(env)
+    return result
 
 
 def die(*a: object, **k: object) -> None:
@@ -154,5 +160,6 @@ code = main(
     now=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
     stdin=io.StringIO(Path(payload_file).read_text()),
 )
-sys.stdout.flush()
-sys.exit(code)
+# `safo hooks guard` ends the process through hard_exit (os._exit) on every route, so this line is never reached. If it
+# is, the guard returned instead of ending the process, which is a defect: fail loudly, with a distinctive status.
+raise SystemExit(f"guard_process returned {code!r} instead of ending the process through hard_exit")
