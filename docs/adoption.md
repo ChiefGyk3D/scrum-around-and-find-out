@@ -150,7 +150,7 @@ active branch rulesets (a ruleset in `evaluate` or `disabled` mode, or for tags,
 | `admins-included` | administrators are included (`enforce_admins`; no ruleset bypass) |
 | `no-bypass` | no bypass allowance or bypass actor; `--agent-login` is named if that account holds one |
 | `no-force-push`, `no-deletion` | force pushes and branch deletion are off |
-| `codeowners-board-yaml`, `codeowners-codeowners-file` | the CODEOWNERS file (read at the default branch's head commit) names an owner for `board.yaml` and for `.github/CODEOWNERS` |
+| `codeowners-board-yaml`, `codeowners-codeowners-file` | the CODEOWNERS file GitHub selected (`.github/`, the root, or `docs/`, read at the default branch's head commit) names an owner for `board.yaml` and for itself; a repository whose only CODEOWNERS is `docs/CODEOWNERS` must own that file, not `.github/CODEOWNERS` |
 | `codeowners-workflows` | every file that is under `.github/workflows/` now, and any file a pull request could add there under any name or depth, has an owner (see below) |
 
 Exit 1 prints a `FAIL <condition>` line for each one that does not hold; an unprotected branch (404 "Branch not
@@ -218,7 +218,18 @@ under the 5,000-an-hour limit) and the two normalized results must be equal: the
 `default_branch`, which must be the repository asked for), the head commit and its trees, the classic rule, every
 ruleset listed and read, CODEOWNERS and its errors. Any difference is exit 2 ("the protection changed while it was
 being read"), because a mix of two moments could certify a state that never existed, for example a secure classic rule
-read, then removed and replaced by a weaker ruleset. A list with a `rel="next"` link is exit 2 whether or not it is short. Each response is read
+read, then removed and replaced by a weaker ruleset.
+
+What the repeat does and does not prove: the second pass reads the classic rule and the rulesets in the opposite order
+(classic, rulesets, rulesets, classic), so a change that alternates with every read, such as an administrator flipping
+between a state with only the classic rule and one with only a ruleset, shows up as a difference. It cannot catch a
+change timed to the two ends of the sequence: if the classic rule is seen in state A at the first and the last read and
+the rulesets are seen in state B in between (A, B, B, A), the two passes agree and the result can be exit 0 although
+the controls never coexisted. No sequence of reads can exclude that. So exit 0 means every condition held in what GitHub
+answered, not that they held at one instant, and anyone who can change the protection can defeat this check. The exit-0
+output and `safo protection --help` say so in one line.
+
+A list with a `rel="next"` link is exit 2 whether or not it is short. Each response is read
 once, with no redirect, a read timeout and a 1 MiB cap; a body shorter than its Content-Length, or two different
 Content-Length headers, is exit 2.
 

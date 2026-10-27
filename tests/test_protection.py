@@ -21,7 +21,8 @@ from typing import Any
 
 import pytest
 
-from cliutil import run_cli
+from cliutil import BOARD, run_cli
+from safo.errors import SafoError
 
 ENV = {"SAFO_TOKEN": "t0ken", "SAFO_TOKEN_KIND": "token"}
 REPO = "/repos/o/r"
@@ -2103,3 +2104,113 @@ def test_a_failure_below_the_credential_lookup_or_the_client_is_never_zero(
     env = ENV if target != "from_gh" else {}
     code, out, _ = run_cli("protection", "--repo", "o/r", env=env)
     assert code == (130 if isinstance(error, KeyboardInterrupt) else 2) and "PASS" not in out
+
+
+# ---- round 5: test gaps that mutants of the boundary and of the two-pass comparison could slip through -------------
+
+
+class StrRaises(SafoError):
+    def __str__(self) -> str:
+        raise RuntimeError("no text")
+
+
+@pytest.mark.parametrize("env", [{}, {"GITHUB_ACTIONS": "true"}], ids=["plain", "workflow"])
+def test_an_error_whose_text_cannot_be_made_still_gets_its_exit_code(env: dict[str, str]) -> None:
+    """Making the text is part of reporting, so it sits inside the same boundary as writing it (kills moving it out)."""
+    from safo.cli import fail
+
+    assert fail(StrRaises(), env, io.StringIO()) == StrRaises.exit_code
+
+
+def test_a_board_mode_error_whose_report_raises_systemexit_zero_is_never_exit_zero() -> None:
+    """The board-mode handler goes through `fail`, like the local-mode one (kills `report(...); return code` there)."""
+    from safo import credentials
+    from safo.cli import main
+
+    def no_token(*args: Any) -> Any:
+        raise credentials.NoTokenError("no token")
+
+    code = main(
+        ["--board", BOARD, "audit"],
+        env={},
+        client_factory=no_token,
+        out=io.StringIO(),
+        err=Raising(SystemExit(0)),
+    )
+    assert code == 2
+
+
+def test_a_board_mode_error_whose_text_cannot_be_made_is_still_an_exit_code() -> None:
+    from safo.cli import main
+
+    def explode(*args: Any) -> Any:
+        raise StrRaises()
+
+    assert main(["--board", BOARD, "audit"], env={}, client_factory=explode, out=io.StringIO(), err=io.StringIO()) == 2
+
+
+def test_a_document_read_more_often_in_one_pass_than_the_other_is_cannot_tell() -> None:
+    """Equal sets, different multiplicity: the same ruleset read three times, the same documents in other numbers."""
+    over = {"id": 8, "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": ["~DEFAULT_BRANCH"]}}}
+    plain, extra = j(ruleset(**over)), j(ruleset(**over, updated_at="later"))
+    listing = j([{"id": 8, "target": "branch", "enforcement": "active"}] * 3)  # no ruleset applies: State is equal
+    routes: dict[str, Entry] = {
+        **world(),
+        f"{REPO}/rulesets": listing,
+        f"{REPO}/rulesets/8": seq(plain, plain, extra, plain, extra, extra),
+    }
+    code, out, err, _ = check(routes)
+    assert code == 2 and "changed while it was being read" in out + err
+
+
+def test_the_read_schedule_is_classic_first_then_classic_last() -> None:
+    """Pins the documented schedule (classic, rulesets, rulesets, classic): a change to it must be a deliberate one."""
+    from safo import protection
+
+    calls: list[bool] = []
+    real = protection.read_state
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs.get("classic_first", True))
+        return real(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(protection, "read_state", spy)
+        assert check(world())[0] == 0
+    assert calls == [True, False]
+
+
+def test_read_sources_orders_the_two_mechanisms_by_classic_first() -> None:
+    from safo import protection
+
+    class Rest:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+
+        def get(self, path: str, what: str) -> tuple[int, Any, dict[str, str]]:
+            self.paths.append(path.rsplit("/", 1)[-1].split("?")[0])
+            return (200, [], {}) if "rulesets" in path else (404, NOT_PROTECTED, {})
+
+    for first, expected in ((True, ["protection", "rulesets"]), (False, ["rulesets", "protection"])):
+        rest = Rest()
+        protection.read_sources(rest, REPO, "main", "", classic_first=first)  # type: ignore[arg-type]
+        assert rest.paths == expected
+
+
+def test_a_pass_says_it_is_not_one_instant_and_still_ends_on_the_summary() -> None:
+    code, out, _, _ = check(good_routes())
+    lines = out.splitlines()
+    assert code == 0 and lines[-1].startswith("protection: all ") and lines[-1].endswith(" conditions hold")
+    assert any(line.startswith("NOTE read-back: ") and "one instant" in line for line in lines[:-1])
+
+
+def test_a_failure_does_not_carry_the_pass_note() -> None:
+    _, out, _, _ = check(with_classic(put({"enabled": False}, "enforce_admins")))
+    assert "one instant" not in out
+
+
+def test_the_help_states_the_limit() -> None:
+    from safo.cli import build_parser
+
+    _, subs = build_parser()
+    assert "one instant" in " ".join(subs["protection"].format_help().split())

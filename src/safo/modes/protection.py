@@ -18,7 +18,15 @@ from safo.modes import LocalMode, register_local
 from safo.protection import API_URL, CannotTell, Rest, check
 
 
+LIMIT = (
+    "Exit 0 means every condition held in what GitHub answered over two full reads, not that they held at one instant: "
+    "a change timed to the two ends of the read (A, B, B, A) can pass, and anyone who can change the protection can "
+    "defeat this check."
+)
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.description = LIMIT
     parser.add_argument("--repo", required=True, help="owner/name of the repository to read")
     parser.add_argument("--agent-login", default="", help="the agent account; named if it may bypass the rule")
     parser.add_argument(
@@ -89,6 +97,8 @@ def _run(ctx: LocalContext, args: argparse.Namespace) -> int:
         lines.append(f"{'PASS' if c.ok else 'FAIL'} {c.id}: {c.text}{shown}")
         if c.warn:
             lines.append(f"NOTE {c.id}: {c.warn}")  # never changes the exit code on its own
+    if not failed:
+        lines.append(f"NOTE read-back: {LIMIT}")  # a note, never a condition: the summary stays the last line
     lines.append(
         f"protection: all {len(conditions)} conditions hold"
         if not failed
