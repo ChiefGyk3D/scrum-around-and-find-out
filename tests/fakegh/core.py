@@ -33,10 +33,11 @@ def handler(name: str) -> Callable[[Handler], Handler]:
 
 
 class GqlError(Exception):
-    def __init__(self, kind: str, message: str, data: JSON | None = None) -> None:
+    def __init__(self, kind: str, message: str, data: JSON | None = None, paths: list[list[str]] | None = None) -> None:
         super().__init__(message)
         self.kind = kind
         self.data = data
+        self.paths = paths  # one error per path, as GitHub reports a null field it could not resolve
 
 
 @dataclass
@@ -123,6 +124,24 @@ class FProject:
 
 
 @dataclass
+class FPull:
+    """A pull request as the handoff check reads it. Every field is raw, so a test can send a null or a wrong type."""
+
+    head: Any = None  # headRefOid
+    comments: list[Any] = field(default_factory=list)  # comment nodes, each a dict (or garbage on purpose)
+    commits: list[Any] = field(default_factory=list)  # commit oids, oldest first
+    state: Any = "OPEN"
+    draft: Any = False
+    base_name: Any = "main"
+    base_oid: Any = "d" * 40
+    pushed: Any = "2000-01-01T00:00:00Z"  # committedDate of the head commit: set by its author, never proof of arrival
+    arrived: Any = "2020-01-01T00:00:00Z"  # when a force-push event says the head arrived; None: no event proves it
+    events: list[Any] = field(default_factory=list)  # timeline nodes: force pushes and base changes, oldest first
+    more_events: Any = False  # pageInfo.hasPreviousPage of the timeline
+    last_commit: Any = None  # replaces the commits(last: 1) node when set
+
+
+@dataclass
 class FRepo:
     full_name: str
     installed: bool = True
@@ -135,7 +154,7 @@ class FRepo:
     protection: dict[str, Any] | None = field(
         default_factory=lambda: {
             "requiresStatusChecks": True,
-            "requiredStatusChecks": [{"context": "ci / CI green"}],
+            "requiredStatusChecks": [{"context": "ci / CI green", "app": {"databaseId": 15368}}],
             "allowsForcePushes": False,
             "isAdminEnforced": True,
             "bypassForcePushAllowances": {"totalCount": 0},
@@ -154,8 +173,11 @@ class FakeGitHub:
         self.repos: dict[str, FRepo] = {}
         self.mutations: list[Mutation] = []
         self.requests: list[str] = []
+        self.kinds: list[str] = []  # `query` or `mutation`, one per request that reached a handler, in order
+        self.pulls: dict[tuple[str, int], FPull] = {}  # (lower-case owner/name, number) -> pull request
         self.faults: list[Fault] = []
         self.listing_lag = 0
+        self.approval_issues: dict[tuple[str, int], JSON] = {}  # (repo lowercased, number) -> GraphQL-shaped node
         self.vanished: set[str] = set()  # item ids that answer NOT_FOUND to any edit
         self.handlers: dict[str, Handler] = {}  # per-test overrides of the registered handlers
         self._seq = 0
@@ -306,6 +328,7 @@ class FakeGitHub:
             return 401, {}, b'{"message": "Bad credentials"}', False
         fault = self._next_fault(op)
         self.requests.append(op)
+        self.kinds.append(match.group(1))
         variables: JSON = body.get("variables") or {}
 
         if fault and fault.delay:
@@ -335,8 +358,8 @@ class FakeGitHub:
         try:
             data = fn(self, variables | {"__document__": document})
         except GqlError as err:
-            error = {"type": err.kind, "message": str(err)}
-            return 200, {}, json.dumps({"data": err.data, "errors": [error]}).encode(), False
+            errors = [{"type": err.kind, "message": str(err), **({"path": p} if p else {})} for p in err.paths or [[]]]
+            return 200, {}, json.dumps({"data": err.data, "errors": errors}).encode(), False
         return 200, {}, json.dumps({"data": data}).encode(), False
 
     def _next_fault(self, op: str) -> Fault | None:

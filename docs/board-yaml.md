@@ -23,6 +23,7 @@ The top-level mapping is required and must contain:
 | `rules` | mapping | no | Automation and field cross-references |
 | `agents` | mapping | no | Agent status tracking |
 | `ui_only` | list | no | Manual settings not readable via the API |
+| `process` | mapping | no | The [process method](#process); absent means `{method: agile}` |
 
 Unknown keys are refused with the key path.
 
@@ -44,6 +45,7 @@ A list; every repository whose open issues and pull requests belong on the board
 | `owner`, `name` | The repository. It may belong to a different account than the project |
 | `default_area` | The `Area` option given to an item from this repository when nothing more specific matches |
 | `area_rules` | Optional list of `{match, area}`; the first rule whose `match` (case-insensitive) occurs in the title or a label wins. Used by `reconcile` only: an event never reads a title |
+| `method` | Optional, `agile` or `waterfall`: this repository's process method. Default: `process.method`. A `null` is refused |
 
 ## fields
 
@@ -87,6 +89,7 @@ filter is set in a second call. An existing view with another layout is refused;
 | `gate_exempt_repos` | none | `owner/name` list, each entry listed in `repositories`, that is not evaluated for the gate; the audit prints a `NOTE` for each |
 | `gate_require_admin_enforced` | `false` | `true` also reports a classic protection rule that does not apply to administrators (`enforce_admins` off). Off by default because the shipped baseline (`scripts/apply-baseline.sh`) sets `enforce_admins` to false; a repository that is gated only for non-administrators then gets a `NOTE` |
 | `gate_admin_exempt_repos` | none | With `gate_require_admin_enforced` on: `owner/name` list, each entry listed in `repositories`, where administrators may bypass, accepted |
+| `gate_check_app_id` | `15368` | The app (GitHub App id, an integer from 1 to 2147483647, GraphQL's `Int`) the gate check must be pinned to; `15368` is GitHub Actions. A required check with no source restriction, or tied to another app, can be satisfied by an app other than your CI and is reported by the [branch gate](no-hidden-work.md#the-branch-gate). Set it to your CI app's id if it is not GitHub Actions. A pin proves the app, not the workflow (every workflow can post as the Actions app), so a pinned check passes with a `NOTE` every time |
 
 Every status name must be an option of the status field; `safo` checks that against `fields` when it loads the file and
 against the live project before it changes anything.
@@ -103,10 +106,79 @@ Used by `agents-status`. All keys are optional.
 
 All values in `working` and `waiting` must be options of the status field.
 
+## process
+
+Optional. Absent, `process: {}` and `process: {method: agile}` mean the same thing, and an all-agile board behaves and
+prints exactly as it did before this key existed. This release only reads and checks the block; no audit rule uses it yet.
+Every error names the key path and is raised at load time, before any request. A value that is `null`, the wrong type or
+not on a list is refused, never replaced by a default. Text from this block echoed in an error is cut to 40 characters of text and is at most 120 characters after escaping and quoting.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `method` | `agile` | `agile` or `waterfall`: the default for every repository |
+| `dependencies` | `none` | `none` or `blocked_by`. Do not write `off`: YAML reads it as `false`, which is refused |
+| `phase_field` | none | Waterfall only, required. A `single_select` in `fields` (not the status or area field); its option order is the phase order; at most 16 options |
+| `active_statuses` | none | Waterfall only, required, at most 16. Options of the status field that mean "being worked", none of them `rules.status.closed` or `merged` |
+| `approvers` | none | Waterfall only, required, 1 to 32 entries of `{login, id}`: a valid GitHub login and the user's positive `databaseId`. Neither may repeat |
+| `gates` | `[]` | Waterfall only, at most 32 entries of `{phase, issue}`: a phase option, one gate per phase, none on the last phase, and `issue` as `owner/repo#N` in one of `repositories` (checked offline) |
+
+"Waterfall" means `process.method` or some `repositories[i].method` is `waterfall`. Waterfall-only keys on any other board
+are refused with `only used when the method or a repository is waterfall`, and a waterfall board needs
+`rules.add_closed_days` of at least 1. On a waterfall board the option names of the phase field and of the status field are restricted: letters and digits, single spaces between words, and the punctuation `- _ . , : ( ) / + & #`, already NFKC-normalized, at most 100 characters. Combining marks, variation selectors, joiners, emoji, tabs, non-ASCII spaces and a leading, trailing or doubled space are refused by option number, never echoed. This stops control and bidi injection and names that differ only in invisible marks; it does not stop look-alike letters from other scripts. The phase field may have at most 16 options and the status field at most 64, checked before any option is read. A board with no waterfall `process` block has no such limits. Unknown keys inside `process` are refused (`baseline` arrives with a later release).
+
+```yaml
+rules:
+  add_closed_days: 30
+process:
+  method: waterfall
+  phase_field: Phase
+  active_statuses: [In progress]
+  approvers:
+    - {login: maintainer-login, id: 1234567}
+  gates:
+    - {phase: Requirements, issue: acme/gates#1}
+```
+
 ## ui_only
 
 A list of sentences for the settings no API can read or set (a Roadmap's date fields and zoom, a view's grouping, the
 project's built-in workflows). `bootstrap` prints them as a checklist and `audit` prints them as a reminder.
+
+## Limits
+
+Every list the loader reads has a limit, checked on the length of the raw list before any entry is read, so a hostile
+file costs one comparison. The error names the key and the limit, for example `fields: at most 100 entries`. The
+shipped boards use at most 25 repositories, 12 fields, 5 views, 15 options in a field and 27 area rules in a
+repository, well under every limit.
+
+| List | Limit |
+|---|---|
+| `repositories` | 200 |
+| `fields` | 100 |
+| options of one field | 64 (a waterfall board's phase field: 16) |
+| `views` | 50 |
+| `area_rules` of one repository | 100 |
+| `ui_only`, `rules.new_item_defaults` | 100 |
+| `exempt_repos` (tracking, threat model), `gate_exempt_repos`, `gate_admin_exempt_repos` | 200 |
+| `agents.working`, `agents.waiting` | 64 |
+| `process.active_statuses` | 16 |
+| `process.approvers`, `process.gates` | 32 |
+
+What an error echoes from the file is bounded, so a file under 1 MiB cannot flood a log:
+
+- a value shown with `repr` (a bad owner, a duplicate name, a status that is not an option) is cut to 200 characters of
+  its `repr` followed by `...`; a realistic value prints exactly as before;
+- a key placed in an error path (an unknown key, a key of `rules.new_item_defaults`) is cut to 200 characters followed by
+  `...`;
+- each option name in a listing of a field's options is cut to 200 characters followed by `...` (identical for names up
+  to 200 characters); a listing has at most 64 names, so about 13 KB at most;
+- text from the `process` block is cut harder: a value is cut to 40 characters of text and is at most 120 characters
+  after escaping and quoting, and a list of option names is at most 400 characters in total, ellipsis included.
+
+Known cost, same as before these limits existed: the YAML parser is pure Python and reads the whole file before any
+limit above can act. A file near the 1 MiB size limit made of tens of thousands of tiny entries can take several
+seconds to parse (about 7 s for 40,000 small mappings, about 14 s for a flat list of 900 KB). The size limit is the only
+bound on that.
 
 ## Refused YAML
 
@@ -124,3 +196,5 @@ All these YAML features are checked in the loader itself; parsing fails with an 
 After an unknown outcome, `status` cannot verify whether the update landed; check the existing project updates before posting again.
 
 `sync` treats the event payload as a pointer: it reads the issue or pull request live (state, draft flag, number, repository) and writes from that. An action that contradicts the live state, or a node that is not in the repository the payload names, is a NOTE (exit 1) and writes nothing. `status` checks that the acknowledged update belongs to the project (`statusUpdate.project.id`); an acknowledgement that does not say so is an unknown outcome. An exhausted rate limit before any write exits 1; after a write was sent it is an unknown outcome (exit 2). Text from GitHub is escaped on every log line, and `status --post --print` shows the update inside `::stop-commands::`.
+
+An error that lists a field's options (for example a status that is not one of them) lists every option. The text is identical to the earlier text for every board whose option names are printable and at most 200 characters; a longer name is cut, and a name with a control, bidi or separator character is escaped (hardening).

@@ -32,6 +32,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built, merged on `main` and released in v0.1.0 |
 | `outcome add` and `usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built, merged on `main` and released in v0.1.0 |
 | `local run` (one prompt to the local model routing picks; never one that would evict a protected model) and the optional local-model clause on `status --post` | Built, merged on `main` and released in v0.1.0 |
+| `handoff check` (is the latest review report on a pull request about its current head; read-only, shows and never blocks; the merge step that passes the reviewed head to `safo wait-ci --sha` waits for `wait-ci`) | In review on a pull request (issue #106, first unit); not yet on `main` |
 | `hooks` (a Claude Code SessionStart probe and a PreToolUse guard on the Agent and Bash tools that enforce `agents.yaml` and the rule that the lead never waits (see [`docs/orchestrator.md`](docs/orchestrator.md)): warn by default, block when asked, any hook error fails open with a visible warning; the approval token is a speed bump, not proof of the maintainer's approval, because a prompt-injected model can write it; see [`docs/hooks.md`](docs/hooks.md)) | Built, merged on `main`. The guard and probe were released in v0.1.0; the lead-waits rule is on `main` since #77 and unreleased. The Agent-tool guard has run on real dispatches in warn mode (53 since 2026-10-09; see [Measurements](docs/measurements.md)), but the lead-waits rule has no measured hit rate yet and the disposable real-session smoke test that [`docs/hooks.md`](docs/hooks.md) asks for before `block` is not recorded as done |
 | No hidden work (the guard needs an open `issue:` in every brief; `audit` finds pull requests with no linked issue and cards missing Kind, Epic, Effort or Area; `reconcile` and `sync` list what needs a human; see [`docs/no-hidden-work.md`](docs/no-hidden-work.md)). The pull request check that fails a pull request with no `Refs #n` is a reusable workflow in git-your-ship-together and is not built here | Built and merged on `main` (#60, issue #54); unreleased, after v0.1.2 |
 | Threat model before build (`audit` and `reconcile` find issues labeled `ai-surface` with no usable `threat-model:` line; a `threat-model` routing shape; see [`docs/threat-model.md`](docs/threat-model.md)). The check that the Threat Dragon file is well formed and moves with the AI surface is a reusable workflow in git-your-ship-together and is not built here | Built and merged on `main` (#71, issue #70); unreleased, after v0.1.2 |
@@ -61,12 +62,13 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `usage` | What each agent has used and has left, from local files only: Codex windows, Claude Code tokens, Copilot sessions, Ollama reachability. `--report` summarises the outcomes log |
 | `route <shape>` | Which agent a task shape should go to, from the rules in `agents.yaml` and the live headroom. Recommends; dispatches nothing |
 | `outcome add` | Appends a finished task to the outcomes log |
+| `handoff check <owner/repo> <pr>` | Whether the latest review report on a pull request names the head the pull request has now. Exit 0 fresh, 1 stale, 2 cannot tell. Read-only; shows, never blocks. See [Handoff](docs/handoff.md) |
 | `local run` | Sends one prompt to the local model (Ollama) that routing picks, never one that would evict a protected model |
 | `profiles verify` | Resolves every evidence pointer of the agent profiles in `agents.yaml` and prints each claim beside what it cites; checks CODEOWNERS covers the files the profiles are made from. Read-only |
 | `protection --repo OWNER/NAME` | Reads the default branch's protection back with GET requests only and exits 0 only when code-owner review, the `CI green` check, an up-to-date branch, administrators, no bypass, no force push or deletion and CODEOWNERS coverage (owners GitHub accepts, `board.yaml`, CODEOWNERS itself, and every existing or future file under `.github/workflows/`) all hold. Exit 1 names each condition that does not; exit 2 when a response cannot be read. A `CI green` check not pinned to an app prints a NOTE; `--require-app-id` makes the pin a condition. See [Adoption](docs/adoption.md) |
 | `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard` |
 
-The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `protection`) read
+The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`, `protection`) read
 files on a person's machine, or `protection` the repository's settings, and are not allowed in the Action.
 
 ## Trust boundary
@@ -151,6 +153,7 @@ replaced are gone.
 - [Lessons](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Lessons)
 - [Measurements](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Measurements)
 - [Adoption](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Adoption)
+- [Approvals](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Approvals)
 - [Privacy](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Privacy)
 - [Look-before-instructing](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Look-before-instructing)
 - [Done-means-verified](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Done-means-verified)

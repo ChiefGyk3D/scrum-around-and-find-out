@@ -11,5 +11,6 @@
 /src/safo/agentsfile.py @ChiefGyk3D
 /src/safo/profile.py @ChiefGyk3D
 /src/safo/profile_render.py @ChiefGyk3D
+/src/safo/profile_compose.py @ChiefGyk3D
 /src/safo/harness_tree.py @ChiefGyk3D
 /scripts/gen_profiles.py @ChiefGyk3D

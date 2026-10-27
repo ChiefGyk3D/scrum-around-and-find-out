@@ -27,6 +27,7 @@ PATHS = [
     "sub/examples/harness/x.md",
     "src/safo/agentsfile.py",
     "src/safo/profile_render.py",
+    "src/safo/profile_compose.py",
     "src/safo/ax",
     "src/agentsfile.py",
     "abc.md",

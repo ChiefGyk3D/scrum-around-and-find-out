@@ -25,11 +25,11 @@ Raw = dict[str, Any]
 
 
 def clean_raw() -> Raw:
-    """Protected by an active ruleset nobody can bypass; a non-admin token (so an empty read would be cannot tell)."""
+    """Protected by an active ruleset nobody can bypass, read by an administrator (an empty list needs ADMIN)."""
     return {
         "nameWithOwner": WIDGETS,
         "isArchived": False,
-        "viewerPermission": "READ",
+        "viewerPermission": "ADMIN",
         "defaultBranchRef": {"name": "main", "branchProtectionRule": None},
         "rulesets": {"totalCount": 1, "nodes": [ruleset("CI green")]},
     }
