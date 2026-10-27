@@ -304,7 +304,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   the process start the moment it is imported: on Linux from `/proc` (the process age is `/proc/uptime` minus the start
   time in `/proc/self/stat`; both count from boot, so the difference is exact, and reading them cannot block); anywhere
   else, or if the age looks wrong (over a minute), it is the time of the import, the earliest point left. The real entry
-  (`python -m safo` and the console script, through `safo.cli.run`) arms the guard with it; a test calling `main()` in a
+  (`python -m safo` and the console script, through the `run` function of the cli module) arms the guard with it; a test calling `main()` in a
   long-lived process does not, so its budget starts when the guard does. Interpreter start-up, package imports, the
   parser and argument parsing are therefore INSIDE the budget. With the host timeout T (10 s in the installed
   settings, scaled in tests) the points are all measured from the process start:
@@ -320,7 +320,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   code came first, for a full stdout pipe, an invalid `SAFO_APPEND_LOCK_TIMEOUT` with a full stderr pipe, and a cold
   start that sleeps before `safo` is imported (Linux; elsewhere the start-up before the import is not counted).
   Importing any module on the guard's path performs no I/O at all (no write to stdout or stderr, no warning): the
-  lock-timeout warning is kept in `guardlog.LOCK_TIMEOUT_WARNING` and printed by `safo.cli.main` only for commands that are
+  lock-timeout warning is kept in the `LOCK_TIMEOUT_WARNING` variable of the guardlog module and printed by the cli module's `main()` only for commands that are
   not hooks, after they ran. The decision is computed and then written
   and flushed to standard output FIRST, on both the Agent and the Bash path (one shared function); only then is the
   log appended, best effort. A re-probe gets at most what leaves two requests per endpoint and 2 s for the issue
