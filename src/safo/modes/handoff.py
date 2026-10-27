@@ -366,8 +366,9 @@ def verdict(client: Client, variables: Mapping[str, Any], roles: tuple[str, ...]
     """(FRESH | STALE, message), or raises Unknown / SafoError.
 
     Everything the answer depends on is read twice: the pull request (head, base, state), the timeline and the comments
-    are read once to decide and once more at the end, and any difference between the two reads is unknown. Nothing is
-    decided from a state that has changed since it was read. The cost is a second round of the same read requests.
+    are read once to decide and once more at the end, and any difference between the two reads is unknown. The final
+    round reads the timeline, then the comments, and the pull request last. The cost is a second round of the same
+    read requests. A push after the very last read cannot be seen; that window is the one that remains.
     """
     head, flags, base = read_pull(client, variables)
     newest = read_comments(client, variables, roles)
@@ -381,10 +382,11 @@ def verdict(client: Client, variables: Mapping[str, Any], roles: tuple[str, ...]
         raise _bad("the newest report's ROLE or HEAD is unreadable (a HEAD must be 7 to 40 hex characters)")
     full = resolve(client, variables, reported)
     timeline = read_timeline(client, variables, head) if full == head else None
-    # the final snapshot: head, base and state; the timeline; the comments. Any difference means it changed meanwhile.
-    changed = read_pull(client, variables) != (head, flags, base)
-    changed = changed or (timeline is not None and read_timeline(client, variables, head) != timeline)
+    # The final snapshot, in this order: the timeline, the comments, and the pull request LAST. A normal push leaves no
+    # timeline event and no comment, so only the head read can show it, and it must be the last thing read.
+    changed = timeline is not None and read_timeline(client, variables, head) != timeline
     changed = changed or read_comments(client, variables, roles) != newest
+    changed = changed or read_pull(client, variables) != (head, flags, base)
     if changed:
         raise _bad(CHANGED)
     label = f"{role} report" + (f" VERDICT {said}" if said else "")

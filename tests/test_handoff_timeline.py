@@ -187,9 +187,9 @@ def test_the_timeline_is_read_only_when_the_shas_match(fake: FakeGitHub) -> None
         "HandoffPr",
         "HandoffComments",
         "HandoffTimeline",
-        "HandoffPr",
         "HandoffTimeline",
         "HandoffComments",
+        "HandoffPr",
     ]
 
 

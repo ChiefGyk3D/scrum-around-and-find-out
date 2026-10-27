@@ -65,25 +65,13 @@ def cases(answer: bytes) -> list[tuple[str, tuple[bytes, ...]]]:
     ]
 
 
-def test_every_ambiguous_or_unsupported_framing_is_refused_for_a_query() -> None:
-    for name, lines in cases(QUERY_ANSWER):
-        refused(framed(*lines, body=chunked(QUERY_ANSWER)), QUERY, ApiError, "framing")
-        assert name
-
-
-def test_every_ambiguous_or_unsupported_framing_is_an_unknown_outcome_for_a_mutation() -> None:
-    for name, lines in cases(MUTATION_ANSWER):
-        error = refused(framed(*lines, body=chunked(MUTATION_ANSWER)), MUTATION, UnknownOutcomeError, "framing")
-        assert isinstance(error, ApiError), name
-
-
 @pytest.mark.parametrize("index", range(17))
-def test_each_framing_case_on_its_own(index: int) -> None:
-    name, lines = cases(QUERY_ANSWER)[index]
+def test_each_ambiguous_or_unsupported_framing_is_refused(index: int) -> None:
+    """A query gets an ApiError; a sent mutation gets the more specific UnknownOutcomeError."""
+    _, lines = cases(QUERY_ANSWER)[index]
     refused(framed(*lines, body=chunked(QUERY_ANSWER)), QUERY, ApiError, "framing")
     _, mutation_lines = cases(MUTATION_ANSWER)[index]
     refused(framed(*mutation_lines, body=chunked(MUTATION_ANSWER)), MUTATION, UnknownOutcomeError, "framing")
-    assert name
 
 
 def test_the_repro_chunked_with_an_agreeing_length_is_not_a_definite_mutation_success() -> None:

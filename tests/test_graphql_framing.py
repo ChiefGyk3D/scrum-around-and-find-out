@@ -54,8 +54,7 @@ MALFORMED = [
 @pytest.mark.parametrize("lines", MALFORMED)
 def test_a_malformed_content_length_is_never_a_complete_answer(lines: tuple[bytes, ...]) -> None:
     refused(raw_framing(*lines, body=QUERY_ANSWER), QUERY, ApiError, "framing")
-    error = refused(raw_framing(*lines, body=MUTATION_ANSWER), MUTATION, UnknownOutcomeError, "framing")
-    assert isinstance(error, ApiError)
+    refused(raw_framing(*lines, body=MUTATION_ANSWER), MUTATION, UnknownOutcomeError, "framing")
 
 
 def test_a_content_length_with_extra_spaces_is_normalized_by_the_parser_and_a_short_body_still_fails() -> None:

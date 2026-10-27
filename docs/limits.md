@@ -62,7 +62,7 @@ takes it for a bug that was hidden.
   `adversarial-reviewer`; `--roles` changes it), and the role is read from the header the same account wrote. It is a
   speed bump like the approval token. A report must also be newer than the moment its commit became the head, and only a
   force-push event proves that moment (a commit's own dates are set by its author and are not used), so a head that
-  arrived by a normal push reads unknown. Equal one-second timestamps are unknown too. A later version could
+  arrived by a normal push reads unknown. Equal one-second timestamps are unknown too. The pull request is read twice, the head read last, and a change between the two rounds is unknown; a push after the very last read cannot be seen. A later version could
   prove the arrival of a normally pushed head from a real review (its `submittedAt` field is server-set and
   tied to a commit) read together with later force-push and base-change events, or from a push event kept outside
   GitHub (a webhook or the audit log); that is an idea, not built. See [Handoff](handoff.md).

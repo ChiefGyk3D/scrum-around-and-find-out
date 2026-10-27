@@ -52,13 +52,16 @@ What it reads, and how strictly:
 - A comment whose HTML is over 200,000 characters, nested over 50 elements deep, or not well formed (a mismatched or
   unclosed tag) cannot be read. If it mentions `ROLE` and its author is trusted, the whole answer is unknown; a comment
   that does not mention `ROLE`, or comes from anyone else, is ignored. The HTML is never copied into the output.
-- **The pull request is read twice and must not have changed.** The first round (head, base branch name and base oid,
-  state and draft flag; the comments; the commits when the report names a short SHA; the timeline) decides. A final
-  round then reads the pull request, the timeline and the comments again, and any difference from the first round (a
-  new head or base, any new or different timeline event, an edited, added or minimized comment, a changed state) makes
-  the answer unknown ("the pull request changed while it was being read"), not a verdict from a state that no longer
-  holds. This costs three more read requests on a fresh answer (two when the timeline is not needed), and a busy base
-  branch, whose oid moves with every push, can make the answer unknown for a moment: run it again.
+- **The pull request is read twice and must not have changed.** The first round reads, in this order, the pull request
+  (head, base branch name and base oid, state and draft flag), the comments, the commits (only when the report names a
+  short SHA) and the timeline, and decides. A final round then reads the timeline, the comments and, **last**, the pull
+  request again, and any difference from the first round (a new head or base, any new or different timeline event, an
+  edited, added or minimized comment, a changed state) makes the answer unknown ("the pull request changed while it
+  was being read"). The head read is the last request on purpose: a normal push leaves no timeline event and no
+  comment, so only the head read can show it. Request order on a fresh answer: pull request, comments, timeline, then
+  timeline, comments, pull request. A push after that very last read cannot be seen; that window is the one that
+  remains. The cost is three more read requests (two when the timeline is not needed), and a busy base branch, whose
+  oid moves with every push, can make the answer unknown for a moment: run it again.
 - **A report is fresh only if it was posted AFTER the moment its commit became the head, and GitHub proves that
   moment.** The only event GitHub records with the time a head arrived is a force-push (`HeadRefForcePushedEvent`
   from the pull request timeline, the last 50 events); the head's time is the latest one whose result is the head. A

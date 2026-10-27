@@ -205,9 +205,9 @@ def test_the_head_is_read_again_after_the_comments(fake: FakeGitHub) -> None:
         "HandoffPr",
         "HandoffComments",
         "HandoffTimeline",
-        "HandoffPr",
         "HandoffTimeline",
         "HandoffComments",
+        "HandoffPr",
     ]
 
 

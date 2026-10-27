@@ -124,15 +124,40 @@ def test_a_stale_answer_is_also_checked_for_drift(fake: FakeGitHub) -> None:
     assert code == 2 and CHANGED in out
 
 
+def test_the_pull_request_read_is_the_final_request_of_a_fresh_run(fake: FakeGitHub) -> None:
+    """A push after the last read cannot be seen, so the head must be the last thing read: a normal push leaves no
+    timeline event and no comment, and only the head read can show it."""
+    go(fake)
+    assert fake.requests[-1] == "HandoffPr" and fake.requests.count("HandoffPr") == 2
+
+
+def test_the_pull_request_read_is_also_the_final_request_of_a_stale_run(fake: FakeGitHub) -> None:
+    run(fake, [comment(report(A), T4)], head=B)
+    assert fake.requests[-1] == "HandoffPr" and fake.requests == [
+        "HandoffPr",
+        "HandoffComments",
+        "HandoffComments",
+        "HandoffPr",
+    ]
+
+
+def test_a_head_that_changes_after_the_final_timeline_and_comments_reads_is_unknown(fake: FakeGitHub) -> None:
+    """The repro: both timeline reads and both comment reads agree, a normal push to B lands, then the final head
+    read answers B. Nothing queried before it shows the push."""
+    drift(fake, "HandoffPr", lambda d: pull(d).update(headRefOid=B))
+    code, out = go(fake)
+    assert code == 2 and CHANGED in out and "FRESH" not in out
+
+
 def test_the_second_round_of_reads_comes_after_the_first(fake: FakeGitHub) -> None:
     go(fake)
     assert fake.requests == [
         "HandoffPr",
         "HandoffComments",
         "HandoffTimeline",
-        "HandoffPr",
         "HandoffTimeline",
         "HandoffComments",
+        "HandoffPr",
     ]
 
 
