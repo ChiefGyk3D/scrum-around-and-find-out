@@ -51,13 +51,15 @@ def c_choice(d: dict[str, Any]) -> str:
 
 
 def c_owner(d: dict[str, Any]) -> str:
-    d["project"]["owner"] = "x y" + "z" * LONG
-    return d["project"]["owner"]
+    value = "x y" + "z" * LONG
+    d["project"]["owner"] = value
+    return value
 
 
 def c_pair(d: dict[str, Any]) -> str:
-    d["repositories"][0]["name"] = "bad name" + "z" * LONG
-    return "acme/" + d["repositories"][0]["name"]
+    name = "bad name" + "z" * LONG
+    d["repositories"][0]["name"] = name
+    return "acme/" + name
 
 
 def c_field_twice(d: dict[str, Any]) -> str:
