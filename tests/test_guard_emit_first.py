@@ -2065,7 +2065,12 @@ GUARD_SHAPED = [
     pytest.param(["hooks", "gua", "--agents", "a.yaml"], id="near-miss-with-installer-flags"),
     pytest.param(["hooks", "--version", "guard"], id="hooks-then-version-then-guard"),
     pytest.param(["hooks", "\udcff"], id="surrogate-word"),
-    pytest.param(["hooks"], id="bare-hooks"),
+    pytest.param(["\udcff", "hooks", "guard"], id="leading-surrogate"),
+    pytest.param(["", "hooks", "guard"], id="leading-empty-word"),
+    pytest.param(["--board", "hooks", "guard"], id="board-lost-its-value"),
+    pytest.param(["--gh-user", "hooks", "guard", "--agents", "a.yaml"], id="gh-user-lost-its-value"),
+    pytest.param(["\udcff", "hooks", "gua", "--agents", "a.yaml"], id="leading-surrogate-and-near-miss"),
+    pytest.param(["--", "hooks", "guard"], id="double-dash-terminator-stays-conservative"),
 ]
 
 # Command lines with the words hooks and guard in them that are NOT the guard: they belong to argparse.
@@ -2083,6 +2088,13 @@ NOT_GUARD = [
     ["hooks-x", "guard"],
     ["install", "hooks", "guard"],
     ["--gh-user", "hooks", "validate", "hooks", "guard"],
+    ["hooks"],
+    ["hooks", "-h"],
+    ["hooks", "--help"],
+    ["--board", "hooks", "install", "hooks", "guard"],
+    ["--board", "x", "validate", "hooks", "guard"],
+    ["\udcff", "hooks", "install"],
+    ["", "hooks", "status", "guard"],
 ]
 
 
@@ -2172,9 +2184,26 @@ def test_the_routing_is_decided_by_position_not_membership() -> None:
     assert mod.guard_words(["--board", "hooks", "hooks", "status", "guard"]) is None
     assert mod.guard_words(["--board", "hooks", "hooks", "guard", "--agents", "p"]) == ["--agents", "p"]
     assert mod.guard_words(["hooks", "guard"]) == []
-    for near in (["hooks", "gua"], ["hooks", "--guard"], ["hooks", "guard=v"], ["hooks", "\udcff"], ["hooks"]):
+    for near in (["hooks", "gua"], ["hooks", "--guard"], ["hooks", "guard=v"], ["hooks", "\udcff"]):
         words = mod.guard_words(near)
         assert words == ["?"] and mod.guard_argv(words) is None, near
+    assert mod.guard_words(["hooks", "gua", "--agents", "p"]) == ["?", "--agents", "p"]
+    for helpful in (["hooks"], ["hooks", "-h"], ["hooks", "--help"]):
+        assert mod.guard_words(helpful) is None, helpful
+
+
+def test_corruption_in_front_of_a_real_hooks_guard_is_still_the_guard() -> None:
+    assert mod.guard_words(["\udcff", "hooks", "guard"]) == []
+    assert mod.guard_words(["", "hooks", "guard", "--agents", "p"]) == ["--agents", "p"]
+    assert mod.guard_words(["--board", "hooks", "guard"]) == []
+    assert mod.guard_words(["--board", "hooks", "guard", "--agents", "p"]) == ["--agents", "p"]
+    assert mod.guard_words(["\udcff", "hooks", "gua", "--agents", "p"]) == ["?", "--agents", "p"]
+    assert mod.guard_words(["--", "hooks", "guard"]) == [], "the -- terminator is deliberately skipped: the guard"
+
+
+def test_corruption_scan_leaves_every_legitimate_argparse_line_alone() -> None:
+    for line in NOT_GUARD:
+        assert mod.guard_words(line) is None, line
 
 
 # -- a guard-shaped line the parser refuses still gets a verdict: a denyable event is DENIED ---------------------------
@@ -2286,6 +2315,130 @@ def test_install_with_an_option_value_named_guard_is_not_swallowed(
         assert b"hookSpecificOutput" not in result.raw, (argv, result.raw)
         assert WARNING not in result.raw.decode(), argv
     assert (tmp_path / "guard").is_file(), "`--settings guard` installed into a file named guard; it was no guard run"
+
+
+# -- a refused line keeps the explicit paths it carries: the strict file is judged, never dropped ----------------------
+
+SALVAGE_SHAPES = [
+    pytest.param(["hooks", "gua", "--agents", "{agents}"], id="near-miss-word"),
+    pytest.param(["hooks", "guard", "--bogus", "--agents", "{agents}"], id="unknown-flag-before"),
+    pytest.param(["hooks", "guard", "--agents", "{agents}", "--bogus"], id="unknown-flag-after"),
+    pytest.param(["hooks", "guard", "--bogus", "--agents={agents}"], id="equals-form"),
+    pytest.param(["hooks", "guard", "--agents", "{agents}", "--agents-local"], id="missing-value-after"),
+    pytest.param(["hooks", "guard", "--agents-local", "--agents", "{agents}"], id="missing-value-before"),
+    pytest.param(["hooks", "guard", "--agents=", "--agents", "{agents}"], id="empty-equals-then-real"),
+    pytest.param(["hooks", "guard", "--agents", "{agents}", "--agents="], id="real-then-empty-equals"),
+    pytest.param(["hooks", "guard", "--agents", "{agents}", "--agents", "--bogus"], id="real-then-flag-value"),
+    pytest.param(["hooks", "guard", "stray", "--agents", "{agents}", "stray2"], id="stray-words"),
+    pytest.param(["\udcff", "hooks", "guard", "--agents", "{agents}"], id="leading-surrogate"),
+    pytest.param(["", "hooks", "guard", "--agents", "{agents}"], id="leading-empty-word"),
+    pytest.param(["--board", "hooks", "guard", "--agents", "{agents}"], id="board-missing-value"),
+    pytest.param(["hooks", "guard", "--agents", "/first/wrong.yaml", "--agents", "{agents}"], id="repeated-last-wins"),
+]
+
+
+@pytest.fixture
+def strict_only(_private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No default configuration anywhere under HOME (so a lost explicit path means the degraded allow); the strict
+    agents file is elsewhere. The mode file says block."""
+    assert not (_private_home / ".config" / "safo" / "agents.yaml").exists()
+    strict = agents_file(tmp_path / "strict-agents.yaml")
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=True, agents=strict)
+    for name in ("SAFO_AGENTS", "SAFO_AGENTS_LOCAL"):
+        monkeypatch.delenv(name, raising=False)
+    return strict
+
+
+def fill(argv: list[str], strict: Path) -> list[str]:
+    return [word.replace("{agents}", str(strict)) for word in argv]
+
+
+@pytest.mark.parametrize("argv", SALVAGE_SHAPES)
+def test_a_refused_guard_line_keeps_the_explicit_agents_path_and_denies(
+    entry: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    hard_exits: list[int],
+    strict_only: Path,
+    argv: list[str],
+) -> None:
+    """No default config exists: a dropped --agents would be the degraded allow (exit 0, no deny line)."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO(dispatch(model=None)))
+    code = entry(fill(argv, strict_only))
+    out = capsys.readouterr().out
+    assert hard_exits == [code]
+    assert code == 2 or (code == 0 and denied(lines(out)[-1])), (code, out)
+    assert "degraded" not in out
+
+
+def test_salvage_reads_both_options_in_both_spellings_last_one_wins_and_ignores_the_rest() -> None:
+    ns = mod.salvage_argv(["?", "--bogus", "--agents", "a", "--agents-local=b", "junk", "--agents=c"])
+    assert (ns.agents, ns.agents_local) == ("c", "b")
+    for words in (["--agents"], ["--agents="], ["--agents", ""], ["--agents", "-x"], ["--agents=-x"], ["?"], []):
+        ns = mod.salvage_argv(words)
+        assert (ns.agents, ns.agents_local) == ("", ""), words
+    ns = mod.salvage_argv(["--agents", "--agents-local", "l"])
+    assert (ns.agents, ns.agents_local) == ("", "l"), "a flag where the value should be is absent, and still read as a flag"
+
+
+def test_dropping_every_explicit_argument_when_one_word_is_malformed_is_caught(
+    entry: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, hard_exits: list[int], strict_only: Path
+) -> None:
+    """Mutant killer: the old behavior (a refused line becomes an empty Namespace) must fail here."""
+    original = mod.salvage_argv
+    seen: list[argparse.Namespace] = []
+
+    def spy(words: Any) -> argparse.Namespace:
+        ns = original(words)
+        seen.append(ns)
+        return ns
+
+    monkeypatch.setattr(mod, "salvage_argv", spy)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(dispatch(model=None)))
+    entry(["hooks", "guard", "--bogus", "--agents", str(strict_only)])
+    assert [ns.agents for ns in seen] == [str(strict_only)], "the explicit path reached the guard"
+    assert "degraded" not in capsys.readouterr().out
+
+
+# -- corruption in front of a real `hooks guard` never reaches argparse (real process, full stderr pipe) ---------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["\udcff", "hooks", "guard", "--agents", "{agents}"],
+        ["", "hooks", "guard", "--agents", "{agents}"],
+        ["--board", "hooks", "guard", "--agents", "{agents}"],
+        ["hooks", "gua", "--agents", "{agents}"],
+        ["hooks", "guard", "--bogus", "--agents", "{agents}"],
+        ["hooks", "guard", "--agents="],
+    ],
+    ids=["leading-surrogate", "leading-empty", "board-missing-value", "near-miss-and-path", "bogus-and-path", "empty"],
+)
+def test_a_real_process_with_a_corrupted_front_and_a_full_stderr_pipe_denies_promptly(
+    _private_home: Path, strict_only: Path, argv: list[str]
+) -> None:
+    result, untouched = run_entry(_private_home, fill(argv, strict_only), payload=dispatch(model=None))
+    assert not result.killed and untouched, "argparse would have written usage to the blocked stderr"
+    [row] = lines(result.raw.decode())
+    if argv[-1] == "--agents=":
+        assert result.status == 0 and WARNING in row["systemMessage"], "no path survives: the visible degraded allow"
+    else:
+        assert result.status == 0 and denied(row), "the salvaged strict file denied the denyable event"
+    assert result.elapsed < CHILD_BUDGET
+
+
+@pytest.mark.parametrize("argv", [["hooks"], ["hooks", "-h"], ["hooks", "--help"]], ids=" ".join)
+def test_a_real_process_asking_for_hooks_help_gets_help_without_reading_stdin(
+    _private_home: Path, strict_only: Path, argv: list[str]
+) -> None:
+    """Non-tty, with a denyable event waiting on stdin: help is argparse's, exit 0 (bare `hooks` exits per argparse),
+    and no guard line is written."""
+    result, _ = run_entry(_private_home, argv, payload=dispatch(model=None), jam_stderr=False)
+    assert not result.killed
+    assert b"hookSpecificOutput" not in result.raw and WARNING not in result.raw.decode(), result.raw
+    assert result.status == (2 if argv == ["hooks"] else 0), result.status
 
 
 # -- no minimum wait once decide_by has passed ----------------------------------------------------------------------

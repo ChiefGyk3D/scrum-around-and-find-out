@@ -905,23 +905,87 @@ def hook_event(argv: Sequence[str] | None) -> str | None:
     return None
 
 
+def encodable(word: str) -> bool:
+    """False for a word that is empty or holds a lone surrogate (what a non-UTF-8 byte in argv becomes on Unix)."""
+    try:
+        word.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return bool(word)
+
+
+def top_level_commands() -> frozenset[str]:
+    """argparse's own top-level commands (read only when a corrupted line needs them; empty if they cannot be read)."""
+    try:
+        from safo.modes import load_all  # local: a plain guard line never needs the whole mode registry
+
+        return frozenset(load_all())
+    except Exception:
+        return frozenset()
+
+
+def corrupted_guard_words(argv: Sequence[str]) -> list[str] | None:
+    """The lenient second choice, used only when the exact position parse did not recognise the line. Walk the leading
+    global options as hooks_tail does; the first word that is not an option is W. Two shapes are a corrupted guard line:
+    (1) W is empty or not valid UTF-8 (a damaged word in front of the command): the first LATER `hooks` word followed
+    by `guard` or by any word that is not one of argparse's hooks subcommands, `-h` or `--help` (and not the end of the
+    line) is the guard; (2) a value option took `hooks` as its value (`--board hooks guard`: the value was lost) and W is
+    `guard` or any other word that is not an argparse top-level command nor a hooks subcommand, `-h` or `--help`. Any
+    other W (`install hooks guard`, a known command, `--gh-user hooks validate hooks guard`) is argparse's. Returns the
+    words handed to the hand-parser (["?", ...] when the guard word itself is damaged), else None."""
+    words = list(argv)
+    index = 0
+    ate_hooks = False
+    while index < len(words):
+        word = words[index]
+        if not word.startswith("-") or word == "-":
+            break
+        takes = "=" not in word and len(word) > 2 and any(opt.startswith(word) for opt in GLOBAL_VALUE_OPTIONS)
+        if takes and index + 1 < len(words) and words[index + 1] == "hooks":
+            ate_hooks = True
+        index += 2 if takes else 1
+    if index >= len(words):
+        return None
+    first = words[index]
+    spare = (*HOOKS_SUBCOMMANDS, "-h", "--help")
+    if not encodable(first):
+        for later in range(index + 1, len(words) - 1):
+            if words[later] == "hooks" and words[later + 1] not in spare:
+                after = words[later + 1 :]
+                return after[1:] if after[0] == "guard" else ["?", *after[1:]]
+        return None
+    if ate_hooks and first not in spare and (first == "guard" or first not in top_level_commands()):
+        rest = words[index + 1 :]
+        return rest if first == "guard" else ["?", *rest]
+    return None
+
+
 def guard_words(argv: Sequence[str]) -> list[str] | None:
     """None when the command line is not the guard's. Otherwise the words the hand-parser judges. The decision is made
     by position, never by membership: after the leading global options the first word is `hooks`, and what follows it
     is either exactly `guard` (the words after it are returned) or a word that is NOT one of argparse's own hooks
-    subcommands (install, probe, mode, status): a near miss (`gua`, `--guard`, `guard=x`, a non-UTF-8 word) or a bare
-    `hooks`, which can only be a corrupted guard line, so it gets the guard's verdict path too (the sentinel ["?"],
-    which guard_argv refuses) and never argparse's usage-to-stderr and exit 2. Anything before `hooks` (global options,
-    --help, --version) is dropped: the guard runs, and argparse never does. `hooks install --agents guard` and
-    every other subcommand line go to argparse as before."""
+    subcommands (install, probe, mode, status), `-h` or `--help`: a near miss (`gua`, `--guard`, `guard=x`, a non-UTF-8
+    word) can only be a corrupted guard line, so it gets the guard's verdict path too (["?", the words after it], which
+    guard_argv refuses and guard_command salvages the explicit paths from) and never argparse's usage-to-stderr and
+    exit 2. Anything before `hooks` (global options, --help, --version) is dropped: the guard runs, and argparse never
+    does. `hooks install --agents guard` and every other subcommand line go to argparse as before.
+
+    Bare `hooks`, `hooks -h` and `hooks --help` are argparse's too, in every mode: asking for help gets help. The
+    limit: a truncated installed line that is reduced to bare `hooks` is not treated as guard-shaped (the installer
+    always writes `hooks guard ...`). `-- hooks guard` (the `--` terminator) is deliberately still the guard: it is
+    skipped like any other leading flag, the conservative route.
+
+    When the exact position parse does not recognise the line (a damaged or empty word in front, or an option that lost
+    its value and took `hooks` for it) the lenient scan corrupted_guard_words gets a second look, so corruption in front
+    of a real `hooks guard` never falls through to argparse."""
     tail = hooks_tail(argv)
     if tail is None:
+        return corrupted_guard_words(argv)
+    if not tail or tail[0] in (*HOOKS_SUBCOMMANDS, "-h", "--help"):
         return None
-    if tail and tail[0] == "guard":
+    if tail[0] == "guard":
         return tail[1:]
-    if tail and tail[0] in HOOKS_SUBCOMMANDS:
-        return None
-    return ["?"]
+    return ["?", *tail[1:]]
 
 
 PROBE_USAGE = (
@@ -1386,13 +1450,37 @@ def guard_argv(words: Sequence[str]) -> argparse.Namespace | None:
     return argparse.Namespace(agents=values["--agents"], agents_local=values["--agents-local"])
 
 
+def salvage_argv(words: Sequence[str]) -> argparse.Namespace:
+    """What can still be read from a line guard_argv refused: `--agents` and `--agents-local`, as `--opt V` or `--opt=V`
+    (exact spellings, last one wins as argparse would), found by a lenient scan that ignores every other word. A value
+    that is empty or looks like a flag is treated as absent (and the word after the option stays unread, so a flag
+    there is still seen). The strict file the installer wrote must not be lost to a stray word."""
+    values = {"--agents": "", "--agents-local": ""}
+    index = 0
+    while index < len(words):
+        word = words[index]
+        index += 1
+        name, equals, value = word.partition("=")
+        if name not in values:
+            continue
+        if not equals:
+            if index >= len(words):
+                break
+            value = words[index]
+            if not value.startswith("-"):
+                index += 1
+        if value and not value.startswith("-"):
+            values[name] = value
+    return argparse.Namespace(agents=values["--agents"], agents_local=values["--agents-local"])
+
+
 def guard_command(words: Sequence[str]) -> int:
     """The real entry for `safo hooks guard WORDS` (called by `safo.cli.run` before argparse is even built). A command
     line the installer could have written goes straight into guard_process. Any other guard-shaped line (a stale or
     edited install, an unknown flag, --help, a near-miss spelling) is a configuration error, not a policy decision, and
     it must not print to standard error or end in argparse's exit 2. But it is also NOT a reason to skip the rules:
     the guard still reads the event on standard input and computes its verdict with the safest defaults it has (default
-    configuration discovery, the mode the installed guard reads, no path from the bad words), so a denyable event is
+    configuration discovery, the mode the installed guard reads, and any explicit --agents / --agents-local path salvaged from the bad words), so a denyable event is
     denied (exit 2) and an allowable one allowed, through guard_process: one hard exit, inside the deadline.
 
     Only when no verdict can be computed at all (standard input holds no readable event: empty, closed, unparseable)
@@ -1401,7 +1489,7 @@ def guard_command(words: Sequence[str]) -> int:
     ctx = LocalContext(sys.stdout, os.environ, dt.datetime.now(dt.UTC))
     args = guard_argv(words)
     if args is None:
-        args = argparse.Namespace(agents="", agents_local="")
+        args = salvage_argv(words)
     return guard_process(ctx, args)
 
 
