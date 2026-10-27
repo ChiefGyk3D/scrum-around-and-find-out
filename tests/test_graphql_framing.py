@@ -95,7 +95,7 @@ def test_a_query_whose_data_is_an_empty_object_is_still_an_answer() -> None:
         assert ask(url, QUERY) == {}
 
 
-# -- a response with no framing at all, and a declared Content-Encoding on a body that parses ---------------------------
+# -- no framing at all, and a declared Content-Encoding on a body that parses ------------------------------------------
 
 
 def test_a_response_with_no_framing_headers_is_never_a_complete_answer() -> None:
@@ -109,8 +109,7 @@ def test_a_response_with_no_framing_headers_is_never_a_complete_answer() -> None
 def test_a_declared_content_encoding_on_a_valid_json_body_is_never_a_success(encoding: str) -> None:
     """The body is plain JSON that would parse: only the header says it cannot be trusted as sent."""
     headers = {"Content-Encoding": encoding}
-    with raw_server(sends(QUERY_ANSWER, headers=headers)) as (url, _), pytest.raises(ApiError, match="Content-Encoding"):
-        ask(url, QUERY)
+    refused(sends(QUERY_ANSWER, headers=headers), QUERY, ApiError, "Content-Encoding")
     refused(sends(MUTATION_ANSWER, headers=headers), MUTATION, UnknownOutcomeError, "Content-Encoding")
 
 

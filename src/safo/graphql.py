@@ -116,12 +116,13 @@ _CONTENT_LENGTH = re.compile(r"[0-9]{1,15}")
 def _content_length(response: Any) -> int | None:
     """The announced body length, None when the response announces none, ApiError when the framing is malformed.
 
-    A response with neither is refused too (unless it is a 204 or 304). A response is framed by exactly one of two things: a single Content-Length of ASCII digits, or a single
+    A response is framed by exactly one of two things: a single Content-Length of ASCII digits, or a single
     `Transfer-Encoding: chunked` (exactly that value) and no Content-Length. Both together, any other transfer coding
     (gzip, deflate, compress, identity, a list, another spelling) and a repeated header are refused: http.client
     decodes chunks and ignores Content-Length, reads Content-Length with int() (which accepts a sign, spaces,
     underscores and non-ASCII digits) and ignores a value it cannot parse, so each of those would let an ambiguously
-    framed body pass for a complete one.
+    framed body pass for a complete one. A response with neither framing header (a body delimited by the connection
+    closing) is refused for the same reason, except a 204 or 304, which carries no body.
     """
     lengths = response.headers.get_all("Content-Length") or []
     codings = response.headers.get_all("Transfer-Encoding") or []
