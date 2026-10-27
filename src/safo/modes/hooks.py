@@ -1674,8 +1674,8 @@ def run_mode(ctx: LocalContext, args: argparse.Namespace) -> int:
 
 
 def installed_form(ctx: LocalContext, args: argparse.Namespace) -> str:
-    """Which form of the guard hook the settings file holds: new (safo-guard), legacy (`safo hooks guard`), mixed (both),
-    absent, or unknown (the file cannot be read as settings). Read only."""
+    """Which form of the guard hook the settings file holds: new (safo-guard), legacy (`safo hooks guard`), mixed
+    (both), absent, or unknown (the file cannot be read as settings). Read only."""
     given = Path(args.settings) if getattr(args, "settings", "") else ctx.home / ".claude" / "settings.json"
     try:
         found = guard_forms(read_settings(given.resolve()))
@@ -1751,7 +1751,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     mode.add_argument("value", choices=MODES)
     status = sub.add_parser("status", help="the guard mode, the installed hook form and retained counts")
     add_agents_arguments(status)
-    status.add_argument("--settings", default="", help="the settings file to inspect (default: ~/.claude/settings.json)")
+    status.add_argument("--settings", default="", help="the settings file to inspect (default ~/.claude/settings.json)")
     status.add_argument("--session", default="", help="session identity for the matching probe state")
 
 

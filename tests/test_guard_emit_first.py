@@ -1950,8 +1950,8 @@ def run_entry(
     host_timeout: float = CHILD_BUDGET,
     module: str = "safo",
 ) -> tuple[Watched, bool]:
-    """Run `python -m MODULE ARGV` (`safo`, the real CLI entry point, or `safo.guard`, the guard's own) under a watchdog that kills its process group at the scaled host
-    timeout. Standard input is a pipe holding `payload`; standard error is, by default, a FULL pipe nobody reads.
+    """Run `python -m MODULE ARGV` (`safo`, the real CLI entry point, or `safo.guard`, the guard's own) under a watchdog
+    that kills its process group at the scaled host timeout. Standard input is a pipe holding `payload`; standard error is, by default, a FULL pipe nobody reads.
     Returns the outcome and whether the blocked pipe still holds exactly what it held (nothing was written to it)."""
     in_read, in_write = os.pipe()
     os.write(in_write, payload.encode())
@@ -2228,20 +2228,6 @@ MALFORMED = [
 ]
 
 
-@pytest.fixture
-def block_home(_private_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Default configuration discovery finds an agents file under HOME and the mode file says block."""
-    (_private_home / ".config" / "safo").mkdir(parents=True, exist_ok=True)
-    (_private_home / ".config" / "safo").chmod(0o700)
-    agents_file(_private_home / ".config" / "safo" / "agents.yaml")
-    set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=True, agents=_private_home / ".config" / "safo" / "agents.yaml")
-    monkeypatch.setenv("HOME", str(_private_home))
-    for name in ("SAFO_AGENTS", "SAFO_AGENTS_LOCAL"):
-        monkeypatch.delenv(name, raising=False)
-    return _private_home
-
-
 @pytest.mark.parametrize("argv", MALFORMED, ids=lambda argv: " ".join(argv))
 def test_malformed_guard_argv_with_a_denyable_event_exits_two_and_never_zero(
     entry: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, hard_exits: list[int], block_home: Path, argv: list[str]
@@ -2342,19 +2328,6 @@ SALVAGE_SHAPES = [
     pytest.param(["--board", "hooks", "guard", "--agents", "{agents}"], id="board-missing-value"),
     pytest.param(["hooks", "guard", "--agents", "/first/wrong.yaml", "--agents", "{agents}"], id="repeated-last-wins"),
 ]
-
-
-@pytest.fixture
-def strict_only(_private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """No default configuration anywhere under HOME (so a lost explicit path means the degraded allow); the strict
-    agents file is elsewhere. The mode file says block."""
-    assert not (_private_home / ".config" / "safo" / "agents.yaml").exists()
-    strict = agents_file(tmp_path / "strict-agents.yaml")
-    set_mode(_private_home, "block")
-    set_probe(_private_home, reachable=True, agents=strict)
-    for name in ("SAFO_AGENTS", "SAFO_AGENTS_LOCAL"):
-        monkeypatch.delenv(name, raising=False)
-    return strict
 
 
 def fill(argv: list[str], strict: Path) -> list[str]:

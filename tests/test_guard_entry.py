@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import io
 import json
-import subprocess
+import os
 import sys
 import time
 import tomllib
@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hooksdata import agents_file, dispatch, set_mode
-from test_guard_emit_first import CHILD_BUDGET, block_home, denied, lines, run_entry, strict_only  # noqa: F401  (fixtures)
 
 import safo as safo_package
+from hooksdata import agents_file, dispatch, set_mode
 from safo import guard as entry_module
 from safo.guardlog import WARNING
 from safo.modes import hooks as mod
+from test_guard_emit_first import CHILD_BUDGET, denied, lines, run_entry
 
 GUARD = "safo.guard"
 NOISE = [
@@ -148,11 +148,18 @@ def test_the_process_ends_exactly_once_and_modes_are_never_loaded(
 def test_importing_the_entry_loads_no_cli_and_no_other_mode() -> None:
     code = (
         "import sys, safo.guard;"
-        "mods = sorted(m for m in sys.modules if m == 'safo.cli' or (m.startswith('safo.modes.') and m != 'safo.modes.hooks'));"
-        "print(mods)"
+        "other = [m for m in sys.modules if m.startswith('safo.modes.') and m != 'safo.modes.hooks'];"
+        "print(sorted([*other, *(m for m in sys.modules if m == 'safo.cli')]))"
     )
-    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=False)
-    assert done.stdout.strip() == "[]", done
+    read, write = os.pipe()
+    pid = os.posix_spawn(
+        sys.executable, [sys.executable, "-c", code], os.environ, file_actions=[(os.POSIX_SPAWN_DUP2, write, 1)]
+    )
+    os.close(write)
+    with os.fdopen(read) as handle:
+        printed = handle.read().strip()
+    assert os.waitpid(pid, 0)[1] == 0
+    assert printed == "[]"
 
 
 def test_the_scan_rules() -> None:

@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from fakegh import FakeGitHub
+from hooksdata import agents_file, set_mode, set_probe
 from safo.graphql import Client
 
 _real_connect = socket.socket.connect
@@ -219,3 +220,30 @@ def gemini_locations(
     )
     monkeypatch.setattr(gemini, "fixed_locations", lambda: locations)
     return locations
+
+
+@pytest.fixture
+def block_home(_private_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Default configuration discovery finds an agents file under HOME and the mode file says block."""
+    (_private_home / ".config" / "safo").mkdir(parents=True, exist_ok=True)
+    (_private_home / ".config" / "safo").chmod(0o700)
+    agents_file(_private_home / ".config" / "safo" / "agents.yaml")
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=True, agents=_private_home / ".config" / "safo" / "agents.yaml")
+    monkeypatch.setenv("HOME", str(_private_home))
+    for name in ("SAFO_AGENTS", "SAFO_AGENTS_LOCAL"):
+        monkeypatch.delenv(name, raising=False)
+    return _private_home
+
+
+@pytest.fixture
+def strict_only(_private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No default configuration anywhere under HOME (so a lost explicit path means the degraded allow); the strict
+    agents file is elsewhere. The mode file says block."""
+    assert not (_private_home / ".config" / "safo" / "agents.yaml").exists()
+    strict = agents_file(tmp_path / "strict-agents.yaml")
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=True, agents=strict)
+    for name in ("SAFO_AGENTS", "SAFO_AGENTS_LOCAL"):
+        monkeypatch.delenv(name, raising=False)
+    return strict
