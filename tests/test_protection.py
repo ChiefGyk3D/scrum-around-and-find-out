@@ -2201,7 +2201,7 @@ def test_a_pass_says_it_is_not_one_instant_and_still_ends_on_the_summary() -> No
     code, out, _, _ = check(good_routes())
     lines = out.splitlines()
     assert code == 0 and lines[-1].startswith("protection: all ") and lines[-1].endswith(" conditions hold")
-    assert any(line.startswith("NOTE read-back: ") and "one instant" in line for line in lines[:-1])
+    assert any(line.startswith("LIMIT read-back: ") and "one instant" in line for line in lines[:-1])
 
 
 def test_a_failure_does_not_carry_the_pass_note() -> None:

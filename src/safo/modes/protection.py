@@ -96,8 +96,8 @@ def _run(ctx: LocalContext, args: argparse.Namespace) -> int:
         lines.append(f"{'PASS' if c.ok else 'FAIL'} {c.id}: {c.text}{shown}")
         if c.warn:
             lines.append(f"NOTE {c.id}: {c.warn}")  # never changes the exit code on its own
-    if not failed:
-        lines.append(f"NOTE read-back: {LIMIT}")  # a note, never a condition: the summary stays the last line
+    if not failed:  # a LIMIT line, not a NOTE (those are per condition); the summary stays last
+        lines.append(f"LIMIT read-back: {LIMIT}")
     lines.append(
         f"protection: all {len(conditions)} conditions hold"
         if not failed
