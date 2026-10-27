@@ -33,6 +33,7 @@ from pathlib import Path
 from time import time as wall_clock  # immune to the monotonic-clock stand-in some tests install
 from typing import Any, TypeVar
 
+import safo
 from safo import gemini, geminibrief, guardlog, leadwait, output, tracking
 from safo.agentsfile import AgentsFile
 from safo.bounded import MAX_BYTES, loads
@@ -57,7 +58,6 @@ from safo.hooks import (
     BASH_TOOL,
     COMMAND,
     CONFIG_REPROBE_TIMEOUT_SECONDS,
-    GUARD_MARGIN_SECONDS,
     GUARD_TIMEOUT_SECONDS,
     LEAD_WAITS,
     REPROBE_SLACK_SECONDS,
@@ -107,6 +107,7 @@ MAX_SIDE_OBJECTS = 8  # `.log-failed.junk.*` entries kept in the state folder; a
 SIDE_PREFIX = ".log-failed.junk."
 SIDE_NAME = re.compile(re.escape(SIDE_PREFIX) + r"[0-9]+-[0-9a-f]{12}")  # exactly what remove_junk names a side object
 SIDE_PRUNE_AGE_SECONDS = 300.0  # an object younger than this (by ctime, which a rename updates) is never pruned
+EMIT_MIN_SECONDS = 0.5  # the write of the line is always given this long, however late the verdict was
 POST_GRACE_SECONDS = 0.5  # after the hard limit the post-delivery work gets this long, still inside the host timeout
 NOTICE_IO_MIN_SECONDS = 0.25  # and at least this long, even when the clock is already past its limit
 _T = TypeVar("_T")
@@ -342,6 +343,7 @@ class Run:
     attempted: bool = False
     failed: bool = False  # the decision could not be delivered (write or flush failed)
     deny: bool = False  # the decision that was attempted was a denial
+    decide_by: float | None = None  # the decision must be written by here (monotonic)
     overran: bool = False  # a bounded worker did not finish and was left running: leave as soon as the line is out
 
 
@@ -388,9 +390,9 @@ def emit(ctx: LocalContext, run: Run, data: dict[str, Any]) -> bool:
         ctx.out.flush()
         return delivered
 
-    left = (run.hard - time.monotonic()) if run.hard is not None else APPEND_LOCK_TIMEOUT + 1.0
+    left = (run.decide_by - time.monotonic()) if run.decide_by is not None else APPEND_LOCK_TIMEOUT + 1.0
     try:
-        done, delivered = run_bounded(write, max(0.0, left) + POST_GRACE_SECONDS)
+        done, delivered = run_bounded(write, max(EMIT_MIN_SECONDS, left))
     except Exception:
         done, delivered = True, False
     if not done:
@@ -713,11 +715,30 @@ class Seen:
     skipped: bool = False
 
 
+def decision_margin(total: float) -> float:
+    """How long before the host's timeout the decision must be out: a fifth of it, never under 2 s for a real timeout
+    (the 10 s the installed settings give is 8 s), and never more than 40% of a very small scaled one."""
+    return min(max(2.0, 0.2 * total), 0.4 * total)
+
+
+def budget_points(begun: float) -> tuple[float, float, float]:
+    """(deadline, decide_by, hard), all monotonic and all measured from `begun`, the START OF THE PROCESS.
+
+    - decide_by: the decision is written by here: total - decision_margin(total) (10 s host timeout: 8 s);
+    - deadline: lookups, the re-probe and the other pre-decision work stop here, one reserve earlier: decide_by - 1 s
+      (a tenth of a small budget) is left to compute and write the line (10 s: 7 s);
+    - hard: the post-delivery work (log, markers) is waited for until here: total - 1 s (10 s: 9 s), plus
+      POST_GRACE_SECONDS, which is still before the host's timeout."""
+    total = float(GUARD_TIMEOUT_SECONDS)
+    decide_by = begun + total - decision_margin(total)
+    return decide_by - min(1.0, 0.1 * total), decide_by, begun + total - LOG_MARGIN_SECONDS
+
+
 def io_budget(run: Run) -> float:
     """How long one batch of state-folder work may hold the hook: at most NOTICE_IO_CAP_SECONDS, at least
     NOTICE_IO_MIN_SECONDS, and not past the hard limit less a margin."""
-    hard = run.hard if run.hard is not None else time.monotonic() + NOTICE_IO_CAP_SECONDS + 0.5
-    return max(NOTICE_IO_MIN_SECONDS, min(NOTICE_IO_CAP_SECONDS, hard - time.monotonic() - 0.5))
+    limit = run.decide_by if run.decide_by is not None else time.monotonic() + NOTICE_IO_CAP_SECONDS + 0.5
+    return max(NOTICE_IO_MIN_SECONDS, min(NOTICE_IO_CAP_SECONDS, limit - time.monotonic() - 0.5))
 
 
 def read_mode_bounded(ctx: LocalContext, run: Run) -> tuple[str, str]:
@@ -959,12 +980,12 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     # The hook's whole budget is GUARD_TIMEOUT_SECONDS from the start of the process; lookups get what is left of it
     # less a margin, so the decision is always written before the host gives up on the hook.
     begun = time.monotonic() if started is None else started
-    deadline = begun + GUARD_TIMEOUT_SECONDS - GUARD_MARGIN_SECONDS
+    deadline, decide_by, hard = budget_points(begun)
     # One clock for the whole hook: the re-probe, the lookup and the log wait all draw on it, and the log wait ends
     # before the host's own timeout, so a decision is written however slow the endpoint, the tracker or the lock is.
-    hard = begun + GUARD_TIMEOUT_SECONDS - LOG_MARGIN_SECONDS
     run = run or Run()
     run.hard = hard
+    run.decide_by = decide_by
 
     def probe_timeout(wanted: float) -> float:
         """Per request: what is wanted, or less when two requests and the lookup would not fit in what is left."""
@@ -1203,9 +1224,10 @@ def lead_wait(
     )
 
 
-def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
-    begun = time.monotonic()
-    run = Run(hard=begun + GUARD_TIMEOUT_SECONDS - LOG_MARGIN_SECONDS)
+def run_guard(ctx: LocalContext, args: argparse.Namespace, begun: float | None = None, run: Run | None = None) -> int:
+    begun = time.monotonic() if begun is None else begun
+    run = run or Run()
+    _, run.decide_by, run.hard = budget_points(begun)
     code = ""
     deny = ""
     try:
@@ -1229,14 +1251,40 @@ def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
     return exit_code(run)
 
 
+process_started: float | None = None
+"""The start of this process on the monotonic clock, set only by arm_process_clock(): a test process that calls the
+guard in-process must not count the time since pytest started."""
+
+
+def arm_process_clock() -> None:
+    """Called by the real entry (`safo.cli.run`: `python -m safo` and the console script) before anything else runs."""
+    global process_started
+    process_started = safo.PROCESS_STARTED
+
+
 def guard_process(ctx: LocalContext, args: argparse.Namespace) -> int:
-    """`safo hooks guard` as a process: run the guard, then END the process through hard_exit with its exit code, even
-    when everything finished normally. Interpreter shutdown would otherwise wait for any non-daemon thread and could
+    """`safo hooks guard` as a process: run the guard, then END the process through hard_exit with its exit code, on
+    EVERY route: a normal return, a crash in the guard, KeyboardInterrupt, SystemExit (an exception that gets out is
+    given the code of an undelivered decision, 2 if a denial had been computed and 1 if not, and then propagates where
+    hard_exit returns, i.e. in tests). Interpreter shutdown would otherwise wait for any non-daemon thread and could
     let a left-behind worker run on; os._exit cannot. Nothing here touches standard output on the main thread (the
-    decision was written and flushed by a thread with a deadline). Where hard_exit is replaced, as in tests, the code
-    is returned."""
-    code = run_guard(ctx, args)
-    hard_exit(code)
+    decision was written and flushed by a thread with a deadline).
+
+    The budget starts at the start of the PROCESS when the real entry has armed the clock (arm_process_clock), so
+    interpreter start-up and package imports are inside it; otherwise (a test calling main() in a long-lived process)
+    it starts now. An armed start that is not recent (older than the whole budget) is ignored too."""
+    now = time.monotonic()
+    started = process_started  # None unless the real entry armed it
+    begun = started if started is not None and 0.0 <= now - started <= float(GUARD_TIMEOUT_SECONDS) else now
+    run = Run()
+    code = EXIT_NOT_DELIVERED
+    try:
+        code = run_guard(ctx, args, begun, run)
+    except BaseException:
+        code = EXIT_BLOCK if run.deny else EXIT_NOT_DELIVERED
+        raise
+    finally:
+        hard_exit(code)
     return code
 
 

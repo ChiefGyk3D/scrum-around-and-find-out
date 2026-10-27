@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import TextIO
 
-from safo import __version__, compat, credentials, output
+from safo import __version__, compat, credentials, guardlog, output
 from safo.context import Context, LocalContext
 from safo.errors import EXIT_INTERRUPTED, EXIT_UNKNOWN, ConfigError, SafoError
 from safo.graphql import GRAPHQL_URL, Client
@@ -84,7 +85,7 @@ def fail(error: SafoError, env: Mapping[str, str], stream: TextIO) -> int:
     return error.exit_code or EXIT_UNKNOWN
 
 
-def main(
+def _run(
     argv: Sequence[str] | None = None,
     *,
     env: Mapping[str, str] | None = None,
@@ -139,5 +140,25 @@ def main(
         return fail(error, env, err)
 
 
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    client_factory: ClientFactory = default_client,
+    out: TextIO | None = None,
+    err: TextIO | None = None,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+    stdin: TextIO | None = None,
+) -> int:
+    code = _run(argv, env=env, client_factory=client_factory, out=out, err=err, today=today, now=now, stdin=stdin)
+    warning = guardlog.LOCK_TIMEOUT_WARNING
+    if warning and hooks.hook_event(sys.argv[1:] if argv is None else argv) is None:  # never for the hooks
+        with contextlib.suppress(OSError, ValueError):
+            output.write(err or sys.stderr, f"safo: {warning}")
+    return code
+
+
 def run() -> None:
+    hooks.arm_process_clock()  # the guard's budget counts from the start of the process
     raise SystemExit(main())

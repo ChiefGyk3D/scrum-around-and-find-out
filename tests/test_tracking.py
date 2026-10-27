@@ -655,7 +655,7 @@ def test_a_session_repository_that_is_not_listed_is_not_accepted_for_citing(
 
 
 def test_a_guard_out_of_time_denies_in_block_mode_and_skips_the_append_and_the_next_dispatch_says_so(
-    _private_home: Path, agents: Path, tmp_path: Path
+    _private_home: Path, agents: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import io
 
@@ -682,6 +682,7 @@ def test_a_guard_out_of_time_denies_in_block_mode_and_skips_the_append_and_the_n
     )
     import time
 
+    monkeypatch.setattr(hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0)  # the subject is the deadline, not the load floor
     hooks_mode.guard(ctx, argparse.Namespace(agents=str(agents), agents_local=""), started=time.monotonic() - 60)
     assert calls == [], "no process is started once the deadline has passed"
     assert json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"] == "deny"

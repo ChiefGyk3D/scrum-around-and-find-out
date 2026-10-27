@@ -47,6 +47,8 @@ from safo.modes import hooks as mod
 
 GOOD = "acme/widgets#12"
 CHILD = Path(__file__).parent / "guard_child.py"
+CHILD_BUDGET = 5.0  # GUARD_TIMEOUT_SECONDS in the real-process children: decide_by 3 s, post-delivery hard limit 4 s
+PRE_BUDGET = 10.0  # the real timeout, for the children that need room for a re-probe: decide_by 8 s
 
 
 class Clock:
@@ -216,7 +218,7 @@ def test_a_loader_that_wedges_for_any_reason_still_prints_a_decision_inside_the_
     pid, fd = spawn("synthetic-wedge", _private_home, agents, fifo, body)
     try:
         raw = read_until(fd, 15)
-        status = wait_exit(pid, 3)
+        status = wait_exit(pid, CHILD_BUDGET)
     finally:
         os.close(fd)
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
@@ -228,10 +230,9 @@ def test_a_loader_that_wedges_for_any_reason_still_prints_a_decision_inside_the_
     assert len(rows) == 1
     assert mod.CONFIG_TIMEOUT_NOTICE in rows[0]["hookSpecificOutput"]["additionalContext"]
     # SYNTHETIC: the loader is replaced by a call that never returns (a wedged mount or kernel read, which cannot be
-    # made without privilege). The budget is 3 s here (deadline 1 s, hard 2 s); the interpreter start is the slack.
-    # Budget 3 s: the hard limit is 2 s into the hook; 1.0 s is allowed for interpreter start-up, which the hook clock
-    # does not count. The line must ARRIVE before that boundary, not merely eventually.
-    assert elapsed < 3.0, f"{elapsed:.1f} s: the decision must land before the scaled budget boundary"
+    # made without privilege). The clock starts with the PROCESS, so start-up is inside the budget: the line must
+    # ARRIVE before the host's (scaled) timeout, not merely eventually.
+    assert elapsed < CHILD_BUDGET, f"{elapsed:.1f} s: the decision must land before the scaled host timeout"
 
 
 def test_a_fifo_as_the_agents_file_is_refused_at_once_by_the_production_loader_not_waited_on(
@@ -280,7 +281,7 @@ def test_a_wedged_state_folder_cannot_hold_a_computed_deny_back_in_a_real_proces
     elapsed = Arrival.at - started
     [row] = lines(raw.decode())
     assert denied(row) and mod.NOTICES_SKIPPED in row["hookSpecificOutput"]["additionalContext"]
-    assert elapsed < 3.0, f"{elapsed:.1f} s: the deny must land before the scaled budget boundary (2 s + 1 s start-up)"
+    assert elapsed < CHILD_BUDGET, f"{elapsed:.1f} s: the deny must land before the scaled host timeout"
 
 
 def test_a_process_killed_after_the_decision_leaves_exactly_one_complete_json_line(
@@ -1012,7 +1013,7 @@ def test_a_wedged_mode_file_read_fails_closed_and_cannot_hold_back_the_verdict(
     [row] = lines(raw.decode())
     assert denied(row) and mod.MODE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0
-    assert Arrival.at - started < 5.0, "before the scaled hard limit of 5 s, start-up included"
+    assert Arrival.at - started < PRE_BUDGET - 2.0, "before decide_by (the real timeout less 2 s), start-up included"
 
 
 # -- remove_junk reports what really happened; side objects are capped ------------------------------------------
@@ -1070,7 +1071,7 @@ def test_a_full_unread_stderr_pipe_cannot_hold_back_a_deny_or_keep_the_process_o
     [row] = lines(raw.decode())
     assert denied(row) and mod.LOG_MARKER_UNUSABLE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0, "the process ended by itself: it does not write to stderr at all"
-    assert Arrival.at - started < 3.0, "before the scaled boundary (2 s hard limit + 1 s start-up)"
+    assert Arrival.at - started < CHILD_BUDGET, "before the scaled host timeout, start-up included"
 
 
 @pytest.mark.parametrize("payload", ["agent", "bash"])
@@ -1217,7 +1218,7 @@ def test_a_wedged_state_write_cannot_hold_back_a_computed_deny_in_a_real_process
     pid, fd = spawn(f"pre-{what}", _private_home, agents, tmp_path / "x", body)
     try:
         raw = read_until(fd, 15)
-        status = wait_exit(pid, 7)  # a wedged utime after the line is left behind at the hard limit (5 s here)
+        status = wait_exit(pid, PRE_BUDGET + 2)  # a wedged utime after the line is left behind at the hard limit
     finally:
         os.close(fd)
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
@@ -1229,7 +1230,7 @@ def test_a_wedged_state_write_cannot_hold_back_a_computed_deny_in_a_real_process
     if what != "touch":  # a wedged utime is after the line now: no slow notice, and the process still ends by itself
         assert mod.STATE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0
-    assert elapsed < 5.0, f"{elapsed:.1f} s: before the scaled hard limit of 5 s, start-up included"
+    assert elapsed < PRE_BUDGET - 2.0, f"{elapsed:.1f} s: before decide_by (8 s), start-up included"
 
 
 # -- the once-per-session probe notice does not come back with every unrelated notice -------------------------
@@ -1611,9 +1612,7 @@ def test_a_blocked_post_delivery_step_ends_the_process_and_nothing_is_written_af
     [row] = rows
     assert denied(row), "the decision was delivered before the blocked step"
     assert status == 0, "and the process ended by itself with the delivered decision's exit code"
-    assert arrived < 3.0 and exited < 4.0, (
-        f"line at {arrived:.1f} s, exit at {exited:.1f} s (budget 3 s, hard limit 2 s)"
-    )
+    assert arrived < CHILD_BUDGET and exited < CHILD_BUDGET, f"line at {arrived:.1f} s, exit at {exited:.1f} s"
     release_and_compare(folder, tmp_path)
 
 
@@ -1641,7 +1640,7 @@ def test_a_blocked_pre_decision_step_does_not_delay_the_decision_and_nothing_is_
     [row] = rows
     assert denied(row) and mod.STATE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0
-    assert arrived < 5.0, f"{arrived:.1f} s: before the scaled hard limit of 5 s, start-up included"
+    assert arrived < PRE_BUDGET - 2.0, f"{arrived:.1f} s: before decide_by (8 s), start-up included"
     assert exited - arrived < 1.5, "an overrun makes the process end right after the line, with no post-delivery work"
     release_and_compare(folder, tmp_path)
 
@@ -1666,7 +1665,7 @@ def test_a_full_stdout_pipe_with_a_reader_that_never_drains_cannot_hold_back_the
     pid, _ = spawn_seam(_private_home, agents, body, mode="seam", barrier=tmp_path / "barrier", stdout_fd=jam_write)
     os.close(jam_write)
     try:
-        status = wait_exit(pid, 8)
+        status = wait_exit(pid, CHILD_BUDGET + 3)
         elapsed = time.monotonic() - started
     finally:
         os.close(jam_read)
@@ -1674,7 +1673,7 @@ def test_a_full_stdout_pipe_with_a_reader_that_never_drains_cannot_hold_back_the
             os.kill(pid, 9)
             os.waitpid(pid, 0)
     assert status == 2, "an undelivered denial exits 2, which the host reads as a block"
-    assert elapsed < 4.0, f"{elapsed:.1f} s: the hard limit is 2 s (3 s budget), plus 0.5 s grace, plus start-up"
+    assert elapsed < CHILD_BUDGET, f"{elapsed:.1f} s: exit 2 at the decision deadline, before the scaled host timeout"
 
 
 def test_a_wedged_non_daemon_thread_cannot_keep_the_process_alive_after_the_decision(
@@ -1689,4 +1688,4 @@ def test_a_wedged_non_daemon_thread_cannot_keep_the_process_alive_after_the_deci
     )
     [row] = rows
     assert denied(row) and status == 0
-    assert exited < 4.0, f"{exited:.1f} s"
+    assert exited < CHILD_BUDGET, f"{exited:.1f} s"

@@ -733,7 +733,8 @@ def test_a_slow_endpoint_and_a_held_log_lock_still_leave_a_decision_inside_the_h
 ) -> None:
     """The budget is scaled down (6 s for the host, 1 s of log wait) so the test is quick; the code uses one clock for
     the re-probe, the lookup and the log wait, so a scaled budget exercises the same arithmetic."""
-    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 6)
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 10)
+    monkeypatch.setattr("safo.modes.hooks.NOTICE_IO_CAP_SECONDS", 5.0)  # the subject is the endpoint, not a loaded box
     monkeypatch.setattr("safo.modes.hooks.APPEND_LOCK_TIMEOUT", 1.0)
     set_mode(_private_home, "block")
     with SlowOllama(tags_delay=2.5) as slow:
@@ -746,7 +747,7 @@ def test_a_slow_endpoint_and_a_held_log_lock_still_leave_a_decision_inside_the_h
             code, out, _ = guard(_private_home, path, dispatch(model=None))
         elapsed = time.monotonic() - started
     assert code == 0 and slow.requests, "the slow endpoint was really asked"
-    assert elapsed < 6 - 0.5, f"{elapsed:.1f} s: the decision must be written before the host's timeout"
+    assert elapsed < 10 - 2, f"{elapsed:.1f} s: the decision must be written by decide_by, 2 s before the host timeout"
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny", "the decision is emitted, the log skipped"
     assert "SAFO routing guard degraded" in data["systemMessage"]
@@ -786,7 +787,8 @@ def test_a_drip_feeding_endpoint_cannot_hold_the_guard_past_its_budget(
     _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale: bool
 ) -> None:
     """A socket timeout is per read, so a body sent a byte at a time never trips it; the probe is cut off in total."""
-    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 6)
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 10)
+    monkeypatch.setattr("safo.modes.hooks.NOTICE_IO_CAP_SECONDS", 5.0)  # the subject is the endpoint, not a loaded box
     set_mode(_private_home, "block")
     with DripOllama(gap=0.2) as slow:
         path = agents_file(tmp_path / "agents.yaml", slow.url, slow.url)
@@ -798,7 +800,7 @@ def test_a_drip_feeding_endpoint_cannot_hold_the_guard_past_its_budget(
         code, out, _ = guard(_private_home, path, dispatch(model=None))
         elapsed = time.monotonic() - started
     assert code == 0 and slow.requests, "the endpoint was really asked"
-    assert elapsed < 6 - 0.5, f"{elapsed:.1f} s: the guard must answer before the host's timeout"
+    assert elapsed < 10 - 2, f"{elapsed:.1f} s: the guard must answer before the host's timeout"
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
@@ -820,7 +822,7 @@ def test_a_claimed_attempt_for_the_new_key_means_no_re_probe_and_an_unknown_heal
 def test_a_re_probe_with_too_little_budget_is_skipped_and_the_notice_says_so(
     _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 3)  # 1 s to the deadline: no room for two requests
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 3)  # 1.5 s to the deadline: no room for two requests
     set_mode(_private_home, "block")
     with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
         path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
