@@ -23,7 +23,7 @@ import re
 import shlex
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -590,11 +590,23 @@ def is_safo_path(word: str) -> bool:
     return os.path.isabs(word) and os.path.normpath(word) == word and os.path.basename(word) == "safo"
 
 
+def is_safo_guard_path(word: str) -> bool:
+    """An absolute, normalized path whose last component is safo-guard (the script beside a venv's or pipx's safo)."""
+    return os.path.isabs(word) and os.path.normpath(word) == word and os.path.basename(word) == "safo-guard"
+
+
 def hook_entry(command: str, timeout: int, message: str = "") -> dict[str, Any]:
     entry: dict[str, Any] = {"type": "command", "command": command, "timeout": timeout}
     if message:
         entry["statusMessage"] = message
     return entry
+
+
+def _tail_ok(tail: Sequence[str]) -> bool:
+    if len(tail) % 2 or any(tail[i] not in ("--agents", "--agents-local") for i in range(0, len(tail), 2)):
+        return False
+    flags = tail[::2]
+    return len(set(flags)) == len(flags) and all(Path(v).is_absolute() for v in tail[1::2])
 
 
 def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
@@ -611,14 +623,54 @@ def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
         prefix = (*launch, "hooks", subcommand)
         if tuple(words[: len(prefix)]) != prefix:
             continue
-        tail = words[len(prefix) :]
-        if len(tail) % 2 or any(tail[i] not in ("--agents", "--agents-local") for i in range(0, len(tail), 2)):
-            return None
-        flags = tail[::2]
-        if len(set(flags)) != len(flags) or any(not Path(v).is_absolute() for v in tail[1::2]):
-            return None
-        return launch
+        return launch if _tail_ok(words[len(prefix) :]) else None
     return None
+
+
+def guard_direct_signature(command: str) -> tuple[str, ...] | None:
+    """The launcher of a command in the guard's own form (`safo-guard`, `python3 -m safo.guard`, or the absolute path
+    of a safo-guard script) named by the safo launcher it corresponds to, so it compares with a legacy line's."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    candidates: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+        (("safo-guard",), ("safo",)),
+        (("python3", "-m", "safo.guard"), ("python3", "-m", "safo")),
+    )
+    if words and is_safo_guard_path(words[0]):
+        candidates = (*candidates, ((words[0],), (words[0][: -len("-guard")],)))
+    for prefix, launch in candidates:
+        if tuple(words[: len(prefix)]) == prefix:
+            return launch if _tail_ok(words[len(prefix) :]) else None
+    return None
+
+
+def guard_signature(command: str) -> tuple[str, ...] | None:
+    """The launcher of an owned guard command, in either form (the legacy `... hooks guard` or the direct one)."""
+    return command_signature(command, "guard") or guard_direct_signature(command)
+
+
+def guard_form(command: str) -> str | None:
+    """`new` for the direct entry point, `legacy` for `... hooks guard ...`, None for a command that is not ours."""
+    if guard_direct_signature(command) is not None:
+        return "new"
+    return "legacy" if command_signature(command, "guard") is not None else None
+
+
+def guard_forms(settings: Any) -> set[str]:
+    """Which forms of the guard command a settings document holds under PreToolUse (empty: none)."""
+    found: set[str] = set()
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    groups = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    for group in groups if isinstance(groups, list) else []:
+        inner = group.get("hooks") if isinstance(group, dict) else None
+        for entry in inner if isinstance(inner, list) else []:
+            command = entry.get("command") if isinstance(entry, dict) else None
+            form = guard_form(command) if isinstance(command, str) else None
+            if form:
+                found.add(form)
+    return found
 
 
 def _ensure(
@@ -628,11 +680,13 @@ def _ensure(
     entry: dict[str, Any],
     subcommand: str,
     legacy_matchers: tuple[str, ...] = (),
+    signature: Callable[[str], tuple[str, ...] | None] | None = None,
 ) -> bool:
     groups = hooks.setdefault(event, [])
     if not isinstance(groups, list) or not all(isinstance(g, dict) for g in groups):
         raise ConfigError("settings: invalid hook groups; fix by hand")
-    expected = command_signature(entry["command"], subcommand)
+    sign = signature or (lambda text: command_signature(text, subcommand))
+    expected = sign(entry["command"])
     kept: list[dict[str, Any]] = []
     slot: int | None = None  # where our hook already sits: it is put back there, so a rerun reorders nothing
     for group in groups:
@@ -642,7 +696,7 @@ def _ensure(
         remaining = []
         for existing in inner:
             command = existing.get("command") if isinstance(existing, dict) else None
-            sig = command_signature(command, subcommand) if isinstance(command, str) else None
+            sig = sign(command) if isinstance(command, str) else None
             exact = command == entry["command"]
             if sig is not None or exact:
                 if group.get("matcher", "") not in (matcher, *legacy_matchers) or existing.get("type") != "command":
@@ -686,6 +740,7 @@ def merge_settings(settings: Any, probe_command: str, guard_command: str) -> tup
             hook_entry(guard_command, GUARD_TIMEOUT_SECONDS),
             "guard",
             LEGACY_GUARD_MATCHERS,
+            guard_signature,  # a legacy `hooks guard` line is ours too: it is replaced by the direct form
         )
         or changed
     )

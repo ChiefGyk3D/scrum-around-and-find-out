@@ -3,7 +3,8 @@
 
     safo hooks install [--settings PATH] [--mode warn|block]   add the probe and the guard to a settings.json
     safo hooks probe                                           SessionStart: is the local LLM reachable?
-    safo hooks guard                                           PreToolUse (Agent, Bash): check the brief, or the wait
+    safo-guard                                                 PreToolUse (Agent, Bash): check the brief, or the wait
+    safo hooks guard                                           the same, as already installed lines call it (legacy)
     safo hooks mode warn|block                                 warn reports; block denies a dispatch that breaks a rule
     safo hooks status                                          the mode and the counts
 
@@ -69,6 +70,7 @@ from safo.hooks import (
     check_dispatch,
     claim_notice,
     decide,
+    guard_forms,
     guard_output,
     is_safo_path,
     log_record,
@@ -969,7 +971,11 @@ def corrupted_guard_words(argv: Sequence[str]) -> list[str] | None:
 
 
 def guard_words(argv: Sequence[str]) -> list[str] | None:
-    """None when the command line is not the guard's. Otherwise the words the hand-parser judges. The decision is made
+    """LEGACY routing, frozen: it serves the `safo hooks guard ...` lines that earlier installs wrote into settings.json
+    and is not to be extended. The installer now writes the guard's own entry point (`safo-guard`, see safo.guard),
+    which never parses subcommands, and re-installing migrates an old line to it. Keep this behavior exactly as it is.
+
+    None when the command line is not the guard's. Otherwise the words the hand-parser judges. The decision is made
     by position, never by membership: after the leading global options the first word is `hooks`, and what follows it
     is either exactly `guard` (the words after it are returned) or a word that is NOT one of argparse's own hooks
     subcommands (install, probe, mode, status), `-h` or `--help`: a near miss (`gua`, `--guard`, `guard=x`, a non-UTF-8
@@ -1600,7 +1606,23 @@ def hook_command(args: argparse.Namespace, subcommand: str) -> str:
             regular = False
         if not regular or not os.access(launcher[0], os.X_OK):
             raise ConfigError("--command: the safo path is not an existing regular executable file")
-    command = f"{args.command} hooks {subcommand}"
+    if subcommand == "guard":  # the guard has its own entry point; the same launcher, resolved the same way
+        if launcher == ("safo",):
+            command = "safo-guard"
+        elif launcher == ("python3", "-m", "safo"):
+            command = "python3 -m safo.guard"
+        else:
+            command = str(Path(launcher[0]).with_name("safo-guard"))
+            try:
+                regular = stat.S_ISREG(os.stat(command).st_mode)
+            except OSError:
+                regular = False
+            if not regular or not os.access(command, os.X_OK):
+                raise ConfigError(
+                    "--command: no safo-guard executable beside that safo; reinstall safo so the console script exists"
+                )
+    else:
+        command = f"{args.command} hooks {subcommand}"
     for flag, value in (("--agents", args.agents), ("--agents-local", args.agents_local)):
         if value:
             command += f" {flag} {shlex.quote(str(Path(value).resolve()))}"
@@ -1651,9 +1673,25 @@ def run_mode(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def installed_form(ctx: LocalContext, args: argparse.Namespace) -> str:
+    """Which form of the guard hook the settings file holds: new (safo-guard), legacy (`safo hooks guard`), mixed (both),
+    absent, or unknown (the file cannot be read as settings). Read only."""
+    given = Path(args.settings) if getattr(args, "settings", "") else ctx.home / ".claude" / "settings.json"
+    try:
+        found = guard_forms(read_settings(given.resolve()))
+    except (ConfigError, OSError):
+        return "unknown (settings unreadable)"
+    if found == {"new"}:
+        return "new (safo-guard)"
+    if found == {"legacy"}:
+        return "legacy (safo hooks guard; run `safo hooks install` to migrate)"
+    return "mixed (both forms; run `safo hooks install` to migrate)" if found else "absent (run `safo hooks install`)"
+
+
 def run_status(ctx: LocalContext, args: argparse.Namespace) -> int:
     for line in guard_lines(ctx.env):
         ctx.say(line)
+    ctx.say(f"  guard hook: {installed_form(ctx, args)}")
     # No session supplied: report unknown; never pick another session's cached state.
     if not args.session:
         ctx.say("  local LLM probe: unknown (supply --session and matching --agents)")
@@ -1711,8 +1749,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     add_agents_arguments(guard_parser)
     mode = sub.add_parser("mode", help="warn (report) or block (deny) a dispatch that breaks a rule")
     mode.add_argument("value", choices=MODES)
-    status = sub.add_parser("status", help="the guard mode and retained counts")
+    status = sub.add_parser("status", help="the guard mode, the installed hook form and retained counts")
     add_agents_arguments(status)
+    status.add_argument("--settings", default="", help="the settings file to inspect (default: ~/.claude/settings.json)")
     status.add_argument("--session", default="", help="session identity for the matching probe state")
 
 

@@ -1942,9 +1942,15 @@ def jam_pipe_counted() -> tuple[int, int, int]:
 
 
 def run_entry(
-    home: Path, argv: list[str], *, payload: str = "", jam_stderr: bool = True, host_timeout: float = CHILD_BUDGET
+    home: Path,
+    argv: list[str],
+    *,
+    payload: str = "",
+    jam_stderr: bool = True,
+    host_timeout: float = CHILD_BUDGET,
+    module: str = "safo",
 ) -> tuple[Watched, bool]:
-    """Run `python -m safo ARGV` (the real entry point) under a watchdog that kills its process group at the scaled host
+    """Run `python -m MODULE ARGV` (`safo`, the real CLI entry point, or `safo.guard`, the guard's own) under a watchdog that kills its process group at the scaled host
     timeout. Standard input is a pipe holding `payload`; standard error is, by default, a FULL pipe nobody reads.
     Returns the outcome and whether the blocked pipe still holds exactly what it held (nothing was written to it)."""
     in_read, in_write = os.pipe()
@@ -1963,7 +1969,7 @@ def run_entry(
     env = {**os.environ, "HOME": str(home)}
     done, killed = threading.Event(), threading.Event()
     started = time.monotonic()
-    pid = os.posix_spawn(sys.executable, [sys.executable, "-m", "safo", *argv], env, file_actions=actions, setpgroup=0)
+    pid = os.posix_spawn(sys.executable, [sys.executable, "-m", module, *argv], env, file_actions=actions, setpgroup=0)
     for number in (in_read, out_write, err_write):
         if number >= 0:
             os.close(number)
