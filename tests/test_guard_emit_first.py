@@ -23,7 +23,7 @@ import threading
 import time
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -2044,6 +2044,166 @@ def test_the_hand_parser_accepts_what_the_installer_writes_and_nothing_else() ->
     assert mod.guard_argv(["--agents-local", "b"]) is not None
     for bad in (["--agents"], ["--bogus", "x"], ["--agents", "a", "--agents", "b"], ["a.yaml"], ["--agents=a"]):
         assert mod.guard_argv(bad) is None, bad
+
+
+# -- every guard-shaped command line reaches the guard, never argparse -------------------------------------------------
+
+GUARD_SHAPED = [
+    pytest.param(["hooks", "guard"], True, id="plain"),
+    pytest.param(["hooks", "guard", "--agents", "a.yaml"], True, id="installer-line"),
+    pytest.param(["--help", "hooks", "guard"], True, id="help-before"),
+    pytest.param(["--version", "hooks", "guard"], True, id="version-before"),
+    pytest.param(["--board", "x", "hooks", "guard"], True, id="global-option-before"),
+    pytest.param(["--board", "x", "hooks", "guard", "--bogus"], False, id="global-option-and-bogus-flag"),
+    pytest.param(["--help", "hooks", "guard", "--help"], False, id="help-both-sides"),
+    pytest.param(["hooks", "--version", "guard"], False, id="non-adjacent"),
+    pytest.param(["guard", "hooks"], False, id="reversed"),
+    pytest.param(["--version", "guard", "x", "hooks"], False, id="non-adjacent-version"),
+]
+
+
+@pytest.fixture
+def entry(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> Any:
+    """cli.run() as the host reaches it: no terminal, the given command line, standard input empty."""
+    from safo import cli  # local: the module imports the whole CLI
+
+    monkeypatch.setattr(cli, "person_at_a_terminal", lambda: False)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    def go(argv: list[str]) -> int:
+        monkeypatch.setattr(sys, "argv", ["safo", *argv])
+        with pytest.raises(SystemExit) as stop:
+            cli.run()
+        return int(stop.value.code or 0)
+
+    return go
+
+
+@pytest.mark.parametrize(("argv", "parses"), GUARD_SHAPED)
+def test_cli_run_routes_every_guard_shaped_argv_to_the_hand_parser_and_ends_once(
+    entry: Any, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int], argv: list[str], parses: bool
+) -> None:
+    from safo import cli
+
+    seen: list[list[str]] = []
+    real = mod.guard_command
+    monkeypatch.setattr(mod, "guard_command", lambda words: (seen.append(list(words)), real(words))[1])
+    monkeypatch.setattr(cli, "main", lambda *a, **k: pytest.fail("argparse was reached by a guard-shaped command line"))
+    processes: list[bool] = []
+    real_process = mod.guard_process
+    monkeypatch.setattr(mod, "guard_process", lambda c, a: (processes.append(True), real_process(c, a))[1])
+    code = entry(argv)
+    assert len(seen) == 1, "the hand-parser path took it"
+    assert len(hard_exits) == 1, "and the process was ended exactly once"
+    assert code == hard_exits[0], "the entry returns the code the guard ended with"
+    assert bool(processes) is parses, "a command line the installer could have written reaches guard_process"
+
+
+def test_a_guard_shaped_command_line_never_ends_with_argparse_exit_zero_silently(entry: Any, capsys: Any) -> None:
+    """The bypass: `--version hooks guard` used to exit 0 inside argparse with nothing on any stream."""
+    entry(["--version", "hooks", "guard"])
+    assert capsys.readouterr().out != "", "the guard answered (a decision or the visible degraded notice)"
+
+
+def test_a_command_line_without_the_guard_words_still_reaches_argparse(
+    entry: Any, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int]
+) -> None:
+    """The negative case: the routing is not a catch-all."""
+    from safo import cli
+
+    called: list[bool] = []
+    monkeypatch.setattr(cli, "main", lambda *a, **k: (called.append(True), 0)[1])
+    monkeypatch.setattr(mod, "guard_command", lambda words: pytest.fail("not a guard command line"))
+    assert entry(["hooks", "probe"]) == 0 and called == [True]
+    called.clear()
+    assert entry(["--version"]) == 0 and called == [True]
+    assert hard_exits == []
+
+
+# -- no minimum wait once decide_by has passed ----------------------------------------------------------------------
+
+
+def blocked_until_released() -> tuple[threading.Event, Any]:
+    release = threading.Event()
+
+    def block(*_: Any, **__: Any) -> Any:
+        release.wait(5)
+        return None
+
+    return release, block
+
+
+@pytest.mark.parametrize("floor", ["NOTICE_IO_MIN_SECONDS"])
+def test_io_budget_is_zero_after_decide_by_whatever_the_minimum_constants_say(
+    monkeypatch: pytest.MonkeyPatch, floor: str
+) -> None:
+    monkeypatch.setattr(mod, floor, 10.0)
+    run = mod.Run()
+    run.decide_by = time.monotonic() - 0.001
+    assert mod.io_budget(run) == 0.0
+
+
+def test_a_computed_denial_is_not_held_by_a_blocked_notice_read_after_decide_by(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 10.0)  # raised: a honored minimum would hold the worker's join
+    release, block = blocked_until_released()
+    monkeypatch.setattr(mod, "notice_unclaimed", block)
+    monkeypatch.setattr(mod, "log_failure_pending", block)
+    run = mod.Run()
+    run.deny = True  # the verdict exists before the notices are read
+    run.decide_by = time.monotonic() - 0.001
+    run.limit = time.monotonic() + 9.0
+    started = time.monotonic()
+    try:
+        seen = mod.read_notices(Path("/nonexistent-state"), Path("/nonexistent-state/x"), True, run)
+        assert time.monotonic() - started < 0.2, "the denial did not wait for the blocked read"
+        assert seen.skipped and run.overran
+    finally:
+        release.set()
+
+
+def test_the_whole_guard_exits_two_at_once_when_the_notice_read_blocks_after_decide_by(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int]
+) -> None:
+    set_mode(_private_home, "block")
+    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 10.0)
+    release, block = blocked_until_released()
+    monkeypatch.setattr(mod, "log_failure_pending", block)
+    monkeypatch.setattr(mod, "notice_unclaimed", block)
+    # The load and the lookups are early enough; the decision point is already behind us when the notices are read.
+    monkeypatch.setattr(mod, "budget_points", lambda begun: (begun + 7.0, begun + 8.0, begun + 9.0))
+    real_notices = mod.read_notices
+
+    def late(folder: Any, path: Any, wants_first: bool, run: Any) -> Any:
+        assert run.deny, "the denial is computed before the notices are read"
+        run.decide_by = time.monotonic() - 0.001  # time passed while the verdict was computed
+        return real_notices(folder, path, wants_first, run)
+
+    monkeypatch.setattr(mod, "read_notices", late)
+    out = Stream()
+    started = time.monotonic()
+    try:
+        assert mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents)) == 2
+        assert time.monotonic() - started < 2.0, "exit 2 at once, not after a minimum wait"
+        assert out.writes == []
+    finally:
+        release.set()
+
+
+def test_bounded_reprobe_grants_no_minimum_after_decide_by(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 10.0)
+    release, block = blocked_until_released()
+    run = mod.Run()
+    run.decide_by = time.monotonic() - 0.001
+    run.limit = time.monotonic() + 9.0
+    monkeypatch.setattr(mod, "reprobe", block)
+    started = time.monotonic()
+    try:
+        fresh, slow = mod.bounded_reprobe(cast(Any, None), Path("p"), 0.0, 0.5, time.monotonic() + 5.0, run)
+        assert fresh is None and slow and time.monotonic() - started < 0.2
+    finally:
+        release.set()
 
 
 # -- a decision whose deadline has already passed waits for nothing ----------------------------------------------------

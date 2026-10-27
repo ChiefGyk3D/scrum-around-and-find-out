@@ -754,11 +754,20 @@ def budget_points(begun: float) -> tuple[float, float, float]:
     return decide_by - min(1.0, 0.1 * total), decide_by, begun + total - LOG_MARGIN_SECONDS
 
 
+def pre_decision_wait(wanted: float, floor: float, run: Run) -> float:
+    """How long a pre-decision wait may last: `wanted`, but not under `floor` while the decision is still due, and
+    NOTHING once decide_by has passed (no minimum wait holds a computed denial back; it is an exit 2 at once)."""
+    if run.decide_by is None:
+        return max(floor, wanted)
+    left = run.decide_by - time.monotonic()
+    return 0.0 if left <= 0 else min(max(floor, wanted), left)
+
+
 def io_budget(run: Run) -> float:
     """How long one batch of state-folder work may hold the hook: at most NOTICE_IO_CAP_SECONDS, at least
-    NOTICE_IO_MIN_SECONDS, and not past the hard limit less a margin."""
+    NOTICE_IO_MIN_SECONDS while the decision is still due, and 0 once decide_by has passed."""
     limit = run.decide_by if run.decide_by is not None else time.monotonic() + NOTICE_IO_CAP_SECONDS + 0.5
-    return max(NOTICE_IO_MIN_SECONDS, min(NOTICE_IO_CAP_SECONDS, limit - time.monotonic() - 0.5))
+    return pre_decision_wait(min(NOTICE_IO_CAP_SECONDS, limit - time.monotonic() - 0.5), NOTICE_IO_MIN_SECONDS, run)
 
 
 def read_mode_bounded(ctx: LocalContext, run: Run) -> tuple[str, str]:
@@ -777,9 +786,10 @@ def bounded_reprobe(
     total (twice the per-request time plus its slack) plus a file-work allowance, and never past the deadline.
     (state or None, slow): slow is True when the batch did not finish; its worker is left running and the process
     ends right after the decision is out (see run_bounded)."""
-    budget = max(
-        NOTICE_IO_MIN_SECONDS,
+    budget = pre_decision_wait(
         min(2 * timeout + REPROBE_SLACK_SECONDS + NOTICE_IO_CAP_SECONDS, deadline - time.monotonic()),
+        NOTICE_IO_MIN_SECONDS,
+        run,
     )
     done, fresh = run_bounded(lambda: reprobe(doc, path, now, timeout), budget, run)
     return (fresh if done else None), not done
@@ -788,8 +798,8 @@ def bounded_reprobe(
 def read_notices(folder: Path | None, path: Path | None, wants_first: bool, run: Run) -> Seen:
     """The two state-folder operations that sit between a computed decision and its emit, under a bound: the
     first-notice flag (only when the probe is not healthy) and the marker inspection. Neither may hold a deny back
-    past NOTICE_IO_CAP_SECONDS (and not past the hard limit, but never under NOTICE_IO_MIN_SECONDS). If they do not
-    finish they are skipped: the decision goes out without those notices, with NOTICES_SKIPPED in the line, and the
+    past NOTICE_IO_CAP_SECONDS (and not past the hard limit; nothing at all once decide_by has passed). If they do
+    not finish they are skipped: the decision goes out without those notices, with NOTICES_SKIPPED in the line, and the
     flag and the marker are left as they were."""
     budget = io_budget(run)
 
@@ -872,6 +882,21 @@ def hook_event(argv: Sequence[str] | None) -> str | None:
     for first, second in itertools.pairwise(words):
         if first == "hooks" and second in ("probe", "guard"):
             return "SessionStart" if second == "probe" else "PreToolUse"
+    return None
+
+
+def guard_words(argv: Sequence[str]) -> list[str] | None:
+    """None when the command line has nothing to do with the guard. Otherwise the words the hand-parser judges: those
+    after the first adjacent `hooks guard`, or, when the two words are present but not together (a malformed line that
+    still names the hook), a word the parser refuses, so the line gets the guard's visible degraded allow and its
+    single hard exit. Anything before the pair (global options, --help, --version) is dropped: the guard runs, and
+    argparse never does."""
+    words = list(argv)
+    for index, (first, second) in enumerate(itertools.pairwise(words)):
+        if first == "hooks" and second == "guard":
+            return words[index + 2 :]
+    if "hooks" in words and "guard" in words:
+        return ["?"]
     return None
 
 

@@ -183,8 +183,11 @@ def run() -> None:
     hooks.arm_process_clock()  # the guard's budget counts from the start of the process
     words = sys.argv[1:]
     HookSafeParser.armed = not person_at_a_terminal()  # a host: no usage, error or help text on the hook commands
-    if words[:2] == ["hooks", "guard"] and not person_at_a_terminal():
-        # What a host runs: no argparse, whose error and help paths write to stderr synchronously. A person at a
-        # terminal still gets argparse's usage and help.
-        raise SystemExit(hooks.guard_command(words[2:]))
+    guard_words = hooks.guard_words(words)
+    if guard_words is not None and not person_at_a_terminal():
+        # What a host runs: no argparse, whose error, help and --version paths write to stderr or exit 0 on their own.
+        # EVERY command line with the guard words in it comes here, wherever they sit (`--version hooks guard`, a
+        # global option first, the words apart): the guard answers, or fails visibly, and ends the process once. A
+        # person at a terminal still gets argparse's usage and help.
+        raise SystemExit(hooks.guard_command(guard_words))
     raise SystemExit(main())
