@@ -8,6 +8,7 @@ The expected bytes are pinned in test_schema_caps.py from origin/main's schema.p
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -58,7 +59,43 @@ def _agents_working(d: dict[str, Any]) -> None:
     d["agents"] = {"working": ["Nope"]}
 
 
+def _unknown_top(d: dict[str, Any]) -> None:
+    d["bogus"] = 1
+
+
+def _unknown_rules(d: dict[str, Any]) -> None:
+    d["rules"]["bogus"] = 1
+
+
+def _unknown_repo(d: dict[str, Any]) -> None:
+    d["repositories"][0]["bogus"] = 1
+
+
+def _nid_empty(d: dict[str, Any]) -> None:
+    d["rules"]["new_item_defaults"] = {"Priority": ""}
+
+
+def _nid_key_150(d: dict[str, Any]) -> None:
+    d["rules"]["new_item_defaults"] = {"K" * 150: "x"}
+
+
+def _unknown_key_200(d: dict[str, Any]) -> None:
+    d["K" * 200] = 1
+
+
+def _listing_name_200(d: dict[str, Any]) -> None:
+    d["fields"][0]["options"].append({"name": "N" * 200})
+    d["rules"]["status"] = {"opened": "Nope"}
+
+
 CASES: dict[str, Edit] = {
+    "unknown_top": _unknown_top,
+    "unknown_rules": _unknown_rules,
+    "unknown_repo": _unknown_repo,
+    "nid_empty": _nid_empty,
+    "nid_key_150": _nid_key_150,
+    "unknown_key_200": _unknown_key_200,
+    "listing_name_200": _listing_name_200,
     "owner": _owner,
     "pair": _pair,
     "field_twice": _field_twice,
@@ -71,4 +108,7 @@ CASES: dict[str, Edit] = {
     "agents_field": _agents_field,
     "agents_working": _agents_working,
 }
+# The allowed-key list of these messages grew on purpose (process, method), so they are compared without it.
+STRIP_ALLOWED = {"unknown_top", "unknown_rules", "unknown_repo", "unknown_key_200"}
+ALLOWED_TEXT = re.compile(r" \(allowed: [^)]*\)")
 DUPLICATE_KEY_TEXT = "version: 1\nproject: {owner: a, owner_type: user, title: t}\nrepositories: []\nrepositories: []\n"

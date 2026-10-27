@@ -313,6 +313,12 @@ def rep(value: object) -> str:
     return text if len(text) <= _MAX_REPR else f"{text[:_MAX_REPR]}..."
 
 
+def clip(value: object) -> str:
+    """A key or a name placed in an error: up to 200 characters as written, longer ones cut and marked with "..."."""
+    text = value if isinstance(value, str) else f"{value}"
+    return text if len(text) <= _MAX_REPR else f"{text[:_MAX_REPR]}..."
+
+
 def show(value: object) -> str:
     """Text for a value in an error message: ASCII only, cut short, and a foreign value named by its type.
 
@@ -358,7 +364,7 @@ def legacy_options_text(names: list[str]) -> str:
     """The full listing, identical to the earlier text for every board whose names are printable.
 
     A name that is not printable (a control, bidi or separator character) is escaped: hardening."""
-    return ", ".join(n if n.isprintable() else show(n)[1:-1] for n in names)
+    return ", ".join(clip(n) if n.isprintable() else show(n)[1:-1] for n in names)
 
 
 class Reader:
@@ -377,7 +383,7 @@ class Reader:
             if bounded and not isinstance(key, str):
                 raise self.fail(path, f"mapping key must be a string, not {type(key).__name__}")
             if key not in allowed:
-                shown = show(key) if bounded and not _PLAIN_KEY.fullmatch(key) else key
+                shown = show(key) if bounded and not _PLAIN_KEY.fullmatch(key) else clip(key)
                 allowed_text = ", ".join(sorted(allowed))
                 raise self.fail(f"{path}.{shown}" if path else shown, f"unknown key (allowed: {allowed_text})")
         for key in sorted(required or set()):
@@ -614,7 +620,7 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
     for k, v in nid_raw.items():
         if not isinstance(k, str):
             raise r.fail("rules.new_item_defaults", f"key must be a string, not {type(k).__name__}")
-        nid[k] = r.string(v, f"rules.new_item_defaults.{k}")
+        nid[k] = r.string(v, f"rules.new_item_defaults.{clip(k)}")
     return Rules(
         r.string(m.get("status_field", "Status"), "rules.status_field"),
         r.string(m.get("area_field", "Area"), "rules.area_field"),
@@ -857,7 +863,7 @@ def _cross_check(r: Reader, board: Board, agents_present: bool = False) -> None:
         if f is None or f.type != "date":
             raise r.fail("rules.done_date_field", f"{rep(rules.done_date_field)} must be a date field in fields")
     for name, option in rules.new_item_defaults:
-        option_exists(name, option, f"rules.new_item_defaults.{name}")
+        option_exists(name, option, f"rules.new_item_defaults.{clip(name)}")
     for i, repo in enumerate(board.repositories):
         if repo.default_area is not None:
             option_exists(rules.area_field, repo.default_area, f"repositories[{i}].default_area")

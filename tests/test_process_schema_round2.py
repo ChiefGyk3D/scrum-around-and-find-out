@@ -444,7 +444,7 @@ def test_other_fields_and_other_boards_keep_the_general_option_cap(monkeypatch: 
     parse_board(agile)
 
 
-def test_a_duplicate_option_is_found_without_a_pairwise_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_duplicate_option_near_the_cap_is_still_named(monkeypatch: pytest.MonkeyPatch) -> None:
     d = base()
     d["fields"].append(
         {"name": "Big", "type": "single_select", "options": [*options_named("D", 63), {"name": "D00007"}]}
@@ -461,16 +461,21 @@ def test_the_largest_approver_id_is_accepted() -> None:
 def test_the_show_bound_is_exact() -> None:
     d = base()
     d["process"] = {"method": EMOJI}
-    with pytest.raises(ConfigError) as err:
-        parse_board(d)
-    shown = str(err.value).split("process.method: ", 1)[1].rsplit(" is not one of", 1)[0]
-    assert len(shown) == 120 and shown.endswith("...'")  # the ceiling is a total: quotes and ellipsis included
+    # 40 emoji escape to ten characters each; the text is cut after 115 of them, so the value is 120 in total
+    expected = "'" + "\\U0001f600" * 11 + "\\U000" + "...'"
+    assert len(expected) == 120
+    refuses(d, f"process.method: {expected} is not one of agile, waterfall")
 
 
 def test_the_listing_bound_is_exact() -> None:
     d = phase_options([f"{i}" + "\u00fc" * 30 for i in range(12)])
     d["process"]["gates"] = gates(("Missing", "acme/widgets#1"))
-    with pytest.raises(ConfigError) as err:
-        parse_board(d)
-    listing = str(err.value).split("(options: ", 1)[1][:-1]
-    assert len(listing) == 400 and listing.endswith("...")  # the ceiling is a total, ellipsis included
+    # each name escapes to 1 + 30 * 4 = 121 characters, is cut to 115 and gets "..."; 8 are listed, then the count
+    items = [f"{i}" + "\\xfc" * 28 + "\\x" + "..." for i in range(8)]
+    listing = ", ".join(items) + ", ... and 4 more"
+    expected = listing[:397] + "..."
+    assert len(expected) == 400
+    refuses(
+        d,
+        f"process.gates[0].phase: 'Missing' is not an option of 'Phase' (options: {expected})",
+    )

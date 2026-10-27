@@ -111,7 +111,7 @@ All values in `working` and `waiting` must be options of the status field.
 Optional. Absent, `process: {}` and `process: {method: agile}` mean the same thing, and an all-agile board behaves and
 prints exactly as it did before this key existed. This release only reads and checks the block; no audit rule uses it yet.
 Every error names the key path and is raised at load time, before any request. A value that is `null`, the wrong type or
-not on a list is refused, never replaced by a default. Text echoed in an error is ASCII, cut to 40 characters.
+not on a list is refused, never replaced by a default. Text from this block echoed in an error is cut to 40 characters of text and is at most 120 characters after escaping and quoting.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -164,10 +164,21 @@ repository, well under every limit.
 | `process.active_statuses` | 16 |
 | `process.approvers`, `process.gates` | 32 |
 
-Duplicate names are found with a set, so the check is linear. A value echoed in an error is cut to 200 characters of its
-`repr` followed by `...` (a realistic value prints exactly as before). Values from the `process` block are cut harder: a
-shown value is at most 120 characters in total, quotes and ellipsis included, and a list of option names is at most 400
-characters in total, ellipsis included.
+What an error echoes from the file is bounded, so a file under 1 MiB cannot flood a log:
+
+- a value shown with `repr` (a bad owner, a duplicate name, a status that is not an option) is cut to 200 characters of
+  its `repr` followed by `...`; a realistic value prints exactly as before;
+- a key placed in an error path (an unknown key, a key of `rules.new_item_defaults`) is cut to 200 characters followed by
+  `...`;
+- each option name in a listing of a field's options is cut to 200 characters followed by `...` (identical for names up
+  to 200 characters); a listing has at most 64 names, so about 13 KB at most;
+- text from the `process` block is cut harder: a value is cut to 40 characters of text and is at most 120 characters
+  after escaping and quoting, and a list of option names is at most 400 characters in total, ellipsis included.
+
+Known cost, same as before these limits existed: the YAML parser is pure Python and reads the whole file before any
+limit above can act. A file near the 1 MiB size limit made of tens of thousands of tiny entries can take several
+seconds to parse (about 7 s for 40,000 small mappings, about 14 s for a flat list of 900 KB). The size limit is the only
+bound on that.
 
 ## Refused YAML
 
@@ -186,4 +197,4 @@ After an unknown outcome, `status` cannot verify whether the update landed; chec
 
 `sync` treats the event payload as a pointer: it reads the issue or pull request live (state, draft flag, number, repository) and writes from that. An action that contradicts the live state, or a node that is not in the repository the payload names, is a NOTE (exit 1) and writes nothing. `status` checks that the acknowledged update belongs to the project (`statusUpdate.project.id`); an acknowledgement that does not say so is an unknown outcome. An exhausted rate limit before any write exits 1; after a write was sent it is an unknown outcome (exit 2). Text from GitHub is escaped on every log line, and `status --post --print` shows the update inside `::stop-commands::`.
 
-An error that lists a field's options (for example a status that is not one of them) lists every option exactly as before. It is identical to the earlier text for every board whose option names are printable; a name with a control, bidi or separator character is escaped (hardening).
+An error that lists a field's options (for example a status that is not one of them) lists every option. The text is identical to the earlier text for every board whose option names are printable and at most 200 characters; a longer name is cut, and a name with a control, bidi or separator character is escaped (hardening).

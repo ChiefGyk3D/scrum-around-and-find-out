@@ -2,7 +2,7 @@
 """Cardinality caps on every list the board loader reads, and a bound on the legacy repr echoes (round 5 of #134).
 
 A cap is checked on the raw list length before any entry is read or built, so a hostile file costs one comparison,
-not a quadratic scan. Boards under the caps load and print exactly as before.
+not a scan of the whole file. Boards under the caps load and print exactly as before.
 """
 
 from __future__ import annotations
@@ -151,7 +151,7 @@ def test_twenty_thousand_options_are_refused_fast_and_unbuilt(monkeypatch: pytes
     assert time.monotonic() - started < 2
 
 
-def test_duplicates_are_found_without_a_quadratic_scan() -> None:
+def test_a_duplicate_field_at_the_cap_edge_is_still_named() -> None:
     d = base()
     set_fields(d, 100)
     d["fields"][99] = {"name": "F0", "type": "text"}
@@ -200,6 +200,13 @@ ECHO_PINS = {
     "done_date": ("55e47a60e1852efad70d65575bb999f852b664693a3857c6656838913871b1c1", 74),
     "agents_field": ("0f5a2f7bb99bc9a43efe5f21bbb2118954e429f4522041c4a0489c5d7e658a02", 55),
     "agents_working": ("5e6bd775f76ddff1fdaf4e0589ae840466a68893549c186bdd91604cf8316913", 66),
+    "unknown_top": ("9f47df0d4d4bf1cdd482fb41fd726600756db7bade09d41e971dda8f4d663ae7", 30),
+    "unknown_rules": ("2bafbba85672f33b2c9c2a3c45d3fe630494ac9d0970261cee710482e7ea051b", 36),
+    "unknown_repo": ("d01b4bc868479d68837e7ed2b01ebf92f910fdb6a84836c20e71a8895cec8276", 46),
+    "nid_empty": ("79ef5dbff98590d6ff27541b9f5382d6cffb0af1d0b5d01da2556249345ef300", 73),
+    "nid_key_150": ("6c64f3ae870a4dd52117926d62af79d9c74a4cafbec8efb8a149dd438ae02105", 376),
+    "unknown_key_200": ("2108e839aa8931c633b6b8e2f08fa5207d77ab33622fb8138ac40acda1674c4f", 225),
+    "listing_name_200": ("a84f08ddd41bd77e816320343cf60d45108608a77b35aa4441a42b67bd960354", 323),
     "duplicate_key": ("c23b3ffb2530162f174a26e88a1a5d2f14d13eae5e080a9f3d4634f27063c856", 48),
 }
 
@@ -211,6 +218,8 @@ def test_a_normal_sized_legacy_echo_keeps_main_s_bytes(name: str) -> None:
     with pytest.raises(ConfigError) as err:
         parse_board(d)
     message = str(err.value)
+    if name in echo.STRIP_ALLOWED:
+        message = echo.ALLOWED_TEXT.sub("", message)
     assert (hashlib.sha256(message.encode()).hexdigest(), len(message)) == ECHO_PINS[name]
 
 
