@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import zlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -306,7 +307,7 @@ def test_template_content_and_placement_rules(tmp_path: Path, text: str, pattern
         "<p>text</p>\n\n{{task}}\n",
         "    <!--\n\n{{task}}\n",
     ],
-    ids=lambda t: t.split("\n")[0] + "|" + str(hash(t) % 997),
+    ids=lambda t: t.split("\n")[0] + "|" + str(zlib.crc32(t.encode()) % 997),
 )
 def test_closed_fences_and_comments_and_blank_line_ended_html_leave_the_placeholder_free(
     tmp_path: Path, text: str

@@ -12,4 +12,7 @@ Routing guard (mode: warn)
 \x0aClaude
   Subagents run inside the Claude Code session and cannot be listed from a shell: watch its panel.
   Their tasks are the board cards with Agent = Claude above.
+ChatGPT: no session to list from a shell; its work is the board cards with Agent = ChatGPT above.
+Ollama: no session to list from a shell; its work is the board cards with Agent = Ollama above.
+RAG: no session to list from a shell; its work is the board cards with Agent = RAG above.
 --- stderr ---
