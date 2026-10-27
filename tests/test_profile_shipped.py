@@ -127,7 +127,7 @@ def test_language_shapes_prefer_chatgpt_and_the_maintainer_or_a_claude_reviews_i
         ("claude-sonnet", "maintainer"),
     )
     docs = a.shape("technical-docs")
-    assert (docs.prefer, docs.fallback, docs.reviewer) == (("claude-sonnet",), (), ("claude-lead",))
+    assert (docs.prefer, docs.fallback, docs.reviewer) == (("claude-sonnet",), (), ("codex",))
 
 
 def test_route_picks_chatgpt_for_language_work_without_a_meter_and_needs_no_meter() -> None:
@@ -181,6 +181,59 @@ def test_the_technical_docs_reviewer_is_not_its_author_and_matches_the_runbook_r
     docs = shipped().shape("technical-docs")
     assert docs.reviewer and not set(docs.reviewer) & {*docs.prefer, *docs.fallback}
     assert docs.reviewer == shipped().shape("ops-runbook").reviewer
+
+
+# The lead frames options and builds nothing a reviewer would stand in for (DoIA's lead template: the lead does not
+# review in place of a reviewer, #33). No shape may list claude-lead as a reviewer; this is the exact allowed set,
+# and it is empty. A shape joins it only by a recorded policy decision, with its name added here.
+LEAD_MAY_REVIEW: frozenset[str] = frozenset()
+
+
+def lead_reviews(a: AgentsFile) -> set[str]:
+    return {s.name for s in a.shapes if "claude-lead" in s.reviewer and s.name not in LEAD_MAY_REVIEW}
+
+
+def unreviewable_authors(a: AgentsFile) -> set[tuple[str, str]]:
+    """(shape, author) pairs where every listed reviewer is the author: 'never the author' leaves no one."""
+    return {
+        (s.name, author) for s in a.shapes if s.reviewer for author in s.chain if all(r == author for r in s.reviewer)
+    }
+
+
+def test_no_shape_lists_the_lead_as_a_reviewer_outside_the_allowed_set() -> None:
+    a = shipped()
+    assert len(a.shapes) > 10, "collected nothing: the guard would pass vacuously"
+    assert lead_reviews(a) == set()
+
+
+def test_the_lead_review_guard_bites() -> None:
+    d = agents_dict()
+    d["shapes"]["ops-runbook"]["reviewer"] = ["claude-lead"]
+    assert "ops-runbook" in lead_reviews(parse_agents(d))
+    assert "ops-runbook" not in lead_reviews(shipped())
+
+
+# Known gap, outside #33 item 1: when Haiku is short, Sonnet authors a small-mechanical-pr and is its only reviewer.
+KNOWN_SELF_REVIEW = {("small-mechanical-pr", "claude-sonnet")}
+
+
+def test_every_author_in_every_shape_chain_has_a_different_reviewer() -> None:
+    assert unreviewable_authors(shipped()) == KNOWN_SELF_REVIEW
+
+
+def test_the_unreviewable_author_guard_bites() -> None:
+    d = agents_dict()
+    d["shapes"]["ops-runbook"]["reviewer"] = ["claude-sonnet"]
+    assert ("ops-runbook", "claude-sonnet") in unreviewable_authors(parse_agents(d))
+
+
+def test_the_runbook_docs_and_adversarial_shapes_are_reviewed_by_someone_else() -> None:
+    a = shipped()
+    for name in ("ops-runbook", "technical-docs"):
+        assert a.shape(name).reviewer == ("codex",)
+        assert recommend(a, name, {}).reviewer == "codex"
+    assert a.shape("adversarial-review").reviewer == ("claude-sonnet", "codex")
+    assert recommend(a, "adversarial-review", {}).reviewer == "claude-sonnet"
 
 
 def test_precedence_between_the_overlapping_shapes_is_stated_in_the_shapes_and_in_rule_6() -> None:

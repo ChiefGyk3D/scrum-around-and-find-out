@@ -7,7 +7,7 @@ The board is always current. That is a property the tools maintain, not a habit 
 | Field | Why it exists |
 |---|---|
 | Status | Backlog, Next, In progress, Blocked, Done. Blocked means it needs a person |
-| Agent | Who owns the card: Claude, Codex, Copilot or the maintainer |
+| Agent | Who owns the card: Claude, Codex, Copilot, ChatGPT, Ollama, RAG or the maintainer (You) |
 | Area | Which part of the system the card is about; filled from the repository and from `area_rules` |
 | Kind, Priority, Effort, Epic | Optional triage fields; `safo` creates them from `board.yaml` and never overwrites a value |
 | Sprint | An iteration field; the sprint is the unit of "Next" |
@@ -38,6 +38,19 @@ default), in progress, waiting on the maintainer (Blocked, or a working card who
 model. Code always renders the count sentence. A reachable local model may append one exact approved prose clause;
 invalid, multiline or unavailable prose adds nothing. Look at
 the update first with `safo status --post --print`: nothing is sent.
+
+## The Agents at work view
+
+The **Agents at work** view is a table grouped by Agent (the grouping is a UI-only setting: Group by = Agent). It shows
+every card that is not Done and has an agent working or waiting: a card whose Status is one of the board's
+`agents.working` statuses (In progress, In review and Next on the shipped boards) or its `agents.waiting` statuses
+(Blocked). Because a view's filter is the one thing `audit` compares, list those statuses in the view's filter and keep
+the two in step; `safo agents-status` prints the same two groups from the live board, with the agent on every line.
+
+Each group is one value of the Agent field: Claude, Codex, Copilot, ChatGPT (language, copy and prompt wording), Ollama
+(local triage, summaries and first drafts), RAG (retrieval over the project docs and issues) and You. A card with no
+Agent is shown as unassigned. A value the board's file does not list is flagged as an unknown agent, never mapped to
+one that is listed.
 
 ## What no API can set
 

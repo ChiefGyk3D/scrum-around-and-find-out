@@ -153,7 +153,7 @@ class FRepo:
     protection: dict[str, Any] | None = field(
         default_factory=lambda: {
             "requiresStatusChecks": True,
-            "requiredStatusChecks": [{"context": "ci / CI green"}],
+            "requiredStatusChecks": [{"context": "ci / CI green", "app": {"databaseId": 15368}}],
             "allowsForcePushes": False,
             "isAdminEnforced": True,
             "bypassForcePushAllowances": {"totalCount": 0},
