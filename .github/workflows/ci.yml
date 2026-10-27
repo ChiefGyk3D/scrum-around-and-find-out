@@ -32,7 +32,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements-dev.txt
         pip install --no-deps -e .
-      test-command: pytest --cov=safo --cov-report=xml
+      # Budget for each Python version's jobs, in minutes (python-ci defaults to 15). The suite sat at that limit
+      # (PR 158's 3.13 job was cancelled after 15m17s), and a slow runner must not fail the gate by timeout (#169).
+      timeout-minutes: 30
+      # -n auto: pytest-xdist, one worker per core; coverage is combined across workers by pytest-cov
+      test-command: pytest -n auto --cov=safo --cov-report=xml
       lint-install-command: pip install --require-hashes -r requirements-dev.txt
       lint-command: |
         ruff check .

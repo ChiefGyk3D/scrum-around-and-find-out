@@ -117,6 +117,34 @@ agents:
       dont:
         - text: Merge its pull request without a Claude review; in the measured month every one needed fixes.
           evidence: "lessons:every-copilot-pull-request-needed-fixes"
+  chatgpt:
+    name: ChatGPT (general models)
+    kind: chatgpt
+    role: "Authors non-technical, public-facing language in the maintainer's voice, and the wording and patterns that steer a local model. Its output is a draft."
+    limits: {plan: "ChatGPT Plus; the allowance is read in the client"}
+    strengths:
+      - "The maintainer's judgment on 2026-10-20, from his own use and not a benchmark: its general (non-cybersecurity) models sound markedly more natural for greetings, jokes and roast copy, social posts, captions and scripts."
+      - "It heavily improved a Discord bot's welcome-greeter copy (Penguin Overlord pull request 319, merged 2026-10-18)."
+      - "Authors the language that steers a local model: system-prompt wording, angle pools, formats, few-shot exemplars, banned phrases and fallback banks."
+    constraints:
+      - "Everything it writes is a draft: the maintainer reviews anything public."
+      - "No repository access in this workflow: it works through briefs and pasted text, and Claude integrates its output into the project."
+      - "Not for technical documentation, runbooks, code or reviews: those stay with Claude."
+      - "The maintainer's voice skill is a Claude Code skill and ChatGPT cannot load it, so its text and rules must be supplied as a ChatGPT Project file or instructions. Setup status: NOT YET DONE."
+    profile:
+      status: profiled
+      brief:
+        inline: Write the requested language as a draft for the maintainer to review, using only the voice rules and examples pasted into this conversation; you have no repository access.
+      do:
+        - text: Route non-technical, public-facing language to it, and treat what it writes as a draft the maintainer reviews.
+          evidence: "lessons:chatgpt-authors-public-facing-language-and-the-local-models-steering-text-claude-integrates-and-measures-2026-10-20"
+        - text: Have it author the wording and patterns that steer the local model, then have Claude integrate them as data and measure the local output.
+          evidence: "lessons:chatgpt-authors-public-facing-language-and-the-local-models-steering-text-claude-integrates-and-measures-2026-10-20"
+      dont:
+        - text: Send it technical documentation, runbooks, code or reviews, which stay with Claude.
+          evidence: "lessons:chatgpt-authors-public-facing-language-and-the-local-models-steering-text-claude-integrates-and-measures-2026-10-20"
+        - text: Publish its output unreviewed, or assume it has the maintainer's voice rules before they are supplied to it.
+          evidence: "lessons:chatgpt-authors-public-facing-language-and-the-local-models-steering-text-claude-integrates-and-measures-2026-10-20"
   ollama:
     name: Local LLM (Ollama)
     kind: ollama
@@ -230,12 +258,12 @@ shapes:
     description: A runbook or operational procedure someone will follow on a live system.
     prefer: [claude-sonnet]
     fallback: []
-    reviewer: [claude-lead]
+    reviewer: [codex]
   adversarial-review:
     description: Try to break a finished change and its claims.
     prefer: [codex]
     fallback: [claude-sonnet]
-    reviewer: [claude-lead]
+    reviewer: [claude-sonnet, codex]
   ci-log-summary:
     description: Summarise a CI log or test output so a person or a Claude model reads ten lines, not ten thousand.
     prefer: [ollama]
@@ -272,8 +300,26 @@ shapes:
     prefer: [ollama]
     fallback: []
     reviewer: [maintainer]
-    note: Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted.
+    note: Used only if it is one plain line whose numbers are the computed counts; otherwise the template line is posted. It stays local; if it is posted publicly under the maintainer's name it becomes prose-in-voice work instead.
     local: {role: general}
+  prose-in-voice:
+    description: Non-technical, public-facing language that must sound human and in the maintainer's voice (greetings, jokes and roast copy, social posts, captions, scripts).
+    prefer: [chatgpt]
+    fallback: [claude-sonnet]
+    reviewer: [maintainer]
+    note: The maintainer's judgment from his own use, not a benchmark. The voice skill is a Claude Code skill, so its text and rules must be supplied to ChatGPT (setup NOT YET DONE); Claude Sonnet with the skill is the fallback. A draft until the maintainer approves it. For public README or docs prose, technical-docs owns the technical correctness and only the voice pass is this shape.
+  prompt-language-for-local-llm:
+    description: The language and patterns that steer a local model (system-prompt wording, angle pools, formats, few-shot exemplars, banned phrases, fallback banks).
+    prefer: [chatgpt]
+    fallback: [claude-sonnet]
+    reviewer: [claude-sonnet, maintainer]
+    note: Ollama runs the generation, ChatGPT authors the wording, Claude integrates it as data and measures the local output (repetition, adherence), and the maintainer approves public copy.
+  technical-docs:
+    description: Technical documentation and reference pages.
+    prefer: [claude-sonnet]
+    fallback: []
+    reviewer: [codex]
+    note: When the page is a runbook or procedure someone follows on a live system, ops-runbook wins; it has the same chain. For public README or docs prose, this shape owns the technical correctness with Claude, and only the voice pass is prose-in-voice language work.
   decision:
     description: A trade-off, or anything that touches hardware.
     prefer: [maintainer]
@@ -319,6 +365,7 @@ rules_of_thumb:
   - "Routing order 3: code from prose, every task review, and ops runbooks go to Sonnet."
   - "Routing order 4: security-sensitive or risky code is built by Sonnet, and Codex attacks it before merge."
   - "Routing order 5: decisions go to the lead and the maintainer; Opus only with the maintainer's OK."
+  - "Routing order 6, read before order 1 for voice prose: prose meant to sound like the maintainer and be published under his name goes to ChatGPT, while mechanical text drafts (changelogs, CI digests, triage, internal status headlines, issue drafts) stay local-first with a Claude model checking anything applied, and technical work stays with Claude, with Codex reviewing runbooks and technical docs because the lead never reviews in place of a reviewer."
   - "Copilot reviews pull requests and nothing else: it is an extra reader on the diff, never the reviewer of record and never a merge gate."
   - Write the brief before choosing the agent. If you cannot write a complete one, the task is a decision or research.
   - The reviewer is a different agent or model from the author, and starts with no memory of the work.

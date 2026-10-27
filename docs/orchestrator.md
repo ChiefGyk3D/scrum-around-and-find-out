@@ -12,11 +12,13 @@ message gets an answer in the turn it arrives.
    issued together, not one after the other.
 3. **The maintainer's message gets an answer in the turn it arrives.** A message that lands while an agent or a background
    command runs is answered now, from what is known, not after the wait.
-4. **A hung step is reported after 5 minutes, not 20.** A step that has shown no progress for 5 minutes is a finding, not
-   something to keep watching. If a standing ruling covers a hung step (for example GYST issue 194, option A), act on it
-   and report; otherwise report it with evidence and a recommendation, and let the maintainer decide. This is how the rule
-   fits [act, then report](act-then-report.md): a ruling the maintainer already made is acted on, and a choice the
-   maintainer has not made is reported, not guessed.
+4. **A hung step is reported after 5 minutes, not 20.** A step that has shown no progress for 5 minutes is a finding,
+   not something to keep watching. An agent whose completion notice arrives without its report is a hung step too: the
+   lead re-dispatches a fresh agent with the same brief within five minutes, and a continued agent is not retried by
+   continuing it (INFERRED, from one session: reports from continued agents go missing). If a standing ruling covers a
+   hung step (for example GYST issue 194, option A), act on it and report; otherwise report it with evidence and a
+   recommendation, and let the maintainer decide. This is how the rule fits [act, then report](act-then-report.md): a
+   ruling the maintainer already made is acted on, and a choice the maintainer has not made is reported, not guessed.
 5. **The lead does not implement.** Code changes go to an implementer agent; the lead verifies. (2026-10-25: the lead implemented
    code itself. Hook issue [#80](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/80) tracks a warning for it.)
 6. **Never start a second watch on something already watched.** One run, one watcher. If a monitor or a background command
