@@ -75,6 +75,12 @@ What it reads, and how strictly:
   the head"). This closes the replay: a report naming `aaaa` written while the head was `bbbb`, then a force-push to
   `aaaa`, reads STALE, as does a force-push back to an earlier reviewed commit. A timeline too long to read in full, or
   any event it cannot read, is unknown.
+- **The force-push that ended at the head must be the newest force-push of all.** If a later force-push went to
+  another commit, the head can only have come back by a normal push (a fast-forward from that commit), and that return
+  has no event with a time, so the earlier force-push proves nothing: the answer is unknown ("it returned after a later
+  force-push"). A force-push to the head and one to another commit with the same timestamp cannot be put in order
+  either: unknown. A force-push back to the head after the other commit makes the head's event the newest again, and
+  the report time is then compared as usual.
 - **Equal timestamps are unknown.** GitHub timestamps have one-second resolution, so a report and the push (or a base
   change) with the same timestamp cannot be put in order: the answer is unknown ("the report and the push have the
   same timestamp; their order cannot be told"), not fresh and not stale.

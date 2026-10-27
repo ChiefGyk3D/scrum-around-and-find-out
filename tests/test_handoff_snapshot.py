@@ -80,7 +80,8 @@ def test_a_force_push_after_the_report_between_the_reads_is_unknown(fake: FakeGi
     later = {"__typename": "HeadRefForcePushedEvent", "createdAt": T6, "afterCommit": {"oid": B}}
     drift(fake, "HandoffTimeline", lambda d: pull(d)["timelineItems"]["nodes"].append(later))
     code, out = go(fake)
-    assert code == 2 and CHANGED in out
+    # the second timeline read is itself unknown (the head would have left after its force-push), before any comparison
+    assert code == 2 and "FRESH" not in out and "STALE" not in out
 
 
 def test_a_force_push_to_the_same_head_again_between_the_reads_is_unknown(fake: FakeGitHub) -> None:

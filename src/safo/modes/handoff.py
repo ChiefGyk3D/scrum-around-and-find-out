@@ -95,6 +95,11 @@ TIMELINE_QUERY = """query HandoffTimeline($owner: String!, $name: String!, $numb
 }"""
 
 CHANGED = "the pull request changed while it was being read, so nothing was compared"
+RETURNED = "cannot tell when this commit became the head: it returned after a later force-push"
+SAME_PUSH_SECOND = (
+    "cannot tell when this commit became the head: a force-push to it and one to another commit have the same "
+    "timestamp; their order cannot be told"
+)
 SAME_SECOND = "the report and the push have the same timestamp; their order cannot be told"
 
 Entry = tuple[str | None, str | None, str | None]  # (role, head, verdict); None when unusable (the verdict: absent)
@@ -305,8 +310,9 @@ def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> Ti
     every event read, so that a second read can be compared with this one.
 
     `since` is the time of the latest force-push whose result is `head`, the only event GitHub records with the time a
-    head arrived. With none there is no proof (a commit's own dates are set by its author), and a timeline too long to
-    read in full is no proof either: both are unknown.
+    head arrived, and it counts only when it is also the newest force-push of all (a later one to another commit means
+    the head came back without an event). With none there is no proof (a commit's own dates are set by its author), and
+    a timeline too long to read in full is no proof either: both are unknown.
     """
     pull = pull_of(client.execute(TIMELINE_QUERY, variables))
     items = pull.get("timelineItems")
@@ -318,6 +324,7 @@ def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> Ti
     if more:
         raise _bad("the pull request timeline is truncated (more than 50 events), so when the head arrived is unknown")
     forced: list[str] = []
+    elsewhere: list[str] = []  # force-pushes to some other commit
     rebased: list[str] = []
     seen: list[tuple[str, str, str | None]] = []
     for node in nodes:
@@ -338,11 +345,20 @@ def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> Ti
         seen.append((kind, created, oid))
         if oid == head:
             forced.append(created)
+        else:
+            elsewhere.append(created)
     if not forced:
         # A normal push leaves no event with a time. The commit's own dates are chosen by its author, so they prove
         # nothing: without a force-push to this head there is no proof of when it arrived.
         raise _bad("cannot tell when this commit became the head: no force-push event records it")
     since = max(forced)
+    if elsewhere and max(elsewhere) >= since:
+        # The newest force-push of all must be the one that ended at this head. Otherwise the head left and came back
+        # (by a normal push, say a fast-forward from the other commit), and that return has no event with a time. At
+        # the same second the order of the two pushes cannot be told either.
+        if max(elsewhere) == since:
+            raise _bad(SAME_PUSH_SECOND)
+        raise _bad(RETURNED)
     return since, max(rebased) if rebased else None, tuple(seen)
 
 

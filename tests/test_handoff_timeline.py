@@ -28,6 +28,7 @@ T3 = "2026-10-14T10:00:00Z"
 T4 = "2026-10-16T10:00:00Z"
 T5 = "2026-10-18T10:00:00Z"
 SAME_SECOND = "cannot be told"
+SAME_SECOND_PUSHES = "same timestamp; their order cannot be told"
 
 
 def force(oid: Any, when: Any = T3) -> dict[str, Any]:
@@ -77,9 +78,55 @@ def test_a_force_push_back_to_an_earlier_reviewed_commit_needs_a_newer_report(fa
     assert with_timeline(fake, [comment(report(A), T5)], events=events)[0] == 0
 
 
-def test_only_force_pushes_to_this_head_set_the_time(fake: FakeGitHub) -> None:
-    events = [force(A, T1), force(C, T2)]  # a push of C later does not move the time A became the head
+def test_an_older_force_push_to_another_commit_does_not_matter(fake: FakeGitHub) -> None:
+    events = [force(C, T1), force(A, T2)]  # C was force-pushed first; the newest force-push of all went to the head
     assert with_timeline(fake, [comment(report(A), T3)], events=events)[0] == 0
+    assert with_timeline(fake, [comment(report(A), "2026-10-12T10:00:00Z")], events=events)[0] == 2  # equal to T2
+    assert with_timeline(fake, [comment(report(A), T1)], events=events)[0] == 1
+
+
+RETURNED = "it returned after a later force-push"
+BETWEEN = "2026-10-12T12:00:00Z"
+
+
+def test_a_head_that_returned_after_a_later_force_push_is_unknown(fake: FakeGitHub) -> None:
+    """Force-push to A at T1, force-push to B at T2, then the head is A again by a normal push (a fast-forward from B).
+    That second arrival has no event, so the time of the first one proves nothing about it."""
+    events = [force(A, T1), force(B, T2)]
+    code, out = with_timeline(fake, [comment(report(A), BETWEEN)], events=events)
+    assert code == 2 and RETURNED in out and "FRESH" not in out and "STALE" not in out
+    assert with_timeline(fake, [comment(report(A), T5)], events=events)[0] == 2  # a later report does not help
+
+
+def test_a_force_push_back_to_the_head_makes_its_event_the_newest(fake: FakeGitHub) -> None:
+    events = [force(B, T1), force(A, T3)]
+    assert with_timeline(fake, [comment(report(A), T4)], events=events)[0] == 0
+    code, out = with_timeline(fake, [comment(report(A), T2)], events=events)
+    assert code == 1 and "before" in out
+
+
+def test_two_force_pushes_to_the_same_head_use_the_later_one(fake: FakeGitHub) -> None:
+    events = [force(A, T1), force(A, T3)]
+    assert with_timeline(fake, [comment(report(A), T4)], events=events)[0] == 0
+    assert with_timeline(fake, [comment(report(A), T2)], events=events)[0] == 1
+
+
+@pytest.mark.parametrize("order", ["other first", "head first"])
+def test_force_pushes_to_the_head_and_to_another_commit_in_the_same_second_are_unknown(
+    fake: FakeGitHub, order: str
+) -> None:
+    """One-second timestamps cannot say which of the two came last, whatever order the list gives."""
+    events = [force(B, T2), force(A, T2)] if order == "other first" else [force(A, T2), force(B, T2)]
+    code, out = with_timeline(fake, [comment(report(A), T4)], events=events)
+    assert code == 2 and SAME_SECOND_PUSHES in out and "FRESH" not in out
+
+
+def test_several_other_commits_after_the_head_are_unknown_and_the_newest_one_decides(fake: FakeGitHub) -> None:
+    assert with_timeline(fake, [comment(report(A), T5)], events=[force(A, T1), force(B, T2), force(C, T3)])[0] == 2
+    # an older other commit does not hide a newer one
+    assert with_timeline(fake, [comment(report(A), T5)], events=[force(B, T1), force(A, T2), force(C, T3)])[0] == 2
+    # the head came last, after both others
+    assert with_timeline(fake, [comment(report(A), T5)], events=[force(B, T1), force(C, T2), force(A, T3)])[0] == 0
 
 
 # -- a normal push: no proof, no answer ---------------------------------------------------------------------------
