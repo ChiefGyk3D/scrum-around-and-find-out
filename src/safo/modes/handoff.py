@@ -89,9 +89,10 @@ TIMELINE_QUERY = """query HandoffTimeline($owner: String!, $name: String!, $numb
         ... on BaseRefChangedEvent { createdAt }
       }
     }
-    commits(last: 1) { nodes { commit { oid committedDate } } }
   } }
 }"""
+
+SAME_SECOND = "the report and the push have the same timestamp; their order cannot be told"
 
 Entry = tuple[str | None, str | None, str | None]  # (role, head, verdict); None when unusable (the verdict: absent)
 
@@ -288,8 +289,9 @@ def resolve(client: Client, variables: Mapping[str, Any], reported: str) -> str:
 def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> tuple[str, str | None]:
     """(since, base_changed): when `head` last became the head, and when the base last changed (or None).
 
-    `since` is the time of the latest force-push whose result is `head`; with none, it is the committedDate of the head
-    commit, which its author controls: a floor, not proof. A timeline too long to read in full is unknown.
+    `since` is the time of the latest force-push whose result is `head`, the only event GitHub records with the time a
+    head arrived. With none there is no proof (a commit's own dates are set by its author), and a timeline too long to
+    read in full is no proof either: both are unknown.
     """
     pull = pull_of(client.execute(TIMELINE_QUERY, variables))
     items = pull.get("timelineItems")
@@ -318,23 +320,11 @@ def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> tu
             raise MalformedDataError("a force-push event has no full commit oid")
         if oid == head:
             forced.append(created)
-    if forced:
-        since = max(forced)
-    else:
-        commits = pull.get("commits")
-        rows = commits.get("nodes") if isinstance(commits, dict) else None
-        commit = (
-            rows[0].get("commit") if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict) else None
-        )
-        date = commit.get("committedDate") if isinstance(commit, dict) else None
-        if (
-            not isinstance(commit, dict)
-            or commit.get("oid") != head
-            or not isinstance(date, str)
-            or not TIME.fullmatch(date)
-        ):
-            raise _bad("when the head commit arrived could not be established")
-        since = date
+    if not forced:
+        # A normal push leaves no event with a time. The commit's own dates are chosen by its author, so they prove
+        # nothing: without a force-push to this head there is no proof of when it arrived.
+        raise _bad("cannot tell when this commit became the head: no force-push event records it")
+    since = max(forced)
     return since, max(rebased) if rebased else None
 
 
@@ -370,6 +360,8 @@ def verdict(client: Client, variables: Mapping[str, Any], roles: tuple[str, ...]
         return STALE, f"{label} names the current head {head[:7]} but was posted before it became the head{flags}"
     if rebased is not None and rebased > when:
         return STALE, f"{label} names the current head {head[:7]} but the base branch changed after it{flags}"
+    if when in (since, rebased):  # one-second timestamps: the order inside the second cannot be told
+        raise _bad(SAME_SECOND)
     return FRESH, f"{label} names the current head {head[:7]}{flags}"
 
 

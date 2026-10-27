@@ -30,10 +30,15 @@ def pr_comments(fake: FakeGitHub, v: JSON) -> JSON:
 def pr_timeline(fake: FakeGitHub, v: JSON) -> JSON:
     found = _pull(fake, v)
     commit = found.last_commit if found.last_commit is not None else {"oid": found.head, "committedDate": found.pushed}
+    proof = []
+    if found.arrived is not None:
+        proof = [
+            {"__typename": "HeadRefForcePushedEvent", "createdAt": found.arrived, "afterCommit": {"oid": found.head}}
+        ]
     return {
         "repository": {
             "pullRequest": {
-                "timelineItems": {"pageInfo": {"hasPreviousPage": found.more_events}, "nodes": found.events},
+                "timelineItems": {"pageInfo": {"hasPreviousPage": found.more_events}, "nodes": [*proof, *found.events]},
                 "commits": {"nodes": [{"commit": commit}]},
             }
         }

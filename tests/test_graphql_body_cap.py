@@ -168,7 +168,7 @@ def test_a_content_length_smaller_than_the_body_cuts_the_body_and_is_never_a_suc
     refused(sends(QUERY_ANSWER + b" " * 100, length=len(QUERY_ANSWER) - 5), QUERY, ApiError)
 
 
-def test_a_content_length_that_is_not_a_number_does_not_lift_the_cap() -> None:
+def test_a_content_length_that_is_not_a_number_is_refused_whatever_the_size() -> None:
     def respond_with(answer: bytes) -> Respond:
         def respond(handler: BaseHTTPRequestHandler) -> None:
             handler.send_response(200)
@@ -178,8 +178,8 @@ def test_a_content_length_that_is_not_a_number_does_not_lift_the_cap() -> None:
 
         return respond
 
-    refused(respond_with(padded(QUERY_ANSWER, CAP + 1)), QUERY, ApiError, "too large")
-    refused(respond_with(padded(MUTATION_ANSWER, CAP + 1)), MUTATION, UnknownOutcomeError, "too large")
+    refused(respond_with(padded(QUERY_ANSWER, CAP + 1)), QUERY, ApiError, "framing")
+    refused(respond_with(padded(MUTATION_ANSWER, CAP + 1)), MUTATION, UnknownOutcomeError, "framing")
 
 
 # -- encodings -------------------------------------------------------------------------------------------------------

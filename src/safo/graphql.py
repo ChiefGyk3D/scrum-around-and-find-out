@@ -110,20 +110,39 @@ def _https_handler(state: _Connected) -> urllib.request.HTTPSHandler:
     return Handler()
 
 
-def _read(response: Any) -> bytes:
-    """The whole body, or ApiError when it is larger than MAX_BODY. The one place a response body is read.
+_CONTENT_LENGTH = re.compile(r"[0-9]{1,15}")
 
-    At most MAX_BODY + 1 bytes are taken, so an oversized answer is seen without being held in memory, and it is
-    refused here, so no caller (a query, a mutation, an error body) can forget the check. `read(n)` returns a short
-    body quietly where `read()` raises; a body shorter than its Content-Length is still an IncompleteRead.
+
+def _content_length(response: Any) -> int | None:
+    """The announced body length, None when the response announces none, ApiError when the framing is malformed.
+
+    http.client reads the header with int(), which accepts a sign, spaces, underscores and non-ASCII digits, and it
+    ignores a value it cannot parse. Only ASCII digits, once, count here; anything else means the length cannot be
+    trusted, so neither can the claim that the body is complete.
     """
+    values = response.headers.get_all("Content-Length") or []
+    if not values:
+        return None
+    if len(values) != 1 or not _CONTENT_LENGTH.fullmatch(values[0]):
+        raise ApiError("GitHub's response framing was malformed (Content-Length)")
+    return int(values[0])
+
+
+def _read(response: Any) -> bytes:
+    """The whole body, or ApiError when it is larger than MAX_BODY or its framing is malformed. The one place a
+    response body is read, so no caller (a query, a mutation, an error body) can forget a check.
+
+    At most MAX_BODY + 1 bytes are taken, so an oversized answer is seen without being held in memory. `read(n)`
+    returns a short body quietly where `read()` raises; a body shorter than its Content-Length is still an
+    IncompleteRead.
+    """
+    declared = _content_length(response)
     data: bytes = response.read(MAX_BODY + 1)
     if len(data) > MAX_BODY:
         raise ApiError(f"GitHub's response was too large (more than {MAX_BODY} bytes)")
-    declared = response.headers.get("Content-Length", "")
     bodiless = getattr(response, "status", 200) in (204, 304)  # these carry no body whatever Content-Length says
-    if not bodiless and declared.isdigit() and len(data) < int(declared):
-        raise http.client.IncompleteRead(data, int(declared) - len(data))
+    if not bodiless and declared is not None and len(data) < declared:
+        raise http.client.IncompleteRead(data, declared - len(data))
     return data
 
 
@@ -204,8 +223,8 @@ class Client:
                 if err.before_send:
                     raise ApiError(f"could not reach GitHub for {op}: {err.error.__class__.__name__}") from None
                 raise self._unknown(op, "the connection failed after the request was sent", cause=err.error) from None
-            except ApiError as err:  # the response was refused unread (too large): the request had gone out
-                raise self._unknown(op, "the response was too large to read", cause=err) from None
+            except ApiError as err:  # refused unread (too large, malformed framing): the request had gone out
+                raise self._unknown(op, str(err), cause=err) from None
             self.requests += 1
             if status == 401:
                 raise AuthError(f"GitHub refused the token (401) on {op}")

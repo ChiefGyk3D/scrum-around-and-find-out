@@ -21,7 +21,7 @@ carries: a `ROLE:` line, then `HEAD: <sha>   BASE: <sha>`) with the pull request
 
 | Exit | Output starts with | Meaning |
 |---|---|---|
-| 0 | `FRESH` | the latest review report names the current head and was posted no earlier than the head arrived |
+| 0 | `FRESH` | the latest review report names the current head and was posted after the head arrived (proven by a force-push event) |
 | 1 | `STALE` | it names an older head (both short SHAs are printed), predates the head, or predates a base change. Exit 1 means only this: a crash is exit 2 |
 | 2 | `UNKNOWN` | no report, an unusable SHA, an internal error, or an answer from GitHub that could not be read in full |
 
@@ -54,18 +54,24 @@ What it reads, and how strictly:
   that does not mention `ROLE`, or comes from anyone else, is ignored. The HTML is never copied into the output.
 - The head is read before the comments and again after them. If it moved, the answer is unknown ("head moved while
   reading"), not a comparison against a stale read.
-- **A report is fresh only if it was posted no earlier than the moment its commit became the head.** The head's time is
-  the latest force-push event (`HeadRefForcePushedEvent`, from the pull request timeline, the last 50 events) whose
-  result is the head; with none, it is the head commit's `committedDate`. The commit date is set by its author, so
-  that second case is a floor, not proof. The report's time is the later of its creation and its last edit, so editing
-  an old report after a push counts as a new report. A report posted before that time is STALE ("posted before it
-  became the head"); a report posted exactly at that time is fresh. This closes the replay: a report naming `aaaa`
-  written while the head was `bbbb`, then a force-push to `aaaa`, reads STALE, as does a force-push back to an earlier
-  reviewed commit. A timeline too long to read in full, a head commit that cannot be found or dated, or any event it
-  cannot read is unknown.
-- **A base branch change after the report is STALE** (`BaseRefChangedEvent`; a change at the same second as the report
-  is not). This is how the `BASE:` line of the header is covered: it is parsed but not compared with anything, and the
-  timeline is the evidence instead.
+- **A report is fresh only if it was posted AFTER the moment its commit became the head, and GitHub proves that
+  moment.** The only event GitHub records with the time a head arrived is a force-push (`HeadRefForcePushedEvent`
+  from the pull request timeline, the last 50 events); the head's time is the latest one whose result is the head. A
+  normal push leaves no event with a time (checked 2026-10-27 by read-only schema introspection and a live query:
+  `PullRequestCommit` has no timestamp, `PullRequestRevisionMarker` is "the last commit the viewer has seen" and is
+  per viewer, and `Commit.pushedDate` answers null). A commit's own `committedDate` and `authoredDate` are chosen by
+  its author, so they prove nothing and are **never used**. With no force-push to the head the answer is
+  **unknown** ("cannot tell when this commit became the head"), so a pull request that only ever received normal
+  pushes reads unknown, not fresh. The report's time is the later of its creation and its last edit, so editing an old
+  report after a push counts as a new report. A report posted before the head arrived is STALE ("posted before it became
+  the head"). This closes the replay: a report naming `aaaa` written while the head was `bbbb`, then a force-push to
+  `aaaa`, reads STALE, as does a force-push back to an earlier reviewed commit. A timeline too long to read in full, or
+  any event it cannot read, is unknown.
+- **Equal timestamps are unknown.** GitHub timestamps have one-second resolution, so a report and the push (or a base
+  change) with the same timestamp cannot be put in order: the answer is unknown ("the report and the push have the
+  same timestamp; their order cannot be told"), not fresh and not stale.
+- **A base branch change after the report is STALE** (`BaseRefChangedEvent`). This is how the `BASE:` line of the
+  header is covered: it is parsed but not compared with anything, and the timeline is the evidence instead.
 - A full 40-hex head is compared as is. A shorter one (7 to 39 hex characters) is looked up among the pull request's own
   commits and counts only when exactly one commit starts with it; no match, several matches or a commit list too long to read in full is
   unknown. Fewer than 7 characters, or anything that is not hex (a left-over `<short sha>`), is unknown.
@@ -77,7 +83,9 @@ What it reads, and how strictly:
   left out), and everything printed is escaped. An internal error prints only its class name.
 - The client refuses any answer from GitHub over 32 MiB at the one place a body is read, for a query and for a
   mutation alike (an oversized mutation answer is an unknown outcome, never a success), and it does not ask for or
-  decode a compressed answer. JSON nested too deeply, text that is not UTF-8, or `errors` that is not a list of
+  decode a compressed answer. A `Content-Length` that is not plain ASCII digits (a sign, spaces, underscores, other
+  scripts' digits, a list, an empty or repeated header) is malformed framing: the answer is refused, and a sent mutation
+  is an unknown outcome, because a body cut short under such a header would otherwise read as complete. JSON nested too deeply, text that is not UTF-8, or `errors` that is not a list of
   objects is an error of the client, so it ends as unknown like any other.
 - **The exit code is the answer.** The verdict is computed first and printed after. If printing fails (a closed
   stream, a broken pipe), the exit code is unchanged. If the verdict cannot be computed for any reason, including an
@@ -88,9 +96,10 @@ Known limits:
 
 - Review bodies (`gh pr review`) and review-thread comments are not read. A report posted only there reads as no
   report. This is tracked in [#160](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/160).
-- The time of a head with no force-push is the commit's own `committedDate`, which its author controls; the check
-  proves the report is not older than that claim, not that the commit arrived then. A trusted commenter can also still
-  post a forged report after a push: the check cannot tell who wrote it (see below).
+- A normally pushed head cannot be dated (see above), so the check is only useful for a head that arrived by
+  force-push, or when you accept unknown. A different source of server-set time (check suites, for example) could
+  widen this; none is used.
+- A trusted commenter can still post a forged report after a push: the check cannot tell who wrote it (see below).
 - A list item is never read as a report. A report posted as a Markdown list is therefore unknown.
 - It sends read queries only (the repository's GraphQL client; GraphQL travels over POST, but no mutation is ever sent).
 

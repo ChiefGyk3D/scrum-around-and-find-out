@@ -131,7 +131,8 @@ class FPull:
     commits: list[Any] = field(default_factory=list)  # commit oids, oldest first
     state: Any = "OPEN"
     draft: Any = False
-    pushed: Any = "2020-01-01T00:00:00Z"  # committedDate of the last commit (the head), when no force-push says better
+    pushed: Any = "2000-01-01T00:00:00Z"  # committedDate of the head commit: set by its author, never proof of arrival
+    arrived: Any = "2020-01-01T00:00:00Z"  # when a force-push event says the head arrived; None: no event proves it
     events: list[Any] = field(default_factory=list)  # timeline nodes: force pushes and base changes, oldest first
     more_events: Any = False  # pageInfo.hasPreviousPage of the timeline
     last_commit: Any = None  # replaces the commits(last: 1) node when set

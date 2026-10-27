@@ -82,6 +82,17 @@ def test_plain_inline_elements_inside_a_paragraph_are_read() -> None:
     assert handoff.report_lines(html) == ["ROLE: reviewer MODEL", ""]
 
 
+@pytest.mark.parametrize("tag", ["a", "strong", "em", "b", "i", "del", "s", "g-emoji"])
+def test_each_allowed_inline_element_keeps_its_text_readable(tag: str) -> None:
+    """One case per tag: dropping any one from the allowed set turns a case red. Hand-written, UNVERIFIED."""
+    assert handoff.report_lines(f"<p>ROLE: <{tag}>reviewer</{tag}> x</p>") == ["ROLE: reviewer x", ""]
+    assert handoff.report_lines(f"<p><{tag}>ROLE: reviewer</{tag}></p>") == ["ROLE: reviewer", ""]
+
+
+def test_the_allowed_inline_set_is_exactly_this() -> None:
+    assert set(handoff.INLINE) == {"a", "strong", "em", "b", "i", "del", "s", "g-emoji"}
+
+
 @pytest.mark.parametrize("wrapper", ["code", "span", "tt", "kbd", "custom-x", "sup"])
 def test_text_inside_any_other_inline_element_is_dropped(wrapper: str) -> None:
     html = f"<p>ROLE: <{wrapper}>reviewer</{wrapper}></p>"
