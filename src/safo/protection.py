@@ -33,7 +33,7 @@ from collections.abc import Callable
 from typing import Any
 
 from safo import __version__, bounded
-from safo.codeowners import CodeownersError, Rule, _tokens, covered, parse_rules
+from safo.codeowners import CodeownersError, Rule, covered, parse_rules
 from safo.errors import SafoError
 
 METHODS = ("GET",)  # the only verb this module can send
@@ -440,6 +440,36 @@ def codeowners_error_lines(rest: Rest, base: str, ref: str, place: str) -> set[i
     return lines
 
 
+INVISIBLE = "᠎​‌‍⁠﻿"  # zero-width or format characters some Unicode versions class as spaces
+
+
+def ascii_tokens(line: str) -> list[str]:
+    """The whitespace-separated tokens of a line, split on ASCII space and tab only (never `str.split()`, which also
+    splits on non-ASCII spaces and so would find an owner GitHub reads as part of the pattern). A backslash keeps the
+    next character, and an unescaped `#` starts a comment, as in `safo.codeowners`."""
+    out: list[str] = []
+    current: list[str] = []
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if char == "\\":
+            current.append(line[i : i + 2])
+            i += 2
+            continue
+        if char == "#":
+            break
+        if char in " \t":
+            if current:
+                out.append("".join(current))
+                current = []
+        else:
+            current.append(char)
+        i += 1
+    if current:
+        out.append("".join(current))
+    return out
+
+
 def codeowners_lines(text: str) -> list[str]:
     """The lines of a CODEOWNERS file, split on `\\n` only (one trailing `\\r` of a CRLF dropped), so the numbers match
     the ones GitHub's errors endpoint reports. `str.splitlines` also breaks on a lone `\\r`, `\\v`, `\\f`,
@@ -447,13 +477,13 @@ def codeowners_lines(text: str) -> list[str]:
     attribute an error to the wrong rule; so any of those, any other control or format character (NUL, a BOM
     anywhere) is "cannot tell" rather than a guess about what GitHub does with it (INFERRED, not observed)."""
     for index, char in enumerate(text):
-        if char in "\n\t":
-            continue
+        if char in "\n\t ":
+            continue  # the only whitespace GitHub's parser knows inside a line is the ASCII space and tab
         if char == "\r":
             if text[index + 1 : index + 2] != "\n":
                 raise CannotTell("cannot tell: CODEOWNERS has a carriage return that is not part of a CRLF line end")
-        elif unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp"):
-            raise CannotTell("cannot tell: CODEOWNERS has a control, format or line-separator character")
+        elif char.isspace() or char in INVISIBLE or unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp", "Zs"):
+            raise CannotTell("cannot tell: CODEOWNERS has a control, format, separator or non-ASCII space character")
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()  # the newline that ends the last line
@@ -466,7 +496,7 @@ def trusted_rules(text: str, bad_lines: set[int]) -> tuple[list[Rule], int]:
     kept: list[str] = []
     downgraded = 0
     for number, line in enumerate(codeowners_lines(text), 1):
-        tokens = _tokens(line)
+        tokens = ascii_tokens(line)
         if tokens and (number in bad_lines or not all(strict_owner(t) for t in tokens[1:])):
             if tokens[1:]:
                 downgraded += 1

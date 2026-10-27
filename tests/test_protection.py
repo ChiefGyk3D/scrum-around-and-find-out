@@ -386,7 +386,7 @@ def test_a_duplicate_key_is_cannot_tell() -> None:
     cannot_tell({**good_routes(), f"{REPO}/branches/main/protection": (200, {}, body)})
 
 
-@pytest.mark.parametrize("status", [201, 202, 403, 500])
+@pytest.mark.parametrize("status", [201, 202, 403, 404, 500])
 @pytest.mark.parametrize("route", ALL_READS)
 def test_only_200_and_404_are_read_even_with_a_good_looking_body(route: str, status: int) -> None:
     body = good_routes()[route][2]
@@ -993,7 +993,8 @@ def test_the_default_fresh_names_differ_on_every_run() -> None:
     assert first != second and len(first) == len(set(first)) == 21
     assert all(p.startswith(".github/workflows/") for p in first)
     assert {p.count("/") for p in first} == {2, 3, 4}  # flat, one deep and two deep
-    assert not any("zz" in p or "probe" in p for p in first)  # no fixed prefix a rule could own
+    assert len({p.split("/")[2][:2] for p in first}) > 8  # no fixed prefix a rule could own
+    assert not any(p.split("/")[2].startswith(("zz", "probe")) for p in first)
     assert any(p.endswith(".yml") for p in first) and any(p.endswith(".yaml") for p in first)
 
 
@@ -1515,3 +1516,42 @@ def test_codeowners_lines_splits_on_newline_only() -> None:
     for char in ODD:
         with pytest.raises(Exception, match="cannot tell"):
             codeowners_lines(f"a{char}b\n")
+
+
+# -- whitespace: GitHub splits tokens on ASCII space and tab only --------------------------------------------------
+
+SPACES = [
+    "\u00a0", "\u1680", *(chr(c) for c in range(0x2000, 0x200B)), "\u202f", "\u205f", "\u3000",
+    "\u180e", "\u200b", "\u200c", "\u200d", "\u2060", "\ufeff",
+]  # fmt: skip
+SPACE_IDS = [f"U+{ord(c):04X}" for c in SPACES]
+
+
+@pytest.mark.parametrize("char", SPACES, ids=SPACE_IDS)
+@pytest.mark.parametrize(
+    "line",
+    [
+        "/board.yaml{c}@owner",  # between the pattern and the owner: one token for GitHub, two for str.split()
+        "/board{c}.yaml @owner",  # inside the pattern
+        "/board.yaml @owner{c}# note",  # around a comment
+        "/board.yaml @owner #{c}note",
+        "{c}/board.yaml @owner",  # leading
+        "/board.yaml @owner{c}",  # trailing
+        "/board.yaml @ow{c}ner",  # inside the owner
+    ],
+    ids=range(7),
+)
+def test_a_non_ascii_space_or_invisible_character_is_cannot_tell(char: str, line: str) -> None:
+    cannot_tell(with_owners(GOOD_OWNERS.replace("/board.yaml @owner", line.format(c=char))))
+
+
+def test_tab_separated_tokens_and_comments_still_work() -> None:
+    text = "/board.yaml\t\t@owner\t# a note\n/.github/CODEOWNERS \t @owner\n/.github/workflows/\t@owner @other\n"
+    assert check(with_owners(text))[0] == 0
+
+
+def test_ascii_tokens_splits_on_space_and_tab_only() -> None:
+    from safo.protection import ascii_tokens
+
+    assert ascii_tokens("a \t b\\ c #d e") == ["a", "b\\ c"]
+    assert ascii_tokens("a\u00a0b c") == ["a\u00a0b", "c"]  # one token for GitHub; the lines are refused before this

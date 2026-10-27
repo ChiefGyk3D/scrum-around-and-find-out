@@ -177,6 +177,12 @@ GitHub's own answer from `GET /repos/{owner}/{repo}/codeowners/errors?ref=<commi
 docs and not yet observed). A line that fails either layer is treated as having no owner. If the errors endpoint cannot
 be read, that is exit 2.
 
+Lines are split on `\n` only (a CRLF is fine), and tokens on ASCII space and tab only, which is how GitHub reads the file
+(INFERRED from its docs, not observed). Anything else that some parsers treat as a break or a space, a lone carriage
+return, `\v`, `\f`, `\x1c`-`\x1e`, `\x85`, U+2028/U+2029, any non-ASCII space (U+00A0, U+2000-U+200A, U+3000, ...), a
+zero-width or format character, NUL or any control character, a byte order mark, is exit 2: a parser that numbers lines
+or splits tokens differently could attribute an error to the wrong rule, or find an owner GitHub does not.
+
 `codeowners-workflows` is judged three ways, and all must pass:
 
 1. **Real files.** The workflow directory is listed from the git tree at that commit (root, `.github`, then
