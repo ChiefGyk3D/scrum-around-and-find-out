@@ -2,7 +2,7 @@
 
 > **The hard rule: no hidden work.** Every unit of work, human or agent, has an issue (or a Jira key) and a board card
 > before work starts, and every pull request links its issue (`Refs #n` or `Closes #n`). Work without a card is a defect
-> of the process. `safo hooks guard`, `safo audit`, `reconcile` and `sync` enforce it; see
+> of the process. the guard hook (`safo-guard`), `safo audit`, `reconcile` and `sync` enforce it; see
 > [docs/no-hidden-work.md](docs/no-hidden-work.md).
 
 SAFO is three things, built for one maintainer running a team of AI agents across a dozen repositories:
@@ -67,7 +67,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `local run` | Sends one prompt to the local model (Ollama) that routing picks, never one that would evict a protected model |
 | `profiles verify` | Resolves every evidence pointer of the agent profiles in `agents.yaml` and prints each claim beside what it cites; checks CODEOWNERS covers the files the profiles are made from. Read-only |
 | `protection --repo OWNER/NAME` | Reads the default branch's protection back with GET requests only and exits 0 only when code-owner review, the `CI green` check, an up-to-date branch, administrators, no bypass, no force push or deletion and CODEOWNERS coverage (owners GitHub accepts, `board.yaml`, CODEOWNERS itself, and every existing or future file under `.github/workflows/`) all hold. Exit 1 names each condition that does not; exit 2 when a response cannot be read. A `CI green` check not pinned to an app prints a NOTE; `--require-app-id` makes the pin a condition. See [Adoption](docs/adoption.md) |
-| `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard` |
+| `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard`; the installed guard hook is the `safo-guard` entry point ([`docs/hooks.md`](docs/hooks.md)) |
 | `gemini` | `quota`, `approve`, `ask`, `keys` and `usage`: a Gemini client that cannot spend money on its own: free-tier calls for public material follow the maintainer's own rate limits from a local ledger, a 429 stops the job and never falls through to paid, and every paid call needs its own single-use approval signed by a hardware security key (at most 2 USD a job and 10 USD a month); `keys` lists and checks the enrolled keys, `usage` adds a vendor-observed spend row. The key is read by name from the secret store at call time. Read-only unless you ask; see [`docs/gemini.md`](docs/gemini.md) |
 
 The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`, `protection`) read

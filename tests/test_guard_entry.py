@@ -297,3 +297,9 @@ def test_mode_is_unchanged(_private_home: Path) -> None:
 
     assert cli_main(["hooks", "mode", "block"])[0] == 0
     assert read_mode({"HOME": str(_private_home)}) == "block"
+
+
+def test_the_entry_arms_the_process_clock(block_home: Path, run_guard: Any) -> None:
+    assert mod.process_started is None
+    run_guard([], dispatch())
+    assert mod.process_started == safo_package.PROCESS_STARTED, "the budget counts from the start of the process"

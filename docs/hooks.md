@@ -8,9 +8,36 @@ approval token, and that includes a model that a prompt injection has talked int
 |---|---|---|
 | `safo hooks install [--settings PATH] [--mode warn\|block] [--command safo]` | none | Merges the two hooks into a `settings.json` (default `~/.claude/settings.json`). Keeps every other hook and setting, is a no-op when run again, keeps a private backup before it replaces the file, and refuses to overwrite a file that changed while it worked (bytes, or the file itself: device, inode, size and modification time are checked again just before the replace, so a rename-over with identical bytes is caught too, with `settings changed while installing`). `--dry-run` writes nothing. |
 | `safo hooks probe` | SessionStart | Asks each Ollama endpoint in `agents.yaml` which models are loaded (two bounded GETs, never a generate), saves the answer and tells the session whether the local LLM is reachable. |
-| `safo hooks guard` | PreToolUse, matcher `Agent\|Task\|Bash` | Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). Two more rules cover Gemini (the sixth and seventh, which deny in every mode). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
+| `safo-guard` (or `python3 -m safo.guard`) | PreToolUse, matcher `Agent\|Task\|Bash` | The guard's own entry point, the command `install` writes (see [The guard's own entry point](#the-guards-own-entry-point)). Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). Two more rules cover Gemini (the sixth and seventh, which deny in every mode). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
 | `safo hooks mode warn\|block` | none | `warn` reports a broken rule and allows the dispatch (the default); `block` denies it. |
-| `safo hooks status [--session ID --agents PATH]` | none | The mode, the retained counts, the health of the hooks and of the last probe. |
+| `safo hooks status [--session ID --agents PATH] [--settings PATH]` | none | Which form of the guard hook is installed (`new`, `legacy`, `mixed`, `absent`), the mode, the retained counts, the health of the hooks and of the last probe. |
+
+A line `safo hooks guard ...` from an earlier install is the legacy form. It keeps working (see below) and `install`
+migrates it.
+
+## The guard's own entry point
+
+The hook runs `safo-guard`, or `python3 -m safo.guard`, never `safo hooks guard`. The guard is a short-lived process
+and the old form had to guess from a garbled command line whether it was the guard (fifteen review passes on PR #116
+each found another line that skipped the verdict). The new entry never parses subcommands: it reads only `--agents` and
+`--agents-local` (`--opt V` or `--opt=V`, the last one wins, an empty value is absent, a value that starts with one dash
+is a path, a following word that starts with `--` is not taken as the value) and ignores every other word, `--help` and
+`--version` included. It uses no argparse, imports no mode, writes nothing to standard error and prints no help. The
+event on standard input gets its verdict through the same code as before and the process ends exactly once, inside the
+deadline. A command line it cannot make sense of changes nothing about that: the event is still read and judged with
+default configuration discovery and the block semantics; only an unreadable event takes the cannot-tell path (the
+visible degraded allow).
+
+`install` writes the launcher you chose, resolved the same way: `safo` gives `safo-guard`, `python3 -m safo` gives
+`python3 -m safo.guard`, and the absolute path of a safo executable gives the `safo-guard` script beside it (which must
+exist). `--agents` and `--agents-local` follow as before. A rerun of `install` replaces an existing legacy
+`safo hooks guard` line with the new one, in place, and touches no other hook; a legacy line with a different launcher
+is still a "migrate by hand" refusal. `safo hooks status` shows the installed form: `new`, `legacy`, `mixed` (both) or
+`absent`.
+
+Legacy routing (`guard_words` in `safo.modes.hooks`) stays exactly as it was for lines already installed, and is frozen:
+it is not extended. Changing the code does not touch your live `settings.json`; re-installing the live hook is a separate
+step you run yourself after the release (`safo hooks install`, then `safo hooks status`).
 
 ## The four rules
 
