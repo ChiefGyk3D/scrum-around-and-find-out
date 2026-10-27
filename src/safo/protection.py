@@ -491,6 +491,7 @@ def find_codeowners(rest: Rest, base: str, root: list[Entry], github: list[Entry
 
 def git_blob_sha(data: bytes) -> str:
     """The object name git gives a file with these bytes; it ties the content to the sha the tree declared."""
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1 -- git blob name, not crypto
     return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
 
 
