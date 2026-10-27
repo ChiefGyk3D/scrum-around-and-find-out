@@ -2403,7 +2403,10 @@ def test_a_configuration_load_that_blocks_is_cut_at_the_limit_whatever_the_floor
     monkeypatch.setattr(mod, "load_agents_for", block)
     started = time.monotonic()
     try:
-        assert mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents)) == 0
+        # No verdict exists (the load never finished): the degraded notice is delivered (0) or, when the limit already
+        # passed, undelivered (1). Never a block (2), and never later than the limit.
+        code = mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents))
+        assert code in (0, 1), code
         assert time.monotonic() - started < 1.5, "cut at the limit, with the load still blocked"
     finally:
         release.set()
