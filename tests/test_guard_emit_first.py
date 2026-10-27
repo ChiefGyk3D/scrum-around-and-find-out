@@ -2422,7 +2422,9 @@ DASH_LOCAL_SHAPES = [
 ]
 
 
-def run_dashed(entry: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, argv: list[str], event: str) -> tuple[int, str]:
+def run_dashed(
+    entry: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, argv: list[str], event: str
+) -> tuple[int, str]:
     monkeypatch.setattr(sys, "stdin", io.StringIO(event))
     code = entry(argv)
     return code, capsys.readouterr().out
@@ -2483,7 +2485,7 @@ def test_the_static_top_level_commands_match_the_real_registry() -> None:
     """The guard never reads the registry; this is the only place it is compared against it."""
     from safo.modes import load_all  # local: the test, never the guard path, enumerates the modes
 
-    assert mod.TOP_LEVEL_COMMANDS == tuple(sorted(load_all())), "update TOP_LEVEL_COMMANDS in modes/hooks.py"
+    assert tuple(sorted(load_all())) == mod.TOP_LEVEL_COMMANDS, "update TOP_LEVEL_COMMANDS in modes/hooks.py"
     assert "hooks" in mod.TOP_LEVEL_COMMANDS, "something was collected"
 
 
