@@ -34,7 +34,7 @@ exist). `--agents` and `--agents-local` follow as before. A rerun of `install` r
 `safo hooks guard` line with the new one, in place, and touches no other hook; a legacy line with a different launcher
 is still a "migrate by hand" refusal. `safo hooks status` shows the installed form: `new`, `legacy`, `mixed` (both), `absent`, or `unknown` (the file cannot be
 read as settings). It counts an entry as the guard by the SAME rule `install` accepts one (one function,
-`entry_problems` in `safo.hooks`): the type is `command` and the matcher is `Agent|Task|Bash` (or the older
+`entry_problems` in the hooks module of the safo package): the type is `command` and the matcher is `Agent|Task|Bash` (or the older
 `Agent|Task` that `install` migrates). A guard-shaped command under another matcher (`Read`, empty, a regex that
 leaves out Agent) or another type (`prompt`, `agent`, none) would never run, so status says `ineffective (wrong
 matcher, wrong type: ...)`, never `new` or `legacy`; `install` refuses the same entry as ambiguous, to be fixed by
