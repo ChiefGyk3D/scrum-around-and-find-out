@@ -28,6 +28,7 @@ def test_the_schema_names_its_rules_keys() -> None:
         "gate_exempt_repos",
         "gate_require_admin_enforced",
         "gate_admin_exempt_repos",
+        "gate_check_app_id",
     } <= RULES_KEYS
 
 

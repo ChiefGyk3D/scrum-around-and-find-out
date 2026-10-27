@@ -71,6 +71,7 @@ rules:
   gate_exempt_repos: []          # owner/name, listed in repositories: not evaluated for the gate
   gate_require_admin_enforced: false  # true also reports a rule that does not apply to administrators
   gate_admin_exempt_repos: []    # with the line above on: owner/name where that is accepted
+  gate_check_app_id: 15368       # the app the gate check must be pinned to (1..2147483647; 15368: GitHub Actions)
   status:
     opened: Backlog
     opened_pr: In progress
