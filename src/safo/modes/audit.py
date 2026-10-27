@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from safo.context import Context
 from safo.coverage import card_findings, not_configured, read_tracked, unlinked_pulls
 from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, MalformedDataError, NotFoundError
+from safo.gate import gate_findings
 from safo.items import ItemState, collect_work, list_board_items
 from safo.live import LiveBoard, LiveField, load_live
 from safo.modes import Mode, register
@@ -110,6 +111,10 @@ def check_tracking(ctx: Context, board: Board, live: LiveBoard, items: list[Item
     held = read_tracked(ctx.client, board, live)
     out.drift += card_findings(board, items, held, repos)
     out.notes += not_configured(board)
+    drift, unknown, notes = gate_findings(ctx.client, board)
+    out.drift += drift
+    out.unknown += unknown
+    out.notes += notes
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
@@ -150,9 +155,12 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         ctx.say("UI-only settings (no API can read or set these; check by eye):")
         for text in board.ui_only:
             ctx.say(f"  - {text}")
-    ctx.say(
+    summary = (
         "clean" if findings.exit_code == EXIT_OK else f"{len(findings.drift)} drift, {len(findings.unknown)} unknown"
     )
+    if not board.rules.gate_check:
+        summary += " (branch gate NOT checked: rules.gate_check is empty)"
+    ctx.say(summary)
     return findings.exit_code
 
 

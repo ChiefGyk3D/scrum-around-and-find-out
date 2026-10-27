@@ -127,6 +127,13 @@ class Rules:
     add_closed_days: int = 0  # reconcile also adds items closed or merged within this many days, as Done
     tracking: Tracking = field(default_factory=Tracking)
     threat_model: ThreatModel = field(default_factory=ThreatModel)
+    # The branch gate: the default branch of every listed repository must require this check (empty turns it off).
+    gate_check: str = "CI green"
+    gate_forbid_force_push: bool = True  # a default branch that allows force pushes is also reported
+    gate_exempt_repos: tuple[str, ...] = ()  # owner/name: not audited for the gate
+    # Off by default: the shipped baseline (scripts/apply-baseline.sh) sets enforce_admins to false.
+    gate_require_admin_enforced: bool = False
+    gate_admin_exempt_repos: tuple[str, ...] = ()  # owner/name: with the above on, admins may bypass here, accepted
 
 
 @dataclass(frozen=True)
@@ -405,6 +412,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
         views.append(view)
 
     rules = _parse_rules(r, top.get("rules", {}))
+    _check_gate_repos(r, rules, repos)
     agents = _parse_agents(r, top.get("agents", {}))
     ui_only = tuple(r.string(s, f"ui_only[{i}]") for i, s in enumerate(r.seq(top.get("ui_only", []), "ui_only")))
     board = Board(project, tuple(repos), tuple(fields), tuple(views), rules, agents, ui_only)
@@ -413,21 +421,28 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
     return board
 
 
+# Every key allowed under `rules`; docs/board-yaml.md and examples/safo.yaml must show each (test_rules_documented).
+RULES_KEYS = frozenset(
+    {
+        "status_field",
+        "area_field",
+        "status",
+        "done_date_field",
+        "new_item_defaults",
+        "add_closed_days",
+        "tracking",
+        "threat_model",
+        "gate_check",
+        "gate_forbid_force_push",
+        "gate_exempt_repos",
+        "gate_require_admin_enforced",
+        "gate_admin_exempt_repos",
+    }
+)
+
+
 def _parse_rules(r: Reader, raw: object) -> Rules:
-    m = r.mapping(
-        raw,
-        "rules",
-        {
-            "status_field",
-            "area_field",
-            "status",
-            "done_date_field",
-            "new_item_defaults",
-            "add_closed_days",
-            "tracking",
-            "threat_model",
-        },
-    )
+    m = r.mapping(raw, "rules", set(RULES_KEYS))
     s = r.mapping(
         m.get("status", {}), "rules.status", {"opened", "reopened", "closed", "merged", "opened_pr", "draft_pr"}
     )
@@ -457,7 +472,60 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
         r.integer(m.get("add_closed_days", 0), "rules.add_closed_days"),
         _parse_tracking(r, m.get("tracking", {})),
         _parse_threat_model(r, m.get("threat_model", {})),
+        _parse_gate_check(r, m.get("gate_check", "CI green")),
+        _parse_gate_force(r, m.get("gate_forbid_force_push", True)),
+        _parse_gate_exempt(r, m.get("gate_exempt_repos", []), "gate_exempt_repos"),
+        _parse_gate_admin(r, m.get("gate_require_admin_enforced", False)),
+        _parse_gate_exempt(r, m.get("gate_admin_exempt_repos", []), "gate_admin_exempt_repos"),
     )
+
+
+def _parse_gate_check(r: Reader, raw: object) -> str:
+    if not isinstance(raw, str):
+        raise r.fail("rules.gate_check", "expected text: a status check name, or an empty string to turn the rule off")
+    name = raw
+    if name != name.strip():
+        raise r.fail("rules.gate_check", "the status check name has leading or trailing whitespace; remove it")
+    if len(name) > 100 or any(ord(c) < 32 for c in name):
+        raise r.fail("rules.gate_check", "expected a status check name: at most 100 characters, no control characters")
+    return name
+
+
+def _parse_gate_force(r: Reader, raw: object) -> bool:
+    if not isinstance(raw, bool):
+        raise r.fail("rules.gate_forbid_force_push", "expected true or false")
+    return raw
+
+
+def _parse_gate_admin(r: Reader, raw: object) -> bool:
+    if not isinstance(raw, bool):
+        raise r.fail("rules.gate_require_admin_enforced", "expected true or false")
+    return raw
+
+
+def _check_gate_repos(r: Reader, rules: Rules, repos: list[Repository]) -> None:
+    """An exemption names a repository listed in `repositories` and is listed once: a typo would exempt nothing."""
+    listed = {repo.full_name.lower() for repo in repos}
+    for key in ("gate_exempt_repos", "gate_admin_exempt_repos"):
+        seen: set[str] = set()
+        for i, entry in enumerate(getattr(rules, key)):
+            folded = entry.lower()
+            if folded in seen:
+                raise r.fail(f"rules.{key}[{i}]", f"{entry!r} is listed twice")
+            seen.add(folded)
+            if folded not in listed:
+                raise r.fail(f"rules.{key}[{i}]", f"{entry!r} is not listed in repositories")
+
+
+def _parse_gate_exempt(r: Reader, raw: object, key: str) -> tuple[str, ...]:
+    exempt: list[str] = []
+    for i, name in enumerate(r.seq(raw, f"rules.{key}")):
+        text = r.string(name, f"rules.{key}[{i}]")
+        owner, _, repo = text.partition("/")
+        if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
+            raise r.fail(f"rules.{key}[{i}]", "expected owner/name")
+        exempt.append(text)
+    return tuple(exempt)
 
 
 def _parse_tracking(r: Reader, raw: object) -> Tracking:

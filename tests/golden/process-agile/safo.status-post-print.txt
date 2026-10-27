@@ -1,0 +1,18 @@
+exit=0
+--- stdout ---
+::stop-commands::00000000000000000000000000000000
+1 done since 2026-10-01, 1 in progress, 1 waiting on the maintainer, 1 next.
+
+**Done since 2026-10-01** (1)
+- ChiefGyk3D/scrum-around-and-find-out#4 Merged and done
+
+**In progress** (1)
+- ChiefGyk3D/scrum-around-and-find-out#1 Open work on the board (Claude)
+
+**Waiting on the maintainer** (1)
+- ChiefGyk3D/scrum-around-and-find-out#5 Waiting on the maintainer (You)
+
+**Next** (1)
+- ChiefGyk3D/scrum-around-and-find-out#6 Queued for next
+::00000000000000000000000000000000::
+--- stderr ---
