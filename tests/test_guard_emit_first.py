@@ -1951,7 +1951,8 @@ def run_entry(
     module: str = "safo",
 ) -> tuple[Watched, bool]:
     """Run `python -m MODULE ARGV` (`safo`, the real CLI entry point, or `safo.guard`, the guard's own) under a watchdog
-    that kills its process group at the scaled host timeout. Standard input is a pipe holding `payload`; standard error is, by default, a FULL pipe nobody reads.
+    that kills its process group at the scaled host timeout. Standard input is a pipe holding `payload`; standard
+    error is, by default, a FULL pipe nobody reads.
     Returns the outcome and whether the blocked pipe still holds exactly what it held (nothing was written to it)."""
     in_read, in_write = os.pipe()
     os.write(in_write, payload.encode())
