@@ -13,7 +13,7 @@ import re
 
 from safo import credentials
 from safo.context import LocalContext
-from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, SafoError
+from safo.errors import EXIT_DRIFT, EXIT_INTERRUPTED, EXIT_OK, EXIT_UNKNOWN, ConfigError, SafoError
 from safo.modes import LocalMode, register_local
 from safo.protection import API_URL, CannotTell, Rest, check
 
@@ -28,8 +28,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--api-url", default=API_URL, help="the REST API (https; plain http for loopback only)")
 
-
-EXIT_INTERRUPTED = 130  # the shell's code for SIGINT: stopped by the operator, nothing decided
 
 
 def emit(ctx: LocalContext, lines: list[str], code: int) -> int:

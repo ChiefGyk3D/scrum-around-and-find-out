@@ -14,6 +14,15 @@ documented and observed meaning (the live shapes are recorded in the pull reques
 Both mechanisms count: the classic branch protection rule and active branch rulesets that apply to the default branch.
 A condition holds when either one provides it; the two "nobody is exempt" conditions must hold for every source in
 effect. Rulesets in `evaluate` or `disabled` mode, and rulesets for tags, do not count.
+
+Limit, stated plainly: a read-back cannot prove that the settings were one state at one instant. GitHub offers no
+atomic snapshot, and GET requests are the only tool here. The whole read is done twice, the second time with the two
+mechanisms read in the opposite order (classic, rulesets, rulesets, classic), and any difference in any document, used
+or not, is "cannot tell". That defeats a world that changes between reads in step with them (an administrator
+alternating between a state with only the classic rule and one with only a ruleset, so the two mechanisms are seen in
+different states) but not a change timed to the two ends of the sequence: classic seen in state A at the first and the
+last read, rulesets in state B in between. That can still pass, and no sequence of reads can exclude it. Anyone who can
+change the protection can defeat this check; it reports what GitHub answered, not that the answer held at any one time.
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ import binascii
 import dataclasses
 import hashlib
 import http.client
+import json
 import re
 import secrets
 import string
@@ -354,21 +364,43 @@ def commit_tree(rest: Rest, base: str, head: str) -> str:
     return tree
 
 
-def read_sources(
-    rest: Rest, base: str, branch: str, agent: str
-) -> tuple[Source | None, tuple[tuple[int, Source], ...]]:
-    """(the classic rule or None, the applying active rulesets as (id, source) in id order)."""
-    classic: Source | None = None
+def raw(*documents: Any) -> str:
+    """A document as read, canonical, so a change in any field (not only the ones this check uses) can be seen."""
+    return json.dumps(documents, sort_keys=True, separators=(",", ":"))
+
+
+def read_classic(rest: Rest, base: str, branch: str, agent: str, seen: list[str]) -> Source | None:
     status, body, _ = rest.get(
         f"{base}/branches/{urllib.parse.quote(branch, safe='/')}/protection", "branch protection"
     )
+    seen.append(raw(status, body))
     if status == 200:
-        classic = parse_classic(body, agent)
-    elif not (isinstance(body, dict) and body.get("message") == "Branch not protected"):
+        return parse_classic(body, agent)
+    if not (isinstance(body, dict) and body.get("message") == "Branch not protected"):
         raise CannotTell("cannot tell: branch protection answered 404 with something other than 'Branch not protected'")
+    return None
+
+
+def read_sources(
+    rest: Rest, base: str, branch: str, agent: str, *, classic_first: bool = True
+) -> tuple[Source | None, tuple[tuple[int, Source], ...], tuple[str, ...]]:
+    """(the classic rule or None, the applying active rulesets as (id, source) in id order, every protection document
+    as read). `classic_first` sets which mechanism is read first; the second pass reads them the other way round."""
+    seen: list[str] = []
+    classic: Source | None = None
+    if classic_first:
+        classic = read_classic(rest, base, branch, agent, seen)
+    rulesets = read_rulesets(rest, base, branch, seen)
+    if not classic_first:
+        classic = read_classic(rest, base, branch, agent, seen)
+    return classic, rulesets, tuple(sorted(seen))
+
+
+def read_rulesets(rest: Rest, base: str, branch: str, seen: list[str]) -> tuple[tuple[int, Source], ...]:
     status, listing, headers = rest.get(
         f"{base}/rulesets?per_page={MAX_RULESETS}&includes_parents=true", "the rulesets"
     )
+    seen.append(raw(status, listing))
     if status != 200 or not isinstance(listing, list):
         raise CannotTell("cannot tell: the ruleset listing is not a list")
     _no_next_page(headers, "the ruleset listing")
@@ -386,12 +418,13 @@ def read_sources(
         if target != "branch" or enforcement != "active":
             continue
         status, detail, _ = rest.get(f"{base}/rulesets/{ident}", "a ruleset")
+        seen.append(raw(status, detail))
         if status != 200:
             raise CannotTell("cannot tell: a listed ruleset could not be read")
         source = parse_ruleset(detail, entry, branch)
         if source is not None:
             rulesets.append((ident, source))
-    return classic, tuple(sorted(rulesets, key=lambda row: row[0]))
+    return tuple(sorted(rulesets, key=lambda row: row[0]))
 
 
 # -- CODEOWNERS ----------------------------------------------------------------------------------------------------
@@ -696,10 +729,7 @@ def directory_wide_owned(rules: list[Rule]) -> bool:
     return state
 
 
-PATHS = (
-    ("codeowners-board-yaml", "board.yaml"),
-    ("codeowners-codeowners-file", ".github/CODEOWNERS"),
-)
+BOARD_PATH = "board.yaml"
 
 
 def ci_condition(sources: list[Source], require_app: int | None) -> Condition:
@@ -723,9 +753,11 @@ def evaluate(
     require_app: int | None = None,
     workflows: list[str] | None = None,
     downgraded: int = 0,
+    owners_path: str = CODEOWNERS_PLACES[0],
 ) -> list[Condition]:
     """`workflows` is the real file list (None when there is no CODEOWNERS, so nothing is covered); an empty list is
-    vacuously covered: with no workflow files there is nothing a pull request could add."""
+    vacuously covered: with no workflow files there is nothing a pull request could add. `owners_path` is the CODEOWNERS
+    location GitHub uses (the one that was read), and that file must be covered by its own rules."""
 
     def some(test: Callable[[Source], bool]) -> bool:
         return any(test(s) for s in sources)
@@ -757,7 +789,7 @@ def evaluate(
         if downgraded
         else ""
     )
-    for ident, path in PATHS:
+    for ident, path in (("codeowners-board-yaml", BOARD_PATH), ("codeowners-codeowners-file", owners_path)):
         conditions.append(Condition(ident, f"CODEOWNERS covers {path}", covered(rules, path), warn=warn))
         warn = ""
     files = workflows if workflows is not None else []
@@ -785,9 +817,11 @@ class State:
     owners: tuple[str, str, str] | None  # location, blob sha, text
     error_lines: frozenset[int]
     workflows: tuple[str, ...] | None
+    trees: tuple[tuple[Entry, ...], tuple[Entry, ...]]  # the root and .github listings as read
+    documents: tuple[str, ...]  # every protection document as read (see `raw`), sorted
 
 
-def read_state(rest: Rest, base: str, repo: str, agent: str) -> State:
+def read_state(rest: Rest, base: str, repo: str, agent: str, *, classic_first: bool = True) -> State:
     first = read_repo(rest, base, repo)
     branch = first.default_branch
     head = branch_head(rest, base, branch)
@@ -797,15 +831,25 @@ def read_state(rest: Rest, base: str, repo: str, agent: str) -> State:
     if gh and gh[0].kind != "tree":
         raise CannotTell("cannot tell: .github is not a directory")
     github = _tree(rest, base, gh[0].sha, "the .github tree", recursive=False, expect=gh[0].sha) if gh else []
-    classic, rulesets = read_sources(rest, base, branch, agent)
+    classic, rulesets, documents = read_sources(rest, base, branch, agent, classic_first=classic_first)
+    shape = (tuple(root), tuple(github))
     chosen = find_codeowners(rest, base, root, github)
     if chosen is None:
-        return State(first, head, tree, classic, rulesets, None, frozenset(), None)
+        return State(first, head, tree, classic, rulesets, None, frozenset(), None, shape, documents)
     place, blob = chosen
     text = read_codeowners(rest, base, head, place, blob)
     lines = frozenset(codeowners_error_lines(rest, base, head, place))
     return State(
-        first, head, tree, classic, rulesets, (place, blob, text), lines, tuple(workflow_files(rest, base, github))
+        first,
+        head,
+        tree,
+        classic,
+        rulesets,
+        (place, blob, text),
+        lines,
+        tuple(workflow_files(rest, base, github)),
+        shape,
+        documents,
     )
 
 
@@ -816,11 +860,14 @@ def check(rest: Rest, repo: str, agent: str = "", require_app: int | None = None
     results must be equal (the repository document, the head commit and its trees, the classic rule, every ruleset
     listed and read, CODEOWNERS and its errors); any difference means the answer mixed two moments, which could certify
     a state that never existed (a secure rule read, then removed and replaced by a weaker ruleset). It costs about
-    twice the requests, roughly two dozen, against a limit of 5,000 an hour.
+    twice the requests, roughly two dozen, against a limit of 5,000 an hour. The second pass reads the classic rule and
+    the rulesets in the opposite order, so a change that alternates with every read cannot show each mechanism in a
+    different state both times. A change timed to the first and last read of the classic rule is not excluded (see the
+    module docstring); this is a documented limit, not a proof of one instant.
     """
     base = _repo_path(repo)
     first = read_state(rest, base, repo, agent)
-    if read_state(rest, base, repo, agent) != first:
+    if read_state(rest, base, repo, agent, classic_first=False) != first:
         raise CannotTell("cannot tell: the protection changed while it was being read")
     sources = ([first.classic] if first.classic is not None else []) + [source for _, source in first.rulesets]
     rules: list[Rule] = []
@@ -828,4 +875,9 @@ def check(rest: Rest, repo: str, agent: str = "", require_app: int | None = None
     if first.owners is not None:
         rules, downgraded = trusted_rules(first.owners[2], set(first.error_lines))
     workflows = list(first.workflows) if first.workflows is not None else None
-    return first.repo.default_branch, len(sources), evaluate(sources, rules, require_app, workflows, downgraded)
+    owners_path = first.owners[0] if first.owners is not None else CODEOWNERS_PLACES[0]
+    return (
+        first.repo.default_branch,
+        len(sources),
+        evaluate(sources, rules, require_app, workflows, downgraded, owners_path),
+    )

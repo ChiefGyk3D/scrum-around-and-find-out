@@ -33,6 +33,11 @@ T_GH = "b" * 40
 T_WF = "c" * 40
 BLOB = "d" * 40
 GOOD_OWNERS = "/board.yaml @owner\n/.github/CODEOWNERS @owner\n/.github/workflows/ @owner\n"
+OWNERS_AT = {  # a file at each location that owns itself, as the check requires of the one GitHub uses
+    ".github/CODEOWNERS": GOOD_OWNERS,
+    "CODEOWNERS": GOOD_OWNERS + "/CODEOWNERS @owner\n",
+    "docs/CODEOWNERS": GOOD_OWNERS + "/docs/CODEOWNERS @owner\n",
+}
 NOT_PROTECTED = {"message": "Branch not protected"}
 Route = tuple[int, dict[str, str], bytes]
 Entry = Route | Callable[[], Route]  # a callable is asked on every request: a fake whose answers change
@@ -108,12 +113,13 @@ def j(body: Any, status: int = 200) -> Route:
 
 
 def world(
-    owners: str = GOOD_OWNERS,
+    owners: str | None = None,
     rows: tuple[tuple[str, str], ...] = WORKFLOWS,
     gh_rows: tuple[tuple[str, str], ...] | None = None,
     place: str = ".github/CODEOWNERS",
 ) -> dict[str, Route]:
     """A consistent fake repository: commit -> root tree -> .github tree -> workflows tree, CODEOWNERS at `place`."""
+    owners = OWNERS_AT[place] if owners is None else owners
     blobs = {"CODEOWNERS": git_sha(owners)}
     gh = (
         gh_rows
@@ -598,6 +604,14 @@ def test_a_bad_codeowners_answer_is_cannot_tell(answer: Route) -> None:
 def test_codeowners_is_read_from_the_first_location_that_exists() -> None:
     assert check(world(place="CODEOWNERS"))[0] == 0
     assert check(world(place="docs/CODEOWNERS"))[0] == 0
+
+
+@pytest.mark.parametrize("place", ["CODEOWNERS", "docs/CODEOWNERS"])
+def test_the_file_in_use_must_cover_itself_not_only_the_github_directory_one(place: str) -> None:
+    """Only `.github/CODEOWNERS` is owned, but the file GitHub uses is `place`: nothing covers it."""
+    code, out, _, _ = check(world(GOOD_OWNERS, place=place))
+    assert code == 1 and failed_ids(out) == ["codeowners-codeowners-file"]
+    assert f"CODEOWNERS covers {place}" in out
 
 
 def test_the_agent_login_must_be_a_login() -> None:
@@ -1756,7 +1770,7 @@ def test_the_root_file_beats_docs_and_docs_is_read_only_as_a_last_resort() -> No
             ("board.yaml", "blob"),
             ("CODEOWNERS", "blob"),
             ("docs", "tree"),
-            blobs={"CODEOWNERS": git_sha(GOOD_OWNERS)},
+            blobs={"CODEOWNERS": git_sha(OWNERS_AT["CODEOWNERS"])},
         )
     )
     queries: list[tuple[str, str]] = []
@@ -1892,3 +1906,197 @@ def test_a_file_where_a_directory_belongs_is_never_fetched_as_a_tree(
     )  # CODEOWNERS stays valid: only the directory is wrong
     code, _, _, seen = check({**world(), f"{REPO}/git/trees/{sha}": j(body)})
     assert code == 2 and f"{REPO}/git/trees/{BLOB}" not in [path for _, path in seen]
+
+
+# ---- round 4: one moment is not provable by reading twice, but a single alternation must not forge it ----------------
+
+
+class Alternating:
+    """A repository an administrator flips between state A and state B on every protection read.
+
+    A: the classic rule gives code-owner review, `CI green`, strict, admins and no bypass, but allows force pushes and
+    deletion. B: the classic rule is gone and an active ruleset gives only non_fast_forward and deletion. No instant has
+    every condition, yet a read that sees A for the classic rule and B for the rulesets would add them up. The state is
+    chosen by the position of the request among the classic and listing reads (`phase` shifts where it starts).
+    """
+
+    def __init__(self, phase: int = 0) -> None:
+        self.reads = phase
+
+    def _is_b(self) -> bool:
+        self.reads += 1
+        return self.reads % 2 == 0
+
+    def classic(self) -> Route:
+        loose = classic()
+        loose["allow_force_pushes"] = {"enabled": True}
+        loose["allow_deletions"] = {"enabled": True}
+        return j(NOT_PROTECTED, 404) if self._is_b() else j(loose)
+
+    def listing(self) -> Route:
+        return listed() if self._is_b() else j([])
+
+
+def alternating_routes(phase: int) -> dict[str, Entry]:
+    flip = Alternating(phase)
+    return {
+        **world(),
+        f"{REPO}/branches/main/protection": flip.classic,
+        f"{REPO}/rulesets": flip.listing,
+        f"{REPO}/rulesets/7": j(ruleset(**NFF_AND_DELETION)),
+    }
+
+
+@pytest.mark.parametrize("phase", [0, 1], ids=["classic-in-A", "classic-in-B"])
+def test_a_world_alternating_between_two_incomplete_states_is_never_certified(phase: int) -> None:
+    code, out, err, _ = check(alternating_routes(phase))
+    assert code == 2 and "PASS" not in out and "changed while it was being read" in out + err
+
+
+def test_the_two_mechanisms_are_read_in_opposite_order_in_the_second_pass() -> None:
+    _, _, _, seen = check(world())
+    marks = [
+        path.rsplit("/", 1)[-1] for _, path in seen if path.endswith(("/protection", "/rulesets"))
+    ]  # classic, rulesets, rulesets, classic
+    assert marks == ["protection", "rulesets", "rulesets", "protection"]
+
+
+def varying(base: Route | dict[str, Any], then: Route | dict[str, Any]) -> Callable[[], Route]:
+    return seq(base if isinstance(base, tuple) else j(base), then if isinstance(then, tuple) else j(then))
+
+
+def test_a_field_this_check_does_not_use_changing_in_the_classic_rule_is_cannot_tell() -> None:
+    cannot_tell({**world(), f"{REPO}/branches/main/protection": varying(classic(), {**classic(), "url": "x"})})
+
+
+def test_a_field_this_check_does_not_use_changing_in_a_ruleset_is_cannot_tell() -> None:
+    routes: dict[str, Entry] = {
+        **ruleset_routes(ruleset()),
+        f"{REPO}/rulesets/7": varying(ruleset(), {**ruleset(), "updated_at": "later"}),
+    }
+    cannot_tell(routes)
+
+
+def test_a_field_this_check_does_not_use_changing_in_the_ruleset_listing_is_cannot_tell() -> None:
+    first = [{"id": 7, "target": "branch", "enforcement": "active"}]
+    then = [{"id": 7, "target": "branch", "enforcement": "active", "updated_at": "later"}]
+    cannot_tell({**ruleset_routes(ruleset()), f"{REPO}/rulesets": varying(first, then)})  # type: ignore[arg-type]
+
+
+# -- between the passes: every document that decides something --------------------------------------------------------
+
+
+def test_codeowners_text_changing_between_the_passes_is_cannot_tell() -> None:
+    other = GOOD_OWNERS + "/docs/ @owner\n"  # a file that would pass by itself
+    routes: dict[str, Entry] = {
+        **world(),
+        f"{REPO}/contents{OWNERS}": varying(contents(GOOD_OWNERS), contents(other)),
+        f"{REPO}/git/trees/{T_GH}": varying(
+            tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), blobs={"CODEOWNERS": git_sha(GOOD_OWNERS)}),
+            tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), blobs={"CODEOWNERS": git_sha(other)}),
+        ),
+    }
+    cannot_tell(routes)
+
+
+def test_the_codeowners_blob_changing_between_the_passes_is_cannot_tell() -> None:
+    """The same text, but the tree names another blob the second time (and the file answer follows it)."""
+    other = GOOD_OWNERS + "# edited\n"
+    routes: dict[str, Entry] = {
+        **world(),
+        f"{REPO}/contents{OWNERS}": varying(contents(GOOD_OWNERS), contents(other)),
+        f"{REPO}/git/trees/{T_GH}": varying(
+            tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), blobs={"CODEOWNERS": git_sha(GOOD_OWNERS)}),
+            tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), blobs={"CODEOWNERS": git_sha(other)}),
+        ),
+    }
+    cannot_tell(routes)
+
+
+def test_the_workflow_tree_changing_between_the_passes_is_cannot_tell() -> None:
+    more = tree(T_WF, *WORKFLOWS, ("new.yml", "blob"))  # owned by the directory rule, so only a comparison can see it
+    cannot_tell({**world(), f"{REPO}/git/trees/{T_WF}": varying(tree(T_WF, *WORKFLOWS), more)})
+
+
+def test_the_root_listing_changing_between_the_passes_is_cannot_tell() -> None:
+    first = tree(T_ROOT, (".github", "tree"), ("board.yaml", "blob"), blobs={"CODEOWNERS": git_sha(GOOD_OWNERS)})
+    then = tree(T_ROOT, (".github", "tree"), ("board.yaml", "blob"), ("README.md", "blob"))
+    cannot_tell({**world(), f"{REPO}/git/trees/{T_ROOT}": varying(first, then)})
+
+
+def test_the_github_listing_changing_between_the_passes_is_cannot_tell() -> None:
+    blobs = {"CODEOWNERS": git_sha(GOOD_OWNERS)}
+    first = tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), blobs=blobs)
+    then = tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), ("dependabot.yml", "blob"), blobs=blobs)
+    cannot_tell({**world(), f"{REPO}/git/trees/{T_GH}": varying(first, then)})
+
+
+def test_a_stable_world_reads_every_document_exactly_twice() -> None:
+    code, _, _, seen = check(world())
+    paths = [path for _, path in seen]
+    assert code == 0
+    for path in (
+        REPO,
+        f"{REPO}/branches/main",
+        f"{REPO}/git/commits/{SHA}",
+        f"{REPO}/git/trees/{T_ROOT}",
+        f"{REPO}/git/trees/{T_GH}",
+        f"{REPO}/git/trees/{T_WF}",
+        f"{REPO}/contents{OWNERS}",
+        f"{REPO}/codeowners/errors",
+        f"{REPO}/branches/main/protection",
+        f"{REPO}/rulesets",
+    ):
+        assert paths.count(path) == 2, path
+    assert len(paths) == 20
+
+
+# -- the error report is inside the exit-code boundary -------------------------------------------------------------------
+
+
+class Raising(io.StringIO):
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+    def write(self, text: str) -> int:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (SystemExit(0), 2),
+        (SystemExit(), 2),
+        (BrokenPipeError(), 2),
+        (OSError("closed"), 2),
+        (ValueError("I/O operation on closed file"), 2),
+        (KeyboardInterrupt(), 130),
+    ],
+    ids=["exit0", "exit", "pipe", "oserror", "closed", "interrupt"],
+)
+def test_an_error_whose_report_cannot_be_written_keeps_a_failing_exit_code(error: BaseException, code: int) -> None:
+    from safo.cli import main
+
+    assert main(["protection", "--repo", "o/r"], env={}, out=io.StringIO(), err=Raising(error)) == code  # no token
+
+
+def test_a_report_that_cannot_be_written_in_a_workflow_run_is_still_two() -> None:
+    from safo.cli import main
+
+    env = {"GITHUB_ACTIONS": "true"}
+    assert main(["protection", "--repo", "o/r"], env=env, out=io.StringIO(), err=Raising(SystemExit(0))) == 2
+
+
+@pytest.mark.parametrize("target", ["from_env", "from_gh", "Rest"])
+@pytest.mark.parametrize("error", [SystemExit(0), RuntimeError("secret"), KeyboardInterrupt()], ids=["exit0", "boom", "int"])
+def test_a_failure_below_the_credential_lookup_or_the_client_is_never_zero(
+    target: str, error: BaseException, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo.modes import protection as mode
+
+    holder: Any = mode.credentials if target != "Rest" else mode
+    monkeypatch.setattr(holder, target, raiser(error))
+    env = ENV if target != "from_gh" else {}
+    code, out, _ = run_cli("protection", "--repo", "o/r", env=env)
+    assert code == (130 if isinstance(error, KeyboardInterrupt) else 2) and "PASS" not in out
