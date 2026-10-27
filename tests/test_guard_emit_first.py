@@ -2087,11 +2087,21 @@ def test_cli_run_routes_every_guard_shaped_argv_to_the_hand_parser_and_ends_once
 
     seen: list[list[str]] = []
     real = mod.guard_command
-    monkeypatch.setattr(mod, "guard_command", lambda words: (seen.append(list(words)), real(words))[1])
+
+    def spy_command(words: Any) -> int:
+        seen.append(list(words))
+        return real(words)
+
+    monkeypatch.setattr(mod, "guard_command", spy_command)
     monkeypatch.setattr(cli, "main", lambda *a, **k: pytest.fail("argparse was reached by a guard-shaped command line"))
     processes: list[bool] = []
     real_process = mod.guard_process
-    monkeypatch.setattr(mod, "guard_process", lambda c, a: (processes.append(True), real_process(c, a))[1])
+
+    def spy_process(ctx: Any, args: Any) -> int:
+        processes.append(True)
+        return real_process(ctx, args)
+
+    monkeypatch.setattr(mod, "guard_process", spy_process)
     code = entry(argv)
     assert len(seen) == 1, "the hand-parser path took it"
     assert len(hard_exits) == 1, "and the process was ended exactly once"
@@ -2112,7 +2122,12 @@ def test_a_command_line_without_the_guard_words_still_reaches_argparse(
     from safo import cli
 
     called: list[bool] = []
-    monkeypatch.setattr(cli, "main", lambda *a, **k: (called.append(True), 0)[1])
+
+    def fake_main(*_: Any, **__: Any) -> int:
+        called.append(True)
+        return 0
+
+    monkeypatch.setattr(cli, "main", fake_main)
     monkeypatch.setattr(mod, "guard_command", lambda words: pytest.fail("not a guard command line"))
     assert entry(["hooks", "probe"]) == 0 and called == [True]
     called.clear()
