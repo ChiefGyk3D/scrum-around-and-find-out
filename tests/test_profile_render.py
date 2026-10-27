@@ -93,9 +93,13 @@ def test_the_policy_boundary_is_in_every_file_exactly_and_just_before_the_profil
             first = form["body"][0]
             assert first["type"] == "markdown" and BOUNDARY_PARAGRAPH in first["attributes"]["value"]
             continue
+        if rel.startswith("caller/"):  # guidance for the caller, not a file a model reads: no policy boundary
+            assert BOUNDARY_PARAGRAPH not in text, rel
+            continue
         assert text.count(BOUNDARY_PARAGRAPH) == 1, rel
         lines = text.split("\n")
-        at = lines.index("## Model profile")
+        # a model file with nothing to say about the profile ends on the boundary
+        at = lines.index("## Model profile") if "## Model profile" in lines else len(lines)
         previous = [x for x in lines[:at] if x.strip()][-1]
         assert previous == BOUNDARY_PARAGRAPH, rel
 
@@ -136,46 +140,51 @@ def test_a_claude_file_starts_with_its_front_matter_and_copies_tools_only_from_t
     assert data.decode().count("---\n") == 2
 
 
-def test_the_profile_section_is_a_fixed_structure_with_a_pointer_on_every_list_line(tmp_path: Path) -> None:
+def test_the_briefing_section_is_a_fixed_structure_with_a_pointer_on_every_list_line(tmp_path: Path) -> None:
     files = render_harness(verified(tmp_path))
     for rel, r in files.items():
         if rel.endswith(".yml"):
             continue
         text = r.data.decode()
-        assert text.count("\n## Model profile\n") == 1, rel
-        section = text.split("\n## Model profile\n", 1)[1]
+        if not rel.startswith("caller/"):  # a model file never shows an evidence pointer
+            assert "(`lessons:" not in text and "### Do" not in text, rel
+            continue
+        assert text.count("\n## Briefing guidance\n") == 1, rel
+        section = text.split("\n## Briefing guidance\n", 1)[1]
         for line in section.split("\n"):
             if line.startswith("- ") and line.endswith(")") and "(`" in line:
                 assert re.search(r" \(`(lessons|outcomes|config):[^`\s]+`\)$", line), (rel, line)
-    codex = files["codex/codex.prompt.md"].data.decode()
+    codex = files["caller/codex/codex.md"].data.decode()
     assert (
         "- Expect it to commit inside a git worktree. (`lessons:codexs-sandbox-cannot-commit-inside-a-git-worktree`)"
         in codex
     )
     assert "### Do not\n" in codex and "### Do\n" in codex
-    assert "{{task}}" in codex and "{{files_in_scope}}" in codex  # the template is rendered as written
-    haiku = files["claude/claude-haiku.md"].data.decode()
+    model = files["codex/codex.prompt.md"].data.decode()
+    assert "{{task}}" in model and "{{files_in_scope}}" in model  # the template is rendered as written
+    haiku = files["caller/claude/claude-haiku.md"].data.decode()
     assert "### Must not be given\n\n- security-sensitive-code (`lessons:" in haiku
 
 
 def test_an_unmeasured_profile_says_on_its_first_body_line_that_nothing_is_claimed(tmp_path: Path) -> None:
-    text = render_harness(verified(tmp_path))["claude/claude-sonnet.md"].data.decode()
-    after = text.split("\n## Model profile\n", 1)[1].lstrip("\n").split("\n")[0]
+    files = render_harness(verified(tmp_path))
+    text = files["caller/claude/claude-sonnet.md"].data.decode()
+    after = text.split("\n## Briefing guidance\n", 1)[1].lstrip("\n").split("\n")[0]
     assert after == "Nothing is claimed about this model: its profile is unmeasured."
     assert "### Do" not in text
-    profiled = render_harness(verified(tmp_path / "b"))["claude/claude-haiku.md"].data.decode()
-    assert "Nothing is claimed" not in profiled
+    assert "Nothing is claimed" not in files["caller/claude/claude-haiku.md"].data.decode()
+    assert "Nothing is claimed" not in files["claude/claude-sonnet.md"].data.decode()  # the model is not told
 
 
 def test_limits_and_thinking_are_one_sentence_each_with_their_pointer(tmp_path: Path) -> None:
-    wrapper = render_harness(verified(tmp_path))["local/ollama.wrapper.txt"].data.decode()
-    assert "- Context ceiling: put at most 2048 tokens in a brief." in wrapper
-    assert "- Output cap: ask for at most 512 tokens in a reply." in wrapper
-    assert "- Thinking: off." in wrapper
-    assert (
-        wrapper.split("\n")[1]
-        == "# think=false: a setting for the caller, who removes this line before sending the prompt."
-    )
+    files = render_harness(verified(tmp_path))
+    caller = files["caller/local/ollama.md"].data.decode()
+    assert "- Context ceiling: put at most 2048 tokens in a brief." in caller
+    assert "- Output cap: ask for at most 512 tokens in a reply." in caller
+    assert "- Thinking: off." in caller
+    assert "- Send `think=false` with the request. It is a setting of the call, not part of the prompt." in caller
+    wrapper = files["local/ollama.wrapper.txt"].data.decode()
+    assert "think=" not in wrapper and "Context ceiling" not in wrapper  # nothing for the caller to strip
 
 
 def test_the_local_wrapper_has_a_task_slot_a_format_line_and_nothing_private(tmp_path: Path) -> None:
@@ -195,21 +204,27 @@ def test_a_template_that_already_holds_the_task_slot_gets_no_second_one(tmp_path
 
 
 def test_the_copilot_instructions_carry_the_scope_rules_the_review_gate_and_the_model_layer(tmp_path: Path) -> None:
-    text = render_harness(verified(tmp_path))["copilot/copilot-instructions.md"].data.decode()
+    files = render_harness(verified(tmp_path))
+    text = files["copilot/copilot-instructions.md"].data.decode()
+    caller = files["caller/copilot/copilot.md"].data.decode()
     for rule in (
         "Edit only the files listed as in scope.",
         "Run the one test command the issue states, exactly as written.",
         "Add no new dependencies, workflow permissions or secrets.",
     ):
         assert f"- {rule}\n" in text
-    assert "### Review gate\n" in text and "stated acceptance criteria first" in text
-    assert "### Model layer: gpt-5.1\n" in text and "- Trust its tests." in text
+    assert "### Review gate\n" in caller and "stated acceptance criteria first" in caller
+    assert "### Model layer: gpt-5.1\n" in caller and "- Trust its tests." in caller
+    assert "### Review gate" not in text and "Trust its tests" not in text
 
 
 def test_the_codex_file_names_what_it_is(tmp_path: Path) -> None:
-    text = render_harness(verified(tmp_path))["codex/codex.prompt.md"].data.decode()
-    assert "\n# Codex preamble: codex\n" in text
-    assert "Prepend this preamble to a self-contained prompt." in text
+    files = render_harness(verified(tmp_path))
+    text = files["codex/codex.prompt.md"].data.decode()
+    assert "\n# Codex preamble: codex\n" in text and "Prepend" not in text
+    assert (
+        "- Prepend `codex/codex.prompt.md` to a self-contained prompt." in files["caller/codex/codex.md"].data.decode()
+    )
 
 
 def test_the_hard_rule_comes_before_the_persona_text_in_a_claude_profile(tmp_path: Path) -> None:
@@ -374,19 +389,18 @@ def test_a_manifest_needs_a_profile(tmp_path: Path) -> None:
         manifest_digest("p.md", "codex", replace(agent, profile=None), v.resolutions)
 
 
-def test_the_think_comment_follows_the_setting_and_is_absent_without_one(tmp_path: Path) -> None:
+def test_the_call_setting_follows_the_setting_and_is_absent_without_one(tmp_path: Path) -> None:
     v = verified(tmp_path)
     p = profile_of(v, "ollama")
     ev = need(p.thinking).evidence
-    on = render_harness(with_profile(v, "ollama", thinking=Thinking("on", ev)))[
-        "local/ollama.wrapper.txt"
-    ].data.decode()
-    assert (
-        on.split("\n")[1] == "# think=true: a setting for the caller, who removes this line before sending the prompt."
-    )
+    files = render_harness(with_profile(v, "ollama", thinking=Thinking("on", ev)))
+    assert "- Send `think=true` with the request." in files["caller/local/ollama.md"].data.decode()
+    assert "think=" not in files["local/ollama.wrapper.txt"].data.decode()
     for thinking in (None, Thinking("default", ev)):
-        text = render_harness(with_profile(v, "ollama", thinking=thinking))["local/ollama.wrapper.txt"].data.decode()
-        assert "# think=" not in text and text.split("\n")[1] == "You are a local model working on one task."
+        files = render_harness(with_profile(v, "ollama", thinking=thinking))
+        assert "think=" not in files["caller/local/ollama.md"].data.decode()
+        text = files["local/ollama.wrapper.txt"].data.decode()
+        assert "think=" not in text and text.split("\n")[1] == "You are a local model working on one task."
 
 
 def test_a_copilot_profile_without_a_gate_has_only_the_boundary_in_its_form_notice(tmp_path: Path) -> None:
@@ -394,7 +408,7 @@ def test_a_copilot_profile_without_a_gate_has_only_the_boundary_in_its_form_noti
     files = render_harness(with_profile(v, "copilot", review_gate=None))
     form = yaml.safe_load(files["copilot/ISSUE_TEMPLATE/copilot-task.yml"].data.decode())
     assert form["body"][0]["attributes"]["value"] == BOUNDARY_PARAGRAPH
-    assert "### Review gate" not in files["copilot/copilot-instructions.md"].data.decode()
+    assert "### Review gate" not in files["caller/copilot/copilot.md"].data.decode()
 
 
 def test_an_empty_template_text_renders_no_brief_section(tmp_path: Path) -> None:
@@ -418,7 +432,7 @@ def test_an_evidence_pointer_with_a_backtick_cannot_be_shown(tmp_path: Path) -> 
 
 
 def test_model_layers_say_when_unmeasured_and_show_their_thinking(tmp_path: Path) -> None:
-    text = render_harness(verified(tmp_path))["copilot/copilot-instructions.md"].data.decode()
+    text = render_harness(verified(tmp_path))["caller/copilot/copilot.md"].data.decode()
     layer = text.split("### Model layer: o3\n", 1)[1]
     assert layer.startswith("\n" + UNMEASURED_LINE + "\n")
     assert "- Thinking: on. (`lessons:" in layer
@@ -489,7 +503,7 @@ def test_the_header_parser_names_what_is_wrong(tmp_path: Path) -> None:
     wrapper = files["local/ollama.wrapper.txt"].data
     with pytest.raises(RenderError, match="malformed"):
         split_header("local/ollama.wrapper.txt", wrapper.replace(b"# GENERATED", b"#GENERATED", 1))
-    assert split_header("local/ollama.wrapper.txt", wrapper)[0].startswith(b"# think=false")
+    assert split_header("local/ollama.wrapper.txt", wrapper)[0].startswith(b"You are a local model")
 
 
 def test_has_header_sees_each_of_the_three_formats_and_nothing_else(tmp_path: Path) -> None:
@@ -563,12 +577,15 @@ def test_a_review_mode_copilot_renders_review_guidance_and_no_issue_form(tmp_pat
     files = _review_files(tmp_path)
     assert "copilot/ISSUE_TEMPLATE/copilot-task.yml" not in files
     text = files["copilot/copilot-instructions.md"].data.decode()
+    caller = files["caller/copilot/copilot.md"].data.decode()
     assert "reviewing a pull request" in text
     assert "## Review rules" in text
     assert "Comment on the diff" in text and "second opinion, not a gate" in text
     # the review checks, the do and the do-not lists and the model layers still come from the profile
-    assert "stated acceptance criteria first" in text and "- Trust its tests." in text
-    assert "### Do not\n" in text and "### Review gate\n" in text
+    # the check wording is the reviewer's own instruction; the do and do-not lists and the layers go to the caller
+    assert "### Review focus\n" in text and "stated acceptance criteria first" in text
+    assert "stated acceptance criteria first" not in caller and "- Trust its tests." in caller
+    assert "### Do not\n" in caller and "### Review gate\n" in caller and "### Do not" not in text
     # nothing tells it to work an issue
     for gone in ("working on an issue", "copilot-task", "Scope rules", "files listed as in scope", "test command"):
         assert gone not in text

@@ -29,6 +29,7 @@ REQUIRED = (
     "agents/",
     "src/safo/agentsfile.py",
     "src/safo/profile_render.py",
+    "src/safo/profile_compose.py",
 )
 LOCATIONS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")  # GitHub's order of precedence
 MAX_BYTES = 3 * 1024 * 1024
