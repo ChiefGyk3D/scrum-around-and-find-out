@@ -658,9 +658,23 @@ def guard_form(command: str) -> str | None:
     return "legacy" if command_signature(command, "guard") is not None else None
 
 
-def guard_forms(settings: Any) -> set[str]:
-    """Which forms of the guard command a settings document holds under PreToolUse (empty: none)."""
+def entry_problems(group: dict[str, Any], entry: Any, matcher: str, legacy_matchers: tuple[str, ...]) -> list[str]:
+    """Why an entry that is ours (its command is recognised) would not run as the hook install writes, else []. The ONE
+    rule: install refuses on any problem (it will not guess), and `status` reports the same problems, so the two cannot
+    drift. The matcher must be the one install writes or one it still migrates; the type must be `command`."""
+    problems = []
+    if group.get("matcher", "") not in (matcher, *legacy_matchers):
+        problems.append("wrong matcher")
+    if not isinstance(entry, dict) or entry.get("type") != "command":
+        problems.append("wrong type")
+    return problems
+
+
+def guard_forms(settings: Any) -> tuple[set[str], list[str]]:
+    """The forms of the guard command a settings document holds under PreToolUse that WOULD RUN (install's acceptance
+    rule, entry_problems), and the problems of the guard-shaped entries that would not (both empty: no guard)."""
     found: set[str] = set()
+    problems: list[str] = []
     hooks = settings.get("hooks") if isinstance(settings, dict) else None
     groups = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
     for group in groups if isinstance(groups, list) else []:
@@ -668,9 +682,14 @@ def guard_forms(settings: Any) -> set[str]:
         for entry in inner if isinstance(inner, list) else []:
             command = entry.get("command") if isinstance(entry, dict) else None
             form = guard_form(command) if isinstance(command, str) else None
-            if form:
+            if not form:
+                continue
+            issues = entry_problems(group, entry, GUARD_MATCHER, LEGACY_GUARD_MATCHERS)
+            if issues:
+                problems.extend(p for p in issues if p not in problems)
+            else:
                 found.add(form)
-    return found
+    return found, problems
 
 
 def _ensure(
@@ -699,7 +718,7 @@ def _ensure(
             sig = sign(command) if isinstance(command, str) else None
             exact = command == entry["command"]
             if sig is not None or exact:
-                if group.get("matcher", "") not in (matcher, *legacy_matchers) or existing.get("type") != "command":
+                if entry_problems(group, existing, matcher, legacy_matchers):
                     raise ConfigError("settings: ambiguous SAFO hook event/matcher/type; fix by hand")
                 if sig != expected:
                     raise ConfigError("settings: changed invocation; migrate by hand")

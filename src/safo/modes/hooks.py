@@ -14,7 +14,6 @@ The guard writes its decision first and persists afterwards (best effort, bounde
 
 from __future__ import annotations
 
-import argparse
 import codecs
 import contextlib
 import datetime as dt
@@ -31,8 +30,9 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from time import time as wall_clock  # immune to the monotonic-clock stand-in some tests install
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import safo
 from safo import gemini, geminibrief, guardlog, leadwait, output, tracking
@@ -92,6 +92,9 @@ from safo.hooks import (
 )
 from safo.localfiles import add_agents_arguments, load_agents_for
 from safo.modes import LocalMode, register_local
+
+if TYPE_CHECKING:  # argparse is imported only where the legacy argparse path needs it: the guard's entry never loads it
+    import argparse
 
 LOOKUP_RESERVE_SECONDS = 2.0  # a re-probe leaves at least this much of the hook's budget for the issue lookup
 MIN_REPROBE_TIMEOUT_SECONDS = 0.5  # below this per request a re-probe is skipped, not attempted
@@ -1463,7 +1466,7 @@ def guard_argv(words: Sequence[str]) -> argparse.Namespace | None:
         seen.add(flag)
         values[flag] = words[index + 1]
         index += 2
-    return argparse.Namespace(agents=values["--agents"], agents_local=values["--agents-local"])
+    return SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"])
 
 
 def salvage_argv(words: Sequence[str]) -> argparse.Namespace:
@@ -1492,7 +1495,7 @@ def salvage_argv(words: Sequence[str]) -> argparse.Namespace:
             index += 1
         if value:
             values[name] = value
-    return argparse.Namespace(agents=values["--agents"], agents_local=values["--agents-local"])
+    return SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"])
 
 
 def guard_command(words: Sequence[str]) -> int:
@@ -1677,12 +1680,16 @@ def run_mode(ctx: LocalContext, args: argparse.Namespace) -> int:
 
 def installed_form(ctx: LocalContext, args: argparse.Namespace) -> str:
     """Which form of the guard hook the settings file holds: new (safo-guard), legacy (`safo hooks guard`), mixed
-    (both), absent, or unknown (the file cannot be read as settings). Read only."""
+    (both), absent, ineffective (a guard-shaped entry that would not run: wrong matcher or type, by the rule `install`
+    uses), or unknown (the file cannot be read as settings). Read only."""
     given = Path(args.settings) if getattr(args, "settings", "") else ctx.home / ".claude" / "settings.json"
     try:
-        found = guard_forms(read_settings(given.resolve()))
+        found, problems = guard_forms(read_settings(given.resolve()))
     except (ConfigError, OSError):
         return "unknown (settings unreadable)"
+    if problems:
+        also = f"; another entry is effective: {' and '.join(sorted(found))}" if found else ""
+        return f"ineffective ({', '.join(problems)}: the guard does not run{also}; fix the entry by hand, install refuses it)"
     if found == {"new"}:
         return "new (safo-guard)"
     if found == {"legacy"}:

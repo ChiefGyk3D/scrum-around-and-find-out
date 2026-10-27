@@ -10,7 +10,7 @@ approval token, and that includes a model that a prompt injection has talked int
 | `safo hooks probe` | SessionStart | Asks each Ollama endpoint in `agents.yaml` which models are loaded (two bounded GETs, never a generate), saves the answer and tells the session whether the local LLM is reachable. |
 | `safo-guard` (or `python3 -m safo.guard`) | PreToolUse, matcher `Agent\|Task\|Bash` | The guard's own entry point, the command `install` writes (see [The guard's own entry point](#the-guards-own-entry-point)). Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). Two more rules cover Gemini (the sixth and seventh, which deny in every mode). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
 | `safo hooks mode warn\|block` | none | `warn` reports a broken rule and allows the dispatch (the default); `block` denies it. |
-| `safo hooks status [--session ID --agents PATH] [--settings PATH]` | none | Which form of the guard hook is installed (`new`, `legacy`, `mixed`, `absent`), the mode, the retained counts, the health of the hooks and of the last probe. |
+| `safo hooks status [--session ID --agents PATH] [--settings PATH]` | none | Which form of the guard hook is installed (`new`, `legacy`, `mixed`, `absent`, `ineffective`, `unknown`), the mode, the retained counts, the health of the hooks and of the last probe. |
 
 A line `safo hooks guard ...` from an earlier install is the legacy form. It keeps working (see below) and `install`
 migrates it.
@@ -32,8 +32,14 @@ visible degraded allow).
 `python3 -m safo.guard`, and the absolute path of a safo executable gives the `safo-guard` script beside it (which must
 exist). `--agents` and `--agents-local` follow as before. A rerun of `install` replaces an existing legacy
 `safo hooks guard` line with the new one, in place, and touches no other hook; a legacy line with a different launcher
-is still a "migrate by hand" refusal. `safo hooks status` shows the installed form: `new`, `legacy`, `mixed` (both) or
-`absent`.
+is still a "migrate by hand" refusal. `safo hooks status` shows the installed form: `new`, `legacy`, `mixed` (both), `absent`, or `unknown` (the file cannot be
+read as settings). It counts an entry as the guard by the SAME rule `install` accepts one (one function,
+`entry_problems` in `safo.hooks`): the type is `command` and the matcher is `Agent|Task|Bash` (or the older
+`Agent|Task` that `install` migrates). A guard-shaped command under another matcher (`Read`, empty, a regex that
+leaves out Agent) or another type (`prompt`, `agent`, none) would never run, so status says `ineffective (wrong
+matcher, wrong type: ...)`, never `new` or `legacy`; `install` refuses the same entry as ambiguous, to be fixed by
+hand. An ineffective duplicate beside a working entry is also `ineffective`, and names the working form after
+"another entry is effective". A command that is not a string is not a guard entry at all (`absent`).
 
 Legacy routing (`guard_words` in `safo.modes.hooks`) stays exactly as it was for lines already installed, and is frozen:
 it is not extended. Changing the code does not touch your live `settings.json`; re-installing the live hook is a separate

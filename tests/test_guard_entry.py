@@ -284,7 +284,7 @@ def test_status_reports_absent_legacy_new_and_mixed(_private_home: Path) -> None
     path = _private_home / ".claude" / "settings.json"
     data = json.loads(path.read_text())
     data["hooks"]["PreToolUse"].append(
-        {"matcher": "Agent", "hooks": [{"type": "command", "command": "safo hooks guard"}]}
+        {"matcher": "Agent|Task|Bash", "hooks": [{"type": "command", "command": "safo hooks guard"}]}
     )
     path.write_text(json.dumps(data))
     assert "mixed" in status_line(_private_home)
@@ -294,7 +294,7 @@ def test_status_reports_absent_legacy_new_and_mixed(_private_home: Path) -> None
 
 def test_the_status_reads_the_settings_file_it_is_given(_private_home: Path, tmp_path: Path) -> None:
     other = tmp_path / "other.json"
-    other.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": "safo-guard"}]}]}}))
+    other.write_text(json.dumps(settings_with([("Agent|Task|Bash", {"type": "command", "command": "safo-guard"})])))
     code, out = cli_main(["hooks", "status", "--settings", str(other)])
     assert code == 0 and "guard hook: new" in out
 
@@ -310,3 +310,108 @@ def test_the_entry_arms_the_process_clock(block_home: Path, run_guard: Any) -> N
     assert mod.process_started is None
     run_guard([], dispatch())
     assert mod.process_started == safo_package.PROCESS_STARTED, "the budget counts from the start of the process"
+
+
+def settings_with(groups: list[tuple[Any, Any]]) -> dict[str, Any]:
+    return {"hooks": {"PreToolUse": [{"matcher": m, "hooks": [h]} for m, h in groups]}}
+
+
+def status_of(tmp_path: Path, data: dict[str, Any]) -> str:
+    target = tmp_path / "given.json"
+    target.write_text(json.dumps(data))
+    code, out = cli_main(["hooks", "status", "--settings", str(target)])
+    assert code == 0
+    [row] = [r for r in out.splitlines() if r.startswith("  guard hook:")]
+    return row
+
+
+FORMS = [pytest.param("safo-guard", id="new"), pytest.param("safo hooks guard", id="legacy")]
+
+
+@pytest.mark.parametrize("command", FORMS)
+@pytest.mark.parametrize(
+    ("matcher", "entry_type", "reason"),
+    [
+        pytest.param("Read", "command", "wrong matcher", id="read"),
+        pytest.param("", "command", "wrong matcher", id="empty"),
+        pytest.param("Bash", "command", "wrong matcher", id="excludes-agent"),
+        pytest.param("^(Read|Write)$", "command", "wrong matcher", id="regex-excludes-agent"),
+        pytest.param("Agent|Task|Bash", "prompt", "wrong type", id="prompt"),
+        pytest.param("Agent|Task|Bash", "agent", "wrong type", id="agent"),
+        pytest.param("Agent|Task|Bash", None, "wrong type", id="missing-type"),
+        pytest.param("Read", "prompt", "wrong matcher, wrong type", id="both"),
+    ],
+)
+def test_status_never_calls_an_ineffective_guard_installed(
+    tmp_path: Path, command: str, matcher: str, entry_type: Any, reason: str
+) -> None:
+    entry = {"command": command} if entry_type is None else {"type": entry_type, "command": command}
+    row = status_of(tmp_path, settings_with([(matcher, entry)]))
+    assert row.startswith("  guard hook: ineffective (" + reason + ":"), row
+    assert "new (" not in row and "legacy (" not in row
+
+
+@pytest.mark.parametrize("command", FORMS)
+def test_status_accepts_exactly_what_install_accepts(tmp_path: Path, command: str) -> None:
+    word = "new" if command == "safo-guard" else "legacy"
+    for matcher in ("Agent|Task|Bash", "Agent|Task"):  # the one install writes and the one it migrates
+        row = status_of(tmp_path, settings_with([(matcher, {"type": "command", "command": command})]))
+        assert row.startswith(f"  guard hook: {word} ("), row
+
+
+def test_status_ignores_a_non_string_command(tmp_path: Path) -> None:
+    row = status_of(tmp_path, settings_with([("Agent|Task|Bash", {"type": "command", "command": ["safo-guard"]})]))
+    assert row.startswith("  guard hook: absent"), row
+
+
+@pytest.mark.parametrize("command", FORMS)
+def test_status_names_an_ineffective_duplicate_beside_an_effective_entry(tmp_path: Path, command: str) -> None:
+    word = "new" if command == "safo-guard" else "legacy"
+    good = ("Agent|Task|Bash", {"type": "command", "command": command})
+    bad = ("Read", {"type": "command", "command": command})
+    row = status_of(tmp_path, settings_with([good, bad]))
+    assert row.startswith("  guard hook: ineffective (wrong matcher:") and f"effective: {word}" in row, row
+
+
+def test_install_and_status_share_one_acceptance_rule(_private_home: Path, tmp_path: Path) -> None:
+    from safo import hooks as rules
+
+    group = {"matcher": "Read"}
+    assert rules.entry_problems(group, {"type": "prompt"}, rules.GUARD_MATCHER, rules.LEGACY_GUARD_MATCHERS) == [
+        "wrong matcher",
+        "wrong type",
+    ]
+    bad = settings_with([("Read", {"type": "command", "command": "safo-guard"})])
+    with pytest.raises(Exception, match="ambiguous"):  # install refuses what status calls ineffective
+        rules.merge_settings(bad, "safo hooks probe", "safo-guard")
+
+
+def _modules_after_import(code: str) -> list[str]:
+    import subprocess
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", "import sys\n" + code + "\nprint(' '.join(sorted(sys.modules)))"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    return done.stdout.split()
+
+
+def test_the_entry_point_imports_neither_argparse_nor_the_cli_nor_other_modes() -> None:
+    loaded = _modules_after_import("import safo.guard")
+    assert "safo.guard" in loaded, "the guard did not import"  # collect loosely, assert that something was loaded
+    assert "argparse" not in loaded
+    assert not {m for m in loaded if m == "safo.cli" or m.startswith("safo.modes.")} - {"safo.modes.hooks"}
+    assert "safo.cli" not in loaded
+
+
+def test_the_import_probe_bites() -> None:  # the negative case: the same probe does see argparse when it is imported
+    assert "argparse" in _modules_after_import("import safo.guard, argparse")
+    assert "safo.cli" in _modules_after_import("import safo.cli")
+
+
+def test_scan_reads_only_the_two_attributes_the_guard_uses() -> None:
+    ns = entry_module.scan(["--agents", "a.yaml", "--agents-local=b.yaml"])
+    assert vars(ns) == {"agents": "a.yaml", "agents_local": "b.yaml"}

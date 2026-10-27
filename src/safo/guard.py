@@ -16,11 +16,11 @@ semantics); only an unreadable event takes the documented cannot-tell path (the 
 
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 import os
 import sys
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 from safo.context import LocalContext
 from safo.modes import hooks
@@ -28,7 +28,7 @@ from safo.modes import hooks
 OPTIONS = ("--agents", "--agents-local")
 
 
-def scan(words: Sequence[str]) -> argparse.Namespace:
+def scan(words: Sequence[str]) -> SimpleNamespace:
     """The two paths in `words`, by a lenient scan. `--opt=V` and `--opt V` (last one wins); an empty value counts as
     absent; a value that starts with a single dash is kept (`-strict.yaml` is a path); the word after a bare `--opt` is
     its value unless it starts with `--` (then the option has no value and that word is read on its own). Everything
@@ -48,7 +48,7 @@ def scan(words: Sequence[str]) -> argparse.Namespace:
             index += 1
         if value:
             values[name] = value
-    return argparse.Namespace(agents=values["--agents"], agents_local=values["--agents-local"])
+    return SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"])
 
 
 def main(argv: Sequence[str] | None = None) -> int:
