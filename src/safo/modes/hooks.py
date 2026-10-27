@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import contextlib
+import datetime as dt
 import itertools
 import json
 import os
@@ -107,7 +108,7 @@ MAX_SIDE_OBJECTS = 8  # `.log-failed.junk.*` entries kept in the state folder; a
 SIDE_PREFIX = ".log-failed.junk."
 SIDE_NAME = re.compile(re.escape(SIDE_PREFIX) + r"[0-9]+-[0-9a-f]{12}")  # exactly what remove_junk names a side object
 SIDE_PRUNE_AGE_SECONDS = 300.0  # an object younger than this (by ctime, which a rename updates) is never pruned
-EMIT_MIN_SECONDS = 0.5  # the write of the line is always given this long, however late the verdict was
+LIMIT_MARGIN_SECONDS = 0.25  # no wait ends later than this before the host's timeout, measured from process start
 POST_GRACE_SECONDS = 0.5  # after the hard limit the post-delivery work gets this long, still inside the host timeout
 NOTICE_IO_MIN_SECONDS = 0.25  # and at least this long, even when the clock is already past its limit
 _T = TypeVar("_T")
@@ -344,6 +345,8 @@ class Run:
     failed: bool = False  # the decision could not be delivered (write or flush failed)
     deny: bool = False  # the decision that was attempted was a denial
     decide_by: float | None = None  # the decision must be written by here (monotonic)
+    limit: float | None = None  # no wait may end after here: the host timeout less LIMIT_MARGIN_SECONDS
+    expired: bool = False  # decide_by had passed before the line was started: nothing written, nothing waited for
     overran: bool = False  # a bounded worker did not finish and was left running: leave as soon as the line is out
 
 
@@ -356,6 +359,8 @@ conftest makes it a no-op that returns, so a pytest process is not killed)."""
 def exit_code(run: Run) -> int:
     """0 normally. A decision that could not be delivered must not look like an allow: a denial then exits 2, which the
     host treats as a block; anything else exits 1, a non-blocking error."""
+    if run.expired:  # no time was left to even try: a denial blocks by its exit code, anything else is let through
+        return EXIT_BLOCK if run.deny else EXIT_OK
     if not run.failed:
         return EXIT_OK
     return EXIT_BLOCK if run.deny else EXIT_NOT_DELIVERED
@@ -375,24 +380,29 @@ def write_all(stream: Any, text: str) -> bool:
 
 
 def emit(ctx: LocalContext, run: Run, data: dict[str, Any]) -> bool:
-    """Write the whole line and flush it, in a worker thread that the main thread waits for until the decision deadline
-    (the hard limit plus POST_GRACE_SECONDS). A reader that never drains a full pipe cannot hold the decision past the
-    host's timeout: at the deadline the process ENDS through hard_exit with the exit code of an undelivered decision (2
-    for a denial, which the host reads as a block; 1 otherwise). A failed or short write is the same undelivered
-    decision. After the first attempt nothing else is ever written, so a truncated line is never followed by a second
-    object. The guard writes nothing to standard error and never changes flags on a shared file description."""
+    """Write the whole line and flush it, in a worker thread that the main thread waits for until `decide_by` (and never
+    past run.limit). A reader that never drains a full pipe cannot hold the decision past the host's timeout: at the
+    deadline the line counts as undelivered, and the entry ends the process with the exit code of an undelivered
+    decision (2 for a denial, which the host reads as a block; 1 otherwise). If `decide_by` has ALREADY passed there is
+    no time to try: nothing is waited for or written (`run.expired`), and the exit code is 2 for a denial and 0
+    otherwise (the allow is silent). A failed or short write is the same undelivered decision. After the first attempt
+    nothing else is ever written, so a truncated line is never followed by a second object. The guard writes nothing to
+    standard error and never changes flags on a shared file description."""
     text = output.line(json.dumps(data)) + "\n"
     run.attempted = True
     run.deny = data.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+    left = (run.decide_by - time.monotonic()) if run.decide_by is not None else APPEND_LOCK_TIMEOUT + 1.0
+    if left <= 0:
+        run.expired = True
+        return False
 
     def write() -> bool:
         delivered = write_all(ctx.out, text)
         ctx.out.flush()
         return delivered
 
-    left = (run.decide_by - time.monotonic()) if run.decide_by is not None else APPEND_LOCK_TIMEOUT + 1.0
     try:
-        done, delivered = run_bounded(write, max(EMIT_MIN_SECONDS, left))
+        done, delivered = run_bounded(write, left, run, overrun=False)
     except Exception:
         done, delivered = True, False
     if not done:
@@ -480,7 +490,7 @@ def emit_then_persist(
 
     left = (run.hard - time.monotonic()) if run.hard is not None else APPEND_LOCK_TIMEOUT + 1.0
     with contextlib.suppress(Exception):
-        run_bounded(after, max(0.0, left) + POST_GRACE_SECONDS)  # not done by then: the entry ends the process
+        run_bounded(after, max(0.0, left) + POST_GRACE_SECONDS, run, overrun=False)  # not done: the entry ends it
 
 
 # -- the log-failed marker: opened relative to the state folder's descriptor, never by a second path lookup -----------
@@ -673,7 +683,9 @@ def clear_log_failure(folder: Path | None, seen: Ident) -> None:
         os.close(dfd)
 
 
-def run_bounded(work: Callable[[], _T], timeout: float, run: Run | None = None) -> tuple[bool, _T | None]:
+def run_bounded(
+    work: Callable[[], _T], timeout: float, run: Run | None = None, *, overrun: bool = True
+) -> tuple[bool, _T | None]:
     """Run `work()` in a daemon thread and wait at most `timeout` seconds. (True, result), or (False, None) when it did
     not finish: the thread is LEFT RUNNING (a thread cannot be cancelled) and `run.overran` is set, which makes the
     guard end the process through hard_exit as soon as its decision is out. An exception in `work` is re-raised. This
@@ -684,7 +696,8 @@ def run_bounded(work: Callable[[], _T], timeout: float, run: Run | None = None) 
     pre-decision worker can still do in the short time between the overrun and that exit is limited to probe and
     health caches (the re-probe's lock file, `.attempt` marker and saved probe state): hints that can change the
     NEXT dispatch's notice or health, never a verdict. A system call already entered at the moment of the exit may
-    complete; nothing is started after it."""
+    complete; nothing is started after it. With `run`, the wait is also clamped so that it never ends after run.limit
+    (the host's timeout less a quarter second, from the process start); `overrun=False` leaves run.overran alone."""
     box: list[tuple[_T | None, BaseException | None]] = []
 
     def target() -> None:
@@ -693,11 +706,13 @@ def run_bounded(work: Callable[[], _T], timeout: float, run: Run | None = None) 
         except BaseException as error:
             box.append((None, error))
 
+    if run is not None and run.limit is not None:
+        timeout = min(timeout, run.limit - time.monotonic())  # no wait ends after the limit, whoever asked for it
     worker = threading.Thread(target=target, daemon=True, name="safo-bounded")
     worker.start()
     worker.join(max(0.0, timeout))
     if worker.is_alive() or not box:
-        if run is not None:
+        if run is not None and overrun:
             run.overran = True
         return False, None
     value, error = box[0]
@@ -719,6 +734,11 @@ def decision_margin(total: float) -> float:
     """How long before the host's timeout the decision must be out: a fifth of it, never under 2 s for a real timeout
     (the 10 s the installed settings give is 8 s), and never more than 40% of a very small scaled one."""
     return min(max(2.0, 0.2 * total), 0.4 * total)
+
+
+def limit_point(begun: float) -> float:
+    """No wait of the guard ends after this: the host's timeout less LIMIT_MARGIN_SECONDS, from the process start."""
+    return begun + float(GUARD_TIMEOUT_SECONDS) - LIMIT_MARGIN_SECONDS
 
 
 def budget_points(begun: float) -> tuple[float, float, float]:
@@ -986,6 +1006,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     run = run or Run()
     run.hard = hard
     run.decide_by = decide_by
+    run.limit = limit_point(begun)
 
     def probe_timeout(wanted: float) -> float:
         """Per request: what is wanted, or less when two requests and the lookup would not fit in what is left."""
@@ -1228,6 +1249,7 @@ def run_guard(ctx: LocalContext, args: argparse.Namespace, begun: float | None =
     begun = time.monotonic() if begun is None else begun
     run = run or Run()
     _, run.decide_by, run.hard = budget_points(begun)
+    run.limit = limit_point(begun)
     code = ""
     deny = ""
     try:
@@ -1262,6 +1284,15 @@ def arm_process_clock() -> None:
     process_started = safo.PROCESS_STARTED
 
 
+def process_begun(now: float) -> float:
+    """Where the guard's budget starts: the process start when the real entry armed the clock and that start is recent
+    (under one whole budget old), otherwise now (a test calling main() in a long-lived process)."""
+    started = process_started
+    if started is not None and 0.0 <= now - started <= float(GUARD_TIMEOUT_SECONDS):
+        return started
+    return now
+
+
 def guard_process(ctx: LocalContext, args: argparse.Namespace) -> int:
     """`safo hooks guard` as a process: run the guard, then END the process through hard_exit with its exit code, on
     EVERY route: a normal return, a crash in the guard, KeyboardInterrupt, SystemExit (an exception that gets out is
@@ -1272,10 +1303,11 @@ def guard_process(ctx: LocalContext, args: argparse.Namespace) -> int:
 
     The budget starts at the start of the PROCESS when the real entry has armed the clock (arm_process_clock), so
     interpreter start-up and package imports are inside it; otherwise (a test calling main() in a long-lived process)
-    it starts now. An armed start that is not recent (older than the whole budget) is ignored too."""
-    now = time.monotonic()
-    started = process_started  # None unless the real entry armed it
-    begun = started if started is not None and 0.0 <= now - started <= float(GUARD_TIMEOUT_SECONDS) else now
+    it starts now. An armed start that is not recent (older than the whole budget) is ignored too. A process that
+    reaches this point after decide_by gets no time to write: a denial is an exit 2 with nothing written, anything else
+    a silent exit 0. A process whose start-up alone reaches the host's timeout cannot be made safe from inside Python:
+    that boundary is the host (`onFailure: block`, SAFO #130) or an external launcher."""
+    begun = process_begun(time.monotonic())
     run = Run()
     code = EXIT_NOT_DELIVERED
     try:
@@ -1285,6 +1317,46 @@ def guard_process(ctx: LocalContext, args: argparse.Namespace) -> int:
         raise
     finally:
         hard_exit(code)
+    return code
+
+
+def guard_argv(words: Sequence[str]) -> argparse.Namespace | None:
+    """The arguments of `hooks guard`, parsed BY HAND and without argparse, whose error and help paths write to standard
+    error synchronously. Exactly what the installer writes is accepted: `--agents PATH` and `--agents-local PATH`, each
+    at most once, in either order, with a value. Anything else is None."""
+    values = {"--agents": "", "--agents-local": ""}
+    seen: set[str] = set()
+    index = 0
+    while index < len(words):
+        flag = words[index]
+        if flag not in values or flag in seen or index + 1 >= len(words):
+            return None
+        seen.add(flag)
+        values[flag] = words[index + 1]
+        index += 2
+    return argparse.Namespace(agents=values["--agents"], agents_local=values["--agents-local"])
+
+
+def guard_command(words: Sequence[str]) -> int:
+    """The real entry for `safo hooks guard WORDS` (called by `safo.cli.run` before argparse is even built). A command
+    line the installer could have written goes straight into guard_process. Any other (a stale or edited install, an
+    unknown flag, --help) is a configuration error, not a policy decision: it must not print to standard error and
+    must never end in argparse's own exit 2 (a block). It gets the same visible degraded allow as every other guard
+    failure, written through the bounded emit, and the process ends: exit 0 if the line was delivered, 1 if not."""
+    ctx = LocalContext(sys.stdout, os.environ, dt.datetime.now(dt.UTC))
+    args = guard_argv(words)
+    if args is not None:
+        return guard_process(ctx, args)
+    begun = process_begun(time.monotonic())
+    run = Run()
+    _, run.decide_by, run.hard = budget_points(begun)
+    run.limit = limit_point(begun)
+    try:
+        diagnostic(ctx, "input", run=run)
+    except Exception:
+        run.failed = True
+    code = exit_code(run)
+    hard_exit(code)
     return code
 
 

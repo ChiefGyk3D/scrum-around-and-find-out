@@ -1318,7 +1318,9 @@ def test_l2_the_hook_passes_its_deadline_to_the_scan(
 ) -> None:
     from safo.modes import hooks as hooks_mode
 
-    monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)  # the whole budget is already gone
+    monkeypatch.setattr(
+        hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun + 9.0)
+    )  # lookups are already late; the decision is not
 
     monkeypatch.setattr(
         hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
@@ -1515,7 +1517,9 @@ def test_r4_the_hook_does_not_honor_a_marker_after_its_deadline(
 ) -> None:
     from safo.modes import hooks as hooks_mode
 
-    monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(
+        hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun + 9.0)
+    )  # lookups are already late; the decision is not
 
     monkeypatch.setattr(
         hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
@@ -1625,7 +1629,9 @@ def test_r4_neither_the_hook_output_nor_the_log_carries_the_command_for_any_kind
 
     command = KIND_COMMANDS[kind]
     if kind == "unscannable-timeout":
-        monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)
+        monkeypatch.setattr(
+            hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun - 1.0)
+        )  # lookups are already late; the decision is not
         monkeypatch.setattr(
             hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
         )  # the subject is the guard deadline, not the load floor on a busy machine

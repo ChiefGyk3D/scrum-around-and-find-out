@@ -311,7 +311,9 @@ def test_a_config_load_that_finishes_late_skips_the_lookups_and_says_so(
     set_probe(_private_home, reachable=False, agents=agents)
 
     def late_load(*a: Any, **k: Any) -> Any:
-        clock.now += 10.1  # the load returned, but after the whole budget (on the injected clock)
+        clock.now += (
+            7.5  # the load returned after the lookup deadline (7 s) but before decide_by (8 s), on the injected clock
+        )
         return load_agents_for(*a, **k)
 
     def must_not_be_asked(ref: Any) -> str:
@@ -323,7 +325,7 @@ def test_a_config_load_that_finishes_late_skips_the_lookups_and_says_so(
     assert mod.run_guard(ctx, namespace(agents)) == 0
     [row] = lines(out.buffered)
     assert denied(row) and mod.BUDGET_NOTICE in row["hookSpecificOutput"]["additionalContext"]
-    assert marker(_private_home).exists(), "the append was skipped: the clock was past the hard limit"
+    assert not marker(_private_home).exists(), "the clock was still before the hard limit (9 s): the append went ahead"
 
 
 # -- B1 / B2: the emit is an explicit step with a result -------------------------------------------------------
@@ -605,7 +607,7 @@ def degrade_everything(home: Path, agents: Path, clock: Clock, monkeypatch: pyte
     real = load_agents_for
 
     def late(*a: Any, **k: Any) -> Any:
-        clock.now += 10.1
+        clock.now += 7.5  # past the lookup deadline (7 s), before decide_by (8 s)
         return real(*a, **k)
 
     monkeypatch.setattr(mod, "load_agents_for", late)  # budget exhausted; no saved probe, so the probe notice too

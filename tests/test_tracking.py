@@ -683,7 +683,9 @@ def test_a_guard_out_of_time_denies_in_block_mode_and_skips_the_append_and_the_n
     import time
 
     monkeypatch.setattr(hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0)  # the subject is the deadline, not the load floor
-    hooks_mode.guard(ctx, argparse.Namespace(agents=str(agents), agents_local=""), started=time.monotonic() - 60)
+    # lookups are late and the log time is gone, but the decision still has time: decide_by is 8 s away
+    monkeypatch.setattr(hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun - 1.0))
+    hooks_mode.guard(ctx, argparse.Namespace(agents=str(agents), agents_local=""), started=time.monotonic())
     assert calls == [], "no process is started once the deadline has passed"
     assert json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"] == "deny"
     # New contract: out of time, the append is skipped (it is never stretched past the hook's budget), and the

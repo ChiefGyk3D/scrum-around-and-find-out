@@ -9,7 +9,7 @@ import datetime as dt
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from typing import TextIO
+from typing import Any, TextIO
 
 from safo import __version__, compat, credentials, guardlog, output
 from safo.context import Context, LocalContext
@@ -47,10 +47,22 @@ def resolve_board(path: str | None, env: Mapping[str, str]) -> Board:
     return load_board("board.yaml")
 
 
+class HookSafeParser(argparse.ArgumentParser):
+    """argparse writes usage, errors and help to the standard streams SYNCHRONOUSLY, and a full stderr pipe would block
+    that for ever. For a hook command line (`hooks guard`, `hooks probe`) it writes nothing at all: the recovery in
+    `_run` turns the failed parse into the hook's visible degraded line instead. (`hooks status` and everything else is
+    typed by a person and keeps argparse's messages.) Sub-parsers are of the same class."""
+
+    armed = False  # set by run(), the real entry, when no person is at a terminal
+    quiet = False
+
+    def _print_message(self, message: str, file: Any = None) -> None:
+        if not (HookSafeParser.armed and HookSafeParser.quiet):
+            super()._print_message(message, file)
+
+
 def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
-    parser = argparse.ArgumentParser(
-        prog="safo", description="Scrum Around and Find Out: a GitHub Project defined as code."
-    )
+    parser = HookSafeParser(prog="safo", description="Scrum Around and Find Out: a GitHub Project defined as code.")
     parser.add_argument("--version", action="version", version=f"safo {__version__}")
     parser.add_argument("--board", default=None, help="the board file (default: $SAFO_BOARD, else ./board.yaml)")
     parser.add_argument("--gh-user", default="", help="use this logged-in gh account's token instead of the active one")
@@ -101,6 +113,7 @@ def _run(
     err = err or sys.stderr
     parser, _ = build_parser()
     clock = now or dt.datetime.now(dt.UTC)
+    HookSafeParser.quiet = hooks.hook_event(sys.argv[1:] if argv is None else argv) is not None
     try:
         args = parser.parse_args(argv)
     except SystemExit as stop:
@@ -159,6 +172,19 @@ def main(
     return code
 
 
+def person_at_a_terminal() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (OSError, ValueError):
+        return False
+
+
 def run() -> None:
     hooks.arm_process_clock()  # the guard's budget counts from the start of the process
+    words = sys.argv[1:]
+    HookSafeParser.armed = not person_at_a_terminal()  # a host: no usage, error or help text on the hook commands
+    if words[:2] == ["hooks", "guard"] and not person_at_a_terminal():
+        # What a host runs: no argparse, whose error and help paths write to stderr synchronously. A person at a
+        # terminal still gets argparse's usage and help.
+        raise SystemExit(hooks.guard_command(words[2:]))
     raise SystemExit(main())
