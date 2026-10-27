@@ -266,7 +266,7 @@ views:
   - {name: Sprint plan, layout: table, filter: "-status:Done"}
   - {name: Roadmap, layout: roadmap, filter: ""}
   - {name: Backlog, layout: table, filter: "status:Backlog"}
-  - {name: Agents at work, layout: table, filter: 'status:"In progress","In review",Next'}
+  - {name: Agents at work, layout: table, filter: 'status:"In progress","In review",Next,Blocked'}
 rules:
   status:
     opened: Backlog

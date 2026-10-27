@@ -23,7 +23,7 @@ from safo.profile import Budget, Profile, check_profiles, parse_profile, templat
 from safo.schema import Reader, _safe_load
 from safo.trust import read_trusted_regular_file
 
-KINDS = ("claude", "codex", "copilot", "chatgpt", "ollama", "human")
+KINDS = ("claude", "codex", "copilot", "chatgpt", "ollama", "rag", "human")
 ROLES = ("general", "embedding", "guard")
 METERS = ("five_hour", "weekly", "monthly_percent")
 
