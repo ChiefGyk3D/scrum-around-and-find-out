@@ -14,7 +14,14 @@ from dataclasses import dataclass, field
 from safo.agentsfile import Agent, AgentsFile, Endpoint, Shape, Threshold
 from safo.ollama import Probe
 
-CARD_LABELS = {"claude": "Claude", "codex": "Codex", "copilot": "Copilot", "ollama": "Claude", "human": "You"}
+CARD_LABELS = {
+    "claude": "Claude",
+    "codex": "Codex",
+    "copilot": "Copilot",
+    "chatgpt": "ChatGPT",
+    "ollama": "Claude",
+    "human": "You",
+}
 METER_NAMES = {
     "five_hour": "the 5-hour window",
     "weekly": "the weekly window",
