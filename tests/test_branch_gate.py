@@ -48,12 +48,10 @@ def ruleset(
     no_force: bool = True,
     integration: int | None = ACTIONS,
     source: str = "Repository",
-    workflows: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """A ruleset; `integration` is the integration id each required check is pinned to (None: any source).
 
-    `source` is the kind of owner of the ruleset (Repository, Organization or Enterprise); `workflows` are the paths of
-    a required-workflows rule.
+    `source` is the kind of owner of the ruleset (Repository, Organization or Enterprise).
     """
     rules: list[dict[str, Any]] = []
     if contexts:
@@ -62,15 +60,6 @@ def ruleset(
                 "type": "REQUIRED_STATUS_CHECKS",
                 "parameters": {
                     "requiredStatusChecks": [{"context": c, "integrationId": integration} for c in contexts]
-                },
-            }
-        )
-    if workflows:
-        rules.append(
-            {
-                "type": "WORKFLOWS",
-                "parameters": {
-                    "workflows": [{"path": w, "ref": "refs/heads/main", "repositoryId": 7} for w in workflows]
                 },
             }
         )

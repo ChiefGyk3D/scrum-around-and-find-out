@@ -24,7 +24,8 @@ a zero allowance count means "nobody" only from an ADMIN token, because GitHub m
 The required check must also come from the CI app (`rules.gate_check_app_id`): a check with no source restriction, or
 tied to another app, is a finding, because any app can post a status with that name. A pin proves the app, not the
 workflow: every workflow of a repository posts as the same Actions app, so a pinned check passes with a NOTE saying so,
-unless a ruleset's required-workflows rule that nobody can bypass backs it. The empty bypass list of a ruleset that an
+always. GitHub's required-workflows rule is not interpreted: nothing in the answer ties a workflow file to a status
+name or proves where it comes from. The empty bypass list of a ruleset that an
 organization or enterprise owns is never believed (it is administered there), even for an ADMIN token.
 
 Where this module cannot be sure what GitHub means, it says "cannot tell" and the audit exits 2;
@@ -77,10 +78,7 @@ Q_BRANCH_GATE = """query RepoBranchGate($owner: String!, $name: String!) {
           totalCount
           nodes {
             type
-            parameters {
-              ... on RequiredStatusChecksParameters { requiredStatusChecks { context integrationId } }
-              ... on WorkflowsParameters { workflows { path ref repositoryId } }
-            }
+            parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context integrationId } } }
           }
         }
       }
@@ -421,23 +419,6 @@ def _source_kind(rs: JSON) -> str:
     return kind
 
 
-def _workflows(params: Any) -> list[JSON]:
-    """The required workflows of a WORKFLOWS rule (`WorkflowsParameters.workflows`, each a `WorkflowFileReference`)."""
-    out = []
-    for w in _list(_obj(params, "rule parameters").get("workflows"), "required workflows"):
-        w = _obj(w, "required workflow")
-        _text(w.get("path"), "required workflow path")
-        if "ref" not in w:
-            raise MalformedDataError("required workflow ref: GitHub's answer lacks it")
-        if w["ref"] is not None:
-            _text(w["ref"], "required workflow ref")
-        rid = w.get("repositoryId")
-        if isinstance(rid, bool) or not isinstance(rid, int) or not 0 < rid <= MAX_INT:
-            raise MalformedDataError("required workflow repositoryId: GitHub's answer lacks it")
-        out.append(w)
-    return out
-
-
 def _validate_ruleset(rs: JSON) -> None:
     """The type of every field asked for in one ruleset, whether or not the ruleset counts for the default branch."""
     name = _s(_text(rs.get("name"), "ruleset name"))
@@ -462,8 +443,6 @@ def _validate_ruleset(rs: JSON) -> None:
         params = rule["parameters"]
         if kind == "REQUIRED_STATUS_CHECKS":
             _checks(_obj(params, "rule parameters").get("requiredStatusChecks"), "requiredStatusChecks", True)
-        elif kind == "WORKFLOWS":
-            _workflows(params)
         elif params is not None:
             _obj(params, "rule parameters")
 
@@ -539,17 +518,6 @@ def _bypass_actors(rs: JSON, permission: str) -> str | None:
     return f"ruleset {name!r} has {len(nodes)} bypass actor{plural} ({', '.join(modes)})"
 
 
-def _workflow_backed(rulesets: list[JSON], permission: str) -> bool:
-    """A required-workflows rule that nobody can bypass backs the pin; one whose bypass list cannot be read does not."""
-    for rs in rulesets:
-        try:
-            if _bypass_actors(rs, permission) is None:
-                return True
-        except Unclear:
-            continue
-    return False
-
-
 def _admin_only(sources: list[Source]) -> bool:
     """Held, but only by rules whose administrator exception was accepted."""
     return any(s.bypass is None for s in sources) and not any(s.bypass is None and not s.admin_open for s in sources)
@@ -608,7 +576,6 @@ def _judge(
     check_sources: list[Source] = []
     force_sources: list[Source] = []
     wrong_source: list[str] = []  # the gate check is required, but not from the CI app
-    workflow_rulesets: list[JSON] = []  # active rulesets on the default branch that require a workflow
     protected = False
     classic = ref["branchProtectionRule"]
     if classic is not None:
@@ -652,8 +619,6 @@ def _judge(
                     wrong_source.append(f"ruleset {rs_name!r} " + why)
             elif kind == "NON_FAST_FORWARD":
                 force_sources.append(Source(rs_name, _bypass_actors(rs, permission)))
-            elif kind == "WORKFLOWS" and _workflows(rule.get("parameters")):
-                workflow_rulesets.append(rs)
 
     if not protected:
         if permission != "ADMIN":
@@ -671,7 +636,7 @@ def _judge(
         elif not held:
             clauses.append(("check", list(dict.fromkeys(ways))))
         else:
-            res.app_pinned_only = not _workflow_backed(workflow_rulesets, permission)
+            res.app_pinned_only = True  # always said: nothing here proves which workflow posted the check
             if _admin_only(check_sources):
                 res.admins_open = True
     if forbid_force:

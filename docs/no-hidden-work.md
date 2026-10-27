@@ -88,10 +88,10 @@ to another app is not your CI, so both are reported (`... does not require the c
 protection accepts it from any app)`). A name from another app or from a plain commit status that merely looks like the gate
 is never credited. **What the pin does not prove:** it identifies the app that posts the check, not the workflow. Every
 workflow and job in the repository runs as the same Actions app, so any of them can post `CI green`, or a lookalike such
-as `evil / CI green`, and satisfy a check pinned to it. A pinned check therefore passes, with a `NOTE` saying so (below).
+as `evil / CI green`, and satisfy a check pinned to it. A pinned check therefore passes, with a `NOTE` saying so every time (below): nothing suppresses it.
 "Unreviewed code cannot reach the default branch" holds only together with ownership of the workflow files (a CODEOWNERS
 rule over the workflow directory, which `safo protection` verifies in PR #168) and the required-reviews rule; this audit
-does not prove either. The strongest evidence it can read is a ruleset **required workflows** rule (see below). Note that `scripts/apply-baseline.sh` omits `app_id`, which makes GitHub
+does not prove either. Note that `scripts/apply-baseline.sh` omits `app_id`, which makes GitHub
 pick the app that most recently reported the check, so a repository set up that way is only as pinned as that choice; pin it
 explicitly. Force pushes are blocked by a classic rule that disallows them or a ruleset with the non-fast-forward rule.
 A rule that someone can get around does not hold the gate: a ruleset with any bypass actor, a force-push bypass allowance,
@@ -193,15 +193,12 @@ GitHub answers "none" instead of "forbidden", so the audit never reads an empty 
 reports ADMIN on the repository; otherwise, and on any refused or failed read, it prints `UNKNOWN NO-GATE ...` naming the
 permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero. An integer `0` allowance count, or an empty `bypassActors` list, means "nobody can bypass" only when `viewerPermission` is ADMIN: from any lower permission it is cannot tell whenever the verdict depends on it (a ruleset that holds the gate check or the force-push block, or a classic rule that blocks force pushes while `gate_forbid_force_push` is on). A bypass that is listed is a finding whatever the permission, and a rule that does not decide the verdict is not asked. The classic pull-request allowances never touch a required check, so they are not asked. Cannot tell is never a pass.
 
-**Required workflows.** A ruleset can require a workflow to pass (a `WORKFLOWS` rule). The GraphQL schema does expose it
-(introspection 2026-10-26: `RepositoryRuleType` has `WORKFLOWS`; its parameters are `WorkflowsParameters`, whose
-`workflows` are `WorkflowFileReference` objects with `path`, `ref` and `repositoryId`), and the query reads
-`... on WorkflowsParameters { workflows { path ref repositoryId } }`. A required-workflows rule that is active on the
-default branch, lists at least one workflow, and that nobody can bypass (same rule as every other: an empty bypass list
-is believed per the permission and ruleset-owner rules above) backs a pinned check and removes the NOTE. It does not
-replace the check: a workflow reference names a file, not a status name, and nothing in the answer ties the two, so a
-repository that has only a required workflow still gets `does not require the check 'CI green'`. Every field is typed
-(`path` text, `ref` text or null, `repositoryId` an integer from 1 to 2147483647); anything else is cannot tell.
+**Required workflows are not interpreted.** GitHub rulesets have a rule that requires a workflow to pass (rule type
+`WORKFLOWS`; the GraphQL schema exposes it, introspection 2026-10-26). SAFO does not read it and it never changes a
+verdict or removes the app-pin NOTE: a workflow reference names a file at a path, ref and repository, and nothing in the
+GraphQL answer ties that file to a status name or proves its provenance (the workflow may be unrelated to the check, come
+from another repository, sit on a mutable branch or tag, or be skipped on creation). Whether and how the audit could ever
+accept a required workflow as the strongest evidence is an open design question, tracked as a follow-up, not a feature.
 
 **Inherited rulesets.** `includeParents: true` also returns rulesets owned by the organization or enterprise. The query
 reads `source { __typename }` (the `source` field of `RepositoryRuleset` is a non-null `RuleSource` union of `Repository`,

@@ -2,7 +2,7 @@
 """The branch gate (SAFO #180, round 2): what app pinning does not prove, and whose bypass list can be believed.
 
 1. An app id proves the producing app, not the workflow: every workflow of a repository shares the Actions app, so a
-   check pinned to it still passes but says so in a NOTE, unless a required-workflows rule backs it.
+   check pinned to it still passes but always says so in a NOTE. Required workflows are not interpreted.
 2. A ruleset inherited from an organization or enterprise is administered there: an empty bypass list read from the
    repository is never believed, whatever the viewer's permission on the repository.
 3. `gate_check_app_id` is a GraphQL Int.
@@ -44,9 +44,9 @@ def read_failure(fake: FakeGitHub, client: Client, raw: dict[str, Any]) -> bool:
     return code == 2 and len(found) == 1 and "unexpected answer" not in found[0]
 
 
-def test_the_query_asks_for_the_ruleset_source_and_required_workflows() -> None:
+def test_the_query_asks_for_the_ruleset_source_and_does_not_select_required_workflows() -> None:
     assert "source { __typename }" in Q_BRANCH_GATE
-    assert "... on WorkflowsParameters { workflows { path ref repositoryId } }" in Q_BRANCH_GATE
+    assert "WorkflowsParameters" not in Q_BRANCH_GATE and "workflows" not in Q_BRANCH_GATE
 
 
 def test_a_lookalike_workflow_pinned_to_the_actions_app_still_passes_but_says_so(
@@ -75,105 +75,44 @@ def test_the_note_names_a_configured_app_that_is_not_actions(fake: FakeGitHub, c
     assert code == 0 and "app 99" in note and "Actions app" not in note, note
 
 
-def test_a_required_workflow_backs_the_pin_and_removes_the_note(fake: FakeGitHub, client: Client) -> None:
-    only_widgets(fake, rulesets=[ruleset("CI green", workflows=(".github/workflows/ci.yml",))], perm="ADMIN")
-    code, text = gate(fake, client)
-    assert code == 0 and not [t for t in pin_notes(text) if WIDGETS in t], text
-
-
-def test_a_required_workflow_in_another_unbypassable_ruleset_counts(fake: FakeGitHub, client: Client) -> None:
-    other = ruleset(no_force=False, workflows=(".github/workflows/ci.yml",)) | {"name": "workflows"}
-    only_widgets(fake, rulesets=[ruleset("CI green"), other], perm="ADMIN")
-    code, text = gate(fake, client)
-    assert code == 0 and not [t for t in pin_notes(text) if WIDGETS in t], text
-
-
-def test_a_required_workflow_that_can_be_bypassed_or_is_empty_does_not_remove_the_note(
-    fake: FakeGitHub, client: Client
-) -> None:
-    bypassable = ruleset(no_force=False, workflows=("ci.yml",)) | {
-        "name": "workflows",
-        "bypassActors": {"totalCount": 1, "nodes": [{"bypassMode": "ALWAYS"}]},
-    }
-    only_widgets(fake, rulesets=[ruleset("CI green"), bypassable], perm="ADMIN")
-    code, text = gate(fake, client)
-    assert code == 0 and [t for t in pin_notes(text) if WIDGETS in t], text
-    empty = ruleset("CI green")
-    empty["rules"]["nodes"].append({"type": "WORKFLOWS", "parameters": {"workflows": []}})
-    empty["rules"]["totalCount"] += 1
-    only_widgets(fake, rulesets=[empty], perm="ADMIN")
-    code, text = gate(fake, client)
-    assert code == 0 and [t for t in pin_notes(text) if WIDGETS in t], text
-
-
-def test_a_required_workflow_alone_is_not_the_gate_check(fake: FakeGitHub, client: Client) -> None:
-    """The workflows rule names a file, not a check: nothing ties it to `CI green`, so it is evidence, not a pass."""
-    only_widgets(fake, rulesets=[ruleset(workflows=("ci.yml",))], perm="ADMIN")
-    code, text = gate(fake, client)
-    assert code == 1 and "does not require the check 'CI green'" in lines(text, WIDGETS)[0]
-
-
-WF = [*RS, "rules", "nodes", 0, "parameters", "workflows"]
-
-
-def workflows_raw() -> dict[str, Any]:
-    raw = clean_raw()
-    raw["rulesets"]["nodes"] = [ruleset("CI green", workflows=("ci.yml",))]
-    return raw
-
-
-def test_the_workflows_baseline_is_clean() -> None:
-    assert workflows_raw()["rulesets"]["nodes"][0]["rules"]["nodes"][1]["type"] == "WORKFLOWS"
-
-
-WFP = [*RS, "rules", "nodes", 1, "parameters"]
-
-
-BAD_PARAMS: list[Any] = [
-    None,
-    {},
-    "x",
-    1,
-    {"workflows": None},
-    {"workflows": {}},
-    {"workflows": "x"},
-    {"workflows": [None]},
-    {"workflows": ["x"]},
-    {"workflows": [{}]},
-    {"workflows": [{"path": 5, "repositoryId": 1, "ref": None}]},
+# Required workflows are not interpreted: a WORKFLOWS rule of any shape changes neither the verdict nor the NOTE.
+WORKFLOW_RULES: list[Any] = [
+    {"type": "WORKFLOWS", "parameters": {}},  # what GitHub answers when no fragment of the union is selected
+    {"type": "WORKFLOWS", "parameters": None},
+    {"type": "WORKFLOWS", "parameters": {"workflows": []}},
+    {
+        "type": "WORKFLOWS",  # Codex's fixture: unrelated file, another repository, mutable ref, not enforced on create
+        "parameters": {
+            "workflows": [{"path": "noop.yml", "ref": "refs/heads/mutable", "repositoryId": 999}],
+            "doNotEnforceOnCreate": True,
+        },
+    },
+    {"type": "WORKFLOWS", "parameters": {"workflows": [{"path": "ci.yml", "ref": None, "repositoryId": 7}] * 2}},
+    {"type": "WORKFLOWS", "parameters": {"workflows": "not even a list"}},
 ]
 
 
-@pytest.mark.parametrize("params", BAD_PARAMS, ids=repr)
-def test_a_required_workflows_rule_that_is_malformed_is_cannot_tell(
-    fake: FakeGitHub, client: Client, params: Any
+@pytest.mark.parametrize("rule", WORKFLOW_RULES, ids=range(len(WORKFLOW_RULES)))
+def test_a_required_workflows_rule_of_any_shape_does_not_remove_the_note(
+    fake: FakeGitHub, client: Client, rule: Any
 ) -> None:
-    assert exit_code(fake, client, workflows_raw()) == 0
-    assert exit_code(fake, client, set_path(workflows_raw(), WFP, params)) == 2
+    node = ruleset("evil / CI green")
+    node["rules"]["nodes"].append(rule)
+    node["rules"]["totalCount"] += 1
+    only_widgets(fake, rulesets=[node], perm="ADMIN")
+    code, text = gate(fake, client)
+    assert code == 0, text
+    assert len([t for t in pin_notes(text) if WIDGETS in t]) == 1, text
 
 
-@pytest.mark.parametrize("bad", ["absent", None, "7", True, 1.5])
-def test_a_required_workflow_repository_id_must_be_an_integer(fake: FakeGitHub, client: Client, bad: Any) -> None:
-    raw = workflows_raw()
-    entry = raw["rulesets"]["nodes"][0]["rules"]["nodes"][1]["parameters"]["workflows"][0]
-    if bad == "absent":
-        del entry["repositoryId"]
-    else:
-        entry["repositoryId"] = bad
-    assert exit_code(fake, client, raw) == 2
-
-
-@pytest.mark.parametrize("ref", ["absent", 5, []])
-def test_a_required_workflow_ref_is_null_or_text(fake: FakeGitHub, client: Client, ref: Any) -> None:
-    raw = workflows_raw()
-    entry = raw["rulesets"]["nodes"][0]["rules"]["nodes"][1]["parameters"]["workflows"][0]
-    if ref == "absent":
-        del entry["ref"]
-    else:
-        entry["ref"] = ref
-    assert read_failure(fake, client, raw) is True  # a typed refusal, not a crash caught as "unexpected answer"
-    entry["ref"] = None
-    assert exit_code(fake, client, raw) == 0
+def test_a_required_workflows_rule_alone_is_not_the_gate_check(fake: FakeGitHub, client: Client) -> None:
+    node = ruleset(no_force=True)
+    node["rules"]["nodes"].append(WORKFLOW_RULES[3])
+    node["rules"]["totalCount"] += 1
+    only_widgets(fake, rulesets=[node], perm="ADMIN")
+    code, text = gate(fake, client)
+    assert code == 1 and "does not require the check 'CI green'" in lines(text, WIDGETS)[0]
+    assert not [t for t in pin_notes(text) if WIDGETS in t]
 
 
 # -- 2. an inherited ruleset's bypass list is not seen from the repository ----
