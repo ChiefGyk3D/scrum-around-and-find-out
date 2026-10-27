@@ -142,6 +142,22 @@ class FRepo:
     full_name: str
     installed: bool = True
     contents: list[FContent] = field(default_factory=list)
+    # What the branch gate reads. The default is a fully protected repository, so a test that is not about the gate
+    # stays clean; a gate test overrides these.
+    default_branch: str | None = "main"
+    archived: bool = False
+    viewer_permission: str = "ADMIN"
+    protection: dict[str, Any] | None = field(
+        default_factory=lambda: {
+            "requiresStatusChecks": True,
+            "requiredStatusChecks": [{"context": "ci / CI green"}],
+            "allowsForcePushes": False,
+            "isAdminEnforced": True,
+            "bypassForcePushAllowances": {"totalCount": 0},
+            "bypassPullRequestAllowances": {"totalCount": 0},
+        }
+    )
+    rulesets: list[dict[str, Any]] = field(default_factory=list)
 
 
 class FakeGitHub:

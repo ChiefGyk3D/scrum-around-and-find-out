@@ -61,6 +61,10 @@ def doc() -> dict[str, Any]:
     }
     agents["codex"]["profile"] = copy.deepcopy(MINIMAL_CODEX)
     agents["copilot"]["profile"] = {"status": "unmeasured"}
+    agents["chatgpt"]["profile"] = {
+        "status": "unmeasured",
+        "brief": {"inline": "Write a draft the maintainer reviews."},
+    }
     agents["ollama"]["profile"] = {"status": "unmeasured", "brief": {"inline": "Answer in the format asked for."}}
     return d
 
