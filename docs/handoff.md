@@ -52,8 +52,13 @@ What it reads, and how strictly:
 - A comment whose HTML is over 200,000 characters, nested over 50 elements deep, or not well formed (a mismatched or
   unclosed tag) cannot be read. If it mentions `ROLE` and its author is trusted, the whole answer is unknown; a comment
   that does not mention `ROLE`, or comes from anyone else, is ignored. The HTML is never copied into the output.
-- The head is read before the comments and again after them. If it moved, the answer is unknown ("head moved while
-  reading"), not a comparison against a stale read.
+- **The pull request is read twice and must not have changed.** The first round (head, base branch name and base oid,
+  state and draft flag; the comments; the commits when the report names a short SHA; the timeline) decides. A final
+  round then reads the pull request, the timeline and the comments again, and any difference from the first round (a
+  new head or base, any new or different timeline event, an edited, added or minimized comment, a changed state) makes
+  the answer unknown ("the pull request changed while it was being read"), not a verdict from a state that no longer
+  holds. This costs three more read requests on a fresh answer (two when the timeline is not needed), and a busy base
+  branch, whose oid moves with every push, can make the answer unknown for a moment: run it again.
 - **A report is fresh only if it was posted AFTER the moment its commit became the head, and GitHub proves that
   moment.** The only event GitHub records with the time a head arrived is a force-push (`HeadRefForcePushedEvent`
   from the pull request timeline, the last 50 events); the head's time is the latest one whose result is the head. A
@@ -83,10 +88,13 @@ What it reads, and how strictly:
   left out), and everything printed is escaped. An internal error prints only its class name.
 - The client refuses any answer from GitHub over 32 MiB at the one place a body is read, for a query and for a
   mutation alike (an oversized mutation answer is an unknown outcome, never a success), and it does not ask for or
-  decode a compressed answer. A `Content-Length` that is not plain ASCII digits (a sign, spaces, underscores, other
-  scripts' digits, a list, an empty or repeated header) is malformed framing: the answer is refused, and a sent mutation
-  is an unknown outcome, because a body cut short under such a header would otherwise read as complete. JSON nested too deeply, text that is not UTF-8, or `errors` that is not a list of
-  objects is an error of the client, so it ends as unknown like any other.
+  decode a compressed answer. A response is framed by exactly one of: a single `Content-Length` of ASCII digits, or a
+  single `Transfer-Encoding: chunked` (that exact value) with no `Content-Length`. Anything else is malformed framing:
+  a sign, spaces, underscores, other scripts' digits, a list, an empty or repeated length; both headers together
+  (even when they agree); any other transfer coding (gzip, deflate, compress, identity, a list, another spelling, a
+  repeated header). The answer is refused, and a sent mutation is an unknown outcome, because an ambiguously framed or
+  cut-short body would otherwise read as complete. JSON nested too deeply, text that is not UTF-8, or `errors` that is
+  not a list of objects is an error of the client too, so it ends as unknown like any other.
 - **The exit code is the answer.** The verdict is computed first and printed after. If printing fails (a closed
   stream, a broken pipe), the exit code is unchanged. If the verdict cannot be computed for any reason, including an
   exception that is not an `Exception` such as `SystemExit` from a dependency, the exit code is 2 and the line names
@@ -97,8 +105,10 @@ Known limits:
 - Review bodies (`gh pr review`) and review-thread comments are not read. A report posted only there reads as no
   report. This is tracked in [#160](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/160).
 - A normally pushed head cannot be dated (see above), so the check is only useful for a head that arrived by
-  force-push, or when you accept unknown. A different source of server-set time (check suites, for example) could
-  widen this; none is used.
+  force-push, or when you accept unknown. Candidate evidence for a later change (an idea, not built): a real pull
+  request review, whose `submittedAt` is set by the server and is tied to a commit, combined with later force-push and
+  base-change events; a push webhook or audit-log event that someone keeps outside GitHub; check-suite creation time
+  for the head commit. None is used.
 - A trusted commenter can still post a forged report after a push: the check cannot tell who wrote it (see below).
 - A list item is never read as a report. A report posted as a Markdown list is therefore unknown.
 - It sends read queries only (the repository's GraphQL client; GraphQL travels over POST, but no mutation is ever sent).

@@ -116,16 +116,24 @@ _CONTENT_LENGTH = re.compile(r"[0-9]{1,15}")
 def _content_length(response: Any) -> int | None:
     """The announced body length, None when the response announces none, ApiError when the framing is malformed.
 
-    http.client reads the header with int(), which accepts a sign, spaces, underscores and non-ASCII digits, and it
-    ignores a value it cannot parse. Only ASCII digits, once, count here; anything else means the length cannot be
-    trusted, so neither can the claim that the body is complete.
+    A response is framed by exactly one of two things: a single Content-Length of ASCII digits, or a single
+    `Transfer-Encoding: chunked` (exactly that value) and no Content-Length. Both together, any other transfer coding
+    (gzip, deflate, compress, identity, a list, another spelling) and a repeated header are refused: http.client
+    decodes chunks and ignores Content-Length, reads Content-Length with int() (which accepts a sign, spaces,
+    underscores and non-ASCII digits) and ignores a value it cannot parse, so each of those would let an ambiguously
+    framed body pass for a complete one.
     """
-    values = response.headers.get_all("Content-Length") or []
-    if not values:
+    lengths = response.headers.get_all("Content-Length") or []
+    codings = response.headers.get_all("Transfer-Encoding") or []
+    if codings:
+        if lengths or codings != ["chunked"]:
+            raise ApiError("GitHub's response framing was malformed (Transfer-Encoding)")
         return None
-    if len(values) != 1 or not _CONTENT_LENGTH.fullmatch(values[0]):
+    if not lengths:
+        return None
+    if len(lengths) != 1 or not _CONTENT_LENGTH.fullmatch(lengths[0]):
         raise ApiError("GitHub's response framing was malformed (Content-Length)")
-    return int(values[0])
+    return int(lengths[0])
 
 
 def _read(response: Any) -> bytes:

@@ -115,7 +115,7 @@ def test_reports_found_on_a_later_page_count(fake: FakeGitHub) -> None:
     fake.page_size = 2
     filler = [comment("noise", EARLY) for _ in range(4)]
     code, _, _ = run(fake, [*filler, comment(report(A), LATE)])
-    assert code == 0 and fake.requests.count("HandoffComments") == 3
+    assert code == 0 and fake.requests.count("HandoffComments") == 6  # 3 pages, read twice
 
 
 # -- trust ------------------------------------------------------------------------------------------------------

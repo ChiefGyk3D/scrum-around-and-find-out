@@ -201,16 +201,31 @@ def test_a_blockquoted_report_is_not_a_report(fake: FakeGitHub) -> None:
 
 def test_the_head_is_read_again_after_the_comments(fake: FakeGitHub) -> None:
     run(fake, [comment(report(A))])
-    assert fake.requests == ["HandoffPr", "HandoffComments", "HandoffTimeline", "HandoffPr"]
+    assert fake.requests == [
+        "HandoffPr",
+        "HandoffComments",
+        "HandoffTimeline",
+        "HandoffPr",
+        "HandoffTimeline",
+        "HandoffComments",
+    ]
 
 
 def test_a_head_that_moves_while_reading_is_unknown(fake: FakeGitHub) -> None:
     heads = iter([A, B, B])
     fake.handlers["HandoffPr"] = lambda f, v: {
-        "repository": {"pullRequest": {"headRefOid": next(heads), "state": "OPEN", "isDraft": False}}
+        "repository": {
+            "pullRequest": {
+                "headRefOid": next(heads),
+                "baseRefName": "main",
+                "baseRefOid": "d" * 40,
+                "state": "OPEN",
+                "isDraft": False,
+            }
+        }
     }
     code, out, _ = run(fake, [comment(report(A))])
-    assert code == 2 and "head moved while reading" in out and "FRESH" not in out and "STALE" not in out
+    assert code == 2 and "changed while it was being read" in out and "FRESH" not in out and "STALE" not in out
 
 
 # -- the client itself: a hostile answer is an ApiError, whoever calls it -----------------------------------------

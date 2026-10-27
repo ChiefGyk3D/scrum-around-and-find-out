@@ -183,7 +183,14 @@ def test_the_timeline_is_read_only_when_the_shas_match(fake: FakeGitHub) -> None
     assert "HandoffTimeline" not in fake.requests
     fake.requests.clear()
     run(fake, [comment(report(A))])
-    assert fake.requests == ["HandoffPr", "HandoffComments", "HandoffTimeline", "HandoffPr"]
+    assert fake.requests == [
+        "HandoffPr",
+        "HandoffComments",
+        "HandoffTimeline",
+        "HandoffPr",
+        "HandoffTimeline",
+        "HandoffComments",
+    ]
 
 
 def test_the_timeline_query_asks_for_only_the_events_it_uses() -> None:

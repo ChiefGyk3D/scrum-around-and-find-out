@@ -62,7 +62,10 @@ takes it for a bug that was hidden.
   `adversarial-reviewer`; `--roles` changes it), and the role is read from the header the same account wrote. It is a
   speed bump like the approval token. A report must also be newer than the moment its commit became the head, and only a
   force-push event proves that moment (a commit's own dates are set by its author and are not used), so a head that
-  arrived by a normal push reads unknown. Equal one-second timestamps are unknown too. See [Handoff](handoff.md).
+  arrived by a normal push reads unknown. Equal one-second timestamps are unknown too. A later version could
+  prove the arrival of a normally pushed head from a real review (its `submittedAt` field is server-set and
+  tied to a commit) read together with later force-push and base-change events, or from a push event kept outside
+  GitHub (a webhook or the audit log); that is an idea, not built. See [Handoff](handoff.md).
 - **An explicit `--agents`, `--log` or `$SAFO_AGENTS` path in the current directory is the user's own choice.** Outside
   Actions it is allowed, because the person typed it. SAFO never searches the current directory for these files on its own.
   Under Actions an explicit path inside the workspace is refused.

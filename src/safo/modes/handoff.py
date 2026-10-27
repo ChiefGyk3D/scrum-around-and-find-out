@@ -61,7 +61,9 @@ HEAD_LINE = re.compile(r"HEAD:[ \t]+(\S+)(?:[ \t]+BASE:[ \t]+\S+)?[ \t]*")
 CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,60}")
 
 PR_QUERY = """query HandoffPr($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state isDraft } }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { headRefOid baseRefName baseRefOid state isDraft }
+  }
 }"""
 COMMENTS_QUERY = """query HandoffComments($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
@@ -92,6 +94,7 @@ TIMELINE_QUERY = """query HandoffTimeline($owner: String!, $name: String!, $numb
   } }
 }"""
 
+CHANGED = "the pull request changed while it was being read, so nothing was compared"
 SAME_SECOND = "the report and the push have the same timestamp; their order cannot be told"
 
 Entry = tuple[str | None, str | None, str | None]  # (role, head, verdict); None when unusable (the verdict: absent)
@@ -135,16 +138,24 @@ def pull_of(data: Any) -> dict[str, Any]:
     return pull
 
 
-def read_pull(client: Client, variables: Mapping[str, Any]) -> tuple[str, str]:
-    """(head, flags): the full head SHA, and "" or " (draft)", " (closed)", " (merged)"."""
+def read_pull(client: Client, variables: Mapping[str, Any]) -> tuple[str, str, tuple[str, str]]:
+    """(head, flags, base): the full head SHA, "" or " (draft)", " (closed)", " (merged)", (base ref name, base oid)."""
     pull = pull_of(client.execute(PR_QUERY, variables))
     head, state, draft = pull.get("headRefOid"), pull.get("state"), pull.get("isDraft")
+    base_name, base_oid = pull.get("baseRefName"), pull.get("baseRefOid")
     if not isinstance(head, str) or not FULL_SHA.fullmatch(head):
         raise _bad("the pull request head is missing or is not a full SHA")
+    if (
+        not isinstance(base_name, str)
+        or not base_name
+        or not isinstance(base_oid, str)
+        or not FULL_SHA.fullmatch(base_oid)
+    ):
+        raise _bad("the pull request base is missing or is not a ref name and a full SHA")
     if not isinstance(state, str) or state not in STATES or not isinstance(draft, bool):
         raise _bad("the pull request state or draft flag is missing or not recognized")
     flags = " (merged)" if state == "MERGED" else " (closed)" if state == "CLOSED" else " (draft)" if draft else ""
-    return head, flags
+    return head, flags, (base_name, base_oid)
 
 
 class _Reader(HTMLParser):
@@ -286,8 +297,12 @@ def resolve(client: Client, variables: Mapping[str, Any], reported: str) -> str:
     return matches.pop()
 
 
-def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> tuple[str, str | None]:
-    """(since, base_changed): when `head` last became the head, and when the base last changed (or None).
+Timeline = tuple[str, str | None, tuple[tuple[str, str, str | None], ...]]
+
+
+def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> Timeline:
+    """(since, base_changed, events): when `head` last became the head, when the base last changed (or None), and
+    every event read, so that a second read can be compared with this one.
 
     `since` is the time of the latest force-push whose result is `head`, the only event GitHub records with the time a
     head arrived. With none there is no proof (a commit's own dates are set by its author), and a timeline too long to
@@ -304,6 +319,7 @@ def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> tu
         raise _bad("the pull request timeline is truncated (more than 50 events), so when the head arrived is unknown")
     forced: list[str] = []
     rebased: list[str] = []
+    seen: list[tuple[str, str, str | None]] = []
     for node in nodes:
         kind = node.get("__typename") if isinstance(node, dict) else None
         created = node.get("createdAt") if isinstance(node, dict) else None
@@ -313,11 +329,13 @@ def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> tu
             raise MalformedDataError("a timeline event has no timestamp")
         if kind == "BaseRefChangedEvent":
             rebased.append(created)
+            seen.append((kind, created, None))
             continue
         after = node.get("afterCommit")
         oid = after.get("oid") if isinstance(after, dict) else None
         if not isinstance(oid, str) or not FULL_SHA.fullmatch(oid):
             raise MalformedDataError("a force-push event has no full commit oid")
+        seen.append((kind, created, oid))
         if oid == head:
             forced.append(created)
     if not forced:
@@ -325,12 +343,13 @@ def read_timeline(client: Client, variables: Mapping[str, Any], head: str) -> tu
         # nothing: without a force-push to this head there is no proof of when it arrived.
         raise _bad("cannot tell when this commit became the head: no force-push event records it")
     since = max(forced)
-    return since, max(rebased) if rebased else None
+    return since, max(rebased) if rebased else None, tuple(seen)
 
 
-def verdict(client: Client, variables: Mapping[str, Any], roles: tuple[str, ...]) -> tuple[str, str]:
-    """(FRESH | STALE, message), or raises Unknown / SafoError."""
-    head, flags = read_pull(client, variables)
+def read_comments(
+    client: Client, variables: Mapping[str, Any], roles: tuple[str, ...]
+) -> tuple[str, list[Entry]] | None:
+    """The newest report: (time, entries), or None when there is none."""
     nodes = pages_bounded(
         client,
         COMMENTS_QUERY,
@@ -340,7 +359,18 @@ def verdict(client: Client, variables: Mapping[str, Any], roles: tuple[str, ...]
         "comments",
         ("authorAssociation", "createdAt", "isMinimized", "bodyHTML"),
     )
-    newest = newest_report(nodes, roles)
+    return newest_report(nodes, roles)
+
+
+def verdict(client: Client, variables: Mapping[str, Any], roles: tuple[str, ...]) -> tuple[str, str]:
+    """(FRESH | STALE, message), or raises Unknown / SafoError.
+
+    Everything the answer depends on is read twice: the pull request (head, base, state), the timeline and the comments
+    are read once to decide and once more at the end, and any difference between the two reads is unknown. Nothing is
+    decided from a state that has changed since it was read. The cost is a second round of the same read requests.
+    """
+    head, flags, base = read_pull(client, variables)
+    newest = read_comments(client, variables, roles)
     if newest is None:
         raise _bad(f"no review report ({', '.join(roles)}) from an owner, member or collaborator has a HEAD line")
     when, entries = newest
@@ -350,12 +380,17 @@ def verdict(client: Client, variables: Mapping[str, Any], roles: tuple[str, ...]
     if role is None or reported is None:
         raise _bad("the newest report's ROLE or HEAD is unreadable (a HEAD must be 7 to 40 hex characters)")
     full = resolve(client, variables, reported)
-    since, rebased = read_timeline(client, variables, head) if full == head else (None, None)
-    if read_pull(client, variables)[0] != head:
-        raise _bad("the head moved while reading, so nothing was compared")
+    timeline = read_timeline(client, variables, head) if full == head else None
+    # the final snapshot: head, base and state; the timeline; the comments. Any difference means it changed meanwhile.
+    changed = read_pull(client, variables) != (head, flags, base)
+    changed = changed or (timeline is not None and read_timeline(client, variables, head) != timeline)
+    changed = changed or read_comments(client, variables, roles) != newest
+    if changed:
+        raise _bad(CHANGED)
     label = f"{role} report" + (f" VERDICT {said}" if said else "")
-    if since is None:
+    if timeline is None:
         return STALE, f"{label} names {full[:7]}, the pull request head is {head[:7]}{flags}"
+    since, rebased, _ = timeline
     if when < since:
         return STALE, f"{label} names the current head {head[:7]} but was posted before it became the head{flags}"
     if rebased is not None and rebased > when:
