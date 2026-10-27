@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import io
 from collections.abc import Callable
@@ -52,12 +53,21 @@ def gate(**over: Any) -> Check:
 
 
 def rest_events(
-    at: str = "2026-11-05T12:00:00Z", app: JSON | None = None, *, complete: bool = True, pages: Any = None
+    at: str = "2026-11-05T12:00:00Z",
+    app: JSON | None = None,
+    *,
+    complete: Any = True,
+    pages: Any = None,
+    repo: Any = "acme/gates",
+    number: Any = 21,
 ) -> EventsRead:
-    """An EventsRead built the only way it can be: through events_from_rest, from serialized REST pages."""
+    """An EventsRead from serialized REST pages, read from `repo`#`number` (the issue the pages came from)."""
     closed = {"event": "closed", "created_at": at, "performed_via_github_app": app}
     return events_from_rest(
-        pages if pages is not None else [[{"event": "labeled", "created_at": at}, closed]], reached_end=complete
+        pages if pages is not None else [[{"event": "labeled", "created_at": at}, closed]],
+        repo=repo,
+        number=number,
+        reached_end=complete,
     )
 
 
@@ -294,15 +304,76 @@ def test_an_incomplete_or_malformed_rest_read_is_unknown_never_approved(fake: Fa
     assert rest_events(complete=False).complete is False and rest_events(pages=[[3]]).closes == ()
 
 
-def test_an_events_read_cannot_be_forged_or_edited() -> None:
-    with pytest.raises(TypeError):
-        EventsRead(object(), True, ())
-    with pytest.raises(TypeError):
-        EventsRead(None, True, ())
+def test_the_cross_check_itself_binds_to_the_check_and_to_completeness_by_identity() -> None:
+    close_at = dt.datetime(2026, 11, 5, 12, 0, tzinfo=dt.UTC)
+    read = Read("Issue", "acme/gates", 21)
+    good = rest_events()
+    assert approvals._cross_check("acme/gates#21", read, close_at, good) is approvals._Cross.MANUAL
+    assert approvals._cross_check("acme/gates#99", read, close_at, good) is approvals._Cross.UNCHECKED
+    truthy = approvals.EventsRead("acme/gates", 21, cast(Any, 1), good.closes)
+    assert approvals._cross_check("acme/gates#21", read, close_at, truthy) is approvals._Cross.UNCHECKED
+
+
+def test_an_events_read_is_immutable() -> None:
     events = rest_events()
-    with pytest.raises(AttributeError):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         events.__setattr__("complete", False)
-    assert not hasattr(events, "__dict__")
+    assert dataclasses.is_dataclass(events)
+
+
+def test_evidence_read_from_another_issue_never_approves(fake: FakeGitHub, client: Client) -> None:
+    """A manual close read from issue B, with the same timestamp, must not stand in for issue A's App close."""
+    for repo, number in (("acme/gates", 22), ("acme/other", 21), ("acme/gates", 2), ("other/gates", 21)):
+        v = judge(fake, client, issue_node(), gate(), events=rest_events(repo=repo, number=number))
+        assert v.state == "unknown" and not v.approved, (repo, number)
+    assert judge(fake, client, issue_node(), gate(), events=rest_events(repo="ACME/Gates")).approved
+
+
+def test_two_issues_closed_in_the_same_second_cannot_swap_their_reads(fake: FakeGitHub, client: Client) -> None:
+    put(fake, issue_node(number=21), repo="acme/gates", number=21)
+    put(fake, issue_node(number=22), repo="acme/gates", number=22)
+    reads = read_issues(client, ["acme/gates#21", "acme/gates#22"])
+    app_21 = rest_events(app={"id": 9}, number=21)
+    manual_22 = rest_events(number=22)
+    chk21, chk22 = gate(ref="acme/gates#21"), gate(ref="acme/gates#22")
+    assert verdict(chk21, reads["acme/gates#21"], app_21).state == "open"
+    assert verdict(chk22, reads["acme/gates#22"], manual_22).approved
+    swapped = verdict(chk21, reads["acme/gates#21"], manual_22)  # 22's manual close offered for 21's App close
+    assert swapped.state == "unknown" and not swapped.approved
+    assert verdict(chk22, reads["acme/gates#22"], app_21).state == "unknown"
+
+
+@pytest.mark.parametrize("number", [True, False, 0, -1, "21", 21.0, None, 2**31, [21]])
+def test_a_bad_issue_number_makes_the_read_incomplete(fake: FakeGitHub, client: Client, number: Any) -> None:
+    events = rest_events(number=number)
+    assert events.complete is False and events.closes == ()
+    v = judge(fake, client, issue_node(), gate(), events=events)
+    assert v.state == "unknown" and not v.approved
+
+
+@pytest.mark.parametrize(
+    "repo", ["", "no-slash", "a b/c", "acme/gates#21", None, 5, chr(0x212A) + "cme/gates", "acme/" + chr(0xE9)]
+)
+def test_a_bad_repository_makes_the_read_incomplete(fake: FakeGitHub, client: Client, repo: Any) -> None:
+    events = rest_events(repo=repo)
+    assert events.complete is False
+    assert not judge(fake, client, issue_node(), gate(), events=events).approved
+
+
+def test_hand_built_evidence_for_the_wrong_issue_or_with_a_bad_number_never_approves(
+    fake: FakeGitHub, client: Client
+) -> None:
+    close = approvals.RestClose(dt.datetime(2026, 11, 5, 12, 0, tzinfo=dt.UTC), False)
+    numbers: list[Any] = [True, "21", 0, 22]
+    for number in numbers:
+        events = approvals.EventsRead("acme/gates", number, True, (close,))
+        assert not judge(fake, client, issue_node(), gate(), events=events).approved, number
+
+
+@pytest.mark.parametrize("flag", ["false", "true", 1, [1], None, 0, object(), 1.0, "yes"])
+def test_completeness_needs_exactly_true(flag: Any) -> None:
+    events = rest_events(complete=flag)
+    assert events.complete is False and events.closes == ()
 
 
 # -- UNKNOWN is never a pass -------------------------------------------------------------------------------------------

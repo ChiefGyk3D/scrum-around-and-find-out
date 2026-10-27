@@ -332,7 +332,10 @@ only when every line holds; it is **open** (for the gate rule, "not passed") whe
    finding, INFERRED). So for each approving close audit also reads the REST `closed` event of that issue and treats
    `performed_via_github_app != null` as not manual: the close does not count, with the line `DRIFT   GATE ... was closed
    through a GitHub App; it counts as open`. This is M2 option 1b; it costs one REST read per approval issue and runs
-   inside the same read-only token.
+   inside the same read-only token. The REST read is bound to the repository and issue number it was read from and
+   must be complete (the last page reached, every page parsed); evidence for another issue, or an incomplete read, is
+   UNKNOWN. Provenance is the caller's duty at the REST-transport boundary (a later unit), not a property of the reader's
+   types: an in-process caller can always build the evidence object, so the reader makes no claim to resist one.
 5. The actor's type is `User` **and** its `databaseId` equals the `id` of an entry in `process.approvers`. The login is
    shown but is not the identity: a login can be renamed or, once released, taken by another person. A matching id with
    a different login counts and prints `NOTE   GATE ... closed by @new-login, who is approver @old-login (renamed)`; a

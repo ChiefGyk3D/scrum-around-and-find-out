@@ -333,6 +333,8 @@ def test_a_line_of_unicode_whitespace_is_not_a_blank_line_even_past_the_ascii_ga
 class _Duck:
     """Looks like a complete, matching, manual EventsRead but is not one."""
 
+    repo = "acme/gates"
+    number = 21
     complete = True
     closes = (approvals.RestClose(dt.datetime(2026, 11, 5, 12, 0, tzinfo=dt.UTC), False),)
 
@@ -344,6 +346,6 @@ def test_a_look_alike_of_an_events_read_never_approves(fake: FakeGitHub, client:
 
 def test_an_events_read_marked_incomplete_never_approves_even_with_closes(fake: FakeGitHub, client: Client) -> None:
     close = approvals.RestClose(dt.datetime(2026, 11, 5, 12, 0, tzinfo=dt.UTC), False)
-    events = approvals.EventsRead(approvals._TOKEN, False, (close,))
+    events = approvals.EventsRead("acme/gates", 21, False, (close,))
     v = judge(fake, client, issue_node(), gate(), events=events)
     assert v.state == "unknown" and not v.approved

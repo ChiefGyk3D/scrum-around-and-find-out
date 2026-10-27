@@ -56,14 +56,19 @@ created) make the answer `UNKNOWN`.
 ## Who counts
 
 The close must be manual (no `closer`), completed, not a duplicate, and not performed through a GitHub App. The App
-check is the REST cross-check, and `verdict()` computes it itself from the REST read, an `EventsRead`. An
-`EventsRead` cannot be built by hand: only `events_from_rest()` makes one, from the pages of REST events, and it
-is complete only when the paginated read reached the end and every page parsed. It approves only when its newest
-`closed` event is the close GraphQL showed and `performed_via_github_app` is null. A missing, incomplete, mismatched
-or look-alike read is `UNKNOWN`.
+check is the REST cross-check, and `verdict()` computes it itself from the REST read, an `EventsRead`, so a missing
+cross-check cannot be silently defaulted. An `EventsRead` records the repository and issue number its pages were read
+**from**, whether the paginated read reached its end with every page parsing, and the validated `closed` events.
+`events_from_rest()` builds one from the pages and the `reached_end` flag, which must be exactly `True`. It approves
+only when it is complete, was read from this very issue (the check's reference and the issue GraphQL answered with,
+compared after the ASCII-only fold), its newest `closed` event is the close GraphQL showed, and
+`performed_via_github_app` is null. A missing, incomplete, other-issue, mismatched or look-alike read is `UNKNOWN`.
 
-The REST transport that fetches those pages is a later unit. Until it exists, no caller can produce an `EventsRead`
-from the network, so nothing approves in production.
+**What this does not claim.** `verdict()` is a library function. A Python object cannot prove where it came from, so
+`EventsRead` is a frozen dataclass and anyone in the same process can build one. Evidence provenance is the CALLER's
+duty and is enforced at the future REST-transport boundary, not by the type. The REST transport is a later unit and
+no production caller imports this module yet, so nothing approves in production. The parameter is structural so a
+missing cross-check cannot be silently defaulted, not to resist a malicious in-process caller.
 
 The closer must be a `User` whose `databaseId` is in the board file's approver list. A login is never the identity;
 it only words the line.

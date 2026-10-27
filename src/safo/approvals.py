@@ -14,10 +14,12 @@ Rules this module holds to:
 - The issue must come from an owner, member or collaborator, and a change approval must name its entry (M13).
 - No text from the issue reaches a line, except logins, which `emit` writes through `ctx.say` (escaped).
 
-The REST cross-check (4b) is structural: `verdict` takes the REST read itself (an `EventsRead`, built only by
-`events_from_rest` from the pages of REST events) and computes the cross-check itself. The REST transport that fetches
-the pages is a follow-up unit (the 400-line budget of #136); until it exists nothing can build an `EventsRead` from
-the network, so nothing approves in production.
+The REST cross-check (4b): `verdict` takes the REST read itself (an `EventsRead`, made by `events_from_rest` from the
+pages of REST events, bound to the repository and issue number they were read from) and computes the cross-check
+itself, so a missing cross-check cannot be silently defaulted. `verdict()` is a library function: where its evidence
+came from is the CALLER's duty, enforced at the future REST-transport boundary, not by the type (Python cannot prove
+provenance in-process, and nothing here claims to). The REST transport is a follow-up unit (the 400-line budget of
+#136); no production caller imports this module yet, so nothing approves in production.
 """
 
 from __future__ import annotations
@@ -358,7 +360,7 @@ class _Cross(enum.Enum):
     UNCHECKED = "unchecked"
 
 
-_TOKEN = object()
+_ABSENT = object()
 
 
 @dataclass(frozen=True)
@@ -367,40 +369,37 @@ class RestClose:
     via_app: bool  # `performed_via_github_app` was non-null
 
 
+@dataclass(frozen=True)
 class EventsRead:
-    """The REST `closed` events of one issue, as read and validated by `events_from_rest`. It cannot be built by hand
-    (the constructor needs a private token) and is immutable. `complete` is true only when the paginated read reached
-    its end and every page parsed."""
+    """The REST `closed` events of one issue: the canonical repository and issue number the pages were read FROM,
+    whether the paginated read reached its end with every page parsing (`complete`), and the validated closes.
 
-    __slots__ = ("_closes", "_complete")
-    _complete: bool
-    _closes: tuple[RestClose, ...]
+    Provenance is the caller's duty, not the type's: a Python object cannot prove where it came from, so this class does
+    not try (anyone in-process can build one). The evidence is enforced at the REST-transport boundary that will call
+    `events_from_rest`; `verdict` only refuses evidence that is missing, incomplete, for another issue, or for another
+    close."""
 
-    def __init__(self, token: object, complete: bool, closes: tuple[RestClose, ...]) -> None:
-        if token is not _TOKEN:
-            raise TypeError("an EventsRead is built only by events_from_rest")
-        object.__setattr__(self, "_complete", complete)
-        object.__setattr__(self, "_closes", closes)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        raise AttributeError("an EventsRead is immutable")
-
-    @property
-    def complete(self) -> bool:
-        return bool(self._complete)
-
-    @property
-    def closes(self) -> tuple[RestClose, ...]:
-        return tuple(self._closes)
+    repo: str
+    number: int
+    complete: bool
+    closes: tuple[RestClose, ...]
 
 
-def events_from_rest(pages: Any, *, reached_end: bool) -> EventsRead:
-    """Parse the pages of REST issue events (a list of pages, each a list of event objects). Every `closed` event
-    must carry a valid `created_at` and the key `performed_via_github_app`; anything malformed makes the read
-    incomplete and empty. `reached_end` is the transport's statement that the last page was the last."""
+def events_from_rest(pages: Any, *, repo: str, number: int, reached_end: bool) -> EventsRead:
+    """Parse the pages of REST issue events read from `repo`#`number` (a list of pages, each a list of event objects).
+    Every `closed` event must carry a valid `created_at` and the key `performed_via_github_app`. Anything malformed, a
+    bad `repo` or `number`, or a `reached_end` that is not exactly True gives an incomplete, empty read (a read that
+    cannot approve). `reached_end` is the transport's statement that the last page was the last."""
+    if (
+        not isinstance(repo, str)
+        or not _REPO.fullmatch(repo)
+        or type(number) is not int
+        or not 1 <= number <= 2**31 - 1
+    ):
+        return EventsRead("", 0, False, ())
     closes: list[RestClose] = []
     try:
-        if not isinstance(pages, list) or not reached_end:
+        if not isinstance(pages, list) or reached_end is not True:
             raise _Malformed("the read is not a complete list of pages")
         for page in pages:
             if not isinstance(page, list) or not all(isinstance(e, dict) for e in page):
@@ -408,19 +407,24 @@ def events_from_rest(pages: Any, *, reached_end: bool) -> EventsRead:
             for event in page:
                 if event.get("event") != "closed":
                     continue
-                app = event.get("performed_via_github_app", _TOKEN)
-                if app is _TOKEN or not (app is None or isinstance(app, dict)):
+                app = event.get("performed_via_github_app", _ABSENT)
+                if app is _ABSENT or not (app is None or isinstance(app, dict)):
                     raise _Malformed("performed_via_github_app is absent or mistyped")
                 closes.append(RestClose(_ts(event.get("created_at")), app is not None))
     except _Malformed:
-        return EventsRead(_TOKEN, False, ())
-    return EventsRead(_TOKEN, True, tuple(closes))
+        return EventsRead(repo, number, False, ())
+    return EventsRead(repo, number, True, tuple(closes))
 
 
-def _cross_check(close_at: dt.datetime, events: object) -> _Cross:
-    """Did a GitHub App perform the close GraphQL showed? UNCHECKED unless `events` is a complete EventsRead whose
-    newest `closed` event is that very close."""
-    if type(events) is not EventsRead or not events.complete or not events.closes:
+def _cross_check(ref: str, read: Read, close_at: dt.datetime, events: object) -> _Cross:
+    """Did a GitHub App perform the close GraphQL showed? UNCHECKED unless `events` is a complete EventsRead read from
+    this very issue (`ref`, and the issue GraphQL answered with) whose newest `closed` event is that very close."""
+    if type(events) is not EventsRead or events.complete is not True or not events.closes:
+        return _Cross.UNCHECKED
+    if type(events.repo) is not str or type(events.number) is not int:
+        return _Cross.UNCHECKED
+    here = _fold_ref(f"{read.repo}#{read.number}")
+    if _fold_ref(f"{events.repo}#{events.number}") != here or here != _fold_ref(ref):
         return _Cross.UNCHECKED
     newest = max(c.at for c in events.closes)
     flags = {c.via_app for c in events.closes if c.at == newest}
@@ -434,7 +438,8 @@ def _cross_check(close_at: dt.datetime, events: object) -> _Cross:
 
 def verdict(chk: Check, read: Read | Unread, events: EventsRead) -> Verdict:
     """The approval test. `events` is the REST read of the issue's events (`events_from_rest`); the cross-check (4b) is
-    computed here from it, so only a complete read whose newest close is the close GraphQL showed can approve."""
+    computed here from it, so only a complete read of this issue whose newest close is the close GraphQL showed can
+    approve. Where the evidence came from is the caller's duty (see `EventsRead`)."""
     try:
         return _verdict(chk, read, events)
     except Exception as err:  # a crash is never an approval and never "stale"; the class name only
@@ -484,7 +489,7 @@ def _verdict(chk: Check, read: Read | Unread, events: object) -> Verdict:
                 "through a project workflow", "by a project workflow"
             )
         )
-    cross = _cross_check(close.at, events)
+    cross = _cross_check(chk.ref, read, close.at, events)
     if cross is _Cross.APP:
         return refuse("was closed through a GitHub App")
     if cross is not _Cross.MANUAL:  # UNCHECKED: no complete matching REST read
