@@ -29,7 +29,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-url", default=API_URL, help="the REST API (https; plain http for loopback only)")
 
 
-
 def emit(ctx: LocalContext, lines: list[str], code: int) -> int:
     """Write the report; the decision `code` was computed before any output and does not depend on it.
 

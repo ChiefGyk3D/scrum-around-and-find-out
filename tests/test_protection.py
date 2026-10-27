@@ -2051,7 +2051,7 @@ def test_a_stable_world_reads_every_document_exactly_twice() -> None:
     assert len(paths) == 20
 
 
-# -- the error report is inside the exit-code boundary -------------------------------------------------------------------
+# -- the error report is inside the exit-code boundary --------------------------------------------------------------
 
 
 class Raising(io.StringIO):
@@ -2089,13 +2089,16 @@ def test_a_report_that_cannot_be_written_in_a_workflow_run_is_still_two() -> Non
 
 
 @pytest.mark.parametrize("target", ["from_env", "from_gh", "Rest"])
-@pytest.mark.parametrize("error", [SystemExit(0), RuntimeError("secret"), KeyboardInterrupt()], ids=["exit0", "boom", "int"])
+@pytest.mark.parametrize(
+    "error", [SystemExit(0), RuntimeError("secret"), KeyboardInterrupt()], ids=["exit0", "boom", "int"]
+)
 def test_a_failure_below_the_credential_lookup_or_the_client_is_never_zero(
     target: str, error: BaseException, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from safo import credentials
     from safo.modes import protection as mode
 
-    holder: Any = mode.credentials if target != "Rest" else mode
+    holder: Any = credentials if target != "Rest" else mode
     monkeypatch.setattr(holder, target, raiser(error))
     env = ENV if target != "from_gh" else {}
     code, out, _ = run_cli("protection", "--repo", "o/r", env=env)
