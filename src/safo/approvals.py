@@ -14,8 +14,10 @@ Rules this module holds to:
 - The issue must come from an owner, member or collaborator, and a change approval must name its entry (M13).
 - No text from the issue reaches a line, except logins, which `emit` writes through `ctx.say` (escaped).
 
-The REST cross-check (4b) is split: `verdict` takes a `CrossCheck`, and `cross_check_from_events` reads the REST
-events strictly; the REST transport is a follow-up unit (the 400-line budget of #136).
+The REST cross-check (4b) is structural: `verdict` takes the REST read itself (an `EventsRead`, built only by
+`events_from_rest` from the pages of REST events) and computes the cross-check itself. The REST transport that fetches
+the pages is a follow-up unit (the 400-line budget of #136); until it exists nothing can build an `EventsRead` from
+the network, so nothing approves in production.
 """
 
 from __future__ import annotations
@@ -348,56 +350,98 @@ def read_issues(client: Executes, refs: Iterable[str]) -> dict[str, Read | Unrea
     return out
 
 
-class CrossCheck(enum.Enum):
-    """The REST cross-check (4b). A type, not a boolean: it has no default and no truthiness, so no falsey value (0, "",
-    [], False) can stand for "checked and manual". Only VERIFIED_MANUAL, from a complete matching REST read, passes."""
+class _Cross(enum.Enum):
+    """The internal result of the REST cross-check; it is never a parameter, so no caller can supply one."""
 
-    VERIFIED_MANUAL = "verified_manual"
-    VERIFIED_APP = "verified_app"
+    MANUAL = "manual"
+    APP = "app"
     UNCHECKED = "unchecked"
 
-    def __bool__(self) -> bool:
-        raise TypeError("a CrossCheck is not a boolean")
+
+_TOKEN = object()
 
 
-def cross_check_from_events(events: Any, close_at: dt.datetime) -> CrossCheck:
-    """From the REST issue events: did a GitHub App perform the newest `closed` event (4b)? UNCHECKED when it cannot be
-    told: no such event, a field missing or mistyped, or the event is not the close GraphQL showed (`close_at`)."""
-    if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
-        return CrossCheck.UNCHECKED
+@dataclass(frozen=True)
+class RestClose:
+    at: dt.datetime
+    via_app: bool  # `performed_via_github_app` was non-null
+
+
+class EventsRead:
+    """The REST `closed` events of one issue, as read and validated by `events_from_rest`. It cannot be built by hand
+    (the constructor needs a private token) and is immutable. `complete` is true only when the paginated read reached
+    its end and every page parsed."""
+
+    __slots__ = ("_closes", "_complete")
+    _complete: bool
+    _closes: tuple[RestClose, ...]
+
+    def __init__(self, token: object, complete: bool, closes: tuple[RestClose, ...]) -> None:
+        if token is not _TOKEN:
+            raise TypeError("an EventsRead is built only by events_from_rest")
+        object.__setattr__(self, "_complete", complete)
+        object.__setattr__(self, "_closes", closes)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("an EventsRead is immutable")
+
+    @property
+    def complete(self) -> bool:
+        return bool(self._complete)
+
+    @property
+    def closes(self) -> tuple[RestClose, ...]:
+        return tuple(self._closes)
+
+
+def events_from_rest(pages: Any, *, reached_end: bool) -> EventsRead:
+    """Parse the pages of REST issue events (a list of pages, each a list of event objects). Every `closed` event
+    must carry a valid `created_at` and the key `performed_via_github_app`; anything malformed makes the read
+    incomplete and empty. `reached_end` is the transport's statement that the last page was the last."""
+    closes: list[RestClose] = []
     try:
-        closed = [(_ts(e.get("created_at")), e) for e in events if e.get("event") == "closed"]
+        if not isinstance(pages, list) or not reached_end:
+            raise _Malformed("the read is not a complete list of pages")
+        for page in pages:
+            if not isinstance(page, list) or not all(isinstance(e, dict) for e in page):
+                raise _Malformed("a page is not a list of events")
+            for event in page:
+                if event.get("event") != "closed":
+                    continue
+                app = event.get("performed_via_github_app", _TOKEN)
+                if app is _TOKEN or not (app is None or isinstance(app, dict)):
+                    raise _Malformed("performed_via_github_app is absent or mistyped")
+                closes.append(RestClose(_ts(event.get("created_at")), app is not None))
     except _Malformed:
-        return CrossCheck.UNCHECKED
-    if not closed:
-        return CrossCheck.UNCHECKED
-    newest = max(at for at, _ in closed)
-    flags = {
-        ("performed_via_github_app" in e, e.get("performed_via_github_app") is not None)
-        for at, e in closed
-        if at == newest
-    }
-    if newest != close_at or len(flags) != 1 or not next(iter(flags))[0]:
-        return CrossCheck.UNCHECKED
-    app = next(e for at, e in closed if at == newest)["performed_via_github_app"]
-    if app is None:
-        return CrossCheck.VERIFIED_MANUAL
-    return CrossCheck.VERIFIED_APP if isinstance(app, dict) else CrossCheck.UNCHECKED
+        return EventsRead(_TOKEN, False, ())
+    return EventsRead(_TOKEN, True, tuple(closes))
+
+
+def _cross_check(close_at: dt.datetime, events: object) -> _Cross:
+    """Did a GitHub App perform the close GraphQL showed? UNCHECKED unless `events` is a complete EventsRead whose
+    newest `closed` event is that very close."""
+    if type(events) is not EventsRead or not events.complete or not events.closes:
+        return _Cross.UNCHECKED
+    newest = max(c.at for c in events.closes)
+    flags = {c.via_app for c in events.closes if c.at == newest}
+    if newest != close_at or len(flags) != 1:
+        return _Cross.UNCHECKED
+    return _Cross.APP if flags.pop() else _Cross.MANUAL
 
 
 # -- judging ---------------------------------------------------------------------------------------------------------
 
 
-def verdict(chk: Check, read: Read | Unread, cross_check: CrossCheck) -> Verdict:
-    """The approval test. `cross_check` is the 4b result (`cross_check_from_events`), required: anything but
-    CrossCheck.VERIFIED_MANUAL cannot approve."""
+def verdict(chk: Check, read: Read | Unread, events: EventsRead) -> Verdict:
+    """The approval test. `events` is the REST read of the issue's events (`events_from_rest`); the cross-check (4b) is
+    computed here from it, so only a complete read whose newest close is the close GraphQL showed can approve."""
     try:
-        return _verdict(chk, read, cross_check)
+        return _verdict(chk, read, events)
     except Exception as err:  # a crash is never an approval and never "stale"; the class name only
         return Verdict("unknown", (f"UNKNOWN {chk.subject} could not be judged ({type(err).__name__})",))
 
 
-def _verdict(chk: Check, read: Read | Unread, cross_check: CrossCheck) -> Verdict:
+def _verdict(chk: Check, read: Read | Unread, events: object) -> Verdict:
     s = chk.subject
 
     def unknown(text: str) -> Verdict:
@@ -440,9 +484,10 @@ def _verdict(chk: Check, read: Read | Unread, cross_check: CrossCheck) -> Verdic
                 "through a project workflow", "by a project workflow"
             )
         )
-    if cross_check is CrossCheck.VERIFIED_APP:
+    cross = _cross_check(close.at, events)
+    if cross is _Cross.APP:
         return refuse("was closed through a GitHub App")
-    if cross_check is not CrossCheck.VERIFIED_MANUAL:  # UNCHECKED, or not a CrossCheck at all
+    if cross is not _Cross.MANUAL:  # UNCHECKED: no complete matching REST read
         return unknown("close could not be cross-checked against the REST event, so it cannot be told")
     if read.association not in TRUSTED_ASSOCIATIONS:
         return refuse("was opened by an account that is not an owner, member or collaborator")
@@ -488,8 +533,8 @@ def _verdict(chk: Check, read: Read | Unread, cross_check: CrossCheck) -> Verdic
             )
         if found == "unusual":
             return unknown(
-                "has unusual characters in its body; an approval body must be printable ASCII text, "
-                "so its entry cannot be told"
+                "has unusual or markup characters in its body; an approval body must be plain text "
+                "using letters, digits and basic punctuation, so its entry cannot be told"
             )
         if found == "html":
             return unknown("has raw HTML in its body; an approval body must be plain text, so its entry cannot be told")
@@ -521,6 +566,12 @@ _STRUCTURE = (
 )
 
 
+# The allow-list: a body line may hold only ASCII letters and digits, space, tab and these marks. Everything else
+# (* _ ` ~ & $ < > [ ] \\ | { } ^ % ...) can make a line render as something other than it reads, for example
+# `**Entry:**` or `&#69;ntry:` rendering as an entry line, so it makes the body UNKNOWN. The one exception is the
+# entry line itself, which must match _ENTRY_LINE (a repository name may hold `_`).
+_PLAIN = re.compile(r"[A-Za-z0-9 \t.,:;!?'\"()#/@+=-]*")
+_ENTRYISH = re.compile(r"entry\s*:", re.IGNORECASE)  # any line that could be read as an entry line, in any case
 _BLANK = re.compile(r"[ \t]*")  # CommonMark's blank line; never str.strip(), which also strips NBSP and the like
 
 
@@ -545,6 +596,8 @@ def body_problem(body: str) -> str | None:
         for name, pattern in _STRUCTURE:
             if pattern.match(line):
                 return name
+    if not all(_ENTRY_LINE.fullmatch(line) or _PLAIN.fullmatch(line) for line in lines):
+        return "unusual"
     return None
 
 
@@ -563,7 +616,7 @@ def _entry_state(body: str, entry: str) -> str:
     if problem:
         return f"structure:{problem}"
     lines = _lines(body) or []
-    at = [i for i, line in enumerate(lines) if line.startswith("Entry:")]
+    at = [i for i, line in enumerate(lines) if _ENTRYISH.search(line)]  # no other line may look like an entry
     if len(at) != 1:
         return "missing"
     i = at[0]

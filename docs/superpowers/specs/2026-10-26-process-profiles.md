@@ -337,8 +337,9 @@ only when every line holds; it is **open** (for the gate rule, "not passed") whe
    shown but is not the identity: a login can be renamed or, once released, taken by another person. A matching id with
    a different login counts and prints `NOTE   GATE ... closed by @new-login, who is approver @old-login (renamed)`; a
    matching login with a different id is **not** an approver.
-6. `I.lastEditedAt` is null or not later than the close event's `createdAt`. A gate edited after its approval no longer
-   says what was approved, so it counts as open with the line below; re-approving means reopening and closing it again.
+6. `I.lastEditedAt` is null or **strictly before** the close event's `createdAt` (an edit in the same second as the
+   close cannot be ordered, so it does not pass; a rename or reopen at or after the close is refused the same way). A
+   gate edited after its approval no longer says what was approved, so it counts as open with the line below; re-approving means reopening and closing it again.
 7. For a change issue only: `I.createdAt` is on or after the start (UTC) of `baseline.frozen`, and `I` is not a gate. For
    the freeze issue: the close is on or before the end of the `frozen` day (UTC).
 8. **The approval is bound to its entry, on one structured line (M13).** For a change issue the **body** must hold
@@ -356,7 +357,11 @@ only when every line holds; it is **open** (for the gate rule, "not passed") whe
    - Markdown structure: a fence (three backticks or tildes anywhere in a line), a thematic break, a heading, a list
      or quote marker, a table (`|`), indented code (four spaces or a tab), a trailing backslash, or any square bracket
      (links, images and reference definitions all need one).
-   - Two `Entry:` lines (even equal) or any other text on the line mean the approval is not for this change.
+   - any character outside an allow-list: ASCII letters, digits, space, tab and the marks `. , : ; ! ? ' " ( ) # / @ + - =`
+     (so no `* _ ` ~ & $ { } ^ %`, which can make a line render as an entry line it does not read as; for example
+     `**Entry:**` or `&#69;ntry:`). Only the entry line itself may hold `_` (a repository name may);
+   - no other line may contain `Entry` followed by optional whitespace and `:`, in any case. Two entry lines (even
+     equal) or any other text on the entry line mean the approval is not for this change.
    Without a matching line, one approval of "something" could be cited for any entry. No issue text becomes scope or
    reaches output (the line names the entry only). Failing it:
    `DRIFT   SCOPE the change adding acme/app#55 cites acme/gates#21, which does not mention acme/app#55 on its own Entry: line; the approval is not for this change`

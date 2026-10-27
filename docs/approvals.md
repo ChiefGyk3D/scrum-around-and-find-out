@@ -36,6 +36,12 @@ never the content:
   marker or a quote marker; a table (any `|`); indented code (four spaces, or a tab, at the start of a non-blank line);
   a line ending in a backslash; and **any square bracket** (`[` or `]`), since links, images and reference or footnote
   definitions all need one.
+- **Markup characters (an allow-list).** A body line may hold only ASCII letters and digits, space, tab and the marks
+  `. , : ; ! ? ' " ( ) # / @ + - =`. Everything else, including `* _ ` ~ & $ { } ^ %`, is refused, because inline
+  Markdown and character references can make a line render as an entry line it does not read as (`**Entry:**`,
+  `&#69;ntry:`). Only the Entry line itself may hold `_`, since a repository name may.
+- **Entry look-alikes.** No other line may contain the word `Entry` (any case, optional whitespace) followed by a colon.
+  A prose sentence that says "Entry:" is therefore refused; word it differently.
 
 Write the approval as ordinary sentences, a blank line, the Entry line, a blank line, and optionally more sentences.
 
@@ -50,9 +56,14 @@ created) make the answer `UNKNOWN`.
 ## Who counts
 
 The close must be manual (no `closer`), completed, not a duplicate, and not performed through a GitHub App. The App
-check is the REST cross-check, passed to `verdict()` as a `CrossCheck`: only `VERIFIED_MANUAL`, built by
-`cross_check_from_events()` from a complete matching REST read, can approve. `UNCHECKED`, or anything that is not a
-`CrossCheck`, is `UNKNOWN`; the type has no truthiness, so no falsey value stands for "checked".
+check is the REST cross-check, and `verdict()` computes it itself from the REST read, an `EventsRead`. An
+`EventsRead` cannot be built by hand: only `events_from_rest()` makes one, from the pages of REST events, and it
+is complete only when the paginated read reached the end and every page parsed. It approves only when its newest
+`closed` event is the close GraphQL showed and `performed_via_github_app` is null. A missing, incomplete, mismatched
+or look-alike read is `UNKNOWN`.
+
+The REST transport that fetches those pages is a later unit. Until it exists, no caller can produce an `EventsRead`
+from the network, so nothing approves in production.
 
 The closer must be a `User` whose `databaseId` is in the board file's approver list. A login is never the identity;
 it only words the line.

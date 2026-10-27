@@ -4,6 +4,7 @@ cross-check type and impossible timestamps. Split from test_approvals.py to keep
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 import pytest
@@ -12,9 +13,9 @@ from fakegh import FakeGitHub
 from fakegh.approval_ops import issue_node
 from fakegh.core import JSON
 from safo import approvals
-from safo.approvals import CrossCheck
+from safo.approvals import Check
 from safo.graphql import Client
-from test_approvals import GATE, E, gate, judge, newest
+from test_approvals import GATE, E, check, gate, judge, newest
 
 HTML_LINE = (
     "UNKNOWN SCOPE acme/gates#21 has raw HTML in its body; an approval body must be plain text, "
@@ -151,13 +152,77 @@ ACCEPTED = {
     "crlf": f"Intro.\r\n\r\n{E}\r\n\r\nOutro.",
     "prose, blank, entry, blank, prose": f"Intro paragraph.\nSecond line.\n\n{E}\n\nOutro paragraph.\n",
     "whitespace-only blank lines": f"Intro.\n  \n{E}\n \t \nOutro.",
-    "a bare angle bracket": f"a < b\n\n{E}",
-    "less-than digit": f"I <3 this\n\n{E}",
-    "arrows": f"1<2 and x <- y\n\n{E}",
     "entry mentioned inline elsewhere": f"I approve {E.removeprefix('Entry: ')}.\n\n{E}",
-    "the word Entry: inside prose": f"Note the Entry: field below.\n\n{E}",
     "inner tab in prose": f"a\tb\n\n{E}",
 }
+
+
+MARKUP_REFUSED: dict[str, str] = {
+    "strong": "**Entry:** attacker/repo#9",
+    "character reference": "&#69;ntry: attacker/repo#9",
+    "code span": "`Entry: attacker/repo#9`",
+    "strikethrough": "~~Entry:~~ attacker/repo#9",
+    "math": "$Entry:$ attacker/repo#9",
+    "backslash": "\\Entry: attacker/repo#9",
+    "split by a character reference": "Entr&#121;: attacker/repo#9",
+    "emphasis star": "*Entry:* attacker/repo#9",
+    "emphasis underscore": "_Entry:_ attacker/repo#9",
+    "a bare angle bracket": "a < b",
+    "less-than digit": "I <3 this",
+    "arrows": "1<2 and x <- y",
+}
+
+
+@pytest.mark.parametrize("name", list(MARKUP_REFUSED))
+@pytest.mark.parametrize("where", ["before", "after"])
+def test_a_rendered_second_entry_cannot_hide_behind_markup(
+    fake: FakeGitHub, client: Client, name: str, where: str
+) -> None:
+    bad = MARKUP_REFUSED[name]
+    body = f"{bad}\n\n{E}" if where == "before" else f"{E}\n\n{bad}"
+    v = judge(fake, client, issue_node(title="t", body=body))
+    assert v.state == "unknown" and not v.approved, name
+    assert v.lines == (UNUSUAL_LINE,), name
+
+
+@pytest.mark.parametrize("ch", list("*_`~&$^%{}"))
+def test_every_markup_character_outside_the_allow_list_refuses_the_body(
+    fake: FakeGitHub, client: Client, ch: str
+) -> None:
+    v = judge(fake, client, issue_node(title="t", body=f"intro {ch} text\n\n{E}"))
+    assert v.state == "unknown" and v.lines == (UNUSUAL_LINE,), ch
+
+
+ENTRY_LOOKALIKES: dict[str, str] = {
+    "upper case": "ENTRY: x/y#1",
+    "lower case": "entry: x/y#1",
+    "space before the colon": "Entry : x/y#1",
+    "inside a sentence": "Please note Entry: x/y#1 here",
+    "tab after the colon": "Entry:\tx/y#1",
+    "mixed case in a sentence": "an eNtRy: field",
+    "tab before the colon": "Entry\t: x/y#1",
+}
+
+
+@pytest.mark.parametrize("name", list(ENTRY_LOOKALIKES))
+def test_no_other_line_may_look_like_an_entry_line(fake: FakeGitHub, client: Client, name: str) -> None:
+    for body in (f"{ENTRY_LOOKALIKES[name]}\n\n{E}", f"{E}\n\n{ENTRY_LOOKALIKES[name]}"):
+        v = judge(fake, client, issue_node(title="t", body=body))
+        assert v.state == "open" and not v.approved, (name, body)
+    alone = judge(fake, client, issue_node(title="t", body=ENTRY_LOOKALIKES[name]))
+    assert alone.state == "open" and not alone.approved, name
+
+
+def test_ordinary_prose_with_the_allowed_punctuation_is_approved(fake: FakeGitHub, client: Client) -> None:
+    prose = "Hello, world. Is this ok? Yes! See (issue #12; a/b @c +1 = 2 - 1: 'x' \"y\")."
+    assert judge(fake, client, issue_node(title="t", body=f"{prose}\n\n{E}\n\n{prose}")).approved
+    underscore_repo = "Entry: acme/my_repo.git#55"
+    chk = check_for("acme/my_repo.git#55")
+    assert judge(fake, client, issue_node(title="t", body=f"{prose}\n\n{underscore_repo}"), chk).approved
+
+
+def check_for(entry: str) -> Check:
+    return check(entry=entry)
 
 
 def test_two_entry_lines_are_not_for_this_change_even_when_apart(fake: FakeGitHub, client: Client) -> None:
@@ -181,8 +246,8 @@ UNUSUAL = {
     "accented letter": "é",
 }
 UNUSUAL_LINE = (
-    "UNKNOWN SCOPE acme/gates#21 has unusual characters in its body; an approval body must be printable ASCII text, "
-    "so its entry cannot be told"
+    "UNKNOWN SCOPE acme/gates#21 has unusual or markup characters in its body; an approval body must be plain text "
+    "using letters, digits and basic punctuation, so its entry cannot be told"
 )
 
 
@@ -226,16 +291,10 @@ def test_plain_paragraphs_with_a_standalone_entry_line_are_approved(
     assert judge(fake, client, issue_node(title="t", body=ACCEPTED[name])).approved, name
 
 
-@pytest.mark.parametrize("flag", [0, 1, "", "VERIFIED_MANUAL", [], {}, None, True, False])
-def test_only_the_exact_manual_cross_check_approves(fake: FakeGitHub, client: Client, flag: Any) -> None:
-    v = judge(fake, client, issue_node(), gate(), cross_check=flag)
-    assert not v.approved and v.state in ("open", "unknown")
-
-
-def test_a_cross_check_has_no_truthiness() -> None:
-    for member in CrossCheck:
-        with pytest.raises(TypeError):
-            bool(member)
+@pytest.mark.parametrize("flag", [0, 1, "", "VERIFIED_MANUAL", [], {}, None, True, False, object()])
+def test_only_a_real_events_read_can_approve(fake: FakeGitHub, client: Client, flag: Any) -> None:
+    v = judge(fake, client, issue_node(), gate(), events=flag)
+    assert not v.approved and v.state == "unknown"
 
 
 IMPOSSIBLE: dict[str, JSON] = {
@@ -269,3 +328,22 @@ def test_a_line_of_unicode_whitespace_is_not_a_blank_line_even_past_the_ascii_ga
     assert approvals._entry_state(f"intro\n{ch}\n{E}", "acme/app#55") == "missing"
     assert approvals._entry_state(f"{E}\n{ch}\nouter", "acme/app#55") == "missing"
     assert approvals._entry_state(f"intro\n \t\n{E}\n\t \nouter", "acme/app#55") == "named"
+
+
+class _Duck:
+    """Looks like a complete, matching, manual EventsRead but is not one."""
+
+    complete = True
+    closes = (approvals.RestClose(dt.datetime(2026, 11, 5, 12, 0, tzinfo=dt.UTC), False),)
+
+
+def test_a_look_alike_of_an_events_read_never_approves(fake: FakeGitHub, client: Client) -> None:
+    v = judge(fake, client, issue_node(), gate(), events=_Duck())
+    assert v.state == "unknown" and not v.approved
+
+
+def test_an_events_read_marked_incomplete_never_approves_even_with_closes(fake: FakeGitHub, client: Client) -> None:
+    close = approvals.RestClose(dt.datetime(2026, 11, 5, 12, 0, tzinfo=dt.UTC), False)
+    events = approvals.EventsRead(approvals._TOKEN, False, (close,))
+    v = judge(fake, client, issue_node(), gate(), events=events)
+    assert v.state == "unknown" and not v.approved

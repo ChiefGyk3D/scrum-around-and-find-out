@@ -14,7 +14,17 @@ from fakegh import FakeGitHub
 from fakegh.approval_ops import closed_event, issue_node, put
 from fakegh.core import JSON, GqlError
 from safo import approvals
-from safo.approvals import Approver, Check, CrossCheck, Read, Unread, Verdict, read_issues, verdict
+from safo.approvals import (
+    Approver,
+    Check,
+    EventsRead,
+    Read,
+    Unread,
+    Verdict,
+    events_from_rest,
+    read_issues,
+    verdict,
+)
 from safo.context import Context
 from safo.graphql import Client
 
@@ -41,16 +51,28 @@ def gate(**over: Any) -> Check:
     return check(kind="gate", subject=GATE, entry=None, frozen=None, **over)
 
 
-def judge(
-    fake: FakeGitHub,
-    client: Client,
-    node: JSON,
-    chk: Check | None = None,
-    cross_check: Any = CrossCheck.VERIFIED_MANUAL,
-) -> Verdict:
+def rest_events(
+    at: str = "2026-11-05T12:00:00Z", app: JSON | None = None, *, complete: bool = True, pages: Any = None
+) -> EventsRead:
+    """An EventsRead built the only way it can be: through events_from_rest, from serialized REST pages."""
+    closed = {"event": "closed", "created_at": at, "performed_via_github_app": app}
+    return events_from_rest(
+        pages if pages is not None else [[{"event": "labeled", "created_at": at}, closed]], reached_end=complete
+    )
+
+
+_DEFAULT: Any = object()
+
+
+def judge(fake: FakeGitHub, client: Client, node: JSON, chk: Check | None = None, events: Any = _DEFAULT) -> Verdict:
     put(fake, node, repo="acme/gates", number=21)
     chk = chk or check()
-    return verdict(chk, read_issues(client, [chk.ref])[chk.ref], cross_check)
+    if events is _DEFAULT:  # a complete, matching, manual REST read of the close this node shows
+        timeline = node.get("timelineItems")
+        nodes = timeline.get("nodes") if isinstance(timeline, dict) else None
+        first = nodes[0] if isinstance(nodes, list) and nodes and isinstance(nodes[0], dict) else {}
+        events = rest_events(at=str(first.get("createdAt", "2026-11-05T12:00:00Z")))
+    return verdict(chk, read_issues(client, [chk.ref])[chk.ref], events)
 
 
 def never_approved(v: Verdict) -> None:
@@ -225,29 +247,62 @@ def test_an_issue_edited_after_its_approval_is_open_and_an_edit_at_the_close_is_
 def test_a_close_through_a_github_app_is_open_and_an_unread_rest_event_is_unknown(
     fake: FakeGitHub, client: Client
 ) -> None:
-    v = judge(fake, client, issue_node(), gate(), cross_check=CrossCheck.VERIFIED_APP)
+    v = judge(fake, client, issue_node(), gate(), events=rest_events(app={"id": 9}))
     assert v.state == "open" and v.lines == (f"DRIFT   {GATE} was closed through a GitHub App; it counts as open",)
-    unread = judge(fake, client, issue_node(), gate(), cross_check=CrossCheck.UNCHECKED)
+    unread = judge(fake, client, issue_node(), gate(), events=rest_events(complete=False))
     assert unread.state == "unknown" and unread.lines[0].startswith(f"UNKNOWN {GATE}")
     never_approved(unread)
 
 
-def test_the_rest_event_is_read_strictly() -> None:
-    at = dt.datetime(2026, 11, 5, 12, 0, tzinfo=dt.UTC)
-    base: dict[str, Any] = {"event": "closed", "created_at": "2026-11-05T12:00:00Z", "performed_via_github_app": None}
-    app = {**base, "performed_via_github_app": {"id": 9}}
-    earlier = {**base, "created_at": "2026-11-01T12:00:00Z", "performed_via_github_app": {"id": 9}}
-    assert approvals.cross_check_from_events([{"event": "labeled"}, base], at) is CrossCheck.VERIFIED_MANUAL
-    assert approvals.cross_check_from_events([earlier, app], at) is CrossCheck.VERIFIED_APP
-    assert (
-        approvals.cross_check_from_events([earlier, base], at) is CrossCheck.VERIFIED_MANUAL
-    )  # the newest closed event decides
-    bad_cases: list[Any] = [
-        [], [{"event": "labeled"}], [{**base, "created_at": "2026-11-05T12:00:01Z"}], [{"event": "closed"}],
-        [{**base, "performed_via_github_app": "x"}], None, [3], [{**base, "created_at": 5}],
-    ]  # fmt: skip
-    for bad in bad_cases:
-        assert approvals.cross_check_from_events(bad, at) is CrossCheck.UNCHECKED
+def test_the_newest_close_event_decides_and_a_mismatch_is_unknown(fake: FakeGitHub, client: Client) -> None:
+    app: JSON = {"id": 9}
+    earlier_app = [[{"event": "closed", "created_at": "2026-11-01T12:00:00Z", "performed_via_github_app": app}]]
+    newest_manual = [
+        *earlier_app[0],
+        {"event": "closed", "created_at": "2026-11-05T12:00:00Z", "performed_via_github_app": None},
+    ]
+    assert judge(fake, client, issue_node(), gate(), events=rest_events(pages=[newest_manual])).approved
+    newest_app: list[JSON] = [
+        {"event": "closed", "created_at": "2026-11-01T12:00:00Z", "performed_via_github_app": None}
+    ]
+    newest_app.append({"event": "closed", "created_at": "2026-11-05T12:00:00Z", "performed_via_github_app": app})
+    refused = judge(fake, client, issue_node(), gate(), events=rest_events(pages=[newest_app]))
+    assert refused.state == "open" and "GitHub App" in refused.lines[0]
+    mismatched = judge(fake, client, issue_node(), gate(), events=rest_events(at="2026-11-05T12:00:01Z"))
+    assert mismatched.state == "unknown" and not mismatched.approved
+
+
+def test_an_incomplete_or_malformed_rest_read_is_unknown_never_approved(fake: FakeGitHub, client: Client) -> None:
+    ok: JSON = {"event": "closed", "created_at": "2026-11-05T12:00:00Z", "performed_via_github_app": None}
+    cases: dict[str, EventsRead] = {
+        "not at the end": rest_events(complete=False),
+        "no pages": rest_events(pages=[]),
+        "page without a close": rest_events(pages=[[{"event": "labeled"}]]),
+        "pages not a list": rest_events(pages={"a": 1}),
+        "page not a list": rest_events(pages=[{"event": "closed"}]),
+        "event not an object": rest_events(pages=[[3]]),
+        "no app key": rest_events(pages=[[{"event": "closed", "created_at": "2026-11-05T12:00:00Z"}]]),
+        "app key mistyped": rest_events(pages=[[{**ok, "performed_via_github_app": "x"}]]),
+        "no time": rest_events(pages=[[{"event": "closed", "performed_via_github_app": None}]]),
+        "time not a string": rest_events(pages=[[{**ok, "created_at": 5}]]),
+        "one good page and one bad": rest_events(pages=[[ok], ["x"]]),
+        "tie that disagrees": rest_events(pages=[[ok, {**ok, "performed_via_github_app": {"id": 1}}]]),
+    }
+    for name, events in cases.items():
+        v = judge(fake, client, issue_node(), gate(), events=events)
+        assert v.state == "unknown" and not v.approved, name
+    assert rest_events(complete=False).complete is False and rest_events(pages=[[3]]).closes == ()
+
+
+def test_an_events_read_cannot_be_forged_or_edited() -> None:
+    with pytest.raises(TypeError):
+        EventsRead(object(), True, ())
+    with pytest.raises(TypeError):
+        EventsRead(None, True, ())
+    events = rest_events()
+    with pytest.raises(AttributeError):
+        events.__setattr__("complete", False)
+    assert not hasattr(events, "__dict__")
 
 
 # -- UNKNOWN is never a pass -------------------------------------------------------------------------------------------
@@ -255,7 +310,7 @@ def test_the_rest_event_is_read_strictly() -> None:
 
 def test_a_missing_issue_is_unknown(fake: FakeGitHub, client: Client) -> None:
     read = read_issues(client, [REF])[REF]
-    v = verdict(gate(), read, CrossCheck.VERIFIED_MANUAL)
+    v = verdict(gate(), read, rest_events())
     assert isinstance(read, Unread) and v.state == "unknown"
     assert v.lines == (f"UNKNOWN {GATE} cannot be read with this token, so no card's gate order can be told",)
     never_approved(v)
@@ -266,14 +321,14 @@ def test_an_answer_that_is_not_not_found_is_unknown_and_names_only_the_class(fak
         raise GqlError("FORBIDDEN", "secret-detail-from-github")
 
     fake.handlers["ApprovalIssues"] = refuse
-    v = verdict(gate(), read_issues(client, [REF])[REF], CrossCheck.VERIFIED_MANUAL)
+    v = verdict(gate(), read_issues(client, [REF])[REF], rest_events())
     assert v.state == "unknown" and "ApiError" in v.lines[0] and "secret-detail" not in v.lines[0]
     never_approved(v)
 
 
 def test_a_transferred_issue_is_unknown(fake: FakeGitHub, client: Client) -> None:
     put(fake, issue_node(repo="acme/other", number=9), repo="acme/gates", number=21)
-    v = verdict(gate(), read_issues(client, [REF])[REF], CrossCheck.VERIFIED_MANUAL)
+    v = verdict(gate(), read_issues(client, [REF])[REF], rest_events())
     assert v.state == "unknown"
     assert v.lines == (f"UNKNOWN {GATE} now answers as acme/other#9; update process.gates",)
     never_approved(v)
@@ -389,7 +444,7 @@ def test_a_malformed_node_is_unknown_never_approved_or_empty(fake: FakeGitHub, c
 def test_a_verdict_that_crashes_is_unknown_with_only_the_class_name(fake: FakeGitHub, client: Client) -> None:
     put(fake, issue_node())
     read = read_issues(client, [REF])[REF]
-    v = verdict(gate(approvers=cast(Any, 5)), read, CrossCheck.VERIFIED_MANUAL)
+    v = verdict(gate(approvers=cast(Any, 5)), read, rest_events())
     assert v.state == "unknown" and v.lines == (f"UNKNOWN {GATE} could not be judged (TypeError)",)
     never_approved(v)
 
@@ -604,4 +659,4 @@ def test_more_references_than_the_cap_are_cannot_tell_not_dropped(
         put(fake, issue_node(number=n))
     got = read_issues(client, ["acme/gates#1", "acme/gates#2", "acme/gates#3"])
     assert isinstance(got["acme/gates#1"], Read) and isinstance(got["acme/gates#3"], Unread)
-    assert verdict(gate(), got["acme/gates#3"], CrossCheck.VERIFIED_MANUAL).state == "unknown"
+    assert verdict(gate(), got["acme/gates#3"], rest_events()).state == "unknown"
