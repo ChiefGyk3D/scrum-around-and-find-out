@@ -12,7 +12,7 @@ from typing import TextIO
 
 from safo import __version__, compat, credentials, output
 from safo.context import Context, LocalContext
-from safo.errors import ConfigError, SafoError
+from safo.errors import EXIT_INTERRUPTED, EXIT_UNKNOWN, ConfigError, SafoError
 from safo.graphql import GRAPHQL_URL, Client
 from safo.modes import LocalMode, hooks, load_all, validate
 from safo.modes.reconcile import safe
@@ -70,6 +70,19 @@ def report(err: SafoError, env: Mapping[str, str], stream: TextIO) -> None:
         output.write(stream, f"error: {text}")
 
 
+def fail(error: SafoError, env: Mapping[str, str], stream: TextIO) -> int:
+    """The exit code for a reported error. Writing the report is inside the same boundary as the work: a stream that
+    raises (a closed pipe, or a `SystemExit(0)` from a wrapper) never changes the code, and the code is never 0. An
+    interrupt while reporting keeps the interrupt code."""
+    try:
+        report(error, env, stream)
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+    except BaseException:  # nothing a stream raises may change the exit code of the error
+        return error.exit_code or EXIT_UNKNOWN
+    return error.exit_code or EXIT_UNKNOWN
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -104,8 +117,7 @@ def main(
         try:
             return mode.run(LocalContext(out, env, clock, dry_run=args.dry_run, stdin=stdin), args)
         except SafoError as error:
-            report(error, env, err)
-            return error.exit_code
+            return fail(error, env, err)
     try:
         board = resolve_board(args.board, env)
         if args.mode == "validate":
@@ -123,8 +135,7 @@ def main(
             return 2
         return mode.run(Context(board, client, out, today or clock.date(), env), args)
     except SafoError as error:
-        report(error, env, err)
-        return error.exit_code
+        return fail(error, env, err)
 
 
 def run() -> None:

@@ -8,6 +8,7 @@ from typing import Any
 EXIT_OK = 0
 EXIT_DRIFT = 1  # drift found, or something could not be fixed
 EXIT_UNKNOWN = 2  # the question could not be asked: bad config, bad token, unreachable
+EXIT_INTERRUPTED = 130  # the shell's code for SIGINT: stopped by the operator, nothing decided
 
 
 class SafoError(Exception):
