@@ -59,7 +59,7 @@ What it reads, and how strictly:
   from the pull request timeline, the last 50 events); the head's time is the latest one whose result is the head. A
   normal push leaves no event with a time (checked 2026-10-27 by read-only schema introspection and a live query:
   `PullRequestCommit` has no timestamp, `PullRequestRevisionMarker` is "the last commit the viewer has seen" and is
-  per viewer, and `Commit.pushedDate` answers null). A commit's own `committedDate` and `authoredDate` are chosen by
+  per viewer, and the `pushedDate` field of a commit answers null). A commit's own `committedDate` and `authoredDate` are chosen by
   its author, so they prove nothing and are **never used**. With no force-push to the head the answer is
   **unknown** ("cannot tell when this commit became the head"), so a pull request that only ever received normal
   pushes reads unknown, not fresh. The report's time is the later of its creation and its last edit, so editing an old
