@@ -91,7 +91,7 @@ def test_the_check_fails_on_a_hand_edit(
 ) -> None:
     script, out = written(tmp_path, monkeypatch)
     target = out / "codex" / "codex.prompt.md"
-    target.write_text(target.read_text().replace("Prepend", "Skip"))
+    target.write_text(target.read_text().replace("No hidden work", "Hidden work is fine"))
     capsys.readouterr()
     code, err = check(script, capsys)
     assert code == 1 and "codex/codex.prompt.md" in err and "body digest" in err

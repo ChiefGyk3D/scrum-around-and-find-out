@@ -36,6 +36,7 @@ GRAPHQL_URL = "https://api.github.com/graphql"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _OPERATION = re.compile(r"^\s*(query|mutation)\s+(\w+)")
 MAX_PAGES = 1000
+MAX_BODY = 32 * 1024 * 1024  # an answer bigger than this is refused unread: json.loads on it could exhaust memory
 
 
 def operation_name(document: str) -> str:
@@ -107,6 +108,58 @@ def _https_handler(state: _Connected) -> urllib.request.HTTPSHandler:
             )
 
     return Handler()
+
+
+_CONTENT_LENGTH = re.compile(r"[0-9]{1,15}")
+
+
+def _content_length(response: Any) -> int | None:
+    """The announced body length, None when the response announces none, ApiError when the framing is malformed.
+
+    A response is framed by exactly one of two things: a single Content-Length of ASCII digits, or a single
+    `Transfer-Encoding: chunked` (exactly that value) and no Content-Length. Both together, any other transfer coding
+    (gzip, deflate, compress, identity, a list, another spelling) and a repeated header are refused: http.client
+    decodes chunks and ignores Content-Length, reads Content-Length with int() (which accepts a sign, spaces,
+    underscores and non-ASCII digits) and ignores a value it cannot parse, so each of those would let an ambiguously
+    framed body pass for a complete one. A response with neither framing header (a body delimited by the connection
+    closing) is refused for the same reason, except a 204 or 304, which carries no body.
+    """
+    lengths = response.headers.get_all("Content-Length") or []
+    codings = response.headers.get_all("Transfer-Encoding") or []
+    if codings:
+        if lengths or codings != ["chunked"]:
+            raise ApiError("GitHub's response framing was malformed (Transfer-Encoding)")
+        return None
+    if not lengths:
+        if getattr(response, "status", 200) in (204, 304):  # these carry no body, so nothing is left to frame
+            return None
+        # A close-delimited body cannot tell a clean end from a cut right after a valid JSON prefix.
+        raise ApiError("GitHub's response framing was missing (no Content-Length or Transfer-Encoding)")
+    if len(lengths) != 1 or not _CONTENT_LENGTH.fullmatch(lengths[0]):
+        raise ApiError("GitHub's response framing was malformed (Content-Length)")
+    return int(lengths[0])
+
+
+def _read(response: Any) -> bytes:
+    """The whole body, or ApiError when it is larger than MAX_BODY or its framing is malformed. The one place a
+    response body is read, so no caller (a query, a mutation, an error body) can forget a check.
+
+    At most MAX_BODY + 1 bytes are taken, so an oversized answer is seen without being held in memory. `read(n)`
+    returns a short body quietly where `read()` raises; a body shorter than its Content-Length is still an
+    IncompleteRead.
+    """
+    declared = _content_length(response)
+    encodings = response.headers.get_all("Content-Encoding") or []
+    if any(value.strip().lower() not in ("", "identity") for value in encodings):
+        # Nothing here decodes a body, so a declared encoding means the bytes are not what they claim to be.
+        raise ApiError("GitHub's response declared a Content-Encoding and was not decoded")
+    data: bytes = response.read(MAX_BODY + 1)
+    if len(data) > MAX_BODY:
+        raise ApiError(f"GitHub's response was too large (more than {MAX_BODY} bytes)")
+    bodiless = getattr(response, "status", 200) in (204, 304)  # these carry no body whatever Content-Length says
+    if not bodiless and declared is not None and len(data) < declared:
+        raise http.client.IncompleteRead(data, declared - len(data))
+    return data
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -186,6 +239,8 @@ class Client:
                 if err.before_send:
                     raise ApiError(f"could not reach GitHub for {op}: {err.error.__class__.__name__}") from None
                 raise self._unknown(op, "the connection failed after the request was sent", cause=err.error) from None
+            except ApiError as err:  # refused unread (too large, malformed framing): the request had gone out
+                raise self._unknown(op, str(err), cause=err) from None
             self.requests += 1
             if status == 401:
                 raise AuthError(f"GitHub refused the token (401) on {op}")
@@ -293,9 +348,15 @@ class Client:
                 body: JSON = json.loads(raw)
             except json.JSONDecodeError as err:
                 raise ApiError(f"GitHub answered {op} with invalid JSON: {err}") from None
+            except RecursionError:
+                raise ApiError(f"GitHub answered {op} with JSON nested too deeply") from None
+            except ValueError:  # not UTF-8 (an encoded body that was not decoded, say)
+                raise ApiError(f"GitHub answered {op} with a body that is not text") from None
             if not isinstance(body, dict):
                 raise ApiError(f"GitHub answered {op} with non-object JSON: {type(body).__name__}")
             errors: list[dict[str, Any]] = body.get("errors") or []
+            if not isinstance(errors, list) or not all(isinstance(e, dict) for e in errors):
+                raise ApiError(f"GitHub answered {op} with errors that are not a list of objects")
             if not errors:
                 if "data" not in body:
                     raise ApiError(f"GitHub answered {op} with neither errors nor data")
@@ -338,9 +399,9 @@ class Client:
             try:
                 response = opener.open(request, timeout=self._timeout)
                 with response as resp:
-                    return resp.status, _lower(resp.headers.items()), resp.read()
+                    return resp.status, _lower(resp.headers.items()), _read(resp)
             except urllib.error.HTTPError as err:
-                return err.code, _lower(err.headers.items()), err.read()
+                return err.code, _lower(err.headers.items()), _read(err)
         except (OSError, http.client.HTTPException) as err:
             raise _Transport(err, before_send=not connected.done) from None
 

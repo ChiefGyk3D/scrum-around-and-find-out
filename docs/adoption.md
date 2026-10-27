@@ -122,12 +122,119 @@ variables. It cannot defend against a step that already runs as the same user in
 change the venv after it is created or read the environment of the steps that hold the key. Keep the job that holds the
 App key free of anything you do not trust. The Action accepts only the modes that talk to the board (`validate`,
 `bootstrap`, `audit`, `sync`, `reconcile`, `status`; its preflight also lets `agents-status` through, which has nothing
-to read on a runner). The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`) are not allowed in the Action. See
+to read on a runner). The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`) are not allowed in the Action. See
 [Limits](limits.md) for the rest of what is accepted.
 
 If your repositories already call the shared workflows in
 [git-your-ship-together](https://github.com/ChiefGyk3D/git-your-ship-together), its `project-sync.yml` is a thin wrapper
 around this Action with the same inputs it always had; bump the pin.
+
+## Check the default branch's protection
+
+A code owner file is only a file until branch protection makes GitHub enforce it. `safo protection` reads the default
+branch's protection back and says which required condition does not hold. It sends GET requests only, needs read access,
+and changes nothing; you apply the protection yourself.
+
+```bash
+safo protection --repo OWNER/NAME [--agent-login AGENT]      # exit 0, 1 or 2
+```
+
+It exits 0 only when all ten conditions hold for the default branch, from the classic branch protection rule or from
+active branch rulesets (a ruleset in `evaluate` or `disabled` mode, or for tags, does not count):
+
+| Condition | Meaning |
+| --- | --- |
+| `code-owner-review` | code-owner review is required |
+| `ci-green` | the `CI green` check is required: the exact name, or one plain-text prefix and ` / ` (`<caller job> / CI green`); the matched context is printed |
+| `up-to-date` | the branch must be up to date before merging, or a merge queue is on |
+| `admins-included` | administrators are included (`enforce_admins`; no ruleset bypass) |
+| `no-bypass` | no bypass allowance or bypass actor; `--agent-login` is named if that account holds one |
+| `no-force-push`, `no-deletion` | force pushes and branch deletion are off |
+| `codeowners-board-yaml`, `codeowners-codeowners-file` | the CODEOWNERS file GitHub selected (`.github/`, the root, or `docs/`, read at the default branch's head commit) names an owner for `board.yaml` and for itself; a repository whose only CODEOWNERS is `docs/CODEOWNERS` must own that file, not `.github/CODEOWNERS` |
+| `codeowners-workflows` | every file that is under `.github/workflows/` now, and any file a pull request could add there under any name or depth, has an owner (see below) |
+
+Exit 1 prints a `FAIL <condition>` line for each one that does not hold; an unprotected branch (404 "Branch not
+protected", no rulesets) fails them all. Exit 2 means it could not tell: a 403 or a rate limit, a response that is not
+JSON, or any field it reads that is absent, null or the wrong type. It is never read as "nothing is set", and it is never
+exit 0. The token goes to `https://api.github.com` only (`--api-url` is for a loopback test server).
+
+Name-only matching lets another source satisfy the check. A required check that is not pinned to an app (GitHub's
+`app_id` or `integration_id` is null, absent or -1: "any app") can be reported by any app or token that can write commit
+statuses, unless branch protection pins it. The default stays name-only, because the shared baseline sets required
+checks by name, but the read-back never reports that silently: it prints `NOTE ci-green: required check is not pinned to
+an app (any source can satisfy it)` (or says the check is pinned to an app other than the expected GitHub Actions app
+15368) and the exit code is unchanged. To make the pin a condition, pass `--require-app-id 15368`: then every matching
+check must be pinned to exactly that app, or `ci-green` fails with exit 1. An `app_id` or `integration_id` that is not
+null, -1 or a positive integer is exit 2.
+
+### How CODEOWNERS is judged
+
+The file is found through a verified chain of objects, not trusted from one answer. The head commit is read by its own
+sha (`GET .../git/commits/{sha}`) and must say it is that commit; the tree it declares is requested by that tree sha and
+the answer must carry the same sha; every deeper tree (`.github`, `docs`, `workflows`) must carry the sha its parent
+listed, be whole (a truncated listing is exit 2), and name no path twice. CODEOWNERS is chosen from those listings in
+GitHub's order (`.github/`, the root, `docs/`), must be a regular file (a symlink or submodule is exit 2), and its
+content must hash, as a git blob, to the sha the tree lists, so an older or other file cannot be substituted. The errors
+and the workflow tree are read at that same commit. Last matching rule wins. An owner counts only if it passes two layers: GitHub's
+naming rules (`@login` of at most 39 characters with no leading, trailing or doubled hyphen, `@org/team`, or an email), and
+GitHub's own answer from `GET /repos/{owner}/{repo}/codeowners/errors?ref=<commit>` (the endpoint exists and returned
+`{"errors":[]}` on a live read; the shape of a non-empty list, `line` and `path` per entry, is INFERRED from the REST
+docs and not yet observed). A line that fails either layer is treated as having no owner. If the errors endpoint cannot
+be read, that is exit 2.
+
+Lines are split on `\n` only (a CRLF is fine), and tokens on ASCII space and tab only, which is how GitHub reads the file
+(INFERRED from its docs, not observed). Anything else that some parsers treat as a break or a space, a lone carriage
+return, `\v`, `\f`, `\x1c`-`\x1e`, `\x85`, U+2028/U+2029, any non-ASCII space (U+00A0, U+2000-U+200A, U+3000, ...), a
+zero-width or format character, NUL or any control character, a byte order mark, is exit 2: a parser that numbers lines
+or splits tokens differently could attribute an error to the wrong rule, or find an owner GitHub does not.
+
+`codeowners-workflows` is judged three ways, and all must pass:
+
+1. **Real files.** The workflow directory is listed from the git tree at that commit (root, `.github`, then
+   `workflows` recursively, so nested files count; a truncated listing is exit 2). Every file must have an owner.
+2. **Structure (the proof).** The last directory-wide rule (`/.github/workflows/`, `.../**`, a parent such as
+   `/.github/`, `/.github/**`, or `*`) must name an owner, and no later rule that could touch the directory may name none.
+   Then every path under it, whatever it is called, ends at an owner. A rule for `*` passes this, and it also covers the
+   rest of the repository. File-specific owners (`/.github/workflows/ci.yml @o`) and partial globs (`*.yml`) do not pass: a
+   new `release.yml` would have no owner.
+3. **Sampling (a second layer, not a proof).** About twenty paths with random names and random directory names (`.yml`,
+   `.yaml` or none, one to three levels), generated at run time, are asked of the rules. A rule file cannot have
+   anticipated them. It is a sample, so a pattern engineered to own most names can pass one run; the structure check above
+   is what stops it.
+
+An empty or absent `.github/workflows/` is **not** vacuously covered: checks 2 and 3 still apply, so it passes only
+when a directory-wide rule is in place.
+
+### Exit codes and output
+
+0 all conditions hold; 1 at least one does not; 2 cannot tell; 130 interrupted (nothing was decided). The decision is
+computed before anything is printed. If the report cannot be written (a closed pipe), a 1 or a 2 stays as it was, and a 0
+becomes 2: a pass nobody could read is not reported as one. Anything unexpected (an exception from a dependency, or any
+`SystemExit`, even `SystemExit(0)`) is exit 2 and names only the exception class; a usage or credential problem is
+reported on stderr as before.
+
+GitHub offers no atomic snapshot of a repository's settings, so the whole read is done twice (about two dozen requests, far
+under the 5,000-an-hour limit) and the two normalized results must be equal: the repository document (`id`, `full_name`,
+`default_branch`, which must be the repository asked for), the head commit and its trees, the classic rule, every
+ruleset listed and read, CODEOWNERS and its errors. Any difference is exit 2 ("the protection changed while it was
+being read"), because a mix of two moments could certify a state that never existed, for example a secure classic rule
+read, then removed and replaced by a weaker ruleset.
+
+What the repeat does and does not prove: the second pass reads the classic rule and the rulesets in the opposite order
+(classic, rulesets, rulesets, classic), so a change that alternates with every read, such as an administrator flipping
+between a state with only the classic rule and one with only a ruleset, shows up as a difference. It cannot catch a
+change timed to the two ends of the sequence: if the classic rule is seen in state A at the first and the last read and
+the rulesets are seen in state B in between (A, B, B, A), the two passes agree and the result can be exit 0 although
+the controls never coexisted. No sequence of reads can exclude that. So exit 0 means every condition held in what GitHub
+answered, not that they held at one instant, and anyone who can change the protection can defeat this check. The exit-0
+output and `safo protection --help` say so in one line.
+
+A list with a `rel="next"` link is exit 2 whether or not it is short. Each response is read
+once, with no redirect, a read timeout and a 1 MiB cap; a body shorter than its Content-Length, or two different
+Content-Length headers, is exit 2.
+
+This is a local mode, not part of the Action. Shared logic with the GraphQL default-branch gate read (#129) is for a
+later change; the two read different APIs and share no code today.
 
 ## A public repository on a personal account, a board in an organization
 

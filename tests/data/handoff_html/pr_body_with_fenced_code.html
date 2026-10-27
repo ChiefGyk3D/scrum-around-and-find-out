@@ -1,0 +1,33 @@
+<p dir="auto">First of the seven v0.1.0 PR groups (plan Tasks T1a to T1c). It also carries the approved spec and the plan, so it supersedes <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="5751315819" data-permission-text="Title is private" data-url="https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/4" data-hovercard-type="pull_request" data-hovercard-url="/ChiefGyk3D/scrum-around-and-find-out/pull/4/hovercard" href="https://github.com/ChiefGyk3D/scrum-around-and-find-out/pull/4">#4</a>. Once this merges I'll <span class="issue-keyword tooltipped tooltipped-se" aria-label="This pull request closes pull request #4.">close</span> <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="5751315819" data-permission-text="Title is private" data-url="https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/4" data-hovercard-type="pull_request" data-hovercard-url="/ChiefGyk3D/scrum-around-and-find-out/pull/4/hovercard" href="https://github.com/ChiefGyk3D/scrum-around-and-find-out/pull/4">#4</a>.</p>
+<h2 dir="auto">What's in it</h2>
+<ul dir="auto">
+<li><strong>Spec and plan:</strong> <code class="notranslate">docs/superpowers/specs/2026-10-07-safo-design.md</code> (with the routing and local-LLM amendment) and <code class="notranslate">docs/superpowers/plans/2026-10-07-safo-v0.1.0.md</code>.</li>
+<li><strong>T1a, scaffold:</strong>
+<ul dir="auto">
+<li>Python package layout and Makefile (<code class="notranslate">make check</code>).</li>
+<li>Hygiene tests.</li>
+<li>A test guard that refuses every non-loopback socket call: <code class="notranslate">connect</code>, <code class="notranslate">connect_ex</code>, both forms of <code class="notranslate">sendto</code>, <code class="notranslate">sendmsg</code>, and the name lookups.</li>
+</ul>
+</li>
+<li><strong>T1b, CI:</strong>
+<ul dir="auto">
+<li>Callers for GYST v1.14.0's python-ci, bash-ci, security and release workflows, pinned by commit. The gate is <code class="notranslate">CI green</code>.</li>
+<li>Dependabot, CODEOWNERS, the PR template and SECURITY.md.</li>
+</ul>
+</li>
+<li><strong>T1c, <code class="notranslate">scripts/apply-baseline.sh</code>:</strong> applies GYST's BASELINE.md settings to this repo. Run it yourself; nothing in CI calls it.
+<ul dir="auto">
+<li><strong>Plan mode is the default:</strong> it prints each call it would make. Only <code class="notranslate">--apply</code> changes anything.</li>
+<li><strong>Force-push check:</strong> it reads GitHub's force-push bypass list over GraphQL as well as the REST field, the gap that bit pfsense. It refuses if a bypass entry exists.</li>
+<li><strong>Required checks:</strong> <code class="notranslate">ci / CI green</code> and <code class="notranslate">shell / CI green</code>.</li>
+<li><strong>Actions allow-list:</strong> fetched from GYST at the pinned commit and validated as JSON before the repo switches to selected actions. A failed fetch leaves your settings as they were.</li>
+<li><strong>Fails closed:</strong> any <code class="notranslate">gh</code> error stops it before the first change.</li>
+</ul>
+</li>
+</ul>
+<h2 dir="auto">Review</h2>
+<p dir="auto">Every task had a Sonnet review against its plan text, with fix rounds until clean. Findings that were parked, with the reasons, are in the build ledger. One open item: shellcheck isn't installed on the build machine, so this PR's <code class="notranslate">shell / CI green</code> is its first shellcheck run.</p>
+<h2 dir="auto">After merge</h2>
+<div class="highlight highlight-source-shell notranslate position-relative overflow-auto" dir="auto" data-snippet-clipboard-copy-content="cd ~/src/scrum-around-and-find-out &amp;&amp; git pull &amp;&amp; bash scripts/apply-baseline.sh"><pre class="notranslate"><span class="pl-c1">cd</span> <span class="pl-k">~</span>/src/scrum-around-and-find-out <span class="pl-k">&amp;&amp;</span> git pull <span class="pl-k">&amp;&amp;</span> bash scripts/apply-baseline.sh</pre></div>
+<p dir="auto">Read the plan output. If it looks right, run it again with <code class="notranslate">--apply</code>.</p>
+<p dir="auto">🤖 Generated with <a href="https://claude.com/claude-code" rel="nofollow">Claude Code</a></p>

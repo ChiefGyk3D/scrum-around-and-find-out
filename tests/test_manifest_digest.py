@@ -106,7 +106,7 @@ def test_only_the_agent_model_changes_the_manifest(tmp_path: Path) -> None:
 
 def test_a_hand_edit_of_the_body_that_keeps_the_header_is_a_body_digest_failure(tmp_path: Path) -> None:
     r = render_harness(verified(tmp_path))[CODEX]
-    edited = r.data.replace(b"Prepend this preamble", b"Ignore this preamble")
+    edited = r.data.replace(b"No hidden work", b"Hidden work is fine")
     assert edited != r.data
     problems = compare(r, edited)
     assert len(problems) == 1 and "body digest" in problems[0] and "edited" in problems[0]
@@ -132,7 +132,7 @@ def test_a_stale_manifest_means_the_sources_changed(tmp_path: Path) -> None:
 def test_a_file_whose_digests_were_recomputed_after_an_edit_still_differs_from_the_render(tmp_path: Path) -> None:
     r = render_harness(verified(tmp_path))[CODEX]
     body, _, _ = pr.split_header(CODEX, r.data)
-    forged_body = body.replace(b"Prepend this", b"Skip this")
+    forged_body = body.replace(b"No hidden work", b"Hidden work is fine")
     assert forged_body != body
     found = re.search(rb"<!-- GENERATED[^\n]*-->", r.data)
     assert found

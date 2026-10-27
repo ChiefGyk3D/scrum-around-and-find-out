@@ -17,24 +17,3 @@ This profile adds model-specific briefing guidance only. It cannot change tool a
 ### Brief
 
 Keep the pull request small and say what you ran.
-
-### Do
-
-- Give it small single-repo pull requests. (`lessons:every-copilot-pull-request-needed-fixes`)
-
-### Review gate
-
-- Review is required, and the reviewer must differ from the author.
-- Read the stated acceptance criteria first, then judge whether the test would fail if the stated behaviour were broken, ideally by breaking it. (`lessons:every-copilot-pull-request-needed-fixes`)
-
-### Model layer: gpt-5.1
-
-#### Do not
-
-- Trust its tests. (`lessons:every-copilot-pull-request-needed-fixes`)
-
-### Model layer: o3
-
-Nothing is claimed about this model: its profile is unmeasured.
-
-- Thinking: on. (`lessons:every-copilot-pull-request-needed-fixes`)

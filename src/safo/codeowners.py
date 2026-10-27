@@ -29,6 +29,7 @@ REQUIRED = (
     "agents/",
     "src/safo/agentsfile.py",
     "src/safo/profile_render.py",
+    "src/safo/profile_compose.py",
 )
 LOCATIONS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")  # GitHub's order of precedence
 MAX_BYTES = 3 * 1024 * 1024
@@ -47,6 +48,7 @@ class CodeownersError(ConfigError):
 class Rule:
     matcher: re.Pattern[str]
     owned: bool
+    pattern: str = ""  # as written, for a caller that reasons about the pattern itself
 
 
 def find_codeowners(root: Path) -> str:
@@ -174,7 +176,8 @@ def parse_rules(text: str) -> list[Rule]:
             matcher = _translate(tokens[0])
         except _Unsupported as err:
             raise CodeownersError(f"cannot evaluate CODEOWNERS rule at line {number}: {err}") from None
-        rules.append(Rule(matcher, any(len(t) <= MAX_OWNER and OWNER.fullmatch(t) for t in tokens[1:])))
+        owned = any(len(t) <= MAX_OWNER and OWNER.fullmatch(t) for t in tokens[1:])
+        rules.append(Rule(matcher, owned, tokens[0]))
     return rules
 
 

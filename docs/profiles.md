@@ -111,7 +111,7 @@ safo profiles verify [--agents FILE]
 It prints one line per claim: where it is, the claim, the evidence kind and what the pointer resolved to (the lesson's
 heading and first line, or the computed metric), so a reviewer can judge relevance. It then checks that CODEOWNERS owns
 `agents.yaml`, `examples/harness/`, `.claude/agents/`, `agents/`, the lessons file, the directory of every template and
-the two source files that hold the profile constants and the renderer. When an outcomes source is configured it also
+the three source files that hold the profile constants, the renderer and the composition check. When an outcomes source is configured it also
 reports, for each profiled agent and model layer, how many recorded outcomes qualify (a card, a review round, a date in
 the window, deduplicated per card, conflicting duplicates voiding their card) against `promotion`, as information only.
 
@@ -142,16 +142,48 @@ them into a repository for you.
 
 | File | Harness | What it is |
 |---|---|---|
-| `claude/<agent>.md` | Claude subagent | Front matter (`name`, `description`, `model` from the agent, `tools` and `disallowedTools` only if the persona's own front matter has them), the persona body when there is one, then the generated section |
-| `codex/<agent>.prompt.md` | Codex | A preamble to prepend to a self-contained prompt |
+| `claude/<agent>.md` | Claude subagent | Front matter (`name`, `description`, `model` from the agent, `tools` and `disallowedTools` only if the persona's own front matter has them), the persona body when there is one, then the brief |
+| `codex/<agent>.prompt.md` | Codex | A preamble: the tracking rule, the policy boundary and the brief |
 | `copilot/ISSUE_TEMPLATE/copilot-task.yml` | Copilot coding agent (`harness_mode: issue` only) | An issue form with the acceptance criteria, the files in scope, one test command and a scope checkbox, all required |
-| `copilot/copilot-instructions.md` | Copilot | `harness_mode: issue`: the three scope rules and the generated section. `harness_mode: review`: the review rules (comment on the diff, a second opinion and not a gate) and the generated section, with the review gate checks as the things to look for |
-| `local/<agent>.wrapper.txt` | Local models | A prompt wrapper with a `{{task}}` slot, a strict output-format line and the ceilings in prose; `think=false` is a comment line for the caller to remove |
+| `copilot/copilot-instructions.md` | Copilot | `harness_mode: issue`: the three scope rules and the brief. `harness_mode: review`: the review rules (comment on the diff, a second opinion and not a gate) and the brief, with the review gate checks as the things to look for |
+| `local/<agent>.wrapper.txt` | Local models | A prompt wrapper with a `{{task}}` slot, a strict output-format line and the brief |
+| `caller/<harness>/<agent>.md` | Whoever briefs the agent | Not sent to a model. How to use the model file above, then the briefing guidance: limits and the call setting (`think=false`), `do` and `dont`, shapes not to hand it, the review gate and the model layers, each with its evidence pointer |
 
-Only an agent with a profile renders. An `unmeasured` profile renders its brief, ceilings and review gate and says on the
-first line of the section that nothing is claimed about the model.
+Only an agent with a profile renders. An `unmeasured` profile renders its brief in the model file and, in the caller
+file, its ceilings and review gate, and says on the first line of the guidance that nothing is claimed about the model.
 
-**The policy boundary.** Every file holds one fixed paragraph, just before the generated section, saying that the profile
+**Two outputs, one source.** Each profiled agent (not the Copilot issue form, which is itself for the person filing the
+issue) renders a model file and a caller file in the same run, from the same verified profile. Instructions to the model
+(the persona, the brief, the tracking rule, the policy boundary, the harness's own rules, and for a review-mode Copilot
+the review gate's check wording) are only in the model file. Guidance to the caller (the limits, `do`, `dont`, the shapes
+not to hand it, the review gate and layers, the evidence pointers, the `think` call setting, how to install or prepend the
+model file) is only in the caller file. The one line both carry is the generated header, an inert comment. In a
+review-mode Copilot the gate's check wording is the reviewer's own instruction, so the caller file names the check and
+points at the model file; in every other mode the wording is caller guidance.
+
+`src/safo/profile_compose.py` checks the pair from the profile alone: every caller section the profile requires is in the
+caller file, and every model instruction is in the model file, each required heading exactly once; no caller sentence or
+evidence pointer is in the model file, and no model sentence is in the caller file; no reserved heading of the other file
+is in a file. Headings are matched by whole name, in any case or spacing, at any level and in ATX, setext or `<h1>` to
+`<h6>` form, so `### Limits`, `## limits` and `<h3>Limits</h3>` in a model file fail while a persona heading such as
+`### Done criteria` is fine. The reserved names of a caller file are Limits, Do, Do not, Must not be given, Review gate,
+Briefing guidance and Model layer; of a model file Brief, Review focus, Scope rules, Review rules, Task and Model profile.
+A sentence is looked for on word boundaries with spacing and line breaks ignored, and a model-side fragment shorter than 20
+characters (a one-word brief, say) is not looked for in the caller file. The only line exempt from the comparison is the
+file's one generated header line, found by the same strict parser the digests use; a second marker line, or a header line
+with other text on it, fails. `scripts/gen_profiles.py` runs the check in `--write` (nothing is written if it fails) and in
+`--check`, which is the generated-file step of `make check`. `--check` also compares both files byte for byte with the
+render, so neither can drift from the other or from `agents.yaml`. One table, `HARNESS_OF_KIND` in
+`src/safo/profile_render.py`, says which agent kinds render and for which harness; the renderer and the check both read it,
+and a file rendered for a kind that is not in it fails the check.
+
+**What the check does not catch.** It matches the text the renderer was given, exactly after whitespace and word-boundary
+normalization. A caller sentence copied into a model file with different case, emphasis, punctuation or look-alike
+characters is not recognised as that sentence; a reserved heading in a form other than ATX, setext or HTML heading is not
+either. An agent whose kind has no harness (the table above) renders nothing, so its `do`, `dont` and brief reach no file
+at all; that predates the split and is not changed here.
+
+**The policy boundary.** Every model file holds one fixed paragraph, just before the generated section (a caller file holds none, since no model reads it), saying that the profile
 adds briefing guidance only and cannot change tool access, secrecy rules, approvals or any instruction from a higher
 source. Profile text, templates and personas that contain that paragraph, the generated header or a second `Model profile`
 heading are refused, so a file cannot imitate the generated part.
@@ -195,11 +227,12 @@ reports an execute, setuid, setgid, sticky or world-write bit, and `--write` rew
 between the inventory and the write (another process swapping an entry in that window) is narrowed by the exclusive,
 no-follow opens and caught by the final inventory, but not prevented.
 
-**Known limitation: who reads the generated text.** The Codex and local-model files are sent to a model, but a few lines
-are written for the caller: the header line and the generated-by comment, the `think=false` comment that tells the caller to
-strip it, and `do`/`dont` lines such as "give it a self-contained prompt" that address whoever builds the prompt, not the
-model. The model sees those lines too. This is a mismatch between the two audiences and is not redesigned here; the
-proposal is that the spec for the Copilot and route group splits a caller section from a model section.
+**Who reads the generated text.** The model files are sent to a model and hold only instructions to it, apart from the
+one header comment line, which a model sees and which carries no instruction. Before the split (issue #107) the Codex
+preamble line "Prepend this preamble", the `think=false` comment, the `do`/`dont` lines such as "give it a self-contained
+prompt", the limits and the review gate were in the same file as the instructions; they are now in `caller/`. The check
+cannot judge whether a caller line is true or well worded, or whether a brief is a good brief, and a brief that quotes a
+caller sentence word for word fails the leak check on purpose.
 
 **Before publishing the files.** `tests/privacy.py` checks the generic patterns (home paths, e-mail addresses, private
 addresses, callsign-shaped tokens) in `examples/harness/`. It cannot know a private handle, an employer term or an internal

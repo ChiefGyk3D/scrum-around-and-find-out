@@ -436,8 +436,14 @@ def test_an_absent_or_null_allowance_count_is_cannot_tell_not_zero(
     assert code == 2 and any(t.startswith("UNKNOWN") and WIDGETS in t for t in text)
 
 
-def test_an_integer_zero_allowance_count_from_a_non_admin_is_a_pass(fake: FakeGitHub, client: Client) -> None:
+def test_an_integer_zero_allowance_count_means_none_only_from_an_administrator(
+    fake: FakeGitHub, client: Client
+) -> None:
+    """SAFO #180: a lower-permission token may be shown a zero for allowances that exist (cannot tell, never a pass)."""
     build_world(fake)
     repo(fake).viewer_permission = "READ"
+    code, text = gate(fake, client)
+    assert code == 2 and any(t.startswith("UNKNOWN") and WIDGETS in t and "ADMIN" in t for t in text)
+    repo(fake).viewer_permission = "ADMIN"
     code, _ = gate(fake, client)
     assert code == 0

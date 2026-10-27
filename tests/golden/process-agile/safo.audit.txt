@@ -11,6 +11,7 @@ DRIFT   AREA ChiefGyk3D/scrum-around-and-find-out#6 -> Core
 NOTE    Kind check not configured: board.yaml defines no Kind field (rules.tracking)
 NOTE    Epic check not configured: board.yaml defines no Epic field (rules.tracking)
 NOTE    Effort check not configured: board.yaml defines no Effort field (rules.tracking)
+NOTE    NO-GATE ChiefGyk3D/scrum-around-and-find-out: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md
 UI-only settings (no API can read or set these; check by eye):
   - Board view: Group by = Status
   - Workflows: Item closed -> Done; Pull request merged -> Done
