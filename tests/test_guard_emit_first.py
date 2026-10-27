@@ -226,7 +226,7 @@ def test_a_loader_that_wedges_for_any_reason_still_prints_a_decision_inside_the_
             os.kill(pid, 9)
             os.waitpid(pid, 0)
     elapsed = Arrival.at - started
-    assert status == 0, "the process ends by itself, with the abandoned load still blocked"
+    assert status == 0, "the process ends by itself, with the load still blocked"
     rows = lines(raw.decode())
     assert len(rows) == 1
     assert mod.CONFIG_TIMEOUT_NOTICE in rows[0]["hookSpecificOutput"]["additionalContext"]
@@ -872,7 +872,7 @@ class Gated:
             self.done.set()
 
 
-def run_with_abandoned_check(home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Gated, Path, str]:
+def run_with_held_check(home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Gated, Path, str]:
     flag = unhealthy(home, agents)
     held = Gated()
     monkeypatch.setattr(mod, "NOTICE_IO_CAP_SECONDS", 0.3)
@@ -882,22 +882,22 @@ def run_with_abandoned_check(home: Path, agents: Path, monkeypatch: pytest.Monke
     return held, flag, out.buffered
 
 
-def test_an_abandoned_notice_check_that_finishes_late_creates_nothing(
+def test_a_notice_check_left_running_that_finishes_late_creates_nothing(
     _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    held, flag, line = run_with_abandoned_check(_private_home, agents, monkeypatch)
+    held, flag, line = run_with_held_check(_private_home, agents, monkeypatch)
     assert mod.NOTICES_SKIPPED in line and not flag.exists()
-    held.gate.set()  # the real check resumes late, in its abandoned thread
+    held.gate.set()  # the real check resumes late, in a thread that was left running
     assert held.done.wait(10)
     assert not flag.exists(), "a worker that finishes late creates nothing"
 
 
-def test_an_abandoned_notice_check_that_finishes_late_leaves_no_descriptor_open(
+def test_a_notice_check_left_running_that_finishes_late_leaves_no_descriptor_open(
     _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     unhealthy(_private_home, agents)
     before = fd_count()
-    held, _, _ = run_with_abandoned_check(_private_home, agents, monkeypatch)
+    held, _, _ = run_with_held_check(_private_home, agents, monkeypatch)
     held.gate.set()
     assert held.done.wait(10)
     deadline = time.monotonic() + 5  # the worker returns its value right after `done`: poll, do not guess
@@ -923,7 +923,7 @@ def test_a_skipped_check_leaves_the_flag_so_the_next_dispatch_shows_the_specific
     _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with monkeypatch.context() as patch:
-        held, flag, line = run_with_abandoned_check(_private_home, agents, patch)
+        held, flag, line = run_with_held_check(_private_home, agents, patch)
     assert mod.NOTICES_SKIPPED in line and not flag.exists()
     held.gate.set()
     assert held.done.wait(10)

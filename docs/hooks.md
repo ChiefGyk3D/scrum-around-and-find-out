@@ -300,7 +300,28 @@ A hook sits inside someone's session, so every error lets the work through, visi
   list, so that record says `probe`. SAFO does not carry the session's repository binding (`tracking_exempt_repos`) to
   the new file name, so after an edit the exemption does not apply until the next `startup`; this is bookkeeping, not
   protection (see the same-user limit below).
-- The guard has one clock: 10 s from the start of the process, less a margin. The decision is computed and then written
+- The guard has one clock, and it starts when the PROCESS started, not when the guard's code first runs. `safo` records
+  the process start the moment it is imported: on Linux from `/proc` (the process age is `/proc/uptime` minus the start
+  time in `/proc/self/stat`; both count from boot, so the difference is exact, and reading them cannot block); anywhere
+  else, or if the age looks wrong (over a minute), it is the time of the import, the earliest point left. The real entry
+  (`python -m safo` and the console script, through `safo.cli.run`) arms the guard with it; a test calling `main()` in a
+  long-lived process does not, so its budget starts when the guard does. Interpreter start-up, package imports, the
+  parser and argument parsing are therefore INSIDE the budget. With the host timeout T (10 s in the installed
+  settings, scaled in tests) the points are all measured from the process start:
+  - the decision is written by `decide_by = T - m`, where the margin `m = max(2 s, 0.2 T)`, clamped to 40% of T for a
+    very small scaled budget: 8 s for T = 10, 3 s for T = 5;
+  - lookups, the re-probe and every other pre-decision wait stop one reserve earlier, at `decide_by - min(1 s, 0.1 T)`
+    (7 s for T = 10), so there is time to compute and write the line;
+  - the post-delivery work (the log and the markers) is waited for until `T - 1 s`, plus 0.5 s, still before T (9.5 s).
+  The decision write itself is given until `decide_by` (never less than 0.5 s): a full pipe whose reader never drains
+  it ends the process with exit 2 at about 8 s, 2 s before the host would kill it. The rule from SAFO #130 stands: a
+  hook the host kills at T is fail-open and its output is discarded, so everything above exists to be out before T. A
+  test runs the guard under a watchdog that SIGKILLs its process group at the scaled T and checks that the line and exit
+  code came first, for a full stdout pipe, an invalid `SAFO_APPEND_LOCK_TIMEOUT` with a full stderr pipe, and a cold
+  start that sleeps before `safo` is imported (Linux; elsewhere the start-up before the import is not counted).
+  Importing any module on the guard's path performs no I/O at all (no write to stdout or stderr, no warning): the
+  lock-timeout warning is kept in `guardlog.LOCK_TIMEOUT_WARNING` and printed by `safo.cli.main` only for commands that are
+  not hooks, after they ran. The decision is computed and then written
   and flushed to standard output FIRST, on both the Agent and the Bash path (one shared function); only then is the
   log appended, best effort. A re-probe gets at most what leaves two requests per endpoint and 2 s for the issue
   lookup, and is cut off in total at twice that per-request time (a socket timeout is per read, so a server that sends a
@@ -308,7 +329,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   request is left, the re-probe is skipped (nothing is claimed, so a later dispatch may try) and the notice names
   `reprobe-skipped`. The event read on standard input also stops at the clock (the lesser of 5 s and what is left).
 - Loading `agents.yaml` runs under a wall-clock bound: a daemon worker thread is joined for the time left until the
-  guard's deadline (at least 0.25 s) and ABANDONED if it is still going. A thread works the same on Linux and macOS and
+  guard's deadline (at least 0.25 s) and LEFT RUNNING if it is still going (the process ends right after the decision). A thread works the same on Linux and macOS and
   in any thread; a signal timer would not. On expiry there is no configuration, so every rule is off, as for an
   unreadable `agents.yaml`: a visible degraded allow (log diagnostic `timeout`) with the notice `budget exceeded:
   configuration load timed out, rules disabled`. That is fail-open and is stated as such. The realistic trigger is a
@@ -337,8 +358,8 @@ A hook sits inside someone's session, so every error lets the work through, visi
   When one overruns, the main thread goes on without it, delivers the decision, and the process then ENDS through
   `os._exit` (the guard's only exit point, taken even when everything finished normally): every thread stops at
   once, runs no clean-up, and a blocked call can never resume. In detail:
-  - The decision is written and flushed by a thread that the main thread waits for until the decision deadline (the
-    hard limit, 1 s before the host's timeout, plus 0.5 s). A reader that keeps a full pipe open and never drains it
+  - The decision is written and flushed by a thread that the main thread waits for until `decide_by` (see the clock
+    above). A reader that keeps a full pipe open and never drains it
     cannot hold the decision back: at the deadline the line counts as undelivered and the process ends with exit 2
     for a denial (the host then relies on exit 2) or exit 1 otherwise. Flags on the shared file description are never
     changed. A write that returns a short count is written again until complete; no progress is a failure.
@@ -498,14 +519,15 @@ no effect.
 
 `SAFO_APPEND_LOCK_TIMEOUT` is how many seconds a log append waits for another writer's lock. Default `3.0`; the value
 is read once when `safo` starts. A value that is not a number, not finite (`nan`, `inf`, `1e999`) or not above 0 is
-ignored: the default is used and one line naming the variable goes to stderr (stdout stays the hook's JSON). A value above
+ignored: the default is used and one line naming the variable is printed to stderr after the command has run, for every command that is not a hook (a
+hook never prints it, and nothing is written when `safo` is imported). A value above
 the maximum of `5` is clamped to 5. A bad value never stops `safo` from starting.
 
 The value is read with Python's `float` syntax, so `1_0`, non-ASCII digits and tiny values such as `1e-5` count as
 numbers; anything above 5 (including the underscore forms) is clamped.
 
-Budget: the host gives the guard 10 s, and the guard runs on one clock from the start of the process. The decision
-is written and flushed first. The append then waits for the lock for the setting or for what is left until 9 s,
+Budget: the host gives the guard 10 s, and the guard runs on one clock from the start of the process (see Failing safe
+for the arithmetic: the decision is out by 8 s). The decision is written and flushed first. The append then waits for the lock for the setting or for what is left until 9 s,
 whichever is less. If less than 0.05 s is left, or the clock is already past 9 s, the append is skipped: it is never
 started late and never stretched past 9 s. A longer setting therefore does not extend the hook. A skipped or failed
 append is reported, on the next guard run, as `previous log write failed` (see Failing safe). The

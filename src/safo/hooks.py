@@ -233,8 +233,8 @@ def bind_repo(path: Path, repo: str | None, source: object) -> str:
 
 def read_bound_repo(path: Path | None, refresh: bool = True) -> str | None:
     """The repository bound at SessionStart, or None (not bound, unreadable, untrusted folder): never exempt. With
-    `refresh` the file's modification time is also refreshed; the guard passes False (its read may run in an abandonable
-    worker) and calls refresh_bound_repo itself, after its decision is delivered."""
+    `refresh` the file's modification time is also refreshed; the guard passes False (its read runs in a bounded worker
+    thread that may be left behind) and calls refresh_bound_repo itself, after its decision is delivered."""
     if path is None or not trusted_dir(path.parent):
         return None
     try:

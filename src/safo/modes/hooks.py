@@ -635,7 +635,7 @@ def write_log_failed(folder: Path | None) -> bool:
 def log_failure_pending(folder: Path | None) -> tuple[str, Ident | None] | None:
     """READ-ONLY observation of the marker: (notice, identity) or None. A usable marker gives LOG_FAILED_NOTICE; junk at
     its name (directory, FIFO, link, foreign or loose-mode file) gives LOG_MARKER_UNUSABLE. The identity is what was
-    observed (from the descriptor, for an opened file). Nothing is changed here, so an abandoned worker cannot
+    observed (from the descriptor, for an opened file). Nothing is changed here, so a worker that is left running cannot
     change anything later: the caller clears or removes it AFTER the line that carries the notice is delivered, and
     only if it is still what was observed. The marker is same-user writable like the rest of the state: it can only add
     a notice, never grant anything."""
@@ -783,10 +783,10 @@ def read_notices(folder: Path | None, path: Path | None, wants_first: bool, run:
 
 def load_config(ctx: LocalContext, args: argparse.Namespace, deadline: float, run: Run) -> AgentsFile:
     """Load agents.yaml under a wall-clock bound (see run_bounded): the load is joined for the time left (at least
-    CONFIG_MIN_WAIT_SECONDS) and ABANDONED if it is still going; the guard goes on without a configuration. The limit:
-    an abandoned load keeps its blocked read until the process exits (it only reads). The realistic cause is a wedged
-    filesystem or kernel read: the production reader opens with O_NONBLOCK and refuses a non-regular file, so a planted
-    FIFO is rejected at once and does not reach this timeout."""
+    CONFIG_MIN_WAIT_SECONDS) and LEFT RUNNING if it is still going; the guard goes on without a configuration. The
+    limit: a load left running keeps its blocked read until the process ends (it only reads). The realistic cause is a
+    wedged filesystem or kernel read: the production reader opens with O_NONBLOCK and refuses a non-regular file, so a
+    planted FIFO is rejected at once and does not reach this timeout."""
     done, doc = run_bounded(
         lambda: load_agents_for(ctx, args), max(CONFIG_MIN_WAIT_SECONDS, deadline - time.monotonic()), run
     )
