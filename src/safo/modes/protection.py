@@ -8,11 +8,12 @@ Spec 8.5 row R2(a); the maintainer applies the protection, this only reads it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 
 from safo import credentials
 from safo.context import LocalContext
-from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError
+from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, SafoError
 from safo.modes import LocalMode, register_local
 from safo.protection import API_URL, CannotTell, Rest, check
 
@@ -40,16 +41,26 @@ def emit(ctx: LocalContext, lines: list[str], code: int) -> int:
     try:
         for line in lines:
             ctx.say(line)
-    except (OSError, ValueError):
+    except Exception:  # a closed pipe, a closed stream, or whatever a reporting backend raises: the decision stands
         return code or EXIT_UNKNOWN
     return code
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
+    """The one boundary: only a deliberate SafoError (a usage or credential problem, handled by the command line) and
+    the three documented codes ever leave this function. An interrupt is 130; anything else, an unexpected exception or
+    any SystemExit (even `SystemExit(0)`) or GeneratorExit from a dependency, is 2 with only the class name reported, so
+    1 stays the code of a decision that was computed and 0 the code of a pass."""
     try:
         return _run(ctx, args)
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
+    except SafoError:
+        raise
+    except BaseException as err:
+        with contextlib.suppress(BaseException):  # reporting the failure must not change the code
+            ctx.say(f"UNKNOWN cannot tell: internal error ({type(err).__name__})")
+        return EXIT_UNKNOWN
 
 
 def _run(ctx: LocalContext, args: argparse.Namespace) -> int:

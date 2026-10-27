@@ -8,6 +8,7 @@ field the check reads has a null / mistyped / absent case that must be exit 2 ("
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import re
@@ -25,7 +26,9 @@ from cliutil import run_cli
 ENV = {"SAFO_TOKEN": "t0ken", "SAFO_TOKEN_KIND": "token"}
 REPO = "/repos/o/r"
 OWNERS = "/.github/CODEOWNERS"
-SHA = "a" * 40  # the default branch's head commit
+SHA = "a" * 40  # the default branch's head COMMIT
+T_ROOT = "e" * 40  # the tree that commit declares (a different object from the commit)
+T_DOCS = "f" * 40
 T_GH = "b" * 40
 T_WF = "c" * 40
 BLOB = "d" * 40
@@ -54,11 +57,17 @@ def classic() -> dict[str, Any]:
     }
 
 
+def git_sha(text: str) -> str:
+    """The name git gives a file with this content: what a tree entry must carry for the content to be accepted."""
+    data = text.encode()
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
 def contents(text: str, place: str = ".github/CODEOWNERS") -> dict[str, Any]:
     return {
         "type": "file",
         "path": place,
-        "sha": BLOB,
+        "sha": git_sha(text),
         "encoding": "base64",
         "content": base64.encodebytes(text.encode()).decode(),
     }
@@ -68,11 +77,21 @@ def repo_doc(**over: Any) -> dict[str, Any]:
     return {"id": 42, "full_name": "o/r", "default_branch": "main", **over}
 
 
-def tree(sha: str, *rows: tuple[str, str], truncated: Any = False) -> dict[str, Any]:
+SUBTREES = {".github": T_GH, "workflows": T_WF, "docs": T_DOCS}
+
+
+def tree(
+    sha: str, *rows: tuple[str, str], truncated: Any = False, blobs: dict[str, str] | None = None
+) -> dict[str, Any]:
     body: dict[str, Any] = {
         "sha": sha,
         "tree": [
-            {"path": path, "type": kind, "sha": {".github": T_GH, "workflows": T_WF}.get(path, BLOB), "mode": "100644"}
+            {
+                "path": path,
+                "type": kind,
+                "sha": SUBTREES.get(path) if kind == "tree" and path in SUBTREES else (blobs or {}).get(path, BLOB),
+                "mode": "040000" if kind == "tree" else "100644",
+            }
             for path, kind in rows
         ],
     }
@@ -88,21 +107,45 @@ def j(body: Any, status: int = 200) -> Route:
     return status, {"Content-Type": "application/json"}, json.dumps(body).encode()
 
 
-def good_routes() -> dict[str, Route]:
+def world(
+    owners: str = GOOD_OWNERS,
+    rows: tuple[tuple[str, str], ...] = WORKFLOWS,
+    gh_rows: tuple[tuple[str, str], ...] | None = None,
+    place: str = ".github/CODEOWNERS",
+) -> dict[str, Route]:
+    """A consistent fake repository: commit -> root tree -> .github tree -> workflows tree, CODEOWNERS at `place`."""
+    blobs = {"CODEOWNERS": git_sha(owners)}
+    gh = (
+        gh_rows
+        if gh_rows is not None
+        else (("workflows", "tree"), *((("CODEOWNERS", "blob"),) if place.startswith(".github") else ()))
+    )
+    root = [(".github", "tree"), ("board.yaml", "blob")]
+    if place == "CODEOWNERS":
+        root.append(("CODEOWNERS", "blob"))
+    if place == "docs/CODEOWNERS":
+        root.append(("docs", "tree"))
     trees = {
-        SHA: tree(SHA, (".github", "tree"), ("board.yaml", "blob")),
-        T_GH: tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob")),
-        T_WF: tree(T_WF, *WORKFLOWS),
+        T_ROOT: tree(T_ROOT, *root, blobs=blobs),
+        T_GH: tree(T_GH, *gh, blobs=blobs),
+        T_WF: tree(T_WF, *rows),
     }
+    if place == "docs/CODEOWNERS":
+        trees[T_DOCS] = tree(T_DOCS, ("CODEOWNERS", "blob"), blobs=blobs)
     return {
         REPO: j(repo_doc()),
         f"{REPO}/branches/main": j({"name": "main", "commit": {"sha": SHA}}),
+        f"{REPO}/git/commits/{SHA}": j({"sha": SHA, "tree": {"sha": T_ROOT}}),
         f"{REPO}/branches/main/protection": j(classic()),
         f"{REPO}/rulesets": j([]),
-        f"{REPO}/contents{OWNERS}": j(contents(GOOD_OWNERS)),
+        f"{REPO}/contents/{place}": j(contents(owners, place)),
         f"{REPO}/codeowners/errors": j({"errors": []}),
         **{f"{REPO}/git/trees/{sha}": j(body) for sha, body in trees.items()},
     }
+
+
+def good_routes() -> dict[str, Route]:
+    return world()
 
 
 @contextmanager
@@ -163,7 +206,7 @@ def with_classic(edit: Edit) -> dict[str, Route]:
 
 
 def with_owners(text: str) -> dict[str, Route]:
-    return {**good_routes(), f"{REPO}/contents{OWNERS}": j(contents(text))}
+    return world(text)
 
 
 def drop(*keys: str) -> Edit:
@@ -323,11 +366,10 @@ def test_unprotected_repository_exits_one() -> None:
 
 
 def test_unprotected_with_no_codeowners_exits_one() -> None:
-    routes = {**good_routes(), f"{REPO}/branches/main/protection": j(NOT_PROTECTED, 404)}
-    del routes[f"{REPO}/contents{OWNERS}"]
+    routes = {**world(gh_rows=(("workflows", "tree"),)), f"{REPO}/branches/main/protection": j(NOT_PROTECTED, 404)}
     code, out, _, seen = check(routes)
     assert code == 1 and "FAIL codeowners-board-yaml" in out and "FAIL codeowners-workflows" in out
-    assert not any("/git/trees/" in path or "codeowners/errors" in path for _, path in seen)
+    assert not any(path.endswith((T_WF,)) or "codeowners/errors" in path or "/contents/" in path for _, path in seen)
 
 
 def cannot_tell(routes: Mapping[str, Entry]) -> None:
@@ -369,7 +411,8 @@ ALL_READS = [
     f"{REPO}/rulesets",
     f"{REPO}/contents{OWNERS}",
     f"{REPO}/codeowners/errors",
-    f"{REPO}/git/trees/{SHA}",
+    f"{REPO}/git/commits/{SHA}",
+    f"{REPO}/git/trees/{T_ROOT}",
     f"{REPO}/git/trees/{T_GH}",
     f"{REPO}/git/trees/{T_WF}",
 ]
@@ -553,10 +596,8 @@ def test_a_bad_codeowners_answer_is_cannot_tell(answer: Route) -> None:
 
 
 def test_codeowners_is_read_from_the_first_location_that_exists() -> None:
-    routes = good_routes()
-    del routes[f"{REPO}/contents{OWNERS}"]
-    routes[f"{REPO}/contents/CODEOWNERS"] = j(contents(GOOD_OWNERS, "CODEOWNERS"))
-    assert check(routes)[0] == 0
+    assert check(world(place="CODEOWNERS"))[0] == 0
+    assert check(world(place="docs/CODEOWNERS"))[0] == 0
 
 
 def test_the_agent_login_must_be_a_login() -> None:
@@ -776,12 +817,8 @@ def test_the_client_can_only_issue_get() -> None:
 # ---- round 2: the real workflow tree, owners GitHub accepts, a stable default branch, bound responses --------------
 
 
-def with_workflows(*rows: tuple[str, str], gh: Any = None) -> dict[str, Route]:
-    routes = good_routes()
-    routes[f"{REPO}/git/trees/{T_WF}"] = j(tree(T_WF, *rows))
-    if gh is not None:
-        routes[f"{REPO}/git/trees/{T_GH}"] = j(gh)
-    return routes
+def with_workflows(*rows: tuple[str, str], gh: tuple[tuple[str, str], ...] | None = None) -> dict[str, Route]:
+    return world(rows=rows, gh_rows=gh)
 
 
 PROBES_ONLY = (
@@ -796,7 +833,7 @@ def failed_ids(out: str) -> list[str]:
 
 
 def test_owning_only_the_old_probe_names_leaves_a_real_workflow_unowned() -> None:
-    routes = {**with_workflows(("release.yml", "blob")), f"{REPO}/contents{OWNERS}": j(contents(PROBES_ONLY))}
+    routes = world(PROBES_ONLY, (("release.yml", "blob"),))
     code, out, _, _ = check(routes)
     assert code == 1 and failed_ids(out) == ["codeowners-workflows"]
 
@@ -806,11 +843,7 @@ def test_a_directory_rule_covers_every_real_file_including_nested_ones() -> None
 
 
 def test_a_shallow_glob_leaves_a_nested_workflow_unowned() -> None:
-    routes = {
-        **good_routes(),
-        f"{REPO}/contents{OWNERS}": j(contents(GOOD_OWNERS.replace("workflows/ ", "workflows/*.yml "))),
-    }
-    code, out, _, _ = check(routes)
+    code, out, _, _ = check(world(GOOD_OWNERS.replace("workflows/ ", "workflows/*.yml ")))
     assert code == 1 and failed_ids(out) == ["codeowners-workflows"]
 
 
@@ -837,34 +870,34 @@ def test_the_workflow_tree_is_walked_level_by_level_and_only_the_last_is_recursi
     queries: list[tuple[str, str]] = []
     assert check(good_routes(), queries=queries)[0] == 0
     trees = [(path.rsplit("/", 1)[1], query) for path, query in queries if "/git/trees/" in path]
-    assert trees == [(SHA, ""), (T_GH, ""), (T_WF, "recursive=1")]
+    assert trees == [(T_ROOT, ""), (T_GH, ""), (T_WF, "recursive=1")] * 2  # two passes
 
 
-@pytest.mark.parametrize("sha", [SHA, T_GH, T_WF])
+@pytest.mark.parametrize("sha", [T_ROOT, T_GH, T_WF])
 @pytest.mark.parametrize("truncated", [True, None, "false", 0], ids=repr)
 def test_a_truncated_or_unlabelled_tree_is_cannot_tell(sha: str, truncated: Any) -> None:
-    rows = {SHA: ((".github", "tree"),), T_GH: (("workflows", "tree"),), T_WF: WORKFLOWS}[sha]
+    rows = {T_ROOT: ((".github", "tree"),), T_GH: (("workflows", "tree"),), T_WF: WORKFLOWS}[sha]
     cannot_tell({**good_routes(), f"{REPO}/git/trees/{sha}": j(tree(sha, *rows, truncated=truncated))})
 
 
-NO_WORKFLOWS_DIR = tree(T_GH, ("CODEOWNERS", "blob"))
+NO_WORKFLOWS_DIR = (("CODEOWNERS", "blob"),)
 FILE_OWNERS = "/board.yaml @o\n/.github/CODEOWNERS @o\n/.github/workflows/ci.yml @o\n"
 
 
 def test_a_file_specific_owner_leaves_a_new_workflow_unowned() -> None:
-    routes = {**with_workflows(("ci.yml", "blob")), f"{REPO}/contents{OWNERS}": j(contents(FILE_OWNERS))}
+    routes = world(FILE_OWNERS, (("ci.yml", "blob"),))
     code, out, _, _ = check(routes)
     assert code == 1 and failed_ids(out) == ["codeowners-workflows"]  # ci.yml itself is owned; release.yml would not be
 
 
 def test_an_empty_workflows_directory_without_a_directory_rule_fails() -> None:
-    routes = {**with_workflows(), f"{REPO}/contents{OWNERS}": j(contents(FILE_OWNERS))}
+    routes = world(FILE_OWNERS, ())
     code, out, _, _ = check(routes)
     assert code == 1 and failed_ids(out) == ["codeowners-workflows"]
 
 
 def test_an_absent_workflows_directory_without_a_directory_rule_fails() -> None:
-    routes = {**with_workflows(gh=NO_WORKFLOWS_DIR), f"{REPO}/contents{OWNERS}": j(contents(FILE_OWNERS))}
+    routes = world(FILE_OWNERS, (), NO_WORKFLOWS_DIR)
     code, out, _, _ = check(routes)
     assert code == 1 and failed_ids(out) == ["codeowners-workflows"]
 
@@ -872,14 +905,12 @@ def test_an_absent_workflows_directory_without_a_directory_rule_fails() -> None:
 def test_an_empty_or_absent_workflows_directory_with_a_directory_rule_passes() -> None:
     assert check(with_workflows())[0] == 0
     assert check(with_workflows(gh=NO_WORKFLOWS_DIR))[0] == 0
-    assert check({**with_workflows(), f"{REPO}/git/trees/{SHA}": j(tree(SHA, ("README.md", "blob")))})[0] == 0
 
 
 def test_a_glob_that_owns_only_some_new_names_fails() -> None:
-    routes = {**with_workflows(("ci.yml", "blob")), f"{REPO}/contents{OWNERS}": j(contents(GOOD_OWNERS))}
     for glob in ("*.yml", "*.yaml"):
         text = GOOD_OWNERS.replace("/.github/workflows/ @owner", f"/.github/workflows/{glob} @owner")
-        assert check({**routes, f"{REPO}/contents{OWNERS}": j(contents(text))})[0] == 1
+        assert check(world(text, (("ci.yml", "blob"),)))[0] == 1
 
 
 def seeded(seed: int) -> Callable[[], str]:
@@ -908,7 +939,7 @@ def test_a_rule_file_written_for_the_fresh_names_of_one_run_cannot_pass_another(
 ) -> None:
     from safo import protection
 
-    routes = {**with_workflows(), f"{REPO}/contents{OWNERS}": j(contents(owning_exactly(1)))}
+    routes = world(owning_exactly(1), ())
     monkeypatch.setattr(protection, "directory_wide_owned", lambda rules: True)  # the sampling layer on its own
     monkeypatch.setattr(protection, "fresh_token", seeded(1))
     assert check(routes)[0] == 0  # proof that a fixed probe set WOULD be fooled by an engineered file
@@ -922,7 +953,7 @@ def test_sampling_alone_cannot_tell_an_engineered_file_from_a_directory_rule(mon
     from safo import protection
     from safo.codeowners import covered, parse_rules
 
-    routes = {**with_workflows(), f"{REPO}/contents{OWNERS}": j(contents(owning_exactly(1)))}
+    routes = world(owning_exactly(1), ())
     monkeypatch.setattr(protection, "fresh_token", seeded(1))
     code, out, _, _ = check(routes)
     assert code == 1 and failed_ids(out) == ["codeowners-workflows"]
@@ -1001,9 +1032,9 @@ def test_the_default_fresh_names_differ_on_every_run() -> None:
 @pytest.mark.parametrize(
     "routes",
     [
-        {f"{REPO}/git/trees/{T_GH}": j(tree(T_GH, ("workflows", "blob")))},
-        {f"{REPO}/git/trees/{SHA}": j(tree(SHA, (".github", "blob")))},
-        {f"{REPO}/git/trees/{T_WF}": j(tree("e" * 40, *WORKFLOWS))},  # the tree answered is not the one asked for
+        {f"{REPO}/git/trees/{T_GH}": j(tree(T_GH, ("workflows", "blob"), ("CODEOWNERS", "blob")))},
+        {f"{REPO}/git/trees/{T_ROOT}": j(tree(T_ROOT, (".github", "blob")))},
+        {f"{REPO}/git/trees/{T_WF}": j(tree("9" * 40, *WORKFLOWS))},  # the tree answered is not the one asked for
         {f"{REPO}/git/trees/{T_WF}": j(tree(T_WF, ("x.yml", "symlink")))},
         {f"{REPO}/git/trees/{T_WF}": j(tree(T_WF, ("", "blob")))},
         {f"{REPO}/git/trees/{T_WF}": j(tree(T_WF, ("/abs.yml", "blob")))},
@@ -1123,7 +1154,7 @@ def test_a_repository_that_changes_between_the_two_reads_is_cannot_tell(then: di
 
 def test_a_stable_repository_is_read_twice_and_passes() -> None:
     code, _, _, seen = check(good_routes())
-    assert code == 0 and [path for _, path in seen].count(REPO) == 2 and seen[-1][1] == REPO
+    assert code == 0 and [path for _, path in seen].count(REPO) == 2  # once per pass; the passes must agree
 
 
 def test_the_repository_name_is_compared_without_case() -> None:
@@ -1380,7 +1411,7 @@ def no_sampling(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def workflow_verdict(owners: str, *rows: tuple[str, str]) -> tuple[int, list[str]]:
-    routes = {**with_workflows(*rows), f"{REPO}/contents{OWNERS}": j(contents(owners))}
+    routes = world(owners, (*rows,))
     code, out, _, _ = check(routes)
     return code, failed_ids(out)
 
@@ -1555,3 +1586,288 @@ def test_ascii_tokens_splits_on_space_and_tab_only() -> None:
 
     assert ascii_tokens("a \t b\\ c #d e") == ["a", "b\\ c"]
     assert ascii_tokens("a\u00a0b c") == ["a\u00a0b", "c"]  # one token for GitHub; the lines are refused before this
+
+
+# ---- round 3: one moment, a verified object chain, one exit-code boundary ------------------------------------
+
+
+def seq(*answers: Route) -> Callable[[], Route]:
+    """A route whose answer changes with each request: the first gets the first answer, ...; the last one stays."""
+    left = list(answers)
+    return lambda: left.pop(0) if len(left) > 1 else left[0]
+
+
+def listed(ident: int = 7) -> Route:
+    return j([{"id": ident, "target": "branch", "enforcement": "active"}])
+
+
+NFF_AND_DELETION = {"rules": [{"type": "non_fast_forward"}, {"type": "deletion"}]}
+
+
+def test_a_secure_rule_replaced_by_a_weaker_ruleset_between_the_passes_is_cannot_tell() -> None:
+    """Union of two moments: the classic rule (read first) and a ruleset (read later) would have passed together."""
+    routes: dict[str, Entry] = {
+        **world(),
+        f"{REPO}/branches/main/protection": seq(j(classic()), j(NOT_PROTECTED, 404)),
+        f"{REPO}/rulesets": seq(j([]), listed()),
+        f"{REPO}/rulesets/7": j(ruleset(**NFF_AND_DELETION)),
+    }
+    code, out, err, _ = check(routes)
+    assert code == 2 and "the protection changed while it was being read" in out + err
+
+
+def test_a_secure_rule_removed_right_after_it_was_read_is_not_certified() -> None:
+    routes: dict[str, Entry] = {**world(), f"{REPO}/branches/main/protection": seq(j(classic()), j(NOT_PROTECTED, 404))}
+    code, out, err, _ = check(routes)
+    assert code == 2 and "changed while it was being read" in out + err
+
+
+def test_a_ruleset_edited_between_the_two_reads_is_cannot_tell() -> None:
+    bypass = ruleset(bypass_actors=[{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}])
+    routes: dict[str, Entry] = {**ruleset_routes(ruleset()), f"{REPO}/rulesets/7": seq(j(ruleset()), j(bypass))}
+    cannot_tell(routes)
+
+
+def test_a_ruleset_that_appears_between_the_passes_is_cannot_tell() -> None:
+    routes: dict[str, Entry] = {**ruleset_routes(ruleset()), f"{REPO}/rulesets": seq(j([]), listed())}
+    cannot_tell(routes)
+
+
+def test_the_default_branch_head_moving_between_the_passes_is_cannot_tell() -> None:
+    other = "7" * 40
+    first, second = {"name": "main", "commit": {"sha": SHA}}, {"name": "main", "commit": {"sha": other}}
+    routes: dict[str, Entry] = {
+        **world(),
+        f"{REPO}/branches/main": seq(j(first), j(second)),
+        f"{REPO}/git/commits/{other}": j({"sha": other, "tree": {"sha": T_ROOT}}),
+    }
+    cannot_tell(routes)
+
+
+def test_the_codeowners_errors_changing_between_the_passes_is_cannot_tell() -> None:
+    cannot_tell({**world(), f"{REPO}/codeowners/errors": seq(j({"errors": []}), errors_for(1))})
+
+
+def test_a_stable_world_is_read_twice_and_passes() -> None:
+    code, _, _, seen = check(world())
+    paths = [path for _, path in seen]
+    assert code == 0 and paths.count(f"{REPO}/branches/main/protection") == 2 and paths.count(f"{REPO}/rulesets") == 2
+    assert paths.count(f"{REPO}/git/commits/{SHA}") == 2
+
+
+# -- the object chain: commit -> tree -> entry -> blob ---------------------------------------------------------------
+
+
+def test_the_root_tree_is_requested_by_the_tree_the_commit_declares() -> None:
+    queries: list[tuple[str, str]] = []
+    check(world(), queries=queries)
+    paths = [path for path, _ in queries]
+    assert f"{REPO}/git/trees/{T_ROOT}" in paths and f"{REPO}/git/trees/{SHA}" not in paths
+
+
+def test_a_root_tree_whose_sha_is_not_the_one_the_commit_declared_is_cannot_tell() -> None:
+    wrong = j(tree("9" * 40, (".github", "tree"), ("board.yaml", "blob")))
+    cannot_tell({**world(), f"{REPO}/git/trees/{T_ROOT}": wrong})
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        j({"sha": "9" * 40, "tree": {"sha": T_ROOT}}),  # another commit than the one asked for
+        j({"sha": SHA, "tree": {"sha": "xyz"}}),
+        j({"sha": SHA, "tree": {"sha": T_ROOT.upper()}}),
+        j({"sha": SHA, "tree": None}),
+        j({"sha": SHA}),
+        j({"tree": {"sha": T_ROOT}}),
+        j({"sha": SHA, "tree": {"sha": T_ROOT}}, 404),
+    ],
+    ids=range(7),
+)
+def test_a_commit_answer_that_is_not_the_head_commit_is_cannot_tell(answer: Route) -> None:
+    cannot_tell({**world(), f"{REPO}/git/commits/{SHA}": answer})
+
+
+def test_a_crafted_tree_for_the_commit_sha_is_not_a_way_in() -> None:
+    """The commit sha must not be asked for as a tree: a crafted tree answered for it is never read."""
+    crafted = j(tree(SHA, (".github", "tree"), ("board.yaml", "blob")))
+    queries: list[tuple[str, str]] = []
+    code = check({**world(), f"{REPO}/git/trees/{SHA}": crafted}, queries=queries)[0]
+    assert code == 0 and f"{REPO}/git/trees/{SHA}" not in [path for path, _ in queries]
+
+
+def test_an_older_permissive_file_cannot_be_substituted_for_the_one_the_tree_names() -> None:
+    older = "* @attacker\n"
+    routes: dict[str, Entry] = {
+        **world(),
+        f"{REPO}/contents{OWNERS}": j(contents(older)),
+    }  # a real older blob, the wrong sha for this tree
+    cannot_tell(routes)
+
+
+def test_content_that_does_not_hash_to_the_sha_it_carries_is_cannot_tell() -> None:
+    forged = {**contents("* @attacker\n"), "sha": git_sha(GOOD_OWNERS)}
+    cannot_tell({**world(), f"{REPO}/contents{OWNERS}": j(forged)})
+
+
+def test_the_blob_is_checked_against_the_tree_entry_not_against_itself() -> None:
+    """Even a file whose own sha is consistent is refused when the tree entry names another blob."""
+    other = tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), blobs={"CODEOWNERS": git_sha("* @attacker\n")})
+    cannot_tell({**world(), f"{REPO}/git/trees/{T_GH}": j(other)})
+
+
+@pytest.mark.parametrize(
+    ("tree_sha", "rows"),
+    [
+        (T_ROOT, ((".github", "tree"), (".github", "tree"), ("board.yaml", "blob"))),
+        (T_ROOT, ((".github", "tree"), ("board.yaml", "blob"), ("board.yaml", "blob"))),
+        (T_GH, (("workflows", "tree"), ("CODEOWNERS", "blob"), ("CODEOWNERS", "blob"))),
+        (T_GH, (("workflows", "tree"), ("workflows", "tree"), ("CODEOWNERS", "blob"))),
+        (T_WF, (("ci.yml", "blob"), ("ci.yml", "blob"))),
+    ],
+    ids=range(5),
+)
+def test_a_tree_that_names_the_same_path_twice_is_cannot_tell(tree_sha: str, rows: tuple[tuple[str, str], ...]) -> None:
+    cannot_tell({**world(), f"{REPO}/git/trees/{tree_sha}": j(tree(tree_sha, *rows))})
+
+
+def test_codeowners_in_two_locations_is_read_from_the_one_github_uses() -> None:
+    permissive = "* @attacker\n"
+    routes: dict[str, Entry] = {**world(), f"{REPO}/contents/CODEOWNERS": j(contents(permissive, "CODEOWNERS"))}
+    routes[f"{REPO}/git/trees/{T_ROOT}"] = j(
+        tree(
+            T_ROOT,
+            (".github", "tree"),
+            ("board.yaml", "blob"),
+            ("CODEOWNERS", "blob"),
+            blobs={"CODEOWNERS": git_sha(permissive)},
+        )
+    )
+    code, out, _, seen = check(routes)
+    assert code == 0, out  # the .github file governs; the root one is never even fetched
+    assert not any(path == f"{REPO}/contents/CODEOWNERS" for _, path in seen)
+
+
+def test_the_root_file_beats_docs_and_docs_is_read_only_as_a_last_resort() -> None:
+    routes = world(place="CODEOWNERS")
+    routes[f"{REPO}/git/trees/{T_ROOT}"] = j(
+        tree(
+            T_ROOT,
+            (".github", "tree"),
+            ("board.yaml", "blob"),
+            ("CODEOWNERS", "blob"),
+            ("docs", "tree"),
+            blobs={"CODEOWNERS": git_sha(GOOD_OWNERS)},
+        )
+    )
+    queries: list[tuple[str, str]] = []
+    assert check(routes, queries=queries)[0] == 0
+    assert not any(path == f"{REPO}/git/trees/{T_DOCS}" for path, _ in queries)
+    assert check(world(place="docs/CODEOWNERS"))[0] == 0
+
+
+@pytest.mark.parametrize("mode_and_kind", [("120000", "blob"), ("160000", "commit"), ("040000", "tree")], ids=str)
+def test_a_codeowners_entry_that_is_not_a_regular_file_is_cannot_tell(mode_and_kind: tuple[str, str]) -> None:
+    mode, kind = mode_and_kind
+    body = tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), blobs={"CODEOWNERS": git_sha(GOOD_OWNERS)})
+    row = next(r for r in body["tree"] if r["path"] == "CODEOWNERS")
+    row["mode"], row["type"] = mode, kind
+    cannot_tell({**world(), f"{REPO}/git/trees/{T_GH}": j(body)})
+
+
+def test_a_tree_entry_without_a_mode_is_cannot_tell() -> None:
+    body = tree(T_GH, ("workflows", "tree"), ("CODEOWNERS", "blob"), blobs={"CODEOWNERS": git_sha(GOOD_OWNERS)})
+    del body["tree"][1]["mode"]
+    cannot_tell({**world(), f"{REPO}/git/trees/{T_GH}": j(body)})
+
+
+# -- one exit-code boundary ------------------------------------------------------------------------------------------
+
+
+def mode_args(url: str) -> Any:
+    import argparse
+
+    return argparse.Namespace(repo="o/r", agent_login="", require_app_id="", api_url=url)
+
+
+def make_context(say: Callable[[str], None] | None = None) -> Any:
+    import datetime as dt
+
+    from safo.context import LocalContext
+
+    class Context(LocalContext):
+        def say(self, line: str = "") -> None:
+            if say is not None:
+                say(line)
+            else:
+                super().say(line)
+
+    return Context(io.StringIO(), ENV, dt.datetime.now(dt.UTC))
+
+
+def raiser(error: BaseException) -> Callable[..., Any]:
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    return boom
+
+
+def test_a_reporting_backend_that_raises_cannot_turn_a_pass_into_one() -> None:
+    from safo.modes import protection as mode
+
+    ctx = make_context(raiser(RuntimeError("secret detail")))
+    with server(good_routes()) as (url, _):
+        assert mode.run(ctx, mode_args(url)) == 2
+
+
+def test_a_reporting_backend_that_raises_leaves_a_computed_failure_as_one() -> None:
+    from safo.modes import protection as mode
+
+    ctx = make_context(raiser(RuntimeError("secret detail")))
+    with server(with_classic(put({"enabled": False}, "enforce_admins"))) as (url, _):
+        assert mode.run(ctx, mode_args(url)) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        SystemExit(0),
+        SystemExit(1),
+        SystemExit(),
+        GeneratorExit(),
+        RuntimeError("secret detail"),
+        MemoryError(),
+        AssertionError("secret detail"),
+    ],
+    ids=lambda e: f"{type(e).__name__}-{e.args[0] if e.args else ''}",
+)
+def test_anything_unexpected_from_a_dependency_is_exit_two_naming_only_the_class(
+    error: BaseException, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo.modes import protection as mode
+
+    monkeypatch.setattr(mode, "check", raiser(error))
+    ctx = make_context()
+    code = mode.run(ctx, mode_args("http://127.0.0.1:9"))
+    out = ctx.out.getvalue()
+    assert code == 2 and type(error).__name__ in out and "secret" not in out
+
+
+def test_the_failure_report_failing_too_still_returns_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    from safo.modes import protection as mode
+
+    monkeypatch.setattr(mode, "check", raiser(SystemExit(0)))
+    assert mode.run(make_context(raiser(SystemExit(0))), mode_args("http://127.0.0.1:9")) == 2
+    assert mode.run(make_context(raiser(BrokenPipeError())), mode_args("http://127.0.0.1:9")) == 2
+
+
+def test_through_the_command_line_a_dependency_exit_is_two_not_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    from safo.modes import protection as mode
+
+    monkeypatch.setattr(mode, "check", raiser(SystemExit(0)))
+    code, out, _ = run_cli("protection", "--repo", "o/r", env=ENV)
+    assert code == 2 and "SystemExit" in out
+
+
+def test_a_deliberate_usage_error_still_reaches_the_command_line_as_a_reported_error() -> None:
+    code, _, err = run_cli("protection", "--repo", "o/r", env={})
+    assert code == 2 and "token" in err  # the SafoError path is unchanged: stderr, not an internal error

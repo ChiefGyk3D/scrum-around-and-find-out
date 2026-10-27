@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import dataclasses
+import hashlib
 import http.client
 import re
 import secrets
@@ -30,7 +31,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from safo import __version__, bounded
 from safo.codeowners import CodeownersError, Rule, covered, parse_rules
@@ -342,13 +343,27 @@ def branch_head(rest: Rest, base: str, branch: str) -> str:
     return sha
 
 
-def read_sources(rest: Rest, base: str, branch: str, agent: str) -> list[Source]:
-    sources: list[Source] = []
+def commit_tree(rest: Rest, base: str, head: str) -> str:
+    """The tree the head commit declares. The commit is read by its own sha and must say it is that commit; every tree
+    below is then checked against what the one above it declared, so a crafted answer cannot supply its own."""
+    status, body, _ = rest.get(f"{base}/git/commits/{head}", "the head commit")
+    top = _obj(body, "the commit answer")
+    tree = _str(_obj(top.get("tree"), "the commit's tree"), "sha", "the commit's tree")
+    if status != 200 or top.get("sha") != head or not SHA.fullmatch(tree):
+        raise CannotTell("cannot tell: the commit answer is not the head commit or declares no tree")
+    return tree
+
+
+def read_sources(
+    rest: Rest, base: str, branch: str, agent: str
+) -> tuple[Source | None, tuple[tuple[int, Source], ...]]:
+    """(the classic rule or None, the applying active rulesets as (id, source) in id order)."""
+    classic: Source | None = None
     status, body, _ = rest.get(
         f"{base}/branches/{urllib.parse.quote(branch, safe='/')}/protection", "branch protection"
     )
     if status == 200:
-        sources.append(parse_classic(body, agent))
+        classic = parse_classic(body, agent)
     elif not (isinstance(body, dict) and body.get("message") == "Branch not protected"):
         raise CannotTell("cannot tell: branch protection answered 404 with something other than 'Branch not protected'")
     status, listing, headers = rest.get(
@@ -359,6 +374,7 @@ def read_sources(rest: Rest, base: str, branch: str, agent: str) -> list[Source]
     _no_next_page(headers, "the ruleset listing")
     if len(listing) >= MAX_RULESETS:
         raise CannotTell("cannot tell: a full page of rulesets may hide more")
+    rulesets: list[tuple[int, Source]] = []
     for item in listing:
         entry = _obj(item, "a listed ruleset")
         ident = entry.get("id")
@@ -374,8 +390,8 @@ def read_sources(rest: Rest, base: str, branch: str, agent: str) -> list[Source]
             raise CannotTell("cannot tell: a listed ruleset could not be read")
         source = parse_ruleset(detail, entry, branch)
         if source is not None:
-            sources.append(source)
-    return sources
+            rulesets.append((ident, source))
+    return classic, tuple(sorted(rulesets, key=lambda row: row[0]))
 
 
 # -- CODEOWNERS ----------------------------------------------------------------------------------------------------
@@ -400,27 +416,71 @@ def strict_owner(token: str) -> bool:
     return bool(_EMAIL.fullmatch(token))
 
 
-def read_codeowners(rest: Rest, base: str, ref: str) -> tuple[str, str] | None:
-    """(location, text) of the first CODEOWNERS GitHub would use at commit `ref`; None when there is no file."""
-    for place in CODEOWNERS_PLACES:
-        status, body, _ = rest.get(f"{base}/contents/{place}?ref={ref}", "CODEOWNERS")
-        if status == 404:
-            if not (isinstance(body, dict) and body.get("message") == "Not Found"):
-                raise CannotTell("cannot tell: CODEOWNERS answered 404 with something other than 'Not Found'")
-            continue
-        file = _obj(body, "the CODEOWNERS answer")
-        if (
-            _str(file, "path", "CODEOWNERS") != place
-            or _str(file, "type", "CODEOWNERS") != "file"
-            or _str(file, "encoding", "CODEOWNERS") != "base64"
-            or not SHA.fullmatch(_str(file, "sha", "CODEOWNERS"))
-        ):
-            raise CannotTell("cannot tell: the CODEOWNERS answer is not the base64 file that was asked for")
-        try:
-            return place, base64.b64decode("".join(_str(file, "content", "CODEOWNERS").split()), validate=True).decode()
-        except (binascii.Error, ValueError):
-            raise CannotTell("cannot tell: CODEOWNERS content cannot be decoded") from None
+class Entry(NamedTuple):
+    path: str
+    kind: str
+    sha: str
+    mode: str
+
+
+REGULAR_FILE_MODES = ("100644", "100755")
+
+
+def _blob_entry(entries: list[Entry], name: str) -> str | None:
+    """The sha of the regular file `name` in a listing, None when absent; anything else by that name is unreadable."""
+    found = [e for e in entries if e.path == name]
+    if not found:
+        return None
+    if found[0].kind != "blob" or found[0].mode not in REGULAR_FILE_MODES:
+        raise CannotTell("cannot tell: a CODEOWNERS entry is not a regular file")
+    return found[0].sha
+
+
+def find_codeowners(rest: Rest, base: str, root: list[Entry], github: list[Entry]) -> tuple[str, str] | None:
+    """(location, blob sha) of the first CODEOWNERS GitHub would use, chosen from the verified trees in its order of
+    precedence (.github, root, docs); None when there is no file. A name repeated in a tree was refused when it was
+    read."""
+    sha = _blob_entry(github, "CODEOWNERS")
+    if sha is not None:
+        return ".github/CODEOWNERS", sha
+    sha = _blob_entry(root, "CODEOWNERS")
+    if sha is not None:
+        return "CODEOWNERS", sha
+    docs = [e for e in root if e.path == "docs"]
+    if docs and docs[0].kind == "tree":
+        sha = _blob_entry(
+            _tree(rest, base, docs[0].sha, "the docs tree", recursive=False, expect=docs[0].sha), "CODEOWNERS"
+        )
+        if sha is not None:
+            return "docs/CODEOWNERS", sha
     return None
+
+
+def git_blob_sha(data: bytes) -> str:
+    """The object name git gives a file with these bytes; it ties the content to the sha the tree declared."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def read_codeowners(rest: Rest, base: str, ref: str, place: str, sha: str) -> str:
+    """The text of the CODEOWNERS file the tree names. The answer must be that path, carry that blob sha, and its bytes
+    must hash to that sha, so an older or other file cannot be substituted."""
+    status, body, _ = rest.get(f"{base}/contents/{place}?ref={ref}", "CODEOWNERS")
+    file = _obj(body, "the CODEOWNERS answer")
+    if (
+        status != 200
+        or _str(file, "path", "CODEOWNERS") != place
+        or _str(file, "type", "CODEOWNERS") != "file"
+        or _str(file, "encoding", "CODEOWNERS") != "base64"
+        or file.get("sha") != sha
+    ):
+        raise CannotTell("cannot tell: the CODEOWNERS answer is not the file the tree names")
+    try:
+        raw = base64.b64decode("".join(_str(file, "content", "CODEOWNERS").split()), validate=True)
+        if git_blob_sha(raw) != sha:
+            raise CannotTell("cannot tell: the CODEOWNERS content does not hash to the sha the tree names")
+        return raw.decode()
+    except (binascii.Error, ValueError):
+        raise CannotTell("cannot tell: CODEOWNERS content cannot be decoded") from None
 
 
 def codeowners_error_lines(rest: Rest, base: str, ref: str, place: str) -> set[int]:
@@ -508,46 +568,41 @@ def trusted_rules(text: str, bad_lines: set[int]) -> tuple[list[Rule], int]:
         raise CannotTell("cannot tell: CODEOWNERS has a rule this check cannot evaluate") from None
 
 
-def _tree(
-    rest: Rest, base: str, sha: str, what: str, *, recursive: bool, expect: str | None
-) -> list[tuple[str, str, str]]:
+def _tree(rest: Rest, base: str, sha: str, what: str, *, recursive: bool, expect: str) -> list[Entry]:
+    """A tree listing that must be the tree `expect` (declared by the object above it), whole, with no repeated name."""
     status, body, _ = rest.get(f"{base}/git/trees/{sha}" + ("?recursive=1" if recursive else ""), what)
     top = _obj(body, what)
-    if status != 200 or (expect is not None and top.get("sha") != expect):
+    if status != 200 or top.get("sha") != expect:
         raise CannotTell(f"cannot tell: {what} is not the tree that was asked for")
     if top.get("truncated") is not False:
         raise CannotTell(f"cannot tell: {what} is truncated or does not say whether it is")
-    rows: list[tuple[str, str, str]] = []
+    rows: list[Entry] = []
     for item in _list(top, "tree", what):
         row = _obj(item, "a tree entry")
         path = _str(row, "path", "a tree entry")
         kind = _str(row, "type", "a tree entry")
         entry = _str(row, "sha", "a tree entry")
+        mode = _str(row, "mode", "a tree entry")
         if kind not in ("blob", "tree", "commit") or not SHA.fullmatch(entry):
             raise CannotTell("cannot tell: a tree entry is not one this check understands")
         if not path or not path.isprintable() or path.startswith("/"):
             raise CannotTell("cannot tell: a tree entry has a path this check will not use")
-        rows.append((path, kind, entry))
+        rows.append(Entry(path, kind, entry, mode))
+    if len({row.path for row in rows}) != len(rows):
+        raise CannotTell(f"cannot tell: {what} names the same path twice")
     return rows
 
 
-def workflow_files(rest: Rest, base: str, head: str) -> list[str]:
-    """Every file under `.github/workflows/` at commit `head`, nested ones included. None at all is an empty list.
-
-    The tree is walked one level at a time (root, `.github`, `workflows` recursively), so a large repository's root
-    listing is the only big read, and a truncated listing at any step is "cannot tell".
-    """
-    current, expect = head, None
-    for step in (".github", "workflows"):
-        entries = _tree(rest, base, current, f"the tree holding {step}", recursive=False, expect=expect)
-        match = [e for e in entries if e[0] == step]
-        if not match:
-            return []
-        if match[0][1] != "tree":
-            raise CannotTell(f"cannot tell: {step} is not a directory")
-        current = expect = match[0][2]
-    listed = _tree(rest, base, current, "the workflows tree", recursive=True, expect=expect)
-    return [".github/workflows/" + path for path, kind, _ in listed if kind != "tree"]
+def workflow_files(rest: Rest, base: str, github: list[Entry]) -> list[str]:
+    """Every file under `.github/workflows/`, nested ones included; none at all is an empty list. The `.github` tree
+    was verified already; `workflows` is read recursively and a truncated listing is "cannot tell"."""
+    match = [e for e in github if e.path == "workflows"]
+    if not match:
+        return []
+    if match[0].kind != "tree":
+        raise CannotTell("cannot tell: workflows is not a directory")
+    listed = _tree(rest, base, match[0].sha, "the workflows tree", recursive=True, expect=match[0].sha)
+    return sorted(".github/workflows/" + row.path for row in listed if row.kind != "tree")
 
 
 FRESH_NAMES = 3  # rounds of random paths per run, each in every shape below
@@ -718,20 +773,59 @@ def evaluate(
     return conditions
 
 
-def check(rest: Rest, repo: str, agent: str = "", require_app: int | None = None) -> tuple[str, int, list[Condition]]:
-    """(default branch, number of protection sources found, conditions). Raises CannotTell, never guesses."""
-    base = _repo_path(repo)
+@dataclasses.dataclass(frozen=True)
+class State:
+    """Everything one pass read, normalized, so two passes can be compared for equality."""
+
+    repo: Repo
+    head: str
+    tree: str
+    classic: Source | None
+    rulesets: tuple[tuple[int, Source], ...]
+    owners: tuple[str, str, str] | None  # location, blob sha, text
+    error_lines: frozenset[int]
+    workflows: tuple[str, ...] | None
+
+
+def read_state(rest: Rest, base: str, repo: str, agent: str) -> State:
     first = read_repo(rest, base, repo)
-    head = branch_head(rest, base, first.default_branch)
-    sources = read_sources(rest, base, first.default_branch, agent)
-    found = read_codeowners(rest, base, head)
+    branch = first.default_branch
+    head = branch_head(rest, base, branch)
+    tree = commit_tree(rest, base, head)
+    root = _tree(rest, base, tree, "the root tree", recursive=False, expect=tree)
+    gh = [e for e in root if e.path == ".github"]
+    if gh and gh[0].kind != "tree":
+        raise CannotTell("cannot tell: .github is not a directory")
+    github = _tree(rest, base, gh[0].sha, "the .github tree", recursive=False, expect=gh[0].sha) if gh else []
+    classic, rulesets = read_sources(rest, base, branch, agent)
+    chosen = find_codeowners(rest, base, root, github)
+    if chosen is None:
+        return State(first, head, tree, classic, rulesets, None, frozenset(), None)
+    place, blob = chosen
+    text = read_codeowners(rest, base, head, place, blob)
+    lines = frozenset(codeowners_error_lines(rest, base, head, place))
+    return State(
+        first, head, tree, classic, rulesets, (place, blob, text), lines, tuple(workflow_files(rest, base, github))
+    )
+
+
+def check(rest: Rest, repo: str, agent: str = "", require_app: int | None = None) -> tuple[str, int, list[Condition]]:
+    """(default branch, number of protection sources found, conditions). Raises CannotTell, never guesses.
+
+    GitHub offers no atomic snapshot of a repository's settings, so the whole read is done twice and the two normalized
+    results must be equal (the repository document, the head commit and its trees, the classic rule, every ruleset
+    listed and read, CODEOWNERS and its errors); any difference means the answer mixed two moments, which could certify
+    a state that never existed (a secure rule read, then removed and replaced by a weaker ruleset). It costs about
+    twice the requests, roughly two dozen, against a limit of 5,000 an hour.
+    """
+    base = _repo_path(repo)
+    first = read_state(rest, base, repo, agent)
+    if read_state(rest, base, repo, agent) != first:
+        raise CannotTell("cannot tell: the protection changed while it was being read")
+    sources = ([first.classic] if first.classic is not None else []) + [source for _, source in first.rulesets]
     rules: list[Rule] = []
-    workflows: list[str] | None = None
     downgraded = 0
-    if found is not None:
-        place, text = found
-        rules, downgraded = trusted_rules(text, codeowners_error_lines(rest, base, head, place))
-        workflows = workflow_files(rest, base, head)
-    if read_repo(rest, base, repo) != first:  # the default branch (or the repository) changed under the read
-        raise CannotTell("cannot tell: the repository or its default branch changed while it was being read")
-    return first.default_branch, len(sources), evaluate(sources, rules, require_app, workflows, downgraded)
+    if first.owners is not None:
+        rules, downgraded = trusted_rules(first.owners[2], set(first.error_lines))
+    workflows = list(first.workflows) if first.workflows is not None else None
+    return first.repo.default_branch, len(sources), evaluate(sources, rules, require_app, workflows, downgraded)

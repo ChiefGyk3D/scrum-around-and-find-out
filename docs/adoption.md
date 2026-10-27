@@ -169,8 +169,13 @@ null, -1 or a positive integer is exit 2.
 
 ### How CODEOWNERS is judged
 
-The file is read at the default branch's head commit (the commit is read once, and CODEOWNERS, the CODEOWNERS errors
-and the workflow tree are all read at it). Last matching rule wins. An owner counts only if it passes two layers: GitHub's
+The file is found through a verified chain of objects, not trusted from one answer. The head commit is read by its own
+sha (`GET .../git/commits/{sha}`) and must say it is that commit; the tree it declares is requested by that tree sha and
+the answer must carry the same sha; every deeper tree (`.github`, `docs`, `workflows`) must carry the sha its parent
+listed, be whole (a truncated listing is exit 2), and name no path twice. CODEOWNERS is chosen from those listings in
+GitHub's order (`.github/`, the root, `docs/`), must be a regular file (a symlink or submodule is exit 2), and its
+content must hash, as a git blob, to the sha the tree lists, so an older or other file cannot be substituted. The errors
+and the workflow tree are read at that same commit. Last matching rule wins. An owner counts only if it passes two layers: GitHub's
 naming rules (`@login` of at most 39 characters with no leading, trailing or doubled hyphen, `@org/team`, or an email), and
 GitHub's own answer from `GET /repos/{owner}/{repo}/codeowners/errors?ref=<commit>` (the endpoint exists and returned
 `{"errors":[]}` on a live read; the shape of a non-empty list, `line` and `path` per entry, is INFERRED from the REST
@@ -204,9 +209,16 @@ when a directory-wide rule is in place.
 
 0 all conditions hold; 1 at least one does not; 2 cannot tell; 130 interrupted (nothing was decided). The decision is
 computed before anything is printed. If the report cannot be written (a closed pipe), a 1 or a 2 stays as it was, and a 0
-becomes 2: a pass nobody could read is not reported as one. The repository document is read at the start and again at the
-end (`id`, `full_name` and `default_branch` must be identical, and `full_name` must be the repository asked for); a
-change in between is exit 2. A list with a `rel="next"` link is exit 2 whether or not it is short. Each response is read
+becomes 2: a pass nobody could read is not reported as one. Anything unexpected (an exception from a dependency, or any
+`SystemExit`, even `SystemExit(0)`) is exit 2 and names only the exception class; a usage or credential problem is
+reported on stderr as before.
+
+GitHub offers no atomic snapshot of a repository's settings, so the whole read is done twice (about two dozen requests, far
+under the 5,000-an-hour limit) and the two normalized results must be equal: the repository document (`id`, `full_name`,
+`default_branch`, which must be the repository asked for), the head commit and its trees, the classic rule, every
+ruleset listed and read, CODEOWNERS and its errors. Any difference is exit 2 ("the protection changed while it was
+being read"), because a mix of two moments could certify a state that never existed, for example a secure classic rule
+read, then removed and replaced by a weaker ruleset. A list with a `rel="next"` link is exit 2 whether or not it is short. Each response is read
 once, with no redirect, a read timeout and a 1 MiB cap; a body shorter than its Content-Length, or two different
 Content-Length headers, is exit 2.
 
