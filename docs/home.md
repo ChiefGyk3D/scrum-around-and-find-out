@@ -25,6 +25,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Local LLM](local-llm.md): what a local model is good and bad at, and the guard that keeps it from evicting a resident model.
 - [Limits](limits.md): reading each tool's real usage and deciding when to switch.
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.
+- [Approval issues](approvals.md): how a gate or change approval is read and what it must say.
 - [agents-status](agents-status.md): one read-only view of what every agent is doing.
 - [Lessons](lessons.md): what went wrong, the evidence, and the rule the code enforces now.
 - [Measurements](measurements.md): what the first month measured, dated and aggregated, and what is not measured yet.

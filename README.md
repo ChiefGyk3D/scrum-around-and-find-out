@@ -149,6 +149,7 @@ replaced are gone.
 - [Lessons](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Lessons)
 - [Measurements](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Measurements)
 - [Adoption](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Adoption)
+- [Approvals](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Approvals)
 - [Privacy](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Privacy)
 - [Look-before-instructing](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Look-before-instructing)
 - [Done-means-verified](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Done-means-verified)

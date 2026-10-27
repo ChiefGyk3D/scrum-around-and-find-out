@@ -332,22 +332,46 @@ only when every line holds; it is **open** (for the gate rule, "not passed") whe
    finding, INFERRED). So for each approving close audit also reads the REST `closed` event of that issue and treats
    `performed_via_github_app != null` as not manual: the close does not count, with the line `DRIFT   GATE ... was closed
    through a GitHub App; it counts as open`. This is M2 option 1b; it costs one REST read per approval issue and runs
-   inside the same read-only token.
+   inside the same read-only token. The REST read is bound to the repository and issue number it was read from and
+   must be complete (the last page reached, every page parsed); evidence for another issue, or an incomplete read, is
+   UNKNOWN. Provenance is the caller's duty at the REST-transport boundary (a later unit), not a property of the reader's
+   types: an in-process caller can always build the evidence object, so the reader makes no claim to resist one.
 5. The actor's type is `User` **and** its `databaseId` equals the `id` of an entry in `process.approvers`. The login is
    shown but is not the identity: a login can be renamed or, once released, taken by another person. A matching id with
    a different login counts and prints `NOTE   GATE ... closed by @new-login, who is approver @old-login (renamed)`; a
    matching login with a different id is **not** an approver.
-6. `I.lastEditedAt` is null or not later than the close event's `createdAt`. A gate edited after its approval no longer
-   says what was approved, so it counts as open with the line below; re-approving means reopening and closing it again.
+6. `I.lastEditedAt` is null or **strictly before** the close event's `createdAt` (an edit in the same second as the
+   close cannot be ordered, so it does not pass; a rename or reopen at or after the close is refused the same way). A
+   gate edited after its approval no longer says what was approved, so it counts as open with the line below; re-approving means reopening and closing it again.
 7. For a change issue only: `I.createdAt` is on or after the start (UTC) of `baseline.frozen`, and `I` is not a gate. For
    the freeze issue: the close is on or before the end of the `frozen` day (UTC).
-8. **The approval is bound to its entry.** For a change issue, the issue's title or body contains the entry's reference
-   (`add` or `remove`, such as `acme/app#55`) as a whole token: found by exact string comparison with a boundary on
-   each side, nothing more. Without it, one approval of "something" could be cited for any entry. This is a search for a
-   string the file already holds; no text from the issue is parsed, becomes scope, or reaches output (the line names the
-   entry only). A title or body edit after the close is already refused by line 6. Failing it:
-   `DRIFT   SCOPE the change adding acme/app#55 cites acme/gates#21, which does not mention acme/app#55; the approval is not for this change`
-   (decision M13).
+8. **The approval is bound to its entry, on one structured line (M13).** For a change issue the **body** must hold
+   exactly one line `Entry: owner/repo#N` (the entry's `add` or `remove` reference, such as `acme/app#55`), nothing else
+   on the line, in ASCII. The repository is compared after the ASCII-only fold; the number as an integer. The title is
+   never used. The body grammar is intentionally narrow, because the human approver sees plain text and the reader must see
+   exactly that; it does not model Markdown, it fails closed. The entry line starts at column 0 and stands alone as a
+   paragraph (the start of the body or a blank line before it, the end of the body or a blank line after it; a blank
+   line is only spaces and tabs). Any of the following anywhere in the body makes the answer UNKNOWN, with a fixed
+   line that names the class and never the content:
+   - characters other than printable ASCII, tab, and `\n` or `\r\n` line ends (no no-break space, bidi mark,
+     zero-width character, NEL, line or paragraph separator, vertical tab, form feed, other control character or lone
+     carriage return);
+   - raw HTML: any `<` that begins a tag, comment, declaration, processing instruction or autolink, even in code;
+   - Markdown structure: a fence (three backticks or tildes anywhere in a line), a thematic break, a heading, a list
+     or quote marker, a table (`|`), indented code (four spaces or a tab), a trailing backslash, or any square bracket
+     (links, images and reference definitions all need one).
+   - any character outside an allow-list: ASCII letters, digits, space, tab and the marks `. , : ; ! ? ' " ( ) # / @ + - =`
+     (so no `* _ ` ~ & $ { } ^ %`, which can make a line render as an entry line it does not read as; for example
+     `**Entry:**` or `&#69;ntry:`). Only the entry line itself may hold `_` (a repository name may);
+   - no other line may contain `Entry` followed by optional whitespace and `:`, in any case. Two entry lines (even
+     equal) or any other text on the entry line mean the approval is not for this change.
+   Without a matching line, one approval of "something" could be cited for any entry. No issue text becomes scope or
+   reaches output (the line names the entry only). Failing it:
+   `DRIFT   SCOPE the change adding acme/app#55 cites acme/gates#21, which does not mention acme/app#55 on its own Entry: line; the approval is not for this change`
+   Line 6 also refuses a rename or reopen at or after the close, and an edit in the same second as the close (`>=`:
+   timestamps have one-second resolution). Timestamps that cannot be true (the issue created after its close, or an
+   edit, rename or reopen before it was created) are UNKNOWN. (Decision M13; history in the note under the decisions
+   table.)
 
 Every actor case has a verdict and a test (U3):
 
@@ -807,7 +831,7 @@ Every row names the verification that proves the mitigation bites (delete the mi
 | R3 | S4 pins baselined items to their phase; phase presence makes a cleared Phase a finding in waterfall repositories; G3 gives a pull request its linked issues' phase, so parking the issue in Backlog does not hide an active pull request; the status update counts cards with no phase | Tests for each: re-phased baselined item, cleared Phase, PR in Build linked to a Backlog issue behind an open gate |
 | R13 | G3 takes the **latest** of the card's own Phase and the linked issues' Phases, from `closingIssuesReferences` and from `Refs` in the body | U7 tests: an own early Phase on a pull request linked to a Build issue behind an open gate still yields DRIFT; a `Refs`-only pull request inherits; a `Refs`-only pull request with no phase anywhere is `MISSING Phase`; a linked issue with a cleared Phase contributes nothing; an issue parked in Backlog with a Build Phase still contributes Build |
 | R14 | A waterfall board reads `archivedStates: [ARCHIVED, NOT_ARCHIVED]`; an archived card with a Phase and an open or non-done issue is a finding; G1-S4 read archived cards | U4/U5a tests: an archived In-progress Build card behind an open gate yields both the gate line and the archived line; an agile board's query still has no `archivedStates` (golden) |
-| R15 | Load-time errors: every `approved_in` cited once, never a gate, a gate's `issue` cited once (2.5); the approval test requires a change issue created on or after `frozen`, a freeze issue closed on or before it, and (line 8, M13) a title or body that contains the entry's reference; `safo process diff --verify` (read-only token; mandatory on same-repository pull requests, M12) checks that a new `approved_in` was closed after the **pull request's creation time**, which the author cannot set and a rebase or squash does not change; a fork pull request has no token, runs the offline diff only and is labeled advisory; swapping a gate's `issue` is not on the diff allowlist; the up-to-date branch rule (R2) stops two pull requests both citing one approval issue | Tests: the two load errors; a change issue created before `frozen` is S3; an approval that does not mention its entry is S3; a pre-closed issue cited in a new entry fails `--verify`; the clock is the PR creation time (a rebase does not move it); a gate-`issue` swap exits 1 |
+| R15 | Load-time errors: every `approved_in` cited once, never a gate, a gate's `issue` cited once (2.5); the approval test requires a change issue created on or after `frozen`, a freeze issue closed on or before it, and (line 8, M13) a body that holds the entry's reference on its own `Entry:` line; `safo process diff --verify` (read-only token; mandatory on same-repository pull requests, M12) checks that a new `approved_in` was closed after the **pull request's creation time**, which the author cannot set and a rebase or squash does not change; a fork pull request has no token, runs the offline diff only and is labeled advisory; swapping a gate's `issue` is not on the diff allowlist; the up-to-date branch rule (R2) stops two pull requests both citing one approval issue | Tests: the two load errors; a change issue created before `frozen` is S3; an approval that does not mention its entry is S3; a pre-closed issue cited in a new entry fails `--verify`; the clock is the PR creation time (a rebase does not move it); a gate-`issue` swap exits 1 |
 | R16 | Approvers carry the immutable `databaseId`; a matching login with another id is not an approver; a matching id with a new login counts and prints a NOTE | Tests: same login different id, same id different login, and null actor |
 | R17 | A gate edited after its approval counts as open with a line. A reopened gate shows as open in the status update and the audit (recoverable, availability only). The blocked-by weakness is stated in "what audit cannot enforce" and in the docs | Tests: `lastEditedAt` later than the close; the docs test that the sentence is present |
 | R4 | `hooks.jira_projects`, default empty: every Jira key is `issue-unusable` and block mode denies | Tests: `issue: FAKE-1` with the default is `issue-unusable` and denied in block mode, and **allowed with a warning in warn mode and with a corrupt mode file**; a listed project is accepted; an unlisted project is `issue-unusable` with no lookup (the fake resolver records zero calls) |
@@ -901,6 +925,13 @@ call it is.
 | M13 | **DECIDED 2026-10-26, "Yes, required".** An approval issue's title or body must contain the entry's add or remove reference, checked by exact string comparison with no free-text scope parsing | Decided. One adjustment for the maintainer to confirm: the issue text is not available offline, so the check runs in audit and in `--verify`; the load-time part only requires that an `approved_in` is cited for each entry |
 | M14 | Audit cadence: gate, scope and phase rules find a breach after the fact, on the next audit; nothing blocks a card from moving | Recommended: run the audit on a schedule of at least daily, and on demand after a gate is closed or reopened; say in the docs that it is detection, not prevention. Dispatch-time gating stays out of scope (6.1). Maintainer's call on the cadence |
 | M15 | Enterprise Managed User approvers: an `EnterpriseUserAccount` actor cannot be named in `process.approvers` in the first cut, so such a close counts as open with an explicit line | Recommended: accept for now; revisit when an enterprise-managed organization adopts the method. Maintainer's call |
+
+*Note on M13 (non-normative history).* The maintainer decided on 2026-10-26 that an approval must name its entry. The
+first wording searched the issue title or body for the reference as a whole token. The security reviews of unit U3
+found that this reads raw markdown (a hidden comment, a link target or an image URL satisfied it) and that a title
+rename after the close is not an edit. The normative rule is now line 8 of the approval test: one `Entry:` line in the
+body, a fail-closed plain-ASCII-prose body grammar (no raw HTML, no Markdown structure, no brackets), the title never used. The decision itself (the approval must name its entry,
+by exact comparison, with no free-text scope parsing) is unchanged.
 
 ## 10. Non-goals, compatibility and migration
 
