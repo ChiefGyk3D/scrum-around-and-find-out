@@ -41,9 +41,10 @@ from hooksdata import (
 )
 from meterdata import NOW
 from safo import hooks as core
+from safo.agentsfile import load_agents_merged
 from safo.context import LocalContext
 from safo.guardlog import APPEND_LOCK_TIMEOUT, WARNING, file_lock
-from safo.hooks import append_log, log_record, notice_path
+from safo.hooks import append_log, log_record, notice_path, state_path
 from safo.localfiles import load_agents_for
 from safo.modes import hooks as mod
 
@@ -2375,11 +2376,148 @@ def test_a_refused_guard_line_keeps_the_explicit_agents_path_and_denies(
 def test_salvage_reads_both_options_in_both_spellings_last_one_wins_and_ignores_the_rest() -> None:
     ns = mod.salvage_argv(["?", "--bogus", "--agents", "a", "--agents-local=b", "junk", "--agents=c"])
     assert (ns.agents, ns.agents_local) == ("c", "b")
-    for words in (["--agents"], ["--agents="], ["--agents", ""], ["--agents", "-x"], ["--agents=-x"], ["?"], []):
+    for words in (
+        ["--agents"],
+        ["--agents="],
+        ["--agents", ""],
+        ["--agents", "--agents"],
+        ["--agents", "--"],
+        ["--agents", "-h"],
+        ["--agents", "--help"],
+        ["?"],
+        [],
+    ):
         ns = mod.salvage_argv(words)
         assert (ns.agents, ns.agents_local) == ("", ""), words
     ns = mod.salvage_argv(["--agents", "--agents-local", "l"])
     assert (ns.agents, ns.agents_local) == ("", "l"), "a flag in the value place is absent, and read as a flag"
+
+
+def test_salvage_keeps_a_path_that_merely_begins_with_a_dash() -> None:
+    """The equals form keeps any non-empty value; the separate-word form keeps the next word unless it is itself an
+    option of the guard grammar. `-strict.yaml` is a path, not a flag."""
+    for words, want in (
+        (["--agents=-strict.yaml"], ("-strict.yaml", "")),
+        (["--agents", "-strict.yaml"], ("-strict.yaml", "")),
+        (["--agents-local=-p"], ("", "-p")),
+        (["--agents-local", "-p"], ("", "-p")),
+        (["--bogus", "--agents=-strict.yaml"], ("-strict.yaml", "")),
+        (["--agents=--odd.yaml"], ("--odd.yaml", "")),
+        (["--agents", "-a", "--agents", "-b"], ("-b", "")),
+        (["--agents=-a", "--agents="], ("-a", "")),
+        (["--agents", "-x", "--agents-local", "-y"], ("-x", "-y")),
+        (["--agents-local", "--agents=P"], ("P", "")),
+    ):
+        ns = mod.salvage_argv(words)
+        assert (ns.agents, ns.agents_local) == want, words
+
+
+DASH_SHAPES = [
+    pytest.param(["hooks", "guard", "--bogus", "--agents=-p"], id="agents-equals"),
+    pytest.param(["hooks", "guard", "--bogus", "--agents", "-p"], id="agents-separate"),
+]
+DASH_LOCAL_SHAPES = [
+    pytest.param(["hooks", "guard", "--bogus", "--agents", "{agents}", "--agents-local=-p"], id="agents-local-equals"),
+    pytest.param(["hooks", "guard", "--bogus", "--agents", "{agents}", "--agents-local", "-p"], id="local-separate"),
+]
+
+
+def run_dashed(entry: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, argv: list[str], event: str) -> tuple[int, str]:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(event))
+    code = entry(argv)
+    return code, capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", DASH_SHAPES)
+def test_a_policy_path_beginning_with_a_dash_is_salvaged_and_denies(
+    entry: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    hard_exits: list[int],
+    strict_only: Path,
+    tmp_path: Path,
+    argv: list[str],
+) -> None:
+    """No default config under HOME (strict_only asserts it): a path lost to its leading dash is the degraded allow."""
+    (tmp_path / "-p").write_bytes(strict_only.read_bytes())
+    monkeypatch.chdir(tmp_path)
+    code, out = run_dashed(entry, monkeypatch, capsys, argv, dispatch(model=None))
+    assert hard_exits == [code]
+    assert code == 2 or (code == 0 and denied(lines(out)[-1])), (code, out)
+    assert "degraded" not in out
+
+
+@pytest.mark.parametrize("overlay", [True, False], ids=["overlay-present", "overlay-absent"])
+@pytest.mark.parametrize("argv", DASH_LOCAL_SHAPES)
+def test_a_local_overlay_path_beginning_with_a_dash_is_salvaged_and_applied(
+    entry: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    hard_exits: list[int],
+    strict_only: Path,
+    _private_home: Path,
+    tmp_path: Path,
+    argv: list[str],
+    overlay: bool,
+) -> None:
+    """The base allows a tracked sonnet brief with a local step (overlay absent: allowed). Only the overlay `-p` (it
+    names a local-step marker the brief lacks) denies it, so a denial proves the overlay was read, not dropped."""
+    monkeypatch.chdir(tmp_path)
+    fresh = json.dumps({"ts": time.time() - 1.0, "reachable": True, "endpoints": []})  # the local server is reachable
+    if overlay:
+        (tmp_path / "-p").write_text("hooks:\n  local_step_markers: [zzz-no-such-marker]\n")
+        (tmp_path / "-p").chmod(0o600)
+    # the probe state is keyed by the document the guard loads: record a fresh one for it, so no re-probe happens
+    merged = load_agents_merged(strict_only, tmp_path / "-p" if overlay else None)
+    state_path(state_folder(_private_home), "session-a", merged).write_text(fresh)
+    code, out = run_dashed(entry, monkeypatch, capsys, fill(argv, strict_only), dispatch())
+    assert hard_exits == [code]
+    if overlay:
+        assert code == 2 or (code == 0 and denied(lines(out)[-1])), (code, out)
+    else:
+        assert code == 0 and not any(denied(row) for row in lines(out)), (code, out)
+    assert "degraded" not in out
+
+
+def test_the_static_top_level_commands_match_the_real_registry() -> None:
+    """The guard never reads the registry; this is the only place it is compared against it."""
+    from safo.modes import load_all  # local: the test, never the guard path, enumerates the modes
+
+    assert mod.TOP_LEVEL_COMMANDS == tuple(sorted(load_all())), "update TOP_LEVEL_COMMANDS in modes/hooks.py"
+    assert "hooks" in mod.TOP_LEVEL_COMMANDS, "something was collected"
+
+
+def test_a_corrupted_guard_line_decides_without_importing_or_enumerating_modes(
+    entry: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    hard_exits: list[int],
+    strict_only: Path,
+) -> None:
+    """`--board hooks gua ...` reaches the lenient scan past `guard` itself; it must not touch the mode registry or the
+    package enumeration (a stalled import would hold the process before the deadline is armed)."""
+    import pkgutil
+
+    import safo.modes as modes_pkg
+
+    calls: list[str] = []
+
+    def tripwire(name: str) -> Any:
+        def trip(*_: Any, **__: Any) -> Any:
+            calls.append(name)  # recorded, because the old code swallowed the raise
+            raise RuntimeError(name)
+
+        return trip
+
+    monkeypatch.setattr(modes_pkg, "load_all", tripwire("load_all"))
+    monkeypatch.setattr(pkgutil, "iter_modules", tripwire("iter_modules"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(dispatch(model=None)))
+    code = entry(["--board", "hooks", "gua", "--agents", str(strict_only)])
+    out = capsys.readouterr().out
+    assert calls == [], "the guard path enumerated modes"
+    assert hard_exits == [code]
+    assert code == 2 or (code == 0 and denied(lines(out)[-1])), (code, out)
+    assert "degraded" not in out
 
 
 def test_dropping_every_explicit_argument_when_one_word_is_malformed_is_caught(

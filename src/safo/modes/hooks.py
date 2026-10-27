@@ -876,6 +876,24 @@ def finish(
 
 
 GLOBAL_VALUE_OPTIONS = ("--board", "--gh-user")  # the top-level options that take the next word as their value
+# argparse's top-level commands, kept static so the guard path never imports or enumerates modes (a stalled import
+# would hold the process before the deadline is armed). Keep in step with the mode registration in safo.modes: a test
+# compares this tuple with load_all().
+TOP_LEVEL_COMMANDS = (
+    "agents-status",
+    "audit",
+    "bootstrap",
+    "hooks",
+    "local",
+    "outcome",
+    "profiles",
+    "reconcile",
+    "route",
+    "status",
+    "sync",
+    "usage",
+    "validate",
+)
 HOOKS_SUBCOMMANDS = ("install", "probe", "mode", "status")  # what argparse serves under `hooks` besides the guard
 
 
@@ -914,16 +932,6 @@ def encodable(word: str) -> bool:
     return bool(word)
 
 
-def top_level_commands() -> frozenset[str]:
-    """argparse's own top-level commands (read only when a corrupted line needs them; empty if they cannot be read)."""
-    try:
-        from safo.modes import load_all  # local: a plain guard line never needs the whole mode registry
-
-        return frozenset(load_all())
-    except Exception:
-        return frozenset()
-
-
 def corrupted_guard_words(argv: Sequence[str]) -> list[str] | None:
     """The lenient second choice, used only when the exact position parse did not recognise the line. Walk the leading
     global options as hooks_tail does; the first word that is not an option is W. Two shapes are a corrupted guard line:
@@ -954,7 +962,7 @@ def corrupted_guard_words(argv: Sequence[str]) -> list[str] | None:
                 after = words[later + 1 :]
                 return after[1:] if after[0] == "guard" else ["?", *after[1:]]
         return None
-    if ate_hooks and first not in spare and (first == "guard" or first not in top_level_commands()):
+    if ate_hooks and first not in spare and (first == "guard" or first not in TOP_LEVEL_COMMANDS):
         rest = words[index + 1 :]
         return rest if first == "guard" else ["?", *rest]
     return None
@@ -1452,9 +1460,13 @@ def guard_argv(words: Sequence[str]) -> argparse.Namespace | None:
 
 def salvage_argv(words: Sequence[str]) -> argparse.Namespace:
     """What can still be read from a line guard_argv refused: `--agents` and `--agents-local`, as `--opt V` or `--opt=V`
-    (exact spellings, last one wins as argparse would), found by a lenient scan that ignores every other word. A value
-    that is empty or looks like a flag is treated as absent (and the word after the option stays unread, so a flag
-    there is still seen). The strict file the installer wrote must not be lost to a stray word."""
+    (exact spellings, last one wins as argparse would), found by a lenient scan that ignores every other word.
+    Value rule: `--opt=V` keeps ANY non-empty V, a leading dash included (`--agents=-strict.yaml` is a path). For
+    `--opt V` the next word is the value unless it is empty or is itself an option of the guard grammar (exactly
+    `--agents`, `--agents-local`, either with `=...`, `-h`, `--help`, `--`, or any other word shaped like a long option,
+    `--...`); then the option is value-less (absent) and that word stays unread, so it is still seen as a flag. A
+    single-dash word (`-strict.yaml`) is a path and is kept. The strict file the installer wrote must not be lost to a
+    stray word."""
     values = {"--agents": "", "--agents-local": ""}
     index = 0
     while index < len(words):
@@ -1467,9 +1479,10 @@ def salvage_argv(words: Sequence[str]) -> argparse.Namespace:
             if index >= len(words):
                 break
             value = words[index]
-            if not value.startswith("-"):
-                index += 1
-        if value and not value.startswith("-"):
+            if value.startswith("--") or value == "-h":
+                continue
+            index += 1
+        if value:
             values[name] = value
     return argparse.Namespace(agents=values["--agents"], agents_local=values["--agents-local"])
 
