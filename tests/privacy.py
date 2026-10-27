@@ -55,6 +55,10 @@ DOCUMENT_KEYS = {
     "status.opened",
     "status.reopened",
     "rules.status.opened",
+    "rules.status.closed",
+    "process.method",
+    "process.approvers",
+    "process.gates",
     "items.totalcount",
     "statusupdate.project.id",
 }
