@@ -25,6 +25,7 @@ def para(*lines: str) -> str:
 
 HEADER = ("ROLE: reviewer   MODEL: n0tst-model", f"HEAD: {A}   BASE: 1234567")
 REPORT_P = para(*HEADER)
+SEEN = ("ROLE: reviewer MODEL: n0tst-model", f"HEAD: {A} BASE: 1234567")  # HEADER with each run of spaces as one
 
 
 # -- the reader, on real renderings -----------------------------------------------------------------------------
@@ -68,9 +69,8 @@ def test_the_real_hard_break_splits_a_paragraph_into_lines() -> None:
 
 
 def test_a_plain_paragraph_with_hard_breaks_gives_its_lines() -> None:
-    assert handoff.report_lines(REPORT_P) == [*HEADER, ""]
+    assert handoff.report_lines(REPORT_P) == [*SEEN, ""]
     assert handoff.report_lines(para("a") + "\n" + para("b")) == ["a", "", "b", ""]
-    assert handoff.report_lines("<p>ROLE: reviewer\nHEAD: x</p>") == ["ROLE: reviewer", "HEAD: x", ""]  # a bare newline
 
 
 def test_character_references_are_decoded() -> None:
@@ -127,7 +127,7 @@ def test_an_html_comment_is_ignored_and_hides_its_markup() -> None:
 
 
 def test_a_paragraph_after_a_closed_container_is_read() -> None:
-    assert handoff.report_lines(f"<pre><code>x</code></pre>\n{REPORT_P}") == [*HEADER, ""]
+    assert handoff.report_lines(f"<pre><code>x</code></pre>\n{REPORT_P}") == [*SEEN, ""]
 
 
 @pytest.mark.parametrize(
@@ -262,3 +262,18 @@ def test_nothing_from_the_html_reaches_the_output(fake: FakeGitHub) -> None:
     html = para(*HEADER, "<script>alert(1)</script>", "::error::boom")
     code, out, _ = run(fake, [comment("", html=html)], head=B)
     assert code == 1 and "boom" not in out and "script" not in out and "<" not in out
+
+
+# -- whitespace collapses as a browser renders it; only <br> breaks a line (hand-written, UNVERIFIED against GitHub) --
+
+
+@pytest.mark.parametrize("gap", ["\n", "&#10;", "&#x0A;", "&NewLine;", "\r\n", "\t", "  \n  ", "\n\n"])
+def test_whitespace_inside_a_paragraph_collapses_to_one_space_and_never_breaks_a_line(gap: str) -> None:
+    assert handoff.report_lines(f"<p>ROLE: reviewer{gap}HEAD: x</p>") == ["ROLE: reviewer HEAD: x", ""]
+
+
+def test_a_soft_break_after_a_br_or_around_inline_elements_adds_no_line() -> None:
+    assert handoff.report_lines("<p>ROLE: reviewer<br>\nHEAD: x</p>") == ["ROLE: reviewer", "HEAD: x", ""]
+    assert handoff.report_lines("<p>ROLE: reviewer<br> \n HEAD: x</p>") == ["ROLE: reviewer", "HEAD: x", ""]
+    assert handoff.report_lines("<p>ROLE: <b>reviewer</b>\nHEAD: x</p>") == ["ROLE: reviewer HEAD: x", ""]
+    assert handoff.report_lines("<p>ROLE: reviewer\n<br>HEAD: x</p>") == ["ROLE: reviewer", "HEAD: x", ""]

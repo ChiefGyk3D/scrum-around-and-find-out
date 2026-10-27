@@ -15,6 +15,11 @@ RAW_BLOCKS = ("<pre", "<details", "<div", "<table", "<script", "<style", "<templ
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
+def soft(markdown: str) -> str:
+    """A paragraph as GitHub renders a soft break (an LF between lines, no `<br>`). Hand-written, UNVERIFIED."""
+    return "\n".join(f'<p dir="auto">{html.escape(block, quote=False)}</p>' for block in markdown.strip().split("\n\n"))
+
+
 def render(markdown: str) -> str:
     text = markdown.replace("\r\n", "\n")
     text = re.sub(r"<!--.*?(-->|\Z)", "", text, flags=re.DOTALL)  # GitHub drops HTML comments from the output

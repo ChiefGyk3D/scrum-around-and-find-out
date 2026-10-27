@@ -15,7 +15,7 @@ import pytest
 
 from fakegh import FakeGitHub
 from fakegh.core import Fault, FPull, GqlError
-from handoff_render import render
+from handoff_render import render, soft
 from localcli import cli
 from safo import graphql
 from safo.modes import handoff
@@ -368,3 +368,26 @@ def test_dry_run_still_reads_and_still_answers(fake: FakeGitHub) -> None:
     fake.pulls[(REPO, 7)] = FPull(head=A, comments=[comment(report(A))])
     code, out, _ = cli("--dry-run", "handoff", "check", REPO, "7", home=HOME, extra_env=env_for(fake))
     assert code == 0 and "FRESH" in out
+
+
+# -- a soft break is not a line break (hand-written HTML, UNVERIFIED against live GitHub output) ----------------------
+
+
+def _para(inner: str) -> str:
+    return f'<p dir="auto">{inner}</p>'
+
+
+@pytest.mark.parametrize("gap", ["\n", "&#10;", "&#x0A;", "&NewLine;"])
+def test_a_soft_break_or_lf_reference_between_role_and_head_is_not_a_header(fake: FakeGitHub, gap: str) -> None:
+    html = _para(f"ROLE: reviewer{gap}HEAD: {A}")
+    assert run(fake, [comment("ROLE", html=html)])[0] == 2
+
+
+def test_a_br_followed_by_a_newline_is_a_header(fake: FakeGitHub) -> None:
+    html = _para(f"ROLE: reviewer<br>\nHEAD: {A}")
+    assert run(fake, [comment("ROLE", html=html)])[0] == 0
+
+
+def test_a_soft_broken_markdown_report_is_not_a_header(fake: FakeGitHub) -> None:
+    body = report(A)
+    assert run(fake, [comment(body, html=soft(body))])[0] == 2

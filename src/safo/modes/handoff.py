@@ -163,8 +163,14 @@ def read_pull(client: Client, variables: Mapping[str, Any]) -> tuple[str, str, t
     return head, flags, (base_name, base_oid)
 
 
+COLLAPSE = re.compile(r"[ \t\n\r\f]+")
+
+
 class _Reader(HTMLParser):
-    """The text of top-level paragraphs, one line per `<br>` or newline, and nothing else.
+    """The text of top-level paragraphs, one line per `<br>`, and nothing else.
+
+    Only `<br>` breaks a line. Any other run of white space (a soft-break newline, `&#10;`) is one space, as a browser
+    shows it, so the lines checked are the lines a reader sees.
 
     A paragraph is read only when it is a direct child of the document. Inside it only plain inline elements keep the
     text readable. Every other element (pre, code, blockquote, details, summary, li, table, script, style, template,
@@ -177,17 +183,14 @@ class _Reader(HTMLParser):
         self.stack: list[tuple[str, bool]] = []  # (tag, text inside it is readable)
         self.text: list[str] = []
         self.lines: list[str] = []
-        self.after_br = False  # GitHub writes `<br>` and then a newline: the pair is one line break
 
     def _readable(self) -> bool:
         return bool(self.stack) and all(ok for _, ok in self.stack)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.after_br = False
         if tag in VOID:
             if tag == "br" and self._readable():
                 self.text.append("\n")
-                self.after_br = True
             return
         if len(self.stack) >= MAX_DEPTH:
             raise UnreadableHtml("a comment's HTML is nested too deeply")
@@ -196,7 +199,6 @@ class _Reader(HTMLParser):
         self.stack.append((tag, ok))
 
     def handle_endtag(self, tag: str) -> None:
-        self.after_br = False
         if tag in VOID:
             return
         if not self.stack or self.stack[-1][0] != tag:
@@ -209,11 +211,8 @@ class _Reader(HTMLParser):
             self.text.clear()
 
     def handle_data(self, data: str) -> None:
-        if self.after_br and data.startswith("\n"):
-            data = data[1:]
-        self.after_br = False
         if self._readable():
-            self.text.append(data)
+            self.text.append(COLLAPSE.sub(" ", data))  # a browser shows any run of white space as one space
 
 
 def report_lines(html: str) -> list[str]:
