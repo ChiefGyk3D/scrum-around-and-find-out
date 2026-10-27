@@ -187,3 +187,29 @@ def test_an_abandoned_record_on_the_same_card_never_collapses_with_an_accepted_o
     r = run(both)
     assert r.counted == 0 and reasons(r) == {q.CONFLICT: 2}, "different outcomes are not duplicates"
     assert all(run(list(p)).counted == 0 for p in itertools.permutations(both))
+
+
+def _as_log(rows: list[Outcome]) -> bytes:
+    return b"".join(o.to_json().encode() + b"\n" for o in rows)
+
+
+def test_a_legacy_record_without_outcome_still_counts_toward_promotion_after_a_round_trip() -> None:
+    from safo.outcomes import parse_log
+
+    rows = spread(10, 10)
+    assert all(o.outcome is None and "outcome" not in o.to_json() for o in rows)
+    loaded = parse_log(_as_log(rows), "log")
+    assert loaded == rows and run(loaded).qualified and run(loaded).counted == 10
+
+
+def test_a_record_with_a_null_outcome_never_reaches_qualification() -> None:
+    import json
+
+    from safo.errors import ConfigError
+    from safo.outcomes import parse_log
+
+    good = _as_log(spread(9, 9))
+    bad = json.loads(rec(50, date=days_ago(1)).to_json())
+    bad["outcome"] = None
+    with pytest.raises(ConfigError, match=r"log:1.outcome: expected"):
+        parse_log(json.dumps(bad).encode() + b"\n" + good, "log")

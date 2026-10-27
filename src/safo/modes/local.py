@@ -59,6 +59,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if len(prompt) > MAX_PROMPT_BYTES:
         raise ConfigError(f"the prompt file is larger than {MAX_PROMPT_BYTES} bytes; summarise it first")
     log = outcomes_path(ctx, args)  # refused here, before anything is sent, if it is not somewhere we may write
+    outcomes.check_appendable(log)  # and if its last line is torn: the append would refuse after the answer
     if ctx.dry_run:
         ctx.say("dry run: prompt validated; no probes, generation or outcome writes")
         return EXIT_OK
@@ -72,7 +73,12 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             ctx.say(f"skipped: {line}")
         ctx.say(f"no local endpoint can take this: hand it to {fallback} instead (nothing was sent)")
         return EXIT_DRIFT
-    label = model if outcomes.valid_model(model) else None  # decided before sending: never fail after the answer
+    if not outcomes.valid_model(model):  # decided before sending: an outcome without its model reads as unknown
+        raise ConfigError(
+            f"the routed model name {output.line(model)[:MAX_SHOWN]!r} cannot be recorded as a model label "
+            f"(letters, digits, . _ : - and single /; at most {outcomes.MAX_MODEL}): nothing was sent or recorded"
+        )
+    label = model
     think = endpoint.think if args.think is None else args.think
     num_ctx = args.num_ctx or endpoint.ctx_for(model)
     try:
@@ -101,8 +107,6 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     output.block(ctx.out, result.response.rstrip("\n").split("\n"))  # untrusted text: inside a stop-commands block
     speed = f"{result.tokens_per_second:g} tok/s" if result.tokens_per_second else "speed unknown"
     shown = output.line(model)[:MAX_SHOWN]  # the routed name in the note: escaped and capped
-    if label is None:
-        shown = f"{shown} (not recordable as a model label)"
     note = (
         f"{endpoint.id} {shown} think={str(think).lower()} num_ctx={num_ctx}: "
         f"{result.eval_count} eval tokens, {speed}; "

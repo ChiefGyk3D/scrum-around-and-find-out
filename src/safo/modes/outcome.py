@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from safo import outcomes
@@ -12,6 +13,19 @@ from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.localfiles import add_agents_arguments, agents_path, load_agents_for, outcomes_is_default, outcomes_path
 from safo.modes import LocalMode, register_local
+
+ASCII_COUNT = re.compile(r"[0-9]+")
+MAX_FLAG_DIGITS = 13  # one past the largest count the log accepts (10**12): longer input is refused unparsed
+
+
+def count(text: str) -> int:
+    """An integer flag: ASCII digits only. `type=int` would take Unicode digits, a `+`, and surrounding spaces, which
+    strict JSON and `parse_findings` refuse. The text is never echoed raw (it may be hostile)."""
+    if not isinstance(text, str) or not ASCII_COUNT.fullmatch(text) or len(text) > MAX_FLAG_DIGITS:
+        raise argparse.ArgumentTypeError(
+            f"expected whole decimal digits 0-9 only, at most {MAX_FLAG_DIGITS} (got {len(text)} characters)"
+        )
+    return int(text)
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
@@ -57,33 +71,33 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--date", default="", help="YYYY-MM-DD (default: today)")
     parser.add_argument(
         "--review-rounds",
-        type=int,
+        type=count,
         default=None,
         help="review passes, the passing one included (default: 1; 0 if abandoned: no passing pass)",
     )
     parser.add_argument("--findings", default="", help="critical=0,important=1,minor=2,unrated=0")
-    parser.add_argument("--tokens", type=int, default=None)
-    parser.add_argument("--requests", type=int, default=None)
+    parser.add_argument("--tokens", type=count, default=None)
+    parser.add_argument("--requests", type=count, default=None)
     parser.add_argument(
         "--model", default=None, help="the underlying model of the run, e.g. gpt-5.4 (default: unknown)"
     )
     parser.add_argument(
-        "--credits-used", type=int, default=None, help="credits or premium requests the run consumed, when known"
+        "--credits-used", type=count, default=None, help="credits or premium requests the run consumed, when known"
     )
     parser.add_argument(
         "--outcome",
         default=None,
         help="accepted or abandoned (default: not recorded, which reads as accepted); an abandoned task still counts",
     )
-    parser.add_argument("--attempts", type=int, default=None, help="how many tries the task took, 1 to 100")
+    parser.add_argument("--attempts", type=count, default=None, help="how many tries the task took, 1 to 100")
     parser.add_argument(
         "--intervention-minutes",
-        type=int,
+        type=count,
         default=None,
         help="minutes you spent steering or fixing it, self-reported at acceptance (0 to 10080)",
     )
     parser.add_argument(
-        "--defects-after-approval", type=int, default=None, help="defects found after the work was approved"
+        "--defects-after-approval", type=count, default=None, help="defects found after the work was approved"
     )
     parser.add_argument("--note", default="")
     parser.add_argument(

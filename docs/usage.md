@@ -113,7 +113,7 @@ meters and hooks with a repeated key is treated like any other malformed line: s
 `safo outcome add` appends one after checking it; add `--model gpt-5.4 --credits-used 12` for the two optional fields.
 
 Four more optional fields record how the task went, all whole numbers or a fixed word, never free text:
-`outcome` (`accepted` or `abandoned`; absent reads as accepted, because the log used to hold only finished tasks),
+`outcome` (`accepted` or `abandoned`; see the strict rule below),
 `attempts` (1 to 100), `intervention_minutes` (0 to 10080) and `defects_after_approval` (0 to 10^12). Flags:
 `--outcome`, `--attempts`, `--intervention-minutes`, `--defects-after-approval`. A task that was dropped is logged with
 `--outcome abandoned`; a task with no record at all stays invisible, because SAFO cannot see it from a local file.
@@ -125,11 +125,20 @@ An `--outcome abandoned` record gets `review_rounds` 0 unless you pass one (no r
 records are **not counted** in `usage --report` (they are listed apart as `abandoned: <agent> <n>`, and under
 `abandoned` in `--json`), in the `outcomes:v1:` evidence metrics, or toward promotion (`qualify` rejects them as
 `abandoned task`); that holds until a report defines how to read them. Old records without `outcome` count as accepted.
+The `outcome` rule is strict: a line with **no** `outcome` key is a legacy record, accepted by definition, and reads
+back unchanged (SAFO never rewrites a ledger line). A line that **has** the key must say `accepted` or `abandoned`:
+`"outcome": null`, a number or an unknown word is invalid and the line is refused, because "cannot tell" must never
+count as an accepted task. An abandoned task has no acceptance, so `--intervention-minutes` and
+`--defects-after-approval` are refused with `--outcome abandoned`. Integer flags take ASCII digits only (no `+`, no
+spaces, no Unicode digits). `outcome add` and `local run` append only when the log's last line is a complete valid
+record; a torn last line (an interrupted write) makes them refuse and change nothing, so you can inspect it. `local run`
+also refuses, before sending anything, a routed model name that cannot be recorded as a model label.
 `safo local run` writes the routed model into the `model` field, but only after the endpoint's
 answer reports that same model (an implicit `:latest` tag is ignored; any other difference in name, tag or size is a
 mismatch). A mismatch, or an answer that reports no model, drops the answer, prints one escaped line naming both
 models, writes no record and exits 3. If the routed name is not a valid model label (for example longer than 128
-characters), the answer is still printed, the record carries no `model` and the note names it, escaped and capped.
+characters), `local run` refuses before sending anything: nothing is generated or recorded, and the error shows the
+name escaped and capped.
 `safo usage --report` summarises a month per agent: tasks, how many needed fixes, review rounds, findings, tokens. It then
 adds a table per agent and model: runs, review rounds per run, the share of runs that needed fixes, findings by severity,
 credits used in total, and credits per run, per run that needed no fixes and per run that needed fixes. Rows without a

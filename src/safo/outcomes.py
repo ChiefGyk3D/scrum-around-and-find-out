@@ -5,9 +5,16 @@ A record: date, card (a GitHub URL or null), agent, shape, review_rounds (review
 findings by severity, tokens and requests when known, and a note. Optional `model` (the underlying model of the
 run) and `credits_used` (credits or premium requests consumed) make agents comparable on cost against rework; a record
 without them stays valid and is written without those keys. Four more optional keys record how a task went: `outcome`
-(`accepted` or `abandoned`; absent means accepted), `attempts` (1 to 100), `intervention_minutes` (whole minutes the
+(`accepted` or `abandoned`), `attempts` (1 to 100), `intervention_minutes` (whole minutes the
 maintainer spent, self-reported at acceptance, 0 to 10080) and `defects_after_approval` (a count). All are whole
 numbers or a fixed word, never free text. Appended one line at a time.
+
+The `outcome` rule is strict. A record with no `outcome` key at all is a legacy record (the log used to hold only
+finished tasks) and is accepted by definition: it reads back unchanged and is never rewritten. A record that has the
+key must carry `accepted` or `abandoned`: `"outcome": null`, a number, an unknown word or any other type is invalid and
+refused like any other bad field, so "cannot tell" never counts as an accepted task. An `abandoned` record has no
+acceptance, so `intervention_minutes` (self-reported at acceptance) and `defects_after_approval` are refused on it.
+Before an append, the existing last line must be a complete valid record; a torn tail is refused, never repaired.
 """
 
 from __future__ import annotations
@@ -167,9 +174,9 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         isinstance(credits, bool) or not isinstance(credits, int) or not 0 <= credits <= MAX_COUNT
     ):
         raise ConfigError(f"{where}.credits_used: expected an integer >= 0 or null")
-    outcome = raw.get("outcome")
-    if outcome is not None and not (isinstance(outcome, str) and outcome in OUTCOME_VALUES):
-        raise ConfigError(f"{where}.outcome: expected one of {', '.join(OUTCOME_VALUES)}, or null")
+    outcome = raw.get("outcome")  # an absent key is a legacy record (accepted); a present key must be a known word
+    if "outcome" in raw and not (isinstance(outcome, str) and outcome in OUTCOME_VALUES):
+        raise ConfigError(f"{where}.outcome: expected one of {', '.join(OUTCOME_VALUES)} (or leave the key out)")
     for key, low, high in (
         ("attempts", 1, MAX_ATTEMPTS),
         ("intervention_minutes", 0, MAX_INTERVENTION_MINUTES),
@@ -178,6 +185,10 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         value = raw.get(key)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high):
             raise ConfigError(f"{where}.{key}: expected an integer from {low} to {high}, or null")
+    if outcome == "abandoned":  # no acceptance happened: these would pollute the aggregates
+        for key in ("intervention_minutes", "defects_after_approval"):
+            if raw.get(key) is not None:
+                raise ConfigError(f"{where}.{key}: not allowed on an abandoned task (it was never accepted)")
     note = raw.get("note", "")
     if not isinstance(note, str) or NOTE_FORBIDDEN.search(note) or len(note) > NOTE_LIMIT:
         raise ConfigError(f"{where}.note: expected one line of text (printable, at most 500 characters)")
@@ -208,6 +219,39 @@ def _read(path: Path) -> bytes:
         raise ConfigError("cannot read outcomes log within resource limits (a regular file, not a link)") from None
 
 
+TAIL_LIMIT = 16 * 1024  # a valid record is far smaller (note 500 characters, ASCII on disk); a longer tail is not one
+
+
+def _check_tail(existing: bytes) -> None:
+    """The last non-empty line of the log must be a complete valid record, or the append would bury the new record
+    behind a line that fails every later load. Refused, never repaired or truncated: the user may want to inspect it."""
+    lines = existing.rstrip().rsplit(b"\n", 1)
+    last = lines[-1][-(TAIL_LIMIT + 1) :] if lines[-1].strip() else b""
+    if not last:
+        return
+    try:
+        if len(last) > TAIL_LIMIT:
+            raise ValueError("tail too long")
+        validate(loads(last))
+    except (ValueError, UnicodeError, ConfigError):
+        raise ConfigError(
+            "outcomes log: the last line is not a complete valid record (a torn write?); "
+            "nothing was appended and nothing was changed: inspect or repair the file first"
+        ) from None
+
+
+def check_appendable(path: Path) -> None:
+    """Advisory, unlocked: ConfigError when `append` would refuse because of the log's tail (a caller about to do
+    expensive work, like generating an answer, asks first). A missing log is fine; `append` stays the authority."""
+    try:
+        existing = _read(path)
+    except ConfigError:
+        if path.is_symlink() or path.exists():
+            raise
+        return
+    _check_tail(existing)
+
+
 def append(path: Path, outcome: Outcome, check_dir: bool = False) -> None:
     """One line, appended under a lock by rewriting the file atomically (mode 0600). The record is validated first,
     so a bad one never reaches the file; a symlinked, special or oversize log is refused, never followed. `check_dir` is
@@ -222,6 +266,7 @@ def append(path: Path, outcome: Outcome, check_dir: bool = False) -> None:
                 if path.is_symlink() or path.exists():
                     raise
                 existing = b""
+            _check_tail(existing)
             if existing and not existing.endswith(b"\n"):
                 existing += b"\n"
             if len(existing) + len(line) > MAX_LOG_BYTES:

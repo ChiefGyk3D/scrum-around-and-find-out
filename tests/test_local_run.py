@@ -275,27 +275,20 @@ def _run_with_routed(home: Path, tmp_path: Path, routed: str, answered: object =
     return code, out, log, sent
 
 
-@pytest.mark.parametrize("routed", ["hf.co/org/m:Q4_K_M", "m" * 129, "a/b/" + "c" * 200])
-def test_a_routed_model_that_cannot_be_a_label_is_recorded_as_null_with_the_name_in_the_note(
+def test_a_slashed_routed_model_is_recorded_as_its_label(_private_home: Path, tmp_path: Path) -> None:
+    code, out, log, sent = _run_with_routed(_private_home, tmp_path, "hf.co/org/m:Q4_K_M")
+    assert code == 0 and sent == "hf.co/org/m:Q4_K_M" and "A short answer." in out
+    assert json.loads(log.read_text())["model"] == "hf.co/org/m:Q4_K_M"
+
+
+@pytest.mark.parametrize("routed", ["m" * 129, "a/b/" + "c" * 200, "bad\x1b[0m::name"])
+def test_a_routed_model_that_cannot_be_a_label_is_refused_before_anything_is_generated(
     _private_home: Path, tmp_path: Path, routed: str
 ) -> None:
     code, out, log, sent = _run_with_routed(_private_home, tmp_path, routed)
-    row = json.loads(log.read_text())
-    assert code == 0 and sent == routed and "A short answer." in out and "error" not in out
-    if routed.startswith("hf.co"):
-        assert row["model"] == routed, "a slashed label is recordable"
-    else:
-        assert "model" not in row and routed[:60] in row["note"] and routed not in row["note"], "capped"
-
-
-def test_a_non_recordable_name_with_control_characters_is_escaped_in_the_note(
-    _private_home: Path, tmp_path: Path
-) -> None:
-    routed = "bad\x1b[0m::name"
-    code, out, log, _ = _run_with_routed(_private_home, tmp_path, routed)
-    row = json.loads(log.read_text())
-    assert code == 0 and "model" not in row and "\\x1b" in row["note"] and "\x1b" not in row["note"]
-    assert "::name" not in row["note"] and "A short answer." in out
+    assert code != 0 and code != 3 and sent == "", "nothing was generated"
+    assert not log.exists() and "A short answer." not in out, "nothing recorded, no answer printed"
+    assert "\x1b" not in out and routed not in out, "the name is escaped and capped in the message"
 
 
 def test_the_latest_tag_is_ignored_in_both_directions(_private_home: Path, tmp_path: Path) -> None:

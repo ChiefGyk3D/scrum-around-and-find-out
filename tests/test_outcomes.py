@@ -398,11 +398,14 @@ def test_a_record_without_the_new_keys_is_byte_identical_to_today() -> None:
     record = outcomes.validate(json.loads(golden))
     assert record.to_json() == golden
     assert not any(k in json.loads(record.to_json()) for k in NEW_KEYS)
-    assert outcomes.validate({**GOOD, **dict.fromkeys(NEW_KEYS)}).to_json() == outcomes.validate(GOOD).to_json()
+    nulls = dict.fromkeys(
+        k for k in NEW_KEYS if k != "outcome"
+    )  # a null count is "not known"; a null outcome is invalid
+    assert outcomes.validate({**GOOD, **nulls}).to_json() == outcomes.validate(GOOD).to_json()
 
 
 def test_the_new_fields_round_trip_when_set(tmp_path: Path) -> None:
-    extra = {"outcome": "abandoned", "attempts": 3, "intervention_minutes": 25, "defects_after_approval": 2}
+    extra = {"outcome": "accepted", "attempts": 3, "intervention_minutes": 25, "defects_after_approval": 2}
     record = outcomes.validate({**GOOD, **extra})
     log = tmp_path / "o.jsonl"
     outcomes.append(log, record)
@@ -482,15 +485,43 @@ def test_a_model_label_is_never_a_path_or_free_text(label: str) -> None:
     assert outcomes.valid_model(label) is False
 
 
-def _ab(n: int, outcome: str | None, rounds: int = 1) -> outcomes.Outcome:
-    return outcomes.validate(
-        {**GOOD, "card": f"https://github.com/acme/widgets/pull/{n}", "review_rounds": rounds, "findings": {},
-         "outcome": outcome, "model": "m", "credits_used": 10}
-    )  # fmt: skip
+def _ab(n: int, outcome: str | None, rounds: int = 1, *, key: bool = True) -> outcomes.Outcome:
+    """`outcome=None` with key=True is an explicit null (invalid); key=False leaves the key out (a legacy record)."""
+    raw: dict[str, Any] = {
+        **GOOD, "card": f"https://github.com/acme/widgets/pull/{n}", "review_rounds": rounds, "findings": {},
+        "model": "m", "credits_used": 10,
+    }  # fmt: skip
+    if key:
+        raw["outcome"] = outcome
+    return outcomes.validate(raw)
+
+
+def test_an_absent_outcome_is_legacy_accepted_and_null_or_unknown_is_invalid() -> None:
+    assert _ab(1, None, key=False).outcome is None and not _ab(1, None, key=False).abandoned
+    for bad in (None, "", "ABANDONED", 0, False, ["abandoned"]):
+        with pytest.raises(ConfigError, match=r"outcome: expected one of accepted, abandoned"):
+            outcomes.validate({**GOOD, "outcome": bad})
+
+
+def test_a_null_outcome_in_a_log_names_its_line_and_the_log_is_unreadable(tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    log.write_text(json.dumps(GOOD) + "\n" + json.dumps({**GOOD, "outcome": None}) + "\n")
+    with pytest.raises(ConfigError, match=r"o.jsonl:2.outcome: expected"):
+        outcomes.load(log)
+
+
+def test_a_legacy_line_without_outcome_reads_back_unchanged_and_is_never_rewritten(tmp_path: Path) -> None:
+    legacy = json.dumps(GOOD, sort_keys=True)
+    log = tmp_path / "o.jsonl"
+    log.write_text(legacy + "\n")
+    [record] = outcomes.load(log)
+    assert record.to_json() == legacy and "outcome" not in record.to_json()
+    outcomes.append(log, outcomes.validate(GOOD))
+    assert log.read_text().splitlines()[0] == legacy
 
 
 def test_abandoned_records_are_excluded_from_every_measure() -> None:
-    rows = [_ab(1, "abandoned", 0), _ab(2, "abandoned", 0), _ab(3, None, 3), _ab(4, "accepted", 1)]
+    rows = [_ab(1, "abandoned", 0), _ab(2, "abandoned", 0), _ab(3, None, 3, key=False), _ab(4, "accepted", 1)]
     q = outcomes.query_outcomes(rows, "2026-10", "copilot")
     assert q.records == 2 and q.value("runs") == 2 and q.value("rounds_per_run") == 2
     assert q.value("credits_per_run") == 10 and q.value("fix_share") == Fraction(1, 2)
@@ -502,3 +533,47 @@ def test_abandoned_records_are_excluded_from_every_measure() -> None:
     assert outcomes.query_outcomes(only, "2026-10", "copilot").value("runs") is None
     assert outcomes.summarise(only, "2026-10") == [] and outcomes.summarise_models(only, "2026-10") == []
     assert outcomes.count_abandoned(rows, "2026-10") == {"copilot": 2}
+
+
+@pytest.mark.parametrize("key", ["intervention_minutes", "defects_after_approval"])
+def test_an_abandoned_record_cannot_carry_acceptance_fields(key: str, tmp_path: Path) -> None:
+    for value in (0, 5):
+        with pytest.raises(ConfigError, match=f"{key}: not allowed on an abandoned task"):
+            outcomes.validate({**GOOD, "outcome": "abandoned", key: value})
+    assert outcomes.validate({**GOOD, "outcome": "abandoned", key: None}).outcome == "abandoned"
+    assert outcomes.validate({**GOOD, "outcome": "accepted", key: 5})
+    assert outcomes.validate({**GOOD, "outcome": "abandoned", "attempts": 3}).attempts == 3
+    log = tmp_path / "o.jsonl"
+    fields: dict[str, Any] = {key: 5, "outcome": "abandoned"}
+    with pytest.raises(ConfigError):
+        outcomes.append(log, outcomes.Outcome("2026-10-07", None, "codex", "research", 0, **fields))
+    assert not log.exists()
+
+
+def _log_with_tail(tmp_path: Path, tail: bytes) -> tuple[Path, bytes]:
+    log = tmp_path / "o.jsonl"
+    log.write_bytes(json.dumps(GOOD).encode() + b"\n" + tail)
+    return log, log.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [b'{"date":', b"{", b'{"date": "2026-10-07", "ag', b"\xff\xfe{", b'{"date": "2026-10-07"}', b"[1]", b"null",
+     b"x" * 100_000, b'{"a":' + b"1" * 3_000_000],
+)  # fmt: skip
+def test_append_refuses_a_torn_or_invalid_last_line_and_writes_nothing(tmp_path: Path, tail: bytes) -> None:
+    log, before = _log_with_tail(tmp_path, tail)
+    with pytest.raises(ConfigError, match="last line is not a complete valid record"):
+        outcomes.append(log, outcomes.validate(GOOD))
+    assert log.read_bytes() == before, "never repaired or truncated"
+    with pytest.raises(ConfigError, match="last line is not a complete valid record"):
+        outcomes.check_appendable(log)
+
+
+def test_append_accepts_a_complete_valid_last_line_with_or_without_its_newline(tmp_path: Path) -> None:
+    for tail in (json.dumps(GOOD).encode(), json.dumps(GOOD).encode() + b"\n", json.dumps(GOOD).encode() + b"\n\n  \n"):
+        log, _ = _log_with_tail(tmp_path, tail)
+        outcomes.check_appendable(log)
+        outcomes.append(log, outcomes.validate(GOOD))
+        assert len(outcomes.load(log)) == 3
+    outcomes.check_appendable(tmp_path / "absent.jsonl")
