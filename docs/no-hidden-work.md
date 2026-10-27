@@ -198,7 +198,7 @@ permission and exits 2. A rule that is found is trusted whatever the permission.
 verdict or removes the app-pin NOTE: a workflow reference names a file at a path, ref and repository, and nothing in the
 GraphQL answer ties that file to a status name or proves its provenance (the workflow may be unrelated to the check, come
 from another repository, sit on a mutable branch or tag, or be skipped on creation). Whether and how the audit could ever
-accept a required workflow as the strongest evidence is an open design question, tracked as a follow-up, not a feature.
+accept a required workflow as the strongest evidence is an open design question, tracked as SAFO issue #185 ("gate: interpret required-workflows rules with proven provenance"), not a feature.
 
 **Inherited rulesets.** `includeParents: true` also returns rulesets owned by the organization or enterprise. The query
 reads `source { __typename }` (the `source` field of `RepositoryRuleset` is a non-null `RuleSource` union of `Repository`,

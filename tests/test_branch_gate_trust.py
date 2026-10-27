@@ -214,3 +214,124 @@ def test_an_answer_with_an_app_id_beyond_the_int_range_is_cannot_tell(fake: Fake
     rs = ruleset("CI green", integration=2147483648)
     assert exit_code(fake, client, clean_raw() | {"rulesets": {"totalCount": 1, "nodes": [rs]}}) == 2
     assert ACTIONS == 15368
+
+
+# -- 4. a non-fast-forward ruleset is asked about its bypass list only when force pushes are forbidden ----
+
+
+def force_only(fake: FakeGitHub, perm: str, source: str) -> None:
+    """A classic rule nobody can bypass holds the check; the ruleset only blocks force pushes (empty bypass list)."""
+    only_widgets(
+        fake, protection=classic("CI green", force=True), rulesets=[ruleset(no_force=True, source=source)], perm=perm
+    )
+
+
+SOURCES = ["Repository", "Organization", "Enterprise"]
+
+
+@pytest.mark.parametrize("source", SOURCES)
+@pytest.mark.parametrize("perm", ["READ", "WRITE", "ADMIN"])
+def test_a_force_block_ruleset_is_not_asked_when_force_pushes_are_not_forbidden(
+    fake: FakeGitHub, client: Client, perm: str, source: str
+) -> None:
+    force_only(fake, perm, source)
+    code, text = gate(fake, client, with_rules(load_test_board(), gate_forbid_force_push=False))
+    assert code == 0 and not unknown(text), text
+
+
+@pytest.mark.parametrize(
+    "source,perm,code",
+    [
+        ("Repository", "ADMIN", 0),
+        ("Repository", "READ", 2),
+        ("Repository", "WRITE", 2),
+        ("Organization", "ADMIN", 2),
+        ("Enterprise", "ADMIN", 2),
+        ("Organization", "READ", 2),
+    ],
+)
+def test_the_same_ruleset_is_asked_when_force_pushes_are_forbidden(
+    fake: FakeGitHub, client: Client, source: str, perm: str, code: int
+) -> None:
+    force_only(fake, perm, source)
+    got, text = gate(fake, client)
+    assert got == code, text
+    assert bool(unknown(text)) == (code == 2)
+
+
+def test_an_inherited_force_block_next_to_a_repository_check_does_not_matter_when_not_forbidden(
+    fake: FakeGitHub, client: Client
+) -> None:
+    only_widgets(
+        fake,
+        rulesets=[ruleset("CI green", no_force=False), ruleset(source="Organization")],
+        perm="ADMIN",
+    )
+    code, text = gate(fake, client, with_rules(load_test_board(), gate_forbid_force_push=False))
+    assert code == 0 and not unknown(text), text
+
+
+# -- 5. a missing field is refused with the audit's own text, not the catch-all for an unexpected error ----
+
+
+def refusal(fake: FakeGitHub, client: Client, raw: dict[str, Any]) -> str:
+    if not fake.projects:
+        build_world(fake)
+    serve(fake, raw)
+    _, text = gate(fake, client)
+    (found,) = [t for t in text if t.startswith("UNKNOWN") and WIDGETS in t]
+    return found
+
+
+def classic_answer() -> dict[str, Any]:
+    raw = clean_raw()
+    raw["rulesets"] = {"totalCount": 0, "nodes": []}
+    raw["defaultBranchRef"]["branchProtectionRule"] = classic("CI green")
+    return raw
+
+
+def absent_integration_id() -> dict[str, Any]:
+    raw = clean_raw()
+    del raw["rulesets"]["nodes"][0]["rules"]["nodes"][0]["parameters"]["requiredStatusChecks"][0]["integrationId"]
+    return raw
+
+
+def absent_app() -> dict[str, Any]:
+    raw = classic_answer()
+    del raw["defaultBranchRef"]["branchProtectionRule"]["requiredStatusChecks"][0]["app"]
+    return raw
+
+
+def absent_rule_parameters() -> dict[str, Any]:
+    raw = clean_raw()
+    del raw["rulesets"]["nodes"][0]["rules"]["nodes"][0]["parameters"]
+    return raw
+
+
+def absent_default_branch_ref() -> dict[str, Any]:
+    raw = clean_raw()
+    del raw["defaultBranchRef"]
+    return raw
+
+
+def absent_protection_rule() -> dict[str, Any]:
+    raw = clean_raw()
+    del raw["defaultBranchRef"]["branchProtectionRule"]
+    return raw
+
+
+ABSENCES = {
+    "integrationId": (absent_integration_id, "lacks integrationId"),
+    "app": (absent_app, "lacks app"),
+    "rule parameters": (absent_rule_parameters, "rule parameters: GitHub's answer lacks them"),
+    "defaultBranchRef": (absent_default_branch_ref, "defaultBranchRef: GitHub's answer lacks it"),
+    "branchProtectionRule": (absent_protection_rule, "branchProtectionRule: GitHub's answer lacks it"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ABSENCES))
+def test_an_absent_field_is_refused_with_the_audits_own_text(fake: FakeGitHub, client: Client, name: str) -> None:
+    make, expected = ABSENCES[name]
+    found = refusal(fake, client, make())
+    assert expected in found, found
+    assert "unexpected answer" not in found

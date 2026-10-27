@@ -617,7 +617,7 @@ def _judge(
                     check_sources.append(Source(rs_name, _bypass_actors(rs, permission)))
                 elif why:
                     wrong_source.append(f"ruleset {rs_name!r} " + why)
-            elif kind == "NON_FAST_FORWARD":
+            elif kind == "NON_FAST_FORWARD" and forbid_force:  # asked only when the verdict depends on it
                 force_sources.append(Source(rs_name, _bypass_actors(rs, permission)))
 
     if not protected:
