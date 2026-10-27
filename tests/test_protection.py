@@ -1887,5 +1887,8 @@ def test_a_commit_tree_sha_with_path_characters_is_never_put_in_a_request() -> N
 def test_a_file_where_a_directory_belongs_is_never_fetched_as_a_tree(
     sha: str, rows: tuple[tuple[str, str], ...]
 ) -> None:
-    code, _, _, seen = check({**world(), f"{REPO}/git/trees/{sha}": j(tree(sha, *rows))})
+    body = tree(
+        sha, *rows, blobs={"CODEOWNERS": git_sha(GOOD_OWNERS)}
+    )  # CODEOWNERS stays valid: only the directory is wrong
+    code, _, _, seen = check({**world(), f"{REPO}/git/trees/{sha}": j(body)})
     assert code == 2 and f"{REPO}/git/trees/{BLOB}" not in [path for _, path in seen]
