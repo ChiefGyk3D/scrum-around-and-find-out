@@ -484,7 +484,10 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
 
 
 def _parse_gate_app(r: Reader, raw: object) -> int:
-    return r.integer(raw, "rules.gate_check_app_id", minimum=1)
+    app = r.integer(raw, "rules.gate_check_app_id", minimum=1)
+    if app > 2147483647:  # GraphQL's Int is 32-bit; a larger id could never match an answer
+        raise r.fail("rules.gate_check_app_id", "expected an integer <= 2147483647 (GraphQL's Int)")
+    return app
 
 
 def _parse_gate_check(r: Reader, raw: object) -> str:

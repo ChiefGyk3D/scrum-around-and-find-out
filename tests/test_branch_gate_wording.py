@@ -105,6 +105,6 @@ def test_every_gate_note_has_one_form(fake: FakeGitHub, client: Client, kind: st
     else:
         board = with_rules(board, gate_check="")
     _, text = gate(fake, client, board)
-    notes = [t for t in text if t.startswith("NOTE") and "NO-GATE" in t]
+    notes = [t for t in text if t.startswith("NOTE") and "NO-GATE" in t and "pinned to" not in t]
     assert len(notes) == 1, notes
     assert NOTE.match(notes[0]), notes[0]

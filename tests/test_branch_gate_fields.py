@@ -252,7 +252,7 @@ def test_an_exempt_repository_is_noted_not_skipped_silently(fake: FakeGitHub, cl
     code, text = gate(fake, client, with_rules(load_test_board(), gate_exempt_repos=(WIDGETS,)))
     assert code == 0
     assert "NOTE    NO-GATE acme/widgets: exempt by rules.gate_exempt_repos (not evaluated)" in text
-    assert not [t for t in text if "NO-GATE acme/manuals" in t and t.startswith("NOTE")]
+    assert not [t for t in text if "NO-GATE acme/manuals" in t and t.startswith("NOTE") and "pinned to" not in t]
 
 
 def test_an_empty_gate_check_says_so_on_the_summary_line(fake: FakeGitHub, client: Client) -> None:

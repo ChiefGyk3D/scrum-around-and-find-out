@@ -47,8 +47,14 @@ def ruleset(
     target: str = "BRANCH",
     no_force: bool = True,
     integration: int | None = ACTIONS,
+    source: str = "Repository",
+    workflows: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """A ruleset; `integration` is the integration id each required check is pinned to (None: any source)."""
+    """A ruleset; `integration` is the integration id each required check is pinned to (None: any source).
+
+    `source` is the kind of owner of the ruleset (Repository, Organization or Enterprise); `workflows` are the paths of
+    a required-workflows rule.
+    """
     rules: list[dict[str, Any]] = []
     if contexts:
         rules.append(
@@ -59,10 +65,20 @@ def ruleset(
                 },
             }
         )
+    if workflows:
+        rules.append(
+            {
+                "type": "WORKFLOWS",
+                "parameters": {
+                    "workflows": [{"path": w, "ref": "refs/heads/main", "repositoryId": 7} for w in workflows]
+                },
+            }
+        )
     if no_force:
         rules.append({"type": "NON_FAST_FORWARD", "parameters": None})
     return {
         "name": "protect",
+        "source": {"__typename": source},
         "enforcement": enforcement,
         "target": target,
         "bypassActors": {"totalCount": 0, "nodes": []},
@@ -93,7 +109,8 @@ def test_protected_with_the_check_is_clean(fake: FakeGitHub, client: Client) -> 
     build_world(fake)
     code, text = gate(fake, client)
     assert code == 0 and text[-1] == "clean"
-    assert not [t for t in text if "NO-GATE" in t]
+    # the only line is the visible limit of an app pin (a pin proves the app, not the workflow), once per repository
+    assert [t for t in text if "NO-GATE" in t and "pinned to the Actions app" not in t] == []
 
 
 def test_a_workflow_prefix_does_not_matter_and_a_different_check_does(fake: FakeGitHub, client: Client) -> None:

@@ -22,7 +22,10 @@ that a rule someone can bypass does not hold the gate. The bypass data is the ex
 a zero allowance count means "nobody" only from an ADMIN token, because GitHub may hide it from a lower one.
 
 The required check must also come from the CI app (`rules.gate_check_app_id`): a check with no source restriction, or
-tied to another app, is a finding, because any app can post a status with that name.
+tied to another app, is a finding, because any app can post a status with that name. A pin proves the app, not the
+workflow: every workflow of a repository posts as the same Actions app, so a pinned check passes with a NOTE saying so,
+unless a ruleset's required-workflows rule that nobody can bypass backs it. An empty bypass list of a ruleset inherited
+from an organization or enterprise is never believed (it is administered there), even for an ADMIN token.
 
 Where this module cannot be sure what GitHub means, it says "cannot tell" and the audit exits 2;
 it never guesses a pass.
@@ -67,13 +70,17 @@ Q_BRANCH_GATE = """query RepoBranchGate($owner: String!, $name: String!) {
         name
         enforcement
         target
+        source { __typename }
         conditions { refName { include exclude } }
         bypassActors(first: 40) { totalCount nodes { bypassMode } }
         rules(first: 40) {
           totalCount
           nodes {
             type
-            parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context integrationId } } }
+            parameters {
+              ... on RequiredStatusChecksParameters { requiredStatusChecks { context integrationId } }
+              ... on WorkflowsParameters { workflows { path ref repositoryId } }
+            }
           }
         }
       }
@@ -94,6 +101,7 @@ class GateResult:
     unknown: str = ""  # why it cannot be told
     note: str = ""  # why the repository was not judged, which is not an error
     admins_open: bool = False  # the gate holds only because administrators are accepted as an exception
+    app_pinned_only: bool = False  # the check is held by an app pin alone: any workflow of that app can post it
 
 
 class Unclear(Exception):
@@ -318,6 +326,7 @@ def _branch_name(value: Any) -> str:
 # has `app: App` (nullable) and `context: String!`; `StatusCheckConfiguration` has `integrationId: Int` (nullable) and
 # `context: String!`; `App.databaseId` is a nullable `Int`. Absent, mistyped or non-positive is cannot tell.
 ANY_SOURCE = None
+MAX_INT = 2147483647  # GraphQL's Int is 32-bit
 
 
 def _app_id(value: Any, what: str) -> int | None:
@@ -325,7 +334,7 @@ def _app_id(value: Any, what: str) -> int | None:
         raise MalformedDataError(f"{what}: GitHub's answer lacks the app id")
     if value == -1:
         return ANY_SOURCE
-    if value < 1:
+    if value < 1 or value > MAX_INT:
         raise MalformedDataError(f"{what}: GitHub's answer lacks the app id")
     return value
 
@@ -400,6 +409,35 @@ def _patterns(ref: Any, what: str) -> None:
             _text(p, f"{what} {key} pattern")
 
 
+# RuleSource is a union of Enterprise, Organization and Repository (GraphQL introspection, 2026-10-26); the type
+# name says who administers the ruleset. Anything else is cannot tell.
+RULE_SOURCES = frozenset({"Repository", "Organization", "Enterprise"})
+
+
+def _source_kind(rs: JSON) -> str:
+    kind = _text(_obj(rs.get("source"), "ruleset source").get("__typename"), "ruleset source type")
+    if kind not in RULE_SOURCES:
+        raise MalformedDataError("ruleset source: GitHub's answer is not a known owner of a ruleset")
+    return kind
+
+
+def _workflows(params: Any) -> list[JSON]:
+    """The required workflows of a WORKFLOWS rule (`WorkflowsParameters.workflows`, each a `WorkflowFileReference`)."""
+    out = []
+    for w in _list(_obj(params, "rule parameters").get("workflows"), "required workflows"):
+        w = _obj(w, "required workflow")
+        _text(w.get("path"), "required workflow path")
+        if "ref" not in w:
+            raise MalformedDataError("required workflow ref: GitHub's answer lacks it")
+        if w["ref"] is not None:
+            _text(w["ref"], "required workflow ref")
+        rid = w.get("repositoryId")
+        if isinstance(rid, bool) or not isinstance(rid, int) or not 0 < rid <= MAX_INT:
+            raise MalformedDataError("required workflow repositoryId: GitHub's answer lacks it")
+        out.append(w)
+    return out
+
+
 def _validate_ruleset(rs: JSON) -> None:
     """The type of every field asked for in one ruleset, whether or not the ruleset counts for the default branch."""
     name = _s(_text(rs.get("name"), "ruleset name"))
@@ -414,6 +452,7 @@ def _validate_ruleset(rs: JSON) -> None:
         ref = _obj(cond, "ruleset conditions").get("refName")
         if ref is not None:
             _patterns(ref, "ruleset refName")
+    _source_kind(rs)
     for actor in _connection(rs.get("bypassActors"), f"ruleset {name!r} bypassActors"):
         _text(actor.get("bypassMode"), "bypassMode")
     for rule in _connection(rs.get("rules"), f"ruleset {name!r} rules"):
@@ -423,6 +462,8 @@ def _validate_ruleset(rs: JSON) -> None:
         params = rule["parameters"]
         if kind == "REQUIRED_STATUS_CHECKS":
             _checks(_obj(params, "rule parameters").get("requiredStatusChecks"), "requiredStatusChecks", True)
+        elif kind == "WORKFLOWS":
+            _workflows(params)
         elif params is not None:
             _obj(params, "rule parameters")
 
@@ -484,12 +525,29 @@ def _bypass_actors(rs: JSON, permission: str) -> str | None:
     name = _s(rs.get("name"))
     nodes = _connection(rs.get("bypassActors"), f"ruleset {name!r} bypassActors")
     if not nodes:
+        kind = _source_kind(rs)
+        if kind != "Repository":
+            raise Unclear(
+                f"ruleset {name!r} is inherited from the {kind.lower()} and lists no bypass actors, but it is "
+                "administered there and the answer does not show that this token can see its bypass list"
+            )
         if permission != "ADMIN":
             raise _hidden(f"ruleset {name!r} lists no bypass actors: the list", permission)
         return None
     modes = sorted({_s(_text(n.get("bypassMode"), "bypassMode")) for n in nodes})
     plural = "" if len(nodes) == 1 else "s"
     return f"ruleset {name!r} has {len(nodes)} bypass actor{plural} ({', '.join(modes)})"
+
+
+def _workflow_backed(rulesets: list[JSON], permission: str) -> bool:
+    """A required-workflows rule that nobody can bypass backs the pin; one whose bypass list cannot be read does not."""
+    for rs in rulesets:
+        try:
+            if _bypass_actors(rs, permission) is None:
+                return True
+        except Unclear:
+            continue
+    return False
 
 
 def _admin_only(sources: list[Source]) -> bool:
@@ -550,6 +608,7 @@ def _judge(
     check_sources: list[Source] = []
     force_sources: list[Source] = []
     wrong_source: list[str] = []  # the gate check is required, but not from the CI app
+    workflow_rulesets: list[JSON] = []  # active rulesets on the default branch that require a workflow
     protected = False
     classic = ref["branchProtectionRule"]
     if classic is not None:
@@ -593,6 +652,8 @@ def _judge(
                     wrong_source.append(f"ruleset {rs_name!r} " + why)
             elif kind == "NON_FAST_FORWARD":
                 force_sources.append(Source(rs_name, _bypass_actors(rs, permission)))
+            elif kind == "WORKFLOWS" and _workflows(rule.get("parameters")):
+                workflow_rulesets.append(rs)
 
     if not protected:
         if permission != "ADMIN":
@@ -609,8 +670,10 @@ def _judge(
             clauses.append((f"is protected but does not require the check {gate!r}", []))
         elif not held:
             clauses.append(("check", list(dict.fromkeys(ways))))
-        elif _admin_only(check_sources):
-            res.admins_open = True
+        else:
+            res.app_pinned_only = not _workflow_backed(workflow_rulesets, permission)
+            if _admin_only(check_sources):
+                res.admins_open = True
     if forbid_force:
         held, ways = _holds(force_sources)
         if not force_sources:
@@ -720,6 +783,16 @@ def gate_findings(client: Client, board: Board) -> tuple[list[str], list[str], l
                 else "accepted by rules.gate_admin_exempt_repos"
             )
             notes.append(f"NO-GATE {name}: gated for everyone except administrators ({why})")
+        if result.app_pinned_only and not result.problems:
+            who = (
+                "the Actions app"
+                if rules.gate_check_app_id == GITHUB_ACTIONS_APP_ID
+                else f"app {rules.gate_check_app_id}"
+            )
+            notes.append(
+                f"NO-GATE {name}: required check is pinned to {who}, which every workflow in the repository can use; "
+                "see docs/no-hidden-work.md"
+            )
         if result.problems:
             drift.append(_s(f"NO-GATE {name}: default branch {result.branch!r} {' and '.join(result.problems)}"))
     return drift, unknown, notes
