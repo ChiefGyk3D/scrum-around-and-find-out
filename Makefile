@@ -35,7 +35,7 @@ typecheck:
 	$(BIN)mypy
 
 test:
-	$(BIN)pytest
+	$(BIN)pytest -n auto
 
 # the same drift checks the test suite runs, named so a failure says which generated file is stale
 generated:
