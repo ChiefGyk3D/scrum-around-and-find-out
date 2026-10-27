@@ -204,7 +204,7 @@ repository that has only a required workflow still gets `does not require the ch
 (`path` text, `ref` text or null, `repositoryId` an integer from 1 to 2147483647); anything else is cannot tell.
 
 **Inherited rulesets.** `includeParents: true` also returns rulesets owned by the organization or enterprise. The query
-reads `source { __typename }` (`RepositoryRuleset.source` is a non-null `RuleSource` union of `Repository`,
+reads `source { __typename }` (the `source` field of `RepositoryRuleset` is a non-null `RuleSource` union of `Repository`,
 `Organization` and `Enterprise`, introspection 2026-10-26; the schema offers no field saying whether the viewer can see an
 inherited ruleset's bypass list). An empty bypass list on a ruleset that is not owned by the repository is therefore never
 believed, even from an ADMIN token: cannot tell (exit 2), because that list is administered at organization or enterprise

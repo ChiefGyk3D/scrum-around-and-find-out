@@ -24,8 +24,8 @@ a zero allowance count means "nobody" only from an ADMIN token, because GitHub m
 The required check must also come from the CI app (`rules.gate_check_app_id`): a check with no source restriction, or
 tied to another app, is a finding, because any app can post a status with that name. A pin proves the app, not the
 workflow: every workflow of a repository posts as the same Actions app, so a pinned check passes with a NOTE saying so,
-unless a ruleset's required-workflows rule that nobody can bypass backs it. An empty bypass list of a ruleset inherited
-from an organization or enterprise is never believed (it is administered there), even for an ADMIN token.
+unless a ruleset's required-workflows rule that nobody can bypass backs it. The empty bypass list of a ruleset that an
+organization or enterprise owns is never believed (it is administered there), even for an ADMIN token.
 
 Where this module cannot be sure what GitHub means, it says "cannot tell" and the audit exits 2;
 it never guesses a pass.
