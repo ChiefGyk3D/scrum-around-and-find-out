@@ -17,7 +17,6 @@ from safo.errors import EXIT_DRIFT, EXIT_INTERRUPTED, EXIT_OK, EXIT_UNKNOWN, Con
 from safo.modes import LocalMode, register_local
 from safo.protection import API_URL, CannotTell, Rest, check
 
-
 LIMIT = (
     "Exit 0 means every condition held in what GitHub answered over two full reads, not that they held at one instant: "
     "a change timed to the two ends of the read (A, B, B, A) can pass, and anyone who can change the protection can "
