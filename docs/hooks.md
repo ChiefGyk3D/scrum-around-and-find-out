@@ -269,7 +269,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
 
 - Malformed, oversized (over 1 MiB), non-object or missing-field input, a standard input that never arrives (5 s), an
   unreadable or invalid `agents.yaml`, a corrupt mode file, a failed state or log write, an unexpected exception and a
-  command line the hook cannot parse (read from the real command line, so `python -m safo hooks guard --no-such-flag` too) all exit 0, print the fixed line `SAFO routing guard degraded: enforcement may be
+  command line the hook cannot parse (see the next bullet) all exit 0, print the fixed line `SAFO routing guard degraded: enforcement may be
   incomplete; inspect safo hooks status.` as hook JSON, and add an enum-only record to the log. No exception text, input
   value or prompt is echoed or stored.
 - **The Gemini rules do not fail open.** They need nothing from `agents.yaml`, so when it cannot be loaded the brief is
@@ -300,10 +300,24 @@ A hook sits inside someone's session, so every error lets the work through, visi
   list, so that record says `probe`. SAFO does not carry the session's repository binding (`tracking_exempt_repos`) to
   the new file name, so after an edit the exemption does not apply until the next `startup`; this is bookkeeping, not
   protection (see the same-user limit below).
+- A hook command line never reaches argparse's writing paths. argparse prints usage and the error to standard error
+  synchronously before it exits 2, and a full stderr pipe would block that until the host killed the hook (fail-open,
+  SAFO #130); exit 2 is also what a host reads as a BLOCK. So the real entry (`python -m safo` and the console script)
+  recognizes `hooks guard` before argparse is even built and parses its arguments by hand: exactly what `safo hooks
+  install` writes, `--agents PATH` and `--agents-local PATH`, each at most once, in either order. Those go straight into
+  the guard. Any other guard command line (an unknown flag, a missing value, a repeated flag, `--help`, a stale or hand
+  edited install) is a configuration error and not a policy decision: nothing is written to standard error, argparse's
+  exit 2 is never used, and the hook answers with the same visible degraded allow as every other failure, through the
+  bounded write: exit 0 if the line was delivered, 1 if not. The same holds for `hooks probe`: in the real entry,
+  when standard input is not a terminal, the hook parsers print nothing (usage, error and help are suppressed) and the
+  failed parse becomes the degraded line. A person at a terminal still gets argparse's usage and help, and `hooks status`
+  (a command a person types) keeps argparse's messages.
 - The guard has one clock, and it starts when the PROCESS started, not when the guard's code first runs. `safo` records
   the process start the moment it is imported: on Linux from `/proc` (the process age is `/proc/uptime` minus the start
   time in `/proc/self/stat`; both count from boot, so the difference is exact, and reading them cannot block); anywhere
-  else, or if the age looks wrong (over a minute), it is the time of the import, the earliest point left. The real entry
+  else, or if the age looks wrong (negative, or over a minute: a long-lived process, or clocks that disagree), it is
+  the time of the import, the earliest point left; the fallback is exercised by a test and documented here. The age is
+  a difference of two boot-time values, so a suspend does not distort it. The real entry
   (`python -m safo` and the console script, through the `run` function of the cli module) arms the guard with it; a test calling `main()` in a
   long-lived process does not, so its budget starts when the guard does. Interpreter start-up, package imports, the
   parser and argument parsing are therefore INSIDE the budget. With the host timeout T (10 s in the installed
@@ -313,8 +327,12 @@ A hook sits inside someone's session, so every error lets the work through, visi
   - lookups, the re-probe and every other pre-decision wait stop one reserve earlier, at `decide_by - min(1 s, 0.1 T)`
     (7 s for T = 10), so there is time to compute and write the line;
   - the post-delivery work (the log and the markers) is waited for until `T - 1 s`, plus 0.5 s, still before T (9.5 s).
-  The decision write itself is given until `decide_by` (never less than 0.5 s): a full pipe whose reader never drains
-  it ends the process with exit 2 at about 8 s, 2 s before the host would kill it. The rule from SAFO #130 stands: a
+  The decision write itself is given until `decide_by`, with NO minimum: a full pipe whose reader never drains it ends
+  the process with exit 2 at about 8 s, 2 s before the host would kill it. If `decide_by` has already passed when the
+  line is about to be written (a late start), nothing is waited for and nothing is written: a denial exits 2, anything
+  else is a silent exit 0. No wait of the guard, pre-decision or after the line, ends later than `T - 0.25 s` from the
+  process start. A process whose start-up alone reaches the host's timeout cannot be made safe from inside the Python
+  entry; the boundary there is the host (`onFailure: block`) or an external launcher, as SAFO #130 tracks. The rule from SAFO #130 stands: a
   hook the host kills at T is fail-open and its output is discarded, so everything above exists to be out before T. A
   test runs the guard under a watchdog that SIGKILLs its process group at the scaled T and checks that the line and exit
   code came first, for a full stdout pipe, an invalid `SAFO_APPEND_LOCK_TIMEOUT` with a full stderr pipe, and a cold

@@ -2078,9 +2078,11 @@ def test_no_wait_ends_after_the_limit_measured_from_the_process_start(
 
     monkeypatch.setattr(threading.Thread, "join", watch)
     set_mode(_private_home, "block")
-    begun = time.monotonic() - 9.0  # the process started 9 s ago of a 10 s budget: limit is 0.75 s away
-    mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents), begun)
-    assert waits and all(0.0 <= wait <= 0.76 for wait in waits), waits
+    # The decision and post-delivery deadlines are far away (8 s, 9 s), but the limit is half a second from now: every
+    # wait the guard asks a thread for must be cut to it, whoever asked.
+    monkeypatch.setattr(mod, "limit_point", lambda begun: time.monotonic() + 0.5)
+    mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents))
+    assert len(waits) >= 4 and all(0.0 <= wait <= 0.51 for wait in waits), waits
 
 
 def test_a_start_older_than_the_whole_budget_is_not_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
