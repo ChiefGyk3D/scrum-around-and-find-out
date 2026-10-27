@@ -1785,23 +1785,6 @@ def test_a_standard_input_that_cannot_be_read_is_a_visible_input_failure(_privat
     assert code == 0 and "degraded" in out.getvalue() and "sentinel-token" not in out.getvalue()
 
 
-@pytest.mark.parametrize("sub", ["guard", "probe"])
-def test_a_hook_started_with_arguments_it_does_not_know_still_exits_zero_with_a_warning(
-    _private_home: Path, sub: str
-) -> None:
-    """argparse exits 2 on a bad flag, and a host reads exit 2 from a PreToolUse hook as a denial."""
-    import contextlib
-    import io
-
-    from safo.cli import main
-
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stderr(io.StringIO()):
-        code = main(["hooks", sub, "--no-such-flag"], env={"HOME": str(_private_home)}, out=out, err=err, now=NOW)
-    assert code == 0 and "SAFO routing guard degraded" in out.getvalue()
-    one_json_line_or_nothing(out.getvalue())
-
-
 def test_a_person_typing_a_bad_command_still_gets_the_usual_usage_error(_private_home: Path) -> None:
     import contextlib
     import io

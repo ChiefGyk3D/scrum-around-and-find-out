@@ -1922,3 +1922,275 @@ def test_guard_process_ends_the_process_exactly_once_on_every_route(
     with pytest.raises(expected[route]):
         mod.guard_process(context(_private_home, "{}", Stream()), namespace(agents))
     assert hard_exits == [2 if route == "deny-then-crash" else 1], "once, with the code of an undelivered decision"
+
+
+# -- the real entry point: a hook command line never reaches argparse's writing paths ---------------------------------
+
+
+def jam_pipe_counted() -> tuple[int, int, int]:
+    """Like jam_pipe, and also how many bytes it holds."""
+    read_end, write_end = os.pipe()
+    os.set_blocking(write_end, False)
+    filled = 0
+    with contextlib.suppress(BlockingIOError):
+        while True:
+            filled += os.write(write_end, b"x" * 65536)
+    os.set_blocking(write_end, True)
+    return read_end, write_end, filled
+
+
+def run_entry(
+    home: Path, argv: list[str], *, payload: str = "", jam_stderr: bool = True, host_timeout: float = CHILD_BUDGET
+) -> tuple[Watched, bool]:
+    """Run `python -m safo ARGV` (the real entry point) under a watchdog that kills its process group at the scaled host
+    timeout. Standard input is a pipe holding `payload`; standard error is, by default, a FULL pipe nobody reads.
+    Returns the outcome and whether the blocked pipe still holds exactly what it held (nothing was written to it)."""
+    in_read, in_write = os.pipe()
+    os.write(in_write, payload.encode())
+    os.close(in_write)
+    out_read, out_write = os.pipe()
+    err_read = err_write = -1
+    filled = 0
+    actions: list[tuple[Any, ...]] = [(os.POSIX_SPAWN_DUP2, in_read, 0), (os.POSIX_SPAWN_DUP2, out_write, 1)]
+    if jam_stderr:
+        err_read, err_write, filled = jam_pipe_counted()
+        actions.append((os.POSIX_SPAWN_DUP2, err_write, 2))
+    else:
+        actions.append((os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0))
+    actions += [(os.POSIX_SPAWN_CLOSE, out_read)]
+    env = {**os.environ, "HOME": str(home)}
+    done, killed = threading.Event(), threading.Event()
+    started = time.monotonic()
+    pid = os.posix_spawn(sys.executable, [sys.executable, "-m", "safo", *argv], env, file_actions=actions, setpgroup=0)
+    for number in (in_read, out_write, err_write):
+        if number >= 0:
+            os.close(number)
+
+    def watchdog() -> None:
+        if not done.wait(max(0.0, host_timeout - (time.monotonic() - started))):
+            killed.set()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+
+    thread = threading.Thread(target=watchdog, daemon=True)
+    thread.start()
+    untouched = True
+    try:
+        raw = read_until(out_read, host_timeout + 5)
+        status = wait_exit(pid, host_timeout + 5)
+        elapsed = time.monotonic() - started
+        if jam_stderr:
+            os.set_blocking(err_read, False)
+            held = 0
+            with contextlib.suppress(BlockingIOError):
+                while chunk := os.read(err_read, 65536):
+                    held += len(chunk)
+            untouched = held == filled
+    finally:
+        done.set()
+        thread.join(2)
+        for number in (out_read, err_read):
+            if number >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(number)
+        with contextlib.suppress(ProcessLookupError, ChildProcessError):
+            os.killpg(pid, signal.SIGKILL)
+    return Watched(status, killed.is_set(), elapsed, Arrival.at - started, raw), untouched
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hooks", "guard", "--no-such-flag"],
+        ["hooks", "guard", "--agents"],
+        ["hooks", "guard", "--help"],
+        ["hooks", "guard", "--agents", "a", "--agents", "b"],
+        ["hooks", "probe", "--no-such-flag"],
+    ],
+    ids=["unknown-flag", "missing-value", "help", "repeated-flag", "probe-unknown-flag"],
+)
+def test_a_hook_command_line_argparse_would_complain_about_writes_nothing_to_a_full_stderr_pipe(
+    _private_home: Path, argv: list[str]
+) -> None:
+    """argparse prints usage and the error to stderr before it exits 2; into a full pipe that blocks until
+    the host kills the hook. The real entry point must answer with the visible degraded allow instead (exit 0,
+    never 2), on stdout, and write nothing to the blocked stderr."""
+    result, untouched = run_entry(_private_home, argv)
+    assert not result.killed, "argparse's own write to the blocked stderr would have held it until the host killed it"
+    assert result.status == 0, "exit 0 with the degraded line: a configuration error is not a policy decision"
+    [row] = lines(result.raw.decode())
+    assert WARNING in row["systemMessage"]
+    assert untouched, "nothing was written to the blocked stderr pipe"
+    assert result.elapsed < CHILD_BUDGET
+
+
+def test_the_real_entry_runs_the_guard_with_the_command_line_the_installer_writes(
+    _private_home: Path, agents: Path
+) -> None:
+    set_probe(_private_home, reachable=True, agents=agents)
+    set_mode(_private_home, "block")
+    result, untouched = run_entry(
+        _private_home, ["hooks", "guard", "--agents", str(agents)], payload=dispatch(model=None)
+    )
+    assert not result.killed and result.status == 0 and untouched
+    [row] = lines(result.raw.decode())
+    assert denied(row)
+
+
+def test_the_hand_parser_accepts_what_the_installer_writes_and_nothing_else() -> None:
+    parsed = mod.guard_argv(["--agents", "a.yaml", "--agents-local", "b.yaml"])
+    assert parsed is not None and (parsed.agents, parsed.agents_local) == ("a.yaml", "b.yaml")
+    assert mod.guard_argv([]) is not None
+    assert mod.guard_argv(["--agents-local", "b"]) is not None
+    for bad in (["--agents"], ["--bogus", "x"], ["--agents", "a", "--agents", "b"], ["a.yaml"], ["--agents=a"]):
+        assert mod.guard_argv(bad) is None, bad
+
+
+# -- a decision whose deadline has already passed waits for nothing ----------------------------------------------------
+
+
+@pytest.mark.parametrize(("mode", "code"), [("block", 2), ("warn", 0)])
+def test_a_decision_whose_deadline_has_passed_is_not_waited_for_or_written(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, mode: str, code: int
+) -> None:
+    """Late start: decide_by is already behind us when the verdict exists. A denial is an exit 2 with nothing
+    written (the host blocks on the code); anything else is a silent allow. No minimum wait is granted."""
+    set_mode(_private_home, mode)
+    monkeypatch.setattr(mod, "CONFIG_MIN_WAIT_SECONDS", 10.0)
+    monkeypatch.setattr(mod, "budget_points", lambda begun: (begun - 3.0, begun - 0.001, begun + 9.0))
+    out = Stream()
+    started = time.monotonic()
+    assert mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents)) == code
+    assert out.writes == [], "nothing was written"
+    assert time.monotonic() - started < 2.0, "and nothing was waited for"
+
+
+def test_no_wait_ends_after_the_limit_measured_from_the_process_start(
+    _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waits: list[float] = []
+    real = threading.Thread.join
+
+    def watch(self: threading.Thread, timeout: float | None = None) -> None:
+        if self.name == "safo-bounded":
+            waits.append(-1.0 if timeout is None else timeout)
+        real(self, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", watch)
+    set_mode(_private_home, "block")
+    begun = time.monotonic() - 9.0  # the process started 9 s ago of a 10 s budget: limit is 0.75 s away
+    mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents), begun)
+    assert waits and all(0.0 <= wait <= 0.76 for wait in waits), waits
+
+
+def test_a_start_older_than_the_whole_budget_is_not_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = time.monotonic()
+    monkeypatch.setattr(mod, "process_started", now - 9.9)
+    assert mod.process_begun(now) == now - 9.9, "recent: inside one budget"
+    monkeypatch.setattr(mod, "process_started", now - 10.1)
+    assert mod.process_begun(now) == now, "older than the budget: the process is not a fresh hook"
+    monkeypatch.setattr(mod, "process_started", None)
+    assert mod.process_begun(now) == now, "never armed (a test process): now"
+
+
+def test_a_late_start_after_decide_by_still_exits_two_before_the_host_kills_the_guard(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    """The child reaches guard_process about 3.8 s into a 5 s budget: after decide_by (3 s), before the limit (4.75 s).
+    The pipe is full. There is no time to wait for it: exit 2, at once."""
+    set_probe(_private_home, reachable=True, agents=agents)
+    set_mode(_private_home, "block")
+    result = run_watched(
+        _private_home,
+        agents,
+        tmp_path,
+        dispatch(model=None),
+        mode="seam",
+        jam_stdout=True,
+        extra_env={"SAFO_CHILD_COLD_START": "3.3", "SAFO_CHILD_CONFIG_FLOOR": "0.7"},
+    )
+    assert not result.killed and result.status == 2, f"status {result.status}, killed {result.killed}"
+    assert result.elapsed < CHILD_BUDGET
+
+
+# -- the process age: what is trusted, and the fallback ----------------------------------------------------------
+
+
+def proc_stat(starttime_ticks: int) -> str:
+    return "123 (safo hooks) S " + " ".join(["0"] * 18 + [str(starttime_ticks)] + ["0"] * 10)
+
+
+def test_the_process_age_is_read_from_proc_and_distrusted_when_it_does_not_look_fresh() -> None:
+    import safo
+
+    ticks = 100.0
+    uptime = "1000.00 4000.00"  # seconds since boot; the process started at tick 95000 = 950 s: 50 s old
+    assert safo._process_age(proc_stat(95000), uptime, ticks) == pytest.approx(50.0)
+    assert safo._process_age(proc_stat(99400), uptime, ticks) == pytest.approx(6.0)
+    assert safo._process_age(proc_stat(94010), uptime, ticks) == pytest.approx(59.9)
+    assert safo._process_age(proc_stat(93990), uptime, ticks) is None, "over the sanity clamp (60 s): not trusted"
+    assert safo._process_age(proc_stat(100010), uptime, ticks) is None, "started after 'now': the clocks disagree"
+    for garbage in ("", "no parenthesis", "1 (x) S 1 2"):
+        assert safo._process_age(garbage, uptime, ticks) is None
+    assert safo._process_age(proc_stat(95000), "", ticks) is None
+    assert safo._process_age(proc_stat(95000), uptime, 0.0) is None
+
+
+def test_an_untrusted_age_falls_back_to_now(monkeypatch: pytest.MonkeyPatch) -> None:
+    import safo
+
+    monkeypatch.setattr(safo, "_process_age", lambda *a: None)
+    before = time.monotonic()
+    assert before <= safo._process_started() <= time.monotonic(), "the fallback is the time of the import, i.e. now"
+
+
+# -- the emit worker completes just after the join times out ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("offset", [2.5, 2.9, 3.0, 3.1, 3.3])
+def test_a_blocked_write_that_completes_around_the_deadline_gives_at_most_one_line_and_never_a_wrong_exit(
+    _private_home: Path, agents: Path, tmp_path: Path, offset: float
+) -> None:
+    """Real process, full stdout pipe. The reader starts draining `offset` seconds after the start, around decide_by
+    (3 s of 5): the emit worker's write finishes just before, at, or just after the main thread gave up on it.
+    Whatever the order: at most ONE complete JSON line, exit 2 when it was not delivered in time, 0 when it was."""
+    set_probe(_private_home, reachable=True, agents=agents)
+    set_mode(_private_home, "block")
+    body = tmp_path / "payload.json"
+    body.write_text(dispatch(model=None))
+    jam_read, jam_write, filled = jam_pipe_counted()
+    started = time.monotonic()
+    pid, _ = spawn_seam(
+        _private_home, agents, body, mode="seam", barrier=tmp_path / "barrier", stdout_fd=jam_write, new_group=True
+    )
+    os.close(jam_write)  # only the child keeps the writing end: the drain sees end of file when it is gone
+    collected: list[bytes] = []
+
+    def drain() -> None:
+        time.sleep(max(0.0, offset - (time.monotonic() - started)))
+        while chunk := os.read(jam_read, 65536):
+            collected.append(chunk)
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    killer = threading.Timer(CHILD_BUDGET, lambda: os.killpg(pid, signal.SIGKILL))
+    killer.start()
+    try:
+        status = wait_exit(pid, CHILD_BUDGET + 5)
+        thread.join(5)
+    finally:
+        killed = not killer.is_alive()
+        killer.cancel()
+        os.close(jam_read)
+        with contextlib.suppress(ProcessLookupError, ChildProcessError):
+            os.killpg(pid, signal.SIGKILL)
+    tail = b"".join(collected)[filled:]
+    complete = [row for row in tail.split(b"\n") if row]
+    assert not killed and status in (0, 2), f"status {status}, killed {killed}"
+    assert len(complete) <= 1 and tail.count(b"\n") <= 1, f"{len(complete)} lines: {tail[:200]!r}"
+    if complete:
+        assert denied(json.loads(complete[0]))
+    if status == 0:
+        assert len(complete) == 1 and tail.endswith(b"\n"), "exit 0 means the line was delivered whole"
+    if offset <= 2.5:
+        assert status == 0 and len(complete) == 1, "drained well before the deadline: delivered"
