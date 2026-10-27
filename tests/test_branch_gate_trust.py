@@ -21,7 +21,7 @@ from safo.gate import Q_BRANCH_GATE
 from safo.graphql import Client
 from test_branch_gate import ACTIONS, WIDGETS, classic, gate, lines, repo, ruleset, with_rules
 from test_branch_gate_source import load, only_widgets, unknown
-from test_branch_gate_strict import RS, clean_raw, drop_path, exit_code, set_path
+from test_branch_gate_strict import RS, clean_raw, drop_path, exit_code, serve, set_path
 from world import build_world, load_test_board
 
 LIMIT = "required check is pinned to the Actions app, which every workflow in the repository can use"
@@ -32,6 +32,16 @@ def pin_notes(text: list[str]) -> list[str]:
 
 
 # -- 1. the producing app is not the workflow ----
+
+
+def read_failure(fake: FakeGitHub, client: Client, raw: dict[str, Any]) -> bool:
+    """Exit 2 with the audit's own refusal text, and not the catch-all for an unexpected error."""
+    if not fake.projects:
+        build_world(fake)
+    serve(fake, raw)
+    code, text = gate(fake, client)
+    found = [t for t in text if t.startswith("UNKNOWN") and WIDGETS in t]
+    return code == 2 and len(found) == 1 and "unexpected answer" not in found[0]
 
 
 def test_the_query_asks_for_the_ruleset_source_and_required_workflows() -> None:
@@ -161,7 +171,7 @@ def test_a_required_workflow_ref_is_null_or_text(fake: FakeGitHub, client: Clien
         del entry["ref"]
     else:
         entry["ref"] = ref
-    assert exit_code(fake, client, raw) == 2
+    assert read_failure(fake, client, raw) is True  # a typed refusal, not a crash caught as "unexpected answer"
     entry["ref"] = None
     assert exit_code(fake, client, raw) == 0
 
@@ -231,7 +241,11 @@ SOURCE = [*RS, "source"]
 def test_an_absent_or_unknown_ruleset_source_is_cannot_tell(fake: FakeGitHub, client: Client, bad: Any) -> None:
     assert exit_code(fake, client, clean_raw()) == 0
     raw = drop_path(clean_raw(), SOURCE) if bad == "absent" else set_path(clean_raw(), SOURCE, bad)
-    assert exit_code(fake, client, raw) == 2
+    assert read_failure(fake, client, raw)
+    # also when the list is not empty, so the owner is not read only to decide about an empty list
+    raw = drop_path(clean_raw(), SOURCE) if bad == "absent" else set_path(clean_raw(), SOURCE, bad)
+    raw["rulesets"]["nodes"][0]["bypassActors"] = {"totalCount": 1, "nodes": [{"bypassMode": "ALWAYS"}]}
+    assert read_failure(fake, client, raw)
 
 
 def test_the_source_is_typed_on_a_ruleset_that_does_not_count(fake: FakeGitHub, client: Client) -> None:
