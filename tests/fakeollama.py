@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+OMIT = object()  # set as FakeOllama.answer_model to leave the model key out of the answer
+
 
 class FakeOllama:
     def __init__(self, installed: list[str], loaded: list[str]) -> None:
@@ -26,6 +28,7 @@ class FakeOllama:
             "prompt_eval_count": 40,
             "eval_duration": 2_000_000_000,
         }
+        self.answer_model: object = self  # the model field of the answer; `self` means echo the requested model
         self.url = ""
         self.hosts: list[str] = []  # the Host header of every request
         self.stall_seconds = 0.0  # hold every GET this long before answering: a reachable host that is hung
@@ -88,7 +91,10 @@ class FakeOllama:
                 elif fake.generate_status != 200:
                     self._send(fake.generate_status, {"error": "boom"})
                 else:
-                    self._send(200, {**fake.reply, "model": body.get("model", "")})
+                    answer = {k: v for k, v in fake.reply.items() if k != "model"}
+                    if fake.answer_model is not OMIT:  # OMIT: the answer has no model key at all
+                        answer["model"] = body.get("model", "") if fake.answer_model is fake else fake.answer_model
+                    self._send(200, answer)
 
             def log_message(self, format: str, *args: Any) -> None:
                 return

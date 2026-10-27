@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from agentsdata import A_MODELS, B_MODELS, write_agents
-from fakeollama import FakeOllama
+from fakeollama import OMIT, FakeOllama
 from localcli import cli, local_run
 
 
@@ -39,6 +39,7 @@ def test_local_run_sends_one_prompt_with_think_off_and_logs_the_outcome(_private
         140,
     )
     assert "a draft until a Claude model reviews it" in row["note"]
+    assert row["model"] == "small-4b-agent", "the model is a field, not only words in the note"
 
 
 def test_local_run_honours_an_explicit_think_flag(_private_home: Path, tmp_path: Path) -> None:
@@ -212,3 +213,105 @@ def test_local_run_under_actions_refuses_an_outcomes_log_in_the_workspace(_priva
             "--log", str(ws / "o.jsonl"), home=_private_home, extra_env=env,
         )  # fmt: skip
         assert code == 2 and "GITHUB_WORKSPACE" in err and a.generates == []
+
+
+def _run_answering(home: Path, tmp_path: Path, answered: object) -> tuple[int, str, Path]:
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x")
+    log = tmp_path / "o.jsonl"
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS).serve() as b:
+        agents = write_agents(tmp_path / "agents.yaml", a.url, b.url)
+        a.answer_model = answered
+        code, out, _ = local_run("ci-log-summary", prompt, agents, log, home)
+    return code, out, log
+
+
+def test_the_implicit_latest_tag_is_the_same_model(_private_home: Path, tmp_path: Path) -> None:
+    code, _, log = _run_answering(_private_home, tmp_path, "small-4b-agent:latest")
+    assert code == 0 and json.loads(log.read_text())["model"] == "small-4b-agent", "the routed name is recorded"
+
+
+@pytest.mark.parametrize(
+    "answered",
+    ["other-model", "small-4b-agent:7b", "small-4b-agent-8b", "resident-12b-thinking", "SMALL-4B-AGENT",
+     "small-4b-agent:latest:latest", "small-4b-agent:Latest", ":latest", "latest"],
+)  # fmt: skip
+def test_a_different_reported_model_fails_closed_and_writes_nothing(
+    _private_home: Path, tmp_path: Path, answered: str
+) -> None:
+    code, out, log = _run_answering(_private_home, tmp_path, answered)
+    assert code == 3 and "model mismatch" in out and "small-4b-agent" in out
+    assert "A short answer." not in out and not log.exists()
+
+
+@pytest.mark.parametrize("answered", ["", None, OMIT, 5, ["small-4b-agent"], {"n": 1}, True])
+def test_no_usable_reported_model_fails_closed_and_is_never_replaced_by_the_request(
+    _private_home: Path, tmp_path: Path, answered: object
+) -> None:
+    code, out, log = _run_answering(_private_home, tmp_path, answered)
+    assert code == 3 and "reported no model" in out and "A short answer." not in out and not log.exists()
+
+
+def test_a_hostile_reported_name_is_escaped_and_capped_in_the_error(_private_home: Path, tmp_path: Path) -> None:
+    hostile = "x\ny\x1b[31m::set-output name=a::b\u2028" + "z" * 500
+    code, out, log = _run_answering(_private_home, tmp_path, hostile)
+    assert code == 3 and not log.exists()
+    assert out.count("\n") == 1, "one line only"
+    assert "\x1b" not in out and "\u2028" not in out and "::set-output" not in out and "z" * 100 not in out
+    assert "\\x0a" in out or "\\n" in out  # repr or escape: never a raw newline inside the line
+
+
+def _run_with_routed(home: Path, tmp_path: Path, routed: str, answered: object = None) -> tuple[int, str, Path, str]:
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x")
+    log = tmp_path / "o.jsonl"
+    models = ["resident-12b-thinking", routed]
+    with FakeOllama(models, models).serve() as a, FakeOllama(B_MODELS, B_MODELS).serve() as b:
+        agents = write_agents(tmp_path / "agents.yaml", a.url, b.url)
+        agents.write_text(agents.read_text().replace("small-4b-agent", json.dumps(routed)))
+        a.answer_model = routed if answered is None else answered
+        code, out, _ = local_run("ci-log-summary", prompt, agents, log, home)
+        sent = a.generates[0]["model"] if a.generates else ""
+    return code, out, log, sent
+
+
+def test_a_slashed_routed_model_is_recorded_as_its_label(_private_home: Path, tmp_path: Path) -> None:
+    code, out, log, sent = _run_with_routed(_private_home, tmp_path, "hf.co/org/m:Q4_K_M")
+    assert code == 0 and sent == "hf.co/org/m:Q4_K_M" and "A short answer." in out
+    assert json.loads(log.read_text())["model"] == "hf.co/org/m:Q4_K_M"
+
+
+@pytest.mark.parametrize("routed", ["m" * 129, "a/b/" + "c" * 200, "bad\x1b[0m::name"])
+def test_a_routed_model_that_cannot_be_a_label_is_refused_before_anything_is_generated(
+    _private_home: Path, tmp_path: Path, routed: str
+) -> None:
+    code, out, log, sent = _run_with_routed(_private_home, tmp_path, routed)
+    assert code != 0 and code != 3 and sent == "", "nothing was generated"
+    assert not log.exists() and "A short answer." not in out, "nothing recorded, no answer printed"
+    assert "\x1b" not in out and routed not in out, "the name is escaped and capped in the message"
+
+
+def test_the_latest_tag_is_ignored_in_both_directions(_private_home: Path, tmp_path: Path) -> None:
+    for answered in ("m1:latest", "m1"):
+        code, _, log, _ = _run_with_routed(_private_home, tmp_path, "m1:latest", answered)
+        assert code == 0 and json.loads(log.read_text())["model"] == "m1:latest"
+        log.unlink()
+    code, _, log, _ = _run_with_routed(_private_home, tmp_path, "m1:latest", "m1:7b")
+    assert code == 3 and not log.exists()
+
+
+def test_local_run_refuses_a_torn_log_before_any_generation(_private_home: Path, tmp_path: Path) -> None:
+    """The torn-tail check runs before the model is asked: no request, no answer, log untouched."""
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("Summarise this log in one sentence.")
+    log = tmp_path / "outcomes.jsonl"
+    log.write_bytes(b'{"date": "2026-10-07", "ag')
+    before = log.read_bytes()
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS).serve() as b:
+        agents = write_agents(tmp_path / "agents.yaml", a.url, b.url)
+        code, out, err = local_run("ci-log-summary", prompt, agents, log, _private_home)
+        assert code == 2, (out, err)
+        assert a.generates == [] and b.generates == [], "nothing may be generated for a log that cannot take the record"
+    assert "last line is not a complete valid record" in err
+    assert "A short answer." not in out and "A short answer." not in err
+    assert log.read_bytes() == before

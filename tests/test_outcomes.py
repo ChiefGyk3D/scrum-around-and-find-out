@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -295,7 +297,7 @@ def test_good_model_names(model: str) -> None:
     "model",
     [
         "", "two words", "line\nbreak", "line\rbreak", "tab\there", "sep\u2028arator", "para\u2029graph", "nel\x85x",
-        "nul\x00", "caf\u00e9", "\uff47pt", "x" * 65, ".leading-dot", "-dash", "a/b", "a;b", 'q"uote', 5, 1.5, True,
+        "nul\x00", "caf\u00e9", "\uff47pt", "x" * 129, ".leading-dot", "-dash", "a;b", 'q"uote', 5, 1.5, True,
         ["a"], {"a": 1},
     ],
 )  # fmt: skip
@@ -380,3 +382,244 @@ def test_model_summary_is_deterministic_under_input_order() -> None:
     assert outcomes.summarise_models([], "2026-10") == []
     with pytest.raises(ConfigError, match="YYYY-MM"):
         outcomes.summarise_models([], "2026-1")
+
+
+# ---- outcome, attempts, intervention_minutes, defects_after_approval (issue #103, unit 1) ----
+
+NEW_KEYS = ("outcome", "attempts", "intervention_minutes", "defects_after_approval")
+
+
+def test_a_record_without_the_new_keys_is_byte_identical_to_today() -> None:
+    golden = (
+        '{"agent": "copilot", "card": "https://github.com/acme/widgets/pull/9", "credits_used": 4, '
+        '"date": "2026-10-07", "findings": {"important": 1}, "model": "gpt-5.4", "note": "Needed fixes.", '
+        '"requests": 3, "review_rounds": 2, "shape": "small-mechanical-pr", "tokens": null}'
+    )
+    record = outcomes.validate(json.loads(golden))
+    assert record.to_json() == golden
+    assert not any(k in json.loads(record.to_json()) for k in NEW_KEYS)
+    nulls = dict.fromkeys(
+        k for k in NEW_KEYS if k != "outcome"
+    )  # a null count is "not known"; a null outcome is invalid
+    assert outcomes.validate({**GOOD, **nulls}).to_json() == outcomes.validate(GOOD).to_json()
+
+
+def test_the_new_fields_round_trip_when_set(tmp_path: Path) -> None:
+    extra = {"outcome": "accepted", "attempts": 3, "intervention_minutes": 25, "defects_after_approval": 2}
+    record = outcomes.validate({**GOOD, **extra})
+    log = tmp_path / "o.jsonl"
+    outcomes.append(log, record)
+    assert outcomes.load(log) == [record]
+    assert {k: json.loads(log.read_text())[k] for k in NEW_KEYS} == extra
+
+
+@pytest.mark.parametrize(
+    ("key", "good"),
+    [("outcome", ["accepted", "abandoned"]), ("attempts", [1, 100]),
+     ("intervention_minutes", [0, 10080]), ("defects_after_approval", [0, 10**12])],
+)  # fmt: skip
+def test_boundary_values_are_accepted(key: str, good: list[object]) -> None:
+    for value in good:
+        assert getattr(outcomes.validate({**GOOD, key: value}), key) == value
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("outcome", ["", "Accepted", "done", "abandoned ", "abandoned\n", 1, True, ["accepted"], {"a": 1}, 1.5]),
+        ("attempts", [0, -1, 101, 1.0, 1.5, True, False, "2", "", [1], {"n": 1}, 10**30]),
+        ("intervention_minutes", [-1, 10081, 1.5, 2.0, True, False, "5", "", [1], {"n": 1}]),
+        ("defects_after_approval", [-1, 10**12 + 1, 1.5, 2.0, True, False, "1", "", [1], {"n": 1}]),
+    ],
+)  # fmt: skip
+def test_bad_new_values_are_refused_and_nothing_is_appended(key: str, bad: list[object], tmp_path: Path) -> None:
+    for value in bad:
+        with pytest.raises(ConfigError, match=f"{key}: expected"):
+            outcomes.validate({**GOOD, key: value})
+    log = tmp_path / "o.jsonl"
+    log.write_bytes(b"")
+    before = log.read_bytes()
+    for value in bad:
+        fields: dict[str, Any] = {key: value}
+        with pytest.raises(ConfigError):
+            outcomes.append(log, outcomes.Outcome("2026-10-07", None, "codex", "research", 1, **fields))
+    assert log.read_bytes() == before
+
+
+def test_a_bad_new_value_in_a_log_names_the_line(tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    log.write_text(json.dumps(GOOD) + "\n" + json.dumps({**GOOD, "attempts": "3"}) + "\n")
+    with pytest.raises(ConfigError, match=r"o.jsonl:2.attempts: expected"):
+        outcomes.load(log)
+
+
+def test_model_names_may_carry_an_ollama_tag() -> None:
+    assert outcomes.validate({**GOOD, "model": "gemma4:12b"}).model == "gemma4:12b"
+    with pytest.raises(ConfigError, match="model: expected"):
+        outcomes.validate({**GOOD, "model": ":12b"})
+
+
+# ---- round 2: model labels, and abandoned records stay out of every measure ----
+
+
+def test_the_closed_set_of_outcome_values() -> None:
+    assert outcomes.OUTCOME_VALUES == ("accepted", "abandoned")
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["hf.co/org/m:Q4_K_M", "a/b", "registry.example/ns/model:7b-q4", "m" * 128, "a" + "/b" * 63],
+)
+def test_a_model_label_may_have_single_slashes(label: str) -> None:
+    assert outcomes.validate({**GOOD, "model": label}).model == label
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["/a", "a/", "a//b", "a/../b", "..", "a..b", "a/./b", "a@sha256", "m" * 129, "a/" + "b" * 127, "a b/c", "a\\b",
+     "a/b\n", "caf\u00e9/x", "-a/b", ".a/b"],
+)  # fmt: skip
+def test_a_model_label_is_never_a_path_or_free_text(label: str) -> None:
+    with pytest.raises(ConfigError, match="model: expected"):
+        outcomes.validate({**GOOD, "model": label})
+    assert outcomes.valid_model(label) is False
+
+
+def _ab(n: int, outcome: str | None, rounds: int = 1, *, key: bool = True) -> outcomes.Outcome:
+    """`outcome=None` with key=True is an explicit null (invalid); key=False leaves the key out (a legacy record)."""
+    raw: dict[str, Any] = {
+        **GOOD, "card": f"https://github.com/acme/widgets/pull/{n}", "review_rounds": rounds, "findings": {},
+        "model": "m", "credits_used": 10,
+    }  # fmt: skip
+    if key:
+        raw["outcome"] = outcome
+    return outcomes.validate(raw)
+
+
+def test_an_absent_outcome_is_legacy_accepted_and_null_or_unknown_is_invalid() -> None:
+    assert _ab(1, None, key=False).outcome is None and not _ab(1, None, key=False).abandoned
+    for bad in (None, "", "ABANDONED", 0, False, ["abandoned"]):
+        with pytest.raises(ConfigError, match=r"outcome: expected one of accepted, abandoned"):
+            outcomes.validate({**GOOD, "outcome": bad})
+
+
+def test_a_null_outcome_in_a_log_names_its_line_and_the_log_is_unreadable(tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    log.write_text(json.dumps(GOOD) + "\n" + json.dumps({**GOOD, "outcome": None}) + "\n")
+    with pytest.raises(ConfigError, match=r"o.jsonl:2.outcome: expected"):
+        outcomes.load(log)
+
+
+def test_a_legacy_line_without_outcome_reads_back_unchanged_and_is_never_rewritten(tmp_path: Path) -> None:
+    legacy = json.dumps(GOOD, sort_keys=True)
+    log = tmp_path / "o.jsonl"
+    log.write_text(legacy + "\n")
+    [record] = outcomes.load(log)
+    assert record.to_json() == legacy and "outcome" not in record.to_json()
+    outcomes.append(log, outcomes.validate(GOOD))
+    assert log.read_text().splitlines()[0] == legacy
+
+
+def test_abandoned_records_are_excluded_from_every_measure() -> None:
+    rows = [_ab(1, "abandoned", 0), _ab(2, "abandoned", 0), _ab(3, None, 3, key=False), _ab(4, "accepted", 1)]
+    q = outcomes.query_outcomes(rows, "2026-10", "copilot")
+    assert q.records == 2 and q.value("runs") == 2 and q.value("rounds_per_run") == 2
+    assert q.value("credits_per_run") == 10 and q.value("fix_share") == Fraction(1, 2)
+    [s] = outcomes.summarise(rows, "2026-10")
+    assert s.tasks == 2 and s.review_rounds == 4
+    [m] = outcomes.summarise_models(rows, "2026-10")
+    assert m.runs == 2 and m.credits_total == 20
+    only = [_ab(1, "abandoned", 0)]
+    assert outcomes.query_outcomes(only, "2026-10", "copilot").value("runs") is None
+    assert outcomes.summarise(only, "2026-10") == [] and outcomes.summarise_models(only, "2026-10") == []
+    assert outcomes.count_abandoned(rows, "2026-10") == {"copilot": 2}
+
+
+@pytest.mark.parametrize("key", ["intervention_minutes", "defects_after_approval"])
+def test_an_abandoned_record_cannot_carry_acceptance_fields(key: str, tmp_path: Path) -> None:
+    for value in (0, 5):
+        with pytest.raises(ConfigError, match=f"{key}: not allowed on an abandoned task"):
+            outcomes.validate({**GOOD, "outcome": "abandoned", key: value})
+    assert outcomes.validate({**GOOD, "outcome": "abandoned", key: None}).outcome == "abandoned"
+    assert outcomes.validate({**GOOD, "outcome": "accepted", key: 5})
+    assert outcomes.validate({**GOOD, "outcome": "abandoned", "attempts": 3}).attempts == 3
+    log = tmp_path / "o.jsonl"
+    fields: dict[str, Any] = {key: 5, "outcome": "abandoned"}
+    with pytest.raises(ConfigError):
+        outcomes.append(log, outcomes.Outcome("2026-10-07", None, "codex", "research", 0, **fields))
+    assert not log.exists()
+
+
+def _log_with_tail(tmp_path: Path, tail: bytes) -> tuple[Path, bytes]:
+    log = tmp_path / "o.jsonl"
+    log.write_bytes(json.dumps(GOOD).encode() + b"\n" + tail)
+    return log, log.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [b'{"date":', b"{", b'{"date": "2026-10-07", "ag', b"\xff\xfe{", b'{"date": "2026-10-07"}', b"[1]", b"null",
+     b"x" * 100_000, b'{"a":' + b"1" * 3_000_000],
+)  # fmt: skip
+def test_append_refuses_a_torn_or_invalid_last_line_and_writes_nothing(tmp_path: Path, tail: bytes) -> None:
+    log, before = _log_with_tail(tmp_path, tail)
+    with pytest.raises(ConfigError, match="last line is not a complete valid record"):
+        outcomes.append(log, outcomes.validate(GOOD))
+    assert log.read_bytes() == before, "never repaired or truncated"
+    with pytest.raises(ConfigError, match="last line is not a complete valid record"):
+        outcomes.check_appendable(log)
+
+
+def test_append_accepts_a_complete_valid_last_line_with_or_without_its_newline(tmp_path: Path) -> None:
+    for tail in (json.dumps(GOOD).encode(), json.dumps(GOOD).encode() + b"\n", json.dumps(GOOD).encode() + b"\n\n  \n"):
+        log, _ = _log_with_tail(tmp_path, tail)
+        outcomes.check_appendable(log)
+        outcomes.append(log, outcomes.validate(GOOD))
+        assert len(outcomes.load(log)) == 3
+    outcomes.check_appendable(tmp_path / "absent.jsonl")
+
+
+def _padded(pad: int) -> bytes:
+    return b" " * pad + json.dumps(GOOD).encode()
+
+
+def test_a_padded_valid_record_gets_the_same_verdict_from_load_and_the_append_check(tmp_path: Path) -> None:
+    """One per-line cap, shared: JSON allows leading whitespace, but a line past the cap is not a record anywhere."""
+    cap = outcomes.LINE_LIMIT
+    good = len(json.dumps(GOOD).encode())
+    for pad, ok in ((cap - good, True), (cap - good + 1, False), (17000, False)):
+        log = tmp_path / f"o{pad}.jsonl"
+        log.write_bytes(_padded(pad) + b"\n")
+        if ok:
+            assert len(outcomes.load(log)) == 1
+            outcomes.check_appendable(log)
+        else:
+            with pytest.raises(ConfigError, match=r":1: .*longer than"):
+                outcomes.load(log)
+            with pytest.raises(ConfigError, match="last line is not a complete valid record"):
+                outcomes.check_appendable(log)
+
+
+def test_an_oversized_line_is_named_by_load_even_in_the_middle(tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    log.write_bytes(json.dumps(GOOD).encode() + b"\n" + _padded(outcomes.LINE_LIMIT) + b"\n")
+    with pytest.raises(ConfigError, match=r"o\.jsonl:2: .*longer than"):
+        outcomes.load(log)
+
+
+def test_the_ledger_is_sole_owner_so_a_write_through_a_pre_opened_descriptor_is_lost(tmp_path: Path) -> None:
+    """Pins the documented ownership contract: append replaces the file atomically (never torn), so another writer
+    holding the old descriptor writes to an unlinked inode. The log stays valid and the stray bytes are not in it."""
+    import os
+
+    log = tmp_path / "o.jsonl"
+    outcomes.append(log, outcomes.validate(GOOD))
+    fd = os.open(log, os.O_WRONLY | os.O_APPEND)
+    try:
+        outcomes.append(log, outcomes.validate(GOOD))
+        os.write(fd, b"stray non-SAFO write\n")
+    finally:
+        os.close(fd)
+    assert b"stray" not in log.read_bytes()
+    assert len(outcomes.load(log)) == 2
+    assert oct(log.stat().st_mode & 0o777) == "0o600"

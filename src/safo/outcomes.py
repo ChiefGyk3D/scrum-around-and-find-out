@@ -4,7 +4,23 @@
 A record: date, card (a GitHub URL or null), agent, shape, review_rounds (review passes, the passing one included),
 findings by severity, tokens and requests when known, and a note. Optional `model` (the underlying model of the
 run) and `credits_used` (credits or premium requests consumed) make agents comparable on cost against rework; a record
-without them stays valid and is written without those keys. Appended one line at a time.
+without them stays valid and is written without those keys. Four more optional keys record how a task went: `outcome`
+(`accepted` or `abandoned`), `attempts` (1 to 100), `intervention_minutes` (whole minutes the
+maintainer spent, self-reported at acceptance, 0 to 10080) and `defects_after_approval` (a count). All are whole
+numbers or a fixed word, never free text. Appended one line at a time.
+
+The `outcome` rule is strict. A record with no `outcome` key at all is a legacy record (the log used to hold only
+finished tasks) and is accepted by definition: it reads back unchanged and is never rewritten. A record that has the
+key must carry `accepted` or `abandoned`: `"outcome": null`, a number, an unknown word or any other type is invalid and
+refused like any other bad field, so "cannot tell" never counts as an accepted task. An `abandoned` record has no
+acceptance, so `intervention_minutes` (self-reported at acceptance) and `defects_after_approval` are refused on it.
+Before an append, the existing last line must be a complete valid record; a torn tail is refused, never repaired.
+No line may be longer than LINE_LIMIT bytes (16 KiB), on load or on append.
+
+Ownership: the ledger is SAFO's private file (mode 0600). An append rewrites it atomically under a sidecar lock
+(write a new file, replace the old one), so a crash can never leave a torn ledger. The price is that only cooperating
+SAFO writers are safe: any other process that holds the log open, or writes to it, is writing to the replaced (unlinked)
+file and its bytes never appear in the log. Do not hold the ledger open or write to it from anything but SAFO.
 """
 
 from __future__ import annotations
@@ -26,13 +42,40 @@ from safo.guardlog import APPEND_LOCK_TIMEOUT, bounded_read, file_lock, write_te
 SEVERITIES = ("critical", "important", "minor", "unrated")
 CARD = re.compile(r"https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:issues|pull)/[0-9]{1,9}")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# A model LABEL, never used as a path: segments of letters, digits and . _ : - joined by single `/` (an Ollama tag
+# `gemma4:12b`, a registry name `hf.co/org/m:Q4_K_M`); starts alphanumeric, no `..` and no `.` segment, at most 128.
+MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*(?:/[A-Za-z0-9._:-]+)*")
+MAX_MODEL = 128
+
+
+def valid_model(name: object) -> bool:
+    """True when `name` can be recorded as the `model` field."""
+    return (
+        isinstance(name, str)
+        and len(name) <= MAX_MODEL
+        and MODEL.fullmatch(name) is not None
+        and ".." not in name
+        and "." not in name.split("/")
+    )
+
+
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 COUNT = re.compile(r"[0-9]{1,9}")
 NOTE_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")  # any control or line-break character
 NOTE_LIMIT = 500
 MAX_COUNT = 10**12
 MAX_ROUNDS = 1000
-OPTIONAL_KEYS = ("model", "credits_used")
+OUTCOME_VALUES = ("accepted", "abandoned")
+MAX_ATTEMPTS = 100
+MAX_INTERVENTION_MINUTES = 7 * 24 * 60  # one week
+OPTIONAL_KEYS = (
+    "model",
+    "credits_used",
+    "outcome",
+    "attempts",
+    "intervention_minutes",
+    "defects_after_approval",
+)
 MAX_LOG_BYTES = 4 * 1024 * 1024
 
 
@@ -49,10 +92,19 @@ class Outcome:
     note: str = ""
     model: str | None = None
     credits_used: int | None = None
+    outcome: str | None = None
+    attempts: int | None = None
+    intervention_minutes: int | None = None
+    defects_after_approval: int | None = None
 
     def to_json(self) -> str:
         data = {k: v for k, v in self.__dict__.items() if v is not None or k not in OPTIONAL_KEYS}  # unset: no key
         return json.dumps(data, sort_keys=True)  # ASCII only: no Unicode line break can split a record
+
+    @property
+    def abandoned(self) -> bool:
+        """A task that was dropped. Until a report defines them, no measure counts it as a finished task."""
+        return self.outcome == "abandoned"
 
     @property
     def finding_count(self) -> int:
@@ -121,13 +173,28 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_COUNT):
             raise ConfigError(f"{where}.{key}: expected an integer >= 0 or null")
     model = raw.get("model")
-    if model is not None and not (isinstance(model, str) and IDENTIFIER.fullmatch(model)):
-        raise ConfigError(f"{where}.model: expected a string of letters, digits, . _ - (at most 64), or null")
+    if model is not None and not (valid_model(model)):
+        raise ConfigError(f"{where}.model: expected a label (letters, digits, . _ : - and single /; max 128), or null")
     credits = raw.get("credits_used")
     if credits is not None and (
         isinstance(credits, bool) or not isinstance(credits, int) or not 0 <= credits <= MAX_COUNT
     ):
         raise ConfigError(f"{where}.credits_used: expected an integer >= 0 or null")
+    outcome = raw.get("outcome")  # an absent key is a legacy record (accepted); a present key must be a known word
+    if "outcome" in raw and not (isinstance(outcome, str) and outcome in OUTCOME_VALUES):
+        raise ConfigError(f"{where}.outcome: expected one of {', '.join(OUTCOME_VALUES)} (or leave the key out)")
+    for key, low, high in (
+        ("attempts", 1, MAX_ATTEMPTS),
+        ("intervention_minutes", 0, MAX_INTERVENTION_MINUTES),
+        ("defects_after_approval", 0, MAX_COUNT),
+    ):
+        value = raw.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high):
+            raise ConfigError(f"{where}.{key}: expected an integer from {low} to {high}, or null")
+    if outcome == "abandoned":  # no acceptance happened: these would pollute the aggregates
+        for key in ("intervention_minutes", "defects_after_approval"):
+            if raw.get(key) is not None:
+                raise ConfigError(f"{where}.{key}: not allowed on an abandoned task (it was never accepted)")
     note = raw.get("note", "")
     if not isinstance(note, str) or NOTE_FORBIDDEN.search(note) or len(note) > NOTE_LIMIT:
         raise ConfigError(f"{where}.note: expected one line of text (printable, at most 500 characters)")
@@ -143,6 +210,10 @@ def validate(raw: Any, where: str = "outcome") -> Outcome:
         note,
         model,
         credits,
+        outcome,
+        raw.get("attempts"),
+        raw.get("intervention_minutes"),
+        raw.get("defects_after_approval"),
     )
 
 
@@ -152,6 +223,41 @@ def _read(path: Path) -> bytes:
         return bounded_read(path, MAX_LOG_BYTES)
     except (OSError, ValueError):
         raise ConfigError("cannot read outcomes log within resource limits (a regular file, not a link)") from None
+
+
+# One line of the log, trailing whitespace aside, is at most this many bytes, for the loader and the append check alike:
+# a valid record is far smaller (note 500 characters, ASCII on disk), so a longer line is not one, padded or not.
+LINE_LIMIT = 16 * 1024
+
+
+def _check_tail(existing: bytes) -> None:
+    """The last non-empty line of the log must be a complete valid record, or the append would bury the new record
+    behind a line that fails every later load. Refused, never repaired or truncated: the user may want to inspect it."""
+    lines = existing.rstrip().rsplit(b"\n", 1)
+    last = lines[-1][-(LINE_LIMIT + 1) :] if lines[-1].strip() else b""
+    if not last:
+        return
+    try:
+        if len(last) > LINE_LIMIT:
+            raise ValueError("line too long")
+        validate(loads(last))
+    except (ValueError, UnicodeError, ConfigError):
+        raise ConfigError(
+            "outcomes log: the last line is not a complete valid record (a torn write?); "
+            "nothing was appended and nothing was changed: inspect or repair the file first"
+        ) from None
+
+
+def check_appendable(path: Path) -> None:
+    """Advisory, unlocked: ConfigError when `append` would refuse because of the log's tail (a caller about to do
+    expensive work, like generating an answer, asks first). A missing log is fine; `append` stays the authority."""
+    try:
+        existing = _read(path)
+    except ConfigError:
+        if path.is_symlink() or path.exists():
+            raise
+        return
+    _check_tail(existing)
 
 
 def append(path: Path, outcome: Outcome, check_dir: bool = False) -> None:
@@ -168,6 +274,7 @@ def append(path: Path, outcome: Outcome, check_dir: bool = False) -> None:
                 if path.is_symlink() or path.exists():
                     raise
                 existing = b""
+            _check_tail(existing)
             if existing and not existing.endswith(b"\n"):
                 existing += b"\n"
             if len(existing) + len(line) > MAX_LOG_BYTES:
@@ -183,6 +290,8 @@ def parse_log(raw: bytes, source: str) -> list[Outcome]:
     for number, line in enumerate(raw.split(b"\n"), 1):
         if not line.strip():
             continue
+        if len(line.rstrip()) > LINE_LIMIT:
+            raise ConfigError(f"{source}:{number}: line longer than {LINE_LIMIT} bytes is not a record")
         try:
             record = loads(line)
         except DuplicateKeyError as err:
@@ -216,7 +325,7 @@ def summarise(outcomes: list[Outcome], month: str) -> list[AgentSummary]:
         raise ConfigError("month: expected YYYY-MM") from None
     groups: dict[str, list[Outcome]] = defaultdict(list)
     for o in outcomes:
-        if o.date.startswith(month):
+        if o.date.startswith(month) and not o.abandoned:
             groups[o.agent].append(o)
     out = []
     for agent, rows in sorted(groups.items()):
@@ -239,6 +348,19 @@ def summarise(outcomes: list[Outcome], month: str) -> list[AgentSummary]:
 
 
 UNKNOWN_MODEL = "unknown"
+
+
+def count_abandoned(outcomes: list[Outcome], month: str) -> dict[str, int]:
+    """Abandoned records dated in `month`, per agent: shown apart, never mixed into a measure."""
+    try:
+        valid_month(month)
+    except ValueError:
+        raise ConfigError("month: expected YYYY-MM") from None
+    counts: dict[str, int] = defaultdict(int)
+    for o in outcomes:
+        if o.abandoned and o.date.startswith(month):
+            counts[o.agent] += 1
+    return dict(sorted(counts.items()))
 
 
 @dataclass(frozen=True)
@@ -273,7 +395,7 @@ def summarise_models(outcomes: list[Outcome], month: str) -> list[ModelSummary]:
         raise ConfigError("month: expected YYYY-MM") from None
     groups: dict[tuple[str, str], list[Outcome]] = defaultdict(list)
     for o in outcomes:
-        if o.date.startswith(month):
+        if o.date.startswith(month) and not o.abandoned:
             groups[(o.agent, o.model or UNKNOWN_MODEL)].append(o)
     out = []
     for (agent, model), rows in sorted(groups.items()):
@@ -370,7 +492,9 @@ def query_outcomes(outcomes: list[Outcome], span: str, agent: str, model: str | 
     """
     first, last = month_span(span)
     rows = [
-        o for o in outcomes if o.agent == agent and (model is None or o.model == model) and first <= o.date[:7] <= last
+        o
+        for o in outcomes
+        if o.agent == agent and not o.abandoned and (model is None or o.model == model) and first <= o.date[:7] <= last
     ]
     values: dict[str, Fraction | None] = dict.fromkeys(METRICS)
     if rows:

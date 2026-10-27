@@ -48,11 +48,8 @@ def test_a_hostile_command_line_never_reaches_the_log(_private_home: Path, tmp_p
         ["--date", "2026-13-01"],
         ["--date", "2026-10-07 10:00:00"],
         ["--card", "https://google.com/search?q=safo"],
-        ["--review-rounds", "-1"],
         ["--findings", "critical=1,invalid=2"],
         ["--findings", "critical=1,important=abc"],
-        ["--tokens", "-500"],
-        ["--requests", "-1"],
     ):
         code, _, _ = cli(*base, *extra, home=_private_home)
         assert code == 2, extra
@@ -162,11 +159,138 @@ def test_hostile_model_and_credits_flags_never_reach_the_log(_private_home: Path
     log = tmp_path / "o.jsonl"
     base = ["outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log)]
     for extra in (
-        ["--model", "two words"], ["--model", "a\nb"], ["--model", "a\u2028b"], ["--model", "x" * 65], ["--model", ""],
-        ["--credits-used", "-1"], ["--credits-used", str(10**13)],
+        ["--model", "two words"], ["--model", "a\nb"], ["--model", "a\u2028b"], ["--model", "x" * 129], ["--model", ""],
+        ["--credits-used", str(10**12 + 1)],
     ):  # fmt: skip
         code, _, err = cli(*base, *extra, home=_private_home)
         assert code == 2 and ("model" in err or "credits_used" in err), extra
-    with pytest.raises(SystemExit):
-        cli(*base, "--credits-used", "1.5", home=_private_home)
+    for bad in ("1.5", "-1", str(10**13)):
+        with pytest.raises(SystemExit):
+            cli(*base, "--credits-used", bad, home=_private_home)
     assert not log.exists()
+
+
+def _add(log: Path, home: Path, *extra: str) -> tuple[int, str, str]:
+    return cli("outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log), *extra, home=home)
+
+
+def test_the_new_flags_are_written_when_given(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    code, _, _ = _add(
+        log, _private_home, "--outcome", "accepted", "--attempts", "3", "--intervention-minutes", "25",
+        "--defects-after-approval", "2",
+    )  # fmt: skip
+    row = json.loads(log.read_text())
+    assert code == 0 and row["outcome"] == "accepted" and row["attempts"] == 3
+    assert row["intervention_minutes"] == 25 and row["defects_after_approval"] == 2
+
+
+def test_without_the_new_flags_no_new_key_is_written(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    assert _add(log, _private_home)[0] == 0
+    new = {"outcome", "attempts", "intervention_minutes", "defects_after_approval"}
+    assert not new & set(json.loads(log.read_text()))
+
+
+def test_bad_new_flag_values_write_nothing_and_exit_nonzero(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    assert _add(log, _private_home)[0] == 0
+    before = log.read_bytes()
+    for extra in (
+        ["--outcome", "done"], ["--outcome", "Accepted"], ["--attempts", "0"], ["--attempts", "101"],
+        ["--intervention-minutes", "10081"], ["--defects-after-approval", "1000000000001"],
+    ):  # fmt: skip
+        code, _, err = _add(log, _private_home, *extra)
+        assert code != 0 and "expected" in err, extra
+        assert log.read_bytes() == before, extra
+    for extra in (
+        ["--attempts", "x"], ["--attempts", "1.5"], ["--intervention-minutes", ""], ["--attempts", "-1"],
+        ["--intervention-minutes", "-1"], ["--defects-after-approval", "-1"],
+    ):  # fmt: skip
+        with pytest.raises(SystemExit):
+            _add(log, _private_home, *extra)
+        assert log.read_bytes() == before, extra
+
+
+def test_dry_run_with_the_new_flags_writes_nothing(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    base = ["--dry-run", "outcome", "add", "--agent", "codex", "--shape", "research", "--log", str(log)]
+    code, out, _ = cli(*base, "--attempts", "2", home=_private_home)
+    assert code == 0 and "nothing written" in out and not log.exists()
+    code, _, _ = cli(*base, "--attempts", "0", home=_private_home)
+    assert code != 0 and not log.exists()
+
+
+def test_an_abandoned_record_gets_no_fabricated_review_round(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    assert _add(log, _private_home, "--outcome", "abandoned")[0] == 0
+    assert _add(log, _private_home, "--outcome", "abandoned", "--review-rounds", "2")[0] == 0
+    assert _add(log, _private_home, "--outcome", "accepted")[0] == 0
+    assert _add(log, _private_home)[0] == 0
+    rounds = [json.loads(x)["review_rounds"] for x in log.read_text().splitlines()]
+    assert rounds == [0, 2, 1, 1]
+
+
+def test_a_model_label_with_slashes_is_accepted_by_outcome_add(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    assert _add(log, _private_home, "--model", "hf.co/org/m:Q4_K_M")[0] == 0
+    assert json.loads(log.read_text())["model"] == "hf.co/org/m:Q4_K_M"
+    assert _add(log, _private_home, "--model", "a//b")[0] == 2
+
+
+def test_usage_report_excludes_abandoned_and_shows_them_apart(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    for extra in (["--outcome", "abandoned"], ["--outcome", "abandoned"], ["--review-rounds", "2"]):
+        assert _add(log, _private_home, "--date", "2026-10-07", *extra)[0] == 0
+    code, out, _ = cli("usage", "--report", "--month", "2026-10", "--log", str(log), home=_private_home)
+    assert code == 0 and "1 tasks, 1 needed fixes, 2 review rounds" in out and "abandoned: codex 2" in out
+    code, out, _ = cli("usage", "--report", "--json", "--month", "2026-10", "--log", str(log), home=_private_home)
+    data = json.loads(out)
+    assert data["agents"][0]["tasks"] == 1 and data["abandoned"] == {"codex": 2}
+    only = tmp_path / "only.jsonl"
+    assert _add(only, _private_home, "--date", "2026-10-07", "--outcome", "abandoned")[0] == 0
+    code, out, _ = cli("usage", "--report", "--month", "2026-10", "--log", str(only), home=_private_home)
+    assert "nothing recorded" in out and "abandoned: codex 1" in out
+
+
+@pytest.mark.parametrize(
+    "flag", ["--attempts", "--intervention-minutes", "--defects-after-approval", "--review-rounds", "--tokens",
+             "--requests", "--credits-used"],
+)  # fmt: skip
+@pytest.mark.parametrize(
+    "value",
+    ["\u0663", "\uff15", "\u0661\u0662", "\u0968", "+5", " 5", "5 ", "5\n", "", "-1", "1.0", "1_0", "0x5", "9" * 400,
+     "\x1b[31m5", "\ud800"],
+)  # fmt: skip
+def test_integer_flags_take_ascii_digits_only_and_never_echo_the_input(
+    _private_home: Path, tmp_path: Path, flag: str, value: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = tmp_path / "o.jsonl"
+    with pytest.raises(SystemExit) as stop:  # argparse's own exit 2 for a bad flag value
+        _add(log, _private_home, flag, value)
+    err = capsys.readouterr().err
+    assert stop.value.code == 2 and not log.exists() and "expected whole decimal digits 0-9 only" in err
+    assert value.strip() not in err or value.strip() == "", "the hostile input is never echoed"
+
+
+def test_integer_flags_still_take_plain_digits(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    code, _, _ = _add(log, _private_home, "--attempts", "3", "--defects-after-approval", "007", "--tokens", "0")
+    row = json.loads(log.read_text())
+    assert code == 0 and row["attempts"] == 3 and row["defects_after_approval"] == 7 and row["tokens"] == 0
+
+
+@pytest.mark.parametrize("flag", ["--intervention-minutes", "--defects-after-approval"])
+def test_an_abandoned_task_with_an_acceptance_field_is_refused(_private_home: Path, tmp_path: Path, flag: str) -> None:
+    log = tmp_path / "o.jsonl"
+    code, _, err = _add(log, _private_home, "--outcome", "abandoned", flag, "3")
+    assert code == 2 and "not allowed on an abandoned task" in err and not log.exists()
+    assert _add(log, _private_home, "--outcome", "abandoned", "--attempts", "3")[0] == 0
+
+
+def test_outcome_add_refuses_a_torn_last_line_and_changes_nothing(_private_home: Path, tmp_path: Path) -> None:
+    log = tmp_path / "o.jsonl"
+    log.write_bytes(b'{"date":')
+    code, _, err = _add(log, _private_home)
+    assert code == 2 and "last line is not a complete valid record" in err
+    assert log.read_bytes() == b'{"date":'

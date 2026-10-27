@@ -59,6 +59,8 @@ guessing:
 - `safo route` uses the local agent only when the probe finds it reachable, and falls back to a named Claude model
   otherwise.
 - If the endpoint disappears mid-request, `safo local run` names the fallback and exits 1.
+- If the endpoint answers with a different model than routing chose (or names none), `safo local run` drops the answer,
+  writes no outcome and exits 3. The reported name is untrusted data and is escaped and length-capped when shown.
 - Endpoints come from configuration, never from the repository. The shipped example uses a placeholder host; real endpoints
   live in a local, git-ignored override file. The privacy check fails on carrier-grade (VPN) addresses and on remote-access
   product names; see [Privacy check](privacy.md).

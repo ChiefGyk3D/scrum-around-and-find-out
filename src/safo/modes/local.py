@@ -30,6 +30,15 @@ def fallback_of(doc: AgentsFile, shape_name: str) -> str:
     return next((a for a in chain if doc.agent(a).kind != "ollama"), "the lead")
 
 
+EXIT_MODEL_MISMATCH = 3  # the endpoint reported a different model than routing chose, or none: nothing is logged
+MAX_SHOWN = 80  # characters of a model name echoed in a message
+
+
+def _bare(name: str) -> str:
+    """Ollama's implicit `:latest` tag removed, nothing else: `m` and `m:latest` are the same model, `m:7b` is not."""
+    return name[: -len(":latest")] if name.endswith(":latest") else name
+
+
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if args.action != "run":
         raise ConfigError("the only local action is `run`")
@@ -50,6 +59,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if len(prompt) > MAX_PROMPT_BYTES:
         raise ConfigError(f"the prompt file is larger than {MAX_PROMPT_BYTES} bytes; summarise it first")
     log = outcomes_path(ctx, args)  # refused here, before anything is sent, if it is not somewhere we may write
+    outcomes.check_appendable(log)  # and if its last line is torn: the append would refuse after the answer
     if ctx.dry_run:
         ctx.say("dry run: prompt validated; no probes, generation or outcome writes")
         return EXIT_OK
@@ -63,6 +73,12 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             ctx.say(f"skipped: {line}")
         ctx.say(f"no local endpoint can take this: hand it to {fallback} instead (nothing was sent)")
         return EXIT_DRIFT
+    if not outcomes.valid_model(model):  # decided before sending: an outcome without its model reads as unknown
+        raise ConfigError(
+            f"the routed model name {output.line(model)[:MAX_SHOWN]!r} cannot be recorded as a model label "
+            f"(letters, digits, . _ : - and single /; at most {outcomes.MAX_MODEL}): nothing was sent or recorded"
+        )
+    label = model
     think = endpoint.think if args.think is None else args.think
     num_ctx = args.num_ctx or endpoint.ctx_for(model)
     try:
@@ -78,10 +94,21 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     except EndpointUnreachableError as err:
         ctx.say(f"{err}: hand it to {fallback} instead")
         return EXIT_DRIFT
+    if not result.model or _bare(result.model) != _bare(model):  # endpoint data is untrusted: never log what it claims
+        reported = result.model[:MAX_SHOWN] + ("..." if len(result.model) > MAX_SHOWN else "")
+        ctx.say(
+            f"model mismatch: asked for {model[:MAX_SHOWN]!r}, the endpoint reported "
+            f"{reported!r}: the answer is dropped and no outcome was written"
+            if result.model
+            else f"the endpoint reported no model (asked for {model[:MAX_SHOWN]!r}): "
+            "the answer is dropped and no outcome was written"
+        )
+        return EXIT_MODEL_MISMATCH
     output.block(ctx.out, result.response.rstrip("\n").split("\n"))  # untrusted text: inside a stop-commands block
     speed = f"{result.tokens_per_second:g} tok/s" if result.tokens_per_second else "speed unknown"
+    shown = output.line(model)[:MAX_SHOWN]  # the routed name in the note: escaped and capped
     note = (
-        f"{endpoint.id} {model} think={str(think).lower()} num_ctx={num_ctx}: "
+        f"{endpoint.id} {shown} think={str(think).lower()} num_ctx={num_ctx}: "
         f"{result.eval_count} eval tokens, {speed}; "
         "a draft until a Claude model reviews it"
     )
@@ -97,6 +124,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             result.eval_count + result.prompt_eval_count,
             1,
             note,
+            label,
         ),
         check_dir=outcomes_is_default(ctx, args),
     )

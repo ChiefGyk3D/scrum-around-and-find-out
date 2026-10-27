@@ -64,7 +64,8 @@ resident. So an endpoint lists the models `safo` may ask for, the `num_ctx` each
 request that would load a different model or use a different `num_ctx` (a cap applies only on an endpoint with no protected
 models), use an endpoint only when the probe finds it reachable, never route to a guard model (the safety model of a production bot), and prefer an endpoint that
 is not shared with production. If nothing fits, or the endpoint goes away mid-request, nothing is sent elsewhere: the command
-names the fallback and exits 1.
+names the fallback and exits 1. If the endpoint answers with a different model than routing chose, or names none, it
+drops the answer, writes no outcome and exits 3 (see [the outcomes log](#the-outcomes-log)).
 
 Real endpoints never go in the repository. `agents.yaml` carries placeholders (`ollama.lan`); put the real ones in
 `~/.config/safo/agents.local.yaml` (git-ignored), which is merged over it key by key.
@@ -102,7 +103,7 @@ checked, never its verdicts.
 One JSON line per finished task: `date`, `card` (a GitHub URL or null), `agent`, `shape`, `review_rounds` (review passes, the
 passing one included), `findings` by severity (`critical`, `important`, `minor`, `unrated`), `tokens` and `requests` when
 known, and a one-line `note`. Two optional fields make agents comparable on cost against rework: `model`, the underlying
-model of the run (for example `claude-sonnet-5-5` or `gpt-5.4`; letters, digits and `. _ -`, at most 64), and
+model of the run (for example `claude-sonnet-5-5` or `gpt-5.4`; a model label: letters, digits and `. _ : -`, with single `/` between parts, at most 128, so `org/model:Q4_K_M` is fine; it is a label and never used as a path), and
 `credits_used`, the whole number of credits or premium requests the run consumed (0 to 10^12). Leave either out, or use
 null, when it is not known: records without a model or credits stay valid, and the seed file has none. They are written
 only when set, so an older line is unchanged. Any other key is refused, and so is a key repeated in any object of a
@@ -110,12 +111,46 @@ line (JSON would silently keep the last one); the error names the key and the li
 meters and hooks with a repeated key is treated like any other malformed line: skipped, not guessed at.
 
 `safo outcome add` appends one after checking it; add `--model gpt-5.4 --credits-used 12` for the two optional fields.
+
+Four more optional fields record how the task went, all whole numbers or a fixed word, never free text:
+`outcome` (`accepted` or `abandoned`; see the strict rule below),
+`attempts` (1 to 100), `intervention_minutes` (0 to 10080) and `defects_after_approval` (0 to 10^12). Flags:
+`--outcome`, `--attempts`, `--intervention-minutes`, `--defects-after-approval`. A task that was dropped is logged with
+`--outcome abandoned`; a task with no record at all stays invisible, because SAFO cannot see it from a local file.
+`intervention_minutes` is **self-reported by the maintainer at acceptance**; it is never derived from timestamps, which
+measure elapsed time, not attention. Any report built on it has to say how many records carry it. A bad value writes
+nothing and exits non-zero; a line without these keys is unchanged. A log that uses the new keys is **not readable by
+an older safo**, which refuses unknown keys: do not downgrade across it, or move the lines aside first.
+An `--outcome abandoned` record gets `review_rounds` 0 unless you pass one (no review pass is invented). Abandoned
+records are **not counted** in `usage --report` (they are listed apart as `abandoned: <agent> <n>`, and under
+`abandoned` in `--json`), in the `outcomes:v1:` evidence metrics, or toward promotion (`qualify` rejects them as
+`abandoned task`); that holds until a report defines how to read them. Old records without `outcome` count as accepted.
+The `outcome` rule is strict: a line with **no** `outcome` key is a legacy record, accepted by definition, and reads
+back unchanged (SAFO never rewrites a ledger line). A line that **has** the key must say `accepted` or `abandoned`:
+`"outcome": null`, a number or an unknown word is invalid and the line is refused, because "cannot tell" must never
+count as an accepted task. An abandoned task has no acceptance, so `--intervention-minutes` and
+`--defects-after-approval` are refused with `--outcome abandoned`. Integer flags take ASCII digits only (no `+`, no
+spaces, no Unicode digits). `outcome add` and `local run` append only when the log's last line is a complete valid
+record; a torn last line (an interrupted write) makes them refuse and change nothing, so you can inspect it. `local run`
+also refuses, before sending anything, a routed model name that cannot be recorded as a model label.
+`safo local run` writes the routed model into the `model` field, but only after the endpoint's
+answer reports that same model (an implicit `:latest` tag is ignored; any other difference in name, tag or size is a
+mismatch). A mismatch, or an answer that reports no model, drops the answer, prints one escaped line naming both
+models, writes no record and exits 3. If the routed name is not a valid model label (for example longer than 128
+characters), `local run` refuses before sending anything: nothing is generated or recorded, and the error shows the
+name escaped and capped.
 `safo usage --report` summarises a month per agent: tasks, how many needed fixes, review rounds, findings, tokens. It then
 adds a table per agent and model: runs, review rounds per run, the share of runs that needed fixes, findings by severity,
 credits used in total, and credits per run, per run that needed no fixes and per run that needed fixes. Rows without a
 model are grouped as `unknown`, sorted by agent and then model. The credit averages count only runs with credits recorded
 and show `unknown` when there are none, so a missing figure is never read as zero. `--json` carries the same table under
 `models`. [Lessons](lessons.md) cite it.
+
+The log is **SAFO's private file** (mode 0600), and SAFO must be its only writer. Every append rewrites the file
+atomically under a lock (a new file replaces the old one), so a crash or kill can never leave a torn ledger. The cost: a
+program that holds the log open, or writes to it, while SAFO appends is writing to the replaced file, and **its bytes are
+silently lost**, with no error on either side. Edit or inspect it only while no `safo` command is running, and reopen the
+file afterwards. A line longer than 16 KiB is not a record: it is refused on read and on append, naming the line.
 
 The seed, [examples/outcomes-2026-10.jsonl](../examples/outcomes-2026-10.jsonl), is one measured day.
 

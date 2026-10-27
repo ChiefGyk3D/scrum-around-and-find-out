@@ -103,14 +103,15 @@ def report(ctx: LocalContext, args: argparse.Namespace, month: str) -> int:
     loaded = outcomes.load(path)
     rows = outcomes.summarise(loaded, month)
     model_rows = outcomes.summarise_models(loaded, month)
+    abandoned = outcomes.count_abandoned(loaded, month)
     if args.json:
         data: list[dict[str, Any]] = [s.__dict__ for s in rows]
         models: list[dict[str, Any]] = [m.__dict__ for m in model_rows]
         # one line, ASCII only; `::` is written as a JSON escape so no value can start a workflow command
         ctx.say(
-            json.dumps({"month": month, "agents": data, "models": models}, separators=(",", ":")).replace(
-                "::", ":\\u003a"
-            )
+            json.dumps(
+                {"month": month, "agents": data, "models": models, "abandoned": abandoned}, separators=(",", ":")
+            ).replace("::", ":\\u003a")
         )
         return EXIT_OK
     ctx.say(f"Outcomes for {month} ({path.name})")
@@ -122,6 +123,8 @@ def report(ctx: LocalContext, args: argparse.Namespace, month: str) -> int:
             f"  {s.agent:<14} {s.tasks} tasks, {s.needed_fixes} needed fixes, {s.review_rounds} review rounds, "
             f"findings: {findings}, tokens {s.tokens:,}, requests {s.requests:,}"
         )
+    if abandoned:
+        ctx.say("  abandoned: " + ", ".join(f"{a} {n}" for a, n in abandoned.items()) + " (not counted above)")
     if model_rows:
         ctx.say("By agent and model (credit averages count only runs with credits recorded)")
     for m in model_rows:

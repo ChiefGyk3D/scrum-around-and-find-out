@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import itertools
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -168,3 +169,47 @@ def test_every_rejection_is_reported_with_a_count_in_a_stable_order() -> None:
     rows = [rec(1, card=None), rec(2, rounds=0), rec(3, date=days_ago(400)), rec(4, date=days_ago(-5))]
     r = run(rows)
     assert r.rejected == tuple(sorted(r.rejected)) and sum(n for _, n in r.rejected) == 4
+
+
+def _abandon(o: Outcome) -> Outcome:
+    return replace(o, outcome="abandoned", review_rounds=0)
+
+
+def test_abandoned_records_never_count_toward_promotion() -> None:
+    rows = [*spread(9, 9), _abandon(rec(40)), _abandon(rec(41)), replace(rec(42), outcome="accepted")]
+    r = run(rows)
+    assert r.counted == 10 and reasons(r) == {q.ABANDONED: 2}
+    assert not run([*spread(8, 8), _abandon(rec(40)), _abandon(rec(41))]).qualified
+
+
+def test_an_abandoned_record_on_the_same_card_never_collapses_with_an_accepted_one() -> None:
+    both = [rec(1, date=days_ago(2)), replace(rec(1, date=days_ago(2)), outcome="abandoned")]
+    r = run(both)
+    assert r.counted == 0 and reasons(r) == {q.CONFLICT: 2}, "different outcomes are not duplicates"
+    assert all(run(list(p)).counted == 0 for p in itertools.permutations(both))
+
+
+def _as_log(rows: list[Outcome]) -> bytes:
+    return b"".join(o.to_json().encode() + b"\n" for o in rows)
+
+
+def test_a_legacy_record_without_outcome_still_counts_toward_promotion_after_a_round_trip() -> None:
+    from safo.outcomes import parse_log
+
+    rows = spread(10, 10)
+    assert all(o.outcome is None and "outcome" not in o.to_json() for o in rows)
+    loaded = parse_log(_as_log(rows), "log")
+    assert loaded == rows and run(loaded).qualified and run(loaded).counted == 10
+
+
+def test_a_record_with_a_null_outcome_never_reaches_qualification() -> None:
+    import json
+
+    from safo.errors import ConfigError
+    from safo.outcomes import parse_log
+
+    good = _as_log(spread(9, 9))
+    bad = json.loads(rec(50, date=days_ago(1)).to_json())
+    bad["outcome"] = None
+    with pytest.raises(ConfigError, match=r"log:1.outcome: expected"):
+        parse_log(json.dumps(bad).encode() + b"\n" + good, "log")
