@@ -1825,8 +1825,9 @@ def test_a_slow_cold_start_and_a_full_stdout_pipe_still_get_exit_two_before_the_
     _private_home: Path, agents: Path, tmp_path: Path
 ) -> None:
     """The child sleeps before it imports safo, as a slow disk would. The budget is counted from the start of the
-    PROCESS, so the decision deadline (3 s of 5) falls inside the host timeout; a clock that started after the imports
-    would put it past the timeout and the host would kill the guard first."""
+    PROCESS, so the decision deadline (8 s of the real 10) falls inside the host timeout; a clock that started after
+    the imports and the 5 s sleep would put it past the timeout and the host would kill the guard first. (The real
+    10 s budget, so the verdict is still computed after the cold start and the exit code is the denial's 2.)"""
     set_probe(_private_home, reachable=True, agents=agents)
     set_mode(_private_home, "block")
     result = run_watched(
@@ -1834,12 +1835,13 @@ def test_a_slow_cold_start_and_a_full_stdout_pipe_still_get_exit_two_before_the_
         agents,
         tmp_path,
         dispatch(model=None),
-        mode="seam",
+        mode="pre-seam",
+        host_timeout=PRE_BUDGET,
         jam_stdout=True,
-        extra_env={"SAFO_CHILD_COLD_START": "2.2"},
+        extra_env={"SAFO_CHILD_COLD_START": "5.0"},
     )
     assert not result.killed and result.status == 2, f"status {result.status}, killed {result.killed}"
-    assert result.elapsed < CHILD_BUDGET
+    assert result.elapsed < PRE_BUDGET
 
 
 def test_the_process_start_is_found_early_enough_to_include_the_interpreter_and_the_cold_start(tmp_path: Path) -> None:
