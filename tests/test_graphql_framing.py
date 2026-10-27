@@ -93,3 +93,28 @@ def test_data_that_is_not_an_object_is_an_unknown_outcome_for_a_mutation(answer:
 def test_a_query_whose_data_is_an_empty_object_is_still_an_answer() -> None:
     with raw_server(sends(b'{"data": {}}')) as (url, _):
         assert ask(url, QUERY) == {}
+
+
+# -- a response with no framing at all, and a declared Content-Encoding on a body that parses ---------------------------
+
+
+def test_a_response_with_no_framing_headers_is_never_a_complete_answer() -> None:
+    """Close-delimited: a clean end cannot be told from a cut right after a valid JSON prefix."""
+    refused(raw_framing(b"Connection: close", body=QUERY_ANSWER), QUERY, ApiError, "framing")
+    refused(raw_framing(b"Connection: close", body=MUTATION_ANSWER), MUTATION, UnknownOutcomeError, "framing")
+    refused(raw_framing(body=MUTATION_ANSWER), MUTATION, UnknownOutcomeError, "framing")
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "GZIP", "deflate", "br", "identity, gzip", "compress"])
+def test_a_declared_content_encoding_on_a_valid_json_body_is_never_a_success(encoding: str) -> None:
+    """The body is plain JSON that would parse: only the header says it cannot be trusted as sent."""
+    headers = {"Content-Encoding": encoding}
+    with raw_server(sends(QUERY_ANSWER, headers=headers)) as (url, _), pytest.raises(ApiError, match="Content-Encoding"):
+        ask(url, QUERY)
+    refused(sends(MUTATION_ANSWER, headers=headers), MUTATION, UnknownOutcomeError, "Content-Encoding")
+
+
+@pytest.mark.parametrize("encoding", ["identity", "Identity"])
+def test_an_identity_content_encoding_is_accepted(encoding: str) -> None:
+    with raw_server(sends(MUTATION_ANSWER, headers={"Content-Encoding": encoding})) as (url, _):
+        assert ask(url, MUTATION) == {"addItem": {"id": "x"}}

@@ -116,7 +116,7 @@ _CONTENT_LENGTH = re.compile(r"[0-9]{1,15}")
 def _content_length(response: Any) -> int | None:
     """The announced body length, None when the response announces none, ApiError when the framing is malformed.
 
-    A response is framed by exactly one of two things: a single Content-Length of ASCII digits, or a single
+    A response with neither is refused too (unless it is a 204 or 304). A response is framed by exactly one of two things: a single Content-Length of ASCII digits, or a single
     `Transfer-Encoding: chunked` (exactly that value) and no Content-Length. Both together, any other transfer coding
     (gzip, deflate, compress, identity, a list, another spelling) and a repeated header are refused: http.client
     decodes chunks and ignores Content-Length, reads Content-Length with int() (which accepts a sign, spaces,
@@ -130,7 +130,10 @@ def _content_length(response: Any) -> int | None:
             raise ApiError("GitHub's response framing was malformed (Transfer-Encoding)")
         return None
     if not lengths:
-        return None
+        if getattr(response, "status", 200) in (204, 304):  # these carry no body, so nothing is left to frame
+            return None
+        # A close-delimited body cannot tell a clean end from a cut right after a valid JSON prefix.
+        raise ApiError("GitHub's response framing was missing (no Content-Length or Transfer-Encoding)")
     if len(lengths) != 1 or not _CONTENT_LENGTH.fullmatch(lengths[0]):
         raise ApiError("GitHub's response framing was malformed (Content-Length)")
     return int(lengths[0])
@@ -145,6 +148,10 @@ def _read(response: Any) -> bytes:
     IncompleteRead.
     """
     declared = _content_length(response)
+    encodings = response.headers.get_all("Content-Encoding") or []
+    if any(value.strip().lower() not in ("", "identity") for value in encodings):
+        # Nothing here decodes a body, so a declared encoding means the bytes are not what they claim to be.
+        raise ApiError("GitHub's response declared a Content-Encoding and was not decoded")
     data: bytes = response.read(MAX_BODY + 1)
     if len(data) > MAX_BODY:
         raise ApiError(f"GitHub's response was too large (more than {MAX_BODY} bytes)")
