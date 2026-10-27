@@ -21,14 +21,18 @@ import os
 import sys
 from collections.abc import Sequence
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 from safo.context import LocalContext
 from safo.modes import hooks
 
+if TYPE_CHECKING:
+    import argparse
+
 OPTIONS = ("--agents", "--agents-local")
 
 
-def scan(words: Sequence[str]) -> SimpleNamespace:
+def scan(words: Sequence[str]) -> argparse.Namespace:
     """The two paths in `words`, by a lenient scan. `--opt=V` and `--opt V` (last one wins); an empty value counts as
     absent; a value that starts with a single dash is kept (`-strict.yaml` is a path); the word after a bare `--opt` is
     its value unless it starts with `--` (then the option has no value and that word is read on its own). Everything
@@ -48,7 +52,8 @@ def scan(words: Sequence[str]) -> SimpleNamespace:
             index += 1
         if value:
             values[name] = value
-    return SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"])
+    # the guard reads only these two attributes; a SimpleNamespace stands in so argparse is never imported
+    return cast("argparse.Namespace", SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"]))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

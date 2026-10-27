@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import time as wall_clock  # immune to the monotonic-clock stand-in some tests install
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import safo
 from safo import gemini, geminibrief, guardlog, leadwait, output, tracking
@@ -1466,7 +1466,7 @@ def guard_argv(words: Sequence[str]) -> argparse.Namespace | None:
         seen.add(flag)
         values[flag] = words[index + 1]
         index += 2
-    return SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"])
+    return cast("argparse.Namespace", SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"]))
 
 
 def salvage_argv(words: Sequence[str]) -> argparse.Namespace:
@@ -1495,7 +1495,7 @@ def salvage_argv(words: Sequence[str]) -> argparse.Namespace:
             index += 1
         if value:
             values[name] = value
-    return SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"])
+    return cast("argparse.Namespace", SimpleNamespace(agents=values["--agents"], agents_local=values["--agents-local"]))
 
 
 def guard_command(words: Sequence[str]) -> int:
