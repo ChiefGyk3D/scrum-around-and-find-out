@@ -17,7 +17,7 @@ REPO = r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
 FINDING = re.compile(
     rf"^DRIFT   NO-GATE {REPO}: default branch '[^']+' "
     r"(has no branch protection and no active ruleset"
-    r"|is protected but does not require the check '[^']+'"
+    r"|is protected but does not require the check '[^']+'( from app [0-9]+ \(.+\))?"
     r"|requires the check '[^']+'(, but it can be bypassed \(.+\)"
     r"| and blocks force pushes, but both can be bypassed \(.+\))"
     r"|blocks force pushes, but it can be bypassed \(.+\)"
@@ -105,6 +105,6 @@ def test_every_gate_note_has_one_form(fake: FakeGitHub, client: Client, kind: st
     else:
         board = with_rules(board, gate_check="")
     _, text = gate(fake, client, board)
-    notes = [t for t in text if t.startswith("NOTE") and "NO-GATE" in t]
+    notes = [t for t in text if t.startswith("NOTE") and "NO-GATE" in t and "pinned to" not in t]
     assert len(notes) == 1, notes
     assert NOTE.match(notes[0]), notes[0]

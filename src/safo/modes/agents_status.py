@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""agents-status: one read-only view of what Claude, Codex and Copilot are doing for the board."""
+"""agents-status: one read-only view of what each agent (Claude, Codex, Copilot, ChatGPT, Ollama, RAG) is doing."""
 
 from __future__ import annotations
 
@@ -16,6 +16,9 @@ from safo.live import load_live
 from safo.modes import Mode, register
 
 HOURS_MAX = 24 * 366
+# Agents with no session or task list a shell can read: their work is only the cards that name them.
+CARD_ONLY_AGENTS = ("ChatGPT", "Ollama", "RAG")
+UNKNOWN = "(unknown agent)"
 
 Q_AGENT_ITEMS = """query AgentItems(
   $id: ID!, $statusField: String!, $agentField: String!, $endCursor: String
@@ -41,6 +44,9 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         raise ConfigError(f"--hours must be above 0 and at most {HOURS_MAX:g}")
     live = load_live(ctx.client, board.project)
     variables = {"id": live.id, "statusField": board.rules.status_field, "agentField": board.agents.field}
+    field = next((f for f in board.fields if f.name == board.agents.field), None)
+    known = {o.name for o in field.options} if field else set()
+    unknown: set[str] = set()
     waiting: list[str] = []
     working: dict[str, list[str]] = defaultdict(list)
     for node in ctx.client.nodes(Q_AGENT_ITEMS, variables, ("node", "items")):
@@ -48,15 +54,21 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         if content.get("__typename") not in ("Issue", "PullRequest") or content.get("state") != "OPEN":
             continue
         status = (node.get("status") or {}).get("name") or ""
-        agent = (node.get("agent") or {}).get("name") or "unassigned"
+        named = (node.get("agent") or {}).get("name") or ""
+        agent = named or "unassigned"
         repo, number = (content.get("repository") or {}).get("nameWithOwner"), content.get("number")
         if not isinstance(repo, str) or not isinstance(number, int) or isinstance(number, bool):
             raise MalformedDataError("agents-status: a card has no repository or number")
         ref = f"{repo}#{number}"
+        shown = agent
+        # a value the board does not list is said so, never mapped to a listed agent or folded into "unassigned"
+        if named and named not in known and (status in board.agents.working or status in board.agents.waiting):
+            unknown.add(agent)
+            shown = f"{agent} {UNKNOWN}"
         if status in board.agents.waiting:
-            waiting.append(f"  {ref}  {str(content['title'])[:80]}  {content['url']}")
+            waiting.append(f"  {shown:<12} {ref}  {str(content['title'])[:80]}  {content['url']}")
         if status in board.agents.working:
-            working[agent].append(f"  {agent:<12} {status:<12} {ref}  {str(content['title'])[:70]}")
+            working[shown].append(f"  {shown:<12} {status:<12} {ref}  {str(content['title'])[:70]}")
 
     ctx.say(f"Waiting on you (Status = {', '.join(board.agents.waiting)})")
     for line in sorted(waiting) or ["  nothing"]:
@@ -67,6 +79,10 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             ctx.say(line)
     if not working:
         ctx.say("  nothing")
+    if unknown:
+        ctx.say(
+            f"\nUnknown agent values (not options of {board.agents.field} in board.yaml): {', '.join(sorted(unknown))}"
+        )
 
     if not args.no_guard:
         ctx.say()
@@ -100,6 +116,12 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     ctx.say("\nClaude")
     ctx.say("  Subagents run inside the Claude Code session and cannot be listed from a shell: watch its panel.")
     ctx.say(f"  Their tasks are the board cards with {board.agents.field} = Claude above.")
+    for name in CARD_ONLY_AGENTS:
+        if name in known:
+            ctx.say(
+                f"{name}: no session to list from a shell; "
+                f"its work is the board cards with {board.agents.field} = {name} above."
+            )
     return EXIT_OK
 
 
@@ -111,4 +133,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-copilot", action="store_true", help="skip the Copilot section")
 
 
-register(Mode("agents-status", "what Claude, Codex and Copilot are doing (read-only)", add_arguments, run))
+register(
+    Mode(
+        "agents-status",
+        "what each agent (Claude, Codex, Copilot, ChatGPT, Ollama, RAG) is doing (read-only)",
+        add_arguments,
+        run,
+    )
+)

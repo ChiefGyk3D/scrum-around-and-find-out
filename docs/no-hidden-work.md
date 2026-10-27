@@ -82,7 +82,18 @@ DRIFT   NO-GATE acme/tools: default branch 'main' requires the check 'CI green' 
 A ruleset counts when it is active (not disabled, not evaluate-only), targets branches, and its include patterns match the
 default branch without an exclude pattern removing it. A required check matches by its own name or after a workflow
 prefix: `CI green` matches `ci / CI green` and `shell / CI green`, which are the names `scripts/apply-baseline.sh`
-requires. Force pushes are blocked by a classic rule that disallows them or a ruleset with the non-fast-forward rule.
+requires. The check must also come from the CI app (`rules.gate_check_app_id`, default 15368, GitHub Actions): a required
+check with no source restriction ("any app") can be satisfied by any app that posts a status with that name, and one tied
+to another app is not your CI, so both are reported (`... does not require the check 'CI green' from app 15368 (classic
+protection accepts it from any app)`). A name from another app or from a plain commit status that merely looks like the gate
+is never credited. **What the pin does not prove:** it identifies the app that posts the check, not the workflow. Every
+workflow and job in the repository runs as the same Actions app, so any of them can post `CI green`, or a lookalike such
+as `evil / CI green`, and satisfy a check pinned to it. A pinned check therefore passes, with a `NOTE` saying so every time (below): nothing suppresses it.
+"Unreviewed code cannot reach the default branch" holds only together with ownership of the workflow files (a CODEOWNERS
+rule over the workflow directory, which `safo protection` verifies in PR #168) and the required-reviews rule; this audit
+does not prove either. Note that `scripts/apply-baseline.sh` omits `app_id`, which makes GitHub
+pick the app that most recently reported the check, so a repository set up that way is only as pinned as that choice; pin it
+explicitly. Force pushes are blocked by a classic rule that disallows them or a ruleset with the non-fast-forward rule.
 A rule that someone can get around does not hold the gate: a ruleset with any bypass actor, a force-push bypass allowance,
 and (only when asked for, see below) a classic rule that does not apply to administrators. One rule nobody can bypass is
 enough.
@@ -94,6 +105,7 @@ rules:
   gate_exempt_repos: []               # owner/name list, each listed in repositories, not evaluated for the gate
   gate_require_admin_enforced: false  # true also reports a rule that does not apply to administrators
   gate_admin_exempt_repos: []         # with the line above on: owner/name list where that is accepted
+  gate_check_app_id: 15368            # the app the gate check must be pinned to (15368: GitHub Actions)
 ```
 
 The rule applies only to repositories listed in `board.yaml`. It is on by default with `CI green`, because it is the
@@ -110,6 +122,7 @@ NOTE    NO-GATE acme/widgets: exempt by rules.gate_exempt_repos (not evaluated)
 NOTE    NO-GATE acme/widgets: gated for everyone except administrators (rules.gate_require_admin_enforced is off)
 NOTE    NO-GATE acme/widgets: the repository is archived (read-only, nothing can merge); the gate was not checked, and this is not durable evidence
 NOTE    NO-GATE (all repositories): the gate check is not configured, rules.gate_check is empty
+NOTE    NO-GATE acme/widgets: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md
 ```
 
 An archived repository and an empty one (no default branch yet) are not judged, and their clean verdict is not durable
@@ -178,7 +191,25 @@ for a GitHub App the **Administration: read** repository permission, for a user 
 Issues permissions the rest of the audit uses are not enough, and the token may well lack Administration: read. Without it
 GitHub answers "none" instead of "forbidden", so the audit never reads an empty answer as "unprotected" unless the token
 reports ADMIN on the repository; otherwise, and on any refused or failed read, it prints `UNKNOWN NO-GATE ...` naming the
-permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero; only an integer `0` means none. Reading it reliably needs `viewerPermission` ADMIN. Cannot tell is never a pass.
+permission and exits 2. A rule that is found is trusted whatever the permission. The allowance data (force-push and pull-request bypass allowances, the admin flag, ruleset bypass actors) is the exception, and rests on an assumption: GitHub may withhold it from a token that cannot administer the repository without raising an error, so the audit reads an absent or null allowance count as cannot tell (exit 2), never as zero. An integer `0` allowance count, or an empty `bypassActors` list, means "nobody can bypass" only when `viewerPermission` is ADMIN: from any lower permission it is cannot tell whenever the verdict depends on it (a ruleset that holds the gate check or the force-push block, or a classic rule that blocks force pushes while `gate_forbid_force_push` is on). A bypass that is listed is a finding whatever the permission, and a rule that does not decide the verdict is not asked. The classic pull-request allowances never touch a required check, so they are not asked. Cannot tell is never a pass.
+
+**Required workflows are not interpreted.** GitHub rulesets have a rule that requires a workflow to pass (rule type
+`WORKFLOWS`; the GraphQL schema exposes it, introspection 2026-10-26). SAFO does not read it and it never changes a
+verdict or removes the app-pin NOTE: a workflow reference names a file at a path, ref and repository, and nothing in the
+GraphQL answer ties that file to a status name or proves its provenance (the workflow may be unrelated to the check, come
+from another repository, sit on a mutable branch or tag, or be skipped on creation). Whether and how the audit could ever
+accept a required workflow as the strongest evidence is an open design question, tracked as SAFO issue #185 ("gate: interpret required-workflows rules with proven provenance"), not a feature.
+
+**Inherited rulesets.** `includeParents: true` also returns rulesets owned by the organization or enterprise. The query
+reads `source { __typename }` (the `source` field of `RepositoryRuleset` is a non-null `RuleSource` union of `Repository`,
+`Organization` and `Enterprise`, introspection 2026-10-26; the schema offers no field saying whether the viewer can see an
+inherited ruleset's bypass list). An empty bypass list on a ruleset that is not owned by the repository is therefore never
+believed, even from an ADMIN token: cannot tell (exit 2), because that list is administered at organization or enterprise
+scope. A listed actor is still a finding, and a source that is absent, null or not one of those three is cannot tell.
+A repository whose gate is held only by an inherited ruleset with an empty list stays at exit 2 until the rule is also set
+on the repository or the organization ruleset lists its bypass actors.
+
+**Where a required check comes from.** The query reads `requiredStatusChecks { context app { databaseId } }` for a classic rule and `requiredStatusChecks { context integrationId }` for a ruleset (field names read by GraphQL introspection on 2026-10-26: the `app` field of `RequiredStatusCheckDescription` is a nullable `App` whose `databaseId` is a nullable `Int`; the `integrationId` field of `StatusCheckConfiguration` is a nullable `Int`). A null `app` or `integrationId`, and the REST convention `-1`, mean "any source". An entry counts toward the gate only if its name matches (the name alone or after a workflow prefix) and it is pinned to `rules.gate_check_app_id`; with several entries of the same name, one pinned to the CI app is enough. If the check is required but only without a source or from another app, the finding says so. App ids are GraphQL `Int`, so an id above 2147483647 is cannot tell, and `gate_check_app_id` is capped there. The field must be present and typed: an absent `app` or `integrationId`, a non-integer or a non-positive id (other than `-1`) is cannot tell, never "any app" and never the default app. This is the same idea as the protection read-back's `--require-app-id`, which prints a NOTE when a check is unpinned; here an unpinned gate check is a finding because the audit's question is whether the gate holds.
 
 The read uses the same GraphQL client as the rest of the audit (a second REST transport would duplicate its redirect,
 retry and loopback hardening). It never writes protection: setting it is `scripts/apply-baseline.sh`, run by a repository

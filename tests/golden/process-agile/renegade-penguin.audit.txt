@@ -111,10 +111,15 @@ DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#45
 DRIFT   MISSING Kind on Renegade-Penguin/hammunition-gps-tether#46
 DRIFT   MISSING Epic on Renegade-Penguin/hammunition-gps-tether#46
 DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#46
-DRIFT   MISSING Kind on card PVTI_0144
-DRIFT   MISSING Epic on card PVTI_0144
-DRIFT   MISSING Effort on card PVTI_0144
+DRIFT   MISSING Kind on card PVTI_0147
+DRIFT   MISSING Epic on card PVTI_0147
+DRIFT   MISSING Effort on card PVTI_0147
 NOTE    Threat-model check not configured: rules.threat_model.label is empty
+NOTE    NO-GATE Renegade-Penguin/Hammunition: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md
+NOTE    NO-GATE Renegade-Penguin/hammunition-hill: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md
+NOTE    NO-GATE Renegade-Penguin/hammunition-tray: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md
+NOTE    NO-GATE Renegade-Penguin/hammunition-bunker: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md
+NOTE    NO-GATE Renegade-Penguin/hammunition-gps-tether: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md
 UI-only settings (no API can read or set these; check by eye):
   - Roadmap: Date fields = Start date / Target date; Zoom = Quarter
   - By repository: Group by = Repository

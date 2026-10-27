@@ -164,6 +164,7 @@ class Rules:
     # Off by default: the shipped baseline (scripts/apply-baseline.sh) sets enforce_admins to false.
     gate_require_admin_enforced: bool = False
     gate_admin_exempt_repos: tuple[str, ...] = ()  # owner/name: with the above on, admins may bypass here, accepted
+    gate_check_app_id: int = 15368  # the app the gate check must be pinned to (15368: GitHub Actions)
 
 
 @dataclass(frozen=True)
@@ -585,6 +586,7 @@ RULES_KEYS = frozenset(
         "gate_exempt_repos",
         "gate_require_admin_enforced",
         "gate_admin_exempt_repos",
+        "gate_check_app_id",
     }
 )
 
@@ -627,7 +629,15 @@ def _parse_rules(r: Reader, raw: object) -> Rules:
         _parse_gate_exempt(r, m.get("gate_exempt_repos", []), "gate_exempt_repos"),
         _parse_gate_admin(r, m.get("gate_require_admin_enforced", False)),
         _parse_gate_exempt(r, m.get("gate_admin_exempt_repos", []), "gate_admin_exempt_repos"),
+        _parse_gate_app(r, m.get("gate_check_app_id", 15368)),
     )
+
+
+def _parse_gate_app(r: Reader, raw: object) -> int:
+    app = r.integer(raw, "rules.gate_check_app_id", minimum=1)
+    if app > 2147483647:  # GraphQL's Int is 32-bit; a larger id could never match an answer
+        raise r.fail("rules.gate_check_app_id", "expected an integer <= 2147483647 (GraphQL's Int)")
+    return app
 
 
 def _parse_gate_check(r: Reader, raw: object) -> str:
