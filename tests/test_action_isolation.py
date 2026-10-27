@@ -60,7 +60,7 @@ def venv(tmp_path: Path) -> Path:
     the copy and the hash-locked install, which action.yml's own tests check)."""
     target = tmp_path / "safo-venv"
     base = {"PY": sys.executable, "TARGET": str(target)}
-    assert bash('"$PY" -I -m venv "$TARGET"', tmp_path, base).returncode == 0
+    assert bash('"$PY" -I -m venv --without-pip "$TARGET"', tmp_path, base).returncode == 0
     code = "import sysconfig; print(sysconfig.get_path('purelib'))"
     found = bash('"$TARGET/bin/python" -I -c "$CODE"', tmp_path, {**base, "CODE": code})
     purelib = Path(found.stdout.strip())
