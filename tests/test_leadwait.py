@@ -1499,7 +1499,9 @@ def test_r4_a_huge_comment_with_a_marker_never_exempts_after_the_deadline() -> N
 def test_r4_a_marker_recorded_before_a_timeout_is_never_honored() -> None:
     """The comment is read early, then the scan runs out of time on the filler. Defense in depth: a scan that timed
     out returns no marker (the reason check's own deadline would also refuse it)."""
-    command = f"sleep 60 # lead-wait: ok - {REASON}\n" + "echo a\n" * BIG
+    # 64 Ki lines of filler is about a second of scanning, 500 times the 2 ms deadline below; the full BIG lines
+    # cost the same proof 25 s (three minutes under coverage) and add nothing, as the scan has no size branch
+    command = f"sleep 60 # lead-wait: ok - {REASON}\n" + "echo a\n" * (BIG // 16)
     assert leadwait.marker_reason(command) == REASON
     assert leadwait.marker_reason(command + " ", deadline=time.monotonic() + 0.002) == ""
 
@@ -1699,6 +1701,10 @@ def test_the_orchestrator_page_carries_the_rules_the_incident_and_the_monitor_br
         "read-only",
         "quoted verbatim",
         "no progress for 5 minutes",
+        "completion notice arrives without its report",
+        "re-dispatches a fresh agent with the same brief within five minutes",
+        "not retried by continuing it",
+        "(INFERRED, from one session:",
         'model: "sonnet"',
         "issue: <owner/repo#N>",
     ):

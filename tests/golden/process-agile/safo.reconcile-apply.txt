@@ -1,0 +1,11 @@
+exit=0
+--- stdout ---
+UPDATED ChiefGyk3D/scrum-around-and-find-out#1: Area = Core; Priority = P2 later
+ADDED ChiefGyk3D/scrum-around-and-find-out#2: Status = Backlog; Area = Core; Priority = P2 later
+UPDATED ChiefGyk3D/scrum-around-and-find-out#5: Area = Core; Priority = P2 later
+UPDATED ChiefGyk3D/scrum-around-and-find-out#6: Area = Core; Priority = P2 later
+ADDED ChiefGyk3D/scrum-around-and-find-out#7: Status = In progress; Area = Core; Priority = P2 later
+UPDATED ChiefGyk3D/scrum-around-and-find-out#3: Status = Done; Done date filled; Area = Core; Priority = P2 later
+UPDATED ChiefGyk3D/scrum-around-and-find-out#4: Done date filled; Area = Core; Priority = P2 later
+items.totalCount after verified adds: 8
+--- stderr ---

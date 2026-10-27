@@ -1,0 +1,27 @@
+exit=0
+--- stdout ---
+Waiting on you (Status = Blocked)
+  Renegade-Penguin/Hammunition#5  Waiting on the maintainer  https://example.invalid/5
+  Renegade-Penguin/hammunition-bunker#35  Waiting on the maintainer  https://example.invalid/35
+  Renegade-Penguin/hammunition-gps-tether#45  Waiting on the maintainer  https://example.invalid/45
+  Renegade-Penguin/hammunition-hill#15  Waiting on the maintainer  https://example.invalid/15
+  Renegade-Penguin/hammunition-tray#25  Waiting on the maintainer  https://example.invalid/25
+\x0aBoard: In progress, Next, by agent (Renegade-Penguin/1)
+  Claude       In progress  Renegade-Penguin/Hammunition#1  Open work on the board
+  Claude       In progress  Renegade-Penguin/hammunition-bunker#31  Open work on the board
+  Claude       In progress  Renegade-Penguin/hammunition-gps-tether#41  Open work on the board
+  Claude       In progress  Renegade-Penguin/hammunition-hill#11  Open work on the board
+  Claude       In progress  Renegade-Penguin/hammunition-tray#21  Open work on the board
+  unassigned   Next         Renegade-Penguin/Hammunition#6  Queued for next
+  unassigned   Next         Renegade-Penguin/hammunition-bunker#36  Queued for next
+  unassigned   Next         Renegade-Penguin/hammunition-gps-tether#46  Queued for next
+  unassigned   Next         Renegade-Penguin/hammunition-hill#16  Queued for next
+  unassigned   Next         Renegade-Penguin/hammunition-tray#26  Queued for next
+
+Routing guard (mode: warn)
+  health: unknown; counts cover retained history
+  no dispatches logged yet
+\x0aClaude
+  Subagents run inside the Claude Code session and cannot be listed from a shell: watch its panel.
+  Their tasks are the board cards with Agent = Claude above.
+--- stderr ---

@@ -8,9 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from agentsdata import agents_dict
 from profiledata import prof
-from safo.agentsfile import MIGRATION_COHORT, AgentsFile, load_agents
+from safo.agentsfile import MIGRATION_COHORT, AgentsFile, load_agents, parse_agents
 from safo.profile import Evidence, slugify
+from safo.routing import recommend
 
 ROOT = Path(__file__).parent.parent
 LESSONS = (ROOT / "docs" / "lessons.md").read_text(encoding="utf-8")
@@ -48,7 +50,7 @@ def test_the_cohort_agents_have_no_profile_and_the_four_measured_agents_do() -> 
     a = shipped()
     for agent_id in MIGRATION_COHORT:
         assert a.agent(agent_id).profile is None
-    for agent_id in ("claude-haiku", "copilot", "codex", "ollama"):
+    for agent_id in ("claude-haiku", "copilot", "codex", "ollama", "chatgpt"):
         assert a.agent(agent_id).profile is not None, agent_id
     assert a.agent("maintainer").profile is None
     assert a.warnings == ()
@@ -56,7 +58,8 @@ def test_the_cohort_agents_have_no_profile_and_the_four_measured_agents_do() -> 
 
 def test_the_measured_status_per_agent() -> None:
     a = shipped()
-    assert {x: prof(a, x).status for x in ("claude-haiku", "copilot", "codex", "ollama")} == {
+    assert {x: prof(a, x).status for x in ("claude-haiku", "copilot", "codex", "ollama", "chatgpt")} == {
+        "chatgpt": "profiled",
         "claude-haiku": "profiled",
         "copilot": "profiled",
         "codex": "profiled",
@@ -100,3 +103,145 @@ def test_the_codex_and_haiku_and_copilot_and_ollama_claims_are_the_ones_the_less
 def test_the_shipped_copilot_is_review_only_so_its_harness_is_review_guidance() -> None:
     copilot = shipped().agent("copilot").profile
     assert copilot is not None and copilot.harness_mode == "review"
+
+
+def test_chatgpt_authors_public_language_and_the_voice_skill_setup_step_is_recorded_as_not_done() -> None:
+    a = shipped()
+    chatgpt = a.agent("chatgpt")
+    assert chatgpt.kind == "chatgpt"
+    p = chatgpt.profile
+    assert p is not None and p.brief is not None and p.brief.inline
+    assert any("draft" in c.text.lower() for c in (*p.do, *p.dont))
+    assert any("NOT YET DONE" in c for c in chatgpt.constraints)
+    assert all(e.evidence.ref.startswith("chatgpt-") for e in (*p.do, *p.dont))
+
+
+def test_language_shapes_prefer_chatgpt_and_the_maintainer_or_a_claude_reviews_it() -> None:
+    a = shipped()
+    voice = a.shape("prose-in-voice")
+    assert (voice.prefer, voice.fallback, voice.reviewer) == (("chatgpt",), ("claude-sonnet",), ("maintainer",))
+    prompts = a.shape("prompt-language-for-local-llm")
+    assert (prompts.prefer, prompts.fallback, prompts.reviewer) == (
+        ("chatgpt",),
+        ("claude-sonnet",),
+        ("claude-sonnet", "maintainer"),
+    )
+    docs = a.shape("technical-docs")
+    assert (docs.prefer, docs.fallback, docs.reviewer) == (("claude-sonnet",), (), ("codex",))
+
+
+def test_route_picks_chatgpt_for_language_work_without_a_meter_and_needs_no_meter() -> None:
+    a = shipped()
+    r = recommend(a, "prose-in-voice", {})
+    assert (r.agent, r.card_label, r.reviewer, r.unknown) == ("chatgpt", "ChatGPT", "maintainer", ())
+    r = recommend(a, "prompt-language-for-local-llm", {})
+    assert (r.agent, r.reviewer) == ("chatgpt", "claude-sonnet")
+    assert recommend(a, "technical-docs", {}).agent == "claude-sonnet"
+
+
+TECHNICAL_SHAPES = (
+    "research",
+    "plan-writing",
+    "integration-code",
+    "well-specified-code",
+    "small-mechanical-pr",
+    "security-sensitive-design",
+    "threat-model",
+    "security-sensitive-code",
+    "ops-runbook",
+    "adversarial-review",
+    "technical-docs",
+)
+
+
+def chatgpt_in_technical_shapes(a: AgentsFile) -> list[str]:
+    """Every technical shape that names ChatGPT as author, fallback or reviewer, or would route to it."""
+    found = []
+    for name in TECHNICAL_SHAPES:
+        shape = a.shape(name)
+        if "chatgpt" in (*shape.prefer, *shape.fallback, *shape.reviewer) or recommend(a, name, {}).agent == "chatgpt":
+            found.append(name)
+    return found
+
+
+def test_technical_text_shapes_never_route_to_chatgpt() -> None:
+    a = shipped()
+    assert len(TECHNICAL_SHAPES) >= 11 and all(a.shape(n) for n in TECHNICAL_SHAPES)  # the guard collected something
+    assert chatgpt_in_technical_shapes(a) == []
+
+
+def test_the_chatgpt_guard_bites_when_a_technical_shape_is_given_to_it() -> None:
+    d = agents_dict()
+    d["shapes"]["ops-runbook"]["fallback"] = ["chatgpt"]
+    d["shapes"]["technical-docs"]["prefer"] = ["chatgpt"]
+    assert chatgpt_in_technical_shapes(parse_agents(d)) == ["ops-runbook", "technical-docs"]
+
+
+def test_the_technical_docs_reviewer_is_not_its_author_and_matches_the_runbook_reviewer() -> None:
+    docs = shipped().shape("technical-docs")
+    assert docs.reviewer and not set(docs.reviewer) & {*docs.prefer, *docs.fallback}
+    assert docs.reviewer == shipped().shape("ops-runbook").reviewer
+
+
+# The lead frames options and builds nothing a reviewer would stand in for (DoIA's lead template: the lead does not
+# review in place of a reviewer, #33). No shape may list claude-lead as a reviewer; this is the exact allowed set,
+# and it is empty. A shape joins it only by a recorded policy decision, with its name added here.
+LEAD_MAY_REVIEW: frozenset[str] = frozenset()
+
+
+def lead_reviews(a: AgentsFile) -> set[str]:
+    return {s.name for s in a.shapes if "claude-lead" in s.reviewer and s.name not in LEAD_MAY_REVIEW}
+
+
+def unreviewable_authors(a: AgentsFile) -> set[tuple[str, str]]:
+    """(shape, author) pairs where every listed reviewer is the author: 'never the author' leaves no one."""
+    return {
+        (s.name, author) for s in a.shapes if s.reviewer for author in s.chain if all(r == author for r in s.reviewer)
+    }
+
+
+def test_no_shape_lists_the_lead_as_a_reviewer_outside_the_allowed_set() -> None:
+    a = shipped()
+    assert len(a.shapes) > 10, "collected nothing: the guard would pass vacuously"
+    assert lead_reviews(a) == set()
+
+
+def test_the_lead_review_guard_bites() -> None:
+    d = agents_dict()
+    d["shapes"]["ops-runbook"]["reviewer"] = ["claude-lead"]
+    assert "ops-runbook" in lead_reviews(parse_agents(d))
+    assert "ops-runbook" not in lead_reviews(shipped())
+
+
+# Known gap, outside #33 item 1: when Haiku is short, Sonnet authors a small-mechanical-pr and is its only reviewer.
+KNOWN_SELF_REVIEW = {("small-mechanical-pr", "claude-sonnet")}
+
+
+def test_every_author_in_every_shape_chain_has_a_different_reviewer() -> None:
+    assert unreviewable_authors(shipped()) == KNOWN_SELF_REVIEW
+
+
+def test_the_unreviewable_author_guard_bites() -> None:
+    d = agents_dict()
+    d["shapes"]["ops-runbook"]["reviewer"] = ["claude-sonnet"]
+    assert ("ops-runbook", "claude-sonnet") in unreviewable_authors(parse_agents(d))
+
+
+def test_the_runbook_docs_and_adversarial_shapes_are_reviewed_by_someone_else() -> None:
+    a = shipped()
+    for name in ("ops-runbook", "technical-docs"):
+        assert a.shape(name).reviewer == ("codex",)
+        assert recommend(a, name, {}).reviewer == "codex"
+    assert a.shape("adversarial-review").reviewer == ("claude-sonnet", "codex")
+    assert recommend(a, "adversarial-review", {}).reviewer == "claude-sonnet"
+
+
+def test_precedence_between_the_overlapping_shapes_is_stated_in_the_shapes_and_in_rule_6() -> None:
+    a = shipped()
+    docs_note = a.shape("technical-docs").note
+    assert "ops-runbook" in docs_note and "prose-in-voice" in docs_note
+    assert "technical-docs" in a.shape("prose-in-voice").note
+    headline = a.shape("status-headline").note
+    assert "stays local" in headline and "prose-in-voice" in headline
+    rule = next(r for r in a.rules_of_thumb if r.startswith("Routing order 6"))
+    assert "ChatGPT" in rule and "local" in rule and "Claude" in rule

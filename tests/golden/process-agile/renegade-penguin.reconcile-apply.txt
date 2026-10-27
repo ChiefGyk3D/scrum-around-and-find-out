@@ -1,0 +1,147 @@
+exit=1
+--- stdout ---
+UPDATED Renegade-Penguin/Hammunition#1: Area = Engine; Priority = P2 later
+ADDED Renegade-Penguin/Hammunition#2: Status = Backlog; Area = Engine; Priority = P2 later
+UPDATED Renegade-Penguin/Hammunition#5: Area = Engine; Priority = P2 later
+UPDATED Renegade-Penguin/Hammunition#6: Area = Engine; Priority = P2 later
+ADDED Renegade-Penguin/Hammunition#7: Status = In progress; Area = Engine; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-hill#11: Area = Hill; Priority = P2 later
+ADDED Renegade-Penguin/hammunition-hill#12: Status = Backlog; Area = Hill; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-hill#15: Area = Hill; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-hill#16: Area = Hill; Priority = P2 later
+ADDED Renegade-Penguin/hammunition-hill#17: Status = In progress; Area = Hill; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-tray#21: Area = Tray; Priority = P2 later
+ADDED Renegade-Penguin/hammunition-tray#22: Status = Backlog; Area = Tray; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-tray#25: Area = Tray; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-tray#26: Area = Tray; Priority = P2 later
+ADDED Renegade-Penguin/hammunition-tray#27: Status = In progress; Area = Tray; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-bunker#31: Area = Bunker; Priority = P2 later
+ADDED Renegade-Penguin/hammunition-bunker#32: Status = Backlog; Area = Bunker; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-bunker#35: Area = Bunker; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-bunker#36: Area = Bunker; Priority = P2 later
+ADDED Renegade-Penguin/hammunition-bunker#37: Status = In progress; Area = Bunker; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-gps-tether#41: Area = GPS tether; Priority = P2 later
+ADDED Renegade-Penguin/hammunition-gps-tether#42: Status = Backlog; Area = GPS tether; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-gps-tether#45: Area = GPS tether; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-gps-tether#46: Area = GPS tether; Priority = P2 later
+ADDED Renegade-Penguin/hammunition-gps-tether#47: Status = In progress; Area = GPS tether; Priority = P2 later
+UPDATED Renegade-Penguin/Hammunition#3: Status = Done; Done date filled; Area = Engine; Priority = P2 later
+UPDATED Renegade-Penguin/Hammunition#4: Done date filled; Area = Engine; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-hill#13: Status = Done; Done date filled; Area = Hill; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-hill#14: Done date filled; Area = Hill; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-tray#23: Status = Done; Done date filled; Area = Tray; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-tray#24: Done date filled; Area = Tray; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-bunker#33: Status = Done; Done date filled; Area = Bunker; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-bunker#34: Done date filled; Area = Bunker; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-gps-tether#43: Status = Done; Done date filled; Area = GPS tether; Priority = P2 later
+UPDATED Renegade-Penguin/hammunition-gps-tether#44: Done date filled; Area = GPS tether; Priority = P2 later
+items.totalCount after verified adds: 36
+HUMAN MISSING Kind on Renegade-Penguin/Hammunition#1
+HUMAN MISSING Epic on Renegade-Penguin/Hammunition#1
+HUMAN MISSING Effort on Renegade-Penguin/Hammunition#1
+HUMAN MISSING Kind on Renegade-Penguin/Hammunition#3
+HUMAN MISSING Epic on Renegade-Penguin/Hammunition#3
+HUMAN MISSING Effort on Renegade-Penguin/Hammunition#3
+HUMAN MISSING Kind on Renegade-Penguin/Hammunition#4
+HUMAN MISSING Epic on Renegade-Penguin/Hammunition#4
+HUMAN MISSING Effort on Renegade-Penguin/Hammunition#4
+HUMAN MISSING Kind on Renegade-Penguin/Hammunition#5
+HUMAN MISSING Epic on Renegade-Penguin/Hammunition#5
+HUMAN MISSING Effort on Renegade-Penguin/Hammunition#5
+HUMAN MISSING Kind on Renegade-Penguin/Hammunition#6
+HUMAN MISSING Epic on Renegade-Penguin/Hammunition#6
+HUMAN MISSING Effort on Renegade-Penguin/Hammunition#6
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-hill#11
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-hill#11
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-hill#11
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-hill#13
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-hill#13
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-hill#13
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-hill#14
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-hill#14
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-hill#14
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-hill#15
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-hill#15
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-hill#15
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-hill#16
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-hill#16
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-hill#16
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-tray#21
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-tray#21
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-tray#21
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-tray#23
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-tray#23
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-tray#23
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-tray#24
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-tray#24
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-tray#24
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-tray#25
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-tray#25
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-tray#25
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-tray#26
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-tray#26
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-tray#26
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-bunker#31
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-bunker#31
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-bunker#31
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-bunker#33
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-bunker#33
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-bunker#33
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-bunker#34
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-bunker#34
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-bunker#34
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-bunker#35
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-bunker#35
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-bunker#35
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-bunker#36
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-bunker#36
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-bunker#36
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-gps-tether#41
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-gps-tether#41
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#41
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-gps-tether#43
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-gps-tether#43
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#43
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-gps-tether#44
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-gps-tether#44
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#44
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-gps-tether#45
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-gps-tether#45
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#45
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-gps-tether#46
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-gps-tether#46
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#46
+HUMAN MISSING Kind on card PVTI_0147
+HUMAN MISSING Epic on card PVTI_0147
+HUMAN MISSING Effort on card PVTI_0147
+HUMAN MISSING Kind on Renegade-Penguin/Hammunition#2
+HUMAN MISSING Epic on Renegade-Penguin/Hammunition#2
+HUMAN MISSING Effort on Renegade-Penguin/Hammunition#2
+HUMAN MISSING Kind on Renegade-Penguin/Hammunition#7
+HUMAN MISSING Epic on Renegade-Penguin/Hammunition#7
+HUMAN MISSING Effort on Renegade-Penguin/Hammunition#7
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-hill#12
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-hill#12
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-hill#12
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-hill#17
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-hill#17
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-hill#17
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-tray#22
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-tray#22
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-tray#22
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-tray#27
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-tray#27
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-tray#27
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-bunker#32
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-bunker#32
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-bunker#32
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-bunker#37
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-bunker#37
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-bunker#37
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-gps-tether#42
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-gps-tether#42
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#42
+HUMAN MISSING Kind on Renegade-Penguin/hammunition-gps-tether#47
+HUMAN MISSING Epic on Renegade-Penguin/hammunition-gps-tether#47
+HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#47
+--- stderr ---
