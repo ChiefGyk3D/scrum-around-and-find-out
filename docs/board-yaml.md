@@ -123,7 +123,7 @@ not on a list is refused, never replaced by a default. Text echoed in an error i
 
 "Waterfall" means `process.method` or some `repositories[i].method` is `waterfall`. Waterfall-only keys on any other board
 are refused with `only used when the method or a repository is waterfall`, and a waterfall board needs
-`rules.add_closed_days` of at least 1. On a waterfall board the option names of the phase field and of the status field must be printable, NFKC-stable text of at most 100 characters. That stops control and bidi injection and keeps names short; it does not stop look-alike letters. A name that is not is refused by option number, never echoed. Unknown keys inside `process` are refused (`baseline` arrives with a later release).
+`rules.add_closed_days` of at least 1. On a waterfall board the option names of the phase field and of the status field are restricted: letters and digits, single spaces between words, and the punctuation `- _ . , : ( ) / + & #`, already NFKC-normalized, at most 100 characters. Combining marks, variation selectors, joiners, emoji, tabs, non-ASCII spaces and a leading, trailing or doubled space are refused by option number, never echoed. This stops control and bidi injection and names that differ only in invisible marks; it does not stop look-alike letters from other scripts. The phase field may have at most 16 options and the status field at most 64, checked before any option is read. A board with no waterfall `process` block has no such limits. Unknown keys inside `process` are refused (`baseline` arrives with a later release).
 
 ```yaml
 rules:
@@ -159,3 +159,5 @@ All these YAML features are checked in the loader itself; parsing fails with an 
 After an unknown outcome, `status` cannot verify whether the update landed; check the existing project updates before posting again.
 
 `sync` treats the event payload as a pointer: it reads the issue or pull request live (state, draft flag, number, repository) and writes from that. An action that contradicts the live state, or a node that is not in the repository the payload names, is a NOTE (exit 1) and writes nothing. `status` checks that the acknowledged update belongs to the project (`statusUpdate.project.id`); an acknowledgement that does not say so is an unknown outcome. An exhausted rate limit before any write exits 1; after a write was sent it is an unknown outcome (exit 2). Text from GitHub is escaped on every log line, and `status --post --print` shows the update inside `::stop-commands::`.
+
+An error that lists a field's options (for example a status that is not one of them) lists every option exactly as before. It is identical to the earlier text for every board whose option names are printable; a name with a control, bidi or separator character is escaped (hardening).

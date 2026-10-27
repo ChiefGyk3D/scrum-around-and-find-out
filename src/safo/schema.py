@@ -36,6 +36,8 @@ REF = re.compile(r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})#(
 _PLAIN_KEY = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _MAX_VALUE_SHOWN = 40
 _MAX_NAME = 100
+MAX_STATUS_OPTIONS = 64  # the status field of a waterfall board
+_NAME_PUNCTUATION = frozenset(" -_.,:()/+&#")
 _MAX_SHOWN_OUTPUT = 117
 _MAX_LISTING = 400
 _MAX_LISTED = 8
@@ -311,9 +313,16 @@ def show(value: object) -> str:
 
 
 def plain_name(name: str) -> bool:
-    """An option name that may be listed in a log: printable (no control, bidi, format or separator characters),
-    already NFKC-normalized, and at most 100 characters."""
-    return len(name) <= _MAX_NAME and name.isprintable() and unicodedata.normalize("NFKC", name) == name
+    """A phase or status option name on a waterfall board. The allowed repertoire is narrow, so two names cannot
+    differ only in marks that render the same: letters and digits (categories L* and N*), a single ASCII space
+    between words, and the punctuation - _ . , : ( ) / + & # ; already NFKC-normalized; at most 100 characters.
+    Combining marks, variation selectors, the grapheme joiner, joiners, emoji, tabs, non-ASCII spaces and a
+    leading, trailing or doubled space are all outside it. Look-alike letters from other scripts are not stopped."""
+    if not 0 < len(name) <= _MAX_NAME or unicodedata.normalize("NFKC", name) != name:
+        return False
+    if name != name.strip(" ") or "  " in name:
+        return False
+    return all(unicodedata.category(c)[0] in "LN" or c in _NAME_PUNCTUATION for c in name)
 
 
 def options_text(names: list[str]) -> str:
@@ -326,8 +335,9 @@ def options_text(names: list[str]) -> str:
 
 
 def legacy_options_text(names: list[str]) -> str:
-    """The full listing, byte-identical to what a printable board always got; only a name that is not printable
-    (a control, bidi or separator character) is escaped."""
+    """The full listing, identical to the earlier text for every board whose names are printable.
+
+    A name that is not printable (a control, bidi or separator character) is escaped: hardening."""
     return ", ".join(n if n.isprintable() else show(n)[1:-1] for n in names)
 
 
@@ -450,6 +460,7 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
             raise r.fail(path, f"{repo.full_name} is listed twice")
         repos.append(repo)
 
+    capped = _process_field_caps(top)
     fields: list[Field] = []
     for i, raw in enumerate(r.seq(top.get("fields", []), "fields")):
         path = f"fields[{i}]"
@@ -465,6 +476,18 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
             raw_options = r.seq(m.get("options"), f"{path}.options") if "options" in m else []
             if not raw_options:
                 raise r.fail(f"{path}.options", "a single_select field needs at least one option")
+            if name in capped and len(raw_options) > capped[name][0]:  # before any option is read, copied or compared
+                limit, role = capped[name]
+                if role == "phase":
+                    raise r.fail(
+                        "process.phase_field",
+                        f"field {show(name)} has {len(raw_options)} options, at most {limit} phases",
+                    )
+                raise r.fail(
+                    f"{path}.options",
+                    f"{len(raw_options)} options, at most {limit} on the status field of a waterfall board",
+                )
+            seen: set[str] = set()
             for j, o in enumerate(raw_options):
                 opath = f"{path}.options[{j}]"
                 om = r.mapping(o, opath, {"name", "color", "description"}, {"name"})
@@ -473,8 +496,9 @@ def parse_board(data: object, source: str = "board.yaml", *, check_fields: bool 
                     r.choice(om.get("color", "GRAY"), f"{opath}.color", COLORS),
                     r.string(om.get("description", ""), f"{opath}.description", empty=True),
                 )
-                if any(x.name == option.name for x in options):
+                if option.name in seen:
                     raise r.fail(f"{opath}.name", f"option {option.name!r} is defined twice in {name!r}")
+                seen.add(option.name)
                 options.append(option)
         elif "options" in m:
             raise r.fail(f"{path}.options", f"only a single_select field has options, not {ftype}")
@@ -657,6 +681,25 @@ def _parse_threat_model(r: Reader, raw: object) -> ThreatModel:
     return ThreatModel(label, tuple(exempt))
 
 
+def _process_field_caps(top: Mapping[str, Any]) -> dict[str, tuple[int, str]]:
+    """Field name -> (most options, role) for the fields a waterfall `process` block depends on.
+
+    Read from the raw document, because the fields are parsed before the block is. Only a block that names a phase
+    field has any: a board with no `process`, or an agile one, is not capped.
+    """
+    process = top.get("process")
+    phase = process.get("phase_field") if isinstance(process, Mapping) else None
+    if not isinstance(phase, str):
+        return {}
+    caps: dict[str, tuple[int, str]] = {}
+    rules = top.get("rules")
+    status = rules.get("status_field", "Status") if isinstance(rules, Mapping) else "Status"
+    if isinstance(status, str):
+        caps[status] = (MAX_STATUS_OPTIONS, "status")
+    caps[phase] = (MAX_PHASES, "phase")  # a phase field that is also the status field is refused later
+    return caps
+
+
 def _parse_process(r: Reader, raw: object, repos: tuple[Repository, ...], rules: Rules) -> Process:
     """The `process` block: its structure and the references that need no `fields` (those are in _cross_check)."""
     allowed = {"method", "active_statuses", "dependencies", "phase_field", "approvers", "gates"}
@@ -813,10 +856,6 @@ def _cross_check_process(r: Reader, board: Board) -> None:
     for role, name in (("status", rules.status_field), ("area", rules.area_field)):
         if phase.name == name:
             raise r.fail("process.phase_field", f"{show(name)} is the {role} field, not a phase field")
-    if len(phase.options) > MAX_PHASES:
-        count = len(phase.options)
-        shown = show(phase.name)
-        raise r.fail("process.phase_field", f"field {shown} has {count} options, at most {MAX_PHASES} phases")
     status = board.field_named(rules.status_field)
     status_options = {o.name for o in status.options} if status and status.type == "single_select" else set()
     for owner, field_ in (("process.phase_field", phase), ("rules.status_field", status)):
@@ -825,7 +864,8 @@ def _cross_check_process(r: Reader, board: Board) -> None:
                 raise r.fail(
                     owner,
                     f"option {i} of {show(field_.name if field_ else '')} must be plain text"
-                    f" (printable, NFKC-normalized, at most {_MAX_NAME} characters) on a waterfall board",
+                    " (letters, digits, single spaces and - _ . , : ( ) / + & #; NFKC-normalized; at most"
+                    f" {_MAX_NAME} characters) on a waterfall board",
                 )
     done = {rules.status.closed, rules.status.merged}
     for i, name in enumerate(process.active_statuses):
