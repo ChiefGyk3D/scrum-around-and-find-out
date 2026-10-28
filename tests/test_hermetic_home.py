@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Canary: every test runs with HOME private and no XDG base directory set, so no test reads real-home state."""
 
 from __future__ import annotations
