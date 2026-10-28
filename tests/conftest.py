@@ -133,11 +133,18 @@ def _sane_umask() -> Iterator[None]:
         os.umask(previous)
 
 
+XDG_NAMES = ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")
+
+
 @pytest.fixture(autouse=True)
 def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
     """HOME is an empty temporary directory in every test: no test ever reads the real home or its agent files."""
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
+    # A CI runner (or a desktop session) may export XDG base directories; they take precedence over HOME in
+    # safo.guardlog, so state and config would land outside the private HOME. Child processes inherit os.environ.
+    for name in XDG_NAMES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     return home
 
