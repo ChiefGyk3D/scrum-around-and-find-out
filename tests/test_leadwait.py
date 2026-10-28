@@ -18,6 +18,7 @@ import pytest
 from hooksdata import agents_file, hooks, probe_file, read_log, set_mode, set_probe
 from safo import leadwait
 from safo.agentsfile import load_agents
+from safo.cli import HookSafeParser
 from safo.errors import ConfigError
 from safo.hooks import bind_repo
 
@@ -504,18 +505,28 @@ def test_deeply_nested_substitutions_do_not_crash_the_scanner() -> None:
 
 
 def test_the_install_messages_and_the_guard_help_say_the_guard_covers_bash(
-    _private_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    _private_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = tmp_path / "settings.json"
     dry = hooks("install", "--settings", str(settings), home=_private_home, dry_run=True)[1]
     assert "PreToolUse (Agent and Bash) guard" in dry
     done = hooks("install", "--settings", str(settings), home=_private_home)[1]
     assert "installed the SessionStart probe and the PreToolUse (Agent and Bash) guard" in done
+    # hooks() runs main() in-process, so argparse's help is silenced only by HookSafeParser.armed, a class attribute
+    # that cli.run() sets when no terminal is attached and that no test of run() used to put back. It is pinned here:
+    # a person at a terminal gets the help whatever ran earlier in this worker or whatever stdin the runner gives.
+    monkeypatch.setattr(HookSafeParser, "armed", False)
     for argv in (("guard", "--help"), ("--help",)):  # the guard's own help, and the list of hooks subcommands
         with pytest.raises(SystemExit):
             hooks(*argv, home=_private_home)
         helped = " ".join(capsys.readouterr().out.split())
         assert "Agent and Bash tools" in helped, argv
+    # Companion: armed (what run() sets for a host, no terminal), the guard's help is deliberately silent, so the
+    # assertions above bite on the state they pin and not on a help text that is always present.
+    monkeypatch.setattr(HookSafeParser, "armed", True)
+    with pytest.raises(SystemExit):
+        hooks("guard", "--help", home=_private_home)
+    assert capsys.readouterr().out == ""
 
 
 # -- round 2: an adversarial review of the tokenizer -------------------------------------------------------------

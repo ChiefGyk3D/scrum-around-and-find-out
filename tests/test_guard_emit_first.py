@@ -2113,6 +2113,9 @@ def entry(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -
 
     monkeypatch.setattr(cli, "person_at_a_terminal", lambda: False)
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    # cli.run() sets this class attribute and nothing resets it; registering it here makes monkeypatch put it back,
+    # so a later test in the same worker (the guard --help assertions in test_leadwait) is not silenced by this one.
+    monkeypatch.setattr(cli.HookSafeParser, "armed", False)
 
     def go(argv: list[str]) -> int:
         # cli.run() arms the budget clock from the process start; a test process is not a fresh one, so each call
@@ -2659,6 +2662,10 @@ def test_a_decision_whose_deadline_has_passed_is_not_waited_for_or_written(
     set_mode(_private_home, mode)
     monkeypatch.setattr(mod, "CONFIG_MIN_WAIT_SECONDS", 10.0)
     monkeypatch.setattr(mod, "budget_points", lambda begun: (begun - 3.0, begun - 0.001, begun + 9.0))
+    # The mode read is injected: with decide_by already behind us its real read gets a zero budget, and on a slow
+    # machine that read can lose the race and fall back to block (SAFO #188), which is not what this test is about.
+    # What is asserted here is the passed deadline, so the mode is a fixed input, not a race.
+    monkeypatch.setattr(mod, "read_mode_bounded", lambda ctx, run: (mode, "healthy"))
     out = Stream()
     started = time.monotonic()
     assert mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents)) == code
