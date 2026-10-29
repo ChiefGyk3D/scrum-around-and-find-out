@@ -88,10 +88,15 @@ AMBIENT_GH_VARIABLES = ("GH_HOST", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_TO
 
 
 def find_gh(env: Mapping[str, str], repo: Path | str | None = None) -> str | None:
-    """The first trustworthy `gh` on PATH. A relative or empty entry is the current directory, which a hostile
-    checkout controls, so it is never searched; neither is a candidate whose real path (symlinks resolved) is inside
-    the current directory, $GITHUB_WORKSPACE or the repository being operated on, because a checkout can add its own
-    `bin` to an absolute PATH. The first entry that passes wins."""
+    """The first trustworthy `gh` on PATH; see `find_executable`."""
+    return find_executable("gh", env, repo)
+
+
+def find_executable(name: str, env: Mapping[str, str], repo: Path | str | None = None) -> str | None:
+    """The first trustworthy executable called `name` on PATH. A relative or empty entry is the current directory,
+    which a hostile checkout controls, so it is never searched; neither is a candidate whose real path (symlinks
+    resolved) is inside the current directory, $GITHUB_WORKSPACE or the repository being operated on, because a
+    checkout can add its own `bin` to an absolute PATH. The first entry that passes wins."""
     roots = [os.getcwd()]
     if env.get("GITHUB_WORKSPACE"):
         roots.append(env["GITHUB_WORKSPACE"])
@@ -100,7 +105,7 @@ def find_gh(env: Mapping[str, str], repo: Path | str | None = None) -> str | Non
     for entry in env.get("PATH", "").split(os.pathsep):
         if not os.path.isabs(entry):
             continue
-        candidate = os.path.join(entry, "gh")
+        candidate = os.path.join(entry, name)
         if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
             continue
         real = os.path.realpath(candidate)

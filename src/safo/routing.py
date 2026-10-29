@@ -21,6 +21,7 @@ CARD_LABELS = {
     "chatgpt": "ChatGPT",
     "ollama": "Ollama",
     "rag": "RAG",
+    "gemini": "Gemini",
     "human": "You",
 }
 METER_NAMES = {

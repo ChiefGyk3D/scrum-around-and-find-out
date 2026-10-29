@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+# The config for `safo gemini` (docs/gemini.md). Copy it to ~/.config/safo/gemini.yaml, keep it private (mode 600), and
+# replace every value marked REPLACE. Nothing here is a vendor limit or a secret: the limits are yours to copy from AI
+# Studio, and the secret store holds the keys, which this file names and never contains.
+version: 1
+
+# The key is only ever sent here. Loopback http is accepted for tests; anything else is refused when the file loads.
+endpoint: https://generativelanguage.googleapis.com
+
+# Where the price table below was read, and the day you read it. Re-read the page before a paid call and when a model's
+# valid_through passes: a paid estimate from a table past its date is refused.
+price_source: https://ai.google.dev/gemini-api/docs/pricing
+price_checked: 2026-10-29
+
+# Names only. The key is read from the secret store at call time and never touches argv, a file or a log.
+secrets:
+  project: image-gen
+  free_config: prd
+  paid_config: prd_paid
+  key_name: GEMINI_API_KEY
+
+# A cap may be lowered here, never raised: the code holds 2 USD per job, 10 USD per month, 2 USD per further block.
+caps: {job_usd: 2, month_usd: 10, block_usd: 2}
+
+# The append-only spend ledger, outside git. Omit it to use ~/.local/share/safo/gemini-spend-ledger.jsonl.
+# ledger: /absolute/path/gemini-spend-ledger.jsonl
+
+timeout_seconds: 60
+max_output_tokens: 2048
+
+# Free-tier limits per model, per project. The vendor shows them in AI Studio and nowhere else, so they are yours to
+# supply. These three are deliberately tiny so an uncopied example cannot overrun a real limit. REPLACE.
+free:
+  gemini-3.6-flash: {rpm: 1, tpm: 1000, rpd: 1}
+
+# Prices in USD per million tokens, from price_source on price_checked. Output includes thinking tokens.
+# valid_through is the last day the listed price holds. An image model is paid-only: give it modality: image.
+paid:
+  gemini-3.6-flash: {input_per_mtok: 0.75, output_per_mtok: 3.75, valid_through: 2026-12-31}
+  gemini-3.8-flash: {input_per_mtok: 0.75, output_per_mtok: 3.75, valid_through: 2026-12-31}
+  gemini-3.5-flash-lite: {input_per_mtok: 0.30, output_per_mtok: 2.50, valid_through: 2026-12-31}

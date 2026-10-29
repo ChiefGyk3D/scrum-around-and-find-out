@@ -8,7 +8,7 @@ approval token, and that includes a model that a prompt injection has talked int
 |---|---|---|
 | `safo hooks install [--settings PATH] [--mode warn\|block] [--command safo]` | none | Merges the two hooks into a `settings.json` (default `~/.claude/settings.json`). Keeps every other hook and setting, is a no-op when run again, keeps a private backup before it replaces the file, and refuses to overwrite a file that changed while it worked (bytes, or the file itself: device, inode, size and modification time are checked again just before the replace, so a rename-over with identical bytes is caught too, with `settings changed while installing`). `--dry-run` writes nothing. |
 | `safo hooks probe` | SessionStart | Asks each Ollama endpoint in `agents.yaml` which models are loaded (two bounded GETs, never a generate), saves the answer and tells the session whether the local LLM is reachable. |
-| `safo hooks guard` | PreToolUse, matcher `Agent\|Task\|Bash` | Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
+| `safo hooks guard` | PreToolUse, matcher `Agent\|Task\|Bash` | Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). Two more rules cover Gemini (the sixth and seventh, which deny in every mode). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
 | `safo hooks mode warn\|block` | none | `warn` reports a broken rule and allows the dispatch (the default); `block` denies it. |
 | `safo hooks status [--session ID --agents PATH]` | none | The mode, the retained counts, the health of the hooks and of the last probe. |
 
@@ -161,6 +161,27 @@ Exemptions are never silent:
 - Like the approval token, both are speed bumps: an agent with shell access can type a marker. Their job is to make a
   deliberate wait a written decision. The rule is a speed bump against accidents, not a sandbox: an actor who can
   already run arbitrary Bash as the same user can also edit the guard's config, mode file and logs.
+
+## The sixth and seventh rules: Gemini
+
+Two rules protect money and privacy for the Gemini provider ([Gemini](gemini.md)). Unlike the five above, they deny
+**even in warn mode**: a paid step with no approval record is blocked, not noted, and private material for the free tier
+is blocked, not noted. The log records `gemini-paid` or `gemini-material` and never the brief; the denial message names
+the missing thing and never repeats the brief's text.
+
+A brief names a Gemini step with a declaration line (`gemini: free ...` or `gemini: paid cap=1.50 approval=ID`), a
+`safo gemini ask|approve` command, or the raw vendor host. A free-text mention is not a step.
+
+6. **`gemini-paid`.** A paid step (`paid`, `--paid`, `tier=paid`, or the paid secret-store config `prd_paid` named anywhere
+   in the brief) states a cap above 0 and at most 2 USD and an approval id whose record exists, has not expired and has not
+   been used. A check that raises, or a guard with no approval folder to look in, blocks.
+7. **`gemini-material`.** Every Gemini step needs the line `gemini-material: public`. A secret-shaped string (an API key, a
+   token, a private key block) anywhere in the brief, or a match for one of the maintainer's private terms (the file named
+   by `SAFO_PRIVACY_EXTRA_FILE`, else `privacy-terms.txt` in the config directory; read, never written, never repeated),
+   blocks it. The vendor host written out in a brief is blocked too: call Gemini only through `safo gemini`.
+
+This is a speed bump on the brief a model writes, not the gate that holds: the approval record, the caps and the free-tier
+limits are enforced again by the wrapper itself.
 
 ## Failing safe
 

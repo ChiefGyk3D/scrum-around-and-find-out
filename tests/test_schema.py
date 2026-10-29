@@ -36,7 +36,9 @@ def test_the_test_board_loads_with_everything_in_it() -> None:
 
 
 @pytest.mark.parametrize(
-    "example", sorted(p for p in EXAMPLES.glob("*.yaml") if not p.name.startswith("agents")), ids=lambda p: p.name
+    "example",
+    sorted(p for p in EXAMPLES.glob("*.yaml") if not p.name.startswith(("agents", "gemini"))),
+    ids=lambda p: p.name,
 )
 def test_every_shipped_example_validates(example: Path) -> None:
     load_board(example)

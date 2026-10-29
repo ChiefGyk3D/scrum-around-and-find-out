@@ -67,6 +67,7 @@ def doc() -> dict[str, Any]:
     }
     agents["ollama"]["profile"] = {"status": "unmeasured", "brief": {"inline": "Answer in the format asked for."}}
     agents["rag"]["profile"] = {"status": "unmeasured", "brief": {"inline": "Return passages with their sources."}}
+    agents["gemini"]["profile"] = {"status": "unmeasured", "brief": {"inline": "Cite each public source by URL."}}
     return d
 
 

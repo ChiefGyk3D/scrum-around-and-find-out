@@ -97,6 +97,8 @@ RULE_IDS = (
     "issue-unusable",
     "issue-unverified",
     "lead-waits",
+    "gemini-paid",
+    "gemini-material",
 )
 DIAGNOSTICS = (
     "mode",

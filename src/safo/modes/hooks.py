@@ -32,6 +32,8 @@ from safo import guardlog, leadwait, tracking
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
+from safo.gemini import ApprovalStore, approval_problem, gemini_state_dir
+from safo.geminibrief import ApprovalCheck, load_terms
 from safo.guardlog import (
     MODES,
     WARNING,
@@ -195,6 +197,17 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def approval_checker(ctx: LocalContext) -> ApprovalCheck | None:
+    """How the guard asks whether a Gemini approval record is live. None when the folder cannot be named, which the
+    rule treats as no record (a paid step is then blocked)."""
+    try:
+        store = ApprovalStore(gemini_state_dir(ctx.env) / "approvals")
+    except ConfigError:
+        return None
+    now = ctx.now
+    return lambda record_id: approval_problem(store, record_id, now)
+
+
 def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = None) -> None:
     # The hook's whole budget is GUARD_TIMEOUT_SECONDS from the start of the process; lookups get what is left of it
     # less a margin, so the decision is always written before the host gives up on the hook.
@@ -239,7 +252,15 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     def repo() -> str | None:
         return bound
 
-    verdict = check_dispatch(doc, payload["tool_input"], reachable, resolve, repo)
+    verdict = check_dispatch(
+        doc,
+        payload["tool_input"],
+        reachable,
+        resolve,
+        repo,
+        approval_check=approval_checker(ctx),
+        terms=load_terms(ctx.env),
+    )
     decision = decide(verdict, mode)
     # One visible notice per session for a probe that cannot be trusted; every dispatch is still logged with its health.
     notice = health != "healthy" and (path is None or first_notice(path))

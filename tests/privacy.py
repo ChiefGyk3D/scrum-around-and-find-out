@@ -76,6 +76,8 @@ ALLOWED_HOSTS = {
     "example.com",  # the reserved documentation domains: the only e-mail hosts a public file may use
     "example.org",
     "shellcheck.net",
+    "generativelanguage.googleapis.com",  # the Gemini API host the key is sent to, and the vendor docs host
+    "ai.google.dev",
     "ollama.lan",  # the placeholder endpoint host in agents.yaml; real ones live in a git-ignored local file
 }
 

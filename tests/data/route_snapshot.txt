@@ -138,6 +138,18 @@ chain: chatgpt -> claude-sonnet
 safo route only recommends: the lead sets the card and hands the work out.
 ## prose-in-voice --json exit=0
 {"shape":"prose-in-voice","agent":"chatgpt","why":"first in the chain with headroom (chatgpt, claude-sonnet)","skipped":[],"reviewer":"maintainer","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"The maintainer's judgment from his own use, not a benchmark. The voice skill is a Claude Code skill, so its text and rules must be supplied to ChatGPT (setup NOT YET DONE); Claude Sonnet with the skill is the fallback. A draft until the maintainer approves it. For public README or docs prose, technical-docs owns the technical correctness and only the voice pass is this shape.","card_label":"ChatGPT","fallback_chain":["chatgpt","claude-sonnet"],"reviews":[{"reviewer":"maintainer","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
+## public-source-research  exit=0
+shape: public-source-research
+recommended: gemini (put Agent = Gemini on the card)
+why: first in the chain with headroom (gemini, claude-sonnet)
+required review: claude-sonnet: ready (independent reviewer)
+required review: codex: ready (independent reviewer)
+reviewer: claude-sonnet (a fresh reviewer: not the author, with headroom)
+note: Free tier only, and only for public material: its prompts may be used for training and read by people. A 429 or a spent local quota sends the work to the fallback and never to paid Gemini; a paid call needs a fresh approval record (docs/gemini.md). Every cited claim is checked at its source before it is used.
+chain: gemini -> claude-sonnet
+safo route only recommends: the lead sets the card and hands the work out.
+## public-source-research --json exit=0
+{"shape":"public-source-research","agent":"gemini","why":"first in the chain with headroom (gemini, claude-sonnet)","skipped":[],"reviewer":"claude-sonnet","reviewer_why":"a fresh reviewer: not the author, with headroom","needs_approval":false,"unknown":[],"endpoint":"","model":"","note":"Free tier only, and only for public material: its prompts may be used for training and read by people. A 429 or a spent local quota sends the work to the fallback and never to paid Gemini; a paid call needs a fresh approval record (docs/gemini.md). Every cited claim is checked at its source before it is used.","card_label":"Gemini","fallback_chain":["gemini","claude-sonnet"],"reviews":[{"reviewer":"claude-sonnet","available":true,"reason":"independent reviewer"},{"reviewer":"codex","available":true,"reason":"independent reviewer"}],"local_role":"","warnings":[]}
 ## research  exit=0
 shape: research
 recommended: codex (put Agent = Codex on the card)

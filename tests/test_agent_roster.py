@@ -33,8 +33,8 @@ ROOT = Path(__file__).parent.parent
 SIEM = ROOT / "boards" / "siem-stack.board.yaml"
 BOARDS = sorted((ROOT / "boards").glob("*.board.yaml"))
 ORIGINAL = ("Claude", "Codex", "Copilot", "You")
-EXTENDED = (*ORIGINAL, "ChatGPT", "Ollama", "RAG")
-NEWER = ("ChatGPT", "Ollama", "RAG")
+EXTENDED = (*ORIGINAL, "ChatGPT", "Ollama", "RAG", "Gemini")
+NEWER = ("ChatGPT", "Ollama", "RAG", "Gemini")
 
 
 def agent_options(board: Board) -> tuple[str, ...]:
@@ -70,7 +70,7 @@ def test_the_guard_on_the_shipped_boards_bites_when_an_option_is_missing(tmp_pat
     text = SIEM.read_text(encoding="utf-8")
     cut = tmp_path / "cut.board.yaml"
     cut.write_text(re.sub(r'\n +- \{name: "RAG"[^\n]*', "", text), encoding="utf-8")
-    assert agent_options(load_board(cut)) == (*ORIGINAL, "ChatGPT", "Ollama")
+    assert agent_options(load_board(cut)) == (*ORIGINAL, "ChatGPT", "Ollama", "Gemini")
 
 
 def old_project(fake: FakeGitHub, board: Board) -> tuple[FProject, FItem]:
@@ -114,10 +114,10 @@ def test_bootstrap_refuses_to_edit_the_agent_options_and_every_value_survives(fa
 def test_a_live_option_the_board_does_not_list_is_drift_not_a_deletion(fake: FakeGitHub, client: Client) -> None:
     board = load_board(SIEM)
     _, project = build_world(fake, board)
-    fake.field(project, "Agent").options.append(FOption("OPT_G", "Gemini"))
+    fake.field(project, "Agent").options.append(FOption("OPT_G", "Mistral"))
     ctx, out = make_context(fake, board, client)
     assert audit_run(ctx, argparse.Namespace()) == 1
-    assert "DRIFT   field 'Agent' has the option 'Gemini', which board.yaml does not list" in out.getvalue()
+    assert "DRIFT   field 'Agent' has the option 'Mistral', which board.yaml does not list" in out.getvalue()
     assert fake.mutations == []
 
 
@@ -169,18 +169,18 @@ def test_an_agent_value_the_board_does_not_list_is_reported_not_guessed(
     fake: FakeGitHub, client: Client, tmp_path: Path
 ) -> None:
     board, project = siem_world(fake)
-    fake.field(project, "Agent").options.append(FOption("OPT_G", "Gemini"))
+    fake.field(project, "Agent").options.append(FOption("OPT_G", "Mistral"))
     repo = board.repositories[0].full_name
     working = fake.add_content(repo, "Issue", 1, "Handled by someone new")
     blocked = fake.add_content(repo, "Issue", 2, "Stuck with someone new")
     plain = fake.add_content(repo, "Issue", 3, "No agent yet")
-    fake.add_item(project, working, Status="In progress", Agent="Gemini")
-    fake.add_item(project, blocked, Status="Blocked", Agent="Gemini")
+    fake.add_item(project, working, Status="In progress", Agent="Mistral")
+    fake.add_item(project, blocked, Status="Blocked", Agent="Mistral")
     fake.add_item(project, plain, Status="Next")
     text = run_status(fake, client, board, tmp_path)
-    assert f"  Gemini (unknown agent) In progress  {repo}#1" in text
-    assert f"  Gemini (unknown agent) {repo}#2" in text
-    assert "Unknown agent values (not options of Agent in board.yaml): Gemini" in text
+    assert f"  Mistral (unknown agent) In progress  {repo}#1" in text
+    assert f"  Mistral (unknown agent) {repo}#2" in text
+    assert "Unknown agent values (not options of Agent in board.yaml): Mistral" in text
     assert f"  unassigned   Next         {repo}#3" in text
     assert "unassigned (unknown" not in text, "a card with no agent is unassigned, not an unknown agent"
 
@@ -228,6 +228,7 @@ def test_every_kind_has_a_card_label_that_is_an_option_of_the_agent_field() -> N
     assert set(KINDS) == set(CARD_LABELS), "a kind without a card label would crash safo route"
     assert set(CARD_LABELS.values()) <= set(EXTENDED)
     assert CARD_LABELS["ollama"] == "Ollama" and CARD_LABELS["rag"] == "RAG" and CARD_LABELS["chatgpt"] == "ChatGPT"
+    assert CARD_LABELS["gemini"] == "Gemini"
 
 
 def test_rag_is_an_agent_with_no_endpoints_and_an_honest_unmeasured_profile() -> None:
@@ -263,16 +264,16 @@ def test_language_work_still_routes_to_chatgpt_with_the_chatgpt_label() -> None:
 
 def test_an_unknown_agent_name_in_a_shape_or_a_lookup_is_refused_by_name() -> None:
     d = agents_dict()
-    d["shapes"]["research"]["prefer"] = ["gemini"]
-    with pytest.raises(ConfigError, match="gemini"):
+    d["shapes"]["research"]["prefer"] = ["mistral"]
+    with pytest.raises(ConfigError, match="mistral"):
         parse_agents(d)
-    with pytest.raises(ConfigError, match="no agent 'gemini'"):
-        parse_agents(agents_dict()).agent("gemini")
+    with pytest.raises(ConfigError, match="no agent 'mistral'"):
+        parse_agents(agents_dict()).agent("mistral")
 
 
 def test_an_unknown_kind_is_refused_and_a_rag_agent_may_not_have_endpoints() -> None:
     d = agents_dict()
-    d["agents"]["rag"]["kind"] = "gemini"
+    d["agents"]["rag"]["kind"] = "mistral"
     with pytest.raises(ConfigError, match="kind"):
         parse_agents(d)
     d = agents_dict()
