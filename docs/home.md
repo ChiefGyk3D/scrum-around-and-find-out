@@ -25,6 +25,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Handoff](handoff.md): how work moves from a card to a merged pull request without losing the thread.
 - [The review loop](review-loop.md): the implement, review, fix and adversarial cycle, with what the build showed.
 - [Claude Code plugins](plugins.md): set up the Codex and Ollama plugins, and where each one fits.
+- [Prerequisites](prerequisites.md): the tools, plugins, packs and accounts SAFO leans on, with verified minimum versions, and `safo doctor` to check them.
 - [Local LLM](local-llm.md): what a local model is good and bad at, and the guard that keeps it from evicting a resident model.
 - [Limits](limits.md): reading each tool's real usage and deciding when to switch.
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.

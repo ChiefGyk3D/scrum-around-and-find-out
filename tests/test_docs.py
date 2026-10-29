@@ -22,6 +22,7 @@ PAGES = (
     "review-loop",
     "local-llm",
     "plugins",
+    "prerequisites",
     "limits",
     "board",
     "agents-status",
