@@ -249,3 +249,16 @@ def test_the_page_guard_bites() -> None:
     dropped = "\n".join(x for x in PAGE.splitlines() if not x.startswith("| `jq` |"))
     assert page_minimums(dropped) != code_minimums()
     assert page_minimums("no table") == {}
+
+
+def test_the_probe_child_gets_no_token_or_account_setting(world: tuple[Path, Path]) -> None:
+    bindir, home = world
+    stock(bindir)
+    seen = home / "seen"
+    dump = 'printf \'%s|%s|%s\' "$SAFO_TOKEN" "$GH_TOKEN" "$GH_HOST"'
+    body = f"#!/bin/sh\n{dump} > '{seen}'\necho 'gh version 2.100.0'\n"
+    (bindir / "gh").write_text(body, encoding="utf-8")
+    (bindir / "gh").chmod(0o755)
+    env = {"SAFO_TOKEN": SECRET, "GH_TOKEN": SECRET, "GH_HOST": "example.invalid"}
+    assert doctor(bindir, home, env=env)[0] == 0
+    assert seen.read_text(encoding="utf-8") == "||"
