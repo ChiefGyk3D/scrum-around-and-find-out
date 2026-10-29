@@ -225,18 +225,35 @@ def findings(
         return list(_FAIL_CLOSED)
 
 
+def _join(text: str) -> str:
+    return text.replace("\\\r\n", "").replace("\\\n", "")
+
+
+def _views(line: str) -> tuple[str, str, str]:
+    """The ONE normalization of a line, used by the scan and by the prefilter alike: NFKC, markdown links dropped,
+    inline code around a `safo` command cut with a terminator, then (`norm`) the text with its backslashes, (`clean`)
+    the text with quotes and backslashes removed, and (`low`) that in lower case."""
+    norm = unicodedata.normalize("NFKC", line)
+    # markdown inline code around a whole command: `safo gemini quota ...` is the command, not a shell substitution
+    norm = MARKDOWN_CODE.sub(r" \1 ; ", MARKDOWN_LINK.sub(" ", norm))
+    clean = norm.replace("'", "").replace('"', "").replace("\\", "")
+    return norm, clean, clean.lower()
+
+
 def normalized(text: str) -> str:
-    """The text the detectors see: continuations joined, NFKC, quotes and backslashes removed, lower case."""
-    joined = text.replace("\\\r\n", "").replace("\\\n", "")
-    return unicodedata.normalize("NFKC", joined).replace("'", "").replace('"', "").replace("\\", "").lower()
+    """The text the detectors see, line by line, joined back (quotes and backslashes removed, lower case)."""
+    return "\n".join(_views(line)[2] for line in _join(text).splitlines())
 
 
 def relevant(text: str) -> bool:
-    """False only when no detector could possibly fire. The decode detector reads backslashes, so it gets the text with
-    them; every other detector gets the stripped text, as `_scan_line` gives it."""
-    plain = normalized(text)
-    raw = unicodedata.normalize("NFKC", text.replace("\\\r\n", "").replace("\\\n", "")).lower()
-    return any(p.search(raw if name == "decode" else plain) for name, p in PREFILTER)
+    """False only when no detector could possibly fire. It runs the detector patterns over the very views `_scan_line`
+    builds: the decode detector reads the text with its backslashes, every other one the cleaned lower case text."""
+    for line in _join(text).splitlines():
+        norm, _, low = _views(line)
+        raw = norm.lower()
+        if any(p.search(raw if name == "decode" else low) for name, p in PREFILTER):
+            return True
+    return False
 
 
 def _core(token: str) -> str:
@@ -265,12 +282,8 @@ def _span(tokens: list[str], start: int) -> list[str]:
 def _scan_line(
     number: int, line: str, steps: list[Step], flags: dict[str, int], materials: list[str], budget: list[int]
 ) -> None:
-    norm = unicodedata.normalize("NFKC", line)
-    # markdown inline code around a whole command: `safo gemini quota ...` is the command, not a shell substitution
-    norm = MARKDOWN_CODE.sub(r" \1 ; ", MARKDOWN_LINK.sub(" ", norm))
+    norm, clean, low = _views(line)
     raw_tokens = norm.split()
-    clean = norm.replace("'", "").replace('"', "").replace("\\", "")
-    low = clean.lower()
     found = MATERIAL.match(clean)
     if found:
         materials.append(found.group("value").lower())
@@ -334,7 +347,7 @@ def _findings(
             raise TimeoutError("the Gemini check ran out of time")
 
     tick()
-    joined = prompt.replace("\\\r\n", "").replace("\\\n", "")
+    joined = _join(prompt)
     steps: list[Step] = []
     flags: dict[str, int] = {}
     materials: list[str] = []

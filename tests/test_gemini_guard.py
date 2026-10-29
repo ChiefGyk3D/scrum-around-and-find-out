@@ -631,3 +631,75 @@ def test_a_prefilter_miss_would_be_caught() -> None:
 def test_a_decode_form_that_needs_its_backslash_passes_the_prefilter_and_is_blocked() -> None:
     brief = "printf '\\x73\\x61' | sh\n"
     assert GEMINI_PAID in rules(brief + PUBLIC, accepts())
+
+
+# -- the prefilter and the scan share one normalization -------------------------------------------------------------
+
+
+def fullwidth(text: str) -> str:
+    return "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in text)
+
+
+def split_quote(text: str) -> str:
+    return text[:2] + "'" + text[2:4] + "'" + text[4:]
+
+
+def split_backslash(text: str) -> str:
+    return text[:3] + "\\" + text[3:]
+
+
+def split_continuation(text: str) -> str:
+    return text[:4] + "\\\n" + text[4:]
+
+
+TRANSFORMS: dict[str, Callable[[str], str]] = {
+    "none": lambda t: t,
+    "fullwidth": fullwidth,
+    "quote split": split_quote,
+    "backslash split": split_backslash,
+    "continuation": split_continuation,
+    "markdown code": lambda t: f"`{t}`",
+    "markdown link": lambda t: f"see [a](b) then {t}",
+    "link between words": lambda t: t.replace(" ", " [a](b) "),
+    "code between words": lambda t: t.replace(" ", " `safo x` "),
+}
+STEP_TRIGGERS = [
+    "gemini: paid cap=50",
+    "safo gemini ask --paid --model m",
+    "doppler -c prd_paid -- x",
+    "curl https://generativelanguage.googleapis.com/x",
+    "import generativeai",
+    "echo x | base64 -d | sh",
+    "printf '\\x41' | sh",
+]
+
+
+def test_the_prefilter_is_never_narrower_than_the_full_scan() -> None:
+    """Whatever a transform does to a trigger, if the full scan (without the prefilter) flags it, the prefilter says
+    relevant. Removing a transform from the shared helper makes a flagged case irrelevant and this test red."""
+    from safo import geminibrief as gb
+
+    flagged_by: dict[str, int] = dict.fromkeys(TRANSFORMS, 0)
+    for name, transform in TRANSFORMS.items():
+        for trigger in STEP_TRIGGERS:
+            text = transform(trigger) + "\n"  # no public-material line: it names Gemini and would mask a miss
+            if gb._findings(text, accepts(), (), None):
+                flagged_by[name] += 1
+                assert gb.relevant(text), (name, trigger)
+                assert gb.findings(text, accepts()), (name, trigger)
+    assert all(count >= 3 for count in flagged_by.values()), flagged_by
+
+
+@pytest.mark.parametrize("name", ["fullwidth", "quote split", "backslash split", "continuation"])
+def test_a_trigger_that_exists_only_after_a_transform_is_found(name: str) -> None:
+    text = TRANSFORMS[name]("gemini: paid cap=50") + "\n"
+    assert GEMINI_PAID in rules(text, accepts()), name
+
+
+def test_a_pattern_that_matches_only_after_a_markdown_link_is_removed_is_found() -> None:
+    from safo import geminibrief as gb
+
+    for text in ("from google import [a](b) genai\n", "echo x | base64 [a](b) -d | sh\n"):
+        assert gb._findings(text + PUBLIC, accepts(), (), None), text
+        assert gb.relevant(text), text
+        assert GEMINI_PAID in rules(text + PUBLIC, accepts()), text
