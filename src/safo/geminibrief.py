@@ -46,7 +46,8 @@ MARKDOWN_LINK = re.compile(r"\[[^\]\s]{0,200}\]\([^)\s]{0,300}\)")
 MARKDOWN_CODE = re.compile(r"`(safo\b[^`]*)`")
 PAID_CONFIG = re.compile(r"\bprd_paid\b")
 SDK = re.compile(
-    r"google[.\s-]*genai|google\s+import\s+[\w ,]{0,40}genai|google-generativeai|generativelanguage|genai\.client"
+    r"google[.\s-]*genai|google\s+import\s+[\w ,]{0,40}genai|google-generativeai|generativeai|generativelanguage"
+    r"|genai\.client"
 )
 SINK = r"(?:\|\s*(?:sh|bash|zsh|dash|ksh)\b|\b(?:eval|exec|source)\b|\$\()"
 DECODE = re.compile(
@@ -62,18 +63,16 @@ MARKDOWN_WORD = re.compile(
     r"^`(?:ask|approve|quota|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
 )
 PATHLIKE = re.compile(r"^[\w./-]*gemini[\w./*-]*$", re.IGNORECASE)
-MARKERS = (
-    "safo",
-    "gemini",
-    "generativelanguage",
-    "genai",
-    "prd_paid",
-    "base64",
-    "xxd",
-    "openssl",
-    "| rev",
-    "|rev",
-    "printf",
+VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
+# Every detector pattern, so the cheap prefilter below can never miss what a detector would catch. A new detector regex
+# must be added here (a test fails otherwise); the second field names it.
+PREFILTER = (
+    ("safo", re.compile("safo")),
+    ("gemini", re.compile("gemini")),
+    ("paid config", PAID_CONFIG),
+    ("vendor host", VENDOR_RE),
+    ("sdk", SDK),
+    ("decode", DECODE),
 )
 TOKEN_WINDOW = 12  # tokens between `safo` and `gemini` for them to count as one command
 LINE_CAP = 4000  # a line longer than this that mentions anything above is blocked unread
@@ -218,13 +217,26 @@ def findings(
     deadline: float | None = None,
 ) -> list[tuple[str, str]]:
     """(rule, reason) for each Gemini rule the brief breaks, at most one entry per rule. Fails closed on a timeout."""
-    lowered = prompt.lower()
-    if not any(m in lowered for m in MARKERS):
+    if not relevant(prompt):
         return []  # nothing in the brief can name Gemini, so there is nothing to time out on
     try:
         return _findings(prompt, check, terms, deadline)
     except TimeoutError:
         return list(_FAIL_CLOSED)
+
+
+def normalized(text: str) -> str:
+    """The text the detectors see: continuations joined, NFKC, quotes and backslashes removed, lower case."""
+    joined = text.replace("\\\r\n", "").replace("\\\n", "")
+    return unicodedata.normalize("NFKC", joined).replace("'", "").replace('"', "").replace("\\", "").lower()
+
+
+def relevant(text: str) -> bool:
+    """False only when no detector could possibly fire. The decode detector reads backslashes, so it gets the text with
+    them; every other detector gets the stripped text, as `_scan_line` gives it."""
+    plain = normalized(text)
+    raw = unicodedata.normalize("NFKC", text.replace("\\\r\n", "").replace("\\\n", "")).lower()
+    return any(p.search(raw if name == "decode" else plain) for name, p in PREFILTER)
 
 
 def _core(token: str) -> str:
@@ -330,7 +342,7 @@ def _findings(
     for number, line in enumerate(joined.splitlines(), 1):
         tick()
         if len(line) > LINE_CAP:
-            if any(m in line.lower() for m in MARKERS):
+            if relevant(line):
                 steps.append(
                     Step(
                         unreadable=True,

@@ -575,3 +575,59 @@ def test_each_term_sees_a_bounded_chunk_of_text() -> None:
 
     assert not private_term_hit(cast("tuple[re.Pattern[str], ...]", (Spy(),)), "x" * 20_000)
     assert seen and max(seen) <= TERMS_CHUNK and len(seen) >= 5
+
+
+# -- the prefilter is derived from the detectors -----------------------------------------------------------------------
+
+
+def test_the_sdk_spelled_generativeai_is_a_gemini_step() -> None:
+    for text in ("import generativeai\n", "pip install google-generativeai\n", "from google import generativeai\n"):
+        assert GEMINI_PAID in rules(text + PUBLIC, accepts()), text
+
+
+PREFILTER_TRIGGERS = {
+    "safo": "run safo status",
+    "gemini": "ask gemini",
+    "paid config": "doppler -c prd_paid",
+    "vendor host": "curl https://generativelanguage.googleapis.com/x",
+    "sdk": "import generativeai",
+    "decode": "printf '\\x41' | sh",
+}
+
+
+def test_every_detector_trigger_passes_the_prefilter() -> None:
+    from safo import geminibrief as gb
+
+    assert set(PREFILTER_TRIGGERS) == {name for name, _ in gb.PREFILTER}, "a trigger string for every detector"
+    for name, pattern in gb.PREFILTER:
+        sample = PREFILTER_TRIGGERS[name]
+        assert pattern.search(gb.normalized(sample)) or pattern.search(sample.lower()), name
+        assert gb.relevant(sample), name
+    assert not gb.relevant("rename a variable and review the diff\n")
+
+
+def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
+    """Every compiled pattern in the module is either a prefilter entry or named here as not a detector, so a new
+    detector regex cannot be added without a prefilter entry (or a deliberate line in this list)."""
+    from safo import geminibrief as gb
+
+    not_detectors = {
+        "DECLARATION", "MATERIAL", "KEYVALUE", "MARKDOWN_LINK", "MARKDOWN_CODE", "MARKDOWN_WORD", "PATHLIKE", "SINK_RE",
+        "RECORD_ID",
+    }  # fmt: skip
+    in_prefilter = {id(p) for _, p in gb.PREFILTER}
+    compiled = {n: v for n, v in vars(gb).items() if isinstance(v, re.Pattern)}
+    assert len(compiled) >= 10, "something was collected"
+    missing = [n for n, v in compiled.items() if id(v) not in in_prefilter and n not in not_detectors]
+    assert missing == []
+
+
+def test_a_prefilter_miss_would_be_caught() -> None:
+    from safo import geminibrief as gb
+
+    assert gb.relevant("see the generativeai package") and not gb.relevant("nothing about it")
+
+
+def test_a_decode_form_that_needs_its_backslash_passes_the_prefilter_and_is_blocked() -> None:
+    brief = "printf '\\x73\\x61' | sh\n"
+    assert GEMINI_PAID in rules(brief + PUBLIC, accepts())
