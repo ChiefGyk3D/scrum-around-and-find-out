@@ -202,3 +202,115 @@ def test_the_hook_denies_a_brief_that_matches_the_private_terms(_private_home: P
     )
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "acme" not in out.lower()
+
+
+# -- the guard parses a command with the parser the CLI uses --------------------------------------------------------
+
+CMD = "run: safo gemini ask --model m --prompt-file p --material public"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "--pai --cap 1.5 --approval " + OK,  # shortened spellings
+        "--paid --ca 1.5 --approval " + OK,
+        "--paid --cap 1.5 --appr " + OK,
+        "--pa --cap 1.5 --approval " + OK,
+        "--PAID --cap 1.5 --approval " + OK,  # mixed case
+        "--paid --cap 1.5 --approval=" + OK + " --job",  # a dangling option the CLI rejects
+        "--paid --cap 9 --approval " + OK,
+        "--paid --cap 1.5 --cap 9 --approval " + OK,  # a repeated flag: the last one wins in the CLI
+        "--paid --cap 1.5",  # no record
+        "--paid=yes --cap 1.5 --approval " + OK,
+    ],
+)
+def test_a_command_the_parser_rejects_or_reads_as_unsafe_is_blocked(tail: str) -> None:
+    assert GEMINI_PAID in rules(f"{CMD} {tail}\n{PUBLIC}", accepts())
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"{CMD} --paid --cap 1.5 --approval {OK}",
+        f"{CMD} --paid --cap=1.5 --approval={OK}",
+        f"{CMD} --paid --cap 9 --cap 1.5 --approval {OK}",  # the last one wins, as in the CLI
+        f"safo gemini --paid --model m ask --cap 1.5 --approval {OK}",  # options before the action
+        f"{CMD} --paid --cap 1.5 --approval {OK} && echo done",
+    ],
+)
+def test_the_same_forms_the_cli_accepts_pass_with_a_live_record(line: str) -> None:
+    assert rules(f"{line}\n{PUBLIC}", accepts()) == []
+
+
+def test_an_approve_command_in_a_brief_is_a_paid_step_and_is_blocked() -> None:
+    assert GEMINI_PAID in rules(f"safo gemini approve --model m --max-usd 1\n{PUBLIC}", accepts())
+
+
+def test_quota_is_not_a_step() -> None:
+    assert rules("safo gemini quota --model m\n", accepts()) == []
+
+
+def test_the_cli_refuses_an_abbreviated_option(_private_home: Path, tmp_path: Path) -> None:
+    import io
+
+    from safo.cli import main
+
+    config = tmp_path / "gemini.yaml"
+    from geminidata import write_config
+
+    write_config(config, "http://127.0.0.1:9", tmp_path / "ledger.jsonl")
+    out = io.StringIO()
+    env = {"HOME": str(_private_home), "PATH": ""}
+    ok = main(
+        ["--dry-run", "gemini", "ask", "--config", str(config), "--model", MODEL, "--material", "public"],
+        env=env,
+        out=out,
+        now=NOW,
+    )
+    assert ok == 0, "the full spelling is accepted"
+    with pytest.raises(SystemExit) as stop:
+        main(
+            ["--dry-run", "gemini", "ask", "--config", str(config), "--model", MODEL, "--mat", "public"],
+            env=env,
+            out=out,
+            now=NOW,
+        )
+    assert stop.value.code == 2
+
+
+def test_the_cli_enforces_the_cap_it_is_given(_private_home: Path, tmp_path: Path) -> None:
+    import io
+
+    from geminidata import write_config
+    from safo.cli import main
+
+    config = tmp_path / "gemini.yaml"
+    write_config(config, "http://127.0.0.1:9", tmp_path / "ledger.jsonl")
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("hello")
+    code = main(
+        [
+            "gemini",
+            "ask",
+            "--config",
+            str(config),
+            "--model",
+            MODEL,
+            "--paid",
+            "--job",
+            "j",
+            "--approval",
+            "abcdefgh12",
+            "--prompt-file",
+            str(prompt),
+            "--material",
+            "public",
+            "--cap",
+            "0.000001",
+        ],
+        env={"HOME": str(_private_home), "PATH": ""},
+        out=io.StringIO(),
+        err=io.StringIO(),
+        now=NOW,
+    )
+    assert code == 2

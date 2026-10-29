@@ -170,7 +170,10 @@ is blocked, not noted. The log records `gemini-paid` or `gemini-material` and ne
 the missing thing and never repeats the brief's text.
 
 A brief names a Gemini step with a declaration line (`gemini: free ...` or `gemini: paid cap=1.50 approval=ID`), a
-`safo gemini ask|approve` command, or the raw vendor host. A free-text mention is not a step.
+`safo gemini ask|approve` command, or the raw vendor host. A free-text mention is not a step. A command is read with the
+parser the CLI itself uses (the same options, no abbreviations), so the guard and the CLI cannot disagree about a
+spelling; a command that parser rejects is treated as a paid, unapproved step. `ask` takes `--cap USD`, and the wrapper
+refuses when its estimate is over it.
 
 6. **`gemini-paid`.** A paid step (`paid`, `--paid`, `tier=paid`, or the paid secret-store config `prd_paid` named anywhere
    in the brief) states a cap above 0 and at most 2 USD and an approval id whose record exists, has not expired and has not

@@ -57,7 +57,8 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     sub = parser.add_subparsers(dest="mode", required=True)
     subs: dict[str, argparse.ArgumentParser] = {}
     for name, mode in load_all().items():
-        subs[name] = sub.add_parser(name, help=mode.help)
+        # gemini: the dispatch guard reads a brief's command with the same definitions and no abbreviations
+        subs[name] = sub.add_parser(name, help=mode.help, allow_abbrev=name != "gemini")
         mode.add_arguments(subs[name])
     return parser, subs
 

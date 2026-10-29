@@ -16,6 +16,7 @@ import argparse
 import datetime as dt
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import NoReturn
 
 from safo import output
 from safo.bounded import read_bounded
@@ -53,6 +54,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--job", default="", help="the job an approval is for")
     parser.add_argument("--approval", default="", help="the id `approve` printed")
     parser.add_argument("--prompt-file", default="", help="the prompt, from a file (never argv)")
+    parser.add_argument("--cap", default="", help="ask: refuse when the estimate is over this many USD (at most 2)")
     parser.add_argument("--max-output-tokens", type=int, default=0, help="a hard output limit (default: the config's)")
     parser.add_argument("--material", default="", help="ask: must be `public`; nothing private goes to Gemini")
     parser.add_argument("--max-usd", default="", help="approve: the most this job may cost, at most 2")
@@ -61,6 +63,24 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ttl-minutes", type=int, default=60, help="approve: how long the record lives (at most 1440)")
     parser.add_argument("--beyond-ceiling", action="store_true", help="approve: this job may pass the 10 USD month")
     parser.add_argument("--issue", default="", help="approve: the tracking issue, owner/repo#N")
+
+
+class BriefParseError(ValueError):
+    """The command in a brief is not one the real parser accepts."""
+
+
+class _BriefParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise BriefParseError(message)
+
+
+def brief_namespace(tokens: list[str]) -> argparse.Namespace:
+    """What the CLI would make of these arguments: the same definitions (`add_arguments`), no abbreviations, and an
+    error for anything it would reject. The dispatch guard reads a brief's command with this, so the two cannot
+    disagree about what a spelling means."""
+    parser = _BriefParser(prog="safo gemini", add_help=False, allow_abbrev=False)
+    add_arguments(parser)
+    return parser.parse_args(tokens)
 
 
 def _config(ctx: LocalContext, args: argparse.Namespace) -> GeminiConfig:
@@ -159,6 +179,13 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if args.material != "public":
         raise ConfigError("--material public is required: private or sensitive material never goes to Gemini")
     ctx.say(quota_line(cfg, req, ctx.now))
+    if args.cap:
+        try:
+            cap = Decimal(args.cap)
+        except InvalidOperation:
+            raise ConfigError("--cap: expected a number of USD") from None
+        if req.tier == "paid" and estimate_usd(cfg, req, ctx.now) > cap:
+            raise RefusedError(f"the estimate is over the --cap of {money(cap)} USD; nothing was sent")
     if ctx.dry_run:
         ctx.say("dry run: no request sent, no key read, nothing logged")
         return EXIT_OK
