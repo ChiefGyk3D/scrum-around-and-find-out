@@ -22,8 +22,13 @@ secrets:
 # A cap may be lowered here, never raised: the code holds 2 USD per job, 10 USD per month, 2 USD per further block.
 caps: {job_usd: 2, month_usd: 10, block_usd: 2}
 
-# The append-only spend ledger, outside git. Omit it to use ~/.local/share/safo/gemini-spend-ledger.jsonl.
+# The append-only spend ledger, outside git. Omit it to use ~/.local/share/safo/gemini-spend-ledger.jsonl. If the ledger
+# is missing while another gemini-spend-ledger.jsonl sits in a sibling folder, every call is refused: point this at the real one.
 # ledger: /absolute/path/gemini-spend-ledger.jsonl
+
+# Your private terms, checked against every prompt before it is sent: none, default (~/.config/safo/privacy-terms.txt) or an
+# absolute path. A file that cannot be read stops the call. `none` is the written opt-out.
+private_terms: default
 
 timeout_seconds: 60
 max_output_tokens: 2048

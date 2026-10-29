@@ -18,7 +18,7 @@ import pytest
 from agentsdata import agents_with
 from geminidata import MODEL, NOW
 from hooksdata import agents_file, dispatch, hooks, read_log, set_mode
-from safo.gemini import ApprovalStore, approval_problem, gemini_state_dir
+from safo.gemini import ApprovalStore, Locations, approval_problem
 from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, findings, load_terms
 from safo.hooks import RULES, Verdict, check_dispatch, decide
 
@@ -39,7 +39,7 @@ PUBLIC = "gemini-material: public\n"
 
 
 def test_a_brief_that_names_no_gemini_step_is_untouched() -> None:
-    assert rules("Research the CVE. Ask Gemini nothing. paid, image, prd_paid words in prose are not a step.") == []
+    assert rules("Research the CVE. Ask Gemini nothing. paid and image words in prose are not a step.") == []
 
 
 def test_a_free_step_needs_the_public_material_line() -> None:
@@ -105,8 +105,9 @@ def test_a_record_check_that_fails_blocks_instead_of_allowing() -> None:
     assert GEMINI_PAID in rules(f"gemini: paid cap=1 approval={OK}\n{PUBLIC}", None), "no checker means no record"
 
 
-def test_an_unparseable_declaration_is_blocked_not_skipped() -> None:
-    assert GEMINI_PAID in rules(f'gemini: paid cap="1 approval={OK}\n{PUBLIC}', accepts())
+def test_quotes_are_removed_before_a_declaration_is_read() -> None:
+    assert rules(f'gemini: paid cap="1 approval={OK}\n{PUBLIC}', accepts()) == []
+    assert GEMINI_PAID in rules(f'gemini: paid cap="3 approval={OK}\n{PUBLIC}', accepts())
 
 
 def test_the_rule_names_are_registered() -> None:
@@ -146,10 +147,11 @@ def test_the_hook_denies_a_paid_brief_with_no_record_in_warn_mode(_private_home:
     assert brief not in json.dumps(row), "the log never holds the brief"
 
 
-def test_the_hook_allows_a_paid_brief_whose_record_is_live(_private_home: Path, tmp_path: Path) -> None:
+def test_the_hook_allows_a_paid_brief_whose_record_is_live(
+    _private_home: Path, tmp_path: Path, gemini_locations: Locations
+) -> None:
     agents = agents_file(tmp_path / "agents.yaml")
-    env = {"HOME": str(_private_home)}
-    store = ApprovalStore(gemini_state_dir(env) / "approvals")
+    store = ApprovalStore(gemini_locations.approvals)
     now = dt.datetime.now(dt.UTC)
     record = store.issue(
         model=MODEL,
@@ -250,67 +252,108 @@ def test_quota_is_not_a_step() -> None:
     assert rules("safo gemini quota --model m\n", accepts()) == []
 
 
-def test_the_cli_refuses_an_abbreviated_option(_private_home: Path, tmp_path: Path) -> None:
+def test_the_cli_refuses_an_abbreviated_option(
+    _private_home: Path, tmp_path: Path, gemini_locations: Locations
+) -> None:
     import io
 
+    from geminidata import write_config
     from safo.cli import main
 
-    config = tmp_path / "gemini.yaml"
-    from geminidata import write_config
-
-    write_config(config, "http://127.0.0.1:9", tmp_path / "ledger.jsonl")
+    write_config(gemini_locations.config, "http://127.0.0.1:9", tmp_path / "ledger.jsonl")
     out = io.StringIO()
     env = {"HOME": str(_private_home), "PATH": ""}
-    ok = main(
-        ["--dry-run", "gemini", "ask", "--config", str(config), "--model", MODEL, "--material", "public"],
-        env=env,
-        out=out,
-        now=NOW,
-    )
-    assert ok == 0, "the full spelling is accepted"
+    argv = ["--dry-run", "gemini", "ask", "--model", MODEL]
+    assert main([*argv, "--material", "public"], env=env, out=out, now=NOW) == 0, "the full spelling is accepted"
     with pytest.raises(SystemExit) as stop:
-        main(
-            ["--dry-run", "gemini", "ask", "--config", str(config), "--model", MODEL, "--mat", "public"],
-            env=env,
-            out=out,
-            now=NOW,
-        )
+        main([*argv, "--mat", "public"], env=env, out=out, now=NOW)
     assert stop.value.code == 2
 
 
-def test_the_cli_enforces_the_cap_it_is_given(_private_home: Path, tmp_path: Path) -> None:
-    import io
+# -- review round: fail closed on every shell form, bounded work, the paid config name on its own --------------------
 
-    from geminidata import write_config
-    from safo.cli import main
+FORMS = [
+    "bash -c 'safo gemini ask --paid --model m --cap 1'",
+    "$(which safo) gemini ask --paid --model m --cap 1",
+    "safo \\\ngemini ask --paid --model m --cap 1",
+    "python3 -m safo.cli gemini ask --paid --model m --cap 1",
+    "env -S 'safo gemini ask --paid --model m'",
+    'eval "safo gemini ask --paid --model m"',
+    "G=gem; safo ${G}ini ask --paid --model m --cap 1",
+    "safo ge'mini' ask --paid --model m --cap 1",
+    "safo gem\\ini ask --paid --model m --cap 1",
+    "safo $'\\x67emini' ask --paid --model m --cap 1",
+    "echo c2FmbyBnZW1pbmkgYXNrIC0tcGFpZA== | base64 -d | sh",
+    "curl https://GenerativeLanguage.GoogleAPIs.com/v1beta/models/m:generateContent",
+    "from google import genai",
+    "import google.genai as g",
+    "- gemini: paid cap=50",
+    '- "gemini": paid cap=50',
+    "doppler -p image-gen -c prd_paid -- curl x",
+    "Run doppler run -p image-gen -c prd_paid -- curl x",
+]
 
-    config = tmp_path / "gemini.yaml"
-    write_config(config, "http://127.0.0.1:9", tmp_path / "ledger.jsonl")
-    prompt = tmp_path / "p.txt"
-    prompt.write_text("hello")
-    code = main(
-        [
-            "gemini",
-            "ask",
-            "--config",
-            str(config),
-            "--model",
-            MODEL,
-            "--paid",
-            "--job",
-            "j",
-            "--approval",
-            "abcdefgh12",
-            "--prompt-file",
-            str(prompt),
-            "--material",
-            "public",
-            "--cap",
-            "0.000001",
-        ],
-        env={"HOME": str(_private_home), "PATH": ""},
-        out=io.StringIO(),
-        err=io.StringIO(),
-        now=NOW,
-    )
-    assert code == 2
+
+@pytest.mark.parametrize("form", FORMS)
+def test_every_shell_form_is_counted_as_a_paid_step_and_blocked_without_a_record(form: str) -> None:
+    assert GEMINI_PAID in rules(f"{form}\n{PUBLIC}", accepts())
+
+
+def test_a_complete_command_inside_a_quoted_shell_string_still_passes() -> None:
+    inner = f"safo gemini ask --paid --model m --cap 1.5 --approval {OK} --material public"
+    assert rules(f"bash -c '{inner}'\n{PUBLIC}", accepts()) == []
+    assert rules(f'eval "{inner}"\n{PUBLIC}', accepts()) == []
+
+
+def test_a_free_step_in_a_shell_form_still_needs_the_public_material_line() -> None:
+    assert GEMINI_MATERIAL in rules("bash -c 'safo gemini ask --model m'\n")
+    assert rules("bash -c 'safo gemini ask --model m'\n" + PUBLIC) == []
+
+
+def test_the_paid_config_name_is_checked_on_its_own() -> None:
+    assert GEMINI_PAID in rules("use doppler -p image-gen -c prd_paid for it", accepts())
+    assert rules("no paid config named here, just prose about prd", accepts()) == []
+
+
+def test_a_list_item_material_line_counts() -> None:
+    assert rules("- gemini: free\n- gemini-material: public\n") == []
+
+
+def test_a_quadratic_brief_is_blocked_fast() -> None:
+    import time
+
+    for brief in ("safo " * 16_000, ("safo gemini ask --paid\n" * 6_000), "safo " * 16_000 + "gemini"):
+        started = time.monotonic()
+        found = findings(brief + "\n" + PUBLIC, accepts())
+        assert time.monotonic() - started < 3.0
+        assert [r for r, _ in found if r == GEMINI_PAID], "blocked"
+
+
+def test_a_past_deadline_fails_closed() -> None:
+    import time
+
+    found = findings(f"gemini: free\n{PUBLIC}", accepts(), (), time.monotonic() - 1)
+    assert {r for r, _ in found} == {GEMINI_PAID, GEMINI_MATERIAL}
+
+
+def test_check_dispatch_fails_closed_when_the_check_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import safo.hooks as h
+
+    def boom(*a: object, **k: object) -> list[tuple[str, str]]:
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(h, "findings", boom)
+    verdict = check_dispatch(agents_with(), {"model": "sonnet", "prompt": "issue: TEST-1\nnothing here"}, False, None)
+    assert GEMINI_PAID in verdict.rules and GEMINI_MATERIAL in verdict.rules
+
+
+def test_the_hook_passes_its_deadline_to_the_check(_private_home: Path, tmp_path: Path) -> None:
+    agents = agents_file(tmp_path / "agents.yaml")
+    brief = "gemini: free\n" + PUBLIC + ("safo gemini ask --paid\n" * 3000)
+    _, out, _ = hooks("guard", "--agents", str(agents), home=_private_home, stdin=dispatch(prompt=brief))
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_safo_and_gemini_far_apart_are_not_one_command() -> None:
+    assert rules("safo status " + "x" * 500 + " and then gemini ask --paid\n", accepts()) == []
+    assert GEMINI_PAID in rules("safo status " + "x" * 100 + " gemini ask --paid\n", accepts())

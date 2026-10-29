@@ -183,7 +183,12 @@ refuses when its estimate is over it.
    by `SAFO_PRIVACY_EXTRA_FILE`, else `privacy-terms.txt` in the config directory; read, never written, never repeated),
    blocks it. The vendor host written out in a brief is blocked too: call Gemini only through `safo gemini`.
 
-This is a speed bump on the brief a model writes, not the gate that holds: the approval record, the caps and the free-tier
+The guard fails closed: it joins line continuations, removes quotes and backslashes, and treats `safo` and `gemini` near each other,
+`safo` beside a shell expansion, base64 decoded to a shell, the vendor host in any case, the Google genai SDK and the name of the
+paid secret-store config as Gemini steps that must pass the strict check; a line over 4000 characters that mentions any of them,
+more than 50 commands, or a check that runs past the guard's deadline is blocked. A false positive is a block, not a leak. It is a
+speed bump against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief is out of its
+reach. It is also not the gate that holds: the approval record, the caps and the free-tier
 limits are enforced again by the wrapper itself.
 
 ## Failing safe

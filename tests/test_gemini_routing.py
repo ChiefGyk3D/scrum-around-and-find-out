@@ -112,17 +112,22 @@ def test_the_gemini_page_states_the_gates_and_is_linked() -> None:
         "image generation is paid-only",
         "safo gemini approve",
         "not proof",
+        "same user",
+        "terminal",
+        "fixed locations",
+        "private terms",
     ):
         assert phrase in page, phrase
     routing = (ROOT / "docs" / "routing.md").read_text(encoding="utf-8")
     assert "gemini.md" in routing and "public-source-research" in routing
     hooks = squash((ROOT / "docs" / "hooks.md").read_text(encoding="utf-8"))
     assert "gemini-paid" in hooks and "gemini-material" in hooks and "even in warn mode" in hooks
+    assert "not a sandbox" in hooks and "raw sdk use" in hooks
 
 
 def test_the_example_config_parses_with_the_vendor_endpoint_and_tiny_free_limits() -> None:
     data = yaml.safe_load((ROOT / "examples" / "gemini.example.yaml").read_text(encoding="utf-8"))
-    cfg = parse_config(data, "example", {"HOME": "/nonexistent"})
+    cfg = parse_config(data, "example", Path("/nonexistent"))
     assert cfg.endpoint == f"https://{VENDOR_HOST}" and cfg.job_cap == 2 and cfg.month_cap == 10
     assert cfg.free and all(f.rpm == 1 and f.rpd == 1 for f in cfg.free.values()), "an uncopied example cannot overrun"
     assert set(cfg.free) <= set(cfg.prices)

@@ -157,3 +157,15 @@ def sleeps() -> list[float]:
 @pytest.fixture
 def client(fake: FakeGitHub, sleeps: list[float]) -> Client:
     return Client(fake.token, fake.url, sleep=sleeps.append)
+
+
+@pytest.fixture(autouse=True)
+def gemini_locations(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The fixed Gemini locations (config, approvals, terms) point into a temporary directory in every test. This is the
+    only seam: production reads them from the account database, never from a flag or the environment."""
+    from safo import gemini
+
+    root = tmp_path_factory.mktemp("gemini-fixed")
+    locations = gemini.Locations(root, root / "gemini.yaml", root / "state" / "approvals", root / "privacy-terms.txt")
+    monkeypatch.setattr(gemini, "fixed_locations", lambda: locations)
+    return locations

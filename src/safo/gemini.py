@@ -26,9 +26,11 @@ import http.client
 import json
 import math
 import os
+import pwd
 import re
 import secrets
 import subprocess
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
@@ -43,7 +45,7 @@ from safo import netguard
 from safo.bounded import MAX_BYTES, MAX_FILE_BYTES, count, loads, read_bounded
 from safo.credentials import find_executable
 from safo.errors import ConfigError, SafoError
-from safo.guardlog import ensure_dir, file_lock, state_dir, write_text
+from safo.guardlog import ensure_dir, file_lock, write_text
 from safo.schema import Reader, _safe_load
 from safo.trust import read_trusted_regular_file
 
@@ -120,6 +122,17 @@ def _decimal(value: object, where: str, *, maximum: Decimal = Decimal(10**9)) ->
     return number
 
 
+def usd_amount(text: str, flag: str) -> Decimal:
+    """A finite, positive amount of USD from the command line, or a clean error (never a traceback)."""
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        raise ConfigError(f"{flag}: expected a number of USD") from None
+    if not value.is_finite() or value <= 0:
+        raise ConfigError(f"{flag}: expected a finite number of USD above 0")
+    return value
+
+
 def stamp(when: dt.datetime) -> str:
     return when.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -177,6 +190,7 @@ class GeminiConfig:
     max_output_tokens: int
     free: Mapping[str, FreeLimits]
     prices: Mapping[str, Price]
+    private_terms: str = "default"  # none, default (the fixed privacy-terms.txt) or an absolute path
 
 
 def _endpoint(r: Reader, value: object) -> str:
@@ -193,13 +207,13 @@ def _endpoint(r: Reader, value: object) -> str:
     raise r.fail("endpoint", f"the key may only go to https://{VENDOR_HOST} (or loopback http, for tests)")
 
 
-def default_ledger(env: Mapping[str, str]) -> Path:
-    base = env.get("XDG_DATA_HOME", "")
-    root = Path(base) if base and Path(base).is_absolute() else Path(env.get("HOME", "")) / ".local" / "share"
-    return root / "safo" / "gemini-spend-ledger.jsonl"
+def default_ledger(home: Path) -> Path:
+    """The one default place for the ledger, under the account's home. If the ledger is missing here while another
+    `gemini-spend-ledger.jsonl` sits in a sibling folder, every call is refused (see `Ledger.read`)."""
+    return home / ".local" / "share" / "safo" / "gemini-spend-ledger.jsonl"
 
 
-def parse_config(data: object, source: str = "gemini config", env: Mapping[str, str] | None = None) -> GeminiConfig:
+def parse_config(data: object, source: str = "gemini config", home: Path | None = None) -> GeminiConfig:
     r = Reader(source)
     top = r.mapping(
         data,
@@ -216,6 +230,7 @@ def parse_config(data: object, source: str = "gemini config", env: Mapping[str, 
             "max_output_tokens",
             "free",
             "paid",
+            "private_terms",
         },
         {"version", "endpoint", "price_source", "price_checked", "secrets", "free", "paid"},
     )
@@ -273,7 +288,14 @@ def parse_config(data: object, source: str = "gemini config", env: Mapping[str, 
             r.integer(m["rpd"], f"{where}.rpd", minimum=1),
         )
     ledger_text = top.get("ledger")
-    ledger = Path(r.string(ledger_text, "ledger")) if ledger_text is not None else default_ledger(env or os.environ)
+    ledger = (
+        Path(r.string(ledger_text, "ledger"))
+        if ledger_text is not None
+        else default_ledger(home or fixed_locations().home)
+    )
+    terms = r.string(top.get("private_terms", "default"), "private_terms")
+    if terms not in ("none", "default") and not (terms.startswith("/") and "\x00" not in terms):
+        raise r.fail("private_terms", "expected none, default or an absolute path")
     if not ledger.is_absolute():
         raise r.fail("ledger", "expected an absolute path")
     timeout = top.get("timeout_seconds", 60)
@@ -295,10 +317,11 @@ def parse_config(data: object, source: str = "gemini config", env: Mapping[str, 
         r.integer(top.get("max_output_tokens", 2048), "max_output_tokens", minimum=1),
         free,
         prices,
+        terms,
     )
 
 
-def load_config(path: Path | str, env: Mapping[str, str] | None = None) -> GeminiConfig:
+def load_config(path: Path | str, home: Path | None = None) -> GeminiConfig:
     """A private file: owned by the user, not writable by others (it names where the key is sent)."""
     p = Path(path)
     try:
@@ -314,7 +337,7 @@ def load_config(path: Path | str, env: Mapping[str, str] | None = None) -> Gemin
         raise ConfigError("gemini config: not valid YAML") from None
     except UnicodeError:
         raise ConfigError("gemini config: not UTF-8 text") from None
-    return parse_config(data, "gemini config", env)
+    return parse_config(data, "gemini config", home)
 
 
 # -- the ledger ----------------------------------------------------------------------------------------------------
@@ -331,6 +354,12 @@ class Ledger:
         try:
             raw = read_bounded(self.path, MAX_FILE_BYTES + 1)
         except FileNotFoundError:
+            others = sorted(p for p in self.path.parent.parent.glob(f"*/{self.path.name}") if p != self.path)
+            if others:
+                raise RefusedError(
+                    "this ledger does not exist yet, but another ledger with the same name does: starting an empty "
+                    "one would read 0 spent. Move the real one here, or point `ledger:` in gemini.yaml at it"
+                ) from None
             return []
         except OSError:
             raise RefusedError(
@@ -426,11 +455,15 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
                 if not isinstance(call_id, str) or call_id in ends:
                     raise ValueError("end")
                 ends[call_id] = row
+            elif kind == "funding":
+                continue
             elif kind == "usage":
                 date = row["date"]
                 if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
                     raise ValueError("date")
                 manual.append((date, _decimal(row["amount_usd"], "amount_usd")))
+            else:
+                raise RefusedError(f"the spend ledger has a row of unknown type (record {number}); fix it by hand")
         except (KeyError, ValueError, ConfigError):
             raise _bad(number) from None
     calls: list[Call] = []
@@ -589,11 +622,29 @@ def quota_line(cfg: GeminiConfig, req: Request, now: dt.datetime) -> str:
 # -- approvals -----------------------------------------------------------------------------------------------------
 
 
-def gemini_state_dir(env: Mapping[str, str]) -> Path:
-    hooks = state_dir(env)
-    if hooks is None:
-        raise ConfigError("HOME is not set, so there is nowhere to keep Gemini approval records")
-    return hooks.parent / "gemini"
+@dataclass(frozen=True)
+class Locations:
+    """Where the config, the approval records and the private-terms file live. Fixed: no flag and no environment
+    variable moves them (a test points them into a temporary directory through the `fixed_locations` seam)."""
+
+    home: Path
+    config: Path
+    approvals: Path
+    terms: Path
+
+
+def fixed_locations() -> Locations:
+    """From the account database, never from $HOME or an XDG variable, which a caller can set."""
+    try:
+        home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    except KeyError:
+        raise ConfigError("this account has no home directory in the account database") from None
+    return Locations(
+        home,
+        home / ".config" / "safo" / "gemini.yaml",
+        home / ".local" / "state" / "safo" / "gemini" / "approvals",
+        home / ".config" / "safo" / "privacy-terms.txt",
+    )
 
 
 @dataclass(frozen=True)
@@ -639,7 +690,11 @@ class ApprovalStore:
             raise ConfigError("approval: the job is a plain name (letters, digits, . _ -), at most 64 characters")
         if not max_usd.is_finite() or not 0 < max_usd <= JOB_CAP:
             raise ConfigError(f"approval: the amount is above 0 and at most the {money(JOB_CAP)} USD job cap")
-        if not quote.strip() or len(quote) > MAX_QUOTE or any(ord(c) < 32 for c in quote):
+        if (
+            not quote.strip()
+            or len(quote) > MAX_QUOTE
+            or any(ord(c) < 32 or unicodedata.category(c) in ("Cf", "Cc", "Zl", "Zp") for c in quote)
+        ):
             raise ConfigError(f"approval: the quote is the maintainer's message, 1 to {MAX_QUOTE} characters, one line")
         if quoted_at > now + dt.timedelta(minutes=1) or quoted_at < now - dt.timedelta(hours=24):
             raise ConfigError("approval: the quote's time is in the future or more than a day old; ask again")
@@ -780,6 +835,42 @@ def _gate_free(cfg: GeminiConfig, snap: Snapshot, req: Request, now: dt.datetime
         )
 
 
+# -- private terms --------------------------------------------------------------------------------------------------
+
+TERMS_FILE_BYTES = 65_536
+TERMS_LINE_CAP = 200
+TERMS_COUNT_CAP = 500
+
+
+def load_private_terms(setting: str, default: Path | None = None) -> tuple[re.Pattern[str], ...]:
+    """The maintainer's private terms (one regular expression a line), strictly: a file that is missing, unreadable,
+    too large or holds an invalid expression stops the call, because a list that failed to load would let a private
+    term through. `none` is the explicit, written-down opt-out."""
+    if setting == "none":
+        return ()
+    path = default if setting == "default" and default is not None else Path(setting)
+    try:
+        text = read_bounded(path, TERMS_FILE_BYTES).decode("utf-8")
+    except (OSError, UnicodeError):
+        raise RefusedError(
+            "the private terms file cannot be read, so nothing was sent (set private_terms: none to opt out)"
+        ) from None
+    if len(text.encode("utf-8")) >= TERMS_FILE_BYTES:
+        raise RefusedError("the private terms file is too large, so nothing was sent")
+    found: list[re.Pattern[str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if len(line) > TERMS_LINE_CAP or len(found) >= TERMS_COUNT_CAP:
+            raise RefusedError("the private terms file has a line or a count over the limit, so nothing was sent")
+        try:
+            found.append(re.compile(line, re.IGNORECASE))
+        except re.error:
+            raise RefusedError("the private terms file has an invalid expression, so nothing was sent") from None
+    return tuple(found)
+
+
 # -- the key -------------------------------------------------------------------------------------------------------
 
 KeyProvider = Callable[[str], str]
@@ -900,6 +991,9 @@ def ask(
 ) -> Reply:
     """Send one request, once, or say which gate stopped it."""
     _check_request(cfg, req)
+    terms = load_private_terms(cfg.private_terms, fixed_locations().terms if cfg.private_terms == "default" else None)
+    if any(t.search(req.prompt) for t in terms):
+        raise RefusedError("the prompt matches one of the maintainer's private terms; nothing was sent")
     ledger = Ledger(cfg.ledger)
     snap = snapshot(ledger.read())
     if req.tier == "paid":
@@ -1006,9 +1100,17 @@ def ask(
     if req.tier == "free":
         actual = Decimal(0)
     elif prompt_tokens is not None and out_tokens is not None and price is not None:
-        actual = (
-            Decimal(prompt_tokens) * price.input_per_mtok + Decimal(out_tokens) * price.output_per_mtok
-        ) / Decimal(1_000_000)
+        # What was reported, never less than a floor from the sizes of what was sent and received, and when the
+        # reported counts are implausibly low for those sizes the estimate (an upper bound) stands instead.
+        prompt_floor = len(req.prompt.encode("utf-8")) // 8
+        out_floor = len(text.encode("utf-8")) // 8
+        low = prompt_tokens < prompt_floor or out_tokens < out_floor
+        used_in, used_out = max(prompt_tokens, prompt_floor), max(out_tokens, out_floor)
+        actual = (Decimal(used_in) * price.input_per_mtok + Decimal(used_out) * price.output_per_mtok) / Decimal(
+            1_000_000
+        )
+        if low:
+            actual = max(actual, est)
     else:
         actual = None  # no usage in the answer: the estimate stands as the spend
     finish("ok", status, prompt_tokens, out_tokens, actual)

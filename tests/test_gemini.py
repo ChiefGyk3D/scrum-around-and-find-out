@@ -38,6 +38,7 @@ from safo.gemini import (
     ApprovalStore,
     GeminiConfig,
     Ledger,
+    Locations,
     OutcomeUnknownError,
     RateLimitStopError,
     RefusedError,
@@ -47,6 +48,7 @@ from safo.gemini import (
     load_config,
     quota_line,
 )
+from safo.gemini import fixed_locations as real_fixed_locations  # bound before the autouse seam replaces it
 
 
 @pytest.fixture
@@ -596,3 +598,133 @@ def test_a_malformed_key_is_refused_without_echoing_it(cfg: GeminiConfig, tmp_pa
     with pytest.raises(RefusedError) as err:
         doppler_key_provider(cfg, {"PATH": str(bin_dir)})("free")
     assert "SECRET-VALUE" not in str(err.value)
+
+
+# -- review round: fixed locations, floors, private terms, the race, legacy ledgers ----------------------------------
+
+
+def test_the_fixed_locations_ignore_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import pwd
+
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("SAFO_GEMINI_CONFIG", str(tmp_path / "x.yaml"))
+    found = real_fixed_locations()
+    home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    assert found.home == home
+    assert found.config == home / ".config" / "safo" / "gemini.yaml"
+    assert found.approvals == home / ".local" / "state" / "safo" / "gemini" / "approvals"
+    assert str(tmp_path) not in str(found)
+
+
+def test_the_default_ledger_is_under_the_fixed_home(tmp_path: Path) -> None:
+    from safo.gemini import default_ledger
+
+    assert default_ledger(tmp_path) == tmp_path / ".local" / "share" / "safo" / "gemini-spend-ledger.jsonl"
+
+
+def test_a_missing_ledger_is_refused_when_another_exists_beside_it(cfg: GeminiConfig, store: ApprovalStore) -> None:
+    other = cfg.ledger.parent.parent / "older" / cfg.ledger.name
+    other.parent.mkdir(parents=True)
+    other.write_text('{"type": "usage", "date": "2026-10-29", "amount_usd": 5}\n')
+    with pytest.raises(RefusedError, match="another ledger"):
+        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+    assert not cfg.ledger.exists()
+
+
+def test_an_unknown_ledger_row_type_is_reported(cfg: GeminiConfig, store: ApprovalStore) -> None:
+    seed(cfg.ledger, [{"date": "2026-10-29", "type": "usgae", "amount_usd": 9}])
+    with pytest.raises(RefusedError, match="unknown"):
+        quota_line(cfg, free(), NOW)
+
+
+def test_two_callers_racing_for_the_last_room_cannot_both_proceed(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = Ledger.read
+    calls = {"n": 0}
+
+    def racing(self: Ledger) -> list[dict[str, Any]]:
+        calls["n"] += 1
+        if calls["n"] == 2:  # the locked re-check: another caller has used the room since the first read
+            for i in range(3):
+                seed(cfg.ledger, start_row(minutes_ago(0.1 * (i + 1)), call_id=f"race{i}"))
+        return real(self)
+
+    monkeypatch.setattr(Ledger, "read", racing)
+    with pytest.raises(RefusedError, match="per minute"):
+        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+    assert server.requests == []
+
+
+def test_zero_token_counts_on_a_paid_answer_do_not_record_zero_spend(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    server.body = {
+        "candidates": [{"content": {"parts": [{"text": "word " * 400}]}}],
+        "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0},
+    }
+    approval = approve(store)
+    reply = ask(cfg, paid(approval, prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
+    start, end = ledger_rows(cfg.ledger)
+    assert end["actual_usd"] > 0 and Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
+    assert reply.cost_usd > 0
+
+
+def test_plausible_counts_are_recorded_as_reported(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+    ask(cfg, paid(approve(store)), store=store, key_for=Keys(), now=NOW)
+    _, end = ledger_rows(cfg.ledger)
+    assert (
+        Decimal(str(end["actual_usd"])) == (Decimal(10) * Decimal("0.75") + Decimal(20) * Decimal("3.75")) / 1_000_000
+    )
+
+
+def test_the_prompt_is_checked_against_the_private_terms(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path
+) -> None:
+    terms = tmp_path / "terms.txt"
+    terms.write_text("# mine\nacme-internal\n")
+    withterms = dataclasses.replace(cfg, private_terms=str(terms))
+    with pytest.raises(RefusedError, match="private term") as err:
+        ask(withterms, free("about ACME-Internal tooling"), store=store, key_for=Keys(), now=NOW)
+    assert "acme" not in str(err.value).lower()
+    ask(withterms, free("about public things"), store=store, key_for=Keys(), now=NOW)
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize("content", [None, "(unclosed\n", "x" * 70_000])
+def test_an_unreadable_or_invalid_terms_file_stops_the_call(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path, content: str | None
+) -> None:
+    terms = tmp_path / "terms.txt"
+    if content is not None:
+        terms.write_text(content)
+    broken = dataclasses.replace(cfg, private_terms=str(terms))
+    with pytest.raises(RefusedError, match="private terms"):
+        ask(broken, free(), store=store, key_for=Keys(), now=NOW)
+    assert server.requests == []
+
+
+def test_the_default_terms_file_is_the_fixed_one(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, gemini_locations: Locations
+) -> None:
+    default = dataclasses.replace(cfg, private_terms="default")
+    with pytest.raises(RefusedError, match="private terms"):
+        ask(default, free(), store=store, key_for=Keys(), now=NOW)
+    gemini_locations.terms.write_text("zzz-private\n")
+    ask(default, free(), store=store, key_for=Keys(), now=NOW)
+    assert len(server.requests) == 1
+
+
+def test_the_config_accepts_only_none_default_or_an_absolute_terms_path(tmp_path: Path, ledger: Path) -> None:
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(config_dict("http://127.0.0.1:9", ledger, private_terms="relative.txt")))
+    with pytest.raises(ConfigError, match="private_terms"):
+        load_config(path)
+
+
+def test_a_bidi_control_in_the_quote_is_refused(store: ApprovalStore) -> None:
+    with pytest.raises(ConfigError, match="quote"):
+        approve(store, quote="yes‮ up to 1.50")

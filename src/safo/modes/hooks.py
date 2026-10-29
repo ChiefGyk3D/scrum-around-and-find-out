@@ -28,11 +28,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from safo import guardlog, leadwait, tracking
+from safo import gemini, guardlog, leadwait, tracking
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
-from safo.gemini import ApprovalStore, approval_problem, gemini_state_dir
+from safo.gemini import ApprovalStore, approval_problem
 from safo.geminibrief import ApprovalCheck, load_terms
 from safo.guardlog import (
     MODES,
@@ -201,7 +201,7 @@ def approval_checker(ctx: LocalContext) -> ApprovalCheck | None:
     """How the guard asks whether a Gemini approval record is live. None when the folder cannot be named, which the
     rule treats as no record (a paid step is then blocked)."""
     try:
-        store = ApprovalStore(gemini_state_dir(ctx.env) / "approvals")
+        store = ApprovalStore(gemini.fixed_locations().approvals)
     except ConfigError:
         return None
     now = ctx.now
@@ -260,6 +260,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         repo,
         approval_check=approval_checker(ctx),
         terms=load_terms(ctx.env),
+        deadline=deadline,
     )
     decision = decide(verdict, mode)
     # One visible notice per session for a probe that cannot be trusted; every dispatch is still logged with its health.

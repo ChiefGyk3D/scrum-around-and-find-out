@@ -108,6 +108,7 @@ def config_dict(url: str, ledger: Path, **over: Any) -> dict[str, Any]:
         },
         "caps": {"job_usd": 2, "month_usd": 10, "block_usd": 2},
         "ledger": str(ledger),
+        "private_terms": "none",
         "timeout_seconds": 5,
         "max_output_tokens": 1000,
         "free": {MODEL: {"rpm": 3, "tpm": 1000, "rpd": 5}},

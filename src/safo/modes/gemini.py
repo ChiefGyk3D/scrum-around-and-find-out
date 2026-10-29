@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-from decimal import Decimal, InvalidOperation
+import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, TextIO
 
-from safo import output
+from safo import gemini, output
 from safo.bounded import read_bounded
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
@@ -33,22 +34,18 @@ from safo.gemini import (
     doppler_key_provider,
     estimate_usd,
     fixed,
-    gemini_state_dir,
     load_config,
     money,
     paid_quota,
     quota_line,
     snapshot,
+    usd_amount,
 )
-from safo.guardlog import config_dir
 from safo.modes import LocalMode, register_local
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("action", choices=["quota", "approve", "ask"])
-    parser.add_argument(
-        "--config", default="", help="gemini.yaml (default: $SAFO_GEMINI_CONFIG, else ~/.config/safo/gemini.yaml)"
-    )
     parser.add_argument("--model", required=True, help="a model named in the config")
     parser.add_argument("--paid", action="store_true", help="the paid tier: needs --job and --approval")
     parser.add_argument("--job", default="", help="the job an approval is for")
@@ -61,7 +58,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--quote", default="", help="approve: the maintainer's message, as he wrote it")
     parser.add_argument("--quoted-at", default="", help="approve: when he wrote it, UTC, YYYY-MM-DDTHH:MM:SSZ")
     parser.add_argument("--ttl-minutes", type=int, default=60, help="approve: how long the record lives (at most 1440)")
-    parser.add_argument("--beyond-ceiling", action="store_true", help="approve: this job may pass the 10 USD month")
     parser.add_argument("--issue", default="", help="approve: the tracking issue, owner/repo#N")
 
 
@@ -83,14 +79,10 @@ def brief_namespace(tokens: list[str]) -> argparse.Namespace:
     return parser.parse_args(tokens)
 
 
-def _config(ctx: LocalContext, args: argparse.Namespace) -> GeminiConfig:
-    chosen = args.config or ctx.env.get("SAFO_GEMINI_CONFIG", "")
-    if not chosen:
-        folder = config_dir(ctx.env)
-        if folder is None:
-            raise ConfigError("HOME is not set, so the Gemini config cannot be found; pass --config")
-        chosen = str(folder / "gemini.yaml")
-    return load_config(chosen, ctx.env)
+def _config() -> GeminiConfig:
+    """The config is at the fixed location; no flag and no variable names another."""
+    loc = gemini.fixed_locations()
+    return load_config(loc.config, loc.home)
 
 
 def _prompt(args: argparse.Namespace) -> str:
@@ -120,13 +112,36 @@ def _request(args: argparse.Namespace) -> Request:
     )
 
 
-def _approve(ctx: LocalContext, args: argparse.Namespace, cfg: GeminiConfig, store: ApprovalStore, req: Request) -> int:
+def _is_tty(stream: object) -> bool:
+    check = getattr(stream, "isatty", None)
+    try:
+        return bool(check()) if callable(check) else False
+    except (OSError, ValueError):
+        return False
+
+
+def _ask_line(ctx: LocalContext, stdin: TextIO, prompt: str) -> str:
+    ctx.say(prompt)
+    return stdin.readline()
+
+
+def approve_flow(
+    ctx: LocalContext,
+    args: argparse.Namespace,
+    cfg: GeminiConfig,
+    store: ApprovalStore,
+    req: Request,
+    *,
+    interactive: bool,
+    confirm: Callable[[str], str],
+) -> int:
+    """Write one approval record, but only for a person at a terminal who types the confirmation phrase.
+
+    `interactive` and `confirm` are arguments, not flags: the command line passes the real streams, and only a test can
+    pass anything else. The ceiling flag comes from the ledger here, never from the caller."""
     line = quota_line(cfg, req, ctx.now)  # first: an approval is refused when the line cannot be produced
     ctx.say(line)
-    try:
-        amount = Decimal(args.max_usd)
-    except InvalidOperation:
-        raise ConfigError("--max-usd: expected a number of USD") from None
+    amount = usd_amount(args.max_usd, "--max-usd")
     estimate = estimate_usd(cfg, req, ctx.now)
     if estimate > cfg.job_cap:
         raise RefusedError(
@@ -136,15 +151,24 @@ def _approve(ctx: LocalContext, args: argparse.Namespace, cfg: GeminiConfig, sto
         raise RefusedError(
             f"the estimate {money(estimate)} USD is over the amount to be approved ({money(amount)} USD)"
         )
-    if paid_quota(cfg, snapshot(Ledger(cfg.ledger).read()), req, ctx.now).beyond and not args.beyond_ceiling:
-        raise RefusedError(
-            f"this job would pass the {money(cfg.month_cap)} USD monthly ceiling; past it every further "
-            f"{money(cfg.block)} USD needs its own approval that says so: add --beyond-ceiling only if he said that"
-        )
+    beyond = paid_quota(cfg, snapshot(Ledger(cfg.ledger).read()), req, ctx.now).beyond
     try:
         quoted = dt.datetime.strptime(args.quoted_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.UTC)
     except ValueError:
         raise ConfigError("--quoted-at: expected the time of his message, UTC, as YYYY-MM-DDTHH:MM:SSZ") from None
+    if not interactive:
+        raise RefusedError(
+            "approve needs a person at a terminal: standard input and output must both be one. "
+            "The quota line above is what the person would be shown"
+        )
+    phrase = f"approve {req.job}"
+    ctx.say(f"quote of his message ({args.quoted_at}): {args.quote}")
+    ctx.say(
+        f"you are approving up to {money(amount)} USD on {req.model} for job {req.job}"
+        + (" and it PASSES the monthly ceiling" if beyond else "")
+    )
+    if confirm(f"type exactly `{phrase}` to approve, anything else cancels: ").strip() != phrase:
+        raise RefusedError("not confirmed; no approval record was written")
     if ctx.dry_run:
         ctx.say("dry run: no approval record written")
         return EXIT_OK
@@ -156,7 +180,7 @@ def _approve(ctx: LocalContext, args: argparse.Namespace, cfg: GeminiConfig, sto
         quoted_at=quoted,
         now=ctx.now,
         ttl_minutes=args.ttl_minutes,
-        beyond_ceiling=args.beyond_ceiling,
+        beyond_ceiling=beyond,
         issue_ref=args.issue,
     )
     ctx.say(
@@ -168,22 +192,28 @@ def _approve(ctx: LocalContext, args: argparse.Namespace, cfg: GeminiConfig, sto
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
-    cfg = _config(ctx, args)
-    store = ApprovalStore(gemini_state_dir(ctx.env) / "approvals")
+    cfg = _config()
+    store = ApprovalStore(gemini.fixed_locations().approvals)
     req = _request(args)
     if args.action == "quota":
         ctx.say(quota_line(cfg, req, ctx.now))
         return EXIT_OK
     if args.action == "approve":
-        return _approve(ctx, args, cfg, store, req)
+        stdin = ctx.stdin if ctx.stdin is not None else sys.stdin
+        return approve_flow(
+            ctx,
+            args,
+            cfg,
+            store,
+            req,
+            interactive=_is_tty(stdin) and _is_tty(ctx.out),
+            confirm=lambda prompt: _ask_line(ctx, stdin, prompt),
+        )
     if args.material != "public":
         raise ConfigError("--material public is required: private or sensitive material never goes to Gemini")
     ctx.say(quota_line(cfg, req, ctx.now))
     if args.cap:
-        try:
-            cap = Decimal(args.cap)
-        except InvalidOperation:
-            raise ConfigError("--cap: expected a number of USD") from None
+        cap = usd_amount(args.cap, "--cap")
         if req.tier == "paid" and estimate_usd(cfg, req, ctx.now) > cap:
             raise RefusedError(f"the estimate is over the --cap of {money(cap)} USD; nothing was sent")
     if ctx.dry_run:

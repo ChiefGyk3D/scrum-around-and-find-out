@@ -352,6 +352,7 @@ def check_dispatch(
     repo: Callable[[], str | None] = lambda: None,
     approval_check: ApprovalCheck | None = None,
     terms: tuple[re.Pattern[str], ...] = (),
+    deadline: float | None = None,
 ) -> Verdict:
     """Apply the routing rules to one Agent tool call.
 
@@ -403,7 +404,14 @@ def check_dispatch(
         if broken:
             rules.append(broken[0])
             reasons.append("no hidden work: " + broken[1])
-    for rule, why in findings(prompt, approval_check, terms):
+    try:
+        gemini_findings = findings(prompt, approval_check, terms, deadline)
+    except Exception:  # a check that cannot finish blocks: it never allows
+        gemini_findings = [
+            (GEMINI_PAID, "the Gemini check failed, so the brief is blocked"),
+            (GEMINI_MATERIAL, "the Gemini check failed, so the brief is blocked"),
+        ]
+    for rule, why in gemini_findings:
         rules.append(rule)
         reasons.append(f"{rule}: {why}")
     return Verdict(tuple(rules), tuple(reasons), model, local_step, na)
