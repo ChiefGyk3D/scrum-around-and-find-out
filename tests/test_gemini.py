@@ -728,3 +728,38 @@ def test_the_config_accepts_only_none_default_or_an_absolute_terms_path(tmp_path
 def test_a_bidi_control_in_the_quote_is_refused(store: ApprovalStore) -> None:
     with pytest.raises(ConfigError, match="quote"):
         approve(store, quote="yes‮ up to 1.50")
+
+
+def test_a_zero_prompt_count_alone_is_not_trusted(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+    server.body = {
+        "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+        "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 5},
+    }
+    ask(cfg, paid(approve(store), prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
+    start, end = ledger_rows(cfg.ledger)
+    assert Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
+
+
+def test_a_zero_output_count_alone_is_not_trusted(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+    server.body = {
+        "candidates": [{"content": {"parts": [{"text": "word " * 400}]}}],
+        "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 0},
+    }
+    ask(cfg, paid(approve(store), prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
+    start, end = ledger_rows(cfg.ledger)
+    assert Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
+
+
+def test_the_terms_loader_refuses_dangerous_shapes_and_accepts_plain_ones(tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    for bad in ("(a+a+)+y", "(a|aa)+y", ".*x", "a+", "(a)\\1", "(unclosed", "x" * 300):
+        path = tmp_path / "t.txt"
+        path.write_text(f"ok-term\n{bad}\n")
+        with pytest.raises(RefusedError, match="private terms"):
+            load_private_terms(str(path))
+    path.write_text("# c\nacme-internal\nproject [a-z]{1,30}\n\\bfoo\\d{2,5}\\b\n")
+    assert len(load_private_terms(str(path))) == 3
+    path.write_text("\n".join(f"t{i}" for i in range(501)))
+    with pytest.raises(RefusedError, match="private terms"):
+        load_private_terms(str(path))

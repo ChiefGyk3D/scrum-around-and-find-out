@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import http.client
+import importlib
 import json
 import math
 import os
@@ -840,12 +841,57 @@ def _gate_free(cfg: GeminiConfig, snap: Snapshot, req: Request, now: dt.datetime
 TERMS_FILE_BYTES = 65_536
 TERMS_LINE_CAP = 200
 TERMS_COUNT_CAP = 500
+TERMS_CHUNK = 4000  # characters one term sees at a time
+TERMS_REPEAT_CAP = 99  # a repeat in a term is bounded: {1,40}, never + or *
+
+_RE_PARSER = importlib.import_module("re._parser")  # private, but the only way to read a pattern's shape (3.11+)
+_RE_CONSTANTS = importlib.import_module("re._constants")
+
+
+def _unsafe_shape(pattern: str) -> str | None:
+    """Why a term could run for a long time, or None. Terms are plain words with bounded repeats: no unbounded repeat,
+    no repeat inside a repeat, no alternation inside a repeat, no back reference."""
+    try:
+        tree = _RE_PARSER.parse(pattern, re.IGNORECASE)
+    except (re.error, RecursionError, OverflowError):
+        return "an invalid expression"
+    c = _RE_CONSTANTS
+
+    def walk(items: Any, in_repeat: bool) -> str | None:
+        for op, av in items:
+            if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
+                _, high, sub = av
+                if high == c.MAXREPEAT or high > TERMS_REPEAT_CAP:
+                    return "an unbounded repeat (use {1,40} instead of + or *)"
+                if in_repeat and high > 1:
+                    return "a repeat inside a repeat"
+                found = walk(sub, in_repeat or high > 1)
+            elif op == c.SUBPATTERN:
+                found = walk(av[3], in_repeat)
+            elif op == c.BRANCH:
+                if in_repeat:
+                    return "an alternation inside a repeat"
+                found = next((r for r in (walk(branch, in_repeat) for branch in av[1]) if r), None)
+            elif op in (c.GROUPREF, c.GROUPREF_EXISTS):
+                return "a back reference"
+            elif op in (c.ASSERT, c.ASSERT_NOT):
+                found = walk(av[1], in_repeat)
+            elif op == c.ATOMIC_GROUP:
+                found = walk(av, in_repeat)
+            else:
+                found = None
+            if found:
+                return found
+        return None
+
+    return walk(tree, False)
 
 
 def load_private_terms(setting: str, default: Path | None = None) -> tuple[re.Pattern[str], ...]:
-    """The maintainer's private terms (one regular expression a line), strictly: a file that is missing, unreadable,
-    too large or holds an invalid expression stops the call, because a list that failed to load would let a private
-    term through. `none` is the explicit, written-down opt-out."""
+    """The maintainer's private terms (one expression a line), strictly, and the one loader the wrapper and the dispatch
+    guard both use: a file that is missing, unreadable, too large, over the count or the line cap, or holds an invalid
+    or dangerous expression stops the call, because a list that failed to load would let a private term through.
+    `none` is the explicit, written-down opt-out."""
     if setting == "none":
         return ()
     path = default if setting == "default" and default is not None else Path(setting)
@@ -858,17 +904,31 @@ def load_private_terms(setting: str, default: Path | None = None) -> tuple[re.Pa
     if len(text.encode("utf-8")) >= TERMS_FILE_BYTES:
         raise RefusedError("the private terms file is too large, so nothing was sent")
     found: list[re.Pattern[str]] = []
-    for line in text.splitlines():
+    for number, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         if len(line) > TERMS_LINE_CAP or len(found) >= TERMS_COUNT_CAP:
-            raise RefusedError("the private terms file has a line or a count over the limit, so nothing was sent")
-        try:
-            found.append(re.compile(line, re.IGNORECASE))
-        except re.error:
-            raise RefusedError("the private terms file has an invalid expression, so nothing was sent") from None
+            raise RefusedError(f"the private terms file has a line or a count over the limit (line {number})")
+        problem = _unsafe_shape(line)
+        if problem:
+            raise RefusedError(f"the private terms file has {problem} (line {number}), so nothing was sent")
+        found.append(re.compile(line, re.IGNORECASE))
     return tuple(found)
+
+
+def private_term_hit(terms: tuple[re.Pattern[str], ...], text: str, tick: Callable[[], None] | None = None) -> bool:
+    """True when any term matches. Each term sees at most TERMS_CHUNK characters at a time (chunks overlap by 200),
+    and `tick` may raise to stop the work."""
+    step = TERMS_CHUNK - 200
+    for start in range(0, max(len(text), 1), step):
+        chunk = text[start : start + TERMS_CHUNK]
+        for term in terms:
+            if tick is not None:
+                tick()
+            if term.search(chunk):
+                return True
+    return False
 
 
 # -- the key -------------------------------------------------------------------------------------------------------
@@ -992,7 +1052,7 @@ def ask(
     """Send one request, once, or say which gate stopped it."""
     _check_request(cfg, req)
     terms = load_private_terms(cfg.private_terms, fixed_locations().terms if cfg.private_terms == "default" else None)
-    if any(t.search(req.prompt) for t in terms):
+    if private_term_hit(terms, req.prompt):
         raise RefusedError("the prompt matches one of the maintainer's private terms; nothing was sent")
     ledger = Ledger(cfg.ledger)
     snap = snapshot(ledger.read())

@@ -74,18 +74,22 @@ gemini-material: public
 ## Who can approve, and the residual
 
 `safo gemini approve` refuses unless standard input **and** standard output are a terminal. It prints the quota line and
-the quote, and writes the record only after the person types `approve <job>` exactly. An agent running Bash has no
-terminal, so it cannot do this by accident or by a prompt-injected command line. The ledger flag for the ceiling is not
-an option. The config, the approval folder and the private-terms file are at **fixed locations** taken from the account
-database, not from `$HOME`, an XDG variable, a flag or `SAFO_GEMINI_CONFIG`; tests move them only through a function
-argument no command line can reach. The ledger's own location is a key in that fixed config, and if the ledger is missing
-while another `gemini-spend-ledger.jsonl` sits in a sibling folder, every call is refused instead of starting an empty
-ledger that reads 0 spent.
+the quote, and writes the record only after the person types `approve <job>` exactly. The ceiling flag is not an option;
+it is derived from the ledger. The config, the approval folder and the private-terms file are at **fixed locations** taken
+from the account database, not from `$HOME`, an XDG variable, a flag or `SAFO_GEMINI_CONFIG`; tests move them only through
+a function argument no command line can reach. The ledger's own location is a key in that fixed config, and if the ledger is
+missing while another `gemini-spend-ledger.jsonl` sits in a sibling folder, every call is refused instead of starting an
+empty ledger that reads 0 spent.
 
-What this does **not** stop: the same user. A process running as the maintainer can write a record file, edit the config
-or the ledger, or allocate a pseudo-terminal. The approval is evidence of the maintainer's word, not proof of it. The
-outside backstop is the vendor-side monthly limit and the automatic-reload settings on the paid account, which no process
-here can change.
+Be plain about what the terminal check is worth. It only stops accidents and a prompt-injected command line that has no
+pseudo-terminal; `script -qec` or any pty gives a process one, and it passes. It is not a barrier against the same user:
+a process running as the maintainer can write a record file directly, edit the config, or **delete or move the ledger,
+which resets the month total to 0** (only the sibling-ledger refusal catches a leftover copy). The approval is evidence of
+the maintainer's word, not proof of it. Real protection needs a channel the agent's UID cannot write: a separate account
+or a root-owned record store that only a human-run tool can add to, or a signed approval token checked by a service the
+agent cannot reach. That costs a second account or a small service and an install step, and it is not built here. Until it
+is, the backstop outside this code is the vendor-side monthly limit and the automatic-reload settings on the paid account,
+which no process here can change.
 
 ## The ledger
 
@@ -101,10 +105,14 @@ and is named by its record number, rather than being ignored.
 ## Private terms
 
 Before anything is sent, the wrapper checks the prompt itself, not only the brief, against the same secret shapes and
-against the maintainer's private terms (one regular expression a line, default `~/.config/safo/privacy-terms.txt`, or the
-path in `private_terms`). A terms file that is missing, unreadable, oversized or holds an invalid expression stops the
-call; `private_terms: none` is the written opt-out. `--material public` is still a statement by the caller: no code can know
-that a text is public, so these checks only catch what looks like a secret or matches a term the maintainer listed.
+against the maintainer's private terms (default `~/.config/safo/privacy-terms.txt`, or the path in `private_terms`). The
+dispatch guard reads the terms with the **same loader** (the fixed config's setting, never `SAFO_PRIVACY_EXTRA_FILE` or an
+XDG variable). A term is a plain word or phrase with bounded repeats: an unbounded repeat (`+`, `*`), a repeat inside a
+repeat, an alternation inside a repeat and a back reference are refused when the file loads, each term sees at most 4000
+characters at a time, and there are at most 500 terms of at most 200 characters. A file that is missing, unreadable,
+oversized or holds an invalid or dangerous expression stops the call (and denies the guarded step); `private_terms: none` is
+the written opt-out. `--material public` is still a statement by the caller: no code can know that a text is public, so
+these checks only catch what looks like a secret or matches a term the maintainer listed.
 
 ## The key
 

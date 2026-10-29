@@ -18,6 +18,7 @@ import contextlib
 import itertools
 import json
 import os
+import re
 import select
 import shlex
 import stat
@@ -33,7 +34,7 @@ from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.gemini import ApprovalStore, approval_problem
-from safo.geminibrief import ApprovalCheck, load_terms
+from safo.geminibrief import ApprovalCheck
 from safo.guardlog import (
     MODES,
     WARNING,
@@ -197,6 +198,13 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def private_terms_provider() -> tuple[re.Pattern[str], ...]:
+    """The guard reads the private terms the way the wrapper does: the fixed config's setting and the one strict loader.
+    Called only when a brief names a Gemini step; any failure to load blocks that step."""
+    loc = gemini.fixed_locations()
+    return gemini.load_private_terms(gemini.load_config(loc.config, loc.home).private_terms, loc.terms)
+
+
 def approval_checker(ctx: LocalContext) -> ApprovalCheck | None:
     """How the guard asks whether a Gemini approval record is live. None when the folder cannot be named, which the
     rule treats as no record (a paid step is then blocked)."""
@@ -259,7 +267,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         resolve,
         repo,
         approval_check=approval_checker(ctx),
-        terms=load_terms(ctx.env),
+        terms=private_terms_provider,
         deadline=deadline,
     )
     decision = decide(verdict, mode)

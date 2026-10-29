@@ -31,7 +31,7 @@ from safo import tracking
 from safo.agentsfile import Agent, AgentsFile, Endpoint
 from safo.bounded import loads
 from safo.errors import ConfigError
-from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, ApprovalCheck, findings
+from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, ApprovalCheck, TermsSource, findings
 from safo.guardlog import (
     APPEND_LOCK_TIMEOUT,
     FILE_CAP,
@@ -351,7 +351,7 @@ def check_dispatch(
     resolve: tracking.Resolver | None = None,
     repo: Callable[[], str | None] = lambda: None,
     approval_check: ApprovalCheck | None = None,
-    terms: tuple[re.Pattern[str], ...] = (),
+    terms: TermsSource = (),
     deadline: float | None = None,
 ) -> Verdict:
     """Apply the routing rules to one Agent tool call.

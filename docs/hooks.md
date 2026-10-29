@@ -183,13 +183,27 @@ refuses when its estimate is over it.
    by `SAFO_PRIVACY_EXTRA_FILE`, else `privacy-terms.txt` in the config directory; read, never written, never repeated),
    blocks it. The vendor host written out in a brief is blocked too: call Gemini only through `safo gemini`.
 
-The guard fails closed: it joins line continuations, removes quotes and backslashes, and treats `safo` and `gemini` near each other,
-`safo` beside a shell expansion, base64 decoded to a shell, the vendor host in any case, the Google genai SDK and the name of the
-paid secret-store config as Gemini steps that must pass the strict check; a line over 4000 characters that mentions any of them,
-more than 50 commands, or a check that runs past the guard's deadline is blocked. A false positive is a block, not a leak. It is a
-speed bump against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief is out of its
-reach. It is also not the gate that holds: the approval record, the caps and the free-tier
-limits are enforced again by the wrapper itself.
+The guard fails closed, but only on what looks like a command. After NFKC normalization, joining line continuations and
+removing quotes and backslashes, these are Gemini steps that must pass the strict check:
+
+- a declaration line in the exact grammar, `gemini: free` or `gemini: paid cap=USD approval=ID` (also as a list item), with
+  nothing after the tier but `key=value` pairs, so `Gemini: free tier only` in a sentence is prose;
+- a command: a `safo` token, then within 12 tokens a `gemini` token, then an action word (`ask`, `approve`, `quota`),
+  cut at `; | & )` and read with the parser the CLI uses; a redirection or a shell expansion inside it is unreadable (a
+  redirection can hide an option from a reader that stops at it), and a path such as `src/safo/gemini.py` or a model id
+  such as `gemini-3.6-flash` is an argument or a name, never a command start;
+- a `gemini` or `safo` token beside a shell expansion, glob, brace, backtick or `%` and an `ask` or `approve` word, which is
+  how a command is built at run time; markdown links and inline code around a known word or a file name are not;
+- base64, openssl, xxd, rev or printf escapes piped to a shell; the vendor host in any case; the Google genai SDK; the
+  paid secret-store config name.
+
+A line over 4000 characters that mentions any of these, more than 50 commands, or a check that runs past the guard's
+deadline is blocked, and so is a private-terms file that does not load (the guard and the wrapper use one loader, see
+[Gemini](gemini.md)). Every block names the line, the reason and the fix. A false positive is a block, not a leak; the
+test suite runs the guard over the repository's own docs and sets a ceiling on false positives. It is a speed bump against an
+honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief is out of its reach. It is
+also not the gate that holds: the approval record, the caps and the free-tier limits are enforced again by the wrapper
+itself.
 
 ## Failing safe
 
