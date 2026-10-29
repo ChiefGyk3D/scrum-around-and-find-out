@@ -112,7 +112,8 @@ def check_tool(tool: Tool, env: Mapping[str, str], run: Callable[..., Any] = sub
         return Result(tool.name, "missing", tool.required, minimum=tool.minimum)
     if not tool.probe:
         return Result(tool.name, "present", tool.required, note="presence only; not run")
-    clean = {"PATH": env.get("PATH", ""), "LC_ALL": "C"}  # no token, no GH_HOST: the child gets nothing to leak
+    # PATH, HOME (doppler refuses to print a version without one) and a locale: no token, no GH_HOST, nothing to leak
+    clean = {k: env[k] for k in ("PATH", "HOME") if k in env} | {"LC_ALL": "C"}
     try:
         done = run(  # argument list, an absolute executable found above, no shell
             [path, "--version"],

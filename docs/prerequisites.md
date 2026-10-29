@@ -18,7 +18,7 @@ exit code is 0 only when every **required** item is present at its minimum, and 
 skill packs are reported and never change the code.
 
 It is read-only. The only thing it runs is `<tool> --version`, with stdin closed, a five-second timeout and a clean
-environment (only `PATH`), so no token or account setting reaches the child. It prints the digits of the version and
+environment (`PATH` and `HOME` only), so no token or account setting reaches the child. It prints the digits of the version and
 nothing else the tool said. A relative or empty `PATH` entry is never searched. `llm-local` is a maintainer's wrapper with
 no version flag we may call, so it is checked for presence only and never run. Plugins and packs are read from
 `~/.claude/plugins/installed_plugins.json` and `~/.claude/skills/`; nothing there is executed.

@@ -262,3 +262,13 @@ def test_the_probe_child_gets_no_token_or_account_setting(world: tuple[Path, Pat
     env = {"SAFO_TOKEN": SECRET, "GH_TOKEN": SECRET, "GH_HOST": "example.invalid"}
     assert doctor(bindir, home, env=env)[0] == 0
     assert seen.read_text(encoding="utf-8") == "||"
+
+
+def test_a_tool_that_needs_home_to_print_its_version_is_given_it(world: tuple[Path, Path]) -> None:
+    bindir, home = world
+    stock(bindir)
+    body = '#!/bin/sh\n[ -n "$HOME" ] || exit 1\necho "v3.77.1"\n'
+    (bindir / "doppler").write_text(body, encoding="utf-8")
+    (bindir / "doppler").chmod(0o755)
+    _, out = doctor(bindir, home)
+    assert line_for(out, "doppler").startswith("present")
