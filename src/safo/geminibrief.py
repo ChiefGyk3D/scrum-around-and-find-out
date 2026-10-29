@@ -162,6 +162,9 @@ def findings(
     deadline: float | None = None,
 ) -> list[tuple[str, str]]:
     """(rule, reason) for each Gemini rule the brief breaks, at most one entry per rule. Fails closed on a timeout."""
+    lowered = prompt.lower()
+    if not any(m in lowered for m in MARKERS):
+        return []  # nothing in the brief can name Gemini, so there is nothing to time out on
     try:
         return _findings(prompt, check, terms, deadline)
     except TimeoutError:

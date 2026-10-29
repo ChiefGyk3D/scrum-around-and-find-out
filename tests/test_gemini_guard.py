@@ -357,3 +357,9 @@ def test_the_hook_passes_its_deadline_to_the_check(_private_home: Path, tmp_path
 def test_safo_and_gemini_far_apart_are_not_one_command() -> None:
     assert rules("safo status " + "x" * 500 + " and then gemini ask --paid\n", accepts()) == []
     assert GEMINI_PAID in rules("safo status " + "x" * 100 + " gemini ask --paid\n", accepts())
+
+
+def test_a_brief_with_no_gemini_marker_is_untouched_by_a_past_deadline() -> None:
+    import time
+
+    assert findings("issue: TEST-1\nrename a variable\n", accepts(), (), time.monotonic() - 1) == []
