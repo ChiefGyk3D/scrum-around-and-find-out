@@ -209,7 +209,11 @@ def approval_checker(ctx: LocalContext) -> ApprovalCheck | None:
     """How the guard asks whether a Gemini approval record is live. None when the folder cannot be named, which the
     rule treats as no record (a paid step is then blocked). While paid use is switched off, every paid step is refused
     with that reason."""
-    if not gemini.paid_enabled():
+    try:
+        enabled = gemini.paid_enabled()
+    except Exception:  # a switch check that fails is "disabled": the hook never fails open
+        enabled = False
+    if not enabled:
         return gemini.DisabledCheck()
     try:
         loc = gemini.fixed_locations()

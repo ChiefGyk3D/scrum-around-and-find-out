@@ -863,12 +863,12 @@ def paid_enabled() -> bool:
     No flag, environment variable or user-editable setting is consulted."""
     from safo import geminisign
 
-    loc = fixed_locations()
     try:
+        loc = fixed_locations()
         data = geminisign.read_trust_file(loc.paid_switch, loc.trust_uid, "paid-use switch")
-    except RefusedError:
+        lines = [x.strip() for x in data.decode("utf-8", "replace").splitlines() if x.strip() and not x.startswith("#")]
+    except Exception:  # any failure to read the switch is "disabled", the safe answer
         return False
-    lines = [x.strip() for x in data.decode("utf-8", "replace").splitlines() if x.strip() and not x.startswith("#")]
     return lines == ["enabled"]
 
 
