@@ -366,3 +366,59 @@ def test_an_empty_signed_field_never_matches_an_empty_expectation(device: Authen
     text = payload(nonce="")
     with pytest.raises(Tier2Refused, match="expect"):
         verify(device, device.assertion(text), text=text, expect={**EXPECT, "nonce": ""})
+
+
+# -- values that lie about equality (round 3) ----------------------------------------------------------------------
+
+
+class LiarStr(str):
+    """A str subclass that says it equals everything, with every dunder and method a comparison might use bent."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    def __hash__(self) -> int:
+        return 0
+
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        return b"lie"
+
+
+def test_a_str_subclass_that_lies_about_equality_is_refused(device: Authenticator) -> None:
+    assertion = device.assertion(payload())
+    for field in ("nonce", "model", "prompt_sha256"):
+        # the expected value is a liar: it "equals" the signed one only through the overridden operators
+        with pytest.raises(Tier2Refused, match="expect"):
+            verify(device, assertion, expect={**EXPECT, field: LiarStr("something else")})
+        # even a liar that holds the right text is refused: only the exact str type counts
+        with pytest.raises(Tier2Refused, match="expect"):
+            verify(device, assertion, expect={**EXPECT, field: LiarStr(EXPECT[field])})
+    # a liar as an extra expected key, and a liar as the key itself
+    with pytest.raises(Tier2Refused, match="expect"):
+        verify(device, assertion, expect={**EXPECT, "job": LiarStr("other")})
+    with pytest.raises(Tier2Refused, match="expect"):
+        verify(device, assertion, expect={**EXPECT, LiarStr("job"): "job-1"})
+
+
+def test_a_signed_nonce_that_differs_is_refused_whatever_the_expectation_claims(device: Authenticator) -> None:
+    text = payload(nonce="ffffffffffffffff")
+    with pytest.raises(Tier2Refused, match="expect"):
+        verify(device, device.assertion(text), text=text, expect={**EXPECT, "nonce": LiarStr(NONCE)})
+
+
+def test_a_lying_origin_or_payload_type_is_refused(device: Authenticator) -> None:
+    assertion = device.assertion(payload())
+    liar_key = Passkey("laptop-1", RP, LiarStr("http://localhost:1"), device.algorithm, b"c", device.spki)
+    with pytest.raises(Tier2Refused, match="origin"):
+        verify(device, assertion, key=liar_key)
+    with pytest.raises(Tier2Refused, match="approval"):
+        verify(device, assertion, text=LiarStr(payload()))
+
+
+def test_a_non_mapping_expect_is_refused(device: Authenticator) -> None:
+    for bad in ([("nonce", NONCE)], "nonce", 5):
+        with pytest.raises(Tier2Refused, match="expect"):
+            verify(device, device.assertion(payload()), expect=bad)

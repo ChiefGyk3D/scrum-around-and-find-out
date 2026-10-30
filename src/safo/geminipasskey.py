@@ -159,6 +159,17 @@ class PasskeyResult:
     synced: bool
 
 
+def _exact_equal(left: object, right: object) -> bool:
+    """Equality for security checks: both sides must be exactly `str` (not a subclass that can bend ==, != or encode),
+    compared as bytes through the base type's own methods and a constant-time compare."""
+    if type(left) is not str or type(right) is not str:
+        return False
+    try:
+        return hmac.compare_digest(str.encode(left, "utf-8"), str.encode(right, "utf-8"))
+    except UnicodeEncodeError:
+        return False
+
+
 def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
@@ -253,6 +264,8 @@ def verify_assertion(
         raise Tier2Refused("passkey approvals are off: the trust file has no `# safo-policy: allow-passkeys` line")
     if credential_fingerprint(key) in revoked:
         raise Tier2Refused(f"the passkey {key.label} is revoked")
+    if type(canonical_payload) is not str:
+        raise Tier2Refused("the approval text is not plain text")
     _check_approval(canonical_payload, expect, now)
     if len(client_data_json) > MAX_CLIENT_DATA:
         raise Tier2Refused("the client data is too large")
@@ -260,19 +273,19 @@ def verify_assertion(
         client = loads(client_data_json)
     except (ValueError, UnicodeError):
         raise Tier2Refused("the client data is not JSON") from None
-    if not isinstance(client, dict) or client.get("type") != "webauthn.get":
+    if not isinstance(client, dict) or not _exact_equal(client.get("type"), "webauthn.get"):
         raise Tier2Refused("the client data is not a sign-in assertion (type)")
     if client.get("crossOrigin") is True:
         raise Tier2Refused("the assertion was made from a cross-origin frame")
-    if client.get("origin") != key.origin:
+    if not _exact_equal(client.get("origin"), key.origin):
         raise Tier2Refused("the assertion is for another origin")
     challenge = client.get("challenge")
-    if not isinstance(challenge, str) or not hmac.compare_digest(
+    if type(challenge) is not str or not hmac.compare_digest(
         b64url_decode(challenge), challenge_for(canonical_payload)
     ):
         raise Tier2Refused("the assertion's challenge is not the hash of this approval")
     auth = parse_authenticator_data(authenticator_data)
-    if not hmac.compare_digest(auth.rp_id_hash, hashlib.sha256(key.rp_id.encode()).digest()):
+    if not hmac.compare_digest(auth.rp_id_hash, hashlib.sha256(str.encode(key.rp_id, "utf-8")).digest()):
         raise Tier2Refused("the assertion is for another relying party")
     if not auth.user_present:
         raise Tier2Refused("the authenticator did not report user presence")
@@ -299,12 +312,18 @@ def _check_approval(canonical_payload: str, expect: Mapping[str, str], now: dt.d
         raise Tier2Refused("the approval text is not JSON") from None
     if not isinstance(data, dict):
         raise Tier2Refused("the approval text is not a JSON object")
+    if not isinstance(expect, Mapping):
+        raise Tier2Refused("the caller did not say what to expect; nothing is verified without it")
+    wanted_items = list(expect.items())  # one snapshot, so the checks below see the same pairs
+    wanted_by_name = {k: v for k, v in wanted_items if type(k) is str}
+    if len(wanted_by_name) != len(wanted_items):
+        raise Tier2Refused("the expected fields are not plain names (expect)")
     for field in REQUIRED_EXPECT:
-        wanted = expect.get(field) if isinstance(expect, Mapping) else None
-        if not isinstance(wanted, str) or not wanted:
+        value = wanted_by_name.get(field)
+        if type(value) is not str or not value:
             raise Tier2Refused(f"the caller did not say which {field} to expect; nothing is verified without it")
-    for field, wanted in expect.items():
-        if data.get(field) != wanted:
+    for field, wanted in wanted_items:
+        if not _exact_equal(data.get(field), wanted):
             raise Tier2Refused(f"the approval's {field} is not the one expected")
     from safo.gemini import _parse_stamp  # the same stamp parser as the hardware-key path
 
