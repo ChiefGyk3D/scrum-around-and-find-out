@@ -150,7 +150,7 @@ class EventScan:
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.tail = ""
         self.safo = self.gemini = self.hit = self.conceal = self.capped = False
-        self.risk = self.command_expansion = False
+        self.risk = self.command_expansion = self.expansion = False
         self.assigned: set[str] = set()
         self.referenced: set[str] = set()
         self.deadline = deadline
@@ -177,7 +177,7 @@ class EventScan:
             self.safo = self.safo or "safo" in view
             self.gemini = self.gemini or "gemini" in view
             # each pattern runs only when its cheap precondition holds, so a long plain stream stays cheap
-            if "\\" in view or "$'" in view:
+            if "\\" in view or "$'" in view or "printf" in view:
                 self.conceal = self.conceal or bool(geminibrief.CONCEAL.search(view))
                 if geminibrief._ANSI_ESCAPE.search(view) or (
                     self.conceal and "printf" in view and re.search(r"printf\s+-v\b", view) is not None
@@ -188,7 +188,7 @@ class EventScan:
                     self.assigned.update(m.group(1) for m in geminibrief._ASSIGNED.finditer(view))
                 if "printf" in view:
                     self.assigned.update(m.group(1) for m in geminibrief._PRINTF_NAME.finditer(view))
-                if "for " in view:
+                if "for" in view:
                     self.assigned.update(m.group(1) for m in geminibrief._LOOP_NAME.finditer(view))
                 if "read" in view:
                     self.assigned.update(m.group(1) for m in geminibrief._READ_NAME.finditer(view))
@@ -199,9 +199,10 @@ class EventScan:
                 if len(self.assigned) > geminibrief.MAX_VARIABLES or len(self.referenced) > MAX_REFERENCED:
                     self.capped = True
                     self.hit = True
-            if "--" in view or "approve" in view:
-                self.risk = self.risk or bool(geminibrief._RISK_OPTION.search(view))
+            if "--" in view or "approve" in view or "{" in view:
+                self.risk = self.risk or bool(geminibrief._RISK_OPTION.search(view)) or geminibrief._brace_risk(view)
             if "$" in view:
+                self.expansion = self.expansion or bool(geminibrief._DOLLAR.search(view))
                 self.command_expansion = self.command_expansion or bool(_COMMAND_EXPANSION.search(view))
             if (
                 geminibrief.PAID_CONFIG.search(view)
@@ -219,7 +220,7 @@ class EventScan:
         # a Gemini option or action beside an expansion where a command word stands needs no named surface
         self.hit = (
             self.hit
-            or (self.risk and self.command_expansion)
+            or (self.risk and (self.expansion or self.command_expansion))
             or (self.safo and self.gemini)
             or (surface and bool(self.assigned & self.referenced))
         )

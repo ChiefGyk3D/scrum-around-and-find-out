@@ -694,12 +694,84 @@ _RISK_OPTION = re.compile(
 )  # exact tokens: --cap-add is not one, and approve is a word of its own
 
 
+_BRACE_GROUP = re.compile(r"\{([^{}]*,[^{}]*)\}")
+_WRAPPERS = _PREFIX_WORDS | frozenset(
+    {
+        "nice",
+        "timeout",
+        "stdbuf",
+        "setsid",
+        "ionice",
+        "strace",
+        "ltrace",
+        "chrt",
+        "taskset",
+        "unbuffer",
+        "doas",
+        "runuser",
+    }
+)  # words that run another command, usually with options of their own before it
+
+
+def _brace_expand(word: str, limit: int = 256) -> list[str]:
+    """The words a brace list in `word` makes (`--{p,un}aid` gives `--paid` and `--unaid`); bounded, text only."""
+    out = [word]
+    for _ in range(4):
+        nxt: list[str] = []
+        changed = False
+        for w in out:
+            m = _BRACE_GROUP.search(w)
+            if m is None:
+                nxt.append(w)
+                continue
+            changed = True
+            nxt.extend(w[: m.start()] + alt + w[m.end() :] for alt in m.group(1).split(","))
+        out = nxt[:limit]
+        if not changed:
+            break
+    return out
+
+
+def _brace_risk(low: str) -> bool:
+    """A brace list that can spell a Gemini-risk token (it is only expanded as text, never resolved against a value)."""
+    return any(
+        _RISK_OPTION.search(candidate)
+        for word in low.split()
+        if "{" in word and "," in word
+        for candidate in _brace_expand(word)
+    )
+
+
+def _after_wrapper(norm: str) -> bool:
+    """An expansion later in a command that starts with a wrapper word (`env -u X $BIN ...`, `time -p $BIN ...`): the
+    options before the real command are not tracked, so any expansion after the wrapper counts."""
+    tokens = _lex(_strip_comment(norm))
+    if tokens is None:
+        return _expands(norm)
+    at_start = True
+    wrapped = False
+    for t in tokens:
+        if t.op:
+            at_start = _breaks(t.value)
+            wrapped = wrapped and not at_start
+            continue
+        if wrapped and _DOLLAR.search(t.value):
+            return True
+        if at_start and t.value in _WRAPPERS:
+            wrapped = True
+        at_start = at_start and t.value in _WRAPPERS
+    return False
+
+
 def _risk_line(norm: str, low: str) -> bool:
     """A Gemini-risk token on a line whose command is made by an expansion: no Gemini word needs to be on the page. The
-    line is also risky when it is a shell or interpreter command string that holds an expansion."""
-    if not _RISK_OPTION.search(low) or ("$" not in norm and "`" not in norm):
+    token may be spelled by a brace list. The line is also risky when it is a shell or interpreter command string that
+    holds an expansion, or when an expansion follows a wrapper word and its options."""
+    if not _expands(norm):
         return False
-    return _expansion_at_command(norm) or bool(_SHELL_C.search(low) and _DOLLAR.search(norm))
+    if not (_RISK_OPTION.search(low) or _brace_risk(low)):
+        return False
+    return _expansion_at_command(norm) or _after_wrapper(norm) or bool(_SHELL_C.search(low) and _DOLLAR.search(norm))
 
 
 def _gemini_expansion(text: str, low: str, names: set[str]) -> bool:

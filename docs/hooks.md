@@ -221,7 +221,9 @@ that must pass the strict check:
   option or action is needed for that last rule, so `safo gemini ${X} ${Y}` is blocked. **No Gemini word is needed at all for one more rule**: a Gemini-risk token on a
   line (`--paid`, `--approval`, `--cap` as an option of its own, `approve` as a word of its own, not `--cap-add` or
   `approver`) whose command word is a variable or other expansion (also inside a `bash -c` style command string) makes
-  the brief relevant and unreadable, so words built by substitutions, interpreters, `tr`, `awk`, `sed`, a sourced file
+  the brief relevant and unreadable. The expansion may also follow a wrapper word and its options (`env -u X $BIN ...`, `time -p`,
+  `nohup`, `nice -n 5`, `timeout 5`, `command -p`), and the token may be spelled by a brace list (`--{p,un}aid`): brace lists on
+  the line are expanded as text and tested, never resolved against a value. So words built by substitutions, interpreters, `tr`, `awk`, `sed`, a sourced file
   or the environment are caught when the action or flag stands on the page. An expansion that nothing in the
   brief assigned, as the command word or on a line with a Gemini option, blocks when the brief names both `safo` and
   `gemini`. An **unrelated construct** (an array, a function, `eval`, `xargs`, an assignment from an expansion, a shell
@@ -272,7 +274,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   uses (fullwidth and look-alike letters folded, invisible characters removed, quotes and backslashes removed, JSON
   escapes such as `\n` and `\uXXXX` decoded). The event scan also denies what the brief scan's flow rule blocks, without
   lines (more than 2000 assigned names, the brief scan's own cap, or more than 50000 referenced names is itself a marker, never a
-  silent stop; a risk token beside an expansion where a command word stands is one too): an ANSI-C word with an escape, `printf -v` with escapes, or a name assigned anywhere and referenced anywhere while
+  silent stop; a risk token together with any expansion anywhere in the stream is one too, as is a risk token spelled by a brace list): an ANSI-C word with an escape, `printf -v` with escapes, or a name assigned anywhere and referenced anywhere while
   `safo`, `gemini` or escape-built words are named. A marker anywhere is **denied** with the diagnostic kept. An event longer
   than 8 MiB, or one that does not finish arriving or cannot be checked within the time, is **denied** as too large or
   incomplete to check. Only an oversized event whose whole stream was read and checked and held no marker is the degraded

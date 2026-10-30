@@ -493,3 +493,56 @@ def test_a_hash_after_a_redirection_and_a_real_comment_are_cut_the_way_bash_cuts
     )
     assert _strip_comment("echo (a)#b") == "echo (a)"
     assert _strip_comment("echo a #b") == "echo a "
+
+
+# -- round nine: wrapper options, brace-built option names ----------------------------------------------------------
+
+WRAPPED = {
+    "env -u": "env -u FOO $BIN $SUB ask --paid --model m\n",
+    "time -p": "time -p $BIN $SUB ask --paid --model m\n",
+    "nohup": "nohup $BIN $SUB ask --paid --model m\n",
+    "env with several options": "env -u A -u B $BIN $SUB ask --paid --model m\n",
+}
+WRAPPED_GUARD_ONLY = {
+    "command -p": "command -p $BIN $SUB ask --paid --model m\n",
+    "nohup --": "nohup -- $BIN $SUB ask --paid --model m\n",
+    "eval --": "eval -- $BIN $SUB ask --paid --model m\n",
+    "xargs -n1": "echo x | xargs -n1 $BIN $SUB ask --paid --model m\n",
+    "nice -n 5": "nice -n 5 $BIN $SUB ask --paid --model m\n",
+    "timeout 5": "timeout 5 $BIN $SUB ask --paid --model m\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(WRAPPED))
+def test_a_wrapper_with_options_before_an_expansion_command_is_still_seen(name: str, tmp_path: Path) -> None:
+    from safo.geminibrief import relevant
+
+    assert stub_runs(WRAPPED[name], tmp_path, BUILT_ENV), "the case is real"
+    assert relevant(WRAPPED[name]) and GEMINI_PAID in rules(WRAPPED[name] + PUBLIC), name
+
+
+@pytest.mark.parametrize("name", sorted(WRAPPED_GUARD_ONLY))
+def test_other_wrappers_with_options_are_seen_too(name: str) -> None:
+    from safo.geminibrief import relevant
+
+    assert relevant(WRAPPED_GUARD_ONLY[name]) and GEMINI_PAID in rules(WRAPPED_GUARD_ONLY[name] + PUBLIC), name
+
+
+BRACED = {
+    "an option name built by braces": "$BIN $SUB ask --{p,un}aid --model m\n",
+    "approve built by braces": "$BIN $SUB appro{v,w}e --max-usd 1\n",
+    "a cap built by braces": "$BIN $SUB ask --{cap,ca}p 1\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(BRACED))
+def test_a_risk_token_built_by_brace_expansion_is_seen(name: str, tmp_path: Path) -> None:
+    from safo.geminibrief import relevant
+
+    assert stub_runs(BRACED[name], tmp_path, BUILT_ENV), "the case is real: bash runs the stub with the built word"
+    assert relevant(BRACED[name]) and GEMINI_PAID in rules(BRACED[name] + PUBLIC), name
+
+
+def test_braces_that_never_spell_a_risk_token_are_left_alone() -> None:
+    assert rules("$BIN $SUB ask --{a,b}ccount\n") == []
+    assert rules("echo {a,b}\ndocker run --cap-{add,drop}=NET_ADMIN $IMAGE\n") == []

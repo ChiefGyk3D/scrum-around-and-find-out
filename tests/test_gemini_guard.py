@@ -615,7 +615,7 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         # the cross-line reader: run only on a brief the prefilter already passed, and acts only with safo and gemini
         "_ASSIGNED", "_PRINTF_NAME", "_LOOP_NAME", "_READ_NAME", "_REFERENCE", "_ANSI_ESCAPE", "_FUNCTION",
         "_RISK_TOKEN", "_PAID_TOKEN", "_GEMINI_WORD", "_SHELL_C", "_ASSIGNMENT_WORD", "_DOLLAR", "_BACKTICK_CMD",
-        "_COMMAND_START", "_GEMINI_OPTION", "_RISK_OPTION",
+        "_COMMAND_START", "_GEMINI_OPTION", "_RISK_OPTION", "_BRACE_GROUP",
         "RECORD_ID",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
@@ -1400,6 +1400,9 @@ BLOCKED_SAMPLES = {
     "conceal": "$'\\x73afo' $'\\x67emini' $'\\x61sk' $'\\x2d\\x2dpaid'\n",
     "variable flow": "A=safo\nB=gemini\n$A $B ask --paid\n",
     "risk option beside an expansion command": "$X $Y ask --paid\n",
+    "a wrapper with options": "env -u FOO $BIN $SUB ask --paid --model m\n",
+    "an option built by braces": "$BIN $SUB ask --{p,un}aid --model m\n",
+    "printf -v without escapes": "printf -v A %s%s sa fo\nprintf -v B %s%s gem ini\n$A $B ask now\n",
     "printf -v flow": "printf -v A '\\x73afo'\n$A gemini ask --paid\n",
 }
 
@@ -1423,6 +1426,27 @@ def parity_gaps(prefilter: list[tuple[str, re.Pattern[str]]]) -> list[str]:
 def test_the_event_scan_denies_whatever_the_brief_scan_blocks() -> None:
     from safo import geminibrief as gb
 
-    assert len(BLOCKED_SAMPLES) >= 10, "something was collected"
+    assert len(BLOCKED_SAMPLES) >= 13, "something was collected"
     assert parity_gaps(list(gb.PREFILTER)) == []
     assert parity_gaps([*gb.PREFILTER, ("a new detector", re.compile("x"))]) == ["a new detector"], "the check bites"
+
+
+WIDER_SAMPLES = {
+    "inside JSON": '{"tool_input": {"prompt": "$X $Y ask --paid --model m"}}',
+    "a bash -c string": 'bash -c "$BIN $SUB ask --paid --model m"\n',
+    "an expansion far from the option": "echo $HOME\n" + "word " * 50 + "\napprove it\n",
+}
+
+
+def test_the_event_scan_is_wider_than_the_brief_scan_where_it_has_no_lines() -> None:
+    import time
+
+    from safo.modes.hooks import EventScan
+
+    for name, sample in WIDER_SAMPLES.items():
+        scan = EventScan(time.monotonic() + 5)
+        scan.feed(sample.encode())
+        assert scan.hit, name
+    quiet = EventScan(time.monotonic() + 5)
+    quiet.feed(b"approve it, and echo hi\n")
+    assert not quiet.hit, "a risk word with no expansion anywhere is not a marker"

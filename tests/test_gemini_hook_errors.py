@@ -318,3 +318,45 @@ def test_more_referenced_names_than_the_event_scan_remembers_is_also_denied(agen
 
     tail = " ".join(f"$R{i}" for i in range(MAX_REFERENCED + 1))
     assert decision(run(agents, _private_home, event_with(tail))) == "deny"
+
+
+def test_an_oversized_event_with_a_risk_token_and_any_expansion_anywhere_is_denied(
+    agents: Path, _private_home: Path
+) -> None:
+    for tail in (
+        "approve the change and echo $HOME later",
+        "docker run --cap 1 $IMAGE",
+        "--paid is an option; see $PATH",
+    ):
+        assert decision(run(agents, _private_home, event_with(tail))) == "deny", tail
+    out = run(agents, _private_home, event_with("approve the change and echo hi, no expansion here"))
+    assert decision(out) is None and "input" in notice(out)
+
+
+def test_an_oversized_event_with_printf_v_and_no_escape_is_still_read(agents: Path, _private_home: Path) -> None:
+    tail = "printf -v A %s%s sa fo and then $A runs"
+    assert decision(run(agents, _private_home, event_with(tail))) == "deny"
+
+
+def test_an_oversized_event_whose_prompt_begins_with_the_expansion_is_denied(agents: Path, _private_home: Path) -> None:
+    event = (
+        '{"hook_event_name": "PreToolUse", "session_id": "s", "tool_name": "Agent", "padding": "'
+        + "A" * (BIG + 64)
+        + '", "tool_input": {"prompt":"$BIN $SUB ask --paid --model m"}}'
+    )
+    assert decision(run(agents, _private_home, event)) == "deny"
+
+
+@pytest.mark.parametrize(
+    "loop", ["for\\tf in a b; do $f; done", "for\\r\\nf in a b; do $f; done", "for  f in a b; do $f; done"]
+)
+def test_a_loop_variable_is_found_whatever_whitespace_follows_for(agents: Path, _private_home: Path, loop: str) -> None:
+    assert decision(run(agents, _private_home, event_with("see safo notes: " + loop))) == "deny"
+
+
+def test_an_oversized_event_with_a_brace_built_option_and_an_expansion_is_denied(
+    agents: Path, _private_home: Path
+) -> None:
+    assert decision(run(agents, _private_home, event_with("$BIN $SUB ask --{p,un}aid --model m"))) == "deny"
+    out = run(agents, _private_home, event_with("echo {a,b} and ordinary text"))
+    assert decision(out) is None

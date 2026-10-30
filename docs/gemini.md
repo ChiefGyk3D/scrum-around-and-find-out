@@ -57,7 +57,7 @@ what needs a model that has no free tier. Every monetary action needs a fresh, e
   there so he can check afterwards what he approved, the same as the approval token in [Hooks](hooks.md).
 - **Single use.** The call spends the nonce before the request leaves: an exclusive marker file **and** an
   `approval_used` row in the hash-chained ledger (which row records the principal and the tier). The ledger row is
-  authoritative, so deleting the marker file does not allow a replay. A record is bound to its model and its job, so it
+  authoritative; the marker file is a second record, not the one that decides. A record is bound to its model and its job, so it
   cannot be inherited by a sub-agent or reused by a second job. A job can never start another job: each paid call needs
   a record of its own. A record also binds the ledger head: if the ledger it was signed against is no longer in the
   current chain, it is refused. Its own `approval_issued` row, written when it was signed, must also be in the chain
@@ -143,12 +143,12 @@ the canonical text, nothing else). The ledger file versus the signed head.
    unsigned, old format, edited payload, signature by an unenrolled key, wrong namespace, non-canonical text).
 2. *The agent enrolls its own key.* It cannot write the root-owned trust file, and the code refuses a trust file the
    agent's account owns or can write (test: owner, group and world write, writable directory, symlink, missing file).
-3. *Signature replay.* A nonce is single use and spent in the chained ledger; deleting the marker file does not help
-   (test); a signature is for one model, one job, at most 2 USD, a short expiry. Against someone who can rewrite the
-   ledger's own state files this holds only until the signed expiry (see Residual risk).
-4. *Resetting the month total.* Deleting or editing the ledger is found (hash chain, named line); replacing it with a
-   fresh chain is found because a signed approval binds a ledger head that must be in the current chain (tests). Not
-   stopped when the ledger, its head file and the height record are all restored together (see Residual risk).
+3. *Reusing an approval.* A nonce is single use and spent in the chained ledger; a signature is for one model, one job, at
+   most 2 USD and a short expiry. These hold against a cooperating or confused caller and by the short signed expiry (see
+   Residual risk).
+4. *The month total.* The ledger is hash-chained (an edit, a removal or a reordering is found and named by line) and a
+   signed approval binds the ledger head it was made against (tests). The state lives under the maintainer's account (see
+   Residual risk).
 5. *A key without a touch.* `no-touch-required` is refused at load; a hardware signature without the touch flag is
    refused; a software key is refused by default.
 6. *A lost key.* Add it to the revocation list; a signature from it is refused even while it is still enrolled (test).
@@ -166,29 +166,24 @@ the canonical text, nothing else). The ledger file versus the signed head.
 - **The key is still readable.** The paid API key lives in the secret store that the maintainer's account can read. An
   agent running as him could call the vendor directly, bypassing `safo` and this gate. The signed approval protects the
   wrapper path and the guard; the **vendor-side monthly limit** is the backstop for everything else.
-- **Single use is enforced against a non-malicious or confused caller, and by a short signed window; it is not proof
-  against an attacker who can write both state files.** The spent nonce lives in the ledger, and the ledger, the head
-  file beside it and the height record (below) are all writable by the maintainer's account. What stops a replay is,
-  in layers: the nonce's `approval_used` row; the approval's own `approval_issued` row having to follow the signed head
-  (so rewinding the ledger to that head fails); the height record, kept apart from the ledger in the fixed state folder,
-  which makes a chain shorter than the highest height ever seen fail with the recorded height named (so rewinding to just
-  after the issuance fails); and the signed expiry, 10 minutes by default and never above 60. **An attacker who can
-  restore the ledger, the head file and the height record to an earlier copy can reuse one signed approval repeatedly
-  until it expires (each use at most 2 USD), and can reset the local monthly accounting.** The bound on that is the
-  short signed expiry and the vendor-side limits, not this code; a monotonic authority outside the maintainer's account
-  would be needed to close it, and none is built. When you archive or replace the ledger on purpose,
-  remove its height record (the `heights` folder next to the approvals) too, or every call is refused.
+- **The approval, ledger and spend state live under the maintainer's account.** Single use and the monthly total are
+  therefore enforced against a cooperating or confused caller and by the short signed expiry (10 minutes by default,
+  never above 60). They are **not** enforced against a hostile process running as that same account. For that reason
+  paid use stays disabled by the root-owned switch until a state authority outside that account exists; the work is
+  tracked in #205. What is in place: the nonce's `approval_used` row; the approval's own `approval_issued` row, which
+  must follow the head it was signed against; the height record, kept apart from the ledger in the fixed state folder,
+  which refuses a chain shorter than the longest one seen and names the recorded height; and the signed expiry. The
+  vendor-side limits remain the backstop. When you archive or replace the ledger on purpose, remove its height record
+  (the `heights` folder next to the approvals) too, or every call is refused.
 - **Inputs to `ssh-keygen` are sealed.** The signature and the allowed-signers line it verifies against are held in
   sealed in-memory files (memfd, write, grow and shrink sealed) and reach it as `/dev/fd` paths, the message goes in on
   standard input, and when signing the message is on standard input and the signature comes back on standard output.
   The key `ssh-keygen` reports verifying must equal the enrolled key that was looked up. Where sealed memory is not
   available, nothing is verified. Linux only.
-- **The chain is tamper-evident, not tamper-proof.** Someone who rewrites the whole ledger and its head file consistently
-  can make a past month read lower. That does not give them a signature: the next paid call still needs a fresh
-  signed approval whose ledger head is in the chain, and an approval signed before the rewrite no longer matches. But
-  the quota line the maintainer reads at the next `approve` comes from the file as it is, so a silently rewritten
-  ledger can show a smaller month. Truncating the last rows is found only if the head file or a signed approval still
-  remembers them.
+- **The chain is tamper-evident, not tamper-proof.** It shows an edit or a removal to a reader; it does not prevent one,
+  and the quota line the maintainer reads at `approve` is computed from the file as it is. A cut-off tail is found only
+  while the head file, the height record or a signed approval still remembers it. The same state-authority work (#205)
+  applies.
 - **Trust-file location.** `/etc/safo` must really be root-owned. The code checks ownership; it cannot prove that
   nobody holds root.
 - **Software and agent-held keys** are weaker than a hardware key. They work only with a written opt-in, and `keys check`
