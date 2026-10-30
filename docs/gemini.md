@@ -7,6 +7,11 @@
 > dispatch guard blocks any brief with a paid step. The approval machinery below stays in the tree, tested, for when the
 > switch is turned on. Nothing on the command line, in the environment or in `gemini.yaml` can turn it on.
 
+> **Paid path design.** The privileged broker that will hold the paid key, the approval consumption records and the spend
+> ledger, and make the paid call (text and generated images), is designed in [Gemini broker](gemini-broker.md), with its
+> risks in [the broker threat model](gemini-broker-threat-model.md). Both are design documents for issue #205; nothing in
+> them is built, and paid use stays disabled.
+
 Gemini is a **free-only** research provider for **public material**. It is in [the roster](routing.md) as the agent
 `gemini`, and the shape `public-source-research` prefers it. This page is what the code does, what it cannot do, and what
 the maintainer has to supply. Decisions are in issues #195 (the spend gate), #196 (the provider) and #200 (this build).
