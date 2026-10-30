@@ -20,7 +20,7 @@ from safo import prereqs
 from safo.cli import main
 
 ROOT = Path(__file__).parent.parent
-SECRET = "ghp_SENTINEL0123456789abcdefghijklmnop"  # a fake, planted to prove it is never printed
+SECRET = "-".join(["planted", "marker", "never", "printed"])  # a fake, built at run time so no scanner sees a token shape
 
 GOOD = {
     "git": "git version 2.47.3",
