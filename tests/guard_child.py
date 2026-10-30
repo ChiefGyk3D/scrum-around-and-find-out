@@ -21,7 +21,9 @@ function. SAFO_CHILD_BLOCK / SAFO_CHILD_FAIL are comma lists of targets `mod.NAM
 (guardlog.os.open_lock blocks the creation of a lock file); FAIL raises OSError. SAFO_CHILD_NONDAEMON=1 starts a
 non-daemon thread that waits for the barrier (a library thread that would keep a normal exit from finishing).
 SAFO_CHILD_COLD_START=SECONDS sleeps before safo is imported. SAFO_CHILD_CONFIG_FLOOR=SECONDS sets the least time a
-configuration load is given.
+configuration load is given. SAFO_CHILD_ARRIVE_AT=SECONDS waits, after the imports, until the process is that old,
+so the guard is reached at that age however slow the interpreter and the imports were (a loaded runner); if it is
+already older it does not wait.
 The budget is scaled down (GUARD_TIMEOUT_SECONDS): 5 s, or 10 s (the real one) for the pre-* modes (re-probe room).
 The cold-start seam SAFO_CHILD_COLD_START=SECONDS sleeps before safo is imported, as a slow interpreter or disk would.
 """
@@ -51,6 +53,10 @@ real_mode_health: Callable[..., Any] = guardlog.mode_health
 
 mode, home, agents, fifo, payload_file = sys.argv[1:6]
 mod.arm_process_clock()  # what cli.run() does in the real entry: the budget counts from the start of the process
+if os.environ.get("SAFO_CHILD_ARRIVE_AT"):  # the age comes from /proc, so waiting here is a late start
+    arrive_at = float(os.environ["SAFO_CHILD_ARRIVE_AT"])
+    while time.monotonic() - sys.modules["safo"].PROCESS_STARTED < arrive_at:
+        time.sleep(0.01)
 if os.environ.get("SAFO_CHILD_CONFIG_FLOOR"):  # the subject is a late start, not how fast a loaded box parses YAML
     mod.__dict__["CONFIG_MIN_WAIT_SECONDS"] = float(os.environ["SAFO_CHILD_CONFIG_FLOOR"])
 mod.__dict__["GUARD_TIMEOUT_SECONDS"] = 10 if mode.startswith("pre-") else 5

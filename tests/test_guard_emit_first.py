@@ -2728,8 +2728,9 @@ def test_a_start_older_than_the_whole_budget_is_not_trusted(monkeypatch: pytest.
 def test_a_late_start_after_decide_by_still_exits_two_before_the_host_kills_the_guard(
     _private_home: Path, agents: Path, tmp_path: Path
 ) -> None:
-    """The child reaches guard_process about 3.8 s into a 5 s budget: after decide_by (3 s), before the limit (4.75 s).
-    The pipe is full. There is no time to wait for it: exit 2, at once."""
+    """The child reaches guard_process 3.1 s into a 5 s budget (the arrival is pinned to the process age, so a slow
+    interpreter or a loaded runner cannot move it): after decide_by (3 s), before the limit (4.75 s), with the most
+    time left for the configuration load. The pipe is full. There is no time to wait for it: exit 2, at once."""
     set_probe(_private_home, reachable=True, agents=agents)
     set_mode(_private_home, "block")
     result = run_watched(
@@ -2739,7 +2740,7 @@ def test_a_late_start_after_decide_by_still_exits_two_before_the_host_kills_the_
         dispatch(model=None),
         mode="seam",
         jam_stdout=True,
-        extra_env={"SAFO_CHILD_COLD_START": "3.3", "SAFO_CHILD_CONFIG_FLOOR": "0.7"},
+        extra_env={"SAFO_CHILD_ARRIVE_AT": "3.1", "SAFO_CHILD_CONFIG_FLOOR": "2.0"},
     )
     assert not result.killed and result.status == 2, f"status {result.status}, killed {result.killed}"
     assert result.elapsed < CHILD_BUDGET
