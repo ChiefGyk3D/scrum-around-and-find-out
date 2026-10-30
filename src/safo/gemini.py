@@ -1340,7 +1340,12 @@ def _unsafe_shape(pattern: str) -> str | None:
                 return found
         return None
 
-    return walk(tree, False)
+    found = walk(tree, False)
+    if found:
+        return found
+    if termsearch.reach(pattern, re.IGNORECASE) > termsearch.TERMS_OVERLAP:
+        return f"an expression too wide (a match, with any look-around, must fit {termsearch.TERMS_OVERLAP} characters)"
+    return None
 
 
 def load_private_terms(setting: str, default: Path | None = None) -> tuple[re.Pattern[str], ...]:
