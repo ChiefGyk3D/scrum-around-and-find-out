@@ -263,8 +263,10 @@ run through a variable, function, `xargs`, `eval` or `-c` when the brief also na
 [Hooks](hooks.md), and a way of building a command that is not on it is not seen. A false positive is a block. The same rules also look at each Bash call: a shell command that names the vendor
 host, its SDK, the key variable or the secret-store project and config names is denied unless it is the `safo gemini`
 wrapper itself (there is no other exemption; what it covers and does not is in
-[Hooks](hooks.md#shell-commands-bash)). That check resolves nothing: a name built from pieces with no escape, or read
-from a file or the environment, and a program that calls the API from inside, are not seen. Raw SDK use inside a
+[Hooks](hooks.md#shell-commands-bash)). That check resolves nothing: names built from variables, decoded or read from a file or the environment, scripts the
+command merely runs, a shadowed Python module defined outside the command, and an alias or function from a shell startup
+file are not seen (a function or alias of the wrapper's name defined in the command itself is denied). The wrapper holds
+the real gates. Raw SDK use inside a
 program is out of its reach. When `agents.yaml` cannot be loaded the Gemini rules still apply to the brief. When
 the event cannot be used, it is never judged from a prefix: an oversized event is read to the end (up to 8 MiB and a few
 seconds) and checked whole for Gemini markers, a marker anywhere is denied, an event past the hard limit or that does not

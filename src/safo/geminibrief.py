@@ -1029,6 +1029,19 @@ SHELL_STORE = "the secret-store project or config name"
 SHELL_BUILT = "a word built from escapes beside a network or secret tool"
 SHELL_TOOL = "a secret tool run with a shell expansion"
 SHELL_UNVERIFIED = "a command that could not be checked in time"
+SHELL_HIJACK = "a function, alias or startup variable that can redirect the wrapper"
+SHELL_CAP = 64 * 1024  # a command longer than this is denied unread: no normalization runs on it
+_WRAP_NAME = r"(?:safo|python[\d.]*|pip[\d.]*)"
+_STARTUP_NAME = r"(?:pythonpath|pythonhome|pythonstartup|bash_env|env)"
+_HIJACK = re.compile(
+    rf"(?<![\w-])alias\s+(?:-\S+\s+)*{_WRAP_NAME}="
+    rf"|(?<![\w$./-]){_WRAP_NAME}\s*\(\)"
+    rf"|(?<![\w-])function\s+{_WRAP_NAME}(?![\w.-])"
+    r"|(?<![\w-])export\s+(?:-\w+\s+)*-\w*f"
+    rf"|(?<![\w-])(?:declare|typeset)\s+-\w*f\w*\s+(?:\S+\s+)*?{_WRAP_NAME}(?![\w.-])"
+    rf"|(?<![\w-]){_STARTUP_NAME}\+?="
+    rf"|(?<![\w-])(?:printf\s+-v|read(?:\s+-\w+)*)\s+{_STARTUP_NAME}(?![\w-])"
+)
 _SHELL_KEY = re.compile(r"gemini[\W_]*api[\W_]*key")
 _SHELL_PROJECT = re.compile(r"(?<![\w-])image-gen(?![\w-])")
 _SHELL_CONFIG = re.compile(r"(?<![\w-])prd(?![\w-])")
@@ -1084,6 +1097,8 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         if deadline is not None and time.monotonic() > deadline:
             raise TimeoutError("the shell check ran out of time")
 
+    if len(command) > SHELL_CAP:
+        return SHELL_UNVERIFIED  # before any normalization: the cost of the check never depends on a hostile length
     try:
         tick()
         lines = _join(command).splitlines() or [command]
@@ -1092,6 +1107,8 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         for line in lines:
             tick()
             _, _, low, pre_low, _pre_raw = _views(line)
+            if _HIJACK.search(low) or _HIJACK.search(pre_low):
+                return SHELL_HIJACK
             for view in (low, pre_low):
                 if VENDOR_RE.search(view) or SDK.search(view):
                     found = found or SHELL_VENDOR

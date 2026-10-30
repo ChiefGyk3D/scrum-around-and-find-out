@@ -249,3 +249,83 @@ def test_a_malformed_shell_event_is_still_the_usual_degraded_path(_private_home:
     payload["tool_input"] = {"command": 5}
     out, _ = run(agents, _private_home, json.dumps(payload))
     assert not denied(out)
+
+
+# -- shapes that make a later wrapper call untrustworthy (round 2) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "alias safo='curl'; safo gemini ask",
+        "alias -- safo=curl\nsafo gemini quota",
+        "alias python3='x'; python3 -m safo gemini quota",
+        "alias pip=true",
+        'safo() { curl "$@"; }; safo gemini ask',
+        "safo () { :; }",
+        "function safo { :; }",
+        "function python { :; }; python -m safo gemini quota",
+        "python3(){ :; }",
+        "pip() { :; }",
+        "export -f safo",
+        "f() { :; }; export -f f",
+        "declare -f safo",
+        "typeset -f python3",
+        "declare -fx pip",
+        "PYTHONPATH=/x python3 -m safo gemini quota",
+        "export PYTHONPATH=/x",
+        "env PYTHONHOME=/x safo gemini quota",
+        "PYTHONSTARTUP=/x python3 -m safo gemini quota",
+        "BASH_ENV=/x bash -c 'safo gemini quota'",
+        "ENV=/x sh -c 'safo gemini quota'",
+        "export 'PYTHON''PATH'=/x",
+        "printf -v PYTHONPATH %s /x",
+        "read PYTHONHOME",
+        "declare -x BASH_ENV=/x",
+    ],
+)
+def test_a_command_that_can_redirect_the_wrapper_is_denied(command: str) -> None:
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_HIJACK, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "make check",
+        "pytest -q tests",
+        "git status --short",
+        "ls",
+        "cat README.md",
+        "python3 -m pytest tests",
+        "docker run --env=FOO x",
+        "echo alias is a word",
+        "export PATH=$PATH:/x",
+        "declare -p",
+        "safo gemini quota",
+    ],
+)
+def test_ordinary_commands_are_not_denied_by_the_redirect_rule(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
+
+
+def test_the_hijack_denial_class_is_fixed_text() -> None:
+    found = geminibrief.shell_command_class("alias safo='tok_SECRETVALUE123'")
+    assert found == geminibrief.SHELL_HIJACK and "SECRETVALUE" not in found and "safo" not in found
+
+
+def test_a_command_over_the_size_cap_is_denied_unread() -> None:
+    assert geminibrief.shell_command_class("x" * (geminibrief.SHELL_CAP + 1)) == geminibrief.SHELL_UNVERIFIED
+    assert geminibrief.shell_command_class("ls " + "x" * 1000) is None
+
+
+def test_an_eight_megabyte_line_is_denied_fast_relative_to_a_small_command() -> None:
+    def took(command: str) -> tuple[float, str | None]:
+        start = time.perf_counter()
+        for _ in range(3):
+            result = geminibrief.shell_command_class(command)
+        return (time.perf_counter() - start) / 3, result
+
+    small, _ = took("x" * 60_000)
+    big, result = took("x" * 8_000_000)
+    assert result == geminibrief.SHELL_UNVERIFIED
+    assert big < small * 20 + 0.05  # refused by length: never scales with the 8 MB (a ratio, not a fixed bound)

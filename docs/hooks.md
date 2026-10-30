@@ -306,9 +306,16 @@ names is denied wherever it runs, so reading this repository's docs with such a 
 denial names the rule (`gemini-material`) and a fixed phrase class, such as "the vendor API host or SDK", and points at the
 wrapper; it never repeats the command. A command that cannot be checked before the deadline is denied.
 
-Not covered, by design: a name built from pieces with no escape (`a=generative; b=language; curl https://$a$b...` with
-no `doppler`), a name read from a file or the environment, a program or script that calls the API (the call is inside a
-file the command only runs), a command that reaches the wrapper's key in another way, and anything else on the page. The wrapper holds the real gates.
+Three more shapes are denied on any command, because they can make a later `safo gemini ...` or `python -m safo gemini ...`
+resolve to something else: defining or exporting a shell function or alias named `safo`, `python`, `python3` or `pip`
+(including `export -f` and `declare -f` / `typeset -f` naming one), and setting `PYTHONPATH`, `PYTHONHOME`,
+`PYTHONSTARTUP`, `BASH_ENV` or `ENV` (assignment, `printf -v` or `read`). A command longer than 64 KiB is denied unread as
+"could not be checked in time": no normalization runs on it, so a hostile length costs nothing.
+
+Not covered, by design: names built from variables (`a=generative; b=language; curl https://$a$b...` with no
+`doppler`), names decoded (`base64 -d | xargs curl`) or read from a file or the environment, a script or program the
+command merely runs, a shadowed Python module defined outside the command (a file named like an installed module on the
+import path), and an alias or function defined by a shell startup file the guard never sees. The wrapper holds the real gates.
 
 That is the whole claim. Not covered: a wrapper script or alias under another name that hides `safo`, a command written
 to a file and run later, other shells than bash, and any language that calls `safo` or the API from inside a program. It does not promise to read every way a shell can build a command: a form outside the list above
