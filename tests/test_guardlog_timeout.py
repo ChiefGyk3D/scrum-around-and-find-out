@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -53,8 +54,12 @@ def test_importing_guardlog_never_raises(
         importlib.reload(guardlog)  # the module body is the import-time parse
         assert 0 < guardlog.APPEND_LOCK_TIMEOUT <= guardlog.MAX_APPEND_LOCK_TIMEOUT
         captured = capsys.readouterr()
-        assert captured.out == ""
-        assert ("SAFO_APPEND_LOCK_TIMEOUT" in captured.err) == (raw in BAD or raw == "1000")  # visible, not silent
+        assert captured.out == "" and captured.err == "", (
+            "importing writes nothing: a full pipe would block it for ever"
+        )
+        warning = guardlog.LOCK_TIMEOUT_WARNING  # kept, and printed by main() for commands that are not hooks
+        assert (warning is not None) == (raw in BAD or raw == "1000")
+        assert warning is None or "SAFO_APPEND_LOCK_TIMEOUT" in warning
     finally:
         monkeypatch.delenv("SAFO_APPEND_LOCK_TIMEOUT")
         importlib.reload(guardlog)
@@ -73,6 +78,26 @@ def test_reload_picks_up_the_environment(monkeypatch: pytest.MonkeyPatch) -> Non
 @pytest.mark.parametrize(("raw", "expected"), [("1_0", 5.0), ("٣", 3.0), ("1e-5", 1e-5)])
 def test_python_float_syntax_is_accepted_as_documented(raw: str, expected: float) -> None:
     assert guardlog.parse_append_lock_timeout(raw)[0] == expected
+
+
+def test_the_warning_is_printed_by_main_for_other_commands_and_never_for_the_hooks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import io
+
+    from safo.cli import main
+
+    monkeypatch.setattr(guardlog, "LOCK_TIMEOUT_WARNING", "SAFO_APPEND_LOCK_TIMEOUT is not a number; using 3 s")
+    env = {"HOME": str(tmp_path), "PATH": ""}
+    other = io.StringIO()
+    main(["hooks", "status"], env=env, out=io.StringIO(), err=other)
+    assert "safo: SAFO_APPEND_LOCK_TIMEOUT is not a number" in other.getvalue(), (
+        "printed AFTER the command, for a person"
+    )
+    for hook in (["hooks", "guard"], ["hooks", "probe"]):
+        quiet = io.StringIO()
+        main(hook, env=env, out=io.StringIO(), err=quiet, stdin=io.StringIO("{}"))
+        assert quiet.getvalue() == "", f"{hook}: a hook never prints it"
 
 
 def test_a_closed_stderr_leaves_stdout_empty(

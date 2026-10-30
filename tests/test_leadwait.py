@@ -18,6 +18,7 @@ import pytest
 from hooksdata import agents_file, hooks, probe_file, read_log, set_mode, set_probe
 from safo import leadwait
 from safo.agentsfile import load_agents
+from safo.cli import HookSafeParser
 from safo.errors import ConfigError
 from safo.hooks import bind_repo
 
@@ -504,18 +505,28 @@ def test_deeply_nested_substitutions_do_not_crash_the_scanner() -> None:
 
 
 def test_the_install_messages_and_the_guard_help_say_the_guard_covers_bash(
-    _private_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    _private_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = tmp_path / "settings.json"
     dry = hooks("install", "--settings", str(settings), home=_private_home, dry_run=True)[1]
     assert "PreToolUse (Agent and Bash) guard" in dry
     done = hooks("install", "--settings", str(settings), home=_private_home)[1]
     assert "installed the SessionStart probe and the PreToolUse (Agent and Bash) guard" in done
+    # hooks() runs main() in-process, so argparse's help is silenced only by HookSafeParser.armed, a class attribute
+    # that cli.run() sets when no terminal is attached and that no test of run() used to put back. It is pinned here:
+    # a person at a terminal gets the help whatever ran earlier in this worker or whatever stdin the runner gives.
+    monkeypatch.setattr(HookSafeParser, "armed", False)
     for argv in (("guard", "--help"), ("--help",)):  # the guard's own help, and the list of hooks subcommands
         with pytest.raises(SystemExit):
             hooks(*argv, home=_private_home)
         helped = " ".join(capsys.readouterr().out.split())
         assert "Agent and Bash tools" in helped, argv
+    # Companion: armed (what run() sets for a host, no terminal), the guard's help is deliberately silent, so the
+    # assertions above bite on the state they pin and not on a help text that is always present.
+    monkeypatch.setattr(HookSafeParser, "armed", True)
+    with pytest.raises(SystemExit):
+        hooks("guard", "--help", home=_private_home)
+    assert capsys.readouterr().out == ""
 
 
 # -- round 2: an adversarial review of the tokenizer -------------------------------------------------------------
@@ -1318,7 +1329,13 @@ def test_l2_the_hook_passes_its_deadline_to_the_scan(
 ) -> None:
     from safo.modes import hooks as hooks_mode
 
-    monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)  # the whole budget is already gone
+    monkeypatch.setattr(
+        hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun + 9.0)
+    )  # lookups are already late; the decision is not
+
+    monkeypatch.setattr(
+        hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
+    )  # the subject is the guard deadline, not the load floor on a busy machine
     set_mode(_private_home, "block")
     out = guard(_private_home, agents, bash("sleep 1"))[1]
     reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
@@ -1511,7 +1528,13 @@ def test_r4_the_hook_does_not_honor_a_marker_after_its_deadline(
 ) -> None:
     from safo.modes import hooks as hooks_mode
 
-    monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(
+        hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun + 9.0)
+    )  # lookups are already late; the decision is not
+
+    monkeypatch.setattr(
+        hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
+    )  # the subject is the guard deadline, not the load floor on a busy machine
     assert denied(_private_home, agents, f"sleep 60 # lead-wait: ok - {REASON}")
 
 
@@ -1617,16 +1640,25 @@ def test_r4_neither_the_hook_output_nor_the_log_carries_the_command_for_any_kind
 
     command = KIND_COMMANDS[kind]
     if kind == "unscannable-timeout":
-        monkeypatch.setattr(hooks_mode, "GUARD_TIMEOUT_SECONDS", 0.0)
+        monkeypatch.setattr(
+            hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun - 1.0)
+        )  # lookups are already late; the decision is not
+        monkeypatch.setattr(
+            hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0
+        )  # the subject is the guard deadline, not the load floor on a busy machine
     else:
         assert kind in leadwait.find_waits(command, THRESHOLD), kind
     set_mode(_private_home, mode)
     out = guard(_private_home, agents, bash(command))[1]
     assert out, kind
-    log_text = (_private_home / ".local/state/safo/hooks/log.jsonl").read_text()
+    log_file = _private_home / ".local/state/safo/hooks/log.jsonl"
+    skipped = kind == "unscannable-timeout"  # out of time at once: the decision is printed, the append is skipped
+    log_text = log_file.read_text() if log_file.exists() else ""
+    assert skipped == (not log_file.exists()), kind
     assert SENTINEL not in out and SENTINEL not in log_text, kind
     assert "sentinel-description" not in out and "sentinel-description" not in log_text, kind
-    assert read_log(_private_home)[-1]["rules"] == ["lead-waits"]
+    if not skipped:
+        assert read_log(_private_home)[-1]["rules"] == ["lead-waits"]
     if kind.startswith("unscannable-"):
         assert kind in out  # the message names the kind, nothing else of the call
 

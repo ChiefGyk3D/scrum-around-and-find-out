@@ -654,8 +654,8 @@ def test_a_session_repository_that_is_not_listed_is_not_accepted_for_citing(
     assert denied(run_guard(_private_home, unlisted, own, bin_dir)[0]) and not (tmp_path / "gh.log").exists()
 
 
-def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
-    _private_home: Path, agents: Path, tmp_path: Path
+def test_a_guard_out_of_time_denies_in_block_mode_and_skips_the_append_and_the_next_dispatch_says_so(
+    _private_home: Path, agents: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import io
 
@@ -682,10 +682,17 @@ def test_a_guard_out_of_time_denies_in_block_mode_and_still_writes_its_decision(
     )
     import time
 
-    hooks_mode.guard(ctx, argparse.Namespace(agents=str(agents), agents_local=""), started=time.monotonic() - 60)
+    monkeypatch.setattr(hooks_mode, "CONFIG_MIN_WAIT_SECONDS", 10.0)  # the subject is the deadline, not the load floor
+    # lookups are late and the log time is gone, but the decision still has time: decide_by is 8 s away
+    monkeypatch.setattr(hooks_mode, "budget_points", lambda begun: (begun - 1.0, begun + 8.0, begun - 1.0))
+    hooks_mode.guard(ctx, argparse.Namespace(agents=str(agents), agents_local=""), started=time.monotonic())
     assert calls == [], "no process is started once the deadline has passed"
     assert json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert read_log(_private_home)[-1]["rules"] == ["issue-unverified"]
+    # New contract: out of time, the append is skipped (it is never stretched past the hook's budget), and the
+    # next dispatch reports the gap through the marker.
+    assert read_log(_private_home) == [], "the decision is printed; the log write was skipped, not attempted late"
+    pending = hooks_mode.log_failure_pending(state_folder(_private_home))
+    assert pending is not None and pending[0] == hooks_mode.LOG_FAILED_NOTICE
 
 
 def test_the_shipped_agents_file_exempts_nothing() -> None:

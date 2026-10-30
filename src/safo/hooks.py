@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import datetime as dt
 import hashlib
 import json
 import os
 import re
 import shlex
+import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +61,8 @@ GUARD_MARGIN_SECONDS = 2  # the guard's own deadline falls this much before the 
 GUARD_TIMEOUT_SECONDS = 10  # room for one lazy re-probe: two requests per endpoint at REPROBE_TIMEOUT_SECONDS
 REPROBE_INTERVAL_SECONDS = 60  # a stale state is refreshed at most this often per session and configuration
 REPROBE_TIMEOUT_SECONDS = 1.5  # per request; the guard sits in front of every dispatch, so this stays short
+REPROBE_SLACK_SECONDS = 0.25  # a re-probe is cut off at twice its per-request timeout plus this
+CONFIG_REPROBE_TIMEOUT_SECONDS = 3.0  # per request, once per new configuration: two requests fit the guard's deadline
 
 NO_MODEL = "no-model"
 APPROVAL = "approval"
@@ -88,13 +92,35 @@ ALWAYS_BLOCK = (GEMINI_PAID, GEMINI_MATERIAL)
 # -- the probe -------------------------------------------------------------------------------------
 
 
-def probe_all(doc: AgentsFile, probe_one: Callable[[Endpoint], Probe] = probe) -> list[tuple[Endpoint, Probe]]:
-    """Every endpoint asked at once, so a session start waits for the slowest one and not for the sum."""
+def probe_all(
+    doc: AgentsFile, probe_one: Callable[[Endpoint], Probe] = probe, wait: float | None = None
+) -> list[tuple[Endpoint, Probe]]:
+    """Every endpoint asked at once, so a session start waits for the slowest one and not for the sum.
+
+    With `wait`, the call returns after that many seconds in all: an endpoint still unanswered then counts as
+    unreachable, and its worker (a daemon thread, which a socket timeout per read cannot bound in total) is left behind.
+    """
     endpoints = [e for a in doc.agents for e in a.endpoints]
     if not endpoints:
         return []
-    with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
-        return list(zip(endpoints, pool.map(probe_one, endpoints), strict=True))
+    if wait is None:
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
+            return list(zip(endpoints, pool.map(probe_one, endpoints), strict=True))
+    answers: list[Probe | None] = [None] * len(endpoints)
+
+    def work(index: int) -> None:
+        try:
+            answers[index] = probe_one(endpoints[index])
+        except Exception:
+            answers[index] = Probe(endpoints[index].id, endpoints[index].url, False, error="error")
+
+    workers = [threading.Thread(target=work, args=(i,), daemon=True) for i in range(len(endpoints))]
+    for worker in workers:
+        worker.start()
+    end = time.monotonic() + wait
+    for worker in workers:
+        worker.join(max(0.0, end - time.monotonic()))
+    return [(e, a or Probe(e.id, e.url, False, error="timeout")) for e, a in zip(endpoints, answers, strict=True)]
 
 
 def probe_state(results: list[tuple[Endpoint, Probe]], when: float) -> dict[str, Any]:
@@ -205,8 +231,10 @@ def bind_repo(path: Path, repo: str | None, source: object) -> str:
         return "changed"
 
 
-def read_bound_repo(path: Path | None) -> str | None:
-    """The repository bound at SessionStart, or None (not bound, unreadable, untrusted folder): never exempt."""
+def read_bound_repo(path: Path | None, refresh: bool = True) -> str | None:
+    """The repository bound at SessionStart, or None (not bound, unreadable, untrusted folder): never exempt. With
+    `refresh` the file's modification time is also refreshed; the guard passes False (its read runs in a bounded worker
+    thread that may be left behind) and calls refresh_bound_repo itself, after its decision is delivered."""
     if path is None or not trusted_dir(path.parent):
         return None
     try:
@@ -214,8 +242,16 @@ def read_bound_repo(path: Path | None) -> str | None:
     except (OSError, ValueError, UnicodeError):
         return None
     value = bound.get("repo") if isinstance(bound, dict) else None
-    touch(repo_path(path))  # the session is alive: keep its binding out of the age-based prune
+    if refresh:
+        touch(repo_path(path))  # the session is alive: keep its binding out of the age-based prune
     return value if isinstance(value, str) else None
+
+
+def refresh_bound_repo(path: Path | None) -> None:
+    """Keep a live session's binding out of the age-based prune (a utime). A health hint: best effort, never part of a
+    verdict."""
+    if path is not None and trusted_dir(path.parent):
+        touch(repo_path(path))
 
 
 def save_state(path: Path, state: dict[str, Any]) -> bool:
@@ -279,25 +315,38 @@ def claim_reprobe(path: Path, now: float) -> bool:
     return True
 
 
-def reprobe(doc: AgentsFile, path: Path, now: float) -> dict[str, Any] | None:
-    """Refresh a stale state in place, bounded and rate limited. Never raises: None means the state could not be
-    refreshed (rate limited, a probe or storage failure, or a newer result already stored), and the caller treats local
-    reachability as unknown."""
+def reprobe(
+    doc: AgentsFile,
+    path: Path,
+    now: float,
+    timeout: float = REPROBE_TIMEOUT_SECONDS,
+) -> dict[str, Any] | None:
+    """Refresh a state in place, bounded and rate limited. `timeout` is per request and the whole probe is cut off at
+    twice that, so a server that answers a byte at a time cannot hold the hook. Never raises: None means the state
+    could not be refreshed (rate limited, a probe or storage failure, or a newer result already stored), and the caller
+    treats local reachability as unknown."""
     try:
         if not claim_reprobe(path, now):
             return None
         started = time.monotonic()
-        results = probe_all(doc, lambda endpoint: probe(endpoint, REPROBE_TIMEOUT_SECONDS))
+        results = probe_all(doc, lambda endpoint: probe(endpoint, timeout), wait=2 * timeout + REPROBE_SLACK_SECONDS)
         state = probe_state(results, now + time.monotonic() - started)  # completion time, as at SessionStart
         return state if save_state(path, state) else None
     except Exception:
         return None
 
 
-def first_notice(path: Path) -> bool:
-    """True once per session and configuration. Later dispatches in the same degraded state stay quiet; the decision
-    log still records every one of them. When the marker cannot be made, say it: a repeated warning beats a hidden
-    one."""
+def notice_unclaimed(path: Path) -> bool:
+    """READ-ONLY: True while the session's one probe notice has not been claimed (the flag does not exist). Safe to run
+    in a worker that is left behind: it changes nothing."""
+    return not os.path.lexists(notice_path(path))
+
+
+def claim_notice(path: Path) -> bool:
+    """Claim the notice (create the flag, O_EXCL): True once per session and configuration. Later dispatches in the same
+    degraded state stay quiet; the decision log still records every one of them. When the flag cannot be made, say it:
+    a repeated warning beats a hidden one. The guard calls this only AFTER the line carrying the notice was delivered,
+    on its own thread."""
     marker = notice_path(path)
     try:
         ensure_dir(marker.parent)
@@ -476,14 +525,43 @@ def log_record(
     }
 
 
-def append_log(path: Path, record: dict[str, Any], limit: int = LOG_LIMIT_BYTES) -> None:
+CORRUPT_KEEP = 5  # corrupt logs kept beside the log; the oldest beyond this are deleted
+
+
+def quarantine_log(path: Path) -> None:
+    """Move a log that is not valid UTF-8 to `<log>.corrupt-<UTC timestamp>-<pid>` (0600, same folder). It never touches
+    `<log>.1`, the real archive. At most CORRUPT_KEEP such files are kept; the oldest names go first."""
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S")
+    target = path.with_name(f"{path.name}.corrupt-{stamp}-{os.getpid()}")
+    number = 0
+    while os.path.lexists(target):  # the same second and process: never replace an earlier one
+        number += 1
+        target = path.with_name(f"{path.name}.corrupt-{stamp}-{os.getpid()}.{number}")
+    os.rename(path, target)
+    target.chmod(0o600)
+    kept = sorted(p for p in path.parent.glob(path.name + ".corrupt-*") if p.is_file() and not p.is_symlink())
+    for extra in kept[: max(0, len(kept) - CORRUPT_KEEP)]:
+        with contextlib.suppress(OSError):
+            extra.unlink()
+
+
+def append_log(
+    path: Path, record: dict[str, Any], limit: int = LOG_LIMIT_BYTES, lock_timeout: float = APPEND_LOCK_TIMEOUT
+) -> None:
     raw = (json.dumps(record, sort_keys=True) + "\n").encode()
     if not valid_record(record) or len(raw) > RECORD_CAP or len(raw) > limit:
         raise ValueError("invalid or oversized record")
-    with file_lock(path.with_name(path.name + ".lock"), timeout=APPEND_LOCK_TIMEOUT):
+    with file_lock(path.with_name(path.name + ".lock"), timeout=lock_timeout):
         try:
             old = bounded_read(path, FILE_CAP)
         except FileNotFoundError:
+            old = b""
+        # Retained bytes that are not valid UTF-8, anywhere (a complete line or the incomplete tail), are corruption:
+        # keep them under a new name, never over the archive, and start a fresh log.
+        try:
+            old.decode("utf-8")
+        except UnicodeDecodeError:
+            quarantine_log(path)
             old = b""
         # Recover only the incomplete tail; preserve complete retained records.
         complete = old[: old.rfind(b"\n") + 1]
@@ -512,11 +590,23 @@ def is_safo_path(word: str) -> bool:
     return os.path.isabs(word) and os.path.normpath(word) == word and os.path.basename(word) == "safo"
 
 
+def is_safo_guard_path(word: str) -> bool:
+    """An absolute, normalized path whose last component is safo-guard (the script beside a venv's or pipx's safo)."""
+    return os.path.isabs(word) and os.path.normpath(word) == word and os.path.basename(word) == "safo-guard"
+
+
 def hook_entry(command: str, timeout: int, message: str = "") -> dict[str, Any]:
     entry: dict[str, Any] = {"type": "command", "command": command, "timeout": timeout}
     if message:
         entry["statusMessage"] = message
     return entry
+
+
+def _tail_ok(tail: Sequence[str]) -> bool:
+    if len(tail) % 2 or any(tail[i] not in ("--agents", "--agents-local") for i in range(0, len(tail), 2)):
+        return False
+    flags = tail[::2]
+    return len(set(flags)) == len(flags) and all(Path(v).is_absolute() for v in tail[1::2])
 
 
 def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
@@ -533,14 +623,73 @@ def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
         prefix = (*launch, "hooks", subcommand)
         if tuple(words[: len(prefix)]) != prefix:
             continue
-        tail = words[len(prefix) :]
-        if len(tail) % 2 or any(tail[i] not in ("--agents", "--agents-local") for i in range(0, len(tail), 2)):
-            return None
-        flags = tail[::2]
-        if len(set(flags)) != len(flags) or any(not Path(v).is_absolute() for v in tail[1::2]):
-            return None
-        return launch
+        return launch if _tail_ok(words[len(prefix) :]) else None
     return None
+
+
+def guard_direct_signature(command: str) -> tuple[str, ...] | None:
+    """The launcher of a command in the guard's own form (`safo-guard`, `python3 -m safo.guard`, or the absolute path
+    of a safo-guard script) named by the safo launcher it corresponds to, so it compares with a legacy line's."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    candidates: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+        (("safo-guard",), ("safo",)),
+        (("python3", "-m", "safo.guard"), ("python3", "-m", "safo")),
+    )
+    if words and is_safo_guard_path(words[0]):
+        candidates = (*candidates, ((words[0],), (words[0][: -len("-guard")],)))
+    for prefix, launch in candidates:
+        if tuple(words[: len(prefix)]) == prefix:
+            return launch if _tail_ok(words[len(prefix) :]) else None
+    return None
+
+
+def guard_signature(command: str) -> tuple[str, ...] | None:
+    """The launcher of an owned guard command, in either form (the legacy `... hooks guard` or the direct one)."""
+    return command_signature(command, "guard") or guard_direct_signature(command)
+
+
+def guard_form(command: str) -> str | None:
+    """`new` for the direct entry point, `legacy` for `... hooks guard ...`, None for a command that is not ours."""
+    if guard_direct_signature(command) is not None:
+        return "new"
+    return "legacy" if command_signature(command, "guard") is not None else None
+
+
+def entry_problems(group: dict[str, Any], entry: Any, matcher: str, legacy_matchers: tuple[str, ...]) -> list[str]:
+    """Why an entry that is ours (its command is recognised) would not run as the hook install writes, else []. The ONE
+    rule: install refuses on any problem (it will not guess), and `status` reports the same problems, so the two cannot
+    drift. The matcher must be the one install writes or one it still migrates; the type must be `command`."""
+    problems = []
+    if group.get("matcher", "") not in (matcher, *legacy_matchers):
+        problems.append("wrong matcher")
+    if not isinstance(entry, dict) or entry.get("type") != "command":
+        problems.append("wrong type")
+    return problems
+
+
+def guard_forms(settings: Any) -> tuple[set[str], list[str]]:
+    """The forms of the guard command a settings document holds under PreToolUse that WOULD RUN (install's acceptance
+    rule, entry_problems), and the problems of the guard-shaped entries that would not (both empty: no guard)."""
+    found: set[str] = set()
+    problems: list[str] = []
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    groups = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    for group in groups if isinstance(groups, list) else []:
+        inner = group.get("hooks") if isinstance(group, dict) else None
+        for entry in inner if isinstance(inner, list) else []:
+            command = entry.get("command") if isinstance(entry, dict) else None
+            form = guard_form(command) if isinstance(command, str) else None
+            if not form:
+                continue
+            issues = entry_problems(group, entry, GUARD_MATCHER, LEGACY_GUARD_MATCHERS)
+            if issues:
+                problems.extend(p for p in issues if p not in problems)
+            else:
+                found.add(form)
+    return found, problems
 
 
 def _ensure(
@@ -550,11 +699,13 @@ def _ensure(
     entry: dict[str, Any],
     subcommand: str,
     legacy_matchers: tuple[str, ...] = (),
+    signature: Callable[[str], tuple[str, ...] | None] | None = None,
 ) -> bool:
     groups = hooks.setdefault(event, [])
     if not isinstance(groups, list) or not all(isinstance(g, dict) for g in groups):
         raise ConfigError("settings: invalid hook groups; fix by hand")
-    expected = command_signature(entry["command"], subcommand)
+    sign = signature or (lambda text: command_signature(text, subcommand))
+    expected = sign(entry["command"])
     kept: list[dict[str, Any]] = []
     slot: int | None = None  # where our hook already sits: it is put back there, so a rerun reorders nothing
     for group in groups:
@@ -564,10 +715,10 @@ def _ensure(
         remaining = []
         for existing in inner:
             command = existing.get("command") if isinstance(existing, dict) else None
-            sig = command_signature(command, subcommand) if isinstance(command, str) else None
+            sig = sign(command) if isinstance(command, str) else None
             exact = command == entry["command"]
             if sig is not None or exact:
-                if group.get("matcher", "") not in (matcher, *legacy_matchers) or existing.get("type") != "command":
+                if entry_problems(group, existing, matcher, legacy_matchers):
                     raise ConfigError("settings: ambiguous SAFO hook event/matcher/type; fix by hand")
                 if sig != expected:
                     raise ConfigError("settings: changed invocation; migrate by hand")
@@ -608,6 +759,7 @@ def merge_settings(settings: Any, probe_command: str, guard_command: str) -> tup
             hook_entry(guard_command, GUARD_TIMEOUT_SECONDS),
             "guard",
             LEGACY_GUARD_MATCHERS,
+            guard_signature,  # a legacy `hooks guard` line is ours too: it is replaced by the direct form
         )
         or changed
     )

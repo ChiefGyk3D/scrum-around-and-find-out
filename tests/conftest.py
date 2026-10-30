@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from fakegh import FakeGitHub
+from hooksdata import agents_file, set_mode, set_probe
 from safo.graphql import Client
 
 _real_connect = socket.socket.connect
@@ -132,13 +133,30 @@ def _sane_umask() -> Iterator[None]:
         os.umask(previous)
 
 
+XDG_NAMES = ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")
+
+
 @pytest.fixture(autouse=True)
 def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
     """HOME is an empty temporary directory in every test: no test ever reads the real home or its agent files."""
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
+    # A CI runner (or a desktop session) may export XDG base directories; they take precedence over HOME in
+    # safo.guardlog, so state and config would land outside the private HOME. Child processes inherit os.environ.
+    for name in XDG_NAMES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     return home
+
+
+@pytest.fixture(autouse=True)
+def hard_exits(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The guard ends its own process with os._exit; in a test that would end pytest. Every in-process test gets a
+    recorder instead (the codes it was asked to exit with). The real-process tests run tests/guard_child.py, which
+    keeps the real os._exit."""
+    codes: list[int] = []
+    monkeypatch.setattr("safo.modes.hooks.hard_exit", codes.append)
+    return codes
 
 
 @pytest.fixture
@@ -209,3 +227,30 @@ def gemini_locations(
     )
     monkeypatch.setattr(gemini, "fixed_locations", lambda: locations)
     return locations
+
+
+@pytest.fixture
+def block_home(_private_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Default configuration discovery finds an agents file under HOME and the mode file says block."""
+    (_private_home / ".config" / "safo").mkdir(parents=True, exist_ok=True)
+    (_private_home / ".config" / "safo").chmod(0o700)
+    agents_file(_private_home / ".config" / "safo" / "agents.yaml")
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=True, agents=_private_home / ".config" / "safo" / "agents.yaml")
+    monkeypatch.setenv("HOME", str(_private_home))
+    for name in ("SAFO_AGENTS", "SAFO_AGENTS_LOCAL"):
+        monkeypatch.delenv(name, raising=False)
+    return _private_home
+
+
+@pytest.fixture
+def strict_only(_private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No default configuration anywhere under HOME (so a lost explicit path means the degraded allow); the strict
+    agents file is elsewhere. The mode file says block."""
+    assert not (_private_home / ".config" / "safo" / "agents.yaml").exists()
+    strict = agents_file(tmp_path / "strict-agents.yaml")
+    set_mode(_private_home, "block")
+    set_probe(_private_home, reachable=True, agents=strict)
+    for name in ("SAFO_AGENTS", "SAFO_AGENTS_LOCAL"):
+        monkeypatch.delenv(name, raising=False)
+    return strict

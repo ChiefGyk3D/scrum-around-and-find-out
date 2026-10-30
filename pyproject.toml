@@ -16,6 +16,7 @@ dependencies = ["PyYAML==6.0.3"]
 
 [project.scripts]
 safo = "safo.cli:run"
+safo-guard = "safo.guard:run"
 
 [tool.setuptools.dynamic]
 version = { attr = "safo.__version__" }
