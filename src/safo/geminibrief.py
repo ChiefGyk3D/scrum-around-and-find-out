@@ -18,8 +18,8 @@ replacing markdown links by their text and joining line continuations, a brief n
 
 A way of building a command that is not on that list is not seen. Every step must be proven complete (cap, approval,
 `gemini-material: public` when it sends anything) or the brief is blocked, and a block names the line, the reason and
-the fix. A false positive is a block, not a leak. Raw SDK use outside a brief is out of this guard's reach, and above
-1 MiB the whole hook fails open. Nothing here repeats any text of the brief in a reason.
+the fix. A false positive is a block, not a leak. Raw SDK use outside a brief is out of this guard's reach.
+Nothing here repeats any text of the brief in a reason.
 """
 
 from __future__ import annotations
@@ -549,6 +549,89 @@ def _scan_line(
         )
 
 
+# Brief-wide reading of a command that is built over several lines. Plain NAME=value assignments are resolved and
+# expanded into the later lines (so a two-line assignment is read as the command it is); anything else that hides or
+# builds a command (an array, a function, eval, xargs, -c, an assignment from an expansion, an expansion that is left)
+# makes a brief that names safo, gemini and an action unreadable.
+_ASSIGN = re.compile(r"(?<![\w$.\-/])([A-Za-z_][A-Za-z0-9_]*)(\+?)=(\"[^\"]*\"|'[^']*'|\(|[^\s;&|<>]*)")
+_VAR_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_FUNCTION = re.compile(r"(?<![\w$.\-/])[A-Za-z_]\w*\s*\(\)|(?<![\w-])function\s+[A-Za-z_]\w*")
+_RISKY_WORD = re.compile(r"(?<![\w-])(?:ask|approve)\b|--paid")
+_CONSTRUCTS = (
+    ("eval", re.compile(r"(?<![\w-])eval\b")),
+    ("xargs", re.compile(r"(?<![\w-])xargs\b")),
+    ("a -c option", re.compile(r"(?<![\w-])-c\b")),
+)
+
+
+_PREFIX_WORDS = frozenset({"env", "command", "exec", "nohup", "time", "sudo", "builtin", "eval", "xargs"})
+
+
+def _code_span(word: str) -> bool:
+    """A markdown code span around an option or a path (`--quoted-at`, `docs/x.md`), which is prose, not a command."""
+    inner = word[1:-1] if len(word) > 2 and word[0] == word[-1] == "`" else ""
+    return bool(inner) and "`" not in inner and (inner[0] == "-" or "/" in inner or "." in inner)
+
+
+def _expansion_at_command(text: str) -> bool:
+    """True when a command word (the first word of a command, after an operator, or after env/command/exec...) still
+    holds a shell expansion or a command substitution, so what runs is not what is written."""
+    tokens = _lex(text) or []
+    at_start = True
+    for t in tokens:
+        if t.op:
+            at_start = _breaks(t.value)
+            continue
+        if at_start and ("$" in t.value or ("`" in t.value and not _code_span(t.value))):
+            return True
+        at_start = at_start and t.value in _PREFIX_WORDS
+    return False
+
+
+def _resolve(lines: list[str]) -> tuple[list[str], list[tuple[str, int]]]:
+    """(the lines with plain assignments expanded into what follows them, the constructs that could not be resolved as
+    (name, line number)). Only literal values are resolved: no command substitution, expansion or array."""
+    known: dict[str, str | None] = {}
+    found: list[tuple[str, int]] = []
+    out: list[str] = []
+
+    def expand(text: str) -> str:
+        def one(m: re.Match[str]) -> str:
+            value = known.get(m.group(1) or m.group(2))
+            return m.group(0) if value is None else value
+
+        return _VAR_REF.sub(one, text)
+
+    for number, line in enumerate(lines, 1):
+        low = _views(line)[2]
+        text, at = "", 0
+        for m in _ASSIGN.finditer(line):
+            text += expand(line[at : m.start()]) + line[m.start() : m.end()]
+            at = m.end()
+            name, plus, value = m.group(1), m.group(2), m.group(3)
+            if value == "(":
+                found.append(("an array", number))
+                known[name] = None
+            elif "$" in value or "`" in value or "\\" in value:
+                found.append(("an assignment from an expansion", number))
+                known[name] = None
+            else:
+                quoted = len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]
+                plain = value[1:-1] if quoted else value
+                before = known.get(name)
+                known[name] = before + plain if plus and before is not None else plain
+        text += expand(line[at:])
+        out.append(text)
+        if _FUNCTION.search(low):
+            found.append(("a function", number))
+        for label, pattern in _CONSTRUCTS:
+            if pattern.search(low):
+                found.append((label, number))
+        if ("$" in text or "`" in text) and _expansion_at_command(_views(text)[0]):
+            found.append(("an expansion that cannot be resolved", number))
+    return out, found
+
+
 def _findings(
     prompt: str, check: ApprovalCheck | None, terms: TermsSource, deadline: float | None
 ) -> list[tuple[str, str]]:
@@ -567,6 +650,17 @@ def _findings(
     flags: dict[str, int] = {}
     materials: list[str] = []
     budget = [MAX_CANDIDATES]
+    expanded, constructs = _resolve(lines)
+    if constructs and re.search(r"\bsafo\b", whole) and re.search(r"\bgemini\b", whole) and _RISKY_WORD.search(whole):
+        name, number = constructs[0]
+        steps.append(
+            Step(
+                unreadable=True,
+                line=number,
+                why=f"the brief names safo, gemini and an action and uses {name} to build or hide the command, so it "
+                "cannot be read as one command; write one plain `safo gemini ask --model M ...` command",
+            )
+        )
     for number, line in enumerate(lines, 1):
         tick()
         if len(line) > LINE_CAP:
@@ -583,6 +677,8 @@ def _findings(
                     flags.setdefault("vendor", number)
             continue
         _scan_line(number, line, steps, flags, materials, budget, runtime_scan)
+        if expanded[number - 1] != line and len(expanded[number - 1]) <= LINE_CAP:
+            _scan_line(number, expanded[number - 1], steps, flags, materials, budget, runtime_scan)
     if "vendor" in flags:
         steps.append(
             Step(

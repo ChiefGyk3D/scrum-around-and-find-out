@@ -34,7 +34,7 @@ from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.gemini import approval_problem
-from safo.geminibrief import ApprovalCheck
+from safo.geminibrief import ApprovalCheck, findings
 from safo.guardlog import (
     MODES,
     WARNING,
@@ -82,32 +82,69 @@ from safo.modes import LocalMode, register_local
 STDIN_TIMEOUT_SECONDS = 5.0  # a host writes the event at once; a silent standard input is a hung host, not a slow one
 
 
+class EventTimeout(TimeoutError):
+    """No event arrived in time. `partial` is whatever bytes had arrived, so a Gemini marker in them is still seen."""
+
+    def __init__(self, partial: bytes) -> None:
+        super().__init__("no event on standard input")
+        self.partial = partial
+
+
+class GeminiEventDeny(Exception):
+    """The Gemini rules deny a dispatch whose event or agents file could not be used. `code` is the diagnostic."""
+
+    def __init__(self, code: str, reason: str) -> None:
+        super().__init__(reason)
+        self.code = code
+        self.reason = reason
+
+
+# literal markers of a Gemini step in raw event text (lower case): both words together, the vendor host, the SDK, the
+# paid secret-store config name
+_GEMINI_ANY = (b"generativelanguage", b"genai", b"generativeai", b"prd_paid")
+
+
+def event_names_gemini(raw: bytes | str) -> bool:
+    """A cheap literal check, for an event that could not be parsed: does the text carry a Gemini marker? It looks at
+    the bytes as read and at the same bytes with JSON `\\uXXXX` escapes decoded."""
+    data = raw.encode("utf-8", "replace") if isinstance(raw, str) else raw
+    views = [data.lower()]
+    with contextlib.suppress(UnicodeError, ValueError):
+        views.append(
+            data.decode("ascii", "ignore").encode("ascii", "ignore").decode("unicode_escape", "ignore").lower().encode()
+        )
+    return any((b"safo" in v and b"gemini" in v) or any(m in v for m in _GEMINI_ANY) for v in views)
+
+
+def event_raw(ctx: LocalContext) -> str | bytes:
+    """The event as read: at most MAX_BYTES + 1 bytes, giving up after STDIN_TIMEOUT_SECONDS (EventTimeout)."""
+    stream = ctx.stdin if ctx.stdin is not None else sys.stdin
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is both OSError and ValueError
+        return stream.read(MAX_BYTES + 1)
+    deadline = time.monotonic() + STDIN_TIMEOUT_SECONDS
+    chunks: list[bytes] = []
+    total = 0
+    while total <= MAX_BYTES:
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            raise EventTimeout(b"".join(chunks))
+        chunk = os.read(fd, min(65_536, MAX_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def event_input(ctx: LocalContext) -> dict[str, Any]:
     """The event as a mapping. Reads at most MAX_BYTES + 1 bytes and gives up after STDIN_TIMEOUT_SECONDS.
 
     A real descriptor is read with `select`, so a writer that never writes or never closes cannot hold the hook until
     the host kills it; a stream with no descriptor (a test's StringIO) is read in one bounded call.
     """
-    stream = ctx.stdin if ctx.stdin is not None else sys.stdin
-    try:
-        fd = stream.fileno()
-    except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is both OSError and ValueError
-        raw: str | bytes = stream.read(MAX_BYTES + 1)
-    else:
-        deadline = time.monotonic() + STDIN_TIMEOUT_SECONDS
-        chunks: list[bytes] = []
-        total = 0
-        while total <= MAX_BYTES:
-            left = deadline - time.monotonic()
-            if left <= 0 or not select.select([fd], [], [], left)[0]:
-                raise TimeoutError("no event on standard input")
-            chunk = os.read(fd, min(65_536, MAX_BYTES + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        raw = b"".join(chunks)
-    payload = loads(raw)
+    payload = loads(event_raw(ctx))
     if not isinstance(payload, dict):
         raise ValueError("invalid event")
     return payload
@@ -120,7 +157,7 @@ def session_id(payload: dict[str, Any]) -> str:
     return value
 
 
-def diagnostic(ctx: LocalContext, code: str, event: str = "PreToolUse") -> None:
+def diagnostic(ctx: LocalContext, code: str, event: str = "PreToolUse", deny: str = "") -> None:
     """Fixed visible warning plus a bounded enum-only record; no exception text or input values."""
     folder = state_dir(ctx.env)
     if folder is not None:
@@ -137,17 +174,17 @@ def diagnostic(ctx: LocalContext, code: str, event: str = "PreToolUse") -> None:
                     code,
                 ),
             )
-    ctx.say(
-        json.dumps(
-            {
-                "systemMessage": WARNING,
-                "hookSpecificOutput": {
-                    "hookEventName": event,
-                    "additionalContext": WARNING + " " + json.dumps({"health": "degraded", "diagnostic": code}),
-                },
-            }
-        )
-    )
+    data: dict[str, Any] = {
+        "systemMessage": WARNING,
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": WARNING + " " + json.dumps({"health": "degraded", "diagnostic": code}),
+        },
+    }
+    if deny:  # the Gemini rules deny even when the rest is degraded; the diagnostic stays in the same answer
+        data["hookSpecificOutput"]["permissionDecision"] = "deny"
+        data["hookSpecificOutput"]["permissionDecisionReason"] = "safo hooks guard: " + deny
+    ctx.say(json.dumps(data))
 
 
 def hook_event(argv: Sequence[str] | None) -> str | None:
@@ -224,11 +261,42 @@ def approval_checker(ctx: LocalContext) -> ApprovalCheck | None:
     return lambda record_id: approval_problem(store, record_id, now)
 
 
+_UNREADABLE = (
+    "gemini-material: the dispatch event could not be read (too large, not valid JSON or not complete) and it names "
+    "Gemini, so it is denied; shorten the brief or remove the Gemini step"
+)
+
+
+def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: float) -> str:
+    """The Gemini rules' findings for a brief as one string, "" when it is clean. Any failure of the check blocks."""
+    prompt = tool_input.get("prompt")
+    try:
+        found = findings(
+            prompt if isinstance(prompt, str) else "", approval_checker(ctx), private_terms_provider, deadline
+        )
+    except Exception:
+        return "gemini-paid: the Gemini check failed, so the brief is blocked"
+    return "; ".join(f"{rule}: {why}" for rule, why in found)
+
+
 def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = None) -> None:
     # The hook's whole budget is GUARD_TIMEOUT_SECONDS from the start of the process; lookups get what is left of it
     # less a margin, so the decision is always written before the host gives up on the hook.
     deadline = (time.monotonic() if started is None else started) + GUARD_TIMEOUT_SECONDS - GUARD_MARGIN_SECONDS
-    payload = event_input(ctx)
+    raw: str | bytes = b""
+    try:
+        raw = event_raw(ctx)
+        payload = loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("invalid event")
+    except EventTimeout as err:
+        if event_names_gemini(err.partial):
+            raise GeminiEventDeny("timeout", _UNREADABLE) from None
+        raise
+    except (ValueError, UnicodeError):
+        if event_names_gemini(raw):
+            raise GeminiEventDeny("input", _UNREADABLE) from None
+        raise
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
     if payload.get("tool_name") == BASH_TOOL:
@@ -245,7 +313,11 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     try:
         doc = load_agents_for(ctx, args)
     except Exception:
-        diagnostic(ctx, "config")  # all rules disabled, visible degraded allow
+        # The other rules are off (visible degraded allow), but the Gemini rules need nothing from agents.yaml.
+        reasons = gemini_reasons(ctx, payload["tool_input"], deadline)
+        if reasons:
+            raise GeminiEventDeny("config", reasons) from None
+        diagnostic(ctx, "config")
         return
     path = state_path(folder, session, doc) if folder else None
     state = read_state(path)
@@ -369,6 +441,8 @@ def lead_wait(ctx: LocalContext, args: argparse.Namespace, payload: dict[str, An
 def run_guard(ctx: LocalContext, args: argparse.Namespace) -> int:
     try:
         guard(ctx, args, time.monotonic())
+    except GeminiEventDeny as err:
+        diagnostic(ctx, err.code, deny=err.reason)
     except TimeoutError:
         diagnostic(ctx, "timeout")
     except (ValueError, UnicodeError):

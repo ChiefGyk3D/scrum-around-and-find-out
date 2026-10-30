@@ -205,6 +205,11 @@ that must pass the strict check:
   `approve` word; and, when the brief names `gemini` and an action anywhere, any line that runs `safo` through `$`, a
   function, `xargs`, `eval`, `alias` or `-c` (so `echo ask --paid | xargs safo gemini` and `alias g='safo gemini'` then
   `g ask --paid` are caught);
+- a command built over several lines: plain `NAME=value` assignments are resolved and expanded into the lines after them,
+  so `A=safo`, `B=gemini`, then `$A $B ask --paid ...` is read as the command it is. When a brief names `safo`, `gemini`
+  and an action and also builds the command with an array, a function, `eval`, `xargs`, `-c`, an assignment from an
+  expansion, or a command word that is still an expansion, it is unreadable and blocked, and the message names the
+  construct. The same constructs in a brief with no Gemini words are left alone;
 - base64, openssl, xxd, rev or printf escapes piped to a shell; the vendor host in any case; the Google genai SDK; the
   paid secret-store config name. These are looked for in the text before markdown links are rewritten, so a host that
   sits only in a link target is seen. A link to the vendor's documentation (`ai.google.dev`) is a mention and passes; the
@@ -218,8 +223,9 @@ guard's deadline is blocked, and so is a private-terms file that does not load o
 the test suite runs the guard over the repository's own docs and sets a ceiling on false positives. It is a speed bump
 against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief is out of its
 reach. The guard is not the gate that holds: the approval record, the caps and the free-tier limits are enforced again by
-the wrapper itself, which raises before any request when a paid call has no live record. **Above 1 MiB the whole hook
-fails open** (see Failing safe), including these two rules; a step padded past that size is not seen.
+the wrapper itself, which raises before any request when a paid call has no live record. When the dispatch event cannot be
+read (over 1 MiB, not valid JSON, cut short, or timed out), or `agents.yaml` cannot be loaded, these two rules still
+run or are applied as a literal check (see Failing safe).
 
 ## Failing safe
 
@@ -230,7 +236,14 @@ A hook sits inside someone's session, so every error lets the work through, visi
   command line the hook cannot parse (read from the real command line, so `python -m safo hooks guard --no-such-flag` too) all exit 0, print the fixed line `SAFO routing guard degraded: enforcement may be
   incomplete; inspect safo hooks status.` as hook JSON, and add an enum-only record to the log. No exception text, input
   value or prompt is echoed or stored.
-- What a failure switches off: input or configuration failures switch off every rule; a state failure (missing, invalid,
+- **The Gemini rules do not fail open.** They need nothing from `agents.yaml`, so when it cannot be loaded the brief is
+  still checked by `gemini-paid` and `gemini-material`, and a violation is denied (the degraded notice stays in the same
+  answer). When the event itself cannot be parsed (over 1 MiB, malformed, incomplete, or a standard input that stops
+  before the end), the text that was read is checked for Gemini markers: the words `safo` and `gemini` together, the
+  vendor host, an SDK name or the paid config name, also with JSON `\uXXXX` escapes decoded. If one is there, the
+  dispatch is **denied** with the diagnostic kept; if none is, it is the degraded allow described here. No other rule
+  changes.
+- What a failure switches off: input or configuration failures switch off every rule except those two; a state failure (missing, invalid,
   future-dated or other-session state, or a re-probe that failed) switches off only the local-step rule; a mode failure
   falls back to `warn`.
 - A denial that was computed survives a log failure.

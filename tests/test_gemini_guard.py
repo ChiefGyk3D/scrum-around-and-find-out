@@ -611,6 +611,8 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
     not_detectors = {
         "DECLARATION", "MATERIAL", "KEYVALUE", "MARKDOWN_LINK", "MARKDOWN_CODE", "MARKDOWN_WORD", "PATHLIKE", "SINK_RE",
         "RUNTIME_FORMS",  # gated by the safo detector, which the prefilter already covers
+        # the cross-line reader: run only on a brief the prefilter already passed, and acts only with safo and gemini
+        "_ASSIGN", "_VAR_REF", "_FUNCTION", "_RISKY_WORD",
         "RECORD_ID",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}

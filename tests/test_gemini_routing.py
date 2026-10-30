@@ -140,7 +140,9 @@ def test_the_example_config_parses_with_the_vendor_endpoint_and_tiny_free_limits
 def test_the_docs_are_honest_about_the_guard_and_the_terms() -> None:
     hooks = squash((ROOT / "docs" / "hooks.md").read_text(encoding="utf-8"))
     gemini = squash((ROOT / "docs" / "gemini.md").read_text(encoding="utf-8"))
-    assert "above 1 mib the whole hook fails open" in hooks and "above 1 mib the whole hook fails open" in gemini
+    assert "the gemini rules do not fail open" in hooks and "denied** with the diagnostic kept" in hooks
+    assert "an unreadable event that carries a gemini marker is denied" in gemini
+    assert "above 1 mib the whole hook fails open" not in hooks + gemini
     assert "safo_privacy_extra_file`, else" not in hooks and "no environment variable changes it" in hooks
     assert "that is the whole claim" in hooks and "is not seen" in hooks
     assert "cannot hide its name" not in hooks + gemini and "fails closed on shell forms" not in gemini
