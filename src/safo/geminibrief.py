@@ -1015,3 +1015,68 @@ def _findings(
             if problem:
                 add(GEMINI_PAID, problem)
     return [(rule, "; ".join(dict.fromkeys(why[:6]))) for rule, why in reasons.items()]
+
+
+# -- shell commands (#209) ---------------------------------------------------------------------------------------------
+# A cheap, fail-closed check on one Bash command. It names no value and resolves nothing: it looks for the vendor API
+# host, its SDK, the key variable name and the secret-store project and config names (all shown in docs/gemini-keys.md
+# and examples/gemini.example.yaml), and for words built from escapes or an expansion beside a network or secret tool.
+# The wrapper `safo gemini ...` holds the real gates. There is no exemption: a command that names them is denied
+# whatever it is called or runs from. The classes are fixed text: a denial never repeats a word of the command.
+SHELL_VENDOR = "the vendor API host or SDK"
+SHELL_KEY = "the key variable name"
+SHELL_STORE = "the secret-store project or config name"
+SHELL_BUILT = "a word built from escapes beside a network or secret tool"
+SHELL_TOOL = "a secret tool run with a shell expansion"
+SHELL_UNVERIFIED = "a command that could not be checked in time"
+SHELL_CAP = 64 * 1024  # a command longer than this is denied unread: no normalization runs on it
+_SHELL_KEY = re.compile(r"gemini[\W_]*api[\W_]*key")
+_SHELL_PROJECT = re.compile(r"(?<![\w-])image-gen(?![\w-])")
+_SHELL_CONFIG = re.compile(r"(?<![\w-])prd(?![\w-])")
+_SECRET_TOOL = re.compile(r"(?<![\w.-])doppler(?![\w-])")
+_NETWORK_TOOL = re.compile(
+    r"(?<![\w.-])(?:curl|wget|nc|ncat|socat|openssl|ssh|telnet|python[\d.]*|node|nodejs|perl|ruby|php|go|deno|bun"
+    r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
+)
+
+
+def shell_command_class(command: str, deadline: float | None = None) -> str | None:
+    """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
+    it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED."""
+
+    def tick() -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("the shell check ran out of time")
+
+    if len(command) > SHELL_CAP:
+        return SHELL_UNVERIFIED  # before any normalization: the cost of the check never depends on a hostile length
+    try:
+        tick()
+        lines = _join(command).splitlines() or [command]
+        found: str | None = None
+        secret_tool = network = False
+        for line in lines:
+            tick()
+            _, _, low, pre_low, _pre_raw = _views(line)
+            for view in (low, pre_low):
+                if VENDOR_RE.search(view) or SDK.search(view):
+                    found = found or SHELL_VENDOR
+                if _SHELL_KEY.search(view):
+                    found = found or SHELL_KEY
+                if PAID_CONFIG.search(view) or _SHELL_PROJECT.search(view):
+                    found = found or SHELL_STORE
+                secret_tool = secret_tool or bool(_SECRET_TOOL.search(view))
+                network = network or bool(_NETWORK_TOOL.search(view))
+            if secret_tool and any(_SHELL_CONFIG.search(v) for v in (low, pre_low)):
+                found = found or SHELL_STORE
+        tick()
+        built = bool(CONCEAL.search(command.lower()) or CONCEAL.search(_join(command).lower()))
+        if found is None and built and (network or secret_tool):
+            found = SHELL_BUILT
+        if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
+            found = SHELL_TOOL
+        if found is None:
+            return None
+        return found
+    except TimeoutError:
+        return SHELL_UNVERIFIED

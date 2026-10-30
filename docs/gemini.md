@@ -260,8 +260,13 @@ shaped like a secret, or a term from the maintainer's private terms, in it. Thes
 a brief, not a sandbox. It reads a literal `safo gemini <action>` command, a declaration line in the exact grammar, and a
 short list of named forms (the vendor host, the Google genai SDK, the paid config name, decode-to-shell pipes, and `safo`
 run through a variable, function, `xargs`, `eval` or `-c` when the brief also names Gemini and an action); the list is in
-[Hooks](hooks.md), and a way of building a command that is not on it is not seen. A false positive is a block. Raw SDK use
-outside a brief is out of its reach. When `agents.yaml` cannot be loaded the Gemini rules still apply to the brief. When
+[Hooks](hooks.md), and a way of building a command that is not on it is not seen. A false positive is a block. The same rules also look at each Bash call: a shell command that names the vendor
+host, its SDK, the key variable or the secret-store project and config names is denied (there is no exemption, the wrapper included; what it covers and does not is in
+[Hooks](hooks.md#shell-commands-bash)). That check resolves nothing: names built from variables, decoded or read from a file or the environment, scripts the
+command merely runs, a shadowed Python module defined outside the command, and an alias or function from a shell startup
+file are not seen (a renamed or hijacked wrapper is covered only to the extent the protected names appear in the command text). The wrapper holds
+the real gates. Raw SDK use inside a
+program is out of its reach. When `agents.yaml` cannot be loaded the Gemini rules still apply to the brief. When
 the event cannot be used, it is never judged from a prefix: an oversized event is read to the end (up to 8 MiB and a few
 seconds) and checked whole for Gemini markers, a marker anywhere is denied, an event past the hard limit or that does not
 finish in time is denied as too large or incomplete to check, and only a whole stream with no marker is the degraded
