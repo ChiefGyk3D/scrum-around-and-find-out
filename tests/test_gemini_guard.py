@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 from agentsdata import agents_with
-from geminidata import MODEL, NOW, hard_timeout
+from geminidata import MODEL, NOW, hard_timeout, pathological
 from hooksdata import agents_file, dispatch, hooks, read_log, set_mode
 from safo.gemini import Locations, approval_problem, open_store
 from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, findings
@@ -517,7 +517,17 @@ def test_the_guard_ignores_the_privacy_variable_and_reads_the_fixed_file(
     assert data == {} or "permissionDecision" not in json.dumps(data), "the variable is not honored"
 
 
-@pytest.mark.parametrize("bad", ["(unclosed\n", "(a+a+)+y\n", "(a|aa)+y\n", ".*secret\n", "x" * 300 + "\n", "(a)\\1\n"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "(unclosed\n",
+        pathological("nested_y") + "\n",
+        pathological("alternation_y") + "\n",
+        ".*secret\n",
+        "x" * 300 + "\n",
+        "(a)\\1\n",
+    ],
+)
 @hard_timeout(30)
 def test_a_bad_or_dangerous_terms_file_makes_the_guard_deny_quickly(
     _private_home: Path, tmp_path: Path, gemini_locations: Locations, bad: str
@@ -768,7 +778,7 @@ def test_one_search_cannot_pass_the_deadline() -> None:
 
     from safo.gemini import RefusedError, private_term_hit
 
-    evil = re.compile("(a+)+$")  # built here, past the loader, to prove the worker is killable
+    evil = re.compile(pathological("nested"))  # built here, past the loader, to prove the worker is killable
     started = time.monotonic()
     with pytest.raises(RefusedError, match="private terms"):
         private_term_hit((evil,), ["a" * 40 + "!"], 1.0)
@@ -785,7 +795,7 @@ def test_the_guard_denies_a_term_check_that_runs_out_of_time(monkeypatch: pytest
     found = findings(
         "gemini: free\n" + PUBLIC + "a" * 40 + "!\n",
         accepts(),
-        (re.compile("(a+)+$"),),
+        (re.compile(pathological("nested")),),
         time.monotonic() + 1.5,
     )
     assert time.monotonic() - started < 5
@@ -1137,7 +1147,7 @@ def test_a_worker_with_no_parent_dies_by_itself_after_its_cpu_limit() -> None:
 
     import safo.termsearch as ts
 
-    payload = "0\t(a+)+$\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+    payload = "0\t" + pathological("nested") + "\n\n" + "a" * 40 + "!"
     worker = subprocess.Popen(  # noqa: S603 - this interpreter and the worker file, no shell
         [sys.executable, "-I", ts.__file__, "1"],
         stdin=subprocess.PIPE,
@@ -1322,7 +1332,7 @@ def test_the_worker_dies_with_its_parent() -> None:
     spawner = (
         "import subprocess, sys, time\n"
         f"w = subprocess.Popen([sys.executable, '-I', {ts.__file__!r}, '100'], stdin=subprocess.PIPE)\n"
-        "w.stdin.write(b'0\\t(a+)+$\\n\\n' + b'a' * 40 + b'!')\n"
+        f"w.stdin.write(b'0\\t{pathological('nested')}\\n\\n' + b'a' * 40 + b'!')\n"
         "w.stdin.close()\n"
         "print(w.pid, flush=True)\n"
         "time.sleep(60)\n"

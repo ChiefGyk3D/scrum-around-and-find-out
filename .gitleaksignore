@@ -4,3 +4,7 @@
 dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_mask.py:private-key:15
 dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_action.py:generic-api-key:144
 dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_action.py:generic-api-key:145
+
+# Test fixture in commit ead90c5 (#197): the doctor test planted a fake token-shaped marker to prove it is
+# never printed. Later commits build it from plain words at run time; the scan reads every commit.
+ead90c5ecb5aabff96b724cc336db335b9f62e36:tests/test_doctor.py:generic-api-key:23

@@ -30,6 +30,7 @@ from geminidata import (
     hard_timeout,
     ledger_rows,
     minutes_ago,
+    pathological,
     seed,
     start_row,
     write_config,
@@ -758,7 +759,7 @@ def test_a_zero_output_count_alone_is_not_trusted(cfg: GeminiConfig, server: Fak
 def test_the_terms_loader_refuses_dangerous_shapes_and_accepts_plain_ones(tmp_path: Path) -> None:
     from safo.gemini import load_private_terms
 
-    for bad in ("(a+a+)+y", "(a|aa)+y", ".*x", "a+", "(a)\\1", "(unclosed", "x" * 300):
+    for bad in (pathological("nested_y"), pathological("alternation_y"), ".*x", "a+", "(a)\\1", "(unclosed", "x" * 300):
         path = tmp_path / "t.txt"
         path.write_text(f"ok-term\n{bad}\n")
         with pytest.raises(RefusedError, match="private terms"):

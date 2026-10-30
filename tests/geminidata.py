@@ -297,3 +297,17 @@ def fake_sk_armor(
     b64 = base64.b64encode(body).decode()
     wrapped = "\n".join(b64[i : i + 70] for i in range(0, len(b64), 70))
     return f"-----BEGIN SSH SIGNATURE-----\n{wrapped}\n-----END SSH SIGNATURE-----\n"
+
+
+# Deliberately catastrophic patterns, used as data to prove that the private-terms loader refuses them and that the
+# search worker can be killed. They are assembled from plain pieces at run time, so no regular-expression literal that
+# backtracks catastrophically sits in the source (static analysis reads a literal, not a joined list).
+_PATHOLOGICAL = {
+    "nested": ["(a", "+", ")", "+$"],
+    "nested_y": ["(a+", "a+)", "+y"],
+    "alternation_y": ["(a|", "aa)", "+y"],
+}
+
+
+def pathological(name: str) -> str:
+    return "".join(_PATHOLOGICAL[name])
