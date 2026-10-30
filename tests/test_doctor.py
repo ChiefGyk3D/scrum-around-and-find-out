@@ -20,7 +20,7 @@ from safo import prereqs
 from safo.cli import main
 
 ROOT = Path(__file__).parent.parent
-SECRET = "-".join(["planted", "marker", "never", "printed"])  # a fake, built at run time so no scanner sees a token shape
+SECRET = "-".join(["planted", "marker", "never", "printed"])  # a fake, built at run time; never printed
 
 GOOD = {
     "git": "git version 2.47.3",
