@@ -730,8 +730,8 @@ def test_each_term_sees_a_bounded_chunk_of_text() -> None:
     seen: list[int] = []
 
     class Spy:
-        def search(self, text: str) -> None:
-            seen.append(len(text))
+        def search(self, text: str, pos: int = 0, endpos: int | None = None) -> None:
+            seen.append((len(text) if endpos is None else endpos) - pos)
 
     assert not hit(cast("tuple[re.Pattern[str], ...]", (Spy(),)), ["x" * 20_000])
     assert seen and max(seen) <= TERMS_CHUNK and len(seen) >= 5
@@ -1506,3 +1506,39 @@ def test_an_unbounded_term_is_still_refused_at_load(tmp_path: Path) -> None:
         path.write_text(f"{term}\n")
         with pytest.raises(Exception, match=r"line 1"):
             load_private_terms(str(path))
+
+
+def test_an_anchored_term_at_the_width_limit_is_found_across_a_boundary() -> None:
+    import re
+
+    from safo.termsearch import TERMS_CHUNK, TERMS_OVERLAP, hit
+
+    term = re.compile(r"\Ba{99}b{99}cc\B")  # 200 wide; each anchor needs one character past a chunk edge
+    start = TERMS_CHUNK - TERMS_OVERLAP
+    text = "x" * start + "a" * 99 + "b" * 99 + "cc" + "x" * 3000
+    assert term.search(text)
+    assert hit((term,), [text])
+
+
+@pytest.mark.parametrize("term", [r"\Ba{99}b{99}cc\B", r"^a{99}b{99}cc$", r"\ba{99}b{99}cc\b"])
+def test_an_anchored_term_at_the_width_limit_is_refused_at_load(term: str, tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    path = tmp_path / "t.txt"
+    path.write_text(f"{term}\n")
+    with pytest.raises(Exception, match=r"too wide.*line 1"):
+        load_private_terms(str(path))
+
+
+def test_an_end_anchor_means_the_end_of_the_text_not_of_a_chunk() -> None:
+    import re
+
+    from safo.termsearch import TERMS_CHUNK, hit
+
+    term = re.compile("secret$")
+    text = "x" * (TERMS_CHUNK - 6) + "secret" + "not-the-end"  # ends the first chunk, not the text
+    assert not term.search(text)
+    assert not hit((term,), [text])
+    assert hit((term,), [text[:TERMS_CHUNK]]) is True  # it does end this text
+    assert not hit((re.compile(r"\Asecret"),), ["x" * (TERMS_CHUNK - 200) + "secret" + "y" * 500])
+    assert hit((re.compile(r"\Asecret"),), ["secret" + "y" * 9000])

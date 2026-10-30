@@ -26,7 +26,8 @@ _UNKNOWN = 10**9  # the reach of a term whose shape cannot be read: wider than a
 
 
 def reach(pattern: str, flags: int = 0) -> int:
-    """The most characters a match of `pattern` can need, looking ahead and behind included. A shape that cannot be
+    """The most characters a match of `pattern` can need, looking ahead and behind included, plus one
+    character of context at each end for the anchors. A shape that cannot be
     read, or an unbounded one, counts as wider than any overlap."""
     try:
         parser = importlib.import_module("re._parser")
@@ -34,7 +35,7 @@ def reach(pattern: str, flags: int = 0) -> int:
         constants = importlib.import_module("re._constants")
     except (re.error, RecursionError, OverflowError, ImportError):
         return _UNKNOWN
-    total = [tree.getwidth()[1]]
+    total = [tree.getwidth()[1] + 2]  # anchors (^ $ \b \B \A \Z) look one character past each end
 
     def walk(items: object) -> None:
         for op, av in items:  # type: ignore[attr-defined]
@@ -67,10 +68,25 @@ def hit(terms: tuple[re.Pattern[str], ...], texts: list[str]) -> bool:
             if term.search(text):
                 return True
         for start in range(0, max(len(text), 1), step):
-            chunk = text[start : start + TERMS_CHUNK]
+            end = min(start + TERMS_CHUNK, len(text))
             for term in narrow:
-                if term.search(chunk):
+                if _found(term, text, start, end):
                     return True
+    return False
+
+
+def _found(term: re.Pattern[str], text: str, start: int, end: int) -> bool:
+    """A match in text[start:end] that is also a match in the whole text, so ^, $, \\A, \\Z and \\b mean the real
+    edges of the text and not the edges of the window. `pos` keeps the context before the window; a match found
+    against the window's cut end is confirmed against the full text before it counts."""
+    pos = start
+    while pos < end:
+        found = term.search(text, pos, end)
+        if found is None:
+            return False
+        if end >= len(text) or term.match(text, found.start()):
+            return True
+        pos = found.start() + 1
     return False
 
 
