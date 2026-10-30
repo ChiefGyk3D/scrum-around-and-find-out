@@ -1143,7 +1143,7 @@ def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: floa
     return "; ".join(f"{rule}: {why}" for rule, why in found)
 
 
-def shell_vendor_check(payload: dict[str, Any], deadline: float) -> None:
+def shell_vendor_check(payload: dict[str, Any]) -> None:
     """Deny a Bash command that goes straight to the vendor API or its key (#209): a cheap, fail-closed speed bump,
     not a sandbox. Only the wrapper `safo gemini ...` is allowed; there is no other exemption. The denial names the
     rule and the phrase class and never the command. An event without a usable command is left to the lead-wait rule,
@@ -1154,7 +1154,8 @@ def shell_vendor_check(payload: dict[str, Any], deadline: float) -> None:
         return
     from safo import geminibrief  # deferred: it loads the Gemini mode, which the entry must not at import
 
-    found = geminibrief.shell_command_class(command, deadline)
+    # its own short budget, like the isolated Gemini check, so a late guard deadline never denies a clean command
+    found = geminibrief.shell_command_class(command, time.monotonic() + ISOLATED_CHECK_SECONDS)
     if found:
         raise GeminiEventDeny("input", SHELL_DENIAL.format(found))
 
@@ -1202,7 +1203,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
     if payload.get("tool_name") == BASH_TOOL:
-        shell_vendor_check(payload, deadline)
+        shell_vendor_check(payload)
         lead_wait(ctx, args, payload, deadline, run)
         return
     if payload.get("tool_name") not in AGENT_TOOLS:
