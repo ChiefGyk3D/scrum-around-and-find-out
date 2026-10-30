@@ -771,7 +771,7 @@ def test_the_wrapper_matches_private_terms_on_the_folded_prompt(
     terms = tmp_path / "terms.txt"
     terms.write_text("acme-internal\n")
     withterms = dataclasses.replace(cfg, private_terms=str(terms))
-    for disguised in ("about аcme-internal", "about ac​me-internal"):
+    for disguised in ("about \u0430cme-internal", "about ac\u200bme-internal"):
         with pytest.raises(RefusedError, match="private term"):
             ask(withterms, free(disguised), store=store, key_for=Keys(), now=NOW)
     assert server.requests == []
