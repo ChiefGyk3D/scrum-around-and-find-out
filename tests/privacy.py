@@ -85,6 +85,19 @@ FILE_SUFFIXES = {
     "pub",
 }  # pub: a public key file
 
+# Names that only the two broker documents may use. Scoped by file, not global: the same text in any other file is
+# still a hostname finding. `safo.broker` is the broker's Python module name; it lives in the same scoped set, so it
+# does not exempt the token everywhere.
+BROKER_DOCS = ("docs/gemini-broker.md", "docs/gemini-broker-threat-model.md")
+BROKER_DOC_NAMES = {
+    "safo-broker.service",
+    "safo-broker.socket",
+    "safo-broker.sock",
+    "sockets.target",
+    "network-online.target",
+    "safo.broker",
+}
+
 ALLOWED_HOSTS = {
     "github.com",
     "api.github.com",
@@ -133,7 +146,7 @@ def scanned_files() -> list[Path]:
     return files
 
 
-def findings(text: str) -> list[str]:
+def findings(text: str, name: str = "") -> list[str]:
     """Category and line only: assertion output and repository logs must never repeat private matches."""
     out: list[str] = []
 
@@ -153,7 +166,12 @@ def findings(text: str) -> list[str]:
             record("e-mail address", m.start())
     for m in HOST.finditer(text):
         host = m.group(0).lower()
-        if host not in ALLOWED_HOSTS and host not in DOCUMENT_KEYS and host.rsplit(".", 1)[-1] not in FILE_SUFFIXES:
+        if (
+            host not in ALLOWED_HOSTS
+            and host not in DOCUMENT_KEYS
+            and not (name in BROKER_DOCS and host in BROKER_DOC_NAMES)
+            and host.rsplit(".", 1)[-1] not in FILE_SUFFIXES
+        ):
             record("hostname", m.start())
     for m in re.finditer(r"https?://[^\s<>\"']+", text, re.I):
         url_host = urlsplit(m.group(0)).hostname

@@ -168,6 +168,8 @@ replaced are gone.
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)
 - [Gemini passkeys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-passkeys)
+- [Gemini broker](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker)
+- [Gemini broker threat model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker-threat-model)
 - [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
 - [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)
 - [Review-loop](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Review-loop)
