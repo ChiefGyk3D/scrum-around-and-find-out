@@ -167,7 +167,11 @@ def _declared(rest: str, line: int) -> Step | None:
     if tier not in ("free", "paid") or not all(KEYVALUE.match(t) for t in pairs):
         return None
     return Step(
-        tier == "paid", _option(tokens, "cap"), _option(tokens, "approval"), line=line, matched=_shown(f"gemini: {rest}")
+        tier == "paid",
+        _option(tokens, "cap"),
+        _option(tokens, "approval"),
+        line=line,
+        matched=_shown(f"gemini: {rest}"),
     )
 
 
@@ -542,7 +546,8 @@ def _scan_line(
     if PAID_CONFIG.search(low) or PAID_CONFIG.search(pre_low):
         # in a brief for this repository's own work, a line that only names the config key, with nothing that could
         # read or run it, is a mention of the key
-        if not (own_repo and not COMMANDISH.search(low) and not COMMANDISH.search(pre_low)):
+        mention = own_repo and not COMMANDISH.search(low) and not COMMANDISH.search(pre_low)
+        if not mention:
             flags.setdefault("paid", number)
     if VENDOR_HOST in low or VENDOR_HOST in pre_low or SDK.search(low) or SDK.search(pre_low):
         flags.setdefault("vendor", number)
@@ -976,7 +981,9 @@ def _findings(
             )
         )
     if "paid" in flags and not any(t.paid or t.unreadable for t in steps):
-        steps.append(Step(paid=True, line=flags["paid"], why="the paid secret-store config is named", matched="prd_paid"))
+        steps.append(
+            Step(paid=True, line=flags["paid"], why="the paid secret-store config is named", matched="prd_paid")
+        )
     if not steps:
         return []
     tick()
