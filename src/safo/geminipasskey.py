@@ -41,6 +41,7 @@ FLAG_BS = 0x10  # backed up now
 FLAG_AT = 0x40
 FLAG_ED = 0x80
 MAX_CLIENT_DATA = 4096
+REQUIRED_EXPECT = ("nonce", "model", "prompt_sha256")  # the caller must name all three, non-empty
 MAX_PAYLOAD = 8192  # the canonical approval JSON is a few hundred bytes
 MAX_SIGNATURE = 128  # a DER ES256 signature is at most 72 bytes, an Ed25519 signature is 64
 MAX_PUBLIC_KEY = 256  # a P-256 or Ed25519 SubjectPublicKeyInfo is 91 or 44 bytes
@@ -242,17 +243,17 @@ def verify_assertion(
     revoked: frozenset[str] = frozenset(),
     allowed: bool = False,
     now: dt.datetime,
-    expect: Mapping[str, str] | None = None,
+    expect: Mapping[str, str],
 ) -> PasskeyResult:
     """Every rule for a passkey approval, in the order a failure is cheapest to explain. The signature check is last and
-    goes through `verifier`. `expect` names fields the approval text must carry with exactly these values (the nonce,
-    the model, a prompt digest); `now` is the clock for the same expiry rule the hardware-key path applies
-    (`now >= expires_at` is expired). The caller spends the nonce and stores the returned counter."""
+    goes through `verifier`. `expect` is REQUIRED and must hold a non-empty nonce, model and prompt_sha256 (it may
+    hold more); the approval text must carry exactly these values. `now` is the clock for the same expiry rule the
+    hardware-key path applies (`now >= expires_at` is expired). The caller spends the nonce and stores the counter."""
     if not allowed:
         raise Tier2Refused("passkey approvals are off: the trust file has no `# safo-policy: allow-passkeys` line")
     if credential_fingerprint(key) in revoked:
         raise Tier2Refused(f"the passkey {key.label} is revoked")
-    _check_approval(canonical_payload, expect or {}, now)
+    _check_approval(canonical_payload, expect, now)
     if len(client_data_json) > MAX_CLIENT_DATA:
         raise Tier2Refused("the client data is too large")
     try:
@@ -298,6 +299,10 @@ def _check_approval(canonical_payload: str, expect: Mapping[str, str], now: dt.d
         raise Tier2Refused("the approval text is not JSON") from None
     if not isinstance(data, dict):
         raise Tier2Refused("the approval text is not a JSON object")
+    for field in REQUIRED_EXPECT:
+        wanted = expect.get(field) if isinstance(expect, Mapping) else None
+        if not isinstance(wanted, str) or not wanted:
+            raise Tier2Refused(f"the caller did not say which {field} to expect; nothing is verified without it")
     for field, wanted in expect.items():
         if data.get(field) != wanted:
             raise Tier2Refused(f"the approval's {field} is not the one expected")

@@ -85,6 +85,13 @@ nonce is spent and the expiry enforced by the same store as Tier 1, and the call
 - Not tested with a real browser or authenticator. A real authenticator can behave differently from the test one (for
   example, a platform authenticator that reports no backup flags).
 
+## Prerequisite for wiring: the prompt digest
+
+`verify_assertion` requires the caller to pass `expect`, holding a non-empty nonce, model and prompt digest
+(`prompt_sha256`), and refuses unless the signed approval text carries exactly those values. So Tier 2 requires the
+approval text to include a prompt digest. Adding one to the production approval payload is a prerequisite for wiring Tier 2
+and is tracked in #217 ("Hardening: what a paid approval binds"). This tier does not define that schema.
+
 ## Dependency choice (decided 2026-10-30)
 
 `cryptography` alone, behind the `SignatureVerifier` interface, as the 2026-10-29 analysis recommended: the design needs

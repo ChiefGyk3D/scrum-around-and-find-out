@@ -17,7 +17,11 @@ import pytest
 from safo import geminipasskey as pk
 from safo.geminipasskey import Passkey, Tier2Refused, Tier2Unavailable
 
-PAYLOAD = '{"expires_at":"2026-10-30T12:25:00Z","job":"job-1","max_usd":"1.50"}'
+PAYLOAD = (
+    '{"expires_at":"2026-10-30T12:25:00Z","job":"job-1","max_usd":"1.50",'
+    '"model":"m-1","nonce":"n-1","prompt_sha256":"p-1"}'
+)
+EXPECT = {"nonce": "n-1", "model": "m-1", "prompt_sha256": "p-1"}
 NOW = dt.datetime(2026, 10, 30, 12, 0, 0, tzinfo=dt.UTC)
 ORIGIN = "http://localhost:41234"
 RP = "localhost"
@@ -59,6 +63,7 @@ def check(fake: pk.SignatureVerifier | None = None, **over: object) -> pk.Passke
         "verifier": fake or FakeVerifier(),
         "allowed": True,
         "now": NOW,
+        "expect": EXPECT,
     }
     args.update(over)
     return pk.verify_assertion(**args)  # type: ignore[arg-type]

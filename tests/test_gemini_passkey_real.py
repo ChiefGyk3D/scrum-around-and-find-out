@@ -333,3 +333,36 @@ def test_the_library_is_an_optional_extra_pinned_and_hash_locked() -> None:
         assert found["cryptography"] == pinned[0].split("==")[1]
         assert lock.count("--hash=sha256:") >= 10
     assert "cryptography" not in (ROOT / "requirements.txt").read_text()
+
+
+# -- the caller must say which approval it expects (round 2) --------------------------------------------------------
+
+
+def test_expect_is_required_and_must_name_nonce_model_and_prompt_digest(device: Authenticator) -> None:
+    assertion = device.assertion(payload())
+    client, auth, sig = assertion
+    with pytest.raises(TypeError):  # no `expect` at all: not a call that can be made
+        pk.verify_assertion(  # type: ignore[call-arg]
+            device.key, payload(), client, auth, sig, verifier=pk.CryptographyVerifier(), allowed=True, now=NOW
+        )
+    for bad in (
+        {},
+        None,
+        {"nonce": NONCE, "model": EXPECT["model"]},  # prompt digest missing
+        {"nonce": NONCE, "prompt_sha256": PROMPT_DIGEST},  # model missing
+        {"model": EXPECT["model"], "prompt_sha256": PROMPT_DIGEST},  # nonce missing
+        {**EXPECT, "nonce": ""},  # empty value
+        {**EXPECT, "model": ""},
+        {**EXPECT, "prompt_sha256": ""},
+        {**EXPECT, "nonce": 5},  # not text
+        {**EXPECT, "model": "gemini-other"},  # mismatch
+    ):
+        with pytest.raises(Tier2Refused, match="expect"):
+            verify(device, assertion, expect=bad)
+    assert verify(device, assertion, expect={**EXPECT, "job": "job-1"}).counter == 7
+
+
+def test_an_empty_signed_field_never_matches_an_empty_expectation(device: Authenticator) -> None:
+    text = payload(nonce="")
+    with pytest.raises(Tier2Refused, match="expect"):
+        verify(device, device.assertion(text), text=text, expect={**EXPECT, "nonce": ""})
