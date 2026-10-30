@@ -6,9 +6,14 @@ Every rule of the guard has a test that fails when the rule is removed, and a ho
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import http.server
+import io
 import json
 import os
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -30,13 +35,15 @@ from hooksdata import (
     state_folder,
 )
 from meterdata import NOW
+from safo import hooks as safo_hooks
 from safo.agentsfile import Endpoint
 from safo.cli import main
 from safo.errors import ConfigError
+from safo.guardlog import file_lock, summarise
 from safo.guardlog import read_log as read_guard_log
-from safo.guardlog import summarise
 from safo.hooks import append_log
 from safo.ollama import Probe
+from safo.ollama import probe as ollama_probe
 
 
 @pytest.fixture
@@ -79,14 +86,14 @@ def test_install_adds_the_session_probe_and_the_agent_guard_to_a_new_settings_fi
         }
     ]
     assert data["hooks"]["PreToolUse"] == [
-        {"matcher": "Agent|Task|Bash", "hooks": [{"type": "command", "command": "safo hooks guard", "timeout": 10}]}
+        {"matcher": "Agent|Task|Bash", "hooks": [{"type": "command", "command": "safo-guard", "timeout": 10}]}
     ]
     assert "Start with warn" in out and not (_private_home / ".config" / "safo" / "mode").exists()
 
 
 def test_install_defaults_to_the_settings_file_in_the_home_directory(_private_home: Path) -> None:
     assert hooks("install", home=_private_home)[0] == 0
-    assert "safo hooks guard" in (_private_home / ".claude" / "settings.json").read_text()
+    assert "safo-guard" in (_private_home / ".claude" / "settings.json").read_text()
 
 
 def test_install_keeps_every_existing_hook_and_setting(_private_home: Path) -> None:
@@ -114,7 +121,7 @@ def test_install_keeps_every_existing_hook_and_setting(_private_home: Path) -> N
         "~/bin/session-start",
         "safo hooks probe",
     ]
-    assert data["hooks"]["PreToolUse"][2]["hooks"][0]["command"] == "safo hooks guard"
+    assert data["hooks"]["PreToolUse"][2]["hooks"][0]["command"] == "safo-guard"
     assert len(data["hooks"]["PreToolUse"]) == 3
 
 
@@ -137,7 +144,7 @@ def test_install_with_another_agents_path_rewrites_its_own_command_and_adds_no_s
     data = json.loads(settings.read_text())
     assert len(data["hooks"]["SessionStart"]) == 1 and len(data["hooks"]["PreToolUse"]) == 1
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == f"safo hooks probe --agents {agents.resolve()}"
-    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == f"safo hooks guard --agents {agents.resolve()}"
+    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == f"safo-guard --agents {agents.resolve()}"
 
 
 def test_install_uses_the_command_it_is_given_and_refuses_one_that_is_not_a_plain_program(_private_home: Path) -> None:
@@ -156,6 +163,8 @@ def _safo_executable(tmp_path: Path) -> Path:
     exe.parent.mkdir(parents=True)
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
+    exe.with_name("safo-guard").write_text("#!/bin/sh\n")
+    exe.with_name("safo-guard").chmod(0o755)
     return exe
 
 
@@ -165,7 +174,7 @@ def test_install_accepts_the_absolute_path_of_a_safo_executable(_private_home: P
     assert hooks("install", "--settings", str(settings), "--command", str(exe), home=_private_home)[0] == 0
     data = json.loads(settings.read_text())
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == f"{exe} hooks probe"
-    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == f"{exe} hooks guard"
+    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == str(exe.with_name("safo-guard"))
     before = settings.read_bytes()
     code, out, _ = hooks("install", "--settings", str(settings), "--command", str(exe), home=_private_home)
     assert code == 0 and "already installed" in out and settings.read_bytes() == before, "ownership: a rerun is a no-op"
@@ -177,6 +186,7 @@ def test_install_accepts_the_absolute_path_of_a_safo_executable(_private_home: P
     pipx = tmp_path / "pipx" / "safo"  # pipx exposes a symlink to the venv's script
     pipx.parent.mkdir()
     pipx.symlink_to(exe)
+    pipx.with_name("safo-guard").symlink_to(exe.with_name("safo-guard"))
     other = _private_home / "pipx.json"
     assert hooks("install", "--settings", str(other), "--command", str(pipx), home=_private_home)[0] == 0
 
@@ -234,7 +244,7 @@ def test_install_writes_through_a_symlinked_settings_file_and_keeps_its_permissi
     link = _private_home / "link.json"
     link.symlink_to(target)
     assert hooks("install", "--settings", str(link), home=_private_home)[0] == 0
-    assert link.is_symlink() and "safo hooks guard" in target.read_text()
+    assert link.is_symlink() and "safo-guard" in target.read_text()
     assert target.stat().st_mode & 0o777 == 0o640
 
 
@@ -539,6 +549,294 @@ def test_reprobe_is_rate_limited_and_a_failed_one_is_unknown_with_one_notice(
     assert "SAFO routing guard degraded" not in third, "one notice per session, however many dispatches"
 
 
+def edit_agents_file(path: Path) -> None:
+    """A real edit mid-session: the merged configuration changes, so the session's state key changes with it."""
+    data = yaml.safe_load(path.read_text())
+    data["hooks"]["tracking_repos"] = [*data["hooks"].get("tracking_repos", []), "example/added-mid-session"]
+    path.write_text(yaml.safe_dump(data))
+    path.chmod(0o600)
+
+
+def test_editing_agents_yaml_mid_session_is_reprobed_not_reported_as_degraded(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        assert hooks("probe", "--agents", str(path), home=_private_home)[0] == 0
+        before = state_folder(_private_home)
+        later = NOW + dt.timedelta(minutes=2)  # the probe's completion time is a moment after NOW
+        guard(_private_home, path, dispatch(prompt=NO_STEP), now=later)
+        first = read_log(_private_home)[-1]
+        assert first["health"] == "healthy" and first["diagnostic"] == ""
+        edit_agents_file(path)
+        seen: list[float] = []
+        real = ollama_probe
+
+        def spy(endpoint: Endpoint, timeout: float = 15) -> Probe:
+            seen.append(timeout)
+            return real(endpoint, timeout)
+
+        monkeypatch.setattr("safo.hooks.probe", spy)
+        code, out, _ = guard(_private_home, path, dispatch(prompt=NO_STEP), now=later)
+        row = read_log(_private_home)[-1]
+        assert code == 0 and "SAFO routing guard degraded" not in out, out
+        assert row["health"] == "healthy" and row["local_reachable"] is True and row["diagnostic"] == ""
+        assert row["rules"] == ["no-local-step"], "the local-step rule is enforced: the endpoint answered"
+        assert "probed now" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert seen and min(seen) > 1.5, "a config edit gets a longer timeout than the per-dispatch 1.5 s"
+        assert len(list(before.glob("probe-*.json"))) == 2, "one state per configuration; the old one is left to prune"
+        asked = len(a.requests)
+        again = guard(_private_home, path, dispatch(prompt=NO_STEP), now=later)[1]
+        assert len(a.requests) == asked and "probed now" not in again, "once per new key, then trusted"
+
+
+def test_two_edits_in_a_minute_are_each_reprobed(_private_home: Path, tmp_path: Path) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        for _ in range(2):  # each edit is a new key, so the 60 s limit of the stale path does not apply
+            edit_agents_file(path)
+            out = guard(_private_home, path, dispatch(prompt=NO_STEP), now=NOW)[1]
+            assert "SAFO routing guard degraded" not in out and read_log(_private_home)[-1]["health"] == "healthy"
+        assert len(a.requests) == 4  # /api/tags and /api/ps, once per edit
+
+
+def test_an_unreachable_endpoint_after_a_config_edit_is_still_reported_degraded(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    path = agents_file(tmp_path / "agents.yaml")  # both endpoints on a closed port
+    set_probe(_private_home, agents=path)
+    edit_agents_file(path)
+    code, out, _ = guard(_private_home, path, dispatch(prompt=NO_STEP))
+    row = read_log(_private_home)[-1]
+    assert code == 0 and "SAFO routing guard degraded" in out
+    context = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert '"diagnostic": "reprobe-timeout"' in context, "a real outage is told apart from a config edit"
+    assert row["health"] == "unknown" and row["local_reachable"] is False and row["rules"] == []
+
+
+def test_a_forged_probe_state_alone_grants_no_tracking_exemption(_private_home: Path, tmp_path: Path) -> None:
+    """The probe state feeds the local-step rule only. Exemptions come from the .repo binding, a separate file."""
+    path = agents_file(tmp_path / "agents.yaml", tracking_exempt_repos=["example/exempt"])
+    edit_agents_file(path)
+    set_probe(_private_home, agents=path)  # what a model could write: a fresh, reachable state under the new key
+    row = read_after(_private_home, path, dispatch(tracked=False, prompt=NO_STEP))
+    assert "no-issue" in row["rules"]
+    assert safo_hooks.read_bound_repo(probe_file(_private_home, path)) is None
+
+
+def test_residual_a_forged_repo_binding_grants_the_exemption(_private_home: Path, tmp_path: Path) -> None:
+    """PINS A KNOWN LIMIT, not a feature (#61, Guard the guard). The binding is a file under the same user id as the
+    governed model, and read_bound_repo trusts any valid JSON at that path, so an agent that can write the state
+    directory can forge an exemption. SAFO does not carry a binding to a new key; it cannot stop a forged one. If a
+    later change makes this fail, update the test and docs/hooks.md together."""
+    path = agents_file(tmp_path / "agents.yaml", tracking_exempt_repos=["example/exempt"])
+    set_probe(_private_home, agents=path)
+    safo_hooks.repo_path(probe_file(_private_home, path)).write_text(json.dumps({"repo": "example/exempt"}))
+    row = read_after(_private_home, path, dispatch(tracked=False, prompt=NO_STEP))
+    assert "no-issue" not in row["rules"]
+
+
+SESSION_START = json.dumps({"hook_event_name": "SessionStart", "session_id": "session-a", "source": "startup"})
+
+
+def run_probe_on(home: Path, agents: Path, stdin: Any) -> tuple[int, str]:
+    out = io.StringIO()
+    code = main(
+        ["hooks", "probe", "--agents", str(agents)],
+        env={"HOME": str(home), "PATH": ""},
+        out=out,
+        err=io.StringIO(),
+        now=NOW,
+        stdin=stdin,
+    )
+    return code, out.getvalue()
+
+
+def test_hooks_probe_on_an_idle_terminal_prints_usage_and_logs_nothing(_private_home: Path, agents: Path) -> None:
+    master, slave = os.openpty()
+    try:
+        with os.fdopen(slave, "r", closefd=False) as terminal:
+            code, out = run_probe_on(_private_home, agents, terminal)
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert code == 0 and "no payload to read, so nothing was probed" in out
+    assert "SAFO routing guard degraded" not in out
+    assert read_log(_private_home) == [], "no error entry: it would count toward degraded health"
+    assert not probe_file(_private_home, agents).exists()
+
+
+def test_hooks_probe_processes_a_valid_event_that_arrives_on_a_terminal(_private_home: Path, agents: Path) -> None:
+    master, slave = os.openpty()
+    try:
+        os.write(master, SESSION_START.encode() + b"\n\x04")  # the line, then end of input
+        with os.fdopen(slave, "r", closefd=False) as terminal:
+            code, out = run_probe_on(_private_home, agents, terminal)
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert code == 0 and "Local LLM" in out and "nothing was probed" not in out
+    assert probe_file(_private_home, agents).exists(), "the event was processed: the state was saved"
+
+
+def test_hooks_probe_with_a_closed_or_empty_stdin_behaves_as_before(_private_home: Path, agents: Path) -> None:
+    closed = io.StringIO()
+    closed.close()
+    read_end, write_end = os.pipe()
+    os.close(write_end)  # an empty pipe: end of input at once
+    with open(os.devnull) as null, os.fdopen(read_end) as empty_pipe:
+        for stream in (closed, null, empty_pipe):
+            code, out = run_probe_on(_private_home, agents, stream)
+            assert code == 0 and "SAFO routing guard degraded" in out and "nothing was probed" not in out
+    assert [r["diagnostic"] for r in read_log(_private_home)] == ["input"] * 3
+
+
+def test_hooks_probe_with_a_piped_payload_is_unchanged(_private_home: Path, agents: Path) -> None:
+    code, out, _ = hooks("probe", "--agents", str(agents), home=_private_home)
+    assert code == 0 and "Local LLM" in out and "nothing was probed" not in out
+
+
+class SlowOllama:
+    """A loopback server whose /api/tags answers after `tags_delay` and whose /api/ps never answers in time."""
+
+    def __init__(self, tags_delay: float) -> None:
+        delay = tags_delay
+        self.requests: list[str] = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                outer.requests.append(self.path)
+                time.sleep(delay if self.path == "/api/tags" else 30)
+                body = b'{"models": []}'
+                with contextlib.suppress(OSError):
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def __enter__(self) -> SlowOllama:
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_a_slow_endpoint_and_a_held_log_lock_still_leave_a_decision_inside_the_hook_budget(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget is scaled down (6 s for the host, 1 s of log wait) so the test is quick; the code uses one clock for
+    the re-probe, the lookup and the log wait, so a scaled budget exercises the same arithmetic."""
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 10)
+    monkeypatch.setattr("safo.modes.hooks.NOTICE_IO_CAP_SECONDS", 5.0)  # the subject is the endpoint, not a loaded box
+    monkeypatch.setattr("safo.modes.hooks.APPEND_LOCK_TIMEOUT", 1.0)
+    set_mode(_private_home, "block")
+    with SlowOllama(tags_delay=2.5) as slow:
+        path = agents_file(tmp_path / "agents.yaml", slow.url, slow.url)
+        edit_agents_file(path)
+        folder = state_folder(_private_home)
+        folder.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        with file_lock(folder / "log.jsonl.lock"):
+            code, out, _ = guard(_private_home, path, dispatch(model=None))
+        elapsed = time.monotonic() - started
+    assert code == 0 and slow.requests, "the slow endpoint was really asked"
+    assert elapsed < 10 - 2, f"{elapsed:.1f} s: the decision must be written by decide_by, 2 s before the host timeout"
+    data = json.loads(out)
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny", "the decision is emitted, the log skipped"
+    assert "SAFO routing guard degraded" in data["systemMessage"]
+
+
+class DripOllama(SlowOllama):
+    """A loopback server that sends its headers, then one byte of a long body every `gap` seconds: each read is quick,
+    so a per-read socket timeout never fires and only a total bound stops the wait."""
+
+    def __init__(self, gap: float) -> None:
+        super().__init__(0.0)
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                outer.requests.append(self.path)
+                with contextlib.suppress(OSError):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "40")
+                    self.end_headers()
+                    for _ in range(40):
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                        time.sleep(gap)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.server.server_close()
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_a_drip_feeding_endpoint_cannot_hold_the_guard_past_its_budget(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale: bool
+) -> None:
+    """A socket timeout is per read, so a body sent a byte at a time never trips it; the probe is cut off in total."""
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 10)
+    monkeypatch.setattr("safo.modes.hooks.NOTICE_IO_CAP_SECONDS", 5.0)  # the subject is the endpoint, not a loaded box
+    set_mode(_private_home, "block")
+    with DripOllama(gap=0.2) as slow:
+        path = agents_file(tmp_path / "agents.yaml", slow.url, slow.url)
+        if stale:
+            set_probe(_private_home, age=900, agents=path)
+        else:
+            edit_agents_file(path)
+        started = time.monotonic()
+        code, out, _ = guard(_private_home, path, dispatch(model=None))
+        elapsed = time.monotonic() - started
+    assert code == 0 and slow.requests, "the endpoint was really asked"
+    assert elapsed < 10 - 2, f"{elapsed:.1f} s: the guard must answer before the host's timeout"
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_claimed_attempt_for_the_new_key_means_no_re_probe_and_an_unknown_health(
+    _private_home: Path, tmp_path: Path
+) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        edit_agents_file(path)
+        state_folder(_private_home).mkdir(parents=True, exist_ok=True)
+        block_reprobe(_private_home, path, age=1.0)  # an attempt a second ago under the new key, from any source
+        code, out, _ = guard(_private_home, path, dispatch(prompt=NO_STEP))
+        assert code == 0 and a.requests == [] and b.requests == []
+    row = read_log(_private_home)[-1]
+    assert row["health"] == "unknown" and row["local_reachable"] is False and row["rules"] == []
+    assert "SAFO routing guard degraded" in out and "probed now" not in out
+
+
+def test_a_re_probe_with_too_little_budget_is_skipped_and_the_notice_says_so(
+    _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 3)  # 1.5 s to the deadline: no room for two requests
+    set_mode(_private_home, "block")
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        code, out, _ = guard(_private_home, path, dispatch(model=None))
+        assert code == 0 and a.requests == [] and b.requests == [], "nothing was asked of the endpoints"
+    data = json.loads(out)
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "reprobe-skipped" in data["hookSpecificOutput"]["additionalContext"]
+    assert not safo_hooks.attempt_path(probe_file(_private_home, path)).exists(), "a skipped re-probe claims nothing"
+
+
 def test_a_configured_age_above_five_minutes_is_honoured(
     _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -704,7 +1002,9 @@ def test_a_log_that_cannot_be_written_does_not_change_the_decision(
     blocker.write_text("x")
     code, out, _ = guard(_private_home, agents, dispatch(model=None), env={"XDG_STATE_HOME": str(blocker)})
     assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "SAFO routing guard degraded" in out and "log-write" in out
+    # The decision is printed before the append, so a failed append is no longer in the same line (and the guard
+    # writes nothing to stderr); with no usable state folder there is no marker either.
+    assert "log-write" not in out
 
 
 def test_the_log_moves_aside_when_it_grows_past_its_limit(tmp_path: Path) -> None:
@@ -1486,23 +1786,6 @@ def test_a_standard_input_that_cannot_be_read_is_a_visible_input_failure(_privat
         stdin=Broken(),
     )
     assert code == 0 and "degraded" in out.getvalue() and "sentinel-token" not in out.getvalue()
-
-
-@pytest.mark.parametrize("sub", ["guard", "probe"])
-def test_a_hook_started_with_arguments_it_does_not_know_still_exits_zero_with_a_warning(
-    _private_home: Path, sub: str
-) -> None:
-    """argparse exits 2 on a bad flag, and a host reads exit 2 from a PreToolUse hook as a denial."""
-    import contextlib
-    import io
-
-    from safo.cli import main
-
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stderr(io.StringIO()):
-        code = main(["hooks", sub, "--no-such-flag"], env={"HOME": str(_private_home)}, out=out, err=err, now=NOW)
-    assert code == 0 and "SAFO routing guard degraded" in out.getvalue()
-    one_json_line_or_nothing(out.getvalue())
 
 
 def test_a_person_typing_a_bad_command_still_gets_the_usual_usage_error(_private_home: Path) -> None:

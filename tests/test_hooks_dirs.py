@@ -52,7 +52,9 @@ def test_a_group_or_world_writable_state_folder_degrades_the_guard_visibly_and_i
     assert code == 0 and WARNING in data["systemMessage"]
     assert not (state_folder(_private_home) / "log.jsonl").exists(), "nothing is written into an untrusted folder"
     assert not list(state_folder(_private_home).glob("*.lock")), "no lock is made there either"
-    assert '"log-write"' in data["hookSpecificOutput"]["additionalContext"]
+    assert not (state_folder(_private_home) / "log-failed").exists(), "no marker either: the folder is not trusted"
+    # The state is distrusted (unknown health), which is what the line shows; the failed append cannot be reported
+    # (the guard writes nothing to stderr and an untrusted folder holds no marker).
 
 
 def test_an_untrusted_state_folder_is_not_read_for_the_probe_state_or_the_log(_private_home: Path) -> None:
@@ -127,4 +129,4 @@ def test_the_installer_still_works_in_a_shared_folder_such_as_a_temporary_direct
     shared.chmod(0o777)
     settings = shared / "try.json"
     assert hooks("install", "--settings", str(settings), home=tmp_path)[0] == 0
-    assert "safo hooks guard" in settings.read_text()
+    assert "safo-guard" in settings.read_text()

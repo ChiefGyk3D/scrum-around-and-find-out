@@ -9,15 +9,18 @@ defaults are used.
 
 from __future__ import annotations
 
-import argparse
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from safo.agentsfile import AgentsFile, load_agents_merged
 from safo.context import LocalContext
 from safo.errors import ConfigError
 from safo.evidence import VerifiedAgents, load_verified_agents
+
+if TYPE_CHECKING:  # annotations only: the guard's entry point must not load argparse
+    import argparse
 
 
 def add_agents_arguments(parser: argparse.ArgumentParser) -> None:

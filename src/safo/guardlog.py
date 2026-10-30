@@ -14,7 +14,6 @@ import fcntl
 import math
 import os
 import stat
-import sys
 import tempfile
 import time
 from collections import Counter
@@ -23,7 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from safo import output
 from safo.bounded import MAX_BYTES, loads, read_bounded
 
 MODES = ("warn", "block")
@@ -56,11 +54,10 @@ def parse_append_lock_timeout(raw: str | None) -> tuple[float, str | None]:
 
 
 # Appends queue behind a writer instead of failing in half a second; interactive state keeps the short default.
-# A bad value warns on stderr (stdout stays exactly the hook's JSON) and falls back; it never stops the import.
-APPEND_LOCK_TIMEOUT, _lock_timeout_warning = parse_append_lock_timeout(os.environ.get("SAFO_APPEND_LOCK_TIMEOUT"))
-if _lock_timeout_warning and sys.stderr is not None:  # print(file=None) would fall back to stdout, the hook's JSON
-    with contextlib.suppress(OSError, ValueError):
-        output.write(sys.stderr, f"safo: {_lock_timeout_warning}")
+# A bad value falls back and never stops the import. NOTHING is written at import: a write to a full stderr pipe blocks
+# for ever, and the guard's budget does not exist yet. The warning text is kept in LOCK_TIMEOUT_WARNING; the guard never
+# prints it, and `safo.cli.main` prints it for every other command, after the command has run.
+APPEND_LOCK_TIMEOUT, LOCK_TIMEOUT_WARNING = parse_append_lock_timeout(os.environ.get("SAFO_APPEND_LOCK_TIMEOUT"))
 LOG_NAME = "log.jsonl"
 PROBE_NAME = "probe.json"
 MODE_NAME = "mode"

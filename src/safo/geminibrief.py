@@ -42,7 +42,6 @@ from safo.gemini import (
     has_secret_shape,
     private_term_hit,
 )
-from safo.modes.gemini import BriefParseError, brief_namespace
 
 GEMINI_PAID = "gemini-paid"
 GEMINI_MATERIAL = "gemini-material"
@@ -389,6 +388,9 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
     if text in _PARSE_CACHE:
         cached = _PARSE_CACHE[text]
         return None if cached is None else dataclasses.replace(cached, line=line)
+    # deferred: the Gemini mode builds argparse, which the guard's entry point must not load at import
+    from safo.modes.gemini import BriefParseError, brief_namespace
+
     try:
         ns = brief_namespace(span)
     except BriefParseError as err:

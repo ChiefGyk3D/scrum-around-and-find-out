@@ -68,6 +68,8 @@ DOCUMENT_KEYS = {
     "process.gates",
     "items.totalcount",
     "statusupdate.project.id",
+    "safo.guard",  # the guard's entry module, `python -m safo.guard`
+    "safo.modes.hooks",  # the module that holds the legacy guard routing
 }
 FILE_SUFFIXES = {
     "md",

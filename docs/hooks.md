@@ -8,9 +8,42 @@ approval token, and that includes a model that a prompt injection has talked int
 |---|---|---|
 | `safo hooks install [--settings PATH] [--mode warn\|block] [--command safo]` | none | Merges the two hooks into a `settings.json` (default `~/.claude/settings.json`). Keeps every other hook and setting, is a no-op when run again, keeps a private backup before it replaces the file, and refuses to overwrite a file that changed while it worked (bytes, or the file itself: device, inode, size and modification time are checked again just before the replace, so a rename-over with identical bytes is caught too, with `settings changed while installing`). `--dry-run` writes nothing. |
 | `safo hooks probe` | SessionStart | Asks each Ollama endpoint in `agents.yaml` which models are loaded (two bounded GETs, never a generate), saves the answer and tells the session whether the local LLM is reachable. |
-| `safo hooks guard` | PreToolUse, matcher `Agent\|Task\|Bash` | Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). Two more rules cover Gemini (the sixth and seventh, which deny in every mode). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
+| `safo-guard` (or `python3 -m safo.guard`) | PreToolUse, matcher `Agent\|Task\|Bash` | The guard's own entry point, the command `install` writes (see [The guard's own entry point](#the-guards-own-entry-point)). Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). Two more rules cover Gemini (the sixth and seventh, which deny in every mode). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
 | `safo hooks mode warn\|block` | none | `warn` reports a broken rule and allows the dispatch (the default); `block` denies it. |
-| `safo hooks status [--session ID --agents PATH]` | none | The mode, the retained counts, the health of the hooks and of the last probe. |
+| `safo hooks status [--session ID --agents PATH] [--settings PATH]` | none | Which form of the guard hook is installed (`new`, `legacy`, `mixed`, `absent`, `ineffective`, `unknown`), the mode, the retained counts, the health of the hooks and of the last probe. |
+
+A line `safo hooks guard ...` from an earlier install is the legacy form. It keeps working (see below) and `install`
+migrates it.
+
+## The guard's own entry point
+
+The hook runs `safo-guard`, or `python3 -m safo.guard`, never `safo hooks guard`. The guard is a short-lived process
+and the old form had to guess from a garbled command line whether it was the guard (fifteen review passes on PR #116
+each found another line that skipped the verdict). The new entry never parses subcommands: it reads only `--agents` and
+`--agents-local` (`--opt V` or `--opt=V`, the last one wins, an empty value is absent, a value that starts with one dash
+is a path, a following word that starts with `--` is not taken as the value) and ignores every other word, `--help` and
+`--version` included. It uses no argparse, imports no mode, writes nothing to standard error and prints no help. The
+event on standard input gets its verdict through the same code as before and the process ends exactly once, inside the
+deadline. A command line it cannot make sense of changes nothing about that: the event is still read and judged with
+default configuration discovery and the block semantics; only an unreadable event takes the cannot-tell path (the
+visible degraded allow).
+
+`install` writes the launcher you chose, resolved the same way: `safo` gives `safo-guard`, `python3 -m safo` gives
+`python3 -m safo.guard`, and the absolute path of a safo executable gives the `safo-guard` script beside it (which must
+exist). `--agents` and `--agents-local` follow as before. A rerun of `install` replaces an existing legacy
+`safo hooks guard` line with the new one, in place, and touches no other hook; a legacy line with a different launcher
+is still a "migrate by hand" refusal. `safo hooks status` shows the installed form: `new`, `legacy`, `mixed` (both), `absent`, or `unknown` (the file cannot be
+read as settings). It counts an entry as the guard by the SAME rule `install` accepts one (one function,
+`entry_problems` in the hooks module of the safo package): the type is `command` and the matcher is `Agent|Task|Bash` (or the older
+`Agent|Task` that `install` migrates). A guard-shaped command under another matcher (`Read`, empty, a regex that
+leaves out Agent) or another type (`prompt`, `agent`, none) would never run, so status says `ineffective (wrong
+matcher, wrong type: ...)`, never `new` or `legacy`; `install` refuses the same entry as ambiguous, to be fixed by
+hand. An ineffective duplicate beside a working entry is also `ineffective`, and names the working form after
+"another entry is effective". A command that is not a string is not a guard entry at all (`absent`).
+
+Legacy routing (`guard_words` in `safo.modes.hooks`) stays exactly as it was for lines already installed, and is frozen:
+it is not extended. Changing the code does not touch your live `settings.json`; re-installing the live hook is a separate
+step you run yourself after the release (`safo hooks install`, then `safo hooks status`).
 
 ## The four rules
 
@@ -269,7 +302,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
 
 - Malformed, oversized (over 1 MiB), non-object or missing-field input, a standard input that never arrives (5 s), an
   unreadable or invalid `agents.yaml`, a corrupt mode file, a failed state or log write, an unexpected exception and a
-  command line the hook cannot parse (read from the real command line, so `python -m safo hooks guard --no-such-flag` too) all exit 0, print the fixed line `SAFO routing guard degraded: enforcement may be
+  command line the hook cannot parse (see the next bullet) all exit 0, print the fixed line `SAFO routing guard degraded: enforcement may be
   incomplete; inspect safo hooks status.` as hook JSON, and add an enum-only record to the log. No exception text, input
   value or prompt is echoed or stored.
 - **The Gemini rules do not fail open.** They need nothing from `agents.yaml`, so when it cannot be loaded the brief is
@@ -291,8 +324,208 @@ A hook sits inside someone's session, so every error lets the work through, visi
 - What a failure switches off: input or configuration failures switch off every rule except those two; a state failure (missing, invalid,
   future-dated or other-session state, or a re-probe that failed) switches off only the local-step rule; a mode failure
   falls back to `warn`.
+- Editing `agents.yaml` mid-session changes the name of the session's probe file (it hashes the merged configuration), so
+  the saved probe no longer applies. The first dispatch after the edit probes again at once, without the one-a-minute
+  limit and with up to 3 s per request (a stale state's re-probe uses 1.5 s), and the guard adds one line saying
+  the local LLM was probed now. That is not a degraded state. If the re-probe finds the
+  endpoint unreachable, the dispatch is degraded and the notice's diagnostic is `reprobe-timeout`, so an outage is
+  told apart from an edit; later dispatches retry at the usual one-a-minute rate. The log keeps its fixed diagnostic
+  list, so that record says `probe`. SAFO does not carry the session's repository binding (`tracking_exempt_repos`) to
+  the new file name, so after an edit the exemption does not apply until the next `startup`; this is bookkeeping, not
+  protection (see the same-user limit below).
+- A hook command line never reaches argparse's writing paths. argparse prints usage and the error to standard error
+  synchronously before it exits 2, and a full stderr pipe would block that until the host killed the hook (fail-open,
+  SAFO #130); exit 2 is also what a host reads as a BLOCK. So the real entry (the module form and the console script)
+  recognizes `hooks guard` before argparse is even built and parses its arguments by hand: exactly what `safo hooks
+  install` writes, `--agents PATH` and `--agents-local PATH`, each at most once, in either order. Those go straight into
+  the guard. Any other guard command line (an unknown flag, a missing value, a repeated flag, `--help`, a stale or hand
+  edited install) is a configuration error and not a policy decision: nothing is written to standard error, argparse's
+  exit 2 is never used, and the hook answers with the same visible degraded allow as every other failure, through the
+  bounded write: exit 0 if the line was delivered, 1 if not. The same holds for `hooks probe`: in the real entry,
+  when standard input is not a terminal, the hook parsers print nothing (usage, error and help are suppressed) and the
+  failed parse becomes the degraded line. A person at a terminal still gets argparse's usage and help, and `hooks status`
+  (a command a person types) keeps argparse's messages.
+- The guard has one clock, and it starts when the PROCESS started, not when the guard's code first runs. `safo` records
+  the process start the moment it is imported: on Linux from `/proc` (the process age is `/proc/uptime` minus the start
+  time in `/proc/self/stat`; both count from boot, so the difference is exact, and reading them cannot block); anywhere
+  else, or if the age looks wrong (negative, or over a minute: a long-lived process, or clocks that disagree), it is
+  the time of the import, the earliest point left; the fallback is exercised by a test and documented here. The age is
+  a difference of two boot-time values, so a suspend does not distort it. The real entry
+  (the module form and the console script, through the `run` function of the cli module) arms the guard with it; a test calling `main()` in a
+  long-lived process does not, so its budget starts when the guard does. Interpreter start-up, package imports, the
+  parser and argument parsing are therefore INSIDE the budget. With the host timeout T (10 s in the installed
+  settings, scaled in tests) the points are all measured from the process start:
+  - the decision is written by `decide_by = T - m`, where the margin `m = max(2 s, 0.2 T)`, clamped to 40% of T for a
+    very small scaled budget: 8 s for T = 10, 3 s for T = 5;
+  - lookups, the re-probe and every other pre-decision wait stop one reserve earlier, at `decide_by - min(1 s, 0.1 T)`
+    (7 s for T = 10), so there is time to compute and write the line;
+  - the post-delivery work (the log and the markers) is waited for until `T - 1 s`, plus 0.5 s, still before T (9.5 s).
+  The decision write itself is given until `decide_by`, with NO minimum: a full pipe whose reader never drains it ends
+  the process with exit 2 at about 8 s, 2 s before the host would kill it. If `decide_by` has already passed when the
+  line is about to be written (a late start), nothing is waited for and nothing is written: a denial exits 2, anything
+  else is a silent exit 0. No wait of the guard, pre-decision or after the line, ends later than `T - 0.25 s` from the
+  process start. A process whose start-up alone reaches the host's timeout cannot be made safe from inside the Python
+  entry; the boundary there is the host (`onFailure: block`) or an external launcher, as SAFO #130 tracks. The rule from SAFO #130 stands: a
+  hook the host kills at T is fail-open and its output is discarded, so everything above exists to be out before T. A
+  test runs the guard under a watchdog that SIGKILLs its process group at the scaled T and checks that the line and exit
+  code came first, for a full stdout pipe, an invalid `SAFO_APPEND_LOCK_TIMEOUT` with a full stderr pipe, and a cold
+  start that sleeps before `safo` is imported (Linux; elsewhere the start-up before the import is not counted).
+  Importing any module on the guard's path performs no I/O at all (no write to stdout or stderr, no warning): the
+  lock-timeout warning is kept in the `LOCK_TIMEOUT_WARNING` variable of the guardlog module and printed by the cli module's `main()` only for commands that are
+  not hooks, after they ran. The decision is computed and then written
+  and flushed to standard output FIRST, on both the Agent and the Bash path (one shared function); only then is the
+  log appended, best effort. A re-probe gets at most what leaves two requests per endpoint and 2 s for the issue
+  lookup, and is cut off in total at twice that per-request time (a socket timeout is per read, so a server that sends a
+  byte at a time would otherwise hold it); an endpoint still silent then counts as unreachable. If less than 0.5 s per
+  request is left, the re-probe is skipped (nothing is claimed, so a later dispatch may try) and the notice names
+  `reprobe-skipped`. The event read on standard input also stops at the clock (the lesser of 5 s and what is left).
+- Loading `agents.yaml` runs under a wall-clock bound: a daemon worker thread is joined for the time left until the
+  guard's deadline (at least 0.25 s) and LEFT RUNNING if it is still going (the process ends right after the decision). A thread works the same on Linux and macOS and
+  in any thread; a signal timer would not. On expiry there is no configuration, so every rule is off, as for an
+  unreadable `agents.yaml`: a visible degraded allow (log diagnostic `timeout`) with the notice `budget exceeded:
+  configuration load timed out, rules disabled`. That is fail-open and is stated as such. The realistic trigger is a
+  wedged filesystem or kernel read, which cannot be made without privilege. It is NOT an ordinary FIFO: the production
+  reader opens with `O_NONBLOCK` and refuses a non-regular file, so a planted FIFO is rejected at once as a `config`
+  failure and never reaches the timeout (a test runs the real loader on a FIFO and pins that). The timeout path itself
+  is tested with a synthetic loader that never returns, and says so. What stays unbounded: the read keeps blocking until the process ends
+  (it only reads), a state-file read or `fsync` that blocks is not interrupted, and a host that kills the hook before
+  the line is out prints nothing. If the load finishes but the clock is past its deadline, the re-probe and the issue
+  lookup are skipped and the notice says `budget exceeded: lookups skipped`; a brief whose issue could not be verified
+  then follows the usual rules (denied in block mode, flagged in warn mode).
+- Delivery is an explicit step: every character of the line is written (a text stream's `write()` returns how many it
+  took; a short count is written again from where it stopped, and no progress, or a return that is not a count, is a
+  failure), then it is flushed. If that fails (a closed or broken pipe) nothing else is done: no log append, no second
+  line, no diagnostic, because once any byte of a decision was attempted nothing else is ever written to standard
+  output. The guard's decision path writes NOTHING to standard error (a stderr write cannot be made safe against a
+  second writer sharing the pipe, and it was advisory; the exit code and the next dispatch's notice carry the
+  information). The one exception is the start-up warning for an invalid `SAFO_APPEND_LOCK_TIMEOUT`, an operator
+  misconfiguration, written once at import. The tests that run the guard as a real process use `posix_spawn` (POSIX
+  only); none of them needs `/proc`. The exit code says what was lost: a denial that could not be delivered exits 2, which Claude Code reads as "block this call" (so it
+  never fails open); any other undelivered line exits 1, a non-blocking error. This is the one case where the guard
+  exits 2. That the host treats exit 2 as a block and exit 1 as non-blocking is the host's documented hook contract,
+  not verified by a test here. A failure in the diagnostic path is caught and becomes the same exit code.
+- The invariant, true by construction because the guard is a short-lived PROCESS: a thread cannot be cancelled, so
+  nothing relies on cancelling one. Bounded work runs in daemon threads that the main thread waits for with a deadline.
+  When one overruns, the main thread goes on without it, delivers the decision, and the process then ENDS through
+  `os._exit` (the guard's only exit point, taken even when everything finished normally): every thread stops at
+  once, runs no clean-up, and a blocked call can never resume. In detail:
+  - The decision is written and flushed by a thread that the main thread waits for until `decide_by` (see the clock
+    above). A reader that keeps a full pipe open and never drains it
+    cannot hold the decision back: at the deadline the line counts as undelivered and the process ends with exit 2
+    for a denial (the host then relies on exit 2) or exit 1 otherwise. Flags on the shared file description are never
+    changed. A write that returns a short count is written again until complete; no progress is a failure.
+  - If a PRE-decision worker overran (config load, state and mode reads, the re-probe), the verdict is computed from
+    what is available, the line goes out, and the process ends at once: no audit or decision write is attempted in
+    that dispatch (it is not logged; the line carries the slow-state notice). A pre-decision worker that was left
+    running can write only probe and health caches while the main thread computes and writes the line: the re-probe's
+    lock file, its `.attempt` marker and the saved probe state. Those are hints that can change the NEXT dispatch's
+    notice or health, never a verdict. That short span, from the overrun to the exit, is the only time a left-behind
+    thread can act.
+  - Otherwise, after the line is out, the audit and decision writes run in one worker that the main thread waits for
+    until the same deadline: the `.repo` modification time (a hint), the clear of the log-failed marker whose notice
+    was in the line, the claim of the probe notice, the log append, and the recording of a failed append. If it is not
+    done by the deadline the process ends. What a deadline-driven exit can still allow: a system call already
+    entered at the moment of the exit may complete; nothing is started after it. A wedged append therefore leaves no
+    log-failed marker, and the next dispatch cannot report it.
+  - Inventory of writes. BEFORE the decision: only the re-probe's (the lock file and its directory, the `.attempt`
+    marker, the probe-state lock and replace, and its clean-up unlink), each in a pre-decision worker. AFTER the
+    delivered line, in the post-delivery worker: the `.repo` utime, the marker clear or junk removal (rename to a side
+    name, delete, put back), the side-object pruning, the notice claim, the log lock, the append and any quarantine of
+    a corrupt log, and the log-failed temp file, install and blocker removal. Everything after the line is bounded by
+    the process exit.
+  - The tests run the guard as a real process with each of those steps blocked behind a barrier file, check the process
+    ended with the right exit code and the line was out in time, then release the barrier and compare a snapshot of
+    every path, mode, modification time, size and inode under the state folder: nothing changes.
+- The verdict never depends on state writes. Everything that touches the state folder before the verdict (the saved
+  probe state, the re-probe's lock and `.attempt` marker, the probe, the save of the probe state, and the pure read of
+  the bound repository) runs under a bound, in a daemon worker thread
+  that is left running if it does not finish (the process ends right after the decision): a read batch gets at most 1.0 s (at least 0.25 s, and not past the hard
+  limit), and the re-probe gets its own total (twice the per-request time plus its slack) plus 1.0 s for its file work,
+  never past the deadline. If any of it does not finish, probe health is `unknown` (the local-step rule is off, as for
+  any unknown state), the repository counts as NOT BOUND (the existing fallback: no `tracking_exempt_repos` or
+  `lead_wait` exemption, so a brief without an open issue, or a wait, is judged by the rule), no further state work
+  is done in that dispatch, and the verdict is computed from the configuration alone. The line carries the fixed
+  notice `state folder slow: probe state skipped`.
+- The mode file read is bounded the same way (at most 1.0 s, at least 0.25 s, not past the hard limit). The documented
+  fallback for an unreadable mode file is `warn`, which would let a violation of an explicit rule through as a warning,
+  so on a TIMEOUT the verdict is computed in `block` mode: fail closed on a slow mode file. The line says `state folder
+  slow: mode file skipped`. (A mode file that is merely unreadable or invalid still falls back to `warn` with the
+  `mode` notice, as before.) `lead_wait.mode` set explicitly to `warn` in `agents.yaml` stays what it says.
+- Between a computed decision and its emit, the only other state-folder work is a READ-ONLY check of the first-notice
+  flag (when the probe is not healthy) and a READ-ONLY inspection of the log-failed marker, under the same bound (at most
+  1.0 s, at least 0.25 s, not past the hard limit). The worker changes nothing. The flag is claimed, and any junk at the
+  marker name removed, by the post-delivery worker (see the invariant above) only after the line that carries that notice was delivered; an undelivered
+  line, or a process killed between the emit and the claim, leaves both as they were, so the notice or the marker
+  comes back on the next dispatch. If the check does not finish it is skipped: the decision goes out WITHOUT those
+  notices, with the fixed text `notices skipped: state folder slow`, and the flag and the marker are left as they
+  were (the check is read-only, so a worker that finishes later creates nothing and leaves no descriptor open). The once-per-session
+  probe notice appears only while it is unclaimed: another notice in the same line does not bring it back.
+- A computed denial is recorded when the verdict is computed, so an unexpected failure anywhere between the verdict and
+  the emit exits 2 (block) instead of falling through to a generic diagnostic and exit 0.
+- Because the decision is printed before the log is touched, a failed or skipped log write can no longer appear in the
+  same JSON line. Persistence is best effort and catches any exception (not only I/O errors). It is reported by a small
+  marker file (`log-failed` in the state folder) that the NEXT guard run reads and reports as
+  `previous log write failed` in its own line (log diagnostic `log-write`). The marker is opened relative to a
+  descriptor of the state folder (checked on the descriptor: ours, not writable by others), never blocks, never follows
+  a link, and must be a regular file of ours. The first install of a failure is an atomic rename of a fresh file (new
+  inode, new token) over the marker, so every failure has its own identity. A run records the identity it read (device,
+  inode, mode, modification time in ns, size) and removes the marker only if it still has that identity, so a failure
+  written by another run in between is kept and reported next. If the rename fails because a directory is in the way,
+  only that observed blocker is removed; only if the removal really happened is the install retried, and then with a
+  hard link, which never overwrites. There is NO rename fallback: where the filesystem has no hard links (EPERM,
+  EOPNOTSUPP, ENOTSUP, EXDEV, ENOSYS) or the name is taken (EEXIST) the retry installs nothing, this run's temp file is
+  dropped, and the failure is not recorded until the blocker is gone by hand (the decision is unaffected); a rename
+  would overwrite a newer marker, and a look at the name before it is a race. If the blocker was replaced meanwhile, the newer marker is left alone, this run's
+  temp file is dropped, and the failure counts as recorded because a marker exists. Junk at the name (directory, FIFO,
+  link, foreign or loose-mode file) is removed after the line is delivered, by one look, an atomic rename to a unique
+  side name, and a second look at the MOVED object: only an object that still has the observed identity is deleted
+  (rmdir or unlink chosen from that same look). The answer is True only if the object is really gone: a directory that
+  is not empty stays under its side name and the answer is False. At most 8 side objects (hidden entries named after the marker, with a random suffix) are
+  kept: empty directories and our own regular files among them are pruned first, and at the cap nothing more is moved
+  aside, so repeated planting cannot grow the folder without bound. Anything else that was moved is put back without
+  overwriting (a hard link) and, if it cannot be put back (the name is taken, or there are no hard links), it is KEPT
+  under its side name, never deleted. Side objects are pruned only when they are older than five minutes (by ctime,
+  which a rename updates, so one a live run has just moved aside is never old) and are named exactly as the guard names
+  them (pid and a random id), and then only an empty directory or a regular file that is ours; links, FIFOs, other
+  names and directories with content are never pruned (they still count toward the cap). The junk is reported once as
+  `log-failed marker unusable` (in that line). Remaining windows,
+  all inside the same-user residual (#61): between the first look and the rename a replacement is briefly moved aside,
+  so a concurrent reader can miss a marker for a moment; the five-field identity tuple is best effort (a recycled inode, or a
+  filesystem with coarse timestamps, could repeat it); and a failure landing between a marker's identity check and its removal by a clear can still be lost. A
+  line carries every applicable notice, highest priority first (`mode` or `mode file skipped`, `state folder slow`, `notices skipped`, the
+  marker's notice, `budget exceeded`, the probe notice), and the marker is deleted only after a line that shows its
+  notice was delivered. The marker is same-user writable like the rest of the state: it can only add a notice and
+  never grants anything.
+- The limit of what writing the decision first covers (vendor documentation for Claude Code hooks, fetched through a
+  summarizing tool, so taken from an extraction, not read in full): a PreToolUse command hook that reaches its timeout
+  does NOT block the call, and its output is discarded, unless the hook entry sets `onFailure: "block"`. So the
+  decision first only helps when the line is out before the host's timeout; a hook that is killed at the timeout is
+  fail-open. Whether the settings that `safo hooks install` writes should set `onFailure: "block"` is tracked separately
+  (SAFO #130) and is a settings decision for the maintainer; this document does not change it. Anything this page says
+  about what the host does after a flushed decision and a later kill is therefore subject to that rule.
+- A log that is not valid UTF-8 anywhere (a complete line or the incomplete tail) is corruption. `append_log` moves it to
+  the log's file name plus `.corrupt-<UTC timestamp>-<pid>` (mode 0600, same folder, same trusted-directory rules) and starts a fresh
+  log. It never touches `log.jsonl.1`, the real archive. At most 5 such files are kept; the oldest names are deleted
+  beyond that, so repeated corruption cannot fill the disk. It does not raise. The same-user residual (#61) still holds
+  here: an actor running as the same user can damage, replace or delete the log and these files; the log is advisory
+  telemetry, not tamper-evident evidence.
+- A re-probe that times out stores an unreachable state for `max_state_age_seconds` (300 s by default), so later
+  dispatches log health `healthy` and `local_reachable` false with no notice, as after a stale-state re-probe.
+- The line shown after the first probe under a new configuration says there was no saved probe for it (an edit, or a
+  session with no probe yet; SAFO cannot tell which) and that no `tracking_exempt_repos` binding carries over.
+- `safo hooks probe` run by hand on a terminal waits a quarter of a second for an event; if none arrives it prints a
+  usage line and exits 0, with no log entry. An event that does arrive (a wrapper that gives the hook a pty) is
+  processed as usual, and so is a piped payload.
+- Same-user limit, tracked in #61 (Guard the guard). The probe state, the `.repo` binding, the `.attempt` marker and the
+  log are files under the same user id as the model the guard governs. An actor that can write the state directory can
+  forge a fresh `{reachable: false}` state (which switches the local-step rule off), forge a `<probe>.repo` file (which
+  grants a repository exemption: a test pins this), pre-create `.attempt` (which suppresses a re-probe for a minute),
+  delete the state and `.attempt` before each dispatch (which forces the slow re-probe every time), or append a valid
+  record to the log (which can make `safo hooks status` read healthy). The log is advisory telemetry, not evidence.
+  SAFO does not try to stop this here, and none of the above is a security boundary; the guard stays a speed bump
+  against accidents.
 - A denial that was computed survives a log failure.
-- stdout is exactly one JSON line or nothing. `probe` and `guard` never exit 2 (a host reads that as a denial), even for a bad flag.
+- stdout is exactly one JSON line or nothing. `probe` and `guard` never exit 2 (a host reads that as a denial), even for a bad flag. The one exception: a guard denial whose line could not be delivered exits 2 so the host blocks (see Failing safe).
 - The host's own timeout (15 s for the probe, 10 s for the guard in the installed settings) is the last backstop. How a
   given Claude Code version treats a timed-out or crashed hook is not verified here.
 
@@ -337,19 +570,21 @@ no effect.
 
 `SAFO_APPEND_LOCK_TIMEOUT` is how many seconds a log append waits for another writer's lock. Default `3.0`; the value
 is read once when `safo` starts. A value that is not a number, not finite (`nan`, `inf`, `1e999`) or not above 0 is
-ignored: the default is used and one line naming the variable goes to stderr (stdout stays the hook's JSON). A value above
+ignored: the default is used and one line naming the variable is printed to stderr after the command has run, for every command that is not a hook (a
+hook never prints it, and nothing is written when `safo` is imported). A value above
 the maximum of `5` is clamped to 5. A bad value never stops `safo` from starting.
 
 The value is read with Python's `float` syntax, so `1_0`, non-ASCII digits and tiny values such as `1e-5` count as
 numbers; anything above 5 (including the underscore forms) is clamped.
 
-Budget: the host gives the guard 10 s. Its lookups stop 2 s earlier, at 8 s, and the append can then wait up to the
-setting, so the worst case is 8 s plus the wait: 11 s at the 3 s default and 13 s at the 5 s clamp, both past the host's
-10 s. The clamp bounds the setting; it does not fix the budget. The guard currently writes its decision after the
-append, so a denial computed in `block` mode is lost if the host kills the hook during the wait (a late failure is
-different: the timeout is an error and degrades visibly). Writing the decision before the log is being done in PR #116
-(issue #97), and the budget will be restated there. Whether Claude Code allows or blocks a hook it kills at the timeout is
-not verified. The other lock users (mode, probe state) keep their 0.5 s wait.
+Budget: the host gives the guard 10 s, and the guard runs on one clock from the start of the process (see Failing safe
+for the arithmetic: the decision is out by 8 s). The decision is written and flushed first. The append then waits for the lock for the setting or for what is left until 9 s,
+whichever is less. If less than 0.05 s is left, or the clock is already past 9 s, the append is skipped: it is never
+started late and never stretched past 9 s. A longer setting therefore does not extend the hook. A skipped or failed
+append is reported, on the next guard run, as `previous log write failed` (see Failing safe). The
+configuration load and the notice I/O are bounded in wall time (see Failing safe). A hook killed at the host's
+timeout is fail-open and its output is discarded unless the hook entry sets `onFailure: "block"` (SAFO #130). The append itself is not interruptible once it holds the lock (fsync can block). The
+other lock users (mode, probe state) keep their 0.5 s wait.
 
 ## Known limits
 

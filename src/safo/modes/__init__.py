@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
-import argparse
 import importlib
 import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from safo.context import Context, LocalContext
+
+if TYPE_CHECKING:  # annotations only: the guard's entry point must not load argparse
+    import argparse
 
 
 @dataclass(frozen=True)
