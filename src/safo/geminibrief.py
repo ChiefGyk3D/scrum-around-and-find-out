@@ -46,6 +46,10 @@ from safo.gemini import (
 GEMINI_PAID = "gemini-paid"
 GEMINI_MATERIAL = "gemini-material"
 GEMINI_RULES = (GEMINI_PAID, GEMINI_MATERIAL)
+# the phrase classes a paid-use denial names; fixed text, so a denial never repeats a word of the brief
+MATCH_COMMAND = "a `safo gemini` command"
+MATCH_DECLARATION = "a `gemini:` declaration"
+MATCH_CONFIG = "the paid config name"
 
 DECLARATION = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)?(?:#+\s*)?gemini(?:-step)?\s*:(?P<rest>.*)$", re.IGNORECASE)
 MATERIAL = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)?gemini-material\s*:\s*(?P<value>.*?)\s*$", re.IGNORECASE)
@@ -118,6 +122,7 @@ class Step:
     line: int = 0
     why: str = ""
     sends: bool = True  # False for a mention that sends nothing (an approve or quota command with no prompt file)
+    matched: str = ""  # the CLASS of phrase that made this a step (never brief text), shown in the denial
 
 
 def _tokens(rest: str) -> list[str] | None:
@@ -154,7 +159,13 @@ def _declared(rest: str, line: int) -> Step | None:
         tier, pairs = tokens[0].lower(), tokens[1:]
     if tier not in ("free", "paid") or not all(KEYVALUE.match(t) for t in pairs):
         return None
-    return Step(tier == "paid", _option(tokens, "cap"), _option(tokens, "approval"), line=line)
+    return Step(
+        tier == "paid",
+        _option(tokens, "cap"),
+        _option(tokens, "approval"),
+        line=line,
+        matched=MATCH_DECLARATION,
+    )
 
 
 def _cap_problem(value: str | None) -> str | None:
@@ -173,7 +184,8 @@ def _paid_problem(step: Step, check: ApprovalCheck | None) -> str | None:
     where = f"line {step.line}: " if step.line else ""
     disabled = getattr(check, "disabled", None)
     if isinstance(disabled, str):
-        return f"{where}{disabled}"
+        found = "; ".join(x for x in (step.why, step.matched) if x)
+        return f"{where}{disabled} [rule gemini-paid, matched: {found}]" if found else f"{where}{disabled}"
     if step.unreadable:
         return (
             f"{where}{step.why or 'this Gemini step could not be read exactly as the CLI reads it'}, so it is treated "
@@ -370,20 +382,25 @@ _ARGPARSE_WORDS = (
 def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) -> Step | None:
     """One command's arguments, read with the parser the CLI itself uses. An operator character inside an argument or
     a shell expansion is unreadable: the shell acts on it before the parser sees it."""
-    if problems:
-        return Step(unreadable=True, line=line, why="the command has " + "; ".join(problems))
     text = " ".join(span)
+    shown = MATCH_COMMAND
+    if problems:
+        return Step(unreadable=True, line=line, why="the command has " + "; ".join(problems), matched=shown)
     for char in OPCHARS:
         if char in text:
             return Step(
                 unreadable=True,
                 line=line,
                 why=f"the command has {char!r} inside an argument (a quoted operator or redirection)",
+                matched=shown,
             )
     for char, name in WILD_NAMES.items():
         if char in text:
             return Step(
-                unreadable=True, line=line, why=f"the command has {char!r} ({name}), which the shell expands first"
+                unreadable=True,
+                line=line,
+                why=f"the command has {char!r} ({name}), which the shell expands first",
+                matched=shown,
             )
     if text in _PARSE_CACHE:
         cached = _PARSE_CACHE[text]
@@ -399,6 +416,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
             unreadable=True,
             line=line,
             why=f"the command has {reason} (an unknown or shortened option, a missing value)",
+            matched=shown,
         )
     else:
         if ns.action == "quota":
@@ -410,6 +428,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
                 ns.approval or None,
                 line=line,
                 sends=ns.action == "ask" or bool(ns.prompt_file),
+                matched=shown,
             )
     if len(_PARSE_CACHE) < 256:
         _PARSE_CACHE[text] = step
@@ -465,7 +484,7 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
                 if (not prev.op and prev.quoted and prev.end == nxt.start) or (
                     i + 1 < len(tokens) and tokens[i + 1].quoted and tokens[i + 1].start == nxt.end
                 ):
-                    problems.append(f"an operator ({nxt.value!r}) touching a quoted word")
+                    problems.append("an operator touching a quoted word")
                 if i + 1 < len(tokens) and not tokens[i + 1].op and tokens[i + 1].value.startswith("--"):
                     problems.append("an option-like word after the command ends, so the cut may be wrong")
                 break
@@ -942,7 +961,9 @@ def _findings(
             )
         )
     if "paid" in flags and not any(t.paid or t.unreadable for t in steps):
-        steps.append(Step(paid=True, line=flags["paid"], why="the paid secret-store config is named"))
+        steps.append(
+            Step(paid=True, line=flags["paid"], why="the paid secret-store config is named", matched=MATCH_CONFIG)
+        )
     if not steps:
         return []
     tick()
