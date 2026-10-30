@@ -512,6 +512,7 @@ def test_a_replaced_ledger_is_caught_by_the_height_record_when_that_was_left_alo
         Ledger(cfg.ledger).append({"type": "usage", "date": "2026-10-29", "amount_usd": 0, "note": "fresh start"})
     assert server.requests == []
 
+
 # -- the signature binds the prompt (#217) ---------------------------------------------------------------------------
 
 A_PROMPT = "Summarize these public advisories."
@@ -702,8 +703,6 @@ def test_the_digest_is_compared_with_compare_digest_on_bytes(
 ) -> None:
     import hmac
 
-    from safo import gemini
-
     calls: list[tuple[object, object]] = []
     real = hmac.compare_digest
 
@@ -711,7 +710,7 @@ def test_the_digest_is_compared_with_compare_digest_on_bytes(
         calls.append((a, b))
         return real(a, b)
 
-    monkeypatch.setattr(gemini.hmac, "compare_digest", spy)
+    monkeypatch.setattr(hmac, "compare_digest", spy)
     record = store.issue(**KEY_ARGS)
     ask(cfg, paid(record.id), store=store, key_for=keys, now=NOW)
     digest = sha(A_PROMPT).encode()

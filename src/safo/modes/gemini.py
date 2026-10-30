@@ -197,7 +197,7 @@ def approve_flow(
     ctx.say(f"prompt: {size} bytes, SHA-256 {digest}")
     ctx.say(
         f"prompt excerpt ({'all' if len(shown) == len(req.prompt) else 'first'} {len(shown)} of {len(req.prompt)} "
-        f"characters, non-ASCII and control characters escaped): {ascii(shown)}"
+        f"characters, non-ASCII and control characters escaped): {shown!a}"
     )
     ctx.say(
         f"you are approving up to {money(amount)} USD on {req.model} for job {req.job}"

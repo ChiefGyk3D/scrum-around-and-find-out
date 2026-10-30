@@ -816,7 +816,7 @@ def prompt_binding(prompt: str) -> tuple[str, int]:
     try:
         raw = str.encode(prompt, "utf-8")
     except UnicodeEncodeError:
-        raise RefusedError("the prompt is not valid text (a lone surrogate), so it cannot be approved or sent") from None
+        raise RefusedError("the prompt is not valid text (a lone surrogate), so nothing was approved or sent") from None
     return hashlib.sha256(raw).hexdigest(), len(raw)
 
 
