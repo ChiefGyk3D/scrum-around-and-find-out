@@ -27,6 +27,7 @@ from geminidata import (
     NOW,
     FakeGemini,
     config_dict,
+    hard_timeout,
     ledger_rows,
     minutes_ago,
     seed,
@@ -695,6 +696,7 @@ def test_the_prompt_is_checked_against_the_private_terms(
 
 
 @pytest.mark.parametrize("content", [None, "(unclosed\n", "x" * 70_000])
+@hard_timeout(30)
 def test_an_unreadable_or_invalid_terms_file_stops_the_call(
     cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path, content: str | None
 ) -> None:
@@ -750,6 +752,7 @@ def test_a_zero_output_count_alone_is_not_trusted(cfg: GeminiConfig, server: Fak
     assert Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
 
 
+@hard_timeout(30)
 def test_the_terms_loader_refuses_dangerous_shapes_and_accepts_plain_ones(tmp_path: Path) -> None:
     from safo.gemini import load_private_terms
 
@@ -765,6 +768,7 @@ def test_the_terms_loader_refuses_dangerous_shapes_and_accepts_plain_ones(tmp_pa
         load_private_terms(str(path))
 
 
+@hard_timeout(30)
 def test_the_wrapper_matches_private_terms_on_the_folded_prompt(
     cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path
 ) -> None:

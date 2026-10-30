@@ -9,9 +9,11 @@ denial, never a pass. Each term sees at most TERMS_CHUNK characters at a time.
 
 from __future__ import annotations
 
-import json
 import re
 import sys
+
+from safo import output
+from safo.bounded import loads
 
 TERMS_CHUNK = 4000  # characters one term sees at a time (chunks overlap by 200)
 
@@ -29,9 +31,10 @@ def hit(terms: tuple[re.Pattern[str], ...], texts: list[str]) -> bool:
 
 
 def main() -> int:
-    data = json.loads(sys.stdin.read())
-    terms = tuple(re.compile(pattern, flags) for pattern, flags in data["terms"])
-    sys.stdout.write("1" if hit(terms, [str(t) for t in data["texts"]]) else "0")
+    """Standard input: one line of JSON (the terms as [pattern, flags] pairs), then the texts separated by NUL."""
+    head, _, body = sys.stdin.read().partition("\n")
+    terms = tuple(re.compile(str(pattern), int(flags)) for pattern, flags in loads(head))
+    output.write(sys.stdout, "1" if hit(terms, body.split("\x00")) else "0")
     return 0
 
 

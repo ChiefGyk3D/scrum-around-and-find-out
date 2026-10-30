@@ -18,7 +18,7 @@ import pytest
 import yaml
 
 from agentsdata import agents_with
-from geminidata import MODEL, NOW
+from geminidata import MODEL, NOW, hard_timeout
 from hooksdata import agents_file, dispatch, hooks, read_log, set_mode
 from safo.gemini import ApprovalStore, Locations, approval_problem
 from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, findings
@@ -487,6 +487,7 @@ def test_the_guard_and_the_wrapper_share_one_terms_loader() -> None:
     assert not hasattr(brief, "load_terms")
 
 
+@hard_timeout(30)
 def test_the_guard_denies_a_brief_that_matches_the_private_terms(
     _private_home: Path, tmp_path: Path, gemini_locations: Locations
 ) -> None:
@@ -510,6 +511,7 @@ def test_the_guard_ignores_the_privacy_variable_and_reads_the_fixed_file(
 
 
 @pytest.mark.parametrize("bad", ["(unclosed\n", "(a+a+)+y\n", "(a|aa)+y\n", ".*secret\n", "x" * 300 + "\n", "(a)\\1\n"])
+@hard_timeout(30)
 def test_a_bad_or_dangerous_terms_file_makes_the_guard_deny_quickly(
     _private_home: Path, tmp_path: Path, gemini_locations: Locations, bad: str
 ) -> None:
@@ -697,6 +699,7 @@ def test_a_pattern_that_matches_only_after_a_markdown_link_is_removed_is_found()
 # -- third review round ---------------------------------------------------------------------------------------------
 
 
+@hard_timeout(30)
 def test_each_term_sees_a_bounded_chunk_of_text() -> None:
     from typing import cast
 
@@ -721,6 +724,7 @@ SLOW = [
 
 
 @pytest.mark.parametrize("term", SLOW)
+@hard_timeout(30)
 def test_slow_term_shapes_are_refused_at_load_with_the_line_number(term: str, tmp_path: Path) -> None:
     from safo.gemini import load_private_terms
 
@@ -730,6 +734,7 @@ def test_slow_term_shapes_are_refused_at_load_with_the_line_number(term: str, tm
         load_private_terms(str(path))
 
 
+@hard_timeout(30)
 def test_a_plausible_term_loads_and_runs_fast(tmp_path: Path) -> None:
     import time
 
@@ -744,6 +749,7 @@ def test_a_plausible_term_loads_and_runs_fast(tmp_path: Path) -> None:
     assert time.monotonic() - started < 3
 
 
+@hard_timeout(30)
 def test_one_search_cannot_pass_the_deadline() -> None:
     import re
     import time
@@ -757,6 +763,7 @@ def test_one_search_cannot_pass_the_deadline() -> None:
     assert time.monotonic() - started < 4
 
 
+@hard_timeout(30)
 def test_the_guard_denies_a_term_check_that_runs_out_of_time(monkeypatch: pytest.MonkeyPatch) -> None:
     import re
     import time
@@ -774,6 +781,7 @@ def test_the_guard_denies_a_term_check_that_runs_out_of_time(monkeypatch: pytest
 
 
 @pytest.mark.parametrize("term", ["x{0,5}", "^", "(?:)", r"\b", "a?"])
+@hard_timeout(30)
 def test_a_term_that_can_match_nothing_is_refused_with_the_line_number(term: str, tmp_path: Path) -> None:
     from safo.gemini import load_private_terms
 
@@ -930,3 +938,97 @@ FIXTURE = [
 def test_the_realistic_brief_fixture(brief: str, blocked: bool) -> None:
     assert len(FIXTURE) == 18
     assert bool(rules(brief, accepts())) is blocked, brief
+
+
+# -- residual forms, lexer differential, link targets ---------------------------------------------------------------
+
+
+def test_xargs_and_alias_forms_without_the_action_in_the_span_are_unreadable() -> None:
+    assert GEMINI_PAID in rules("echo ask --paid | xargs safo gemini\n" + PUBLIC, accepts())
+    assert GEMINI_PAID in rules("alias g='safo gemini'\ng ask --paid --model m\n" + PUBLIC, accepts())
+    assert rules("alias ll='ls -l'\n", accepts()) == []
+
+
+LEXER = [
+    "safo gemini ask --model m --material \"a\"';' --paid",
+    "safo gemini ask --model m x';'y --paid",
+    "safo gemini ask --model m --material 'a' --paid",
+    'safo gemini ask --model m --material "a b" --paid',
+    "safo gemini ask --model m --material a\;b --paid",
+    'safo gemini ask --model m "a"; --paid',
+    "safo gemini ask --model m 'a'| cat --paid",
+    "safo gemini ask --model m --material 'it'\"'\"'s' --paid",
+    "safo gemini ask --model m && echo --paid",
+]
+
+
+@pytest.mark.parametrize("line", LEXER)
+def test_the_guard_never_reads_a_quoted_form_freer_than_bash_runs_it(line: str, tmp_path: Path) -> None:
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "argv.txt"
+    stub = bin_dir / "safo"
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RECORD"\n')
+    stub.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "RECORD": str(record)}
+    subprocess.run(["bash", "-c", line], cwd=tmp_path, env=env, check=False, capture_output=True)  # noqa: S603, S607 - a fixed test command
+    paid = record.exists() and "--paid" in record.read_text().split("\n")
+    if paid:
+        assert GEMINI_PAID in rules(f"{line}\n{PUBLIC}"), line
+
+
+GLUED = [
+    "safo gemini ask --model m --material \"a\"';' --paid",
+    "safo gemini ask --model m x';'y --paid",
+    'safo gemini ask --model m "a"; --paid',
+    "safo gemini ask --model m 'a'| cat --paid",
+    "safo gemini ask --model m ge'mini' --paid",
+    "safo gemini ask --model m && echo --paid",
+]
+
+
+@pytest.mark.parametrize("line", GLUED)
+def test_a_word_with_a_quote_inside_or_an_operator_glued_to_a_quote_is_unreadable(line: str) -> None:
+    assert GEMINI_PAID in rules(f"{line}\n{PUBLIC}", accepts()), line
+
+
+def test_ordinary_quoting_still_reads_as_the_shell_does() -> None:
+    ok = f"safo gemini ask --model m --material \"public\" --prompt-file 'p.txt' --paid --cap 1.5 --approval {OK}"
+    assert rules(ok + "\n" + PUBLIC, accepts()) == []
+    assert rules("safo gemini ask --model m --material 'public' && echo done\n" + PUBLIC, accepts()) == []
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "[docs](https://generativelanguage.googleapis.com/v1beta/models)",
+        "[x](https://GenerativeLanguage.GoogleAPIs.com/v1)",
+        "[sdk](https://pypi.org/project/google-generativeai)",
+        "[sdk](https://pypi.org/project/google-genai)",
+    ],
+)
+def test_a_vendor_host_or_sdk_in_a_link_target_is_still_seen(link: str) -> None:
+    from safo import geminibrief as gb
+
+    assert gb.relevant(link), link
+    assert GEMINI_MATERIAL in rules(f"see {link}\n", accepts())
+
+
+def test_a_link_to_the_vendor_docs_page_is_a_mention_not_a_call() -> None:
+    assert rules("Prices are at [the pricing page](https://ai.google.dev/gemini-api/docs/pricing).\n", accepts()) == []
+
+
+def test_quote_forms_that_would_otherwise_pass_a_complete_command_are_unreadable() -> None:
+    full = f"--model m --material public --paid --cap 1 --approval {OK}"
+    assert rules(f"safo gemini ask {full}\n{PUBLIC}", accepts()) == [], "the plain command passes"
+    assert GEMINI_PAID in rules(f"safo ge'mini' ask {full}\n{PUBLIC}", accepts()), "a quote inside the gemini word"
+    assert GEMINI_PAID in rules(
+        f"safo gemini ask --model m --material 'pu'blic --paid --cap 1 --approval {OK}\n{PUBLIC}", accepts()
+    )
+    glued = f"safo gemini ask --model m --paid --cap 1 --approval {OK} --material 'public'; echo done"
+    assert GEMINI_PAID in rules(f"{glued}\n{PUBLIC}", accepts()), "an operator touching a quoted word"
+    spaced = glued.replace("'public';", "'public' ;")
+    assert rules(f"{spaced}\n{PUBLIC}", accepts()) == [], "the same command with a space before the operator"
+    assert GEMINI_PAID in rules(f"sa'f'o gemini ask {full}\n{PUBLIC}", accepts()), "a quote inside the safo word"

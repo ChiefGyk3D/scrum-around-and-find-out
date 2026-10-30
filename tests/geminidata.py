@@ -10,7 +10,7 @@ import datetime as dt
 import json
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -178,3 +178,44 @@ def start_row(
 
 def minutes_ago(n: float) -> dt.datetime:
     return NOW - dt.timedelta(minutes=n)
+
+
+def hard_timeout(seconds: float) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    """Run a test in a forked child and fail it cleanly if it has not finished in `seconds`. A regex search in C cannot
+    be interrupted by a signal, so a regression that lets a slow term through would otherwise hang the whole run."""
+    import functools
+    import multiprocessing
+    import traceback
+
+    import pytest
+
+    def decorate(fn: Callable[..., None]) -> Callable[..., None]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> None:
+            ctx = multiprocessing.get_context("fork")
+            outcome = ctx.Queue()
+
+            def child() -> None:
+                try:
+                    fn(*args, **kwargs)
+                    outcome.put("")
+                except BaseException:
+                    outcome.put(traceback.format_exc())
+
+            process = ctx.Process(target=child)
+            process.start()
+            process.join(seconds)
+            if process.is_alive():
+                process.kill()
+                process.join()
+                pytest.fail(f"{fn.__name__} did not finish in {seconds:g} s (a hang)", pytrace=False)
+            try:
+                failure = outcome.get(timeout=2)
+            except Exception:
+                pytest.fail(f"{fn.__name__}: the child ended without a result", pytrace=False)
+            if failure:
+                pytest.fail(failure, pytrace=False)
+
+        return wrapper
+
+    return decorate

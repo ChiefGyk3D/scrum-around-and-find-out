@@ -89,7 +89,7 @@ MAX_CANDIDATES = 50  # commands examined per brief; more than this is blocked
 TERMS_SECONDS_DEFAULT = 5.0  # the most the private-terms search is given
 TERMS_MIN_SECONDS = 0.5  # the least the private-terms search is given when the deadline is close
 OPCHARS = frozenset(";|&()<>")
-RUNTIME_FORMS = re.compile(r"\$|\bxargs\b|\beval\b|(?<![\w-])-c\b|\bfunction\b|\(\)")
+RUNTIME_FORMS = re.compile(r"\$|\bxargs\b|\beval\b|\balias\b|(?<![\w-])-c\b|\bfunction\b|\(\)")
 WILD_NAMES = {
     "$": "a shell expansion",
     "*": "a glob",
@@ -220,16 +220,22 @@ def _join(text: str) -> str:
     return text.replace("\\\r\n", "").replace("\\\n", "")
 
 
-def _views(line: str) -> tuple[str, str, str]:
-    """The ONE normalization of a line, used by the scan and by the prefilter alike: folded (NFKD, invisible and
-    combining characters removed, NFKC, look-alike letters mapped), markdown links replaced by their text, inline code
-    around a `safo` command cut with a terminator, then (`norm`) that text with its quotes and backslashes, (`clean`)
-    the text with quotes and backslashes removed, and (`low`) that in lower case."""
-    norm = fold(line)
+def _strip(text: str) -> str:
+    return text.replace("'", "").replace('"', "").replace("\\", "")
+
+
+def _views(line: str) -> tuple[str, str, str, str, str]:
+    """The ONE normalization of a line, used by the scan and by the prefilter alike. The line is folded (NFKD, invisible
+    and combining characters removed, NFKC, look-alike letters mapped); markdown links become their text and inline code
+    around a `safo` command gets a terminator. Returns, in order: `norm` (that text, quotes and backslashes kept),
+    `clean` (quotes and backslashes removed), `low` (clean in lower case), and two views of the folded line BEFORE the
+    link rewrite, `pre_low` (clean, lower case) and `pre_raw` (lower case with its backslashes), so a vendor host or
+    an SDK name that sits only in a link target is still seen."""
+    folded = fold(line)
     # markdown inline code around a whole command: `safo gemini quota ...` is the command, not a shell substitution
-    norm = MARKDOWN_CODE.sub(r" \1 ; ", MARKDOWN_LINK.sub(r"\1", norm))
-    clean = norm.replace("'", "").replace('"', "").replace("\\", "")
-    return norm, clean, clean.lower()
+    norm = MARKDOWN_CODE.sub(r" \1 ; ", MARKDOWN_LINK.sub(r"\1", folded))
+    clean = _strip(norm)
+    return norm, clean, clean.lower(), _strip(folded).lower(), folded.lower()
 
 
 def normalized(text: str) -> str:
@@ -239,38 +245,93 @@ def normalized(text: str) -> str:
 
 def relevant(text: str) -> bool:
     """False only when no detector could possibly fire. It runs the detector patterns over the very views `_scan_line`
-    builds: the decode detector reads the text with its backslashes, every other one the cleaned lower case text."""
+    builds, link targets included: the decode detector reads the text with its backslashes, every other one the cleaned
+    lower case text."""
     for line in _join(text).splitlines():
-        norm, _, low = _views(line)
+        norm, _, low, pre_low, pre_raw = _views(line)
         raw = norm.lower()
-        if any(p.search(raw if name == "decode" else low) for name, p in PREFILTER):
-            return True
+        for name, pattern in PREFILTER:
+            if name == "decode":
+                if pattern.search(raw) or pattern.search(pre_raw):
+                    return True
+            elif pattern.search(low) or pattern.search(pre_low):
+                return True
     return False
 
 
 class Tok(NamedTuple):
     value: str
-    quoted: bool
+    quoted: bool  # the word held a quote
     op: bool
+    mixed: bool  # a quote or backslash anywhere but the two outer edges of the word
+    start: int
+    end: int
 
 
 def _lex(text: str) -> list[Tok] | None:
-    """Shell-like words with quotes noted, not interpreted: an unquoted operator run is its own token, a quoted one
-    stays inside a word (which is how a quoted `;` is told from a real one). None on an unterminated quote."""
-    lexer = shlex.shlex(text, posix=False, punctuation_chars=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""
+    """Words the way bash cuts them, for the subset the guard reads: unquoted whitespace ends a word, an unquoted run of
+    `; | & ( ) < >` is an operator token, single quotes are literal, double quotes honor a backslash before `$ ` " \\`,
+    and a backslash outside quotes escapes one character. Each word notes whether it held a quote and whether the quote
+    or backslash was anywhere but its outer edges. None on an unterminated quote."""
     tokens: list[Tok] = []
-    try:
-        for raw in lexer:
-            if all(c in OPCHARS for c in raw):
-                tokens.append(Tok(raw, False, True))
+    n = len(text)
+    i = 0
+    while i < n:
+        c = text[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c in OPCHARS:
+            j = i
+            while j < n and text[j] in OPCHARS:
+                j += 1
+            tokens.append(Tok(text[i:j], False, True, False, i, j))
+            i = j
+            continue
+        start = i
+        buf: list[str] = []
+        quoted = escaped = False
+        segments = 0
+        while i < n and not text[i].isspace() and text[i] not in OPCHARS:
+            c = text[i]
+            if c == "'":
+                end = text.find("'", i + 1)
+                if end == -1:
+                    return None
+                buf.append(text[i + 1 : end])
+                quoted = True
+                segments += 1
+                i = end + 1
+            elif c == '"':
+                j = i + 1
+                chunk: list[str] = []
+                while True:
+                    if j >= n:
+                        return None
+                    d = text[j]
+                    if d == "\\" and j + 1 < n and text[j + 1] in '$`"\\':
+                        chunk.append(text[j + 1])
+                        j += 2
+                    elif d == '"':
+                        break
+                    else:
+                        chunk.append(d)
+                        j += 1
+                buf.append("".join(chunk))
+                quoted = True
+                segments += 1
+                i = j + 1
+            elif c == "\\":
+                escaped = True
+                if i + 1 < n:
+                    buf.append(text[i + 1])
+                i += 2
             else:
-                tokens.append(
-                    Tok(raw.replace("'", "").replace('"', "").replace("\\", ""), "'" in raw or '"' in raw, False)
-                )
-    except ValueError:
-        return None
+                buf.append(c)
+                i += 1
+        whole_quote = quoted and segments == 1 and not escaped and text[start] in "'\"" and text[i - 1] == text[start]
+        mixed = escaped or (quoted and not whole_quote)
+        tokens.append(Tok("".join(buf), quoted or escaped, False, mixed, start, i))
     return tokens
 
 
@@ -357,10 +418,13 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
     for g, t in enumerate(tokens):
         if t.op or _core(t.value) != "gemini":
             continue
-        if not safos[bisect.bisect_left(safos, g - TOKEN_WINDOW) : bisect.bisect_left(safos, g)]:
+        window = safos[bisect.bisect_left(safos, g - TOKEN_WINDOW) : bisect.bisect_left(safos, g)]
+        if not window:
             continue
         span: list[str] = []
         problems: list[str] = []
+        if t.mixed or any(tokens[k].mixed for k in window):
+            problems.append("a word with a quote or backslash in the middle of it")
         i = g + 1
         while i < len(tokens):
             nxt = tokens[i]
@@ -370,7 +434,16 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
                         span.pop()
                     i += 2 if i + 1 < len(tokens) and not tokens[i + 1].op else 1
                     continue
+                prev = tokens[i - 1]
+                if (not prev.op and prev.quoted and prev.end == nxt.start) or (
+                    i + 1 < len(tokens) and tokens[i + 1].quoted and tokens[i + 1].start == nxt.end
+                ):
+                    problems.append(f"an operator ({nxt.value!r}) touching a quoted word")
+                if any(not r.op and r.value.startswith("--") for r in tokens[i + 1 :]):
+                    problems.append("an option-like word after the command ends, so the cut may be wrong")
                 break
+            if nxt.mixed:
+                problems.append("a word with a quote or backslash in the middle of it")
             for char in OPCHARS:
                 if char in nxt.value:
                     problems.append(f"{char!r} inside quotes")
@@ -398,7 +471,7 @@ def _scan_line(
     budget: list[int],
     runtime_scan: bool,
 ) -> None:
-    norm, clean, low = _views(line)
+    norm, clean, low, pre_low, pre_raw = _views(line)
     found = MATERIAL.match(clean)
     if found:
         materials.append(found.group("value").lower())
@@ -408,11 +481,13 @@ def _scan_line(
         step = _declared(declared.group("rest"), number)
         if step is not None:
             steps.append(step)
-    if PAID_CONFIG.search(low):
+    if PAID_CONFIG.search(low) or PAID_CONFIG.search(pre_low):
         flags.setdefault("paid", number)
-    if VENDOR_HOST in low or SDK.search(low):
+    if VENDOR_HOST in low or VENDOR_HOST in pre_low or SDK.search(low) or SDK.search(pre_low):
         flags.setdefault("vendor", number)
-    if DECODE.search(norm.lower()) and SINK_RE.search(norm.lower()):
+    if (DECODE.search(norm.lower()) and SINK_RE.search(norm.lower())) or (
+        DECODE.search(pre_raw) and SINK_RE.search(pre_raw)
+    ):
         steps.append(Step(unreadable=True, line=number, why="the line decodes text and hands it to a shell"))
     if runtime_scan and "safo" in low and RUNTIME_FORMS.search(low):
         steps.append(

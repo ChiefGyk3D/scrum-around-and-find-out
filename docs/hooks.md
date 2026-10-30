@@ -192,17 +192,23 @@ that must pass the strict check:
 - a declaration line in the exact grammar, `gemini: free` or `gemini: paid cap=USD approval=ID` (also as a list item), with
   nothing after the tier but `key=value` pairs, so `Gemini: free tier only` in a sentence is prose;
 - a literal `safo gemini <action>` command: a `safo` word, then within 12 shell words a `gemini` word, then an action word
-  (`ask`, `approve`, `quota`), also inside a quoted string. Quotes are respected: the arguments end at an unquoted
-  `; | & )`, a redirection and its operand are skipped the way the shell skips them, and an operator or a shell expansion
-  character inside an argument makes the step unreadable. The arguments are read with the parser the CLI uses. A path such
+  (`ask`, `approve`, `quota`), also inside a quoted string. Words are cut the way bash cuts them (single and double
+  quotes, a backslash escape): the arguments end at an unquoted `; | & )`, a redirection and its operand are skipped the
+  way the shell skips them, and an operator or a shell expansion character inside an argument makes the step unreadable,
+  as does a word with a quote or backslash anywhere but its outer edges (`"a"';'`), an operator touching a quoted word
+  with no space, and an option-like `--` word after the cut. The arguments are read with the parser the CLI uses. A path such
   as `src/safo/gemini.py` or a model id such as `gemini-3.6-flash` is an argument or a name, never a command start;
 - these named forms: a `safo` or `gemini` word beside a shell expansion, glob, brace, backtick or `%` and an `ask` or
   `approve` word; and, when the brief names `gemini` and an action anywhere, any line that runs `safo` through `$`, a
-  function, `xargs`, `eval` or `-c`;
+  function, `xargs`, `eval`, `alias` or `-c` (so `echo ask --paid | xargs safo gemini` and `alias g='safo gemini'` then
+  `g ask --paid` are caught);
 - base64, openssl, xxd, rev or printf escapes piped to a shell; the vendor host in any case; the Google genai SDK; the
-  paid secret-store config name.
+  paid secret-store config name. These are looked for in the text before markdown links are rewritten, so a host that
+  sits only in a link target is seen. A link to the vendor's documentation (`ai.google.dev`) is a mention and passes; the
+  API host (`generativelanguage.googleapis.com`) in a link is the API named and is blocked, like a URL in a command.
 
-That is the whole claim. It does not promise to read every way a shell can build a command: a form outside the list above
+That is the whole claim. Not covered: a wrapper script or alias under another name that hides `safo`, a command written
+to a file and run later, other shells than bash, and any language that calls `safo` or the API from inside a program. It does not promise to read every way a shell can build a command: a form outside the list above
 is not seen. A line over 4000 characters that mentions any of these, more than 50 commands, or a check that runs past the
 guard's deadline is blocked, and so is a private-terms file that does not load or a terms search that does not finish
 (see [Gemini](gemini.md)). Every block names the line, the reason and the fix. A false positive is a block, not a leak;

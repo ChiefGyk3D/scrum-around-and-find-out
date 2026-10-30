@@ -958,7 +958,9 @@ def private_term_hit(terms: tuple[re.Pattern[str], ...], texts: list[str], timeo
     that does not answer in time, or fails, raises TermsCheckError, which callers treat as a hit."""
     if not terms:
         return False
-    payload = json.dumps({"terms": [[t.pattern, t.flags] for t in terms], "texts": texts})
+    payload = (
+        json.dumps([[t.pattern, t.flags] for t in terms]) + "\n" + "\x00".join(t.replace("\x00", " ") for t in texts)
+    )
     try:
         done = subprocess.run(
             [sys.executable, "-I", "-m", "safo.termsearch"],
@@ -970,9 +972,10 @@ def private_term_hit(terms: tuple[re.Pattern[str], ...], texts: list[str], timeo
         )
     except (subprocess.TimeoutExpired, OSError):
         raise TermsCheckError("the private terms check ran out of time, so it counts as a match") from None
-    if done.returncode != 0 or done.stdout not in ("0", "1"):
+    answer = done.stdout.strip()
+    if done.returncode != 0 or answer not in ("0", "1"):
         raise TermsCheckError("the private terms check failed, so it counts as a match")
-    return done.stdout == "1"
+    return answer == "1"
 
 
 # -- the key -------------------------------------------------------------------------------------------------------
