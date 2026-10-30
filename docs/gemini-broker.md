@@ -146,7 +146,7 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
   broker.yaml                      root:root 0644   caps, model allowlist, prices, allowed uids, limits, timeouts
   broker/                          root:root 0700
     paid-key                       root:root 0600   the encrypted credential
-/opt/safo-broker/                  root:root 0755   a venv built by root from a signed tag's hash-locked requirements; the broker code
+/opt/safo-broker/                  root:root 0755   releases/VERSION (a venv of locked wheels plus the broker source, read-only) and the symlink current
 /var/lib/safo-broker-install/version  root:root 0644   the highest broker version ever installed (monotonic)
 /etc/systemd/system/
   safo-broker.socket               root:root 0644
@@ -170,8 +170,8 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
   maintainer's account can write is code an agent can change. Updating it is a root-run install from a hardware-key
   signed tag, never from a folder the account can write (see "Install and update chain").
 - The ledger keeps today's hash-chained row format so the existing reader code is shared, not copied. It adds row
-  types for the broker (`nonce_issued`, `call_recovered`) and fields for images and reservations (below). A model
-  suspension (see "Cost") is a file in the state directory.
+  types for the broker (`nonce_issued`, `ambiguous_call`, `ambiguous_resolved`) and fields for images and reservations (below). A model
+  suspension (see "Cost") is a file in the state directory that a restart does not remove.
 - The maintainer reads spend through the socket (`status`), not by reading the directory.
 
 ## Install and update chain
@@ -195,25 +195,47 @@ it still leaves to a human.
 
 1. **Fetches the source itself**, as root, into a root-owned temporary directory (a shallow clone of the repository at the
    tag). It never reads a maintainer-writable staging folder, a download folder or a copy handed to it.
-2. **Verifies the tag signature** against `/etc/safo/broker-release-signers` (git's SSH signature verification with that
-   file as the allowed signers; exact flags are **inferred** from the git and `ssh-keygen` manuals and are re-checked when the
-   installer is built). A tag not signed by an enrolled key is refused. A compromised maintainer account cannot sign
-   without the touch, so it cannot make a tag the installer accepts.
-3. **Refuses a rollback.** `/var/lib/safo-broker-install/version` (root:root 0644) holds the highest version ever
+2. **Verifies the signed annotated tag object, not just a commit.** The tag must be an annotated tag (`git cat-file -t`
+   says `tag`; a lightweight tag is refused) and its own signature must verify against
+   `/etc/safo/broker-release-signers` (git's SSH signature verification with that file as the allowed signers; exact flags
+   are **inferred** from the git and `ssh-keygen` manuals and re-checked when the installer is built). The commit that
+   tag points to is the only tree used afterward. A compromised maintainer account cannot sign without the touch.
+3. **Takes the version from the signed tag and nowhere else.** The version is parsed with a strict pattern from the
+   signed tag's name (a leading `v` and three dotted numbers) and cross-checked against the package's own `__version__`, read from the source
+   without importing it. A mismatch is refused. The `VERSION` argument on the command line is only an expected value that
+   must equal the tag's; there is no separately supplied VERSION file.
+4. **Refuses a rollback.** `/var/lib/safo-broker-install/version` (root:root 0644) holds the highest version ever
    installed. A version below it is refused, and the same version is refused unless root passes `--reinstall`. Going
    down needs root to pass `--allow-downgrade VERSION` explicitly; the installer logs it to the journal and to a
    root-owned log. A second root-owned file, `/etc/safo/broker-min-version`, is a floor: after a fix for a flaw, root
-   raises it, and **the broker itself refuses to start below it**, so an old tree restored over the install cannot run.
-4. **Shows the review and waits.** It prints the old and new versions, the tag's signer label and fingerprint, the commit
-   hash, and `git diff OLD..NEW` limited to the broker, the units, the installer and the dependency lock, and requires
-   root to type the new version to continue. That is the **review gate before every install**: the maintainer reads the
-   diff of the code that will hold the key. The release notes state whether the cyber-tier review covers the diff.
-5. **Builds from the signed tag, in root's own directory.** It creates the virtual environment under `/opt/safo-broker`
-   from the tag's hash-locked requirements (`pip install --require-hashes`), so there is no prebuilt artifact to swap:
-   what runs was built by root from the verified commit, and every dependency must match a hash that is itself in the
-   signed commit. It then checks the ownership walk of the whole tree (root-owned, nothing group or world writable),
-   installs the units, runs `systemd-analyze verify`, writes the new version to the monotonic file, and restarts the
-   service.
+   raises it, and **the broker itself refuses to start below it**.
+5. **Shows the review and waits.** It prints the old and new versions, the tag's signer label and fingerprint, the commit
+   hash, and: the diff of **every packaging and build-control file** changed since the installed release (`pyproject.toml`,
+   any setup script or setup configuration, the packaging manifest, the requirements inputs and the lock, the installer, the units and
+   any build or release script), the diff of the broker source, and **every dependency that is added, removed or changed,
+   with its exact wheel filename, its hash and the index it comes from** (the lock records the index). Root types the new
+   version to continue. That is the **review gate before every install**. The release notes state whether the cyber-tier
+   review covers the diff.
+6. **Installs from wheels only, so no build code runs as root.** The environment is made with `pip install
+   --only-binary=:all: --require-hashes --no-deps --isolated`, from a clean environment, against the index named in the
+   signed lock. `--only-binary=:all:` makes pip refuse any source distribution, so **no build backend ever runs as root**;
+   `--require-hashes` and `--no-deps` mean exactly the wheel files in the lock are installed and nothing is resolved at
+   install time. The lock lists exact wheel files and their hashes; **a dependency that has no wheel is a release
+   blocker**. The broker's own package is a plain copy of its source directory from the verified tree (a pure-Python
+   package, no build step), and the copied file list is checked against the tree. Installing a wheel runs no project code as
+   root; code inside a wheel runs only as `safo-broker`, which is why step 5 shows every dependency change.
+7. **Stages, verifies, then activates atomically.** The release is built in a new, root-owned directory
+   `/opt/safo-broker/releases/VERSION` (made read-only when built); the live path is the symlink
+   `/opt/safo-broker/current`, and the unit's `ExecStart` runs through it. Before activation the installer, offline:
+   checks the ownership walk of the whole staged tree; re-hashes every installed file against a manifest generated from
+   the verified commit; runs `systemd-analyze verify` on the staged units; and runs a self-test of the staged tree as the
+   `safo-broker` user with a fake key, a fake vendor and no network. Only then does it swap the symlink with an atomic
+   rename, install the units (written under a temporary name and renamed), reload systemd and restart the service, and
+   check that `status` answers.
+8. **Rolls back automatically.** A failure in the build, the verification, the unit install, the restart or the
+   post-start `status` check swaps the symlink back to the previous release, restores the previous release's units,
+   restarts, and reports what failed. The previous two releases are kept. The monotonic version file is written only
+   after the new release has started and answered, so a failed install does not raise the floor.
 
 **A second layer, for any prebuilt artifact.** If a release ever ships a prebuilt wheel or archive, root verifies a
 build attestation (a sigstore attestation made by the release workflow) against the pinned identity of that workflow
@@ -231,8 +253,11 @@ trust on first use of a tag the maintainer has reviewed.
 
 **Verification (planned, phase 5).** Installer tests against a temporary tree and a throwaway git repository with test
 keys: an unsigned tag, a tag signed by a key not in the signers file, a tag signed by an approval key (wrong file), a
-lower version, an equal version, a downgrade with and without the flag, a tampered requirements hash, a source path
-supplied by the caller (ignored), and a broker started below the floor each refuse; a correct signed tag installs.
+lower version, an equal version, a downgrade with and without the flag, a tampered requirements hash, a lightweight tag, a
+tag whose name disagrees with the code's version, a dependency with only a source distribution (pip must refuse it and no
+build backend may run), a source path supplied by the caller (ignored), and a broker started below the floor each refuse;
+a correct signed tag installs. Failure injection at each of build, verification, unit install, restart and the post-start
+check must leave the previous release active and the version file unchanged.
 
 ## The root-door precondition (a documented residual risk)
 
@@ -315,7 +340,7 @@ exact request. The pid is logged as a number and never trusted.
 
 | `op` | Request fields | Reply fields (when `ok` is true) | What it does |
 |---|---|---|---|
-| `status` | none | `enabled`, `key_loaded`, `epoch`, `ledger_head`, `month_spent`, `month_cap`, `block`, `prices_valid_through`, `line` | Reads state; spends nothing. Works when disabled, and says so. |
+| `status` | none | `enabled`, `key_loaded`, `epoch`, `ledger_head`, `month_spent`, `month_cap`, `block`, `prices_valid_through`, `suspended` (the models stopped by a breach or an ambiguous call), `line` | Reads state; spends nothing. Works when disabled, and says so. |
 | `begin` | `model`, `job`, `kind`, `count`, `image_size`, `aspect_ratio`, `prompt_bytes`, `max_output_tokens`, `max_usd` (not less than the reservation) | `nonce`, `epoch`, `expires_at`, `ledger_head`, `estimate_usd`, `reserve_usd`, `thinking_level`, `beyond_ceiling`, `line` | Hands out a broker-chosen nonce and the numbers the approval must carry, after checking the request against the caps. Writes `issued/NONCE`. |
 | `call` | the same fields, plus `prompt`, `approval` (`payload`, `signature`) | `receipt`, `text`, `attachments` | Verifies, spends, calls the vendor, records, returns. |
 | `check` | `nonce` | `state` (`live`, `used`, `expired`, `unknown`) | For the dispatch guard: is this approval still live? Spends nothing. |
@@ -336,7 +361,7 @@ the key. `code` and `exit`:
 | `busy` | 2 | A paid call is already in flight, or a rate limit applies |
 | `rate_limited` | 3 | The vendor answered 429; **final**, never retried, never falls through to another tier |
 | `vendor_refused` | 2 | A definite vendor 4xx other than 429; not repeated |
-| `outcome_unknown` | 4 | The request left and its result cannot be told; recorded as spent at the reservation; not repeated |
+| `outcome_unknown` | 4 | The request left and its result cannot be told; recorded as spent at the reservation, the model suspended until root clears it; not repeated |
 | `internal` | 4 | The broker failed; state is described in "Crash and power loss" |
 
 **Receipt** (in the `call` reply, and written by the client beside each image): `call_id`, `nonce`, `epoch`, `model`,
@@ -392,7 +417,7 @@ The broker checks, in this order, and stops at the first failure (each refusal b
 5. Broker, outside the state lock but inside the one-call slot: read the key, send **one** request, with the deadline
    from `broker.yaml` (images are slow; the default is 180 seconds), no retry.
 6. Broker: classify the answer, append `call_end` with the actual cost and the amount released from the reservation
-   (see "Cost"; a breach also suspends the model), `fsync`, **release the call slot**, then write the reply under the
+   (see "Cost"; a breach or an ambiguous outcome also suspends the model), `fsync`, **release the call slot**, then write the reply under the
    write deadline.
 
 **Crash and power loss, the stated choice: spend is recorded BEFORE the vendor call.** The cost is that a crash between
@@ -400,13 +425,16 @@ step 4 and the vendor request charges the month for a call that may never have l
 most) is counted that was not spent. The benefit is that no crash can allow a replay or an undercount. The rules:
 
 - A crash before step 4 completes: nothing was recorded and nothing left, so the approval is still usable.
-- A crash after step 4: the nonce is spent. On the next start, recovery finds every `call_start` with no `call_end` and
-  appends `call_end` with status `ambiguous` and `call_recovered`; the reservation stays counted. A `used/` marker with no
-  ledger row (or the reverse) is made to agree the same way. **Either record alone marks the nonce spent.**
+- A crash after step 4: the nonce is spent, and because nothing can say whether the request left or what it was billed,
+  the call is **ambiguous** (see "Cost", rule 7). On the next start, before the socket serves anything, recovery finds
+  every `call_start` with no `call_end`, appends `ambiguous_call`, keeps the **full reservation counted as spent**, and
+  **suspends that model**. A restart never clears the suspension; only root does. A `used/` marker with no ledger row (or
+  the reverse) is made to agree the same way. **Either record alone marks the nonce spent.**
 - The reply is lost with the connection. The broker keeps no copy of text or images, so the maintainer asks again with
-  a new approval. The lost cost is bounded by the approved maximum.
-- The maintainer can read the vendor billing page and add a correction with the root-only `usage` command; the client
-  has no way to write a `usage` row.
+  a new approval, after root has cleared the suspension if the call was ambiguous. The amount counted is the
+  reservation; what the vendor actually billed is learned from its billing page.
+- The maintainer reads the vendor billing page and root enters the real amount with the root-only `usage` command, which
+  resolves the ambiguous call; the client has no way to write a `usage` row.
 - Power loss is the same case, so the `fsync` of the file and its directory completes before the connection to the
   vendor is opened.
 
@@ -420,11 +448,27 @@ before the call, and reconciles afterwards. Two numbers are kept apart:
   USD) and the monthly ceiling (10 USD, with the extra-block rule) are all checked against the **reservation**, never
   the estimate. A call whose reservation does not fit is refused before the key is read.
 
-`reservation = input_tokens_bound * input_per_mtok + M * max(text_output_per_mtok, image_output_per_mtok)`
+`reservation = A + B + C`
 
-where `input_tokens_bound` is the prompt counted at three bytes a token (today's rule), and `M` is the output-token
-limit the broker puts in the vendor request (below) or, for a model whose cap is not yet verified, the vendor's
-documented output limit for the model.
+- **A, input:** `(prompt_bytes + 64) * input_per_mtok`. **One input token per byte of the UTF-8 prompt is a true upper
+  bound**, because a token stands for at least one byte, so no tokenizer can produce more tokens than bytes; the fixed 64
+  is a margin for tokens the vendor adds around a request (inferred, not shown by any page; the margin is small against
+  any realistic price). The earlier "three bytes a token" rule is an estimate and is **not** used for the reservation
+  (it stays in the typical estimate shown to the maintainer). The alternative, calling the vendor's token-counting
+  endpoint first, was rejected: it is a second vendor call with its own failure and ambiguity cases, its answer can
+  differ from the billed count, and the byte bound needs neither. The cost of the byte bound is a larger reservation for
+  long prompts (at most 0.40 USD for a 200,000 byte prompt on the dearest input rate listed), which `approve` shows.
+- **B, output:** `M * max(text_output_per_mtok, image_output_per_mtok)`, where `M` is the output-token limit the broker
+  puts in the vendor request (below) or, for a model whose cap is not yet verified, the vendor's documented output limit
+  for the model.
+- **C, interim images:** for an image call, `2 * image_tokens[size] * image_output_per_mtok`, added **on top of B**
+  unless the cap has been observed to cover them (below). The vendor's image guide says the model may generate up to two
+  interim images before the final one (verified); whether they are billed as image output, and whether they count
+  inside `M`, is inferred. Text calls have no C.
+
+Every other billed category is excluded by construction, not estimated: the request carries no tools, no grounding or
+search, no cached content and no input images, and asks for no thought summaries (`thinking_summaries: none`); the vendor's
+pricing page says tool and grounding tokens are billed only when those features are used (verified, 2026-10-30).
 
 ### What the vendor lets a request cap (read 2026-10-30)
 
@@ -459,27 +503,40 @@ interim images are billed as image output. The design therefore does not trust t
    cap, or the month room (or the signed `beyond_ceiling` does not cover it), writes it into the ledger as the
    call's reserved amount with `call_start`, and only then sends.
 4. **Until a cap is verified for a model, reserve the vendor's documented maximum.** Each model in `broker.yaml` has
-   `cap_verified`, false by default, set by root only after phase 2 has observed real responses with the cap in force
-   (output tokens at or below `M` for the sizes and model). While it is false the reservation uses the model's documented
-   output limit instead of `M`. The arithmetic, from the vendor's per-token prices of 2026-10-30: Nano Banana 2.1,
-   32,768 tokens at 30 USD per million is 0.98 USD; Nano Banana 2, 32,768 at 60 is 1.97 USD (just under the cap, with no
-   room for much input); Nano Banana 2 Lite, 4,096 at 30 is 0.12 USD; **Nano Banana Pro, 32,768 at 120 is 3.93 USD,
-   which is over the 2 USD job cap, so every Pro call is refused until a cap is verified for it.** That is deliberate:
-   the design does not admit a model whose worst case it cannot fit under the approval.
+   `cap_verified`, false by default, set by root only after phase 7 has observed real responses with the cap in force:
+   total billed output tokens, **interim images included**, at or below `M` for the sizes and model. While it is false B
+   uses the model's documented output limit instead of `M`, and C is added. The arithmetic for a 1K image, from the
+   vendor's per-token prices of 2026-10-30 (input negligible): Nano Banana 2.1, B 0.983 plus C 0.067 is **1.05 USD**; Nano
+   Banana 2 Lite, B 0.123 plus C 0.067 is **0.19 USD**; Nano Banana 2, B 1.966 plus C 0.134 is **2.10 USD, over the 2 USD
+   job cap, so refused** until its cap is verified; Nano Banana Pro, B 3.93 alone is **over the cap, refused**. That is
+   deliberate: the design does not admit a model whose worst case it cannot fit under the approval.
 5. **Reconcile after.** From the usage the vendor returns (input, text and thinking, image output tokens) at the
    table's prices the broker computes the actual cost and records `reserved_usd`, `actual_usd` and
    `released_usd = reserved - actual`. The month then counts the actual, never less than a floor from the number of
-   images returned times the smallest per-image figure for the model. A response with no usable usage keeps the whole
-   reservation as spent.
+   images returned times the smallest per-image figure for the model. A response whose usage is missing, malformed or
+   implausible is not reconciled at all: it is an ambiguous call (rule 7).
 6. **A breach stops the model.** If the actual cost is above the reservation, the actual is recorded and counted, the
-   receipt says `breach: true`, and the broker **suspends that model**: further calls for it are refused until root
-   clears the suspension (`safo-broker-admin`) after reading the vendor billing page. A spend above the reservation is
-   never absorbed quietly, and it cannot happen twice without root.
-7. **What this does and does not guarantee.** Guaranteed: no call is sent whose worst case, as the broker computes it,
-   exceeds the signed maximum, the job cap or the month room. Not guaranteed: that the vendor honors the cap. The cap is a
-   request to the vendor; the broker cannot force it. If the vendor does not honor it, one call can bill up to the
-   model's documented output limit at the image rate (the figures in rule 4) before the breach is seen. That is the
-   residual risk, bounded by the vendor-side monthly limit, and rules 4 and 6 are what keep it to one call per model.
+   receipt says `breach: true`, and the broker **suspends that model**: further calls for it are refused, across restarts,
+   until root clears the suspension (`safo-broker-admin clear-suspend MODEL`) after reading the vendor billing page.
+7. **An ambiguous call is a loss of knowledge, so it also stops the model.** A call is ambiguous when the request left (or
+   may have left) and the broker cannot establish what was billed: the broker crashes or loses power after the spend is
+   written, the request times out, the connection drops, the answer is unreadable or oversized, a 5xx or 408 or redirect
+   comes back, or the usage figures are missing, malformed or implausible. The broker then: keeps the **full reservation
+   counted as spent**; appends an `ambiguous_call` row; and **suspends that model** with a state file written before
+   anything else is allowed to proceed. After a crash the same happens at the next start: recovery finds every
+   `call_start` with no `call_end`, appends `ambiguous_call`, and suspends the model before the socket serves anything.
+   A restart never clears a suspension; only root does, with `clear-suspend`, after the maintainer has read the vendor
+   billing page and entered the real amount (`safo-broker-admin usage`), which appends an `ambiguous_resolved` row that
+   replaces the reservation with the real figure. Definite non-billing outcomes (a 429, a definite 4xx, a refusal before
+   the request left) are not ambiguous and do not suspend. The price of this rule is availability: a vendor 5xx or a
+   crash takes that model off until root acts.
+8. **What this does and does not guarantee.** Guaranteed: no call is sent whose worst case, as the broker computes it,
+   exceeds the signed maximum, the job cap or the month room; and after a breach or an ambiguous outcome no further call
+   on that model runs without root. Not guaranteed: that the vendor honors the cap or bills only what it reports. If it
+   does not, **one call per model** can bill more than reserved before the broker finds out (up to the documented limit
+   at the image rate, plus whatever is billed after a lost connection), and a billing completed after the broker lost the
+   response is not seen until the billing page is read. **The vendor-side monthly spend limit is the only hard
+   backstop for that amount, and decision 14 keeps it set.**
 
 Text calls follow the same rules: the generation request already carries `maxOutputTokens`, which the broker always
 sends, the reservation is that limit times the output rate (thinking tokens are billed as output), and a text model
@@ -506,7 +563,8 @@ prices:
       thinking_levels: ["minimal", "medium", "high"]
       thinking_level_sent: "minimal"
       min_text_tokens: 512
-      cap_verified: false              # root sets true after phase 2 observes the cap holding
+      interim_images: 2                # the vendor guide's stated maximum before the final image (reserved in C)
+      cap_verified: false              # root sets true after phase 7 observes total billed output within M
       max_images: 1
     gemini-3.1-flash-lite-image:
       kind: image
@@ -520,6 +578,7 @@ prices:
       thinking_levels: ["minimal", "high"]
       thinking_level_sent: "minimal"
       min_text_tokens: 512
+      interim_images: 2
       cap_verified: false
       max_images: 1
 ```
@@ -700,7 +759,7 @@ StartLimitBurst=5
 Type=simple
 User=safo-broker
 Group=safo-broker
-ExecStart=/opt/safo-broker/venv/bin/python -I -m safo.broker
+ExecStart=/opt/safo-broker/current/venv/bin/python -I -m safo.broker
 LoadCredentialEncrypted=paid-key:/etc/safo/broker/paid-key
 StateDirectory=safo-broker
 StateDirectoryMode=0700
@@ -818,7 +877,7 @@ answer is size-capped; connect and read timeouts apply. The key goes in the `x-g
   the reply is `rate_limited` with exit 3 and the vendor's `Retry-After` when it is a finite number of seconds under a day.
   Nothing is retried. There is no other tier for the broker to fall through to, and the client never answers a paid 429
   by calling the free path or asking for a second approval. After the request leaves, a timeout, a 5xx, a 408, a redirect
-  or an unreadable answer is `outcome_unknown`, counted at the reservation, not repeated.
+  or an unreadable answer is `outcome_unknown`, counted at the reservation, the model suspended, not repeated.
 
 ## The free path stays independent
 
@@ -922,10 +981,10 @@ review). Decisions 12 to 14 came out of that review and are **open**.
 | 7 | Images first, text-to-image only, one image and one approval per call; a count per approval only later, and "up to N calls" never | Yes |
 | 8 | Image output: a fixed folder of the maintainer's choosing, files 0600, never overwritten, a sidecar receipt, never auto-opened by an agent | Yes; name the folder when phase 4 is built |
 | 9 | Broker v1 accepts hardware-key (Tier 1) approvals only; passkeys wait until their approval wiring exists | Yes |
-| 10 | Broker code is installed by root, built from a hardware-key signed tag verified against a root-owned signers file, never from a folder the maintainer's account can write; no rollback without an explicit root flag; the diff is read before every install ("Install and update chain") | Yes |
+| 10 | Broker code is installed by root from a hardware-key signed annotated tag verified against a root-owned signers file, from hash-locked wheels only (no build backend as root), staged and activated atomically with automatic rollback, never from a folder the maintainer's account can write; no rollback of version without an explicit root flag; the diff and every dependency change are read before every install ("Install and update chain") | Yes |
 | 11 | Remote broker on the lab machine, as a later option | Not now |
 | 12 | Whether to enroll a separate hardware key (or keys) for signing broker releases, kept apart from the approval keys | Yes: a release key and an approval key are different powers; a second touch per release is the price |
-| 13 | Nano Banana Pro: refused until the output cap is shown to hold (its worst case is 3.93 USD, over the job cap). Start with Nano Banana 2.1 and Lite and revisit Pro with evidence | Yes; Pro only if the quality of 2.1 is not enough |
+| 13 | Nano Banana Pro and Nano Banana 2 are refused until the output cap is shown to hold (their unverified worst cases are over the 2 USD job cap). Start with Nano Banana 2.1 and Lite and revisit the others with evidence | Yes; the others only if the quality of 2.1 is not enough |
 | 14 | Accept the root-door precondition as a documented residual risk: with any root door open the caps are advisory against a deliberate local attacker, and the vendor-side monthly limit is the only hard backstop | Yes, and keep the vendor-side limit set |
 
 ## What this page does not claim

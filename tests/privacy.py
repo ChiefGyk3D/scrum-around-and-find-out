@@ -54,7 +54,6 @@ DOCUMENT_KEYS = {
     "project.number",
     "signing.key",  # config keys in docs/gemini-keys.md
     "signing.principal",
-    "safo.broker",  # the broker's module name in docs/gemini-broker.md
     "webauthn.get",  # the WebAuthn client-data type string in docs/gemini-passkeys.md
     "agents.waiting",
     "agents.working",
@@ -86,14 +85,17 @@ FILE_SUFFIXES = {
     "pub",
 }  # pub: a public key file
 
-# The exact systemd unit and socket names docs/gemini-broker.md uses. An exact list, not a suffix rule: a name like
-# prod.corp.service must still be flagged as a hostname.
-UNIT_NAMES = {
+# Names that only the two broker documents may use. Scoped by file, not global: the same text in any other file is
+# still a hostname finding. `safo.broker` is the broker's Python module name; it lives in the same scoped set, so it
+# does not exempt the token everywhere.
+BROKER_DOCS = ("docs/gemini-broker.md", "docs/gemini-broker-threat-model.md")
+BROKER_DOC_NAMES = {
     "safo-broker.service",
     "safo-broker.socket",
     "safo-broker.sock",
     "sockets.target",
     "network-online.target",
+    "safo.broker",
 }
 
 ALLOWED_HOSTS = {
@@ -144,7 +146,7 @@ def scanned_files() -> list[Path]:
     return files
 
 
-def findings(text: str) -> list[str]:
+def findings(text: str, name: str = "") -> list[str]:
     """Category and line only: assertion output and repository logs must never repeat private matches."""
     out: list[str] = []
 
@@ -167,7 +169,7 @@ def findings(text: str) -> list[str]:
         if (
             host not in ALLOWED_HOSTS
             and host not in DOCUMENT_KEYS
-            and host not in UNIT_NAMES
+            and not (name in BROKER_DOCS and host in BROKER_DOC_NAMES)
             and host.rsplit(".", 1)[-1] not in FILE_SUFFIXES
         ):
             record("hostname", m.start())

@@ -12,7 +12,7 @@ from privacy import EXCLUDED, ROOT, extra_patterns, findings, scanned_files
 
 @pytest.mark.parametrize("path", scanned_files(), ids=lambda p: str(p.relative_to(ROOT)))
 def test_a_public_file_names_no_host_machine_or_callsign(path: Path) -> None:
-    hits = findings(path.read_text(encoding="utf-8"))
+    hits = findings(path.read_text(encoding="utf-8"), path.relative_to(ROOT).as_posix())
     assert not hits, f"{path.relative_to(ROOT)}: " + "; ".join(hits)
 
 
@@ -147,10 +147,40 @@ def test_a_terms_file_inside_the_repository_is_refused(monkeypatch: pytest.Monke
         extra_patterns()
 
 
-def test_the_exact_unit_names_pass_and_a_look_alike_does_not() -> None:
-    from privacy import UNIT_NAMES
+def hostname_hits(text: str, name: str) -> list[str]:
+    return [h for h in findings(text, name) if h.startswith("hostname:")]
 
-    assert UNIT_NAMES, "something is allowed"
-    assert not [h for name in UNIT_NAMES for h in findings(f"enable {name} now") if h.startswith("hostname:")]
-    assert any(h.startswith("hostname:") for h in findings("enable other-broker.service now"))
-    assert any(h.startswith("hostname:") for h in findings("enable safo-broker.services now"))
+
+def test_the_broker_names_pass_only_in_the_two_broker_documents() -> None:
+    from privacy import BROKER_DOC_NAMES, BROKER_DOCS
+
+    assert BROKER_DOCS == ("docs/gemini-broker.md", "docs/gemini-broker-threat-model.md")
+    assert BROKER_DOC_NAMES, "something is allowed"
+    for doc in BROKER_DOCS:
+        for token in BROKER_DOC_NAMES:
+            assert not hostname_hits(f"enable {token} now", doc), (doc, token)
+            # the guard bites: the same text anywhere else is a hostname finding
+            for other in ("docs/home.md", "README.md", "docs/gemini-broker.md.bak", "docs/x/gemini-broker.md", ""):
+                assert hostname_hits(f"enable {token} now", other), (other, token)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "connect to network-online.target",
+        "connect to safo.broker",
+        "restart safo-broker.service on the box",
+        "ssh to sockets.target",
+    ],
+)
+def test_a_broker_name_in_an_unrelated_document_is_still_flagged(text: str) -> None:
+    assert hostname_hits(text, "docs/usage.md")
+    assert hostname_hits(text, "")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["enable other-broker.service now", "enable safo-broker.services now", "use safo-broker.service.corp.net"],
+)
+def test_a_look_alike_is_flagged_even_in_a_broker_document(text: str) -> None:
+    assert hostname_hits(text, "docs/gemini-broker.md")

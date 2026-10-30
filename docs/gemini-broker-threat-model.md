@@ -43,7 +43,7 @@ consuming projects' review of generated art.
 | A holder of a stolen hardware key | Can sign if the PIN is not required or is known |
 | Someone who persuades the maintainer to touch | Gets a signature for what is shown |
 | Root (the maintainer acting as root, or an attacker who has root) | Everything; outside the design |
-| A compromised dependency or release artifact | Runs as the broker if it is in the installed code |
+| A compromised dependency or release artifact | Its code runs as the broker user; the installer never runs a build backend as root |
 | A model reading attacker-controlled text and writing prompts or briefs | May ask for spend or for an image of anything |
 
 ## Trust boundaries
@@ -157,22 +157,29 @@ control, or a command that reads the installed system), then the residual risk.
 
 ### R5. Tampering with code, config, prices or units
 
-- **Mitigation.** All are root-owned and read-only to the broker (`ReadOnlyPaths=`). The code is built by root, in its
-  own directory, from a **hardware-key signed release tag** verified against a root-owned signers file kept apart from
-  the approval keys; the installer fetches the source itself (never from a folder the maintainer's account can write),
-  builds from the tag's hash-locked requirements, refuses any version below the root-owned monotonic version file (and
-  the broker refuses to start below the root-owned floor), and shows the diff to root for a typed confirmation before
-  every install. `broker.yaml` is read through the ownership walk on every request; prices carry `valid_through`; caps in
-  config can only lower the constants. The design's "Install and update chain" states the details.
-- **Verification.** Planned installer tests against a throwaway git repository with test keys: an unsigned tag, a tag
-  signed by a key that is not a release key (including an approval key), a lower and an equal version, a downgrade with
-  and without the explicit flag, a tampered hash in the lock, a caller-supplied source path (ignored), and a broker started
-  below the floor all refuse. `check-install` walks every path and fails on a wrong owner, a group or world write, a
-  symlink, or a parent directory the maintainer account can write; a config that raises a cap is refused.
-- **Residual.** The signed code can still be bad: the maintainer's reading of the diff and the cyber-tier review are the
-  controls. A stolen release key whose PIN is known, or a maintainer who confirms without reading, defeats the gate. The
-  first install is trust on first use of a reviewed tag. A build attestation, when a prebuilt artifact ships, shows which
-  workflow built it, not that the tag was reviewed.
+- **Mitigation.** All are root-owned and read-only to the broker (`ReadOnlyPaths=`). The code is installed by root from a
+  **signed annotated tag object** (a hardware key, verified against a root-owned signers file kept apart from the approval
+  keys); the version is parsed from the signed tag name and cross-checked against the code, never read from a separately
+  supplied file. The installer fetches the source itself, refuses any version below the root-owned monotonic version file
+  (and the broker refuses to start below the root-owned floor), and shows root every packaging and build-control change and
+  every added or changed dependency with its wheel file, hash and index before a typed confirmation. It installs **only
+  from hash-locked wheels** (`--only-binary=:all:`, `--require-hashes`, `--no-deps`), so no build backend runs as root;
+  the broker's own source is copied, not built. The release is staged read-only, verified offline (ownership, file hashes,
+  units, a self-test as the broker user), activated by an atomic symlink swap, and rolled back automatically on any
+  failure. `broker.yaml` is read through the ownership walk on every request; prices carry `valid_through`; caps in
+  config can only lower the constants.
+- **Verification.** Planned installer tests against a throwaway git repository with test keys: an unsigned tag, a
+  lightweight tag, a tag signed by a key that is not a release key (including an approval key), a tag name that
+  disagrees with the code's version, a lower and an equal version, a downgrade with and without the explicit flag, a
+  tampered hash, a dependency with only a source distribution (pip must refuse it and no build backend may run), a
+  caller-supplied source path, and a broker started below the floor all refuse; failure injected at each install stage
+  leaves the previous release active and the version file unchanged. `check-install` walks every path and fails on a wrong
+  owner, a group or world write, a symlink, or a parent directory the maintainer account can write.
+- **Residual.** The signed code and the wheels can still be bad: wheel code runs as the broker user, so the maintainer's
+  reading of the diff and the dependency list, and the cyber-tier review, are the controls. A stolen release key whose
+  PIN is known, or a maintainer who confirms without reading, defeats the gate. The first install is trust on first use of
+  a reviewed tag. A build attestation, when a prebuilt artifact ships, shows which workflow built it, not that the tag was
+  reviewed.
 
 ### R6. The touch for a request he did not read
 
@@ -204,28 +211,34 @@ control, or a command that reads the installed system), then the residual risk.
 
 ### R8. A call bills more than its approval
 
-- **Mitigation.** The broker does not rely on an estimate. It **reserves the worst case** before the call (input bound
-  plus `M` output tokens at the highest output rate, where `M` is the cap it sends in the vendor request) and refuses when
-  the reservation exceeds the signed `max_usd`, the job cap or the month room. The vendor documents `max_output_tokens`
-  and `thinking_level` for the request (verified on the vendor's API reference, read 2026-10-30), and the broker
-  always sends them: the lowest thinking level the model lists, and `M` in the signed text. Whether the vendor
-  honors `M` on image models is **inferred, not shown**, so until a model's cap has been observed (`cap_verified`) the
-  reservation uses the model's **documented output limit**, which makes Nano Banana Pro (3.93 USD worst case) refuse
-  under the 2 USD job cap and leaves the other models at 0.12 to 1.97 USD. After the call it reconciles the actual
-  usage, records reserved, actual and released amounts, floors the figure by the images returned, and keeps the whole
-  reservation as spent when usage is missing. If the actual exceeds the reservation (a breach) it is recorded, counted
-  and the **model is suspended** until root clears it. No grounding or tools are in the request; stale prices and sizes
-  outside the table are refused.
-- **Verification.** Planned: reservation arithmetic per model and size, with `cap_verified` true and false, against the
-  table; the Pro refusal; usage below the reservation releases the difference; usage above it records `breach`, counts
-  the actual and refuses the next call for that model until `clear-suspend`; no usage keeps the reservation; low usage is
-  floored; an `M` below the image's token count is refused; a 4K request for the 1K-only model is refused. Phase 7 observes
-  the real cap on Nano Banana 2 Lite first (0.12 USD worst case) before any other model is enabled.
-- **Residual.** The cap is a request to the vendor and the broker cannot force it. If the vendor does not honor it, one
-  call can bill up to the model's documented output limit at the image rate before the breach is seen (the figures
-  above), then the suspension stops further calls for that model. That single-call exposure is bounded by the vendor-side
-  monthly limit, which must stay set. The earlier claim that the monthly ceiling bounds the rest was wrong for the
-  call already running; the ceiling bounds only what the broker can see before sending.
+- **Mitigation.** The broker does not rely on an estimate. It **reserves the worst case** before the call and refuses
+  when the reservation exceeds the signed `max_usd`, the job cap or the month room. The reservation is the input at one
+  token per byte of the prompt (a true upper bound) plus a margin, plus the output cap `M` at the highest output rate,
+  plus, for image calls, the vendor's documented maximum of two interim images at the image rate. The vendor documents
+  `max_output_tokens` and `thinking_level` for the request (verified on the vendor's API reference, read 2026-10-30);
+  the broker always sends them (the lowest thinking level the model lists, and `M` in the signed text), and sends no
+  tools, grounding, cached content, input images or thought summaries, so no other category can be billed. That the
+  vendor honors `M` on image models, interim images included, is **inferred, not shown**, so until a model's cap has
+  been observed (`cap_verified`) the reservation uses the model's documented output limit: 1.05 USD for Nano Banana
+  2.1, 0.19 for Lite, and over the 2 USD cap (so refused) for Nano Banana 2 and Pro, all for a 1K image. After the
+  call it reconciles the actual usage and records reserved, actual and released amounts. Any outcome the broker cannot
+  establish (a crash, a timeout, a lost response, a 5xx, a redirect, missing or unusable usage) is **ambiguous**: the
+  full reservation stays counted, an `ambiguous_call` row is written, and the model is suspended across restarts until
+  root clears it after reading the vendor billing page. An actual above the reservation (a breach) is counted and
+  suspends the model the same way.
+- **Verification.** Planned: reservation arithmetic per model and size, with `cap_verified` true and false, including the
+  input bound on a prompt of single-byte-per-token worst case and the interim-image term; the refusals above;
+  usage below the reservation releases the difference; usage above it records `breach` and suspends; each ambiguous case
+  (crash after the spend is written, timeout, dropped connection, unreadable answer, 5xx, missing, malformed or implausible
+  usage) writes `ambiguous_call`, keeps the reservation and suspends, and a restart does not clear it; the next call on
+  the model is refused until `clear-suspend`; a 429 and a definite 4xx do not suspend; an `M` below the image's token count is
+  refused. Phase 7 observes the real cap on Nano Banana 2 Lite first (0.19 USD worst case) before any other model is
+  enabled.
+- **Residual.** The cap is a request to the vendor and the broker cannot force it, and a call whose result is lost may
+  have been billed in full after the connection dropped. In either case **one call per model** can bill more than reserved
+  before the broker, or root reading the billing page, learns of it; the suspension stops the second. **The vendor-side
+  monthly spend limit is the only hard backstop for that amount, and decision 14 keeps it set.** The monthly ceiling bounds
+  only what the broker can see before sending.
 
 ### R9. A stolen or lost enrolled key
 
@@ -259,13 +272,18 @@ control, or a command that reads the installed system), then the residual risk.
 
 ### R12. Crash or power loss mid-call
 
-- **Mitigation.** Spend is recorded and synced **before** the vendor request; recovery marks every unfinished call
-  `ambiguous` at its reservation; either consumption record alone marks the nonce spent; nothing replays.
+- **Mitigation.** Spend is recorded and synced **before** the vendor request, so nothing replays and nothing is
+  undercounted. Because a crash after that point leaves it unknown whether the request left and what it cost, recovery
+  treats every unfinished call as **ambiguous**: it keeps the full reservation counted, appends `ambiguous_call`, and
+  suspends the model before serving anything; only root clears the suspension, after reconciling with the vendor billing
+  page. Either consumption record alone marks the nonce spent.
 - **Verification.** Planned: fault injection between each pair of steps, then restart; assert the nonce is unusable, the
-  month counts the reservation and the vendor fake saw at most one request. Documented cost: a crash before the request
-  charges one reservation for nothing.
-- **Residual.** The lost reply is not recoverable (the broker keeps no copy), so one approval can be spent for no
-  usable output; bounded by the approved maximum.
+  month counts the reservation, the model is suspended and stays suspended after another restart, a call on it is refused,
+  `clear-suspend` is root-only, and the vendor fake saw at most one request. Documented costs: a crash before the request
+  charges one reservation for nothing, and takes the model off until root acts.
+- **Residual.** The lost reply is not recoverable (the broker keeps no copy), so one approval can be spent for no usable
+  output. The amount actually billed after a lost connection is unknown until the billing page is read; the vendor-side
+  monthly limit is the backstop.
 
 ### R13. A 429 or an error falls through, or is retried
 
