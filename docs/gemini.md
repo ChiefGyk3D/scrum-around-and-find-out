@@ -262,7 +262,7 @@ short list of named forms (the vendor host, the Google genai SDK, the paid confi
 run through a variable, function, `xargs`, `eval` or `-c` when the brief also names Gemini and an action); the list is in
 [Hooks](hooks.md), and a way of building a command that is not on it is not seen. A false positive is a block. The same rules also look at each Bash call: a shell command that names the vendor
 host, its SDK, the key variable or the secret-store project and config names is denied unless it is the `safo gemini`
-wrapper or a plain read or test command run inside this repository (the exact list, and what it does not cover, is in
+wrapper itself (there is no other exemption; what it covers and does not is in
 [Hooks](hooks.md#shell-commands-bash)). That check resolves nothing: a name built from pieces with no escape, or read
 from a file or the environment, and a program that calls the API from inside, are not seen. Raw SDK use inside a
 program is out of its reach. When `agents.yaml` cannot be loaded the Gemini rules still apply to the brief. When

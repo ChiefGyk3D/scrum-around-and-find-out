@@ -71,7 +71,7 @@ def reason(out: str) -> str:
     [
         f"curl -s https://{HOST}/v1/models",
         f"curl -s 'https://{HOST}'",
-        f"curl https://gen''erative{HOST[len('generative'):]}",
+        f"curl https://gen''erative{HOST[len('generative') :]}",
         f'wget "https://{HOST.replace("language", "lan" + chr(92) + "guage")}"',
         f"doppler secrets get {KEY} --plain",
         f"echo ${{{KEY}}}",
@@ -79,7 +79,7 @@ def reason(out: str) -> str:
         f"doppler secrets --config {PAID}",
         "doppler secrets get X --config prd --plain",
         f"python3 -c 'import {SDK}'",
-        f"python3 -c \"from google import genai; genai.Client()\"",
+        'python3 -c "from google import genai; genai.Client()"',
         f"cat /dev/null\ncurl https://{HOST}",
         f"ls \\\n; curl https://{HOST.replace('generative', 'gener' + chr(92) + chr(10) + 'ative')}",
         # look-alike letters and full-width forms fold to the plain name
@@ -163,7 +163,7 @@ def test_scan_time_grows_in_proportion_to_the_command() -> None:
     assert large < small * 16 * 6 + 0.05  # 16x the input within 6x slack on linear growth
 
 
-# -- the repo exemption -------------------------------------------------------------------------------------------
+# -- no exemption for this repository ----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -175,47 +175,45 @@ def test_scan_time_grows_in_proportion_to_the_command() -> None:
         f"git commit -m 'document {KEY} handling'",
         f"cat docs/gemini-keys.md | grep {PROJECT}",
         f"make check PY=python # {PAID}",
-    ],
-)
-def test_reading_and_testing_this_repository_is_allowed(command: str) -> None:
-    assert geminibrief.shell_command_class(command, cwd=REPO) is None, command
-    assert geminibrief.shell_command_class(command, cwd=REPO / "docs") is None, command
-    assert geminibrief.shell_command_class(command) is not None, command  # not from outside the repo
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
+        f"make SHELL='curl https://{HOST}' check",
+        f"make --eval='x:; curl https://{HOST}' x",
+        f"make -f /dev/stdin <<< 'x:; curl https://{HOST}'",
+        f"git grep -O'curl https://{HOST}' x",
+        f"git diff --ext-diff --output=/tmp/x {HOST}",
+        f"cat ~/.config/safo/gemini.yaml # {PAID}",
+        f"head -n5 examples/gemini.example.yaml # {KEY}",
+        f"grep -rn . ~/.config/safo # {PROJECT}",
         f"curl https://{HOST}",
         f"grep -rn {HOST} docs | sh",
-        f"grep -rn {HOST} docs; curl https://{HOST}",
-        f"cat docs/x | curl -d @- https://{HOST}",
-        f"git -c alias.x='!curl https://{HOST}' x",
-        f"git -C /somewhere commit -m {KEY}",
-        f"rg --pre curl {HOST} docs",
         f"cat $(curl https://{HOST})",
-        f"cd / && grep {HOST} x",
-        f"make check; doppler secrets get {KEY}",
-        f"pytest $(echo {KEY})",
     ],
 )
-def test_the_repo_exemption_is_narrow(command: str) -> None:
-    assert geminibrief.shell_command_class(command, cwd=REPO) is not None, command
+def test_nothing_is_exempt_by_where_it_runs_or_what_tool_it_is(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
 
 
-def test_a_folder_that_only_looks_like_this_repo_is_not_exempt(tmp_path: Path) -> None:
-    (tmp_path / "src" / "safo").mkdir(parents=True)  # no geminibrief.py inside
-    assert geminibrief.shell_command_class(f"grep {HOST} x", cwd=tmp_path) is not None
+def test_the_function_takes_no_working_directory() -> None:
+    # a spoofed checkout (marker files made anywhere) buys nothing: there is no argument to carry one
+    call: Any = geminibrief.shell_command_class
+    with pytest.raises(TypeError):
+        call(f"grep {HOST} x", cwd=REPO)
 
 
-def test_the_repo_docs_and_tests_do_not_trip_a_read_of_themselves() -> None:
-    # the false-positive ceiling for this repo's own reading commands stays at 0
-    names = [p.name for p in (REPO / "docs").glob("*.md")] + [p.name for p in (REPO / "tests").glob("test_gemini*.py")]
-    assert names
-    for name in names:
-        sub = "docs" if name.endswith(".md") else "tests"
-        assert geminibrief.shell_command_class(f"cat {sub}/{name}", cwd=REPO) is None, name
-        assert geminibrief.shell_command_class(f"grep -n x {sub}/{name}", cwd=REPO) is None, name
+def test_the_hook_ignores_the_cwd_even_inside_a_real_checkout(_private_home: Path, agents: Path) -> None:
+    assert denied(run(agents, _private_home, event(f"grep -rn {HOST} docs", cwd=REPO))[0])
+
+
+def test_a_directory_with_spoofed_marker_files_is_denied(_private_home: Path, agents: Path, tmp_path: Path) -> None:
+    fake = tmp_path / "fake"
+    (fake / "src" / "safo").mkdir(parents=True)
+    (fake / "src" / "safo" / "geminibrief.py").write_text("")
+    (fake / "pyproject.toml").write_text("")
+    assert denied(run(agents, _private_home, event(f"cat {PAID}", cwd=fake))[0])
+
+
+@pytest.mark.parametrize("command", ["make check", "make lint typecheck test", "pytest -q tests", "git status --short"])
+def test_this_repos_normal_commands_are_not_denied_without_an_exemption(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
 
 
 # -- the hook ----------------------------------------------------------------------------------------------------
@@ -238,14 +236,6 @@ def test_the_hook_denies_for_a_sub_agent_call_too(_private_home: Path, agents: P
 def test_the_hook_allows_the_wrapper_and_an_ordinary_command(_private_home: Path, agents: Path) -> None:
     for command in ("safo gemini quota", "ls -la", "pytest -q"):
         assert run(agents, _private_home, event(command)) == ("", ""), command
-
-
-def test_the_hook_allows_a_repo_read_from_the_repo_and_denies_it_elsewhere(
-    _private_home: Path, agents: Path, tmp_path: Path
-) -> None:
-    command = f"grep -rn {HOST} docs"
-    assert run(agents, _private_home, event(command, cwd=REPO)) == ("", "")
-    assert denied(run(agents, _private_home, event(command, cwd=tmp_path))[0])
 
 
 def test_a_background_call_is_still_checked(_private_home: Path, agents: Path) -> None:

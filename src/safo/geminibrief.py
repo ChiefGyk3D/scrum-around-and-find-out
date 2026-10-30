@@ -31,7 +31,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 from typing import NamedTuple
 
 from safo.gemini import (
@@ -1020,10 +1019,9 @@ def _findings(
 
 # -- shell commands (#209) ---------------------------------------------------------------------------------------------
 # A cheap, fail-closed check on one Bash command. It names no value and resolves nothing: it looks for the vendor API
-# host, its SDK, the key variable name and the secret-store project and config names (all shown in docs/gemini-keys.md
-# and examples/gemini.example.yaml), and for words built from escapes or an expansion beside a network or secret tool.
-# The wrapper `safo gemini ...` holds the real gates and is allowed; so are plain read and test commands run inside this
-# repository's checkout. Everything else that names them is denied. The classes are fixed text: a denial never repeats
+# The wrapper `safo gemini ...` holds the real gates and is the only exemption. Everything else that names them is
+# denied. The classes are fixed text: a denial never repeats a word of the command.
+# The wrapper `safo gemini ...` holds the real gates and is the only exemption. Everything else that names them is denied. The classes are fixed text: a denial never repeats
 # a word of the command.
 SHELL_VENDOR = "the vendor API host or SDK"
 SHELL_KEY = "the key variable name"
@@ -1040,9 +1038,6 @@ _NETWORK_TOOL = re.compile(
     r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
 )
 _WRAPPER_FORBIDDEN = frozenset("$`()")
-_REPO_SAFE = frozenset({"pytest", "make", "ls", "cat", "head", "tail", "grep", "rg", "diff", "wc", "git"})
-_REPO_GIT = frozenset({"add", "commit", "diff", "log", "show", "status", "grep"})
-_REPO_MARKER = ("src/safo/geminibrief.py", "pyproject.toml")
 
 
 def _shell_segments(command: str) -> list[list[Tok]] | None:
@@ -1081,44 +1076,7 @@ def _is_wrapper(command: str) -> bool:
     return True
 
 
-def _own_repo(cwd: Path | None) -> bool:
-    if cwd is None:
-        return False
-    try:
-        here = cwd.resolve()
-        for folder in (here, *here.parents):
-            if all((folder / marker).is_file() for marker in _REPO_MARKER):
-                return True
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return False
-
-
-def _is_repo_command(command: str) -> bool:
-    """A read or test command from a short list (pytest, make, cat, grep, a few git subcommands ...): no expansion,
-    substitution or group, no escape-built word, and every command in a pipeline or list is on the list."""
-    if any(c in command for c in _WRAPPER_FORBIDDEN) or CONCEAL.search(command.lower()):
-        return False
-    segments = _shell_segments(command)
-    if not segments:
-        return False
-    for words in segments:
-        values = [t.value for t in words]
-        head = values[0]
-        if head == "git":
-            if len(values) < 2 or values[1] not in _REPO_GIT or any(v in ("-c", "-C") for v in values):
-                return False
-        elif re.fullmatch(r"python[\d.]*", head):
-            if values[1:3] != ["-m", "pytest"]:
-                return False
-        elif head not in _REPO_SAFE:
-            return False
-        if head == "rg" and any(v.startswith("--pre") for v in values):
-            return False
-    return True
-
-
-def shell_command_class(command: str, cwd: Path | None = None, deadline: float | None = None) -> str | None:
+def shell_command_class(command: str, deadline: float | None = None) -> str | None:
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
     it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED."""
 
@@ -1133,7 +1091,7 @@ def shell_command_class(command: str, cwd: Path | None = None, deadline: float |
         secret_tool = network = False
         for line in lines:
             tick()
-            _, _, low, pre_low, pre_raw = _views(line)
+            _, _, low, pre_low, _pre_raw = _views(line)
             for view in (low, pre_low):
                 if VENDOR_RE.search(view) or SDK.search(view):
                     found = found or SHELL_VENDOR
@@ -1155,8 +1113,6 @@ def shell_command_class(command: str, cwd: Path | None = None, deadline: float |
             return None
         tick()
         if _is_wrapper(command):
-            return None
-        if _own_repo(cwd) and _is_repo_command(command):
             return None
         return found
     except TimeoutError:

@@ -1144,18 +1144,17 @@ def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: floa
 
 
 def shell_vendor_check(payload: dict[str, Any], deadline: float) -> None:
-    """Deny a Bash command that goes straight to the vendor API or its key (#209): a cheap, fail-closed speed bump, not a
-    sandbox. The wrapper `safo gemini ...` and read or test commands inside this repository are allowed. The denial
-    names the rule and the phrase class and never the command. An event without a usable command is left to the
-    lead-wait rule, which refuses it as before."""
+    """Deny a Bash command that goes straight to the vendor API or its key (#209): a cheap, fail-closed speed bump,
+    not a sandbox. Only the wrapper `safo gemini ...` is allowed; there is no other exemption. The denial names the
+    rule and the phrase class and never the command. An event without a usable command is left to the lead-wait rule,
+    which refuses it as before."""
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or payload.get("hook_event_name") != "PreToolUse":
         return
     from safo import geminibrief  # deferred: it loads the Gemini mode, which the entry must not at import
 
-    cwd = payload.get("cwd")
-    found = geminibrief.shell_command_class(command, Path(cwd) if isinstance(cwd, str) and cwd else None, deadline)
+    found = geminibrief.shell_command_class(command, deadline)
     if found:
         raise GeminiEventDeny("input", SHELL_DENIAL.format(found))
 

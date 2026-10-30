@@ -296,19 +296,19 @@ more forms are denied without a name on the page: a word built with escapes (an 
 `\u` escape, `printf -v`) in a command that also runs a network tool or `doppler`, and `doppler` with any `$` expansion
 or backtick. Nothing is resolved: a variable's value is never looked up.
 
-Two things are allowed even when a name is on the page. The wrapper itself: every command in the call is `safo gemini ...`
-(or `python -m safo gemini ...`) with no `$`, backtick or parenthesis anywhere, so nothing can ride along; a second
-command after `;`, `&&`, `|` or a newline makes it a different command and it is judged on its own. And the docs and tests
-of this repository: when the call's working directory is inside a checkout of this repository, a command made only of
-`pytest`, `python -m pytest`, `make`, `cat`, `head`, `tail`, `ls`, `grep`, `rg` (without `--pre`), `diff`, `wc` or `git
-add|commit|diff|log|show|status|grep` (no `-c`, no `-C`), with no `$`, backtick, parenthesis or escape-built word. The
+One thing is allowed even when a name is on the page, and nothing else is exempt: the wrapper itself. Every command in
+the call is `safo gemini ...` (or `python -m safo gemini ...`) with no `$`, backtick or parenthesis anywhere, so nothing
+can ride along; a second command after `;`, `&&`, `|` or a newline makes it a different command and it is judged on its
+own. There is no exemption for a working directory, a tool name or this repository: `make`, `git`, `cat` and `grep` can
+all run or print anything, and the working directory is the caller's to choose. A command that spells out one of those
+names is denied wherever it runs, so reading this repository's docs with such a command is denied too (the normal
+`make check`, `pytest` and `git` commands name none of them and pass). The
 denial names the rule (`gemini-material`) and a fixed phrase class, such as "the vendor API host or SDK", and points at the
 wrapper; it never repeats the command. A command that cannot be checked before the deadline is denied.
 
 Not covered, by design: a name built from pieces with no escape (`a=generative; b=language; curl https://$a$b...` with
 no `doppler`), a name read from a file or the environment, a program or script that calls the API (the call is inside a
-file the command only runs), a command that reaches the wrapper's key in another way, and any command run from a working
-directory inside this repository that is on the short list above. The wrapper holds the real gates.
+file the command only runs), a command that reaches the wrapper's key in another way, and anything else on the page. The wrapper holds the real gates.
 
 That is the whole claim. Not covered: a wrapper script or alias under another name that hides `safo`, a command written
 to a file and run later, other shells than bash, and any language that calls `safo` or the API from inside a program. It does not promise to read every way a shell can build a command: a form outside the list above
