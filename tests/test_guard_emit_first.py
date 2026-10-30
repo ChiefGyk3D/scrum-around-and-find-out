@@ -458,7 +458,10 @@ def test_a_held_log_lock_costs_the_bash_deny_no_time_and_the_wait_ends_inside_th
         mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents))
     ended = time.monotonic()
     assert denied(lines(out.buffered)[0])
-    assert stamps[0] - started < 0.5, "the deny is out before any lock wait"
+    # Relative to the end of the run, so a slow start cannot fail it: the lock wait is a real wait that runs to about
+    # 2 s (the budget less the log margin), and a deny flushed before it ends well ahead of the end. A deny held back
+    # until the wait is over is flushed within a few milliseconds of the end.
+    assert ended - stamps[0] > 0.25, "the deny is out before any lock wait"
     assert ended - started < 3, "and the bounded wait still ends before the hook's timeout"
     assert marker(_private_home).exists()
 
