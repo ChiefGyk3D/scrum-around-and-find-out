@@ -52,6 +52,9 @@ def test_the_scan_covers_the_docs_the_examples_and_the_readme() -> None:
         ("/home/Alice.B/src", "home-directory path"),
         ("C:\\Users\\alice\\Desktop", "home-directory path"),
         ("open file:///home/x", "file URL"),
+        ("unit prod.corp.service and host.internal.socket", "hostname"),
+        ("via db1.example.sock or box.lab.target", "hostname"),
+        ("safo-broker.service.corp.net", "hostname"),
     ],
 )
 def test_the_patterns_catch_what_they_are_for(text: str, category: str) -> None:
@@ -142,3 +145,12 @@ def test_a_terms_file_inside_the_repository_is_refused(monkeypatch: pytest.Monke
     monkeypatch.setenv("SAFO_PRIVACY_EXTRA_FILE", str(inside))
     with pytest.raises(RuntimeError, match="outside"):
         extra_patterns()
+
+
+def test_the_exact_unit_names_pass_and_a_look_alike_does_not() -> None:
+    from privacy import UNIT_NAMES
+
+    assert UNIT_NAMES, "something is allowed"
+    assert not [h for name in UNIT_NAMES for h in findings(f"enable {name} now") if h.startswith("hostname:")]
+    assert any(h.startswith("hostname:") for h in findings("enable other-broker.service now"))
+    assert any(h.startswith("hostname:") for h in findings("enable safo-broker.services now"))

@@ -70,12 +70,12 @@ Medium (loss within the caps, or loss of privacy), Low (availability or annoyanc
 |---|---|---|---|---|
 | R1 | The account reads the paid key and calls the vendor directly | Critical | Key readable by the account (the case today); with the broker: root | 1 |
 | R2 | A local process feeds the broker malformed, huge or slow input to take control of it or its key | Critical | Local access to the socket (every agent has it) | 2 |
-| R3 | Replay of an approval, or a rewound ledger, to spend past the caps | High | Same account (today); with the broker: root or a state restore | 3 |
-| R4 | An approval is reused for something else: another prompt, size, count or model | High | A valid signed approval in hand | 4 |
-| R5 | The broker's code, config, prices or units are changed | High | Root, or a poisoned release | 5 |
-| R6 | The maintainer touches for a request he did not read | High | A prompt-injected agent that can run `approve` | 6 |
-| R7 | Binary output abuse: oversized, mislabeled or polyglot bytes; a client path or link trick; an agent opens the file | Medium to High | A hostile or confused vendor reply, or a confused client | 7 |
-| R8 | The estimate undercounts (thinking tokens, a stale price, a size outside the table) | Medium | A normal call | 8 |
+| R3 | Replay of an approval, or a rewound ledger, to spend past the caps | High | Same account (today); with the broker: root or a state restore | 4 |
+| R4 | An approval is reused for something else: another prompt, size, count or model | High | A valid signed approval in hand | 5 |
+| R5 | The broker's code, config, prices or units are changed | High | Root, a stolen release-signing key, or a reviewed-but-malicious tag | 6 |
+| R6 | The maintainer touches for a request he did not read | High | A prompt-injected agent that can run `approve` | 7 |
+| R7 | Binary output abuse: oversized, mislabeled or polyglot bytes; a client path or link trick; an agent opens the file | Medium to High | A hostile or confused vendor reply, or a confused client | 8 |
+| R8 | One accepted image or text call bills more than its approval: thinking and text output that the vendor does not cap, a stale price, a size outside the table | High | A normal call; no attacker needed | 3 |
 | R9 | An enrolled key is stolen or lost | High | Physical theft, plus the PIN if required | 9 |
 | R10 | The key or a prompt leaks through a log, an error, a core dump, a process listing | High | Read access to logs or the process | 10 |
 | R11 | Request goes to the wrong host, or the key is carried by a redirect | Critical | DNS or network position, plus a missing check | 11 |
@@ -83,15 +83,16 @@ Medium (loss within the caps, or loss of privacy), Low (availability or annoyanc
 | R13 | A vendor 429 or error falls through to another tier or is retried into more spend | Medium | A rate-limited moment | 13 |
 | R14 | Private material is sent to the vendor in a prompt | Medium | A careless or injected prompt | 14 |
 | R15 | Generated art is published unreviewed: wrong mascot, a rights or disclosure problem | Medium | A consuming project skipping review | 15 |
-| R16 | The root-equivalent doors: passwordless sudo, the docker group | Critical | Present on the machine | 16 |
-| R17 | A flood or slow clients keep the paid path unavailable | Low | Local access | 17 |
+| R16 | A root-equivalent door on the maintainer's account (a command-specific sudo or polkit grant, a root-run job on a writable file, a group, a setuid helper, a vulnerable privileged service) | Critical | Present on the machine | 16 |
+| R17 | A flood, slow clients or a client that stops reading keep the paid path unavailable | Low | Local access as the allowed uid | 17 |
 | R18 | The clock is moved to extend an approval's life | Medium | Root or a time-source attack | 18 |
 | R19 | The free key spends money, or the free path calls the broker | Medium | A project with billing on the free key | 19 |
 | R20 | A state backup is restored over live state | Medium | Root | 20 |
 
 The ranking puts R1 first because it is the case today and the one the broker exists to close, and R2 second because
-the socket is reachable by every agent and the broker holds the key. R16 is a precondition more than a risk the broker
-can reduce: its impact is Critical if the installer's check is ignored.
+the socket is reachable by every agent and the broker holds the key. R8 is third because it needs no attacker at all:
+an ordinary call can bill past its approval if the vendor does not honor a cap. R16 is a precondition more than a risk
+the broker can reduce: its impact is Critical, and the checks for it are partial (see its entry).
 
 ## Findings, mitigations and verifications
 
@@ -117,13 +118,16 @@ control, or a command that reads the installed system), then the residual risk.
 - **Mitigation.** Strict framing with a length cap checked before any read (1 MiB request, 256 KiB reply header,
   24 MiB attachment); a 5 second deadline to deliver a request; the bounded JSON loader plus duplicate-key, depth and
   unknown-key rejection; no `pickle`, `eval` or shell anywhere in the path; patterns for names checked with
-  `fullmatch`; peer uid allowlist; at most 8 connections; one vendor call in flight; the unit's confinement (no
+  `fullmatch`; peer uid allowlist; a connection cap and a per-uid cap enforced in the broker (the socket unit's
+  `MaxConnections=` does nothing with `Accept=no`, so it is not relied on); a deadline on every frame read and every frame
+  written, with the paid-call slot released before the reply is written; one vendor call in flight; the unit's confinement (no
   capabilities, no home, a system-call allowlist, no writable-executable memory, bounded memory and tasks) so that a
   parser bug yields a confined, unprivileged process whose only secret is the key it was already handed.
 - **Verification.** Planned `tests/test_broker_protocol.py`: a table of malformed frames (zero length, over the cap,
   short body, stalled body, invalid UTF-8, duplicate keys, deep nesting, wrong types, unknown keys, unknown version)
   each expecting a coded refusal and no state change; a randomized framing fuzz with a fixed seed; a connection-flood
-  test. `systemd-analyze security --offline` on the shipped unit in CI.
+  test (the ninth and the third-per-uid are closed unread); a peer that stops reading a large attachment is dropped at
+  the write deadline with the slot already free. `systemd-analyze security --offline` on the shipped unit in CI.
 - **Residual.** A memory-safety bug in the interpreter or a library could still reach the key. The unit limits what
   follows; it does not remove the key from the process. The cyber-tier review (phase 6) is the check on the parser.
 
@@ -153,14 +157,22 @@ control, or a command that reads the installed system), then the residual risk.
 
 ### R5. Tampering with code, config, prices or units
 
-- **Mitigation.** All are root-owned and read-only to the broker (`ReadOnlyPaths=`); the code is installed from a
-  hash-locked requirements file into `/opt/safo-broker`, not run from the maintainer's checkout; `broker.yaml` is read
-  through the ownership walk on every request; prices carry `valid_through`; caps in config can only lower the constants.
-  The broker has no dependency on the passkey extra in v1, which keeps the installed set small.
-- **Verification.** Planned: `check-install` walks every path and fails on a wrong owner, a group or world write, a
-  symlink, or a parent directory the maintainer account can write; a config that raises a cap is refused; a price past
-  its date refuses a paid estimate. Release artifacts are hashed and the maintainer compares the digest on install.
-- **Residual.** A poisoned release that the maintainer installs. The update is his decision and he reads the diff.
+- **Mitigation.** All are root-owned and read-only to the broker (`ReadOnlyPaths=`). The code is built by root, in its
+  own directory, from a **hardware-key signed release tag** verified against a root-owned signers file kept apart from
+  the approval keys; the installer fetches the source itself (never from a folder the maintainer's account can write),
+  builds from the tag's hash-locked requirements, refuses any version below the root-owned monotonic version file (and
+  the broker refuses to start below the root-owned floor), and shows the diff to root for a typed confirmation before
+  every install. `broker.yaml` is read through the ownership walk on every request; prices carry `valid_through`; caps in
+  config can only lower the constants. The design's "Install and update chain" states the details.
+- **Verification.** Planned installer tests against a throwaway git repository with test keys: an unsigned tag, a tag
+  signed by a key that is not a release key (including an approval key), a lower and an equal version, a downgrade with
+  and without the explicit flag, a tampered hash in the lock, a caller-supplied source path (ignored), and a broker started
+  below the floor all refuse. `check-install` walks every path and fails on a wrong owner, a group or world write, a
+  symlink, or a parent directory the maintainer account can write; a config that raises a cap is refused.
+- **Residual.** The signed code can still be bad: the maintainer's reading of the diff and the cyber-tier review are the
+  controls. A stolen release key whose PIN is known, or a maintainer who confirms without reading, defeats the gate. The
+  first install is trust on first use of a reviewed tag. A build attestation, when a prebuilt artifact ships, shows which
+  workflow built it, not that the tag was reviewed.
 
 ### R6. The touch for a request he did not read
 
@@ -190,17 +202,30 @@ control, or a command that reads the installed system), then the residual risk.
 - **Residual.** A valid PNG, JPEG or WebP can still carry content that harms whatever opens it, or an image that is
   wrong for its purpose. The maintainer's review is the control for what is in the picture; the brand rule is below (R15).
 
-### R8. Cost undercount
+### R8. A call bills more than its approval
 
-- **Mitigation.** The broker computes the estimate from a price table the maintainer's account cannot edit, includes a
-  fixed text and thinking allowance for image calls, refuses sizes not in the table, refuses stale prices, raises a
-  reported cost to a floor from the number of images returned, and records an overrun as spent. The request carries no
-  grounding or tools. The monthly ceiling and the vendor-side limit bound the rest.
-- **Verification.** Planned: estimate tests per model and size against the table values; a fake vendor reply with
-  implausibly low usage is floored; a reply with high thinking usage records `overrun` and counts it; a request for 4K on
-  the 1K-only model is refused.
-- **Residual.** If the image request cannot cap thinking tokens (unverified), one call can exceed its approved maximum
-  by the thinking cost; it is recorded and counts. The vendor-side limit is the backstop.
+- **Mitigation.** The broker does not rely on an estimate. It **reserves the worst case** before the call (input bound
+  plus `M` output tokens at the highest output rate, where `M` is the cap it sends in the vendor request) and refuses when
+  the reservation exceeds the signed `max_usd`, the job cap or the month room. The vendor documents `max_output_tokens`
+  and `thinking_level` for the request (verified on the vendor's API reference, read 2026-10-30), and the broker
+  always sends them: the lowest thinking level the model lists, and `M` in the signed text. Whether the vendor
+  honors `M` on image models is **inferred, not shown**, so until a model's cap has been observed (`cap_verified`) the
+  reservation uses the model's **documented output limit**, which makes Nano Banana Pro (3.93 USD worst case) refuse
+  under the 2 USD job cap and leaves the other models at 0.12 to 1.97 USD. After the call it reconciles the actual
+  usage, records reserved, actual and released amounts, floors the figure by the images returned, and keeps the whole
+  reservation as spent when usage is missing. If the actual exceeds the reservation (a breach) it is recorded, counted
+  and the **model is suspended** until root clears it. No grounding or tools are in the request; stale prices and sizes
+  outside the table are refused.
+- **Verification.** Planned: reservation arithmetic per model and size, with `cap_verified` true and false, against the
+  table; the Pro refusal; usage below the reservation releases the difference; usage above it records `breach`, counts
+  the actual and refuses the next call for that model until `clear-suspend`; no usage keeps the reservation; low usage is
+  floored; an `M` below the image's token count is refused; a 4K request for the 1K-only model is refused. Phase 7 observes
+  the real cap on Nano Banana 2 Lite first (0.12 USD worst case) before any other model is enabled.
+- **Residual.** The cap is a request to the vendor and the broker cannot force it. If the vendor does not honor it, one
+  call can bill up to the model's documented output limit at the image rate before the breach is seen (the figures
+  above), then the suspension stops further calls for that model. That single-call exposure is bounded by the vendor-side
+  monthly limit, which must stay set. The earlier claim that the monthly ceiling bounds the rest was wrong for the
+  call already running; the ceiling bounds only what the broker can see before sending.
 
 ### R9. A stolen or lost enrolled key
 
@@ -235,10 +260,10 @@ control, or a command that reads the installed system), then the residual risk.
 ### R12. Crash or power loss mid-call
 
 - **Mitigation.** Spend is recorded and synced **before** the vendor request; recovery marks every unfinished call
-  `ambiguous` at its estimate; either consumption record alone marks the nonce spent; nothing replays.
+  `ambiguous` at its reservation; either consumption record alone marks the nonce spent; nothing replays.
 - **Verification.** Planned: fault injection between each pair of steps, then restart; assert the nonce is unusable, the
-  month counts the estimate and the vendor fake saw at most one request. Documented cost: a crash before the request
-  charges one estimate for nothing.
+  month counts the reservation and the vendor fake saw at most one request. Documented cost: a crash before the request
+  charges one reservation for nothing.
 - **Residual.** The lost reply is not recoverable (the broker keeps no copy), so one approval can be spent for no
   usable output; bounded by the approved maximum.
 
@@ -272,21 +297,35 @@ control, or a command that reads the installed system), then the residual risk.
   matters is a person looking at each image.
 - **Residual.** Entirely the consuming project's.
 
-### R16. Root-equivalent doors on the maintainer's account
+### R16. A root-equivalent door on the maintainer's account
 
-- **Mitigation.** `safo-broker-admin check-install` fails if `sudo -n true` succeeds for the account, if the account is
-  in the `docker` group or another root-equivalent group, or if any path in the table above has the wrong owner or mode.
-  The runbook states the precondition.
-- **Verification.** Command: `sudo -n true` must fail; `id -nG` must not list `docker`. Planned test of the check
-  against a fake group database and a fake sudo.
-- **Residual.** A new door added later; the check is a snapshot, so it runs again on every start of the admin tool and
-  is repeated by `status`.
+- **Mitigation.** `safo-broker-admin check-install` lists, and fails while any hit is unexplained: any `sudo` rule for the
+  account (`sudo -l -U`, not only `sudo -n true`), root-equivalent group membership (including `docker`, `lxd`, `disk`),
+  polkit rules that grant the account actions, root-owned paths under `/etc`, `/usr/local`, `/opt` and the unit,
+  cron and sudoers directories that the account can write, root-run units, timers and jobs that execute a file the
+  account can write or read files from its home, and setuid, setgid or file-capability files not owned by a package.
+  The design lists the checks in full ("The root-door precondition").
+- **Verification.** Planned tests of the check against a fake sudoers output, a fake group database, a temporary tree
+  with writable root-run scripts and units, and a fake polkit directory: each door produces a hit, and a clean tree
+  produces none. Commands on the installed system: `sudo -l -U LOGIN`, `id -nG`.
+- **Residual (a documented, accepted risk).** The checks are partial and a snapshot. They cannot see a kernel or privileged
+  service flaw, a package-owned setuid program with a local bug, a privileged socket the checks do not list, access control
+  lists they do not read, a root process started later, or physical access. A clean report means "no door found by these
+  checks". **If any root door exists, the broker raises the bar only for accidents and prompt-injected agents; against a
+  deliberate local attacker running as the maintainer, the spend caps, single use and key confinement are advisory,** and
+  the vendor-side monthly limit is the only hard backstop. The maintainer accepts this by enabling paid use.
 
 ### R17. Availability
 
-- **Mitigation.** Connection, rate, size and time limits; one call in flight; restart limits; the free path unaffected.
-- **Verification.** Planned flood and slow-peer tests; the free-path independence tests.
-- **Residual.** A local process can keep the paid path busy. Loss of paid use is accepted; loss of money is not.
+- **Mitigation.** Connection and per-uid caps in the broker; read deadlines on every request frame and write deadlines on
+  every reply frame (the 24 MiB attachment included); the paid-call slot released before the reply is written, so a client
+  that stops reading cannot hold it; rate, size and time limits; one call in flight; restart limits; the free path
+  unaffected.
+- **Verification.** Planned flood, slow-reader and slow-writer tests (a stalled reader is dropped and a second call
+  proceeds); the free-path independence tests.
+- **Residual (accepted).** The one uid that is allowed to connect can always occupy the outstanding-nonce and `begin`
+  budgets and its own connections until their deadlines. It costs no money and cannot authorize a call. The limits bound
+  how long it lasts and a service restart clears it. Loss of paid use is accepted; loss of money is not.
 
 ### R18. Clock
 
@@ -316,7 +355,10 @@ control, or a command that reads the installed system), then the residual risk.
 - Root, the kernel, systemd, `ssh-keygen` and the TLS store behave.
 - The hardware key reports its touch and PIN flags honestly.
 - The vendor bills what its page says and returns honest usage figures.
-- The maintainer's account has no door to root (checked as a snapshot).
+- The maintainer's account has no door to root. The installer checks for many doors and reports a clean result as "none
+found"; the statement itself is accepted, not proven (R16).
+- The vendor honors the output cap and thinking level the broker sends. Not shown by any page read; observed in phase 7
+  before a model is trusted (R8).
 
 ## What was covered and what was not
 
@@ -324,7 +366,7 @@ Covered: the design in [the broker design](gemini-broker.md) read against the cu
 `geminisign.py`, `geminipasskey.py` and `modes/gemini.py`, and the public docs. Not covered: any built broker (there is
 none); the systemd unit's behavior on a running system (only an offline lint was run); a real hardware key; the vendor's
 real image response; the interaction of `MemoryDenyWriteExecute` and the system-call filter with `ssh-keygen`; the
-installer. This model is the input to the cyber-tier review in phase 6, which is a separate step and not replaced by it.
+installer and its signature checks; the vendor behavior under `max_output_tokens` on image models. This model is the input to the cyber-tier review in phase 6, which is a separate step and not replaced by it.
 
 ## Reopen this model when
 

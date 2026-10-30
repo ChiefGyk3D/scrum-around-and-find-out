@@ -84,11 +84,17 @@ FILE_SUFFIXES = {
     "toml",
     "lock",
     "pub",
-    "service",  # systemd unit file names in docs/gemini-broker.md
-    "socket",
-    "sock",  # a Unix socket path
-    "target",
 }  # pub: a public key file
+
+# The exact systemd unit and socket names docs/gemini-broker.md uses. An exact list, not a suffix rule: a name like
+# prod.corp.service must still be flagged as a hostname.
+UNIT_NAMES = {
+    "safo-broker.service",
+    "safo-broker.socket",
+    "safo-broker.sock",
+    "sockets.target",
+    "network-online.target",
+}
 
 ALLOWED_HOSTS = {
     "github.com",
@@ -158,7 +164,12 @@ def findings(text: str) -> list[str]:
             record("e-mail address", m.start())
     for m in HOST.finditer(text):
         host = m.group(0).lower()
-        if host not in ALLOWED_HOSTS and host not in DOCUMENT_KEYS and host.rsplit(".", 1)[-1] not in FILE_SUFFIXES:
+        if (
+            host not in ALLOWED_HOSTS
+            and host not in DOCUMENT_KEYS
+            and host not in UNIT_NAMES
+            and host.rsplit(".", 1)[-1] not in FILE_SUFFIXES
+        ):
             record("hostname", m.start())
     for m in re.finditer(r"https?://[^\s<>\"']+", text, re.I):
         url_host = urlsplit(m.group(0)).hostname
