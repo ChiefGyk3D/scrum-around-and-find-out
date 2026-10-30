@@ -493,6 +493,7 @@ class Row:
     errors: list[dict[str, Any]] | None = None
     status: int | None = None
     committed: bool = False  # the fake applied the mutation before it answered
+    timeout: float = 30.0  # generous: a loaded runner can stall a healthy answer past a tight socket timeout
 
 
 def _answer(status: int, body: str, **kw: Any) -> Fault:
@@ -502,7 +503,8 @@ def _answer(status: int, body: str, **kw: Any) -> Fault:
 ROWS = [
     # -- the request went out and the answer cannot be trusted
     Row("drop after commit", _answer(200, "{}", commit_then_drop=True), UnknownOutcomeError, committed=True),
-    Row("timeout", _answer(200, '{"data": {}}', delay=1.0), UnknownOutcomeError),
+    # the one row that wants a short timeout: the server stalls well past it, so the result holds at any speed
+    Row("timeout", _answer(200, '{"data": {}}', delay=2.0), UnknownOutcomeError, timeout=0.2),
     *[
         Row(f"http {code}", _answer(code, "gateway", commit=True), UnknownOutcomeError, status=code, committed=True)
         for code in (500, 502, 503, 504)
@@ -607,7 +609,7 @@ def test_a_mutation_is_only_a_success_when_the_answer_is_clean(fake: FakeGitHub,
     world(fake)
     fake.faults.append(row.fault)
     waits: list[float] = []
-    c = Client(fake.token, fake.url, sleep=waits.append, max_attempts=3, max_wait=120, timeout=0.2)
+    c = Client(fake.token, fake.url, sleep=waits.append, max_attempts=3, max_wait=120, timeout=row.timeout)
 
     if row.expect is None:
         assert c.execute(ADD, {"p": "PVT_1"}) == row.data
