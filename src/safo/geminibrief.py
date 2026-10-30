@@ -701,34 +701,42 @@ _BRACE_FRAGMENTS = ("--", "appro", "cap", "paid")
 
 
 def _brace_list(word: str) -> bool:
-    """Whether the word holds a brace expansion bash would perform (`{a,b}` or `{x..y}`, nested too, never `${...}`).
-    One pass over the text, no string built; more than 64 levels deep counts as a brace expansion."""
-    open_lists: list[bool] = []
+    """Whether the word holds a brace expansion bash would perform (`{a,b}` or `{x..y}`, nested too). A `${...}` is a
+    frame of its own, so a comma inside it never makes the braces around it a list and its `}` never closes one. One
+    pass over the text, no string built; more than 64 levels deep counts as a brace expansion."""
+    frames: list[int] = []  # 0: a ${...}, 1: a list so far, 2: a list that has a separator
     i = 0
     while i < len(word):
         c = word[i]
         if c == "\\":
             i += 2
             continue
-        if c == "{" and (i == 0 or word[i - 1] != "$"):
-            if len(open_lists) >= 64:
+        if c == "{":
+            if len(frames) >= 64:
                 return True
-            open_lists.append(False)
-        elif c == "}" and open_lists:
-            if open_lists.pop():
+            frames.append(0 if i > 0 and word[i - 1] == "$" else 1)
+        elif c == "}" and frames:
+            if frames.pop() == 2:
                 return True
-        elif open_lists and (c == "," or (c == "." and word[i + 1 : i + 2] == ".")):
-            open_lists[-1] = True
+        elif frames and frames[-1] and (c == "," or (c == "." and word[i + 1 : i + 2] == ".")):
+            frames[-1] = 2
         i += 1
     return False
 
 
 def _has_brace_word(norm: str) -> bool:
-    """An unquoted word on the line that is a brace expansion. A word held in quotes is not expanded by the shell."""
+    """A word on the line that bash may brace-expand: an unquoted brace list, or any word holding a brace that is only
+    partly quoted. A word that is one quoted string is not expanded by the shell."""
     tokens = _lex(_strip_comment(norm))
     if tokens is None:
         return "{" in norm and _brace_list(norm)
-    return any(not t.op and not t.quoted and "{" in t.value and _brace_list(t.value) for t in tokens)
+    return any(
+        not t.op
+        and "{" in t.value
+        and not (t.quoted and not t.mixed)  # a word that is one quoted string is not brace-expanded
+        and (t.mixed or _brace_list(t.value))  # a partly quoted word still may be: any brace in it counts
+        for t in tokens
+    )
 
 
 def _brace_word_risk(low: str) -> bool:
@@ -773,7 +781,7 @@ def _risk_line(norm: str, low: str) -> bool:
     brace = _has_brace_word(norm)
     if (word or brace) and _expansion_at_command(norm):
         return True
-    if _RISK_FLAG.search(low) and _expansion_past_first_word(norm):
+    if (_RISK_FLAG.search(low) or brace) and _expansion_past_first_word(norm):
         return True
     return word and bool(_SHELL_C.search(low) and _DOLLAR.search(norm))
 

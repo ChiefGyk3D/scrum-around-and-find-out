@@ -540,6 +540,9 @@ BRACED = {
     "a sequence expression": "$BIN $SUB ask --{p..p}aid --model m\n",
     "nested braces": "$BIN $SUB ask --{{p,q},un}aid --model m\n",
     "braces after an option fragment": "$BIN $SUB ask --pa{id,xx} --model m\n",
+    "a quoted part and an unquoted list": "$BIN $SUB ask --'p'{aid,xx} --model m\n",
+    "a double-quoted prefix": '$BIN $SUB ask "--"{p,un}aid --model m\n',
+    "quotes inside a built word": '$BIN $SUB ask --"pa"{id,xx} --model m\n',
 }
 
 
@@ -552,11 +555,12 @@ def test_a_risk_token_built_by_brace_expansion_is_seen(name: str, tmp_path: Path
 
 
 def test_braces_are_judged_without_building_any_word_and_the_false_blocks_are_the_documented_ones() -> None:
-    assert rules("echo {a,b}\ndocker run --cap-{add,drop}=NET_ADMIN $IMAGE\n") == []
+    assert rules("echo {a,b}\ndocker run --cap-add=NET_ADMIN $IMAGE\n") == []
     assert rules("echo ${HOME} ${X:-a,b}\n") == []
     assert rules('$BIN $SUB ask now "--{p,un}aid"\n') == [], "a quoted word is not brace-expanded by the shell"
-    # documented false block: a brace list on a line whose command is an expansion
+    # documented false blocks: a brace list beside an expansion past the first word, or as the command
     assert GEMINI_PAID in rules("$BIN $SUB ask --{a,b}ccount\n")
+    assert GEMINI_PAID in rules("docker run --cap-{add,drop}=NET_ADMIN $IMAGE\n")
 
 
 # -- round ten: nothing is enumerated, so nothing can be exhausted or silently cut ------------------------------------
@@ -586,3 +590,51 @@ def test_a_parameter_expansion_is_not_a_brace_list_and_a_long_brace_word_is_neve
     assert _brace_word_risk("--" + "x" * 5000 + "{") is True, "past the length bound it is a marker, never silently cut"
     assert _brace_word_risk("--x{") is False
     assert _brace_word_risk("echo {a,b}") is False
+
+
+# -- round eleven: mixed quoting, braces behind a wrapper, and ${...} inside a list ---------------------------------
+
+BRACED_WRAPPED = {
+    "env -u": "env -u FOO $BIN $SUB ask --{p,un}aid --model m\n",
+    "time -p": "time -p $BIN $SUB ask --{p,un}aid --model m\n",
+    "nohup": "nohup $BIN $SUB ask --{p,un}aid --model m\n",
+    "nice": "nice -n 5 $BIN $SUB ask --{p,un}aid --model m\n",
+    "a quoted wrapper": '"env" -u FOO $BIN $SUB ask --{p,un}aid --model m\n',
+    "a backslashed wrapper": "\\env -u FOO $BIN $SUB ask --{p,un}aid --model m\n",
+    "a wrapper by path": "/usr/bin/env -u FOO $BIN $SUB ask --{p,un}aid --model m\n",
+    "an assignment before the wrapper": "X=1 env -u FOO $BIN $SUB ask --{p,un}aid --model m\n",
+}
+BRACED_WRAPPED_GUARD_ONLY = {
+    "command -p": "command -p $BIN $SUB ask --{p,un}aid --model m\n",
+    "timeout": "timeout 5 $BIN $SUB ask --{p,un}aid --model m\n",
+    "xargs -n1": "echo x | xargs -n1 $BIN $SUB ask --{p,un}aid --model m\n",
+    "eval --": "eval -- $BIN $SUB ask --{p,un}aid --model m\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(BRACED_WRAPPED))
+def test_a_brace_built_risk_token_behind_a_wrapper_is_blocked(name: str, tmp_path: Path) -> None:
+    from safo.geminibrief import relevant
+
+    assert stub_runs(BRACED_WRAPPED[name], tmp_path, BUILT_ENV), "the case is real"
+    assert relevant(BRACED_WRAPPED[name]) and GEMINI_PAID in rules(BRACED_WRAPPED[name] + PUBLIC), name
+
+
+@pytest.mark.parametrize("name", sorted(BRACED_WRAPPED_GUARD_ONLY))
+def test_a_brace_built_risk_token_behind_other_wrappers_is_blocked(name: str) -> None:
+    from safo.geminibrief import relevant
+
+    text = BRACED_WRAPPED_GUARD_ONLY[name]
+    assert relevant(text) and GEMINI_PAID in rules(text + PUBLIC), name
+
+
+def test_the_brace_scanner_keeps_parameter_expansions_apart_from_lists() -> None:
+    from safo.geminibrief import _brace_list
+
+    assert _brace_list("${X:-a,b}") is False
+    assert _brace_list("${X:-a,b}{p,q}") is True, "a real list after a parameter expansion"
+    assert _brace_list("{p,q}${X:-a,b}") is True
+    assert _brace_list("{a,${X}}") is True, "a list wrapping a parameter expansion"
+    assert _brace_list("{a${X:-b,c}}") is False, "a comma inside ${...} does not make the outer braces a list"
+    assert _brace_list("${X}{a}") is False and _brace_list("{a}") is False
+    assert _brace_list("{a..b}") is True and _brace_list("${X:-a..b}") is False

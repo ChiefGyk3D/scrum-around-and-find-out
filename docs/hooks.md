@@ -224,7 +224,10 @@ that must pass the strict check:
   the brief relevant and unreadable. On a line with `--paid`, `--approval`, `--cap` or `approve` followed by an option, **any expansion after the first word of
   the command** makes the line unreadable (NAME=value words before the command are skipped), so no wrapper (`env`, `time`,
   `nohup`, a quoted, backslashed or path-named one) needs to be named or tracked. A brace expansion that bash would perform
-  (`{a,b}` or `{x..y}`, nested too, unquoted, never `${...}`) counts as a possible risk token: no word is built or
+  (`{a,b}` or `{x..y}`, nested too, never `${...}`, whose commas and closing brace belong to it alone) counts as a
+  possible risk token, and so does any brace in a word that is only partly quoted (a word that is one quoted string is
+  not expanded by the shell). A brace expansion also makes an expansion after the first word of the command unreadable, as
+  a risk flag does: no word is built or
   enumerated, the line is only scanned once, and a line past the length bound is judged by its marks without being cut. So words built by substitutions, interpreters, `tr`, `awk`, `sed`, a sourced file
   or the environment are caught when the action or flag stands on the page. An expansion that nothing in the
   brief assigned, as the command word or on a line with a Gemini option, blocks when the brief names both `safo` and
@@ -236,7 +239,7 @@ that must pass the strict check:
   Escape-built words make a brief relevant on their own. The false blocks this adds, by design: a brief that names the
   Gemini surface and runs a command through a variable it assigned; a brief with escape sequences that does so; a
   command segment with the word `gemini` and any `$` expansion, even in prose; any brace expansion on a line whose command
-  is an expansion (`$BIN ask --{a,b}ccount`); a line with `--paid`, `--approval`, `--cap` or `approve --...` and an
+  is an expansion (`$BIN ask --{a,b}ccount`) or that has an expansion in an argument (`docker run --cap-{add,drop}=X $IMAGE`); a line with `--paid`, `--approval`, `--cap` or `approve --...` and an
   expansion in any argument (`deploy $X --paid`); a line that starts with an expansion and
   carries `--paid`, `--approval`, `--cap` or the word `approve`; a comment that holds `$`, a backtick, `;`, `|` or `&`
   (read as code); and **here-documents**: their bodies are read like any other lines and are not skipped, because a
