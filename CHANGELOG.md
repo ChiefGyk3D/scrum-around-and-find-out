@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Threat model for SAFO as a whole (#228): `docs/safo-threat-model.md` (assets, actors, trust boundaries, 25 ranked risks,
+  each with a mitigation marked verified or inferred, a verification and a residual risk) and the OWASP Threat Dragon file
+  `docs/threat-model/safo.threat-dragon.json`. The paid Gemini broker keeps its own model. Linked from the README, the wiki
+  home and `docs/threat-model.md`; the wiki page is `Safo-threat-model`. `tests/test_safo_threat_model.py` keeps the page,
+  the file, the links and the named tests in step.
 - Docs: the design and threat model for the Gemini paid-path broker (#205): a small unprivileged system service behind a
   socket unit that holds the paid key, the approval consumption records and the spend ledger, verifies the signed
   approval and makes the vendor call, with image generation as the first case. Documents only; no broker code, and

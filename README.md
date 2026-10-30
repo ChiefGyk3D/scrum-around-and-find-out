@@ -26,7 +26,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | Python scaffold, CI on git-your-ship-together, repository files, `scripts/apply-baseline.sh` | Built, merged on `main` |
 | GraphQL client (refuses redirects; never replays a mutation whose outcome is unknown), `board.yaml` schema and validator | Built, merged on `main` |
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
-| `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App token, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
+| `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App installation token on the App credential path, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
 | `agents-status` (the board, Codex, Copilot and the routing-guard counts in one read-only view) | Built, merged on `main` and released in v0.1.0 |
 | `usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built, merged on `main` and released in v0.1.0 |
 | `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built, merged on `main` and released in v0.1.0 |
@@ -83,6 +83,14 @@ a same-user process from an earlier step can mutate the Action's venv or read cr
 
 The approval token that `safo hooks` checks is a speed bump, not proof that the maintainer said yes: a prompt-injected
 model can write it. The other accepted residuals are listed in [docs/limits.md](docs/limits.md).
+
+## Threat model
+
+SAFO has a threat model as a whole: assets, actors, trust boundaries, 25 ranked risks, and a mitigation, a verification and
+a residual risk for each, with each control marked verified or inferred. Read it in
+[docs/safo-threat-model.md](docs/safo-threat-model.md); the OWASP Threat Dragon file is
+[docs/threat-model/safo.threat-dragon.json](docs/threat-model/safo.threat-dragon.json). The paid Gemini path has its own model in
+[docs/gemini-broker-threat-model.md](docs/gemini-broker-threat-model.md). The rule that requires a model is [docs/threat-model.md](docs/threat-model.md).
 
 ## Routing
 
@@ -171,6 +179,7 @@ replaced are gone.
 - [Gemini broker](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker)
 - [Gemini broker threat model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker-threat-model)
 - [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
+- [Safo-threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Safo-threat-model)
 - [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)
 - [Review-loop](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Review-loop)
 - [Personas](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Personas)

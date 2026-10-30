@@ -12,6 +12,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
 - [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
 - [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
+- [SAFO threat model](safo-threat-model.md): the threat model of SAFO as a whole: assets, actors, trust boundaries, 25 ranked risks, a mitigation and a verification for each, and what SAFO does not guarantee.
 - [Gemini](gemini.md): the free-only provider for public material, and the approval gate on every paid call.
 - [Gemini keys](gemini-keys.md): enrolling, rotating, backing up and revoking the security keys that sign paid approvals.
 - [Gemini passkeys](gemini-passkeys.md): the opt-in passkey tier: real ES256 and EdDSA verification (optional `safo[passkeys]` extra); enrollment and approval wiring not built.

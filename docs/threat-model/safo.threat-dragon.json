@@ -1,0 +1,981 @@
+{
+  "version": "2.6.2",
+  "summary": {
+    "title": "SAFO threat model",
+    "owner": "ChiefGyk3D",
+    "description": "Threat model of Scrum Around and Find Out as a whole: the board-as-code Action, agent routing and the usage meter, the dispatch guard and hooks, handoff evidence and profiles, writes to GitHub, the install path, GitHub text as untrusted input, guard-file policy, configuration sync and local model routing. The paid Gemini broker is modeled in docs/gemini-broker-threat-model.md and not repeated. Drawn from the repository code and docs; a draft for the maintainer and a cyber-tier review, not an audit."
+  },
+  "detail": {
+    "contributors": [],
+    "diagrams": [
+      {
+        "id": 0,
+        "title": "SAFO data flow",
+        "diagramType": "STRIDE",
+        "cells": [
+          {
+            "id": "tb-public",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "Public GitHub content to agents",
+              "description": "Issue, pull request and comment text is written by anyone and read by models and by SAFO."
+            },
+            "position": {
+              "x": 20,
+              "y": 20
+            },
+            "size": {
+              "width": 330,
+              "height": 560
+            }
+          },
+          {
+            "id": "tb-user",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "The maintainer's account and laptop",
+              "description": "Agents and the guard share one user id: files, settings, `gh` login."
+            },
+            "position": {
+              "x": 380,
+              "y": 20
+            },
+            "size": {
+              "width": 560,
+              "height": 560
+            }
+          },
+          {
+            "id": "tb-runner",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "The CI job (Action)",
+              "description": "The job that holds the App key or token versus anything else that runs in or before it."
+            },
+            "position": {
+              "x": 970,
+              "y": 20
+            },
+            "size": {
+              "width": 300,
+              "height": 260
+            }
+          },
+          {
+            "id": "tb-lan",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "The local model server",
+              "description": "Prompts leave the laptop for a LAN host that also serves production services."
+            },
+            "position": {
+              "x": 970,
+              "y": 300
+            },
+            "size": {
+              "width": 300,
+              "height": 140
+            }
+          },
+          {
+            "id": "tb-upstream",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "Upstream releases",
+              "description": "Package index, Actions, GYST workflows, DoIA releases, install sources."
+            },
+            "position": {
+              "x": 20,
+              "y": 600
+            },
+            "size": {
+              "width": 560,
+              "height": 140
+            }
+          },
+          {
+            "id": "tb-sync",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "Private configuration sync and public publishing",
+              "description": "Files that leave the laptop for a private remote, and docs that leave for the public wiki."
+            },
+            "position": {
+              "x": 600,
+              "y": 600
+            },
+            "size": {
+              "width": 670,
+              "height": 140
+            }
+          },
+          {
+            "id": "a-outsider",
+            "shape": "actor",
+            "data": {
+              "name": "An outside contributor",
+              "description": "Opens issues, pull requests and comments; a fork pull request; no secrets, no write access.",
+              "threats": []
+            },
+            "position": {
+              "x": 60,
+              "y": 80
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "a-github",
+            "shape": "actor",
+            "data": {
+              "name": "GitHub itself",
+              "description": "Outage, rate limits, secondary limits, API or schema changes.",
+              "threats": []
+            },
+            "position": {
+              "x": 60,
+              "y": 300
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "e-github",
+            "shape": "actor",
+            "data": {
+              "name": "GitHub API and public content",
+              "description": "Issues, pull requests, comments, Projects, branch protection, rate limits.",
+              "threats": [
+                {
+                  "id": "t-s13",
+                  "number": 13,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S13: GitHub rate limits and outages stall the board, audits and lookups",
+                  "description": "Asset at risk: availability of the board, the audits and the guard's lookups. Actor class: none; ordinary heavy use. Consequence: work stalls or, in `block` mode, a dispatch is denied. Prerequisites: Actor class: none needed. Rank 16. Tracking: #204.",
+                  "mitigation": "Partial. Controls: [V] The client honors retry-after, the primary reset and secondary-limit or abuse messages with bounded attempts, then raises RateLimitedError (src/safo/graphql.py). [V] Pagination stops at 1000 pages and a response over 32 MiB is refused unread (graphql.py). [V] The guard's lookup has a deadline; an unanswered lookup is denied in `block` mode and a warning in `warn` (docs/no-hidden-work.md). [V] Redirects are refused, so a limit response cannot move the token to another host (graphql.py; tests/test_graphql.py). Verification: tests/test_graphql.py; tests/test_graphql_body_cap.py. Residual: Open. Owner: the maintainer. Tracked in #204. SAFO guarantees only the statements listed under Mitigation."
+                },
+                {
+                  "id": "t-s14",
+                  "number": 14,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S14: GitHub behavior or schema changes and a check's answer",
+                  "description": "Asset at risk: the assurance the checks give. Actor class: GitHub, by changing its behavior. Consequence: a check could report a pass when it should say it cannot tell. Prerequisites: Actor class: a change on GitHub's side. Rank 17. Tracking: #238.",
+                  "mitigation": "Partial. Controls: [V] Fields are read strictly: an absent, null or mistyped field is exit 2 'cannot tell', never exit 0 (docs/adoption.md; tests/test_malformed_nodes.py, test_items_strict.py, test_protection.py). [V] A response that is not JSON, is truncated or is oversized is an error, and a mutation answer that is not understood is an unknown outcome (tests/test_graphql_framing.py). [V] `protection` reads everything twice and exits 2 on any difference (docs/adoption.md). Verification: tests/test_malformed_nodes.py; tests/test_items_strict.py; tests/test_protection.py; tests/test_graphql_framing.py. Residual: Open. Owner: the maintainer. Tracked in #238. SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            },
+            "position": {
+              "x": 60,
+              "y": 440
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "a-maint",
+            "shape": "actor",
+            "data": {
+              "name": "The maintainer",
+              "description": "Holds every approval and every merge. Can make mistakes: a slip, a tired touch.",
+              "threats": []
+            },
+            "position": {
+              "x": 410,
+              "y": 60
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "a-agent",
+            "shape": "actor",
+            "data": {
+              "name": "The maintainer's own agents, including a prompt-injected one",
+              "description": "Run commands as the maintainer's account, read untrusted text, write briefs, comment through the maintainer's identity.",
+              "threats": []
+            },
+            "position": {
+              "x": 410,
+              "y": 200
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "a-token",
+            "shape": "actor",
+            "data": {
+              "name": "A compromised GitHub token, or another process on the same account",
+              "description": "Acts with the token's scope or the account's file permissions.",
+              "threats": []
+            },
+            "position": {
+              "x": 410,
+              "y": 340
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "a-lanserver",
+            "shape": "actor",
+            "data": {
+              "name": "A compromised or LAN-adjacent model server",
+              "description": "Reads prompts it is sent, answers probes, returns output it chose, claims any model name.",
+              "threats": []
+            },
+            "position": {
+              "x": 1000,
+              "y": 460
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "p-guard",
+            "shape": "process",
+            "data": {
+              "name": "Dispatch guard and hooks",
+              "description": "safo-guard: PreToolUse on Agent, Task and Bash; SessionStart probe. A speed bump and an audit trail.",
+              "threats": [
+                {
+                  "id": "t-s04",
+                  "number": 4,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S04: The approval token and the routing rules rest on model-written text",
+                  "description": "Asset at risk: model-tier spend and routing discipline. Actor class: a prompt-injected or careless agent. Consequence: a dispatch goes ahead that a person did not approve. Prerequisites: Actor class: an agent that writes a brief. Rank 7. Tracking: #81.",
+                  "mitigation": "Partial. Controls: [V] `block` mode makes forgetting visible, and an unrecognized or `inherit` model needs the token (docs/hooks.md rule 1). [V] The log records the model as `unknown`, never the value sent, and never the brief (docs/hooks.md, What is stored). [V] Paid Gemini spend does not depend on the token: it needs a hardware-key signature (docs/gemini.md). Verification: tests/test_guard.py; tests/test_hooks.py; `safo hooks status` shows the mode and the retained counts. Residual: Open. Owner: the maintainer. Tracked in #81. SAFO guarantees only the statements listed under Mitigation. The token is a speed bump and not proof of approval (docs/hooks.md)."
+                },
+                {
+                  "id": "t-s08",
+                  "number": 8,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S08: Guard enforcement: error, timeout and the limits of a text scanner",
+                  "description": "Asset at risk: the guard's rules (waiting, vendor-API use, tracking). Actor class: an agent that writes shell commands. Consequence: a rule does not apply to a call. Prerequisites: Actor class: an agent with shell access. Rank 10. Tracking: #130, #188.",
+                  "mitigation": "Partial. Controls: [V] The decision is computed and written first, on one clock that starts at process start, with a margin before the host timeout (docs/hooks.md, Failing safe; tests/test_guard_emit_first.py). [V] Every degraded allow prints a fixed visible notice and writes an enum-only log record (docs/hooks.md). [V] The Gemini rules keep running when agents.yaml cannot be loaded, and an event too large or incomplete to check is denied (docs/hooks.md). [V] A shell command over 64 KiB, or a check that runs out of time, is denied; constructs the scanner will not guess at have their own verdicts that `block` mode denies (docs/hooks.md). [V] A slow mode file is judged in `block` (docs/hooks.md). [V] The documented limits each have a test that asserts exactly what is allowed (docs/hooks.md, Known limits). Verification: tests/test_guard_emit_first.py, test_guard_entry.py, test_guardlog_timeout.py, test_leadwait.py, test_leadwait_bash.py, test_gemini_bash.py, test_gemini_hook_errors.py. Residual: Open. Owner: the maintainer. Tracked in #130, #188. SAFO guarantees only the statements listed under Mitigation. The real gates sit in the wrapper, branch protection and the host."
+                }
+              ]
+            },
+            "position": {
+              "x": 640,
+              "y": 120
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "p-router",
+            "shape": "process",
+            "data": {
+              "name": "Routing, usage meter and local modes",
+              "description": "route, usage, outcome, local run, status headline.",
+              "threats": [
+                {
+                  "id": "t-s20",
+                  "number": 20,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Tampering",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S20: Usage meter or outcomes log inputs are not independent evidence",
+                  "description": "Asset at risk: routing and promotion decisions. Actor class: a process of the maintainer's account. Consequence: a worse routing choice, which a person reviews. Prerequisites: Actor class: a process of the maintainer's account. Rank 23. Tracking: none needed (accepted).",
+                  "mitigation": "Partial. Controls: [V] The meters read through bounded readers and skip a half-written last line (the meters in src/safo/meters use the readers in src/safo/bounded.py; docs/usage.md). The exact caps were not enumerated for this model. [V] Unknown headroom never blocks a route and is printed (docs/usage.md). [V] The outcomes log is validated, kept in a private directory, and promotion counts are a speed bump (docs/limits.md). Verification: tests/test_meters.py; tests/test_outcomes.py; tests/test_usage_mode.py. Residual: Same-user forgery is not defended (S02). The effect is a worse routing choice, which a person reviews. Accepted."
+                }
+              ]
+            },
+            "position": {
+              "x": 640,
+              "y": 260
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "p-handoff",
+            "shape": "process",
+            "data": {
+              "name": "Handoff evidence and profiles",
+              "description": "handoff check, profiles verify and render, profiles brief.",
+              "threats": [
+                {
+                  "id": "t-s07",
+                  "number": 7,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S07: Handoff evidence: whether a review report matches the current head and its author",
+                  "description": "Asset at risk: the merge decision. Actor class: an agent commenting through the maintainer's account, or an ordinary later push. Consequence: a pull request looks reviewed when it was not reviewed at its current head. Prerequisites: Actor class: comment rights as the maintainer's account, or any push after a review. Rank 9. Tracking: #106, #160.",
+                  "mitigation": "Partial. Controls: [V] Only OWNER, MEMBER and COLLABORATOR comments count; only reviewing roles count (src/safo/modes/handoff.py). [V] The report is read from GitHub's rendered HTML and only from top-level paragraphs (docs/handoff.md). [V] Freshness needs proof of when the head arrived; without it the answer is unknown, and equal timestamps are unknown (docs/handoff.md). [V] The pull request is read twice and a change between reads is unknown, never fresh (docs/handoff.md). [V] The output says a report names the head; it never says the work was approved (docs/limits.md). Verification: tests/test_handoff_check.py, test_handoff_html.py, test_handoff_timeline.py, test_handoff_snapshot.py, test_handoff_strict.py. Residual: Open. Owner: the maintainer. Tracked in #106, #160. SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            },
+            "position": {
+              "x": 640,
+              "y": 400
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "s-guardfiles",
+            "shape": "store",
+            "data": {
+              "name": "Guard files and settings",
+              "description": "agents.yaml and override, mode file, probe state, decision log, settings.json, personas.",
+              "threats": [
+                {
+                  "id": "t-s02",
+                  "number": 2,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S02: Guard files, state and hook wiring share an account with the agents the guard governs",
+                  "description": "Asset at risk: the guard's configuration, state and hook wiring. Actor class: an agent or process running as the maintainer's account. Consequence: tool abuse by that account could change what the guard enforces. The guard is a speed bump and an audit trail, not a boundary (docs/hooks.md). Prerequisites: Actor class: a process of the maintainer's account. Rank 2. Tracking: #61, #130, #231.",
+                  "mitigation": "Partial. Controls: [V] SAFO creates its state and config directories 0700 and degrades visibly when one is not owned by the user or is group or world writable (src/safo/guardlog.py; docs/hooks.md, What is stored). [V] A private agents file must be a regular file owned by the user, with no link on the way and no group or world write above it (src/safo/trust.py). [V] `safo hooks install` keeps a private backup and re-checks the settings file's identity before the replace (docs/hooks.md). [V] Under Actions an agents file or log inside the workspace is refused (docs/hooks.md, Where the local files may live). [V] CODEOWNERS names the maintainer for agents.yaml, the persona paths and the generator (.github/CODEOWNERS). Verification: tests/test_trusted_regular_file.py; tests/test_hooks_dirs.py; tests/test_localfiles_boundary.py; `safo hooks status` shows the installed form and health. Residual: Open. Owner: the maintainer. Tracked in #61, #130, #231. SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            },
+            "position": {
+              "x": 640,
+              "y": 500
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "s-secrets",
+            "shape": "store",
+            "data": {
+              "name": "Credentials",
+              "description": "The stored gh login, secret-store entries, the App key.",
+              "threats": [
+                {
+                  "id": "t-s03",
+                  "number": 3,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S03: The maintainer's stored GitHub login is broad and shared with the account's processes",
+                  "description": "Asset at risk: the maintainer's GitHub repositories and organizations. Actor class: a process running as the maintainer's account. Consequence: calls are made with more authority than SAFO needs. Prerequisites: Actor class: a process of the maintainer's account, or theft of the login. Rank 3. Tracking: #82, #232.",
+                  "mitigation": "Partial. Controls: [V] Under GitHub Actions SAFO never runs `gh`; the credentials are the inputs the caller passes (src/safo/credentials.py). [V] SAFO finds `gh` only on absolute PATH entries outside the checkout and strips ambient token variables from the child (credentials.py). [V] The CLI never asks for a broader scope on the user's behalf (docs/usage.md). [V] On the App credential path SAFO mints a one-hour installation token with named permissions; the personal-token path is caller-scoped and is covered by S24 (action.yml). Verification: tests/test_credentials.py; tests/test_gh_token.py; tests/test_cli_credentials.py. Residual: Open. Owner: the maintainer. Tracked in #82, #232. SAFO guarantees only the statements listed under Mitigation."
+                },
+                {
+                  "id": "t-s24",
+                  "number": 24,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S24: The caller-supplied personal access token path of the Action",
+                  "description": "Asset at risk: the repositories and board the token can reach. Actor class: a caller who supplies a token, or whoever obtains it. Consequence: the token's own authority and lifetime apply, and SAFO does not narrow them. Prerequisites: Actor class: a caller using the token input, plus a leak of the token or a broad grant. Rank 6. Tracking: #242.",
+                  "mitigation": "Partial. Controls: [V] A personal access token is refused for an organization-owned board unless `allow-token-for-org` is true (src/safo/credentials.py); a token and an App key together are refused (src/safo/action_preflight.py). [V] The token is masked before use and never printed (src/safo/action_mask.py, src/safo/credentials.py). [V] The named App permissions, the one-hour lifetime and the repository limit describe the App credential path only; the personal-token path is caller-scoped. Verification: tests/test_credentials.py; tests/test_cli_credentials.py; tests/test_preflight.py. Residual: Open. Owner: the maintainer. Tracked in #242. SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            },
+            "position": {
+              "x": 410,
+              "y": 480
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "p-action",
+            "shape": "process",
+            "data": {
+              "name": "Action and board modes",
+              "description": "validate, bootstrap, audit, sync, reconcile, status, protection. Mints a one-hour App token.",
+              "threats": [
+                {
+                  "id": "t-s05",
+                  "number": 5,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S05: Action credentials and the caller's workflow: data leakage of the Action's credentials",
+                  "description": "Asset at risk: the Action's credentials. Actor class: an outside contributor or a dependency of the caller's workflow. Consequence: the credentials are exposed, or a write is steered by untrusted content. Prerequisites: Actor class: an outside contributor or a compromised dependency; the exposure depends on how the caller wires the workflow. Rank 4. Tracking: #236, ChiefGyk3D/git-your-ship-together#251.",
+                  "mitigation": "Partial. Controls: [V] On the plain `pull_request` event, for a fork's pull request, the preflight refuses a literal key, a token input and a secret-store fetch (src/safo/action_preflight.py). SAFO makes no other claim about the trigger or the caller's workflow. [V] Every credential is masked before use, one line at a time, and the masking command prints no value (src/safo/action_mask.py). [V] On the App credential path SAFO mints a one-hour installation token with named permissions (action.yml); the personal-token path is caller-scoped and is covered by S24. [V] SAFO installs into a fresh hash-pinned venv, runs isolated Python and checks the venv before and after (action.yml, src/safo/venv_check.py). [V] The local modes are refused before anything is minted (action_preflight.py). [V] Inputs reach the shell only through environment variables, and every action in this repository is pinned by commit (action.yml, .github/workflows). Verification: tests/test_action.py (the fork case), tests/test_preflight.py, tests/test_mask.py, tests/test_venv_check.py, tests/test_action_isolation.py, tests/test_workflows.py. Residual: Open. Owner: the maintainer. Tracked in #236, ChiefGyk3D/git-your-ship-together#251. SAFO guarantees only the statements listed under Mitigation."
+                },
+                {
+                  "id": "t-s12",
+                  "number": 12,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S12: Board writes: where the board file and the events come from",
+                  "description": "Asset at risk: the Project board and its cards. Actor class: an outside contributor or a misconfigured caller. Consequence: a write the maintainer did not intend. Prerequisites: Actor class: a contributor whose change is merged, or a caller that is wired loosely. Rank 5. Tracking: #236.",
+                  "mitigation": "Partial. Controls: [V] The loader refuses duplicate keys, anchors, aliases, merge keys, files over 1 MiB and nesting over 64, and caps every list (docs/board-yaml.md). [V] The board file and the status file must resolve to a path inside the workspace (src/safo/action_preflight.py). [V] `sync` treats the event payload as a pointer, reads the live state and writes nothing when they contradict (docs/board-yaml.md). [V] `reconcile` and `sync` write only what a rule can decide and print the rest as `HUMAN` lines; `bootstrap` never edits an existing field's options (docs/no-hidden-work.md, docs/adoption.md). [V] A dry run sends no mutation. On the App path the minted token has read-only Projects permission; a caller-supplied personal token retains its existing authority (src/safo/graphql.py, action.yml). [V] `safo protection` checks that board.yaml and CODEOWNERS have an owner (docs/adoption.md). [V] Adoption asks for the App to be installed on selected repositories only (docs/adoption.md). Verification: tests/test_schema.py, test_duplicate_keys.py, test_schema_caps.py, test_sync.py, test_reconcile.py, test_bootstrap.py, test_codeowners_check.py. Residual: Open. Owner: the maintainer. Tracked in #236. SAFO guarantees only the statements listed under Mitigation."
+                },
+                {
+                  "id": "t-s15",
+                  "number": 15,
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S15: Persona, template, agents.yaml or promotion evidence is changed to steer agents",
+                  "description": "A pull request, or a write to the local override, changes the text that is rendered into the instruction files agents obey, or adds plausible outcome records so a profile is promoted. Prerequisites: A merged pull request with the owner's review, or write access to the local files (S02). Rank 18. Tracking: none needed (accepted residual in docs/limits.md).",
+                  "mitigation": "Controls: [V] CODEOWNERS covers agents.yaml, the generated harness files, personas, templates, lessons and the generator; `safo profiles verify` fails when one of those has no owner (.github/CODEOWNERS; docs/profiles.md). [V] Profile text runs through text rules, a phrase tripwire and a private-path check, and the generated diff is read by a person (docs/limits.md). [V] Render digests show a stale or edited generated file; they are not a signature (docs/limits.md). [V] The profile status stays declared in agents.yaml; promotion counts are a speed bump and the maintainer reads the evidence (docs/limits.md). Verification: tests/test_profiles_verify.py; tests/test_profile_text_rules.py; tests/test_manifest_digest.py; `make generated` fails on drift. Residual: A plausible harmful instruction that passes the tripwire and the review is a human judgement (docs/limits.md). Reopen when a profile line is found to have steered an agent wrongly."
+                },
+                {
+                  "id": "t-s17",
+                  "number": 17,
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Repudiation",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S17: A write is repeated or its outcome is guessed after an ambiguous failure",
+                  "description": "A connection drops after a mutation was sent, and the client resends it or reports success, which duplicates a card or hides a failed write. Prerequisites: A network fault or a rate-limit response at the wrong moment. Rank 20. Tracking: none needed (mitigated).",
+                  "mitigation": "Controls: [V] Once a mutation has gone out it is never replayed; an ambiguous result raises UnknownOutcomeError and says to re-read state (src/safo/graphql.py, src/safo/mutation.py). [V] A reply with no written object id is an unknown outcome (mutation.py). Verification: tests/test_graphql.py::test_a_mutation_that_commits_then_drops_connection_raises_unknown_outcome and the null-payload cases. Residual: The caller must re-read before retrying; `status --post` notes that an unknown outcome cannot be verified automatically (docs/board-yaml.md)."
+                },
+                {
+                  "id": "t-s18",
+                  "number": 18,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Repudiation",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S18: Process rules are satisfied by form and not substance (issue line, threat-model line, linked issue)",
+                  "description": "Asset at risk: the meaning of the process checks. Actor class: an author of a brief, issue or pull request. Consequence: a presence check passes without the thing it stands for. Prerequisites: Actor class: authorship of a brief, issue or pull request. Rank 21. Tracking: none needed (accepted).",
+                  "mitigation": "Partial. Controls: [V] A brief's issue must be in the listed tracking repositories and be open; an unrelated open issue does not satisfy the rule (docs/no-hidden-work.md). [V] `audit` states it does not open the model file or judge the reason; a person reads them (docs/threat-model.md). [V] The branch gate checks that the default branch requires `CI green`, pinned to the CI app (docs/no-hidden-work.md). Verification: tests/test_tracking.py; tests/test_no_hidden_work.py; tests/test_threatmodel.py; tests/test_branch_gate.py. Residual: These checks make absence visible; they cannot judge truth. Accepted."
+                },
+                {
+                  "id": "t-s19",
+                  "number": 19,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Spoofing",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S19: The protection read-back certifies a state that did not hold at one instant",
+                  "description": "Asset at risk: the assurance the protection read-back gives. Actor class: someone with administrator rights on the repository. Consequence: the read-back reports a state that did not hold at one instant. Prerequisites: Actor class: administrator rights on the repository. Rank 22. Tracking: none needed (accepted).",
+                  "mitigation": "Partial. Controls: [V] The read is repeated in a different order and any difference is exit 2; the exit-0 output says it is not an instant (docs/adoption.md). [V] An unpinned required check prints a NOTE, and `--require-app-id` makes the pin a condition (docs/adoption.md). [V] The baseline script prints commands in plan mode and an agent never applies it (README.md, scripts/apply-baseline.sh). Verification: tests/test_protection.py; tests/test_apply_baseline.py; tests/test_branch_gate_source.py. Residual: Anyone who can change the protection can defeat the check (docs/adoption.md). Accepted."
+                },
+                {
+                  "id": "t-s21",
+                  "number": 21,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Repudiation",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S21: This threat model goes stale because SAFO's own CI does not run the Threat Dragon check",
+                  "description": "A prompt, agent config or guard change merges with no change to the model, because the shared check is not wired into this repository's CI. Prerequisites: None. Ordinary drift. Rank 24. Tracking: #240.",
+                  "mitigation": "Partial. Controls: [V] The GYST `threat-model.yml` workflow exists and checks the file's shape and that it moves with the AI surface (read for this model); this repository does not call it yet (.github/workflows/ci.yml). [V] tests/test_safo_threat_model.py in this repository checks that the model file and this page agree on the risk ids and carry the required fields. Verification: tests/test_safo_threat_model.py; the GYST check run locally against the file (see the pull request). Residual: Until the workflow is called, only the local test and review keep the model current."
+                }
+              ]
+            },
+            "position": {
+              "x": 1000,
+              "y": 70
+            },
+            "size": {
+              "width": 220,
+              "height": 90
+            }
+          },
+          {
+            "id": "e-ollama",
+            "shape": "actor",
+            "data": {
+              "name": "Local model server (Ollama)",
+              "description": "A LAN host that also serves production services.",
+              "threats": [
+                {
+                  "id": "t-s16",
+                  "number": 16,
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S16: A convenience call to the local model evicts a production model",
+                  "description": "`safo local run` or a probe loads a different model or context on a GPU shared with production services. Prerequisites: A routing or configuration mistake. Rank 19. Tracking: #191.",
+                  "mitigation": "Controls: [V] Only allow-listed models are asked for, with exactly the `num_ctx` the resident model is loaded with; protected models are never routed to (docs/local-llm.md). [V] The probe is two read-only GETs and never calls generate (docs/usage.md). Verification: tests/test_ollama.py; tests/test_local_run.py; tests/test_routing.py; tests/test_routing_hostile.py. Residual: When the local server cannot be seen, the lead must stop and ask rather than route around it (#191). Reopen on any eviction of a production model."
+                }
+              ]
+            },
+            "position": {
+              "x": 1000,
+              "y": 330
+            },
+            "size": {
+              "width": 170,
+              "height": 70
+            }
+          },
+          {
+            "id": "e-providers",
+            "shape": "actor",
+            "data": {
+              "name": "Model providers",
+              "description": "Codex, Claude, Copilot, Gemini free tier; the paid path is modeled in docs/gemini-broker-threat-model.md.",
+              "threats": [
+                {
+                  "id": "t-s22",
+                  "number": 22,
+                  "status": "Open",
+                  "severity": "Critical",
+                  "type": "Elevation of privilege",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S22: Paid Gemini spend outside its caps (modeled separately)",
+                  "description": "Asset at risk: the paid Gemini key and spend. Actor class: a prompt-injected agent or an attacker of the broker, as that model describes. Consequence: spend outside approval or caps. The abuse cases are in the broker design's own model and are not repeated here. Prerequisites: Actor class: see that model. Rank 25. Tracking: #205, #217, docs/gemini-broker-threat-model.md.",
+                  "mitigation": "Partial. Controls: [V] Paid use is disabled behind a root-owned switch today, and the guard denies any paid step while it is off (docs/gemini.md). [V] The design-grade model for the broker is [Gemini broker: threat model](gemini-broker-threat-model.md). Verification: See the broker model. Today: tests/test_gemini_paid_switch.py, tests/test_gemini_guard.py. Residual: Open. Owner: the maintainer. Tracked in #205 and #217. Modeled separately; SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            },
+            "position": {
+              "x": 1000,
+              "y": 180
+            },
+            "size": {
+              "width": 220,
+              "height": 70
+            }
+          },
+          {
+            "id": "a-dep",
+            "shape": "actor",
+            "data": {
+              "name": "A compromised dependency, Action or reusable workflow",
+              "description": "Runs inside the Action job, CI or the maintainer's tooling.",
+              "threats": []
+            },
+            "position": {
+              "x": 60,
+              "y": 640
+            },
+            "size": {
+              "width": 220,
+              "height": 70
+            }
+          },
+          {
+            "id": "p-install",
+            "shape": "process",
+            "data": {
+              "name": "Install and update path",
+              "description": "pip or pipx from a source, the hash-locked venv, GYST pins, DoIA release, doctor.",
+              "threats": [
+                {
+                  "id": "t-s06",
+                  "number": 6,
+                  "status": "Open",
+                  "severity": "Critical",
+                  "type": "Tampering",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S06: Supply chain: an upstream release that SAFO runs or installs",
+                  "description": "Asset at risk: the Action's credentials and the maintainer's machine. Actor class: a compromised upstream maintainer or release. Consequence: code runs with the credentials or as the guard. Prerequisites: Actor class: compromise of an upstream release process. Rank 8. Tracking: #216, #162, #163, #165, #233.",
+                  "mitigation": "Partial. Controls: [V] One runtime dependency, hash-locked; the Action and CI install with `--require-hashes` (requirements.txt, action.yml, .github/workflows/ci.yml). [V] GYST workflows and third-party Actions are pinned by commit with the version in a comment (.github/workflows). [V] CI sets the runner egress policy to block in this repository's callers (.github/workflows/ci.yml). [V] The DoIA release is pinned in one place, scripts/doia-tag.txt, and a test fails on any other (docs/personas.md). Verification: `pip install --require-hashes -r requirements.txt` fails on any changed file; tests/test_workflows.py; tests/test_docs.py (the DoIA pin). Residual: Open. Owner: the maintainer. Tracked in #216, #162, #163, #165, #233. SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            },
+            "position": {
+              "x": 320,
+              "y": 640
+            },
+            "size": {
+              "width": 220,
+              "height": 70
+            }
+          },
+          {
+            "id": "s-dotfiles",
+            "shape": "store",
+            "data": {
+              "name": "Private configuration sync",
+              "description": "The maintainer's private configuration repository and its sync tool (not read for this model).",
+              "threats": [
+                {
+                  "id": "t-s11",
+                  "number": 11,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S11: Config sync: private SAFO material pushed to a remote",
+                  "description": "Asset at risk: asset A7 and the maintainer's local configuration. Actor class: the maintainer, by a slip, or a wider-than-intended sync scope. Consequence: a private file leaves the laptop for a hosted remote. Prerequisites: Actor class: the maintainer; no attacker is needed. Rank 15. Tracking: the private config-sync tracker (maintainer-only).",
+                  "mitigation": "Partial. Controls: [V] The rule is written: exploit-level detail stays out of synced configuration trees (docs/security-findings.md); the terms file is never put in a dotfiles repository or a published backup, and `.gitignore` excludes `privacy-terms*` (docs/privacy.md). [I] The sync tool lives outside this repository and was not read for this model, so what it pushes is not stated here. Verification: Nothing in this repository checks it; the check is tracked in the private config-sync tracker (maintainer-only). Residual: Open. Owner: the maintainer. Tracked in the private config-sync tracker (maintainer-only). SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            },
+            "position": {
+              "x": 640,
+              "y": 640
+            },
+            "size": {
+              "width": 220,
+              "height": 70
+            }
+          },
+          {
+            "id": "f-publish-target",
+            "shape": "actor",
+            "data": {
+              "name": "Public repositories and wiki",
+              "description": "Commits, docs, issues, pull requests and the wiki mirror of docs/.",
+              "threats": []
+            },
+            "position": {
+              "x": 1000,
+              "y": 640
+            },
+            "size": {
+              "width": 220,
+              "height": 70
+            }
+          },
+          {
+            "id": "f-text",
+            "shape": "flow",
+            "source": {
+              "cell": "a-outsider"
+            },
+            "target": {
+              "cell": "a-agent"
+            },
+            "data": {
+              "name": "Issue, pull request and comment text",
+              "description": "Attacker-written text read by agents.",
+              "threats": [
+                {
+                  "id": "t-s01",
+                  "number": 1,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S01: Prompt injection: attacker-written text reaches a model that holds tool access",
+                  "description": "Asset at risk: the maintainer's repositories, accounts and agent quota. Actor class: an outside contributor. Consequence: text an outsider wrote influences what an agent does with the maintainer's authority. Prerequisites: Actor class: any contributor to a repository an agent reads. Rank 1. Tracking: #81, #61, #123, #230.",
+                  "mitigation": "Partial. Controls: [V] Handoff evidence reads only comments by an OWNER, MEMBER or COLLABORATOR (src/safo/modes/handoff.py). [V] `safo profiles brief` puts task text between random-id fences and refuses a value that can close its own fence (src/safo/brief.py). It claims structure only. [V] The status headline model sees four counts and no card titles (src/safo/headline.py). [V] `audit` and the threat-model check read single anchored lines, never free text (src/safo/threatmodel.py). [V] Only the maintainer merges; `safo protection` reads back code-owner review and the `CI green` gate (docs/adoption.md). Verification: tests/test_handoff_check.py::test_a_report_from_an_untrusted_author_is_ignored; tests/test_brief_fill.py; tests/test_status_headline.py; `safo protection --repo OWNER/NAME` exits 0. No test can show that a model resists an instruction; none is claimed. Residual: Open. Owner: the maintainer. Tracked in #81, #61, #123, #230. SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            }
+          },
+          {
+            "id": "f-read",
+            "shape": "flow",
+            "source": {
+              "cell": "e-github"
+            },
+            "target": {
+              "cell": "p-handoff"
+            },
+            "data": {
+              "name": "Comments, timeline, branch protection",
+              "description": "Read by handoff, audit and protection.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-brief",
+            "shape": "flow",
+            "source": {
+              "cell": "a-agent"
+            },
+            "target": {
+              "cell": "p-guard"
+            },
+            "data": {
+              "name": "Briefs and shell commands",
+              "description": "Model-written text the guard judges.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-edit",
+            "shape": "flow",
+            "source": {
+              "cell": "a-agent"
+            },
+            "target": {
+              "cell": "s-guardfiles"
+            },
+            "data": {
+              "name": "File writes as the same user",
+              "description": "Not a boundary.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-state",
+            "shape": "flow",
+            "source": {
+              "cell": "p-guard"
+            },
+            "target": {
+              "cell": "s-guardfiles"
+            },
+            "data": {
+              "name": "Guard reads config, writes state and log",
+              "description": "Directory trust checks apply.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-cred",
+            "shape": "flow",
+            "source": {
+              "cell": "s-secrets"
+            },
+            "target": {
+              "cell": "p-action"
+            },
+            "data": {
+              "name": "App key or token into the job",
+              "description": "Masked before use.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-api",
+            "shape": "flow",
+            "source": {
+              "cell": "p-action"
+            },
+            "target": {
+              "cell": "e-github"
+            },
+            "data": {
+              "name": "GraphQL and REST calls",
+              "description": "Redirects refused; mutations never replayed.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-model",
+            "shape": "flow",
+            "source": {
+              "cell": "p-router"
+            },
+            "target": {
+              "cell": "e-ollama"
+            },
+            "data": {
+              "name": "Prompts to the local model",
+              "description": "Endpoints loopback or private LAN only.",
+              "threats": [
+                {
+                  "id": "t-s10",
+                  "number": 10,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S10: Data leakage to a model host: private text sent to a host that should not receive it",
+                  "description": "Asset at risk: private text in briefs and prompts. Actor class: a careless or prompt-injected agent. Consequence: material reaches a third-party service or a host the configuration did not intend. Prerequisites: Actor class: an agent that writes a brief or a prompt file. Rank 12. Tracking: docs/gemini.md, #235.",
+                  "mitigation": "Partial. Controls: [V] Every Gemini step needs `gemini-material: public`; a secret-shaped string or a match for the maintainer's private terms blocks it, in every guard mode (docs/hooks.md, seventh rule). [V] Local endpoint addresses are validated at load and at connect, and a name is resolved once (src/safo/netguard.py). [V] A redirect is an error, so a prompt is never replayed to a host the configuration did not name (src/safo/ollama.py). [V] A URL with credentials is refused; endpoints come from configuration and never from the repository (docs/local-llm.md). Verification: tests/test_netguard.py; tests/test_ollama.py::test_a_redirect_is_never_followed_so_a_prompt_cannot_be_replayed_to_another_host; tests/test_gemini_guard.py; tests/test_local_run.py. Residual: Open. Owner: the maintainer. Tracked in docs/gemini.md, #235. SAFO guarantees only the statements listed under Mitigation."
+                },
+                {
+                  "id": "t-s23",
+                  "number": 23,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S23: Local model server: confidentiality of prompts and integrity of results on the local path",
+                  "description": "Asset at risk: prompt confidentiality and result integrity on the local model path. Actor class: a compromised or LAN-adjacent model server. Consequence: prompts are observed or the output is chosen by someone other than the maintainer. Prerequisites: Actor class: a foothold on the home network or the model server. Rank 13. Tracking: #241.",
+                  "mitigation": "Partial. Controls: [V] Address validation and DNS pinning prevent request forgery and rebinding (src/safo/netguard.py). Endpoint authentication is not among the guarantees. [V] A redirect is an error, so a prompt is never replayed to a host the configuration did not name (src/safo/ollama.py). [V] A URL with credentials is refused; the probe is read-only GETs (docs/local-llm.md, docs/usage.md). Verification: tests/test_netguard.py; tests/test_ollama.py. Residual: Open. Owner: the maintainer. Tracked in #241. SAFO guarantees only the statements listed under Mitigation."
+                },
+                {
+                  "id": "t-s25",
+                  "number": 25,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S25: Local model answer integrity: a local answer applied without review",
+                  "description": "Asset at risk: decisions and documents that use a local answer. Actor class: a model error or a compromised model server. Consequence: a wrong or chosen answer is applied or published. Prerequisites: Actor class: an ordinary model error, or the actor of S23. Rank 14. Tracking: #243.",
+                  "mitigation": "Partial. Controls: [V] Code groups and counts and the model writes prose over a correct structure; a status headline is used only if it is one plain line whose numbers are the computed counts (docs/local-llm.md, src/safo/headline.py). [V] Only field values a reviewer checked are applied from a triage draft (docs/routing.md, issue-triage shape). [V] Review of a local answer before it is applied is a required operating procedure (docs/local-llm.md). Verification: tests/test_status_headline.py; tests/test_local_run.py. Residual: Open. Owner: the maintainer. Tracked in #243. SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            }
+          },
+          {
+            "id": "f-lanserver",
+            "shape": "flow",
+            "source": {
+              "cell": "a-lanserver"
+            },
+            "target": {
+              "cell": "p-router"
+            },
+            "data": {
+              "name": "Replies, probe answers and observed prompts",
+              "description": "Prompts to the local model server and its answers.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-prov",
+            "shape": "flow",
+            "source": {
+              "cell": "a-agent"
+            },
+            "target": {
+              "cell": "e-providers"
+            },
+            "data": {
+              "name": "Briefs to hosted models",
+              "description": "Gemini free tier for public material only.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-publish",
+            "shape": "flow",
+            "source": {
+              "cell": "a-agent"
+            },
+            "target": {
+              "cell": "f-publish-target"
+            },
+            "data": {
+              "name": "Commits, docs, issues, comments",
+              "description": "What reaches the public record.",
+              "threats": [
+                {
+                  "id": "t-s09",
+                  "number": 9,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "modelType": "STRIDE",
+                  "new": false,
+                  "title": "S09: Data leakage: maintainer private identifiers (asset A7) or unfixed-finding detail reach a public artifact",
+                  "description": "Asset at risk: asset A7 and unfixed-finding detail. Actor class: the maintainer or an agent, by a slip. Consequence: private material appears in a public artifact. Prerequisites: Actor class: the maintainer or an agent; no attacker is needed. Rank 11. Tracking: #123, #234.",
+                  "mitigation": "Partial. Controls: [V] tests/test_privacy.py scans docs/, examples/, README.md and agents.yaml for the generic patterns it lists; failures never repeat the matched text. [V] The maintainer's own terms live in a file outside the repository (mode 600) and the test refuses a terms file inside it (docs/privacy.md). [V] Unfixed findings stay in a gitignored local path or a draft advisory; a public issue carries a safe summary (docs/security-findings.md). [V] The guard log never stores a brief or a prompt (docs/hooks.md). Verification: tests/test_privacy.py; `SAFO_PRIVACY_EXTRA_FILE=<terms file> make check` run locally before a push. Residual: Open. Owner: the maintainer. Tracked in #123, #234. SAFO guarantees only the statements listed under Mitigation."
+                }
+              ]
+            }
+          },
+          {
+            "id": "f-upstream",
+            "shape": "flow",
+            "source": {
+              "cell": "a-dep"
+            },
+            "target": {
+              "cell": "p-install"
+            },
+            "data": {
+              "name": "Releases and workflow refs",
+              "description": "Pinned by hash or commit where the repository controls it.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-upstream2",
+            "shape": "flow",
+            "source": {
+              "cell": "a-dep"
+            },
+            "target": {
+              "cell": "p-action"
+            },
+            "data": {
+              "name": "Dependencies and Actions in the Action job",
+              "description": "Hash-locked.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-sync",
+            "shape": "flow",
+            "source": {
+              "cell": "s-guardfiles"
+            },
+            "target": {
+              "cell": "s-dotfiles"
+            },
+            "data": {
+              "name": "Configuration sync",
+              "description": "What is pushed is not verified here.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f-token",
+            "shape": "flow",
+            "source": {
+              "cell": "a-token"
+            },
+            "target": {
+              "cell": "s-secrets"
+            },
+            "data": {
+              "name": "Use of a stolen token or the account's login",
+              "description": "Scope decides the damage.",
+              "threats": []
+            }
+          }
+        ]
+      }
+    ],
+    "diagramTop": 1,
+    "reviewer": "",
+    "threatTop": 25
+  }
+}
