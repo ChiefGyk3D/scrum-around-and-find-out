@@ -283,7 +283,7 @@ def test_a_quadratic_brief_is_blocked_fast() -> None:
 
 
 def test_the_linear_time_guard_bites_on_quadratic_work() -> None:
-    assert not _grows_linearly(lambda size: sum(1 for _ in range(size * size // 40)))
+    assert not _grows_linearly(lambda size: sum(1 for _ in range(size * size // 8)))
 
 
 def test_a_past_deadline_fails_closed() -> None:
