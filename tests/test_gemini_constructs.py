@@ -566,15 +566,36 @@ def test_braces_are_judged_without_building_any_word_and_the_false_blocks_are_th
 # -- round ten: nothing is enumerated, so nothing can be exhausted or silently cut ------------------------------------
 
 
-def test_a_line_with_a_huge_brace_list_is_judged_in_linear_time() -> None:
-    started = time.monotonic()
-    many = "$BIN $SUB ask --{" + ",".join("a" * 10 for _ in range(20000)) + "}paid --model m\n"
+def _grows_linearly(work: Callable[[int], object], small: int = 2500, big: int = 20000) -> bool:
+    """Compare an 8x larger input to a small one on the same machine, so a slow or busy runner
+    cannot fail it (a fixed seconds bound did): linear work costs about 8x, quadratic about 64x."""
+    timings = []
+    for size in (small, big):
+        started = time.monotonic()
+        work(size)
+        timings.append(time.monotonic() - started)
+    return timings[1] < 24 * timings[0] + 0.25
+
+
+def _brace_lines(size: int) -> None:
+    many = "$BIN $SUB ask --{" + ",".join("a" * 10 for _ in range(size)) + "}paid --model m\n"
     assert GEMINI_PAID in rules(many + PUBLIC)
-    nested = "$BIN $SUB ask --" + "{a," * 5000 + "b" + "}" * 5000 + "\n"
+    depth = size // 4
+    nested = "$BIN $SUB ask --" + "{a," * depth + "b" + "}" * depth + "\n"
     assert GEMINI_PAID in rules(nested + PUBLIC)
-    words = "$BIN " + " ".join("{a,b}" * 3 for _ in range(20000)) + " --paid\n"
+    words = "$BIN " + " ".join("{a,b}" * 3 for _ in range(size)) + " --paid\n"
     assert GEMINI_PAID in rules(words + PUBLIC)
-    assert time.monotonic() - started < 8.0
+
+
+def test_a_line_with_a_huge_brace_list_is_judged_in_linear_time() -> None:
+    assert _grows_linearly(_brace_lines)
+
+
+def test_the_linear_time_guard_bites_on_quadratic_work() -> None:
+    def quadratic(size: int) -> None:
+        sum(1 for _ in range(size * size // 40))
+
+    assert not _grows_linearly(quadratic)
 
 
 def test_a_line_past_the_length_bound_that_could_hold_a_risk_token_is_unreadable_not_cut() -> None:

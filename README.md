@@ -38,6 +38,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | No hidden work (the guard needs an open `issue:` in every brief; `audit` finds pull requests with no linked issue and cards missing Kind, Epic, Effort or Area; `reconcile` and `sync` list what needs a human; see [`docs/no-hidden-work.md`](docs/no-hidden-work.md)). The pull request check that fails a pull request with no `Refs #n` is a reusable workflow in git-your-ship-together and is not built here | Built and merged on `main` (#60, issue #54); unreleased, after v0.1.2 |
 | Threat model before build (`audit` and `reconcile` find issues labeled `ai-surface` with no usable `threat-model:` line; a `threat-model` routing shape; see [`docs/threat-model.md`](docs/threat-model.md)). The check that the Threat Dragon file is well formed and moves with the AI surface is a reusable workflow in git-your-ship-together and is not built here | Built and merged on `main` (#71, issue #70); unreleased, after v0.1.2 |
 | `protection` (the read-only branch-protection read-back, spec 8.5 R2(a); GET only, exit 2 when it cannot tell) | Built for #139. Not yet checked against a fully protected live repository: the field names were compared only with this repository's own (partly protected) `main`, see the pull request |
+| `doctor` and [Prerequisites](docs/prerequisites.md) (verified minimum versions for the external tools, the plugins and packs SAFO relies on, the accounts and secret names; `safo doctor` is the read-only presence check, issue #197) | Built for #197; not yet merged |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
 | Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
@@ -69,8 +70,9 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `protection --repo OWNER/NAME` | Reads the default branch's protection back with GET requests only and exits 0 only when code-owner review, the `CI green` check, an up-to-date branch, administrators, no bypass, no force push or deletion and CODEOWNERS coverage (owners GitHub accepts, `board.yaml`, CODEOWNERS itself, and every existing or future file under `.github/workflows/`) all hold. Exit 1 names each condition that does not; exit 2 when a response cannot be read. A `CI green` check not pinned to an app prints a NOTE; `--require-app-id` makes the pin a condition. See [Adoption](docs/adoption.md) |
 | `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard` |
 | `gemini` | `quota`, `approve`, `ask`, `keys` and `usage`: a Gemini client that cannot spend money on its own: free-tier calls for public material follow the maintainer's own rate limits from a local ledger, a 429 stops the job and never falls through to paid, and every paid call needs its own single-use approval signed by a hardware security key (at most 2 USD a job and 10 USD a month); `keys` lists and checks the enrolled keys, `usage` adds a vendor-observed spend row. The key is read by name from the secret store at call time. Read-only unless you ask; see [`docs/gemini.md`](docs/gemini.md) |
+| `doctor` | Is each prerequisite present, missing or too old? Python, git and gh are required; the other tools, plugins and skill packs are reported. Read-only: it runs only `<tool> --version`. See [`docs/prerequisites.md`](docs/prerequisites.md) |
 
-The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`, `protection`) read
+The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`, `protection`, `doctor`) read
 files on a person's machine, or `protection` the repository's settings, and are not allowed in the Action.
 
 ## Trust boundary
@@ -172,6 +174,7 @@ replaced are gone.
 - [Personas](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Personas)
 - [Plugins](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Plugins)
 - [Local-llm](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-llm)
+- [Prerequisites](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Prerequisites)
 - [No-hidden-work](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/No-hidden-work)
 
 ## Licence
