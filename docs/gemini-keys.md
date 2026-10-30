@@ -19,7 +19,7 @@ Nothing here uses a serial number, a hostname or a machine name: keys are named 
 | Tier | What signs | Status |
 |---|---|---|
 | 1 (recommended, the default) | A hardware security key (`ed25519-sk` or `ecdsa-sk`) through OpenSSH, a touch for every approval, a PIN if you require one | Built and tested (with software keys; see "What the tests could not prove") |
-| 2 (opt-in, off) | A WebAuthn passkey assertion | **Not shippable.** Rules and tests exist; it needs a dependency decision. See [Gemini passkeys](gemini-passkeys.md) |
+| 2 (opt-in, off) | A WebAuthn passkey assertion (ES256 or EdDSA), checked with the optional `safo[passkeys]` extra | Verification built and tested with real signatures; enrollment page and approval wiring **not built**, and paid use is disabled, so it authorizes nothing today. See [Gemini passkeys](gemini-passkeys.md) |
 | Other | A software key (a file) or an agent-held key | Refused unless a written per-key opt-in; `keys check` warns loudly |
 
 ## The trust files
@@ -47,11 +47,39 @@ Per-key switches are comment lines in the allowed-signers file (OpenSSH ignores 
   a key made with `-O verify-required`.
 - `# safo: LABEL allow-software`: the written opt-in for a key that is not a hardware key. See "Software and agent-held
   keys".
-- `# safo-policy: allow-passkeys` and `# safo-passkey: ...` belong to Tier 2 and do nothing today.
+- `# safo-policy: allow-passkeys` and `# safo-passkey: ...` belong to Tier 2 (see "Passkeys (Tier 2)" below). They are comments to OpenSSH.
 
 The files must be owned by root, not writable by group or others, in directories that are root-owned and not writable
 by others. That is what stops an agent running as you from enrolling its own key. A file that fails is refused with
 the rule it broke.
+
+## Passkeys (Tier 2, opt-in)
+
+**Use a hardware security key if you have one.** A passkey is the fallback for people who do not. A synced passkey is only
+as strong as the cloud account and the device unlock behind it, and software that drives a browser can ask it to sign;
+a hardware key is a separate device whose touch is a physical act. `keys check` warns about every enrolled passkey.
+
+Enrolling one (the loopback enrollment page is **not built yet**; the trust-file format below is final):
+
+1. Install the extra: `pip install 'safo[passkeys]'` (hash-locked; people who never use passkeys do not need it).
+2. Register a credential for relying party id `localhost` at the loopback page's exact origin, with user verification
+   required. Algorithm ES256 or EdDSA. Keep the credential id and the SubjectPublicKeyInfo public key, both base64url.
+3. Add the lines to `/etc/safo/gemini-allowed-signers` as root, with a backup and a diff, exactly as for an SSH key
+   (see "Setup" above):
+
+   ```text
+   # safo-passkey: label=laptop-1 rp=localhost origin=http://localhost:PORT alg=ES256 id=CREDENTIAL_ID_B64URL key=SPKI_B64URL
+   # safo-policy: allow-passkeys
+   ```
+
+   Without the policy line the passkey is ignored and `keys check` says so. A passkey is revoked by the SHA-256
+   fingerprint of its public key in the revocation file.
+4. Run `safo gemini keys check`. Paid use stays disabled by its own switch whatever you enroll.
+
+**Warning for agent-held keys that are not FIDO keys** (for example a fingerprint reader that holds an SSH key in an agent
+with a cooldown): they are not Tier 1 and not Tier 2. A process that can reach the agent can sign again inside the
+cooldown without a new touch, so "one touch per approval" does not hold. They are refused unless you write the per-key
+`allow-software` opt-in, and `keys check` warns. Prefer a hardware security key.
 
 ## Read-only commands
 

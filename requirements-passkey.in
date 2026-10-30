@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# The optional passkey extra (safo[passkeys], Tier 2 approvals, #211). Not installed by the Action or by a plain install.
+# Regenerate the hash lock after editing:
+#   pip-compile --generate-hashes --strip-extras --no-header --output-file requirements-passkey.txt requirements-passkey.in
+cryptography==50.0.2

@@ -8,6 +8,7 @@ are the right ones, and that every other rule bites. Tier 2 is not shippable unt
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 
@@ -16,7 +17,8 @@ import pytest
 from safo import geminipasskey as pk
 from safo.geminipasskey import Passkey, Tier2Refused, Tier2Unavailable
 
-PAYLOAD = '{"job":"job-1","max_usd":"1.50"}'
+PAYLOAD = '{"expires_at":"2026-10-30T12:25:00Z","job":"job-1","max_usd":"1.50"}'
+NOW = dt.datetime(2026, 10, 30, 12, 0, 0, tzinfo=dt.UTC)
 ORIGIN = "http://localhost:41234"
 RP = "localhost"
 KEY = Passkey("laptop-1", RP, ORIGIN, "ES256", b"cred-id-1", b"spki-der-bytes")
@@ -56,6 +58,7 @@ def check(fake: pk.SignatureVerifier | None = None, **over: object) -> pk.Passke
         "signature": b"sig",
         "verifier": fake or FakeVerifier(),
         "allowed": True,
+        "now": NOW,
     }
     args.update(over)
     return pk.verify_assertion(**args)  # type: ignore[arg-type]

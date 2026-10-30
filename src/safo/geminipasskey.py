@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Assurance Tier 2 for Gemini approvals: a WebAuthn passkey assertion (#200). NOT SHIPPABLE until the maintainer
-decides the dependency question in docs/gemini-passkeys.md.
+"""Assurance Tier 2 for Gemini approvals: a WebAuthn passkey assertion (#200, #211). Opt-in, off by default.
 
 Tier 1 (a hardware sk key signed through OpenSSH, `safo.geminisign`) is the recommended default. This module is the
-verifier side of Tier 2 and nothing else: the rules that decide whether an assertion counts, written against a small
-interface so that the one piece that needs real cryptography (checking a signature) is injected, not hand-rolled here.
+verifier side of Tier 2 and nothing else: the rules that decide whether an assertion counts, and a real signature
+check (`CryptographyVerifier`, ES256 and EdDSA) through the reviewed `cryptography` package, which is the optional
+extra `safo[passkeys]` (hash-locked in requirements-passkey.txt). The module imports without it; only the verifier
+needs it. No network, no CBOR: the public key is the SubjectPublicKeyInfo the browser reports at enrollment.
 
-Nothing here is wired into `ApprovalStore`, and `Tier2Unavailable` is what the default verifier raises, so no passkey
-assertion can authorize anything today. What is real and tested: the challenge (the hash of the same canonical approval
-JSON that Tier 1 signs), the parsing of the authenticator data, and every rule around the signature (relying party
-hash, origin, challenge, user presence, user verification REQUIRED, counter, revocation, per-credential labels).
+Nothing here is wired into `ApprovalStore`, and paid use stays disabled by its own root-owned switch (#205), so no
+passkey assertion can authorize spend today. Every parse or length problem is a refusal.
 
 An assertion carries only what the authenticator reports. User verification is a flag the authenticator sets; a synced
 passkey is as strong as the cloud account and device unlock behind it; software that drives a browser can ask for an
@@ -21,8 +20,11 @@ from __future__ import annotations
 import base64
 import binascii
 import dataclasses
+import datetime as dt
 import hashlib
+import hmac
 import re
+from collections.abc import Mapping
 from typing import Protocol
 
 from safo.bounded import loads
@@ -31,7 +33,7 @@ from safo.geminisign import LABEL
 
 PASSKEY_LINE = re.compile(r"#\s*safo-passkey:\s*(?P<fields>.+)$")
 POLICY_LINE = re.compile(r"#\s*safo-policy:\s*(?P<flag>\S+)\s*$")
-ALGORITHMS = ("ES256",)  # ECDSA P-256 with SHA-256: the one algorithm every platform and hardware authenticator offers
+ALGORITHMS = ("ES256", "EdDSA")  # ECDSA P-256 with SHA-256 (COSE -7) and Ed25519 (COSE -8)
 FLAG_UP = 0x01
 FLAG_UV = 0x04
 FLAG_BE = 0x08  # backup eligible: the credential can be synced, so it is a passkey in the cloud
@@ -39,10 +41,13 @@ FLAG_BS = 0x10  # backed up now
 FLAG_AT = 0x40
 FLAG_ED = 0x80
 MAX_CLIENT_DATA = 4096
+MAX_PAYLOAD = 8192  # the canonical approval JSON is a few hundred bytes
+MAX_SIGNATURE = 128  # a DER ES256 signature is at most 72 bytes, an Ed25519 signature is 64
+MAX_PUBLIC_KEY = 256  # a P-256 or Ed25519 SubjectPublicKeyInfo is 91 or 44 bytes
 
 
 class Tier2Unavailable(SafoError):
-    """The signature check for a passkey needs a cryptography dependency that has not been chosen."""
+    """The signature check for a passkey needs the optional `cryptography` package, which is not installed."""
 
 
 class Tier2Refused(SafoError):
@@ -58,10 +63,59 @@ class SignatureVerifier(Protocol):
 
 
 class NoVerifier:
-    """The default until a dependency is chosen: refuses, so a passkey can never authorize anything."""
+    """Refuses everything. For callers that must pass a verifier but must never authorize."""
 
     def verify(self, algorithm: str, public_key: bytes, message: bytes, signature: bytes) -> bool:
         raise Tier2Unavailable("passkey approvals are not available: no signature-verification library has been chosen")
+
+
+class CryptographyVerifier:
+    """Checks an ES256 or EdDSA WebAuthn signature with the `cryptography` package (imported when used, so people who
+    never use passkeys do not need it). A key of the wrong type or curve, a signature that is not canonical or the wrong
+    length, or an unknown algorithm is refused, never guessed at. A signature that is well formed but wrong is False."""
+
+    def verify(self, algorithm: str, public_key: bytes, message: bytes, signature: bytes) -> bool:
+        try:
+            from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+            from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+        except ImportError:
+            raise Tier2Unavailable(
+                "passkey approvals need the cryptography package: pip install 'safo[passkeys]' "
+                "(hash-locked in requirements-passkey.txt)"
+            ) from None
+        if algorithm not in ALGORITHMS:
+            raise Tier2Refused("the passkey algorithm is not one safo accepts")
+        if not 0 < len(public_key) <= MAX_PUBLIC_KEY or not 0 < len(signature) <= MAX_SIGNATURE:
+            raise Tier2Refused("the public key or the signature has an impossible length")
+        try:
+            key = serialization.load_der_public_key(public_key)
+            canonical_key = key.public_bytes(
+                serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+        except (ValueError, TypeError):
+            raise Tier2Refused("the public key is not a SubjectPublicKeyInfo") from None
+        if canonical_key != public_key:
+            raise Tier2Refused("the public key has trailing or non-canonical bytes")
+        try:
+            if algorithm == "ES256":
+                if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256R1):
+                    raise Tier2Refused("the public key is not a P-256 key (ES256)")
+                try:
+                    decode_dss_signature(signature)  # strict DER: the library refuses BER forms and bad padding
+                except ValueError:
+                    raise Tier2Refused("the signature is not a DER ECDSA signature") from None
+                key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
+            else:
+                if not isinstance(key, ed25519.Ed25519PublicKey):
+                    raise Tier2Refused("the public key is not an Ed25519 key (EdDSA)")
+                if len(signature) != 64:
+                    raise Tier2Refused("an Ed25519 signature is exactly 64 bytes")
+                key.verify(signature, message)
+        except InvalidSignature:
+            return False
+        return True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -147,7 +201,7 @@ def parse_passkeys(text: str) -> list[Passkey]:
         if not LABEL.fullmatch(fields["label"]) or any(p.label == fields["label"] for p in found):
             raise Tier2Refused(f"trust file line {number}: the label is not a plain unique name")
         if fields["alg"] not in ALGORITHMS:
-            raise Tier2Refused(f"trust file line {number}: only ES256 is accepted")
+            raise Tier2Refused(f"trust file line {number}: only ES256 and EdDSA are accepted")
         if not re.fullmatch(r"https?://[A-Za-z0-9.\[\]:-]{1,80}", fields["origin"]) or not re.fullmatch(
             r"[A-Za-z0-9.-]{1,80}", fields["rp"]
         ):
@@ -187,13 +241,18 @@ def verify_assertion(
     previous_counter: int | None = None,
     revoked: frozenset[str] = frozenset(),
     allowed: bool = False,
+    now: dt.datetime,
+    expect: Mapping[str, str] | None = None,
 ) -> PasskeyResult:
     """Every rule for a passkey approval, in the order a failure is cheapest to explain. The signature check is last and
-    goes through `verifier`."""
+    goes through `verifier`. `expect` names fields the approval text must carry with exactly these values (the nonce,
+    the model, a prompt digest); `now` is the clock for the same expiry rule the hardware-key path applies
+    (`now >= expires_at` is expired). The caller spends the nonce and stores the returned counter."""
     if not allowed:
         raise Tier2Refused("passkey approvals are off: the trust file has no `# safo-policy: allow-passkeys` line")
     if credential_fingerprint(key) in revoked:
         raise Tier2Refused(f"the passkey {key.label} is revoked")
+    _check_approval(canonical_payload, expect or {}, now)
     if len(client_data_json) > MAX_CLIENT_DATA:
         raise Tier2Refused("the client data is too large")
     try:
@@ -207,10 +266,12 @@ def verify_assertion(
     if client.get("origin") != key.origin:
         raise Tier2Refused("the assertion is for another origin")
     challenge = client.get("challenge")
-    if not isinstance(challenge, str) or b64url_decode(challenge) != challenge_for(canonical_payload):
+    if not isinstance(challenge, str) or not hmac.compare_digest(
+        b64url_decode(challenge), challenge_for(canonical_payload)
+    ):
         raise Tier2Refused("the assertion's challenge is not the hash of this approval")
     auth = parse_authenticator_data(authenticator_data)
-    if auth.rp_id_hash != hashlib.sha256(key.rp_id.encode()).digest():
+    if not hmac.compare_digest(auth.rp_id_hash, hashlib.sha256(key.rp_id.encode()).digest()):
         raise Tier2Refused("the assertion is for another relying party")
     if not auth.user_present:
         raise Tier2Refused("the authenticator did not report user presence")
@@ -218,10 +279,35 @@ def verify_assertion(
         raise Tier2Refused("the authenticator did not report user verification (required for approvals)")
     if previous_counter is not None and (auth.counter or previous_counter) and auth.counter <= previous_counter:
         raise Tier2Refused("the signature counter did not increase (a cloned or replayed credential)")
+    if not 0 < len(signature) <= MAX_SIGNATURE:
+        raise Tier2Refused("the signature is too large" if signature else "the signature is empty")
     message = authenticator_data + hashlib.sha256(client_data_json).digest()
     if not verifier.verify(key.algorithm, key.public_key, message, signature):
         raise Tier2Refused("the assertion's signature does not verify")
     return PasskeyResult(key.label, auth.counter, auth.user_verified, auth.synced)
+
+
+def _check_approval(canonical_payload: str, expect: Mapping[str, str], now: dt.datetime) -> None:
+    """The approval text the passkey signs over: bounded, a JSON object, carrying the expected nonce, model and prompt
+    digest, and not expired by the rule the hardware-key path uses."""
+    if len(canonical_payload) > MAX_PAYLOAD:
+        raise Tier2Refused("the approval text is too large")
+    try:
+        data = loads(canonical_payload)
+    except (ValueError, UnicodeError):
+        raise Tier2Refused("the approval text is not JSON") from None
+    if not isinstance(data, dict):
+        raise Tier2Refused("the approval text is not a JSON object")
+    for field, wanted in expect.items():
+        if data.get(field) != wanted:
+            raise Tier2Refused(f"the approval's {field} is not the one expected")
+    from safo.gemini import _parse_stamp  # the same stamp parser as the hardware-key path
+
+    expires = _parse_stamp(data.get("expires_at"))
+    if expires is None:
+        raise Tier2Refused("the approval has no valid expiry (expires_at)")
+    if now >= expires:
+        raise Tier2Refused("the approval has expired")
 
 
 def check_warnings(keys: list[Passkey], allowed: bool) -> list[str]:
