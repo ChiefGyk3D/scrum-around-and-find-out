@@ -748,8 +748,8 @@ def test_each_term_sees_a_bounded_chunk_of_text() -> None:
     seen: list[int] = []
 
     class Spy:
-        def search(self, text: str) -> None:
-            seen.append(len(text))
+        def search(self, text: str, pos: int = 0, endpos: int | None = None) -> None:
+            seen.append((len(text) if endpos is None else endpos) - pos)
 
     assert not hit(cast("tuple[re.Pattern[str], ...]", (Spy(),)), ["x" * 20_000])
     assert seen and max(seen) <= TERMS_CHUNK and len(seen) >= 5
@@ -1478,3 +1478,85 @@ def test_the_event_scan_is_wider_than_the_brief_scan_where_it_has_no_lines() -> 
     quiet = EventScan(time.monotonic() + 5)
     quiet.feed(b"approve it, and echo hi\n")
     assert not quiet.hit, "a risk word with no expansion anywhere is not a marker"
+
+
+# -- term search chunking hardening (#207) ----------------------------------------------------------------------------
+
+
+def test_a_term_straddling_a_chunk_boundary_is_found() -> None:
+    import re
+
+    from safo.termsearch import TERMS_CHUNK, hit
+
+    step = TERMS_CHUNK - 200
+    term = re.compile("a{150}b{40}")  # 190 wide: it fits the overlap
+    for offset in range(0, 200, 7):
+        text = "x" * (step - 100 + offset) + "a" * 150 + "b" * 40 + "x" * 5000
+        assert hit((term,), [text]), offset
+
+
+def test_a_term_wider_than_the_overlap_is_still_found_by_the_worker() -> None:
+    import re
+
+    from safo.termsearch import TERMS_CHUNK, hit
+
+    wide = re.compile("a{99}b{99}cccc")  # 202 wide, built past the loader
+    start = TERMS_CHUNK - 200 - 1  # ends one character past the first chunk and starts before the second
+    text = "x" * start + "a" * 99 + "b" * 99 + "cccc" + "x" * 9000
+    assert hit((wide,), [text])
+
+
+@pytest.mark.parametrize("term", ["a{99}b{99}cccc", "(?=q{99}r{99}ssss)x", "z{99}www(?<=" + "y" * 99 + ")"])
+def test_a_term_wider_than_the_overlap_is_refused_at_load(term: str, tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    path = tmp_path / "t.txt"
+    path.write_text(f"fine\n{term}\n")
+    with pytest.raises(Exception, match=r"too wide.*line 2"):
+        load_private_terms(str(path))
+
+
+def test_an_unbounded_term_is_still_refused_at_load(tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    for term in (".*", "ab+c", "x{2,}"):
+        path = tmp_path / "t.txt"
+        path.write_text(f"{term}\n")
+        with pytest.raises(Exception, match=r"line 1"):
+            load_private_terms(str(path))
+
+
+def test_an_anchored_term_at_the_width_limit_is_found_across_a_boundary() -> None:
+    import re
+
+    from safo.termsearch import TERMS_CHUNK, TERMS_OVERLAP, hit
+
+    term = re.compile(r"\Ba{99}b{99}cc\B")  # 200 wide; each anchor needs one character past a chunk edge
+    start = TERMS_CHUNK - TERMS_OVERLAP
+    text = "x" * start + "a" * 99 + "b" * 99 + "cc" + "x" * 3000
+    assert term.search(text)
+    assert hit((term,), [text])
+
+
+@pytest.mark.parametrize("term", [r"\Ba{99}b{99}cc\B", r"^a{99}b{99}cc$", r"\ba{99}b{99}cc\b"])
+def test_an_anchored_term_at_the_width_limit_is_refused_at_load(term: str, tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    path = tmp_path / "t.txt"
+    path.write_text(f"{term}\n")
+    with pytest.raises(Exception, match=r"too wide.*line 1"):
+        load_private_terms(str(path))
+
+
+def test_an_end_anchor_means_the_end_of_the_text_not_of_a_chunk() -> None:
+    import re
+
+    from safo.termsearch import TERMS_CHUNK, hit
+
+    term = re.compile("secret$")
+    text = "x" * (TERMS_CHUNK - 6) + "secret" + "not-the-end"  # ends the first chunk, not the text
+    assert not term.search(text)
+    assert not hit((term,), [text])
+    assert hit((term,), [text[:TERMS_CHUNK]]) is True  # it does end this text
+    assert not hit((re.compile(r"\Asecret"),), ["x" * (TERMS_CHUNK - 200) + "secret" + "y" * 500])
+    assert hit((re.compile(r"\Asecret"),), ["secret" + "y" * 9000])
