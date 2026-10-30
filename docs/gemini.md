@@ -272,7 +272,9 @@ seconds) and checked whole for Gemini markers, a marker anywhere is denied, an e
 finish in time is denied as too large or incomplete to check, and only a whole stream with no marker is the degraded
 allow (details in [Hooks](hooks.md)). If another rule of the guard raises an error, the Gemini rules are run again on their
 own, so a violation is still denied. A Gemini command built from variables is blocked by design: the guard reads literal
-commands and models no shell. The gates that hold are in the wrapper: a paid call
+commands and models no shell. A Gemini-risk option (`--paid`, `--approval`, `--cap`) or the word `approve` on a line
+whose command is an expansion is blocked even when no Gemini word is on the page, and here-document bodies are read
+like any other line (they can be run by a shell), which can false-block shell examples inside a here-document. The gates that hold are in the wrapper: a paid call
 without a live, signed approval record raises before any request.
 
 ## What is not built or not verified

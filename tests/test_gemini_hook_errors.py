@@ -289,3 +289,32 @@ def test_an_error_in_another_rule_leaves_a_clean_brief_the_degraded_allow(
     assert decision(out) is None and "unexpected" in notice(out)
     out = run(agents, _private_home, dispatch(prompt="Summarise the log."))
     assert decision(out) is None and "unexpected" in notice(out)
+
+
+def assignments(count: int, start: int = 0) -> str:
+    return " ".join(f"V{i}=1" for i in range(start, start + count))
+
+
+@pytest.mark.parametrize("count", [2001, 5001])
+def test_an_oversized_event_with_more_assigned_names_than_the_brief_scan_follows_is_denied(
+    agents: Path, _private_home: Path, count: int
+) -> None:
+    tail = assignments(count) + " and later LATE=1 then $LATE ran"
+    assert decision(run(agents, _private_home, event_with(tail))) == "deny"
+
+
+def test_the_name_cap_is_the_brief_scans_cap_and_below_it_nothing_is_denied(agents: Path, _private_home: Path) -> None:
+    from safo.geminibrief import MAX_VARIABLES
+
+    below = assignments(MAX_VARIABLES - 1) + " and plain log text"
+    out = run(agents, _private_home, event_with(below))
+    assert decision(out) is None and "input" in notice(out)
+    over = assignments(MAX_VARIABLES + 1) + " and plain log text"
+    assert decision(run(agents, _private_home, event_with(over))) == "deny"
+
+
+def test_more_referenced_names_than_the_event_scan_remembers_is_also_denied(agents: Path, _private_home: Path) -> None:
+    from safo.modes.hooks import MAX_REFERENCED
+
+    tail = " ".join(f"$R{i}" for i in range(MAX_REFERENCED + 1))
+    assert decision(run(agents, _private_home, event_with(tail))) == "deny"

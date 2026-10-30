@@ -254,6 +254,8 @@ def relevant(text: str) -> bool:
     for line in _join(text).splitlines():
         norm, _, low, pre_low, pre_raw = _views(line)
         raw = norm.lower()
+        if _risk_line(norm, low):
+            return True
         for name, pattern in PREFILTER:
             if name == "conceal":
                 concealed = concealed or bool(pattern.search(raw) or pattern.search(pre_raw))
@@ -575,9 +577,9 @@ _LOOP_NAME = re.compile(r"(?<![\w-])for\s+([A-Za-z_]\w*)\s+in\b")
 _READ_NAME = re.compile(r"(?<![\w-])read\s+(?:-\w+\s+)*([A-Za-z_]\w*)")
 _REFERENCE = re.compile(r"\$\{?[!#]?([A-Za-z_][A-Za-z0-9_]*)")
 _ANSI_ESCAPE = re.compile(r"\$'[^']*\\[^']*'")
-_RISK_TOKEN = re.compile(r"--paid|--approval|--cap\b|(?<![\w-])(?:ask|approve)\b")
+_RISK_TOKEN = re.compile(r"--paid|--approval|--cap(?![\w-])|(?<![\w-])(?:ask|approve)\b")
 _PAID_TOKEN = re.compile(r"--paid|(?<![\w-])approve\b")
-_GEMINI_WORD = re.compile(r"\b(?:safo|gemini)\b|--paid|--approval|--cap\b")
+_GEMINI_WORD = re.compile(r"\b(?:safo|gemini)\b|--paid|--approval|--cap(?![\w-])")
 _SHELL_C = re.compile(
     r"(?<![\w-])(?:bash|sh|zsh|dash|ksh|csh|tcsh|fish|pwsh|python[\d.]*|perl|ruby|node|php|lua)\b(?:\s+-{1,2}[\w-]+)*"
     r"\s+-\w*c\b"
@@ -593,24 +595,40 @@ Construct = tuple[str, int, str]  # (what, line number, kind: flow, weak, standa
 
 
 def _strip_comment(text: str) -> str:
-    """The text without a shell comment: a `#` that starts a word and is not inside quotes or escaped."""
-    quote = ""
+    """The text without a shell comment, cut the way bash cuts: a `#` that starts a word (at the start, or after an
+    ASCII space, tab, newline or one of `; & | ( ) < >`), outside single quotes, double quotes and `$'...'` words
+    (inside which a backslash escapes the next character, a quote included). It fails closed: when the comment text
+    holds `$`, a backtick, `;`, `|` or `&`, or the text before it holds `$'` or a non-ASCII space (an ordinary word
+    character to bash), the whole line is returned, so nothing bash may still run is hidden."""
+    mode = ""
     i = 0
     while i < len(text):
         c = text[i]
-        if quote:
-            if c == "\\" and quote == '"':
+        if mode == "'":
+            if c == "'":
+                mode = ""
+        elif mode in ('"', "$'"):
+            if c == "\\":
                 i += 2
                 continue
-            if c == quote:
-                quote = ""
+            if c == mode[-1]:
+                mode = ""
         elif c == "\\":
             i += 2
             continue
-        elif c in "'\"":
-            quote = c
-        elif c == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|("):
-            return text[:i]
+        elif c == "'":
+            mode = "'"
+        elif c == '"':
+            mode = '"'
+        elif c == "$" and text[i + 1 : i + 2] == "'":
+            mode = "$'"
+            i += 2
+            continue
+        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()<>"):
+            head, tail = text[:i], text[i:]
+            if any(ch in tail for ch in "$`;|&") or "$'" in head or any(ord(ch) > 127 and ch.isspace() for ch in head):
+                return text
+            return head
         i += 1
     return text
 
@@ -670,7 +688,18 @@ def _expansion_at_command(text: str) -> bool:
     return False
 
 
-_GEMINI_OPTION = re.compile(r"--paid|--approval|--cap\b")
+_GEMINI_OPTION = re.compile(r"--paid|--approval|--cap(?![\w-])")
+_RISK_OPTION = re.compile(
+    r"(?<![\w-])--paid(?![\w-])|(?<![\w-])--approval(?![\w-])|(?<![\w-])--cap(?![\w-])|(?<![\w-])approve(?![\w-])"
+)  # exact tokens: --cap-add is not one, and approve is a word of its own
+
+
+def _risk_line(norm: str, low: str) -> bool:
+    """A Gemini-risk token on a line whose command is made by an expansion: no Gemini word needs to be on the page. The
+    line is also risky when it is a shell or interpreter command string that holds an expansion."""
+    if not _RISK_OPTION.search(low) or ("$" not in norm and "`" not in norm):
+        return False
+    return _expansion_at_command(norm) or bool(_SHELL_C.search(low) and _DOLLAR.search(norm))
 
 
 def _gemini_expansion(text: str, low: str, names: set[str]) -> bool:
@@ -733,6 +762,10 @@ def _flows(lines: list[str], tick: Callable[[], None]) -> list[Construct]:
             elif _expands(text[m.end() :].split(None, 1)[0] if text[m.end() :].strip() else ""):
                 found.append(("an assignment from an expansion", number, "standalone"))
         at_command = _expansion_at_command(views[0])
+        if _risk_line(views[0], low):
+            found.append(
+                ("a Gemini option or action on a line whose command is built by an expansion", number, "always")
+            )
         concealed = bool(CONCEAL.search(text.lower()))
         expands = _expands(text)
         option = bool(_GEMINI_OPTION.search(low))

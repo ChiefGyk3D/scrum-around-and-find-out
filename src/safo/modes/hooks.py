@@ -86,7 +86,10 @@ STDIN_TIMEOUT_SECONDS = 5.0  # a host writes the event at once; a silent standar
 HARD_LIMIT_BYTES = 8 * 1024 * 1024  # the most of an oversized event that is read and checked for Gemini markers
 ISOLATED_CHECK_SECONDS = 1.5  # the separate Gemini check run when another rule raised
 DRAIN_SECONDS = 4.0  # the most time reading and checking the rest of an oversized event may take
-_MAX_NAMES = 5000  # assigned or referenced names remembered while scanning an event
+_COMMAND_EXPANSION = re.compile(
+    r"(?m)(?:^|[;&|(`]|\b(?:env|exec|eval|do|then|else|command|nohup|sudo)\s)\s*[\"']?\$[\w{(@*#?!\\\\-]"
+)  # an expansion where a command word would stand
+MAX_REFERENCED = 50_000  # referenced names remembered while scanning an event; more is treated as a marker
 _JSON_ESCAPE = re.compile(r'\\(?:u([0-9a-fA-F]{4})|([nrtbf"\\/]))')
 _JSON_SIMPLE = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
 
@@ -146,7 +149,8 @@ class EventScan:
     def __init__(self, deadline: float) -> None:
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.tail = ""
-        self.safo = self.gemini = self.hit = self.conceal = False
+        self.safo = self.gemini = self.hit = self.conceal = self.capped = False
+        self.risk = self.command_expansion = False
         self.assigned: set[str] = set()
         self.referenced: set[str] = set()
         self.deadline = deadline
@@ -157,39 +161,68 @@ class EventScan:
         window = self.tail + self.decoder.decode(chunk)
         self.tail = window[-self.OVERLAP :]
         text = _JSON_ESCAPE.sub(_json_unescape, window) if "\\" in window else window
-        views = [text.lower(), geminibrief._strip(text.lower())]
+        lowered = text.lower()
+        views = [lowered]
+        stripped = geminibrief._strip(lowered)
+        if stripped != lowered:
+            views.append(stripped)
         if text != window or not window.isascii():
             folded = gemini.fold(text).lower()
-            views += [folded, geminibrief._strip(folded)]
+            if folded != lowered:
+                views.append(folded)
+            folded_stripped = geminibrief._strip(folded)
+            if folded_stripped != folded and folded_stripped not in views:
+                views.append(folded_stripped)
         for view in views:
             self.safo = self.safo or "safo" in view
             self.gemini = self.gemini or "gemini" in view
-            self.conceal = self.conceal or bool(geminibrief.CONCEAL.search(view))
-            if geminibrief._ANSI_ESCAPE.search(view) or (
-                self.conceal and re.search(r"printf\s+-v\b", view) is not None
-            ):
-                self.hit = True
-            if len(self.assigned) < _MAX_NAMES:
-                for pattern in (
-                    geminibrief._ASSIGNED,
-                    geminibrief._PRINTF_NAME,
-                    geminibrief._LOOP_NAME,
-                    geminibrief._READ_NAME,
+            # each pattern runs only when its cheap precondition holds, so a long plain stream stays cheap
+            if "\\" in view or "$'" in view:
+                self.conceal = self.conceal or bool(geminibrief.CONCEAL.search(view))
+                if geminibrief._ANSI_ESCAPE.search(view) or (
+                    self.conceal and "printf" in view and re.search(r"printf\s+-v\b", view) is not None
                 ):
-                    self.assigned.update(m.group(1) for m in pattern.finditer(view))
-            if len(self.referenced) < _MAX_NAMES:
-                self.referenced.update(m.group(1) for m in geminibrief._REFERENCE.finditer(view))
+                    self.hit = True
+            if not self.capped:
+                if "=" in view:
+                    self.assigned.update(m.group(1) for m in geminibrief._ASSIGNED.finditer(view))
+                if "printf" in view:
+                    self.assigned.update(m.group(1) for m in geminibrief._PRINTF_NAME.finditer(view))
+                if "for " in view:
+                    self.assigned.update(m.group(1) for m in geminibrief._LOOP_NAME.finditer(view))
+                if "read" in view:
+                    self.assigned.update(m.group(1) for m in geminibrief._READ_NAME.finditer(view))
+                if "$" in view:
+                    self.referenced.update(m.group(1) for m in geminibrief._REFERENCE.finditer(view))
+                # the brief scan's own policy: more assigned names than it follows is unreadable, and so is a stream
+                # with more referenced names than are remembered; never a silent stop
+                if len(self.assigned) > geminibrief.MAX_VARIABLES or len(self.referenced) > MAX_REFERENCED:
+                    self.capped = True
+                    self.hit = True
+            if "--" in view or "approve" in view:
+                self.risk = self.risk or bool(geminibrief._RISK_OPTION.search(view))
+            if "$" in view:
+                self.command_expansion = self.command_expansion or bool(_COMMAND_EXPANSION.search(view))
             if (
                 geminibrief.PAID_CONFIG.search(view)
                 or gemini.VENDOR_HOST in view
                 or geminibrief.SDK.search(view)
-                or (geminibrief.DECODE.search(view) and geminibrief.SINK_RE.search(view))
+                or (
+                    ("base64" in view or "xxd" in view or "openssl" in view or "rev" in view or "printf" in view)
+                    and (geminibrief.DECODE.search(view) and geminibrief.SINK_RE.search(view))
+                )
             ):
                 self.hit = True
         # the brief scan's flow rule, without lines: a name assigned anywhere and referenced anywhere, with the Gemini
         # surface (safo, gemini or escape-built words) named somewhere in the stream
         surface = self.safo or self.gemini or self.conceal
-        self.hit = self.hit or (self.safo and self.gemini) or (surface and bool(self.assigned & self.referenced))
+        # a Gemini option or action beside an expansion where a command word stands needs no named surface
+        self.hit = (
+            self.hit
+            or (self.risk and self.command_expansion)
+            or (self.safo and self.gemini)
+            or (surface and bool(self.assigned & self.referenced))
+        )
 
 
 def read_event(source: EventStream) -> tuple[bytes, bool]:

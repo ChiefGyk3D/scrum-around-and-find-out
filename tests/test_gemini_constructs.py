@@ -81,8 +81,8 @@ def test_an_assignment_counts_wherever_it_sits() -> None:
 
 
 ALLOWED = {
-    "the constructs without any Gemini word": "A=ls\nB=-l\n$A $B ask --paid\nf() { echo hi; }\nxargs -n1 echo\n",
-    "an array without Gemini words": 'C=(git status)\n"${C[@]}" --paid\n',
+    "the constructs without any Gemini word": "A=ls\nB=-l\n$A $B\nf() { echo hi; }\nxargs -n1 echo\n",
+    "an array without Gemini words": 'C=(git status)\n"${C[@]}" --verbose\n',
     "variables that never reach a command position": "A=1\nB=2\necho $A $B\nsafo gemini quota --model m\n",
     "prose naming Gemini with an unrelated assignment": "X=1\nThe notes mention gemini and safo only in prose.\n",
     "one literal free command and a plain assignment": (
@@ -144,6 +144,9 @@ ORDINARY = {
     "an unrelated eval": 'eval "ls -l"',
     "tar -c": "tar -c archive src",
     "a chained build": "make -j4 && ./run.sh",
+    "approve in prose": "Please approve the change before merging.",
+    "a docker capability with a variable": "IMAGE=x\ndocker run --cap-add=NET_ADMIN $IMAGE",
+    "approve in prose beside a variable": "The reviewer should approve $PR_NUMBER only after the tests pass.",
 }
 
 
@@ -153,8 +156,8 @@ def test_ordinary_additions_beside_a_free_gemini_command_are_allowed(name: str) 
     assert rules(FREE + PUBLIC + ORDINARY[name] + "\n") == [], name
 
 
-def test_the_ten_ordinary_briefs_are_all_in_the_fixture() -> None:
-    assert len(ORDINARY) == 10
+def test_the_ordinary_briefs_are_all_in_the_fixture() -> None:
+    assert len(ORDINARY) == 13
 
 
 CONCEALED = {
@@ -263,7 +266,7 @@ def test_an_unresolved_value_as_an_argument_of_a_line_with_a_gemini_option_is_un
 STUB = '#!/bin/sh\nprintf "ARGV:"; for a; do printf " <%s>" "$a"; done; echo\n'
 
 
-def stub_runs(script: str, tmp: Path) -> bool:
+def stub_runs(script: str, tmp: Path, extra_env: dict[str, str] | None = None) -> bool:
     """Whether bash, given this script, ends up running the stub as `safo gemini ask ...`."""
     bindir = tmp / "bin"
     bindir.mkdir(exist_ok=True)
@@ -276,10 +279,10 @@ def stub_runs(script: str, tmp: Path) -> bool:
         text=True,
         timeout=10,
         cwd=tmp,
-        env={"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp)},
+        env={"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp), **(extra_env or {})},
         check=False,
     )
-    return "ARGV: <gemini> <ask>" in done.stdout
+    return "ARGV: <gemini> <" in done.stdout
 
 
 SHADOWED = {
@@ -322,10 +325,11 @@ def test_every_kind_of_assigned_name_that_becomes_the_command_blocks(name: str) 
     assert GEMINI_PAID in rules(NAMED[name] + PUBLIC), name
 
 
-def test_a_comment_is_not_code_even_when_it_holds_a_variable_and_a_gemini_option() -> None:
-    brief = "A=1\necho ok # $A ask --paid\n" + FREE + PUBLIC
-    assert rules(brief) == []
-    assert rules("A=1\necho ok # B=2 and $A run\n" + FREE + PUBLIC) == []
+def test_a_plain_comment_is_not_code_but_one_that_could_hide_a_command_is_read_whole() -> None:
+    assert rules("A=1\necho ok # just words and B=2\n" + FREE + PUBLIC) == []
+    assert rules("A=1\necho ok # B=2 then run\n" + FREE + PUBLIC) == []
+    # a comment holding an expansion, a separator or a backtick is kept whole: it is read as code (a false block)
+    assert GEMINI_PAID in rules("A=1\necho ok # $A ask --paid\n" + FREE + PUBLIC)
     assert GEMINI_PAID in rules("A=1\necho ok '# not a comment' $A --paid\n" + FREE + PUBLIC)
 
 
@@ -337,8 +341,8 @@ def test_more_names_than_can_be_followed_is_unreadable() -> None:
 
 
 def test_a_weak_flow_needs_safo_gemini_and_an_action_all_named() -> None:
-    assert rules("Notes on safo.\n$X ask --paid\n") == []
-    assert GEMINI_PAID in rules("Notes on safo.\nNotes on gemini.\n$X ask --paid\n" + PUBLIC)
+    assert rules("Notes on safo.\n$X ask now\n") == []
+    assert GEMINI_PAID in rules("Notes on safo.\nNotes on gemini.\n$X ask now\n" + PUBLIC)
 
 
 def test_a_variable_or_an_escape_on_a_gemini_line_blocks_where_the_surface_is_named() -> None:
@@ -390,3 +394,102 @@ def test_a_loop_or_read_variable_run_as_a_command_is_a_flow_in_a_brief_that_name
     assert GEMINI_PAID in rules("Notes on safo.\nY=$'\\x41'\nfor f in a b; do $f; done\n")
     assert GEMINI_PAID in rules("Notes on safo.\nY=$'\\x41'\nread -r C\n$C now\n")
     assert rules("Notes on safo.\nfor f in a b; do echo done; done\n") == []
+
+
+# -- round eight: words built by substitutions, interpreters, tr, awk, sed, a sourced file or the environment ---------
+
+BUILT = {
+    "printf": 'A=$(printf "%s%s" sa fo)\nB=$(printf "%s%s" gem ini)\n$A $B ask --paid --model m\n',
+    "an interpreter one-liner": (
+        'A=$(python3 -c \'print("s"+"a"+"f"+"o")\')\nB=$(python3 -c \'print("gem"+"ini")\')\n'
+        "$A $B ask --paid --model m\n"
+    ),
+    "tr": "A=$(echo SAFO | tr A-Z a-z)\nB=$(echo GEMINI | tr A-Z a-z)\n$A $B ask --paid --model m\n",
+    "awk": 'A=$(awk \'BEGIN{printf "sa" "fo"}\')\nB=$(awk \'BEGIN{printf "gem" "ini"}\')\n$A $B ask --paid --model m\n',
+    "sed": "A=$(echo sxfo | sed s/x/a/)\nB=$(echo gemXni | sed s/X/i/)\n$A $B ask --paid --model m\n",
+    "a sourced file": "printf 'A=safo\\nB=gemini\\n' > vars.sh\n. ./vars.sh\n$A $B ask --paid --model m\n",
+    "values from the environment": "$BIN $SUB ask --paid --model m\n",
+    "a command string": 'bash -c "$BIN $SUB ask --paid --model m"\n',
+    "approve": 'A=$(printf "%s%s" sa fo)\nB=$(printf "%s%s" gem ini)\n$A $B approve --max-usd 1\n',
+}
+BUILT_ENV = {"BIN": "safo", "SUB": "gemini"}
+
+
+@pytest.mark.parametrize("name", sorted(BUILT))
+def test_a_command_built_without_naming_the_surface_is_blocked_where_bash_runs_it(name: str, tmp_path: Path) -> None:
+    from safo.geminibrief import relevant
+
+    script = BUILT[name]
+    assert stub_runs(script, tmp_path, BUILT_ENV), "the case is real: bash really runs safo gemini"
+    assert relevant(script), name
+    assert GEMINI_PAID in rules(script + PUBLIC), name
+
+
+def test_a_gemini_option_beside_a_command_made_of_an_expansion_is_enough_without_any_named_surface() -> None:
+    assert GEMINI_PAID in rules("$X $Y ask --paid\n")
+    assert GEMINI_PAID in rules("$X --approval id\n")
+    assert GEMINI_PAID in rules("$X --cap 1\n")
+    assert GEMINI_PAID in rules("$X approve now\n")
+    assert rules("docker run --cap-add=NET_ADMIN $IMAGE\n") == []
+    assert rules("approve $X\n") == []
+    assert rules("$X ask\n") == [], "ask alone is not a Gemini-risk token"
+    assert rules("$X approver now\n") == [] and rules("$X disapprove now\n") == [], "approve is a word of its own"
+
+
+# -- round eight: here-documents are scanned like any other line ------------------------------------------------------
+
+HEREDOCS = {
+    "bash": "bash <<'EOF'\nA=safo\nB=gemini\n$A $B ask --paid --model m\nEOF\n",
+    "sh -s": "sh -s <<'EOF'\nA=safo\nB=gemini\n$A $B ask --paid --model m\nEOF\n",
+    "source": "source /dev/stdin <<'EOF'\nA=safo\nB=gemini\n$A $B ask --paid --model m\nEOF\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(HEREDOCS))
+def test_a_heredoc_that_a_shell_runs_is_blocked_not_skipped(name: str, tmp_path: Path) -> None:
+    assert stub_runs(HEREDOCS[name], tmp_path), "the case is real: bash really runs it"
+    assert GEMINI_PAID in rules(HEREDOCS[name] + PUBLIC), name
+
+
+# -- round eight: the comment cutter follows bash --------------------------------------------------------------------
+
+NBSP = "\u00a0"
+COMMENTED = {
+    "an ANSI-C word that holds an escaped quote": "A=safo\nB=gemini\necho $'a\\' # b' ; $A $B ask --paid --model m\n",
+    "a non-ASCII space before the hash": "A=safo\nB=gemini\necho x" + NBSP + "#y ; $A $B ask --paid --model m\n",
+    "a hash after an ordinary space inside quotes": "A=safo\nB=gemini\necho 'x #y' ; $A $B ask --paid --model m\n",
+    "a hash in a word": "A=safo\nB=gemini\necho x#y ; $A $B ask --paid --model m\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(COMMENTED))
+def test_what_the_comment_cutter_hides_is_never_what_bash_runs(name: str, tmp_path: Path) -> None:
+    assert stub_runs(COMMENTED[name], tmp_path), "the case is real: bash really runs safo gemini"
+    assert GEMINI_PAID in rules(COMMENTED[name] + PUBLIC), name
+
+
+def test_a_hash_after_a_redirection_and_a_real_comment_are_cut_the_way_bash_cuts() -> None:
+    from safo.geminibrief import _strip_comment
+
+    assert _strip_comment("echo hi # a plain comment") == "echo hi "
+    assert _strip_comment("echo hi #plain") == "echo hi "
+    assert _strip_comment("echo x#y") == "echo x#y"
+    assert _strip_comment("echo 'a # b'") == "echo 'a # b'"
+    assert _strip_comment("cat < #c") == "cat < "
+    assert _strip_comment("# only a comment") == ""
+    # fail closed: text that bash may still run is kept whole
+    assert _strip_comment("echo a<#b ; $A") == "echo a<#b ; $A"
+    assert _strip_comment("ls # $A") == "ls # $A"
+    assert _strip_comment("ls # `date`") == "ls # `date`"
+    assert _strip_comment("ls # a; b") == "ls # a; b"
+    assert _strip_comment("echo $'x' # y") == "echo $'x' # y"
+    assert _strip_comment("echo x" + NBSP + "# y") == "echo x" + NBSP + "# y"
+    # each cutting rule on its own, with a benign comment so that the fail-closed rules do not apply
+    assert _strip_comment('echo "a\\" # b"') == 'echo "a\\" # b"', "a backslash escapes a quote in double quotes"
+    assert _strip_comment("echo a<#b") == "echo a<", "a hash after < starts a comment"
+    assert _strip_comment("echo a>#b") == "echo a>", "a hash after > starts a comment"
+    assert _strip_comment("echo x" + NBSP + "y # z") == "echo x" + NBSP + "y # z", (
+        "a non-ASCII space is a word character"
+    )
+    assert _strip_comment("echo (a)#b") == "echo (a)"
+    assert _strip_comment("echo a #b") == "echo a "

@@ -207,7 +207,10 @@ that must pass the strict check:
   `g ask --paid` are caught);
 - a command built from variables, escapes or substitutions. **No value is ever resolved and no shell is modeled**: a Gemini
   command that is built from variables is blocked by design, and a command made only of literal words stays readable.
-  Shell comments are cut off first (quote-aware) and are never code. A name counts as assigned when it is set anywhere in
+  Shell comments are cut off first, the way bash cuts them: a `#` that starts a word (at the start, or after an ASCII
+  space, tab, newline or one of `; & | ( ) < >`), outside single quotes, double quotes and `$'...'` words. The cut fails
+  closed: when the comment text holds `$`, a backtick, `;`, `|` or `&`, or the text before the `#` holds `$'` or a
+  non-ASCII space, the whole line is read. A name counts as assigned when it is set anywhere in
   the brief (`NAME=value`, a prefix assignment, `export`, `declare`, `readonly`, `local`, an array, `printf -v`, a `for` or
   `read` variable), in any order. When the brief names the Gemini surface (`safo`, `gemini`, the vendor host, an SDK, the
   paid config, or words built with escapes), it is unreadable if an assigned name is the command word (also after
@@ -215,7 +218,11 @@ that must pass the strict check:
   `--approval`, `--cap`, `ask`, `approve`); or if an escape (an ANSI-C `$'...'` word, a hex, octal or `\u` escape, `printf -v`)
   is the command word or sits on such a line; or if a command segment (the words between `; | & ( ) < >`) holds the word
   `gemini`, the vendor host, an SDK or the paid config and, in that same segment, any variable or expansion. No visible
-  option or action is needed for that last rule, so `safo gemini ${X} ${Y}` is blocked. An expansion that nothing in the
+  option or action is needed for that last rule, so `safo gemini ${X} ${Y}` is blocked. **No Gemini word is needed at all for one more rule**: a Gemini-risk token on a
+  line (`--paid`, `--approval`, `--cap` as an option of its own, `approve` as a word of its own, not `--cap-add` or
+  `approver`) whose command word is a variable or other expansion (also inside a `bash -c` style command string) makes
+  the brief relevant and unreadable, so words built by substitutions, interpreters, `tr`, `awk`, `sed`, a sourced file
+  or the environment are caught when the action or flag stands on the page. An expansion that nothing in the
   brief assigned, as the command word or on a line with a Gemini option, blocks when the brief names both `safo` and
   `gemini`. An **unrelated construct** (an array, a function, `eval`, `xargs`, an assignment from an expansion, a shell
   or interpreter `-c`) blocks only beside a `--paid` or `approve` step; beside a free command it is left alone, as it
@@ -224,7 +231,11 @@ that must pass the strict check:
   start with a common command word (`echo`, `printf`, `cat`, `base64`, ...); markdown code spans are not substitutions.
   Escape-built words make a brief relevant on their own. The false blocks this adds, by design: a brief that names the
   Gemini surface and runs a command through a variable it assigned; a brief with escape sequences that does so; a
-  command segment with the word `gemini` and any `$` expansion, even in prose. Time is checked once per line and the
+  command segment with the word `gemini` and any `$` expansion, even in prose; a line that starts with an expansion and
+  carries `--paid`, `--approval`, `--cap` or the word `approve`; a comment that holds `$`, a backtick, `;`, `|` or `&`
+  (read as code); and **here-documents**: their bodies are read like any other lines and are not skipped, because a
+  here-document can be fed to `bash`, `sh -s` or `source /dev/stdin` and run, so skipping bodies would be a way around the
+  guard; shell examples inside a here-document can therefore false-block an ordinary brief. Time is checked once per line and the
   tracked names are capped at 2000. The message names the construct;
 - base64, openssl, xxd, rev or printf escapes piped to a shell; the vendor host in any case; the Google genai SDK; the
   paid secret-store config name. These are looked for in the text before markdown links are rewritten, so a host that
@@ -260,7 +271,8 @@ A hook sits inside someone's session, so every error lets the work through, visi
   vendor host, an SDK name, the paid config name, or a decode-to-shell form, after the same normalization the brief scan
   uses (fullwidth and look-alike letters folded, invisible characters removed, quotes and backslashes removed, JSON
   escapes such as `\n` and `\uXXXX` decoded). The event scan also denies what the brief scan's flow rule blocks, without
-  lines: an ANSI-C word with an escape, `printf -v` with escapes, or a name assigned anywhere and referenced anywhere while
+  lines (more than 2000 assigned names, the brief scan's own cap, or more than 50000 referenced names is itself a marker, never a
+  silent stop; a risk token beside an expansion where a command word stands is one too): an ANSI-C word with an escape, `printf -v` with escapes, or a name assigned anywhere and referenced anywhere while
   `safo`, `gemini` or escape-built words are named. A marker anywhere is **denied** with the diagnostic kept. An event longer
   than 8 MiB, or one that does not finish arriving or cannot be checked within the time, is **denied** as too large or
   incomplete to check. Only an oversized event whose whole stream was read and checked and held no marker is the degraded

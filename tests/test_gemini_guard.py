@@ -615,7 +615,7 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         # the cross-line reader: run only on a brief the prefilter already passed, and acts only with safo and gemini
         "_ASSIGNED", "_PRINTF_NAME", "_LOOP_NAME", "_READ_NAME", "_REFERENCE", "_ANSI_ESCAPE", "_FUNCTION",
         "_RISK_TOKEN", "_PAID_TOKEN", "_GEMINI_WORD", "_SHELL_C", "_ASSIGNMENT_WORD", "_DOLLAR", "_BACKTICK_CMD",
-        "_COMMAND_START", "_GEMINI_OPTION",
+        "_COMMAND_START", "_GEMINI_OPTION", "_RISK_OPTION",
         "RECORD_ID",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
@@ -1399,6 +1399,7 @@ BLOCKED_SAMPLES = {
     "decode": "printf '\\x41' | sh\n",
     "conceal": "$'\\x73afo' $'\\x67emini' $'\\x61sk' $'\\x2d\\x2dpaid'\n",
     "variable flow": "A=safo\nB=gemini\n$A $B ask --paid\n",
+    "risk option beside an expansion command": "$X $Y ask --paid\n",
     "printf -v flow": "printf -v A '\\x73afo'\n$A gemini ask --paid\n",
 }
 
@@ -1422,6 +1423,6 @@ def parity_gaps(prefilter: list[tuple[str, re.Pattern[str]]]) -> list[str]:
 def test_the_event_scan_denies_whatever_the_brief_scan_blocks() -> None:
     from safo import geminibrief as gb
 
-    assert len(BLOCKED_SAMPLES) >= 9, "something was collected"
+    assert len(BLOCKED_SAMPLES) >= 10, "something was collected"
     assert parity_gaps(list(gb.PREFILTER)) == []
     assert parity_gaps([*gb.PREFILTER, ("a new detector", re.compile("x"))]) == ["a new detector"], "the check bites"
