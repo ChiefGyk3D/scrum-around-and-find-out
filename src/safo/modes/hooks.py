@@ -200,7 +200,9 @@ class EventScan:
                     self.capped = True
                     self.hit = True
             if "--" in view or "approve" in view or "{" in view:
-                self.risk = self.risk or bool(geminibrief._RISK_OPTION.search(view)) or geminibrief._brace_risk(view)
+                self.risk = (
+                    self.risk or bool(geminibrief._RISK_OPTION.search(view)) or geminibrief._brace_word_risk(view)
+                )
             if "$" in view:
                 self.expansion = self.expansion or bool(geminibrief._DOLLAR.search(view))
                 self.command_expansion = self.command_expansion or bool(_COMMAND_EXPANSION.search(view))

@@ -694,84 +694,88 @@ _RISK_OPTION = re.compile(
 )  # exact tokens: --cap-add is not one, and approve is a word of its own
 
 
-_BRACE_GROUP = re.compile(r"\{([^{}]*,[^{}]*)\}")
-_WRAPPERS = _PREFIX_WORDS | frozenset(
-    {
-        "nice",
-        "timeout",
-        "stdbuf",
-        "setsid",
-        "ionice",
-        "strace",
-        "ltrace",
-        "chrt",
-        "taskset",
-        "unbuffer",
-        "doas",
-        "runuser",
-    }
-)  # words that run another command, usually with options of their own before it
+_RISK_FLAG = re.compile(
+    r"(?<![\w-])--paid(?![\w-])|(?<![\w-])--approval(?![\w-])|(?<![\w-])--cap(?![\w-])|(?<![\w-])approve(?=\s+-)"
+)  # the flags that are unambiguous in prose: `approve` counts only when an option follows it
+_BRACE_FRAGMENTS = ("--", "appro", "cap", "paid")
 
 
-def _brace_expand(word: str, limit: int = 256) -> list[str]:
-    """The words a brace list in `word` makes (`--{p,un}aid` gives `--paid` and `--unaid`); bounded, text only."""
-    out = [word]
-    for _ in range(4):
-        nxt: list[str] = []
-        changed = False
-        for w in out:
-            m = _BRACE_GROUP.search(w)
-            if m is None:
-                nxt.append(w)
-                continue
-            changed = True
-            nxt.extend(w[: m.start()] + alt + w[m.end() :] for alt in m.group(1).split(","))
-        out = nxt[:limit]
-        if not changed:
-            break
-    return out
+def _brace_list(word: str) -> bool:
+    """Whether the word holds a brace expansion bash would perform (`{a,b}` or `{x..y}`, nested too, never `${...}`).
+    One pass over the text, no string built; more than 64 levels deep counts as a brace expansion."""
+    open_lists: list[bool] = []
+    i = 0
+    while i < len(word):
+        c = word[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "{" and (i == 0 or word[i - 1] != "$"):
+            if len(open_lists) >= 64:
+                return True
+            open_lists.append(False)
+        elif c == "}" and open_lists:
+            if open_lists.pop():
+                return True
+        elif open_lists and (c == "," or (c == "." and word[i + 1 : i + 2] == ".")):
+            open_lists[-1] = True
+        i += 1
+    return False
 
 
-def _brace_risk(low: str) -> bool:
-    """A brace list that can spell a Gemini-risk token (it is only expanded as text, never resolved against a value)."""
+def _has_brace_word(norm: str) -> bool:
+    """An unquoted word on the line that is a brace expansion. A word held in quotes is not expanded by the shell."""
+    tokens = _lex(_strip_comment(norm))
+    if tokens is None:
+        return "{" in norm and _brace_list(norm)
+    return any(not t.op and not t.quoted and "{" in t.value and _brace_list(t.value) for t in tokens)
+
+
+def _brace_word_risk(low: str) -> bool:
+    """For text with no lines (an oversized event): a brace expansion in a word that holds `--`, `appro`, `cap` or
+    `paid`, so a risk token could be spelled by it. A word longer than LINE_CAP that holds a brace counts."""
     return any(
-        _RISK_OPTION.search(candidate)
+        "{" in word and any(f in word for f in _BRACE_FRAGMENTS) and (len(word) > LINE_CAP or _brace_list(word))
         for word in low.split()
-        if "{" in word and "," in word
-        for candidate in _brace_expand(word)
     )
 
 
-def _after_wrapper(norm: str) -> bool:
-    """An expansion later in a command that starts with a wrapper word (`env -u X $BIN ...`, `time -p $BIN ...`): the
-    options before the real command are not tracked, so any expansion after the wrapper counts."""
-    tokens = _lex(_strip_comment(norm))
+def _expansion_past_first_word(norm: str) -> bool:
+    """Any expansion after the first word of a command (NAME=value words before it are skipped): a wrapper such as
+    `env -u X $BIN ...` hides the real command behind options, so no wrapper is named and none is tracked."""
+    text = _strip_comment(norm)
+    if _backtick_command(text):
+        return True
+    tokens = _lex(text)
     if tokens is None:
-        return _expands(norm)
-    at_start = True
-    wrapped = False
+        return _expands(text)
+    seen_command = False
     for t in tokens:
         if t.op:
-            at_start = _breaks(t.value)
-            wrapped = wrapped and not at_start
-            continue
-        if wrapped and _DOLLAR.search(t.value):
+            seen_command = seen_command and not _breaks(t.value)
+        elif not seen_command:
+            seen_command = not _ASSIGNMENT_WORD.match(t.value)
+        elif _DOLLAR.search(t.value):
             return True
-        if at_start and t.value in _WRAPPERS:
-            wrapped = True
-        at_start = at_start and t.value in _WRAPPERS
     return False
 
 
 def _risk_line(norm: str, low: str) -> bool:
-    """A Gemini-risk token on a line whose command is made by an expansion: no Gemini word needs to be on the page. The
-    token may be spelled by a brace list. The line is also risky when it is a shell or interpreter command string that
-    holds an expansion, or when an expansion follows a wrapper word and its options."""
+    """A Gemini-risk token on a line whose command is made by an expansion: no Gemini word needs to be on the page.
+    Nothing is enumerated or built: a brace expansion on the line may spell a token, so it counts as one; an expansion
+    anywhere after the first word counts when the line carries an unambiguous flag; a line longer than LINE_CAP is
+    judged by the same marks without being read further."""
+    if len(norm) > LINE_CAP:
+        return ("$" in norm or "`" in norm) and bool(_RISK_OPTION.search(low) or "{" in norm)
     if not _expands(norm):
         return False
-    if not (_RISK_OPTION.search(low) or _brace_risk(low)):
-        return False
-    return _expansion_at_command(norm) or _after_wrapper(norm) or bool(_SHELL_C.search(low) and _DOLLAR.search(norm))
+    word = bool(_RISK_OPTION.search(low))
+    brace = _has_brace_word(norm)
+    if (word or brace) and _expansion_at_command(norm):
+        return True
+    if _RISK_FLAG.search(low) and _expansion_past_first_word(norm):
+        return True
+    return word and bool(_SHELL_C.search(low) and _DOLLAR.search(norm))
 
 
 def _gemini_expansion(text: str, low: str, names: set[str]) -> bool:

@@ -502,13 +502,18 @@ WRAPPED = {
     "time -p": "time -p $BIN $SUB ask --paid --model m\n",
     "nohup": "nohup $BIN $SUB ask --paid --model m\n",
     "env with several options": "env -u A -u B $BIN $SUB ask --paid --model m\n",
+    "a quoted wrapper": '"env" -u FOO $BIN $SUB ask --paid --model m\n',
+    "a backslashed wrapper": "\\env -u FOO $BIN $SUB ask --paid --model m\n",
+    "a wrapper by path": "/usr/bin/env -u FOO $BIN $SUB ask --paid --model m\n",
+    "an assignment before the wrapper": "X=1 env -u FOO $BIN $SUB ask --paid --model m\n",
+    "an assignment before nohup": "X=1 Y=2 nohup $BIN $SUB ask --paid --model m\n",
+    "nice": "nice -n 5 $BIN $SUB ask --paid --model m\n",
 }
 WRAPPED_GUARD_ONLY = {
     "command -p": "command -p $BIN $SUB ask --paid --model m\n",
     "nohup --": "nohup -- $BIN $SUB ask --paid --model m\n",
     "eval --": "eval -- $BIN $SUB ask --paid --model m\n",
     "xargs -n1": "echo x | xargs -n1 $BIN $SUB ask --paid --model m\n",
-    "nice -n 5": "nice -n 5 $BIN $SUB ask --paid --model m\n",
     "timeout 5": "timeout 5 $BIN $SUB ask --paid --model m\n",
 }
 
@@ -532,6 +537,9 @@ BRACED = {
     "an option name built by braces": "$BIN $SUB ask --{p,un}aid --model m\n",
     "approve built by braces": "$BIN $SUB appro{v,w}e --max-usd 1\n",
     "a cap built by braces": "$BIN $SUB ask --{cap,ca}p 1\n",
+    "a sequence expression": "$BIN $SUB ask --{p..p}aid --model m\n",
+    "nested braces": "$BIN $SUB ask --{{p,q},un}aid --model m\n",
+    "braces after an option fragment": "$BIN $SUB ask --pa{id,xx} --model m\n",
 }
 
 
@@ -543,6 +551,38 @@ def test_a_risk_token_built_by_brace_expansion_is_seen(name: str, tmp_path: Path
     assert relevant(BRACED[name]) and GEMINI_PAID in rules(BRACED[name] + PUBLIC), name
 
 
-def test_braces_that_never_spell_a_risk_token_are_left_alone() -> None:
-    assert rules("$BIN $SUB ask --{a,b}ccount\n") == []
+def test_braces_are_judged_without_building_any_word_and_the_false_blocks_are_the_documented_ones() -> None:
     assert rules("echo {a,b}\ndocker run --cap-{add,drop}=NET_ADMIN $IMAGE\n") == []
+    assert rules("echo ${HOME} ${X:-a,b}\n") == []
+    assert rules('$BIN $SUB ask now "--{p,un}aid"\n') == [], "a quoted word is not brace-expanded by the shell"
+    # documented false block: a brace list on a line whose command is an expansion
+    assert GEMINI_PAID in rules("$BIN $SUB ask --{a,b}ccount\n")
+
+
+# -- round ten: nothing is enumerated, so nothing can be exhausted or silently cut ------------------------------------
+
+
+def test_a_line_with_a_huge_brace_list_is_judged_in_linear_time() -> None:
+    started = time.monotonic()
+    many = "$BIN $SUB ask --{" + ",".join("a" * 10 for _ in range(20000)) + "}paid --model m\n"
+    assert GEMINI_PAID in rules(many + PUBLIC)
+    nested = "$BIN $SUB ask --" + "{a," * 5000 + "b" + "}" * 5000 + "\n"
+    assert GEMINI_PAID in rules(nested + PUBLIC)
+    words = "$BIN " + " ".join("{a,b}" * 3 for _ in range(20000)) + " --paid\n"
+    assert GEMINI_PAID in rules(words + PUBLIC)
+    assert time.monotonic() - started < 8.0
+
+
+def test_a_line_past_the_length_bound_that_could_hold_a_risk_token_is_unreadable_not_cut() -> None:
+    long = "$BIN " + "x " * 5000 + "--paid\n"
+    assert GEMINI_PAID in rules(long + PUBLIC)
+    assert rules("echo " + "x " * 5000 + "\n") == []
+
+
+def test_a_parameter_expansion_is_not_a_brace_list_and_a_long_brace_word_is_never_cut() -> None:
+    from safo.geminibrief import _brace_word_risk
+
+    assert rules("$BIN ${X:-a,b} now\n") == []
+    assert _brace_word_risk("--" + "x" * 5000 + "{") is True, "past the length bound it is a marker, never silently cut"
+    assert _brace_word_risk("--x{") is False
+    assert _brace_word_risk("echo {a,b}") is False

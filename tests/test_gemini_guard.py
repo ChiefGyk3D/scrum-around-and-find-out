@@ -615,7 +615,7 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         # the cross-line reader: run only on a brief the prefilter already passed, and acts only with safo and gemini
         "_ASSIGNED", "_PRINTF_NAME", "_LOOP_NAME", "_READ_NAME", "_REFERENCE", "_ANSI_ESCAPE", "_FUNCTION",
         "_RISK_TOKEN", "_PAID_TOKEN", "_GEMINI_WORD", "_SHELL_C", "_ASSIGNMENT_WORD", "_DOLLAR", "_BACKTICK_CMD",
-        "_COMMAND_START", "_GEMINI_OPTION", "_RISK_OPTION", "_BRACE_GROUP",
+        "_COMMAND_START", "_GEMINI_OPTION", "_RISK_OPTION", "_RISK_FLAG",
         "RECORD_ID",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
