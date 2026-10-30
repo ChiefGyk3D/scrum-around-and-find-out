@@ -826,3 +826,35 @@ def test_issue_refuses_a_prompt_over_the_character_limit(store: ApprovalStore) -
     store.issue(**{**KEY_ARGS, "prompt": "w" * 4000})
     with pytest.raises(RefusedError, match="at most 4000"):
         store.issue(**{**KEY_ARGS, "prompt": "w" * 4001})
+
+
+class _LiesInLen(str):
+    def __len__(self) -> int:
+        return 1
+
+
+class _LiesLong(str):
+    def __len__(self) -> int:
+        return 5000
+
+
+class _LiesInEncode(str):
+    def encode(self, *args: Any, **kw: Any) -> bytes:
+        return b"x"
+
+
+@pytest.mark.parametrize(
+    "liar",
+    [
+        pytest.param(_LiesInLen("w" * 4001), id="len-1-over-limit"),
+        pytest.param(_LiesLong("short prompt"), id="len-5000-short"),
+        pytest.param(_LiesInEncode("another prompt"), id="lying-encode"),
+        pytest.param(b"bytes prompt", id="bytes"),
+        pytest.param(7, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_the_store_accepts_only_an_exact_str_prompt(store: ApprovalStore, liar: Any) -> None:
+    with pytest.raises(RefusedError, match="plain text"):
+        store.issue(**{**KEY_ARGS, "prompt": liar})
+    assert not store.folder.exists() or list(store.folder.glob("*.json")) == []

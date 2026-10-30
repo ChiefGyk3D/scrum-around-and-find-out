@@ -1029,9 +1029,13 @@ class ApprovalStore:
         from safo import geminisign
 
         require_paid()
-        prompt_digest, prompt_size = prompt_binding(prompt)  # the signature covers these exact bytes (#217)
-        if len(prompt) > MAX_APPROVED_PROMPT_CHARS:
-            raise RefusedError(too_long(len(prompt)))
+        # One plain snapshot (exact `str` only): the digest, the length limit and the signature all come from it, and
+        # no method of the caller's object is called after the type check (#217).
+        prompt_raw = prompt_bytes(prompt)
+        prompt_text = bytes.decode(prompt_raw, "utf-8")
+        prompt_digest, prompt_size = prompt_binding(prompt_text)
+        if len(prompt_text) > MAX_APPROVED_PROMPT_CHARS:
+            raise RefusedError(too_long(len(prompt_text)))
         if not MODEL_NAME.fullmatch(model):
             raise ConfigError("approval: the model name is not a plain model name")
         if not JOB_NAME.fullmatch(job):

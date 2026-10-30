@@ -167,10 +167,11 @@ def approve_flow(
     pass anything else. The ceiling flag comes from the ledger here, never from the caller."""
     if not ctx.dry_run:
         gemini.require_paid()  # a dry run spends nothing and writes nothing, so it can still test a key
-    if not req.prompt:
-        raise ConfigError("approve needs --prompt-file: an approval covers the exact prompt that `ask` will read")
     # One snapshot: the display, the digest and the signature all come from this text, never from `req` again.
-    text = bytes.decode(gemini.prompt_bytes(req.prompt), "utf-8")
+    snapshot_raw = gemini.prompt_bytes(req.prompt)  # exact str only; the bytes are the single source
+    if not snapshot_raw:
+        raise ConfigError("approve needs --prompt-file: an approval covers the exact prompt that `ask` will read")
+    text = bytes.decode(snapshot_raw, "utf-8")
     req = dataclasses.replace(req, prompt=text)
     if len(text) > MAX_APPROVED_PROMPT_CHARS:
         raise RefusedError(too_long(len(text)))
