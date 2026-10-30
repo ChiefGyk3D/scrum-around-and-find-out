@@ -768,3 +768,61 @@ def test_the_issued_payload_satisfies_the_passkey_expect_mapping(store: Approval
 def test_issue_refuses_a_prompt_that_cannot_be_encoded(store: ApprovalStore) -> None:
     with pytest.raises(RefusedError, match="prompt"):
         store.issue(**{**KEY_ARGS, "prompt": "lone \ud800 surrogate"})
+
+
+# -- one snapshot of the prompt, and a last check at the send boundary (#217) ----------------------------------------
+
+
+def test_a_prompt_swapped_after_the_gate_is_not_what_is_sent(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    req = paid(record.id)
+    real = ApprovalStore.consume
+
+    def hostile(self: ApprovalStore, record_id: str) -> None:
+        real(self, record_id)
+        object.__setattr__(req, "prompt", "a different paid prompt")  # after the gate, before the send
+
+    monkeypatch.setattr(ApprovalStore, "consume", hostile)
+    ask(cfg, req, store=store, key_for=keys, now=NOW)
+    assert req.prompt == "a different paid prompt", "the swap happened"
+    assert len(server.requests) == 1
+    assert json.dumps(server.requests).count("a different paid prompt") == 0
+    assert A_PROMPT in json.dumps(server.requests)
+
+
+def test_a_prompt_swapped_by_a_ledger_hook_is_not_what_is_sent(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    req = paid(record.id)
+    real = Ledger.append
+
+    def hostile(self: Ledger, row: dict[str, Any], *, ts: str = "") -> str:
+        if row.get("type") == "call_start":
+            object.__setattr__(req, "prompt", "a different paid prompt")
+        return real(self, row, ts=ts)
+
+    monkeypatch.setattr(Ledger, "append", hostile)
+    ask(cfg, req, store=store, key_for=keys, now=NOW)
+    assert "a different paid prompt" not in json.dumps(server.requests) and A_PROMPT in json.dumps(server.requests)
+
+
+def test_the_send_boundary_refuses_a_body_that_is_not_the_approved_prompt(
+    cfg: GeminiConfig, server: FakeGemini
+) -> None:
+    from safo import gemini
+
+    approved = sha(A_PROMPT)
+    with pytest.raises(RefusedError, match="not the prompt the approval covers"):
+        gemini._post(cfg, paid("x" * 16), "FAKE-KEY-for-tests-0123456789", b"another prompt", approved)
+    assert server.requests == []
+    status, _, _ = gemini._post(cfg, paid("x" * 16), "FAKE-KEY-for-tests-0123456789", A_PROMPT.encode(), approved)
+    assert status == 200 and len(server.requests) == 1
+
+
+def test_issue_refuses_a_prompt_over_the_character_limit(store: ApprovalStore) -> None:
+    store.issue(**{**KEY_ARGS, "prompt": "w" * 4000})
+    with pytest.raises(RefusedError, match="at most 4000"):
+        store.issue(**{**KEY_ARGS, "prompt": "w" * 4001})

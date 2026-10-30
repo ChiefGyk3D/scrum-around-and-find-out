@@ -18,6 +18,7 @@ has said yes in his own message, and he touches the key only after reading the q
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import os
 import re
@@ -46,14 +47,14 @@ from safo.gemini import (
     money,
     open_store,
     paid_quota,
+    MAX_APPROVED_PROMPT_CHARS,
     prompt_binding,
+    too_long,
     quota_line,
     snapshot,
     usd_amount,
 )
 from safo.modes import LocalMode, register_local
-
-EXCERPT_CHARS = 200  # how much of the prompt the approval request quotes; the digest covers all of it
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -168,7 +169,12 @@ def approve_flow(
         gemini.require_paid()  # a dry run spends nothing and writes nothing, so it can still test a key
     if not req.prompt:
         raise ConfigError("approve needs --prompt-file: an approval covers the exact prompt that `ask` will read")
-    digest, size = prompt_binding(req.prompt)  # the same bytes `ask` sends, from the same file
+    # One snapshot: the display, the digest and the signature all come from this text, never from `req` again.
+    text = bytes.decode(gemini.prompt_bytes(req.prompt), "utf-8")
+    req = dataclasses.replace(req, prompt=text)
+    if len(text) > MAX_APPROVED_PROMPT_CHARS:
+        raise RefusedError(too_long(len(text)))
+    digest, size = prompt_binding(text)  # the same bytes `ask` sends, from the same file
     line = quota_line(cfg, req, ctx.now)  # first: an approval is refused when the line cannot be produced
     ctx.say(line)
     amount = usd_amount(args.max_usd, "--max-usd")
@@ -193,19 +199,18 @@ def approve_flow(
         )
     phrase = f"approve {req.job}"
     ctx.say(f"quote of his message ({args.quoted_at}): {args.quote}")
-    shown = req.prompt[:EXCERPT_CHARS]
-    ctx.say(f"prompt: {size} bytes, SHA-256 {digest}")
-    ctx.say(
-        f"prompt excerpt ({'all' if len(shown) == len(req.prompt) else 'first'} {len(shown)} of {len(req.prompt)} "
-        f"characters, non-ASCII and control characters escaped): {shown!a}"
-    )
+    ctx.say(f"prompt: {len(text)} characters, {size} bytes, SHA-256 {digest}")
+    ctx.say("--- the WHOLE prompt starts (line by line; non-ASCII and control characters are escaped) ---")
+    for number, row in enumerate(text.split("\n"), 1):
+        ctx.say(f"{number:4d}| {row!a}")
+    ctx.say("--- the prompt ends ---")
     ctx.say(
         f"you are approving up to {money(amount)} USD on {req.model} for job {req.job}"
         + (" and it PASSES the monthly ceiling" if beyond else "")
     )
     ctx.say(
         "your security key will blink next. Touch it only because you have just read the quota line, the quote and "
-        "the prompt digest and excerpt above and they are right; the signature covers that exact prompt and no other. "
+        "the whole prompt and its digest above and they are right; the signature covers that exact prompt and no other. "
         "If you did not start this, do not touch it."
     )
     if confirm(f"type exactly `{phrase}` to approve, anything else cancels: ").strip() != phrase:
@@ -236,7 +241,7 @@ def approve_flow(
         now=ctx.now,
         ttl_minutes=args.ttl_minutes,
         beyond_ceiling=beyond,
-        prompt=req.prompt,
+        prompt=text,
         issue_ref=args.issue,
     )
     ctx.say(

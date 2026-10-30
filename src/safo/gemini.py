@@ -809,6 +809,26 @@ def paid_quota(cfg: GeminiConfig, snap: Snapshot, req: Request, now: dt.datetime
     return PaidQuota(req.model, month_spent(snap, now), estimate_usd(cfg, req, now), cfg.job_cap, cfg.month_cap)
 
 
+MAX_APPROVED_PROMPT_CHARS = 4000  # the signer reads the whole prompt, so an approval covers no more than this
+
+
+def too_long(characters: int) -> str:
+    return (
+        f"the prompt is {characters} characters; an approval covers at most {MAX_APPROVED_PROMPT_CHARS}, because the "
+        "person signing must be able to read all of it. Shorten the prompt or split the job"
+    )
+
+
+def prompt_bytes(prompt: str) -> bytes:
+    """The one snapshot of a prompt: its strict UTF-8 bytes (a lone surrogate is a refusal)."""
+    if type(prompt) is not str:
+        raise RefusedError("the prompt is not plain text, so nothing was sent")
+    try:
+        return str.encode(prompt, "utf-8")
+    except UnicodeEncodeError:
+        raise RefusedError("the prompt is not valid text (a lone surrogate), so nothing was approved or sent") from None
+
+
 def prompt_binding(prompt: str) -> tuple[str, int]:
     """What a signed approval covers: the lowercase hex SHA-256 of the exact UTF-8 bytes of the prompt the wrapper
     sends, and their count. No normalization, no trimming: a changed byte, a trailing newline or another Unicode form
@@ -1010,6 +1030,8 @@ class ApprovalStore:
 
         require_paid()
         prompt_digest, prompt_size = prompt_binding(prompt)  # the signature covers these exact bytes (#217)
+        if len(prompt) > MAX_APPROVED_PROMPT_CHARS:
+            raise RefusedError(too_long(len(prompt)))
         if not MODEL_NAME.fullmatch(model):
             raise ConfigError("approval: the model name is not a plain model name")
         if not JOB_NAME.fullmatch(job):
@@ -1565,14 +1587,24 @@ def _reason(body: object) -> str:
     return f" {status}" if isinstance(status, str) and re.fullmatch(r"[A-Z_]{3,40}", status) else ""
 
 
-def _post(cfg: GeminiConfig, req: Request, key: str) -> tuple[int, Mapping[str, str], bytes]:
-    """One POST. A failure before the request leaves is RefusedError; after it, the caller treats it as unknown."""
+def _post(
+    cfg: GeminiConfig, req: Request, key: str, prompt: bytes, approved: str | None = None
+) -> tuple[int, Mapping[str, str], bytes]:
+    """One POST. A failure before the request leaves is RefusedError; after it, the caller treats it as unknown.
+
+    `prompt` is the one snapshot of the prompt bytes taken at the start of `ask`; the body is built from it and from
+    nothing else. For a paid call `approved` is the digest the approval was signed with, and the prompt text found in
+    the finished body is hashed once more: a body that differs from what was approved is refused before it is sent."""
     body = json.dumps(
         {
-            "contents": [{"role": "user", "parts": [{"text": req.prompt}]}],
+            "contents": [{"role": "user", "parts": [{"text": bytes.decode(prompt, "utf-8")}]}],
             "generationConfig": {"maxOutputTokens": req.max_output_tokens or cfg.max_output_tokens},
         }
     ).encode()
+    if approved is not None:
+        text = json.loads(body)["contents"][0]["parts"][0]["text"]
+        if not digests_equal(hashlib.sha256(str.encode(text, "utf-8")).hexdigest(), approved):
+            raise RefusedError("the request body is not the prompt the approval covers; nothing was sent")
     conn = _connection(cfg)
     try:
         try:
@@ -1608,6 +1640,11 @@ def ask(
     now: dt.datetime,
 ) -> Reply:
     """Send one request, once, or say which gate stopped it."""
+    # One snapshot of the prompt, taken once: bytes cannot change. `req` is rebuilt from it so that nothing below reads
+    # the caller's object again (a frozen dataclass can still be altered with object.__setattr__), and the body is
+    # built from these same bytes (#217).
+    prompt_raw = prompt_bytes(req.prompt)
+    req = dataclasses.replace(req, prompt=bytes.decode(prompt_raw, "utf-8"))
     if req.tier == "paid":
         require_paid()  # before anything else: the paid path is off unless the root-owned switch says it is on
     _check_request(cfg, req)
@@ -1687,7 +1724,7 @@ def ask(
             return "(the quota line could not be rebuilt)"
 
     try:
-        status, headers, raw = _post(cfg, req, key)
+        status, headers, raw = _post(cfg, req, key, prompt_raw, record.prompt_sha256 if record else None)
     except RefusedError:
         finish("not_sent", None, None, None, Decimal(0))
         raise

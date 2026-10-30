@@ -53,7 +53,7 @@ what needs a model that has no free tier. Every monetary action needs a fresh, e
   (the label of the enrolled key), the **ledger head** at signing time and the **prompt digest** (see "What a signature
   covers"). It is made by `safo gemini approve`, which the
   lead runs **only after the maintainer has said yes in his own message**; the maintainer then reads the quota line, the
-  quote, the prompt digest and a short excerpt, and touches the key. The wrapper checks the signature with `ssh-keygen -Y verify` against **public keys only**
+  quote, the prompt digest and the whole prompt, and touches the key. The wrapper checks the signature with `ssh-keygen -Y verify` against **public keys only**
   (see "Who can approve"). A file with no signature, in the older unsigned format, or in an older payload version
   (version 1, which bound no prompt) authorizes nothing and is refused with a message that says to ask for a fresh one. The quote is
   there so he can check afterwards what he approved, the same as the approval token in [Hooks](hooks.md).
@@ -109,14 +109,20 @@ its canonical form (sorted keys, no whitespace, ASCII only), the signature schem
 the `version` goes from 1 to 2.
 
 - **At `approve`.** The digest is computed from the same `--prompt-file` that `ask` will read. `approve` refuses without a
-  prompt file. Before the person types the phrase and touches the key it prints the byte count, the full digest, and a
-  quoted excerpt (the first 200 characters, with non-ASCII and control characters shown as escapes so nothing is hidden),
-  so the signature is over what they saw. The digest is also written to the `approval_issued` ledger row.
+  prompt file. Before the person types the phrase and touches the key it prints the character and byte counts, the full digest, and the
+  **whole prompt**, line by line between a start and an end marker, with non-ASCII and control characters shown as
+  escapes so nothing is hidden and nothing is cut off. The signature is over what they saw. An approval is refused for a
+  prompt longer than **4000 characters** (the refusal says so): shorten the prompt or split the job. The digest is also written to the `approval_issued` ledger row.
 - **At the paid gate.** The wrapper recomputes the digest and length from the prompt it is about to send, never from the
   record, and refuses unless they equal the signed values. It also refuses an approval with a missing or malformed digest
   or length, an approval in any other payload version, and an approval whose digest and length are not the ones on its
   single-use `approval_issued` ledger row. The digest comparison uses `hmac.compare_digest` on bytes taken through the base
   `str` type's own methods. A refused prompt does not spend the approval.
+- **One snapshot.** `approve` and `ask` each take the prompt once, as a bytes object, and build everything from it: the
+  display, the digest and the signature in `approve`; the check, the ledger rows and the request body in `ask`. They do
+  not read the caller's request object again, so changing it after the check changes nothing. As a last line of defense
+  the finished request body is hashed once more and the call is refused before it leaves if that is not the approved
+  digest.
 - **Free tier.** Unchanged: it needs no approval and has no digest.
 - **Tier 2.** The passkey verifier takes this digest from the payload through its required `expect` mapping
   (`prompt_sha256`; see [Gemini passkeys](gemini-passkeys.md)).
@@ -126,7 +132,7 @@ An approval is therefore for one prompt. Editing the prompt after approving mean
 ## Who can approve: signed approvals
 
 `safo gemini approve` refuses unless standard input **and** standard output are a terminal. It prints the quota line, the
-quote, the prompt digest and a short quoted excerpt of the prompt, tells the person that the key will blink and to touch it only after reading them, and asks them to type
+quote, the prompt digest and the whole prompt, tells the person that the key will blink and to touch it only after reading them, and asks them to type
 `approve <job>` exactly. Only then does it call `ssh-keygen -Y sign -n safo-gemini-approval` with the key named in
 `gemini.yaml` (`signing: {key: /absolute/path, principal: yubikey-a}`). The code never opens that file: it hands the
 path to `ssh-keygen`, which asks the hardware key for the signature. With the global `--dry-run` flag, `safo gemini approve` runs the same
@@ -185,7 +191,7 @@ the canonical text, nothing else). The ledger file versus the signed head.
 6. *A lost key.* Add it to the revocation list; a signature from it is refused even while it is still enrolled (test).
 7. *The agent makes the key blink (confused deputy).* An agent can run `approve` or any `ssh-keygen -Y sign`, and the key
    will blink. The typed `approve <job>` on a real terminal and the quota line printed first are what tie a touch to a
-   spend: **touch the key only after reading the quota line, the quote and the prompt digest and excerpt, and never for
+   spend: **touch the key only after reading the quota line, the quote and the whole prompt and its digest, and never for
    a prompt you did not start.** Because the signature covers the prompt digest, an approval cannot be reused for a
    different prompt (tests: one byte, a trailing newline and a Unicode normalization difference are each refused).
 
