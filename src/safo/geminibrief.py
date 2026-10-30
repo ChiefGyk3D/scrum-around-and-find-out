@@ -1018,11 +1018,10 @@ def _findings(
 
 
 # -- shell commands (#209) ---------------------------------------------------------------------------------------------
-# A cheap, fail-closed check on one Bash command. It names no value and resolves nothing: it looks for the vendor API
+# host, its SDK, the key variable name and the secret-store project and config names (all shown in docs/gemini-keys.md
+# and examples/gemini.example.yaml), and for words built from escapes or an expansion beside a network or secret tool.
 # The wrapper `safo gemini ...` holds the real gates and is the only exemption. Everything else that names them is
 # denied. The classes are fixed text: a denial never repeats a word of the command.
-# The wrapper `safo gemini ...` holds the real gates and is the only exemption. Everything else that names them is denied. The classes are fixed text: a denial never repeats
-# a word of the command.
 SHELL_VENDOR = "the vendor API host or SDK"
 SHELL_KEY = "the key variable name"
 SHELL_STORE = "the secret-store project or config name"
