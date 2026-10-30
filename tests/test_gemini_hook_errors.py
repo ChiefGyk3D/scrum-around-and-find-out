@@ -10,6 +10,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -113,22 +115,126 @@ class Pipe:
         os.close(self.w)
 
 
+# -- round six: the whole stream is scanned, never a prefix ---------------------------------------------------------
+
+HARD = 8 * 1024 * 1024
+
+
+def fullwidth(text: str) -> str:
+    """The fullwidth spelling of ASCII letters, built from code points (no look-alike characters in the source)."""
+    return "".join(chr(ord(c) + 0xFEE0) if c.isalpha() else c for c in text)
+
+
+def event_with(tail: str, pad: int = BIG + 64, key: str = "padding") -> str:
+    """A well-formed event whose Gemini text sits after `pad` bytes of padding (so after the retained prefix)."""
+    return (
+        '{"hook_event_name": "PreToolUse", "session_id": "s", "tool_name": "Agent", '
+        f'"{key}": "' + "A" * pad + '", "tool_input": {"prompt": "' + tail + '"}}'
+    )
+
+
 @pytest.mark.parametrize(
-    ("partial", "denied"),
-    [(b'{"tool_name": "Agent", "prompt": "safo gemini ask --paid', True), (b'{"tool_name": "Ag', False)],
+    "tail",
+    [
+        "safo gemini ask --paid --model m",
+        "\\uff53\\uff41\\uff46\\uff4f \\uff47\\uff45\\uff4d\\uff49\\uff4e\\uff49 ask",  # JSON-escaped fullwidth
+        "\\u0073afo \\u0067emini ask",
+        "generativelanguage.googleapis.com",
+        "echo c2FmbyBnZW1pbmkgYXNrIC0tcGFpZA== | base64 -d | sh",
+        "use the prd_paid config",
+    ],
 )
-def test_an_event_that_times_out_is_checked_for_the_markers_in_what_arrived(
-    agents: Path, _private_home: Path, monkeypatch: pytest.MonkeyPatch, partial: bytes, denied: bool
-) -> None:
-    monkeypatch.setattr(modes.hooks, "STDIN_TIMEOUT_SECONDS", 0.2)
-    pipe = Pipe(partial)
+def test_a_marker_after_the_retained_prefix_is_found(agents: Path, _private_home: Path, tail: str) -> None:
+    out = run(agents, _private_home, event_with(tail))
+    assert decision(out) == "deny" and "input" in notice(out)
+
+
+def test_fullwidth_and_lookalike_spellings_are_folded_before_the_check(agents: Path, _private_home: Path) -> None:
+    out = run(agents, _private_home, event_with(fullwidth("safo gemini") + " ask --paid"))
+    assert decision(out) == "deny"
+    out = run(agents, _private_home, '{"prompt": "' + fullwidth("safo gemini") + " ask --paid")  # malformed, short
+    assert decision(out) == "deny"
+
+
+def test_a_marker_split_across_read_chunks_is_found(agents: Path, _private_home: Path) -> None:
+    pad = 65_536 * 17 - 3  # the word starts three bytes before a chunk boundary
+    out = run(agents, _private_home, event_with("safo gemini ask", pad=pad))
+    assert decision(out) == "deny"
+
+
+def test_a_whole_stream_with_no_marker_is_the_degraded_allow(agents: Path, _private_home: Path) -> None:
+    out = run(agents, _private_home, event_with("Summarise the log.", pad=3 * BIG))
+    assert decision(out) is None and "input" in notice(out)
+
+
+def test_an_event_over_the_hard_limit_is_denied_as_unverifiable(agents: Path, _private_home: Path) -> None:
+    out = run(agents, _private_home, event_with("Summarise the log.", pad=HARD + 1024))
+    assert decision(out) == "deny"
+    assert "too large" in json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+class Slow:
+    """A producer that writes a prefix over the cap and then stalls, on a real descriptor."""
+
+    def __init__(self, first: bytes, then: bytes = b"", pause: float = 2.0) -> None:
+        r, self.w = os.pipe()
+        self.stream = os.fdopen(r, "r")
+        self.thread = threading.Thread(target=self._write, args=(first, then, pause), daemon=True)
+        self.thread.start()
+
+    def _write(self, first: bytes, then: bytes, pause: float) -> None:
+        try:
+            os.write(self.w, first[:0])
+            for i in range(0, len(first), 65_536):
+                os.write(self.w, first[i : i + 65_536])
+            time.sleep(pause)
+            if then:
+                os.write(self.w, then)
+            os.close(self.w)
+        except OSError:
+            return
+
+    def close(self) -> None:
+        self.stream.close()
+        self.thread.join(timeout=5)
+
+
+def run_pipe(agents: Path, home: Path, pipe: Slow) -> str:
     out = io.StringIO()
+    env = {"HOME": str(home), "PATH": ""}
     try:
-        env = {"HOME": str(_private_home), "PATH": ""}
         main(
             ["hooks", "guard", "--agents", str(agents)], env=env, out=out, err=io.StringIO(), now=NOW, stdin=pipe.stream
         )
     finally:
         pipe.close()
-    assert (decision(out.getvalue()) == "deny") is denied
-    assert "timeout" in notice(out.getvalue())
+    return out.getvalue()
+
+
+def test_a_slow_producer_that_does_not_finish_in_time_is_denied(
+    agents: Path, _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(modes.hooks, "DRAIN_SECONDS", 0.3)
+    prefix = event_with("Summarise the log.").encode()[: BIG + 100]
+    out = run_pipe(agents, _private_home, Slow(prefix, pause=2.0))
+    assert decision(out) == "deny"
+    assert "too large or incomplete" in json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_a_slow_producer_that_finishes_in_time_is_scanned_to_the_end(
+    agents: Path, _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(modes.hooks, "DRAIN_SECONDS", 5.0)
+    whole = event_with("safo gemini ask --paid").encode()
+    out = run_pipe(agents, _private_home, Slow(whole[: BIG + 100], whole[BIG + 100 :], pause=0.3))
+    assert decision(out) == "deny"
+
+
+def test_a_stalled_event_with_some_bytes_and_no_marker_is_denied_but_a_silent_one_is_the_degraded_allow(
+    agents: Path, _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(modes.hooks, "STDIN_TIMEOUT_SECONDS", 0.2)
+    out = run_pipe(agents, _private_home, Slow(b'{"tool_name": "Ag', pause=1.0))
+    assert decision(out) == "deny" and "timeout" in notice(out)
+    out = run_pipe(agents, _private_home, Slow(b"", pause=1.0))
+    assert decision(out) is None and "timeout" in notice(out)

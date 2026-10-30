@@ -4,11 +4,12 @@ as unreadable when it cannot be resolved; the same constructs in a brief with no
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
 import pytest
 
-from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, findings
+from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, LINE_CAP, _expansion_at_command, findings
 
 OK = "id-0123456789ab"
 PUBLIC = "gemini-material: public\n"
@@ -101,7 +102,7 @@ HIDING = [
     "X=foo\\ bar",
     "eval true",
     "xargs -n1 echo",
-    "tar -c x",
+    "sh -c true",
     "f() { true; }",
     "function g { true; }",
     "X=$(date)",
@@ -125,3 +126,118 @@ def test_the_same_construct_beside_a_brief_without_a_paid_step_is_left_alone(lin
 @pytest.mark.parametrize("words", ["Notes on safo only.", "Notes on gemini only."])
 def test_the_rule_needs_both_words_not_one(words: str) -> None:
     assert rules(f"{words}\neval true\nTo ask --paid is not a command.\n") == []
+
+
+# -- round six: caps, lexer failures, comments, concealed words, and ordinary briefs ---------------------------------
+
+FREE = "safo gemini ask --model gemini-3.6-flash --prompt-file p.txt --material public\n"
+
+ORDINARY = {
+    "python -c": 'python -c "print(1)"',
+    "bash -c": 'bash -c "pytest -q"',
+    "find with xargs": "find . -print0 | xargs -0 wc -l",
+    "a helper function": "helper() { echo hi; }",
+    "a function declaration": "function build { make; }",
+    "an unrelated array": "FILES=(a b c)",
+    "a revision from a substitution": "REV=$(git rev-parse HEAD)",
+    "an unrelated eval": 'eval "ls -l"',
+    "tar -c": "tar -c archive src",
+    "a chained build": "make -j4 && ./run.sh",
+}
+
+
+@pytest.mark.parametrize("name", sorted(ORDINARY))
+def test_ordinary_additions_beside_a_free_gemini_command_are_allowed(name: str) -> None:
+    assert rules(ORDINARY[name] + "\n" + FREE + PUBLIC) == [], name
+    assert rules(FREE + PUBLIC + ORDINARY[name] + "\n") == [], name
+
+
+def test_the_ten_ordinary_briefs_are_all_in_the_fixture() -> None:
+    assert len(ORDINARY) == 10
+
+
+CONCEALED = {
+    "ansi-c words": "$'\\x73afo' $'gemini' ask --paid --model m\n",
+    "ansi-c assignments with octal": "A=$'\\163afo'\nB=$'\\147emini'\n$A $B ask --paid --model m\n",
+    "ansi-c for every word": "A=$'\\x73\\x61\\x66\\x6f'\nB=$'\\x67emini'\n$A $B $'\\x61sk' --paid\n",
+    "printf -v": "printf -v A '\\x73afo'\nprintf -v B 'gemini'\n$A $B ask --paid --model m\n",
+    "an unresolved substitution": "A=$(printf '\\x73afo')\n$A gemini ask --paid\n",
+    "every word unresolved": "A=$(printf '\\x73afo')\nB=$(printf '\\x67emini')\n$A $B $(printf '\\x61sk') --paid\n",
+    "printf -v with a conversion": "printf -v A '%s' safo\n$A gemini ask --paid\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(CONCEALED))
+def test_words_built_by_escapes_do_not_hide_a_paid_command(name: str) -> None:
+    assert GEMINI_PAID in rules(CONCEALED[name] + PUBLIC), name
+
+
+def test_plain_escapes_are_read_as_the_command_they_produce() -> None:
+    ok = "A=$'\\x73afo'\nB=gemini\n$A $B ask --paid --model m --cap 1.5 --approval " + OK + " --material public\n"
+    assert rules(ok + PUBLIC) == []
+    assert GEMINI_PAID in rules(ok.replace(OK, "missing-record-1") + PUBLIC)
+
+
+def test_escapes_and_substitutions_in_a_brief_that_builds_no_gemini_command_are_left_alone() -> None:
+    assert rules("A=$'\\x41'\n$A foo\n") == []
+    assert rules("printf -v A '\\x41'\n$A foo\nthen ask --paid is only prose\n") == []
+    assert rules("echo $'\\x41'\n") == []
+
+
+def test_an_expanded_line_past_the_line_limit_is_unreadable_not_dropped() -> None:
+    brief = "A=" + "x" * 3000 + "\necho $A$A safo gemini ask --model m\n" + PUBLIC
+    assert GEMINI_PAID in rules(brief)
+
+
+def test_amplified_expansions_are_bounded_in_time_and_size() -> None:
+    big = "A=" + "x" * (LINE_CAP - 100) + "\n"
+    nested = big + "$A" * 1500 + "\n" + "\n".join("$A$A$A" for _ in range(3000)) + "\nsafo gemini quota --model m\n"
+    started = time.monotonic()
+    found = rules(nested + PUBLIC)
+    assert time.monotonic() - started < 3.0
+    assert GEMINI_PAID in found
+
+
+def test_a_line_the_lexer_cannot_read_is_unreadable_and_comments_are_not_code() -> None:
+    assert _expansion_at_command('echo "$A') is True
+    assert _expansion_at_command("echo 'x") is False
+    assert _expansion_at_command("ls # $A and `date`") is False
+    assert _expansion_at_command("# $A is described here") is False
+    assert _expansion_at_command("$A ask") is True
+
+
+def test_resolve_checks_the_clock_per_line_and_per_substitution() -> None:
+    from safo.geminibrief import _resolve
+
+    ticks: list[int] = []
+    _resolve(["A=x", "$A $A", "$A"], lambda: ticks.append(1))
+    assert len(ticks) == 3 + 3, "one check per line and one per substitution"
+
+
+def test_a_rule_that_runs_past_the_deadline_blocks_the_brief() -> None:
+    brief = "A=x\n" * 50 + "safo gemini ask --paid --model m\n" + PUBLIC
+    assert GEMINI_PAID in [r for r, _ in findings(brief, accepts, (), deadline=time.monotonic() - 1)]
+
+
+def test_a_tar_c_beside_a_paid_command_is_not_a_hiding_construct_but_a_shell_c_is() -> None:
+    assert rules("tar -c archive src\n" + VALID_PAID + PUBLIC) == []
+    assert GEMINI_PAID in rules("bash -c true\n" + VALID_PAID + PUBLIC)
+    assert GEMINI_PAID in rules("python3 -c 'print(1)'\n" + VALID_PAID + PUBLIC)
+
+
+def test_a_backtick_command_word_is_a_substitution_and_a_markdown_span_is_not() -> None:
+    assert GEMINI_PAID in rules("`echo safo` gemini ask --paid --model m\n" + PUBLIC)
+    assert rules("Run `quota` or `approve <job>` as described.\nsafo and gemini are named here.\n") == []
+
+
+def test_escape_words_make_a_brief_relevant_only_with_a_gemini_option_or_action() -> None:
+    from safo.geminibrief import relevant
+
+    assert not relevant("echo $'\\x41'\n")
+    assert relevant("echo $'\\x41' --paid\n")
+
+
+def test_an_unresolved_value_as_an_argument_of_a_line_with_a_gemini_option_is_unreadable() -> None:
+    notes = "Notes on safo.\nNotes on gemini.\nTo ask is fine.\n"
+    assert GEMINI_PAID in rules(notes + "deploy $TARGET --paid\n" + PUBLIC)
+    assert rules(notes + "deploy staging --paid\n") == []

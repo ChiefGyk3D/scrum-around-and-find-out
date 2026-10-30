@@ -266,9 +266,11 @@ a brief, not a sandbox. It reads a literal `safo gemini <action>` command, a dec
 short list of named forms (the vendor host, the Google genai SDK, the paid config name, decode-to-shell pipes, and `safo`
 run through a variable, function, `xargs`, `eval` or `-c` when the brief also names Gemini and an action); the list is in
 [Hooks](hooks.md), and a way of building a command that is not on it is not seen. A false positive is a block. Raw SDK use
-outside a brief is out of its reach. When the event cannot be read (over 1 MiB, malformed, incomplete) or `agents.yaml`
-cannot be loaded, the Gemini rules still apply: a brief is checked as usual without `agents.yaml`, and an unreadable
-event that carries a Gemini marker is denied (one without a marker is the degraded allow). The gates that hold are in the wrapper: a paid call
+outside a brief is out of its reach. When `agents.yaml` cannot be loaded the Gemini rules still apply to the brief. When
+the event cannot be used, it is never judged from a prefix: an oversized event is read to the end (up to 8 MiB and a few
+seconds) and checked whole for Gemini markers, a marker anywhere is denied, an event past the hard limit or that does not
+finish in time is denied as too large or incomplete to check, and only a whole stream with no marker is the degraded
+allow (details in [Hooks](hooks.md)). The gates that hold are in the wrapper: a paid call
 without a live, signed approval record raises before any request.
 
 ## What is not built or not verified

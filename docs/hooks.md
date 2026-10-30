@@ -205,11 +205,19 @@ that must pass the strict check:
   `approve` word; and, when the brief names `gemini` and an action anywhere, any line that runs `safo` through `$`, a
   function, `xargs`, `eval`, `alias` or `-c` (so `echo ask --paid | xargs safo gemini` and `alias g='safo gemini'` then
   `g ask --paid` are caught);
-- a command built over several lines: plain `NAME=value` assignments are resolved and expanded into the lines after them,
-  so `A=safo`, `B=gemini`, then `$A $B ask --paid ...` is read as the command it is. When a brief names `safo`, `gemini`
-  and an action and also builds the command with an array, a function, `eval`, `xargs`, `-c`, an assignment from an
-  expansion, or a command word that is still an expansion, it is unreadable and blocked, and the message names the
-  construct. The same constructs in a brief with no Gemini words are left alone;
+- a command built over several lines: plain `NAME=value` assignments, plain ANSI-C words (`$'\x73afo'`, octal too) and
+  `printf -v NAME 'literal'` are resolved and expanded into what follows them, so `A=safo`, `B=gemini`, then
+  `$A $B ask --paid ...` is read as the command it is. Expansion is bounded: time is checked per line and per
+  substitution, a line may not grow past 4000 characters nor the brief past 200000, and either makes the brief
+  unreadable (an expanded line is never dropped). What cannot be resolved is a construct, and two kinds matter. A
+  **value that still reaches a command position** (a command word that is a left-over expansion or substitution, an
+  escape or `printf -v` that cannot be resolved, a line the lexer cannot read that holds an expansion; shell comments
+  are not code) makes a brief unreadable when it names `safo`, `gemini` and an action, or builds words with escapes and
+  carries a Gemini option or action; the words themselves are not required to be literal. An **unrelated construct**
+  (an array, a function, `eval`, `xargs`, an assignment from an expansion, a shell or interpreter `-c`) blocks only
+  beside a `--paid` or `approve` step; beside a free command it is left alone, as is any of them in a brief that names
+  no Gemini command. Backtick command substitutions are recognized only when they start with a common command word
+  (`echo`, `printf`, `cat`, `base64`, ...); markdown code spans are not substitutions. The message names the construct;
 - base64, openssl, xxd, rev or printf escapes piped to a shell; the vendor host in any case; the Google genai SDK; the
   paid secret-store config name. These are looked for in the text before markdown links are rewritten, so a host that
   sits only in a link target is seen. A link to the vendor's documentation (`ai.google.dev`) is a mention and passes; the
@@ -238,10 +246,16 @@ A hook sits inside someone's session, so every error lets the work through, visi
   value or prompt is echoed or stored.
 - **The Gemini rules do not fail open.** They need nothing from `agents.yaml`, so when it cannot be loaded the brief is
   still checked by `gemini-paid` and `gemini-material`, and a violation is denied (the degraded notice stays in the same
-  answer). When the event itself cannot be parsed (over 1 MiB, malformed, incomplete, or a standard input that stops
-  before the end), the text that was read is checked for Gemini markers: the words `safo` and `gemini` together, the
-  vendor host, an SDK name or the paid config name, also with JSON `\uXXXX` escapes decoded. If one is there, the
-  dispatch is **denied** with the diagnostic kept; if none is, it is the degraded allow described here. No other rule
+  answer). When the event itself cannot be used, the decision is never made from a prefix. An event over 1 MiB is read
+  to its end, up to 8 MiB and 4 seconds, and the whole stream is checked for Gemini markers as it goes (the end of each
+  chunk is carried into the next, so a marker cannot hide at a boundary): the words `safo` and `gemini` both seen, the
+  vendor host, an SDK name, the paid config name, or a decode-to-shell form, after the same normalization the brief scan
+  uses (fullwidth and look-alike letters folded, invisible characters removed, quotes and backslashes removed, JSON
+  escapes such as `\n` and `\uXXXX` decoded). A marker anywhere is **denied** with the diagnostic kept. An event longer
+  than 8 MiB, or one that does not finish arriving or cannot be checked within the time, is **denied** as too large or
+  incomplete to check. Only an oversized event whose whole stream was read and checked and held no marker is the degraded
+  allow. Malformed JSON within the cap is checked whole the same way. A standard input that stalls after some bytes is
+  checked for markers and denied either way; one that never delivers a single byte is the degraded allow. No other rule
   changes.
 - What a failure switches off: input or configuration failures switch off every rule except those two; a state failure (missing, invalid,
   future-dated or other-session state, or a re-probe that failed) switches off only the local-step rule; a mode failure

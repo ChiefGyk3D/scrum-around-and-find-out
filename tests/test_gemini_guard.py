@@ -589,6 +589,7 @@ PREFILTER_TRIGGERS = {
     "vendor host": "curl https://generativelanguage.googleapis.com/x",
     "sdk": "import generativeai",
     "decode": "printf '\\x41' | sh",
+    "conceal": "$'\\x73afo' ask --paid",
 }
 
 
@@ -612,7 +613,8 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "DECLARATION", "MATERIAL", "KEYVALUE", "MARKDOWN_LINK", "MARKDOWN_CODE", "MARKDOWN_WORD", "PATHLIKE", "SINK_RE",
         "RUNTIME_FORMS",  # gated by the safo detector, which the prefilter already covers
         # the cross-line reader: run only on a brief the prefilter already passed, and acts only with safo and gemini
-        "_ASSIGN", "_VAR_REF", "_FUNCTION", "_RISKY_WORD",
+        "_ASSIGN", "_VAR_REF", "_FUNCTION", "_RISKY_WORD", "_ANSI_C", "_PRINTF_V", "_ESCAPE", "_PLAIN_VALUE",
+        "_RISK_TOKEN", "_PAID_TOKEN", "_GEMINI_WORD", "_SHELL_C", "_ASSIGNMENT_WORD", "_DOLLAR", "_BACKTICK_CMD",
         "RECORD_ID",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}

@@ -14,6 +14,7 @@ A computed block-mode denial is retained if only logging fails.
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import itertools
 import json
@@ -29,7 +30,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from safo import gemini, guardlog, leadwait, tracking
+from safo import gemini, geminibrief, guardlog, leadwait, tracking
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
@@ -82,8 +83,36 @@ from safo.modes import LocalMode, register_local
 STDIN_TIMEOUT_SECONDS = 5.0  # a host writes the event at once; a silent standard input is a hung host, not a slow one
 
 
+HARD_LIMIT_BYTES = 8 * 1024 * 1024  # the most of an oversized event that is read and checked for Gemini markers
+DRAIN_SECONDS = 4.0  # the most time reading and checking the rest of an oversized event may take
+_JSON_ESCAPE = re.compile(r'\\(?:u([0-9a-fA-F]{4})|([nrtbf"\\/]))')
+_JSON_SIMPLE = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
+
+
+class EventStream:
+    """Standard input as the guard reads it: a real descriptor with `select` (so a writer that never writes or never
+    closes cannot hold the hook), anything else (a test's StringIO) with plain bounded reads."""
+
+    def __init__(self, ctx: LocalContext) -> None:
+        self.stream = ctx.stdin if ctx.stdin is not None else sys.stdin
+        try:
+            self.fd: int | None = self.stream.fileno()
+        except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is both OSError and ValueError
+            self.fd = None
+
+    def read(self, size: int, deadline: float) -> bytes:
+        """Up to `size` bytes, b"" at the end of the stream; TimeoutError when none arrive before `deadline`."""
+        if self.fd is None:
+            data = self.stream.read(size)
+            return data.encode("utf-8", "replace") if isinstance(data, str) else data
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([self.fd], [], [], left)[0]:
+            raise TimeoutError("no event on standard input")
+        return os.read(self.fd, size)
+
+
 class EventTimeout(TimeoutError):
-    """No event arrived in time. `partial` is whatever bytes had arrived, so a Gemini marker in them is still seen."""
+    """No event arrived in time. `partial` is whatever bytes had arrived, so they can still be checked."""
 
     def __init__(self, partial: bytes) -> None:
         super().__init__("no event on standard input")
@@ -99,43 +128,91 @@ class GeminiEventDeny(Exception):
         self.reason = reason
 
 
-# literal markers of a Gemini step in raw event text (lower case): both words together, the vendor host, the SDK, the
-# paid secret-store config name
-_GEMINI_ANY = (b"generativelanguage", b"genai", b"generativeai", b"prd_paid")
+def _json_unescape(m: re.Match[str]) -> str:
+    return chr(int(m.group(1), 16)) if m.group(1) else _JSON_SIMPLE.get(m.group(2), m.group(2))
 
 
-def event_names_gemini(raw: bytes | str) -> bool:
-    """A cheap literal check, for an event that could not be parsed: does the text carry a Gemini marker? It looks at
-    the bytes as read and at the same bytes with JSON `\\uXXXX` escapes decoded."""
-    data = raw.encode("utf-8", "replace") if isinstance(raw, str) else raw
-    views = [data.lower()]
-    with contextlib.suppress(UnicodeError, ValueError):
-        views.append(
-            data.decode("ascii", "ignore").encode("ascii", "ignore").decode("unicode_escape", "ignore").lower().encode()
-        )
-    return any((b"safo" in v and b"gemini" in v) or any(m in v for m in _GEMINI_ANY) for v in views)
+class EventScan:
+    """Bounded, stateful marker detection over a stream of bytes, for an event that cannot be parsed. Each chunk is
+    checked together with the end of the one before (a marker cannot hide across a boundary), after the same
+    normalization the brief scan uses: JSON `\\uXXXX` escapes decoded, the text folded (fullwidth and look-alike
+    letters, invisible characters), quotes and backslashes removed. It reports a marker when the words `safo` and
+    `gemini` have both been seen, or the vendor host, an SDK name or the paid config name, or a decode-to-shell form."""
+
+    OVERLAP = 160
+
+    def __init__(self, deadline: float) -> None:
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.tail = ""
+        self.safo = self.gemini = self.hit = False
+        self.deadline = deadline
+
+    def feed(self, chunk: bytes) -> None:
+        if time.monotonic() > self.deadline:
+            raise TimeoutError("the event could not be checked in time")
+        window = self.tail + self.decoder.decode(chunk)
+        self.tail = window[-self.OVERLAP :]
+        text = _JSON_ESCAPE.sub(_json_unescape, window) if "\\" in window else window
+        views = [text.lower(), geminibrief._strip(text.lower())]
+        if text != window or not window.isascii():
+            folded = gemini.fold(text).lower()
+            views += [folded, geminibrief._strip(folded)]
+        for view in views:
+            self.safo = self.safo or "safo" in view
+            self.gemini = self.gemini or "gemini" in view
+            if (
+                geminibrief.PAID_CONFIG.search(view)
+                or gemini.VENDOR_HOST in view
+                or geminibrief.SDK.search(view)
+                or (geminibrief.DECODE.search(view) and geminibrief.SINK_RE.search(view))
+            ):
+                self.hit = True
+        self.hit = self.hit or (self.safo and self.gemini)
 
 
-def event_raw(ctx: LocalContext) -> str | bytes:
-    """The event as read: at most MAX_BYTES + 1 bytes, giving up after STDIN_TIMEOUT_SECONDS (EventTimeout)."""
-    stream = ctx.stdin if ctx.stdin is not None else sys.stdin
-    try:
-        fd = stream.fileno()
-    except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is both OSError and ValueError
-        return stream.read(MAX_BYTES + 1)
-    deadline = time.monotonic() + STDIN_TIMEOUT_SECONDS
+def read_event(source: EventStream) -> tuple[bytes, bool]:
+    """(the event as read, whether it is over the cap). At most MAX_BYTES + 1 bytes are kept; EventTimeout when the
+    event stalls for STDIN_TIMEOUT_SECONDS."""
+    deadline = time.monotonic() + STDIN_TIMEOUT_SECONDS if source.fd is not None else 0.0
     chunks: list[bytes] = []
     total = 0
     while total <= MAX_BYTES:
-        left = deadline - time.monotonic()
-        if left <= 0 or not select.select([fd], [], [], left)[0]:
-            raise EventTimeout(b"".join(chunks))
-        chunk = os.read(fd, min(65_536, MAX_BYTES + 1 - total))
+        try:
+            chunk = source.read(min(65_536, MAX_BYTES + 1 - total), deadline)
+        except TimeoutError:
+            raise EventTimeout(b"".join(chunks)) from None
         if not chunk:
             break
         chunks.append(chunk)
         total += len(chunk)
-    return b"".join(chunks)
+    return b"".join(chunks), total > MAX_BYTES
+
+
+def scan_event(source: EventStream | None, prefix: bytes) -> str:
+    """Check `prefix` and, for an oversized event (`source` given), the rest of the stream up to HARD_LIMIT_BYTES and
+    DRAIN_SECONDS. Returns "marker", "clean" (the whole stream was scanned), "limit" (it is longer than the hard limit)
+    or "slow" (it did not finish arriving, or could not be checked, in time)."""
+    deadline = time.monotonic() + DRAIN_SECONDS
+    scan = EventScan(deadline)
+    total = len(prefix)
+    try:
+        for i in range(0, len(prefix), 65_536):
+            scan.feed(prefix[i : i + 65_536])
+            if scan.hit:
+                return "marker"
+        while source is not None:
+            chunk = source.read(262_144, deadline)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > HARD_LIMIT_BYTES:
+                return "limit"
+            scan.feed(chunk)
+            if scan.hit:
+                return "marker"
+    except TimeoutError:
+        return "slow"
+    return "marker" if scan.hit else "clean"
 
 
 def event_input(ctx: LocalContext) -> dict[str, Any]:
@@ -144,7 +221,10 @@ def event_input(ctx: LocalContext) -> dict[str, Any]:
     A real descriptor is read with `select`, so a writer that never writes or never closes cannot hold the hook until
     the host kills it; a stream with no descriptor (a test's StringIO) is read in one bounded call.
     """
-    payload = loads(event_raw(ctx))
+    raw, oversize = read_event(EventStream(ctx))
+    if oversize:
+        raise ValueError("oversized event")
+    payload = loads(raw)
     if not isinstance(payload, dict):
         raise ValueError("invalid event")
     return payload
@@ -261,6 +341,14 @@ def approval_checker(ctx: LocalContext) -> ApprovalCheck | None:
     return lambda record_id: approval_problem(store, record_id, now)
 
 
+_TOO_LARGE = (
+    "gemini-material: the dispatch event is too large to check (over 8 MiB), so it is denied; "
+    "shorten the brief or remove the Gemini step"
+)
+_UNVERIFIABLE = (
+    "gemini-material: the dispatch event is too large or incomplete to check (it did not finish arriving in time), so "
+    "it is denied; shorten the brief or remove the Gemini step"
+)
 _UNREADABLE = (
     "gemini-material: the dispatch event could not be read (too large, not valid JSON or not complete) and it names "
     "Gemini, so it is denied; shorten the brief or remove the Gemini step"
@@ -283,19 +371,29 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     # The hook's whole budget is GUARD_TIMEOUT_SECONDS from the start of the process; lookups get what is left of it
     # less a margin, so the decision is always written before the host gives up on the hook.
     deadline = (time.monotonic() if started is None else started) + GUARD_TIMEOUT_SECONDS - GUARD_MARGIN_SECONDS
-    raw: str | bytes = b""
+    source = EventStream(ctx)
+    raw = b""
     try:
-        raw = event_raw(ctx)
+        raw, oversize = read_event(source)
+        if oversize:
+            raise ValueError("oversized event")
         payload = loads(raw)
         if not isinstance(payload, dict):
             raise ValueError("invalid event")
     except EventTimeout as err:
-        if event_names_gemini(err.partial):
-            raise GeminiEventDeny("timeout", _UNREADABLE) from None
-        raise
+        if not err.partial:
+            raise  # nothing arrived at all: the degraded allow, as before
+        found = scan_event(None, err.partial)
+        raise GeminiEventDeny("timeout", _UNREADABLE if found == "marker" else _UNVERIFIABLE) from None
     except (ValueError, UnicodeError):
-        if event_names_gemini(raw):
+        # Never decided from a prefix: an oversized event is read to the end (up to the hard limit) and checked whole.
+        found = scan_event(source if len(raw) > MAX_BYTES else None, raw)
+        if found == "marker":
             raise GeminiEventDeny("input", _UNREADABLE) from None
+        if found == "limit":
+            raise GeminiEventDeny("input", _TOO_LARGE) from None
+        if found == "slow":
+            raise GeminiEventDeny("input", _UNVERIFIABLE) from None
         raise
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
