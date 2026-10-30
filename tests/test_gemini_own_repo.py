@@ -72,3 +72,12 @@ def test_no_argument_value_appears_in_the_denial(line: str) -> None:
 def test_no_exemption_even_with_the_own_repo_issue_line(line: str) -> None:
     assert paid(OWN + PUBLIC + line + "\n"), line
     assert paid(PUBLIC + line + "\n"), line
+
+
+@pytest.mark.parametrize("op", ["&", "|", ">", "<", ";"])
+def test_a_long_operator_run_is_not_repeated_in_the_denial(op: str) -> None:
+    run = op * 1500
+    reasons = paid(PUBLIC + f"safo gemini ask 'x'{run} --model m --prompt-file p\n")
+    assert reasons, "the brief is denied"
+    assert all(len(r) < 600 for r in reasons)
+    assert all(op * 3 not in r for r in reasons)

@@ -484,7 +484,7 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
                 if (not prev.op and prev.quoted and prev.end == nxt.start) or (
                     i + 1 < len(tokens) and tokens[i + 1].quoted and tokens[i + 1].start == nxt.end
                 ):
-                    problems.append(f"an operator ({nxt.value!r}) touching a quoted word")
+                    problems.append("an operator touching a quoted word")
                 if i + 1 < len(tokens) and not tokens[i + 1].op and tokens[i + 1].value.startswith("--"):
                     problems.append("an option-like word after the command ends, so the cut may be wrong")
                 break
