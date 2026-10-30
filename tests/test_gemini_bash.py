@@ -2,7 +2,7 @@
 """Dispatch guard coverage for shell commands (#209).
 
 A Bash call that names the vendor API host, its SDK, the key variable or the secret-store project and config names is
-denied unless it is the documented wrapper or a read-only/test command inside this repository. The guard is a speed
+denied. There is no exemption: not the wrapper, not a working directory, not this repository. The guard is a speed
 bump; the wrapper holds the real gates. Names are built at run time so scanners stay quiet about this file.
 """
 
@@ -297,3 +297,46 @@ def test_an_eight_megabyte_line_is_denied_fast_relative_to_a_small_command() -> 
     big, result = took("x" * 8_000_000)
     assert result == geminibrief.SHELL_UNVERIFIED
     assert big < small * 20 + 0.05  # refused by length: never scales with the 8 MB (a ratio, not a fixed bound)
+
+
+# -- a failing check denies (round 3) --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("error", [RuntimeError, ValueError, RecursionError, MemoryError])
+@pytest.mark.parametrize("mode", ["warn", "block"])
+def test_an_error_in_the_check_denies_with_fixed_text(
+    error: type[Exception], mode: str, _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hooksdata import set_mode
+
+    def boom(*_args: Any, **_kwargs: Any) -> str:
+        raise error("tok_EXCEPTIONTEXT123")
+
+    monkeypatch.setattr(geminibrief, "shell_command_class", boom)
+    set_mode(_private_home, mode)
+    command = f"echo tok_COMMANDTEXT456 {KEY}"
+    out, _ = run(agents, _private_home, event(command))
+    assert denied(out)
+    text = reason(out)
+    assert "could not be checked in time" in text and "safo gemini" in text
+    logged = json.dumps(read_log(_private_home)) + out
+    assert "EXCEPTIONTEXT" not in logged and "COMMANDTEXT" not in logged and KEY not in logged
+    assert read_log(_private_home)[-1]["decision"] == "error"
+
+
+def test_the_error_denial_is_not_a_blanket_deny(_private_home: Path, agents: Path) -> None:
+    assert run(agents, _private_home, event("ls -la")) == ("", "")
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_an_interrupt_is_not_swallowed_by_the_check(
+    error: type[BaseException], _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo.modes import hooks as hooks_mode
+
+    def boom(*_args: Any, **_kwargs: Any) -> str:
+        raise error()
+
+    monkeypatch.setattr(geminibrief, "shell_command_class", boom)
+    with pytest.raises(error):
+        hooks_mode.shell_vendor_check(json.loads(event("ls")))

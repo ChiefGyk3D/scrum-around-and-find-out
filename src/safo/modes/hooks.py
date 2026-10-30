@@ -1155,7 +1155,10 @@ def shell_vendor_check(payload: dict[str, Any]) -> None:
     from safo import geminibrief  # deferred: it loads the Gemini mode, which the entry must not at import
 
     # its own short budget, like the isolated Gemini check, so a late guard deadline never denies a clean command
-    found = geminibrief.shell_command_class(command, time.monotonic() + ISOLATED_CHECK_SECONDS)
+    try:
+        found = geminibrief.shell_command_class(command, time.monotonic() + ISOLATED_CHECK_SECONDS)
+    except Exception:  # fail closed: any error in the check is "could not be checked"; no exception text is kept
+        found = geminibrief.SHELL_UNVERIFIED
     if found:
         raise GeminiEventDeny("input", SHELL_DENIAL.format(found))
 
