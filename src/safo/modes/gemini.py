@@ -33,6 +33,7 @@ from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.gemini import (
     DEFAULT_TTL_MINUTES,
+    MAX_APPROVED_PROMPT_CHARS,
     MAX_PROMPT_BYTES,
     ApprovalStore,
     GeminiConfig,
@@ -47,11 +48,10 @@ from safo.gemini import (
     money,
     open_store,
     paid_quota,
-    MAX_APPROVED_PROMPT_CHARS,
     prompt_binding,
-    too_long,
     quota_line,
     snapshot,
+    too_long,
     usd_amount,
 )
 from safo.modes import LocalMode, register_local
@@ -210,7 +210,8 @@ def approve_flow(
     )
     ctx.say(
         "your security key will blink next. Touch it only because you have just read the quota line, the quote and "
-        "the whole prompt and its digest above and they are right; the signature covers that exact prompt and no other. "
+        "the whole prompt and its digest above and they are right; the signature covers that exact prompt and no "
+        "other. "
         "If you did not start this, do not touch it."
     )
     if confirm(f"type exactly `{phrase}` to approve, anything else cancels: ").strip() != phrase:
