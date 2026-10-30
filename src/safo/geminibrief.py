@@ -2,23 +2,24 @@
 """What the dispatch guard reads in a brief about Gemini (#200).
 
 This is a speed bump against an honest or prompt-injected model writing a brief, not a sandbox: whoever can run shell
-commands can reach the wrapper directly, and the wrapper (`safo.gemini`) is where the gates really are. The guard fails
-closed, but only on things that look like a command. After NFKC normalization, joining line continuations and removing
-quotes and backslashes, a brief names a Gemini step when it has
+commands can reach the wrapper directly, and the wrapper (`safo.gemini`) is where the gates really are. The guard's
+claim is narrow. After folding the text (invisible and combining characters removed, look-alike letters mapped),
+replacing markdown links by their text and joining line continuations, a brief names a Gemini step when it has
 
 * a declaration line in the exact grammar: `gemini: free` or `gemini: paid cap=USD approval=ID` (also as a list item),
   with nothing after the tier but `key=value` pairs;
-* a command: a `safo` token, then within a few tokens a `gemini` token, then an action word (`ask`, `approve`,
-  `quota`). It is cut at `; | & )`, read with the parser the CLI itself uses (a redirection inside it is unreadable),
-  and a path such as `src/safo/gemini.py` or a model id such as `gemini-3.6-flash` is never a command start;
-* a `gemini` or `safo` token beside a shell expansion, glob, brace, backtick or `%` and an `ask` or `approve` word, so
-  a command built at run time cannot hide its name;
-* a decode-to-shell form (base64, openssl, xxd, rev, printf escapes piped to a shell), the vendor host in any case, the
-  Google genai SDK, or the name of the paid secret-store config.
+* a literal `safo gemini <action>` command (a `safo` word, within a few shell words a `gemini` word, then `ask`,
+  `approve` or `quota`), also inside a quoted string. Quotes are respected, the arguments end at an unquoted operator,
+  redirections are skipped as the shell skips them, an operator or expansion character inside an argument is
+  unreadable, and the arguments are read with the parser the CLI itself uses;
+* the named forms: `safo` or `gemini` beside a shell expansion, glob, brace, backtick or `%` and an ask/approve word;
+  a line that runs `safo` through `$`, a function, `xargs`, `eval` or `-c` when the brief names `gemini` and an action;
+  a decode-to-shell pipe; the vendor host in any case; the Google genai SDK; the paid secret-store config name.
 
-Every step must be proven complete (cap, approval, `gemini-material: public`) or the brief is blocked, and a block names
-the line, the reason and the fix. A false positive is a block, not a leak. Raw SDK use outside a brief is out of this
-guard's reach. Nothing here repeats any text of the brief in a reason.
+A way of building a command that is not on that list is not seen. Every step must be proven complete (cap, approval,
+`gemini-material: public` when it sends anything) or the brief is blocked, and a block names the line, the reason and
+the fix. A false positive is a block, not a leak. Raw SDK use outside a brief is out of this guard's reach, and above
+1 MiB the whole hook fails open. Nothing here repeats any text of the brief in a reason.
 """
 
 from __future__ import annotations
@@ -28,12 +29,20 @@ import dataclasses
 import re
 import shlex
 import time
-import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import NamedTuple
 
-from safo.gemini import JOB_CAP, RECORD_ID, VENDOR_HOST, has_secret_shape, private_term_hit
+from safo.gemini import (
+    JOB_CAP,
+    RECORD_ID,
+    VENDOR_HOST,
+    TermsCheckError,
+    fold,
+    has_secret_shape,
+    private_term_hit,
+)
 from safo.modes.gemini import BriefParseError, brief_namespace
 
 GEMINI_PAID = "gemini-paid"
@@ -42,7 +51,7 @@ GEMINI_RULES = (GEMINI_PAID, GEMINI_MATERIAL)
 
 DECLARATION = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)?(?:#+\s*)?gemini(?:-step)?\s*:(?P<rest>.*)$", re.IGNORECASE)
 MATERIAL = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)?gemini-material\s*:\s*(?P<value>.*?)\s*$", re.IGNORECASE)
-MARKDOWN_LINK = re.compile(r"\[[^\]\s]{0,200}\]\([^)\s]{0,300}\)")
+MARKDOWN_LINK = re.compile(r"\[([^\]]{0,200})\]\([^)\s]{0,300}\)")
 MARKDOWN_CODE = re.compile(r"`(safo\b[^`]*)`")
 PAID_CONFIG = re.compile(r"\bprd_paid\b")
 SDK = re.compile(
@@ -62,7 +71,7 @@ ACTIONS = ("ask", "approve", "quota")
 MARKDOWN_WORD = re.compile(
     r"^`(?:ask|approve|quota|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
 )
-PATHLIKE = re.compile(r"^[\w./-]*gemini[\w./*-]*$", re.IGNORECASE)
+PATHLIKE = re.compile(r"^[\w./-]*gemini[\w./-]*$", re.IGNORECASE)
 VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
 # Every detector pattern, so the cheap prefilter below can never miss what a detector would catch. A new detector regex
 # must be added here (a test fails otherwise); the second field names it.
@@ -77,6 +86,21 @@ PREFILTER = (
 TOKEN_WINDOW = 12  # tokens between `safo` and `gemini` for them to count as one command
 LINE_CAP = 4000  # a line longer than this that mentions anything above is blocked unread
 MAX_CANDIDATES = 50  # commands examined per brief; more than this is blocked
+TERMS_SECONDS_DEFAULT = 5.0  # the most the private-terms search is given
+TERMS_MIN_SECONDS = 0.5  # the least the private-terms search is given when the deadline is close
+OPCHARS = frozenset(";|&()<>")
+RUNTIME_FORMS = re.compile(r"\$|\bxargs\b|\beval\b|(?<![\w-])-c\b|\bfunction\b|\(\)")
+WILD_NAMES = {
+    "$": "a shell expansion",
+    "*": "a glob",
+    "?": "a glob",
+    "[": "a glob or bracket",
+    "]": "a glob or bracket",
+    "{": "a brace expansion",
+    "}": "a brace expansion",
+    "`": "a command substitution",
+    "%": "a format string",
+}
 FIX = (
     "reword the mention (keep `safo`, `gemini` and ask/approve out of one line), or write the step as one plain "
     "`safo gemini ask --model M ...` command, or as a `gemini: free` or `gemini: paid cap=USD approval=ID` line"
@@ -95,6 +119,7 @@ class Step:
     unreadable: bool = False
     line: int = 0
     why: str = ""
+    sends: bool = True  # False for a mention that sends nothing (an approve or quota command with no prompt file)
 
 
 def _tokens(rest: str) -> list[str] | None:
@@ -132,40 +157,6 @@ def _declared(rest: str, line: int) -> Step | None:
     if tier not in ("free", "paid") or not all(KEYVALUE.match(t) for t in pairs):
         return None
     return Step(tier == "paid", _option(tokens, "cap"), _option(tokens, "approval"), line=line)
-
-
-_PARSE_CACHE: dict[str, Step | None] = {}
-
-
-def _command_step(span: list[str], line: int) -> Step | None:
-    """One command's arguments, read with the parser the CLI itself uses. A redirection or an expansion inside the
-    command is unreadable: the shell would act on it before the parser ever sees it."""
-    text = " ".join(span)
-    if "<" in text or ">" in text:
-        return Step(unreadable=True, line=line, why="the command has a redirection, which can hide an option")
-    if any(c in text for c in SHELL_WILD):
-        return Step(unreadable=True, line=line, why="the command has a shell expansion, glob, brace or backtick")
-    if text in _PARSE_CACHE:
-        cached = _PARSE_CACHE[text]
-        return None if cached is None else dataclasses.replace(cached, line=line)
-    try:
-        ns = brief_namespace(span)
-    except BriefParseError:
-        step: Step | None = Step(
-            unreadable=True,
-            line=line,
-            why="the command is not one the CLI accepts (an unknown or shortened option, a missing value)",
-        )
-    else:
-        if ns.action == "quota":
-            step = None  # not a step: it prints the quota line and sends nothing
-        else:
-            step = Step(
-                bool(ns.paid) or ns.action == "approve", ns.cap or ns.max_usd or None, ns.approval or None, line=line
-            )
-    if len(_PARSE_CACHE) < 256:
-        _PARSE_CACHE[text] = step
-    return step
 
 
 def _cap_problem(value: str | None) -> str | None:
@@ -230,12 +221,13 @@ def _join(text: str) -> str:
 
 
 def _views(line: str) -> tuple[str, str, str]:
-    """The ONE normalization of a line, used by the scan and by the prefilter alike: NFKC, markdown links dropped,
-    inline code around a `safo` command cut with a terminator, then (`norm`) the text with its backslashes, (`clean`)
+    """The ONE normalization of a line, used by the scan and by the prefilter alike: folded (NFKD, invisible and
+    combining characters removed, NFKC, look-alike letters mapped), markdown links replaced by their text, inline code
+    around a `safo` command cut with a terminator, then (`norm`) that text with its quotes and backslashes, (`clean`)
     the text with quotes and backslashes removed, and (`low`) that in lower case."""
-    norm = unicodedata.normalize("NFKC", line)
+    norm = fold(line)
     # markdown inline code around a whole command: `safo gemini quota ...` is the command, not a shell substitution
-    norm = MARKDOWN_CODE.sub(r" \1 ; ", MARKDOWN_LINK.sub(" ", norm))
+    norm = MARKDOWN_CODE.sub(r" \1 ; ", MARKDOWN_LINK.sub(r"\1", norm))
     clean = norm.replace("'", "").replace('"', "").replace("\\", "")
     return norm, clean, clean.lower()
 
@@ -256,8 +248,34 @@ def relevant(text: str) -> bool:
     return False
 
 
+class Tok(NamedTuple):
+    value: str
+    quoted: bool
+    op: bool
+
+
+def _lex(text: str) -> list[Tok] | None:
+    """Shell-like words with quotes noted, not interpreted: an unquoted operator run is its own token, a quoted one
+    stays inside a word (which is how a quoted `;` is told from a real one). None on an unterminated quote."""
+    lexer = shlex.shlex(text, posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens: list[Tok] = []
+    try:
+        for raw in lexer:
+            if all(c in OPCHARS for c in raw):
+                tokens.append(Tok(raw, False, True))
+            else:
+                tokens.append(
+                    Tok(raw.replace("'", "").replace('"', "").replace("\\", ""), "'" in raw or '"' in raw, False)
+                )
+    except ValueError:
+        return None
+    return tokens
+
+
 def _core(token: str) -> str:
-    return token.strip("()${};|&,:'\"`").lower()
+    return token.strip("()${};|&,:'\"`?!.").lower()
 
 
 def _is_safo(token: str) -> bool:
@@ -265,25 +283,122 @@ def _is_safo(token: str) -> bool:
     return base == "safo" or base.startswith("safo.")
 
 
-def _span(tokens: list[str], start: int) -> list[str]:
-    """The arguments of a command: up to the first shell operator (`; | & )`), which may sit inside a token."""
-    span: list[str] = []
-    for token in tokens[start:]:
-        cut = min((i for i in (token.find(c) for c in ";|&)") if i != -1), default=-1)
-        if cut == -1:
-            span.append(token)
+_PARSE_CACHE: dict[str, Step | None] = {}
+_ARGPARSE_WORDS = (
+    ("unrecognized arguments", "an option or argument the CLI does not know (abbreviations are refused too)"),
+    ("required", "a missing action or required option"),
+    ("expected one argument", "an option with no value"),
+    ("invalid choice", "an action that is not ask, approve or quota"),
+    ("invalid", "a value the CLI rejects"),
+)
+
+
+def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) -> Step | None:
+    """One command's arguments, read with the parser the CLI itself uses. An operator character inside an argument or
+    a shell expansion is unreadable: the shell acts on it before the parser sees it."""
+    if problems:
+        return Step(unreadable=True, line=line, why="the command has " + "; ".join(problems))
+    text = " ".join(span)
+    for char in OPCHARS:
+        if char in text:
+            return Step(
+                unreadable=True,
+                line=line,
+                why=f"the command has {char!r} inside an argument (a quoted operator or redirection)",
+            )
+    for char, name in WILD_NAMES.items():
+        if char in text:
+            return Step(
+                unreadable=True, line=line, why=f"the command has {char!r} ({name}), which the shell expands first"
+            )
+    if text in _PARSE_CACHE:
+        cached = _PARSE_CACHE[text]
+        return None if cached is None else dataclasses.replace(cached, line=line)
+    try:
+        ns = brief_namespace(span)
+    except BriefParseError as err:
+        reason = next((phrase for key, phrase in _ARGPARSE_WORDS if key in str(err)), "a form the CLI does not accept")
+        step: Step | None = Step(
+            unreadable=True,
+            line=line,
+            why=f"the command has {reason} (an unknown or shortened option, a missing value)",
+        )
+    else:
+        if ns.action == "quota":
+            step = None  # not a step: it prints the quota line and sends nothing
+        else:
+            step = Step(
+                bool(ns.paid) or ns.action == "approve",
+                ns.cap or ns.max_usd or None,
+                ns.approval or None,
+                line=line,
+                sends=ns.action == "ask" or bool(ns.prompt_file),
+            )
+    if len(_PARSE_CACHE) < 256:
+        _PARSE_CACHE[text] = step
+    return step
+
+
+def _commands(text: str, number: int, steps: list[Step], budget: list[int], depth: int = 0) -> bool:
+    """Find `safo ... gemini ... <action>` commands in a line, also inside a quoted shell string (`bash -c '...'`).
+    True when at least one command was found."""
+    tokens = _lex(text)
+    if tokens is None:
+        low = text.lower()
+        if "safo" in low and "gemini" in low:
+            steps.append(Step(unreadable=True, line=number, why="the line has an unbalanced quote"))
+            return True
+        return False
+    found = False
+    for t in tokens:
+        if t.quoted and " " in t.value and "safo" in t.value.lower() and depth < 3:
+            found = _commands(t.value, number, steps, budget, depth + 1) or found
+    safos = [i for i, t in enumerate(tokens) if not t.op and _is_safo(t.value)]
+    for g, t in enumerate(tokens):
+        if t.op or _core(t.value) != "gemini":
             continue
-        if cut > 0:
-            span.append(token[:cut])
-        break
-    return span
+        if not safos[bisect.bisect_left(safos, g - TOKEN_WINDOW) : bisect.bisect_left(safos, g)]:
+            continue
+        span: list[str] = []
+        problems: list[str] = []
+        i = g + 1
+        while i < len(tokens):
+            nxt = tokens[i]
+            if nxt.op:
+                if "<" in nxt.value or ">" in nxt.value:  # a redirection: the shell skips it and its operand
+                    if span and span[-1] in ("0", "1", "2"):
+                        span.pop()
+                    i += 2 if i + 1 < len(tokens) and not tokens[i + 1].op else 1
+                    continue
+                break
+            for char in OPCHARS:
+                if char in nxt.value:
+                    problems.append(f"{char!r} inside quotes")
+            span.append(nxt.value.rstrip("?!.,") or nxt.value)
+            i += 1
+        if not any(w.lower() in ACTIONS for w in span):
+            continue  # `safo gemini` in a sentence, with no action word: prose
+        found = True
+        budget[0] -= 1
+        if budget[0] < 0:
+            steps.append(Step(unreadable=True, line=number, why="the brief has more than 50 Gemini commands"))
+            return True
+        step = _command_step(span, number, tuple(dict.fromkeys(problems)))
+        if step is not None:
+            steps.append(step)
+    return found
 
 
 def _scan_line(
-    number: int, line: str, steps: list[Step], flags: dict[str, int], materials: list[str], budget: list[int]
+    number: int,
+    line: str,
+    steps: list[Step],
+    flags: dict[str, int],
+    materials: list[str],
+    budget: list[int],
+    runtime_scan: bool,
 ) -> None:
     norm, clean, low = _views(line)
-    raw_tokens = norm.split()
     found = MATERIAL.match(clean)
     if found:
         materials.append(found.group("value").lower())
@@ -299,34 +414,32 @@ def _scan_line(
         flags.setdefault("vendor", number)
     if DECODE.search(norm.lower()) and SINK_RE.search(norm.lower()):
         steps.append(Step(unreadable=True, line=number, why="the line decodes text and hands it to a shell"))
-    tokens = clean.split()
-    safos = [i for i, t in enumerate(tokens) if _is_safo(t)]
-    geminis = [i for i, t in enumerate(tokens) if _core(t) == "gemini"]
-    if not safos and not geminis:
+    if runtime_scan and "safo" in low and RUNTIME_FORMS.search(low):
+        steps.append(
+            Step(
+                unreadable=True,
+                line=number,
+                why="the line runs safo through a variable, function, xargs, eval or -c while the brief names "
+                "Gemini and an action, so the command cannot be read",
+            )
+        )
+    if "safo" not in low and "gemini" not in low:
         return
-    commands = 0
-    for g in geminis:
-        if not safos[bisect.bisect_left(safos, g - TOKEN_WINDOW) : bisect.bisect_left(safos, g)]:
-            continue
-        span = _span(tokens, g + 1)
-        if not any(w.lower() in ACTIONS for w in span):
-            continue  # `safo gemini` in a sentence, with no action word: prose
-        commands += 1
-        budget[0] -= 1
-        if budget[0] < 0:
-            steps.append(Step(unreadable=True, line=number, why="the brief has more than 50 Gemini commands"))
-            return
-        found_step = _command_step(span, number)
-        if found_step is not None:
-            steps.append(found_step)
-    if commands:
+    if _commands(norm, number, steps, budget):
         return
     # no plain command: a name or a command built at run time (an expansion, a glob, printf) beside an action word
-    risky = any(_core(t) in RISKY_ACTIONS for t in tokens)
-    anchors = sorted(safos + geminis)
+    tokens = _lex(norm) or []
+    values: list[str] = []
+    for t in tokens:
+        if t.op:
+            continue
+        # a quoted string that holds a command (`printf 'safo gem%s ask'`) is read word by word
+        values.extend(t.value.split() if t.quoted and " " in t.value else [t.value])
+    risky = any(_core(v) in RISKY_ACTIONS for v in values)
+    anchors = [i for i, v in enumerate(values) if _is_safo(v) or _core(v) == "gemini"]
     wild_near = False
-    for i, t in enumerate(raw_tokens):
-        if any(c in t for c in SHELL_WILD) and not (PATHLIKE.match(t) or MARKDOWN_WORD.match(t)):
+    for i, v in enumerate(values):
+        if any(c in v for c in SHELL_WILD) and not (PATHLIKE.match(v) or MARKDOWN_WORD.match(v)):
             near = bisect.bisect_left(anchors, i - TOKEN_WINDOW)
             if near < len(anchors) and anchors[near] <= i + TOKEN_WINDOW:
                 wild_near = True
@@ -334,7 +447,9 @@ def _scan_line(
     if risky and wild_near:
         steps.append(
             Step(
-                unreadable=True, line=number, why="the line builds a Gemini command at run time (an expansion or glob)"
+                unreadable=True,
+                line=number,
+                why="the line builds a Gemini command at run time (a shell expansion, glob or format string)",
             )
         )
 
@@ -348,11 +463,16 @@ def _findings(
 
     tick()
     joined = _join(prompt)
+    lines = joined.splitlines()
+    whole = "\n".join(_views(line)[2] for line in lines)
+    runtime_scan = bool(re.search(r"\bgemini\b", whole)) and bool(
+        re.search(r"(?<![\w-])(?:ask|approve)\b|--paid", whole)
+    )
     steps: list[Step] = []
     flags: dict[str, int] = {}
     materials: list[str] = []
     budget = [MAX_CANDIDATES]
-    for number, line in enumerate(joined.splitlines(), 1):
+    for number, line in enumerate(lines, 1):
         tick()
         if len(line) > LINE_CAP:
             if relevant(line):
@@ -367,7 +487,7 @@ def _findings(
                 if "generativelanguage" in line.lower() or "genai" in line.lower():
                     flags.setdefault("vendor", number)
             continue
-        _scan_line(number, line, steps, flags, materials, budget)
+        _scan_line(number, line, steps, flags, materials, budget, runtime_scan)
     if "vendor" in flags:
         steps.append(
             Step(
@@ -377,13 +497,7 @@ def _findings(
             )
         )
     if "paid" in flags and not any(t.paid or t.unreadable for t in steps):
-        steps.append(
-            Step(
-                paid=True,
-                line=flags["paid"],
-                why="the paid secret-store config is named",
-            )
-        )
+        steps.append(Step(paid=True, line=flags["paid"], why="the paid secret-store config is named"))
     if not steps:
         return []
     tick()
@@ -392,34 +506,42 @@ def _findings(
     def add(rule: str, why: str) -> None:
         reasons.setdefault(rule, []).append(why)
 
+    sends = any(step.sends or step.unreadable for step in steps)
     if "vendor" in flags:
         add(
             GEMINI_MATERIAL,
             f"line {flags['vendor']}: call Gemini only through `safo gemini`, never the vendor API or its SDK directly",
         )
-    if not materials or any(m != "public" for m in materials):
-        add(
-            GEMINI_MATERIAL,
-            "a Gemini step needs the line `gemini-material: public` (private or sensitive material never goes to it); "
-            "add it, or remove the Gemini step",
-        )
-    if has_secret_shape(prompt):
-        add(
-            GEMINI_MATERIAL,
-            "the brief holds something shaped like a secret or a private key; remove it before any Gemini step",
-        )
-    if terms:
-        tick()
-        try:
-            loaded = terms() if callable(terms) else terms
-        except Exception as err:  # the loader's message names no brief text; any failure blocks
-            add(GEMINI_MATERIAL, f"the private terms could not be loaded ({err}); fix the terms file")
-            loaded = ()
-        if loaded and private_term_hit(loaded, joined, tick):
+    if sends:
+        if not materials or any(m != "public" for m in materials):
             add(
                 GEMINI_MATERIAL,
-                "the brief matches one of the maintainer's private terms; remove it before any Gemini step",
+                "a Gemini step needs the line `gemini-material: public` (private or sensitive material never goes to "
+                "it); add it, or remove the Gemini step",
             )
+        if has_secret_shape(prompt):
+            add(
+                GEMINI_MATERIAL,
+                "the brief holds something shaped like a secret or a private key; remove it before any Gemini step",
+            )
+        if terms:
+            tick()
+            try:
+                loaded = terms() if callable(terms) else terms
+            except Exception as err:  # the loader's message names no brief text; any failure blocks
+                add(GEMINI_MATERIAL, f"the private terms could not be loaded ({err}); fix the terms file")
+                loaded = ()
+            if loaded:
+                left = (deadline - time.monotonic()) if deadline is not None else TERMS_SECONDS_DEFAULT
+                limit = min(max(left - 0.2, TERMS_MIN_SECONDS), TERMS_SECONDS_DEFAULT)
+                try:
+                    if private_term_hit(loaded, [joined, whole], limit):
+                        add(
+                            GEMINI_MATERIAL,
+                            "the brief matches one of the maintainer's private terms; remove it before any Gemini step",
+                        )
+                except TermsCheckError as err:
+                    add(GEMINI_MATERIAL, str(err))
     for step in steps[: MAX_CANDIDATES + 5]:
         tick()
         if step.paid or step.unreadable:

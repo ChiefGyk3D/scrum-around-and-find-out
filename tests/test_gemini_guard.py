@@ -231,15 +231,18 @@ def test_every_shell_form_is_counted_as_a_paid_step_and_blocked_without_a_record
     assert GEMINI_PAID in rules(f"{form}\n{PUBLIC}", accepts())
 
 
-def test_a_complete_command_inside_a_quoted_shell_string_still_passes() -> None:
+def test_a_command_inside_a_shell_string_is_read_but_the_run_time_rule_blocks_it() -> None:
     inner = f"safo gemini ask --paid --model m --cap 1.5 --approval {OK} --material public"
-    assert rules(f"bash -c '{inner}'\n{PUBLIC}", accepts()) == []
-    assert rules(f'eval "{inner}"\n{PUBLIC}', accepts()) == []
+    for wrapper in ("bash -c '{}'", 'eval "{}"'):
+        text = dict(findings(wrapper.format(inner) + "\n" + PUBLIC, accepts()))[GEMINI_PAID]
+        assert "-c" in text or "eval" in text, text
+    assert rules(inner + "\n" + PUBLIC, accepts()) == []
 
 
 def test_a_free_step_in_a_shell_form_still_needs_the_public_material_line() -> None:
-    assert GEMINI_MATERIAL in rules("bash -c 'safo gemini ask --model m'\n")
-    assert rules("bash -c 'safo gemini ask --model m'\n" + PUBLIC) == []
+    assert GEMINI_MATERIAL in rules("safo gemini ask --model m\n")
+    assert rules("safo gemini ask --model m\n" + PUBLIC) == []
+    assert GEMINI_PAID in rules("bash -c 'safo gemini ask --model m'\n" + PUBLIC), "the -c form is read as unreadable"
 
 
 def test_the_paid_config_name_is_checked_on_its_own() -> None:
@@ -562,21 +565,6 @@ def test_a_wild_character_far_from_any_gemini_or_safo_token_is_not_a_command() -
     assert GEMINI_PAID in rules(near + "\n", accepts())
 
 
-def test_each_term_sees_a_bounded_chunk_of_text() -> None:
-    from typing import cast
-
-    from safo.gemini import TERMS_CHUNK, private_term_hit
-
-    seen: list[int] = []
-
-    class Spy:
-        def search(self, text: str) -> None:
-            seen.append(len(text))
-
-    assert not private_term_hit(cast("tuple[re.Pattern[str], ...]", (Spy(),)), "x" * 20_000)
-    assert seen and max(seen) <= TERMS_CHUNK and len(seen) >= 5
-
-
 # -- the prefilter is derived from the detectors -----------------------------------------------------------------------
 
 
@@ -613,6 +601,7 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
 
     not_detectors = {
         "DECLARATION", "MATERIAL", "KEYVALUE", "MARKDOWN_LINK", "MARKDOWN_CODE", "MARKDOWN_WORD", "PATHLIKE", "SINK_RE",
+        "RUNTIME_FORMS",  # gated by the safo detector, which the prefilter already covers
         "RECORD_ID",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
@@ -699,7 +688,245 @@ def test_a_trigger_that_exists_only_after_a_transform_is_found(name: str) -> Non
 def test_a_pattern_that_matches_only_after_a_markdown_link_is_removed_is_found() -> None:
     from safo import geminibrief as gb
 
-    for text in ("from google import [a](b) genai\n", "echo x | base64 [a](b) -d | sh\n"):
+    for text in ("from google import [a](b) genai\n", "from google import [a](b) [c](d) generativeai\n"):
         assert gb._findings(text + PUBLIC, accepts(), (), None), text
         assert gb.relevant(text), text
         assert GEMINI_PAID in rules(text + PUBLIC, accepts()), text
+
+
+# -- third review round ---------------------------------------------------------------------------------------------
+
+
+def test_each_term_sees_a_bounded_chunk_of_text() -> None:
+    from typing import cast
+
+    from safo.termsearch import TERMS_CHUNK, hit
+
+    seen: list[int] = []
+
+    class Spy:
+        def search(self, text: str) -> None:
+            seen.append(len(text))
+
+    assert not hit(cast("tuple[re.Pattern[str], ...]", (Spy(),)), ["x" * 20_000])
+    assert seen and max(seen) <= TERMS_CHUNK and len(seen) >= 5
+
+
+SLOW = [
+    "(a?){26}a{26}",
+    "[a-z]{0,99}[a-z]{0,99}[a-z]{0,99}[a-z]{0,99}[a-z]{0,99}!",
+    ".{0,99}.{0,99}.{0,99}z",
+    "(ab?){2}",
+]
+
+
+@pytest.mark.parametrize("term", SLOW)
+def test_slow_term_shapes_are_refused_at_load_with_the_line_number(term: str, tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    path = tmp_path / "t.txt"
+    path.write_text(f"fine\n{term}\n")
+    with pytest.raises(Exception, match=r"line 2"):
+        load_private_terms(str(path))
+
+
+def test_a_plausible_term_loads_and_runs_fast(tmp_path: Path) -> None:
+    import time
+
+    from safo.gemini import load_private_terms, private_term_hit
+
+    path = tmp_path / "t.txt"
+    path.write_text("foo.{0,50}bar.{0,50}baz\nacme-internal\n")
+    terms = load_private_terms(str(path))
+    started = time.monotonic()
+    assert private_term_hit(terms, ["x foo 12 bar 34 baz y" + "z" * 20_000], 5.0)
+    assert not private_term_hit(terms, ["nothing here " * 2000], 5.0)
+    assert time.monotonic() - started < 3
+
+
+def test_one_search_cannot_pass_the_deadline() -> None:
+    import re
+    import time
+
+    from safo.gemini import RefusedError, private_term_hit
+
+    evil = re.compile("(a+)+$")  # built here, past the loader, to prove the worker is killable
+    started = time.monotonic()
+    with pytest.raises(RefusedError, match="private terms"):
+        private_term_hit((evil,), ["a" * 40 + "!"], 1.0)
+    assert time.monotonic() - started < 4
+
+
+def test_the_guard_denies_a_term_check_that_runs_out_of_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+    import time
+
+    monkeypatch.setattr("safo.geminibrief.TERMS_MIN_SECONDS", 0.5)
+    started = time.monotonic()
+    found = findings(
+        "gemini: free\n" + PUBLIC + "a" * 40 + "!\n",
+        accepts(),
+        (re.compile("(a+)+$"),),
+        time.monotonic() + 1.5,
+    )
+    assert time.monotonic() - started < 5
+    assert GEMINI_MATERIAL in {r for r, _ in found}
+
+
+@pytest.mark.parametrize("term", ["x{0,5}", "^", "(?:)", r"\b", "a?"])
+def test_a_term_that_can_match_nothing_is_refused_with_the_line_number(term: str, tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    path = tmp_path / "t.txt"
+    path.write_text(f"fine\n{term}\n")
+    with pytest.raises(Exception, match=r"line 2"):
+        load_private_terms(str(path))
+
+
+QUOTING = [
+    'safo gemini ask --model m --material "a;b" --paid',
+    "safo gemini ask --model m --material 'a|b' --paid",
+    'safo --board "a b c d e f g h i j k l" gemini ask --paid --model m',
+    "safo gemini ask '>' --paid --model m",
+]
+
+
+@pytest.mark.parametrize("line", QUOTING)
+def test_quoting_cannot_hide_an_option_or_stretch_the_window(line: str) -> None:
+    assert GEMINI_PAID in rules(f"{line}\n{PUBLIC}", accepts()), line
+
+
+def test_a_quoted_operator_is_named_in_the_message() -> None:
+    text = dict(findings('safo gemini ask --model m --material "a;b"\n' + PUBLIC, accepts()))[GEMINI_PAID]
+    assert "';'" in text and "quote" in text
+
+
+LINKS = [
+    "[safo](x) gemini ask --paid --model m",
+    "safo [gemini](x) ask --paid --model m",
+    "safo gemini [ask](x) --model m [--paid](x)",
+]
+
+
+@pytest.mark.parametrize("line", LINKS)
+def test_a_link_is_replaced_by_its_text_not_deleted(line: str) -> None:
+    assert GEMINI_PAID in rules(f"{line}\n{PUBLIC}", accepts()), line
+
+
+LOOKALIKES = [
+    "sa\u200bfo gemini ask --paid --model m",
+    "safo ge\u0301mini ask --paid --model m",
+    "safo gem\U000e0067ini ask --paid --model m",
+    "sa\x00fo gemini ask --paid --model m",
+    "safo gemini\ufe0f ask --paid --model m",
+    "\u0455afo gemini ask --paid --model m",
+    "safo gem\u0456ni ask --paid --model m",
+    "safo gemini \u0430sk --paid --model m",
+    "safo gemini ask --pa\u0456d --model m",
+    "safo gemini approve\u200d --model m",
+]
+
+
+@pytest.mark.parametrize("line", LOOKALIKES)
+def test_invisible_and_lookalike_characters_do_not_hide_a_command(line: str) -> None:
+    assert GEMINI_PAID in rules(f"{line}\n{PUBLIC}", accepts()), repr(line)
+
+
+def test_private_terms_are_matched_on_the_folded_text_too() -> None:
+    import re
+
+    terms = (re.compile("acme-internal", re.IGNORECASE),)
+    for disguised in ("\u0430cme-internal", "ac\u200bme-internal", "ACME\uff0dinternal"):
+        found = findings(f"gemini: free\n{PUBLIC}{disguised}\n", accepts(), terms)
+        assert GEMINI_MATERIAL in {r for r, _ in found}, repr(disguised)
+
+
+def test_the_wrapper_folds_the_prompt_before_the_private_terms(tmp_path: Path) -> None:
+    from safo.gemini import fold
+
+    assert fold("\u0430cme\u200b-internal") == "acme-internal"
+
+
+RUNTIME = [
+    'CMD="gemini ask"\nsafo $CMD --paid --model m',
+    "G=gemini\nA=ask\nsafo $G $A --paid",
+    "safo ${x:-gemini} ask --paid",
+    'run() { safo "$@"; }\nrun gemini ask --paid',
+    "echo 'gemini ask --paid' | xargs safo",
+    'python3 -c \'from safo.cli import main; main(["gemini","ask","--paid"])\'',
+    "eval safo gemini ask --paid",
+]
+
+
+@pytest.mark.parametrize("brief", RUNTIME)
+def test_named_run_time_forms_across_lines_are_unreadable(brief: str) -> None:
+    assert GEMINI_PAID in rules(f"{brief}\n{PUBLIC}", accepts()), brief
+
+
+def test_the_run_time_rule_needs_gemini_and_an_action_in_the_brief() -> None:
+    assert rules("safo audit -c board.yaml and eval $X\n", accepts()) == []
+
+
+def test_trailing_punctuation_is_not_part_of_a_word() -> None:
+    from safo.geminibrief import _core
+
+    assert _core("gemini?") == "gemini" and _core("safo.") == "safo" and _core("ask!") == "ask"
+    assert rules("Is it gemini? Try safo gemini quota --model m?\n", accepts()) == []
+
+
+def test_a_quota_or_approve_mention_needs_no_public_material_line() -> None:
+    assert GEMINI_MATERIAL not in rules("safo gemini approve --model m --max-usd 1\n", accepts())
+    assert rules("safo gemini quota --model m\n", accepts()) == []
+    assert GEMINI_MATERIAL in rules("safo gemini ask --model m\n", accepts())
+
+
+def test_a_redirect_outside_or_after_the_command_is_not_a_problem() -> None:
+    ok = "safo gemini ask --model m --material public"
+    assert rules(f"{ok} 2>&1\n{PUBLIC}", accepts()) == []
+    assert rules(f"{ok} > out.txt\n{PUBLIC}", accepts()) == []
+    assert rules(f"{ok} && echo done > log\n{PUBLIC}", accepts()) == []
+    assert GEMINI_PAID in rules("safo gemini ask --model m > out --paid\n" + PUBLIC, accepts())
+
+
+def test_a_star_in_a_gemini_word_is_not_a_path() -> None:
+    assert GEMINI_PAID in rules("safo gemini* ask --paid --model m\n" + PUBLIC, accepts())
+
+
+def test_an_unreadable_step_says_which_form_made_it_so() -> None:
+    cases = {
+        "safo gemini ask --model $M --paid\n": "'$'",
+        "safo gemini ask --pai --model m\n": "option",
+        "safo gemini ask 'x\n": "quote",
+    }
+    for text, word in cases.items():
+        why = dict(findings(text + PUBLIC, accepts()))[GEMINI_PAID]
+        assert word in why, (text, why)
+
+
+# (brief, blocked): realistic briefs, with the expected outcome stated for each
+FIXTURE = [
+    ("Summarize the changelog of tool X. Ask the maintainer if unsure.", False),
+    ("Run safo audit --board board.yaml and report drift.", False),
+    ("See docs/gemini.md and src/safo/gemini.py for how the wrapper works.", False),
+    ("Edit tests/test_gemini_guard.py to add a case for the quota line.", False),
+    ("The Gemini free tier is for public material only.", False),
+    ("Use `safo gemini quota --model gemini-3.6-flash` first.", False),
+    ("safo gemini quota --model gemini-3.6-flash 2>&1 | tee quota.txt", False),
+    (f"safo gemini ask --model gemini-3.6-flash --material public --prompt-file p.txt\n{PUBLIC}", False),
+    (f"gemini: free model=gemini-3.6-flash\n{PUBLIC}", False),
+    (f"gemini: paid model=gemini-3.6-flash cap=1.5 approval={OK}\n{PUBLIC}", False),
+    ("safo gemini ask --model gemini-3.6-flash --material public --prompt-file p.txt\n", True),
+    (f"safo gemini ask --model gemini-3.6-flash --paid --job j --cap 1.5\n{PUBLIC}", True),
+    (f"bash -c 'safo gemini ask --paid --model m --cap 1'\n{PUBLIC}", True),
+    (f"curl -H x https://generativelanguage.googleapis.com/v1beta\n{PUBLIC}", True),
+    (f"doppler run -p image-gen -c prd_paid -- ./job.sh\n{PUBLIC}", True),
+    (f"- gemini: paid cap=50\n{PUBLIC}", True),
+    (f'safo gemini ask --model m --material "a;b" --paid\n{PUBLIC}', True),
+    (f"[safo](x) gemini ask --paid --model m\n{PUBLIC}", True),
+]
+
+
+@pytest.mark.parametrize(("brief", "blocked"), FIXTURE, ids=range(len(FIXTURE)))
+def test_the_realistic_brief_fixture(brief: str, blocked: bool) -> None:
+    assert len(FIXTURE) == 18
+    assert bool(rules(brief, accepts())) is blocked, brief

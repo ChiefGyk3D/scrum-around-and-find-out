@@ -132,3 +132,14 @@ def test_the_example_config_parses_with_the_vendor_endpoint_and_tiny_free_limits
     assert cfg.free and all(f.rpm == 1 and f.rpd == 1 for f in cfg.free.values()), "an uncopied example cannot overrun"
     assert set(cfg.free) <= set(cfg.prices)
     assert str(cfg.ledger).endswith("gemini-spend-ledger.jsonl")
+
+
+def test_the_docs_are_honest_about_the_guard_and_the_terms() -> None:
+    hooks = squash((ROOT / "docs" / "hooks.md").read_text(encoding="utf-8"))
+    gemini = squash((ROOT / "docs" / "gemini.md").read_text(encoding="utf-8"))
+    assert "above 1 mib the whole hook fails open" in hooks and "above 1 mib the whole hook fails open" in gemini
+    assert "safo_privacy_extra_file`, else" not in hooks and "no environment variable changes it" in hooks
+    assert "that is the whole claim" in hooks and "is not seen" in hooks
+    assert "cannot hide its name" not in hooks + gemini and "fails closed on shell forms" not in gemini
+    assert "killed after a few seconds" in gemini and "multiply to more than 10000" in gemini
+    assert "child process" in gemini

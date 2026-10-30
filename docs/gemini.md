@@ -105,14 +105,20 @@ and is named by its record number, rather than being ignored.
 ## Private terms
 
 Before anything is sent, the wrapper checks the prompt itself, not only the brief, against the same secret shapes and
-against the maintainer's private terms (default `~/.config/safo/privacy-terms.txt`, or the path in `private_terms`). The
-dispatch guard reads the terms with the **same loader** (the fixed config's setting, never `SAFO_PRIVACY_EXTRA_FILE` or an
-XDG variable). A term is a plain word or phrase with bounded repeats: an unbounded repeat (`+`, `*`), a repeat inside a
-repeat, an alternation inside a repeat and a back reference are refused when the file loads, each term sees at most 4000
-characters at a time, and there are at most 500 terms of at most 200 characters. A file that is missing, unreadable,
-oversized or holds an invalid or dangerous expression stops the call (and denies the guarded step); `private_terms: none` is
-the written opt-out. `--material public` is still a statement by the caller: no code can know that a text is public, so
-these checks only catch what looks like a secret or matches a term the maintainer listed.
+against the maintainer's private terms (default `~/.config/safo/privacy-terms.txt`, or the path in `private_terms`), on
+the text as written and on its folded form (invisible characters removed, look-alike letters mapped). The dispatch guard
+reads the terms with the **same loader** (the fixed config's setting, never `SAFO_PRIVACY_EXTRA_FILE` or an XDG variable).
+
+A term is a plain word or phrase with a few bounded repeats. Refused when the file loads, with the line number: a pattern
+that can match nothing at all (`x{0,5}`, `^`, `\b`, an empty group), an unbounded repeat (`+`, `*`), a repeat inside a
+repeat or of something that can match nothing, an alternation inside a repeat, a back reference, and repeats whose upper
+bounds multiply to more than 10000 (so `foo.{0,50}bar.{0,50}baz` loads, `.{0,99}.{0,99}.{0,99}z` does not). At most 500
+terms of at most 200 characters. These shape rules keep a search short, but they cannot prove it: the search itself also
+runs in a **child process that is killed after a few seconds**, and a search that does not finish counts as a match, so
+the guard denies and the wrapper sends nothing. Each term sees at most 4000 characters at a time. A file that is missing,
+unreadable or oversized stops the call; `private_terms: none` is the written opt-out. `--material public` is still a
+statement by the caller: no code can know that a text is public, so these checks only catch what looks like a secret or
+matches a term the maintainer listed.
 
 ## The key
 
@@ -138,12 +144,16 @@ bound. Retry-After on a 429 is shown only when it is a finite number of seconds 
 ## What the guard checks
 
 The dispatch guard ([Hooks](hooks.md)) denies a brief that names a paid Gemini step with no live approval record or no cap
-of at most 2 USD, and a brief that names any Gemini step without `gemini-material: public` or with something shaped like a
-secret, or a term from the maintainer's private terms file, in it. These two rules, `gemini-paid` and `gemini-material`,
-deny **even in warn mode**. The guard is a speed bump against an honest or prompt-injected model writing a brief, not a sandbox: it
-fails closed on shell forms (quoting, `bash -c`, `eval`, line continuations, a command built at run time, base64 to a
-shell, the vendor host in any case, the Google genai SDK, the paid config name), and a false positive is a block. Raw SDK
-use outside a brief is out of its reach. The gates that hold are in the wrapper.
+of at most 2 USD, and a brief that names a step that sends anything without `gemini-material: public`, or with something
+shaped like a secret, or a term from the maintainer's private terms, in it. These two rules, `gemini-paid` and
+`gemini-material`, deny **even in warn mode**. The guard is a speed bump against an honest or prompt-injected model writing
+a brief, not a sandbox. It reads a literal `safo gemini <action>` command, a declaration line in the exact grammar, and a
+short list of named forms (the vendor host, the Google genai SDK, the paid config name, decode-to-shell pipes, and `safo`
+run through a variable, function, `xargs`, `eval` or `-c` when the brief also names Gemini and an action); the list is in
+[Hooks](hooks.md), and a way of building a command that is not on it is not seen. A false positive is a block. Raw SDK use
+outside a brief is out of its reach, and **above 1 MiB the whole hook fails open** with a degraded notice, the Gemini rules
+included (changing the hook's core to read further was left alone). The gates that hold are in the wrapper: a paid call
+without a live approval record raises before any request.
 
 ## What is not built or not verified
 

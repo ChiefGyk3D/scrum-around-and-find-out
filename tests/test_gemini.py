@@ -763,3 +763,15 @@ def test_the_terms_loader_refuses_dangerous_shapes_and_accepts_plain_ones(tmp_pa
     path.write_text("\n".join(f"t{i}" for i in range(501)))
     with pytest.raises(RefusedError, match="private terms"):
         load_private_terms(str(path))
+
+
+def test_the_wrapper_matches_private_terms_on_the_folded_prompt(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path
+) -> None:
+    terms = tmp_path / "terms.txt"
+    terms.write_text("acme-internal\n")
+    withterms = dataclasses.replace(cfg, private_terms=str(terms))
+    for disguised in ("about аcme-internal", "about ac​me-internal"):
+        with pytest.raises(RefusedError, match="private term"):
+            ask(withterms, free(disguised), store=store, key_for=Keys(), now=NOW)
+    assert server.requests == []

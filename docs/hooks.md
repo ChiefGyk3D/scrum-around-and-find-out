@@ -179,31 +179,38 @@ refuses when its estimate is over it.
    in the brief) states a cap above 0 and at most 2 USD and an approval id whose record exists, has not expired and has not
    been used. A check that raises, or a guard with no approval folder to look in, blocks.
 7. **`gemini-material`.** Every Gemini step needs the line `gemini-material: public`. A secret-shaped string (an API key, a
-   token, a private key block) anywhere in the brief, or a match for one of the maintainer's private terms (the file named
-   by `SAFO_PRIVACY_EXTRA_FILE`, else `privacy-terms.txt` in the config directory; read, never written, never repeated),
-   blocks it. The vendor host written out in a brief is blocked too: call Gemini only through `safo gemini`.
+   token, a private key block) anywhere in the brief, or a match for one of the maintainer's private terms (the terms the fixed Gemini config names, by
+   default `privacy-terms.txt` beside it, loaded by the same strict loader the wrapper uses; no environment variable
+   changes it; read, never written, never repeated), blocks it. A mention that sends nothing (an `approve` or `quota`
+   command with no prompt file) does not need the line. The vendor host written out in a brief is blocked too: call Gemini only through `safo gemini`.
 
-The guard fails closed, but only on what looks like a command. After NFKC normalization, joining line continuations and
-removing quotes and backslashes, these are Gemini steps that must pass the strict check:
+What the guard covers is stated narrowly, because it is a speed bump and the wrapper holds the gates. After folding the
+text (NFKD with invisible, combining and control characters removed, NFKC, common Cyrillic and Greek look-alike letters
+mapped to Latin), replacing a markdown link by its text and joining line continuations, it treats these as Gemini steps
+that must pass the strict check:
 
 - a declaration line in the exact grammar, `gemini: free` or `gemini: paid cap=USD approval=ID` (also as a list item), with
   nothing after the tier but `key=value` pairs, so `Gemini: free tier only` in a sentence is prose;
-- a command: a `safo` token, then within 12 tokens a `gemini` token, then an action word (`ask`, `approve`, `quota`),
-  cut at `; | & )` and read with the parser the CLI uses; a redirection or a shell expansion inside it is unreadable (a
-  redirection can hide an option from a reader that stops at it), and a path such as `src/safo/gemini.py` or a model id
-  such as `gemini-3.6-flash` is an argument or a name, never a command start;
-- a `gemini` or `safo` token beside a shell expansion, glob, brace, backtick or `%` and an `ask` or `approve` word, which is
-  how a command is built at run time; markdown links and inline code around a known word or a file name are not;
+- a literal `safo gemini <action>` command: a `safo` word, then within 12 shell words a `gemini` word, then an action word
+  (`ask`, `approve`, `quota`), also inside a quoted string. Quotes are respected: the arguments end at an unquoted
+  `; | & )`, a redirection and its operand are skipped the way the shell skips them, and an operator or a shell expansion
+  character inside an argument makes the step unreadable. The arguments are read with the parser the CLI uses. A path such
+  as `src/safo/gemini.py` or a model id such as `gemini-3.6-flash` is an argument or a name, never a command start;
+- these named forms: a `safo` or `gemini` word beside a shell expansion, glob, brace, backtick or `%` and an `ask` or
+  `approve` word; and, when the brief names `gemini` and an action anywhere, any line that runs `safo` through `$`, a
+  function, `xargs`, `eval` or `-c`;
 - base64, openssl, xxd, rev or printf escapes piped to a shell; the vendor host in any case; the Google genai SDK; the
   paid secret-store config name.
 
-A line over 4000 characters that mentions any of these, more than 50 commands, or a check that runs past the guard's
-deadline is blocked, and so is a private-terms file that does not load (the guard and the wrapper use one loader, see
-[Gemini](gemini.md)). Every block names the line, the reason and the fix. A false positive is a block, not a leak; the
-test suite runs the guard over the repository's own docs and sets a ceiling on false positives. It is a speed bump against an
-honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief is out of its reach. It is
-also not the gate that holds: the approval record, the caps and the free-tier limits are enforced again by the wrapper
-itself.
+That is the whole claim. It does not promise to read every way a shell can build a command: a form outside the list above
+is not seen. A line over 4000 characters that mentions any of these, more than 50 commands, or a check that runs past the
+guard's deadline is blocked, and so is a private-terms file that does not load or a terms search that does not finish
+(see [Gemini](gemini.md)). Every block names the line, the reason and the fix. A false positive is a block, not a leak;
+the test suite runs the guard over the repository's own docs and sets a ceiling on false positives. It is a speed bump
+against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief is out of its
+reach. The guard is not the gate that holds: the approval record, the caps and the free-tier limits are enforced again by
+the wrapper itself, which raises before any request when a paid call has no live record. **Above 1 MiB the whole hook
+fails open** (see Failing safe), including these two rules; a step padded past that size is not seen.
 
 ## Failing safe
 

@@ -31,6 +31,7 @@ import pwd
 import re
 import secrets
 import subprocess
+import sys
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ from safo.credentials import find_executable
 from safo.errors import ConfigError, SafoError
 from safo.guardlog import ensure_dir, file_lock, write_text
 from safo.schema import Reader, _safe_load
+from safo.termsearch import TERMS_CHUNK as TERMS_CHUNK  # re-exported for the tests
 from safo.trust import read_trusted_regular_file
 
 VENDOR_HOST = "generativelanguage.googleapis.com"
@@ -841,31 +843,65 @@ def _gate_free(cfg: GeminiConfig, snap: Snapshot, req: Request, now: dt.datetime
 TERMS_FILE_BYTES = 65_536
 TERMS_LINE_CAP = 200
 TERMS_COUNT_CAP = 500
-TERMS_CHUNK = 4000  # characters one term sees at a time
-TERMS_REPEAT_CAP = 99  # a repeat in a term is bounded: {1,40}, never + or *
+TERMS_REPEAT_CAP = 99  # one repeat in a term is bounded: {1,40}, never + or *
+TERMS_WORK_CAP = 10_000  # the product of every repeat's upper bound in one term
+TERMS_SECONDS = 5.0  # a term search that runs longer than this is killed and counts as a denial
 
 _RE_PARSER = importlib.import_module("re._parser")  # private, but the only way to read a pattern's shape (3.11+)
 _RE_CONSTANTS = importlib.import_module("re._constants")
 
+_HOMOGLYPHS = str.maketrans(
+    {
+        "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0456": "i", "\u0458": "j",
+        "\u0455": "s", "\u0501": "d", "\u043a": "k", "\u043c": "m", "\u0445": "x", "\u0443": "y", "\u0261": "g",
+        "\u0192": "f", "\u03bf": "o", "\u03b1": "a", "\u03b5": "e", "\u03b9": "i", "\u03ba": "k", "\u03c1": "p",
+        "\u03bd": "v", "\u03c4": "t", "\u0475": "v",
+    }
+)  # fmt: skip
+
+
+def fold(text: str) -> str:
+    """What a reader would see: NFKD, combining marks, format and control characters (zero-width, tag, variation
+    selector, NUL) removed except tab and newline, NFKC, and common Cyrillic and Greek look-alikes mapped to Latin."""
+    stripped = "".join(
+        c
+        for c in unicodedata.normalize("NFKD", text)
+        if c in "\t\n" or unicodedata.category(c) not in ("Mn", "Cf", "Cc")
+    )
+    return unicodedata.normalize("NFKC", stripped).translate(_HOMOGLYPHS)
+
+
+class TermsCheckError(RefusedError):
+    """The private-terms search could not finish: it counts as a hit."""
+
 
 def _unsafe_shape(pattern: str) -> str | None:
-    """Why a term could run for a long time, or None. Terms are plain words with bounded repeats: no unbounded repeat,
-    no repeat inside a repeat, no alternation inside a repeat, no back reference."""
+    """Why a term could run for a long time or match nothing, or None. Terms are plain words with a few bounded
+    repeats: no repeat whose body can match nothing or holds another repeat, no alternation inside a repeat, no back
+    reference, no pattern that can match the empty string, and a product of repeat bounds under TERMS_WORK_CAP."""
     try:
         tree = _RE_PARSER.parse(pattern, re.IGNORECASE)
     except (re.error, RecursionError, OverflowError):
         return "an invalid expression"
     c = _RE_CONSTANTS
+    if tree.getwidth()[0] == 0:
+        return "an expression that can match the empty string"
+    work = [1]
 
     def walk(items: Any, in_repeat: bool) -> str | None:
         for op, av in items:
             if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
-                _, high, sub = av
+                _low, high, sub = av
                 if high == c.MAXREPEAT or high > TERMS_REPEAT_CAP:
                     return "an unbounded repeat (use {1,40} instead of + or *)"
-                if in_repeat and high > 1:
+                if in_repeat:
                     return "a repeat inside a repeat"
-                found = walk(sub, in_repeat or high > 1)
+                if sub.getwidth()[0] == 0:
+                    return "a repeat of something that can match nothing"
+                work[0] *= max(high, 1)
+                if work[0] > TERMS_WORK_CAP:
+                    return "repeats that multiply to more than 10000"
+                found = walk(sub, True)
             elif op == c.SUBPATTERN:
                 found = walk(av[3], in_repeat)
             elif op == c.BRANCH:
@@ -889,9 +925,9 @@ def _unsafe_shape(pattern: str) -> str | None:
 
 def load_private_terms(setting: str, default: Path | None = None) -> tuple[re.Pattern[str], ...]:
     """The maintainer's private terms (one expression a line), strictly, and the one loader the wrapper and the dispatch
-    guard both use: a file that is missing, unreadable, too large, over the count or the line cap, or holds an invalid
-    or dangerous expression stops the call, because a list that failed to load would let a private term through.
-    `none` is the explicit, written-down opt-out."""
+    guard both use: a file that is missing, unreadable, too large, over the count or the line cap, or holds an invalid,
+    empty-matching or slow-looking expression stops the call, because a list that failed to load would let a private
+    term through. `none` is the explicit, written-down opt-out."""
     if setting == "none":
         return ()
     path = default if setting == "default" and default is not None else Path(setting)
@@ -917,18 +953,26 @@ def load_private_terms(setting: str, default: Path | None = None) -> tuple[re.Pa
     return tuple(found)
 
 
-def private_term_hit(terms: tuple[re.Pattern[str], ...], text: str, tick: Callable[[], None] | None = None) -> bool:
-    """True when any term matches. Each term sees at most TERMS_CHUNK characters at a time (chunks overlap by 200),
-    and `tick` may raise to stop the work."""
-    step = TERMS_CHUNK - 200
-    for start in range(0, max(len(text), 1), step):
-        chunk = text[start : start + TERMS_CHUNK]
-        for term in terms:
-            if tick is not None:
-                tick()
-            if term.search(chunk):
-                return True
-    return False
+def private_term_hit(terms: tuple[re.Pattern[str], ...], texts: list[str], timeout: float = TERMS_SECONDS) -> bool:
+    """True when any term matches any text. The search runs in a child process that is killed at `timeout`; a child
+    that does not answer in time, or fails, raises TermsCheckError, which callers treat as a hit."""
+    if not terms:
+        return False
+    payload = json.dumps({"terms": [[t.pattern, t.flags] for t in terms], "texts": texts})
+    try:
+        done = subprocess.run(
+            [sys.executable, "-I", "-m", "safo.termsearch"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=max(timeout, 0.1),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        raise TermsCheckError("the private terms check ran out of time, so it counts as a match") from None
+    if done.returncode != 0 or done.stdout not in ("0", "1"):
+        raise TermsCheckError("the private terms check failed, so it counts as a match")
+    return done.stdout == "1"
 
 
 # -- the key -------------------------------------------------------------------------------------------------------
@@ -1052,7 +1096,7 @@ def ask(
     """Send one request, once, or say which gate stopped it."""
     _check_request(cfg, req)
     terms = load_private_terms(cfg.private_terms, fixed_locations().terms if cfg.private_terms == "default" else None)
-    if private_term_hit(terms, req.prompt):
+    if private_term_hit(terms, [req.prompt, fold(req.prompt)]):
         raise RefusedError("the prompt matches one of the maintainer's private terms; nothing was sent")
     ledger = Ledger(cfg.ledger)
     snap = snapshot(ledger.read())
