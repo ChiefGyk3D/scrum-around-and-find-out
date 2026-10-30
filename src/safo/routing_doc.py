@@ -23,7 +23,7 @@ def render_routing(doc: AgentsFile) -> str:
         "> Generated from `agents.yaml` by `scripts/gen_routing.py`. Do not edit this page: edit `agents.yaml` and run",
         "> `python scripts/gen_routing.py --write`. `safo route <shape>` applies these rules to the live headroom",
         "> that `safo usage` measures; see [Usage](usage.md). How to brief each agent is in",
-        "> [Agent profiles](profiles.md).",
+        "> [Agent profiles](profiles.md). The free-tier and paid gates for Gemini are in [Gemini](gemini.md).",
         "",
         "## Task shapes",
         "",

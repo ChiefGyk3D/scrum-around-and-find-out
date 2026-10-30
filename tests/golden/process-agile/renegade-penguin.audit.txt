@@ -111,9 +111,9 @@ DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#45
 DRIFT   MISSING Kind on Renegade-Penguin/hammunition-gps-tether#46
 DRIFT   MISSING Epic on Renegade-Penguin/hammunition-gps-tether#46
 DRIFT   MISSING Effort on Renegade-Penguin/hammunition-gps-tether#46
-DRIFT   MISSING Kind on card PVTI_0147
-DRIFT   MISSING Epic on card PVTI_0147
-DRIFT   MISSING Effort on card PVTI_0147
+DRIFT   MISSING Kind on card PVTI_0148
+DRIFT   MISSING Epic on card PVTI_0148
+DRIFT   MISSING Effort on card PVTI_0148
 NOTE    Threat-model check not configured: rules.threat_model.label is empty
 NOTE    NO-GATE Renegade-Penguin/Hammunition: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md
 NOTE    NO-GATE Renegade-Penguin/hammunition-hill: required check is pinned to the Actions app, which every workflow in the repository can use; see docs/no-hidden-work.md

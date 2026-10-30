@@ -111,9 +111,9 @@ HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#45
 HUMAN MISSING Kind on Renegade-Penguin/hammunition-gps-tether#46
 HUMAN MISSING Epic on Renegade-Penguin/hammunition-gps-tether#46
 HUMAN MISSING Effort on Renegade-Penguin/hammunition-gps-tether#46
-HUMAN MISSING Kind on card PVTI_0147
-HUMAN MISSING Epic on card PVTI_0147
-HUMAN MISSING Effort on card PVTI_0147
+HUMAN MISSING Kind on card PVTI_0148
+HUMAN MISSING Epic on card PVTI_0148
+HUMAN MISSING Effort on card PVTI_0148
 HUMAN MISSING Kind on Renegade-Penguin/Hammunition#2
 HUMAN MISSING Epic on Renegade-Penguin/Hammunition#2
 HUMAN MISSING Effort on Renegade-Penguin/Hammunition#2

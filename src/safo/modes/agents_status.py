@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""agents-status: one read-only view of what each agent (Claude, Codex, Copilot, ChatGPT, Ollama, RAG) is doing."""
+"""agents-status: one read-only view of what each agent (Claude, Codex, Copilot, ChatGPT, Ollama, RAG, Gemini) does."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from safo.modes import Mode, register
 
 HOURS_MAX = 24 * 366
 # Agents with no session or task list a shell can read: their work is only the cards that name them.
-CARD_ONLY_AGENTS = ("ChatGPT", "Ollama", "RAG")
+CARD_ONLY_AGENTS = ("ChatGPT", "Ollama", "RAG", "Gemini")
 UNKNOWN = "(unknown agent)"
 
 Q_AGENT_ITEMS = """query AgentItems(
@@ -136,7 +136,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 register(
     Mode(
         "agents-status",
-        "what each agent (Claude, Codex, Copilot, ChatGPT, Ollama, RAG) is doing (read-only)",
+        "what each agent (Claude, Codex, Copilot, ChatGPT, Ollama, RAG, Gemini) is doing (read-only)",
         add_arguments,
         run,
     )

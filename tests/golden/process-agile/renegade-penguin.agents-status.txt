@@ -27,4 +27,5 @@ Routing guard (mode: warn)
 ChatGPT: no session to list from a shell; its work is the board cards with Agent = ChatGPT above.
 Ollama: no session to list from a shell; its work is the board cards with Agent = Ollama above.
 RAG: no session to list from a shell; its work is the board cards with Agent = RAG above.
+Gemini: no session to list from a shell; its work is the board cards with Agent = Gemini above.
 --- stderr ---

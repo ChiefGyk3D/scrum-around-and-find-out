@@ -12,6 +12,9 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
 - [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
 - [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
+- [Gemini](gemini.md): the free-only provider for public material, and the approval gate on every paid call.
+- [Gemini keys](gemini-keys.md): enrolling, rotating, backing up and revoking the security keys that sign paid approvals.
+- [Gemini passkeys](gemini-passkeys.md): the passkey tier, designed and tested against a fake verifier, not shippable until a dependency is chosen.
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
 - [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
 - [Look before instructing](look-before-instructing.md): prior art, then the vendor's docs page, then the live system; never a click path from memory.

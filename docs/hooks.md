@@ -8,7 +8,7 @@ approval token, and that includes a model that a prompt injection has talked int
 |---|---|---|
 | `safo hooks install [--settings PATH] [--mode warn\|block] [--command safo]` | none | Merges the two hooks into a `settings.json` (default `~/.claude/settings.json`). Keeps every other hook and setting, is a no-op when run again, keeps a private backup before it replaces the file, and refuses to overwrite a file that changed while it worked (bytes, or the file itself: device, inode, size and modification time are checked again just before the replace, so a rename-over with identical bytes is caught too, with `settings changed while installing`). `--dry-run` writes nothing. |
 | `safo hooks probe` | SessionStart | Asks each Ollama endpoint in `agents.yaml` which models are loaded (two bounded GETs, never a generate), saves the answer and tells the session whether the local LLM is reachable. |
-| `safo hooks guard` | PreToolUse, matcher `Agent\|Task\|Bash` | Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
+| `safo hooks guard` | PreToolUse, matcher `Agent\|Task\|Bash` | Checks each subagent brief against four rules (below), and each Bash call of the lead against the lead-never-waits rule (the fifth). Two more rules cover Gemini (the sixth and seventh, which deny in every mode). A rerun of `install` moves an older `Agent\|Task` matcher to this one. |
 | `safo hooks mode warn\|block` | none | `warn` reports a broken rule and allows the dispatch (the default); `block` denies it. |
 | `safo hooks status [--session ID --agents PATH]` | none | The mode, the retained counts, the health of the hooks and of the last probe. |
 
@@ -162,6 +162,107 @@ Exemptions are never silent:
   deliberate wait a written decision. The rule is a speed bump against accidents, not a sandbox: an actor who can
   already run arbitrary Bash as the same user can also edit the guard's config, mode file and logs.
 
+## The sixth and seventh rules: Gemini
+
+Two rules protect money and privacy for the Gemini provider ([Gemini](gemini.md)). Unlike the five above, they deny
+**even in warn mode**: a paid step with no approval record is blocked, not noted, and private material for the free tier
+is blocked, not noted. The log records `gemini-paid` or `gemini-material` and never the brief; the denial message names
+the missing thing and never repeats the brief's text.
+
+A brief names a Gemini step with a declaration line (`gemini: free ...` or `gemini: paid cap=1.50 approval=ID`), a
+`safo gemini ask|approve` command, or the raw vendor host. A free-text mention is not a step. A command is read with the
+parser the CLI itself uses (the same options, no abbreviations), so the guard and the CLI cannot disagree about a
+spelling; a command that parser rejects is treated as a paid, unapproved step. `ask` takes `--cap USD`, and the wrapper
+refuses when its estimate is over it.
+
+6. **`gemini-paid`.** A paid step (`paid`, `--paid`, `tier=paid`, or the paid secret-store config `prd_paid` named anywhere
+   in the brief) is refused outright, with a message that says paid use is disabled, while the root-owned paid-use switch is off (the
+   default; see [Gemini](gemini.md)). Once it is on, a paid step states a cap above 0 and at most 2 USD and an approval id whose record exists, carries a valid signature by an
+   enrolled security key (see [Gemini](gemini.md)), was signed against a ledger head that is still in the ledger chain, has
+   not expired and has not been used (its nonce is not spent in the ledger). A check that raises, or a guard with no approval folder to look in, blocks.
+7. **`gemini-material`.** Every Gemini step needs the line `gemini-material: public`. A secret-shaped string (an API key, a
+   token, a private key block) anywhere in the brief, or a match for one of the maintainer's private terms (the terms the fixed Gemini config names, by
+   default `privacy-terms.txt` beside it, loaded by the same strict loader the wrapper uses; no environment variable
+   changes it; read, never written, never repeated), blocks it. A mention that sends nothing (an `approve` or `quota`
+   command with no prompt file) does not need the line. The vendor host written out in a brief is blocked too: call Gemini only through `safo gemini`.
+
+What the guard covers is stated narrowly, because it is a speed bump and the wrapper holds the gates. After folding the
+text (NFKD with invisible, combining and control characters removed, NFKC, common Cyrillic and Greek look-alike letters
+mapped to Latin), replacing a markdown link by its text and joining line continuations, it treats these as Gemini steps
+that must pass the strict check:
+
+- a declaration line in the exact grammar, `gemini: free` or `gemini: paid cap=USD approval=ID` (also as a list item), with
+  nothing after the tier but `key=value` pairs, so `Gemini: free tier only` in a sentence is prose;
+- a literal `safo gemini <action>` command: a `safo` word, then in the same simple command (no `;`, `|` or `&` between,
+  however many flags sit in between) a `gemini` word, then an action word
+  (`ask`, `approve`, `quota`), also inside a quoted string. Words are cut the way bash cuts them (single and double
+  quotes, a backslash escape): the arguments end at an unquoted `; | & )`, a redirection and its operand are skipped the
+  way the shell skips them, and an operator or a shell expansion character inside an argument makes the step unreadable,
+  as does a word with a quote or backslash anywhere but its outer edges (`"a"';'`), an operator touching a quoted word
+  with no space, and an option-like `--` word straight after the cut. The arguments are read with the parser the CLI uses. A path such
+  as `src/safo/gemini.py` or a model id such as `gemini-3.6-flash` is an argument or a name, never a command start;
+- these named forms: a `safo` or `gemini` word beside a shell expansion, glob, brace, backtick or `%` and an `ask` or
+  `approve` word; and, when the brief names `gemini` and an action anywhere, any line that runs `safo` through `$`, a
+  function, `xargs`, `eval`, `alias` or `-c` (so `echo ask --paid | xargs safo gemini` and `alias g='safo gemini'` then
+  `g ask --paid` are caught);
+- a command built from variables, escapes or substitutions. **No value is ever resolved and no shell is modeled**: a Gemini
+  command that is built from variables is blocked by design, and a command made only of literal words stays readable.
+  Shell comments are cut off first, the way bash cuts them: a `#` that starts a word (at the start, or after an ASCII
+  space, tab, newline or one of `; & | ( ) < >`), outside single quotes, double quotes and `$'...'` words. The cut fails
+  closed: when the comment text holds `$`, a backtick, `;`, `|` or `&`, or the text before the `#` holds `$'` or a
+  non-ASCII space, the whole line is read. A name counts as assigned when it is set anywhere in
+  the brief (`NAME=value`, a prefix assignment, `export`, `declare`, `readonly`, `local`, an array, `printf -v`, a `for` or
+  `read` variable), in any order. When the brief names the Gemini surface (`safo`, `gemini`, the vendor host, an SDK, the
+  paid config, or words built with escapes), it is unreadable if an assigned name is the command word (also after
+  `env`, `do`, `then` and the like), or is referenced on a line that carries a Gemini option or action (`--paid`,
+  `--approval`, `--cap`, `ask`, `approve`); or if an escape (an ANSI-C `$'...'` word, a hex, octal or `\u` escape, `printf -v`)
+  is the command word or sits on such a line; or if a command segment (the words between `; | & ( ) < >`) holds the word
+  `gemini`, the vendor host, an SDK or the paid config and, in that same segment, any variable or expansion. No visible
+  option or action is needed for that last rule, so `safo gemini ${X} ${Y}` is blocked. **No Gemini word is needed at all for one more rule**: a Gemini-risk token on a
+  line (`--paid`, `--approval`, `--cap` as an option of its own, `approve` as a word of its own, not `--cap-add` or
+  `approver`) whose command word is a variable or other expansion (also inside a `bash -c` style command string) makes
+  the brief relevant and unreadable. On a line with `--paid`, `--approval`, `--cap` or `approve` followed by an option, **any expansion after the first word of
+  the command** makes the line unreadable (NAME=value words before the command are skipped), so no wrapper (`env`, `time`,
+  `nohup`, a quoted, backslashed or path-named one) needs to be named or tracked. A brace expansion that bash would perform
+  (`{a,b}` or `{x..y}`, nested too, never `${...}`, whose commas and closing brace belong to it alone) counts as a
+  possible risk token, and so does any brace in a word that is only partly quoted (a word that is one quoted string is
+  not expanded by the shell). A brace expansion also makes an expansion after the first word of the command unreadable, as
+  a risk flag does: no word is built or
+  enumerated, the line is only scanned once, and a line past the length bound is judged by its marks without being cut. So words built by substitutions, interpreters, `tr`, `awk`, `sed`, a sourced file
+  or the environment are caught when the action or flag stands on the page. An expansion that nothing in the
+  brief assigned, as the command word or on a line with a Gemini option, blocks when the brief names both `safo` and
+  `gemini`. An **unrelated construct** (an array, a function, `eval`, `xargs`, an assignment from an expansion, a shell
+  or interpreter `-c`) blocks only beside a `--paid` or `approve` step; beside a free command it is left alone, as it
+  is in a brief that names no Gemini command. A line the lexer cannot read that holds an expansion is unreadable.
+  Backtick command substitutions are recognized only where a command word or a value would stand and only when they
+  start with a common command word (`echo`, `printf`, `cat`, `base64`, ...); markdown code spans are not substitutions.
+  Escape-built words make a brief relevant on their own. The false blocks this adds, by design: a brief that names the
+  Gemini surface and runs a command through a variable it assigned; a brief with escape sequences that does so; a
+  command segment with the word `gemini` and any `$` expansion, even in prose; any brace expansion on a line whose command
+  is an expansion (`$BIN ask --{a,b}ccount`) or that has an expansion in an argument (`docker run --cap-{add,drop}=X $IMAGE`); a line with `--paid`, `--approval`, `--cap` or `approve --...` and an
+  expansion in any argument (`deploy $X --paid`); a line that starts with an expansion and
+  carries `--paid`, `--approval`, `--cap` or the word `approve`; a comment that holds `$`, a backtick, `;`, `|` or `&`
+  (read as code); and **here-documents**: their bodies are read like any other lines and are not skipped, because a
+  here-document can be fed to `bash`, `sh -s` or `source /dev/stdin` and run, so skipping bodies would be a way around the
+  guard; shell examples inside a here-document can therefore false-block an ordinary brief. Time is checked once per line and the
+  tracked names are capped at 2000. The message names the construct;
+- base64, openssl, xxd, rev or printf escapes piped to a shell; the vendor host in any case; the Google genai SDK; the
+  paid secret-store config name. These are looked for in the text before markdown links are rewritten, so a host that
+  sits only in a link target is seen. A link to the vendor's documentation (`ai.google.dev`) is a mention and passes; the
+  API host (`generativelanguage.googleapis.com`) in a link is the API named and is blocked, like a URL in a command.
+
+That is the whole claim. Not covered: a wrapper script or alias under another name that hides `safo`, a command written
+to a file and run later, other shells than bash, and any language that calls `safo` or the API from inside a program. It does not promise to read every way a shell can build a command: a form outside the list above
+is not seen. A line over 4000 characters that mentions any of these, more than 50 commands, or a check that runs past the
+guard's deadline is blocked, and so is a private-terms file that does not load or a terms search that does not finish
+(see [Gemini](gemini.md)). Every block names the line, the reason and the fix. A false positive is a block, not a leak;
+the test suite runs the guard over the repository's own docs and sets a ceiling on false positives. It is a speed bump
+against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief is out of its
+reach. The guard is not the gate that holds: the approval record, the caps and the free-tier limits are enforced again by
+the wrapper itself, which raises before any request when a paid call has no live record. When the dispatch event cannot be
+read (over 1 MiB, not valid JSON, cut short, or timed out), or `agents.yaml` cannot be loaded, these two rules still
+run or are applied as a literal check (see Failing safe).
+
 ## Failing safe
 
 A hook sits inside someone's session, so every error lets the work through, visibly.
@@ -171,7 +272,23 @@ A hook sits inside someone's session, so every error lets the work through, visi
   command line the hook cannot parse (read from the real command line, so `python -m safo hooks guard --no-such-flag` too) all exit 0, print the fixed line `SAFO routing guard degraded: enforcement may be
   incomplete; inspect safo hooks status.` as hook JSON, and add an enum-only record to the log. No exception text, input
   value or prompt is echoed or stored.
-- What a failure switches off: input or configuration failures switch off every rule; a state failure (missing, invalid,
+- **The Gemini rules do not fail open.** They need nothing from `agents.yaml`, so when it cannot be loaded the brief is
+  still checked by `gemini-paid` and `gemini-material`, and a violation is denied (the degraded notice stays in the same
+  answer). When the event itself cannot be used, the decision is never made from a prefix. An event over 1 MiB is read
+  to its end, up to 8 MiB and 4 seconds, and the whole stream is checked for Gemini markers as it goes (the end of each
+  chunk is carried into the next, so a marker cannot hide at a boundary): the words `safo` and `gemini` both seen, the
+  vendor host, an SDK name, the paid config name, or a decode-to-shell form, after the same normalization the brief scan
+  uses (fullwidth and look-alike letters folded, invisible characters removed, quotes and backslashes removed, JSON
+  escapes such as `\n` and `\uXXXX` decoded). The event scan also denies what the brief scan's flow rule blocks, without
+  lines (more than 2000 assigned names, the brief scan's own cap, or more than 50000 referenced names is itself a marker, never a
+  silent stop; a risk token together with any expansion anywhere in the stream is one too, as is a brace expansion inside a word that holds `--`, `appro`, `cap` or `paid`): an ANSI-C word with an escape, `printf -v` with escapes, or a name assigned anywhere and referenced anywhere while
+  `safo`, `gemini` or escape-built words are named. A marker anywhere is **denied** with the diagnostic kept. An event longer
+  than 8 MiB, or one that does not finish arriving or cannot be checked within the time, is **denied** as too large or
+  incomplete to check. Only an oversized event whose whole stream was read and checked and held no marker is the degraded
+  allow. Malformed JSON within the cap is checked whole the same way. A standard input that stalls after some bytes is
+  checked for markers and denied either way; one that never delivers a single byte is the degraded allow. No other rule
+  changes.
+- What a failure switches off: input or configuration failures switch off every rule except those two; a state failure (missing, invalid,
   future-dated or other-session state, or a re-probe that failed) switches off only the local-step rule; a mode failure
   falls back to `warn`.
 - A denial that was computed survives a log failure.

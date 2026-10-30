@@ -1528,14 +1528,14 @@ def test_a_slow_endpoint_costs_the_guard_one_bounded_wait_and_never_a_decision(
     import time
 
     with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
-        a.stall_seconds = b.stall_seconds = 2.5
+        a.stall_seconds = b.stall_seconds = 5.0  # far above the re-probe's own 1.5 s, so a full wait is unmistakable
         path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
         set_probe(_private_home, age=900, agents=path)
         set_mode(_private_home, "block")
         started = time.monotonic()
         code, out, _ = guard(_private_home, path, dispatch(model=None, prompt=NO_STEP))
         elapsed = time.monotonic() - started
-    assert code == 0 and elapsed < 2.4, "the re-probe gives up after its own short timeout"
+    assert code == 0 and elapsed < 3.8, "the re-probe gives up after its own short timeout, not the stall"
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
     row = read_log(_private_home)[-1]
     assert row["rules"] == ["no-model"] and row["local_reachable"] is False, "the answer was 'not reachable'"

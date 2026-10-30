@@ -31,6 +31,7 @@ from safo import tracking
 from safo.agentsfile import Agent, AgentsFile, Endpoint
 from safo.bounded import loads
 from safo.errors import ConfigError
+from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, ApprovalCheck, TermsSource, findings
 from safo.guardlog import (
     APPEND_LOCK_TIMEOUT,
     FILE_CAP,
@@ -67,7 +68,21 @@ NO_ISSUE = "no-issue"  # the brief names no tracking item (or an unusable one)
 ISSUE_UNUSABLE = "issue-unusable"  # the item does not exist or is closed
 ISSUE_UNVERIFIED = "issue-unverified"  # the item could not be looked up
 LEAD_WAITS = "lead-waits"  # a lead session's foreground Bash call waits (gh run watch, a polling loop, a long sleep)
-RULES = (NO_MODEL, UNKNOWN_MODEL, APPROVAL, NO_LOCAL_STEP, NO_ISSUE, ISSUE_UNUSABLE, ISSUE_UNVERIFIED, LEAD_WAITS)
+RULES = (
+    NO_MODEL,
+    UNKNOWN_MODEL,
+    APPROVAL,
+    NO_LOCAL_STEP,
+    NO_ISSUE,
+    ISSUE_UNUSABLE,
+    ISSUE_UNVERIFIED,
+    LEAD_WAITS,
+    GEMINI_PAID,
+    GEMINI_MATERIAL,
+)
+# These deny in every guard mode, warn included: no approval record for money, or private material for the free tier,
+# is blocked and not noted (#200, #195).
+ALWAYS_BLOCK = (GEMINI_PAID, GEMINI_MATERIAL)
 
 
 # -- the probe -------------------------------------------------------------------------------------
@@ -335,6 +350,9 @@ def check_dispatch(
     reachable: bool,
     resolve: tracking.Resolver | None = None,
     repo: Callable[[], str | None] = lambda: None,
+    approval_check: ApprovalCheck | None = None,
+    terms: TermsSource = (),
+    deadline: float | None = None,
 ) -> Verdict:
     """Apply the routing rules to one Agent tool call.
 
@@ -386,6 +404,16 @@ def check_dispatch(
         if broken:
             rules.append(broken[0])
             reasons.append("no hidden work: " + broken[1])
+    try:
+        gemini_findings = findings(prompt, approval_check, terms, deadline)
+    except Exception:  # a check that cannot finish blocks: it never allows
+        gemini_findings = [
+            (GEMINI_PAID, "the Gemini check failed, so the brief is blocked"),
+            (GEMINI_MATERIAL, "the Gemini check failed, so the brief is blocked"),
+        ]
+    for rule, why in gemini_findings:
+        rules.append(rule)
+        reasons.append(f"{rule}: {why}")
     return Verdict(tuple(rules), tuple(reasons), model, local_step, na)
 
 
@@ -393,6 +421,8 @@ def decide(verdict: Verdict, mode: str) -> str:
     """allow when nothing is wrong; otherwise deny in block mode and warn (allow, but say so) in warn mode."""
     if not verdict.rules:
         return "allow"
+    if any(rule in ALWAYS_BLOCK for rule in verdict.rules):
+        return "deny"
     return "deny" if mode == "block" else "warn"
 
 
