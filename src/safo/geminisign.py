@@ -20,16 +20,15 @@ from __future__ import annotations
 
 import base64
 import binascii
-import contextlib
 import dataclasses
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
 import subprocess
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -72,6 +71,7 @@ class Trust:
     revoked: Path
     uid: int = 0  # the owner the trust files must have: root, in production
     require_hardware: bool = True  # only sk keys unless a key carries the written opt-in
+    revocation_required: bool = True  # a missing revocation list refuses verification (a test may turn this off)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,7 +146,15 @@ def read_trust_file(path: Path, uid: int, what: str) -> bytes:
             raise RefusedError(f"the {what} is not owned by the account that must own it (root, in production)")
         if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise RefusedError(f"the {what} is writable by its group or by others")
-        data = os.read(fd, TRUST_FILE_BYTES + 1)
+        chunks: list[bytes] = []
+        total = 0
+        while total <= TRUST_FILE_BYTES:  # a read may return less than the whole file: go on until the end
+            part = os.read(fd, TRUST_FILE_BYTES + 1 - total)
+            if not part:
+                break
+            chunks.append(part)
+            total += len(part)
+        data = b"".join(chunks)
     except OSError:
         raise RefusedError(f"the {what} cannot be read") from None
     finally:
@@ -353,10 +361,9 @@ def load_roster(trust: Trust) -> Roster:
     keys = parse_signers(read_trust_file(trust.signers, trust.uid, "allowed-signers file").decode("utf-8", "replace"))
     present = os.path.lexists(trust.revoked)
     prints: frozenset[str] = frozenset()
-    if present:
-        _, prints = parse_revoked(
-            read_trust_file(trust.revoked, trust.uid, "revocation list").decode("utf-8", "replace")
-        )
+    if present or trust.revocation_required:  # required: a missing list is read, and refused, not treated as empty
+        text = read_trust_file(trust.revoked, trust.uid, "revocation list").decode("utf-8", "replace")
+        _, prints = parse_revoked(text)
     return Roster(tuple(keys), prints, present)
 
 
@@ -449,40 +456,73 @@ def ssh_keygen() -> str:
     raise RefusedError("ssh-keygen was not found in a system directory")
 
 
+_SEALS = (
+    getattr(fcntl, "F_SEAL_SEAL", 1) | getattr(fcntl, "F_SEAL_SHRINK", 2) | getattr(fcntl, "F_SEAL_GROW", 4)
+    | getattr(fcntl, "F_SEAL_WRITE", 8)
+)  # fmt: skip
+_GOOD = re.compile(rb'Good "([^"\n]{1,100})" signature for (\S{1,100}) with \S{1,40} key (SHA256:[A-Za-z0-9+/]{43})\n?')
+
+
+def _sealed(data: bytes) -> int:
+    """An in-memory file that nobody, this process and the same account included, can change any more: its contents
+    are fixed before ssh-keygen opens it. Fails closed where sealed memory is not available."""
+    try:
+        fd = os.memfd_create("safo", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    except (OSError, AttributeError):
+        raise RefusedError("sealed memory (memfd) is not available, so nothing was verified") from None
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        fcntl.fcntl(fd, getattr(fcntl, "F_ADD_SEALS", 1033), _SEALS)
+    except OSError:
+        os.close(fd)
+        raise RefusedError("sealed memory (memfd) could not be sealed, so nothing was verified") from None
+    return fd
+
+
 def _ssh_keygen_verify(
     exe: str, line: str, payload: bytes, armor: str, namespace: str, label: str, now: dt.datetime
-) -> bool:
+) -> str | None:
     """The cryptographic check, by OpenSSH itself, against ONE allowed-signers line built here from the key that was
-    already looked up (so the namespace in the file is the namespace asked for)."""
-    with tempfile.TemporaryDirectory(prefix="safo-verify-") as folder:
-        signers, sig = Path(folder, "signers"), Path(folder, "sig")
-        signers.write_text(line + "\n")
-        sig.write_text(armor)
-        try:
-            done = subprocess.run(  # noqa: S603 - absolute system ssh-keygen, fixed argument list, no shell
-                [
-                    exe,
-                    "-Y",
-                    "verify",
-                    f"-Overify-time={now.astimezone(dt.UTC):%Y%m%d%H%M%S}Z",
-                    "-f",
-                    str(signers),
-                    "-I",
-                    label,
-                    "-n",
-                    namespace,
-                    "-s",
-                    str(sig),
-                ],
-                input=payload,
-                capture_output=True,
-                check=False,
-                timeout=20,
-                env={"PATH": "/usr/bin:/bin"},
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            raise RefusedError("ssh-keygen could not verify the signature") from None
-    return done.returncode == 0 and done.stdout.startswith(b'Good "')
+    already looked up. The line and the signature are sealed in memory before ssh-keygen starts and reach it as
+    /dev/fd paths; the message is on its standard input. Returns the key fingerprint OpenSSH says it verified (for the
+    caller to compare with the key it looked up), or None when the signature does not verify."""
+    fds = [_sealed((line + "\n").encode()), _sealed(armor.encode())]
+    try:
+        done = subprocess.run(  # noqa: S603 - absolute system ssh-keygen, fixed argument list, no shell
+            [
+                exe,
+                "-Y",
+                "verify",
+                f"-Overify-time={now.astimezone(dt.UTC):%Y%m%d%H%M%S}Z",
+                "-f",
+                f"/dev/fd/{fds[0]}",
+                "-I",
+                label,
+                "-n",
+                namespace,
+                "-s",
+                f"/dev/fd/{fds[1]}",
+            ],
+            input=payload,
+            capture_output=True,
+            check=False,
+            timeout=20,
+            env={"PATH": "/usr/bin:/bin"},
+            pass_fds=tuple(fds),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise RefusedError("ssh-keygen could not verify the signature") from None
+    finally:
+        for fd in fds:
+            os.close(fd)
+    found = _GOOD.fullmatch(done.stdout)
+    if done.returncode != 0 or found is None:
+        return None
+    if found.group(1).decode() != namespace or found.group(2).decode() != label:
+        raise RefusedError("ssh-keygen verified a signature that does not match the one that was checked")
+    return found.group(3).decode()
 
 
 def verify(
@@ -516,36 +556,42 @@ def verify(
         if when is not None:  # OpenSSH enforces the window too, against the time it is told (below)
             options += f',{name}="{when:%Y%m%d%H%M%S}Z"'
     line = f"{key.label} {options} {key.key_type} {key.b64}"
-    if not _ssh_keygen_verify(ssh_keygen(), line, payload, armor, namespace, key.label, now):
+    named = _ssh_keygen_verify(ssh_keygen(), line, payload, armor, namespace, key.label, now)
+    if named is None:
         raise RefusedError("the approval's signature does not verify")
+    if named != key.fingerprint:
+        raise RefusedError("the key ssh-keygen verified does not match the enrolled key that was looked up")
     return Verified(key.label, key.fingerprint, key.key_type, key.hardware, present, verified)
 
 
 def sign(key_path: str, payload: bytes, namespace: str, env: Mapping[str, str]) -> str:
-    """Ask ssh-keygen to sign. The private key (or sk key handle) is named by path and never opened here. For a hardware
-    key this is where the key blinks and waits for a touch."""
+    """Ask ssh-keygen to sign. The private key (or sk key handle) is named by path and never opened here. The message
+    goes in on standard input and the signature comes back on standard output, so no file stands between the text that
+    was decided and the text that is signed. For a hardware key this is where the key blinks and waits for a touch."""
     if not key_path.startswith("/") or "\x00" in key_path:
         raise ConfigError("signing.key must be an absolute path to a key file (or a public key held by an agent)")
-    with tempfile.TemporaryDirectory(prefix="safo-sign-") as folder:
-        message = Path(folder, "approval")
-        message.write_bytes(payload)
-        child = {k: v for k, v in env.items() if k in _SIGNING_ENV}
-        child["PATH"] = "/usr/bin:/bin"
-        try:
-            done = subprocess.run(  # noqa: S603 - absolute system ssh-keygen, fixed argument list, no shell
-                [ssh_keygen(), "-Y", "sign", "-f", key_path, "-n", namespace, str(message)],
-                stdout=subprocess.DEVNULL,
-                check=False,
-                timeout=300,
-                env=child,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            raise RefusedError("ssh-keygen could not sign (is the key attached, and was it touched in time?)") from None
-        if done.returncode != 0:
-            raise RefusedError("ssh-keygen did not sign; no approval was written")
-        with contextlib.suppress(OSError):
-            return Path(folder, "approval.sig").read_text()
-    raise RefusedError("ssh-keygen wrote no signature")
+    child = {k: v for k, v in env.items() if k in _SIGNING_ENV}
+    child["PATH"] = "/usr/bin:/bin"
+    try:
+        done = subprocess.run(  # noqa: S603 - absolute system ssh-keygen, fixed argument list, no shell
+            [ssh_keygen(), "-Y", "sign", "-f", key_path, "-n", namespace],
+            input=payload,
+            stdout=subprocess.PIPE,
+            check=False,
+            timeout=300,
+            env=child,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise RefusedError("ssh-keygen could not sign (is the key attached, and was it touched in time?)") from None
+    if done.returncode != 0:
+        raise RefusedError("ssh-keygen did not sign; no approval was written")
+    try:
+        armor = done.stdout.decode("ascii")
+    except UnicodeError:
+        armor = ""
+    if len(armor) > SIGNATURE_BYTES or not armor.startswith("-----BEGIN SSH SIGNATURE-----"):
+        raise RefusedError("ssh-keygen wrote no signature")
+    return armor
 
 
 # -- the keys subcommands (read-only) ---------------------------------------------------------------------------------

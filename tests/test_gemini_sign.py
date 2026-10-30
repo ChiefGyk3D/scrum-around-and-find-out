@@ -9,10 +9,13 @@ spend has a test that goes red when the check is removed.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -38,7 +41,7 @@ class Rig:
         self.signers.chmod(0o644)
 
     def trust(self, *, hardware: bool = False, uid: int | None = None) -> Trust:
-        return Trust(self.signers, self.revoked, os.geteuid() if uid is None else uid, hardware)
+        return Trust(self.signers, self.revoked, os.geteuid() if uid is None else uid, hardware, False)
 
     def sign(self, key: Path | None = None, payload: bytes = PAYLOAD, namespace: str = NAMESPACE) -> str:
         return geminisign.sign(str(key or self.a), payload, namespace, {})
@@ -88,7 +91,7 @@ def test_the_namespace_is_also_bound_by_openssh_itself(rig: Rig) -> None:
         "yubikey-a",
         dt.datetime.now(dt.UTC),
     )
-    assert ok is False
+    assert ok is None
 
 
 def test_a_key_that_is_not_enrolled_is_refused(rig: Rig) -> None:
@@ -160,9 +163,9 @@ class SkRig(Rig):
         self.verified_called = 0
         monkeypatch.setattr(geminisign, "_ssh_keygen_verify", self._ok)
 
-    def _ok(self, *args: object) -> bool:
+    def _ok(self, *args: object) -> str:
         self.verified_called += 1
-        return True
+        return fingerprint(self.blob)
 
     def verify(self, flags: int) -> geminisign.Verified:
         return geminisign.verify(self.trust(hardware=True), PAYLOAD, fake_sk_armor(self.blob, flags))
@@ -466,3 +469,144 @@ def test_a_window_time_must_be_utc_and_well_formed(rig: Rig, value: str) -> None
     windowed(rig, "", value)
     with refused("valid-before"):
         geminisign.load_roster(rig.trust())
+
+
+# -- verification and signing inputs are sealed, not handed over by pathname ----------------------------------------
+
+REAL_RUN = subprocess.run
+
+
+def run_hook(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, before: Callable[[list[str], dict[str, Any]], None]
+) -> list[Any]:
+    """Run `before(argv, kwargs)` just before every real ssh-keygen call, then make the call. Returns the calls seen."""
+    seen: list[Any] = []
+
+    def wrapper(argv: list[str], **kwargs: Any) -> Any:
+        seen.append((list(argv), dict(kwargs)))
+        before(argv, kwargs)
+        return REAL_RUN(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", wrapper)
+    return seen
+
+
+def test_inputs_replaced_between_the_decision_and_ssh_keygen_change_nothing(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every path the verifier gives ssh-keygen is overwritten with another key's data just before the call runs. The
+    signature that was parsed must be the one verified, so a signature by a key that is not enrolled stays refused."""
+    other_signers = tmp_path / "other-signers"
+    other_signers.write_text(signers_line("yubikey-a", rig.b.with_suffix(".pub")) + "\n")
+    target = b'{"job":"target"}'
+    foreign = rig.sign(rig.b, target)
+    old_genuine = rig.sign(rig.a, PAYLOAD)
+
+    def swap(argv: list[str], kwargs: dict[str, Any]) -> None:
+        for flag, data in (("-f", other_signers.read_bytes()), ("-s", foreign.encode())):
+            if flag in argv:
+                with contextlib.suppress(OSError):
+                    Path(argv[argv.index(flag) + 1]).write_bytes(data)
+
+    run_hook(rig, monkeypatch, swap)
+    with refused("does not verify"):
+        geminisign.verify(rig.trust(), target, old_genuine)
+
+
+def test_ssh_keygen_gets_sealed_descriptors_and_the_message_on_stdin(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = run_hook(rig, monkeypatch, lambda argv, kwargs: None)
+    geminisign.verify(rig.trust(), PAYLOAD, rig.sign())
+    verify_calls = [(a, k) for a, k in seen if "verify" in a]
+    argv, kwargs = verify_calls[0]
+    for flag in ("-f", "-s"):
+        assert argv[argv.index(flag) + 1].startswith("/dev/fd/")
+    assert kwargs["input"] == PAYLOAD and len(kwargs["pass_fds"]) == 2
+
+
+def test_signing_feeds_the_message_on_stdin_and_reads_the_signature_from_stdout(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = run_hook(rig, monkeypatch, lambda argv, kwargs: None)
+    armor = rig.sign()
+    argv, kwargs = seen[0]
+    assert argv[1:] == ["-Y", "sign", "-f", str(rig.a), "-n", NAMESPACE], "no message path is handed over"
+    assert kwargs["input"] == PAYLOAD and armor.startswith("-----BEGIN SSH SIGNATURE-----")
+
+
+def test_without_sealed_memory_nothing_is_verified(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    armor = rig.sign()
+
+    def no_memfd(*args: object) -> int:
+        raise OSError("no memfd")
+
+    monkeypatch.setattr(os, "memfd_create", no_memfd)
+    with refused("sealed"):
+        geminisign.verify(rig.trust(), PAYLOAD, armor)
+
+
+def test_the_key_ssh_keygen_names_must_be_the_one_that_was_parsed(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    other_fp = subprocess.run(  # noqa: S603 - the system ssh-keygen, a path made by the test, no shell
+        [SSH_KEYGEN, "-lf", str(rig.b) + ".pub"], capture_output=True, text=True, check=True
+    ).stdout.split()[1]
+
+    def lying(argv: list[str], **kwargs: Any) -> Any:
+        done = REAL_RUN(argv, **kwargs)
+        done.stdout = (
+            b'Good "safo-gemini-approval" signature for yubikey-a with ED25519 key ' + other_fp.encode() + b"\n"
+        )
+        return done
+
+    armor = rig.sign()
+    monkeypatch.setattr(subprocess, "run", lying)
+    with refused("does not match"):
+        geminisign.verify(rig.trust(), PAYLOAD, armor)
+
+
+# -- the revocation list is required, and a trust file is read to its end -------------------------------------------
+
+
+def test_a_missing_revocation_file_refuses_verification_by_default(rig: Rig) -> None:
+    strict = Trust(rig.signers, rig.revoked, os.geteuid(), False)
+    assert strict.revocation_required is True
+    with refused("does not exist"):
+        geminisign.verify(strict, PAYLOAD, rig.sign())
+    rig.revoked.write_text("")
+    rig.revoked.chmod(0o644)
+    assert geminisign.verify(strict, PAYLOAD, rig.sign()).label == "yubikey-a"
+
+
+def test_a_trust_file_is_read_until_the_end_of_the_file(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_read = os.read
+    monkeypatch.setattr(os, "read", lambda fd, n: real_read(fd, min(n, 7)))
+    assert geminisign.read_trust_file(rig.signers, os.geteuid(), "x") == rig.signers.read_bytes()
+    rig.signers.write_text("# " + "x" * geminisign.TRUST_FILE_BYTES + "\n")
+    with refused("larger than"):
+        geminisign.read_trust_file(rig.signers, os.geteuid(), "x")
+
+
+def test_a_sealed_file_cannot_be_written_resized_or_reopened_for_writing() -> None:
+    fd = geminisign._sealed(b"fixed")
+    try:
+        with pytest.raises(OSError):
+            os.write(fd, b"more")
+        with pytest.raises(OSError), open(f"/dev/fd/{fd}", "wb") as handle:
+            handle.write(b"other")
+        with pytest.raises(OSError):
+            os.ftruncate(fd, 0)
+        assert Path(f"/dev/fd/{fd}").read_bytes() == b"fixed"
+    finally:
+        os.close(fd)
+
+
+def test_the_label_ssh_keygen_names_must_be_the_one_that_was_checked(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    armor = rig.sign()
+    fp = geminisign.load_roster(rig.trust()).keys[0].fingerprint
+
+    def lying(argv: list[str], **kwargs: Any) -> Any:
+        done = REAL_RUN(argv, **kwargs)
+        done.stdout = b'Good "safo-gemini-approval" signature for someone-else with ED25519 key ' + fp.encode() + b"\n"
+        return done
+
+    monkeypatch.setattr(subprocess, "run", lying)
+    with refused("does not match the one"):
+        geminisign.verify(rig.trust(), PAYLOAD, armor)

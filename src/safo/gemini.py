@@ -841,6 +841,7 @@ class Locations:
     revoked: Path = Path("/etc/safo/gemini-revoked-signers")  # public keys or fingerprints that may no longer approve
     trust_uid: int = 0  # the owner the two files above must have
     require_hardware: bool = True  # only sk keys, unless a key carries the written opt-in; a test may turn this off
+    revocation_required: bool = True  # a missing revocation list refuses every approval; a test may turn this off
 
     @property
     def height_dir(self) -> Path:
@@ -889,7 +890,7 @@ def open_store(
     """The one way to build an approval store: trust files and strictness from the fixed locations."""
     from safo import geminisign
 
-    trust = geminisign.Trust(loc.signers, loc.revoked, loc.trust_uid, loc.require_hardware)
+    trust = geminisign.Trust(loc.signers, loc.revoked, loc.trust_uid, loc.require_hardware, loc.revocation_required)
     return ApprovalStore(loc.approvals, trust, ledger, signing_key, signing_principal, env or {})
 
 

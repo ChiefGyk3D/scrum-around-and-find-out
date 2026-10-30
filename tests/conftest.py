@@ -200,6 +200,7 @@ def gemini_locations(
         root / "revoked",
         os.geteuid(),
         False,
+        False,
     )
     monkeypatch.setattr(gemini, "fixed_locations", lambda: locations)
     return locations

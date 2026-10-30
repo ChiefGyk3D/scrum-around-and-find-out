@@ -231,7 +231,7 @@ def approve_flow(
 
 def _trust() -> geminisign.Trust:
     loc = gemini.fixed_locations()
-    return geminisign.Trust(loc.signers, loc.revoked, loc.trust_uid, loc.require_hardware)
+    return geminisign.Trust(loc.signers, loc.revoked, loc.trust_uid, loc.require_hardware, loc.revocation_required)
 
 
 def run_keys(ctx: LocalContext, args: argparse.Namespace) -> int:

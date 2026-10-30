@@ -27,7 +27,9 @@ Both are public, maintainer-edited, root-owned, and **never written by safo**.
   accepts only the `namespaces`, `valid-after` and `valid-before` options (the last two must be quoted UTC times ending in `Z`: `valid-before="20261231Z"`, `YYYYMMDDHHMMZ` or `YYYYMMDDHHMMSSZ`, and `valid-before` must be later than `valid-after`; both ends are inclusive), refuses `no-touch-required`, certificates and
   a duplicate label or key, and accepts only `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com` and
   `ssh-ed25519` keys.
-- `/etc/safo/gemini-revoked-signers`: a public key (`TYPE BASE64 comment`) or a `SHA256:` fingerprint per line. A
+- `/etc/safo/gemini-revoked-signers`: **required, but it may be empty**; a missing file refuses every approval (so a
+  maintenance step that removes it cannot let a revoked key through; replace it atomically). A public key (`TYPE BASE64
+  comment`) or a `SHA256:` fingerprint per line. A
   signature from a revoked key is refused even if the key is still enrolled, so revoking does not delete history.
 
 A key outside its window is **refused** at verify (OpenSSH is given the same window and the current time through
@@ -55,8 +57,8 @@ safo gemini keys propose ~/.ssh/KEYFILE.pub --label yubikey-a   # prints the exa
 ```
 
 `check` warns when fewer than two usable keys are enrolled, when a key is a software key, when a hardware key has no PIN
-requirement, when there is no revocation file, and when a Tier 2 credential is enrolled. It fails when no usable key is
-enrolled or a key carries `no-touch-required`.
+requirement, and when a Tier 2 credential is enrolled. It fails when no usable key is enrolled, when a key carries
+`no-touch-required`, or when the revocation file is missing.
 
 ## Setup: the first key (needs your touch; the agent does not do this)
 
@@ -82,7 +84,8 @@ enrolled or a key carries `no-touch-required`.
    safo gemini keys propose ~/.ssh/safo_gemini_yubikey_a.pub --label yubikey-a
    ```
 
-4. **Add it as root, with a backup and a diff.** First time only, make the folder and files:
+4. **Add it as root, with a backup and a diff.** First time only, make the folder and **both** files, the revocation
+   file included (it may be empty, but a missing one refuses every approval):
 
    ```bash
    sudo install -d -m 755 -o root -g root /etc/safo
@@ -168,7 +171,7 @@ A key is lost or stolen: **revoke first, investigate second.**
 - [ ] Keys were made with `-O verify-required`, and the allowed-signers file carries `# safo: LABEL require-pin` for each.
 - [ ] Files in `/etc/safo` are owned by root, mode 644, and `ls -l` shows it.
 - [ ] Fingerprints written down off this machine.
-- [ ] The revocation file exists (it may be empty).
+- [ ] The revocation file exists (it may be empty; without it every approval is refused).
 - [ ] A `--dry-run` approval worked with each key.
 - [ ] You know the rule: **touch the key only after reading the quota line and the quote, and never for a prompt you did
       not start.**

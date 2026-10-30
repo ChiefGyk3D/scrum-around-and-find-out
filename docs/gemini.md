@@ -131,9 +131,11 @@ the canonical text, nothing else). The ledger file versus the signed head.
 2. *The agent enrolls its own key.* It cannot write the root-owned trust file, and the code refuses a trust file the
    agent's account owns or can write (test: owner, group and world write, writable directory, symlink, missing file).
 3. *Signature replay.* A nonce is single use and spent in the chained ledger; deleting the marker file does not help
-   (test); a signature is for one model, one job, at most 2 USD, a short expiry.
+   (test); a signature is for one model, one job, at most 2 USD, a short expiry. Against someone who can rewrite the
+   ledger's own state files this holds only until the signed expiry (see Residual risk).
 4. *Resetting the month total.* Deleting or editing the ledger is found (hash chain, named line); replacing it with a
-   fresh chain is found because a signed approval binds a ledger head that must be in the current chain (tests).
+   fresh chain is found because a signed approval binds a ledger head that must be in the current chain (tests). Not
+   stopped when the ledger, its head file and the height record are all restored together (see Residual risk).
 5. *A key without a touch.* `no-touch-required` is refused at load; a hardware signature without the touch flag is
    refused; a software key is refused by default.
 6. *A lost key.* Add it to the revocation list; a signature from it is refused even while it is still enrolled (test).
@@ -157,10 +159,17 @@ the canonical text, nothing else). The ledger file versus the signed head.
   in layers: the nonce's `approval_used` row; the approval's own `approval_issued` row having to follow the signed head
   (so rewinding the ledger to that head fails); the height record, kept apart from the ledger in the fixed state folder,
   which makes a chain shorter than the highest height ever seen fail with the recorded height named (so rewinding to just
-  after the issuance fails); and the signed expiry, 10 minutes by default and never above 60. An attacker who can rewind
-  the ledger, the head file **and** the height record within that window can replay **one** approval of at most 2 USD
-  once, and that is still bounded by the vendor-side monthly limit. When you archive or replace the ledger on purpose,
+  after the issuance fails); and the signed expiry, 10 minutes by default and never above 60. **An attacker who can
+  restore the ledger, the head file and the height record to an earlier copy can reuse one signed approval repeatedly
+  until it expires (each use at most 2 USD), and can reset the local monthly accounting.** The bound on that is the
+  short signed expiry and the vendor-side limits, not this code; a monotonic authority outside the maintainer's account
+  would be needed to close it, and none is built. When you archive or replace the ledger on purpose,
   remove its height record (the `heights` folder next to the approvals) too, or every call is refused.
+- **Inputs to `ssh-keygen` are sealed.** The signature and the allowed-signers line it verifies against are held in
+  sealed in-memory files (memfd, write, grow and shrink sealed) and reach it as `/dev/fd` paths, the message goes in on
+  standard input, and when signing the message is on standard input and the signature comes back on standard output.
+  The key `ssh-keygen` reports verifying must equal the enrolled key that was looked up. Where sealed memory is not
+  available, nothing is verified. Linux only.
 - **The chain is tamper-evident, not tamper-proof.** Someone who rewrites the whole ledger and its head file consistently
   can make a past month read lower. That does not give them a signature: the next paid call still needs a fresh
   signed approval whose ledger head is in the chain, and an approval signed before the rewrite no longer matches. But
