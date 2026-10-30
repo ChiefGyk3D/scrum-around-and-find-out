@@ -52,6 +52,10 @@ MATERIAL = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)?gemini-material\s*:\s*(?
 MARKDOWN_LINK = re.compile(r"\[([^\]]{0,200})\]\([^)\s]{0,300}\)")
 MARKDOWN_CODE = re.compile(r"`(safo\b[^`]*)`")
 PAID_CONFIG = re.compile(r"\bprd_paid\b")
+OWN_ISSUE = re.compile(r"^\s*issue:\s*ChiefGyk3D/scrum-around-and-find-out#\d{1,6}\s*$", re.MULTILINE)
+COMMANDISH = re.compile(
+    r"[$|;&<>(){}\\]|\b(?:doppler|curl|wget|export|printenv|env|cat|echo|eval|exec|source|bash|sh|secrets?)\b"
+)
 SDK = re.compile(
     r"google[.\s-]*genai|google\s+import\s+[\w ,]{0,40}genai|google-generativeai|generativeai|generativelanguage"
     r"|genai\.client"
@@ -82,6 +86,7 @@ PREFILTER = (
     ("decode", DECODE),
     ("conceal", CONCEAL),
 )
+MATCH_CAP = 80  # the most matched text a denial repeats
 LINE_CAP = 4000  # a line longer than this that mentions anything above is blocked unread
 MAX_CANDIDATES = 50  # commands examined per brief; more than this is blocked
 TERMS_SECONDS_DEFAULT = 5.0  # the most the private-terms search is given
@@ -118,6 +123,7 @@ class Step:
     line: int = 0
     why: str = ""
     sends: bool = True  # False for a mention that sends nothing (an approve or quota command with no prompt file)
+    matched: str = ""  # the text that made this a step, shown in the denial so the brief's author can find it
 
 
 def _tokens(rest: str) -> list[str] | None:
@@ -141,6 +147,12 @@ def _option(tokens: list[str], name: str) -> str | None:
 KEYVALUE = re.compile(r"^[A-Za-z_-]{1,20}=\S{0,200}$")
 
 
+def _shown(text: str) -> str:
+    """Matched text for a denial: one line, no control characters, capped."""
+    flat = "".join(c if c.isprintable() else " " for c in " ".join(text.split()))
+    return flat if len(flat) <= MATCH_CAP else flat[: MATCH_CAP - 3] + "..."
+
+
 def _declared(rest: str, line: int) -> Step | None:
     """A declaration line in the exact grammar: a tier (`free` or `paid`) and then only key=value pairs. Anything else
     after `gemini:` is prose (a heading, a sentence) and is not a step."""
@@ -154,7 +166,9 @@ def _declared(rest: str, line: int) -> Step | None:
         tier, pairs = tokens[0].lower(), tokens[1:]
     if tier not in ("free", "paid") or not all(KEYVALUE.match(t) for t in pairs):
         return None
-    return Step(tier == "paid", _option(tokens, "cap"), _option(tokens, "approval"), line=line)
+    return Step(
+        tier == "paid", _option(tokens, "cap"), _option(tokens, "approval"), line=line, matched=_shown(f"gemini: {rest}")
+    )
 
 
 def _cap_problem(value: str | None) -> str | None:
@@ -173,7 +187,8 @@ def _paid_problem(step: Step, check: ApprovalCheck | None) -> str | None:
     where = f"line {step.line}: " if step.line else ""
     disabled = getattr(check, "disabled", None)
     if isinstance(disabled, str):
-        return f"{where}{disabled}"
+        found = "; ".join(x for x in (step.why, step.matched) if x)
+        return f"{where}{disabled}" + (f" [matched: {found}]" if found else "")
     if step.unreadable:
         return (
             f"{where}{step.why or 'this Gemini step could not be read exactly as the CLI reads it'}, so it is treated "
@@ -370,20 +385,25 @@ _ARGPARSE_WORDS = (
 def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) -> Step | None:
     """One command's arguments, read with the parser the CLI itself uses. An operator character inside an argument or
     a shell expansion is unreadable: the shell acts on it before the parser sees it."""
-    if problems:
-        return Step(unreadable=True, line=line, why="the command has " + "; ".join(problems))
     text = " ".join(span)
+    shown = _shown("gemini " + text)
+    if problems:
+        return Step(unreadable=True, line=line, why="the command has " + "; ".join(problems), matched=shown)
     for char in OPCHARS:
         if char in text:
             return Step(
                 unreadable=True,
                 line=line,
                 why=f"the command has {char!r} inside an argument (a quoted operator or redirection)",
+                matched=shown,
             )
     for char, name in WILD_NAMES.items():
         if char in text:
             return Step(
-                unreadable=True, line=line, why=f"the command has {char!r} ({name}), which the shell expands first"
+                unreadable=True,
+                line=line,
+                why=f"the command has {char!r} ({name}), which the shell expands first",
+                matched=shown,
             )
     if text in _PARSE_CACHE:
         cached = _PARSE_CACHE[text]
@@ -399,6 +419,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
             unreadable=True,
             line=line,
             why=f"the command has {reason} (an unknown or shortened option, a missing value)",
+            matched=shown,
         )
     else:
         if ns.action == "quota":
@@ -410,13 +431,16 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
                 ns.approval or None,
                 line=line,
                 sends=ns.action == "ask" or bool(ns.prompt_file),
+                matched=shown,
             )
     if len(_PARSE_CACHE) < 256:
         _PARSE_CACHE[text] = step
     return step
 
 
-def _commands(text: str, number: int, steps: list[Step], budget: list[int], depth: int = 0) -> bool:
+def _commands(
+    text: str, number: int, steps: list[Step], budget: list[int], depth: int = 0, own_repo: bool = False
+) -> bool:
     """Find `safo ... gemini ... <action>` commands in a line, also inside a quoted shell string (`bash -c '...'`).
     True when at least one command was found."""
     tokens = _lex(text)
@@ -429,7 +453,7 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
     found = False
     for t in tokens:
         if t.quoted and " " in t.value and "safo" in t.value.lower() and depth < 3:
-            found = _commands(t.value, number, steps, budget, depth + 1) or found
+            found = _commands(t.value, number, steps, budget, depth + 1, own_repo) or found
     # `gemini` after a `safo` in the same simple command, however many flags sit between them; a redirection does not
     # end the command, an unquoted `; | & ( )` does
     last_safo = -1
@@ -480,6 +504,11 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
         if not any(w.lower() in ACTIONS for w in span):
             continue  # `safo gemini` in a sentence, with no action word: prose
         found = True
+        if own_repo and not problems and len(span) == 1 and span[0].lower() in RISKY_ACTIONS:
+            # a bare `safo gemini approve` or `ask` names the command and nothing else: it cannot run (the CLI needs
+            # a model, a prompt file or an approval record), so in a brief for this repository's own work it is a
+            # mention of the command, not a request to use the vendor
+            continue
         budget[0] -= 1
         if budget[0] < 0:
             steps.append(Step(unreadable=True, line=number, why="the brief has more than 50 Gemini commands"))
@@ -498,6 +527,7 @@ def _scan_line(
     materials: list[str],
     budget: list[int],
     runtime_scan: bool,
+    own_repo: bool = False,
 ) -> None:
     norm, clean, low, pre_low, pre_raw = _views(line)
     found = MATERIAL.match(clean)
@@ -510,7 +540,10 @@ def _scan_line(
         if step is not None:
             steps.append(step)
     if PAID_CONFIG.search(low) or PAID_CONFIG.search(pre_low):
-        flags.setdefault("paid", number)
+        # in a brief for this repository's own work, a line that only names the config key, with nothing that could
+        # read or run it, is a mention of the key
+        if not (own_repo and not COMMANDISH.search(low) and not COMMANDISH.search(pre_low)):
+            flags.setdefault("paid", number)
     if VENDOR_HOST in low or VENDOR_HOST in pre_low or SDK.search(low) or SDK.search(pre_low):
         flags.setdefault("vendor", number)
     if (DECODE.search(norm.lower()) and SINK_RE.search(norm.lower())) or (
@@ -528,7 +561,7 @@ def _scan_line(
         )
     if "safo" not in low and "gemini" not in low:
         return
-    if _commands(norm, number, steps, budget):
+    if _commands(norm, number, steps, budget, 0, own_repo):
         return
     # no plain command: a name or a command built at run time (an expansion, a glob, printf) beside an action word
     tokens = _lex(norm) or []
@@ -881,6 +914,7 @@ def _findings(
     tick()
     joined = _join(prompt)
     lines = joined.splitlines()
+    own_repo = bool(OWN_ISSUE.search(joined))
     whole = "\n".join(_views(line)[2] for line in lines)
     runtime_scan = bool(re.search(r"\bgemini\b", whole)) and bool(
         re.search(r"(?<![\w-])(?:ask|approve)\b|--paid", whole)
@@ -932,7 +966,7 @@ def _findings(
                 if "generativelanguage" in line.lower() or "genai" in line.lower():
                     flags.setdefault("vendor", number)
             continue
-        _scan_line(number, line, steps, flags, materials, budget, runtime_scan)
+        _scan_line(number, line, steps, flags, materials, budget, runtime_scan, own_repo)
     if "vendor" in flags:
         steps.append(
             Step(
@@ -942,7 +976,7 @@ def _findings(
             )
         )
     if "paid" in flags and not any(t.paid or t.unreadable for t in steps):
-        steps.append(Step(paid=True, line=flags["paid"], why="the paid secret-store config is named"))
+        steps.append(Step(paid=True, line=flags["paid"], why="the paid secret-store config is named", matched="prd_paid"))
     if not steps:
         return []
     tick()
