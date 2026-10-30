@@ -158,6 +158,7 @@ def test_the_hook_allows_a_paid_brief_whose_record_is_live(
     store = open_store(gemini_locations, ledger, str(gemini_locations.home / "key"), "test-key-a")
     now = dt.datetime.now(dt.UTC)
     record = store.issue(
+        prompt="Summarize the public advisories.",
         model=MODEL,
         max_usd=Decimal("1.50"),
         job="j1",
@@ -1390,6 +1391,7 @@ def test_the_hook_blocks_every_paid_step_while_paid_use_is_disabled(
     store = open_store(gemini_locations, ledger, str(gemini_locations.home / "key"), "test-key-a")
     now = dt.datetime.now(dt.UTC)
     record = store.issue(
+        prompt="Summarize the public advisories.",
         model=MODEL,
         max_usd=Decimal("1.50"),
         job="j1",

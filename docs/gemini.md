@@ -50,10 +50,12 @@ what needs a model that has no free tier. Every monetary action needs a fresh, e
   text: the model, a maximum of at most 2 USD, a job name, a short expiry (10 minutes by default, never above 60, and it ends
   with the job),
   whether it passes the monthly ceiling, a one-time nonce, the quote of his message and its time, the signing principal
-  (the label of the enrolled key) and the **ledger head** at signing time. It is made by `safo gemini approve`, which the
-  lead runs **only after the maintainer has said yes in his own message**; the maintainer then reads the quota line and
-  the quote and touches the key. The wrapper checks the signature with `ssh-keygen -Y verify` against **public keys only**
-  (see "Who can approve"). A file with no signature, or in the older unsigned format, authorizes nothing. The quote is
+  (the label of the enrolled key), the **ledger head** at signing time and the **prompt digest** (see "What a signature
+  covers"). It is made by `safo gemini approve`, which the
+  lead runs **only after the maintainer has said yes in his own message**; the maintainer then reads the quota line, the
+  quote, the prompt digest and a short excerpt, and touches the key. The wrapper checks the signature with `ssh-keygen -Y verify` against **public keys only**
+  (see "Who can approve"). A file with no signature, in the older unsigned format, or in an older payload version
+  (version 1, which bound no prompt) authorizes nothing and is refused with a message that says to ask for a fresh one. The quote is
   there so he can check afterwards what he approved, the same as the approval token in [Hooks](hooks.md).
 - **Single use.** The call spends the nonce before the request leaves: an exclusive marker file **and** an
   `approval_used` row in the hash-chained ledger (which row records the principal and the tier). The ledger row is
@@ -93,10 +95,38 @@ gemini: paid model=gemini-3.6-flash cap=1.50 approval=<id>
 gemini-material: public
 ```
 
+## What a signature covers: the prompt
+
+Approval payload **version 2** adds two fields to the canonical JSON text that both approval tiers sign:
+
+- `prompt_sha256`: the lowercase hexadecimal SHA-256 of the exact bytes of the prompt the wrapper will send, and
+- `prompt_bytes`: the number of those bytes, as a plain integer.
+
+The canonical form of the prompt is the **UTF-8 bytes of the prompt file as `ask` reads it**, with nothing done to them: no
+Unicode normalization, no trimming, no line-ending change. One changed byte, a trailing newline, or the same text in
+another Unicode form (composed versus decomposed) is a different prompt with a different digest. The rest of the payload,
+its canonical form (sorted keys, no whitespace, ASCII only), the signature scheme and the namespace are unchanged; only
+the `version` goes from 1 to 2.
+
+- **At `approve`.** The digest is computed from the same `--prompt-file` that `ask` will read. `approve` refuses without a
+  prompt file. Before the person types the phrase and touches the key it prints the byte count, the full digest, and a
+  quoted excerpt (the first 200 characters, with non-ASCII and control characters shown as escapes so nothing is hidden),
+  so the signature is over what they saw. The digest is also written to the `approval_issued` ledger row.
+- **At the paid gate.** The wrapper recomputes the digest and length from the prompt it is about to send, never from the
+  record, and refuses unless they equal the signed values. It also refuses an approval with a missing or malformed digest
+  or length, an approval in any other payload version, and an approval whose digest and length are not the ones on its
+  single-use `approval_issued` ledger row. The digest comparison uses `hmac.compare_digest` on bytes taken through the base
+  `str` type's own methods. A refused prompt does not spend the approval.
+- **Free tier.** Unchanged: it needs no approval and has no digest.
+- **Tier 2.** The passkey verifier takes this digest from the payload through its required `expect` mapping
+  (`prompt_sha256`; see [Gemini passkeys](gemini-passkeys.md)).
+
+An approval is therefore for one prompt. Editing the prompt after approving means asking for a new approval.
+
 ## Who can approve: signed approvals
 
-`safo gemini approve` refuses unless standard input **and** standard output are a terminal. It prints the quota line and
-the quote, tells the person that the key will blink and to touch it only after reading them, and asks them to type
+`safo gemini approve` refuses unless standard input **and** standard output are a terminal. It prints the quota line, the
+quote, the prompt digest and a short quoted excerpt of the prompt, tells the person that the key will blink and to touch it only after reading them, and asks them to type
 `approve <job>` exactly. Only then does it call `ssh-keygen -Y sign -n safo-gemini-approval` with the key named in
 `gemini.yaml` (`signing: {key: /absolute/path, principal: yubikey-a}`). The code never opens that file: it hands the
 path to `ssh-keygen`, which asks the hardware key for the signature. With the global `--dry-run` flag, `safo gemini approve` runs the same
@@ -140,7 +170,8 @@ the canonical text, nothing else). The ledger file versus the signed head.
 *Abuse cases, and what stops each.*
 
 1. *The agent writes its own approval record.* A record without a valid signature by an enrolled key is refused (tests:
-   unsigned, old format, edited payload, signature by an unenrolled key, wrong namespace, non-canonical text).
+   unsigned, old format or version, edited payload, signature by an unenrolled key, wrong namespace, non-canonical
+   text, missing or malformed prompt digest).
 2. *The agent enrolls its own key.* It cannot write the root-owned trust file, and the code refuses a trust file the
    agent's account owns or can write (test: owner, group and world write, writable directory, symlink, missing file).
 3. *Reusing an approval.* A nonce is single use and spent in the chained ledger; a signature is for one model, one job, at
@@ -154,7 +185,9 @@ the canonical text, nothing else). The ledger file versus the signed head.
 6. *A lost key.* Add it to the revocation list; a signature from it is refused even while it is still enrolled (test).
 7. *The agent makes the key blink (confused deputy).* An agent can run `approve` or any `ssh-keygen -Y sign`, and the key
    will blink. The typed `approve <job>` on a real terminal and the quota line printed first are what tie a touch to a
-   spend: **touch the key only after reading the quota line and the quote, and never for a prompt you did not start.**
+   spend: **touch the key only after reading the quota line, the quote and the prompt digest and excerpt, and never for
+   a prompt you did not start.** Because the signature covers the prompt digest, an approval cannot be reused for a
+   different prompt (tests: one byte, a trailing newline and a Unicode normalization difference are each refused).
 
 *Residual risk, stated plainly.*
 

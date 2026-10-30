@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -454,3 +455,55 @@ def test_the_cli_refuses_a_paid_ask_with_the_switch_off(rig: Rig) -> None:
     code, _, err = rig.run(*argv, "--material", "public")
     assert code == 2 and "paid use is disabled" in err
     assert not rig.asked.exists() and rig.server.requests == []
+
+
+# -- the approval request shows what the signature covers (#217) -----------------------------------------------------
+
+
+def test_approve_shows_the_digest_the_length_and_a_quoted_excerpt_before_the_phrase(rig: Rig) -> None:
+    import hashlib
+
+    text = rig.prompt.read_text()
+    code, out = rig.approve()
+    assert code == 0, out
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    assert digest in out and f"{len(text.encode())} bytes" in out and repr(text) in out
+    assert out.index(digest) < out.index("type exactly")
+    signed = json.loads(json.loads(rig.approvals()[0].read_text())["payload"])
+    assert signed["prompt_sha256"] == digest and signed["prompt_bytes"] == len(text.encode())
+
+
+def test_the_excerpt_shows_invisible_and_control_characters_as_escapes(rig: Rig) -> None:
+    rig.prompt.write_text("Summarize‮ this​\x1b[31m public\nnote.\n", encoding="utf-8")
+    code, out = rig.approve()
+    assert code == 0, out
+    for raw in ("‮", "​", "\x1b"):
+        assert raw not in out, "an invisible or control character reached the maintainer's terminal"
+    assert "\\u202e" in out and "\\u200b" in out and "\\x1b" in out
+
+
+def test_a_long_prompt_is_excerpted_not_dumped(rig: Rig) -> None:
+    rig.prompt.write_text("public " * 400)
+    code, out = rig.approve()
+    assert code == 0, out
+    assert "public " * 400 not in out and "first" in out
+
+
+def test_approve_without_a_prompt_file_is_refused_and_writes_nothing(rig: Rig) -> None:
+    args = approve_args(rig)
+    at = args.index("--prompt-file")
+    del args[at : at + 2]
+    code, out, err = rig.run(*args)
+    assert code != 0 and "prompt" in (out + err) and rig.approvals() == []
+
+
+def test_the_ask_command_reads_the_same_bytes_the_approval_covered(rig: Rig) -> None:
+    rig.approve()
+    record_id = rig.approvals()[0].stem
+    ask = [
+        "ask", *rig.base(), "--paid", "--job", "job-1", "--approval", record_id,
+        "--prompt-file", str(rig.prompt), "--max-output-tokens", "400", "--material", "public",
+    ]  # fmt: skip
+    rig.prompt.write_text(rig.prompt.read_text() + "\n")  # changed after the maintainer signed
+    code, _, err = rig.run(*ask)
+    assert code == 2 and "prompt" in err and rig.server.requests == []

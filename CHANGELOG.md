@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Gemini approvals: hardened what a signed paid approval binds (#217). Approval payload version 2 carries a prompt digest
+  (`prompt_sha256`, `prompt_bytes`) on both approval tiers; `approve` shows the digest and a quoted excerpt, the paid gate
+  recomputes it from the prompt it is about to send and refuses on any mismatch, missing digest or older payload version,
+  and the passkey verifier takes it through its `expect` mapping. Approvals from before this change are refused with a
+  clear message. Paid use stays disabled.
 - Gemini Tier 2: real WebAuthn assertion verification (ES256 and EdDSA) with the `cryptography` package, an optional
   hash-locked extra (`safo[passkeys]`). Opt-in; nothing in the approval path calls it and paid use stays disabled (#211).
 - Guard: a dedicated entry point, `safo-guard` (and `python -m safo.guard`), so the hook never parses subcommands

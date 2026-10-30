@@ -91,8 +91,12 @@ def free(prompt: str = "What changed in the CVE list?", **kw: Any) -> Request:
     return Request(**{"model": MODEL, "prompt": prompt, "tier": "free", **kw})
 
 
+PAID_PROMPT = "Summarize these public advisories."
+
+
 def approve(store: ApprovalStore, **kw: Any) -> str:
     args: dict[str, Any] = {
+        "prompt": PAID_PROMPT,
         "model": MODEL,
         "max_usd": Decimal("1.50"),
         "job": "job-1",
@@ -109,7 +113,7 @@ def approve(store: ApprovalStore, **kw: Any) -> str:
 def paid(approval: str, **kw: Any) -> Request:
     args: dict[str, Any] = {
         "model": MODEL,
-        "prompt": "Summarize these public advisories.",
+        "prompt": PAID_PROMPT,
         "tier": "paid",
         "job": "job-1",
         "approval": approval,
@@ -537,6 +541,7 @@ def test_tests_never_write_the_real_ledger(cfg: GeminiConfig, tmp_path: Path) ->
 
 def test_an_approval_carries_the_quote_and_time(store: ApprovalStore) -> None:
     approval = store.issue(
+        prompt=PAID_PROMPT,
         model=MODEL,
         max_usd=Decimal("1"),
         job="j",
@@ -670,7 +675,7 @@ def test_zero_token_counts_on_a_paid_answer_do_not_record_zero_spend(
         "candidates": [{"content": {"parts": [{"text": "word " * 400}]}}],
         "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0},
     }
-    approval = approve(store)
+    approval = approve(store, prompt="x" * 900)
     reply = ask(cfg, paid(approval, prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
     start, end = ledger_rows(cfg.ledger)
     assert end["actual_usd"] > 0 and Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
@@ -740,7 +745,7 @@ def test_a_zero_prompt_count_alone_is_not_trusted(cfg: GeminiConfig, server: Fak
         "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
         "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 5},
     }
-    ask(cfg, paid(approve(store), prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
+    ask(cfg, paid(approve(store, prompt="x" * 900), prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
     start, end = ledger_rows(cfg.ledger)
     assert Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
 
@@ -750,7 +755,7 @@ def test_a_zero_output_count_alone_is_not_trusted(cfg: GeminiConfig, server: Fak
         "candidates": [{"content": {"parts": [{"text": "word " * 400}]}}],
         "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 0},
     }
-    ask(cfg, paid(approve(store), prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
+    ask(cfg, paid(approve(store, prompt="x" * 900), prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
     start, end = ledger_rows(cfg.ledger)
     assert Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
 

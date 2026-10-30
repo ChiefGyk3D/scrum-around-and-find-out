@@ -46,11 +46,14 @@ from safo.gemini import (
     money,
     open_store,
     paid_quota,
+    prompt_binding,
     quota_line,
     snapshot,
     usd_amount,
 )
 from safo.modes import LocalMode, register_local
+
+EXCERPT_CHARS = 200  # how much of the prompt the approval request quotes; the digest covers all of it
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -163,6 +166,9 @@ def approve_flow(
     pass anything else. The ceiling flag comes from the ledger here, never from the caller."""
     if not ctx.dry_run:
         gemini.require_paid()  # a dry run spends nothing and writes nothing, so it can still test a key
+    if not req.prompt:
+        raise ConfigError("approve needs --prompt-file: an approval covers the exact prompt that `ask` will read")
+    digest, size = prompt_binding(req.prompt)  # the same bytes `ask` sends, from the same file
     line = quota_line(cfg, req, ctx.now)  # first: an approval is refused when the line cannot be produced
     ctx.say(line)
     amount = usd_amount(args.max_usd, "--max-usd")
@@ -187,13 +193,20 @@ def approve_flow(
         )
     phrase = f"approve {req.job}"
     ctx.say(f"quote of his message ({args.quoted_at}): {args.quote}")
+    shown = req.prompt[:EXCERPT_CHARS]
+    ctx.say(f"prompt: {size} bytes, SHA-256 {digest}")
+    ctx.say(
+        f"prompt excerpt ({'all' if len(shown) == len(req.prompt) else 'first'} {len(shown)} of {len(req.prompt)} "
+        f"characters, non-ASCII and control characters escaped): {ascii(shown)}"
+    )
     ctx.say(
         f"you are approving up to {money(amount)} USD on {req.model} for job {req.job}"
         + (" and it PASSES the monthly ceiling" if beyond else "")
     )
     ctx.say(
-        "your security key will blink next. Touch it only because you have just read the quota line and the quote "
-        "above and they are right; if you did not start this, do not touch it."
+        "your security key will blink next. Touch it only because you have just read the quota line, the quote and "
+        "the prompt digest and excerpt above and they are right; the signature covers that exact prompt and no other. "
+        "If you did not start this, do not touch it."
     )
     if confirm(f"type exactly `{phrase}` to approve, anything else cancels: ").strip() != phrase:
         raise RefusedError("not confirmed; no approval record was written")
@@ -223,6 +236,7 @@ def approve_flow(
         now=ctx.now,
         ttl_minutes=args.ttl_minutes,
         beyond_ceiling=beyond,
+        prompt=req.prompt,
         issue_ref=args.issue,
     )
     ctx.say(
