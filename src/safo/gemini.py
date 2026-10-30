@@ -1602,7 +1602,7 @@ def _post(
         }
     ).encode()
     if approved is not None:
-        text = json.loads(body)["contents"][0]["parts"][0]["text"]
+        text = loads(body)["contents"][0]["parts"][0]["text"]
         if not digests_equal(hashlib.sha256(str.encode(text, "utf-8")).hexdigest(), approved):
             raise RefusedError("the request body is not the prompt the approval covers; nothing was sent")
     conn = _connection(cfg)
