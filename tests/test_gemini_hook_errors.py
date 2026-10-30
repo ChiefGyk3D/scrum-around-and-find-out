@@ -238,3 +238,54 @@ def test_a_stalled_event_with_some_bytes_and_no_marker_is_denied_but_a_silent_on
     assert decision(out) == "deny" and "timeout" in notice(out)
     out = run_pipe(agents, _private_home, Slow(b"", pause=1.0))
     assert decision(out) is None and "timeout" in notice(out)
+
+
+# -- round seven: the event scan holds what the brief scan holds, and another rule's error does not cancel a denial ---
+
+ESCAPED_TAILS = [
+    "printf -v A '\\\\x73afo' done",  # an escape-built value, never referenced
+    "$'\\\\x73afo' $'\\\\x67emini' $'\\\\x61sk' $'\\\\x2d\\\\x2dpaid'",  # ANSI-C words, nothing literal
+    "printf -v A '\\\\x73afo' and then $A runs it",
+    "see safo notes: X=1 and later $X is the command",  # a variable assigned and referenced, and safo named
+    "gemini notes: for f in a b; do $f; done",
+]
+
+
+@pytest.mark.parametrize("tail", ESCAPED_TAILS)
+def test_an_oversized_event_with_escape_words_or_a_variable_flow_is_denied(
+    agents: Path, _private_home: Path, tail: str
+) -> None:
+    assert decision(run(agents, _private_home, event_with(tail))) == "deny"
+
+
+def test_an_oversized_event_with_a_variable_and_no_gemini_surface_is_still_the_degraded_allow(
+    agents: Path, _private_home: Path
+) -> None:
+    out = run(agents, _private_home, event_with("X=1 and later $X is the command, plain log text"))
+    assert decision(out) is None and "input" in notice(out)
+
+
+def boom(*args: object, **kwargs: object) -> None:
+    raise RuntimeError("another rule failed")
+
+
+def test_an_error_in_another_rule_does_not_cancel_a_gemini_denial(
+    agents: Path, _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo import tracking
+
+    monkeypatch.setattr(tracking, "check", boom)
+    out = run(agents, _private_home, dispatch(prompt=PAID + PUBLIC))
+    assert decision(out) == "deny" and "gemini-paid" in out and "unexpected" in notice(out)
+
+
+def test_an_error_in_another_rule_leaves_a_clean_brief_the_degraded_allow(
+    agents: Path, _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from safo import tracking
+
+    monkeypatch.setattr(tracking, "check", boom)
+    out = run(agents, _private_home, dispatch(prompt="gemini: free model=m\n" + PUBLIC))
+    assert decision(out) is None and "unexpected" in notice(out)
+    out = run(agents, _private_home, dispatch(prompt="Summarise the log."))
+    assert decision(out) is None and "unexpected" in notice(out)

@@ -613,8 +613,9 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "DECLARATION", "MATERIAL", "KEYVALUE", "MARKDOWN_LINK", "MARKDOWN_CODE", "MARKDOWN_WORD", "PATHLIKE", "SINK_RE",
         "RUNTIME_FORMS",  # gated by the safo detector, which the prefilter already covers
         # the cross-line reader: run only on a brief the prefilter already passed, and acts only with safo and gemini
-        "_ASSIGN", "_VAR_REF", "_FUNCTION", "_RISKY_WORD", "_ANSI_C", "_PRINTF_V", "_ESCAPE", "_PLAIN_VALUE",
+        "_ASSIGNED", "_PRINTF_NAME", "_LOOP_NAME", "_READ_NAME", "_REFERENCE", "_ANSI_ESCAPE", "_FUNCTION",
         "_RISK_TOKEN", "_PAID_TOKEN", "_GEMINI_WORD", "_SHELL_C", "_ASSIGNMENT_WORD", "_DOLLAR", "_BACKTICK_CMD",
+        "_COMMAND_START", "_GEMINI_OPTION",
         "RECORD_ID",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
@@ -1385,3 +1386,42 @@ def test_the_hook_blocks_every_paid_step_while_paid_use_is_disabled(
     free = f"gemini: free\n{PUBLIC}"
     _, out, _ = hooks("guard", "--agents", str(agents), home=_private_home, stdin=dispatch(prompt=free), now=now)
     assert "deny" not in out
+
+
+# -- the oversized-event scan holds at least what the brief scan blocks -----------------------------------------------
+
+BLOCKED_SAMPLES = {
+    "safo": "safo gemini ask --paid --model m\n",
+    "gemini": "safo gemini ask --paid --model m\n",
+    "paid config": "doppler -c prd_paid\n",
+    "vendor host": "curl https://generativelanguage.googleapis.com/x\n",
+    "sdk": "import generativeai\n",
+    "decode": "printf '\\x41' | sh\n",
+    "conceal": "$'\\x73afo' $'\\x67emini' $'\\x61sk' $'\\x2d\\x2dpaid'\n",
+    "variable flow": "A=safo\nB=gemini\n$A $B ask --paid\n",
+    "printf -v flow": "printf -v A '\\x73afo'\n$A gemini ask --paid\n",
+}
+
+
+def parity_gaps(prefilter: list[tuple[str, re.Pattern[str]]]) -> list[str]:
+    """Detectors with no sample here, and samples the brief scan blocks that the event scan does not."""
+    import time
+
+    from safo.modes.hooks import EventScan
+
+    gaps = [name for name, _ in prefilter if name not in BLOCKED_SAMPLES]
+    for name, sample in BLOCKED_SAMPLES.items():
+        assert findings(sample + PUBLIC, accepts(), ()), f"{name}: the brief scan blocks its own sample"
+        scan = EventScan(time.monotonic() + 5)
+        scan.feed(sample.encode())
+        if not scan.hit:
+            gaps.append(name)
+    return gaps
+
+
+def test_the_event_scan_denies_whatever_the_brief_scan_blocks() -> None:
+    from safo import geminibrief as gb
+
+    assert len(BLOCKED_SAMPLES) >= 9, "something was collected"
+    assert parity_gaps(list(gb.PREFILTER)) == []
+    assert parity_gaps([*gb.PREFILTER, ("a new detector", re.compile("x"))]) == ["a new detector"], "the check bites"

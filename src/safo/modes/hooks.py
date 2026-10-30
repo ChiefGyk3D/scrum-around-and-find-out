@@ -84,7 +84,9 @@ STDIN_TIMEOUT_SECONDS = 5.0  # a host writes the event at once; a silent standar
 
 
 HARD_LIMIT_BYTES = 8 * 1024 * 1024  # the most of an oversized event that is read and checked for Gemini markers
+ISOLATED_CHECK_SECONDS = 1.5  # the separate Gemini check run when another rule raised
 DRAIN_SECONDS = 4.0  # the most time reading and checking the rest of an oversized event may take
+_MAX_NAMES = 5000  # assigned or referenced names remembered while scanning an event
 _JSON_ESCAPE = re.compile(r'\\(?:u([0-9a-fA-F]{4})|([nrtbf"\\/]))')
 _JSON_SIMPLE = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
 
@@ -144,7 +146,9 @@ class EventScan:
     def __init__(self, deadline: float) -> None:
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.tail = ""
-        self.safo = self.gemini = self.hit = False
+        self.safo = self.gemini = self.hit = self.conceal = False
+        self.assigned: set[str] = set()
+        self.referenced: set[str] = set()
         self.deadline = deadline
 
     def feed(self, chunk: bytes) -> None:
@@ -160,6 +164,21 @@ class EventScan:
         for view in views:
             self.safo = self.safo or "safo" in view
             self.gemini = self.gemini or "gemini" in view
+            self.conceal = self.conceal or bool(geminibrief.CONCEAL.search(view))
+            if geminibrief._ANSI_ESCAPE.search(view) or (
+                self.conceal and re.search(r"printf\s+-v\b", view) is not None
+            ):
+                self.hit = True
+            if len(self.assigned) < _MAX_NAMES:
+                for pattern in (
+                    geminibrief._ASSIGNED,
+                    geminibrief._PRINTF_NAME,
+                    geminibrief._LOOP_NAME,
+                    geminibrief._READ_NAME,
+                ):
+                    self.assigned.update(m.group(1) for m in pattern.finditer(view))
+            if len(self.referenced) < _MAX_NAMES:
+                self.referenced.update(m.group(1) for m in geminibrief._REFERENCE.finditer(view))
             if (
                 geminibrief.PAID_CONFIG.search(view)
                 or gemini.VENDOR_HOST in view
@@ -167,7 +186,10 @@ class EventScan:
                 or (geminibrief.DECODE.search(view) and geminibrief.SINK_RE.search(view))
             ):
                 self.hit = True
-        self.hit = self.hit or (self.safo and self.gemini)
+        # the brief scan's flow rule, without lines: a name assigned anywhere and referenced anywhere, with the Gemini
+        # surface (safo, gemini or escape-built words) named somewhere in the stream
+        surface = self.safo or self.gemini or self.conceal
+        self.hit = self.hit or (self.safo and self.gemini) or (surface and bool(self.assigned & self.referenced))
 
 
 def read_event(source: EventStream) -> tuple[bytes, bool]:
@@ -438,16 +460,24 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     def repo() -> str | None:
         return bound
 
-    verdict = check_dispatch(
-        doc,
-        payload["tool_input"],
-        reachable,
-        resolve,
-        repo,
-        approval_check=approval_checker(ctx),
-        terms=private_terms_provider,
-        deadline=deadline,
-    )
+    try:
+        verdict = check_dispatch(
+            doc,
+            payload["tool_input"],
+            reachable,
+            resolve,
+            repo,
+            approval_check=approval_checker(ctx),
+            terms=private_terms_provider,
+            deadline=deadline,
+        )
+    except Exception:
+        # Another rule failed (tracking, the lookup, anything). The Gemini rules get their own fresh, short check, so a
+        # failure elsewhere can never cancel a denial: a violation is denied, a clean brief is the degraded allow.
+        reasons = gemini_reasons(ctx, payload["tool_input"], time.monotonic() + ISOLATED_CHECK_SECONDS)
+        if reasons:
+            raise GeminiEventDeny("unexpected", reasons) from None
+        raise
     decision = decide(verdict, mode)
     # One visible notice per session for a probe that cannot be trusted; every dispatch is still logged with its health.
     notice = health != "healthy" and (path is None or first_notice(path))

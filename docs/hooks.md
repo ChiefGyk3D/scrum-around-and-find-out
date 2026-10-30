@@ -205,19 +205,27 @@ that must pass the strict check:
   `approve` word; and, when the brief names `gemini` and an action anywhere, any line that runs `safo` through `$`, a
   function, `xargs`, `eval`, `alias` or `-c` (so `echo ask --paid | xargs safo gemini` and `alias g='safo gemini'` then
   `g ask --paid` are caught);
-- a command built over several lines: plain `NAME=value` assignments, plain ANSI-C words (`$'\x73afo'`, octal too) and
-  `printf -v NAME 'literal'` are resolved and expanded into what follows them, so `A=safo`, `B=gemini`, then
-  `$A $B ask --paid ...` is read as the command it is. Expansion is bounded: time is checked per line and per
-  substitution, a line may not grow past 4000 characters nor the brief past 200000, and either makes the brief
-  unreadable (an expanded line is never dropped). What cannot be resolved is a construct, and two kinds matter. A
-  **value that still reaches a command position** (a command word that is a left-over expansion or substitution, an
-  escape or `printf -v` that cannot be resolved, a line the lexer cannot read that holds an expansion; shell comments
-  are not code) makes a brief unreadable when it names `safo`, `gemini` and an action, or builds words with escapes and
-  carries a Gemini option or action; the words themselves are not required to be literal. An **unrelated construct**
-  (an array, a function, `eval`, `xargs`, an assignment from an expansion, a shell or interpreter `-c`) blocks only
-  beside a `--paid` or `approve` step; beside a free command it is left alone, as is any of them in a brief that names
-  no Gemini command. Backtick command substitutions are recognized only when they start with a common command word
-  (`echo`, `printf`, `cat`, `base64`, ...); markdown code spans are not substitutions. The message names the construct;
+- a command built from variables, escapes or substitutions. **No value is ever resolved and no shell is modeled**: a Gemini
+  command that is built from variables is blocked by design, and a command made only of literal words stays readable.
+  Shell comments are cut off first (quote-aware) and are never code. A name counts as assigned when it is set anywhere in
+  the brief (`NAME=value`, a prefix assignment, `export`, `declare`, `readonly`, `local`, an array, `printf -v`, a `for` or
+  `read` variable), in any order. When the brief names the Gemini surface (`safo`, `gemini`, the vendor host, an SDK, the
+  paid config, or words built with escapes), it is unreadable if an assigned name is the command word (also after
+  `env`, `do`, `then` and the like), or is referenced on a line that carries a Gemini option or action (`--paid`,
+  `--approval`, `--cap`, `ask`, `approve`); or if an escape (an ANSI-C `$'...'` word, a hex, octal or `\u` escape, `printf -v`)
+  is the command word or sits on such a line; or if a command segment (the words between `; | & ( ) < >`) holds the word
+  `gemini`, the vendor host, an SDK or the paid config and, in that same segment, any variable or expansion. No visible
+  option or action is needed for that last rule, so `safo gemini ${X} ${Y}` is blocked. An expansion that nothing in the
+  brief assigned, as the command word or on a line with a Gemini option, blocks when the brief names both `safo` and
+  `gemini`. An **unrelated construct** (an array, a function, `eval`, `xargs`, an assignment from an expansion, a shell
+  or interpreter `-c`) blocks only beside a `--paid` or `approve` step; beside a free command it is left alone, as it
+  is in a brief that names no Gemini command. A line the lexer cannot read that holds an expansion is unreadable.
+  Backtick command substitutions are recognized only where a command word or a value would stand and only when they
+  start with a common command word (`echo`, `printf`, `cat`, `base64`, ...); markdown code spans are not substitutions.
+  Escape-built words make a brief relevant on their own. The false blocks this adds, by design: a brief that names the
+  Gemini surface and runs a command through a variable it assigned; a brief with escape sequences that does so; a
+  command segment with the word `gemini` and any `$` expansion, even in prose. Time is checked once per line and the
+  tracked names are capped at 2000. The message names the construct;
 - base64, openssl, xxd, rev or printf escapes piped to a shell; the vendor host in any case; the Google genai SDK; the
   paid secret-store config name. These are looked for in the text before markdown links are rewritten, so a host that
   sits only in a link target is seen. A link to the vendor's documentation (`ai.google.dev`) is a mention and passes; the
@@ -251,7 +259,9 @@ A hook sits inside someone's session, so every error lets the work through, visi
   chunk is carried into the next, so a marker cannot hide at a boundary): the words `safo` and `gemini` both seen, the
   vendor host, an SDK name, the paid config name, or a decode-to-shell form, after the same normalization the brief scan
   uses (fullwidth and look-alike letters folded, invisible characters removed, quotes and backslashes removed, JSON
-  escapes such as `\n` and `\uXXXX` decoded). A marker anywhere is **denied** with the diagnostic kept. An event longer
+  escapes such as `\n` and `\uXXXX` decoded). The event scan also denies what the brief scan's flow rule blocks, without
+  lines: an ANSI-C word with an escape, `printf -v` with escapes, or a name assigned anywhere and referenced anywhere while
+  `safo`, `gemini` or escape-built words are named. A marker anywhere is **denied** with the diagnostic kept. An event longer
   than 8 MiB, or one that does not finish arriving or cannot be checked within the time, is **denied** as too large or
   incomplete to check. Only an oversized event whose whole stream was read and checked and held no marker is the degraded
   allow. Malformed JSON within the cap is checked whole the same way. A standard input that stalls after some bytes is

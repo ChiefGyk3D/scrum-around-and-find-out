@@ -270,7 +270,9 @@ outside a brief is out of its reach. When `agents.yaml` cannot be loaded the Gem
 the event cannot be used, it is never judged from a prefix: an oversized event is read to the end (up to 8 MiB and a few
 seconds) and checked whole for Gemini markers, a marker anywhere is denied, an event past the hard limit or that does not
 finish in time is denied as too large or incomplete to check, and only a whole stream with no marker is the degraded
-allow (details in [Hooks](hooks.md)). The gates that hold are in the wrapper: a paid call
+allow (details in [Hooks](hooks.md)). If another rule of the guard raises an error, the Gemini rules are run again on their
+own, so a violation is still denied. A Gemini command built from variables is blocked by design: the guard reads literal
+commands and models no shell. The gates that hold are in the wrapper: a paid call
 without a live, signed approval record raises before any request.
 
 ## What is not built or not verified

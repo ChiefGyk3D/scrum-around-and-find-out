@@ -249,8 +249,8 @@ def relevant(text: str) -> bool:
     """False only when no detector could possibly fire. It runs the detector patterns over the very views `_scan_line`
     builds, link targets included: the decode detector reads the text with its backslashes, every other one the cleaned
     lower case text. Words built with escapes (ANSI-C quoting, `printf -v`, hex or octal escapes) make a brief relevant
-    when it also carries a Gemini option or action, since the words themselves may be what the escapes hide."""
-    concealed = risky = False
+    on their own, since the words and the options may both be what the escapes hide."""
+    concealed = False
     for line in _join(text).splitlines():
         norm, _, low, pre_low, pre_raw = _views(line)
         raw = norm.lower()
@@ -262,8 +262,7 @@ def relevant(text: str) -> bool:
                     return True
             elif pattern.search(low) or pattern.search(pre_low):
                 return True
-        risky = risky or bool(_RISK_TOKEN.search(low))
-    return concealed and risky
+    return concealed
 
 
 class Tok(NamedTuple):
@@ -557,35 +556,25 @@ def _scan_line(
         )
 
 
-# Brief-wide reading of a command that is built over several lines.
+# Brief-wide reading of a command that is built over several lines. No shell semantics are modeled and no value is
+# resolved: the guard only asks where variables, escapes and substitutions FLOW.
 #
-# * Plain NAME=value assignments, plain ANSI-C words ($'\x73afo') and `printf -v NAME 'literal'` are resolved and the
-#   values expanded into what follows, so a command built that way is read as the literal command it is.
-# * What cannot be resolved is a "construct". A FLOW construct is a value that still reaches a command position (an
-#   expansion or substitution that is left, an escape or printf that cannot be resolved): it makes the brief unreadable
-#   when the brief names a Gemini command or builds words with escapes. A STANDALONE construct (an array, a function,
-#   eval, xargs, a shell -c, an assignment from an expansion) makes the brief unreadable only beside a paid or approve
-#   step. A resource construct (a line or the total growing past a limit) always does.
-_ASSIGN = re.compile(r"(?<![\w$.\-/])([A-Za-z_][A-Za-z0-9_]*)(\+?)=(\"[^\"]*\"|'[^']*'|\(|[^\s;&|<>]*)")
-_VAR_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+# * A FLOW construct makes the brief unreadable when it names the Gemini surface (safo, gemini, the vendor host, an SDK,
+#   the paid config, or words built with escapes): a variable assigned anywhere in the brief (NAME=value, a prefix
+#   assignment, export/declare/readonly/local, an array, printf -v, a for or read variable) that is referenced at a
+#   command position, or as an argument of a line that carries a Gemini option or action; an ANSI-C word or an escape on
+#   such a line, or an ANSI-C word at a command position. A "weak" flow (an expansion nothing in the brief assigned)
+#   needs safo, gemini and an action all named. A command made only of literal words, with no variable, stays readable.
+# * A STANDALONE construct (an array, a function, eval, xargs, a shell -c, an assignment from an expansion) makes the
+#   brief unreadable only beside a paid or approve step. A shell comment is not code: it is cut off, quote-aware, before
+#   anything else is looked at.
 _FUNCTION = re.compile(r"(?<![\w$.\-/])[A-Za-z_]\w*\s*\(\)|(?<![\w-])function\s+[A-Za-z_]\w*")
-_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
-_PRINTF_V = re.compile(
-    r"(?<![\w$.\-/])printf\s+-v\s+([A-Za-z_]\w*)\s+('(?:[^'\\]|\\.)*'|\"(?:[^\"$`\\]|\\.)*\"|[^\s;&|<>$`\"']+)"
-)
-_ESCAPE = re.compile(r"\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{1,3}|.)", re.S)
-_SIMPLE_ESCAPES = {
-    "n": "\n",
-    "t": "\t",
-    "r": "\r",
-    "a": "\a",
-    "b": "\b",
-    "f": "\f",
-    "v": "\v",
-    "e": "\x1b",
-    "E": "\x1b",
-}
-_PLAIN_VALUE = re.compile(r"[\w@%+=:,./-]+")
+_ASSIGNED = re.compile(r"(?<![\w$.\-/])([A-Za-z_][A-Za-z0-9_]*)\+?=")
+_PRINTF_NAME = re.compile(r"(?<![\w$.\-/])printf\s+-v\s+([A-Za-z_]\w*)")
+_LOOP_NAME = re.compile(r"(?<![\w-])for\s+([A-Za-z_]\w*)\s+in\b")
+_READ_NAME = re.compile(r"(?<![\w-])read\s+(?:-\w+\s+)*([A-Za-z_]\w*)")
+_REFERENCE = re.compile(r"\$\{?[!#]?([A-Za-z_][A-Za-z0-9_]*)")
+_ANSI_ESCAPE = re.compile(r"\$'[^']*\\[^']*'")
 _RISK_TOKEN = re.compile(r"--paid|--approval|--cap\b|(?<![\w-])(?:ask|approve)\b")
 _PAID_TOKEN = re.compile(r"--paid|(?<![\w-])approve\b")
 _GEMINI_WORD = re.compile(r"\b(?:safo|gemini)\b|--paid|--approval|--cap\b")
@@ -598,104 +587,82 @@ _STANDALONE = (
     ("xargs", re.compile(r"(?<![\w-])xargs\b")),
     ("a shell or interpreter -c", _SHELL_C),
 )
-TOTAL_EXPANDED_CAP = 200_000  # characters of expanded lines in one brief
+MAX_VARIABLES = 2000  # assigned names tracked in one brief; more is unreadable
 
-Construct = tuple[str, int, str]  # (what, line number, kind: flow, standalone or always)
-
-
-class _Grew(Exception):
-    """An expansion grew past a limit."""
-
-
-def _unescape(body: str) -> str | None:
-    def one(m: re.Match[str]) -> str:
-        g = m.group(1)
-        if g[0] == "x":
-            return chr(int(g[1:], 16))
-        if g[0] in "uU":
-            return chr(int(g[1:], 16))
-        if g[0] in "01234567":
-            return chr(int(g, 8) & 0xFF)
-        return _SIMPLE_ESCAPES.get(g, g if g in "\\'\"?" else "\\" + g)
-
-    try:
-        return _ESCAPE.sub(one, body)
-    except (ValueError, OverflowError):
-        return None
-
-
-def _as_word(value: str) -> str | None:
-    """A resolved value as shell text: itself when plain, single-quoted when it only holds printable text, else None."""
-    if value and _PLAIN_VALUE.fullmatch(value):
-        return value
-    if value and all(c.isprintable() and c not in "'\\$`" for c in value):
-        return "'" + value + "'"
-    return None
-
-
-def _ansi_c(text: str) -> tuple[str, bool]:
-    """ANSI-C words resolved where plain. The flag is True when one could not be."""
-    bad = False
-
-    def one(m: re.Match[str]) -> str:
-        nonlocal bad
-        word = _as_word(_unescape(m.group(1)) or "")
-        if word is None:
-            bad = True
-            return m.group(0)
-        return word
-
-    return _ANSI_C.sub(one, text), bad
+Construct = tuple[str, int, str]  # (what, line number, kind: flow, weak, standalone or always)
 
 
 def _strip_comment(text: str) -> str:
-    """The text without a shell comment: a `#` that starts a word and is not inside quotes."""
+    """The text without a shell comment: a `#` that starts a word and is not inside quotes or escaped."""
     quote = ""
-    for i, c in enumerate(text):
+    i = 0
+    while i < len(text):
+        c = text[i]
         if quote:
+            if c == "\\" and quote == '"':
+                i += 2
+                continue
             if c == quote:
                 quote = ""
+        elif c == "\\":
+            i += 2
+            continue
         elif c in "'\"":
             quote = c
-        elif c == "\\":
-            continue
-        elif c == "#" and (i == 0 or text[i - 1].isspace()):
+        elif c == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|("):
             return text[:i]
+        i += 1
     return text
 
 
 _ASSIGNMENT_WORD = re.compile(r"[A-Za-z_]\w*\+?=")
-_PREFIX_WORDS = frozenset({"env", "command", "exec", "nohup", "time", "sudo", "builtin", "eval", "xargs"})
-
-
-_DOLLAR = re.compile(r"\$[\w{(@*#?!-]")  # a shell expansion ($A, ${A}, $(cmd), $1, $@), not a price or a bare sign
+_PREFIX_WORDS = frozenset(
+    {"env", "command", "exec", "nohup", "time", "sudo", "builtin", "eval", "xargs", "do", "then", "else", "elif", "if"}
+    | {"while", "until", "!", "{"}
+)
+_DOLLAR = re.compile(
+    r"\$[\w{(@*#?!\\-]"
+)  # a shell expansion ($A, ${A}, $(cmd), $1, $@, $'..'), not a price or a bare sign
 _BACKTICK_CMD = re.compile(
     r"`\s*(?:echo|printf|cat|base64|xxd|rev|tr|sed|awk|cut|head|tail|printenv|which|env|command|type|basename|dirname"
     r"|readlink|date|git|jq|python[\d.]*|perl|ruby|node|bash|sh)\b[^`]*`"
 )  # a command substitution in backticks; markdown code spans (`quota`, `approve <job>`) are not one
 
 
+_COMMAND_START = re.compile(r"(?:\s*(?:[A-Za-z_]\w*\+?=\S*|env|command|exec|nohup|time|sudo|eval|xargs)\s+)*\s*")
+
+
+def _backtick_command(text: str) -> bool:
+    """A backtick command substitution where a command word (or an assignment value) would stand: at the start of a
+    command or after `;`, `&`, `|`, `(`, `=`. In prose a code span such as `printf -v` has text before it."""
+    for m in _BACKTICK_CMD.finditer(text):
+        before = text[: m.start()]
+        if before.rstrip().endswith((";", "&", "|", "(", "=")) or _COMMAND_START.fullmatch(before):
+            return True
+    return False
+
+
 def _expands(text: str) -> bool:
-    """True when the text holds a shell expansion or a backtick command substitution."""
-    return bool(_DOLLAR.search(text) or _BACKTICK_CMD.search(text))
+    """True when the text holds a shell expansion, or a backtick substitution where a command or a value would stand."""
+    return bool(_DOLLAR.search(text) or _backtick_command(text))
 
 
 def _expansion_at_command(text: str) -> bool:
-    """True when a command word (the first word of a command, after an operator, or after env/command/exec...) still
-    holds a shell expansion or a command substitution, so what runs is not what is written. A line the lexer cannot
-    read that holds one is unreadable, so True as well. A shell comment is not code."""
+    """True when a command word (the first word of a command, after an operator, or after env/command/exec...) holds a
+    shell expansion, an ANSI-C word or a command substitution, so what runs is not what is written. A line the lexer
+    cannot read that holds one is unreadable, so True as well. A shell comment is not code."""
     text = _strip_comment(text)
     tokens = _lex(text)
     if tokens is None:
         return _expands(text)
-    if _BACKTICK_CMD.search(text):
+    if _backtick_command(text):
         return True
     at_start = True
     for t in tokens:
         if t.op:
             at_start = _breaks(t.value)
             continue
-        if at_start and _ASSIGNMENT_WORD.match(t.value) and not t.quoted:
+        if at_start and _ASSIGNMENT_WORD.match(t.value):
             continue  # NAME=value before the command word: the value is judged as an assignment, not as the command
         if at_start and _DOLLAR.search(t.value):
             return True
@@ -703,94 +670,86 @@ def _expansion_at_command(text: str) -> bool:
     return False
 
 
-def _expansion_anywhere(text: str) -> bool:
-    return _expands(_strip_comment(text))
+_GEMINI_OPTION = re.compile(r"--paid|--approval|--cap\b")
 
 
-def _resolve(lines: list[str], tick: Callable[[], None]) -> tuple[list[str], list[Construct]]:
-    """(the lines with the resolvable values expanded into what follows them, the constructs that could not be
-    resolved). Time is checked per line and per expansion; a line may not grow past LINE_CAP, nor the brief past
-    TOTAL_EXPANDED_CAP: either records a construct and stops expanding."""
-    known: dict[str, str | None] = {}
-    found: list[Construct] = []
-    out: list[str] = []
-    total = 0
-    for number, line in enumerate(lines, 1):
-        tick()
-        if total > TOTAL_EXPANDED_CAP:
-            found.append(("expansions that grow past the limit for a brief", number, "always"))
-            out.extend(lines[number - 1 :])
-            break
-        size = [len(line)]
-
-        def expand(text: str, size: list[int] = size) -> str:
-            def one(ref: re.Match[str]) -> str:
-                tick()
-                value = known.get(ref.group(1) or ref.group(2))
-                if value is None:
-                    return ref.group(0)
-                size[0] += len(value) - len(ref.group(0))
-                if size[0] > LINE_CAP:
-                    raise _Grew
-                return value
-
-            return _VAR_REF.sub(one, text)
-
-        try:
-            work, bad = _ansi_c(line)
-            if bad:
-                found.append(("an escape sequence that cannot be resolved", number, "flow"))
-            text, at = "", 0
-            low = _views(work)[2]
-            # printf -v NAME 'literal' is an assignment
-            for pm in _PRINTF_V.finditer(work):
-                raw = pm.group(2)
-                inner = raw[1:-1] if raw[:1] in "'\"" and raw[-1:] == raw[:1] and len(raw) >= 2 else raw
-                if "%" in inner.replace("%%", ""):
-                    found.append(("printf -v with a conversion", number, "flow"))
-                    known[pm.group(1)] = None
-                else:
-                    value = _unescape(inner.replace("%%", "%"))
-                    known[pm.group(1)] = value if value is not None and "\x00" not in value else None
-                    if known[pm.group(1)] is None:
-                        found.append(("printf -v with a value that cannot be resolved", number, "flow"))
-            for m in _ASSIGN.finditer(work):
-                text += expand(work[at : m.start()]) + work[m.start() : m.end()]
-                at = m.end()
-                name, plus, value = m.group(1), m.group(2), m.group(3)
-                if value == "(":
-                    found.append(("an array", number, "standalone"))
-                    known[name] = None
-                elif "$" in value or "`" in value or "\\" in value:
-                    found.append(("an assignment from an expansion", number, "standalone"))
-                    known[name] = None
-                else:
-                    quoted = len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]
-                    plain = value[1:-1] if quoted else value
-                    before = known.get(name)
-                    known[name] = before + plain if plus and before is not None else plain
-            text += expand(work[at:])
-        except _Grew:
-            found.append(("a line that grows past the line limit when its variables are expanded", number, "always"))
-            out.append(line)
-            total += len(line)
+def _gemini_expansion(text: str, low: str, names: set[str]) -> bool:
+    """A command segment that holds the word `gemini` (or the vendor host, an SDK or the paid config) and, in that same
+    segment, a variable the brief assigns or any other expansion. A segment ends at `; | & ( ) < >`, so an expansion in
+    another command is not counted, however near. When the lexer cannot read the line, the whole line is the segment."""
+    marker = bool(PAID_CONFIG.search(low) or VENDOR_HOST in low or SDK.search(low))
+    tokens = _lex(text)
+    if tokens is None:
+        return (marker or bool(re.search(r"(?<![\w/.-])gemini(?![\w/.-])", low))) and (
+            _expands(text) or any(m.group(1) in names for m in _REFERENCE.finditer(text))
+        )
+    segments: dict[int, list[Tok]] = {}
+    segment = 0
+    for t in tokens:
+        if t.op:
+            if _breaks(t.value):
+                segment += 1
             continue
-        out.append(text)
-        total += len(text)
+        segments.setdefault(segment, []).append(t)
+    for words in segments.values():
+        if not (marker or any(_core(t.value) == "gemini" for t in words)):
+            continue
+        for t in words:
+            if _DOLLAR.search(t.value) or any(m.group(1) in names for m in _REFERENCE.finditer(t.value)):
+                return True
+    return marker and _expands(text)
+
+
+def _flows(lines: list[str], tick: Callable[[], None]) -> list[Construct]:
+    """The constructs that hide where a command comes from. Time is checked once per line; nothing is expanded."""
+    found: list[Construct] = []
+    stripped: list[str] = []
+    names: set[str] = set()
+    for line in lines:
+        tick()
+        text = _strip_comment(line)
+        stripped.append(text)
+        for pattern in (_ASSIGNED, _PRINTF_NAME, _LOOP_NAME, _READ_NAME):
+            names.update(m.group(1) for m in pattern.finditer(text))
+    if len(names) > MAX_VARIABLES:
+        return [("more variables than can be followed", 1, "always")]
+    for number, text in enumerate(stripped, 1):
+        if not text.strip():
+            continue
+        views = _views(text)
+        low = views[2]
+        value = [m.group(1) for m in _REFERENCE.finditer(text)]
+        refers = any(name in names for name in value)
+        gemini_line = bool(_RISK_TOKEN.search(low))
         if _FUNCTION.search(low):
             found.append(("a function", number, "standalone"))
         for label, pattern in _STANDALONE:
             if pattern.search(low):
                 found.append((label, number, "standalone"))
-        if ("$" in text or "`" in text) and _expansion_at_command(_views(text)[0]):
-            found.append(("an expansion that cannot be resolved", number, "flow"))
-        elif (
-            ("$" in text or "`" in text)
-            and _GEMINI_WORD.search(_views(text)[2])
-            and _expansion_anywhere(_views(text)[0])
-        ):
-            found.append(("an expansion that cannot be resolved in a Gemini command line", number, "flow"))
-    return out, found
+        for m in _ASSIGNED.finditer(text):
+            rest = text[m.end() : m.end() + 2]
+            if rest.startswith("(") and not rest.startswith("(("):
+                found.append(("an array", number, "standalone"))
+            elif _expands(text[m.end() :].split(None, 1)[0] if text[m.end() :].strip() else ""):
+                found.append(("an assignment from an expansion", number, "standalone"))
+        at_command = _expansion_at_command(views[0])
+        concealed = bool(CONCEAL.search(text.lower()))
+        expands = _expands(text)
+        option = bool(_GEMINI_OPTION.search(low))
+        # independent checks: every one that holds is recorded, and the brief-wide gating picks what counts
+        if at_command and (refers or concealed):
+            found.append(("a variable or escape sequence that is the command", number, "flow"))
+        if at_command:
+            found.append(("an expansion that is the command", number, "weak"))
+        if _gemini_expansion(text, low, names):
+            found.append(("a variable or expansion on a line that names Gemini", number, "flow"))
+        if refers and gemini_line:
+            found.append(("a variable in a Gemini command line", number, "flow"))
+        if expands and option:
+            found.append(("an expansion in a Gemini command line", number, "weak"))
+        if concealed and (gemini_line or option or _GEMINI_WORD.search(low)):
+            found.append(("an escape sequence on a Gemini line", number, "flow"))
+    return found
 
 
 def _findings(
@@ -811,21 +770,31 @@ def _findings(
     flags: dict[str, int] = {}
     materials: list[str] = []
     budget = [MAX_CANDIDATES]
-    expanded, constructs = _resolve(lines, tick)
-    whole2 = "\n".join(_views(line)[2] for line in expanded)
-    named = bool(re.search(r"\bsafo\b", whole2) and re.search(r"\bgemini\b", whole2))
-    flow_on = (named and bool(_RISK_TOKEN.search(whole2))) or (
-        bool(CONCEAL.search(joined.lower())) and bool(_GEMINI_WORD.search(whole2) or _RISK_TOKEN.search(whole2))
+    constructs = _flows(lines, tick)
+    named = bool(re.search(r"\bsafo\b", whole) and re.search(r"\bgemini\b", whole))
+    surface = bool(
+        re.search(r"\b(?:safo|gemini)\b", whole)
+        or PAID_CONFIG.search(whole)
+        or VENDOR_HOST in whole
+        or SDK.search(whole)
+        or CONCEAL.search(joined.lower())
     )
-    standalone_on = named and bool(_PAID_TOKEN.search(whole2))
+    weak_on = named
+    standalone_on = named and bool(_PAID_TOKEN.search(whole))
     for name, number, kind in constructs:
-        if kind == "always" or (kind == "flow" and flow_on) or (kind == "standalone" and standalone_on):
+        if (
+            kind == "always"
+            or (kind == "flow" and surface)
+            or (kind == "weak" and weak_on)
+            or (kind == "standalone" and standalone_on)
+        ):
             steps.append(
                 Step(
                     unreadable=True,
                     line=number,
-                    why=f"the brief uses {name} to build or hide a command, so it cannot be read as one command; "
-                    "write one plain `safo gemini ask --model M ...` command",
+                    why=f"the brief uses {name}, so it cannot be read as one command; a Gemini command built from "
+                    "variables, escapes or substitutions is blocked by design: write one plain "
+                    "`safo gemini ask --model M ...` command",
                 )
             )
             break
@@ -845,8 +814,6 @@ def _findings(
                     flags.setdefault("vendor", number)
             continue
         _scan_line(number, line, steps, flags, materials, budget, runtime_scan)
-        if expanded[number - 1] != line:  # `_resolve` keeps every expanded line within LINE_CAP, or records why not
-            _scan_line(number, expanded[number - 1], steps, flags, materials, budget, runtime_scan)
     if "vendor" in flags:
         steps.append(
             Step(
