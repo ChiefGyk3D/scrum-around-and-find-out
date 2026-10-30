@@ -284,13 +284,39 @@ that must pass the strict check:
   sits only in a link target is seen. A link to the vendor's documentation (`ai.google.dev`) is a mention and passes; the
   API host (`generativelanguage.googleapis.com`) in a link is the API named and is blocked, like a URL in a command.
 
+### Shell commands (Bash)
+
+The same rules also look at every Bash call, the lead's and a sub-agent's, in the foreground or the background, before
+the lead-never-waits rule runs. This is a cheap, fail-closed deny, not a shell model. A command is denied, in every mode,
+when it names the vendor API host, the Google genai SDK, the key variable (`GEMINI_API_KEY`), the paid config
+(`prd_paid`), the secret-store project (`image-gen`), or the config `prd` beside `doppler` (the names in
+[Gemini keys](gemini-keys.md) and `examples/gemini.example.yaml`). Quotes, backslashes, line continuations, comments and
+look-alike letters are removed or folded first, the same views the brief scan uses, so `gen""erative...` is seen. Two
+more forms are denied without a name on the page: a word built with escapes (an ANSI-C `$'...'` word, a hex, octal or
+`\u` escape, `printf -v`) in a command that also runs a network tool or `doppler`, and `doppler` with any `$` expansion
+or backtick. Nothing is resolved: a variable's value is never looked up.
+
+Two things are allowed even when a name is on the page. The wrapper itself: every command in the call is `safo gemini ...`
+(or `python -m safo gemini ...`) with no `$`, backtick or parenthesis anywhere, so nothing can ride along; a second
+command after `;`, `&&`, `|` or a newline makes it a different command and it is judged on its own. And the docs and tests
+of this repository: when the call's working directory is inside a checkout of this repository, a command made only of
+`pytest`, `python -m pytest`, `make`, `cat`, `head`, `tail`, `ls`, `grep`, `rg` (without `--pre`), `diff`, `wc` or `git
+add|commit|diff|log|show|status|grep` (no `-c`, no `-C`), with no `$`, backtick, parenthesis or escape-built word. The
+denial names the rule (`gemini-material`) and a fixed phrase class, such as "the vendor API host or SDK", and points at the
+wrapper; it never repeats the command. A command that cannot be checked before the deadline is denied.
+
+Not covered, by design: a name built from pieces with no escape (`a=generative; b=language; curl https://$a$b...` with
+no `doppler`), a name read from a file or the environment, a program or script that calls the API (the call is inside a
+file the command only runs), a command that reaches the wrapper's key in another way, and any command run from a working
+directory inside this repository that is on the short list above. The wrapper holds the real gates.
+
 That is the whole claim. Not covered: a wrapper script or alias under another name that hides `safo`, a command written
 to a file and run later, other shells than bash, and any language that calls `safo` or the API from inside a program. It does not promise to read every way a shell can build a command: a form outside the list above
 is not seen. A line over 4000 characters that mentions any of these, more than 50 commands, or a check that runs past the
 guard's deadline is blocked, and so is a private-terms file that does not load or a terms search that does not finish
 (see [Gemini](gemini.md)). Every block names the line, the reason and the fix. A false positive is a block, not a leak;
 the test suite runs the guard over the repository's own docs and sets a ceiling on false positives. It is a speed bump
-against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief is out of its
+against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief or a shell command is out of its
 reach. The guard is not the gate that holds: the approval record, the caps and the free-tier limits are enforced again by
 the wrapper itself, which raises before any request when a paid call has no live record. When the dispatch event cannot be
 read (over 1 MiB, not valid JSON, cut short, or timed out), or `agents.yaml` cannot be loaded, these two rules still

@@ -31,6 +31,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import NamedTuple
 
 from safo.gemini import (
@@ -1015,3 +1016,148 @@ def _findings(
             if problem:
                 add(GEMINI_PAID, problem)
     return [(rule, "; ".join(dict.fromkeys(why[:6]))) for rule, why in reasons.items()]
+
+
+# -- shell commands (#209) ---------------------------------------------------------------------------------------------
+# A cheap, fail-closed check on one Bash command. It names no value and resolves nothing: it looks for the vendor API
+# host, its SDK, the key variable name and the secret-store project and config names (all shown in docs/gemini-keys.md
+# and examples/gemini.example.yaml), and for words built from escapes or an expansion beside a network or secret tool.
+# The wrapper `safo gemini ...` holds the real gates and is allowed; so are plain read and test commands run inside this
+# repository's checkout. Everything else that names them is denied. The classes are fixed text: a denial never repeats
+# a word of the command.
+SHELL_VENDOR = "the vendor API host or SDK"
+SHELL_KEY = "the key variable name"
+SHELL_STORE = "the secret-store project or config name"
+SHELL_BUILT = "a word built from escapes beside a network or secret tool"
+SHELL_TOOL = "a secret tool run with a shell expansion"
+SHELL_UNVERIFIED = "a command that could not be checked in time"
+_SHELL_KEY = re.compile(r"gemini[\W_]*api[\W_]*key")
+_SHELL_PROJECT = re.compile(r"(?<![\w-])image-gen(?![\w-])")
+_SHELL_CONFIG = re.compile(r"(?<![\w-])prd(?![\w-])")
+_SECRET_TOOL = re.compile(r"(?<![\w.-])doppler(?![\w-])")
+_NETWORK_TOOL = re.compile(
+    r"(?<![\w.-])(?:curl|wget|nc|ncat|socat|openssl|ssh|telnet|python[\d.]*|node|nodejs|perl|ruby|php|go|deno|bun"
+    r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
+)
+_WRAPPER_FORBIDDEN = frozenset("$`()")
+_REPO_SAFE = frozenset({"pytest", "make", "ls", "cat", "head", "tail", "grep", "rg", "diff", "wc", "git"})
+_REPO_GIT = frozenset({"add", "commit", "diff", "log", "show", "status", "grep"})
+_REPO_MARKER = ("src/safo/geminibrief.py", "pyproject.toml")
+
+
+def _shell_segments(command: str) -> list[list[Tok]] | None:
+    """The words of each simple command: cut at `; | &` and at every newline (bash ends a command there too), shell
+    comments removed. None when the lexer cannot read a line (an unterminated quote, a quote spanning lines)."""
+    segments: list[list[Tok]] = []
+    for line in _join(command).splitlines():
+        tokens = _lex(_strip_comment(line))
+        if tokens is None:
+            return None
+        segments.append([])
+        for t in tokens:
+            if t.op:
+                if _breaks(t.value):
+                    segments.append([])
+                continue
+            segments[-1].append(t)
+    return [words for words in segments if words]
+
+
+def _is_wrapper(command: str) -> bool:
+    """Only `safo gemini ...` (also `python -m safo gemini ...`) commands: no expansion, substitution or group anywhere,
+    so nothing else can ride along. Redirections are allowed."""
+    if any(c in command for c in _WRAPPER_FORBIDDEN):
+        return False
+    segments = _shell_segments(command)
+    if not segments:
+        return False
+    for words in segments:
+        values = [t.value for t in words]
+        if values[:2] == ["safo", "gemini"]:
+            continue
+        if values[:1] and re.fullmatch(r"python[\d.]*", values[0]) and values[1:4] == ["-m", "safo", "gemini"]:
+            continue
+        return False
+    return True
+
+
+def _own_repo(cwd: Path | None) -> bool:
+    if cwd is None:
+        return False
+    try:
+        here = cwd.resolve()
+        for folder in (here, *here.parents):
+            if all((folder / marker).is_file() for marker in _REPO_MARKER):
+                return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return False
+
+
+def _is_repo_command(command: str) -> bool:
+    """A read or test command from a short list (pytest, make, cat, grep, a few git subcommands ...): no expansion,
+    substitution or group, no escape-built word, and every command in a pipeline or list is on the list."""
+    if any(c in command for c in _WRAPPER_FORBIDDEN) or CONCEAL.search(command.lower()):
+        return False
+    segments = _shell_segments(command)
+    if not segments:
+        return False
+    for words in segments:
+        values = [t.value for t in words]
+        head = values[0]
+        if head == "git":
+            if len(values) < 2 or values[1] not in _REPO_GIT or any(v in ("-c", "-C") for v in values):
+                return False
+        elif re.fullmatch(r"python[\d.]*", head):
+            if values[1:3] != ["-m", "pytest"]:
+                return False
+        elif head not in _REPO_SAFE:
+            return False
+        if head == "rg" and any(v.startswith("--pre") for v in values):
+            return False
+    return True
+
+
+def shell_command_class(command: str, cwd: Path | None = None, deadline: float | None = None) -> str | None:
+    """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
+    it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED."""
+
+    def tick() -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("the shell check ran out of time")
+
+    try:
+        tick()
+        lines = _join(command).splitlines() or [command]
+        found: str | None = None
+        secret_tool = network = False
+        for line in lines:
+            tick()
+            _, _, low, pre_low, pre_raw = _views(line)
+            for view in (low, pre_low):
+                if VENDOR_RE.search(view) or SDK.search(view):
+                    found = found or SHELL_VENDOR
+                if _SHELL_KEY.search(view):
+                    found = found or SHELL_KEY
+                if PAID_CONFIG.search(view) or _SHELL_PROJECT.search(view):
+                    found = found or SHELL_STORE
+                secret_tool = secret_tool or bool(_SECRET_TOOL.search(view))
+                network = network or bool(_NETWORK_TOOL.search(view))
+            if secret_tool and any(_SHELL_CONFIG.search(v) for v in (low, pre_low)):
+                found = found or SHELL_STORE
+        tick()
+        built = bool(CONCEAL.search(command.lower()) or CONCEAL.search(_join(command).lower()))
+        if found is None and built and (network or secret_tool):
+            found = SHELL_BUILT
+        if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
+            found = SHELL_TOOL
+        if found is None:
+            return None
+        tick()
+        if _is_wrapper(command):
+            return None
+        if _own_repo(cwd) and _is_repo_command(command):
+            return None
+        return found
+    except TimeoutError:
+        return SHELL_UNVERIFIED

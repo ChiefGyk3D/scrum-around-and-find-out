@@ -1123,6 +1123,12 @@ _UNREADABLE = (
 )
 
 
+SHELL_DENIAL = (
+    "gemini-material: this shell command names {}, so it is denied; call Gemini only through the wrapper, "
+    "`safo gemini ask --model M --prompt-file F ...` (docs/gemini.md)"
+)
+
+
 def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: float) -> str:
     """The Gemini rules' findings for a brief as one string, "" when it is clean. Any failure of the check blocks."""
     prompt = tool_input.get("prompt")
@@ -1135,6 +1141,23 @@ def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: floa
     except Exception:
         return "gemini-paid: the Gemini check failed, so the brief is blocked"
     return "; ".join(f"{rule}: {why}" for rule, why in found)
+
+
+def shell_vendor_check(payload: dict[str, Any], deadline: float) -> None:
+    """Deny a Bash command that goes straight to the vendor API or its key (#209): a cheap, fail-closed speed bump, not a
+    sandbox. The wrapper `safo gemini ...` and read or test commands inside this repository are allowed. The denial
+    names the rule and the phrase class and never the command. An event without a usable command is left to the
+    lead-wait rule, which refuses it as before."""
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or payload.get("hook_event_name") != "PreToolUse":
+        return
+    from safo import geminibrief  # deferred: it loads the Gemini mode, which the entry must not at import
+
+    cwd = payload.get("cwd")
+    found = geminibrief.shell_command_class(command, Path(cwd) if isinstance(cwd, str) and cwd else None, deadline)
+    if found:
+        raise GeminiEventDeny("input", SHELL_DENIAL.format(found))
 
 
 def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = None, run: Run | None = None) -> None:
@@ -1180,6 +1203,7 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     if not isinstance(payload.get("tool_name"), str):
         raise ValueError("missing tool name")
     if payload.get("tool_name") == BASH_TOOL:
+        shell_vendor_check(payload, deadline)
         lead_wait(ctx, args, payload, deadline, run)
         return
     if payload.get("tool_name") not in AGENT_TOOLS:
