@@ -14,11 +14,22 @@ from pathlib import Path
 
 import pytest
 
-from geminidata import FAKE_KEY, MODEL, NOW, FakeGemini, ledger_rows, seed, start_row, write_config
+from geminidata import (
+    FAKE_KEY,
+    MODEL,
+    NOW,
+    FakeGemini,
+    ledger_rows,
+    make_key,
+    seed,
+    signers_line,
+    start_row,
+    write_config,
+)
 from safo.cli import main
 from safo.context import LocalContext
 from safo.errors import ConfigError
-from safo.gemini import ApprovalStore, GeminiConfig, Locations, load_config
+from safo.gemini import GeminiConfig, Locations, load_config, open_store
 from safo.modes.gemini import approve_flow, brief_namespace
 
 
@@ -35,7 +46,8 @@ class Rig:
         self.server = server
         self.locations = locations
         self.ledger = tmp_path / "data" / "ledger.jsonl"
-        self.config = write_config(locations.config, server.url, self.ledger)
+        self.signing = {"key": str(locations.home / "key"), "principal": "test-key-a"}
+        self.config = write_config(locations.config, server.url, self.ledger, signing=self.signing)
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         self.asked = tmp_path / "doppler-asked.txt"
@@ -72,7 +84,7 @@ class Rig:
                 ctx,
                 args,
                 self.cfg(),
-                ApprovalStore(self.locations.approvals),
+                open_store(self.locations, self.ledger, self.signing["key"], "test-key-a", ctx.env),
                 req,
                 interactive=interactive,
                 confirm=lambda prompt: (out.write(prompt), answer)[1],
@@ -254,12 +266,12 @@ def test_approve_refuses_more_than_two_dollars_and_an_estimate_over_the_amount(r
 
 def test_the_ceiling_flag_comes_from_the_ledger_not_from_the_caller(rig: Rig) -> None:
     code, out = rig.approve()
-    assert code == 0 and '"beyond_ceiling": false' in rig.approvals()[0].read_text()
+    assert code == 0 and '"beyond_ceiling":false' in rig.approvals()[0].read_text().replace("\\", "")
     seed(rig.ledger, start_row(NOW - dt.timedelta(days=1), tier="paid", usd=9.999, call_id="p"))
     code, out = rig.approve()
     assert code == 0 and "beyond ceiling: YES" in out
     newest = sorted(rig.approvals(), key=lambda p: p.stat().st_mtime_ns)[-1]
-    assert '"beyond_ceiling": true' in newest.read_text()
+    assert '"beyond_ceiling":true' in newest.read_text().replace("\\", "")
 
 
 def test_a_prompt_file_over_the_cap_is_refused(rig: Rig) -> None:
@@ -318,3 +330,92 @@ def test_the_cli_enforces_the_cap_it_is_given(rig: Rig) -> None:
 
 def test_config_error_type_is_clean(rig: Rig) -> None:
     assert issubclass(ConfigError, Exception)
+
+
+# -- keys, dry run and usage (#200) -----------------------------------------------------------------------------------
+
+
+def test_keys_list_check_and_propose_are_read_only(rig: Rig, tmp_path: Path) -> None:
+    signers = rig.locations.signers
+    before = signers.read_bytes()
+    code, out, _ = rig.run("keys", "list")
+    assert code == 0 and "test-key-a" in out and "SHA256:" in out and "usable" in out
+    code, out, _ = rig.run("keys", "check")
+    assert code == 0 and "WARNING" in out and "only one usable key" in out
+    other = make_key(tmp_path / "other")
+    code, out, _ = rig.run("keys", "propose", str(other) + ".pub", "--label", "backup-1")
+    assert code == 0 and 'backup-1 namespaces="safo-gemini-approval"' in out and "nothing was written" in out
+    assert signers.read_bytes() == before and not rig.locations.revoked.exists()
+
+
+def test_keys_propose_needs_a_label_and_a_file(rig: Rig) -> None:
+    code, _, err = rig.run("keys", "propose")
+    assert code == 2 and "label" in err
+
+
+def test_keys_check_fails_when_a_key_is_unsafe(rig: Rig) -> None:
+    rig.locations.signers.write_text(
+        signers_line(
+            "test-key-a", rig.locations.home / "key.pub", options='no-touch-required,namespaces="safo-gemini-approval"'
+        )
+        + "\n"
+    )
+    code, _, err = rig.run("keys", "check")
+    assert code == 2 and "no-touch-required" in err
+
+
+def test_the_dry_run_signs_and_checks_a_dummy_without_writing_anything(rig: Rig) -> None:
+    before = rig.ledger.exists()
+    args = brief_namespace(approve_args(rig))
+    out = io.StringIO()
+    ctx = LocalContext(out, {"HOME": str(rig.home), "PATH": str(rig.bin)}, NOW, dry_run=True)
+    req = __import__("safo.modes.gemini", fromlist=["_request"])._request(args)
+    store = open_store(rig.locations, rig.ledger, rig.signing["key"], "test-key-a", ctx.env)
+    code = approve_flow(ctx, args, rig.cfg(), store, req, interactive=True, confirm=lambda p: "approve job-1")
+    assert code == 0 and "dry run: the signature verifies" in out.getvalue() and "test-key-a" in out.getvalue()
+    assert rig.approvals() == [] and rig.ledger.exists() == before
+
+
+def test_approve_tells_the_person_when_to_touch_the_key(rig: Rig) -> None:
+    code, out = rig.approve()
+    assert code == 0
+    assert (
+        out.index("QUOTA paid")
+        < out.index("quote of his message")
+        < out.index("will blink")
+        < out.index("type exactly")
+    )
+    assert "signed by test-key-a" in out
+
+
+def test_usage_adds_a_chained_row_that_counts_toward_the_month(rig: Rig) -> None:
+    code, _, _ = rig.run("usage", "--amount-usd", "1.25", "--on-date", "2026-10-29", "--note", "vendor page")
+    assert code == 0
+    rows = ledger_rows(rig.ledger, everything=True)
+    assert [r["type"] for r in rows] == ["chain_start", "usage"] and rows[1]["prev_hash"] == rows[0]["hash"]
+    _, out, _ = rig.run("quota", *rig.base(), "--paid")
+    assert "spent 1.25 of 10.00" in out
+    for bad in (
+        ["--amount-usd", "x"],
+        ["--amount-usd", "1", "--on-date", "soon"],
+        ["--amount-usd", "1", "--on-date", "2026-10-29"],
+    ):
+        code, _, _err = rig.run("usage", *bad, "--note", "") if bad[-1] != "2026-10-29" else rig.run("usage", *bad)
+        assert code == 2
+
+
+def test_the_guard_parser_still_needs_a_model_for_the_money_actions() -> None:
+    from safo.modes.gemini import BriefParseError
+
+    with pytest.raises(BriefParseError):
+        brief_namespace(["ask", "--paid"])
+    assert brief_namespace(["keys", "list"]).keys_action == "list"
+
+
+def test_a_stray_word_after_a_money_action_is_refused_like_any_unknown_argument(rig: Rig) -> None:
+    from safo.modes.gemini import BriefParseError
+
+    with pytest.raises(BriefParseError, match="unrecognized"):
+        brief_namespace(["ask", "list", "--model", MODEL])
+    code, _, err = rig.run("quota", "list", *rig.base())
+    assert code == 2 and "unrecognized" in err

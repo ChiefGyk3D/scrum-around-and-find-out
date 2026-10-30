@@ -159,13 +159,47 @@ def client(fake: FakeGitHub, sleeps: list[float]) -> Client:
     return Client(fake.token, fake.url, sleep=sleeps.append)
 
 
+@pytest.fixture(scope="session")
+def _gemini_session_keys(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Two software ed25519 keys made once per session by ssh-keygen (public halves only matter to the code under test).
+    A real approval key is a hardware sk key; see docs/gemini.md for what a software key cannot prove."""
+    from geminidata import make_key
+
+    folder = tmp_path_factory.mktemp("gemini-keys")
+    make_key(folder / "a")
+    make_key(folder / "b")
+    return folder
+
+
 @pytest.fixture(autouse=True)
-def gemini_locations(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """The fixed Gemini locations (config, approvals, terms) point into a temporary directory in every test. This is the
-    only seam: production reads them from the account database, never from a flag or the environment."""
+def gemini_locations(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch, _gemini_session_keys: Path
+) -> Any:
+    """The fixed Gemini locations (config, approvals, terms, allowed-signers) point into a temporary directory in every
+    test. This is the only seam: production reads them from the account database, never from a flag or the environment.
+    The seam also turns `require_hardware` off and names the test user as the trust-file owner, so a software key made
+    for the test can sign; the default and the root-owner rule are proven in tests/test_gemini_sign.py."""
+    import shutil
+
+    from geminidata import signers_line
     from safo import gemini
 
     root = tmp_path_factory.mktemp("gemini-fixed")
-    locations = gemini.Locations(root, root / "gemini.yaml", root / "state" / "approvals", root / "privacy-terms.txt")
+    shutil.copy(_gemini_session_keys / "a", root / "key")
+    shutil.copy(_gemini_session_keys / "a.pub", root / "key.pub")
+    (root / "key").chmod(0o600)
+    signers = root / "signers"
+    signers.write_text(signers_line("test-key-a", root / "key.pub") + "\n")
+    signers.chmod(0o644)
+    locations = gemini.Locations(
+        root,
+        root / "gemini.yaml",
+        root / "state" / "approvals",
+        root / "privacy-terms.txt",
+        signers,
+        root / "revoked",
+        os.geteuid(),
+        False,
+    )
     monkeypatch.setattr(gemini, "fixed_locations", lambda: locations)
     return locations

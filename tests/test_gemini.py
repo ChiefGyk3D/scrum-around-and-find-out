@@ -47,6 +47,7 @@ from safo.gemini import (
     ask,
     doppler_key_provider,
     load_config,
+    open_store,
     quota_line,
 )
 from safo.gemini import fixed_locations as real_fixed_locations  # bound before the autouse seam replaces it
@@ -69,8 +70,9 @@ def cfg(tmp_path: Path, server: FakeGemini, ledger: Path) -> GeminiConfig:
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> ApprovalStore:
-    return ApprovalStore(tmp_path / "state" / "approvals")
+def store(cfg: GeminiConfig, gemini_locations: Locations) -> ApprovalStore:
+    """A store that signs with the test's software key (enrolled as test-key-a in the fixed allowed-signers file)."""
+    return open_store(gemini_locations, cfg.ledger, str(gemini_locations.home / "key"), "test-key-a")
 
 
 class Keys:
@@ -543,7 +545,7 @@ def test_an_approval_carries_the_quote_and_time(store: ApprovalStore) -> None:
         ttl_minutes=30,
         beyond_ceiling=False,
     )
-    data = json.loads((store.folder / f"{approval.id}.json").read_text())
+    data = json.loads(json.loads((store.folder / f"{approval.id}.json").read_text())["payload"])
     assert data["quote"] == "go ahead, one dollar" and data["quoted_at"].startswith("2026-10-29T19:59")
     assert stat.S_IMODE(os.stat(store.folder / f"{approval.id}.json").st_mode) == 0o600
 

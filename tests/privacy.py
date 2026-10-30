@@ -41,13 +41,20 @@ PATTERNS: dict[str, str] = {
 
 # An e-mail address: a local part, an @ and a host whose last label is letters (so pkg@v1.2.3 is not one).
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}\b")
-ALLOWED_EMAIL_DOMAINS = {"example.com", "example.org"}  # spec 2.5: the reserved documentation domains, any local part
+ALLOWED_EMAIL_DOMAINS = {
+    "example.com",
+    "example.org",
+    "openssh.com",
+}  # spec 2.5: the reserved documentation domains, any local part
 
 # A domain-like token must be one of these; anything else is a hostname that does not belong in a public document.
 HOST = re.compile(r"(?i)\b(?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,63}\b")
 # File-like dotted names are not hosts. Single-label private names come from the external supplement.
 DOCUMENT_KEYS = {
     "project.number",
+    "signing.key",  # config keys in docs/gemini-keys.md
+    "signing.principal",
+    "webauthn.get",  # the WebAuthn client-data type string in docs/gemini-passkeys.md
     "agents.waiting",
     "agents.working",
     "status.closed",
@@ -62,7 +69,19 @@ DOCUMENT_KEYS = {
     "items.totalcount",
     "statusupdate.project.id",
 }
-FILE_SUFFIXES = {"md", "yaml", "yml", "py", "json", "jsonl", "txt", "sh", "toml", "lock"}
+FILE_SUFFIXES = {
+    "md",
+    "yaml",
+    "yml",
+    "py",
+    "json",
+    "jsonl",
+    "txt",
+    "sh",
+    "toml",
+    "lock",
+    "pub",
+}  # pub: a public key file
 
 ALLOWED_HOSTS = {
     "github.com",
@@ -78,6 +97,10 @@ ALLOWED_HOSTS = {
     "shellcheck.net",
     "generativelanguage.googleapis.com",  # the Gemini API host the key is sent to, and the vendor docs host
     "ai.google.dev",
+    "openssh.com",  # the domain in OpenSSH key type names such as sk-ssh-ed25519@openssh.com
+    "developers.yubico.com",  # vendor pages read for docs/gemini-keys.md
+    "immurok.com",
+    "localhost",  # the loopback name of the passkey page in docs/gemini-passkeys.md
     "ollama.lan",  # the placeholder endpoint host in agents.yaml; real ones live in a git-ignored local file
 }
 

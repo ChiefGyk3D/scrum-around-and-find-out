@@ -25,22 +25,28 @@ A model never counts, caps or approves anything here.
    is only our own count (other users of the same project are invisible to it), so the vendor's answer is the authority.
 2. **A 429 is final.** On HTTP 429 (`RESOURCE_EXHAUSTED`) the job stops and reports the quota line, exit code 3. Nothing is
    retried and a free call **never falls through to paid**: the paid key is not even read.
-3. **Money needs its own approval record.** See below. No record, no paid call, and in the dispatch guard no record means
-   a denial in every guard mode, `warn` included.
+3. **Money needs its own signed approval.** See below. No valid signature by an enrolled security key, no paid call, and in
+   the dispatch guard no record means a denial in every guard mode, `warn` included.
 
 ## Paid calls
 
 Paid use is for what the free tier cannot do (image generation is paid-only: the free quota for image models is zero) or
 what needs a model that has no free tier. Every monetary action needs a fresh, explicit, single-use **approval record**.
 
-- **What a record is.** A file with a quote of the maintainer's message, the time of that message, the model, a maximum
-  amount of at most 2 USD, a job name, an expiry (at most 24 hours, and it ends with the job) and whether it may pass the
-  monthly ceiling. It is created by `safo gemini approve`, which the lead runs **only after the maintainer has said yes in
-  his own message**. A record is evidence of what was said, not proof that it was said: the quote is there so he can check
-  it afterwards, the same as the approval token in [Hooks](hooks.md).
-- **Single use.** The call spends the record before the request leaves (an exclusive marker file), so a crash or a timeout
-  cannot allow a replay. It is bound to its model and its job, so it cannot be inherited by a sub-agent or reused by a
-  second job. A job can never start another job: each paid call needs a record of its own.
+- **What a record is.** A **signature** made by the maintainer's hardware security key (a touch) over a canonical JSON
+  text: the model, a maximum of at most 2 USD, a job name, a short expiry (at most 4 hours, and it ends with the job),
+  whether it passes the monthly ceiling, a one-time nonce, the quote of his message and its time, the signing principal
+  (the label of the enrolled key) and the **ledger head** at signing time. It is made by `safo gemini approve`, which the
+  lead runs **only after the maintainer has said yes in his own message**; the maintainer then reads the quota line and
+  the quote and touches the key. The wrapper checks the signature with `ssh-keygen -Y verify` against **public keys only**
+  (see "Who can approve"). A file with no signature, or in the older unsigned format, authorizes nothing. The quote is
+  there so he can check afterwards what he approved, the same as the approval token in [Hooks](hooks.md).
+- **Single use.** The call spends the nonce before the request leaves: an exclusive marker file **and** an
+  `approval_used` row in the hash-chained ledger (which row records the principal and the tier). The ledger row is
+  authoritative, so deleting the marker file does not allow a replay. A record is bound to its model and its job, so it
+  cannot be inherited by a sub-agent or reused by a second job. A job can never start another job: each paid call needs
+  a record of its own. A record also binds the ledger head: if the ledger it was signed against is no longer in the
+  current chain, it is refused.
 - **Caps.** At most **2 USD per job** and **10 USD per month**. The estimate is an upper bound (the prompt counted at three
   bytes a token, plus every output token the request allows) and must fit the job cap and the approved amount. Past 10 USD
   in a month, each further 2 USD block needs its own record that says so; `approve` sets that flag from the ledger in
@@ -57,7 +63,7 @@ what needs a model that has no free tier. Every monetary action needs a fresh, e
   thinking tokens, as the vendor bills them.
 
 ```bash
-# the maintainer said yes in his own message; a person runs this at a terminal, quoting him exactly (see "Who can approve"):
+# the maintainer said yes in his own message; a person runs this at a terminal, quoting him exactly, then touches the key:
 safo gemini approve --model gemini-3.6-flash --prompt-file prompt.txt --max-output-tokens 1000 \
   --max-usd 1.50 --job research-1 --quote "yes, up to 1.50 on this" --quoted-at 2026-10-29T15:00:00Z --issue owner/repo#200
 safo gemini ask --model gemini-3.6-flash --paid --job research-1 --approval <id printed above> \
@@ -71,36 +77,106 @@ gemini: paid model=gemini-3.6-flash cap=1.50 approval=<id>
 gemini-material: public
 ```
 
-## Who can approve, and the residual
+## Who can approve: signed approvals
 
 `safo gemini approve` refuses unless standard input **and** standard output are a terminal. It prints the quota line and
-the quote, and writes the record only after the person types `approve <job>` exactly. The ceiling flag is not an option;
-it is derived from the ledger. The config, the approval folder and the private-terms file are at **fixed locations** taken
-from the account database, not from `$HOME`, an XDG variable, a flag or `SAFO_GEMINI_CONFIG`; tests move them only through
-a function argument no command line can reach. The ledger's own location is a key in that fixed config, and if the ledger is
-missing while another `gemini-spend-ledger.jsonl` sits in a sibling folder, every call is refused instead of starting an
-empty ledger that reads 0 spent.
+the quote, tells the person that the key will blink and to touch it only after reading them, and asks them to type
+`approve <job>` exactly. Only then does it call `ssh-keygen -Y sign -n safo-gemini-approval` with the key named in
+`gemini.yaml` (`signing: {key: /absolute/path, principal: yubikey-a}`). The code never opens that file: it hands the
+path to `ssh-keygen`, which asks the hardware key for the signature. With the global `--dry-run` flag, `safo gemini approve` runs the same
+flow signs and verifies a throw-away text in another namespace (`safo-gemini-approval-dryrun`): it tests the key, the
+enrollment and the touch, spends nothing, and writes no record and no ledger row.
 
-Be plain about what the terminal check is worth. It only stops accidents and a prompt-injected command line that has no
-pseudo-terminal; `script -qec` or any pty gives a process one, and it passes. It is not a barrier against the same user:
-a process running as the maintainer can write a record file directly, edit the config, or **delete or move the ledger,
-which resets the month total to 0** (only the sibling-ledger refusal catches a leftover copy). The approval is evidence of
-the maintainer's word, not proof of it. Real protection needs a channel the agent's UID cannot write: a separate account
-or a root-owned record store that only a human-run tool can add to, or a signed approval token checked by a service the
-agent cannot reach. That costs a second account or a small service and an install step, and it is not built here. Until it
-is, the backstop outside this code is the vendor-side monthly limit and the automatic-reload settings on the paid account,
-which no process here can change.
+The trust is two **maintainer-edited public files** at fixed locations, `/etc/safo/gemini-allowed-signers` and
+`/etc/safo/gemini-revoked-signers`. The code requires each to be a regular file **owned by root**, not writable by group
+or others, under directories that are root-owned and not writable by others, and it never writes to them. That is the
+rule that stops an agent running as the maintainer from enrolling its own key: the agent's account cannot write there.
+No flag, environment variable or `gemini.yaml` setting moves them or relaxes the rules; only a test, through the
+`fixed_locations` function argument, can. Several keys can be enrolled, each under its own label; see
+[Gemini keys](gemini-keys.md) for adding, rotating, backing up and revoking them. Only hardware keys (`ed25519-sk`,
+`ecdsa-sk`) count, unless a key carries a written per-key opt-in; a key with `no-touch-required` is refused when the file
+is loaded.
+
+What `ssh-keygen -Y verify` does not say, the code reads from the public signature itself: the signer's key (so the
+revocation list is consulted by key), the namespace, and for a hardware key the authenticator's flags: **user presence
+must be set** (the touch), and **user verification (the PIN)** where the maintainer wrote `require-pin` for that key. Those
+flags are part of what the key signs, so they are authentic once the signature verifies; they are only as honest as
+the authenticator that reports them.
+
+The config, the approval folder and the private-terms file are at **fixed locations** taken from the account database,
+not from `$HOME`, an XDG variable, a flag or `SAFO_GEMINI_CONFIG`. The ledger location is a key in that fixed
+config, and if the ledger is missing while another `gemini-spend-ledger.jsonl` sits in a sibling folder, every call is
+refused instead of starting an empty ledger that reads 0 spent.
+
+### Threat model (the approval and the ledger)
+
+*Assets.* The paid Gemini key and the money it spends (a 2 USD job cap, a 10 USD month, a 30 USD vendor limit behind it);
+the integrity of the spend ledger; the maintainer's trust file (which keys may approve).
+
+*Actors.* The maintainer (holds the hardware key). A model or agent running as the same user, the maintainer's account (can run
+commands, write that account's files, read its environment, and may be prompt-injected). A process on the same machine
+as another user. Someone who steals a key. Someone who persuades the maintainer to touch.
+
+*Trust boundaries.* The agent's account versus root (the trust files). The agent's account versus the hardware key (the
+private half never leaves it; a signature needs a touch). The approval text versus the signed bytes (a signature covers
+the canonical text, nothing else). The ledger file versus the signed head.
+
+*Abuse cases, and what stops each.*
+
+1. *The agent writes its own approval record.* A record without a valid signature by an enrolled key is refused (tests:
+   unsigned, old format, edited payload, signature by an unenrolled key, wrong namespace, non-canonical text).
+2. *The agent enrolls its own key.* It cannot write the root-owned trust file, and the code refuses a trust file the
+   agent's account owns or can write (test: owner, group and world write, writable directory, symlink, missing file).
+3. *Signature replay.* A nonce is single use and spent in the chained ledger; deleting the marker file does not help
+   (test); a signature is for one model, one job, at most 2 USD, a short expiry.
+4. *Resetting the month total.* Deleting or editing the ledger is found (hash chain, named line); replacing it with a
+   fresh chain is found because a signed approval binds a ledger head that must be in the current chain (tests).
+5. *A key without a touch.* `no-touch-required` is refused at load; a hardware signature without the touch flag is
+   refused; a software key is refused by default.
+6. *A lost key.* Add it to the revocation list; a signature from it is refused even while it is still enrolled (test).
+7. *The agent makes the key blink (confused deputy).* An agent can run `approve` or any `ssh-keygen -Y sign`, and the key
+   will blink. The typed `approve <job>` on a real terminal and the quota line printed first are what tie a touch to a
+   spend: **touch the key only after reading the quota line and the quote, and never for a prompt you did not start.**
+
+*Residual risk, stated plainly.*
+
+- **Social engineering of the touch.** A tired maintainer who touches a blinking key approves whatever was signed. The
+  signed text is bounded (2 USD, one job, minutes) and the ledger names the principal, but the touch is a human decision.
+- **Compromise of the signing step.** `approve` runs as the maintainer's account; code that replaces `ssh-keygen`,
+  `safo` itself, or the terminal can show one quota line and sign another text. The verifier checks the signed text, not
+  what was displayed. A hardware key with a display (not assumed here) would close this.
+- **The key is still readable.** The paid API key lives in the secret store that the maintainer's account can read. An
+  agent running as him could call the vendor directly, bypassing `safo` and this gate. The signed approval protects the
+  wrapper path and the guard; the **vendor-side monthly limit** is the backstop for everything else.
+- **The chain is tamper-evident, not tamper-proof.** Someone who rewrites the whole ledger and its head file consistently
+  can make a past month read lower. That does not give them a signature: the next paid call still needs a fresh
+  signed approval whose ledger head is in the chain, and an approval signed before the rewrite no longer matches. But
+  the quota line the maintainer reads at the next `approve` comes from the file as it is, so a silently rewritten
+  ledger can show a smaller month. Truncating the last rows is found only if the head file or a signed approval still
+  remembers them.
+- **Trust-file location.** `/etc/safo` must really be root-owned. The code checks ownership; it cannot prove that
+  nobody holds root.
+- **Software and agent-held keys** are weaker than a hardware key. They work only with a written opt-in, and `keys check`
+  says so.
+- **Assurance Tier 2 (passkeys) is not built.** See [Gemini keys](gemini-keys.md).
 
 ## The ledger
 
 `gemini-spend-ledger.jsonl` lives outside git (default `~/.local/share/safo/`, or the path in `gemini.yaml`), is created
-mode 600 and is **append-only**: the wrapper only appends, under a lock, and fsyncs. A call writes a `call_start` row (time,
-model, tier, estimated tokens and cost, job, approval) before the request leaves and a `call_end` row after (status, HTTP
-status, usage, actual cost). A start with no end, and an ambiguous end, count their **estimate** as spent. The maintainer
-may add `{"type": "usage", "date": "YYYY-MM-DD", "amount_usd": N}` rows by hand, for example from the vendor's own
-billing page; they count toward the month. Any line the reader cannot parse stops every call, because a counter that skips
-a line could undercount. A ledger that is a symlink or a pipe is refused. Tests use a temporary ledger and never the real one. A row of an unknown type (a misspelled `usage`, say) stops every call
-and is named by its record number, rather than being ignored.
+mode 600 and is **append-only and hash-chained**: the wrapper only appends, under a lock, and fsyncs. The first time it
+writes, it appends a `chain_start` row that records the hash of the exact bytes of every older row; from then on each
+row carries `prev_hash` and its own `hash`. The older rows are never edited. If anything after (or before) `chain_start`
+is deleted, edited, reordered or cut off, every call refuses and names the line. A second copy of the newest hash sits in
+a small head file beside it (the ledger name plus a head suffix), which catches a truncated tail; a signed approval also binds the head it was made
+against. A call writes a `call_start` row (time, model, tier, estimated tokens and cost, job, approval) before the
+request leaves and a `call_end` row after (status, HTTP status, usage, actual cost); `approval_issued` and
+`approval_used` rows record the nonce, the signing principal and the tier. A start with no end, and an ambiguous end,
+count their **estimate** as spent. Rows are **no longer added by hand** once the chain has started (that would break it):
+use `safo gemini usage --amount-usd N --on-date YYYY-MM-DD --note "where the number came from"` for spend you read on the
+vendor's billing page; it adds a chained `usage` row that counts toward the month. Any line the reader cannot parse stops
+every call, because a counter that skips a line could undercount. A ledger that is a symlink or a pipe is refused. Tests
+use a temporary ledger and never the real one. A row of an unknown type stops every call and is named by its record
+number, rather than being ignored.
 
 ## Private terms
 
@@ -155,7 +231,7 @@ run through a variable, function, `xargs`, `eval` or `-c` when the brief also na
 [Hooks](hooks.md), and a way of building a command that is not on it is not seen. A false positive is a block. Raw SDK use
 outside a brief is out of its reach, and **above 1 MiB the whole hook fails open** with a degraded notice, the Gemini rules
 included (changing the hook's core to read further was left alone). The gates that hold are in the wrapper: a paid call
-without a live approval record raises before any request.
+without a live, signed approval record raises before any request.
 
 ## What is not built or not verified
 
@@ -168,10 +244,16 @@ without a live approval record raises before any request.
 - The vendor-side 25 USD automatic reload the maintainer described is a spend path this gate cannot see. The internal
   ceiling of 10 USD a month stays well under the vendor's own monthly limit, which is the backstop outside our code.
 
+
 ## Installing it
 
 1. Copy `examples/gemini.example.yaml` to `~/.config/safo/gemini.yaml` (mode 600; this path is fixed) and replace the free-tier limits with
-   the ones AI Studio shows. Point `ledger:` at the existing ledger if you keep one.
-2. `safo gemini quota --model gemini-3.6-flash` prints the quota line and sends nothing.
-3. The agent entry, the shape and the board option are in `agents.yaml` and the board files. A live `agents.yaml` and a
+   the ones AI Studio shows. Point `ledger:` at the existing ledger if you keep one. Add the `signing:` block once a key
+   is enrolled.
+2. Enroll at least two security keys by following [Gemini keys](gemini-keys.md). Until a key is enrolled, no paid call can
+   be approved; the free tier does not need one.
+3. `safo gemini quota --model gemini-3.6-flash` prints the quota line and sends nothing. `safo gemini keys check` checks the
+   enrolled keys. A dry run of `safo gemini approve` (the global `--dry-run` flag; the key guide has the full command)
+   tests a key without spending.
+4. The agent entry, the shape and the board option are in `agents.yaml` and the board files. A live `agents.yaml` and a
    live project need the same additions by hand; `safo audit` reports the missing Agent option.

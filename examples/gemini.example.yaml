@@ -26,6 +26,14 @@ caps: {job_usd: 2, month_usd: 10, block_usd: 2}
 # is missing while another gemini-spend-ledger.jsonl sits in a sibling folder, every call is refused: point this at the real one.
 # ledger: /absolute/path/gemini-spend-ledger.jsonl
 
+# Who signs paid approvals (docs/gemini-keys.md). The path is handed to `ssh-keygen -Y sign`; this code never opens it.
+# For a hardware key it is the small key-handle file `ssh-keygen -t ed25519-sk` wrote, not a secret. The principal is the
+# label of that key in /etc/safo/gemini-allowed-signers. Leave the block out until a key is enrolled: no paid call can
+# be approved without it, and the free tier does not need it. REPLACE both values.
+# signing:
+#   key: /path/to/safo_gemini_yubikey_a
+#   principal: yubikey-a
+
 # Your private terms, checked against every prompt before it is sent: none, default (~/.config/safo/privacy-terms.txt) or an
 # absolute path. A file that cannot be read stops the call. `none` is the written opt-out.
 private_terms: default

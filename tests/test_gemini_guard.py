@@ -21,7 +21,7 @@ import yaml
 from agentsdata import agents_with
 from geminidata import MODEL, NOW, hard_timeout
 from hooksdata import agents_file, dispatch, hooks, read_log, set_mode
-from safo.gemini import ApprovalStore, Locations, approval_problem
+from safo.gemini import Locations, approval_problem, open_store
 from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, findings
 from safo.hooks import RULES, Verdict, check_dispatch, decide
 
@@ -154,7 +154,8 @@ def test_the_hook_allows_a_paid_brief_whose_record_is_live(
     _private_home: Path, tmp_path: Path, gemini_locations: Locations
 ) -> None:
     agents = agents_file(tmp_path / "agents.yaml")
-    store = ApprovalStore(gemini_locations.approvals)
+    ledger = tmp_path / "data" / "ledger.jsonl"  # in its own folder: a bare ledger.jsonl would look like a stray ledger
+    store = open_store(gemini_locations, ledger, str(gemini_locations.home / "key"), "test-key-a")
     now = dt.datetime.now(dt.UTC)
     record = store.issue(
         model=MODEL,
@@ -167,6 +168,8 @@ def test_the_hook_allows_a_paid_brief_whose_record_is_live(
         beyond_ceiling=False,
     )
     _config_with_terms(gemini_locations, tmp_path, "none")
+    config = gemini_locations.config.read_text().replace(str(tmp_path / "ledger.jsonl"), str(ledger))
+    gemini_locations.config.write_text(config)
     brief = f"gemini: paid model={MODEL} cap=1.50 approval={record.id}\n{PUBLIC}"
     code, out, _ = hooks("guard", "--agents", str(agents), home=_private_home, stdin=dispatch(prompt=brief), now=now)
     assert code == 0

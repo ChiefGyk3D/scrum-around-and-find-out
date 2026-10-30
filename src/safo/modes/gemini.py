@@ -6,20 +6,26 @@
                                                            print the quota line, then write one single-use approval
     safo gemini ask     --model M --material public --prompt-file F [--paid --job J --approval ID]
                                                            print the quota line, send ONE request, log it
+    safo gemini keys    list | check | propose PUBKEY_FILE --label NAME
+                                                           read-only: the enrolled approval keys (never edits them)
+    safo gemini usage   --amount-usd X --on-date YYYY-MM-DD --note TEXT
+                                                           add a vendor-observed spend row to the chained ledger
 
-Read docs/gemini.md. `approve` records what the maintainer said; run it only after he has said yes in his own message.
+Read docs/gemini.md. `approve` asks the maintainer's security key to SIGN his approval (a touch); run it only after he
+has said yes in his own message, and he touches the key only after reading the quota line.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn, TextIO
 
-from safo import gemini, output
+from safo import gemini, geminisign, output
 from safo.bounded import read_bounded
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
@@ -36,6 +42,7 @@ from safo.gemini import (
     fixed,
     load_config,
     money,
+    open_store,
     paid_quota,
     quota_line,
     snapshot,
@@ -45,8 +52,14 @@ from safo.modes import LocalMode, register_local
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("action", choices=["quota", "approve", "ask"])
-    parser.add_argument("--model", required=True, help="a model named in the config")
+    parser.add_argument("action", choices=["quota", "approve", "ask", "keys", "usage"])
+    parser.add_argument("keys_action", nargs="?", choices=["list", "check", "propose"], help="keys: what to do")
+    parser.add_argument("keys_file", nargs="?", default="", help="keys propose: the public key file (.pub)")
+    parser.add_argument("--label", default="", help="keys propose: the principal label, such as yubikey-a")
+    parser.add_argument("--amount-usd", default="", help="usage: the spend to add, in USD")
+    parser.add_argument("--on-date", default="", help="usage: the date of that spend, YYYY-MM-DD")
+    parser.add_argument("--note", default="", help="usage: where the number came from")
+    parser.add_argument("--model", default="", help="a model named in the config (not needed for keys and usage)")
     parser.add_argument("--paid", action="store_true", help="the paid tier: needs --job and --approval")
     parser.add_argument("--job", default="", help="the job an approval is for")
     parser.add_argument("--approval", default="", help="the id `approve` printed")
@@ -76,7 +89,12 @@ def brief_namespace(tokens: list[str]) -> argparse.Namespace:
     disagree about what a spelling means."""
     parser = _BriefParser(prog="safo gemini", add_help=False, allow_abbrev=False)
     add_arguments(parser)
-    return parser.parse_args(tokens)
+    ns = parser.parse_args(tokens)
+    if ns.action in ("quota", "approve", "ask") and not ns.model:
+        raise BriefParseError("the following arguments are required: --model")
+    if ns.action not in ("keys",) and (ns.keys_action or ns.keys_file):
+        raise BriefParseError("unrecognized arguments: a word after the action")
+    return ns
 
 
 def _config() -> GeminiConfig:
@@ -167,10 +185,28 @@ def approve_flow(
         f"you are approving up to {money(amount)} USD on {req.model} for job {req.job}"
         + (" and it PASSES the monthly ceiling" if beyond else "")
     )
+    ctx.say(
+        "your security key will blink next. Touch it only because you have just read the quota line and the quote "
+        "above and they are right; if you did not start this, do not touch it."
+    )
     if confirm(f"type exactly `{phrase}` to approve, anything else cancels: ").strip() != phrase:
         raise RefusedError("not confirmed; no approval record was written")
     if ctx.dry_run:
-        ctx.say("dry run: no approval record written")
+        # signs a throw-away text in another namespace and checks it: tests the key and the enrollment, spends nothing,
+        # writes no record and no ledger row
+        trust = store.trust
+        if trust is None or not store.signing_key or not store.signing_principal:
+            raise RefusedError("signing is not set up (signing.key and signing.principal in gemini.yaml)")
+        text = geminisign.canonical({"dry_run": True, "job": req.job})
+        armor = geminisign.sign(store.signing_key, text.encode(), geminisign.DRYRUN_NAMESPACE, ctx.env)
+        who = geminisign.verify(trust, text.encode(), armor, namespace=geminisign.DRYRUN_NAMESPACE)
+        if who.label != store.signing_principal:
+            raise RefusedError("the key that signed is not the principal named in gemini.yaml")
+        ctx.say(
+            f"dry run: the signature verifies. principal {who.label}, {who.key_type}, {who.fingerprint}, "
+            f"touch {'seen' if who.user_present else 'not shown (a software key reports none)'}, "
+            f"PIN {'seen' if who.user_verified else 'not shown'}. No approval record and no ledger row were written."
+        )
         return EXIT_OK
     record = store.issue(
         model=req.model,
@@ -185,15 +221,72 @@ def approve_flow(
     )
     ctx.say(
         f"approval record {record.id}: {req.model}, job {record.job}, up to {money(amount)} USD, "
-        f"single use, expires {record.expires_at.strftime('%Y-%m-%dT%H:%M:%SZ')}. It records the quote; "
-        "it is not proof that he said it."
+        f"single use, signed by {record.principal}, expires {record.expires_at.strftime('%Y-%m-%dT%H:%M:%SZ')}."
     )
     return EXIT_OK
 
 
+def _trust() -> geminisign.Trust:
+    loc = gemini.fixed_locations()
+    return geminisign.Trust(loc.signers, loc.revoked, loc.trust_uid, loc.require_hardware)
+
+
+def run_keys(ctx: LocalContext, args: argparse.Namespace) -> int:
+    """Read-only. The maintainer enrolls, rotates or revokes a key by editing the two trust files by hand."""
+    trust = _trust()
+    if args.keys_action == "list":
+        for row in geminisign.key_rows(trust) or ["(no key is enrolled)"]:
+            ctx.say(row)
+        return EXIT_OK
+    if args.keys_action == "check":
+        problems, warnings = geminisign.check_report(trust)
+        for line in problems:
+            ctx.say(f"PROBLEM: {line}")
+        for line in warnings:
+            ctx.say(f"WARNING: {line}")
+        if problems:
+            raise RefusedError("keys check found problems (above)")
+        ctx.say(f"ok: every enrolled key parses, none carries no-touch-required ({len(warnings)} warnings)")
+        return EXIT_OK
+    if args.keys_action == "propose":
+        if not args.keys_file or not args.label:
+            raise ConfigError("keys propose needs a public key file and --label NAME")
+        for line in geminisign.propose_line(trust, Path(args.keys_file), args.label):
+            ctx.say(line)
+        return EXIT_OK
+    raise ConfigError("keys: say list, check or propose")
+
+
+def run_usage(ctx: LocalContext, args: argparse.Namespace, cfg: GeminiConfig) -> int:
+    amount = usd_amount(args.amount_usd, "--amount-usd")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.on_date):
+        raise ConfigError("--on-date: expected YYYY-MM-DD")
+    if not args.note.strip() or len(args.note) > 300:
+        raise ConfigError("--note: say where the number came from (1 to 300 characters)")
+    if ctx.dry_run:
+        ctx.say("dry run: nothing written")
+        return EXIT_OK
+    ledger = Ledger(cfg.ledger)
+    with ledger.lock():
+        ledger.append(
+            {"type": "usage", "date": args.on_date, "amount_usd": float(amount), "note": args.note.strip()},
+            ts=gemini.stamp(ctx.now),
+        )
+    ctx.say(f"added {money(amount)} USD for {args.on_date} to the chained ledger")
+    return EXIT_OK
+
+
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
+    if args.action != "keys" and (args.keys_action or args.keys_file):
+        raise ConfigError("unrecognized arguments: a word after the action")
+    if args.action == "keys":
+        return run_keys(ctx, args)
     cfg = _config()
-    store = ApprovalStore(gemini.fixed_locations().approvals)
+    if args.action == "usage":
+        return run_usage(ctx, args, cfg)
+    if not args.model:
+        raise ConfigError("--model is required")
+    store = open_store(gemini.fixed_locations(), cfg.ledger, cfg.signing_key, cfg.signing_principal, ctx.env)
     req = _request(args)
     if args.action == "quota":
         ctx.say(quota_line(cfg, req, ctx.now))

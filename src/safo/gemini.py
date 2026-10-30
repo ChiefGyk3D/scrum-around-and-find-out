@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import datetime as dt
+import hashlib
 import http.client
 import importlib
 import json
@@ -64,7 +65,7 @@ JOB_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 PLAIN_KEY = re.compile(r"[\x21-\x7e]{16,512}")
 MAX_PROMPT_BYTES = 200_000
 MAX_QUOTE = 500
-MAX_TTL_MINUTES = 24 * 60
+MAX_TTL_MINUTES = 240  # a signed approval is short-lived: the touch happens just before the job
 MAX_RETRY_AFTER = 86_400.0
 SECRET_TOOL_TIMEOUT = 20.0
 SECRET_SHAPES = (
@@ -194,6 +195,8 @@ class GeminiConfig:
     free: Mapping[str, FreeLimits]
     prices: Mapping[str, Price]
     private_terms: str = "default"  # none, default (the fixed privacy-terms.txt) or an absolute path
+    signing_key: str = ""  # the key file (or agent-held public key) `ssh-keygen -Y sign` is given; never opened here
+    signing_principal: str = ""  # the enrolled label that key signs as; written into the signed text and checked
 
 
 def _endpoint(r: Reader, value: object) -> str:
@@ -234,6 +237,7 @@ def parse_config(data: object, source: str = "gemini config", home: Path | None 
             "free",
             "paid",
             "private_terms",
+            "signing",
         },
         {"version", "endpoint", "price_source", "price_checked", "secrets", "free", "paid"},
     )
@@ -301,6 +305,13 @@ def parse_config(data: object, source: str = "gemini config", home: Path | None 
         raise r.fail("private_terms", "expected none, default or an absolute path")
     if not ledger.is_absolute():
         raise r.fail("ledger", "expected an absolute path")
+    signing = r.mapping(top.get("signing", {}), "signing", {"key", "principal"})
+    signing_key = r.string(signing["key"], "signing.key") if "key" in signing else ""
+    principal = r.string(signing["principal"], "signing.principal") if "principal" in signing else ""
+    if principal and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", principal):
+        raise r.fail("signing.principal", "expected the label of an enrolled key, such as yubikey-a")
+    if signing_key and (not signing_key.startswith("/") or "\x00" in signing_key):
+        raise r.fail("signing.key", "expected an absolute path to a key file")
     timeout = top.get("timeout_seconds", 60)
     if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not 1 <= timeout <= 300:
         raise r.fail("timeout_seconds", "expected a number from 1 to 300")
@@ -321,6 +332,8 @@ def parse_config(data: object, source: str = "gemini config", home: Path | None 
         free,
         prices,
         terms,
+        signing_key,
+        principal,
     )
 
 
@@ -346,14 +359,35 @@ def load_config(path: Path | str, home: Path | None = None) -> GeminiConfig:
 # -- the ledger ----------------------------------------------------------------------------------------------------
 
 
+def _chain_hash(row: Mapping[str, Any]) -> str:
+    """The hash of a chained row: canonical JSON of every field except `hash` itself (it covers `prev_hash`)."""
+    body = {k: v for k, v in row.items() if k != "hash"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class LedgerState:
+    rows: list[dict[str, Any]]
+    started: bool  # a chain_start row exists
+    head: str  # the hash of the last chained row, "" before the chain starts
+    chained: int  # how many chained rows
+    prefix_hash: str  # sha256 of every byte before chain_start (the legacy rows)
+
+
 class Ledger:
-    """Append-only JSON lines, outside git. A line it cannot read stops every call: a counter that skips a line could
-    undercount spend."""
+    """Append-only JSON lines, outside git, hash-chained from a `chain_start` row on. A line it cannot read stops every
+    call: a counter that skips a line could undercount spend. After `chain_start` every row carries `prev_hash` and its
+    own `hash`; deleting, editing, reordering or truncating a row is found and named by line number. The rows before
+    `chain_start` are never edited: `chain_start` records the hash of their exact bytes."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def read(self) -> list[dict[str, Any]]:
+    @property
+    def head_file(self) -> Path:
+        return self.path.with_name(self.path.name + ".head")
+
+    def state(self) -> LedgerState:
         try:
             raw = read_bounded(self.path, MAX_FILE_BYTES + 1)
         except FileNotFoundError:
@@ -363,7 +397,7 @@ class Ledger:
                     "this ledger does not exist yet, but another ledger with the same name does: starting an empty "
                     "one would read 0 spent. Move the real one here, or point `ledger:` in gemini.yaml at it"
                 ) from None
-            return []
+            return LedgerState([], False, "", 0, hashlib.sha256(b"").hexdigest())
         except OSError:
             raise RefusedError(
                 "the spend ledger is not a plain readable file (a link, a pipe or no permission)"
@@ -371,7 +405,11 @@ class Ledger:
         if len(raw) > MAX_FILE_BYTES:
             raise RefusedError("the spend ledger is larger than the reader allows; archive it by hand first")
         rows: list[dict[str, Any]] = []
-        for number, line in enumerate(raw.splitlines(), 1):
+        numbers: list[int] = []
+        offsets: list[int] = []
+        at = 0
+        for number, line in enumerate(raw.splitlines(keepends=True), 1):
+            start, at = at, at + len(line)
             if not line.strip():
                 continue
             try:
@@ -381,10 +419,84 @@ class Ledger:
             if not isinstance(row, dict):
                 raise RefusedError(f"the spend ledger has an unreadable line ({number}); fix it by hand")
             rows.append(row)
-        return rows
+            numbers.append(number)
+            offsets.append(start)
+        first = next((i for i, row in enumerate(rows) if row.get("type") == "chain_start"), None)
+        if first is None:
+            for i, row in enumerate(rows):
+                if "prev_hash" in row or "hash" in row:
+                    raise RefusedError(
+                        f"the spend ledger has a chained row (line {numbers[i]}) but no chain_start: rows were removed"
+                    )
+            return LedgerState(rows, False, "", 0, hashlib.sha256(raw).hexdigest())
+        prefix_hash = hashlib.sha256(raw[: offsets[first]]).hexdigest()
+        previous = prefix_hash
+        for i in range(first, len(rows)):
+            row, line_no = rows[i], numbers[i]
+            if row.get("type") == "chain_start" and i != first:
+                raise RefusedError(f"the spend ledger starts its chain twice (line {line_no})")
+            if row.get("prev_hash") != previous:
+                raise RefusedError(
+                    f"the spend ledger chain is broken at line {line_no}: a row before it was removed, "
+                    "reordered or edited"
+                )
+            if not isinstance(row.get("hash"), str) or row["hash"] != _chain_hash(row):
+                raise RefusedError(f"the spend ledger chain is broken at line {line_no}: this row was edited")
+            previous = row["hash"]
+        if rows[first].get("legacy_rows") != first:
+            raise RefusedError(f"the spend ledger chain is broken at line {numbers[first]}: legacy rows were removed")
+        state = LedgerState(rows, True, previous, len(rows) - first, prefix_hash)
+        self._check_head_file(state, rows[first:], numbers[first:])
+        return state
 
-    def append(self, row: dict[str, Any]) -> None:
-        data = (json.dumps(row, sort_keys=True) + "\n").encode()
+    def _check_head_file(self, state: LedgerState, chained: list[dict[str, Any]], numbers: list[int]) -> None:
+        """The head file is a second copy of the newest hash. An editor that truncates the tail but leaves it is caught;
+        one that also rewrites it is not (see docs/gemini.md)."""
+        try:
+            text = read_bounded(self.head_file, 256).decode("ascii").strip()
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError):
+            raise RefusedError("the spend ledger's head file cannot be read") from None
+        count_text, _, digest = text.partition(" ")
+        if not count_text.isdigit() or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RefusedError("the spend ledger's head file is malformed")
+        count = int(count_text)
+        if count > state.chained:
+            raise RefusedError(
+                f"the spend ledger is shorter than its head file says ({state.chained} chained rows, "
+                f"{count} expected): rows at the end were removed"
+            )
+        if count and chained[count - 1]["hash"] != digest:
+            raise RefusedError("the spend ledger does not match its head file: it was rewritten")
+
+    def read(self) -> list[dict[str, Any]]:
+        return self.state().rows
+
+    def append(self, row: dict[str, Any], *, ts: str = "") -> str:
+        """Append one chained row (starting the chain first when it has not begun) and return its hash. The caller holds
+        `lock()`; the chain is checked before anything is written, so a broken ledger takes no new rows."""
+        state = self.state()
+        lines: list[dict[str, Any]] = []
+        previous = state.head
+        if not state.started:
+            start = {
+                "type": "chain_start",
+                "ts": ts or stamp(dt.datetime.now(dt.UTC)),
+                "legacy_rows": len(state.rows),
+                "prev_hash": state.prefix_hash,
+            }
+            start["hash"] = _chain_hash(start)
+            lines.append(start)
+            previous = str(start["hash"])
+        full = {**row, "prev_hash": previous}
+        full["hash"] = _chain_hash(full)
+        lines.append(full)
+        self._write_lines(lines, state.chained + len(lines))
+        return str(full["hash"])
+
+    def _write_lines(self, lines: list[dict[str, Any]], count: int) -> None:
+        data = "".join(json.dumps(r, sort_keys=True) + "\n" for r in lines).encode()
         try:
             ensure_dir(self.path.parent)
             fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -398,6 +510,23 @@ class Ledger:
             raise RefusedError("the spend ledger could not be written") from None
         finally:
             os.close(fd)
+        with contextlib.suppress(GeminiError, ConfigError, OSError):
+            write_text(self.head_file, f"{count} {lines[-1]['hash']}\n")
+
+    def ensure_chain(self, ts: str = "") -> str:
+        """Start the chain if it has not begun; return the hash of the newest row. The caller holds `lock()`."""
+        state = self.state()
+        if state.started:
+            return state.head
+        start = {
+            "type": "chain_start",
+            "ts": ts or stamp(dt.datetime.now(dt.UTC)),
+            "legacy_rows": len(state.rows),
+            "prev_hash": state.prefix_hash,
+        }
+        start["hash"] = _chain_hash(start)
+        self._write_lines([start], 1)
+        return str(start["hash"])
 
     def lock(self) -> contextlib.AbstractContextManager[None]:
         return file_lock(self.path.with_name(self.path.name + ".lock"), timeout=10.0)
@@ -429,6 +558,8 @@ class Call:
 class Snapshot:
     calls: tuple[Call, ...]
     manual: tuple[tuple[str, Decimal], ...]  # (YYYY-MM-DD, USD) the maintainer wrote as `usage` rows
+    heads: frozenset[str] = frozenset()  # the hash of every chained row: an approval's ledger_head must be one of them
+    used: tuple[tuple[str, str], ...] = ()  # (nonce, principal) of every approval a call has spent
 
 
 def _bad(number: int) -> RefusedError:
@@ -439,6 +570,8 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
     starts: dict[str, Call] = {}
     ends: dict[str, dict[str, Any]] = {}
     manual: list[tuple[str, Decimal]] = []
+    used: list[tuple[str, str]] = []
+    heads = frozenset(str(row["hash"]) for row in rows if isinstance(row.get("hash"), str))
     for number, row in enumerate(rows, 1):
         kind = row.get("type")
         try:
@@ -458,8 +591,13 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
                 if not isinstance(call_id, str) or call_id in ends:
                     raise ValueError("end")
                 ends[call_id] = row
-            elif kind == "funding":
+            elif kind in ("funding", "chain_start", "approval_issued"):
                 continue
+            elif kind == "approval_used":
+                nonce, principal = row["nonce"], row["principal"]
+                if not isinstance(nonce, str) or not isinstance(principal, str) or any(n == nonce for n, _ in used):
+                    raise ValueError("used")
+                used.append((nonce, principal))
             elif kind == "usage":
                 date = row["date"]
                 if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
@@ -486,7 +624,7 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
         calls.append(call)
     if ends:
         raise _bad(0)  # an end with no start
-    return Snapshot(tuple(calls), tuple(manual))
+    return Snapshot(tuple(calls), tuple(manual), heads, tuple(used))
 
 
 # -- quota lines and the free-tier gate ----------------------------------------------------------------------------
@@ -638,6 +776,11 @@ class Locations:
     config: Path
     approvals: Path
     terms: Path
+    # public keys, root-owned and maintainer-edited; this code never writes to them
+    signers: Path = Path("/etc/safo/gemini-allowed-signers")
+    revoked: Path = Path("/etc/safo/gemini-revoked-signers")  # public keys or fingerprints that may no longer approve
+    trust_uid: int = 0  # the owner the two files above must have
+    require_hardware: bool = True  # only sk keys, unless a key carries the written opt-in; a test may turn this off
 
 
 def fixed_locations() -> Locations:
@@ -656,7 +799,7 @@ def fixed_locations() -> Locations:
 
 @dataclass(frozen=True)
 class Approval:
-    id: str
+    id: str  # the nonce
     model: str
     max_usd: Decimal
     job: str
@@ -666,17 +809,49 @@ class Approval:
     expires_at: dt.datetime
     beyond_ceiling: bool
     issue: str = ""
+    principal: str = ""  # the enrolled key that signed it
+    ledger_head: str = ""  # the ledger chain head it was signed against
+    hardware: bool = False
+
+
+def open_store(
+    loc: Locations,
+    ledger: Path | None,
+    signing_key: str = "",
+    signing_principal: str = "",
+    env: Mapping[str, str] | None = None,
+) -> ApprovalStore:
+    """The one way to build an approval store: trust files and strictness from the fixed locations."""
+    from safo import geminisign
+
+    trust = geminisign.Trust(loc.signers, loc.revoked, loc.trust_uid, loc.require_hardware)
+    return ApprovalStore(loc.approvals, trust, ledger, signing_key, signing_principal, env or {})
 
 
 class ApprovalStore:
-    """One JSON file per approval, mode 0600, in a private folder; a `.used` marker beside it spends it exactly once.
+    """One signed JSON file per approval in a private folder. The file is `{"payload": <canonical JSON text>,
+    "signature": <SSH signature>}`; nothing in it counts until the signature verifies against an enrolled PUBLIC key
+    (see `safo.geminisign`). A record with no signature, or any older unsigned format, authorizes nothing. Single use:
+    the nonce is spent in the hash-chained ledger (authoritative) and by a `.used` marker beside the file.
 
-    A record is evidence of what the maintainer said, written by whoever ran `safo gemini approve`: it is not proof
-    that he said it, and the quote is there so he can check it afterwards.
-    """
+    A record is the maintainer's signature over his quoted words, the amount, the job and a ledger head. The quote is
+    there so he can check afterwards what he approved."""
 
-    def __init__(self, folder: Path) -> None:
+    def __init__(
+        self,
+        folder: Path,
+        trust: Any = None,
+        ledger: Path | None = None,
+        signing_key: str = "",
+        signing_principal: str = "",
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         self.folder = folder
+        self.signing_principal = signing_principal
+        self.trust = trust
+        self.ledger = Ledger(ledger) if ledger is not None else None
+        self.signing_key = signing_key
+        self.env = env or {}
 
     def issue(
         self,
@@ -691,6 +866,8 @@ class ApprovalStore:
         beyond_ceiling: bool,
         issue_ref: str = "",
     ) -> Approval:
+        from safo import geminisign
+
         if not MODEL_NAME.fullmatch(model):
             raise ConfigError("approval: the model name is not a plain model name")
         if not JOB_NAME.fullmatch(job):
@@ -707,49 +884,104 @@ class ApprovalStore:
             raise ConfigError("approval: the quote's time is in the future or more than a day old; ask again")
         if not 1 <= ttl_minutes <= MAX_TTL_MINUTES:
             raise ConfigError(f"approval: the record lives 1 to {MAX_TTL_MINUTES} minutes")
-        record = Approval(
-            secrets.token_hex(8),
-            model,
-            max_usd,
-            job,
-            quote,
-            quoted_at,
-            now,
-            now + dt.timedelta(minutes=ttl_minutes),
-            beyond_ceiling,
-            issue_ref[:80],
-        )
+        if self.trust is None or self.ledger is None or not self.signing_key or not self.signing_principal:
+            raise ConfigError(
+                "approval: signing is not set up (signing.key and signing.principal in gemini.yaml, and the "
+                "allowed-signers file); "
+                "see docs/gemini.md"
+            )
+        ledger = self.ledger
+        with ledger.lock():
+            head = ledger.ensure_chain(stamp(now))  # the chain must exist so the signature has something to bind
+        nonce = secrets.token_hex(8)
         data = {
-            "id": record.id,
+            "version": 1,
+            "nonce": nonce,
             "model": model,
             "max_usd": str(max_usd),
             "job": job,
             "quote": quote,
             "quoted_at": stamp(quoted_at),
             "created": stamp(now),
-            "expires_at": stamp(record.expires_at),
+            "expires_at": stamp(now + dt.timedelta(minutes=ttl_minutes)),
             "beyond_ceiling": beyond_ceiling,
-            "issue": record.issue,
+            "ledger_head": head,
+            "issue": issue_ref[:80],
+            "principal": self.signing_principal,
         }
-        write_text(self.folder / f"{record.id}.json", json.dumps(data, sort_keys=True) + "\n")
+        payload = geminisign.canonical(data)
+        armor = geminisign.sign(self.signing_key, payload.encode(), geminisign.NAMESPACE, self.env)
+        signer = geminisign.verify(self.trust, payload.encode(), armor)
+        if signer.label != self.signing_principal:
+            raise RefusedError("the key that signed is not the principal named in gemini.yaml; no approval was written")
+        path = self.folder / f"{nonce}.json"
+        write_text(path, json.dumps({"payload": payload, "signature": armor}, sort_keys=True) + "\n")
+        record = self.load(nonce)
+        with ledger.lock():
+            ledger.append(
+                {
+                    "type": "approval_issued",
+                    "ts": stamp(now),
+                    "nonce": nonce,
+                    "principal": signer.label,
+                    "fingerprint": signer.fingerprint,
+                    "tier": 1,
+                    "key_kind": "hardware" if signer.hardware else "software",
+                    "job": job,
+                    "model": model,
+                    "max_usd": str(max_usd),
+                    "expires_at": data["expires_at"],
+                }
+            )
         return record
 
     def load(self, record_id: str) -> Approval:
+        from safo import geminisign
+
         if not RECORD_ID.fullmatch(record_id):
             raise RefusedError("a paid call needs an approval record: pass its id")
+        if self.trust is None:
+            raise RefusedError("signed approvals are not set up: there is no allowed-signers file to check against")
         try:
-            data = loads(read_bounded(self.folder / f"{record_id}.json", 8192))
-            if not isinstance(data, dict) or data.get("id") != record_id:
+            outer = loads(read_bounded(self.folder / f"{record_id}.json", 16384))
+        except FileNotFoundError:
+            raise RefusedError("there is no approval record with that id; a paid call needs one") from None
+        except (OSError, ValueError, UnicodeError):
+            raise RefusedError("the approval record cannot be read; ask for a fresh one") from None
+        if (
+            not isinstance(outer, dict)
+            or set(outer) != {"payload", "signature"}
+            or not isinstance(outer["payload"], str)
+            or not isinstance(outer["signature"], str)
+        ):
+            raise RefusedError(
+                "this approval record is not a signed approval (an unsigned record authorizes nothing); "
+                "ask for a fresh one"
+            )
+        text, armor = outer["payload"], outer["signature"]
+        who = geminisign.verify(self.trust, text.encode(), armor)  # raises RefusedError when it does not verify
+        try:
+            data = loads(text)
+            if not isinstance(data, dict) or geminisign.canonical(data) != text or data.get("version") != 1:
                 raise ValueError("record")
+            if data["nonce"] != record_id or data["principal"] != who.label:
+                raise ValueError("nonce")
             quoted = _parse_stamp(data["quoted_at"])
             created = _parse_stamp(data["created"])
             expires = _parse_stamp(data["expires_at"])
             if quoted is None or created is None or expires is None or not isinstance(data["beyond_ceiling"], bool):
                 raise ValueError("record")
+            if not MODEL_NAME.fullmatch(str(data["model"])) or not JOB_NAME.fullmatch(str(data["job"])):
+                raise ValueError("names")
+            max_usd = _decimal(data["max_usd"], "max_usd")
+            if not 0 < max_usd <= JOB_CAP or not isinstance(data["ledger_head"], str) or not data["ledger_head"]:
+                raise ValueError("amount")
+            if expires <= created or expires - created > dt.timedelta(minutes=MAX_TTL_MINUTES):
+                raise ValueError("lifetime")
             return Approval(
                 record_id,
                 str(data["model"]),
-                _decimal(data["max_usd"], "max_usd"),
+                max_usd,
                 str(data["job"]),
                 str(data["quote"]),
                 quoted,
@@ -757,17 +989,19 @@ class ApprovalStore:
                 expires,
                 data["beyond_ceiling"],
                 str(data.get("issue", "")),
+                who.label,
+                data["ledger_head"],
+                who.hardware,
             )
-        except FileNotFoundError:
-            raise RefusedError("there is no approval record with that id; a paid call needs one") from None
-        except (OSError, ValueError, KeyError, ConfigError):
-            raise RefusedError("the approval record cannot be read; ask for a fresh one") from None
+        except (ValueError, KeyError, ConfigError):
+            raise RefusedError("the signed approval is malformed or outside the caps; ask for a fresh one") from None
 
     def is_used(self, record_id: str) -> bool:
         return os.path.lexists(self.folder / f"{record_id}.used")
 
     def consume(self, record_id: str) -> None:
-        """Atomic: the marker is created exclusively, so two callers cannot both spend one record."""
+        """Atomic: the marker is created exclusively, so two callers cannot both spend one record. The ledger row that
+        spends the nonce for good is written by the caller under the ledger lock."""
         ensure_dir(self.folder)
         try:
             fd = os.open(self.folder / f"{record_id}.used", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -782,12 +1016,18 @@ def approval_problem(store: ApprovalStore, record_id: str, now: dt.datetime) -> 
     """Why a record cannot be used now, or None when it is live. For the dispatch guard; it spends nothing."""
     try:
         record = store.load(record_id)
+        if store.is_used(record_id):
+            return "this approval record was already used"
+        if now >= record.expires_at:
+            return "this approval record has expired"
+        if store.ledger is not None:
+            snap = snapshot(store.ledger.read())
+            if any(nonce == record_id for nonce, _ in snap.used):
+                return "this approval record was already used"
+            if record.ledger_head not in snap.heads:
+                return "this approval was signed against a ledger head that is not in the current ledger"
     except GeminiError as err:
         return str(err)
-    if store.is_used(record_id):
-        return "this approval record was already used"
-    if now >= record.expires_at:
-        return "this approval record has expired"
     return None
 
 
@@ -797,8 +1037,13 @@ def _gate_paid(
     if not req.approval:
         raise RefusedError("a paid call needs an approval record (--approval ID); none was given")
     record = store.load(req.approval)
-    if store.is_used(record.id):
+    if store.is_used(record.id) or any(nonce == record.id for nonce, _ in snap.used):
         raise RefusedError("this approval record was already used; each paid call needs a fresh one")
+    if record.ledger_head not in snap.heads:
+        raise RefusedError(
+            "this approval was signed against a ledger head that is not in the current ledger chain: "
+            "the ledger was replaced or rewound; ask for a fresh approval"
+        )
     if now >= record.expires_at:
         raise RefusedError("this approval record has expired; ask for a fresh one")
     if record.model != req.model:
@@ -1174,6 +1419,17 @@ def ask(
         if req.tier == "paid":
             record, est = _gate_paid(cfg, store, snap, req, now)
             store.consume(record.id)  # spent before the request leaves, so a crash can never allow a replay
+            ledger.append(
+                {
+                    "type": "approval_used",
+                    "ts": stamp(now),
+                    "nonce": record.id,
+                    "principal": record.principal,
+                    "tier": 1,
+                    "key_kind": "hardware" if record.hardware else "software",
+                    "job": req.job,
+                }
+            )
         else:
             _gate_free(cfg, snap, req, now)
         ledger.append(
