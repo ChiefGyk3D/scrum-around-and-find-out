@@ -419,3 +419,38 @@ def test_a_stray_word_after_a_money_action_is_refused_like_any_unknown_argument(
         brief_namespace(["ask", "list", "--model", MODEL])
     code, _, err = rig.run("quota", "list", *rig.base())
     assert code == 2 and "unrecognized" in err
+
+
+# -- the paid path is off unless the root-owned switch says otherwise ----------------------------------------------
+
+
+def test_approve_is_refused_while_paid_use_is_disabled_and_a_dry_run_still_tests_the_key(rig: Rig) -> None:
+    rig.locations.paid_switch.unlink()
+    code, out = rig.approve()
+    assert code == -1 and "paid use is disabled" in out and "#NNN" in out and rig.approvals() == []
+    assert "type exactly" not in out and "QUOTA paid" not in out, "refused before the person is asked anything"
+    args = brief_namespace(approve_args(rig))
+    text = io.StringIO()
+    ctx = LocalContext(text, {"HOME": str(rig.home), "PATH": str(rig.bin)}, NOW, dry_run=True)
+    req = __import__("safo.modes.gemini", fromlist=["_request"])._request(args)
+    store = open_store(rig.locations, rig.ledger, rig.signing["key"], "test-key-a", ctx.env)
+    assert approve_flow(ctx, args, rig.cfg(), store, req, interactive=True, confirm=lambda p: "approve job-1") == 0
+    assert "dry run: the signature verifies" in text.getvalue() and rig.approvals() == []
+
+
+def test_the_cli_refuses_a_paid_ask_with_the_switch_off(rig: Rig) -> None:
+    rig.locations.paid_switch.unlink()
+    argv = [
+        "ask",
+        *rig.base(),
+        "--paid",
+        "--job",
+        "job-1",
+        "--approval",
+        "abcdefgh12",
+        "--prompt-file",
+        str(rig.prompt),
+    ]
+    code, _, err = rig.run(*argv, "--material", "public")
+    assert code == 2 and "paid use is disabled" in err
+    assert not rig.asked.exists() and rig.server.requests == []

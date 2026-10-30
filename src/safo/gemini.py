@@ -842,11 +842,48 @@ class Locations:
     trust_uid: int = 0  # the owner the two files above must have
     require_hardware: bool = True  # only sk keys, unless a key carries the written opt-in; a test may turn this off
     revocation_required: bool = True  # a missing revocation list refuses every approval; a test may turn this off
+    # the paid path is off unless this root-owned file says `enabled`; absence means disabled
+    paid_switch: Path = Path("/etc/safo/gemini-paid-enabled")
 
     @property
     def height_dir(self) -> Path:
         """Where the highest ledger height ever seen is kept, apart from the ledger (beside the approvals)."""
         return self.approvals.parent / "heights"
+
+
+PAID_DISABLED = (
+    "paid use is disabled: the maintainer enables it only after the replay-state hardening ships (follow-up #NNN); "
+    "the free tier is unaffected"
+)
+
+
+def paid_enabled() -> bool:
+    """True only when the root-owned switch file exists, passes the same ownership walk as the trust files, and says
+    `enabled`. Anything else (absent, wrong owner, writable, a symlink into a writable place, other text) is disabled.
+    No flag, environment variable or user-editable setting is consulted."""
+    from safo import geminisign
+
+    loc = fixed_locations()
+    try:
+        data = geminisign.read_trust_file(loc.paid_switch, loc.trust_uid, "paid-use switch")
+    except RefusedError:
+        return False
+    lines = [x.strip() for x in data.decode("utf-8", "replace").splitlines() if x.strip() and not x.startswith("#")]
+    return lines == ["enabled"]
+
+
+def require_paid() -> None:
+    if not paid_enabled():
+        raise RefusedError(PAID_DISABLED)
+
+
+class DisabledCheck:
+    """What the dispatch guard is given while paid use is off: every paid step is refused with the reason."""
+
+    disabled = PAID_DISABLED
+
+    def __call__(self, record_id: str) -> str | None:
+        return PAID_DISABLED
 
 
 def fixed_locations() -> Locations:
@@ -934,6 +971,7 @@ class ApprovalStore:
     ) -> Approval:
         from safo import geminisign
 
+        require_paid()
         if not MODEL_NAME.fullmatch(model):
             raise ConfigError("approval: the model name is not a plain model name")
         if not JOB_NAME.fullmatch(job):
@@ -1483,6 +1521,8 @@ def ask(
     now: dt.datetime,
 ) -> Reply:
     """Send one request, once, or say which gate stopped it."""
+    if req.tier == "paid":
+        require_paid()  # before anything else: the paid path is off unless the root-owned switch says it is on
     _check_request(cfg, req)
     terms = load_private_terms(cfg.private_terms, fixed_locations().terms if cfg.private_terms == "default" else None)
     if private_term_hit(terms, [req.prompt, fold(req.prompt)]):

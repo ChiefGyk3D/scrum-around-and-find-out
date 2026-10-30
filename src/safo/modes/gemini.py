@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import re
 import sys
 from collections.abc import Callable
@@ -160,6 +161,8 @@ def approve_flow(
 
     `interactive` and `confirm` are arguments, not flags: the command line passes the real streams, and only a test can
     pass anything else. The ceiling flag comes from the ledger here, never from the caller."""
+    if not ctx.dry_run:
+        gemini.require_paid()  # a dry run spends nothing and writes nothing, so it can still test a key
     line = quota_line(cfg, req, ctx.now)  # first: an approval is refused when the line cannot be produced
     ctx.say(line)
     amount = usd_amount(args.max_usd, "--max-usd")
@@ -237,6 +240,9 @@ def _trust() -> geminisign.Trust:
 def run_keys(ctx: LocalContext, args: argparse.Namespace) -> int:
     """Read-only. The maintainer enrolls, rotates or revokes a key by editing the two trust files by hand."""
     trust = _trust()
+    if args.keys_action in ("list", "check") and not os.path.lexists(trust.signers) and not gemini.paid_enabled():
+        ctx.say("no allowed-signers file, and paid use is disabled: there are no approval keys to list or check")
+        return EXIT_OK
     if args.keys_action == "list":
         for row in geminisign.key_rows(trust, ctx.now) or ["(no key is enrolled)"]:
             ctx.say(row)

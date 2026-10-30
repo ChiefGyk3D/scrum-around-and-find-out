@@ -176,7 +176,8 @@ spelling; a command that parser rejects is treated as a paid, unapproved step. `
 refuses when its estimate is over it.
 
 6. **`gemini-paid`.** A paid step (`paid`, `--paid`, `tier=paid`, or the paid secret-store config `prd_paid` named anywhere
-   in the brief) states a cap above 0 and at most 2 USD and an approval id whose record exists, carries a valid signature by an
+   in the brief) is refused outright, with a message that says paid use is disabled, while the root-owned paid-use switch is off (the
+   default; see [Gemini](gemini.md)). Once it is on, a paid step states a cap above 0 and at most 2 USD and an approval id whose record exists, carries a valid signature by an
    enrolled security key (see [Gemini](gemini.md)), was signed against a ledger head that is still in the ledger chain, has
    not expired and has not been used (its nonce is not spent in the ledger). A check that raises, or a guard with no approval folder to look in, blocks.
 7. **`gemini-material`.** Every Gemini step needs the line `gemini-material: public`. A secret-shaped string (an API key, a

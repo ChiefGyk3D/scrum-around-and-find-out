@@ -1,5 +1,12 @@
 # Gemini
 
+> **Status.** The free research path is live: `quota`, `ask` without `--paid`, and `keys` need no root file and no key.
+> The paid path is built but **disabled** by a root-owned switch file (`/etc/safo/gemini-paid-enabled`, which must say
+> `enabled`; absent means disabled) until a state authority outside the maintainer's account exists to hold the spend
+> and single-use state. While it is off, `ask --paid` and `approve` are refused with a message that says so, and the
+> dispatch guard blocks any brief with a paid step. The approval machinery below stays in the tree, tested, for when the
+> switch is turned on. Nothing on the command line, in the environment or in `gemini.yaml` can turn it on.
+
 Gemini is a **free-only** research provider for **public material**. It is in [the roster](routing.md) as the agent
 `gemini`, and the shape `public-source-research` prefers it. This page is what the code does, what it cannot do, and what
 the maintainer has to supply. Decisions are in issues #195 (the spend gate), #196 (the provider) and #200 (this build).
@@ -29,6 +36,12 @@ A model never counts, caps or approves anything here.
    the dispatch guard no record means a denial in every guard mode, `warn` included.
 
 ## Paid calls
+
+**Disabled for now.** Everything in this section describes the path that runs only when the root-owned switch is on
+(`/etc/safo/gemini-paid-enabled`, owned by root, not group- or other-writable, under root-owned directories, containing the
+line `enabled`; it is read with the same ownership walk as the trust files). Without it, every paid call and every
+`approve` is refused with "paid use is disabled" and the guard blocks paid steps. A `--dry-run` of `safo gemini approve`
+still works, because it signs a throw-away text and spends and writes nothing.
 
 Paid use is for what the free tier cannot do (image generation is paid-only: the free quota for image models is zero) or
 what needs a model that has no free tier. Every monetary action needs a fresh, explicit, single-use **approval record**.
@@ -272,10 +285,10 @@ without a live, signed approval record raises before any request.
 ## Installing it
 
 1. Copy `examples/gemini.example.yaml` to `~/.config/safo/gemini.yaml` (mode 600; this path is fixed) and replace the free-tier limits with
-   the ones AI Studio shows. Point `ledger:` at the existing ledger if you keep one. Add the `signing:` block once a key
-   is enrolled.
-2. Enroll at least two security keys by following [Gemini keys](gemini-keys.md). Until a key is enrolled, no paid call can
-   be approved; the free tier does not need one.
+   the ones AI Studio shows. Point `ledger:` at the existing ledger if you keep one. That is all a free-only user needs:
+   no key, no `/etc/safo`. Add the `signing:` block only when paid use is enabled.
+2. Only when paid use is enabled: enroll at least two security keys by following [Gemini keys](gemini-keys.md) and create
+   the switch file. Until then no paid call can be approved.
 3. `safo gemini quota --model gemini-3.6-flash` prints the quota line and sends nothing. `safo gemini keys check` checks the
    enrolled keys. A dry run of `safo gemini approve` (the global `--dry-run` flag; the key guide has the full command)
    tests a key without spending.

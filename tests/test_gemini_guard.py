@@ -1345,3 +1345,39 @@ def test_the_worker_dies_with_its_parent() -> None:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
         parent.kill()
+
+
+def test_the_hook_blocks_every_paid_step_while_paid_use_is_disabled(
+    _private_home: Path, tmp_path: Path, gemini_locations: Locations
+) -> None:
+    agents = agents_file(tmp_path / "agents.yaml")
+    ledger = tmp_path / "data" / "ledger.jsonl"
+    store = open_store(gemini_locations, ledger, str(gemini_locations.home / "key"), "test-key-a")
+    now = dt.datetime.now(dt.UTC)
+    record = store.issue(
+        model=MODEL,
+        max_usd=Decimal("1.50"),
+        job="j1",
+        quote="yes, up to 1.50",
+        quoted_at=now - dt.timedelta(minutes=1),
+        now=now,
+        ttl_minutes=10,
+        beyond_ceiling=False,
+    )
+    _config_with_terms(gemini_locations, tmp_path, "none")
+    gemini_locations.config.write_text(
+        gemini_locations.config.read_text().replace(str(tmp_path / "ledger.jsonl"), str(ledger))
+    )
+    gemini_locations.paid_switch.unlink()
+    for brief in (
+        f"gemini: paid model={MODEL} cap=1.50 approval={record.id}\n{PUBLIC}",
+        f"gemini: paid model={MODEL}\n{PUBLIC}",
+        f"safo gemini ask --model {MODEL} --paid --job j --cap 1.5 --approval {record.id} --material public\n{PUBLIC}",
+    ):
+        _, out, _ = hooks("guard", "--agents", str(agents), home=_private_home, stdin=dispatch(prompt=brief), now=now)
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "paid use is disabled" in data["hookSpecificOutput"]["permissionDecisionReason"]
+    free = f"gemini: free\n{PUBLIC}"
+    _, out, _ = hooks("guard", "--agents", str(agents), home=_private_home, stdin=dispatch(prompt=free), now=now)
+    assert "deny" not in out

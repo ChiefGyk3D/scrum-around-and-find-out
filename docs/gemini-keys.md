@@ -1,5 +1,10 @@
 # Gemini keys
 
+> **Status.** These steps are **needed only when paid use is enabled**. The free research path needs no key and no root
+> file, and paid use is disabled by a root-owned switch until a state authority outside the maintainer's account
+> exists (see [Gemini](gemini.md)). The setup is kept so it is ready, and `keys check` and a dry run of `safo gemini approve` can
+> test a key while the switch is off.
+
 Who may approve paid Gemini spend, and how to add, rotate, back up and revoke the keys that do. Read
 [Gemini](gemini.md) first for what a signed approval is and what it cannot do.
 
@@ -60,7 +65,7 @@ safo gemini keys propose ~/.ssh/KEYFILE.pub --label yubikey-a   # prints the exa
 requirement, and when a Tier 2 credential is enrolled. It fails when no usable key is enrolled, when a key carries
 `no-touch-required`, or when the revocation file is missing.
 
-## Setup: the first key (needs your touch; the agent does not do this)
+## Setup: the first key (only when paid use is enabled; needs your touch; the agent does not do this)
 
 1. **Check OpenSSH.** `ssh -V` must be 8.2 or newer for FIDO keys, and 8.4 or newer for `verify-required` (verified,
    Yubico page, 2026-10-29). The build must have FIDO support (`ssh-keygen -t ed25519-sk` says so if not).

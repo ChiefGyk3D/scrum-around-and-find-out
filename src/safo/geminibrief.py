@@ -169,6 +169,9 @@ def _cap_problem(value: str | None) -> str | None:
 
 def _paid_problem(step: Step, check: ApprovalCheck | None) -> str | None:
     where = f"line {step.line}: " if step.line else ""
+    disabled = getattr(check, "disabled", None)
+    if isinstance(disabled, str):
+        return f"{where}{disabled}"
     if step.unreadable:
         return (
             f"{where}{step.why or 'this Gemini step could not be read exactly as the CLI reads it'}, so it is treated "
