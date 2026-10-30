@@ -646,7 +646,7 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "_COMMAND_START", "_GEMINI_OPTION", "_RISK_OPTION", "_RISK_FLAG",
         "RECORD_ID",
         # the Bash command check (#209) is its own scan of a shell command, not a brief detector
-        "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL", "_HIJACK",
+        "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
     compiled = {n: v for n, v in vars(gb).items() if isinstance(v, re.Pattern)}

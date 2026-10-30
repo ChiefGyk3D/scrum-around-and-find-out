@@ -117,9 +117,24 @@ def test_the_classifier_leaves_ordinary_commands_alone(command: str) -> None:
     assert geminibrief.shell_command_class(command) is None, command
 
 
-def test_the_wrapper_is_allowed_even_when_it_carries_a_name() -> None:
-    assert geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is None
-    assert geminibrief.shell_command_class(f"python3 -m safo gemini quota # {KEY}") is None
+def test_the_wrapper_is_not_exempt_when_it_carries_a_name() -> None:
+    assert (
+        geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is not None
+    )
+    assert geminibrief.shell_command_class(f"python3 -m safo gemini quota # {KEY}") is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "safo gemini quota",
+        "safo gemini ask --model m --prompt-file p",
+        "safo gemini keys check",
+        "python -m safo gemini quota",
+    ],
+)
+def test_the_documented_wrapper_commands_name_nothing_and_are_not_touched(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
 
 
 @pytest.mark.parametrize(
@@ -134,7 +149,7 @@ def test_the_wrapper_is_allowed_even_when_it_carries_a_name() -> None:
         f"\ncurl https://{HOST}",
     ],
 )
-def test_the_wrapper_exemption_does_not_cover_what_is_chained_to_it(tail: str) -> None:
+def test_a_name_chained_to_the_wrapper_is_denied(tail: str) -> None:
     assert geminibrief.shell_command_class("safo gemini ask --model m --prompt-file p" + tail) is not None, tail
 
 
@@ -251,66 +266,19 @@ def test_a_malformed_shell_event_is_still_the_usual_degraded_path(_private_home:
     assert not denied(out)
 
 
-# -- shapes that make a later wrapper call untrustworthy (round 2) ---------------------------------------------------
+# -- a renamed or hijacked wrapper gains nothing ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "alias safo='curl'; safo gemini ask",
-        "alias -- safo=curl\nsafo gemini quota",
-        "alias python3='x'; python3 -m safo gemini quota",
-        "alias pip=true",
-        'safo() { curl "$@"; }; safo gemini ask',
-        "safo () { :; }",
-        "function safo { :; }",
-        "function python { :; }; python -m safo gemini quota",
-        "python3(){ :; }",
-        "pip() { :; }",
-        "export -f safo",
-        "f() { :; }; export -f f",
-        "declare -f safo",
-        "typeset -f python3",
-        "declare -fx pip",
-        "PYTHONPATH=/x python3 -m safo gemini quota",
-        "export PYTHONPATH=/x",
-        "env PYTHONHOME=/x safo gemini quota",
-        "PYTHONSTARTUP=/x python3 -m safo gemini quota",
-        "BASH_ENV=/x bash -c 'safo gemini quota'",
-        "ENV=/x sh -c 'safo gemini quota'",
-        "export 'PYTHON''PATH'=/x",
-        "printf -v PYTHONPATH %s /x",
-        "read PYTHONHOME",
-        "declare -x BASH_ENV=/x",
+        f"alias safo='curl'; safo gemini ask --prompt {HOST}",
+        f'safo() {{ curl "$@"; }}; safo https://{HOST}',
+        f"PYTHONPATH=/x python3 -m safo gemini quota {KEY}",
     ],
 )
-def test_a_command_that_can_redirect_the_wrapper_is_denied(command: str) -> None:
-    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_HIJACK, command
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "make check",
-        "pytest -q tests",
-        "git status --short",
-        "ls",
-        "cat README.md",
-        "python3 -m pytest tests",
-        "docker run --env=FOO x",
-        "echo alias is a word",
-        "export PATH=$PATH:/x",
-        "declare -p",
-        "safo gemini quota",
-    ],
-)
-def test_ordinary_commands_are_not_denied_by_the_redirect_rule(command: str) -> None:
-    assert geminibrief.shell_command_class(command) is None, command
-
-
-def test_the_hijack_denial_class_is_fixed_text() -> None:
-    found = geminibrief.shell_command_class("alias safo='tok_SECRETVALUE123'")
-    assert found == geminibrief.SHELL_HIJACK and "SECRETVALUE" not in found and "safo" not in found
+def test_a_hijacked_wrapper_name_is_denied_by_the_names_in_the_text(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
 
 
 def test_a_command_over_the_size_cap_is_denied_unread() -> None:

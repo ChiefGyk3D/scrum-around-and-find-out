@@ -1021,27 +1021,15 @@ def _findings(
 # A cheap, fail-closed check on one Bash command. It names no value and resolves nothing: it looks for the vendor API
 # host, its SDK, the key variable name and the secret-store project and config names (all shown in docs/gemini-keys.md
 # and examples/gemini.example.yaml), and for words built from escapes or an expansion beside a network or secret tool.
-# The wrapper `safo gemini ...` holds the real gates and is the only exemption. Everything else that names them is
-# denied. The classes are fixed text: a denial never repeats a word of the command.
+# The wrapper `safo gemini ...` holds the real gates. There is no exemption: a command that names them is denied
+# whatever it is called or runs from. The classes are fixed text: a denial never repeats a word of the command.
 SHELL_VENDOR = "the vendor API host or SDK"
 SHELL_KEY = "the key variable name"
 SHELL_STORE = "the secret-store project or config name"
 SHELL_BUILT = "a word built from escapes beside a network or secret tool"
 SHELL_TOOL = "a secret tool run with a shell expansion"
 SHELL_UNVERIFIED = "a command that could not be checked in time"
-SHELL_HIJACK = "a function, alias or startup variable that can redirect the wrapper"
 SHELL_CAP = 64 * 1024  # a command longer than this is denied unread: no normalization runs on it
-_WRAP_NAME = r"(?:safo|python[\d.]*|pip[\d.]*)"
-_STARTUP_NAME = r"(?:pythonpath|pythonhome|pythonstartup|bash_env|env)"
-_HIJACK = re.compile(
-    rf"(?<![\w-])alias\s+(?:-\S+\s+)*{_WRAP_NAME}="
-    rf"|(?<![\w$./-]){_WRAP_NAME}\s*\(\)"
-    rf"|(?<![\w-])function\s+{_WRAP_NAME}(?![\w.-])"
-    r"|(?<![\w-])export\s+(?:-\w+\s+)*-\w*f"
-    rf"|(?<![\w-])(?:declare|typeset)\s+-\w*f\w*\s+(?:\S+\s+)*?{_WRAP_NAME}(?![\w.-])"
-    rf"|(?<![\w-]){_STARTUP_NAME}\+?="
-    rf"|(?<![\w-])(?:printf\s+-v|read(?:\s+-\w+)*)\s+{_STARTUP_NAME}(?![\w-])"
-)
 _SHELL_KEY = re.compile(r"gemini[\W_]*api[\W_]*key")
 _SHELL_PROJECT = re.compile(r"(?<![\w-])image-gen(?![\w-])")
 _SHELL_CONFIG = re.compile(r"(?<![\w-])prd(?![\w-])")
@@ -1050,43 +1038,6 @@ _NETWORK_TOOL = re.compile(
     r"(?<![\w.-])(?:curl|wget|nc|ncat|socat|openssl|ssh|telnet|python[\d.]*|node|nodejs|perl|ruby|php|go|deno|bun"
     r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
 )
-_WRAPPER_FORBIDDEN = frozenset("$`()")
-
-
-def _shell_segments(command: str) -> list[list[Tok]] | None:
-    """The words of each simple command: cut at `; | &` and at every newline (bash ends a command there too), shell
-    comments removed. None when the lexer cannot read a line (an unterminated quote, a quote spanning lines)."""
-    segments: list[list[Tok]] = []
-    for line in _join(command).splitlines():
-        tokens = _lex(_strip_comment(line))
-        if tokens is None:
-            return None
-        segments.append([])
-        for t in tokens:
-            if t.op:
-                if _breaks(t.value):
-                    segments.append([])
-                continue
-            segments[-1].append(t)
-    return [words for words in segments if words]
-
-
-def _is_wrapper(command: str) -> bool:
-    """Only `safo gemini ...` (also `python -m safo gemini ...`) commands: no expansion, substitution or group anywhere,
-    so nothing else can ride along. Redirections are allowed."""
-    if any(c in command for c in _WRAPPER_FORBIDDEN):
-        return False
-    segments = _shell_segments(command)
-    if not segments:
-        return False
-    for words in segments:
-        values = [t.value for t in words]
-        if values[:2] == ["safo", "gemini"]:
-            continue
-        if values[:1] and re.fullmatch(r"python[\d.]*", values[0]) and values[1:4] == ["-m", "safo", "gemini"]:
-            continue
-        return False
-    return True
 
 
 def shell_command_class(command: str, deadline: float | None = None) -> str | None:
@@ -1107,8 +1058,6 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         for line in lines:
             tick()
             _, _, low, pre_low, _pre_raw = _views(line)
-            if _HIJACK.search(low) or _HIJACK.search(pre_low):
-                return SHELL_HIJACK
             for view in (low, pre_low):
                 if VENDOR_RE.search(view) or SDK.search(view):
                     found = found or SHELL_VENDOR
@@ -1127,9 +1076,6 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
             found = SHELL_TOOL
         if found is None:
-            return None
-        tick()
-        if _is_wrapper(command):
             return None
         return found
     except TimeoutError:

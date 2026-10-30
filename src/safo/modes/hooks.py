@@ -1145,7 +1145,7 @@ def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: floa
 
 def shell_vendor_check(payload: dict[str, Any]) -> None:
     """Deny a Bash command that goes straight to the vendor API or its key (#209): a cheap, fail-closed speed bump,
-    not a sandbox. Only the wrapper `safo gemini ...` is allowed; there is no other exemption. The denial names the
+    not a sandbox. There is no exemption. The denial names the
     rule and the phrase class and never the command. An event without a usable command is left to the lead-wait rule,
     which refuses it as before."""
     tool_input = payload.get("tool_input")

@@ -296,26 +296,20 @@ more forms are denied without a name on the page: a word built with escapes (an 
 `\u` escape, `printf -v`) in a command that also runs a network tool or `doppler`, and `doppler` with any `$` expansion
 or backtick. Nothing is resolved: a variable's value is never looked up.
 
-One thing is allowed even when a name is on the page, and nothing else is exempt: the wrapper itself. Every command in
-the call is `safo gemini ...` (or `python -m safo gemini ...`) with no `$`, backtick or parenthesis anywhere, so nothing
-can ride along; a second command after `;`, `&&`, `|` or a newline makes it a different command and it is judged on its
-own. There is no exemption for a working directory, a tool name or this repository: `make`, `git`, `cat` and `grep` can
-all run or print anything, and the working directory is the caller's to choose. A command that spells out one of those
-names is denied wherever it runs, so reading this repository's docs with such a command is denied too (the normal
-`make check`, `pytest` and `git` commands name none of them and pass). The
+Nothing is exempt: not the wrapper, not a working directory, not a tool name, not this repository. `safo gemini ...`
+commands as documented name none of the protected names, so the check does not touch them; a command that does spell one
+out is denied however it is called or wherever it runs (reading this repository's docs with such a command is denied too;
+the normal `make check`, `pytest` and `git` commands name none and pass). A renamed or hijacked wrapper (an alias, a
+function, a changed `PYTHONPATH`) is covered only to the extent the protected names appear in the command text. A command
+longer than 64 KiB is denied unread as "could not be checked in time": no normalization runs on it, so a hostile length costs
+nothing, and the shorter ones are checked against the deadline line by line. The
 denial names the rule (`gemini-material`) and a fixed phrase class, such as "the vendor API host or SDK", and points at the
 wrapper; it never repeats the command. A command that cannot be checked before the deadline is denied.
-
-Three more shapes are denied on any command, because they can make a later `safo gemini ...` or `python -m safo gemini ...`
-resolve to something else: defining or exporting a shell function or alias named `safo`, `python`, `python3` or `pip`
-(including `export -f` and `declare -f` / `typeset -f` naming one), and setting `PYTHONPATH`, `PYTHONHOME`,
-`PYTHONSTARTUP`, `BASH_ENV` or `ENV` (assignment, `printf -v` or `read`). A command longer than 64 KiB is denied unread as
-"could not be checked in time": no normalization runs on it, so a hostile length costs nothing.
 
 Not covered, by design: names built from variables (`a=generative; b=language; curl https://$a$b...` with no
 `doppler`), names decoded (`base64 -d | xargs curl`) or read from a file or the environment, a script or program the
 command merely runs, a shadowed Python module defined outside the command (a file named like an installed module on the
-import path), and an alias or function defined by a shell startup file the guard never sees. The wrapper holds the real gates.
+import path), an alias or function defined by a shell startup file the guard never sees, and anything the folding and regexes do not name. The wrapper holds the real gates.
 
 That is the whole claim. Not covered: a wrapper script or alias under another name that hides `safo`, a command written
 to a file and run later, other shells than bash, and any language that calls `safo` or the API from inside a program. It does not promise to read every way a shell can build a command: a form outside the list above
