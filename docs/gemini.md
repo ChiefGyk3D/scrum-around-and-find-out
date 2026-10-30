@@ -188,7 +188,7 @@ the canonical text, nothing else). The ledger file versus the signed head.
   nobody holds root.
 - **Software and agent-held keys** are weaker than a hardware key. They work only with a written opt-in, and `keys check`
   says so.
-- **Assurance Tier 2 (passkeys) is not built.** See [Gemini keys](gemini-keys.md).
+- **Assurance Tier 2 (passkeys) is verification only.** Real signature checks exist; the enrollment page and the approval wiring do not, and it is opt-in. See [Gemini passkeys](gemini-passkeys.md).
 
 ## The ledger
 

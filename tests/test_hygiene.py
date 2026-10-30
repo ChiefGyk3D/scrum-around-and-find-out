@@ -59,16 +59,32 @@ def test_nothing_runs_a_shell_from_a_string() -> None:
     assert offenders == []
 
 
-def test_the_runtime_imports_only_the_standard_library_and_pyyaml() -> None:
+def runtime_import_offenders(root: Path) -> list[str]:
+    """Imports outside the standard library and PyYAML. The one exception is the optional passkey extra: cryptography
+    may be imported by geminipasskey.py only from inside a function (an indented line), so a plain install skips it."""
     stdlib = set(__import__("sys").stdlib_module_names)
     allowed = stdlib | {"yaml", "safo"}
     bad = []
-    for path in (ROOT / "src" / "safo").rglob("*.py"):
+    for path in root.rglob("*.py"):
         for line in path.read_text().splitlines():
-            m = re.match(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", line)
-            if m and m[1] not in allowed:
-                bad.append(f"{path.name}: {line.strip()}")
-    assert bad == []
+            m = re.match(r"^(\s*)(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+            if not m or m[2] in allowed:
+                continue
+            if m[2] == "cryptography" and path.name == "geminipasskey.py" and m[1]:
+                continue
+            bad.append(f"{path.name}: {line.strip()}")
+    return bad
+
+
+def test_the_runtime_imports_only_the_standard_library_and_pyyaml(tmp_path: Path) -> None:
+    assert runtime_import_offenders(ROOT / "src" / "safo") == []
+    # the guard bites: a top-level cryptography import, or one in any other module, is an offender
+    (tmp_path / "geminipasskey.py").write_text("import cryptography\n")
+    (tmp_path / "other.py").write_text("def f():\n    import cryptography\n")
+    assert len(runtime_import_offenders(tmp_path)) == 2
+    (tmp_path / "geminipasskey.py").write_text("def f():\n    import cryptography\n")
+    (tmp_path / "other.py").write_text("")
+    assert runtime_import_offenders(tmp_path) == []
 
 
 def test_the_version_is_one_number() -> None:
