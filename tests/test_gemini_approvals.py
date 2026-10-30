@@ -8,6 +8,7 @@ the paid call is refused with nothing sent.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import json
@@ -858,3 +859,124 @@ def test_the_store_accepts_only_an_exact_str_prompt(store: ApprovalStore, liar: 
     with pytest.raises(RefusedError, match="plain text"):
         store.issue(**{**KEY_ARGS, "prompt": liar})
     assert not store.folder.exists() or list(store.folder.glob("*.json")) == []
+
+
+# -- every caller-supplied field is copied through base types once, at the entry (#217) ------------------------------
+
+
+def _liar(base: type, text: Any) -> Any:
+    """A subclass whose comparison, formatting, hashing, indexing, truth and length all lie."""
+
+    class Liar(base):  # type: ignore[misc]
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+        def __format__(self, spec: str) -> str:
+            return "unapproved-expensive-model"
+
+        def __str__(self) -> str:
+            return "unapproved-expensive-model"
+
+        def __hash__(self) -> int:
+            return 1
+
+        def __index__(self) -> int:
+            return 1_000_000
+
+        def __bool__(self) -> bool:
+            return False
+
+        def __len__(self) -> int:
+            return 1
+
+    return Liar(text)
+
+
+REQUEST_FIELDS: dict[str, tuple[type, Any]] = {
+    "model": (str, MODEL),
+    "prompt": (str, PROMPT),
+    "tier": (str, "paid"),
+    "job": (str, "job-1"),
+    "approval": (str, "0123456789abcdef"),
+    "max_output_tokens": (int, 500),
+}
+
+
+@pytest.mark.parametrize("field", sorted(REQUEST_FIELDS))
+def test_a_lying_subclass_in_any_request_field_is_refused_at_the_entry_and_nothing_is_written(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, field: str
+) -> None:
+    base, value = REQUEST_FIELDS[field]
+    record = store.issue(**KEY_ARGS)
+    good = paid(record.id)
+    bad = dataclasses.replace(good, **swap(field, _liar(base, value)))
+    rows_before = ledger_rows(cfg.ledger, everything=True)
+    with pytest.raises(RefusedError, match=field) as err:
+        ask(cfg, bad, store=store, key_for=keys, now=NOW)
+    assert "unapproved-expensive-model" not in str(err.value), "the refusal does not echo the value"
+    assert server.requests == [] and not store.is_used(record.id)
+    assert ledger_rows(cfg.ledger, everything=True) == rows_before
+    for wrong in (b"x", 7, None, 1.5, True) if base is str else ("x", 1.5, None, True, b"1"):
+        with pytest.raises(RefusedError, match=field):
+            ask(cfg, dataclasses.replace(good, **swap(field, wrong)), store=store, key_for=keys, now=NOW)
+    assert server.requests == []
+
+
+def swap(field: str, value: Any) -> dict[str, Any]:
+    return {field: value}
+
+
+def test_a_request_subclass_is_refused(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+    class Sub(Request):
+        pass
+
+    record = store.issue(**KEY_ARGS)
+    good = paid(record.id)
+    with pytest.raises(RefusedError, match="request"):
+        ask(cfg, Sub(**dataclasses.asdict(good)), store=store, key_for=keys, now=NOW)
+    assert server.requests == []
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("model", _liar(str, MODEL)),
+        ("job", _liar(str, "job-1")),
+        ("quote", _liar(str, "yes")),
+        ("issue_ref", _liar(str, "o/r#1")),
+        ("max_usd", _liar(Decimal, "1.5")),
+        ("ttl_minutes", _liar(int, 10)),
+        ("beyond_ceiling", 1),
+        ("quoted_at", _liar(str, "2026-10-30")),
+        ("now", NOW.replace(tzinfo=None)),
+    ],
+)
+def test_the_store_refuses_a_lying_argument_and_writes_nothing(store: ApprovalStore, field: str, wrong: Any) -> None:
+    with pytest.raises(RefusedError, match=field):
+        store.issue(**{**KEY_ARGS, field: wrong})
+    assert not store.folder.exists() or list(store.folder.glob("*.json")) == []
+
+
+def test_the_model_is_one_plain_string_in_the_url_the_body_the_ledger_and_the_signed_payload(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    ask(cfg, paid(record.id, max_output_tokens=300), store=store, key_for=keys, now=NOW)
+    signed = json.loads(json.loads((store.folder / f"{record.id}.json").read_text())["payload"])
+    rows = ledger_rows(cfg.ledger, everything=True)
+    issued = next(r for r in rows if r["type"] == "approval_issued")
+    started = next(r for r in rows if r["type"] == "call_start")
+    sent = server.requests[0]
+    assert signed["model"].encode() == issued["model"].encode() == started["model"].encode() == MODEL.encode()
+    assert f"/v1beta/models/{MODEL}:generateContent".encode() in json.dumps(sent).encode()
+    assert signed["job"].encode() == started["job"].encode() == b"job-1"
+    assert json.dumps(sent).count('"maxOutputTokens": 300') == 1
+
+
+def test_the_config_values_that_reach_a_request_are_exact_base_types(cfg: GeminiConfig) -> None:
+    assert type(cfg.max_output_tokens) is int and type(cfg.endpoint) is str
+    assert all(type(k) is str for k in cfg.prices) and all(type(k) is str for k in cfg.free)
+    assert type(cfg.job_cap) is Decimal and type(cfg.month_cap) is Decimal

@@ -123,6 +123,11 @@ the `version` goes from 1 to 2.
   not read the caller's request object again, so changing it after the check changes nothing. As a last line of defense
   the finished request body is hashed once more and the call is refused before it leaves if that is not the approved
   digest.
+- **Plain values only.** `ask`, `approve` and the approval store copy every field they are given (model, job, tier,
+  approval id, prompt, output-token limit, the amounts, the quote and the clock) once, at the entry, through base types,
+  and accept only the exact expected type (a `str` or `int` subclass, a bool where a number belongs, or a request
+  subclass is refused with a message that names the field and never echoes the value). The gates, the ledger rows, the
+  request address, the body and the signed payload are all built from those copies, never from the caller's objects.
 - **Free tier.** Unchanged: it needs no approval and has no digest.
 - **Tier 2.** The passkey verifier takes this digest from the payload through its required `expect` mapping
   (`prompt_sha256`; see [Gemini passkeys](gemini-passkeys.md)).

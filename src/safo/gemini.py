@@ -840,6 +840,52 @@ def prompt_binding(prompt: str) -> tuple[str, int]:
     return hashlib.sha256(raw).hexdigest(), len(raw)
 
 
+def plain_str(value: object, name: str) -> str:
+    """A caller's string as a plain `str`: exact type only, copied through bytes so nothing of the caller's object is
+    left. The refusal names the field and never echoes the value."""
+    if type(value) is not str:
+        raise RefusedError(f"{name} is not a plain text value, so nothing was done")
+    try:
+        return bytes.decode(str.encode(value, "utf-8"), "utf-8")
+    except UnicodeEncodeError:
+        raise RefusedError(f"{name} is not valid text, so nothing was done") from None
+
+
+def plain_int(value: object, name: str) -> int:
+    """A caller's integer as a plain `int`: exact type (a bool or a subclass is refused), copied through bytes."""
+    if type(value) is not int:
+        raise RefusedError(f"{name} is not a plain whole number, so nothing was done")
+    try:
+        return int.from_bytes(int.to_bytes(value, 8, "big", signed=True), "big", signed=True)
+    except OverflowError:
+        raise RefusedError(f"{name} is out of range, so nothing was done") from None
+
+
+def plain_time(value: object, name: str) -> dt.datetime:
+    """A caller's time as a plain UTC `datetime`: exact type and a plain fixed-offset zone."""
+    if type(value) is not dt.datetime or type(value.tzinfo) is not dt.timezone:
+        raise RefusedError(f"{name} is not a plain time with a time zone, so nothing was done")
+    return dt.datetime.astimezone(value, dt.UTC)
+
+
+def canonical_request(req: Request) -> Request:
+    """The one entry copy of a request, built from base types only. Every later use reads this copy and never the
+    caller's object (a frozen dataclass can still be altered, and a `str` or `int` subclass can lie in ==, !=, hash,
+    format, str, bool, len and index). Anything but the exact expected types is refused (#217)."""
+    if type(req) is not Request:
+        raise RefusedError("the request is not a plain request, so nothing was done")
+    fields = {name: object.__getattribute__(req, name) for name in ("model", "prompt", "tier", "job", "approval")}
+    out_tokens = object.__getattribute__(req, "max_output_tokens")
+    return Request(
+        model=plain_str(fields["model"], "model"),
+        prompt=bytes.decode(prompt_bytes(fields["prompt"]), "utf-8"),
+        tier=plain_str(fields["tier"], "tier"),
+        job=plain_str(fields["job"], "job"),
+        approval=plain_str(fields["approval"], "approval"),
+        max_output_tokens=plain_int(out_tokens, "max_output_tokens"),
+    )
+
+
 def digests_equal(left: object, right: object) -> bool:
     """Equality for the prompt digest: both sides must be exactly `str` (not a subclass that can bend ==, != or
     encode), compared as bytes through the base type's own methods and a constant-time compare."""
@@ -870,6 +916,8 @@ def _check_request(cfg: GeminiConfig, req: Request) -> None:
 
 def quota_line(cfg: GeminiConfig, req: Request, now: dt.datetime) -> str:
     """The line printed before any approval and before any call. It cannot be produced without the numbers."""
+    req = canonical_request(req)
+    now = plain_time(now, "now")
     _check_request(cfg, req)
     snap = snapshot(Ledger(cfg.ledger).read())
     if req.tier == "free":
@@ -1029,8 +1077,20 @@ class ApprovalStore:
         from safo import geminisign
 
         require_paid()
-        # One plain snapshot (exact `str` only): the digest, the length limit and the signature all come from it, and
-        # no method of the caller's object is called after the type check (#217).
+        # One plain copy of every argument (exact types only); nothing below reads the caller's objects (#217).
+        model = plain_str(model, "model")
+        job = plain_str(job, "job")
+        quote = plain_str(quote, "quote")
+        issue_ref = plain_str(issue_ref, "issue_ref")
+        if type(max_usd) is not Decimal:
+            raise RefusedError("max_usd is not a plain decimal amount, so nothing was done")
+        max_usd = Decimal(format(max_usd, "f")) if max_usd.is_finite() else max_usd
+        ttl_minutes = plain_int(ttl_minutes, "ttl_minutes")
+        if type(beyond_ceiling) is not bool:
+            raise RefusedError("beyond_ceiling is not a plain true or false, so nothing was done")
+        beyond_ceiling = bool.__and__(beyond_ceiling, True)
+        quoted_at = plain_time(quoted_at, "quoted_at")
+        now = plain_time(now, "now")
         prompt_raw = prompt_bytes(prompt)
         prompt_text = bytes.decode(prompt_raw, "utf-8")
         prompt_digest, prompt_size = prompt_binding(prompt_text)
@@ -1644,11 +1704,11 @@ def ask(
     now: dt.datetime,
 ) -> Reply:
     """Send one request, once, or say which gate stopped it."""
-    # One snapshot of the prompt, taken once: bytes cannot change. `req` is rebuilt from it so that nothing below reads
-    # the caller's object again (a frozen dataclass can still be altered with object.__setattr__), and the body is
-    # built from these same bytes (#217).
-    prompt_raw = prompt_bytes(req.prompt)
-    req = dataclasses.replace(req, prompt=bytes.decode(prompt_raw, "utf-8"))
+    # One plain copy of every field, taken once at the entry. Nothing below reads the caller's object again, and the
+    # body is built from the prompt bytes snapshotted here (#217).
+    req = canonical_request(req)
+    now = plain_time(now, "now")
+    prompt_raw = str.encode(req.prompt, "utf-8")
     if req.tier == "paid":
         require_paid()  # before anything else: the paid path is off unless the root-owned switch says it is on
     _check_request(cfg, req)

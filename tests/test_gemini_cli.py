@@ -30,7 +30,7 @@ from geminidata import (
 from safo.cli import main
 from safo.context import LocalContext
 from safo.errors import ConfigError
-from safo.gemini import GeminiConfig, Locations, load_config, open_store
+from safo.gemini import GeminiConfig, Locations, RefusedError, load_config, open_store
 from safo.modes.gemini import approve_flow, brief_namespace
 
 
@@ -553,3 +553,26 @@ def test_the_ask_command_reads_the_same_bytes_the_approval_covered(rig: Rig) -> 
     rig.prompt.write_text(rig.prompt.read_text() + "\n")  # changed after the maintainer signed
     code, _, err = rig.run(*ask)
     assert code == 2 and "prompt" in err and rig.server.requests == []
+
+
+@pytest.mark.parametrize("field", ["model", "job", "prompt", "tier", "max_output_tokens"])
+def test_approve_flow_refuses_a_lying_request_field_and_writes_nothing(rig: Rig, field: str) -> None:
+    class Liar(int if field == "max_output_tokens" else str):  # type: ignore[misc]
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __format__(self, spec: str) -> str:
+            return "other"
+
+        __hash__ = str.__hash__
+
+    args = brief_namespace(approve_args(rig))
+    req = __import__("safo.modes.gemini", fromlist=["_request"])._request(args)
+    original = getattr(req, field)
+    object.__setattr__(req, field, Liar(original))
+    out = io.StringIO()
+    ctx = LocalContext(out, {"HOME": str(rig.home), "PATH": str(rig.bin)}, NOW)
+    store = open_store(rig.locations, rig.ledger, rig.signing["key"], "test-key-a", ctx.env)
+    with pytest.raises(RefusedError, match=field):
+        approve_flow(ctx, args, rig.cfg(), store, req, interactive=True, confirm=lambda p: "approve job-1")
+    assert rig.approvals() == [] and "other" not in out.getvalue()

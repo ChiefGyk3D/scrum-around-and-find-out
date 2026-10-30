@@ -167,7 +167,10 @@ def approve_flow(
     pass anything else. The ceiling flag comes from the ledger here, never from the caller."""
     if not ctx.dry_run:
         gemini.require_paid()  # a dry run spends nothing and writes nothing, so it can still test a key
-    # One snapshot: the display, the digest and the signature all come from this text, never from `req` again.
+    # One plain copy of the request and the clock, taken once: the display, the digest and the signature all come from
+    # these, never from the caller's objects again.
+    req = gemini.canonical_request(req)
+    now = gemini.plain_time(ctx.now, "now")
     snapshot_raw = gemini.prompt_bytes(req.prompt)  # exact str only; the bytes are the single source
     if not snapshot_raw:
         raise ConfigError("approve needs --prompt-file: an approval covers the exact prompt that `ask` will read")
@@ -176,10 +179,10 @@ def approve_flow(
     if len(text) > MAX_APPROVED_PROMPT_CHARS:
         raise RefusedError(too_long(len(text)))
     digest, size = prompt_binding(text)  # the same bytes `ask` sends, from the same file
-    line = quota_line(cfg, req, ctx.now)  # first: an approval is refused when the line cannot be produced
+    line = quota_line(cfg, req, now)  # first: an approval is refused when the line cannot be produced
     ctx.say(line)
     amount = usd_amount(args.max_usd, "--max-usd")
-    estimate = estimate_usd(cfg, req, ctx.now)
+    estimate = estimate_usd(cfg, req, now)
     if estimate > cfg.job_cap:
         raise RefusedError(
             f"the estimate {money(estimate)} USD is over the {money(cfg.job_cap)} USD job cap; lower the output limit"
@@ -188,7 +191,7 @@ def approve_flow(
         raise RefusedError(
             f"the estimate {money(estimate)} USD is over the amount to be approved ({money(amount)} USD)"
         )
-    beyond = paid_quota(cfg, snapshot(Ledger(cfg.ledger).read()), req, ctx.now).beyond
+    beyond = paid_quota(cfg, snapshot(Ledger(cfg.ledger).read()), req, now).beyond
     try:
         quoted = dt.datetime.strptime(args.quoted_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.UTC)
     except ValueError:
@@ -225,7 +228,7 @@ def approve_flow(
             raise RefusedError("signing is not set up (signing.key and signing.principal in gemini.yaml)")
         text = geminisign.canonical({"dry_run": True, "job": req.job})
         armor = geminisign.sign(store.signing_key, text.encode(), geminisign.DRYRUN_NAMESPACE, ctx.env)
-        who = geminisign.verify(trust, text.encode(), armor, namespace=geminisign.DRYRUN_NAMESPACE, now=ctx.now)
+        who = geminisign.verify(trust, text.encode(), armor, namespace=geminisign.DRYRUN_NAMESPACE, now=now)
         if who.label != store.signing_principal:
             raise RefusedError("the key that signed is not the principal named in gemini.yaml")
         ctx.say(
@@ -240,7 +243,7 @@ def approve_flow(
         job=req.job,
         quote=args.quote,
         quoted_at=quoted,
-        now=ctx.now,
+        now=now,
         ttl_minutes=args.ttl_minutes,
         beyond_ceiling=beyond,
         prompt=text,
