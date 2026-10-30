@@ -54,6 +54,7 @@ DOCUMENT_KEYS = {
     "project.number",
     "signing.key",  # config keys in docs/gemini-keys.md
     "signing.principal",
+    "safo.broker",  # the broker's module name in docs/gemini-broker.md
     "webauthn.get",  # the WebAuthn client-data type string in docs/gemini-passkeys.md
     "agents.waiting",
     "agents.working",
@@ -83,6 +84,10 @@ FILE_SUFFIXES = {
     "toml",
     "lock",
     "pub",
+    "service",  # systemd unit file names in docs/gemini-broker.md
+    "socket",
+    "sock",  # a Unix socket path
+    "target",
 }  # pub: a public key file
 
 ALLOWED_HOSTS = {
