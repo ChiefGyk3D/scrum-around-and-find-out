@@ -34,7 +34,8 @@ Paid use is for what the free tier cannot do (image generation is paid-only: the
 what needs a model that has no free tier. Every monetary action needs a fresh, explicit, single-use **approval record**.
 
 - **What a record is.** A **signature** made by the maintainer's hardware security key (a touch) over a canonical JSON
-  text: the model, a maximum of at most 2 USD, a job name, a short expiry (at most 4 hours, and it ends with the job),
+  text: the model, a maximum of at most 2 USD, a job name, a short expiry (10 minutes by default, never above 60, and it ends
+  with the job),
   whether it passes the monthly ceiling, a one-time nonce, the quote of his message and its time, the signing principal
   (the label of the enrolled key) and the **ledger head** at signing time. It is made by `safo gemini approve`, which the
   lead runs **only after the maintainer has said yes in his own message**; the maintainer then reads the quota line and
@@ -46,7 +47,9 @@ what needs a model that has no free tier. Every monetary action needs a fresh, e
   authoritative, so deleting the marker file does not allow a replay. A record is bound to its model and its job, so it
   cannot be inherited by a sub-agent or reused by a second job. A job can never start another job: each paid call needs
   a record of its own. A record also binds the ledger head: if the ledger it was signed against is no longer in the
-  current chain, it is refused.
+  current chain, it is refused. Its own `approval_issued` row, written when it was signed, must also be in the chain
+  **after** that head, so a ledger rewound to the signed head (which is still a member of the chain) has lost it and the
+  approval is refused. What single use does and does not stop is spelled out under "Residual risk".
 - **Caps.** At most **2 USD per job** and **10 USD per month**. The estimate is an upper bound (the prompt counted at three
   bytes a token, plus every output token the request allows) and must fit the job cap and the approved amount. Past 10 USD
   in a month, each further 2 USD block needs its own record that says so; `approve` sets that flag from the ledger in
@@ -148,6 +151,16 @@ the canonical text, nothing else). The ledger file versus the signed head.
 - **The key is still readable.** The paid API key lives in the secret store that the maintainer's account can read. An
   agent running as him could call the vendor directly, bypassing `safo` and this gate. The signed approval protects the
   wrapper path and the guard; the **vendor-side monthly limit** is the backstop for everything else.
+- **Single use is enforced against a non-malicious or confused caller, and by a short signed window; it is not proof
+  against an attacker who can write both state files.** The spent nonce lives in the ledger, and the ledger, the head
+  file beside it and the height record (below) are all writable by the maintainer's account. What stops a replay is,
+  in layers: the nonce's `approval_used` row; the approval's own `approval_issued` row having to follow the signed head
+  (so rewinding the ledger to that head fails); the height record, kept apart from the ledger in the fixed state folder,
+  which makes a chain shorter than the highest height ever seen fail with the recorded height named (so rewinding to just
+  after the issuance fails); and the signed expiry, 10 minutes by default and never above 60. An attacker who can rewind
+  the ledger, the head file **and** the height record within that window can replay **one** approval of at most 2 USD
+  once, and that is still bounded by the vendor-side monthly limit. When you archive or replace the ledger on purpose,
+  remove its height record (the `heights` folder next to the approvals) too, or every call is refused.
 - **The chain is tamper-evident, not tamper-proof.** Someone who rewrites the whole ledger and its head file consistently
   can make a past month read lower. That does not give them a signature: the next paid call still needs a fresh
   signed approval whose ledger head is in the chain, and an approval signed before the rewrite no longer matches. But
@@ -167,7 +180,9 @@ mode 600 and is **append-only and hash-chained**: the wrapper only appends, unde
 writes, it appends a `chain_start` row that records the hash of the exact bytes of every older row; from then on each
 row carries `prev_hash` and its own `hash`. The older rows are never edited. If anything after (or before) `chain_start`
 is deleted, edited, reordered or cut off, every call refuses and names the line. A second copy of the newest hash sits in
-a small head file beside it (the ledger name plus a head suffix), which catches a truncated tail; a signed approval also binds the head it was made
+a small head file beside it (the ledger name plus a head suffix) catches a truncated tail, and a **height record** kept
+apart from the ledger, in the fixed state folder (`heights`, beside the approvals), remembers the longest chain this
+wrapper has seen and refuses a shorter one, naming the recorded height; a signed approval also binds the head it was made
 against. A call writes a `call_start` row (time, model, tier, estimated tokens and cost, job, approval) before the
 request leaves and a `call_end` row after (status, HTTP status, usage, actual cost); `approval_issued` and
 `approval_used` rows record the nonce, the signing principal and the tier. A start with no end, and an ambiguous end,

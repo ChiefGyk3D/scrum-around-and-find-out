@@ -65,7 +65,8 @@ JOB_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 PLAIN_KEY = re.compile(r"[\x21-\x7e]{16,512}")
 MAX_PROMPT_BYTES = 200_000
 MAX_QUOTE = 500
-MAX_TTL_MINUTES = 240  # a signed approval is short-lived: the touch happens just before the job
+MAX_TTL_MINUTES = 60  # a signed approval is short-lived: the touch happens just before the job
+DEFAULT_TTL_MINUTES = 10  # the default; the window in which a replay against a rewound ledger could work
 MAX_RETRY_AFTER = 86_400.0
 SECRET_TOOL_TIMEOUT = 20.0
 SECRET_SHAPES = (
@@ -387,7 +388,20 @@ class Ledger:
     def head_file(self) -> Path:
         return self.path.with_name(self.path.name + ".head")
 
+    @property
+    def height_file(self) -> Path:
+        """The highest chain height this wrapper has seen, kept in the fixed state folder and not beside the ledger."""
+        key = hashlib.sha256(str(self.path.absolute()).encode()).hexdigest()[:16]
+        return fixed_locations().height_dir / f"{key}.height"
+
     def state(self) -> LedgerState:
+        """The ledger as it is, verified: the chain, the head file and the height record. Every refusal is a
+        RefusedError that names what was found."""
+        state = self._load()
+        self._check_height(state, [r for r in state.rows if isinstance(r.get("hash"), str)])
+        return state
+
+    def _load(self) -> LedgerState:
         try:
             raw = read_bounded(self.path, MAX_FILE_BYTES + 1)
         except FileNotFoundError:
@@ -449,6 +463,35 @@ class Ledger:
         self._check_head_file(state, rows[first:], numbers[first:])
         return state
 
+    def _check_height(self, state: LedgerState, chained: list[dict[str, Any]]) -> None:
+        """The height record (see `height_file`) is the second copy that is not beside the ledger. A chain shorter than
+        it, or one whose row at that height has another hash, was rewound or rewritten."""
+        try:
+            text = read_bounded(self.height_file, 256).decode("ascii").strip()
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError):
+            raise RefusedError("the height record of the spend ledger cannot be read") from None
+        count_text, _, digest = text.partition(" ")
+        if not count_text.isdigit() or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RefusedError("the height record of the spend ledger is malformed")
+        count = int(count_text)
+        if count > state.chained:
+            raise RefusedError(
+                f"the spend ledger is shorter than the height record kept apart from it (recorded height {count}, "
+                f"chain has {state.chained} rows): it was rewound"
+            )
+        if count and chained[count - 1]["hash"] != digest:
+            raise RefusedError("the spend ledger does not match the height record kept apart from it: it was rewritten")
+
+    def _record_height(self, count: int, digest: str) -> None:
+        try:
+            current = int(read_bounded(self.height_file, 256).decode("ascii").split()[0])
+        except (OSError, UnicodeError, ValueError, IndexError):
+            current = 0
+        if count > current:
+            write_text(self.height_file, f"{count} {digest}\n")
+
     def _check_head_file(self, state: LedgerState, chained: list[dict[str, Any]], numbers: list[int]) -> None:
         """The head file is a second copy of the newest hash. An editor that truncates the tail but leaves it is caught;
         one that also rewrites it is not (see docs/gemini.md)."""
@@ -496,6 +539,10 @@ class Ledger:
         return str(full["hash"])
 
     def _write_lines(self, lines: list[dict[str, Any]], count: int) -> None:
+        try:
+            ensure_dir(self.height_file.parent)  # fail before a row is written if the height record cannot be kept
+        except (ConfigError, OSError):
+            raise RefusedError("the folder for the ledger height record cannot be used; nothing was written") from None
         data = "".join(json.dumps(r, sort_keys=True) + "\n" for r in lines).encode()
         try:
             ensure_dir(self.path.parent)
@@ -512,6 +559,8 @@ class Ledger:
             os.close(fd)
         with contextlib.suppress(GeminiError, ConfigError, OSError):
             write_text(self.head_file, f"{count} {lines[-1]['hash']}\n")
+        with contextlib.suppress(GeminiError, ConfigError, OSError):
+            self._record_height(count, str(lines[-1]["hash"]))
 
     def ensure_chain(self, ts: str = "") -> str:
         """Start the chain if it has not begun; return the hash of the newest row. The caller holds `lock()`."""
@@ -559,6 +608,10 @@ class Snapshot:
     calls: tuple[Call, ...]
     manual: tuple[tuple[str, Decimal], ...]  # (YYYY-MM-DD, USD) the maintainer wrote as `usage` rows
     heads: frozenset[str] = frozenset()  # the hash of every chained row: an approval's ledger_head must be one of them
+    order: tuple[str, ...] = ()  # those hashes, oldest first
+    issued: tuple[
+        tuple[str, str, int], ...
+    ] = ()  # (nonce, principal, position in `order`) of every approval_issued row
     used: tuple[tuple[str, str], ...] = ()  # (nonce, principal) of every approval a call has spent
 
 
@@ -571,7 +624,9 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
     ends: dict[str, dict[str, Any]] = {}
     manual: list[tuple[str, Decimal]] = []
     used: list[tuple[str, str]] = []
-    heads = frozenset(str(row["hash"]) for row in rows if isinstance(row.get("hash"), str))
+    order = tuple(str(row["hash"]) for row in rows if isinstance(row.get("hash"), str))
+    heads = frozenset(order)
+    issued: list[tuple[str, str, int]] = []
     for number, row in enumerate(rows, 1):
         kind = row.get("type")
         try:
@@ -591,8 +646,13 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
                 if not isinstance(call_id, str) or call_id in ends:
                     raise ValueError("end")
                 ends[call_id] = row
-            elif kind in ("funding", "chain_start", "approval_issued"):
+            elif kind in ("funding", "chain_start"):
                 continue
+            elif kind == "approval_issued":
+                nonce, principal = row["nonce"], row["principal"]
+                if not isinstance(nonce, str) or not isinstance(principal, str):
+                    raise ValueError("issued")
+                issued.append((nonce, principal, order.index(row["hash"]) if row.get("hash") in heads else -1))
             elif kind == "approval_used":
                 nonce, principal = row["nonce"], row["principal"]
                 if not isinstance(nonce, str) or not isinstance(principal, str) or any(n == nonce for n, _ in used):
@@ -624,7 +684,7 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
         calls.append(call)
     if ends:
         raise _bad(0)  # an end with no start
-    return Snapshot(tuple(calls), tuple(manual), heads, tuple(used))
+    return Snapshot(tuple(calls), tuple(manual), heads, order, tuple(issued), tuple(used))
 
 
 # -- quota lines and the free-tier gate ----------------------------------------------------------------------------
@@ -782,6 +842,11 @@ class Locations:
     trust_uid: int = 0  # the owner the two files above must have
     require_hardware: bool = True  # only sk keys, unless a key carries the written opt-in; a test may turn this off
 
+    @property
+    def height_dir(self) -> Path:
+        """Where the highest ledger height ever seen is kept, apart from the ledger (beside the approvals)."""
+        return self.approvals.parent / "heights"
+
 
 def fixed_locations() -> Locations:
     """From the account database, never from $HOME or an XDG variable, which a caller can set."""
@@ -911,12 +976,12 @@ class ApprovalStore:
         }
         payload = geminisign.canonical(data)
         armor = geminisign.sign(self.signing_key, payload.encode(), geminisign.NAMESPACE, self.env)
-        signer = geminisign.verify(self.trust, payload.encode(), armor)
+        signer = geminisign.verify(self.trust, payload.encode(), armor, now=now)
         if signer.label != self.signing_principal:
             raise RefusedError("the key that signed is not the principal named in gemini.yaml; no approval was written")
         path = self.folder / f"{nonce}.json"
         write_text(path, json.dumps({"payload": payload, "signature": armor}, sort_keys=True) + "\n")
-        record = self.load(nonce)
+        record = self.load(nonce, now)
         with ledger.lock():
             ledger.append(
                 {
@@ -935,7 +1000,7 @@ class ApprovalStore:
             )
         return record
 
-    def load(self, record_id: str) -> Approval:
+    def load(self, record_id: str, now: dt.datetime | None = None) -> Approval:
         from safo import geminisign
 
         if not RECORD_ID.fullmatch(record_id):
@@ -959,7 +1024,9 @@ class ApprovalStore:
                 "ask for a fresh one"
             )
         text, armor = outer["payload"], outer["signature"]
-        who = geminisign.verify(self.trust, text.encode(), armor)  # raises RefusedError when it does not verify
+        who = geminisign.verify(
+            self.trust, text.encode(), armor, now=now
+        )  # raises RefusedError when it does not verify
         try:
             data = loads(text)
             if not isinstance(data, dict) or geminisign.canonical(data) != text or data.get("version") != 1:
@@ -1012,10 +1079,28 @@ class ApprovalStore:
         os.close(fd)
 
 
+def ledger_problem(record: Approval, snap: Snapshot) -> str | None:
+    """Why the ledger does not back this approval, or None. The approval must have been signed against a head that is
+    in the chain, and its own `approval_issued` row (written when it was signed, by the same principal) must come after
+    that head: a ledger rewound to the signed head has lost that row, so the approval is not replayable against it."""
+    if record.ledger_head not in snap.heads:
+        return (
+            "this approval was signed against a ledger head that is not in the current ledger chain: "
+            "the ledger was replaced or rewound; ask for a fresh approval"
+        )
+    issued = next((pos for nonce, who, pos in snap.issued if nonce == record.id and who == record.principal), None)
+    if issued is None or issued <= snap.order.index(record.ledger_head):
+        return (
+            "this approval's own issuance row is not in the ledger chain after the head it was signed against: "
+            "the ledger was rewound; ask for a fresh approval"
+        )
+    return None
+
+
 def approval_problem(store: ApprovalStore, record_id: str, now: dt.datetime) -> str | None:
     """Why a record cannot be used now, or None when it is live. For the dispatch guard; it spends nothing."""
     try:
-        record = store.load(record_id)
+        record = store.load(record_id, now)
         if store.is_used(record_id):
             return "this approval record was already used"
         if now >= record.expires_at:
@@ -1024,8 +1109,9 @@ def approval_problem(store: ApprovalStore, record_id: str, now: dt.datetime) -> 
             snap = snapshot(store.ledger.read())
             if any(nonce == record_id for nonce, _ in snap.used):
                 return "this approval record was already used"
-            if record.ledger_head not in snap.heads:
-                return "this approval was signed against a ledger head that is not in the current ledger"
+            problem = ledger_problem(record, snap)
+            if problem:
+                return problem
     except GeminiError as err:
         return str(err)
     return None
@@ -1036,14 +1122,12 @@ def _gate_paid(
 ) -> tuple[Approval, Decimal]:
     if not req.approval:
         raise RefusedError("a paid call needs an approval record (--approval ID); none was given")
-    record = store.load(req.approval)
+    record = store.load(req.approval, now)
     if store.is_used(record.id) or any(nonce == record.id for nonce, _ in snap.used):
         raise RefusedError("this approval record was already used; each paid call needs a fresh one")
-    if record.ledger_head not in snap.heads:
-        raise RefusedError(
-            "this approval was signed against a ledger head that is not in the current ledger chain: "
-            "the ledger was replaced or rewound; ask for a fresh approval"
-        )
+    problem = ledger_problem(record, snap)
+    if problem:
+        raise RefusedError(problem)
     if now >= record.expires_at:
         raise RefusedError("this approval record has expired; ask for a fresh one")
     if record.model != req.model:

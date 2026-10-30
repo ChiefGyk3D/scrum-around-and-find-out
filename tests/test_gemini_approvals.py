@@ -302,6 +302,8 @@ def test_an_approval_signed_against_a_ledger_that_was_replaced_is_refused(
     record = store.issue(**KEY_ARGS)
     cfg.ledger.unlink()
     cfg.ledger.with_name(cfg.ledger.name + ".head").unlink()
+    for height in Ledger(cfg.ledger).height_file.parent.glob("*"):  # an attacker who can also remove the height record
+        height.unlink()
     Ledger(cfg.ledger).append({"type": "usage", "date": "2026-10-29", "amount_usd": 0, "note": "fresh start"})
     refuse_and_send_nothing(cfg, server, store, record.id, "ledger head")
     assert "ledger head" in str(approval_problem(store, record.id, NOW))
@@ -377,3 +379,128 @@ def test_the_default_refuses_a_software_approval_key(cfg: GeminiConfig, gemini_l
     store = open_store(strict, cfg.ledger, key, "test-key-a")
     with pytest.raises(RefusedError, match="not a hardware key"):
         store.issue(**KEY_ARGS)
+
+
+# -- a rewound ledger cannot replay an approval (a: issuance, b: short window, c: height record) ----------------------
+
+
+def rewind(cfg: GeminiConfig, keep_through: str, *, drop_height: bool) -> None:
+    """What an attacker with write access to the ledger can do: cut it back to a chosen row, make the head file agree,
+    and (optionally) remove the separately kept height record too."""
+    lines = cfg.ledger.read_text().splitlines()
+    kept: list[str] = []
+    for line in lines:
+        kept.append(line)
+        if json.loads(line).get("hash") == keep_through:
+            break
+    else:
+        raise AssertionError("row not found")
+    cfg.ledger.write_text("\n".join(kept) + "\n")
+    first = next(i for i, x in enumerate(kept) if json.loads(x)["type"] == "chain_start")
+    cfg.ledger.with_name(cfg.ledger.name + ".head").write_text(f"{len(kept) - first} {keep_through}\n")
+    if drop_height:
+        for height in Ledger(cfg.ledger).height_file.parent.glob("*"):
+            height.unlink()
+
+
+def row_hash(cfg: GeminiConfig, kind: str) -> str:
+    return str(next(r["hash"] for r in ledger_rows(cfg.ledger, everything=True) if r["type"] == kind))
+
+
+def test_an_approval_rewound_to_its_signed_head_loses_its_issuance_and_is_refused(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    seed(cfg.ledger, start_row(minutes_ago(30), call_id="old"))
+    record = store.issue(**KEY_ARGS)
+    rewind(cfg, record.ledger_head, drop_height=True)  # the head is still a member of the chain
+    assert record.ledger_head in {r.get("hash") for r in ledger_rows(cfg.ledger, everything=True)}
+    refuse_and_send_nothing(cfg, server, store, record.id, "issuance")
+    assert "issuance" in str(approval_problem(store, record.id, NOW))
+
+
+def test_an_issuance_row_by_another_principal_does_not_count(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str
+) -> None:
+    data = payload_for(store)
+    nonce = forge(store, data, key=key)
+    assert store.ledger is not None
+    with store.ledger.lock():
+        store.ledger.append({"type": "approval_issued", "nonce": nonce, "principal": "someone-else", "ts": stamp(NOW)})
+    refuse_and_send_nothing(cfg, server, store, nonce, "issuance")
+
+
+def test_an_issuance_row_recorded_before_the_head_does_not_count(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str
+) -> None:
+    data = payload_for(store)
+    assert store.ledger is not None
+    with store.ledger.lock():
+        store.ledger.append(
+            {"type": "approval_issued", "nonce": data["nonce"], "principal": "test-key-a", "ts": stamp(NOW)}
+        )
+        data["ledger_head"] = store.ledger.state().head  # signed after the issuance row, so it is not after the head
+    nonce = forge(store, data, key=key)
+    refuse_and_send_nothing(cfg, server, store, nonce, "issuance")
+
+
+def test_a_rewind_to_just_after_the_issuance_is_caught_by_the_height_record(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    issued = row_hash(cfg, "approval_issued")
+    height_before = Ledger(cfg.ledger).state().chained
+    ask(cfg, paid(record.id), store=store, key_for=keys, now=NOW)
+    assert len(server.requests) == 1
+    rewind(cfg, issued, drop_height=False)  # drops approval_used and the call rows
+    (store.folder / f"{record.id}.used").unlink()
+    with pytest.raises(RefusedError, match=rf"recorded height {height_before + 3}") as err:
+        ask(cfg, paid(record.id), store=store, key_for=keys, now=NOW)
+    assert "shorter" in str(err.value)
+    assert len(server.requests) == 1, "the replay sent nothing"
+
+
+def test_the_height_record_is_kept_apart_from_the_ledger_and_only_grows(
+    cfg: GeminiConfig, store: ApprovalStore
+) -> None:
+    ledger = Ledger(cfg.ledger)
+    assert not ledger.height_file.exists()
+    store.issue(**KEY_ARGS)
+    first = ledger.height_file.read_text().split()
+    assert ledger.height_file.parent != cfg.ledger.parent and first[0] == str(ledger.state().chained)
+    seed(cfg.ledger, start_row(minutes_ago(1), call_id="x"))
+    assert int(ledger.height_file.read_text().split()[0]) == ledger.state().chained > int(first[0])
+
+
+def test_a_height_record_that_the_chain_no_longer_matches_is_refused(cfg: GeminiConfig, store: ApprovalStore) -> None:
+    store.issue(**KEY_ARGS)
+    ledger = Ledger(cfg.ledger)
+    count = ledger.height_file.read_text().split()[0]
+    ledger.height_file.write_text(f"{count} {'0' * 64}\n")
+    with pytest.raises(RefusedError, match="height record"):
+        ledger.read()
+    ledger.height_file.write_text("garbage\n")
+    with pytest.raises(RefusedError, match="height record"):
+        ledger.read()
+
+
+def test_a_signed_lifetime_over_an_hour_is_refused_and_the_default_is_ten_minutes(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str
+) -> None:
+    with pytest.raises(ConfigError, match="1 to 60"):
+        store.issue(**{**KEY_ARGS, "ttl_minutes": 61})
+    nonce = forge(store, payload_for(store, expires_at=stamp(NOW + dt.timedelta(minutes=61))), key=key)
+    refuse_and_send_nothing(cfg, server, store, nonce, "caps")
+    from safo.modes.gemini import brief_namespace
+
+    assert brief_namespace(["approve", "--model", MODEL]).ttl_minutes == 10
+
+
+def test_a_replaced_ledger_is_caught_by_the_height_record_when_that_was_left_alone(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    store.issue(**KEY_ARGS)
+    cfg.ledger.unlink()
+    cfg.ledger.with_name(cfg.ledger.name + ".head").unlink()
+    with pytest.raises(RefusedError, match="height"):
+        Ledger(cfg.ledger).append({"type": "usage", "date": "2026-10-29", "amount_usd": 0, "note": "fresh start"})
+    assert server.requests == []

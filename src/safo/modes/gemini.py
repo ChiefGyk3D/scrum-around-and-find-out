@@ -30,6 +30,7 @@ from safo.bounded import read_bounded
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.gemini import (
+    DEFAULT_TTL_MINUTES,
     MAX_PROMPT_BYTES,
     ApprovalStore,
     GeminiConfig,
@@ -70,7 +71,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-usd", default="", help="approve: the most this job may cost, at most 2")
     parser.add_argument("--quote", default="", help="approve: the maintainer's message, as he wrote it")
     parser.add_argument("--quoted-at", default="", help="approve: when he wrote it, UTC, YYYY-MM-DDTHH:MM:SSZ")
-    parser.add_argument("--ttl-minutes", type=int, default=60, help="approve: how long the record lives (at most 1440)")
+    parser.add_argument(
+        "--ttl-minutes", type=int, default=DEFAULT_TTL_MINUTES, help="approve: how long the record lives (at most 60)"
+    )
     parser.add_argument("--issue", default="", help="approve: the tracking issue, owner/repo#N")
 
 
@@ -199,7 +202,7 @@ def approve_flow(
             raise RefusedError("signing is not set up (signing.key and signing.principal in gemini.yaml)")
         text = geminisign.canonical({"dry_run": True, "job": req.job})
         armor = geminisign.sign(store.signing_key, text.encode(), geminisign.DRYRUN_NAMESPACE, ctx.env)
-        who = geminisign.verify(trust, text.encode(), armor, namespace=geminisign.DRYRUN_NAMESPACE)
+        who = geminisign.verify(trust, text.encode(), armor, namespace=geminisign.DRYRUN_NAMESPACE, now=ctx.now)
         if who.label != store.signing_principal:
             raise RefusedError("the key that signed is not the principal named in gemini.yaml")
         ctx.say(
@@ -235,11 +238,11 @@ def run_keys(ctx: LocalContext, args: argparse.Namespace) -> int:
     """Read-only. The maintainer enrolls, rotates or revokes a key by editing the two trust files by hand."""
     trust = _trust()
     if args.keys_action == "list":
-        for row in geminisign.key_rows(trust) or ["(no key is enrolled)"]:
+        for row in geminisign.key_rows(trust, ctx.now) or ["(no key is enrolled)"]:
             ctx.say(row)
         return EXIT_OK
     if args.keys_action == "check":
-        problems, warnings = geminisign.check_report(trust)
+        problems, warnings = geminisign.check_report(trust, ctx.now)
         for line in problems:
             ctx.say(f"PROBLEM: {line}")
         for line in warnings:

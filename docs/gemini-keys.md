@@ -24,11 +24,15 @@ Both are public, maintainer-edited, root-owned, and **never written by safo**.
 - `/etc/safo/gemini-allowed-signers`: one line per key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. This
   is OpenSSH's allowed-signers format (verified in `man ssh-keygen`, section ALLOWED SIGNERS: principals, options, key
   type, base64 key; the `namespaces=` option binds a key to a signature namespace). The label is the principal. The code
-  accepts only the `namespaces`, `valid-after` and `valid-before` options, refuses `no-touch-required`, certificates and
+  accepts only the `namespaces`, `valid-after` and `valid-before` options (the last two must be quoted UTC times ending in `Z`: `valid-before="20261231Z"`, `YYYYMMDDHHMMZ` or `YYYYMMDDHHMMSSZ`, and `valid-before` must be later than `valid-after`; both ends are inclusive), refuses `no-touch-required`, certificates and
   a duplicate label or key, and accepts only `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com` and
   `ssh-ed25519` keys.
 - `/etc/safo/gemini-revoked-signers`: a public key (`TYPE BASE64 comment`) or a `SHA256:` fingerprint per line. A
   signature from a revoked key is refused even if the key is still enrolled, so revoking does not delete history.
+
+A key outside its window is **refused** at verify (OpenSSH is given the same window and the current time through
+`-Overify-time=`, both verified in `man ssh-keygen` and run on this machine), and `keys list` and `keys check` show it as
+`NOT usable: expired` or `not yet valid`. Use `valid-before` to give a key an end date you do not want to forget.
 
 Per-key switches are comment lines in the allowed-signers file (OpenSSH ignores them):
 

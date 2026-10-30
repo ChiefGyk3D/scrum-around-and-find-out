@@ -165,3 +165,21 @@ def test_a_broken_chain_is_not_extended(path: Path) -> None:
     with pytest.raises(RefusedError):
         Ledger(path).append({"type": "usage", "date": "2026-10-29", "amount_usd": 1, "note": "x"})
     assert path.stat().st_size == size
+
+
+def test_a_chain_start_that_miscounts_the_legacy_rows_is_found_even_when_every_hash_fits(path: Path) -> None:
+    """A whole-chain rewrite with consistent hashes still cannot change how many old rows there were."""
+    from safo.gemini import _chain_hash
+
+    prefix = path.read_bytes()
+    start = {
+        "type": "chain_start",
+        "ts": "2026-10-29T00:00:00Z",
+        "legacy_rows": 1,
+        "prev_hash": hashlib.sha256(prefix).hexdigest(),
+    }
+    start["hash"] = _chain_hash(start)
+    with path.open("a") as handle:
+        handle.write(json.dumps(start) + "\n")
+    with pytest.raises(RefusedError, match="legacy rows"):
+        Ledger(path).read()

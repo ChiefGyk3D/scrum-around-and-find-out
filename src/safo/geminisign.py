@@ -22,6 +22,7 @@ import base64
 import binascii
 import contextlib
 import dataclasses
+import datetime as dt
 import hashlib
 import json
 import os
@@ -83,6 +84,8 @@ class Enrolled:
     allow_software: bool = False
     require_pin: bool = False
     options: str = ""
+    valid_after: dt.datetime | None = None  # inclusive, UTC
+    valid_before: dt.datetime | None = None  # inclusive, UTC
 
     @property
     def hardware(self) -> bool:
@@ -169,8 +172,29 @@ def _split_options(text: str) -> list[str]:
     return parts
 
 
-def _check_options(options: str, number: int) -> None:
+_WINDOW_TIME = re.compile(r"(\d{4})(\d{2})(\d{2})(?:(\d{2})(\d{2})(\d{2})?)?Z")
+
+
+def _window_time(value: str, name: str, number: int) -> dt.datetime:
+    """OpenSSH reads these in the local time zone unless they end in Z; only the UTC form is accepted here, so the
+    window means the same thing on every machine."""
+    found = _WINDOW_TIME.fullmatch(value)
+    if found is None:
+        raise RefusedError(
+            f"allowed-signers line {number}: {name} must be a UTC time ending in Z "
+            "(YYYYMMDDZ, YYYYMMDDHHMMZ or YYYYMMDDHHMMSSZ)"
+        )
+    year, month, day, hour, minute, second = (int(x or 0) for x in found.groups())
+    try:
+        return dt.datetime(year, month, day, hour, minute, second, tzinfo=dt.UTC)
+    except ValueError:
+        raise RefusedError(f"allowed-signers line {number}: {name} is not a real time") from None
+
+
+def _check_options(options: str, number: int) -> tuple[dt.datetime | None, dt.datetime | None]:
     namespaces_ok = False
+    after: dt.datetime | None = None
+    before: dt.datetime | None = None
     for part in filter(None, _split_options(options)):
         name, _, value = part.partition("=")
         name = name.lower()
@@ -183,13 +207,17 @@ def _check_options(options: str, number: int) -> None:
             if value.strip('"') != NAMESPACE:
                 raise RefusedError(f'allowed-signers line {number}: namespaces must be exactly "{NAMESPACE}"')
             namespaces_ok = True
-        elif name in ("valid-after", "valid-before"):
-            if not re.fullmatch(r'"?[0-9]{8,14}Z?"?', value):
-                raise RefusedError(f"allowed-signers line {number}: {name} is not a date")
+        elif name == "valid-after":
+            after = _window_time(value.strip('"'), name, number)
+        elif name == "valid-before":
+            before = _window_time(value.strip('"'), name, number)
         else:
             raise RefusedError(f"allowed-signers line {number}: the option {name[:30]!r} is not allowed")
+    if after is not None and before is not None and before <= after:
+        raise RefusedError(f"allowed-signers line {number}: valid-before must be later than valid-after")
     if not namespaces_ok:
         raise RefusedError(f'allowed-signers line {number}: the key must be bound with namespaces="{NAMESPACE}"')
+    return after, before
 
 
 def _blob_type(blob: bytes) -> str | None:
@@ -248,7 +276,7 @@ def parse_signers(text: str) -> list[Enrolled]:
         if len(rest) < 2:
             raise RefusedError(f"allowed-signers line {number}: expected key type and key")
         key_type, b64 = rest[0], rest[1]
-        _check_options(options, number)
+        after, before = _check_options(options, number)
         if key_type not in KEY_TYPES:
             raise RefusedError(f"allowed-signers line {number}: key type {key_type[:40]!r} is not accepted")
         try:
@@ -261,7 +289,18 @@ def parse_signers(text: str) -> list[Enrolled]:
             raise RefusedError(f"allowed-signers line {number}: the label {label} is used twice")
         if any(k.blob == blob for k in keys):
             raise RefusedError(f"allowed-signers line {number}: this key is enrolled twice")
-        keys.append(Enrolled(label, key_type, blob, b64, fingerprint_of(blob), options=options))
+        keys.append(
+            Enrolled(
+                label,
+                key_type,
+                blob,
+                b64,
+                fingerprint_of(blob),
+                options=options,
+                valid_after=after,
+                valid_before=before,
+            )
+        )
     known = {k.label for k in keys}
     for label in flags:
         if label not in known:
@@ -321,9 +360,20 @@ def load_roster(trust: Trust) -> Roster:
     return Roster(tuple(keys), prints, present)
 
 
-def unusable_reason(key: Enrolled, trust: Trust, roster: Roster) -> str | None:
+def _window_problem(key: Enrolled, now: dt.datetime) -> str | None:
+    if key.valid_before is not None and now > key.valid_before:
+        return f"expired (valid-before {key.valid_before:%Y-%m-%dT%H:%M:%SZ})"
+    if key.valid_after is not None and now < key.valid_after:
+        return f"not yet valid (valid-after {key.valid_after:%Y-%m-%dT%H:%M:%SZ})"
+    return None
+
+
+def unusable_reason(key: Enrolled, trust: Trust, roster: Roster, now: dt.datetime | None = None) -> str | None:
     if roster.is_revoked(key):
         return "revoked"
+    problem = _window_problem(key, now or dt.datetime.now(dt.UTC))
+    if problem:
+        return problem
     if not key.hardware and trust.require_hardware and not key.allow_software:
         return "not a hardware key and no written opt-in"
     return None
@@ -399,7 +449,9 @@ def ssh_keygen() -> str:
     raise RefusedError("ssh-keygen was not found in a system directory")
 
 
-def _ssh_keygen_verify(exe: str, line: str, payload: bytes, armor: str, namespace: str, label: str) -> bool:
+def _ssh_keygen_verify(
+    exe: str, line: str, payload: bytes, armor: str, namespace: str, label: str, now: dt.datetime
+) -> bool:
     """The cryptographic check, by OpenSSH itself, against ONE allowed-signers line built here from the key that was
     already looked up (so the namespace in the file is the namespace asked for)."""
     with tempfile.TemporaryDirectory(prefix="safo-verify-") as folder:
@@ -408,7 +460,20 @@ def _ssh_keygen_verify(exe: str, line: str, payload: bytes, armor: str, namespac
         sig.write_text(armor)
         try:
             done = subprocess.run(  # noqa: S603 - absolute system ssh-keygen, fixed argument list, no shell
-                [exe, "-Y", "verify", "-f", str(signers), "-I", label, "-n", namespace, "-s", str(sig)],
+                [
+                    exe,
+                    "-Y",
+                    "verify",
+                    f"-Overify-time={now.astimezone(dt.UTC):%Y%m%d%H%M%S}Z",
+                    "-f",
+                    str(signers),
+                    "-I",
+                    label,
+                    "-n",
+                    namespace,
+                    "-s",
+                    str(sig),
+                ],
                 input=payload,
                 capture_output=True,
                 check=False,
@@ -420,7 +485,9 @@ def _ssh_keygen_verify(exe: str, line: str, payload: bytes, armor: str, namespac
     return done.returncode == 0 and done.stdout.startswith(b'Good "')
 
 
-def verify(trust: Trust, payload: bytes, armor: str, *, namespace: str = NAMESPACE) -> Verified:
+def verify(
+    trust: Trust, payload: bytes, armor: str, *, namespace: str = NAMESPACE, now: dt.datetime | None = None
+) -> Verified:
     """Who signed `payload`, or why nobody who counts did. Every refusal is a RefusedError."""
     info = parse_signature(armor)
     if info.namespace != namespace:
@@ -431,7 +498,8 @@ def verify(trust: Trust, payload: bytes, armor: str, *, namespace: str = NAMESPA
     key = next((k for k in roster.keys if k.blob == info.blob), None)
     if key is None:
         raise RefusedError("the approval was not signed by an enrolled key")
-    problem = unusable_reason(key, trust, roster)
+    now = now or dt.datetime.now(dt.UTC)
+    problem = unusable_reason(key, trust, roster, now)
     if problem:
         raise RefusedError(f"the signing key {key.label} cannot approve: {problem}")
     present = verified = None
@@ -444,8 +512,11 @@ def verify(trust: Trust, payload: bytes, armor: str, *, namespace: str = NAMESPA
         if key.require_pin and not verified:
             raise RefusedError(f"the signature by {key.label} does not show a PIN check (user verification)")
     options = f'namespaces="{namespace}"'
+    for name, when in (("valid-after", key.valid_after), ("valid-before", key.valid_before)):
+        if when is not None:  # OpenSSH enforces the window too, against the time it is told (below)
+            options += f',{name}="{when:%Y%m%d%H%M%S}Z"'
     line = f"{key.label} {options} {key.key_type} {key.b64}"
-    if not _ssh_keygen_verify(ssh_keygen(), line, payload, armor, namespace, key.label):
+    if not _ssh_keygen_verify(ssh_keygen(), line, payload, armor, namespace, key.label, now):
         raise RefusedError("the approval's signature does not verify")
     return Verified(key.label, key.fingerprint, key.key_type, key.hardware, present, verified)
 
@@ -480,11 +551,11 @@ def sign(key_path: str, payload: bytes, namespace: str, env: Mapping[str, str]) 
 # -- the keys subcommands (read-only) ---------------------------------------------------------------------------------
 
 
-def key_rows(trust: Trust) -> list[str]:
+def key_rows(trust: Trust, now: dt.datetime | None = None) -> list[str]:
     roster = load_roster(trust)
     rows = []
     for k in roster.keys:
-        why = unusable_reason(k, trust, roster)
+        why = unusable_reason(k, trust, roster, now)
         rows.append(
             f"{k.label}  {k.key_type}  {k.fingerprint}  "
             f"{'hardware (touch required)' if k.hardware else 'SOFTWARE'}  "
@@ -496,12 +567,12 @@ def key_rows(trust: Trust) -> list[str]:
     return rows
 
 
-def check_report(trust: Trust) -> tuple[list[str], list[str]]:
+def check_report(trust: Trust, now: dt.datetime | None = None) -> tuple[list[str], list[str]]:
     """(problems, warnings). A file that does not load raises; a key that is fine but weak is a warning."""
     roster = load_roster(trust)
     problems: list[str] = []
     warnings: list[str] = []
-    usable = [k for k in roster.keys if unusable_reason(k, trust, roster) is None]
+    usable = [k for k in roster.keys if unusable_reason(k, trust, roster, now) is None]
     if not usable:
         problems.append("no usable key is enrolled, so nothing can be approved")
     if len(usable) == 1:
@@ -520,6 +591,12 @@ def check_report(trust: Trust) -> tuple[list[str], list[str]]:
             )
         if roster.is_revoked(k):
             warnings.append(f"{k.label} is revoked and cannot approve")
+    from safo import geminipasskey  # tier 2 lives beside tier 1 in the same trust file
+
+    text = read_trust_file(trust.signers, trust.uid, "allowed-signers file").decode("utf-8", "replace")
+    warnings.extend(
+        geminipasskey.check_warnings(geminipasskey.parse_passkeys(text), geminipasskey.passkeys_allowed(text))
+    )
     if not roster.revoked_file_present:
         warnings.append("there is no revocation list file; create an empty one so a lost key can be added to it")
     return problems, warnings

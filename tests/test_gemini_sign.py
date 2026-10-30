@@ -9,6 +9,7 @@ spend has a test that goes red when the check is removed.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import subprocess
 from pathlib import Path
@@ -85,6 +86,7 @@ def test_the_namespace_is_also_bound_by_openssh_itself(rig: Rig) -> None:
         armor,
         NAMESPACE,
         "yubikey-a",
+        dt.datetime.now(dt.UTC),
     )
     assert ok is False
 
@@ -204,7 +206,7 @@ def test_a_key_that_carries_no_touch_required_is_refused_at_load(rig: Rig) -> No
         f'namespaces="{NAMESPACE}",NO-TOUCH-REQUIRED',
     ):
         rig.set_signers(signers_line("yubikey-a", pub, options=options))
-        with refused("no-touch-required"):
+        with refused("carries no-touch-required"):
             geminisign.load_roster(rig.trust())
 
 
@@ -216,7 +218,8 @@ def test_a_key_that_carries_no_touch_required_is_refused_at_load(rig: Rig) -> No
         (f'namespaces="{NAMESPACE},file"', "namespaces must be exactly"),
         (f'cert-authority,namespaces="{NAMESPACE}"', "not allowed"),
         (f'namespaces="{NAMESPACE}",verify-required', "not allowed"),
-        (f'namespaces="{NAMESPACE}",valid-before="soon"', "not a date"),
+        (f'namespaces="{NAMESPACE}",valid-before="soon"', "UTC time"),
+        (f'namespaces="{NAMESPACE}",valid-after="20261029Z",valid-before="20261029Z"', "later than valid-after"),
     ],
 )
 def test_the_options_on_a_key_are_strict(rig: Rig, options: str, match: str) -> None:
@@ -253,6 +256,20 @@ def test_an_empty_allowed_signers_file_approves_nothing(rig: Rig) -> None:
 def test_the_trust_file_must_be_owned_by_the_required_account(rig: Rig) -> None:
     with refused("not owned"):
         geminisign.verify(rig.trust(uid=os.geteuid() + 1), PAYLOAD, rig.sign())
+
+
+def test_the_file_itself_must_be_owned_by_the_required_account(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolated from the directory rule: every directory is fine and only the file's owner differs."""
+    real = os.fstat
+
+    def other_owner(fd: int) -> os.stat_result:
+        r = real(fd)
+        fields = (r.st_mode, r.st_ino, r.st_dev, r.st_nlink, r.st_uid + 1, r.st_gid, r.st_size, 0, 0, 0)
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", other_owner)
+    with refused("file is not owned|not owned by the account"):
+        geminisign.read_trust_file(rig.signers, os.geteuid(), "allowed-signers file")
 
 
 def test_the_production_trust_account_is_root(tmp_path: Path) -> None:
@@ -377,3 +394,75 @@ def test_check_fails_on_no_touch_required_and_when_nothing_is_enrolled(rig: Rig)
 
 def test_canonical_json_has_no_variance() -> None:
     assert geminisign.canonical({"b": 1, "a": "é"}) == '{"a":"\\u00e9","b":1}'
+
+
+def test_check_warns_about_a_tier_two_passkey_in_the_same_file(rig: Rig) -> None:
+    rig.set_signers(
+        signers_line("yubikey-a", rig.a.with_suffix(".pub")),
+        "# safo: yubikey-a allow-software",
+        "# safo-passkey: label=laptop-1 rp=localhost origin=http://localhost:1 alg=ES256 id=AAAA key=AAAA",
+    )
+    _, warnings = geminisign.check_report(rig.trust())
+    text = " ".join(warnings)
+    assert "laptop-1 is a passkey (assurance tier 2)" in text and "passkey approvals are OFF" in text
+    # and the SSH verifier is untouched by the extra line
+    assert geminisign.verify(rig.trust(), PAYLOAD, rig.sign()).label == "yubikey-a"
+
+
+# -- validity window: valid-after / valid-before are enforced, not just parsed ---------------------------------------
+
+AT = dt.datetime(2026, 10, 29, 20, 0, tzinfo=dt.UTC)
+
+
+def windowed(rig: Rig, after: str = "", before: str = "") -> None:
+    options = f'namespaces="{NAMESPACE}"'
+    if after:
+        options += f',valid-after="{after}"'
+    if before:
+        options += f',valid-before="{before}"'
+    rig.set_signers(signers_line("yubikey-a", rig.a.with_suffix(".pub"), options=options))
+
+
+def test_a_key_inside_its_window_signs(rig: Rig) -> None:
+    windowed(rig, "20260101Z", "20261231235959Z")
+    assert geminisign.verify(rig.trust(), PAYLOAD, rig.sign(), now=AT).label == "yubikey-a"
+
+
+@pytest.mark.parametrize(
+    ("after", "before", "word"),
+    [("", "20260101Z", "expired"), ("", "202610291959Z", "expired"), ("20270101Z", "", "not yet valid")],
+)
+def test_an_expired_or_not_yet_valid_key_is_refused_at_verify_and_shown_as_unusable(
+    rig: Rig, after: str, before: str, word: str
+) -> None:
+    windowed(rig, after, before)
+    with refused(word):
+        geminisign.verify(rig.trust(), PAYLOAD, rig.sign(), now=AT)
+    assert word in geminisign.key_rows(rig.trust(), AT)[0] and "NOT usable" in geminisign.key_rows(rig.trust(), AT)[0]
+    problems, _ = geminisign.check_report(rig.trust(), AT)
+    assert problems and "no usable key" in problems[0]
+
+
+def test_the_window_edges_are_inclusive_and_use_the_clock_it_is_given(rig: Rig) -> None:
+    windowed(rig, "20261029195900Z", "20261029200000Z")
+    assert geminisign.verify(rig.trust(), PAYLOAD, rig.sign(), now=AT).label == "yubikey-a"
+    with refused("expired"):
+        geminisign.verify(rig.trust(), PAYLOAD, rig.sign(), now=AT + dt.timedelta(seconds=1))
+    with refused("not yet valid"):
+        geminisign.verify(rig.trust(), PAYLOAD, rig.sign(), now=AT - dt.timedelta(minutes=1, seconds=1))
+
+
+def test_openssh_enforces_the_window_too_even_if_our_own_check_is_bypassed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    windowed(rig, "", "20260101Z")
+    monkeypatch.setattr(geminisign, "_window_problem", lambda key, now: None)
+    with refused("does not verify"):
+        geminisign.verify(rig.trust(), PAYLOAD, rig.sign(), now=AT)
+
+
+@pytest.mark.parametrize("value", ["20261029", "soon", "2026-10-29Z", "20261029T1200Z", "202610291200"])
+def test_a_window_time_must_be_utc_and_well_formed(rig: Rig, value: str) -> None:
+    windowed(rig, "", value)
+    with refused("valid-before"):
+        geminisign.load_roster(rig.trust())
