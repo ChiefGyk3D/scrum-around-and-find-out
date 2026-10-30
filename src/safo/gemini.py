@@ -43,7 +43,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-from safo import netguard
+from safo import netguard, termsearch
 from safo.bounded import MAX_BYTES, MAX_FILE_BYTES, count, loads, read_bounded
 from safo.credentials import find_executable
 from safo.errors import ConfigError, SafoError
@@ -605,7 +605,11 @@ def _check_request(cfg: GeminiConfig, req: Request) -> None:
         raise RefusedError("the tier is free or paid")
     if not MODEL_NAME.fullmatch(req.model):
         raise RefusedError("the model name is not a plain model name")
-    if len(req.prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+    try:
+        size = len(req.prompt.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise RefusedError("the prompt is not valid text (a lone surrogate), so nothing was sent") from None
+    if size > MAX_PROMPT_BYTES:
         raise RefusedError(f"the prompt is larger than {MAX_PROMPT_BYTES} bytes; cut it down")
     if has_secret_shape(req.prompt):
         raise RefusedError("the prompt holds something shaped like a secret or a private key; nothing was sent")
@@ -850,23 +854,37 @@ TERMS_SECONDS = 5.0  # a term search that runs longer than this is killed and co
 _RE_PARSER = importlib.import_module("re._parser")  # private, but the only way to read a pattern's shape (3.11+)
 _RE_CONSTANTS = importlib.import_module("re._constants")
 
-_HOMOGLYPHS = str.maketrans(
-    {
-        "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0456": "i", "\u0458": "j",
-        "\u0455": "s", "\u0501": "d", "\u043a": "k", "\u043c": "m", "\u0445": "x", "\u0443": "y", "\u0261": "g",
-        "\u0192": "f", "\u03bf": "o", "\u03b1": "a", "\u03b5": "e", "\u03b9": "i", "\u03ba": "k", "\u03c1": "p",
-        "\u03bd": "v", "\u03c4": "t", "\u0475": "v",
-    }
-)  # fmt: skip
+_LETTERS = {
+    # Cyrillic, lower and upper case
+    "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0456": "i", "\u0458": "j",
+    "\u0455": "s", "\u0501": "d", "\u043a": "k", "\u043c": "m", "\u0445": "x", "\u0443": "y", "\u04bb": "h",
+    "\u051b": "q", "\u051d": "w", "\u04cf": "l",
+    "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K", "\u041c": "M", "\u041d": "H", "\u041e": "O",
+    "\u0420": "P", "\u0421": "C", "\u0422": "T", "\u0425": "X", "\u0406": "I", "\u0408": "J", "\u0405": "S",
+    "\u0423": "Y",
+    # Greek, lower and upper case
+    "\u03bf": "o", "\u03b1": "a", "\u03b5": "e", "\u03b9": "i", "\u03ba": "k", "\u03c1": "p", "\u03bd": "v",
+    "\u03c4": "t", "\u0475": "v",
+    "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H", "\u0399": "I", "\u039a": "K",
+    "\u039c": "M", "\u039d": "N", "\u039f": "O", "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X",
+    # Armenian, Latin extensions and small capitals
+    "\u0585": "o", "\u057d": "u", "\u0578": "n", "\u0581": "g", "\u0251": "a", "\u0261": "g", "\u0192": "f",
+    "\ua731": "s", "\u1d00": "a", "\ua730": "f", "\u1d0f": "o", "\u1d0d": "m", "\u1d07": "e", "\u026a": "i",
+    "\u0274": "n", "\u1d18": "p", "\u1d0b": "k", "\u029f": "l", "\u0280": "r", "\u1d05": "d", "\u0262": "g",
+}  # fmt: skip
+# letters and symbols that draw nothing: Hangul fillers and the braille blank
+_BLANKS = {0x3164: None, 0x115F: None, 0x1160: None, 0xFFA0: None, 0x2800: None}
+_HOMOGLYPHS = str.maketrans({**_LETTERS, **{chr(k): v for k, v in _BLANKS.items()}})
 
 
 def fold(text: str) -> str:
     """What a reader would see: NFKD, combining marks, format and control characters (zero-width, tag, variation
-    selector, NUL) removed except tab and newline, NFKC, and common Cyrillic and Greek look-alikes mapped to Latin."""
+    selector, NUL) and the invisible letters (Hangul fillers, braille blank) removed except tab and newline, NFKC, and
+    common Cyrillic, Greek, Armenian and small-capital look-alikes, upper and lower case, mapped to Latin."""
     stripped = "".join(
         c
         for c in unicodedata.normalize("NFKD", text)
-        if c in "\t\n" or unicodedata.category(c) not in ("Mn", "Cf", "Cc")
+        if c in "\t\n" or (unicodedata.category(c) not in ("Mn", "Cf", "Cc") and ord(c) not in _BLANKS)
     )
     return unicodedata.normalize("NFKC", stripped).translate(_HOMOGLYPHS)
 
@@ -875,10 +893,29 @@ class TermsCheckError(RefusedError):
     """The private-terms search could not finish: it counts as a hit."""
 
 
+TERMS_OPTIONAL_CAP = 8  # optional parts and alternatives in one term, together
+
+
+def _is_wildcard_repeat(op: Any, av: Any) -> bool:
+    """A repeat of `.`, `\\w`, `\\s`, `\\S`, a negated or category class: the kind whose neighbours multiply."""
+    c = _RE_CONSTANTS
+    if op not in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
+        return False
+    _low, high, sub = av
+    if high <= 1 or len(sub) != 1:
+        return False
+    inner, value = sub[0]
+    if inner in (c.ANY, c.NOT_LITERAL, c.CATEGORY):
+        return True
+    return inner == c.IN and any(kind in (c.CATEGORY, c.NEGATE) for kind, _ in value)
+
+
 def _unsafe_shape(pattern: str) -> str | None:
     """Why a term could run for a long time or match nothing, or None. Terms are plain words with a few bounded
     repeats: no repeat whose body can match nothing or holds another repeat, no alternation inside a repeat, no back
-    reference, no pattern that can match the empty string, and a product of repeat bounds under TERMS_WORK_CAP."""
+    reference, no pattern that can match the empty string, at most TERMS_OPTIONAL_CAP optional parts and alternatives
+    together (each doubles the work), no two wildcard repeats next to each other, and a product of repeat bounds under
+    TERMS_WORK_CAP."""
     try:
         tree = _RE_PARSER.parse(pattern, re.IGNORECASE)
     except (re.error, RecursionError, OverflowError):
@@ -887,26 +924,41 @@ def _unsafe_shape(pattern: str) -> str | None:
     if tree.getwidth()[0] == 0:
         return "an expression that can match the empty string"
     work = [1]
+    optional = [0]
+    crowded = "too many optional parts, alternatives or repeats multiplying together"
 
     def walk(items: Any, in_repeat: bool) -> str | None:
+        previous_wild = False
         for op, av in items:
+            wild = _is_wildcard_repeat(op, av)
+            if wild and previous_wild:
+                return "two wildcard repeats next to each other"
+            previous_wild = wild
             if op in (c.MAX_REPEAT, c.MIN_REPEAT, c.POSSESSIVE_REPEAT):
-                _low, high, sub = av
+                low, high, sub = av
                 if high == c.MAXREPEAT or high > TERMS_REPEAT_CAP:
                     return "an unbounded repeat (use {1,40} instead of + or *)"
                 if in_repeat:
                     return "a repeat inside a repeat"
                 if sub.getwidth()[0] == 0:
                     return "a repeat of something that can match nothing"
-                work[0] *= max(high, 1)
-                if work[0] > TERMS_WORK_CAP:
-                    return "repeats that multiply to more than 10000"
+                if low == 0 and high == 1:
+                    optional[0] += 1
+                    work[0] *= 2
+                else:
+                    work[0] *= max(high, 1)
+                if work[0] > TERMS_WORK_CAP or optional[0] > TERMS_OPTIONAL_CAP:
+                    return crowded
                 found = walk(sub, True)
             elif op == c.SUBPATTERN:
                 found = walk(av[3], in_repeat)
             elif op == c.BRANCH:
                 if in_repeat:
                     return "an alternation inside a repeat"
+                optional[0] += len(av[1]) - 1
+                work[0] *= len(av[1])
+                if work[0] > TERMS_WORK_CAP or optional[0] > TERMS_OPTIONAL_CAP:
+                    return crowded
                 found = next((r for r in (walk(branch, in_repeat) for branch in av[1]) if r), None)
             elif op in (c.GROUPREF, c.GROUPREF_EXISTS):
                 return "a back reference"
@@ -958,20 +1010,24 @@ def private_term_hit(terms: tuple[re.Pattern[str], ...], texts: list[str], timeo
     that does not answer in time, or fails, raises TermsCheckError, which callers treat as a hit."""
     if not terms:
         return False
-    payload = (
-        json.dumps([[t.pattern, t.flags] for t in terms]) + "\n" + "\x00".join(t.replace("\x00", " ") for t in texts)
-    )
+    if any("\n" in t.pattern for t in terms):
+        raise TermsCheckError("a private term spans lines, so it cannot be checked and counts as a match")
+    body = "\x00".join(t.replace("\x00", " ") for t in texts)
+    payload = "".join(f"{t.flags}\t{t.pattern}\n" for t in terms) + "\n" + body
     try:
-        done = subprocess.run(
-            [sys.executable, "-I", "-m", "safo.termsearch"],
+        done = subprocess.run(  # noqa: S603 - this interpreter and the worker file beside the package, no shell
+            [sys.executable, "-I", termsearch.__file__, str(math.ceil(timeout) + 2)],
+            start_new_session=True,
             input=payload,
             capture_output=True,
             text=True,
             check=False,
             timeout=max(timeout, 0.1),
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired:
         raise TermsCheckError("the private terms check ran out of time, so it counts as a match") from None
+    except (OSError, UnicodeError):  # the worker could not start, or a text cannot be encoded (a lone surrogate)
+        raise TermsCheckError("the private terms check could not run, so it counts as a match") from None
     answer = done.stdout.strip()
     if done.returncode != 0 or answer not in ("0", "1"):
         raise TermsCheckError("the private terms check failed, so it counts as a match")

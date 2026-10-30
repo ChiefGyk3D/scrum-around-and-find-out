@@ -729,7 +729,7 @@ def test_the_config_accepts_only_none_default_or_an_absolute_terms_path(tmp_path
 
 def test_a_bidi_control_in_the_quote_is_refused(store: ApprovalStore) -> None:
     with pytest.raises(ConfigError, match="quote"):
-        approve(store, quote="yes‮ up to 1.50")
+        approve(store, quote="yes\u202e up to 1.50")
 
 
 def test_a_zero_prompt_count_alone_is_not_trusted(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
@@ -778,4 +778,12 @@ def test_the_wrapper_matches_private_terms_on_the_folded_prompt(
     for disguised in ("about \u0430cme-internal", "about ac\u200bme-internal"):
         with pytest.raises(RefusedError, match="private term"):
             ask(withterms, free(disguised), store=store, key_for=Keys(), now=NOW)
+    assert server.requests == []
+
+
+def test_ask_refuses_a_prompt_with_a_lone_surrogate_cleanly(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path
+) -> None:
+    with pytest.raises(RefusedError, match="not valid text"):
+        ask(cfg, free("x \ud800 foo"), store=store, key_for=Keys(), now=NOW)
     assert server.requests == []

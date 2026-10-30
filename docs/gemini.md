@@ -111,11 +111,13 @@ reads the terms with the **same loader** (the fixed config's setting, never `SAF
 
 A term is a plain word or phrase with a few bounded repeats. Refused when the file loads, with the line number: a pattern
 that can match nothing at all (`x{0,5}`, `^`, `\b`, an empty group), an unbounded repeat (`+`, `*`), a repeat inside a
-repeat or of something that can match nothing, an alternation inside a repeat, a back reference, and repeats whose upper
+repeat or of something that can match nothing, an alternation inside a repeat, a back reference, more than 8 optional parts and alternatives together (each doubles the work), two wildcard repeats (`.`, `\w`, `\s`, `\S`) next to each other, and repeats whose upper
 bounds multiply to more than 10000 (so `foo.{0,50}bar.{0,50}baz` loads, `.{0,99}.{0,99}.{0,99}z` does not). At most 500
 terms of at most 200 characters. These shape rules keep a search short, but they cannot prove it: the search itself also
 runs in a **child process that is killed after a few seconds**, and a search that does not finish counts as a match, so
-the guard denies and the wrapper sends nothing. Each term sees at most 4000 characters at a time. A file that is missing,
+the guard denies and the wrapper sends nothing. The worker is found by file path and needs no install; it also limits
+itself (a CPU limit, an alarm of its own, and on Linux a signal when its parent dies) so it cannot outlive the process that
+started it. Each term sees at most 4000 characters at a time. A file that is missing,
 unreadable or oversized stops the call; `private_terms: none` is the written opt-out. `--material public` is still a
 statement by the caller: no code can know that a text is public, so these checks only catch what looks like a secret or
 matches a term the maintainer listed.

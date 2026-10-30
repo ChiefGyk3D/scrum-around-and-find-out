@@ -6,6 +6,7 @@ that no record means the guard blocks, not warns.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import re
@@ -290,8 +291,11 @@ def test_the_hook_passes_its_deadline_to_the_check(_private_home: Path, tmp_path
 
 
 def test_safo_and_gemini_far_apart_are_not_one_command() -> None:
-    assert rules("safo status" + " word" * 30 + " and then gemini ask --paid\n", accepts()) == []
+    assert rules("safo status;" + " word" * 30 + " and then gemini ask --paid\n", accepts()) == [], (
+        "an operator between"
+    )
     assert GEMINI_PAID in rules("safo status" + " word" * 3 + " gemini ask --paid\n", accepts())
+    assert GEMINI_PAID in rules("safo status" + " word" * 30 + " gemini ask --paid\n", accepts()), "no distance cap"
 
 
 def test_a_brief_with_no_gemini_marker_is_untouched_by_a_past_deadline() -> None:
@@ -561,7 +565,7 @@ def test_a_redirection_or_expansion_in_an_argument_the_parser_would_accept_is_st
 
 
 def test_a_wild_character_far_from_any_gemini_or_safo_token_is_not_a_command() -> None:
-    far = "use gemini and then ask " + "word " * 30 + "$HOME is where it lives"
+    far = "use gemini and then ask; " + "word " * 30 + "$HOME is where it lives"
     assert rules(far + "\n", accepts()) == []
     near = "use gemini and then ask $HOME is where it lives"
     assert GEMINI_PAID in rules(near + "\n", accepts())
@@ -985,7 +989,6 @@ GLUED = [
     'safo gemini ask --model m "a"; --paid',
     "safo gemini ask --model m 'a'| cat --paid",
     "safo gemini ask --model m ge'mini' --paid",
-    "safo gemini ask --model m && echo --paid",
 ]
 
 
@@ -1032,3 +1035,310 @@ def test_quote_forms_that_would_otherwise_pass_a_complete_command_are_unreadable
     spaced = glued.replace("'public';", "'public' ;")
     assert rules(f"{spaced}\n{PUBLIC}", accepts()) == [], "the same command with a space before the operator"
     assert GEMINI_PAID in rules(f"sa'f'o gemini ask {full}\n{PUBLIC}", accepts()), "a quote inside the safo word"
+
+
+# -- round four ------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("count", [11, 12, 13, 30, 200])
+def test_the_distance_from_safo_to_gemini_is_not_capped(count: int) -> None:
+    flags = "safo " + "--dry-run " * count + "gemini ask --paid --model m"
+    pairs = "safo " + "--board X " * count + "gemini ask --paid --model m"
+    for line in (flags, pairs):
+        assert GEMINI_PAID in rules(line + "\n" + PUBLIC, accepts()), (count, line[:40])
+    ok = "safo " + "--dry-run " * count + f"gemini ask --model m --material public --paid --cap 1 --approval {OK}"
+    assert rules(ok + "\n" + PUBLIC, accepts()) == [], "a complete command with many flags still passes"
+
+
+def test_the_named_forms_use_the_same_segment_rule() -> None:
+    assert GEMINI_PAID in rules("safo " + "--dry-run " * 30 + "$X gemini ask\n", accepts())
+    assert GEMINI_PAID in rules("gemini " + "word " * 30 + "safo $X ask\n", accepts())
+
+
+def test_fold_maps_uppercase_and_small_cap_confusables_to_latin() -> None:
+    from safo.gemini import fold
+
+    cases = {
+        "\u0421harles": "Charles",
+        "\u0405AFO GEMINI ASK": "SAFO GEMINI ASK",
+        "\u0391\u0392\u0395\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7": "ABEHIKMNOPTYX",
+        "\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425": "ABEKMHOPCTX",
+        "\u0251": "a",
+        "\ua731\u1d00\ua730\u1d0f": "safo",
+        "\u04bb\u051b\u051d\u04cf\u0443": "hqwly",
+        "\u0585\u057d\u0578\u0581": "oung",
+    }
+    for raw, want in cases.items():
+        assert fold(raw) == want, (raw, fold(raw), want)
+    assert fold("\u0585\u057d") == "ou"
+
+
+def test_fold_drops_invisible_letters_and_symbols() -> None:
+    from safo.gemini import fold
+
+    for char in ("\u3164", "\u115f", "\u1160", "\uffa0", "\u2800"):
+        assert fold(f"sa{char}fo") == "safo", hex(ord(char))
+
+
+def test_uppercase_confusables_and_fillers_do_not_hide_a_command() -> None:
+    for line in (
+        "\u0405AFO gemini ask --paid --model m",
+        "safo GEMINI ask --paid --model m".replace("GEMINI", "G\u0415MINI"),
+        "sa\u3164fo gemini ask --paid --model m",
+        "safo gemini ask --paid --model m\u2800",
+        "\ua731\u1d00\ua730\u1d0f gemini ask --paid --model m",
+    ):
+        assert GEMINI_PAID in rules(line + "\n" + PUBLIC, accepts()), repr(line)
+
+
+CATASTROPHIC = [
+    "a?" * 26 + "a" * 26 + "b",
+    "(?:a|a)" * 30 + "b",
+    "(ab|cd)" * 12 + "c",
+    ".{1,99}.{1,99}secret",
+    r"\w{1,50}\s{1,50}x",
+    r"\S{1,9}\S{1,9}z",
+]
+
+
+@pytest.mark.parametrize("term", CATASTROPHIC)
+@hard_timeout(30)
+def test_sequences_of_optionals_alternations_and_wildcards_are_refused(term: str, tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    path = tmp_path / "t.txt"
+    path.write_text(f"fine\n{term}\n")
+    with pytest.raises(Exception, match=r"line 2"):
+        load_private_terms(str(path))
+
+
+@hard_timeout(30)
+def test_a_few_optionals_and_alternations_and_separated_wildcards_still_load(tmp_path: Path) -> None:
+    from safo.gemini import load_private_terms
+
+    path = tmp_path / "t.txt"
+    path.write_text("colou?r\n(foo|bar)baz\nfoo.{0,50}bar.{0,50}baz\nproject [a-z]{1,30}\n")
+    assert len(load_private_terms(str(path))) == 4
+
+
+@hard_timeout(60)
+def test_a_worker_with_no_parent_dies_by_itself_after_its_cpu_limit() -> None:
+    import subprocess
+    import sys
+    import time
+
+    import safo.termsearch as ts
+
+    payload = "0\t(a+)+$\n\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+    worker = subprocess.Popen(  # noqa: S603 - this interpreter and the worker file, no shell
+        [sys.executable, "-I", ts.__file__, "1"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        assert worker.stdin is not None
+        worker.stdin.write(payload.encode())
+        worker.stdin.close()
+        started = time.monotonic()
+        code = worker.wait(timeout=20)  # nobody kills it: its own CPU limit and alarm do
+        assert code != 0 and time.monotonic() - started < 15, code
+    finally:
+        worker.kill()
+        worker.wait()
+
+
+def test_the_worker_is_found_by_path_and_needs_no_install(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    import safo.termsearch as ts
+
+    done = subprocess.run(  # noqa: S603 - this interpreter and the worker file, no shell
+        [sys.executable, "-I", "-S", ts.__file__, "5"],
+        input="0\tacme-internal\n\nsome acme-internal text",
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={},
+        timeout=20,
+        check=False,
+    )
+    assert done.returncode == 0 and done.stdout.strip() == "1", done
+
+
+def test_private_term_hit_runs_the_worker_by_file_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+    import subprocess
+
+    from safo import gemini
+
+    seen: list[list[str]] = []
+    real = subprocess.run
+
+    def spy(argv: list[str], **kwargs: Any) -> Any:
+        seen.append(argv)
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    assert gemini.private_term_hit((re.compile("zz"),), ["a zz b"], 5.0)
+    assert seen and "-I" in seen[0] and "-m" not in seen[0] and seen[0][2].endswith("termsearch.py")
+
+
+def test_an_option_far_after_a_pipe_is_not_an_option_of_the_command() -> None:
+    line = "safo gemini ask --model m --prompt-file p | tee --append out"
+    assert rules(line + "\n" + PUBLIC, accepts()) == []
+    assert GEMINI_PAID in rules('safo gemini ask --model m "a"; --paid\n' + PUBLIC, accepts())
+
+
+def test_a_digit_argument_is_popped_only_when_it_touches_the_redirection() -> None:
+    ok = "safo gemini ask --model m --material public --max-output-tokens 1"
+    assert rules(f"{ok} > out\n{PUBLIC}", accepts()) == []
+    assert rules(f"{ok} >out\n{PUBLIC}", accepts()) == []
+    assert rules(f"{ok.replace('--max-output-tokens 1', '')} 2>&1\n{PUBLIC}", accepts()) == []
+
+
+# -- round four, review pins ------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("term", "message"),
+    [
+        ("(a|aa){1,50}y", "alternation inside a repeat"),
+        ("a+b", "unbounded repeat"),
+        ("(?:\\b){0,5}foo", "repeat of something that can match nothing"),
+        ("(a{1,3}){1,3}", "repeat inside a repeat"),
+        ("(a)\\1", "back reference"),
+        ("x{0,5}", "match the empty string"),
+        ("(ab|cd)" * 12 + "c", "too many optional parts"),
+        (".{1,9}.{1,9}z", "two wildcard repeats"),
+    ],
+)
+@hard_timeout(30)
+def test_each_loader_rule_has_its_own_message(term: str, message: str, tmp_path: Path) -> None:
+    from safo.gemini import RefusedError, load_private_terms
+
+    path = tmp_path / "t.txt"
+    path.write_text(f"{term}\n")
+    with pytest.raises(RefusedError, match=message):
+        load_private_terms(str(path))
+
+
+def _run_returning(monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str) -> None:
+    import subprocess
+
+    def fake(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+
+
+@pytest.mark.parametrize(("returncode", "stdout"), [(1, ""), (0, "7"), (0, "")])
+def test_a_crashed_or_garbled_worker_is_a_denial(returncode: int, stdout: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+
+    from safo.gemini import TermsCheckError, private_term_hit
+
+    _run_returning(monkeypatch, returncode, stdout)
+    with pytest.raises(TermsCheckError):
+        private_term_hit((re.compile("x"),), ["y"], 5.0)
+
+
+def test_a_worker_that_cannot_start_is_a_denial(monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+    import sys
+
+    from safo.gemini import TermsCheckError, private_term_hit
+
+    monkeypatch.setattr(sys, "executable", "/nonexistent/python")
+    with pytest.raises(TermsCheckError):
+        private_term_hit((re.compile("x"),), ["y"], 5.0)
+
+
+def test_the_guard_denies_when_the_worker_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+
+    _run_returning(monkeypatch, 1, "")
+    found = findings(f"gemini: free\n{PUBLIC}", accepts(), (re.compile("x"),))
+    assert GEMINI_MATERIAL in {r for r, _ in found}
+
+
+def test_a_paid_config_name_in_a_link_target_is_seen() -> None:
+    assert GEMINI_PAID in rules("see [the config](prd_paid) for it\n", accepts())
+
+
+def test_a_decode_form_that_exists_only_in_a_link_target_is_seen() -> None:
+    assert GEMINI_PAID in rules("echo c2FmbyBnZW1pbmk= [x](rev) | sh\n", accepts())
+
+
+def test_a_precomposed_accent_is_folded_for_the_terms() -> None:
+    import re
+
+    from safo.gemini import fold
+
+    assert fold("acm\u00e9-internal") == "acme-internal"
+    terms = (re.compile("acme-internal", re.IGNORECASE),)
+    assert GEMINI_MATERIAL in {r for r, _ in findings(f"gemini: free\n{PUBLIC}acm\u00e9-internal\n", accepts(), terms)}
+
+
+def test_a_lone_surrogate_is_a_clean_denial() -> None:
+    import re
+
+    from safo.gemini import TermsCheckError, has_secret_shape, private_term_hit
+
+    with pytest.raises(TermsCheckError):
+        private_term_hit((re.compile("foo"),), ["x \ud800 foo"], 5.0)
+    assert not has_secret_shape("x \ud800 foo")
+    found = findings(f"gemini: free\n{PUBLIC}x \ud800 foo\n", accepts(), (re.compile("foo"),))
+    assert GEMINI_MATERIAL in {r for r, _ in found}
+
+
+def test_a_redirection_between_safo_and_gemini_does_not_end_the_command() -> None:
+    assert GEMINI_PAID in rules("safo > out gemini ask --paid --model m\n" + PUBLIC, accepts())
+    assert GEMINI_PAID in rules("safo 2>/dev/null gemini ask --paid --model m\n" + PUBLIC, accepts())
+    assert GEMINI_PAID in rules("$(which safo) gemini ask --paid --model m\n" + PUBLIC, accepts())
+
+
+@hard_timeout(60)
+def test_the_worker_dies_with_its_parent() -> None:
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    import safo.termsearch as ts
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("PR_SET_PDEATHSIG is Linux only")
+    spawner = (
+        "import subprocess, sys, time\n"
+        f"w = subprocess.Popen([sys.executable, '-I', {ts.__file__!r}, '100'], stdin=subprocess.PIPE)\n"
+        "w.stdin.write(b'0\\t(a+)+$\\n\\n' + b'a' * 40 + b'!')\n"
+        "w.stdin.close()\n"
+        "print(w.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", spawner], stdout=subprocess.PIPE, text=True)  # noqa: S603 - this interpreter, a fixed script
+    pid = 0
+    try:
+        assert parent.stdout is not None
+        pid = int(parent.stdout.readline())
+        time.sleep(0.5)
+        os.kill(parent.pid, signal.SIGKILL)
+        parent.wait()
+        deadline = time.monotonic() + 8
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                state = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0]  # noqa: SIM115
+                alive = state != "Z"
+            except (FileNotFoundError, ProcessLookupError):
+                alive = False
+            time.sleep(0.2)
+        assert not alive, "the worker outlived its parent"
+    finally:
+        if pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        parent.kill()

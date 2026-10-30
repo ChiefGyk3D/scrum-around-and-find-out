@@ -24,7 +24,6 @@ the fix. A false positive is a block, not a leak. Raw SDK use outside a brief is
 
 from __future__ import annotations
 
-import bisect
 import dataclasses
 import re
 import shlex
@@ -66,12 +65,10 @@ SINK_RE = re.compile(SINK)
 SHELL_WILD = frozenset("$*?[]{}`%")
 RISKY_ACTIONS = ("ask", "approve")
 ACTIONS = ("ask", "approve", "quota")
-# a path or file name about the feature, for example src/safo/gemini.py or tests/test_gemini*.py
 # inline code in prose that wraps a known word, an option or a file name; any other word in backticks runs as a command
 MARKDOWN_WORD = re.compile(
     r"^`(?:ask|approve|quota|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
 )
-PATHLIKE = re.compile(r"^[\w./-]*gemini[\w./-]*$", re.IGNORECASE)
 VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
 # Every detector pattern, so the cheap prefilter below can never miss what a detector would catch. A new detector regex
 # must be added here (a test fails otherwise); the second field names it.
@@ -83,7 +80,6 @@ PREFILTER = (
     ("sdk", SDK),
     ("decode", DECODE),
 )
-TOKEN_WINDOW = 12  # tokens between `safo` and `gemini` for them to count as one command
 LINE_CAP = 4000  # a line longer than this that mentions anything above is blocked unread
 MAX_CANDIDATES = 50  # commands examined per brief; more than this is blocked
 TERMS_SECONDS_DEFAULT = 5.0  # the most the private-terms search is given
@@ -335,6 +331,12 @@ def _lex(text: str) -> list[Tok] | None:
     return tokens
 
 
+def _breaks(operator: str) -> bool:
+    """An operator that ends a simple command: `;`, `|` or `&` (also in `&&` and `||`). Parentheses and redirections
+    do not, so `$(which safo) gemini ask` and `safo > out gemini ask` stay one command."""
+    return any(c in operator for c in ";|&")
+
+
 def _core(token: str) -> str:
     return token.strip("()${};|&,:'\"`?!.").lower()
 
@@ -414,23 +416,34 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
     for t in tokens:
         if t.quoted and " " in t.value and "safo" in t.value.lower() and depth < 3:
             found = _commands(t.value, number, steps, budget, depth + 1) or found
-    safos = [i for i, t in enumerate(tokens) if not t.op and _is_safo(t.value)]
+    # `gemini` after a `safo` in the same simple command, however many flags sit between them; a redirection does not
+    # end the command, an unquoted `; | & ( )` does
+    last_safo = -1
+    last_stop = -1
+    mixed_since_safo = False
     for g, t in enumerate(tokens):
-        if t.op or _core(t.value) != "gemini":
+        if t.op:
+            if _breaks(t.value):
+                last_stop = g
             continue
-        window = safos[bisect.bisect_left(safos, g - TOKEN_WINDOW) : bisect.bisect_left(safos, g)]
-        if not window:
+        if _is_safo(t.value):
+            last_safo = g
+            mixed_since_safo = t.mixed
+            continue
+        mixed_since_safo = mixed_since_safo or t.mixed
+        if _core(t.value) != "gemini" or last_safo < 0 or last_safo < last_stop:
             continue
         span: list[str] = []
         problems: list[str] = []
-        if t.mixed or any(tokens[k].mixed for k in window):
+        if mixed_since_safo:
             problems.append("a word with a quote or backslash in the middle of it")
         i = g + 1
+        word_end = -1
         while i < len(tokens):
             nxt = tokens[i]
             if nxt.op:
                 if "<" in nxt.value or ">" in nxt.value:  # a redirection: the shell skips it and its operand
-                    if span and span[-1] in ("0", "1", "2"):
+                    if span and span[-1] in ("0", "1", "2") and word_end == nxt.start:
                         span.pop()
                     i += 2 if i + 1 < len(tokens) and not tokens[i + 1].op else 1
                     continue
@@ -439,7 +452,7 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
                     i + 1 < len(tokens) and tokens[i + 1].quoted and tokens[i + 1].start == nxt.end
                 ):
                     problems.append(f"an operator ({nxt.value!r}) touching a quoted word")
-                if any(not r.op and r.value.startswith("--") for r in tokens[i + 1 :]):
+                if i + 1 < len(tokens) and not tokens[i + 1].op and tokens[i + 1].value.startswith("--"):
                     problems.append("an option-like word after the command ends, so the cut may be wrong")
                 break
             if nxt.mixed:
@@ -448,6 +461,7 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
                 if char in nxt.value:
                     problems.append(f"{char!r} inside quotes")
             span.append(nxt.value.rstrip("?!.,") or nxt.value)
+            word_end = nxt.end
             i += 1
         if not any(w.lower() in ACTIONS for w in span):
             continue  # `safo gemini` in a sentence, with no action word: prose
@@ -505,20 +519,23 @@ def _scan_line(
     # no plain command: a name or a command built at run time (an expansion, a glob, printf) beside an action word
     tokens = _lex(norm) or []
     values: list[str] = []
+    segments: list[int] = []
+    segment = 0
     for t in tokens:
         if t.op:
+            if _breaks(t.value):
+                segment += 1
             continue
         # a quoted string that holds a command (`printf 'safo gem%s ask'`) is read word by word
-        values.extend(t.value.split() if t.quoted and " " in t.value else [t.value])
+        for word in t.value.split() if t.quoted and " " in t.value else [t.value]:
+            values.append(word)
+            segments.append(segment)
     risky = any(_core(v) in RISKY_ACTIONS for v in values)
-    anchors = [i for i, v in enumerate(values) if _is_safo(v) or _core(v) == "gemini"]
-    wild_near = False
-    for i, v in enumerate(values):
-        if any(c in v for c in SHELL_WILD) and not (PATHLIKE.match(v) or MARKDOWN_WORD.match(v)):
-            near = bisect.bisect_left(anchors, i - TOKEN_WINDOW)
-            if near < len(anchors) and anchors[near] <= i + TOKEN_WINDOW:
-                wild_near = True
-                break
+    anchored = {segments[i] for i, v in enumerate(values) if _is_safo(v) or _core(v) == "gemini"}
+    wild_near = any(
+        any(c in v for c in SHELL_WILD) and not MARKDOWN_WORD.match(v) and segments[i] in anchored
+        for i, v in enumerate(values)
+    )
     if risky and wild_near:
         steps.append(
             Step(

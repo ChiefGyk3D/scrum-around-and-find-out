@@ -191,12 +191,13 @@ that must pass the strict check:
 
 - a declaration line in the exact grammar, `gemini: free` or `gemini: paid cap=USD approval=ID` (also as a list item), with
   nothing after the tier but `key=value` pairs, so `Gemini: free tier only` in a sentence is prose;
-- a literal `safo gemini <action>` command: a `safo` word, then within 12 shell words a `gemini` word, then an action word
+- a literal `safo gemini <action>` command: a `safo` word, then in the same simple command (no `;`, `|` or `&` between,
+  however many flags sit in between) a `gemini` word, then an action word
   (`ask`, `approve`, `quota`), also inside a quoted string. Words are cut the way bash cuts them (single and double
   quotes, a backslash escape): the arguments end at an unquoted `; | & )`, a redirection and its operand are skipped the
   way the shell skips them, and an operator or a shell expansion character inside an argument makes the step unreadable,
   as does a word with a quote or backslash anywhere but its outer edges (`"a"';'`), an operator touching a quoted word
-  with no space, and an option-like `--` word after the cut. The arguments are read with the parser the CLI uses. A path such
+  with no space, and an option-like `--` word straight after the cut. The arguments are read with the parser the CLI uses. A path such
   as `src/safo/gemini.py` or a model id such as `gemini-3.6-flash` is an argument or a name, never a command start;
 - these named forms: a `safo` or `gemini` word beside a shell expansion, glob, brace, backtick or `%` and an `ask` or
   `approve` word; and, when the brief names `gemini` and an action anywhere, any line that runs `safo` through `$`, a
