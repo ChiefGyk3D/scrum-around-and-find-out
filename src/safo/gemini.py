@@ -852,7 +852,7 @@ class Locations:
 
 
 PAID_DISABLED = (
-    "paid use is disabled: the maintainer enables it only after the replay-state hardening ships (follow-up #NNN); "
+    "paid use is disabled: the maintainer enables it only after the replay-state hardening ships (follow-up #205); "
     "the free tier is unaffected"
 )
 

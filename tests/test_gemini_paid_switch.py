@@ -142,7 +142,7 @@ def test_nothing_on_the_command_line_or_in_the_environment_can_enable_it(
             code = int(stop.code or 0)
         assert code == 2 and not server.requests
         if not extra:
-            assert "paid use is disabled" in err.getvalue() and "#NNN" in err.getvalue()
+            assert "paid use is disabled" in err.getvalue() and "#205" in err.getvalue()
 
 
 def test_ask_paid_and_approve_are_refused_while_it_is_off(gemini_locations: Locations, server: FakeGemini) -> None:
@@ -160,7 +160,7 @@ def test_ask_paid_and_approve_are_refused_while_it_is_off(gemini_locations: Loca
             now=NOW,
         )
     assert server.requests == []
-    assert "#NNN" in PAID_DISABLED
+    assert "#205" in PAID_DISABLED
 
 
 def test_the_free_path_needs_no_root_file_at_all(

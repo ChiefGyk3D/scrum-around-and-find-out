@@ -427,7 +427,7 @@ def test_a_stray_word_after_a_money_action_is_refused_like_any_unknown_argument(
 def test_approve_is_refused_while_paid_use_is_disabled_and_a_dry_run_still_tests_the_key(rig: Rig) -> None:
     rig.locations.paid_switch.unlink()
     code, out = rig.approve()
-    assert code == -1 and "paid use is disabled" in out and "#NNN" in out and rig.approvals() == []
+    assert code == -1 and "paid use is disabled" in out and "#205" in out and rig.approvals() == []
     assert "type exactly" not in out and "QUOTA paid" not in out, "refused before the person is asked anything"
     args = brief_namespace(approve_args(rig))
     text = io.StringIO()
