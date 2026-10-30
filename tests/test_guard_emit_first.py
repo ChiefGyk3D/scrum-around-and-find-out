@@ -2714,11 +2714,12 @@ def test_no_wait_ends_after_the_limit_measured_from_the_process_start(
 
     monkeypatch.setattr(threading.Thread, "join", watch)
     set_mode(_private_home, "block")
-    # The decision and post-delivery deadlines are far away (8 s, 9 s), but the limit is half a second from now: every
-    # wait the guard asks a thread for must be cut to it, whoever asked.
-    monkeypatch.setattr(mod, "limit_point", lambda begun: time.monotonic() + 0.5)
+    # The decision and post-delivery deadlines are far away (8 s, 9 s), but the limit is 3 s from now: every wait the
+    # guard asks a thread for must be cut to it, whoever asked. (Half a second left the first worker running to the
+    # limit under a tracing coverage run, so the later waits never happened.)
+    monkeypatch.setattr(mod, "limit_point", lambda begun: time.monotonic() + 3.0)
     mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents))
-    assert len(waits) >= 4 and all(0.0 <= wait <= 0.51 for wait in waits), waits
+    assert len(waits) >= 4 and all(0.0 <= wait <= 3.01 for wait in waits), waits
 
 
 def test_a_start_older_than_the_whole_budget_is_not_trusted(monkeypatch: pytest.MonkeyPatch) -> None:

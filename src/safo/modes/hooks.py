@@ -893,6 +893,7 @@ TOP_LEVEL_COMMANDS = (
     "agents-status",
     "audit",
     "bootstrap",
+    "doctor",
     "gemini",
     "handoff",
     "hooks",

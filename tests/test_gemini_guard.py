@@ -258,14 +258,32 @@ def test_a_list_item_material_line_counts() -> None:
     assert rules("- gemini: free\n- gemini-material: public\n") == []
 
 
-def test_a_quadratic_brief_is_blocked_fast() -> None:
+def _grows_linearly(work: Callable[[int], object], small: int = 2000, big: int = 16_000) -> bool:
+    """Compare an 8x larger input to a small one on the same machine, so a slow or busy runner (or a tracing coverage
+    run on Python 3.11 and 3.12) cannot fail it, which a fixed seconds bound did: linear work costs about 8x, quadratic
+    about 64x."""
     import time
 
-    for brief in ("safo " * 16_000, ("safo gemini ask --paid\n" * 6_000), "safo " * 16_000 + "gemini"):
+    timings = []
+    for size in (small, big):
         started = time.monotonic()
+        work(size)
+        timings.append(time.monotonic() - started)
+    return timings[1] < 24 * timings[0] + 0.25
+
+
+def _quadratic_briefs(size: int) -> None:
+    for brief in ("safo " * size, "safo gemini ask --paid\n" * (size * 3 // 8), "safo " * size + "gemini"):
         found = findings(brief + "\n" + PUBLIC, accepts())
-        assert time.monotonic() - started < 3.0
         assert [r for r, _ in found if r == GEMINI_PAID], "blocked"
+
+
+def test_a_quadratic_brief_is_blocked_fast() -> None:
+    assert _grows_linearly(_quadratic_briefs)
+
+
+def test_the_linear_time_guard_bites_on_quadratic_work() -> None:
+    assert not _grows_linearly(lambda size: sum(1 for _ in range(size * size // 40)))
 
 
 def test_a_past_deadline_fails_closed() -> None:
