@@ -335,7 +335,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   protection (see the same-user limit below).
 - A hook command line never reaches argparse's writing paths. argparse prints usage and the error to standard error
   synchronously before it exits 2, and a full stderr pipe would block that until the host killed the hook (fail-open,
-  SAFO #130); exit 2 is also what a host reads as a BLOCK. So the real entry (`python -m safo` and the console script)
+  SAFO #130); exit 2 is also what a host reads as a BLOCK. So the real entry (the module form and the console script)
   recognizes `hooks guard` before argparse is even built and parses its arguments by hand: exactly what `safo hooks
   install` writes, `--agents PATH` and `--agents-local PATH`, each at most once, in either order. Those go straight into
   the guard. Any other guard command line (an unknown flag, a missing value, a repeated flag, `--help`, a stale or hand
@@ -351,7 +351,7 @@ A hook sits inside someone's session, so every error lets the work through, visi
   else, or if the age looks wrong (negative, or over a minute: a long-lived process, or clocks that disagree), it is
   the time of the import, the earliest point left; the fallback is exercised by a test and documented here. The age is
   a difference of two boot-time values, so a suspend does not distort it. The real entry
-  (`python -m safo` and the console script, through the `run` function of the cli module) arms the guard with it; a test calling `main()` in a
+  (the module form and the console script, through the `run` function of the cli module) arms the guard with it; a test calling `main()` in a
   long-lived process does not, so its budget starts when the guard does. Interpreter start-up, package imports, the
   parser and argument parsing are therefore INSIDE the budget. With the host timeout T (10 s in the installed
   settings, scaled in tests) the points are all measured from the process start:

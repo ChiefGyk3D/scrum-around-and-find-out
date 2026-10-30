@@ -492,14 +492,14 @@ def test_a_computed_deny_is_printed_when_the_append_hangs(
     assert not worker.is_alive()
 
 
-def test_event_input_stops_at_the_shared_clock_not_at_its_own_five_seconds() -> None:
+def test_read_event_stops_at_the_shared_clock_not_at_its_own_five_seconds() -> None:
     read_end, write_end = os.pipe()
     stream = os.fdopen(read_end, "r")
     try:
         ctx = LocalContext(io.StringIO(), {}, NOW, stdin=stream)
         started = time.monotonic()
         with pytest.raises(TimeoutError):
-            mod.event_input(ctx, until=started + 0.2)
+            mod.read_event(mod.EventStream(ctx), started + 0.2)
         assert time.monotonic() - started < 1.5
     finally:
         stream.close()
@@ -637,7 +637,10 @@ def test_the_marker_survives_a_dispatch_whose_line_was_not_delivered(
     state_folder(_private_home).mkdir(parents=True, exist_ok=True)
     degrade_everything(_private_home, agents, clock, monkeypatch)
     out = Stream(flush_fails=True)
-    assert mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents)) == mod.EXIT_NOT_DELIVERED
+    # a brief that names nothing Gemini-related: with the budget gone the Gemini rules deny any brief they cannot check
+    # (by design), and a denial that cannot be delivered exits 2, which is not what this test is about
+    event = dispatch(model=None, prompt="Summarise it.")
+    assert mod.run_guard(context(_private_home, event, out), namespace(agents)) == mod.EXIT_NOT_DELIVERED
     assert marker(_private_home).exists(), "its notice was never delivered, so it is still owed"
 
 

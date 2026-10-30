@@ -35,13 +35,12 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import safo
-from safo import gemini, geminibrief, guardlog, leadwait, output, tracking
+from safo import gemini, guardlog, leadwait, output, tracking
 from safo.agentsfile import AgentsFile
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.gemini import approval_problem
-from safo.geminibrief import ApprovalCheck, findings
 from safo.guardlog import (
     APPEND_LOCK_TIMEOUT,
     MODES,
@@ -93,8 +92,10 @@ from safo.hooks import (
 from safo.localfiles import add_agents_arguments, load_agents_for
 from safo.modes import LocalMode, register_local
 
-if TYPE_CHECKING:  # argparse is imported only where the legacy argparse path needs it: the guard's entry never loads it
+if TYPE_CHECKING:  # imported only where needed: the guard's entry never loads argparse or the Gemini mode
     import argparse
+
+    from safo.geminibrief import ApprovalCheck
 
 LOOKUP_RESERVE_SECONDS = 2.0  # a re-probe leaves at least this much of the hook's budget for the issue lookup
 MIN_REPROBE_TIMEOUT_SECONDS = 0.5  # below this per request a re-probe is skipped, not attempted
@@ -198,6 +199,8 @@ class EventScan:
         self.deadline = deadline
 
     def feed(self, chunk: bytes) -> None:
+        from safo import geminibrief  # deferred: it loads the Gemini mode, which the guard's entry must not at import
+
         if time.monotonic() > self.deadline:
             raise TimeoutError("the event could not be checked in time")
         window = self.tail + self.decoder.decode(chunk)
@@ -830,7 +833,7 @@ def load_config(ctx: LocalContext, args: argparse.Namespace, deadline: float, ru
 
 
 def load_or_degrade(
-    ctx: LocalContext, args: argparse.Namespace, deadline: float, run: Run, tool_input: dict[str, Any]
+    ctx: LocalContext, args: argparse.Namespace, deadline: float, run: Run, tool_input: dict[str, Any] | None = None
 ) -> AgentsFile | None:
     """The configuration, or None after the visible degraded allow: every rule else is off without a configuration.
     The Gemini rules need nothing from agents.yaml, so a brief that violates them is still denied."""
@@ -840,8 +843,10 @@ def load_or_degrade(
         timed_out = True
     except Exception:
         timed_out = False
-    reasons = gemini_reasons(
-        ctx, tool_input, time.monotonic() + ISOLATED_CHECK_SECONDS if timed_out else deadline
+    reasons = (
+        gemini_reasons(ctx, tool_input, time.monotonic() + ISOLATED_CHECK_SECONDS if timed_out else deadline)
+        if tool_input is not None
+        else ""
     )
     if reasons:
         raise GeminiEventDeny("config", reasons)
@@ -888,6 +893,7 @@ TOP_LEVEL_COMMANDS = (
     "agents-status",
     "audit",
     "bootstrap",
+    "gemini",
     "handoff",
     "hooks",
     "local",
@@ -1120,6 +1126,8 @@ def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: floa
     """The Gemini rules' findings for a brief as one string, "" when it is clean. Any failure of the check blocks."""
     prompt = tool_input.get("prompt")
     try:
+        from safo.geminibrief import findings  # deferred: it loads the Gemini mode, which the entry must not at import
+
         found = findings(
             prompt if isinstance(prompt, str) else "", approval_checker(ctx), private_terms_provider, deadline
         )
