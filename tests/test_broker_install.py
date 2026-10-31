@@ -942,3 +942,110 @@ def test_a_file_dropped_into_the_venv_bin_by_the_install_step_is_caught(
         do_install(world, "1.0.0", apply=True)
     assert current_name(world.layout) is None
     assert [p.name for p in (world.layout.opt_dir / "releases").iterdir()] == []
+
+
+# ---- CI finding: the release must not depend on the caller's umask or on the modes of copied files ----------------
+
+
+def mode_map(release: Path) -> dict[str, int]:
+    return {
+        str(p.relative_to(release)): stat.S_IMODE(os.lstat(p).st_mode)
+        for p in sorted(release.rglob("*"))
+        if not p.is_symlink()
+    }
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o077, 0o022, 0o000])
+def test_the_activated_release_has_the_same_modes_under_any_caller_umask(world: World, mask: int) -> None:
+    world.release("1.0.0")
+    old = os.umask(mask)
+    try:
+        do_install(world, "1.0.0", apply=True)
+    finally:
+        os.umask(old)
+    modes = mode_map(world.layout.opt_dir / "releases" / "1.0.0")
+    assert modes, "something was built"
+    assert all(m & 0o022 == 0 for m in modes.values())
+    reference = world.root.parent / "reference"
+    reference.mkdir()
+    # the same release built under the reference umask must match file for file
+    other = make_world(reference)
+    other.release("1.0.0")
+    old = os.umask(0o022)
+    try:
+        do_install(other, "1.0.0", apply=True)
+    finally:
+        os.umask(old)
+    assert modes == mode_map(other.layout.opt_dir / "releases" / "1.0.0")
+
+
+def test_files_copied_group_writable_by_the_environment_builder_are_normalized(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a hosted runner the stdlib's own venv scripts are group writable and venv copies their modes."""
+    world.release("1.0.0")
+    real_run = install._run
+
+    def run_and_widen(argv: Sequence[str], **kw: Any) -> Any:
+        done = real_run(argv, **kw)
+        if "install" in argv and "--python" in argv:
+            bin_dir = Path(argv[argv.index("--python") + 1]).parent
+            (bin_dir / "Activate.ps1").chmod(0o666)
+            (bin_dir.parent / "pyvenv.cfg").chmod(0o664)
+        return done
+
+    monkeypatch.setattr(install, "_run", run_and_widen)
+    do_install(world, "1.0.0", apply=True)
+    modes = mode_map(world.layout.opt_dir / "releases" / "1.0.0")
+    assert modes["venv/bin/Activate.ps1"] == 0o444
+    assert all(m & 0o022 == 0 for m in modes.values())
+
+
+def test_a_file_made_group_writable_after_normalization_is_still_refused(world: World, tmp_path: Path) -> None:
+    tree = tmp_path / "stage"
+    (tree / "venv" / "bin").mkdir(parents=True)
+    f = tree / "venv" / "bin" / "activate"
+    f.write_text("x")
+    f.chmod(0o666)
+    install.normalize_modes(tree)
+    assert stat.S_IMODE(f.stat().st_mode) == 0o644
+    install.check_tree_owner(tree, world.layout)
+    f.chmod(0o664)  # after normalization
+    with pytest.raises(InstallError, match="writable"):
+        install.check_tree_owner(tree, world.layout)
+
+
+def test_normalization_never_follows_a_symlink(world: World, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.write_text("x")
+    outside.chmod(0o666)
+    tree = tmp_path / "stage"
+    (tree / "venv").mkdir(parents=True)
+    (tree / "venv" / "lib64").symlink_to(outside)
+    install.normalize_modes(tree)
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o666  # untouched
+    (tree / "venv" / "evil").symlink_to(outside)
+    with pytest.raises(InstallError, match="unexpected symlink"):
+        install.check_links(tree)
+
+
+def test_the_build_runs_under_an_explicit_umask(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    world.release("1.0.0")
+    seen: list[int] = []
+    real_run = install._run
+
+    def spy(argv: Sequence[str], **kw: Any) -> Any:
+        if "install" in argv and "--python" in argv:
+            current = os.umask(0)
+            os.umask(current)
+            seen.append(current)
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(install, "_run", spy)
+    old = os.umask(0o002)
+    try:
+        do_install(world, "1.0.0", apply=True)
+        assert os.umask(old) == 0o002  # restored afterward
+    finally:
+        os.umask(old)
+    assert seen == [0o022]

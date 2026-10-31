@@ -50,6 +50,7 @@ import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 REPO_URL = "https://github.com/ChiefGyk3D/scrum-around-and-find-out.git"  # a constant: no option or variable changes it
 GIT = "/usr/bin/git"
@@ -669,6 +670,24 @@ def check_venv_bin(bin_dir: Path) -> None:
             raise InstallError(msg)
 
 
+def check_links(release: Path) -> None:
+    """The only links in a staged tree are the ones `venv` makes. Run before anything is chmod-ed."""
+    for rel, p in _walk(release):
+        if p.is_symlink() and not (rel == "venv/lib64" or re.fullmatch(r"venv/bin/python[0-9.]*", rel)):
+            msg = f"staged tree has an unexpected symlink at {rel}"
+            raise InstallError(msg)
+
+
+def normalize_modes(release: Path) -> None:
+    """Clear group/other write and the setuid/setgid/sticky bits on every real file and directory. The result must not
+    depend on the caller's umask or on the modes of files the environment builder copied. Links are never followed."""
+    for _rel, p in _walk(release):
+        st = os.lstat(p)
+        if stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode):
+            os.chmod(p, stat.S_IMODE(st.st_mode) & ~0o7022, follow_symlinks=False)
+    os.chmod(release, stat.S_IMODE(os.lstat(release).st_mode) & ~0o7022)
+
+
 def check_tree_owner(release: Path, layout: Layout) -> None:
     for rel, p in _walk(release):
         st = os.lstat(p)
@@ -676,10 +695,8 @@ def check_tree_owner(release: Path, layout: Layout) -> None:
             msg = f"staged file {rel} is not owned by the trusted user"
             raise InstallError(msg)
         if stat.S_ISLNK(st.st_mode):
-            if not (rel == "venv/lib64" or re.fullmatch(r"venv/bin/python[0-9.]*", rel)):
-                msg = f"staged tree has an unexpected symlink at {rel}"
-                raise InstallError(msg)
-        elif st.st_mode & 0o022:
+            continue  # check_links has already limited which links may exist
+        if st.st_mode & 0o022:
             msg = f"staged file {rel} is writable by its group or others"
             raise InstallError(msg)
 
@@ -1045,7 +1062,16 @@ def build_review(
 # ---- building -------------------------------------------------------------------------------------------------
 
 
-def build_release(
+def build_release(*args: Any, **kwargs: Any) -> None:
+    """Build under an explicit umask, so the release never depends on the caller's (the children inherit it)."""
+    old = os.umask(0o022)
+    try:
+        _build_release(*args, **kwargs)
+    finally:
+        os.umask(old)
+
+
+def _build_release(
     layout: Layout,
     hooks: Hooks,
     stage: Path,
@@ -1096,6 +1122,8 @@ def build_release(
     if set(installed) != set(wanted) or any(installed[k].read_bytes() != wanted[k] for k in wanted):
         msg = "the installed broker source does not match the verified commit"
         raise InstallError(msg)
+    check_links(stage)
+    normalize_modes(stage)
     write_manifest(stage)
     check_tree_owner(stage, layout)
     if verify_manifest(stage):
