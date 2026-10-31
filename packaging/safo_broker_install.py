@@ -305,7 +305,7 @@ def write_atomic(path: Path, data: bytes, mode: int) -> None:
 def log_line(layout: Layout, message: str) -> None:
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {message}\n"
     print(f"safo-broker-install: {message}", file=sys.stderr)
-    fd = os.open(layout.log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o644)
+    fd = os.open(layout.log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     try:
         os.write(fd, line.encode())
     finally:
@@ -1350,7 +1350,7 @@ def activate(
             step = "restart"
             detail = reload_and_restart(hooks)
             step = "version file"
-            write_atomic(layout.version_file, (fmt(new_highest) + "\n").encode(), 0o644)
+            write_atomic(layout.version_file, (fmt(new_highest) + "\n").encode(), 0o600)
             hooks.fault("after_version_write")
         except Exception as exc:
             note = restore(layout, hooks, fd, old_target, old_prev_target, old_units, final)

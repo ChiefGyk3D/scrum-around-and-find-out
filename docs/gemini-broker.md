@@ -169,7 +169,7 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
   broker/                          root:root 0700
     paid-key                       root:root 0600   the encrypted credential
 /opt/safo-broker/                  root:root 0755   releases/VERSION (a venv of locked wheels plus the broker source, read-only) and the symlink current
-/var/lib/safo-broker-install/version  root:root 0644   the highest broker version ever installed (monotonic)
+/var/lib/safo-broker-install/version  root:root 0600   the highest broker version ever installed (monotonic)
 /etc/systemd/system/
   safo-broker.socket               root:root 0644
   safo-broker.service              root:root 0644
@@ -226,7 +226,7 @@ it still leaves to a human.
    signed tag's name (a leading `v` and three dotted numbers) and cross-checked against the package's own `__version__`, read from the source
    without importing it. A mismatch is refused. The `VERSION` argument on the command line is only an expected value that
    must equal the tag's; there is no separately supplied VERSION file.
-4. **Refuses a rollback.** `/var/lib/safo-broker-install/version` (root:root 0644) holds the highest version ever
+4. **Refuses a rollback.** `/var/lib/safo-broker-install/version` (root:root 0600) holds the highest version ever
    installed. A version below it is refused, and the same version is refused unless root passes `--reinstall`. Going
    down needs root to pass `--allow-downgrade VERSION` explicitly; the installer logs it to the journal and to a
    root-owned log. A second root-owned file, `/etc/safo/broker-min-version`, is a floor: after a fix for a flaw, root

@@ -1049,3 +1049,13 @@ def test_the_build_runs_under_an_explicit_umask(world: World, monkeypatch: pytes
     finally:
         os.umask(old)
     assert seen == [0o022]
+
+
+def test_the_log_and_the_version_record_are_root_only(world: World) -> None:
+    """Nothing but the installer reads them, so neither is world readable."""
+    world.release("1.0.0")
+    do_install(world, "1.0.0", apply=True)
+    assert stat.S_IMODE(world.layout.log_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(world.layout.version_file.stat().st_mode) == 0o600
+    # the unit files stay 0644 on purpose: they hold no secret and `systemctl cat` must work for the maintainer
+    assert stat.S_IMODE((world.layout.unit_dir / "safo-broker.service").stat().st_mode) == 0o644
