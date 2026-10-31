@@ -4,6 +4,7 @@ a fake vendor and a fake clock. Software keys stand in for a hardware key, as in
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import os
 from pathlib import Path
@@ -21,6 +22,15 @@ from safo.broker.policy import BrokerRequest, Caps
 from safo.geminisign import Trust
 
 LABEL = "yubikey-a"
+
+
+def as_hardware(trust: Trust, payload: bytes, armor: str, *, namespace: str, now: dt.datetime) -> geminisign.Verified:
+    """The real signature check, with the key reported as a touched hardware key. The tests sign with a software
+    ed25519 key (a hardware key cannot sign in a test); this is the one place that stands in for the authenticator."""
+    who = geminisign.verify(trust, payload, armor, namespace=namespace, now=now)
+    return dataclasses.replace(who, hardware=True, user_present=True, user_verified=False)
+
+
 IMAGE_MODEL = "gemini-nano-banana-2.1"
 IMAGE_PROMPT = "a small blue square on a white page"
 
@@ -69,6 +79,7 @@ class Rig:
         self.vendor = FakeVendor(self.clock)
         self.faults = faults
         self.pipeline_faults = pipeline_faults
+        self.verifier = as_hardware
         self.policy = policy(Caps())
         self.build()
 
@@ -86,6 +97,7 @@ class Rig:
             wall=self.clock.wall,
             mono=self.clock.mono,
             faults=self.pipeline_faults,
+            verifier=self.verifier,
         )
 
     def restart(self, faults: Faults | None = None) -> None:
@@ -111,13 +123,13 @@ class Rig:
             "kind": req.kind,
             "max_output_tokens": req.max_output_tokens,
             "thinking_level": req.thinking_level,
-            "max_usd": format_usd(2_500_000),
+            "max_usd": format_usd(offer.max_micro),
             "job": req.job,
             "prompt_sha256": digest,
             "prompt_bytes": size,
             "quote": "go ahead",
-            "quoted_at": gemini.stamp(now - dt.timedelta(minutes=1)),
-            "created": gemini.stamp(now - dt.timedelta(minutes=1)),
+            "quoted_at": gemini.stamp(now),
+            "created": gemini.stamp(now),
             "expires_at": gemini.stamp(now + dt.timedelta(minutes=9)),
             "beyond_ceiling": offer.beyond_ceiling,
             "ledger_head": offer.ledger_head,

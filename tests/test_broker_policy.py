@@ -129,9 +129,20 @@ def test_a_verified_pro_model_is_allowed_by_name_and_then_priced_at_its_cap() ->
     assert priced.reservation.total_micro < JOB_CAP_MICRO  # 2000 tokens at the image rate
 
 
-def test_nano_banana_2_fits_the_testing_cap_and_pro_does_not() -> None:
+def test_nano_banana_2_is_under_the_testing_cap_but_refused_until_its_cap_is_verified_and_pro_is_over_it() -> None:
     pol = policy()
-    nb2 = pol.price(image(NB2), NOW).reservation.total_micro
+    with pytest.raises(Refused) as refused:  # decision 13: over 2 USD with the cap unverified
+        pol.price(image(NB2), NOW)
+    assert refused.value.code == "model_refused"
+    nb2 = reserve_amount(
+        pol.prices.models[NB2],
+        kind="image",
+        prompt_bytes=0,
+        max_output_tokens=4096,
+        image_size="1K",
+        count=1,
+        today=NOW.date(),
+    ).total_micro
     assert 2_100_000 <= nb2 <= JOB_CAP_MICRO
     pol.check_caps(nb2, max_micro=JOB_CAP_MICRO, beyond_ceiling=False, month_spent_micro=0)
     pro = reserve_amount(
