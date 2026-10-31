@@ -29,7 +29,10 @@
   until root clears it. A reply over the signed output cap is a breach, recorded at the cap or the reported usage
   (whichever is higher), and suspends the model. Image replies accept only PNG, JPEG or WebP: the container is walked to
   its real end (an allow-list of segments and chunks, each with a body of exactly its shape; one image, no trailing data, no
-  animation, checksums and exact decoded size where the format has them, no Exif, XMP or compressed metadata), the declared size is capped, and nothing but the checked bytes is passed on. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
+  animation, checksums and exact decoded size where the format has them, no Exif, XMP or compressed metadata), the declared size is capped, and nothing but the checked bytes is passed on. Review fixes: the approval must come from a hardware key with a
+  touch (no software opt-in in the broker path); the issued record binds the maximum, the ceiling flag, the ledger head
+  and the creation time; a model with an unverified output cap is refused above 2 USD whatever the job cap is; a
+  temporary file left in `issued/` by a kill no longer stops `begin` or the start-up flush. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
   `pre_spend` hook. Paid use stays disabled.
 
 - Tests: the linear-time guard in `tests/test_gemini_constructs.py` counts executed lines instead of reading a clock, so machine speed, load and Python version cannot flip it; its negative case runs a quadratic brace scan (#248).

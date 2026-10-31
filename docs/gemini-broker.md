@@ -35,10 +35,15 @@ pipeline, the vendor request templates and reply parser, the image checks, and t
 - **Approval verification** (`approval.py`). The signed text is encoded to ASCII once, verified by `ssh-keygen -Y verify`
   through the existing verifier (absolute path, fixed argument vector, no shell, a two-entry environment, signers line
   and signature sealed in memory), and only then parsed again. The namespace is a constant in code. The text must be the
-  canonical form and the key that verified must be the principal named in it. Revocation is checked again under the
-  ledger lock, just before the spend.
+  canonical form and the key that verified must be the principal named in it. The key must be a hardware key and the
+  signature must show a touch: a software key is refused even when root enrolled it with the written opt-in in the
+  shared signers file (decision 9). Revocation is checked again under the ledger lock, just before the spend.
 - **`begin`** (`issue.py`) writes `issued/NONCE` (private, at most four outstanding, ten minute life); a call needs its
-  nonce there, unexpired, and an approval that agrees with what was asked for. A restart flushes the table.
+  nonce there, unexpired, and an approval that agrees with what was asked for: every field that changes the cost
+  (the maximum, the monthly-ceiling flag as the broker computed it at `begin`, the ledger head `begin` gave, and a
+  creation time no earlier than the nonce). A client cannot sign a different maximum or a ceiling flag of its own. A
+  restart flushes the table; a temporary file left by a killed write is recognized by its name and removed under the
+  issue lock, and any other stray file still stops the table.
 - **The pipeline** (`pipeline.py`): verify, reserve (the spend and the markers are written first), build the request
   from a fixed template, write `call_sent`, send through an injected transport, classify, settle or make ambiguous. A
   429 and a definite 4xx settle at zero. Everything after the request may have left that does not tell what was billed
@@ -48,6 +53,8 @@ pipeline, the vendor request templates and reply parser, the image checks, and t
 - **The output cap** (decision 13): the signed `max_output_tokens` is always sent and checked against the reply (text,
   thinking and image tokens together). A reply over it is a breach: recorded at the cap or the reported usage, whichever
   is higher, the model suspended, even when the money stays inside the reservation (`cap_verified` false).
+  Decision 13 is its own rule and does not move with the job cap: a model whose cap is not verified is refused when its
+  worst case is over 2 USD (Nano Banana 2 at about 2.10 USD, Pro), at a job cap of 2.00, 2.50 or 5.00 alike.
 - **Images** (`images.py`, `vendor.py`): one image per call, PNG, JPEG or WebP only, found by the first bytes and matching
   the named type. The broker decodes no pixels and is not a decoder, but it walks each container to its real end by
   lengths and markers as an allow-list: every segment or chunk is a known type whose body has exactly its shape (JPEG
