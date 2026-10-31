@@ -106,8 +106,7 @@ key, no timing assertions): the wire format, the server, the entry point and the
 
 Where phase 3 read the design and had to choose, it is listed in the pull request. Not built: the idle exit, the audit copy
 `approvals/NONCE.json` of the design, the installer and units, the admin command (so nothing can yet clear a suspension),
-<<<<<<< HEAD
-and the client (phase 4b, below). The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
+and the client (phase 4b, below). The stop wakeup is a pipe, so the server module makes no `socket()` or `socketpair()` call of its own. `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit (the pytest wrapper skips, with the reason, where there is no user service manager). The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
 
 ### Phase 4b status
 
@@ -115,11 +114,8 @@ The thin client, `src/safo/broker/client.py`, built and tested with a scripted f
 socketpairs (a software key, the fake vendor) and a temporary unix socket, with injected clocks and no network. It is
 described in "The client" below. What is **not** done: wiring it into the command line (see "Where the client is not
 wired yet"), the dispatch guard's `check`, removal of the in-process paid path, and the free-path independence tests;
-those are the rest of phase 4. The safe image writer is phase 4a, a separate branch; until it is in the tree the client
-uses a small marked adapter with the same signature.
-=======
-and the client. The stop wakeup is a pipe, so the server module makes no `socket()` or `socketpair()` call of its own. `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit (the pytest wrapper skips, with the reason, where there is no user service manager). The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
->>>>>>> origin/feat/259-broker-phase3
+those are the rest of phase 4. The safe image writer of phase 4a is now in the tree and `default_writer()` uses it; the small marked adapter
+(`adapter_write_image`) remains only as a fallback and for tests, and can be deleted later.
 
 ## The requirement
 
