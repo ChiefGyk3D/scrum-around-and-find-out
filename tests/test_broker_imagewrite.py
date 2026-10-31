@@ -89,6 +89,7 @@ def test_sniff(data: bytes, kind: str) -> None:
         b"\x89PNG\r\n\x1a\x0b" + b"x" * 20,  # one byte wrong
         b"\xff\xd8",  # truncated JPEG signature
         b"\xff\xd9\xff" + b"x" * 20,
+        b"RIFX\x20\x00\x00\x00WEBPVP8 " + b"x" * 16,  # one byte off RIFF
         b"RIFF\x20\x00\x00\x00WEBX" + b"x" * 20,  # RIFF but not WebP
         b"RIFF\x20\x00\x00\x00WAVEfmt " + b"x" * 20,
         b"RIFF\x20\x00\x00\x00WEB",  # truncated
@@ -203,14 +204,16 @@ def test_allowed_parameter_narrows(out: Path) -> None:
 
 @pytest.mark.parametrize("allowed", [("gif",), ("png", "svg"), "png"])
 def test_unknown_allowed_entry_is_a_config_error(out: Path, allowed: Any) -> None:
-    with pytest.raises(ImageWriteError):
+    with pytest.raises(ImageWriteError) as caught:
         write_image(PNG, str(out), "a", allowed=allowed, _step=never_opened)
+    assert type(caught.value) is ImageWriteError
 
 
-@pytest.mark.parametrize("cap", [0, -1, True, "100", 1.5, None])
+@pytest.mark.parametrize("cap", [0, -1, True, False, "100", 1.5, None])
 def test_bad_cap_is_refused(out: Path, cap: Any) -> None:
-    with pytest.raises(ImageWriteError):
+    with pytest.raises(ImageWriteError) as caught:
         write_image(PNG, str(out), "a", max_bytes=cap, _step=never_opened)
+    assert type(caught.value) is ImageWriteError  # a config error, not a "too big" refusal
 
 
 # -- the name is made here -----------------------------------------------------------------------------------------
@@ -251,6 +254,7 @@ def test_hostile_stem_cannot_reach_the_file_system(out: Path, stem: str) -> None
     path = write_image(PNG, str(out), stem)
     base = os.path.basename(path)
     assert NAME.match(base), base
+    assert not base.startswith(("-", "."))  # never an option for a tool, never a hidden file
     assert os.path.dirname(path) == str(out)
     assert names(out) == [base]
     assert not (out.parent / "passwd").exists()
@@ -269,8 +273,9 @@ def test_stem_is_cut_at_48(out: Path) -> None:
 
 @pytest.mark.parametrize("stem", [b"cat", None, 5, ["cat"]])
 def test_non_text_stem_is_refused(out: Path, stem: Any) -> None:
-    with pytest.raises(ImageWriteError):
+    with pytest.raises(ImageWriteError) as caught:
         write_image(PNG, str(out), stem, _step=never_opened)
+    assert type(caught.value) is ImageWriteError
 
 
 def test_type_and_name_from_the_caller_are_ignored(out: Path) -> None:
@@ -939,3 +944,176 @@ def test_summary_never_touches_the_file_system(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(Path, "open", refuse)
     monkeypatch.setattr(Path, "stat", refuse)
     print_summary("/x/a.png", PNG, file=io.StringIO())
+
+
+# -- sibling cases the first mutation sweep found --------------------------------------------------------------------
+
+
+def test_empty_image_has_its_own_refusal(out: Path) -> None:
+    with pytest.raises(ImageRejected, match="empty"):
+        write_image(b"", str(out), "cat", _step=never_opened)
+
+
+@pytest.mark.parametrize("bad", [5, None, 1.5, ["/tmp"], b"/tmp"])
+def test_directory_of_the_wrong_type_is_unsafe_not_a_type_error(bad: Any) -> None:
+    with pytest.raises(UnsafeDirectory):
+        write_image(PNG, bad, "cat")
+
+
+def test_directory_with_a_nul_inside_is_unsafe_not_a_value_error(out: Path) -> None:
+    with pytest.raises(UnsafeDirectory):
+        write_image(PNG, str(out) + "\x00/x", "cat")
+    with pytest.raises(UnsafeDirectory):
+        default_output_dir(state_home=str(out) + "\x00/x")
+
+
+def test_dot_components_are_dropped_from_the_returned_path(out: Path) -> None:
+    path = write_image(PNG, str(out) + "/././/", "cat")
+    assert os.path.dirname(path) == str(out)
+
+
+def test_a_missing_directory_is_not_created_by_the_writer(tmp_path: Path) -> None:
+    with pytest.raises(UnsafeDirectory):
+        write_image(PNG, str(tmp_path / "new" / "deeper"), "cat")
+    assert names(tmp_path) == []
+
+
+def test_created_directories_are_made_private_from_the_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    modes: list[int] = []
+    real_mkdir = os.mkdir
+
+    def spy(path: Any, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        modes.append(mode)
+        real_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", spy)
+    default_output_dir(state_home=None, home=str(tmp_path))
+    assert modes == [0o700] * 4
+
+
+def test_the_temporary_file_is_created_private_from_the_start(out: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    modes: list[int] = []
+    real_open = os.open
+
+    def spy(path: Any, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if flags & os.O_CREAT:
+            modes.append(mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", spy)
+    write_image(PNG, str(out), "cat")
+    assert modes == [0o600]
+
+
+def test_a_crash_inside_the_directory_walk_closes_every_descriptor(out: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fds() -> set[str]:
+        return set(os.listdir("/proc/self/fd"))
+
+    before = fds()
+
+    def boom(fd: int) -> os.stat_result:
+        raise Boom
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", boom)
+        with pytest.raises(Boom):
+            write_image(PNG, str(out), "cat")
+    assert len(fds() - before) <= 1  # the listing itself holds one
+
+
+def fake_stat(mode: int, uid: int) -> os.stat_result:
+    return os.stat_result((stat.S_IFDIR | mode, 1, 1, 1, uid, 0, 0, 0, 0, 0))
+
+
+MINE = os.geteuid()
+OTHER = MINE + 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "uid", "ok"),
+    [
+        (0o700, MINE, True),
+        (0o755, MINE, True),
+        (0o700, OTHER, False),
+        (0o755, OTHER, False),
+        (0o770, MINE, False),
+        (0o707, MINE, False),
+        (0o720, MINE, False),
+        (0o702, MINE, False),
+        (0o1777, MINE, True),
+        (0o1777, OTHER, False),
+        (0o1770, MINE, True),
+        (0o2770, MINE, False),
+    ],
+)
+def test_write_directory_rule_table(mode: int, uid: int, ok: bool) -> None:
+    if ok:
+        imagewrite._check_write_dir(fake_stat(mode, uid))
+    else:
+        with pytest.raises(UnsafeDirectory):
+            imagewrite._check_write_dir(fake_stat(mode, uid))
+
+
+@pytest.mark.parametrize(
+    ("mode", "uid", "ok"),
+    [
+        (0o700, MINE, True),
+        (0o755, MINE, True),
+        (0o700, OTHER, False),
+        (0o770, MINE, False),
+        (0o707, MINE, False),
+        (0o1777, MINE, False),
+        (0o720, MINE, False),
+        (0o702, MINE, False),
+    ],
+)
+def test_lenient_directory_rule_table(mode: int, uid: int, ok: bool) -> None:
+    if ok:
+        imagewrite._check_lenient(fake_stat(mode, uid))
+    else:
+        with pytest.raises(UnsafeDirectory):
+            imagewrite._check_lenient(fake_stat(mode, uid))
+
+
+@pytest.mark.parametrize(
+    ("mode", "uid", "ok"),
+    [
+        (0o700, MINE, True),
+        (0o500, MINE, True),
+        (0o700, OTHER, False),
+        (0o750, MINE, False),
+        (0o710, MINE, False),
+        (0o705, MINE, False),
+        (0o701, MINE, False),
+        (0o740, MINE, False),
+        (0o704, MINE, False),
+        (0o755, MINE, False),
+        (0o1700, MINE, True),
+    ],
+)
+def test_private_directory_rule_table(mode: int, uid: int, ok: bool) -> None:
+    if ok:
+        imagewrite._check_private(fake_stat(mode, uid))
+    else:
+        with pytest.raises(UnsafeDirectory):
+            imagewrite._check_private(fake_stat(mode, uid))
+
+
+def test_a_base_directory_that_is_group_readable_is_accepted(tmp_path: Path) -> None:
+    state = make_dir(tmp_path / "state", 0o755)
+    assert default_output_dir(state_home=str(state), home=str(tmp_path)).startswith(str(state))
+
+
+def test_default_dir_refuses_the_wrong_owner_below_the_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = make_dir(tmp_path / "state")
+    default_output_dir(state_home=str(state), home=str(tmp_path))
+    real_mine = imagewrite._mine
+    calls = {"n": 0}
+
+    def mine_until_base(st: os.stat_result) -> bool:
+        calls["n"] += 1
+        return real_mine(st) if calls["n"] == 1 else False  # the base passes, safo is "someone else's"
+
+    monkeypatch.setattr(imagewrite, "_mine", mine_until_base)
+    with pytest.raises(UnsafeDirectory):
+        default_output_dir(state_home=str(state), home=str(tmp_path))

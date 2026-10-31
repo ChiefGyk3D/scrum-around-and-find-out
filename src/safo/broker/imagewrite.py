@@ -290,7 +290,6 @@ def write_image(
             raise ImageWriteError("no free file name in the output directory")
         step("linked")
         os.unlink(tmp_name, dir_fd=dirfd)
-        tmp_name = None
         step("unlinked")
         os.fsync(dirfd)
         step("dir-synced")
