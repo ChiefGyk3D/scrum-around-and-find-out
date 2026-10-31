@@ -13,8 +13,11 @@ ead90c5ecb5aabff96b724cc336db335b9f62e36:tests/test_doctor.py:generic-api-key:23
 # Exact fingerprint only; later commits build the marker at run time.
 4f2c0577ef624c33d985ec0a094aeb33576dfb66:tests/test_doctor.py:generic-api-key:23
 
-# Fake test fixtures in commits that live only on unmerged branches (phase 4b client, feat/260-broker-client, and the
-# enrollment preflight, feat/263-enrollment-prep). The scan reads every branch, so those commits are flagged on any
-# run. Neither is on main. Exact fingerprints only; the owners should build the strings at run time before merging.
+# Fake test fixture in the phase 4b client commit on feat/260-broker-client (a key-shaped string in a test). The owning
+# PR replaces the literal with a value built at run time; the old commit stays reachable, and the scan reads every
+# branch. This entry can go when that branch is squash-merged.
 2f52019bda07c69d59c525491c37996c3036c169:tests/test_broker_client.py:generic-api-key:228
+
+# Fake test fixture in the enrollment preflight commit on feat/263-enrollment-prep. Same situation: replaced in the
+# owning PR, the old commit stays reachable, and this entry can go when the branch is squash-merged.
 4767aaaeb4ca263e930bdcd052cc6f7eb77b26a6:tests/test_gemini_preflight.py:generic-api-key:22
