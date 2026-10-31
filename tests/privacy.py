@@ -69,6 +69,7 @@ DOCUMENT_KEYS = {
     "items.totalcount",
     "statusupdate.project.id",
     "safo.guard",  # the guard's entry module, `python -m safo.guard`
+    "github.sha",  # the Actions context value for the commit a run is on, in the caller examples
     "safo.modes.hooks",  # the module that holds the legacy guard routing
 }
 FILE_SUFFIXES = {
