@@ -111,12 +111,56 @@ def test_the_key_is_read_on_the_remote_tty_and_never_appears() -> None:
     assert "host+tpm2" in doc  # the TPM variant is mentioned
 
 
-def test_the_switch_is_left_off() -> None:
+def switch_lines(doc: str) -> list[str]:
+    return [line for line in command_lines(doc) if "gemini-paid-enabled" in line]
+
+
+def test_the_switch_is_left_off_until_the_last_step() -> None:
     doc = text()
     assert "gemini-paid-enabled" in doc  # the text says it stays off
-    for line in command_lines(doc):
-        assert "gemini-paid-enabled" not in line, "no command may create the switch"
     assert "OFF" in doc
+    creators = [x for x in switch_lines(doc) if "printf" in x or ">" in x]
+    assert len(creators) == 1, "exactly one command creates the switch"
+    last = doc.rindex("### Step ")
+    assert doc.index(creators[0]) > last, "and it is in the last step"
+
+
+def test_the_line_that_creates_the_switch_cannot_run_unless_the_preflight_passes() -> None:
+    doc = text()
+    line = next(x for x in switch_lines(doc) if "printf" in x)
+    pre = "safo.gemini_preflight --enabling"
+    assert pre in line
+    assert "/opt/safo-broker/current/bin/python -I -m" in line  # root runs the installed, reviewed copy, isolated
+    assert line.index(pre) < line.index("&&") < line.index("printf") < line.index("gemini-paid-enabled")
+    assert line.count("&&") >= 2 and "||" not in line and ";" not in line
+    assert "--ack-observe-mode" not in line  # the acknowledgement is never in a pasteable line
+
+
+def test_the_switch_step_explains_the_acknowledgement_its_evidence_blast_radius_and_rollback() -> None:
+    doc = text()
+    step = doc[doc.rindex("### Step ") :]
+    assert "--ack-observe-mode" in step
+    assert "empty" in step and "dry run" in step  # the minimum evidence
+    assert "first clean real call" in step and "drop" in step
+    assert "Blast radius:" in step and "Rollback:" in step
+    assert step.index("Rollback:") < step.index("rm /etc/safo/gemini-paid-enabled")
+
+
+def test_the_drop_step_comes_before_the_switch_and_says_drop_at_the_latest_after_the_first_clean_call() -> None:
+    doc = text()
+    assert doc.index("MODE=drop") < doc.rindex("### Step ")
+    drop = next(
+        x
+        for x in re.split(r"^### Step ", doc, flags=re.MULTILINE)
+        if x.splitlines()[0:1] and "drop mode" in x.splitlines()[0]
+    )
+    assert "first clean real call" in drop and "at the latest" in drop
+
+
+def test_the_observe_week_wording_no_longer_treats_observe_as_a_safe_state_for_paid_use() -> None:
+    doc = text()
+    assert "In observe mode nothing is blocked" in doc  # still said, but now with the consequence
+    assert "does not stop the key leaving" in doc or "could send the key" in doc
 
 
 def test_the_allowed_signers_file_is_created_with_the_git_namespace_and_a_placeholder_key(tmp_path: Path) -> None:

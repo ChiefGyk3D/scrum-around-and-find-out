@@ -69,7 +69,7 @@ REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Service", "TasksMax", "32"),
     ("Service", "MemoryMax", "512M"),
     ("Service", "TimeoutStartSec", "30s"),
-    ("Service", "TimeoutStopSec", "15s"),
+    ("Service", "TimeoutStopSec", "360s"),
     ("Service", "Restart", "on-failure"),
     ("Service", "RestartSec", "2s"),
 )

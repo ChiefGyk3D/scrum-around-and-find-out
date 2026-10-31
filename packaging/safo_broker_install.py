@@ -451,6 +451,7 @@ def verify_tag(repo: Path, tag: str, layout: Layout, home: Path) -> TagInfo:
     if done.returncode != 0 or not good:
         msg = f"the signature on {tag} did not verify against the release signers file"
         raise InstallError(msg)
+    check_reported_key_type(good[2], layout.key_types)
     return TagInfo(commit=commit, signer=f"{good[1]} {good[2]} {good[3]}")
 
 
@@ -569,7 +570,7 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Service", "TasksMax", "32"),
         ("Service", "MemoryMax", "512M"),
         ("Service", "TimeoutStartSec", "30s"),
-        ("Service", "TimeoutStopSec", "15s"),
+        ("Service", "TimeoutStopSec", "360s"),
         ("Service", "Restart", "on-failure"),
         ("Service", "RestartSec", "2s"),
     ),
@@ -734,23 +735,67 @@ def enforce_unit_policy(units: dict[str, str] | dict[str, bytes] | dict[str, str
                 raise InstallError(msg)
 
 
+SIGNER_PRINCIPAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]*")  # one plain name: no list, wildcard or negation
+SIGNER_OPTIONS = 'namespaces="git"'  # the only option a release signer line may carry, written exactly so
+SIGNER_BODY_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+# What ssh-keygen prints for the key type of a verified signature. A certificate prints a name ending in -CERT, which is
+# never in this table, so a signature made through a certificate authority cannot pass.
+REPORTED_KEY_TYPE = {
+    "sk-ssh-ed25519@openssh.com": "ED25519-SK",
+    "sk-ecdsa-sha2-nistp256@openssh.com": "ECDSA-SK",
+    "ssh-ed25519": "ED25519",
+    "ecdsa-sha2-nistp256": "ECDSA",
+    "ssh-rsa": "RSA",
+}
+
+
+def _signer_line_problem(line: str, allowed: Sequence[str]) -> str | None:
+    """Why a signers line is not exactly `PRINCIPAL namespaces="git" KEYTYPE BASE64 [comment]` with an allowed plain key
+    type, or None. Anything else (cert-authority, another or extra option, a principal list or pattern, a certificate
+    type) is refused rather than interpreted, because OpenSSH reads those as wider trust."""
+    tokens = line.split(None, 4)
+    if len(tokens) < 4:
+        return "a line is not principal, options, key type and key"
+    principal, options, key_type, body = tokens[:4]
+    if not SIGNER_PRINCIPAL_RE.fullmatch(principal):
+        return "a principal is not one plain name"
+    if options != SIGNER_OPTIONS:
+        return f"the only allowed option is exactly {SIGNER_OPTIONS}"
+    if key_type not in allowed:
+        return "a key type is not allowed"
+    if not SIGNER_BODY_RE.fullmatch(body):
+        return "a key is not base64"
+    return None
+
+
 def check_signer_key_types(path: Path, allowed: Sequence[str]) -> None:
-    """Every key in the release signers file must be of an allowed type (hardware keys by default)."""
+    """Every line of the release signers file must be an exact key line of an allowed type (hardware keys by default):
+    one plain principal, exactly the git namespace restriction, no cert-authority and no other option."""
     found = 0
     for raw in path.read_text().splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        types = [t for t in line.split() if re.fullmatch(r"(sk-)?(ssh|ecdsa)-[A-Za-z0-9@.-]+", t)]
-        if not types or any(t not in allowed for t in types):
+        problem = _signer_line_problem(line, allowed)
+        if problem:
             msg = (
-                f"the release signers file has a key that is not a hardware key of an allowed type "
-                f"({', '.join(allowed)}); root can name other types with --release-key-type"
+                f"the release signers file has a line that is not an exact key line of a hardware key type "
+                f"({', '.join(allowed)}; {problem}); root can name other types with --release-key-type"
             )
             raise InstallError(msg)
         found += 1
     if not found:
         msg = "the release signers file has no keys"
+        raise InstallError(msg)
+
+
+def check_reported_key_type(reported: str, allowed: Sequence[str]) -> None:
+    """The key type ssh-keygen reports for a verified signature must be a plain allowed type, never a certificate."""
+    if reported.endswith("-CERT") or "CERT" in reported:
+        msg = f"the signature verified through a certificate ({reported}), which is refused"
+        raise InstallError(msg)
+    if reported not in {REPORTED_KEY_TYPE[t] for t in allowed if t in REPORTED_KEY_TYPE}:
+        msg = f"the signature verified with a key type that is not an allowed one ({reported})"
         raise InstallError(msg)
 
 

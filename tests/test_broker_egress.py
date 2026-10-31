@@ -151,10 +151,10 @@ def make_conf(tmp_path: Path, text: str) -> tuple[Path, Path]:
     return conf, tmp_path
 
 
-def test_the_config_names_the_host_and_defaults_to_observe(tmp_path: Path) -> None:
+def test_the_config_names_the_host_and_a_missing_mode_means_drop(tmp_path: Path) -> None:
     conf, anchor = make_conf(tmp_path, f"# the vendor host\nVENDOR_HOST={HOST}\n")
     cfg = egress.read_config(conf, uid=os.getuid(), anchor=anchor)
-    assert (cfg.host, cfg.mode) == (HOST, "observe")
+    assert (cfg.host, cfg.mode) == (HOST, "drop")  # fail closed: only an explicit MODE=observe logs and accepts
     conf.write_text(f"VENDOR_HOST={HOST}\nMODE=drop\n")
     assert egress.read_config(conf, uid=os.getuid(), anchor=anchor).mode == "drop"
 

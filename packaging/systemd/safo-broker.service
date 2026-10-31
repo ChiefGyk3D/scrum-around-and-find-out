@@ -72,6 +72,6 @@ LimitNOFILE=64
 TasksMax=32
 MemoryMax=512M
 TimeoutStartSec=30s
-TimeoutStopSec=15s
+TimeoutStopSec=360s
 Restart=on-failure
 RestartSec=2s

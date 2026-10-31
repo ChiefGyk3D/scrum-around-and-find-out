@@ -42,6 +42,7 @@ if __name__ == "__main__" and not sys.flags.isolated:  # before any import outsi
 import argparse
 import dataclasses
 import datetime as dt
+import hashlib
 import pwd
 import re
 import stat
@@ -58,6 +59,17 @@ from safo.broker.records import MONTH, SCHEMA_VERSION, UID_MAX
 from safo.errors import SafoError
 
 SERVICE_USER = "safo-broker"
+UNIT_NAMES = (  # the units the installer manages; a test pins this tuple to the installer's
+    "safo-broker.service",
+    "safo-broker.socket",
+    "safo-broker-egress.service",
+    "safo-broker-egress-refresh.service",
+    "safo-broker-egress-refresh.timer",
+)
+NOT_CHECKED = (
+    "not checked here: sudo rules, root-equivalent groups, polkit, writable root-run paths, setuid files and the "
+    "old secret-store credential (docs/gemini-broker.md, The root-door precondition, lists them for a manual review)"
+)
 VERSION = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 SUDO_UID = re.compile(r"[0-9]{1,10}")
 USAGE = (
@@ -92,6 +104,9 @@ class Paths:
     min_version: Path = Path("/etc/safo/broker-min-version")
     install_version: Path = Path("/var/lib/safo-broker-install/version")
     release_link: Path = Path("/opt/safo-broker/current")
+    unit_dir: Path = Path("/etc/systemd/system")
+    egress_helper: Path = Path("/usr/local/sbin/safo-broker-egress")
+    egress_conf: Path = Path("/etc/safo/broker-egress.conf")
     trust_uid: int = 0  # who must own the root files above
 
 
@@ -212,8 +227,121 @@ def _read_version(path: Path, uid: int, what: str) -> tuple[tuple[int, int, int]
     return version, ""
 
 
+def _helper_problem(path: Path, uid: int) -> str:
+    """Why the egress helper is not a root-owned, executable, closed file (empty when it is)."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return "is missing"
+    if stat.S_ISLNK(info.st_mode):
+        return "is a symbolic link"
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    if info.st_uid != uid:
+        return "is not owned by root"
+    if info.st_mode & 0o022:
+        return "is writable by its group or by others"
+    if not info.st_mode & 0o100:
+        return "is not executable"
+    try:
+        geminisign.read_trust_file(path, uid, "egress helper")
+    except gemini.RefusedError:
+        return "sits under a directory that is not owned by root or is writable"
+    return ""
+
+
+def _check_units(paths: Paths, release: Path, name_version: str, facts: list[str], fails: list[str]) -> None:
+    """The installed unit files, the release's own copies and the release manifest must be the same bytes."""
+    manifest: dict[str, str] = {}
+    try:
+        text = geminisign.read_trust_file(release / "MANIFEST.sha256", paths.trust_uid, "release manifest")
+        for line in text.decode("utf-8", "replace").splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3 and parts[0] == "file":
+                manifest[parts[2]] = parts[1]
+    except gemini.RefusedError:
+        fails.append("the release manifest cannot be read (missing, not owned by root, or writable)")
+        return
+    try:
+        recorded = geminisign.read_trust_file(release / "VERSION", paths.trust_uid, "release version file")
+    except gemini.RefusedError:
+        fails.append("the release version file cannot be read")
+    else:
+        said = recorded.decode("ascii", "replace").strip()
+        if said != name_version:
+            fails.append(f"the release version file says {said[:20]}, the folder is {name_version}")
+        else:
+            facts.append(f"release version file: {said}")
+    good = 0
+    for name in UNIT_NAMES:
+        try:
+            shipped = geminisign.read_trust_file(release / "units" / name, paths.trust_uid, f"release unit {name}")
+        except gemini.RefusedError:
+            fails.append(f"release unit {name} cannot be read")
+            continue
+        if f"units/{name}" not in manifest:
+            fails.append(f"the release manifest has no line for units/{name}")
+            continue
+        if hashlib.sha256(shipped).hexdigest() != manifest[f"units/{name}"]:
+            fails.append(f"release unit {name} does not match the release manifest")
+            continue
+        if os.path.islink(paths.unit_dir / name):
+            fails.append(f"unit {name} is a symbolic link, which the installer never writes")
+            continue
+        try:
+            installed = geminisign.read_trust_file(paths.unit_dir / name, paths.trust_uid, f"unit {name}")
+        except gemini.RefusedError as exc:
+            reason = "is missing" if not os.path.lexists(paths.unit_dir / name) else f"cannot be read ({exc})"
+            fails.append(f"unit {name} {reason}")
+            continue
+        if installed != shipped:
+            fails.append(f"unit {name} differs from the signed release")
+            continue
+        good += 1
+    if good == len(UNIT_NAMES):
+        facts.append(f"units: {good} match the signed release")
+
+
+def _check_switch_and_egress(paths: Paths, facts: list[str], fails: list[str], notes: list[str]) -> None:
+    present = os.path.lexists(paths.switch)
+    enabled = False
+    if not present:
+        facts.append("switch: absent (paid use is off)")
+    else:
+        try:
+            data = geminisign.read_trust_file(paths.switch, paths.trust_uid, "paid-use switch")
+            lines = [
+                x.strip() for x in data.decode("utf-8", "replace").splitlines() if x.strip() and not x.startswith("#")
+            ]
+            enabled = lines == ["enabled"]
+        except gemini.RefusedError:
+            enabled = False
+        if enabled:
+            facts.append("switch: enabled")
+        else:
+            fails.append(
+                "the switch file exists but the broker would treat it as off (not exactly enabled, or not root-owned)"
+            )
+    mode = ""
+    try:
+        conf = geminisign.read_trust_file(paths.egress_conf, paths.trust_uid, "egress config")
+        values = dict(
+            x.split("=", 1) for x in conf.decode("utf-8", "replace").splitlines() if re.fullmatch(r"[A-Z_]+=.*", x)
+        )
+        mode = values.get("MODE", "drop")
+    except gemini.RefusedError:
+        mode = ""
+    if mode in ("observe", "drop"):
+        facts.append(f"egress mode: {mode}")
+        if enabled and mode == "observe":
+            notes.append("paid use is enabled while the egress control is in observe mode (it logs and accepts)")
+    elif enabled:
+        fails.append("paid use is enabled but the egress config cannot be read or has no valid mode")
+
+
 def check_install(paths: Paths) -> tuple[list[str], list[str]]:
-    """(facts, failures): whether the release link, the monotonic version record and the floor agree. Read-only."""
+    """(facts, failures): whether the release link, the version record, the floor, the installed unit files (against the
+    release's own copies and its manifest), the egress helper and the switch agree. Read-only."""
     facts: list[str] = []
     fails: list[str] = []
     notes: list[str] = []
@@ -243,6 +371,8 @@ def check_install(paths: Paths) -> tuple[list[str], list[str]]:
                     fails.append("the release folder is not a folder owned by root and closed to group and others")
                 else:
                     current = _version(target.name.encode())
+                    if current is not None:
+                        _check_units(paths, target, target.name, facts, fails)
     recorded, why = _read_version(paths.install_version, paths.trust_uid, "recorded version")
     if why:
         fails.append(why)
@@ -252,6 +382,12 @@ def check_install(paths: Paths) -> tuple[list[str], list[str]]:
     for label, value in (("release", current), ("recorded", recorded), ("floor", floor)):
         if value is not None:
             facts.append(f"{label}: {_show(value)}")
+    problem = _helper_problem(paths.egress_helper, paths.trust_uid)
+    if problem:
+        fails.append(f"the egress helper {problem}")
+    else:
+        facts.append("egress helper: root-owned and executable")
+    _check_switch_and_egress(paths, facts, fails, notes)
     if current is not None and floor is not None and current < floor:
         fails.append("the release is below the floor, so the broker refuses to start")
     if floor is not None and recorded is not None and floor > recorded:
@@ -262,7 +398,8 @@ def check_install(paths: Paths) -> tuple[list[str], list[str]]:
         notes.append("the release is below the highest version ever installed (a rollback or an allowed downgrade)")
     lines = facts + [f"fail: {text}" for text in fails] + [f"note: {text}" for text in notes]
     if not fails:
-        lines.append("ok: the release link, the record and the floor agree")
+        lines.append("ok: the release link, the record, the floor, the units, the egress helper and the switch agree")
+    lines.append(NOT_CHECKED)
     return lines, fails
 
 
