@@ -14,7 +14,9 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import re
 import secrets
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,8 @@ ISSUED_DIR = "issued"
 MAX_OUTSTANDING = 4
 DEFAULT_TTL = dt.timedelta(minutes=10)
 ISSUED_BYTES = 4096
+# what `write_text` leaves behind if the process dies between creating the temporary file and renaming it
+TEMP_NAME = re.compile(r"\.[0-9a-f]{16,64}\.[A-Za-z0-9_]{1,16}")
 _KEYS = {
     "nonce",
     "epoch",
@@ -44,6 +48,8 @@ _KEYS = {
     "prompt_bytes",
     "max_output_tokens",
     "max_micro",
+    "beyond_ceiling",
+    "ledger_head",
     "created",
     "expires_at",
 }
@@ -59,6 +65,7 @@ class Offer:
     reserve_micro: int
     thinking_level: str
     beyond_ceiling: bool
+    max_micro: int
 
 
 def _plain(now: object) -> dt.datetime:
@@ -75,6 +82,7 @@ class Issuer:
         self.epoch = epoch
         self.ttl = ttl
         self.dir = ledger.dir / ISSUED_DIR
+        self.faults: Callable[[str], None] = lambda point: None
 
     # -- files
 
@@ -102,9 +110,20 @@ class Issuer:
         except OSError:
             raise LedgerError("the issued folder cannot be read") from None
         for name in names:
-            if NONCE.fullmatch(name) is None:
+            if NONCE.fullmatch(name) is None and TEMP_NAME.fullmatch(name) is None:
                 raise LedgerError("the issued folder holds a file that is not a nonce")
         return sorted(names)
+
+    def _nonces(self) -> list[str]:
+        return [name for name in self._names() if NONCE.fullmatch(name)]
+
+    def _sweep_temporary(self) -> None:
+        """Remove what a killed write left. Only called holding the issued lock, which every writer holds, so no
+        write is in flight; a link is removed, never followed."""
+        for name in self._names():
+            if TEMP_NAME.fullmatch(name):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.dir / name)
 
     @staticmethod
     def _expiry(data: dict[str, Any]) -> dt.datetime:
@@ -147,12 +166,14 @@ class Issuer:
             raise Refused("model_suspended", "this model is stopped until root clears it")
         month = view.month_spent(now)
         beyond = month + reservation.total_micro > self.policy.caps.month_micro
+        self.policy.check_unverified(price, reservation.total_micro)
         self.policy.check_caps(
             reservation.total_micro, max_micro=max_micro, beyond_ceiling=beyond, month_spent_micro=month
         )
         head = view.head or GENESIS
         ensure_dir(self.dir)
         with file_lock(self.dir.parent / "issued.lock", timeout=self.ledger.lock_seconds):
+            self._sweep_temporary()
             live = self._prune(now)
             if live >= MAX_OUTSTANDING:
                 raise Refused("busy", "too many approvals are outstanding; use or wait for one")
@@ -170,17 +191,32 @@ class Issuer:
                 "prompt_bytes": prompt_bytes,
                 "max_output_tokens": shape.max_output_tokens,
                 "max_micro": max_micro,
+                "beyond_ceiling": beyond,
+                "ledger_head": head,
                 "created": gemini.stamp(now),
                 "expires_at": gemini.stamp(expires),
             }
-            write_text(self._path(nonce), json.dumps(record, sort_keys=True) + "\n")
+            write_text(
+                self._path(nonce),
+                json.dumps(record, sort_keys=True) + "\n",
+                before_replace=lambda: self.faults("issued_before_replace"),
+            )
+            self.faults("issued_after_write")
         return Offer(
-            nonce, self.epoch, expires, head, estimate, reservation.total_micro, price.thinking_level_sent, beyond
+            nonce,
+            self.epoch,
+            expires,
+            head,
+            estimate,
+            reservation.total_micro,
+            price.thinking_level_sent,
+            beyond,
+            max_micro,
         )
 
     def _prune(self, now: dt.datetime) -> int:
         live = 0
-        for name in self._names():
+        for name in self._nonces():
             data = self._read(name)
             if data is None:
                 continue
@@ -208,6 +244,11 @@ class Issuer:
             and data["aspect_ratio"] == approval.aspect_ratio
             and data["prompt_bytes"] == approval.prompt_bytes
             and data["max_output_tokens"] == approval.max_output_tokens
+            and data["max_micro"] == approval.max_micro
+            and data["beyond_ceiling"] == approval.beyond_ceiling
+            and data["ledger_head"] == approval.ledger_head
+            and (created := parse_stamp(data["created"])) is not None
+            and approval.created >= created
         )
         if not same:
             raise Refused("bad_approval", "this approval does not match what was asked for when the nonce was issued")
@@ -229,8 +270,10 @@ class Issuer:
 
     def flush(self) -> int:
         """A restart empties the table: every nonce handed out must be asked for again. Returns how many went."""
-        names = self._names()
-        for name in names:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(self._path(name))
+        with file_lock(self.dir.parent / "issued.lock", timeout=self.ledger.lock_seconds):
+            self._sweep_temporary()
+            names = self._nonces()
+            for name in names:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self._path(name))
         return len(names)
