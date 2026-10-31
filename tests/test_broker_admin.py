@@ -627,7 +627,7 @@ def test_clear_records_no_sudo_uid_when_there_is_none_or_it_is_not_a_number(tmp_
     run(tmp_path, "clear", FLAT, "--confirm", cid2, env={"SUDO_UID": "12; rm"})
     assert last_rows(tmp_path, 3)[0]["sudo_uid"] == -1
     cid3 = ambiguous(ledger, now=LATER)
-    run(tmp_path, "clear", FLAT, "--confirm", cid3, env={"SUDO_UID": str(2**40)})
+    run(tmp_path, "clear", FLAT, "--confirm", cid3, env={"SUDO_UID": str(2**32)})
     assert last_rows(tmp_path, 3)[0]["sudo_uid"] == -1
 
 
@@ -685,6 +685,7 @@ def test_an_actual_for_a_call_that_is_not_among_the_cause_or_is_a_breach_is_refu
     cid = breached(ledger)
     args = ("clear", FLAT, "--confirm", cid, "--reason", "r")
     assert run(tmp_path, *args, "--actual", f"{cid}=0.001")[0] == 2  # a breach is already counted at its actual
+    assert run(tmp_path, *args, "--actual", f"{cid}=0.02")[0] == 2  # not even a higher figure: nothing to resolve
     assert run(tmp_path, *args, "--actual", f"{'a' * 32}=0.001")[0] == 2
     assert run(tmp_path, *args, "--actual", "nonsense")[0] == 2
     assert FLAT in ledger.view().suspended
@@ -1125,3 +1126,73 @@ def test_an_admin_row_goes_through_the_strict_row_shape(tmp_path: Path) -> None:
     copy2 = CallLedger(state_dir(tmp_path))
     copy2.ledger.append_many([good], ts="2026-10-30T12:00:30Z")
     assert copy2.view().month_total("2026-10") == 5005
+
+
+def plant(tmp: Path) -> tuple[Path, Path]:
+    """Modules an operator's directory or environment could hold, named like what the command imports first."""
+    folder, marker = tmp / "planted", tmp / "ran"
+    folder.mkdir()
+    for name in ("pwd", "argparse", "dataclasses"):
+        (folder / f"{name}.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+    return folder, marker
+
+
+def start(folder: Path, *, isolated: bool) -> subprocess.CompletedProcess[str]:
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(folder)}
+    if isolated:
+        return subprocess.run(
+            [sys.executable, "-I", "-m", "safo.broker.admin", "status"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            cwd=folder,
+            env=env,
+        )
+    return subprocess.run(
+        [sys.executable, "-B", "-m", "safo.broker.admin", "status"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=folder,
+        env=env,
+    )
+
+
+def test_an_isolated_start_imports_nothing_from_the_working_directory_or_the_python_path(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("this check expects a non-root test run")
+    folder, marker = plant(tmp_path)
+    done = start(folder, isolated=True)
+    assert not marker.exists()
+    assert done.returncode == 2 and "root" in done.stderr
+
+
+def test_a_start_that_is_not_isolated_is_refused_before_anything_is_imported(tmp_path: Path) -> None:
+    folder, marker = plant(tmp_path)
+    done = start(folder, isolated=False)  # no -I: the planted modules are on the path
+    assert not marker.exists()
+    assert done.returncode == 2
+    assert "python -I -m safo.broker.admin" in done.stderr
+    assert done.stdout == ""
+
+
+def test_the_entry_function_refuses_when_python_was_not_started_isolated(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert not sys.flags.isolated  # the test runner itself is not isolated
+    monkeypatch.setattr(sys, "argv", ["admin", "status"])
+    assert admin.main() == 2
+    assert "refusing to run" in capsys.readouterr().err
+
+
+def test_the_usage_lines_name_the_isolated_command() -> None:
+    assert all(
+        "python -I -m safo.broker.admin" in line
+        for line in admin.USAGE.splitlines()
+        if "usage" in line or "   " in line
+    )
+    assert "python -m" not in admin.USAGE and "python -m" not in (admin.__doc__ or "").replace("python -I -m", "")

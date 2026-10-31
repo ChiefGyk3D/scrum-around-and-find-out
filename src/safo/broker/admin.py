@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The root-only administration command for the paid Gemini broker (docs/gemini-broker.md, "Administration").
 
-    python -m safo.broker.admin status | usage | check-install | clear | reconcile
+    python -I -m safo.broker.admin status | usage | check-install | clear | reconcile
 
 How root gets at the ledger without weakening the rule the service relies on. The ledger refuses any file that does
 not belong to the effective uid, and the state directory belongs to the service user, so root cannot open it as
@@ -18,20 +18,33 @@ The drop is explicit and checked: the working directory is moved to `/`, the uma
 groups are emptied, then the group and then the user are set, the three ids of each kind are read back, and the process
 proves it cannot return to root. Any failure stops the command before the ledger is opened. Reading the root-owned files
 (`status` and `check-install`) happens BEFORE the drop. Nothing is read from standard input: a confirmation is a typed
-argument. All output goes through `safo.output`. `now` and the identity operations are parameters, so tests need no
-clock and no root.
+argument. All output goes through `safo.output`.
+
+Run it ONLY as `python -I -m safo.broker.admin ...` with the root-owned interpreter by its full path. `-I` (isolated)
+keeps the current directory, the user site and every PYTHON environment variable out of the module search path, so
+nothing the operator's shell can reach is imported while the process is root. The module refuses to start otherwise
+(`sys.flags.isolated`), and checks that before it imports anything outside the standard library. The interpreter's own
+start-up and the `safo` and `safo.broker` package files are imported before this check can run: they come from the
+installed, root-owned release, which is why the check is a second line and not the only one.
+
+`now` and the identity operations are parameters, so tests need no clock and no root.
 """
 
 from __future__ import annotations
 
+import os
+import sys
+
+if __name__ == "__main__" and not sys.flags.isolated:  # before any import outside the standard library
+    os.write(2, b"safo-broker-admin: refusing to run; start it as: python -I -m safo.broker.admin ...\n")
+    raise SystemExit(2)
+
 import argparse
 import dataclasses
 import datetime as dt
-import os
 import pwd
 import re
 import stat
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
@@ -48,12 +61,12 @@ SERVICE_USER = "safo-broker"
 VERSION = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 SUDO_UID = re.compile(r"[0-9]{1,10}")
 USAGE = (
-    "usage: python -m safo.broker.admin status\n"
-    "       python -m safo.broker.admin usage [--month YYYY-MM]\n"
-    "       python -m safo.broker.admin check-install\n"
-    "       python -m safo.broker.admin clear MODEL --confirm CALL_ID [--confirm CALL_ID ...]"
+    "usage: python -I -m safo.broker.admin status\n"
+    "       python -I -m safo.broker.admin usage [--month YYYY-MM]\n"
+    "       python -I -m safo.broker.admin check-install\n"
+    "       python -I -m safo.broker.admin clear MODEL --confirm CALL_ID [--confirm CALL_ID ...]"
     " [--actual CALL_ID=USD ... --reason TEXT]\n"
-    "       python -m safo.broker.admin reconcile [--month YYYY-MM] [--billing-usd USD --reason TEXT]"
+    "       python -I -m safo.broker.admin reconcile [--month YYYY-MM] [--billing-usd USD --reason TEXT]"
 )
 
 
@@ -463,6 +476,9 @@ def _run(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if not sys.flags.isolated:
+        output.write(sys.stderr, "safo-broker-admin: refusing to run; start it as: python -I -m safo.broker.admin ...")
+        return 2
     return run(
         sys.argv[1:] if argv is None else argv,
         now=dt.datetime.now(dt.UTC),
