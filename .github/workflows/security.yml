@@ -26,5 +26,7 @@ jobs:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional Service Token fallback; unset means OIDC only
     with:
       pip-audit-requirements: requirements.txt
+      # GYST v1.26.0 takes one requirements file; pip-audit repeats --requirement, so the passkey lock rides in the extra args (#216)
+      pip-audit-extra-args: --requirement requirements-passkey.txt
       scorecard: true
       egress-policy: block
