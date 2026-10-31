@@ -4,9 +4,11 @@
 # nftables ruleset keyed on this unit's user (port 443 to a refreshed set of vendor addresses only, no DNS, no IPv6) and
 # writes the hosts view bind-mounted over /etc/hosts below, so this service resolves the vendor name without DNS. The
 # service is bound to that unit (it starts only with it and stops when it stops) and cannot reach a resolver, bus or name-
-# cache socket: those directories are inaccessible and /etc/nsswitch.conf is a files-only copy. It also cannot create or
-# connect Unix sockets at all (AF_INET only): it serves from the listener systemd hands it, so no other local service can
-# be asked to make a connection for it. A server design that needs Unix sockets needs a reviewed change of this line.
+# cache socket: those directories are inaccessible and /etc/nsswitch.conf is a files-only copy. RestrictAddressFamilies=
+# AF_INET limits the socket() call only (man systemd.exec): the service cannot create a Unix socket with socket(), but
+# socketpair() and io_uring are not covered by it, so this line alone does not make Unix sockets impossible. The server
+# is expected to serve from the listener systemd hands it and to create no Unix sockets of its own (no socket pairs, no
+# io_uring); a design that needs them needs a reviewed change of this line.
 # recvmsg and recvmmsg are denied too: a descriptor passed over the listener would be a socket with someone else's uid,
 # which the egress rule does not match. Plain read and recv on the listener are unaffected.
 # There is no start condition on the root-owned enable switch: the broker reads the switch on every request, answers

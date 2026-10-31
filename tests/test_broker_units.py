@@ -282,9 +282,9 @@ def test_the_egress_units_run_the_separately_installed_root_helper_not_the_relea
             assert "--rules" not in line
 
 
-def test_the_broker_cannot_create_or_connect_unix_sockets() -> None:
-    """It serves from the listener systemd hands it and talks to the vendor over IPv4 only, so no other local service
-    can be asked to make a connection for it. A server that needs Unix sockets needs a reviewed policy change."""
+def test_the_broker_allows_only_ipv4_through_socket_calls() -> None:
+    """The line limits socket() only; socketpair() and io_uring are not covered, so it is one layer, not a proof. A
+    server that needs Unix sockets needs a reviewed policy change."""
     assert values("safo-broker.service", "RestrictAddressFamilies") == ["AF_INET"]
 
 
@@ -297,3 +297,17 @@ def test_the_broker_cannot_receive_descriptors_over_its_listener() -> None:
 
 def test_the_egress_set_is_refreshed_every_minute() -> None:
     assert values("safo-broker-egress-refresh.timer", "OnUnitActiveSec") == ["1min"]
+
+
+def test_the_comments_say_exactly_what_the_address_family_line_does_and_does_not_do() -> None:
+    """RestrictAddressFamilies restricts the socket() call only (man systemd.exec): socketpair() and io_uring are not
+    covered, so no text may claim that Unix sockets are impossible."""
+    comments = " ".join(x for x in read("safo-broker.service").splitlines() if x.startswith("#"))
+    assert "at all" not in comments
+    assert "socket()" in comments and "socketpair()" in comments and "io_uring" in comments
+    doc = (UNIT_DIR.parents[1] / "docs" / "gemini-broker.md").read_text()
+    section = doc[doc.index("**Egress control for the service user.**") : doc.index("**Unit policy.**")]
+    assert "no Unix\nsockets at all" not in section and "no Unix sockets at all" not in section
+    assert "socketpair()" in section and "io_uring" in section
+    test_source = Path(__file__).read_text()
+    assert "cannot create or connect Unix sockets" not in test_source.split("def test_the_comments_say_exactly")[0]

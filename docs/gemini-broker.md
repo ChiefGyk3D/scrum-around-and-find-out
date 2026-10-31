@@ -330,14 +330,20 @@ new release cannot change what root does with network-administration rights. The
 
 What it does not do: a service that reaches the vendor front end can still use the key there (spend) and can use the
 vendor as a dead drop; a root-level compromise removes the control; and the table can be missing for up to a minute
-after an outside firewall reload until the next timer run rebuilds it. The broker unit allows only IPv4 sockets (no
-Unix sockets at all), so the socket server must serve from the listener systemd passes in and must not create Unix
-sockets (no socket pairs, no default asyncio loop); a design that needs them needs a reviewed change of that line. The vendor-side key restriction in the runbook bounds what a leaked key can reach.
+after an outside firewall reload until the next timer run rebuilds it. The broker unit's address-family line allows only
+IPv4 sockets, but it limits the `socket()` call only (see the systemd manual on execution settings): `socketpair()` and `io_uring` are
+not covered, so it does not make Unix sockets impossible. The socket server is expected to serve from the listener
+systemd passes in and to create no Unix sockets of its own (no socket pairs, no io_uring, no default asyncio loop); a
+design that needs them needs a reviewed change of that line. The vendor-side key restriction in the runbook bounds what a leaked key can reach.
 Unverified until a run on a throwaway machine: that the two read-only bind mounts work under `ProtectSystem=strict` with
 `/etc/safo` read-only (the design reading says they do, because the source is read through the host path and the
 destination mounts are read-only); if they do not, move the hosts view to a directory under `/run` and change both
 paths together. Also unverified: the egress units under a real system, and nft loading on a real kernel (the ruleset is
 only syntax-checked, inside a private user and network namespace).
+
+**Not proven in the sandbox experiment.** The parent-directory ownership walk of `read_trust_file` was shimmed there,
+because a user-mode sandbox shows root-owned directories as owned by the overflow user. It is to be proven in phase 7, on
+the real host, with the real root-owned `/etc/safo` tree.
 
 **Unit policy.** The installer checks every release's units against a fixed policy after the signature verifies: units are
 read as printable ASCII with newline-only line breaks, no backslash anywhere (so no continuation or escape can make two
