@@ -34,6 +34,7 @@ from collections.abc import Callable, Collection
 from typing import TextIO
 
 from safo.broker.errors import BrokerError
+from safo.output import write
 
 ALLOWED_TYPES: tuple[str, ...] = ("png", "jpeg", "webp")
 MAX_IMAGE_BYTES = 24 * 1024 * 1024
@@ -350,5 +351,5 @@ def print_summary(path: str, data: bytes, *, file: TextIO | None = None) -> str:
     """
     kind = sniff_image_type(data) or "unknown"
     line = f"saved {len(data)} bytes, type {kind}: {ascii(path)[1:-1]}"
-    print(line, file=file if file is not None else sys.stdout)
+    write(file if file is not None else sys.stdout, line)
     return line
