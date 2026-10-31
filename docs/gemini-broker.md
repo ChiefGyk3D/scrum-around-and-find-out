@@ -105,10 +105,10 @@ and the client (phase 4b, below). The transport has only been run against loopba
 
 The thin client, `src/safo/broker/client.py`, built and tested with a scripted fake broker, the real server over
 socketpairs (a software key, the fake vendor) and a temporary unix socket, with injected clocks and no network. It is
-described in "The client" below. What is **not** done: wiring it into `safo gemini` (see "Where the client is not wired
-yet"), the dispatch guard's `check`, removal of the in-process paid path, and the free-path independence tests; those
-are the rest of phase 4. The safe image writer is phase 4a, a separate branch; until it is in the tree the client uses a
-small marked adapter with the same signature.
+described in "The client" below. What is **not** done: wiring it into the command line (see "Where the client is not
+wired yet"), the dispatch guard's `check`, removal of the in-process paid path, and the free-path independence tests;
+those are the rest of phase 4. The safe image writer is phase 4a, a separate branch; until it is in the tree the client
+uses a small marked adapter with the same signature.
 
 ## The requirement
 

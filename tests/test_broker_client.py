@@ -281,7 +281,7 @@ def test_a_signer_failure_or_cancelled_touch_sends_no_call(rig: d.Rig, failure: 
     rig.signer.fail = failure
     assert rig.run() == 2
     assert rig.broker.ops == ["begin"] and rig.broker.opened == 1
-    assert "nothing was sent" in rig.err.getvalue()
+    assert "nothing was sent" in rig.err.getvalue() and "security key did not sign" in rig.err.getvalue()
     assert "SIGNER-DETAIL" not in rig.err.getvalue()
 
 
@@ -518,7 +518,7 @@ def test_a_connect_failure_for_the_call_is_nothing_sent(rig: d.Rig) -> None:
 def test_a_keyboard_interrupt_while_waiting_is_outcome_unknown(rig: d.Rig) -> None:
     rig.broker.answer("call", [KeyboardInterrupt()])
     assert rig.run() == 4
-    assert CHARGED in rig.err.getvalue()
+    assert CHARGED in rig.err.getvalue() and "(interrupted)" in rig.err.getvalue()
 
 
 def test_a_reply_for_another_prompt_is_discarded(rig: d.Rig) -> None:
@@ -612,6 +612,7 @@ def test_an_answer_cannot_write_escapes_to_the_terminal(rig: d.Rig) -> None:
 def test_an_answer_that_is_not_text_is_discarded(rig: d.Rig) -> None:
     rig.broker.answer("call", [d.reply_frame(protocol.ok_body({"receipt": d.receipt(), "text": 5, "attachments": []}))])
     assert rig.run() == 4
+    assert "does not belong to this request" in rig.err.getvalue()
 
 
 # -- images ------------------------------------------------------------------------------------------------------------
@@ -695,7 +696,7 @@ def test_a_missing_attachment_for_an_image_call_is_reported(rig: d.Rig) -> None:
     rig.broker.answer("begin", d.offer_reply(thinking_level="minimal"))
     rig.broker.answer("call", d.ok_call(text="", rcpt=d.image_receipt(d.PNG, images=[]), images=()))
     assert rig.run(d.image_params()) == 4 and rig.writer.calls == []
-    assert CHARGED in rig.err.getvalue()
+    assert CHARGED in rig.err.getvalue() and "the reply carried no image" in rig.err.getvalue()
 
 
 def test_a_receipt_that_disagrees_with_the_attachment_description_is_discarded(rig: d.Rig) -> None:
@@ -930,3 +931,55 @@ def test_a_signature_with_a_non_ascii_tail_is_never_sent(rig: d.Rig, key: Path) 
     rig.signer.armor_override = good + "\u3000"
     assert rig.run() == 2
     assert rig.broker.ops == ["begin"] and rig.broker.opened == 1
+
+
+def test_an_unexpected_failure_after_the_send_is_reported_as_possibly_charged(rig: d.Rig) -> None:
+    def broken(data: bytes, directory: str, stem: str, limit: int) -> str:
+        raise RuntimeError("ZEBRA-PROMPT-7731 inside a bug")
+
+    rig.broker.answer("begin", d.offer_reply(thinking_level="minimal"))
+    rig.broker.answer("call", d.ok_call(text="", rcpt=d.image_receipt(), images=(d.PNG,)))
+    rig.deps.writer = broken
+    assert rig.run(d.image_params()) == 4
+    assert CHARGED in rig.err.getvalue() and "RuntimeError" in rig.err.getvalue() and "ZEBRA" not in rig.err.getvalue()
+
+
+def test_an_unexpected_failure_before_the_send_says_nothing_was_sent(rig: d.Rig) -> None:
+    def broken(text: str) -> None:
+        raise RuntimeError("ZEBRA-PROMPT-7731 inside a bug")
+
+    rig.deps.terms = broken
+    assert rig.run() == 2
+    assert "nothing was sent" in rig.err.getvalue() and "ZEBRA" not in rig.err.getvalue()
+    assert CHARGED not in rig.err.getvalue()
+
+
+def test_an_interrupt_while_waiting_for_the_touch_sends_nothing(rig: d.Rig) -> None:
+    rig.signer.fail = KeyboardInterrupt()
+    assert rig.run() == 130
+    assert "nothing was sent" in rig.err.getvalue() and rig.broker.ops == ["begin"]
+
+
+def test_an_interrupt_at_the_confirmation_sends_nothing(rig: d.Rig) -> None:
+    def interrupted(prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    rig.deps.confirm = interrupted
+    assert rig.run() == 130 and rig.signer.payloads == []
+
+
+def test_an_interrupt_after_the_reply_arrived_is_still_possibly_charged(rig: d.Rig) -> None:
+    def interrupted(data: bytes, directory: str, stem: str, limit: int) -> str:
+        raise KeyboardInterrupt
+
+    rig.broker.answer("begin", d.offer_reply(thinking_level="minimal"))
+    rig.broker.answer("call", d.ok_call(text="", rcpt=d.image_receipt(), images=(d.PNG,)))
+    rig.deps.writer = interrupted
+    assert rig.run(d.image_params()) == 4
+    assert CHARGED in rig.err.getvalue()
+
+
+def test_the_signed_fields_are_shown_verbatim_even_with_a_double_colon(rig: d.Rig) -> None:
+    rig.run(d.text_params(quote="go::ahead now", issue="owner/repo#2::3"))
+    assert "  quote: go::ahead now\n" in rig.shown[0]
+    assert "  issue: owner/repo#2::3\n" in rig.shown[0]

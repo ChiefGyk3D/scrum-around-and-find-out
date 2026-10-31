@@ -45,13 +45,13 @@ from pathlib import Path
 from typing import Any, Protocol, TextIO
 
 from safo import gemini, geminisign, output
-from safo.bounded import read_bounded
+from safo.bounded import loads, read_bounded
 from safo.broker import protocol
 from safo.broker.errors import Refused
 from safo.broker.money import MoneyError, format_usd, parse_usd
 from safo.broker.protocol import ProtocolError
 from safo.broker.records import EPOCH, HEAD, NONCE, STAMP, parse_approval, parse_stamp
-from safo.errors import EXIT_OK, SafoError
+from safo.errors import EXIT_INTERRUPTED, EXIT_OK, SafoError
 from safo.schema import Reader, _safe_load
 from safo.trust import read_trusted_regular_file
 
@@ -691,20 +691,21 @@ def build_payload(c: Checked, offer: Offer, principal: str, now: dt.datetime) ->
 def show_approval(out: TextIO, text: str, c: Checked, offer: Offer) -> None:
     """The approval screen, rendered from the SIGNED text itself: every field, then the cost, the digest and the whole
     prompt. A field cannot be signed without being listed, because the list is made from the signed text."""
-    signed = json.loads(text)
+    signed = loads(text)
     if offer.line:
         say(out, offer.line)
-    say(out, "the approval you are about to sign (every line below is part of the signature):")
+    rows = ["the approval you are about to sign (every line below is part of the signature):"]
     for name in sorted(signed):
         value = signed[name]
-        say(out, f"  {name}: {value if isinstance(value, str) else json.dumps(value)}")
+        rows.append(f"  {name}: {value if isinstance(value, str) else json.dumps(value)}")
+    rows.append(f"quote of his message ({c.quoted_at}): {c.quote}")
+    output.block(out, rows)  # verbatim (no `::` rewriting): the person must see exactly what is signed
     say(
         out,
         f"cost: typical estimate {format_usd(offer.estimate_micro)} USD, "
         f"worst case {format_usd(offer.reserve_micro)} USD (what the caps check), "
         f"you approve up to {format_usd(c.max_micro)} USD",
     )
-    say(out, f"quote of his message ({c.quoted_at}): {c.quote}")
     say(out, f"prompt: {len(c.prompt)} characters, {c.size} bytes, SHA-256 {c.digest}")
     say(out, "--- the WHOLE prompt starts (line by line; non-ASCII and control characters are escaped) ---")
     output.block(out, [f"{number:4d}| {row!a}" for number, row in enumerate(c.prompt.split("\n"), 1)])
@@ -923,9 +924,18 @@ class _Unknown(Exception):
     """The call request may have left and no usable reply came back. Never retried."""
 
 
-def _call(c: Checked, approval: dict[str, str], cfg: ClientConfig, deps: Deps) -> Reply:
+@dataclasses.dataclass
+class _Progress:
+    """How far a call got, so an unexpected failure is reported as what it is: nothing sent, or possibly charged."""
+
+    want: Want | None = None
+    connected: bool = False
+
+
+def _call(c: Checked, approval: dict[str, str], cfg: ClientConfig, deps: Deps, progress: _Progress) -> Reply:
     body = _body("call", prompt=c.prompt, approval=approval, **c.shape())
     chan = _open(deps, "nothing was sent (the signed approval is unused)")
+    progress.connected = True  # from here on the request may have left
     begun = deps.mono()  # the wait covers the send as well as the reply
     try:
         send_request(chan, body)
@@ -940,14 +950,26 @@ def _call(c: Checked, approval: dict[str, str], cfg: ClientConfig, deps: Deps) -
 
 def run_paid(params: PaidParams, cfg: ClientConfig, deps: Deps, out: TextIO, err: TextIO) -> int:
     """One paid call, start to finish. Returns the exit status; nothing is retried and no other tier is tried."""
+    progress = _Progress()
     try:
-        return _run(params, cfg, deps, out, err)
+        return _run(params, cfg, deps, out, err, progress)
     except SafoError as problem:
         say(err, f"error: {problem}")
         return problem.exit_code
+    except KeyboardInterrupt:
+        if progress.connected and progress.want is not None:
+            return _unknown(err, progress.want, "the client was interrupted after the request was sent")
+        say(err, "interrupted; nothing was sent")
+        return EXIT_INTERRUPTED
+    except Exception as failure:  # a bug: say only its class, never its text (which could quote the prompt)
+        if progress.connected and progress.want is not None:
+            why = f"the client failed after the request was sent ({type(failure).__name__})"
+            return _unknown(err, progress.want, why)
+        say(err, f"error: the client failed ({type(failure).__name__}); nothing was sent")
+        return EXIT_REFUSED
 
 
-def _run(params: PaidParams, cfg: ClientConfig, deps: Deps, out: TextIO, err: TextIO) -> int:
+def _run(params: PaidParams, cfg: ClientConfig, deps: Deps, out: TextIO, err: TextIO, progress: _Progress) -> int:
     c = check_params(params)
     if not cfg.signing_key or not cfg.principal:
         raise ClientError(SIGNING_MISSING)
@@ -987,8 +1009,9 @@ def _run(params: PaidParams, cfg: ClientConfig, deps: Deps, out: TextIO, err: Te
         raise ClientError("the approval expired before it could be sent; nothing was sent, start again")
     deps.terms(c.prompt)  # again, on the same bytes, just before they leave
     want = Want(offer.nonce, offer.epoch, c.model, c.kind, c.count, c.image_size, c.digest)
+    progress.want = want
     try:
-        reply = _call(c, {"payload": text, "signature": armor}, cfg, deps)
+        reply = _call(c, {"payload": text, "signature": armor}, cfg, deps, progress)
     except _Unknown as lost:
         return _unknown(err, want, f"no usable reply arrived after the request was sent ({lost})")
     if reply.body["ok"] is True:
