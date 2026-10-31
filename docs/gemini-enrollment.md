@@ -195,13 +195,13 @@ file in a scratch directory that you own; it touches no `/etc` file and no real 
 
 ```bash
 T="$(mktemp -d)" && cd "$T" && printf 'safo enrollment test\n' > msg
-ssh-keygen -Y sign -f ~/.ssh/safo/safo_gemini_a -n safo-gemini-approval-dryrun msg
+ssh-keygen -Y sign -f ~/.ssh/safo/safo_gemini_a -n safo-gemini-approval-dryrun < msg > sig.txt
 printf 'key-a namespaces="safo-gemini-approval-dryrun" %s\n' "$(cut -d' ' -f1,2 ~/.ssh/safo/safo_gemini_a.pub)" > allowed
-ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s msg.sig < msg; echo "rc=$?"
+ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s sig.txt < msg; echo "rc=$?"
 ```
 
-Touch the key and give the PIN at the sign step. `-Y sign` with a file argument writes `msg.sig` next to it (manual:
-"written to the path of the input file with .sig appended"). Blast radius: files under the new temporary directory
+Touch the key and give the PIN at the sign step. With no file argument `-Y sign` signs standard input and writes
+the signature to standard output (manual), which the redirect saves as `sig.txt`. Blast radius: files under the new temporary directory
 only. Rollback: `rm -r "$T"`. Expected:
 
 ```text
@@ -213,22 +213,23 @@ rc=0
 each of which must print a failure and a nonzero rc:
 
 ```bash
-ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval -s msg.sig < msg; echo "rc=$?"
-printf 'other\n' | ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s msg.sig; echo "rc=$?"
-ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s msg.sig -r ~/.ssh/safo/safo_gemini_a.pub < msg; echo "rc=$?"
+ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval -s sig.txt < msg; echo "rc=$?"
+printf 'other\n' | ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s sig.txt; echo "rc=$?"
+ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s sig.txt -r ~/.ssh/safo/safo_gemini_a.pub < msg; echo "rc=$?"
 ```
 
 Expected (run): `Couldn't verify signature: namespace does not match` with `rc=255`; `Signature verification failed:
 incorrect signature` with `rc=255`; and for the revocation test `Could not verify signature.` with `rc=255` (the `-r` file
 may be a list of public keys; manual). If any of these three ends in `rc=0`, stop: the check is not biting.
 
-Two more checks, by hand: sign again and confirm it **asks for a touch and the PIN every time** (the manual says
-`verify-required` requires verification "for each signature"), and unplug the key and confirm the sign command fails.
-The manual does not say that `-Y verify` reports the PIN check, so a green verify does not prove the PIN was asked; the
-safo dry run reads the authenticator flags and prints touch and PIN, and that is the proof once phase 2 and 5 are merged.
-(`ssh-keygen -Y check-novalidate -n NAMESPACE -s FILE.sig < msg` checks structure only and "does not validate if a
-signature comes from an authorized signer"; run: `Good "safo-gemini-approval-dryrun" signature with ED25519 key SHA256:...`,
-rc 0.)
+Two more checks, by hand. Sign again and confirm it asks for a touch and the PIN every time (the manual says
+`verify-required` requires verification for each signature). Then unplug the key and confirm the sign command fails.
+
+The manual does not say that `-Y verify` reports the PIN check, so a green verify does not prove the PIN was asked. The
+safo dry run reads the authenticator flags and prints touch and PIN, and that is the proof once phases 2 and 5 are merged.
+
+For the structure-only check, `ssh-keygen -Y check-novalidate -n NAMESPACE -s SIGFILE < msg` does not validate that a
+signature comes from an authorized signer (manual). Run with a software key it printed a Good line and exited 0.
 
 ## Step b. Test a second device (the Immurok): decision table
 
@@ -259,12 +260,12 @@ Edit `agent_keys.txt` down to the single line for the device and rename it `IMK.
 type; an `sk-` prefix means a FIDO-style hardware key). Then:
 
 ```bash
-ssh-keygen -Y sign -f IMK.pub -n safo-gemini-approval-dryrun msg ; echo "rc=$?"
+ssh-keygen -Y sign -f IMK.pub -n safo-gemini-approval-dryrun < msg > sig.txt ; echo "rc=$?"
 printf 'imk namespaces="safo-gemini-approval-dryrun" %s\n' "$(cut -d' ' -f1,2 IMK.pub)" > allowed
-ssh-keygen -Y verify -f allowed -I imk -n safo-gemini-approval-dryrun -s msg.sig < msg; echo "rc=$?"
+ssh-keygen -Y verify -f allowed -I imk -n safo-gemini-approval-dryrun -s sig.txt < msg; echo "rc=$?"
 ```
 
-B2: the sign works (rc 0, `msg.sig` exists). B3: the verify prints `Good ... signature for imk` with rc 0. The manual says the
+B2: the sign works (rc 0, `sig.txt` exists). B3: the verify prints `Good ... signature for imk` with rc 0. The manual says the
 `-f` of `-Y sign` may be "a public key with the private half available via ssh-agent". `-U` is documented there only for
 a CA key, so it is not used; if the sign fails with a message about reading the private key, that is itself a result,
 not a reason to add flags. If the vendor ships a signing library, `-w PROVIDER` (for key creation) and the
@@ -274,7 +275,7 @@ is trusting that code, so read what it is first.
 Then three more tests, each with a fresh sign command:
 
 ```bash
-for i in 1 2 3; do rm -f msg.sig; ssh-keygen -Y sign -f IMK.pub -n safo-gemini-approval-dryrun msg; echo "sign $i rc=$?"; done
+for i in 1 2 3; do rm -f sig.txt; ssh-keygen -Y sign -f IMK.pub -n safo-gemini-approval-dryrun < msg > sig.txt; echo "sign $i rc=$?"; done
 ```
 
 B4: count the gestures. Each of the three signatures must have asked for its own fingerprint gesture. If the second or
@@ -412,24 +413,26 @@ key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. The label is the 
 4. **Check it with OpenSSH, and with the preflight.**
 
    ```bash
-   ssh-keygen -Y find-principals -f /etc/safo/gemini-allowed-signers -s "$T/msg.sig"
+   ssh-keygen -Y find-principals -f /etc/safo/gemini-allowed-signers -s "$T/sig.txt"
    python -m safo.gemini_preflight
    ```
 
-   For `$T/msg.sig` use the signature from step a4 (re-run a4 first if the folder is gone). Expected: the first command
+   For `$T/sig.txt` use the signature from step a4 (re-run a4 first if the folder is gone). Expected: the first command
    prints `key-a`'s label as it appears in the file (run with a software key: it printed the principal), and `find-principals`
    does not check the namespace, so it only proves the key is listed. To prove the **namespace restriction** bites, the
    dry-run signature must now be refused by the real file (run, with the restriction `safo-gemini-approval`):
 
    ```bash
-   ssh-keygen -Y verify -f /etc/safo/gemini-allowed-signers -I yubikey-a -n safo-gemini-approval-dryrun -s "$T/msg.sig" < "$T/msg"; echo "rc=$?"
+   ssh-keygen -Y verify -f /etc/safo/gemini-allowed-signers -I yubikey-a -n safo-gemini-approval-dryrun -s "$T/sig.txt" < "$T/msg"; echo "rc=$?"
    ```
 
-   Expected: `... key is not permitted for use in signature namespace "safo-gemini-approval-dryrun"`, `Could not verify
-   signature.`, `rc=255`. The preflight line `allowed-signers` must read `PASS ... each bound to namespaces="safo-gemini-approval";
-   root-owned, mode 0644`. Do not sign any other text in the real `safo-gemini-approval` namespace: a signature there is
-   what the broker is built to accept once the payload is right. The safo `--dry-run` approve (gemini-keys.md, "Test
-   without spending") is the proof that matters once the broker is merged.
+   Expected: a line ending in `is not permitted for use in signature namespace` followed by the dry-run name, then
+   `Could not verify signature.`, then `rc=255`.
+
+   The preflight line `allowed-signers` must read `PASS`, with every key line bound to the approval namespace, root-owned,
+   mode 0644. Do not sign any other text in the real approval namespace: a signature there is what the broker is built to
+   accept once the payload is right. The `--dry-run` approve in the keys page (section "Test without spending") is the
+   proof that matters once the broker is merged.
 
 5. **The release signers file** is the same shape with the other namespace, and its own file, installed by root the same
    way: `/etc/safo/broker-release-signers`, lines `release-key namespaces="git" KEYTYPE BASE64`, root-owned, mode 0644.
@@ -480,7 +483,7 @@ the backup. Expected: `safo gemini keys list` shows both until the old one is re
 3. Cross-check with OpenSSH (public-key form of the revocation file, in a scratch directory):
 
    ```bash
-   ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s msg.sig -r ~/.ssh/safo/safo_gemini_a.pub < msg; echo "rc=$?"
+   ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s sig.txt -r ~/.ssh/safo/safo_gemini_a.pub < msg; echo "rc=$?"
    ```
 
    Expected (run): `Could not verify signature.`, `rc=255`.

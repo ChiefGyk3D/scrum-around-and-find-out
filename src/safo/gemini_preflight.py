@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from safo import output
+
 NAMESPACE = "safo-gemini-approval"
 SK_TYPES = ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
 READ_ONLY_COMMANDS: tuple[tuple[str, ...], ...] = (
@@ -363,7 +365,8 @@ def run_preflight(loc: Locations, runner: Runner, lookup: UserLookup) -> list[Ch
 
 
 def render(checks: Sequence[Check]) -> str:
-    return "\n".join(f"{c.status.upper()} {c.name}: {c.detail}" for c in checks)
+    # names found on disk (state directory entries) can hold control characters: the shared escaper handles them
+    return "\n".join(output.line(f"{c.status.upper()} {c.name}: {c.detail}") for c in checks)
 
 
 def exit_code(checks: Sequence[Check], *, strict: bool = False) -> int:
@@ -386,7 +389,7 @@ def main_with(loc: Locations, runner: Runner, lookup: UserLookup, *, out: TextIO
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if any(a not in {"--strict"} for a in args):
-        sys.stderr.write("usage: python -m safo.gemini_preflight [--strict]\n")
+        output.write(sys.stderr, "usage: python -m safo.gemini_preflight [--strict]")
         return 2
     return main_with(Locations(), default_runner, default_lookup, out=sys.stdout, strict="--strict" in args)
 

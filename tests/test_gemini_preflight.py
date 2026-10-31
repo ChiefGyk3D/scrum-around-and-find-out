@@ -407,3 +407,11 @@ def test_the_guard_bites_a_checker_that_would_write(tmp_path: Path) -> None:
     (root / "etc" / "safo" / "stray").write_text("x")
     assert snapshot(root) != before
     assert loc.allowed_signers.exists()
+
+
+def test_a_state_entry_name_with_a_control_character_is_escaped_in_the_report(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    (loc.state_dir / "bad\x1bname").write_text("x")  # mode 0644: reported, and the name must not reach the output raw
+    out = pf.render(pf.run_preflight(loc, FakeRunner(), lookup_ok))
+    assert "\x1b" not in out
+    assert "bad\\x1bname" in out
