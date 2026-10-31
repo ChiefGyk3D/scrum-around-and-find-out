@@ -281,6 +281,41 @@ build backend may run), a source path supplied by the caller (ignored), and a br
 a correct signed tag installs. Failure injection at each of build, verification, unit install, restart and the post-start
 check must leave the previous release active and the version file unchanged.
 
+## Install (phase 5 status)
+
+What phase 5 puts in the tree, all testable without root and none of it run on a real machine yet:
+
+- `packaging/systemd/safo-broker.socket` and `packaging/systemd/safo-broker.service`: the two units from "The unit files
+  and their hardening", plus `ReadWritePaths=` for the state directory only, `ConditionPathExists=` on the root-owned
+  switch, and explicit start and stop timeouts. `tests/test_broker_units.py` checks every hardening line by name (removing
+  one fails a test), runs `systemd-analyze verify` and `systemd-analyze security --offline` where the tool exists (the
+  tests skip, with the reason shown, when it does not), and fails if the exposure score rises above 2.0.
+- `packaging/broker-requirements.txt`: the hash-locked wheel list the installer reads. Wheel hashes only.
+- `src/safo/broker/install.py`: `safo-broker-install`, standard library only, so root can copy the one file to
+  `/usr/local/sbin`. Commands: `plan` (prints the setup runbook, never runs it), `install VERSION` (a dry run unless
+  `--apply`; `--reinstall`, `--allow-downgrade VERSION`), and `rollback` (`--to VERSION`). The chain is the one in
+  "Install and update chain": the source comes from a fixed URL and a single tag fetch (no option or variable changes it),
+  the signed annotated tag object is verified against `/etc/safo/broker-release-signers`, the version comes from the tag
+  and is cross-checked with `__version__`, the floor and the highest-installed record are checked, wheels are fetched with
+  `--only-binary=:all: --require-hashes --no-deps --isolated` and every file is re-checked against the lock, the release
+  is built in a staging directory with a manifest, made read-only, and activated with a rename over a temporary link.
+- `src/safo/broker/runbook.py`: the one-time root setup as full `ssh -t host 'sudo ...'` lines, each step with its blast
+  radius and rollback. The paid key is typed at a hidden prompt on the remote terminal and never appears in the text. The
+  switch is left off.
+
+Beyond the design text, the installer also refuses: a signed tag object stored under a different tag name (the object
+carries its own name, which must equal the requested tag); a signature block that is not an SSH signature (so a GPG
+signature checked against whatever keyring root has is never consulted); a symlink or submodule anywhere in the release
+tree; a wheel with a `.pth` file, a scripts directory, console or GUI entry points, a link member or an unsafe member
+path; a wheel that would install a package named `safo` over the broker's own code; a missing or unusable floor file; and
+a missing version file when a release is already installed. Release directories are named `VERSION`, or `VERSION.rN` when
+`--reinstall` installs a version that is already present.
+
+**Run it first on a throwaway machine.** Until the maintainer has run the installer and the units on a throwaway VM, these
+are unverified: that `MemoryDenyWriteExecute=yes` lets `ssh-keygen` run under the service, that `@system-service` allows
+`memfd_create`, that `LoadCredentialEncrypted=` hands the key to the service user only, that the owner and mode of the
+socket let the client group connect, and that the service skips its start cleanly when the switch file is absent.
+
 ## The root-door precondition (a documented residual risk)
 
 The whole design assumes the maintainer's account, and every agent running as it, has **no way to become root**. The

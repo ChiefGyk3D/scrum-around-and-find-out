@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Paid Gemini broker, phase 5 (#261): the systemd units and the installer, none of it run on a real machine yet. New
+  `packaging/systemd/` socket and service units for a dedicated unprivileged user (strong sandboxing, an encrypted
+  credential for the paid key, the root-owned switch as a start condition), `packaging/broker-requirements.txt` (hash-locked
+  wheels), `safo.broker.install` (`safo-broker-install`: dry run by default; verifies a signed annotated tag against a
+  root-owned signers file; wheels only, with hashes required; floor and monotonic version checks; a staged, read-only,
+  manifest-checked release activated by an atomic symlink swap; automatic and manual rollback; never touches the state
+  directory) and `safo.broker.runbook` (the one-time root setup as copy-paste lines with blast radius and rollback, printed
+  and never run). Paid use stays disabled.
+
 - Paid Gemini broker, phase 1 (#205): the core library under `src/safo/broker/`. Integer micro-dollar arithmetic and the
   worst-case reservation (prompt bytes plus 64 tokens at one token per byte, the output cap, two interim images), the
   per-job cap (2.50 USD in the testing phase) and monthly ceiling (10 USD), the model allow-list with Pro and Nano Banana
