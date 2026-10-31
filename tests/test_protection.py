@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import re
+import secrets
 import threading
 import urllib.parse
 from collections.abc import Callable, Iterator, Mapping
@@ -1021,13 +1022,17 @@ def hashed(seed: int) -> Callable[[int], int]:
     import itertools
 
     count = itertools.count()
-    return lambda n: int.from_bytes(hashlib.sha256(f"{seed}-{next(count)}".encode()).digest(), "big") % n
+
+    def randbelow(n: int) -> int:
+        return int.from_bytes(hashlib.sha256(f"{seed}-{next(count)}".encode()).digest(), "big") % n
+
+    return randbelow
 
 
 def _token_with(monkeypatch: pytest.MonkeyPatch, source: Callable[[int], int]) -> str:
     from safo import protection
 
-    monkeypatch.setattr(protection.secrets, "randbelow", source)
+    monkeypatch.setattr(secrets, "randbelow", source)
     return protection._random_token()
 
 
@@ -1045,7 +1050,7 @@ def test_the_random_tokens_are_not_hexadecimal_and_start_anywhere(monkeypatch: p
     """Over a fixed seeded source the statistics are a fixed outcome, not a chance. (Seed 247 was run and passes.)"""
     from safo import protection
 
-    monkeypatch.setattr(protection.secrets, "randbelow", hashed(247))
+    monkeypatch.setattr(secrets, "randbelow", hashed(247))
     _assert_token_statistics([protection._random_token() for _ in range(600)])
 
 
@@ -1087,13 +1092,13 @@ def test_the_default_token_source_is_secrets_randbelow_and_is_drawn_from_every_t
     """A spy (it delegates to the real source): the default path draws once for the length, once per character."""
     from safo import protection
 
-    real, calls = protection.secrets.randbelow, []
+    real, calls = secrets.randbelow, []
 
     def spy(n: int) -> int:
         calls.append(n)
         return real(n)
 
-    monkeypatch.setattr(protection.secrets, "randbelow", spy)
+    monkeypatch.setattr(secrets, "randbelow", spy)
     for _ in range(3):
         before = len(calls)
         token = protection._random_token()
@@ -1135,7 +1140,7 @@ def _assert_fresh_names(paths: list[str]) -> None:
 def _fresh_names_from(monkeypatch: pytest.MonkeyPatch, seed: int) -> list[str]:
     from safo import protection
 
-    monkeypatch.setattr(protection.secrets, "randbelow", hashed(seed))
+    monkeypatch.setattr(secrets, "randbelow", hashed(seed))
     return protection.fresh_workflow_paths()
 
 
@@ -1152,7 +1157,7 @@ def test_the_fresh_names_differ_from_one_run_to_the_next_while_the_source_advanc
 ) -> None:
     from safo import protection
 
-    monkeypatch.setattr(protection.secrets, "randbelow", hashed(3))
+    monkeypatch.setattr(secrets, "randbelow", hashed(3))
     first, second = protection.fresh_workflow_paths(), protection.fresh_workflow_paths()
     assert first != second and not set(first) & set(second)
     _assert_fresh_names(first)
@@ -1163,13 +1168,13 @@ def test_the_default_fresh_names_draw_new_randomness_on_every_run(monkeypatch: p
     """A spy on the default source (it delegates to the real one): each run draws again, for all 21 names."""
     from safo import protection
 
-    real, calls = protection.secrets.randbelow, []
+    real, calls = secrets.randbelow, []
 
     def spy(n: int) -> int:
         calls.append(n)
         return real(n)
 
-    monkeypatch.setattr(protection.secrets, "randbelow", spy)
+    monkeypatch.setattr(secrets, "randbelow", spy)
     protection.fresh_workflow_paths()
     first_run = len(calls)
     # 33 tokens a run (3 rounds of 1+1+1+2+2+2+3), each at least a length draw and six character draws.
@@ -1181,7 +1186,7 @@ def test_the_default_fresh_names_draw_new_randomness_on_every_run(monkeypatch: p
 def test_the_fresh_names_check_bites_on_a_source_that_ignores_the_draws(monkeypatch: pytest.MonkeyPatch) -> None:
     from safo import protection
 
-    monkeypatch.setattr(protection.secrets, "randbelow", lambda n: 0)
+    monkeypatch.setattr(secrets, "randbelow", lambda n: 0)
     with pytest.raises(AssertionError):
         _assert_fresh_names(protection.fresh_workflow_paths())
 
