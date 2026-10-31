@@ -5,14 +5,18 @@ as unreadable when it cannot be resolved; the same constructs in a brief with no
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import safo.geminibrief as _geminibrief
 from safo.geminibrief import GEMINI_PAID, _expansion_at_command, findings
 
+_GEMINIBRIEF = _geminibrief.__file__
 OK = "id-0123456789ab"
 PUBLIC = "gemini-material: public\n"
 
@@ -566,15 +570,38 @@ def test_braces_are_judged_without_building_any_word_and_the_false_blocks_are_th
 # -- round ten: nothing is enumerated, so nothing can be exhausted or silently cut ------------------------------------
 
 
-def _grows_linearly(work: Callable[[int], object], small: int = 2500, big: int = 20000) -> bool:
-    """Compare an 8x larger input to a small one on the same machine, so a slow or busy runner
-    cannot fail it (a fixed seconds bound did): linear work costs about 8x, quadratic about 64x."""
-    timings = []
-    for size in (small, big):
-        started = time.monotonic()
+def _steps(work: Callable[[int], object], size: int, files: tuple[str, ...]) -> int:
+    """How many Python lines the work runs in the given source files: a count, not a clock, so a slow or busy
+    machine and the interpreter version cannot change it. Work done inside C (a regex) is not counted."""
+    count = 0
+
+    def local(frame: Any, event: str, arg: object) -> Any:
+        nonlocal count
+        if event == "line":
+            count += 1
+        return local
+
+    def tracer(frame: Any, event: str, arg: object) -> Any:
+        return local if frame.f_code.co_filename in files else None
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
         work(size)
-        timings.append(time.monotonic() - started)
-    return timings[1] < 24 * timings[0] + 0.25
+    finally:
+        sys.settrace(previous)
+    return count
+
+
+def _grows_linearly(
+    work: Callable[[int], object], files: tuple[str, ...] = (_GEMINIBRIEF,), small: int = 20, big: int = 160
+) -> bool:
+    """Count the lines run for an input 8x larger and for a small one: linear work counts about 8x, quadratic about
+    64x. The bound of 12x sits between them, and the count is exact, so it never flakes. The sizes keep every line
+    under LINE_CAP: a longer line is clipped, which would hide growth."""
+    low, high = _steps(work, small, files), _steps(work, big, files)
+    assert low > 0, "nothing was counted: the guard is not looking at the code it protects"
+    return high < 12 * low
 
 
 def _brace_lines(size: int) -> None:
@@ -591,11 +618,20 @@ def test_a_line_with_a_huge_brace_list_is_judged_in_linear_time() -> None:
     assert _grows_linearly(_brace_lines)
 
 
-def test_the_linear_time_guard_bites_on_quadratic_work() -> None:
-    def quadratic(size: int) -> None:
-        sum(1 for _ in range(size * size // 8))
+def test_the_linear_time_guard_bites_on_quadratic_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    import safo.geminibrief as gb
 
-    assert not _grows_linearly(quadratic)
+    real = gb._brace_list
+
+    def quadratic_brace_list(word: str) -> bool:
+        for end in range(len(word)):  # rescans the prefix at every character: quadratic
+            real(word[: end + 1])
+        return real(word)
+
+    assert _grows_linearly(_brace_lines), "the real code is judged linear"
+    monkeypatch.setattr(gb, "_brace_list", quadratic_brace_list)
+    assert not _grows_linearly(_brace_lines, (_GEMINIBRIEF, __file__)), "a quadratic scan is caught"
+
 
 
 def test_a_line_past_the_length_bound_that_could_hold_a_risk_token_is_unreadable_not_cut() -> None:
