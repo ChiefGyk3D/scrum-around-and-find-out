@@ -1,7 +1,8 @@
 # Gemini broker: design for the paid path
 
-> **Status: phases 1 to 3 of the build plan are in the tree; the rest is design.** The core library, the call
-> pipeline and the socket server under `src/safo/broker/` exist (see "Phase 1 status" to "Phase 3 status" below). There is no unit, no installer, no client and no vendor call has ever been made, so
+> **Status: phases 1 to 3 and the client module of phase 4 are in the tree; the rest is design.** The core library, the
+> call pipeline, the socket server and the thin client under `src/safo/broker/` exist (see "Phase 1 status" to
+> "Phase 4b status" below). There is no unit, no installer and no `safo gemini` wiring, and no vendor call has ever been made, so
 > paid use stays disabled by the root-owned switch (see [Gemini](gemini.md)) until the broker is built, reviewed and
 > enabled by the maintainer. This page is the design for issue #205 (steps 1 and 2); the risks are in
 > [the broker threat model](gemini-broker-threat-model.md). Nothing here is a promise about code that does not exist yet; the
@@ -105,7 +106,16 @@ key, no timing assertions): the wire format, the server, the entry point and the
 
 Where phase 3 read the design and had to choose, it is listed in the pull request. Not built: the idle exit, the audit copy
 `approvals/NONCE.json` of the design, the installer and units, the admin command (so nothing can yet clear a suspension),
-and the client. The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
+and the client (phase 4b, below). The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
+
+### Phase 4b status
+
+The thin client, `src/safo/broker/client.py`, built and tested with a scripted fake broker, the real server over
+socketpairs (a software key, the fake vendor) and a temporary unix socket, with injected clocks and no network. It is
+described in "The client" below. What is **not** done: wiring it into the command line (see "Where the client is not
+wired yet"), the dispatch guard's `check`, removal of the in-process paid path, and the free-path independence tests;
+those are the rest of phase 4. The safe image writer is phase 4a, a separate branch; until it is in the tree the client
+uses a small marked adapter with the same signature.
 
 ## The requirement
 
@@ -535,6 +545,83 @@ most) is counted that was not spent. The benefit is that no crash can allow a re
   resolves the ambiguous call; the client has no way to write a `usage` row.
 - Power loss is the same case, so the `fsync` of the file and its directory completes before the connection to the
   vendor is opened.
+
+## The client
+
+`src/safo/broker/client.py` is the only code on the maintainer's side that talks to the broker. It holds no paid key
+(it never reads one), no ledger and no state. It imports the wire format, `protocol.py`, unchanged, and uses nothing from
+the free path: no secret-store reader, no vendor call, no HTTP client, no logging, no direct printing (a test fails on any
+of them).
+
+**Where it finds the socket and the key.** In this order: a root-owned `/etc/safo/broker-client.yaml` (read through the
+same ownership walk as the trust files; it may set `socket` and nothing else), then the maintainer's own
+`~/.config/safo/broker-client.yaml` (private to the account), then the constant `/run/safo-broker.sock`. No environment
+variable names the socket, because the wrapper strips the environment and a variable is the caller's to set. The user
+file holds `version: 1`, `socket`, `signing.key` and `signing.principal` (the same two settings as `gemini.yaml`),
+`image_output_dir` (an absolute path to a mode 0700 folder), `private_terms` and `reply_seconds` (10 to 900, default 240).
+The client opens the socket path without following a link, checks on the descriptor that it is a socket owned by root and
+not writable by everyone, and connects through `/proc/self/fd`, so the object it checked is the object it connected to;
+an account that is not root cannot put a socket there for the client to talk to.
+
+**A paid call, in order.**
+
+1. Everything that can be checked alone, before a socket is opened: names, the amounts, the quote and its time, the image
+   fields, that the prompt is plain text of at most 4000 characters (more is refused, as the design says, because the
+   person signing must be able to read all of it), has no secret shape and no private term, and, for an image, that the
+   output folder is usable (so a full disk cannot discard an image that was paid for). The private-terms check runs
+   again on the same bytes just before the send.
+2. `begin` on its own connection. The offer (nonce, epoch, ledger head, estimate, reservation, thinking level, whether it
+   passes the monthly ceiling, expiry) is checked field by field; an offer whose worst case is over the amount named, or
+   that is already expired, is not signed.
+3. The signed text is built from the offer and the parameters and checked by the broker's own approval parser. The
+   screen is then rendered **from that text**: every signed field as `name: value`, the cost line (typical estimate, worst
+   case, the amount approved), the quote, the digest and size, the **whole** prompt line by line with non-ASCII and control
+   characters escaped, and a warning when the call passes the monthly ceiling. A field cannot be signed without being on
+   the screen because the list is made from the signed text.
+4. The person types `approve JOB`. A terminal is required (standard input and output).
+5. `ssh-keygen -Y sign` through the existing signer: an absolute system binary, the argument vector `-Y sign -f KEY -n
+   safo-gemini-approval`, no shell, the text on standard input, a small environment (`PATH`, `HOME`, and the signing
+   variables), and standard error left on the terminal so the key's touch prompt is seen. A signer failure, a cancelled
+   touch, or a signature in another namespace sends nothing.
+6. `call` on a new connection, once. Exactly one reply is read: the JSON frame, then the one attachment frame it names.
+
+**What a reply is believed for.** A success or a charge-related failure is used only if its receipt names this request:
+the nonce, epoch, model, kind, count, size and the SHA-256 of the exact prompt bytes. Anything else is discarded and
+reported as a possible charge with the nonce and digest to look up. Every receipt field is checked for shape and the
+extra fields are dropped. An answer is printed through the repository's output module, which writes out every control and format
+character, so a reply cannot move the cursor or rewrite the terminal.
+
+**Never retried.** A timeout, a reset, a short, oversize or malformed reply, or an interrupt after the call request was
+started is an unknown outcome: exit 4, "THE CALL MAY HAVE BEEN CHARGED", the nonce and digest, no retry, and no fallback
+to the free tier (a paid 429 is final, as above). A failure to connect, before anything is sent, is exit 2 and leaves the
+signed approval unused.
+
+| Exit | Meaning |
+|---|---|
+| 0 | The call succeeded and the receipt matched |
+| 2 | Refused before anything was spent or sent: a bad parameter, no terminal, a wrong confirmation, a failed signer, the broker's refusal codes (`disabled`, `bad_approval`, `expired`, `over_job_cap`, `needs_block_approval`, `busy`, and the rest of exit 2 in the table above), or `vendor_refused` |
+| 3 | `rate_limited`: the vendor refused the call; the retry hint is shown, nothing was repeated |
+| 4 | `outcome_unknown`, `internal`, or any reply the client could not use after the request was sent |
+
+`rate_limited`, `vendor_refused`, `outcome_unknown` and `internal` print the sentence for the code, say the call may have
+been charged and show the receipt (or say none arrived). The other codes are refused before any vendor call: they print
+the sentence and say that no receipt was issued.
+
+**Images.** The attachment is checked against its description (length and SHA-256) and against the receipt, its first
+bytes must name the type the broker named, and it goes through the writer with the signature `(data, directory, stem,
+max_bytes)`. The stem is built from the UTC time, the job, the first 8 characters of the nonce and the index; nothing in
+a name comes from the reply. The client never opens, previews or parses the image: it prints the path, the byte count and
+the type the first bytes name. A receipt file, `NAME.receipt.json`, is written beside the image (exclusive, mode 0600,
+`reviewed: false`). If the image cannot be saved, the message says money was spent and gives the size and digest.
+
+**Running it.** `python3 -I -m safo.broker.client --model M --job J --kind text|image --max-output-tokens N --max-usd X
+--quote Q --quoted-at T --prompt-file F [--issue I] [--image-size S --aspect-ratio R --count N]`. The prompt comes from a
+file, never from the command line.
+
+**Where the client is not wired yet.** `safo gemini ask --paid` and `safo gemini approve` still use the in-process path,
+which stays disabled by the switch. Wiring the client in needs the wrapper to hand `ask` the signing variables and a
+standard input (today only `approve` gets them) and the dispatch guard to learn the new step, and both were being changed
+by other work, so the client ships as a module with the entry above.
 
 ## Cost
 
