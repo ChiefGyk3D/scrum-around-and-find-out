@@ -320,12 +320,13 @@ def test_each_row_field_rejects_wrong_types_and_ranges(kind: str) -> None:
                 continue
             if (kind, name, wrong) == ("call_start", "image_size", ""):
                 continue  # an empty size is what a text call records
-            if kind == "admin_action" and (name, wrong) in {
+            if kind == "admin_action" and (name, wrong) in [
                 ("sudo_uid", -1),  # no sudo
                 ("reason", ""),
+                ("reason", "Z Z"),  # a reason is free printable text
                 ("month", ""),  # a clear names no month
                 ("model", ""),  # an adjustment names no model
-            }:
+            ]:
                 continue
             bad = copy.deepcopy(row(kind))
             bad[name] = wrong
