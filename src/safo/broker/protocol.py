@@ -320,6 +320,8 @@ def parse_reply(body: bytes) -> dict[str, Any]:
         if not all(_attachment_ok(item) for item in attachments):
             raise ProtocolError("bad_request")
         return data
+    if "attachments" in data:  # only a success carries any
+        raise ProtocolError("bad_request")
     code = data.get("code")
     if data.get("ok") is not False or type(code) is not str or code not in REPLY_CODES:
         raise ProtocolError("bad_request")
@@ -332,4 +334,4 @@ def parse_reply(body: bytes) -> dict[str, Any]:
 def attachment_count(reply: Mapping[str, Any]) -> int:
     """How many attachment frames follow this (already parsed) success reply."""
     attachments = reply.get("attachments", [])
-    return len(attachments) if type(attachments) is list else 0
+    return len(attachments) if reply.get("ok") is True and type(attachments) is list else 0

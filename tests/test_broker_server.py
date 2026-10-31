@@ -1098,17 +1098,17 @@ def force_overlap(env: Env, n: int) -> None:
 
 @pytest.mark.parametrize("budget", ["max_calls_per_minute", "max_calls_per_day"])
 def test_concurrent_clients_never_pass_the_call_budget(rig: Rig, budget: str) -> None:
-    env = Env(rig, max_concurrent_calls=4, call_per_minute=100, max_calls_per_minute=2, max_calls_per_day=2)
-    force_overlap(env, 4)
-    results = run_together(env, [text_req(job=f"job-{i}") for i in range(4)])
+    env = Env(rig, max_concurrent_calls=2, call_per_minute=100, max_calls_per_minute=1, max_calls_per_day=1)
+    force_overlap(env, 3)
+    results = run_together(env, [text_req(job=f"job-{i}") for i in range(3)])
     codes = sorted(r.code for r in results)
-    assert codes == ["busy", "busy", "ok", "ok"]
-    assert len(rig.vendor.requests) == 2 and len(rig.ledger.view().calls) == 2
+    assert codes == ["busy", "busy", "ok"]
+    assert len(rig.vendor.requests) == 1 and len(rig.ledger.view().calls) == 1
     assert env.server.calls_in_flight == 0
 
 
 def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=3, call_per_minute=100, max_calls_per_minute=1)
+    env = Env(rig, max_concurrent_calls=2, call_per_minute=100, max_calls_per_minute=1)
     release = threading.Event()
     entered = threading.Event()
 
@@ -1124,7 +1124,7 @@ def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(r
     worker = threading.Thread(target=lambda: box.append(exchange(env.server, first_body)))
     worker.start()
     assert entered.wait(30)
-    rest = run_together(env, [text_req(job=f"job-{i}") for i in range(2)])
+    rest = run_together(env, [text_req(job=f"job-{i}") for i in range(2)])  # one slot is left
     release.set()
     worker.join()
     assert [r.code for r in rest] == ["busy", "busy"] and box[0].code == "ok"
@@ -1216,3 +1216,32 @@ def test_the_switch_is_looked_at_again_under_the_ledger_lock(env: Env) -> None:
     env.server.switch = switch
     assert env.call(text_req()).code == "ok"
     assert len(seen) == 2  # once at the door, once just before the spend
+
+
+def test_after_a_stop_no_admitted_connection_can_begin_or_spend(env: Env) -> None:
+    req = text_req()
+    payload, signature = env.rig.approved(req)
+    before = state_snapshot(env.rig)
+    env.server.stop()
+    base = {"job": "j", "kind": "text", "max_output_tokens": 5, "prompt_bytes": 5, "max_usd": "2"}
+    assert env.ask("begin", model="flat-test", **base).code == "busy"
+    assert env.ask("call", **call_fields(req, payload, signature)).code == "busy"
+    assert env.rig.vendor.requests == [] and state_snapshot(env.rig) == before
+    assert env.ask("status").code == "ok" and env.ask("check", nonce="0123456789abcdef").code == "ok"
+
+
+def test_a_stop_during_verification_stops_the_spend(env: Env) -> None:
+    env.rig.pipeline.faults = lambda point: env.server.stop() if point == "after_verify" else None
+    req = text_req()
+    payload, signature = env.rig.approved(req)
+    before = state_snapshot(env.rig)
+    assert env.ask("call", **call_fields(req, payload, signature)).code == "busy"
+    assert env.rig.vendor.requests == [] and state_snapshot(env.rig) == before
+
+
+def test_the_server_refuses_more_concurrent_calls_than_the_memory_bound() -> None:
+    from safo.errors import ConfigError
+
+    ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=2)
+    with pytest.raises(ConfigError):
+        ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=3)

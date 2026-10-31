@@ -36,7 +36,7 @@ from safo.broker.server import (
     load_config,
     read_config,
 )
-from safo.broker.transport import VENDOR_HOST, VENDOR_PORT, HttpsTransport
+from safo.broker.transport import VENDOR_HOST, VENDOR_PORT, HttpsTransport, default_arm
 from safo.broker.vendor import TransportError, TransportTimeout, VendorRequest
 from safo.errors import ConfigError, SafoError
 from serverdata import call_fields, split_frames
@@ -212,6 +212,7 @@ def test_every_server_key_can_be_set(tmp_path: Path) -> None:
         "server:\n  allowed_uids: [1]\n  slot_wait: 61\n",
         "server:\n  allowed_uids: [1]\n  max_calls_per_minute: 0\n",
         "server:\n  allowed_uids: [1]\n  max_concurrent_calls: 9\n",
+        "server:\n  allowed_uids: [1]\n  max_concurrent_calls: 3\n",
         "server: []\n",
         "server:\n  allowed_uids: [1]\n  allowed_uids: [2]\n",
         "server: &a\n  allowed_uids: [1]\nother: *a\n",
@@ -543,6 +544,106 @@ def test_the_connection_gets_the_request_deadline_and_is_always_closed() -> None
     with pytest.raises(TransportError):
         HttpsTransport(lambda: GOOD_KEY, factory=Conn).send(req())  # type: ignore[arg-type]  # a stand-in connection
     assert log == [(VENDOR_HOST, VENDOR_PORT, 5.0), "closed"]
+
+
+class Dribble:
+    """A connection whose answer outlasts the whole-call deadline: `getresponse` or the body read fires the watchdog."""
+
+    def __init__(self, fire_in: str) -> None:
+        self.fire_in = fire_in
+        self.fire: Any = None
+        self.shutdowns: list[int] = []
+        self.closed = False
+        outer = self
+
+        class Sock:
+            def shutdown(self, how: int) -> None:
+                outer.shutdowns.append(how)
+
+        self.sock = Sock()
+
+    def request(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def getresponse(self) -> Any:
+        outer = self
+        if self.fire_in == "headers":
+            self.fire()
+            raise OSError("shut down")
+
+        class Reply:
+            status = 200
+
+            def getheaders(self) -> list[tuple[str, str]]:
+                return []
+
+            def read(self, count: int) -> bytes:
+                outer.fire()  # the deadline passes while the body trickles in
+                return b"part"
+
+        return Reply()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class Arm:
+    def __init__(self) -> None:
+        self.seconds: list[float] = []
+        self.cancelled = 0
+        self.fire: Any = None
+
+    def __call__(self, seconds: float, fire: Any) -> Any:
+        self.seconds.append(seconds)
+        self.fire = fire
+        outer = self
+
+        class Handle:
+            def cancel(self) -> None:
+                outer.cancelled += 1
+
+        return Handle()
+
+
+@pytest.mark.parametrize("where", ["headers", "body"])
+def test_the_whole_call_has_one_deadline_that_shuts_the_connection_down(where: str) -> None:
+    arm = Arm()
+    conn = Dribble(where)
+
+    def factory(*args: Any, **kwargs: Any) -> Any:
+        conn.fire = arm.fire
+        return conn
+
+    def arm_and_link(seconds: float, fire: Any) -> Any:
+        handle = arm(seconds, fire)
+        conn.fire = fire
+        return handle
+
+    transport = HttpsTransport(lambda: GOOD_KEY, factory=factory, arm=arm_and_link)
+    with pytest.raises(TransportTimeout):
+        transport.send(req())
+    assert arm.seconds == [5.0] and arm.cancelled == 1 and conn.closed
+    assert conn.shutdowns == [socket.SHUT_RDWR]
+
+
+def test_the_deadline_watchdog_is_cancelled_after_a_good_answer(vendor: tuple[int, type[Vendor]]) -> None:
+    port, handler = vendor
+    handler.reply = (200, {}, b"{}")
+    arm = Arm()
+    transport = HttpsTransport(
+        lambda: GOOD_KEY, host="127.0.0.1", port=port, factory=http.client.HTTPConnection, arm=arm
+    )
+    assert transport.send(req()).status == 200
+    assert arm.seconds == [5.0] and arm.cancelled == 1
+
+
+def test_the_default_watchdog_fires_once_and_can_be_cancelled() -> None:
+    fired = threading.Event()
+    default_arm(0.01, fired.set)
+    assert fired.wait(30)
+    quiet = default_arm(3600, fired.clear)
+    quiet.cancel()
+    assert fired.is_set()
 
 
 def test_the_destination_is_fixed_and_the_real_connection_refuses_loopback(vendor: tuple[int, type[Vendor]]) -> None:

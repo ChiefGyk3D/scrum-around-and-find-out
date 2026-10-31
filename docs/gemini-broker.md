@@ -91,10 +91,10 @@ key, no timing assertions): the wire format, the server, the entry point and the
   connection drops the connection. Operations: `status`, `begin`, `call`, `check`, `dryrun`. Root's `clear` is **not** on
   the socket (phase 5). While the switch is off, every operation but `status` and `dryrun` answers `disabled`; the switch
   is read on every request. Per peer and per minute: 6 `begin`, 10 `call` attempts, 30 of each other operation; a refusal
-  is `busy`. One paid call is in flight at once (`max_concurrent_calls`; a second `call` is `busy` after `slot_wait`
+  is `busy`. One paid call is in flight at once (`max_concurrent_calls`, at most 2, a bound from the 512 MiB unit limit with two image calls in memory; a second `call` is `busy` after `slot_wait`
   seconds, default 0), the slot is released before the reply is written, and vendor calls started are counted from the
   ledger (5 a minute, 20 a day). The server logs numbers and enumerated words from an allowlist of field names.
-- **Stopping.** SIGTERM stops accepting, lets calls in flight finish and answer, and waits `grace_seconds` (default 150).
+- **Stopping.** SIGTERM stops accepting; a connection admitted earlier can no longer `begin` or spend (`busy`, and the spend gate checks again under the ledger lock, as it does for the switch). Calls in flight finish and answer, and waits `grace_seconds` (default 150).
   A call still open after that is made ambiguous (the reservation stays counted, the model is suspended) and the exit
   status is 4. A call killed some other way is made ambiguous by `recover` at the next start, before the first accept.
 - **`python -I -m safo.broker`** reads `/etc/safo/broker.yaml` (sections `server`, `prices`, `caps`, `deadline_seconds`),

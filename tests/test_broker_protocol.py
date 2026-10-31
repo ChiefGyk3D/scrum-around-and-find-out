@@ -636,3 +636,19 @@ def test_a_valid_reply_over_the_frame_limit_is_refused_by_the_client() -> None:
         p.parse_reply(big)
     exact = json.dumps({"v": 1, "ok": True, "pad": "a" * (p.MAX_REPLY_FRAME - 60)}).encode()
     assert len(exact) <= p.MAX_REPLY_FRAME and p.parse_reply(exact)["ok"] is True
+
+
+def test_an_error_reply_announces_no_attachments() -> None:
+    body = json.loads(p.error_body("busy"))
+    body["attachments"] = [GOOD_ATTACHMENT] * 5000
+    with pytest.raises(ProtocolError):
+        p.parse_reply(json.dumps(body).encode())
+    body["attachments"] = []
+    with pytest.raises(ProtocolError):
+        p.parse_reply(json.dumps(body).encode())
+
+
+def test_attachment_count_is_zero_unless_the_reply_is_a_success() -> None:
+    assert p.attachment_count({"ok": False, "attachments": [GOOD_ATTACHMENT]}) == 0
+    assert p.attachment_count({"attachments": [GOOD_ATTACHMENT]}) == 0
+    assert p.attachment_count({"ok": True, "attachments": [GOOD_ATTACHMENT]}) == 1

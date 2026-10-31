@@ -113,7 +113,7 @@ class ServerConfig:
             raise ConfigError("broker server: allowed_uids is a non-empty list of user ids")
         _count(self.max_connections, "max_connections", 1, 64)
         _count(self.max_per_uid, "max_per_uid", 1, 64)
-        _count(self.max_concurrent_calls, "max_concurrent_calls", 1, 8)
+        _count(self.max_concurrent_calls, "max_concurrent_calls", 1, 2)  # 512 MiB unit: two image calls at most
         for name in ("begin_per_minute", "call_per_minute", "other_per_minute"):
             _count(getattr(self, name), name, 1, 10_000)
         _count(self.max_calls_per_minute, "max_calls_per_minute", 1, 1_000)
@@ -361,6 +361,8 @@ class Server:
     def _spend_gate(self) -> None:
         """Run by the pipeline under the ledger lock, just before the spend: root may have switched paid use off while
         the approval was being verified (a slow `ssh-keygen`)."""
+        if self._stopping:
+            raise Refused("busy", "the broker is stopping")
         if not self.switch():
             raise Refused("disabled", "paid use is disabled")
 
@@ -531,6 +533,8 @@ class Server:
 
     def _dispatch(self, request: Request, uid: int) -> Outcome:
         op = request.op
+        if self._stopping and op in ("begin", "call"):  # a connection admitted before the stop cannot start new work
+            return _fail("busy")
         if op not in ("status", "dryrun") and not self.switch():
             return _fail("disabled")
         limits = {
