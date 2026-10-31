@@ -46,14 +46,16 @@ def test_every_step_names_its_blast_radius_and_rollback() -> None:
     for step in steps:
         assert "Blast radius:" in step, step.splitlines()[0]
         assert "Rollback:" in step, step.splitlines()[0]
-        assert any(line.startswith("ssh -t host 'sudo ") for line in step.splitlines()), step.splitlines()[0]
+        assert any(line.startswith("ssh -t host 'sudo env -i PATH=") for line in step.splitlines()), step.splitlines()[
+            0
+        ]
 
 
 def test_every_command_is_a_full_ssh_sudo_line_with_the_host_placeholder() -> None:
     lines = command_lines(text())
     assert lines
     for line in lines:
-        assert line.startswith("ssh -t host 'sudo "), line
+        assert line.startswith("ssh -t host 'sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "), line
         assert line.endswith("'"), line
         outer = shlex.split(line)
         assert outer[:3] == ["ssh", "-t", "host"], line
@@ -75,17 +77,19 @@ def test_every_line_in_a_code_block_is_a_full_ssh_line() -> None:
     lines = code_lines(text())
     assert len(lines) >= 12
     for line in lines:
-        assert line.startswith("ssh -t host 'sudo "), line  # no bare sudo, no root prompt, no comment lines
+        assert line.startswith("ssh -t host 'sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "), (
+            line
+        )  # no bare sudo, no root prompt, no comment lines
 
 
 def test_the_key_is_read_on_the_remote_tty_and_never_appears() -> None:
     doc = text()
     cred = next(line for line in command_lines(doc) if "systemd-creds encrypt" in line)
     remote = shlex.split(cred)[3]
-    assert remote.startswith("sudo bash -c ")
+    assert remote.startswith(f"sudo {runbook.ENV} bash -c ")
     # let a local shell do the remote parse: print the script exactly as bash would receive it
     done = subprocess.run(  # noqa: S603 - fixed argv, local sh evaluating a test string, no secret
-        ["/bin/sh", "-c", "printf %s " + remote.removeprefix("sudo bash -c ")],
+        ["/bin/sh", "-c", "printf %s " + remote.removeprefix(f"sudo {runbook.ENV} bash -c ")],
         capture_output=True,
         text=True,
         check=True,
@@ -187,3 +191,15 @@ def test_the_installer_is_read_and_installed_from_one_root_owned_copy() -> None:
     assert "reviewed/checkout" not in lines[hash_]
     assert "reviewed/checkout" not in lines[final]
     assert sum("reviewed/checkout" in line for line in lines) == 1  # the checkout is read exactly once
+
+
+def test_root_commands_run_with_a_fixed_environment_and_a_locked_down_pager() -> None:
+    lines = command_lines(text())
+    assert lines
+    for line in lines:
+        assert " env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin " in line, line
+    pager = next(line for line in lines if " less " in line)
+    for need in ("LESSSECURE=1", "LESSOPEN= ", "LESSCLOSE= "):
+        assert need in pager
+    # nothing relies on an unqualified program name picked up from the remote session: the PATH is the fixed one
+    assert not any("PATH=$" in line or 'PATH="$' in line for line in lines)

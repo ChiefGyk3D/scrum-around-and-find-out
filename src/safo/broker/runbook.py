@@ -28,12 +28,16 @@ class Step:
     note: str = ""
 
 
-def ssh(cmd: str) -> str:
+ENV = "env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin"  # root never inherits the remote session's PATH or pager settings
+PAGER_ENV = "LESSSECURE=1 LESSOPEN= LESSCLOSE= TERM=$TERM"  # no shell escape, no preprocessor, a terminal that works
+
+
+def ssh(cmd: str, *, env: str = "") -> str:
     """Wrap one remote command as a full copy-paste line. `cmd` must not contain a single quote."""
     if "'" in cmd:
         msg = "a remote command may not contain a single quote"
         raise ValueError(msg)
-    return f"ssh -t host 'sudo {cmd}'"
+    return f"ssh -t host 'sudo {ENV} {env + ' ' if env else ''}{cmd}'"
 
 
 def steps(login: str) -> tuple[Step, ...]:
@@ -89,7 +93,7 @@ def steps(login: str) -> tuple[Step, ...]:
                     "/var/lib/safo-broker-install/stage/safo-broker-install"
                 ),
                 ssh("sha256sum /var/lib/safo-broker-install/stage/safo-broker-install"),
-                ssh("less /var/lib/safo-broker-install/stage/safo-broker-install"),
+                ssh("less /var/lib/safo-broker-install/stage/safo-broker-install", env=PAGER_ENV),
                 ssh(
                     "install -m 0755 -o root -g root /var/lib/safo-broker-install/stage/safo-broker-install "
                     "/usr/local/sbin/safo-broker-install"

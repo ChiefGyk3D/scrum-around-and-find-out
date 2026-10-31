@@ -566,8 +566,9 @@ def inspect_wheel(path: Path) -> None:
             if name.endswith(".pth"):
                 msg = f"{path.name} contains a .pth file ({name}), which runs code at interpreter start"
                 raise InstallError(msg)
-            if ".data/scripts/" in name:
-                msg = f"{path.name} installs scripts ({name})"
+            data_part = name.split(".data/", 1)
+            if len(data_part) == 2 and data_part[1].split("/", 1)[0] not in ("purelib", "platlib"):
+                msg = f"{path.name} installs scripts, headers or data outside site-packages ({name})"
                 raise InstallError(msg)
             if name.endswith(".dist-info/entry_points.txt"):
                 body = z.read(info).decode("utf-8", "replace")
@@ -653,6 +654,19 @@ def verify_manifest(release: Path) -> list[str]:
     problems += [f"unexpected: {r}" for r in sorted(actual - expect.keys())]
     problems += [f"missing: {r}" for r in sorted(expect.keys() - actual)]
     return sorted(set(problems))
+
+
+def check_venv_bin(bin_dir: Path) -> None:
+    """Nothing but what `venv` itself creates may sit in bin/, and the interpreter names must still be links."""
+    for entry in bin_dir.iterdir():
+        name = entry.name
+        if re.fullmatch(r"python[0-9.]*", name):
+            if not entry.is_symlink():
+                msg = f"venv/bin/{name} is not a symlink after the install; refused"
+                raise InstallError(msg)
+        elif name not in ("activate", "activate.csh", "activate.fish", "Activate.ps1"):
+            msg = f"venv/bin/{name} was not created by venv; refused"
+            raise InstallError(msg)
 
 
 def check_tree_owner(release: Path, layout: Layout) -> None:
@@ -1053,6 +1067,7 @@ def build_release(
     if done.returncode != 0:
         msg = f"pip install failed: {' | '.join(done.stderr.strip().splitlines()[-3:])}"
         raise InstallError(msg)
+    check_venv_bin(stage / "venv" / "bin")
     if list(site.rglob("*.pth")):
         msg = "the installed environment contains a .pth file; refused"
         raise InstallError(msg)
@@ -1135,11 +1150,12 @@ def check_policy(
     return highest, downgrade
 
 
-def prepare_state(layout: Layout) -> None:
+def prepare_state(layout: Layout, *, need_work: bool = True) -> None:
     """The installer's own directories must be root-owned and closed before anything is written there."""
     check_trusted(layout.version_file.parent, layout, "installer state directory", want_dir=True)
-    layout.work_dir.mkdir(mode=0o700, exist_ok=True)
-    check_trusted(layout.work_dir, layout, "work directory", want_dir=True)
+    if need_work:
+        layout.work_dir.mkdir(mode=0o700, exist_ok=True)
+        check_trusted(layout.work_dir, layout, "work directory", want_dir=True)
     if os.path.lexists(layout.log_file):
         check_trusted(layout.log_file, layout, "install log")
 
@@ -1363,6 +1379,7 @@ def restore(
 def rollback(layout: Layout, hooks: Hooks, *, to: str | None = None, out: Callable[[str], None] = print) -> str:
     check_trusted(layout.opt_dir, layout, "install directory", want_dir=True)
     floor = read_floor(layout)
+    prepare_state(layout, need_work=False)
     with single_instance(layout):
         fd = open_opt(layout)
         try:

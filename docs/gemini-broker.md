@@ -311,6 +311,13 @@ path; a wheel that would install a package named `safo` over the broker's own co
 a missing version file when a release is already installed. A release directory is named for its version; when
 `--reinstall` installs a version that is already present, the new directory gets a numbered suffix.
 
+**Known limit of the post-start check.** Until the socket server exists (phase 3), the installer's health check can only
+ask systemd whether the socket is enabled and active; it cannot ask the broker for `status`. With the switch file absent
+the service is skipped by its start condition, so a first install records its version without the broker having
+answered. The check is a replaceable hook; phase 3 wires in a bounded `status` request that must name the expected
+release, and until then a freshly installed release is exercised only by its offline self-test and the maintainer's
+dry run.
+
 **Run it first on a throwaway machine.** Until the maintainer has run the installer and the units on a throwaway VM, these
 are unverified: that `MemoryDenyWriteExecute=yes` lets `ssh-keygen` run under the service, that `@system-service` allows
 `memfd_create`, that `LoadCredentialEncrypted=` hands the key to the service user only, that the owner and mode of the

@@ -868,3 +868,54 @@ def test_the_self_test_runs_as_the_service_user_in_an_empty_network_namespace_wh
     assert as_root[-4:-1] == [str(py), "-I", "-c"]
     plain = install.self_test_argv(py, ("safo.broker",), as_service_user=False)
     assert plain == [str(py), "-I", "-c", "import safo.broker"]
+
+
+# ---- review round 2: wheel data schemes, venv bin, rollback state directory ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "member", ["fakedep-1.0.data/data/bin/python", "fakedep-1.0.data/headers/x.h", "fakedep-1.0.data/data/etc/x"]
+)
+def test_a_wheel_data_scheme_outside_site_packages_is_refused(world: World, member: str) -> None:
+    for w in world.wheels.iterdir():
+        w.unlink()
+    make_wheel(world.wheels, files={member: b"x"})
+    world.release("1.0.0")
+    with pytest.raises(InstallError, match="outside site-packages"):
+        do_install(world, "1.0.0")
+
+
+def test_a_wheel_purelib_data_scheme_is_still_accepted(world: World) -> None:
+    for w in world.wheels.iterdir():
+        w.unlink()
+    make_wheel(world.wheels, files={"fakedep-1.0.data/purelib/fakeextra.py": b"X = 1\n"})
+    world.release("1.0.0")
+    do_install(world, "1.0.0")  # inspection passes (a dry run)
+
+
+def test_the_venv_bin_check_refuses_extra_files_and_a_regular_interpreter(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3.13").symlink_to("/usr/bin/python3")
+    (bin_dir / "python").symlink_to("python3.13")
+    (bin_dir / "activate").write_text("x")
+    install.check_venv_bin(bin_dir)
+    (bin_dir / "evil").write_text("x")
+    with pytest.raises(InstallError, match="not created by venv"):
+        install.check_venv_bin(bin_dir)
+    (bin_dir / "evil").unlink()
+    (bin_dir / "python").unlink()
+    (bin_dir / "python").write_text("#!/bin/sh\n")
+    with pytest.raises(InstallError, match="not a symlink"):
+        install.check_venv_bin(bin_dir)
+
+
+def test_rollback_validates_the_installer_state_directory(world: World) -> None:
+    world.release("1.0.0")
+    world.release("1.1.0")
+    do_install(world, "1.0.0", apply=True)
+    do_install(world, "1.1.0", apply=True)
+    world.layout.version_file.parent.chmod(0o775)
+    with pytest.raises(InstallError, match="writable"):
+        install.rollback(world.layout, world.hooks(), out=lambda s: None)
+    assert current_name(world.layout) == "1.1.0"
