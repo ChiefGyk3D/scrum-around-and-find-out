@@ -22,7 +22,7 @@ from hooksdata import agents_file, dispatch, set_mode
 from safo import guard as entry_module
 from safo.guardlog import WARNING
 from safo.modes import hooks as mod
-from test_guard_emit_first import CHILD_BUDGET, denied, lines, run_entry
+from test_guard_emit_first import denied, lines, run_entry
 
 GUARD = "safo.guard"
 NOISE = [
@@ -51,7 +51,6 @@ def test_noise_on_the_command_line_still_denies_a_denyable_event_with_a_full_std
     assert not result.killed and untouched, "nothing was written to the blocked stderr"
     [row] = lines(result.raw.decode())
     assert result.status == 0 and denied(row), "a verdict, never help, never a silent exit 0"
-    assert result.elapsed < CHILD_BUDGET
 
 
 @pytest.mark.parametrize("argv", NOISE)

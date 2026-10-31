@@ -20,6 +20,13 @@
   vendor call: paid use stays disabled. `Ledger` in `gemini.py` gains `append_many` and an overridable empty-ledger
   hook, and `valid_quote` is shared; the existing behavior is unchanged.
 
+- Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
+  generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed
+  time with the budget any more; what they prove is the behavior (the one complete JSON line, the exit status 0 or 2,
+  the process ending by itself with the blocked call still blocked, no post-delivery step started after an overrun, the
+  budget counted from the process start). The in-process tests use the injected clock, or a call that blocks until the
+  test releases it, instead of a stopwatch, and the order of the budget points is checked as arithmetic for any host
+  timeout. Nothing was skipped, and the guard is unchanged.
 - Tests: the linear-time guard in `tests/test_gemini_constructs.py` counts executed lines instead of reading a clock, so machine speed, load and Python version cannot flip it; its negative case runs a quadratic brace scan (#248).
 - Gemini approvals: hardened what a signed paid approval binds (#217). Approval payload version 2 carries a prompt digest
   (`prompt_sha256`, `prompt_bytes`) on both approval tiers; `approve` shows the digest and the whole prompt (approvals are refused above 4000 characters), the paid gate

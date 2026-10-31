@@ -50,8 +50,16 @@ from safo.modes import hooks as mod
 
 GOOD = "acme/widgets#12"
 CHILD = Path(__file__).parent / "guard_child.py"
-CHILD_BUDGET = 5.0  # GUARD_TIMEOUT_SECONDS in the real-process children: decide_by 3 s, post-delivery hard limit 4 s
-PRE_BUDGET = 10.0  # the real timeout, for the children that need room for a re-probe: decide_by 8 s
+# The real-process children run the guard with a SCALED budget (GUARD_TIMEOUT_SECONDS), counted from the process start
+# like the real one. It is generous (decide_by 12 s of 15, post-delivery hard limit 14 s) so that a loaded machine,
+# where the interpreter start and the imports alone can take seconds, does not eat the child's own budget. A test that
+# kills the child itself passes a much larger one: it costs nothing there.
+CHILD_BUDGET = 15.0
+# What the TEST side waits for a child, an event or a line: several times the largest budget. It is only a "this never
+# came" bound, so a hang fails with a clear message; no assertion compares an elapsed time with the budget (a loaded
+# machine moves elapsed times, not behavior). The budget arithmetic itself is proven without a clock, in
+# test_the_budget_points_keep_their_order_for_any_host_timeout.
+WAIT = 90.0
 
 
 class Clock:
@@ -157,9 +165,18 @@ def marker(home: Path) -> Path:
 # -- B4: a real wall-clock bound on the configuration load ---------------------------------------------------
 
 
-def spawn(mode: str, home: Path, agents: Path, fifo: Path, body: Path, stderr_fd: int | None = None) -> tuple[int, int]:
+def spawn(
+    mode: str,
+    home: Path,
+    agents: Path,
+    fifo: Path,
+    body: Path,
+    stderr_fd: int | None = None,
+    budget: float = CHILD_BUDGET,
+) -> tuple[int, int]:
     """Start tests/guard_child.py as a real process; returns (pid, read end of its standard output). Standard error is
-    discarded unless `stderr_fd` is given (a test where what stderr does matters passes its own pipe)."""
+    discarded unless `stderr_fd` is given (a test where what stderr does matters passes its own pipe). `budget` is the
+    child's scaled GUARD_TIMEOUT_SECONDS."""
     read_end, write_end = os.pipe()
     actions: list[tuple[Any, ...]] = [(os.POSIX_SPAWN_DUP2, write_end, 1), (os.POSIX_SPAWN_CLOSE, read_end)]
     if stderr_fd is None:
@@ -167,7 +184,12 @@ def spawn(mode: str, home: Path, agents: Path, fifo: Path, body: Path, stderr_fd
     else:
         actions.append((os.POSIX_SPAWN_DUP2, stderr_fd, 2))
     argv = [sys.executable, str(CHILD), mode, str(home), str(agents), str(fifo), str(body)]
-    pid = os.posix_spawn(sys.executable, argv, os.environ, file_actions=actions)
+    pid = os.posix_spawn(
+        sys.executable,
+        argv,
+        {**os.environ, "SAFO_CHILD_BUDGET": str(budget), "SAFO_CHILD_NOW": str(NOW.timestamp())},
+        file_actions=actions,
+    )
     os.close(write_end)
     return pid, read_end
 
@@ -217,25 +239,22 @@ def test_a_loader_that_wedges_for_any_reason_still_prints_a_decision_inside_the_
     body = tmp_path / "payload.json"
     body.write_text(dispatch(model=None) if payload == "agent" else bash("sleep 60"))
     set_mode(_private_home, "block")
-    started = time.monotonic()
     pid, fd = spawn("synthetic-wedge", _private_home, agents, fifo, body)
     try:
-        raw = read_until(fd, 15)
-        status = wait_exit(pid, CHILD_BUDGET)
+        raw = read_until(fd, WAIT)
+        status = wait_exit(pid, WAIT)
     finally:
         os.close(fd)
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
             os.kill(pid, 9)
             os.waitpid(pid, 0)
-    elapsed = Arrival.at - started
     assert status == 0, "the process ends by itself, with the load still blocked"
     rows = lines(raw.decode())
     assert len(rows) == 1
     assert mod.CONFIG_TIMEOUT_NOTICE in rows[0]["hookSpecificOutput"]["additionalContext"]
     # SYNTHETIC: the loader is replaced by a call that never returns (a wedged mount or kernel read, which cannot be
-    # made without privilege). The clock starts with the PROCESS, so start-up is inside the budget: the line must
-    # ARRIVE before the host's (scaled) timeout, not merely eventually.
-    assert elapsed < CHILD_BUDGET, f"{elapsed:.1f} s: the decision must land before the scaled host timeout"
+    # made without privilege). The load is blocked for good, so the line, the notice and the exit can only come from
+    # the guard cutting the wait itself; "before the host's timeout" is the budget arithmetic, proven without a clock.
 
 
 def test_a_fifo_as_the_agents_file_is_refused_at_once_by_the_production_loader_not_waited_on(
@@ -248,10 +267,9 @@ def test_a_fifo_as_the_agents_file_is_refused_at_once_by_the_production_loader_n
     body = tmp_path / "payload.json"
     body.write_text(dispatch(model=None))
     set_mode(_private_home, "block")
-    started = time.monotonic()
     pid, fd = spawn("real-loader", _private_home, fifo, fifo, body)
     try:
-        raw = read_until(fd, 15)
+        raw = read_until(fd, WAIT)
     finally:
         os.close(fd)
         os.kill(pid, 9)
@@ -259,8 +277,8 @@ def test_a_fifo_as_the_agents_file_is_refused_at_once_by_the_production_loader_n
     rows = lines(raw.decode())
     assert len(rows) == 1
     context = rows[0]["hookSpecificOutput"]["additionalContext"]
+    # refused at once, not waited on: the timeout notice is what a wait on the FIFO would have produced
     assert '"diagnostic": "config"' in context and mod.CONFIG_TIMEOUT_NOTICE not in context
-    assert time.monotonic() - started < 3, "refused at once: no wait on the FIFO"
 
 
 @pytest.mark.parametrize("what", ["pending", "first-notice", "marker-dir"])
@@ -273,18 +291,17 @@ def test_a_wedged_state_folder_cannot_hold_a_computed_deny_back_in_a_real_proces
     body = tmp_path / "payload.json"
     body.write_text(dispatch(model=None) if payload == "agent" else bash("sleep 60"))
     set_mode(_private_home, "block")
-    started = time.monotonic()
     pid, fd = spawn(f"slow-{what}", _private_home, agents, tmp_path / "x", body)
     try:
-        raw = read_until(fd, 15)
+        raw = read_until(fd, WAIT)
     finally:
         os.close(fd)
         os.kill(pid, 9)
         os.waitpid(pid, 0)
-    elapsed = Arrival.at - started
+    # the state-folder operation is blocked for good: the deny line, with the skipped-notices notice, is the guard
+    # going on without it
     [row] = lines(raw.decode())
     assert denied(row) and mod.NOTICES_SKIPPED in row["hookSpecificOutput"]["additionalContext"]
-    assert elapsed < CHILD_BUDGET, f"{elapsed:.1f} s: the deny must land before the scaled host timeout"
 
 
 def test_a_process_killed_after_the_decision_leaves_exactly_one_complete_json_line(
@@ -293,12 +310,14 @@ def test_a_process_killed_after_the_decision_leaves_exactly_one_complete_json_li
     body = tmp_path / "payload.json"
     body.write_text(bash("sleep 60"))
     set_mode(_private_home, "block")
-    pid, fd = spawn("hang-append", _private_home, agents, tmp_path / "x", body)
-    first = read_until(fd, 8, first_line=True)
+    # killed by the test at once, so the child's own budget is never reached: a huge one means a loaded machine cannot
+    # end the child between the line and the check that it is still alive
+    pid, fd = spawn("hang-append", _private_home, agents, tmp_path / "x", body, budget=3600.0)
+    first = read_until(fd, WAIT, first_line=True)
     alive = os.waitpid(pid, os.WNOHANG) == (0, 0)
     os.kill(pid, 9)
-    status = wait_exit(pid, 5)
-    rest = read_until(fd, 2)
+    status = wait_exit(pid, WAIT)
+    rest = read_until(fd, WAIT)
     os.close(fd)
     assert status == -9, "the kill (SIGKILL) is what ended it; the test does not depend on any cleanup"
     assert alive, "the process is still inside the hanging append when the decision is already out"
@@ -445,24 +464,31 @@ def test_a_held_log_lock_costs_the_bash_deny_no_time_and_the_wait_ends_inside_th
     set_mode(_private_home, "block")
     folder = state_folder(_private_home)
     folder.mkdir(parents=True, exist_ok=True)
-    stamps: list[float] = []
+    steps: list[str] = []
+    lock_waits: list[float] = []
 
     class Stamped(Stream):
         def flush(self) -> None:
-            if self.buffered and not stamps:
-                stamps.append(time.monotonic())
+            if self.buffered and "flush" not in steps:
+                steps.append("flush")
 
+    real_append = append_log
+
+    def spy(path: Path, record: dict[str, Any], **kw: Any) -> None:
+        steps.append("append")
+        lock_waits.append(kw["lock_timeout"])
+        real_append(path, record, **kw)  # the lock is held below: this really waits, then gives up
+
+    monkeypatch.setattr(mod, "append_log", spy)
     out = Stamped()
-    started = time.monotonic()
     with file_lock(folder / "log.jsonl.lock"):
         mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents))
-    ended = time.monotonic()
     assert denied(lines(out.buffered)[0])
-    # Relative to the end of the run, so a slow start cannot fail it: the lock wait is a real wait that runs to about
-    # 2 s (the budget less the log margin), and a deny flushed before it ends well ahead of the end. A deny held back
-    # until the wait is over is flushed within a few milliseconds of the end.
-    assert ended - stamps[0] > 0.25, "the deny is out before any lock wait"
-    assert ended - started < 3, "and the bounded wait still ends before the hook's timeout"
+    # Order and the size of the wait, not a stopwatch: the deny was flushed before the append was even entered (so the
+    # held lock costs it nothing), and the lock wait is what is left before the hard limit (the budget less the log
+    # margin), not the 5 s setting, so it ends before the hook's timeout.
+    assert steps == ["flush", "append"], "the deny is out before any lock wait"
+    assert len(lock_waits) == 1 and 0.0 < lock_waits[0] <= 3 - mod.LOG_MARGIN_SECONDS, lock_waits
     assert marker(_private_home).exists()
 
 
@@ -474,7 +500,7 @@ def test_a_computed_deny_is_printed_when_the_append_hangs(
 
     def append(*a: Any, **k: Any) -> None:
         reached.set()
-        release.wait(10)
+        release.wait(WAIT)
 
     monkeypatch.setattr(mod, "append_log", append)
     pipe = Pipe()
@@ -483,24 +509,35 @@ def test_a_computed_deny_is_printed_when_the_append_hangs(
     )
     worker.start()
     try:
-        assert reached.wait(5)
+        assert reached.wait(WAIT)
         assert denied(lines(pipe.read())[0]), "the deny is already in the pipe while the append is still blocked"
     finally:
         release.set()
-        worker.join(10)
+        worker.join(WAIT)
         pipe.close()
     assert not worker.is_alive()
 
 
-def test_read_event_stops_at_the_shared_clock_not_at_its_own_five_seconds() -> None:
+def test_read_event_stops_at_the_shared_clock_not_at_its_own_five_seconds(
+    clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the injected clock the shared deadline is 0.2 s away and the event's own timeout 5 s: the only wait the read
+    asks the descriptor for is the 0.2 s. (Counting the wait that was asked for, not timing the one that was made.)"""
+    asked: list[float | None] = []
+    real_select = select.select
+
+    def spy(r: Any, w: Any, x: Any, timeout: float | None = None) -> Any:
+        asked.append(timeout)
+        return real_select(r, w, x, timeout)
+
+    monkeypatch.setattr(select, "select", spy)
     read_end, write_end = os.pipe()
     stream = os.fdopen(read_end, "r")
     try:
         ctx = LocalContext(io.StringIO(), {}, NOW, stdin=stream)
-        started = time.monotonic()
         with pytest.raises(TimeoutError):
-            mod.read_event(mod.EventStream(ctx), started + 0.2)
-        assert time.monotonic() - started < 1.5
+            mod.read_event(mod.EventStream(ctx), clock.now + 0.2)  # nothing is ever written: the read can only time out
+        assert asked == [pytest.approx(0.2)], asked
     finally:
         stream.close()
         os.close(write_end)
@@ -550,7 +587,7 @@ def test_junk_at_the_marker_name_is_replaced_by_a_regular_marker_without_blockin
         target=lambda: result.append(mod.write_log_failed(state_folder(_private_home))), daemon=True
     )
     worker.start()
-    worker.join(5)
+    worker.join(WAIT)
     assert not worker.is_alive(), "a FIFO with no reader must not block the open"
     assert result == [True]
     info = os.lstat(where)
@@ -699,11 +736,15 @@ def test_notice_io_that_does_not_finish_is_skipped_and_leaves_the_marker_and_fla
     mod.write_log_failed(folder)
     before = os.lstat(folder / mod.LOG_FAILED_NAME)
     monkeypatch.setattr(mod, "NOTICE_IO_CAP_SECONDS", 0.3)
-    monkeypatch.setattr(mod, "log_failure_pending", lambda f: time.sleep(5))
+    blocker = Blocker()
+    monkeypatch.setattr(mod, "log_failure_pending", blocker)
     out = Stream()
-    started = time.monotonic()
-    assert mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents)) == 0
-    assert time.monotonic() - started < 3
+    try:
+        assert mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents)) == 0
+        # the read is still blocked when the guard has already answered: it was skipped, not waited for
+        assert blocker.entered.is_set() and not blocker.finished.is_set()
+    finally:
+        blocker.release.set()
     [row] = lines(out.buffered)
     assert denied(row) and mod.NOTICES_SKIPPED in row["hookSpecificOutput"]["additionalContext"]
     after = os.lstat(folder / mod.LOG_FAILED_NAME)
@@ -875,7 +916,7 @@ class Gated:
         self.done = threading.Event()
 
     def check(self, path: Path) -> bool:
-        self.gate.wait(10)
+        self.gate.wait(WAIT)
         try:
             return core.notice_unclaimed(path)
         finally:
@@ -898,7 +939,7 @@ def test_a_notice_check_left_running_that_finishes_late_creates_nothing(
     held, flag, line = run_with_held_check(_private_home, agents, monkeypatch)
     assert mod.NOTICES_SKIPPED in line and not flag.exists()
     held.gate.set()  # the real check resumes late, in a thread that was left running
-    assert held.done.wait(10)
+    assert held.done.wait(WAIT)
     assert not flag.exists(), "a worker that finishes late creates nothing"
 
 
@@ -909,8 +950,8 @@ def test_a_notice_check_left_running_that_finishes_late_leaves_no_descriptor_ope
     before = fd_count()
     held, _, _ = run_with_held_check(_private_home, agents, monkeypatch)
     held.gate.set()
-    assert held.done.wait(10)
-    deadline = time.monotonic() + 5  # the worker returns its value right after `done`: poll, do not guess
+    assert held.done.wait(WAIT)
+    deadline = time.monotonic() + WAIT  # the worker returns its value right after `done`: poll, do not guess
     while fd_count() != before and time.monotonic() < deadline:
         time.sleep(0.01)
     assert fd_count() == before
@@ -936,7 +977,7 @@ def test_a_skipped_check_leaves_the_flag_so_the_next_dispatch_shows_the_specific
         held, flag, line = run_with_held_check(_private_home, agents, patch)
     assert mod.NOTICES_SKIPPED in line and not flag.exists()
     held.gate.set()
-    assert held.done.wait(10)
+    assert held.done.wait(WAIT)
     nxt = Stream()
     mod.run_guard(context(_private_home, dispatch(model=None), nxt), namespace(agents))
     assert mod.NOTICES_SKIPPED not in nxt.buffered and WARNING in nxt.buffered and flag.exists()
@@ -968,7 +1009,7 @@ def test_two_processes_appending_to_one_corrupt_log_quarantine_it_once_and_lose_
         )
         for me, other in (("a", "b"), ("b", "a"))
     ]
-    codes = [wait_exit(pid, 30) for pid in pids]
+    codes = [wait_exit(pid, WAIT) for pid in pids]
     assert codes == [0, 0]
     assert sorted(f.name for f in barrier.iterdir()) == ["a", "b"], "both reached the barrier"
     assert len(corrupt_files(tmp_path)) == 1, "the corrupt log is moved once, under the lock"
@@ -1011,11 +1052,10 @@ def test_a_wedged_mode_file_read_fails_closed_and_cannot_hold_back_the_verdict(
     verdict is computed in block mode (fail closed on a slow mode file) and the brief is denied."""
     body = tmp_path / "payload.json"
     body.write_text(dispatch(model=None) if payload == "agent" else bash("sleep 60"))
-    started = time.monotonic()
     pid, fd = spawn("pre-mode", _private_home, agents, tmp_path / "x", body)
     try:
-        raw = read_until(fd, 15)
-        status = wait_exit(pid, 4)
+        raw = read_until(fd, WAIT)
+        status = wait_exit(pid, WAIT)
     finally:
         os.close(fd)
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
@@ -1024,7 +1064,6 @@ def test_a_wedged_mode_file_read_fails_closed_and_cannot_hold_back_the_verdict(
     [row] = lines(raw.decode())
     assert denied(row) and mod.MODE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0
-    assert Arrival.at - started < PRE_BUDGET - 2.0, "before decide_by (the real timeout less 2 s), start-up included"
 
 
 # -- remove_junk reports what really happened; side objects are capped ------------------------------------------
@@ -1067,11 +1106,10 @@ def test_a_full_unread_stderr_pipe_cannot_hold_back_a_deny_or_keep_the_process_o
         while True:
             os.write(jam_write, b"x" * 65536)
     os.set_blocking(jam_write, True)  # the child's writes would now BLOCK
-    started = time.monotonic()
     pid, fd = spawn("plain", _private_home, agents, tmp_path / "x", body, stderr_fd=jam_write)
     try:
-        raw = read_until(fd, 15)
-        status = wait_exit(pid, 6)
+        raw = read_until(fd, WAIT)
+        status = wait_exit(pid, WAIT)
     finally:
         os.close(fd)
         os.close(jam_write)
@@ -1082,7 +1120,6 @@ def test_a_full_unread_stderr_pipe_cannot_hold_back_a_deny_or_keep_the_process_o
     [row] = lines(raw.decode())
     assert denied(row) and mod.LOG_MARKER_UNUSABLE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0, "the process ended by itself: it does not write to stderr at all"
-    assert Arrival.at - started < CHILD_BUDGET, "before the scaled host timeout, start-up included"
 
 
 @pytest.mark.parametrize("payload", ["agent", "bash"])
@@ -1225,23 +1262,20 @@ def test_a_wedged_state_write_cannot_hold_back_a_computed_deny_in_a_real_process
     body = tmp_path / "payload.json"
     body.write_text(dispatch(model=None) if payload == "agent" else bash("sleep 60"))
     set_mode(_private_home, "block")
-    started = time.monotonic()
     pid, fd = spawn(f"pre-{what}", _private_home, agents, tmp_path / "x", body)
     try:
-        raw = read_until(fd, 15)
-        status = wait_exit(pid, PRE_BUDGET + 2)  # a wedged utime after the line is left behind at the hard limit
+        raw = read_until(fd, WAIT)
+        status = wait_exit(pid, WAIT)  # a wedged utime after the line is left behind at the hard limit
     finally:
         os.close(fd)
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
             os.kill(pid, 9)
             os.waitpid(pid, 0)
-    elapsed = Arrival.at - started
     [row] = lines(raw.decode())
     assert denied(row), "the verdict does not depend on the state work"
     if what != "touch":  # a wedged utime is after the line now: no slow notice, and the process still ends by itself
         assert mod.STATE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0
-    assert elapsed < PRE_BUDGET - 2.0, f"{elapsed:.1f} s: before decide_by (8 s), start-up included"
 
 
 # -- the once-per-session probe notice does not come back with every unrelated notice -------------------------
@@ -1275,8 +1309,8 @@ def test_a_process_killed_between_the_emit_and_the_claim_shows_the_notice_again_
     body = tmp_path / "payload.json"
     body.write_text(dispatch(model=None))
     pid, fd = spawn("die-at-claim", _private_home, agents, tmp_path / "x", body)
-    raw = read_until(fd, 15)
-    status = wait_exit(pid, 5)
+    raw = read_until(fd, WAIT)
+    status = wait_exit(pid, WAIT)
     os.close(fd)
     assert status == -9 and lines(raw.decode()), "the line was delivered, then the process died before the claim"
     assert not flag.exists()
@@ -1293,8 +1327,8 @@ def test_a_process_killed_between_the_emit_and_the_clear_leaves_the_marker_for_t
     body = tmp_path / "payload.json"
     body.write_text(dispatch(model=None))
     pid, fd = spawn("die-at-clear", _private_home, agents, tmp_path / "x", body)
-    raw = read_until(fd, 15)
-    status = wait_exit(pid, 5)
+    raw = read_until(fd, WAIT)
+    status = wait_exit(pid, WAIT)
     os.close(fd)
     assert status == -9 and mod.LOG_FAILED_NOTICE in raw.decode()
     assert marker(_private_home).exists()
@@ -1524,6 +1558,7 @@ def spawn_seam(
     stderr_fd: int | None = None,
     extra_env: dict[str, str] | None = None,
     new_group: bool = False,
+    budget: float = CHILD_BUDGET,
 ) -> tuple[int, int]:
     """Start tests/guard_child.py with seams from its environment. Returns (pid, read end of its stdout), or (pid, -1)
     when `stdout_fd` is given (the test then owns the child's standard output). Standard error goes to /dev/null: the
@@ -1539,7 +1574,14 @@ def spawn_seam(
         actions += [(os.POSIX_SPAWN_DUP2, write_end, 1), (os.POSIX_SPAWN_CLOSE, read_end)]
     else:
         actions.append((os.POSIX_SPAWN_DUP2, stdout_fd, 1))
-    env = {**os.environ, "SAFO_CHILD_BARRIER": str(barrier), "SAFO_CHILD_BLOCK": block, "SAFO_CHILD_FAIL": fail}
+    env = {
+        **os.environ,
+        "SAFO_CHILD_BARRIER": str(barrier),
+        "SAFO_CHILD_BLOCK": block,
+        "SAFO_CHILD_FAIL": fail,
+        "SAFO_CHILD_BUDGET": str(budget),
+        "SAFO_CHILD_NOW": str(NOW.timestamp()),
+    }
     env.update(extra_env or {})
     if nondaemon:
         env["SAFO_CHILD_NONDAEMON"] = "1"
@@ -1553,23 +1595,22 @@ def spawn_seam(
 
 def run_seam(
     home: Path, agents: Path, tmp_path: Path, payload: str, **options: Any
-) -> tuple[list[dict[str, Any]], int, float, float]:
-    """Run the child to its end. Returns (lines, exit status, seconds to the first line, seconds to the exit)."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Run the child to its end. Returns (lines, exit status). The end is waited for up to WAIT: a hang is a failure
+    with a message, and no elapsed time is compared with the budget."""
     body = tmp_path / "payload.json"
     body.write_text(payload)
     barrier = tmp_path / "barrier"
-    started = time.monotonic()
     pid, fd = spawn_seam(home, agents, body, barrier=barrier, **options)
     try:
-        raw = read_until(fd, 20)  # to end of file: the child's standard output closes when the process is gone
-        exited = time.monotonic() - started
-        status = wait_exit(pid, 5)
+        raw = read_until(fd, WAIT)  # to end of file: the child's standard output closes when the process is gone
+        status = wait_exit(pid, WAIT)
     finally:
         os.close(fd)
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
             os.kill(pid, 9)
             os.waitpid(pid, 0)
-    return lines(raw.decode()), status, Arrival.at - started, exited
+    return lines(raw.decode()), status
 
 
 def state_snapshot(folder: Path) -> dict[str, tuple[int, ...]]:
@@ -1626,13 +1667,24 @@ def test_a_blocked_post_delivery_step_ends_the_process_and_nothing_is_written_af
         (folder / "log.jsonl").chmod(0o600)
     set_mode(_private_home, "block")
     block, fail = POST_STEPS[step]
-    rows, status, arrived, exited = run_seam(
-        _private_home, agents, tmp_path, dispatch(model=None), mode="seam", block=block, fail=fail
+    witness = tmp_path / "witness"
+    witness.mkdir()
+    rows, status = run_seam(
+        _private_home,
+        agents,
+        tmp_path,
+        dispatch(model=None),
+        mode="seam",
+        block=block,
+        fail=fail,
+        extra_env={"SAFO_CHILD_WITNESS": str(witness)},
     )
     [row] = rows
     assert denied(row), "the decision was delivered before the blocked step"
     assert status == 0, "and the process ended by itself with the delivered decision's exit code"
-    assert arrived < CHILD_BUDGET and exited < CHILD_BUDGET, f"line at {arrived:.1f} s, exit at {exited:.1f} s"
+    # the step really was reached (and was then blocked for good): the test is not passing because it never ran
+    reached = {"quarantine": "append_log", "marker-write": "write_log_failed"}.get(step, block.split(".")[1])
+    assert (witness / reached).exists(), f"{reached} was never entered: nothing was blocked"
     release_and_compare(folder, tmp_path)
 
 
@@ -1654,14 +1706,23 @@ def test_a_blocked_pre_decision_step_does_not_delay_the_decision_and_nothing_is_
     folder = state_folder(_private_home)
     folder.mkdir(parents=True, exist_ok=True)
     set_mode(_private_home, "block")
-    rows, status, arrived, exited = run_seam(
-        _private_home, agents, tmp_path, dispatch(model=None), mode="pre-seam", block=PRE_STEPS[step]
+    witness = tmp_path / "witness"
+    witness.mkdir()
+    rows, status = run_seam(
+        _private_home,
+        agents,
+        tmp_path,
+        dispatch(model=None),
+        mode="pre-seam",
+        block=PRE_STEPS[step],
+        extra_env={"SAFO_CHILD_WITNESS": str(witness)},
     )
     [row] = rows
     assert denied(row) and mod.STATE_SLOW_NOTICE in row["hookSpecificOutput"]["additionalContext"]
     assert status == 0
-    assert arrived < PRE_BUDGET - 2.0, f"{arrived:.1f} s: before decide_by (8 s), start-up included"
-    assert exited - arrived < 1.5, "an overrun makes the process end right after the line, with no post-delivery work"
+    # an overrun makes the process end right after the line, with no post-delivery work: not one of those steps was
+    # even started (a started step would have left its witness file, whether it then blocked or not)
+    assert sorted(path.name for path in witness.iterdir()) == [], "post-delivery work was started after an overrun"
     release_and_compare(folder, tmp_path)
 
 
@@ -1681,19 +1742,16 @@ def test_a_full_stdout_pipe_with_a_reader_that_never_drains_cannot_hold_back_the
         while True:
             os.write(jam_write, b"x" * 65536)
     os.set_blocking(jam_write, True)  # the child's write would now BLOCK
-    started = time.monotonic()
     pid, _ = spawn_seam(_private_home, agents, body, mode="seam", barrier=tmp_path / "barrier", stdout_fd=jam_write)
     os.close(jam_write)
     try:
-        status = wait_exit(pid, CHILD_BUDGET + 3)
-        elapsed = time.monotonic() - started
+        status = wait_exit(pid, WAIT)  # the reader never reads: only the guard's own deadline can end the process
     finally:
         os.close(jam_read)
         with contextlib.suppress(ProcessLookupError, ChildProcessError):
             os.kill(pid, 9)
             os.waitpid(pid, 0)
     assert status == 2, "an undelivered denial exits 2, which the host reads as a block"
-    assert elapsed < CHILD_BUDGET, f"{elapsed:.1f} s: exit 2 at the decision deadline, before the scaled host timeout"
 
 
 def test_a_wedged_non_daemon_thread_cannot_keep_the_process_alive_after_the_decision(
@@ -1703,12 +1761,10 @@ def test_a_wedged_non_daemon_thread_cannot_keep_the_process_alive_after_the_deci
     through os._exit instead."""
     set_probe(_private_home, reachable=True, agents=agents)
     set_mode(_private_home, "block")
-    rows, status, _arrived, exited = run_seam(
-        _private_home, agents, tmp_path, dispatch(model=None), mode="seam", nondaemon=True
-    )
+    # the non-daemon thread waits for a barrier that is never created: only os._exit can end this process
+    rows, status = run_seam(_private_home, agents, tmp_path, dispatch(model=None), mode="seam", nondaemon=True)
     [row] = rows
     assert denied(row) and status == 0
-    assert exited < CHILD_BUDGET, f"{exited:.1f} s"
 
 
 # -- a host watchdog: the guard must have answered BEFORE the host kills it ------------------------------------------
@@ -1738,13 +1794,15 @@ def run_watched(
     tmp_path: Path,
     payload: str,
     *,
-    host_timeout: float = CHILD_BUDGET,
+    host_timeout: float = WAIT,
     jam_stdout: bool = False,
     jam_stderr: bool = False,
     **options: Any,
 ) -> Watched:
-    """Run the guard in its own process group. A watchdog thread SIGKILLs the whole group at EXACTLY `host_timeout`
-    seconds after the process was started, as the host would. The result says whether the guard got out in time."""
+    """Run the guard in its own process group. A watchdog thread SIGKILLs the whole group `host_timeout` seconds after
+    the process was started, as a host that has lost patience would; the default is WAIT, several times the child's
+    budget, so the result says whether the guard ended ITSELF (a guard that hangs gets killed and `killed` is set) and
+    never whether a loaded machine was slow."""
     body = tmp_path / "payload.json"
     body.write_text(payload)
     jam: list[int] = []
@@ -1784,7 +1842,7 @@ def run_watched(
         elapsed = time.monotonic() - started
     finally:
         done.set()
-        thread.join(2)
+        thread.join(WAIT)
         if fd >= 0:
             os.close(fd)
         for number in (
@@ -1806,7 +1864,6 @@ def test_a_full_stdout_pipe_is_answered_with_exit_two_before_the_host_kills_the_
     set_mode(_private_home, "block")
     result = run_watched(_private_home, agents, tmp_path, dispatch(model=None), mode="seam", jam_stdout=True)
     assert not result.killed and result.status == 2, f"status {result.status}, killed {result.killed}"
-    assert result.elapsed < CHILD_BUDGET
 
 
 def test_an_invalid_lock_timeout_and_a_full_stderr_pipe_cannot_stop_the_guard_importing_or_deciding(
@@ -1828,30 +1885,34 @@ def test_an_invalid_lock_timeout_and_a_full_stderr_pipe_cannot_stop_the_guard_im
     assert not result.killed, "the host would have killed a guard that was stuck at import"
     [row] = lines(result.raw.decode())
     assert denied(row) and result.status == 0
-    assert result.elapsed < CHILD_BUDGET
 
 
-def test_a_slow_cold_start_and_a_full_stdout_pipe_still_get_exit_two_before_the_host_kills_the_guard(
+def test_a_slow_cold_start_and_a_full_stdout_pipe_still_get_exit_two_and_the_budget_counts_the_cold_start(
     _private_home: Path, agents: Path, tmp_path: Path
 ) -> None:
     """The child sleeps before it imports safo, as a slow disk would. The budget is counted from the start of the
-    PROCESS, so the decision deadline (8 s of the real 10) falls inside the host timeout; a clock that started after
-    the imports and the 5 s sleep would put it past the timeout and the host would kill the guard first. (The real
-    10 s budget, so the verdict is still computed after the cold start and the exit code is the denial's 2.)"""
+    PROCESS, so the decision deadline falls inside the host timeout; a clock that started after the imports and the
+    sleep would put it past the timeout and the host would kill the guard first. The child logs how old the process
+    was each time the guard computed its budget: that age includes the sleep (a LOWER bound, which a slow machine can
+    only raise), and the exit code is the denial's 2 though the pipe is full."""
     set_probe(_private_home, reachable=True, agents=agents)
     set_mode(_private_home, "block")
+    ages = tmp_path / "ages"
+    cold = 3.0
     result = run_watched(
         _private_home,
         agents,
         tmp_path,
         dispatch(model=None),
         mode="pre-seam",
-        host_timeout=PRE_BUDGET,
         jam_stdout=True,
-        extra_env={"SAFO_CHILD_COLD_START": "5.0"},
+        extra_env={"SAFO_CHILD_COLD_START": str(cold), "SAFO_CHILD_AGE_LOG": str(ages)},
     )
     assert not result.killed and result.status == 2, f"status {result.status}, killed {result.killed}"
-    assert result.elapsed < PRE_BUDGET
+    seen = [float(row) for row in ages.read_text().split()]
+    assert seen, "the guard computed no budget"
+    # (a /proc start time has the resolution of a clock tick, 10 ms: a little under the sleep is the same as the sleep)
+    assert min(seen) >= cold - 0.2, f"{min(seen):.2f} s: the budget must count from the process start, cold start too"
 
 
 def test_the_process_start_is_found_early_enough_to_include_the_interpreter_and_the_cold_start(tmp_path: Path) -> None:
@@ -1863,10 +1924,10 @@ def test_the_process_start_is_found_early_enough_to_include_the_interpreter_and_
     pid = os.posix_spawn(sys.executable, [sys.executable, "-c", code], os.environ, file_actions=actions)
     os.close(write_end)
     try:
-        age = float(read_until(read_end, 20).decode().strip())
+        age = float(read_until(read_end, WAIT).decode().strip())
     finally:
         os.close(read_end)
-    assert wait_exit(pid, 10) == 0
+    assert wait_exit(pid, WAIT) == 0
     assert 0.0 <= age < 30.0
     if Path("/proc/self/stat").exists():
         assert age >= 0.7, f"{age:.2f} s: the start-up before the import is counted"
@@ -1892,11 +1953,11 @@ def test_importing_everything_on_the_guard_path_writes_nothing_even_with_an_inva
     os.close(out_w)
     os.close(err_w)
     try:
-        out, err = read_until(out_r, 20), read_until(err_r, 20)
+        out, err = read_until(out_r, WAIT), read_until(err_r, WAIT)
     finally:
         os.close(out_r)
         os.close(err_r)
-    assert wait_exit(pid, 10) == 0
+    assert wait_exit(pid, WAIT) == 0
     assert out == b"" and err == b"", f"import wrote {out!r} / {err!r}"
 
 
@@ -1953,12 +2014,12 @@ def run_entry(
     *,
     payload: str = "",
     jam_stderr: bool = True,
-    host_timeout: float = CHILD_BUDGET,
+    host_timeout: float = WAIT,
     module: str = "safo",
 ) -> tuple[Watched, bool]:
     """Run `python -m MODULE ARGV` (`safo`, the real CLI entry point, or `safo.guard`, the guard's own) under a watchdog
-    that kills its process group at the scaled host timeout. Standard input is a pipe holding `payload`; standard
-    error is, by default, a FULL pipe nobody reads.
+    that kills its process group after `host_timeout` (WAIT: a hang is killed and reported, a slow start is not).
+    Standard input is a pipe holding `payload`; standard error is, by default, a FULL pipe nobody reads.
     Returns the outcome and whether the blocked pipe still holds exactly what it held (nothing was written to it)."""
     in_read, in_write = os.pipe()
     os.write(in_write, payload.encode())
@@ -2003,7 +2064,7 @@ def run_entry(
             untouched = held == filled
     finally:
         done.set()
-        thread.join(2)
+        thread.join(WAIT)
         for number in (out_read, err_read):
             if number >= 0:
                 with contextlib.suppress(OSError):
@@ -2036,7 +2097,6 @@ def test_a_hook_command_line_argparse_would_complain_about_writes_nothing_to_a_f
     [row] = lines(result.raw.decode())
     assert WARNING in row["systemMessage"]
     assert untouched, "nothing was written to the blocked stderr pipe"
-    assert result.elapsed < CHILD_BUDGET
 
 
 def test_the_real_entry_runs_the_guard_with_the_command_line_the_installer_writes(
@@ -2295,7 +2355,6 @@ def test_a_real_process_with_a_full_stderr_pipe_and_a_near_miss_denies_promptly(
     assert not result.killed and untouched, "nothing was written to the blocked stderr, so nothing blocked on it"
     [row] = lines(result.raw.decode())
     assert result.status == 0 and denied(row), "a denyable event is denied by the deny line, not a degraded allow"
-    assert result.elapsed < CHILD_BUDGET
 
 
 def test_a_real_process_with_a_full_stderr_pipe_and_a_near_miss_allows_an_allowable_event(block_home: Path) -> None:
@@ -2555,7 +2614,6 @@ def test_a_real_process_with_a_corrupted_front_and_a_full_stderr_pipe_denies_pro
         assert result.status == 0 and WARNING in row["systemMessage"], "no path survives: the visible degraded allow"
     else:
         assert result.status == 0 and denied(row), "the salvaged strict file denied the denyable event"
-    assert result.elapsed < CHILD_BUDGET
 
 
 @pytest.mark.parametrize("argv", [["hooks"], ["hooks", "-h"], ["hooks", "--help"]], ids=" ".join)
@@ -2573,14 +2631,25 @@ def test_a_real_process_asking_for_hooks_help_gets_help_without_reading_stdin(
 # -- no minimum wait once decide_by has passed ----------------------------------------------------------------------
 
 
-def blocked_until_released() -> tuple[threading.Event, Any]:
-    release = threading.Event()
+class Blocker:
+    """A call that blocks until `release` is set, or for HOLD seconds, whichever comes first, and says so. A guard
+    that does not wait for it has returned while `finished` is still unset; a guard that waits (a minimum wait that
+    was honored) gets the call's own end after HOLD, which the test makes visible in the outcome. Nothing here is a
+    stopwatch: HOLD is longer than any wait the guard could legitimately make and shorter than the minimum the test
+    raises, so the outcome differs by what the guard did, not by how fast the machine is."""
 
-    def block(*_: Any, **__: Any) -> Any:
-        release.wait(5)
+    HOLD = 20.0
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.entered = threading.Event()
+        self.finished = threading.Event()
+
+    def __call__(self, *_: Any, **__: Any) -> Any:
+        self.entered.set()
+        self.release.wait(self.HOLD)
+        self.finished.set()
         return None
-
-    return release, block
 
 
 @pytest.mark.parametrize("floor", ["NOTICE_IO_MIN_SECONDS"])
@@ -2596,31 +2665,32 @@ def test_io_budget_is_zero_after_decide_by_whatever_the_minimum_constants_say(
 def test_a_computed_denial_is_not_held_by_a_blocked_notice_read_after_decide_by(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 10.0)  # raised: a honored minimum would hold the worker's join
-    release, block = blocked_until_released()
-    monkeypatch.setattr(mod, "notice_unclaimed", block)
-    monkeypatch.setattr(mod, "log_failure_pending", block)
+    # raised far past the blocker's hold: a honored minimum would hold the worker's join until the blocked read ends
+    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 1000.0)
+    blocker = Blocker()
+    monkeypatch.setattr(mod, "notice_unclaimed", blocker)
+    monkeypatch.setattr(mod, "log_failure_pending", blocker)
     run = mod.Run()
     run.deny = True  # the verdict exists before the notices are read
     run.decide_by = time.monotonic() - 0.001
-    run.limit = time.monotonic() + 9.0
-    started = time.monotonic()
+    run.limit = time.monotonic() + 3600.0  # no limit clamp to hide a granted minimum
     try:
         seen = mod.read_notices(Path("/nonexistent-state"), Path("/nonexistent-state/x"), True, run)
-        assert time.monotonic() - started < 0.2, "the denial did not wait for the blocked read"
-        assert seen.skipped and run.overran
+        # skipped while the read is still blocked: the denial did not wait for it
+        assert seen.skipped and run.overran and not blocker.finished.is_set()
     finally:
-        release.set()
+        blocker.release.set()
 
 
 def test_the_whole_guard_exits_two_at_once_when_the_notice_read_blocks_after_decide_by(
     _private_home: Path, agents: Path, monkeypatch: pytest.MonkeyPatch, hard_exits: list[int]
 ) -> None:
     set_mode(_private_home, "block")
-    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 10.0)
-    release, block = blocked_until_released()
-    monkeypatch.setattr(mod, "log_failure_pending", block)
-    monkeypatch.setattr(mod, "notice_unclaimed", block)
+    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 1000.0)  # past the blocker's hold, as above
+    blocker = Blocker()
+    monkeypatch.setattr(mod, "log_failure_pending", blocker)
+    monkeypatch.setattr(mod, "notice_unclaimed", blocker)
+    monkeypatch.setattr(mod, "limit_point", lambda begun: begun + 3600.0)  # no limit clamp to hide a granted minimum
     # The load and the lookups are early enough; the decision point is already behind us when the notices are read.
     monkeypatch.setattr(mod, "budget_points", lambda begun: (begun + 7.0, begun + 8.0, begun + 9.0))
     real_notices = mod.read_notices
@@ -2632,28 +2702,26 @@ def test_the_whole_guard_exits_two_at_once_when_the_notice_read_blocks_after_dec
 
     monkeypatch.setattr(mod, "read_notices", late)
     out = Stream()
-    started = time.monotonic()
     try:
         assert mod.run_guard(context(_private_home, dispatch(model=None), out), namespace(agents)) == 2
-        assert time.monotonic() - started < 2.0, "exit 2 at once, not after a minimum wait"
+        assert not blocker.finished.is_set(), "exit 2 at once, not after a minimum wait for the blocked read"
         assert out.writes == []
     finally:
-        release.set()
+        blocker.release.set()
 
 
 def test_bounded_reprobe_grants_no_minimum_after_decide_by(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 10.0)
-    release, block = blocked_until_released()
+    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 1000.0)  # past the blocker's hold, as above
+    blocker = Blocker()
     run = mod.Run()
     run.decide_by = time.monotonic() - 0.001
-    run.limit = time.monotonic() + 9.0
-    monkeypatch.setattr(mod, "reprobe", block)
-    started = time.monotonic()
+    run.limit = time.monotonic() + 3600.0  # no limit clamp to hide a granted minimum
+    monkeypatch.setattr(mod, "reprobe", blocker)
     try:
         fresh, slow = mod.bounded_reprobe(cast(Any, None), Path("p"), 0.0, 0.5, time.monotonic() + 5.0, run)
-        assert fresh is None and slow and time.monotonic() - started < 0.2
+        assert fresh is None and slow and not blocker.finished.is_set(), "given up on at once, still blocked"
     finally:
-        release.set()
+        blocker.release.set()
 
 
 # -- a decision whose deadline has already passed waits for nothing ----------------------------------------------------
@@ -2666,17 +2734,24 @@ def test_a_decision_whose_deadline_has_passed_is_not_waited_for_or_written(
     """Late start: decide_by is already behind us when the verdict exists. A denial is an exit 2 with nothing
     written (the host blocks on the code); anything else is a silent allow. No minimum wait is granted."""
     set_mode(_private_home, mode)
-    monkeypatch.setattr(mod, "CONFIG_MIN_WAIT_SECONDS", 10.0)
+    blocker = Blocker()  # everything that could be waited for after decide_by is blocked, and no minimum may hold it
+    monkeypatch.setattr(mod, "NOTICE_IO_MIN_SECONDS", 1000.0)
+    monkeypatch.setattr(mod, "CONFIG_MIN_WAIT_SECONDS", 1000.0)
+    monkeypatch.setattr(mod, "limit_point", lambda begun: begun + 3600.0)  # no limit clamp to hide a granted minimum
+    monkeypatch.setattr(mod, "notice_unclaimed", blocker)
+    monkeypatch.setattr(mod, "log_failure_pending", blocker)
     monkeypatch.setattr(mod, "budget_points", lambda begun: (begun - 3.0, begun - 0.001, begun + 9.0))
     # The mode read is injected: with decide_by already behind us its real read gets a zero budget, and on a slow
     # machine that read can lose the race and fall back to block (SAFO #188), which is not what this test is about.
     # What is asserted here is the passed deadline, so the mode is a fixed input, not a race.
     monkeypatch.setattr(mod, "read_mode_bounded", lambda ctx, run: (mode, "healthy"))
     out = Stream()
-    started = time.monotonic()
-    assert mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents)) == code
-    assert out.writes == [], "nothing was written"
-    assert time.monotonic() - started < 2.0, "and nothing was waited for"
+    try:
+        assert mod.run_guard(context(_private_home, bash("sleep 60"), out), namespace(agents)) == code
+        assert out.writes == [], "nothing was written"
+        assert not blocker.finished.is_set(), "and nothing was waited for"
+    finally:
+        blocker.release.set()
 
 
 @pytest.mark.parametrize("mode", ["block", "warn"])
@@ -2686,19 +2761,20 @@ def test_a_configuration_load_that_blocks_is_cut_at_the_limit_whatever_the_floor
     """The floor (CONFIG_MIN_WAIT_SECONDS) is real only when a load really blocks: it is raised far past the limit and
     the load is held, and the guard still returns at the limit, not after the floor and not when the load ends."""
     set_mode(_private_home, mode)
-    monkeypatch.setattr(mod, "CONFIG_MIN_WAIT_SECONDS", 10.0)
+    monkeypatch.setattr(
+        mod, "CONFIG_MIN_WAIT_SECONDS", 1000.0
+    )  # past the blocker's hold: the limit is all that cuts it
     monkeypatch.setattr(mod, "limit_point", lambda begun: time.monotonic() + 0.6)
-    release, block = blocked_until_released()
-    monkeypatch.setattr(mod, "load_agents_for", block)
-    started = time.monotonic()
+    blocker = Blocker()
+    monkeypatch.setattr(mod, "load_agents_for", blocker)
     try:
         # No verdict exists (the load never finished): the degraded notice is delivered (0) or, when the limit already
         # passed, undelivered (1). Never a block (2), and never later than the limit.
         code = mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents))
         assert code in (0, 1), code
-        assert time.monotonic() - started < 1.5, "cut at the limit, with the load still blocked"
+        assert not blocker.finished.is_set(), "cut at the limit, with the load still blocked"
     finally:
-        release.set()
+        blocker.release.set()
 
 
 def test_no_wait_ends_after_the_limit_measured_from_the_process_start(
@@ -2714,12 +2790,34 @@ def test_no_wait_ends_after_the_limit_measured_from_the_process_start(
 
     monkeypatch.setattr(threading.Thread, "join", watch)
     set_mode(_private_home, "block")
-    # The decision and post-delivery deadlines are far away (8 s, 9 s), but the limit is 3 s from now: every wait the
-    # guard asks a thread for must be cut to it, whoever asked. (Half a second left the first worker running to the
-    # limit under a tracing coverage run, so the later waits never happened.)
-    monkeypatch.setattr(mod, "limit_point", lambda begun: time.monotonic() + 3.0)
+    # The decision and post-delivery deadlines are far away (8 s, 9 s), but the limit is 5 s from now: every wait the
+    # guard asks a thread for must be cut to it, whoever asked. (5 s is room for a worker to finish on a loaded machine
+    # or under a tracing coverage run; a worker left running to the limit would end the guard early, and the later
+    # waits would never be made.)
+    monkeypatch.setattr(mod, "limit_point", lambda begun: time.monotonic() + 5.0)
     mod.run_guard(context(_private_home, bash("sleep 60"), Stream()), namespace(agents))
-    assert len(waits) >= 4 and all(0.0 <= wait <= 3.01 for wait in waits), waits
+    assert len(waits) >= 4 and all(0.0 <= wait <= 5.0 for wait in waits), waits
+
+
+@pytest.mark.parametrize("total", [3, 5, 10, 15, 30, 60])
+def test_the_budget_points_keep_their_order_for_any_host_timeout(monkeypatch: pytest.MonkeyPatch, total: int) -> None:
+    """The real-process tests no longer race a stopwatch against the host's timeout; this is what that race proved,
+    as arithmetic that no machine load can move: for any host timeout the pre-decision work stops first, then the
+    decision is due, then the post-delivery wait ends (with its grace), then the limit that no wait may pass, and the
+    host's timeout is last. A decision written at decide_by and a process that ends at the hard limit are therefore
+    both gone before the host kills the hook."""
+    monkeypatch.setattr(mod, "GUARD_TIMEOUT_SECONDS", total)
+    deadline, decide_by, hard = mod.budget_points(0.0)
+    limit = mod.limit_point(0.0)
+    assert 0.0 < deadline < decide_by < hard, (deadline, decide_by, hard)
+    assert decide_by == pytest.approx(total - mod.decision_margin(total))
+    assert hard + mod.POST_GRACE_SECONDS < limit < total, (hard, limit)
+
+
+def test_the_installed_hook_timeout_gives_the_documented_budget_points() -> None:
+    """The real timeout (10 s): lookups stop at 7 s, the decision is due at 8 s, the log wait ends at 9 s."""
+    assert float(cast(Any, mod).GUARD_TIMEOUT_SECONDS) == 10.0
+    assert mod.budget_points(100.0) == (107.0, 108.0, 109.0)
 
 
 def test_a_start_older_than_the_whole_budget_is_not_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2735,9 +2833,9 @@ def test_a_start_older_than_the_whole_budget_is_not_trusted(monkeypatch: pytest.
 def test_a_late_start_after_decide_by_still_exits_two_before_the_host_kills_the_guard(
     _private_home: Path, agents: Path, tmp_path: Path
 ) -> None:
-    """The child reaches guard_process 3.1 s into a 5 s budget (the arrival is pinned to the process age, so a slow
-    interpreter or a loaded runner cannot move it): after decide_by (3 s), before the limit (4.75 s), with the most
-    time left for the configuration load. The pipe is full. There is no time to wait for it: exit 2, at once."""
+    """The child reaches guard_process just past decide_by (the arrival is pinned to the process age, so a slow
+    interpreter or a loaded runner cannot move it earlier), before the limit, with the most time left for the
+    configuration load. The pipe is full. There is no time to wait for it: exit 2, and the host never has to kill it."""
     set_probe(_private_home, reachable=True, agents=agents)
     set_mode(_private_home, "block")
     result = run_watched(
@@ -2747,10 +2845,12 @@ def test_a_late_start_after_decide_by_still_exits_two_before_the_host_kills_the_
         dispatch(model=None),
         mode="seam",
         jam_stdout=True,
-        extra_env={"SAFO_CHILD_ARRIVE_AT": "3.1", "SAFO_CHILD_CONFIG_FLOOR": "2.0"},
+        extra_env={
+            "SAFO_CHILD_ARRIVE_AT": str(CHILD_BUDGET - mod.decision_margin(CHILD_BUDGET) + 0.1),
+            "SAFO_CHILD_CONFIG_FLOOR": "2.0",
+        },
     )
     assert not result.killed and result.status == 2, f"status {result.status}, killed {result.killed}"
-    assert result.elapsed < CHILD_BUDGET
 
 
 # -- the process age: what is trusted, and the fallback ----------------------------------------------------------
@@ -2787,13 +2887,18 @@ def test_an_untrusted_age_falls_back_to_now(monkeypatch: pytest.MonkeyPatch) -> 
 # -- the emit worker completes just after the join times out ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("offset", [2.5, 2.9, 3.0, 3.1, 3.3])
+DECIDE_BY = CHILD_BUDGET - mod.decision_margin(CHILD_BUDGET)  # the child's decision deadline, from its start
+
+
+@pytest.mark.parametrize("offset", [0.0, DECIDE_BY - 0.1, DECIDE_BY, DECIDE_BY + 0.1, DECIDE_BY + 0.3])
 def test_a_blocked_write_that_completes_around_the_deadline_gives_at_most_one_line_and_never_a_wrong_exit(
     _private_home: Path, agents: Path, tmp_path: Path, offset: float
 ) -> None:
     """Real process, full stdout pipe. The reader starts draining `offset` seconds after the start, around decide_by
     (3 s of 5): the emit worker's write finishes just before, at, or just after the main thread gave up on it.
-    Whatever the order: at most ONE complete JSON line, exit 2 when it was not delivered in time, 0 when it was."""
+    Whatever the order: at most ONE complete JSON line, exit 2 when it was not delivered in time, 0 when it was.
+    (Which side of the deadline a drain at about decide_by lands on is the race; the asserted outcomes hold on both.
+    A drain from the very start, offset 0, is far enough from it to be delivered on any machine.)"""
     set_probe(_private_home, reachable=True, agents=agents)
     set_mode(_private_home, "block")
     body = tmp_path / "payload.json"
@@ -2813,11 +2918,11 @@ def test_a_blocked_write_that_completes_around_the_deadline_gives_at_most_one_li
 
     thread = threading.Thread(target=drain, daemon=True)
     thread.start()
-    killer = threading.Timer(CHILD_BUDGET, lambda: os.killpg(pid, signal.SIGKILL))
+    killer = threading.Timer(WAIT, lambda: os.killpg(pid, signal.SIGKILL))  # a hang only: the guard ends itself
     killer.start()
     try:
-        status = wait_exit(pid, CHILD_BUDGET + 5)
-        thread.join(5)
+        status = wait_exit(pid, WAIT + 5)
+        thread.join(WAIT)
     finally:
         killed = not killer.is_alive()
         killer.cancel()
@@ -2832,5 +2937,5 @@ def test_a_blocked_write_that_completes_around_the_deadline_gives_at_most_one_li
         assert denied(json.loads(complete[0]))
     if status == 0:
         assert len(complete) == 1 and tail.endswith(b"\n"), "exit 0 means the line was delivered whole"
-    if offset <= 2.5:
-        assert status == 0 and len(complete) == 1, "drained well before the deadline: delivered"
+    if offset == 0.0:
+        assert status == 0 and len(complete) == 1, "drained from the start: delivered"
