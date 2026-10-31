@@ -194,6 +194,8 @@ def _open_chain(parts: list[str], *, create: bool, check: Callable[[int, int, os
                 except OSError:
                     raise _unsafe() from None
                 try:
+                    # 0o700 is owner-only, and a directory needs the x bit.
+                    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
                     os.fchmod(child, 0o700)
                 except BaseException as exc:
                     os.close(child)
