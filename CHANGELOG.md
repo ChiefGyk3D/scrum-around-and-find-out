@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Paid Gemini broker, phase 5 (#261): the systemd units and the installer, none of it run on a real machine yet. New
+  `packaging/systemd/` socket and service units for a dedicated unprivileged user (strong sandboxing, an encrypted
+  credential for the paid key, the root-owned switch as a start condition), `packaging/broker-requirements.txt` (hash-locked
+  wheels), `packaging/safo_broker_install.py` (`safo-broker-install`: dry run by default; verifies a signed annotated tag against a
+  root-owned signers file; wheels only, with hashes required; floor and monotonic version checks; a staged, read-only,
+  manifest-checked release activated by an atomic symlink swap; automatic and manual rollback; never touches the state
+  directory), `safo.broker.floor` (the broker refuses to start below the root-owned version floor) and `safo.broker.runbook` (the one-time root setup as copy-paste lines with blast radius and rollback, printed
+  and never run). Also an egress control for the service user (an nftables table, a refresh timer, a hosts view and a files-only name
+  service configuration; observe mode first), a fixed unit policy the installer enforces, a real self-test of the staged
+  release, a hardware-key requirement for release signers and a trusted-interpreter check. Paid use stays disabled.
+
 - Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor above 2 (standard input only for `approve`), the `safo` package that launched it pinned first on the import path, and a fresh private working directory; the child verifies its own environment and directory instead of trusting the interpreter flag, and the mode is read by the real parser. No signing provider library or askpass program is passed on. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
 - Paid Gemini broker, phase 4a (#260): `src/safo/broker/imagewrite.py`, the client's safe image writer, with no socket
