@@ -32,7 +32,6 @@ import contextlib
 import errno
 import hashlib
 import hmac
-import json
 import os
 import re
 import secrets
@@ -41,6 +40,7 @@ import sys
 from collections.abc import Callable, Collection
 from typing import TextIO
 
+from safo.bounded import loads
 from safo.broker.errors import BrokerError
 from safo.output import write
 
@@ -368,7 +368,7 @@ def write_receipt_file(image_path: str, data: bytes) -> str:
     if not isinstance(data, bytes) or not 0 < len(data) <= MAX_RECEIPT_FILE:
         raise ImageWriteError("the receipt file is empty or too large")
     try:
-        document = json.loads(data.decode("utf-8"))
+        document = loads(data)
     except (ValueError, RecursionError):
         raise ImageWriteError("the receipt file is not JSON") from None
     if not isinstance(document, dict) or document.get("reviewed") is not False:

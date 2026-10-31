@@ -66,8 +66,8 @@ DECODE = re.compile(
 )
 SINK_RE = re.compile(SINK)
 SHELL_WILD = frozenset("$*?[]{}`%")
-RISKY_ACTIONS = ("ask", "approve", "paid", "paid-dryrun")  # approve, paid and paid-dryrun: the paid entries (#287)
-ACTIONS = ("ask", "approve", "quota", "paid", "paid-dryrun")
+RISKY_ACTIONS = ("ask", "approve")
+ACTIONS = ("ask", "approve", "quota", "paid", "paid-dryrun")  # paid and paid-dryrun: the broker entries (#287)
 # inline code in prose that wraps a known word, an option or a file name; any other word in backticks runs as a command
 MARKDOWN_WORD = re.compile(
     r"^`(?:ask|approve|quota|paid|paid-dryrun|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"

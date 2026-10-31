@@ -311,7 +311,7 @@ def test_a_brief_with_no_gemini_marker_is_untouched_by_a_past_deadline() -> None
 # -- second review round -------------------------------------------------------------------------------------------
 
 EXAMPLE_MODELS = sorted(
-    yaml.safe_load((Path(__file__).parent.parent / "examples" / "gemini.example.yaml").read_text())["paid"]
+    yaml.safe_load((Path(__file__).parent.parent / "examples" / "gemini.example.yaml").read_text())["free"]
 )
 
 
@@ -451,7 +451,7 @@ def test_the_guard_over_the_repos_own_docs_has_a_small_false_positive_ceiling() 
         if "gemini" in p.lower()
     ]
     legit = re.compile(
-        r"safo gemini (?:ask|approve)|gemini: ?(?:free|paid)|prd_paid|generativelanguage|genai|base64|xxd|openssl",
+        r"safo gemini (?:ask|approve|paid)|gemini: ?(?:free|paid)|prd_paid|generativelanguage|genai|base64|xxd|openssl",
         re.IGNORECASE,
     )
     assert len(paragraphs) >= 20, "something was collected"

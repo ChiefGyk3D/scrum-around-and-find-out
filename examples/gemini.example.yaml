@@ -33,6 +33,8 @@ max_output_tokens: 2048
 # supply. These three are deliberately tiny so an uncopied example cannot overrun a real limit. REPLACE.
 free:
   gemini-3.6-flash: {rpm: 1, tpm: 1000, rpd: 1}
+  gemini-3.8-flash: {rpm: 1, tpm: 1000, rpd: 1}
+  gemini-3.5-flash-lite: {rpm: 1, tpm: 1000, rpd: 1}
 
 # Models the free tier must refuse because they are paid-only (image generation). They are called through the broker.
 # image_models: []

@@ -113,7 +113,7 @@ and the client (phase 4b, below). The stop wakeup is a pipe, so the server modul
 The thin client, `src/safo/broker/client.py`, built and tested with a scripted fake broker, the real server over
 socketpairs (a software key, the fake vendor) and a temporary unix socket, with injected clocks and no network. It is
 described in "The client" below. **Phase 4 is finished by #287:** the client is wired into the command line
-(`safo gemini paid` and `safo gemini paid-dryrun`), the in-process paid path is **deleted** from `safo.gemini` and the
+(`safo gemini paid` and `safo gemini paid-dryrun`), the in-process paid path is **deleted** from the free-tier module and the
 Gemini command group (not just disabled), and the dispatch guard denies every paid step because no approval record
 exists any more. The safe image writer of phase 4a is in the tree and `default_writer()` and `default_sidecar()` use it;
 the small marked adapter (`adapter_write_image`, `adapter_write_sidecar`) remains only as a fallback and for tests, and can be

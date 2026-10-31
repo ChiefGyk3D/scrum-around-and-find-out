@@ -79,7 +79,7 @@ Enrolling one (the loopback enrollment page is **not built yet**; the trust-file
 
    Without the policy line the passkey is ignored and `keys check` says so. A passkey is revoked by the SHA-256
    fingerprint of its public key in the revocation file.
-4. Run `safo gemini keys check`. Paid use stays disabled by the broker's own switch whatever you enroll.
+4. Run `safo gemini keys check`. Paid use stays disabled by the switch of the broker whatever you enroll.
 
 **Warning for agent-held keys that are not FIDO keys** (for example a fingerprint reader that holds an SSH key in an agent
 with a cooldown): they are not Tier 1 and not Tier 2. A process that can reach the agent can sign again inside the
@@ -164,7 +164,7 @@ requirement, and when a Tier 2 credential is enrolled. It fails when no usable k
    ```
 
    At a terminal, type `dryrun key-test`, touch the key (and give the PIN if you set one). The dry run signs a throw-away
-   text in another namespace (`safo-gemini-approval-dryrun`), sends it to the broker's `dryrun` operation, which verifies it
+   text in another namespace (`safo-gemini-approval-dryrun`), sends it to the `dryrun` operation of the broker, which verifies it
    against the enrolled key, and prints the label, the fingerprint, whether it saw the touch and the PIN, and whether paid
    use is switched on in the broker. It writes no approval and no ledger row, and it cannot approve a call. The preflight's
    hardware-key line passes only when the key in the agent or in the key file matches a key enrolled in the allowed-signers

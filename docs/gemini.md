@@ -180,7 +180,7 @@ This is not a sandbox: the child runs as your user. Precisely:
 - **Covered: the child.** It starts with `-I` and an allow-list environment, so nothing the caller set reaches the code
   that reads the config, the prompt or a key, and the caller's working directory, user site and `PYTHON*` variables
   cannot change what it imports.
-- **Covered, as early as this program can: the refusal.** It is the first statement of `safo.cli.run` (any command line
+- **Covered, as early as this program can: the refusal.** It is the first statement of the entry function in the `cli` module (any command line
   that has the word `gemini` among its arguments), before the hook clock, the guard entry or any parsing, and it is made
   again on the parsed command. A startup variable beside such a command line stops it with nothing else run.
 - **Not covered: anything that acts before the first line of this program.** The installed `safo` console script starts

@@ -319,7 +319,7 @@ guard's deadline is blocked, and so is a private-terms file that does not load o
 the test suite runs the guard over the repository's own docs and sets a ceiling on false positives. It is a speed bump
 against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief or a shell command is out of its
 reach. The guard is not the gate that holds: the free-tier limits are enforced again by the wrapper itself, and a paid
-request is refused by `ask` before any request; the paid path is the broker, which verifies a fresh signature per call. When the dispatch event cannot be
+request is refused before any request is made; the paid path is the broker, which verifies a fresh signature per call. When the dispatch event cannot be
 read (over 1 MiB, not valid JSON, cut short, or timed out), or `agents.yaml` cannot be loaded, these two rules still
 run or are applied as a literal check (see Failing safe).
 
