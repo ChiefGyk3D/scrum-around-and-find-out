@@ -15,6 +15,11 @@ as the agent `gemini`, and the shape `public-source-research` prefers it. This p
 do, and what the maintainer has to supply. Decisions are in issues #195 (the spend gate), #196 (the provider), #200 (this
 build) and #287 (removing the in-process paid path).
 
+**Migrating an existing `gemini.yaml`.** The schema change is not backward compatible: a file that still has the old
+paid keys (`price_source`, `price_checked`, `secrets.paid_config`, `caps`, `paid`, and the `signing` block) is refused
+when it loads. Migrate it first by removing those keys (the signing key and principal now live in
+`broker-client.yaml`). A helper for this exists outside the repository on the maintainer machine.
+
 ## Why free-only, and what never goes to it
 
 The vendor's terms say that prompts sent through the free tier may be **used for training** and **read by human

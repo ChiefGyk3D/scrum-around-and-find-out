@@ -108,7 +108,7 @@ control, or a command that reads the installed system), then the residual risk.
 - **Verification.** Commands run as the maintainer account on the installed system, each expected to fail: `cat
   /etc/safo/broker/paid-key`, `ls /etc/safo/broker`, `ls /run/credentials/safo-broker.service`, `cat
   /proc/$(systemctl show -p MainPID --value safo-broker.service)/environ`, and a secret-store read of the old paid
-  config (expected: gone). `safo-broker-admin check-install` runs these and prints pass or fail. Planned test:
+  config (expected: gone). These are run by hand today; `safo-broker-admin check-install` does not run them (it checks the release, units, egress helper and switch). Planned test:
   `tests/test_broker_install_check.py` builds a temporary tree with each wrong owner and mode and expects a failure.
 - **Residual.** The key passes through the vendor console and the maintainer's hands once (created on another device,
   typed on a virtual console). Root can read it. The vendor-side monthly limit stays the backstop.
@@ -318,12 +318,12 @@ control, or a command that reads the installed system), then the residual risk.
 
 ### R16. A root-equivalent door on the maintainer's account
 
-- **Mitigation.** `safo-broker-admin check-install` lists, and fails while any hit is unexplained: any `sudo` rule for the
+- **Mitigation.** The maintainer reviews by hand today (`safo-broker-admin check-install` does not do this yet; its output says so) and fixes or explains in writing any hit: any `sudo` rule for the
   account (`sudo -l -U`, not only `sudo -n true`), root-equivalent group membership (including `docker`, `lxd`, `disk`),
   polkit rules that grant the account actions, root-owned paths under `/etc`, `/usr/local`, `/opt` and the unit,
   cron and sudoers directories that the account can write, root-run units, timers and jobs that execute a file the
   account can write or read files from its home, and setuid, setgid or file-capability files not owned by a package.
-  The design lists the checks in full ("The root-door precondition").
+  The design lists the review in full ("The root-door precondition").
 - **Verification.** Planned tests of the check against a fake sudoers output, a fake group database, a temporary tree
   with writable root-run scripts and units, and a fake polkit directory: each door produces a hit, and a clean tree
   produces none. Commands on the installed system: `sudo -l -U LOGIN`, `id -nG`.

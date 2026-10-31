@@ -86,10 +86,20 @@ class CallRecord:
     resolved_micro: int | None = None
     ambiguous: bool = False
     breach: bool = False
+    last_row: dt.datetime | None = None  # the time of the row that ended or made the call ambiguous
 
     @property
     def month(self) -> str:
+        """The month the call was reserved in: the month it belongs to."""
         return self.started.strftime("%Y-%m")
+
+    @property
+    def months(self) -> frozenset[str]:
+        """Every month that counts this call. A call that ends in a later month than the one it was reserved in
+        straddles the boundary and counts in both: the later month's cap must see money that left before midnight."""
+        if self.last_row is None:
+            return frozenset({self.month})
+        return frozenset({self.month, self.last_row.strftime("%Y-%m")})
 
     @property
     def counted_micro(self) -> int:
@@ -118,10 +128,14 @@ class LedgerView:
 
     def month_total(self, key: str) -> int:
         """What a month counts: every call at its counted figure, plus what root added for it. Only ever grows."""
-        return sum(c.counted_micro for c in self.calls.values() if c.month == key) + self.adjusted.get(key, 0)
+        return sum(c.counted_micro for c in self.calls.values() if key in c.months) + self.adjusted.get(key, 0)
 
     def month_spent(self, now: dt.datetime) -> int:
-        return self.month_total(now.astimezone(dt.UTC).strftime("%Y-%m"))
+        """What the month of `now` counts. A call still open that was reserved in an earlier month is in flight across
+        the boundary: it counts here too, at its reservation, until it ends."""
+        key = now.astimezone(dt.UTC).strftime("%Y-%m")
+        in_flight = sum(c.counted_micro for c in self.open_calls() if key not in c.months and c.month < key)
+        return self.month_total(key) + in_flight
 
     def open_calls(self) -> list[CallRecord]:
         return [c for c in self.calls.values() if c.state in (CallState.RESERVED, CallState.SENT)]
@@ -190,12 +204,14 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
                 rec.state = advance(rec.state, CallState.SENT)
             elif kind == "call_end":
                 _end(rec, row)
+                rec.last_row = when
                 pending = cid if rec.breach else None
             elif kind == "ambiguous_call":
                 if row["model"] != rec.model or row["reserved_micro"] != rec.reserved_micro:
                     raise _corrupt()
                 rec.state = advance(rec.state, CallState.AMBIGUOUS)
                 rec.ambiguous = True
+                rec.last_row = when
                 pending = cid
             elif kind == "suspended":
                 if row["model"] != rec.model or row["reason"] != ("breach" if rec.breach else "ambiguous"):

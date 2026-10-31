@@ -183,7 +183,7 @@ def read_config(path: Path, *, uid: int = 0, anchor: Path = Path("/")) -> Config
             raise EgressError(msg)
         values[m[1]] = m[2]
     host = values.get("VENDOR_HOST", "")
-    mode = values.get("MODE", "observe")
+    mode = values.get("MODE", "drop")  # fail closed: observe (log and accept) must be asked for by name
     if not valid_host(host):
         msg = "the egress config has no plausible VENDOR_HOST"
         raise EgressError(msg)

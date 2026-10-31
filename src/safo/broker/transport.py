@@ -15,6 +15,7 @@ import contextlib
 import http.client
 import socket
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -51,12 +52,14 @@ class HttpsTransport:
         port: int = VENDOR_PORT,
         factory: Factory = PinnedHTTPSConnection,
         arm: Arm = default_arm,
+        mono: Callable[[], float] = time.monotonic,
     ) -> None:
         self._key = key
         self._host = host
         self._port = port
         self._factory = factory
         self._arm = arm
+        self._mono = mono
 
     def send(self, request: VendorRequest) -> RawReply:
         headers = {
@@ -65,8 +68,12 @@ class HttpsTransport:
             "accept": "application/json",
             "connection": "close",
         }
+        deadline_at = self._mono() + request.timeout_seconds  # one deadline: lookup, every address, send and reply
         conn: Any = self._factory(self._host, self._port, timeout=request.timeout_seconds)
         late = threading.Event()
+        bind = getattr(conn, "bind_deadline", None)
+        if bind is not None:  # a pinned connection shares the deadline with every address it tries
+            bind(deadline_at, self._mono, late.is_set)
 
         def deadline() -> None:  # one deadline for the whole call: connect, request, headers and every read of the body
             late.set()

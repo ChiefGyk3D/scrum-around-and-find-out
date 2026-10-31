@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -155,6 +156,9 @@ def paths(tmp: Path) -> admin.Paths:
         min_version=tmp / "etc" / "broker-min-version",
         install_version=tmp / "var" / "version",
         release_link=tmp / "opt" / "current",
+        unit_dir=tmp / "units",
+        egress_helper=tmp / "sbin" / "safo-broker-egress",
+        egress_conf=tmp / "etc" / "broker-egress.conf",
         trust_uid=os.getuid(),
     )
 
@@ -455,10 +459,34 @@ def test_usage_takes_another_month_and_refuses_a_malformed_one(tmp_path: Path) -
 # -- check-install -------------------------------------------------------------------------------------------------
 
 
+UNIT_NAMES = (
+    "safo-broker.service",
+    "safo-broker.socket",
+    "safo-broker-egress.service",
+    "safo-broker-egress-refresh.service",
+    "safo-broker-egress-refresh.timer",
+)
+
+
+def unit_text(name: str) -> bytes:
+    return f"[Unit]\nDescription={name}\n".encode()
+
+
+def manifest_line(release: Path, rel: str) -> str:
+    return f"file\t{hashlib.sha256((release / rel).read_bytes()).hexdigest()}\t{rel}"
+
+
 def install(tmp: Path, *, current: str = "1.2.3", recorded: str = "1.2.3", floor: str = "1.0.0") -> None:
+    """A complete, consistent install: link, release (units, VERSION, manifest), installed units, helper, records."""
     p = paths(tmp)
     release = tmp / "opt" / "releases" / current
-    release.mkdir(parents=True, exist_ok=True)
+    (release / "units").mkdir(parents=True, exist_ok=True)
+    for name in UNIT_NAMES:
+        (release / "units" / name).write_bytes(unit_text(name))
+    (release / "VERSION").write_text(current + "\n")
+    (release / "COMMIT").write_text("0" * 40 + "\n")
+    lines = [manifest_line(release, f"units/{n}") for n in UNIT_NAMES] + [manifest_line(release, "VERSION")]
+    (release / "MANIFEST.sha256").write_text("\n".join(lines) + "\n")
     if p.release_link.is_symlink():
         p.release_link.unlink()
     p.release_link.symlink_to(release)
@@ -466,6 +494,15 @@ def install(tmp: Path, *, current: str = "1.2.3", recorded: str = "1.2.3", floor
     p.install_version.write_text(recorded + "\n")
     p.min_version.parent.mkdir(parents=True, exist_ok=True)
     p.min_version.write_text(floor + "\n")
+    p.unit_dir.mkdir(exist_ok=True)
+    for name in UNIT_NAMES:
+        (p.unit_dir / name).write_bytes(unit_text(name))
+        (p.unit_dir / name).chmod(0o644)
+    p.egress_helper.parent.mkdir(exist_ok=True)
+    p.egress_helper.write_text("#!/bin/sh\n")
+    p.egress_helper.chmod(0o755)
+    p.egress_conf.write_text("VENDOR_HOST=api.vendor.example\nMODE=drop\n")
+    p.egress_conf.chmod(0o644)
 
 
 def test_check_install_passes_when_link_record_and_floor_agree(tmp_path: Path) -> None:
@@ -1197,3 +1234,160 @@ def test_the_usage_lines_name_the_isolated_command() -> None:
         if "usage" in line or "   " in line
     )
     assert "python -m" not in admin.USAGE and "python -m" not in (admin.__doc__ or "").replace("python -I -m", "")
+
+
+# -- check-install: what the docs claim beyond the link, the record and the floor (issue 288) -----------------------
+
+
+def test_a_complete_install_reports_units_helper_and_switch(tmp_path: Path) -> None:
+    install(tmp_path)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 0, out
+    assert "units: 5 match the signed release" in out
+    assert "release version file: 1.2.3" in out
+    assert "egress helper: root-owned and executable" in out
+    assert "switch: absent (paid use is off)" in out
+    assert "egress mode: drop" in out
+
+
+def test_a_unit_that_differs_from_the_release_fails(tmp_path: Path) -> None:
+    install(tmp_path)
+    unit = paths(tmp_path).unit_dir / "safo-broker.service"
+    unit.write_bytes(unit.read_bytes() + b"ExecStartPre=/bin/true\n")
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "fail: unit safo-broker.service differs from the signed release" in out
+
+
+@pytest.mark.parametrize("name", UNIT_NAMES)
+def test_every_unit_is_checked_and_a_missing_one_fails(tmp_path: Path, name: str) -> None:
+    install(tmp_path)
+    (paths(tmp_path).unit_dir / name).unlink()
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and f"fail: unit {name} is missing" in out
+
+
+def test_a_symlinked_or_writable_unit_fails(tmp_path: Path) -> None:
+    install(tmp_path)
+    unit = paths(tmp_path).unit_dir / "safo-broker.socket"
+    unit.chmod(0o664)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "unit safo-broker.socket" in out and "writable" in out
+    unit.unlink()
+    real = tmp_path / "real.socket"
+    real.write_bytes(unit_text("safo-broker.socket"))
+    real.chmod(0o644)
+    unit.symlink_to(real)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "fail: unit safo-broker.socket is a symbolic link" in out
+
+
+def test_a_release_unit_that_differs_from_the_manifest_fails(tmp_path: Path) -> None:
+    install(tmp_path)
+    release = tmp_path / "opt" / "releases" / "1.2.3"
+    changed = unit_text("safo-broker.service") + b"# changed\n"
+    (release / "units" / "safo-broker.service").write_bytes(changed)
+    (paths(tmp_path).unit_dir / "safo-broker.service").write_bytes(
+        changed
+    )  # installed == release, but not the manifest
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "does not match the release manifest" in out
+
+
+def test_a_missing_manifest_or_manifest_line_fails(tmp_path: Path) -> None:
+    install(tmp_path)
+    manifest = tmp_path / "opt" / "releases" / "1.2.3" / "MANIFEST.sha256"
+    kept = [x for x in manifest.read_text().splitlines() if "safo-broker.timer" not in x and "refresh.timer" not in x]
+    manifest.write_text("\n".join(kept) + "\n")
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "no line for units/safo-broker-egress-refresh.timer" in out
+    manifest.unlink()
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "release manifest cannot be read" in out
+
+
+def test_the_release_version_file_must_match_the_folder(tmp_path: Path) -> None:
+    install(tmp_path)
+    version = tmp_path / "opt" / "releases" / "1.2.3" / "VERSION"
+    version.write_text("1.2.4\n")
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "release version file says 1.2.4, the folder is 1.2.3" in out
+    version.unlink()
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "release version file cannot be read" in out
+
+
+def test_the_egress_helper_must_exist_be_root_owned_executable_and_closed(tmp_path: Path) -> None:
+    install(tmp_path)
+    helper = paths(tmp_path).egress_helper
+    helper.chmod(0o644)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "egress helper is not executable" in out
+    helper.chmod(0o775)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "egress helper" in out and "writable" in out
+    helper.unlink()
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "egress helper" in out and "missing" in out
+
+
+def test_a_symlinked_egress_helper_fails(tmp_path: Path) -> None:
+    install(tmp_path)
+    helper = paths(tmp_path).egress_helper
+    real = tmp_path / "real-helper"
+    real.write_text("#!/bin/sh\n")
+    real.chmod(0o755)
+    helper.unlink()
+    helper.symlink_to(real)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "egress helper" in out and "symbolic link" in out
+
+
+def test_the_helper_owner_check_names_a_wrong_owner(tmp_path: Path) -> None:
+    helper = tmp_path / "h"
+    helper.write_text("x")
+    helper.chmod(0o755)
+    assert admin._helper_problem(helper, os.getuid()) == ""
+    assert "owned by" in admin._helper_problem(helper, os.getuid() + 1)
+
+
+def test_the_switch_state_is_reported_and_an_invalid_file_fails(tmp_path: Path) -> None:
+    install(tmp_path)
+    switch = paths(tmp_path).switch
+    switch.write_text("enabled\n")
+    switch.chmod(0o644)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 0 and "switch: enabled" in out
+    switch.write_text("yes\n")
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "fail: the switch file exists but the broker would treat it as off" in out
+    switch.write_text("enabled\n")
+    switch.chmod(0o666)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "broker would treat it as off" in out
+
+
+def test_an_enabled_switch_with_the_egress_control_in_observe_mode_is_noted(tmp_path: Path) -> None:
+    install(tmp_path)
+    p = paths(tmp_path)
+    p.switch.write_text("enabled\n")
+    p.switch.chmod(0o644)
+    p.egress_conf.write_text("VENDOR_HOST=api.vendor.example\nMODE=observe\n")
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 0
+    assert "note: paid use is enabled while the egress control is in observe mode" in out
+    p.egress_conf.unlink()
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "fail: paid use is enabled but the egress config cannot be read" in out
+
+
+def test_the_unit_list_here_equals_the_installers() -> None:
+    import safo_broker_install as installer
+
+    assert admin.UNIT_NAMES == installer.UNIT_NAMES == UNIT_NAMES
+
+
+def test_check_install_does_not_claim_the_root_door_checks(tmp_path: Path) -> None:
+    """Honest output: the sudo, group, polkit and writable-path checks are not part of this command, and it says so."""
+    install(tmp_path)
+    _code, out, _ = run(tmp_path, "check-install")
+    assert "not checked here: sudo rules, root-equivalent groups, polkit, writable root-run paths" in out

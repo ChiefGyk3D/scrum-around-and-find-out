@@ -105,9 +105,10 @@ preflight below).
    WARN hardware-key: no hardware key is visible: plug it in (and load it with ssh-add if you use the agent)
    FAIL allowed-signers: the file does not exist (step d of docs/gemini-enrollment.md)
    PASS switch: absent: paid use is off (the safe state until the dry run has passed)
+   WARN egress-mode: the egress config does not exist (the egress steps of the runbook are not done)
    FAIL service-user: user safo-broker does not exist (step 2 of the root setup in docs/gemini-broker.md)
    WARN state-dir: absent: systemd creates it at the first start of the service (StateDirectory=)
-   summary: 3 pass, 3 warn, 2 fail; exit 1
+   summary: 3 pass, 4 warn, 2 fail; exit 1
    ```
 
    The two `FAIL` lines are expected until the root setup and step d are done. Run it again at the end. Blast radius:
@@ -436,12 +437,26 @@ key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. The label is the 
 
 5. **The release signers file** is the same shape with the other namespace, and its own file, installed by root the same
    way: `/etc/safo/broker-release-signers`, lines `release-key namespaces="git" KEYTYPE BASE64`, root-owned, mode 0644.
-   Whether the installer asks for exactly `namespaces="git"` is **inferred** (see step c); it is re-checked when the
-   installer is built.
+   The installer accepts only that exact shape: one plain principal name (no list, wildcard or `!`), exactly the option
+   `namespaces="git"` and no other option (so no `cert-authority`, no `valid-before`), a hardware key type
+   (`sk-ssh-ed25519@openssh.com` or `sk-ecdsa-sha2-nistp256@openssh.com`) and a base64 key. A certificate-authority line
+   would let any software key holding a certificate from that authority sign a release without a touch, so it is refused,
+   and after `git verify-tag` the installer also refuses a signature whose reported key type is a certificate. To retire a
+   key, delete its line.
 
-The enable switch `/etc/safo/gemini-paid-enabled` is **not** created in this runbook. It comes last, after the dry run.
-The preflight reports it as `absent` (pass) and as `present` (warn: the content is not read, because the broker, not the
-preflight, decides).
+The enable switch /etc/safo/gemini-paid-enabled is created by the **last step** of the root runbook, after the dry run,
+and by no other line. That line runs the preflight first (python -I -m safo.gemini_preflight --enabling, as root, from the
+installed release) and writes the file only if it exits 0. The preflight reports the switch as absent (pass) and as
+present (warn: the content is not read, because the broker, not the preflight, decides). Its egress-mode line reads the
+root-owned egress config and prints the mode word only: drop passes; observe warns while paid use is off and **fails**
+when the switch is being created (--enabling) or already exists; a missing or unusable config fails in that case too.
+
+The one way past the observe-mode failure is the flag `--ack-observe-mode`, which you add to that line yourself. Observe
+mode logs and accepts, so a code execution bug in the broker could send the paid key to any IPv4 address until you switch
+to drop; the vendor-side spend limit is the only backstop. Use the flag only after an empty observe log (see the runbook's
+egress step) through a full dry run, which is the minimum evidence, and switch to drop after the first clean real call at
+the latest. Blast radius: the window between enabling and the switch to drop. Rollback: remove the switch, set `MODE=drop`,
+restart the egress service.
 
 ## Step e. Rotate and revoke
 

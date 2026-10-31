@@ -5,6 +5,10 @@ It answers one question before the first dry run: is this machine ready for hard
 writes, creates, signs, enrolls or deletes anything, makes no network or vendor call, and opens no private key. Its
 only commands are the four read-only queries in `READ_ONLY_COMMANDS`, run without a shell through an injected runner.
 
+Run it with `--enabling` just before the enable switch is created: it then FAILS while the egress control is in
+observe mode (it logs and accepts), unless the maintainer also passes `--ack-observe-mode` (see the runbook). The same
+check applies whenever the switch file already exists.
+
 It prints one line per check, `PASS`, `WARN` or `FAIL`, then a summary, and returns an exit code: 0 when nothing
 failed (1 when anything failed, or anything warned with `strict`). Output carries names, counts, modes, owners and line
 numbers only: never a key line, a key type's key material, or file content.
@@ -43,6 +47,10 @@ READ_ONLY_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("ssh-add", "-L"),
 )
 _TOKEN = re.compile(r'(?:[^\s"]|"[^"]*")+')
+_FLAGS = {"--strict", "--enabling", "--ack-observe-mode"}
+USAGE = (
+    "usage: python -m safo.gemini_preflight [--strict] [--enabling] [--ack-observe-mode] [--key-file /absolute/path]"
+)
 _RUN_SECONDS = 10
 _MAX_FILE_BYTES = 65_536
 
@@ -68,6 +76,7 @@ class Check:
 class Locations:
     allowed_signers: Path = Path("/etc/safo/gemini-allowed-signers")
     switch: Path = Path("/etc/safo/gemini-paid-enabled")
+    egress_conf: Path = Path("/etc/safo/broker-egress.conf")
     state_dir: Path = Path("/var/lib/safo-broker")
     udev_dirs: tuple[Path, ...] = (Path("/etc/udev/rules.d"), Path("/usr/lib/udev/rules.d"), Path("/lib/udev/rules.d"))
     sk_helper_dirs: tuple[Path, ...] = (Path("/usr/lib/openssh"), Path("/usr/libexec/openssh"), Path("/usr/libexec"))
@@ -411,6 +420,73 @@ def check_switch(loc: Locations) -> Check:
     )
 
 
+_CONF_LINE = re.compile(r"([A-Z_]+)=(.*)")
+
+
+def _egress_mode(loc: Locations) -> tuple[str | None, str]:
+    """(mode, problem): the mode word from the root-owned egress config, read like the helper reads it (a missing MODE
+    line means drop). Nothing but the mode word is ever returned: not the vendor host, not the file."""
+    _st, problem = _file_problem(loc.egress_conf, loc.trust_uid)
+    if problem == "absent":
+        return None, "the egress config does not exist (the egress steps of the runbook are not done)"
+    if problem:
+        return None, f"the egress config {problem}"
+    parent = _parent_problem(loc.egress_conf, loc.trust_uid)
+    if parent:
+        return None, f"the egress config is fine but {parent}"
+    try:
+        text = loc.egress_conf.read_text(errors="replace")
+    except OSError:
+        return None, "the egress config cannot be read"
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _CONF_LINE.fullmatch(line)
+        if not m or m[1] not in ("VENDOR_HOST", "MODE") or m[1] in values:
+            return None, "the egress config has a line that is not VENDOR_HOST=... or MODE=..., or repeats one"
+        values[m[1]] = m[2]
+    mode = values.get("MODE", "drop")
+    if mode not in ("observe", "drop"):
+        return None, "the egress config MODE is neither observe nor drop"
+    return mode, ""
+
+
+def check_egress_mode(loc: Locations, *, enabling: bool, ack_observe: bool) -> Check:
+    """Paid use may not be enabled while the egress control only logs and accepts. `enabling` is true when the
+    maintainer is about to create the switch (`--enabling`) or the switch file already exists. The acknowledgement turns
+    the one failure (observe mode) into a warning; it never excuses a missing or unusable config."""
+    name = "egress-mode"
+    enabled = enabling or os.path.lexists(loc.switch)
+    mode, problem = _egress_mode(loc)
+    if mode is None:
+        return Check(name, "fail" if enabled else "warn", problem)
+    if mode == "drop":
+        return Check(name, "pass", "drop: connections from the service user outside the allowed set are dropped")
+    if not enabled:
+        return Check(
+            name,
+            "warn",
+            "observe: the egress control logs and accepts. Fine while paid use is off; switch to drop before paid use, "
+            "or at the latest after the first clean real call",
+        )
+    if ack_observe:
+        return Check(
+            name,
+            "warn",
+            "observe, acknowledged with --ack-observe-mode: the minimum evidence is an empty observe log through a "
+            "full dry run; switch to drop after the first clean real call at the latest",
+        )
+    return Check(
+        name,
+        "fail",
+        "paid use is being enabled while the egress control is in observe mode (it logs and accepts, so a code "
+        "execution bug in the broker could send the key anywhere). Set MODE=drop, or pass --ack-observe-mode after an "
+        "empty observe log through a full dry run",
+    )
+
+
 def check_service_user(loc: Locations, lookup: UserLookup) -> Check:
     uid = lookup(loc.service_user)
     if uid is None:
@@ -470,7 +546,9 @@ def check_state_dir(loc: Locations, lookup: UserLookup) -> Check:
     )
 
 
-def run_preflight(loc: Locations, runner: Runner, lookup: UserLookup) -> list[Check]:
+def run_preflight(
+    loc: Locations, runner: Runner, lookup: UserLookup, *, enabling: bool = False, ack_observe: bool = False
+) -> list[Check]:
     return [
         check_ssh_sk_support(loc, runner),
         check_libfido2(runner),
@@ -478,6 +556,7 @@ def run_preflight(loc: Locations, runner: Runner, lookup: UserLookup) -> list[Ch
         check_hardware_key(runner, loc),
         check_allowed_signers(loc),
         check_switch(loc),
+        check_egress_mode(loc, enabling=enabling, ack_observe=ack_observe),
         check_service_user(loc, lookup),
         check_state_dir(loc, lookup),
     ]
@@ -496,8 +575,17 @@ def exit_code(checks: Sequence[Check], *, strict: bool = False) -> int:
     return 0
 
 
-def main_with(loc: Locations, runner: Runner, lookup: UserLookup, *, out: TextIO, strict: bool = False) -> int:
-    checks = run_preflight(loc, runner, lookup)
+def main_with(
+    loc: Locations,
+    runner: Runner,
+    lookup: UserLookup,
+    *,
+    out: TextIO,
+    strict: bool = False,
+    enabling: bool = False,
+    ack_observe: bool = False,
+) -> int:
+    checks = run_preflight(loc, runner, lookup, enabling=enabling, ack_observe=ack_observe)
     out.write(render(checks) + "\n")
     counts = {s: sum(1 for c in checks if c.status == s) for s in ("pass", "warn", "fail")}
     code = exit_code(checks, strict=strict)
@@ -511,15 +599,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if "--key-file" in args:
         at = args.index("--key-file")
         if at + 1 >= len(args) or not args[at + 1].startswith("/"):
-            output.write(sys.stderr, "usage: python -m safo.gemini_preflight [--strict] [--key-file /absolute/path]")
+            output.write(sys.stderr, USAGE)
             return 2
         key_file = Path(args[at + 1])
         del args[at : at + 2]
-    if any(a not in {"--strict"} for a in args):
-        output.write(sys.stderr, "usage: python -m safo.gemini_preflight [--strict] [--key-file /absolute/path]")
+    if any(a not in _FLAGS for a in args):
+        output.write(sys.stderr, USAGE)
         return 2
     return main_with(
-        Locations(key_file=key_file), default_runner, default_lookup, out=sys.stdout, strict="--strict" in args
+        Locations(key_file=key_file),
+        default_runner,
+        default_lookup,
+        out=sys.stdout,
+        strict="--strict" in args,
+        enabling="--enabling" in args,
+        ack_observe="--ack-observe-mode" in args,
     )
 
 

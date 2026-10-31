@@ -15,6 +15,7 @@ import http.client
 import ipaddress
 import re
 import socket
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -92,27 +93,89 @@ def validated_addresses(host: str, port: int) -> list[str]:
     return found
 
 
-def connect_pinned(address: tuple[str, int], timeout: float | None = None, source_address: Any = None) -> socket.socket:
-    """`socket.create_connection` that resolves once, checks every answer and connects to a checked address."""
+def connect_pinned(
+    address: tuple[str, int],
+    timeout: float | None = None,
+    source_address: Any = None,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    expired: Callable[[], bool] | None = None,
+) -> socket.socket:
+    """`socket.create_connection` that resolves once, checks every answer and connects to a checked address.
+
+    With a `deadline` (an absolute time on `clock`) the lookup and every attempt share it: each attempt gets the lesser
+    of `timeout` and what is left, no attempt starts once nothing is left or `expired()` says so, and a connection made
+    after the deadline is closed and refused. Failover to the next address never outlasts the caller's deadline."""
     host, port = address
     last: OSError | None = None
-    for ip in validated_addresses(host, port):
+    addresses = validated_addresses(host, port)
+    for ip in addresses:
+        attempt = timeout
+        if deadline is not None:
+            left = deadline - clock()
+            if left <= 0 or (expired is not None and expired()):
+                raise TimeoutError("the connect deadline passed")
+            attempt = left if timeout is None else min(timeout, left)
         try:
-            return socket.create_connection((ip, port), timeout, source_address)
+            sock = socket.create_connection((ip, port), attempt, source_address)
         except OSError as err:
             last = err
+            continue
+        if deadline is not None and (clock() >= deadline or (expired is not None and expired())):
+            sock.close()
+            raise TimeoutError("the connect deadline passed")
+        return sock
     raise last or BlockedDestinationError("destination did not resolve")
 
 
-class PinnedHTTPConnection(http.client.HTTPConnection):
+class _Deadline:
+    """The part of a pinned connection that carries one call deadline into the connect."""
+
+    _deadline: float | None = None
+    _clock: Callable[[], float] = time.monotonic
+    _expired: Callable[[], bool] | None = None
+
+    def bind_deadline(
+        self, deadline: float, clock: Callable[[], float] = time.monotonic, expired: Callable[[], bool] | None = None
+    ) -> None:
+        """Every address attempt shares `deadline`; the connection is closed rather than used after it."""
+        self._deadline, self._clock, self._expired = deadline, clock, expired
+
+    def _connect_pinned(
+        self, address: tuple[str, int], timeout: float | None = None, source: Any = None
+    ) -> socket.socket:
+        return connect_pinned(
+            address, timeout, source, deadline=self._deadline, clock=self._clock, expired=self._expired
+        )
+
+    def _passed(self) -> bool:
+        return self._deadline is not None and (
+            self._clock() >= self._deadline or (self._expired is not None and self._expired())
+        )
+
+
+class PinnedHTTPConnection(_Deadline, http.client.HTTPConnection):
     """Connects to the checked address; the Host header and the TLS name stay the configured host."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._create_connection = connect_pinned
+        self._create_connection = self._connect_pinned
+
+    def connect(self) -> None:
+        super().connect()
+        if self._passed():  # a slow set-up after the TCP connect: nothing has been sent yet
+            self.close()
+            raise TimeoutError("the connect deadline passed")
 
 
-class PinnedHTTPSConnection(http.client.HTTPSConnection):
+class PinnedHTTPSConnection(_Deadline, http.client.HTTPSConnection):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._create_connection = connect_pinned
+        self._create_connection = self._connect_pinned
+
+    def connect(self) -> None:
+        super().connect()
+        if self._passed():  # the TLS handshake ran past the deadline: nothing has been sent yet
+            self.close()
+            raise TimeoutError("the connect deadline passed")
