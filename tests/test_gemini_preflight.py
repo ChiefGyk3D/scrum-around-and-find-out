@@ -21,6 +21,7 @@ from safo import gemini_preflight as pf
 NS = "safo-gemini-approval"
 # built from pieces at run time so no key-shaped literal sits in the tree (the secret scan reads every commit)
 KEY_B64 = "".join(["AAAA", "GnNrLXNzaC1lZDI1NTE5QG9w", "ZW5zc2guY29tAAAA", "I" + "Placeholder" * 4])
+VENDOR = "api" + ".vendor.example"  # a stand-in host name; the report must never print it
 SECRET = "BEGIN OPENSSH PRIVATE KEY topsecretmaterial"
 ALLOWED_COMMANDS = {
     ("ssh", "-Q", "key"),
@@ -79,6 +80,9 @@ def make_tree(tmp_path: Path, *, signers_lines: list[str] | None = None) -> pf.L
     helper = root / "openssh"
     helper.mkdir()
     (helper / "ssh-sk-helper").write_text("")
+    conf = etc / "broker-egress.conf"
+    conf.write_text(f"VENDOR_HOST={VENDOR}\nMODE=drop\n")
+    conf.chmod(0o644)
     state = root / "state"
     state.mkdir()
     state.chmod(0o700)
@@ -87,6 +91,7 @@ def make_tree(tmp_path: Path, *, signers_lines: list[str] | None = None) -> pf.L
     return pf.Locations(
         allowed_signers=signers,
         switch=etc / "gemini-paid-enabled",
+        egress_conf=conf,
         state_dir=state,
         udev_dirs=(udev,),
         sk_helper_dirs=(helper,),
@@ -362,7 +367,7 @@ def test_the_checker_changes_nothing_and_runs_on_a_read_only_tree(tmp_path: Path
     assert [ln for ln in report.splitlines() if ln.startswith("FAIL")] == [
         ln for ln in report.splitlines() if "FAIL state-dir" in ln
     ]
-    assert sum(1 for ln in report.splitlines() if ln.startswith("PASS")) == 7, report
+    assert sum(1 for ln in report.splitlines() if ln.startswith("PASS")) == 8, report
 
 
 def test_only_the_read_only_commands_are_run(tmp_path: Path) -> None:
@@ -416,3 +421,110 @@ def test_a_state_entry_name_with_a_control_character_is_escaped_in_the_report(tm
     out = pf.render(pf.run_preflight(loc, FakeRunner(), lookup_ok))
     assert "\x1b" not in out
     assert "bad\\x1bname" in out
+
+
+# ---- the egress mode: paid use may not be enabled while the egress control only logs (issue 288) ------------------
+
+
+def set_mode(loc: pf.Locations, text: str, mode: int = 0o644) -> None:
+    loc.egress_conf.write_text(text)
+    loc.egress_conf.chmod(mode)
+
+
+def egress(loc: pf.Locations, **kw: bool) -> pf.Check:
+    return by_name(pf.run_preflight(loc, FakeRunner(), lookup_ok, **kw))["egress-mode"]
+
+
+def test_drop_mode_passes_whether_or_not_paid_use_is_being_enabled(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    assert egress(loc).status == egress(loc, enabling=True).status == "pass"
+    loc.switch.write_text("enabled\n")
+    loc.switch.chmod(0o644)
+    assert egress(loc).status == "pass"
+
+
+def test_a_missing_mode_line_means_drop_like_the_helper(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\n")
+    assert egress(loc, enabling=True).status == "pass"
+
+
+def test_observe_mode_only_warns_while_paid_use_is_off(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=observe\n")
+    got = egress(loc)
+    assert got.status == "warn" and "observe" in got.detail
+    checks = pf.run_preflight(loc, FakeRunner(), lookup_ok)
+    assert pf.exit_code(checks) == 0
+    assert pf.exit_code(checks, strict=True) == 1
+
+
+def test_enabling_paid_use_in_observe_mode_fails(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=observe\n")
+    got = egress(loc, enabling=True)
+    assert got.status == "fail" and "--ack-observe-mode" in got.detail
+    checks = pf.run_preflight(loc, FakeRunner(), lookup_ok, enabling=True)
+    assert pf.exit_code(checks) == 1
+
+
+def test_a_switch_that_is_already_present_counts_as_enabled(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=observe\n")
+    loc.switch.write_text("enabled\n")
+    loc.switch.chmod(0o644)
+    assert egress(loc).status == "fail"
+
+
+def test_the_acknowledgement_turns_the_failure_into_a_warning_that_names_the_minimum_evidence(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=observe\n")
+    got = egress(loc, enabling=True, ack_observe=True)
+    assert got.status == "warn"
+    assert "empty" in got.detail and "dry run" in got.detail and "drop" in got.detail
+    assert pf.exit_code(pf.run_preflight(loc, FakeRunner(), lookup_ok, enabling=True, ack_observe=True)) == 0
+
+
+def test_the_acknowledgement_does_not_excuse_a_missing_or_unusable_config(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    loc.egress_conf.unlink()
+    assert egress(loc).status == "warn"  # nothing to enable yet
+    assert egress(loc, enabling=True, ack_observe=True).status == "fail"
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=drop\n", mode=0o666)
+    assert egress(loc, enabling=True, ack_observe=True).status == "fail"
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=maybe\n")
+    assert egress(loc, enabling=True, ack_observe=True).status == "fail"
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=drop\nMODE=observe\n")
+    assert egress(loc, enabling=True, ack_observe=True).status == "fail"
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nSURPRISE=1\n")
+    assert egress(loc, enabling=True, ack_observe=True).status == "fail"
+
+
+def test_a_symlinked_config_is_unusable(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    real = loc.egress_conf.with_name("real.conf")
+    real.write_text("MODE=drop\n")
+    real.chmod(0o644)
+    loc.egress_conf.unlink()
+    loc.egress_conf.symlink_to(real)
+    assert egress(loc, enabling=True).status == "fail"
+
+
+def test_the_egress_report_never_prints_the_vendor_host_or_the_file(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    for text in (f"VENDOR_HOST={VENDOR}\nMODE=observe\n", f"VENDOR_HOST={VENDOR}\nMODE=drop\n", "garbage " + VENDOR):
+        set_mode(loc, text)
+        out = pf.render(pf.run_preflight(loc, FakeRunner(), lookup_ok, enabling=True))
+        assert VENDOR not in out and "garbage" not in out
+
+
+def test_the_command_line_takes_the_two_flags_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loc = make_tree(tmp_path)
+    set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=observe\n")
+    monkeypatch.setattr(pf, "Locations", lambda: loc)
+    monkeypatch.setattr(pf, "default_runner", FakeRunner())
+    monkeypatch.setattr(pf, "default_lookup", lookup_ok)
+    assert pf.main(["--enabling"]) == 1
+    assert pf.main(["--enabling", "--ack-observe-mode"]) == 0
+    assert pf.main(["--ack-observe-mode"]) == 0
+    assert pf.main(["--bogus"]) == 2

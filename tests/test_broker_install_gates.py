@@ -170,6 +170,87 @@ def test_other_key_types_are_refused(tmp_path: Path, line: str) -> None:
         install.check_signer_key_types(f, install.SK_KEY_TYPES)
 
 
+# ---- the signers file may not widen trust (issue 288) ------------------------------------------------------------
+
+_SK = "sk-ssh-ed25519@openssh.com"
+_BODY = "AAAA" + "example"  # not a key: only the shape the parser looks at
+
+
+def _signers(tmp_path: Path, line: str) -> Path:
+    f = tmp_path / "signers"
+    f.write_text(line + "\n")
+    return f
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f'rel cert-authority,namespaces="git" {_SK} {_BODY}',  # the finding: a CA line
+        f'rel namespaces="git",cert-authority {_SK} {_BODY}',
+        f'rel CERT-AUTHORITY,namespaces="git" {_SK} {_BODY}',
+        f"rel cert-authority {_SK} {_BODY}",
+        f"rel {_SK} {_BODY}",  # no namespace restriction
+        f'rel namespaces="git,file" {_SK} {_BODY}',  # a wider namespace list
+        f'rel namespaces="*" {_SK} {_BODY}',
+        f'rel namespaces="git" valid-before="20991231" {_SK} {_BODY}',  # any further option widens or confuses
+        f'rel namespaces="git",principals="x" {_SK} {_BODY}',
+        f'rel namespaces="git",namespaces="file" {_SK} {_BODY}',
+        f'* namespaces="git" {_SK} {_BODY}',  # a wildcard principal
+        f'a,b namespaces="git" {_SK} {_BODY}',  # a principal list
+        f'!a namespaces="git" {_SK} {_BODY}',  # a negated principal
+        f'*@example.invalid namespaces="git" {_SK} {_BODY}',
+        f'rel namespaces="git" {_SK}-cert-v01@openssh.com {_BODY}',  # a certificate type
+        f'rel namespaces="git" {_SK}',  # no key body
+        'rel namespaces="git"',
+        "rel",
+    ],
+)
+def test_a_line_that_widens_trust_or_is_not_an_exact_hardware_key_line_is_refused(tmp_path: Path, line: str) -> None:
+    f = _signers(tmp_path, line)
+    with pytest.raises(InstallError, match="signers file"):
+        install.check_signer_key_types(f, install.SK_KEY_TYPES)
+
+
+def test_one_bad_line_among_good_ones_refuses_the_file(tmp_path: Path) -> None:
+    good = f'rel namespaces="git" {_SK} {_BODY} laptop key'
+    f = _signers(tmp_path, good + f'\nca cert-authority,namespaces="git" {_SK} {_BODY}')
+    with pytest.raises(InstallError, match="signers file"):
+        install.check_signer_key_types(f, install.SK_KEY_TYPES)
+    install.check_signer_key_types(_signers(tmp_path, good), install.SK_KEY_TYPES)  # the good line alone passes
+
+
+def test_the_installer_refuses_a_ca_line_before_it_fetches_anything(world: World) -> None:
+    world.release("1.0.0")
+    world.layout.signers.write_text(f'ca cert-authority,namespaces="git" {_SK} {_BODY}\n')
+    world.layout.signers.chmod(0o644)
+    strict = dataclasses.replace(world.layout, key_types=install.SK_KEY_TYPES)
+    with pytest.raises(InstallError, match="signers file"):
+        install.install("1.0.0", strict, world.hooks(), out=lambda s: None)
+
+
+@pytest.mark.parametrize(
+    ("reported", "allowed", "ok"),
+    [
+        ("ED25519-SK", install.SK_KEY_TYPES, True),
+        ("ECDSA-SK", install.SK_KEY_TYPES, True),
+        ("ED25519-SK-CERT", install.SK_KEY_TYPES, False),
+        ("ED25519", install.SK_KEY_TYPES, False),
+        ("RSA", install.SK_KEY_TYPES, False),
+        ("ED25519", ("ssh-ed25519",), True),
+        ("ED25519-CERT", ("ssh-ed25519",), False),
+        ("ED25519-SK", ("ssh-ed25519",), False),
+    ],
+)
+def test_the_key_type_that_verified_must_be_a_plain_allowed_key_not_a_certificate(
+    reported: str, allowed: tuple[str, ...], ok: bool
+) -> None:
+    if ok:
+        install.check_reported_key_type(reported, allowed)
+    else:
+        with pytest.raises(InstallError, match=r"certificate|not an allowed"):
+            install.check_reported_key_type(reported, allowed)
+
+
 def test_an_empty_signers_file_is_refused(tmp_path: Path) -> None:
     f = tmp_path / "signers"
     f.write_text("# nothing\n")

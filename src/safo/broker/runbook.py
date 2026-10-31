@@ -6,7 +6,9 @@ maintainer reads the plan and pastes each line himself. Every command is a full 
 a placeholder, never a real name), and every step states its blast radius and its rollback before the change.
 
 The key itself is never in this text: the credential step reads it on the remote terminal with `read -rs`, so it is
-never in an argument, a history file or `ps`. The enable switch is left OFF: no line here creates it.
+never in an argument, a history file or `ps`. The enable switch is left OFF until the last step, whose
+only creating line
+runs the read-only preflight first and cannot create the switch while the egress control is in observe mode.
 """
 
 from __future__ import annotations
@@ -206,7 +208,11 @@ def steps(login: str) -> tuple[Step, ...]:
             "Turn the egress control on, in observe mode",
             "This loads an nftables table that matches only the broker's service user (port 443 to a set of vendor "
             "addresses that a timer refreshes every minute; no DNS and no IPv6 for that user) and writes the "
-            "hosts view the broker unit bind-mounts. In observe mode nothing is blocked. Run it before the socket "
+            "hosts view the broker unit bind-mounts. In observe mode nothing is blocked, which also means "
+            "the control does "
+            "not stop the key leaving: observe mode is for finding the addresses to allow, never a state to "
+            "run paid use "
+            "in. Run it before the socket "
             "step. The checks at the end: the table must exist and the set must hold addresses, and the timer must "
             "be scheduled. Traffic to the vendor set is accepted before the logging rule, so it never appears in "
             "this log; the log shows only what the rules would drop.",
@@ -243,9 +249,13 @@ def steps(login: str) -> tuple[Step, ...]:
             "Nothing to undo; the rollback line above is a no-op.",
         ),
         Step(
-            "Switch the egress control to drop mode (after about a week of clean observation)",
-            "Run this only after a clean observation week (an empty observe log, a table that exists, a set that holds "
-            "addresses, a scheduled timer). In drop mode a connection from the broker's service user to anything "
+            "Switch the egress control to drop mode (before the switch, or at the latest after the first "
+            "clean real call)",
+            "Run this before the last step. The minimum evidence is an empty observe log through a full dry run, a "
+            "table that exists, a set that holds addresses and a scheduled timer; a week of observation is better. If "
+            "you take the acknowledged path in the last step instead, run this step right after the first clean real "
+            "call at the latest, and do not make a second real call before it. In drop mode a connection "
+            "from the broker's service user to anything "
             "outside the allowed set is logged at a limited rate and dropped. The third line is a deliberately "
             "blocked probe: the service user tries to connect to a documentation address that is never in the set; "
             "it must fail after the timeout, and the last line must then show the drop log entry. If either does not "
@@ -263,6 +273,34 @@ def steps(login: str) -> tuple[Step, ...]:
                 ssh("sed -i s/^MODE=drop/MODE=observe/ /etc/safo/broker-egress.conf"),
                 ssh("systemctl restart safo-broker-egress.service"),
             ),
+        ),
+        Step(
+            "Create the enable switch (this refuses while the egress control is in observe mode)",
+            "This is the only line in the runbook that creates /etc/safo/gemini-paid-enabled. It first runs "
+            "the read-only "
+            "preflight with --enabling as root from the installed release (isolated interpreter), and the file is "
+            "written only if that exits 0. The preflight fails while the egress control is in observe mode, when the "
+            "egress config is missing or unusable, and on any other failed check. Run the dry run with a real key "
+            "before this step.",
+            (
+                ssh(
+                    'sh -c "/opt/safo-broker/current/bin/python -I -m safo.gemini_preflight --enabling '
+                    '&& printf \\"enabled\\\\n\\" > /etc/safo/gemini-paid-enabled '
+                    '&& chmod 0644 /etc/safo/gemini-paid-enabled"'
+                ),
+            ),
+            "Paid calls become possible for approved requests: the broker reads the switch on every request. Nothing "
+            "else changes. With the egress control in drop mode the broker can reach only the vendor addresses.",
+            (ssh("rm /etc/safo/gemini-paid-enabled"),),
+            "To knowingly enable paid use while the egress control is still in observe mode (the control then logs and "
+            "accepts, so a code execution bug in the broker could send the key anywhere; the vendor-side spend limit "
+            "is the only backstop), add --ack-observe-mode after --enabling in that line yourself. The "
+            "minimum evidence "
+            "is an empty observe log through a full dry run. The preflight then reports a warning instead "
+            "of a failure. "
+            "Then run the drop-mode step right after the first clean real call at the latest. Rollback for the "
+            "acknowledged path is the same: remove the switch, then set MODE=drop with the lines of the "
+            "drop-mode step.",
         ),
     )
 
@@ -295,9 +333,9 @@ def render(*, maintainer: str) -> str:
     out += [
         "## The switch stays OFF",
         "",
-        "This runbook never creates the root-owned switch file, /etc/safo/gemini-paid-enabled. Create it last, as "
-        "the keys guide describes, after the dry",
-        "run with a real key. While it is absent the broker answers status and dry run, and every paid call is "
+        "The root-owned switch file, /etc/safo/gemini-paid-enabled, is created only by the last step, after the dry",
+        "run with a real key and only if the preflight passes. Create it last. While it is absent the "
+        "broker answers status and dry run, and every paid call is "
         "answered as "
         "disabled before the ledger is written or the key is read, so no call can reach the vendor.",
         "",
@@ -320,12 +358,15 @@ def render(*, maintainer: str) -> str:
         "",
         "## Observe, then drop",
         "",
-        "Keep the egress control in observe mode for about a week of real use. Because vendor traffic is accepted "
+        "Observe mode logs and accepts: it does not stop the key leaving. Use it only while paid use is off, or for "
+        "the short, acknowledged window described in the last step, and never as the resting state. Keep it for a "
+        "dry-run week where you can. Because vendor traffic is accepted "
         "before the logging rule, a clean week is an empty log: read the log line from the egress step and "
         "investigate every entry until there is nothing unexplained. Also check that the table exists, the set "
         "holds addresses and the timer is scheduled. Then run the drop-mode step, and afterwards make a deliberately "
         "blocked probe: a connection from the service user to a destination outside the set, which must now be "
-        "dropped and logged with the drop prefix. If a call fails in drop mode, the rollback line puts it back in "
+        "dropped and logged with the drop prefix. Switch to drop before the switch is created, or at the latest after "
+        "the first clean real call. If a call fails in drop mode, the rollback line puts it back in "
         "observe mode at once.",
         "",
     ]

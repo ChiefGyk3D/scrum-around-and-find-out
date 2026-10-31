@@ -95,7 +95,7 @@ key, no timing assertions): the wire format, the server, the entry point and the
   is `busy`. One paid call is in flight at once (`max_concurrent_calls` is fixed at 1 by the config check; a second `call` is `busy` after `slot_wait`
   seconds, default 0), the slot is released before the reply is written, and vendor calls started are counted from the
   ledger (5 a minute, 20 a day). The server logs numbers and enumerated words from an allowlist of field names.
-- **Stopping.** SIGTERM stops accepting; a connection admitted earlier can no longer `begin` or spend (`busy`, and the spend gate checks again under the ledger lock, as it does for the switch). Calls in flight finish and answer, and waits `grace_seconds` (default 150).
+- **Stopping.** SIGTERM stops accepting; a connection admitted earlier can no longer `begin` or spend (`busy`, and the spend gate checks again under the ledger lock, as it does for the switch). Calls in flight finish and answer, and waits `grace_seconds` (default 150, at most 300: the config refuses more). The unit's `TimeoutStopSec` is 360 seconds, above that longest drain plus a margin, so systemd does not kill the process before it records the calls still open; a test pins the relation and the installer unit policy pins the value.
   A call still open after that is made ambiguous (the reservation stays counted, the model is suspended) and the exit
   status is 4. A call killed some other way is made ambiguous by `recover` at the next start, before the first accept.
 - **`python -I -m safo.broker`** reads `/etc/safo/broker.yaml` (sections `server`, `prices`, `caps`, `deadline_seconds`),
@@ -409,8 +409,16 @@ new release cannot change what root does with network-administration rights. The
   service resolves the vendor name from the generated file and cannot ask another process to resolve anything else.
 - The broker unit is bound to the egress unit and ordered after it: it starts only with the rules loaded and stops when
   they are stopped.
-- The shipped default is observe mode (log, then let through). After about a week with only vendor addresses in the log,
-  one line in the root-owned config switches to drop mode; the runbook has the steps, blast radius and rollback.
+- Observe mode (log, then let through) exists to find the addresses to allow. It does **not** stop the key leaving, so it is
+  not a state to run paid use in. The mode is one value in the root-owned config (`MODE=observe` or `MODE=drop`; a missing
+  line means drop, and the helper reads it, not the unit). The runbook's last step creates the enable switch only after
+  the read-only preflight (`python -I -m safo.gemini_preflight --enabling`, run by root from the installed release) exits 0,
+  and that preflight fails while the mode is observe. The only way past it is `--ack-observe-mode`, added by hand to that
+  line after an empty observe log through a full dry run (the minimum evidence); the preflight then warns, and the runbook
+  says to switch to drop after the first clean real call at the latest. Blast radius of the acknowledged path: until the
+  switch to drop, a code execution bug in the broker could send the key to any IPv4 address on any port, and only the
+  vendor-side spend limit bounds the loss. Rollback: remove the switch, then set `MODE=drop` and restart the egress service
+  (the lines are in the drop-mode step).
 
 What it does not do: a service that reaches the vendor front end can still use the key there (spend) and can use the
 vendor as a dead drop; a root-level compromise removes the control; and the table can be missing for up to a minute
@@ -460,8 +468,14 @@ socket let the client group connect, and that the service skips its start cleanl
 The whole design assumes the maintainer's account, and every agent running as it, has **no way to become root**. The
 installer's checks reduce the chance that this is false; they cannot prove it, and this page does not claim they do.
 
-**What the administration command's `check-install` checks (phase 5), reporting each hit for the maintainer to fix or explain in
-writing, and failing while any hit is unexplained:**
+**What `check-install` does not check yet.** The list below is the manual review the maintainer does (and the planned
+scope of a later phase). Today `safo-broker-admin check-install` checks the release link, the version record, the floor, the
+installed unit files, the egress helper and the switch (see the administration section), and its output ends with a line
+saying that these root-door items are not checked. It does not run `sudo -l`, read group or polkit data, or walk the
+file system. Until it does, treat a passing `check-install` as "the installation matches the signed release", never as
+"no door to root exists".
+
+**The root-door review (manual today; each hit is fixed or explained in writing):**
 
 - `sudo -l -U LOGIN`: any rule at all for the account, `NOPASSWD` or not, including command-specific rules (a rule for
   one command can be an editor, a service manager or an installer with a shell escape); and `sudo -n true`.
@@ -1059,7 +1073,13 @@ ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin re
   `releases/`, owned by root and closed to group and others, that `/var/lib/safo-broker-install/version` and
   `/etc/safo/broker-min-version` are readable root-owned versions, and that the release is not below the floor, not
   newer than the record, and the floor is not above the record. A release below the highest recorded version is noted, not
-  failed (an allowed downgrade). It exits 1 on any failure.
+  failed (an allowed downgrade). It also checks that the release's `VERSION` file names its folder, that each of the five
+  unit files under `/etc/systemd/system` is a regular, root-owned, closed file with exactly the bytes of the release's own copy
+  and that copy matches the release manifest, that the egress helper is a root-owned, executable file closed to group and
+  others, and it reports the switch state (a switch file that is present but is not exactly `enabled`, or not root-owned,
+  fails because the broker would treat it as off) and the egress mode. It notes, without failing, an enabled switch with the
+  egress control in observe mode (the preflight owns that decision), and it fails if the switch is enabled but the egress
+  config cannot be read. It exits 1 on any failure. It does not check the root-door items listed above.
 - **clear MODEL** first prints the record of every call that suspended the model (call id, model, job, kind
   `ambiguous` or `breach`, start time, reserved amount, state, counted amount, recorded actual) and changes nothing.
   Read the vendor billing page, then repeat the command with `--confirm CALL_ID` for **every** call id printed. The
@@ -1342,7 +1362,7 @@ service and spend nothing.
 | 2 | The call pipeline against the fake vendor: request builders per kind, the image response handling (magic bytes, limits, receipts), 429 and ambiguous outcomes. Reservation, reconciliation, breach and suspension. The response parser targets the vendor's documented shape and refuses any shape it has not been shown | Review |
 | 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, idle exit, the operations, logging allowlist; fake socket peers and a fuzz test of the framing | Review of the parser and the limits |
 | 4 | The thin client: `approve` and `ask --paid` go through the socket, safe image writing and sidecars, the guard's `check`, **removal of the in-process paid path**, the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |
-| 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that so far covers the release link, the record and the floor; the root-door checks remain), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
+| 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that covers the release link, the record, the floor, the installed units against the signed release, the egress helper and the switch; the root-door checks remain a manual review), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
 | 6 | **Cyber-tier security review** of the broker and the signed-approval verification (issue step 3) | Clean review |
 | 7 | The maintainer does the root setup and the dry run, then creates the switch (issue step 5). The first calls use Nano Banana 2 Lite to record the real response shape and to observe the output cap; root then sets `cap_verified` for each model observed; a fixture PR follows | The maintainer's own run; the observation reviewed |
 | 8 | Text paid calls through the same path, the `usage` workflow, then the optional count-per-approval and passkey wiring if the maintainer wants them | Review per item |

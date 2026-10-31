@@ -463,3 +463,45 @@ def test_the_start_condition_on_the_switch_cannot_come_back_in_a_release() -> No
     text = base.replace("[Unit]\n", "[Unit]\nConditionPathExists=/etc/safo/gemini-paid-enabled\n", 1)
     message = refused("safo-broker.service", text)
     assert "ConditionPathExists" in message
+
+
+# ---- the stop timeout must outlast the drain (issue 288) -----------------------------------------------------------
+
+
+def _seconds_of(value: str) -> int:
+    assert value.endswith("s") and value[:-1].isdigit(), value
+    return int(value[:-1])
+
+
+def _stop_timeouts() -> dict[str, int]:
+    """TimeoutStopSec of the broker unit from the shipped file, the installer table and the test table."""
+    shipped_line = [x for x in read("safo-broker.service").splitlines() if x.startswith("TimeoutStopSec=")]
+    assert len(shipped_line) == 1
+
+    def pinned(rows: tuple[tuple[str, str, str], ...]) -> str:
+        return next(v for s, k, v in rows if (s, k) == ("Service", "TimeoutStopSec"))
+
+    tables = {
+        "shipped": shipped_line[0].partition("=")[2],
+        "installer": pinned(install.UNIT_POLICY["safo-broker.service"]),
+        "pinned": pinned(REQUIRED_BY_UNIT["safo-broker.service"]),
+    }
+    return {k: _seconds_of(v) for k, v in tables.items()}
+
+
+def test_the_stop_timeout_outlasts_the_longest_drain_the_server_allows() -> None:
+    from safo.broker.server import MAX_GRACE_SECONDS, ServerConfig
+
+    longest = max(MAX_GRACE_SECONDS, ServerConfig(allowed_uids=frozenset({1})).grace_seconds)
+    timeouts = _stop_timeouts()
+    assert len(set(timeouts.values())) == 1, timeouts  # the file, the installer and the tests agree
+    assert min(timeouts.values()) >= longest + 30, (timeouts, longest)  # the drain plus a margin
+
+
+def test_the_server_refuses_a_drain_longer_than_the_unit_can_wait() -> None:
+    from safo.broker.server import MAX_GRACE_SECONDS, ServerConfig
+    from safo.errors import ConfigError
+
+    ServerConfig(allowed_uids=frozenset({1}), grace_seconds=MAX_GRACE_SECONDS)
+    with pytest.raises(ConfigError, match="grace_seconds"):
+        ServerConfig(allowed_uids=frozenset({1}), grace_seconds=MAX_GRACE_SECONDS + 1)

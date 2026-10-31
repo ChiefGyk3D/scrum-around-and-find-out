@@ -81,6 +81,11 @@ def _count(value: object, name: str, low: int, high: int) -> int:
     return value
 
 
+# The longest drain a stop may wait for. The broker unit TimeoutStopSec must stay above this plus a margin, or systemd
+# kills the process before it records the calls still open (a test pins the relation).
+MAX_GRACE_SECONDS = 300.0
+
+
 def _seconds(value: object, name: str, low: float, high: float) -> float:
     if type(value) not in (int, float) or not low <= float(value) <= high:  # type: ignore[arg-type]  # checked just above
         raise ConfigError(f"broker server: {name} is a number of seconds from {low} to {high}")
@@ -120,7 +125,7 @@ class ServerConfig:
         _count(self.max_calls_per_day, "max_calls_per_day", 1, 100_000)
         for name in ("read_deadline", "write_json_deadline", "write_progress", "write_frame_total"):
             _seconds(getattr(self, name), name, 0.001, 3_600.0)
-        _seconds(self.grace_seconds, "grace_seconds", 0.0, 3_600.0)
+        _seconds(self.grace_seconds, "grace_seconds", 0.0, MAX_GRACE_SECONDS)
         _seconds(self.slot_wait, "slot_wait", 0.0, 60.0)
 
     @classmethod

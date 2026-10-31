@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Paid Gemini broker, phase 6 review items for install and units (#288): the broker unit now waits 360 seconds to stop
+  (above the longest drain, which the config now caps at 300 seconds, so a stop no longer kills a call before it is
+  recorded); the release signers file accepts only exact hardware key lines with `namespaces="git"` (no
+  `cert-authority`, no other option, no principal list or pattern) and a signature made through a certificate is refused;
+  the egress helper treats a missing `MODE` as drop, the preflight reports the egress mode and fails when the enable
+  switch is being created (`--enabling`) or exists while the mode is observe, unless `--ack-observe-mode` is passed after
+  an empty observe log through a full dry run, and the runbook gains a last step that creates the switch only if that
+  preflight passes and says to switch to drop after the first clean real call at the latest; `check-install` now also
+  checks the installed unit files against the signed release and its manifest, the release version file, the egress
+  helper and the switch, and says which root-door checks it does not do (the docs are corrected to match). Paid use stays
+  disabled.
 - Paid Gemini broker, administration command (#262): `python -I -m safo.broker.admin` with `status`, `usage`,
   `check-install`, `clear` and `reconcile`, run by root. It reads the root-owned files, then drops to the service user
   (groups emptied, group, user, read back, regain probe) before opening the ledger, so the ledger's owner rule is
