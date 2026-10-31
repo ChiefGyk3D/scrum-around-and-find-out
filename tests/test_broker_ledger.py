@@ -155,6 +155,7 @@ def test_the_marker_alone_marks_a_nonce_spent(tmp_path: Path) -> None:
     with pytest.raises(Refused) as err:
         CallLedger(folder).reserve(req, appr, policy(), epoch=EPOCH, now=NOW)
     assert err.value.code == "used"
+    assert not (folder / "ledger.jsonl").exists()  # refused up front, not after a row was appended
 
 
 def test_the_ledger_row_alone_marks_a_nonce_spent(tmp_path: Path) -> None:
@@ -837,6 +838,13 @@ SCENARIOS: dict[str, list[dict[str, Any]]] = {
         row_of("call_sent", call_id=CID),
         row_of("call_end", call_id=CID, **{**END, "actual_micro": 500, "released_micro": 0, "breach": True}),
         row_of("call_sent", call_id=CID),
+    ],
+    "a breach whose suspension comes after another call's row": [
+        *start_rows(OTHER, "3" * 16),
+        row_of("call_sent", call_id=CID),
+        row_of("call_end", call_id=CID, **{**END, "actual_micro": 500, "released_micro": 0, "breach": True}),
+        row_of("call_sent", call_id=OTHER),
+        row_of("suspended", call_id=CID, model=FLAT, reason="breach"),
     ],
     "ambiguous with no suspension after it": [
         row_of("ambiguous_call", call_id=CID, model=FLAT, reserved_micro=100, reason="timeout")

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Paid Gemini broker, phase 1 (#205): the core library under `src/safo/broker/`. Integer micro-dollar arithmetic and the
+  worst-case reservation (prompt bytes plus 64 tokens at one token per byte, the output cap, two interim images), the
+  per-job cap (2.50 USD in the testing phase) and monthly ceiling (10 USD), the model allow-list with Pro and Nano Banana
+  Pro refused, the call state machine, schema version 3 approval and ledger records parsed strictly, and a ledger that
+  records the spend before a call is sent and recovers any interruption as ambiguous or settled. No socket, service or
+  vendor call: paid use stays disabled. `Ledger` in `gemini.py` gains `append_many` and an overridable empty-ledger
+  hook, and `valid_quote` is shared; the existing behavior is unchanged.
+
 - Gemini approvals: hardened what a signed paid approval binds (#217). Approval payload version 2 carries a prompt digest
   (`prompt_sha256`, `prompt_bytes`) on both approval tiers; `approve` shows the digest and the whole prompt (approvals are refused above 4000 characters), the paid gate
   recomputes it from the prompt it is about to send and refuses on any mismatch, missing digest or older payload version,
