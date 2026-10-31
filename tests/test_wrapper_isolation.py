@@ -477,7 +477,7 @@ def test_the_scratch_parent_refuses_a_symlink_in_its_path(tmp_path: Path) -> Non
 
 
 def test_a_rewrite_that_changes_the_command_is_refused_not_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Global-option values and positional values that equal `propose` must not move the rewrite onto the action word."""
+    """Option values and positional values that equal `propose` must not move the rewrite onto the action word."""
     monkeypatch.chdir(tmp_path)
     tricky = ["--board", "propose", "gemini", "keys", "propose", "propose", "--label", "x"]
     try:
