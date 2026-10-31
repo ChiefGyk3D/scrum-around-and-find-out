@@ -9,6 +9,16 @@
   settles an ambiguous call at its whole reservation unless root names a verified amount with a reason, and records the
   uid and time in a new `admin_action` ledger row. `reconcile` reports mismatches and can only raise a month. Paid use
   stays disabled.
+- Paid Gemini broker, phase 5 (#261): the systemd units and the installer, none of it run on a real machine yet. New
+  `packaging/systemd/` socket and service units for a dedicated unprivileged user (strong sandboxing, an encrypted
+  credential for the paid key, the root-owned switch as a start condition), `packaging/broker-requirements.txt` (hash-locked
+  wheels), `packaging/safo_broker_install.py` (`safo-broker-install`: dry run by default; verifies a signed annotated tag against a
+  root-owned signers file; wheels only, with hashes required; floor and monotonic version checks; a staged, read-only,
+  manifest-checked release activated by an atomic symlink swap; automatic and manual rollback; never touches the state
+  directory), `safo.broker.floor` (the broker refuses to start below the root-owned version floor) and `safo.broker.runbook` (the one-time root setup as copy-paste lines with blast radius and rollback, printed
+  and never run). Also an egress control for the service user (an nftables table, a refresh timer, a hosts view and a files-only name
+  service configuration; observe mode first), a fixed unit policy the installer enforces, a real self-test of the staged
+  release, a hardware-key requirement for release signers and a trusted-interpreter check. Paid use stays disabled.
 - Gemini enrollment preparation (#263): `docs/gemini-enrollment.md`, a copy-paste maintainer runbook (enroll one or two
   FIDO2 keys for approvals, a pass or fail table for testing a second device, a separate release-signing key, the
   root-owned allowed-signers lines with the namespace restriction, rotate and revoke), each step with its blast radius,
@@ -51,6 +61,21 @@
   and the creation time; a model with an unverified output cap is refused above 2 USD whatever the job cap is; a
   temporary file left in `issued/` by a kill no longer stops `begin` or the start-up flush. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
   `pre_spend` hook. Paid use stays disabled.
+
+- Paid Gemini broker, phase 3 (#259): the socket server in `src/safo/broker/`, tested over socketpairs and a temporary
+  unix socket against the fake vendor, with injected clocks and no network. `protocol.py` is the wire format on its own
+  (length-prefixed frames, the 1 MiB request and 256 KiB reply limits, a versioned envelope, strict field tables, one
+  fixed sentence per reply code; a thin client imports it unchanged). The core code list gains `rate_limited`,
+  `vendor_refused` and `outcome_unknown`. `server.py` takes the descriptor systemd passes (exactly one listening unix
+  stream socket for this pid, else it refuses), checks the peer uid with `SO_PEERCRED` against the root-owned list,
+  reads one request under a whole-frame deadline, runs the operations (`status`, `begin`, `call`, `check`, `dryrun`),
+  writes one reply and closes. It fails closed: a malformed request changes no state and makes no vendor call. It
+  enforces the connection caps, per-peer rate limits, one paid call in flight (released before the reply is written)
+  and per-minute and per-day call budgets, checks the root-owned switch on every request, logs numbers and enumerated
+  words only, and on SIGTERM lets calls in flight finish and records any still open after the grace period as
+  ambiguous. `python -I -m safo.broker` wires it: the epoch, switch, key and `broker.yaml` readers, no-core and
+  not-dumpable hardening, a scrubbed environment, the checked HTTPS transport to the vendor, and recovery before the
+  first accept. The stop wakeup is a pipe, not a socket pair, so the unit's address-family or system-call filters never touch it; `scripts/broker_sandbox_check.py` (with an opt-in pytest wrapper, `SAFO_SANDBOX_CHECK=1`, that skips with its reason otherwise; every step has a timeout and the check a total deadline) runs the real start-up flow as a socket-activated user unit under the unit's hardening properties, in error-number and kill modes and with `~socketpair` filtered, and fails for an injected socket, socketpair or recvmsg call. Paid use stays disabled.
 
 - Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
   generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed

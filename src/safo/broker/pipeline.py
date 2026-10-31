@@ -127,6 +127,7 @@ class Pipeline:
         self.mono = mono
         self.deadline = deadline_seconds
         self.faults: Faults = faults or (lambda point: None)
+        self.spend_gate: Callable[[], None] = lambda: None  # the server sets it: raises Refused when paid use is off
 
     # -- the call
 
@@ -136,6 +137,7 @@ class Pipeline:
         self.faults("after_verify")
 
         def last_look() -> None:  # under the ledger lock, just before the spend: a key revoked a moment ago is caught
+            self.spend_gate()
             now = self.wall()
             verify_approval(payload, signature, self.trust, now=now, verifier=self.verifier)
             self.issuer.check(approval, now=now)

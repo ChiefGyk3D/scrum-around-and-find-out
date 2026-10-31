@@ -88,3 +88,38 @@ def verify_approval(
     if approval.principal != who.label:
         raise _bad("the key that signed is not the principal named in the approval")
     return approval
+
+
+def verify_dryrun(
+    payload: object,
+    signature: object,
+    trust: geminisign.Trust,
+    *,
+    now: dt.datetime,
+    verifier: Verifier = geminisign.verify,
+) -> geminisign.Verified:
+    """The key that signed a throw-away text in the dry-run namespace, or `Refused`. The same file checks, key window,
+    touch and PIN rules as a real approval, and the same sealed `ssh-keygen`; but the text is not parsed (it is only a
+    proof that the key works), and nothing is recorded or spent. A signature made for a real approval is refused here
+    by the namespace, and a dry-run signature is refused there."""
+    try:
+        when = plain_time(now, "now")
+    except RefusedError:
+        raise Refused("bad_request", "the time is not a plain time with a time zone") from None
+    if type(payload) is not str or type(signature) is not str:
+        raise _bad("the approval is not plain text")
+    if not 0 < len(payload) <= MAX_APPROVAL_BYTES or not 0 < len(signature) <= geminisign.SIGNATURE_BYTES:
+        raise _bad("the approval or its signature has a size the broker does not accept")
+    try:
+        raw = str.encode(payload, "ascii")
+    except UnicodeEncodeError:
+        raise _bad("the signed text is not plain ASCII") from None
+    try:
+        who = verifier(trust, raw, signature, namespace=geminisign.DRYRUN_NAMESPACE, now=when)
+    except (RefusedError, ConfigError, OSError, ValueError, UnicodeError):
+        if _revoked(trust, signature):
+            raise Refused("revoked", "the key that signed this approval has been revoked") from None
+        raise _bad() from None
+    if not who.hardware or who.user_present is not True:  # the dry run tests the hardware key, as a real approval does
+        raise _bad("a paid approval needs a hardware key and a touch")
+    return who
