@@ -286,7 +286,7 @@ check must leave the previous release active and the version file unchanged.
 What phase 5 puts in the tree, all testable without root and none of it run on a real machine yet:
 
 - `packaging/systemd/safo-broker.socket` and `packaging/systemd/safo-broker.service`: the two units from "The unit files
-  and their hardening", plus `ReadWritePaths=` for the state directory only, `ConditionPathExists=` on the root-owned
+  and their hardening", plus `ReadWritePaths=` for the state directory only, the bind mounts and hidden sockets described under the egress control, `ConditionPathExists=` on the root-owned
   switch, an `ExecStartPre` floor check (the `floor` module of the broker package, which refuses to start a release below
   `/etc/safo/broker-min-version`, the second layer behind the installer), and explicit start and stop timeouts.
   `tests/test_broker_units.py` checks every hardening line by name (removing one fails a test), runs `systemd-analyze verify` and `systemd-analyze security --offline` where the tool exists (the
@@ -303,6 +303,43 @@ What phase 5 puts in the tree, all testable without root and none of it run on a
 - `src/safo/broker/runbook.py`: the one-time root setup as full `ssh -t host 'sudo ...'` lines, each step with its blast
   radius and rollback. The paid key is typed at a hidden prompt on the remote terminal and never appears in the text. The
   switch is left off.
+
+**Egress control for the service user.** The units alone do not limit where the service can connect, so phase 5 also
+ships an nftables table keyed on the service user, three small units and a root helper (the `egress` module of the
+broker package, run from the signed release):
+
+- The table lets the service user open new connections only to port 443 of a named set of vendor IPv4 addresses.
+  Everything else from that user is logged and, in drop mode, dropped, including IPv6, DNS, loopback and every other
+  port. Other users are not matched.
+- A root timer runs the helper every five minutes. It reads the vendor host name from the root-owned
+  egress config file under `/etc/safo` (the name is in no unit and no command line), validates every address (public IPv4
+  only: no private, loopback, link-local, multicast, reserved or carrier-grade range; an empty, oversized or
+  malformed answer is refused), swaps the set in one flush-and-add transaction, and rewrites a fixed-size hosts view.
+  On any error nothing changes and the previous set and hosts view stay; an address that is not refreshed expires from
+  the set after an hour.
+- The broker unit bind-mounts that hosts view read-only over `/etc/hosts` and a files-only name service switch file read-only
+  over its usual place under `/etc`, and hides the resolver, bus, name-cache and private-manager socket directories, so the
+  service resolves the vendor name from the generated file and cannot ask another process to resolve anything else.
+- The broker unit is bound to the egress unit and ordered after it: it starts only with the rules loaded and stops when
+  they are stopped.
+- The shipped default is observe mode (log, then let through). After about a week with only vendor addresses in the log,
+  one line in the root-owned config switches to drop mode; the runbook has the steps, blast radius and rollback.
+
+What it does not do: a service that reaches the vendor front end can still use the key there (spend) and can use the
+vendor as a dead drop; abstract Unix sockets are shared with the host network namespace and are not hidden; a root-level
+compromise removes the control. The vendor-side key restriction in the runbook bounds what a leaked key can reach.
+Unverified until a run on a throwaway machine: that the two read-only bind mounts work under `ProtectSystem=strict` with
+`/etc/safo` read-only (the design reading says they do, because the source is read through the host path and the
+destination mounts are read-only); if they do not, move the hosts view to a directory under `/run` and change both
+paths together. Also unverified: the egress units under a real system, and nft loading on a real kernel (the ruleset is
+only syntax-checked, inside a private user and network namespace).
+
+**Unit policy.** The installer checks every release's units against a fixed policy after the signature verifies: units are
+read as printable ASCII with newline-only line breaks, no backslash anywhere (so no continuation or escape can make two
+readers disagree), each section once; every key must be pinned to exact values or be `Description` or `Documentation`
+(an allowlist, so an unknown key is refused); the ordering and dependency keys are pinned. Where `systemd-analyze` exists it
+also verifies the staged units, requires the broker service's hardening checks to resolve as set, and enforces an exposure
+budget per unit. Nothing is started.
 
 Beyond the design text, the installer also refuses: a signed tag object stored under a different tag name (the object
 carries its own name, which must equal the requested tag); a signature block that is not an SSH signature (so a GPG
