@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import socket
 import threading
 from collections.abc import Callable
@@ -17,7 +18,7 @@ from safo.broker import protocol
 from safo.broker.policy import BrokerRequest
 from safo.broker.server import PeerCred, Server, ServerConfig
 
-UID = 1000
+UID = os.getuid()  # tests that use a real socket are served as this very user, whoever runs them
 CRED = PeerCred(4242, UID, UID)
 
 

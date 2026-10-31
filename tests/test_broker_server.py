@@ -731,7 +731,7 @@ def test_a_peer_whose_credentials_cannot_be_read_is_closed_without_a_reply(tmp_p
 
 def test_the_wrong_uid_gets_no_work_done_even_with_a_valid_call(tmp_path: Path, env: Env) -> None:
     payload, signature = env.rig.approved(text_req())
-    env.server.peer_cred = lambda sock: PeerCred(1, 0, 0)
+    env.server.peer_cred = lambda sock: PeerCred(1, UID + 1, 0)
     listener, thread, _ = unix_server(tmp_path, env)
     client = connect(tmp_path)
     assert json.loads(split_frames(read_all(client))[0])["code"] == "unauthorized_peer"
@@ -1032,7 +1032,7 @@ def test_no_failure_path_logs_client_text_or_secrets(env: Env, caplog: pytest.Lo
     env.call(text_req(prompt=sentinel, job="SENTINELJOB2"))
     text = "\n".join(r.getMessage() for r in caplog.records if r.name == "safo.broker")
     assert text and "SENTINEL" not in text and "quote" not in text
-    assert "op=call" in text and "code=" in text and "uid=1000" in text and "RuntimeError" in text
+    assert "op=call" in text and "code=" in text and f"uid={UID}" in text and "RuntimeError" in text
 
 
 def test_the_log_takes_only_allowlisted_fields_and_plain_values(caplog: pytest.LogCaptureFixture) -> None:
@@ -1330,3 +1330,8 @@ def test_the_stop_pipe_is_closed_when_serve_returns_and_a_late_stop_writes_nowhe
     assert written == [write_fd]
     env.server.close()  # idempotent
     assert closed.count(read_fd) == 1
+
+
+def test_the_real_socket_tests_are_served_as_the_user_who_runs_them() -> None:
+    assert UID == os.getuid()  # a runner's uid is rarely 1000: a fixed number made six of these fail in CI
+    assert peer_credentials(socket.socketpair()[0]).uid == UID
