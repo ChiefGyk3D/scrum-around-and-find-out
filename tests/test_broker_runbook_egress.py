@@ -63,7 +63,7 @@ def test_the_drop_step_has_a_rollback_to_observe_and_names_its_blast_radius() ->
 
 def test_the_observe_step_reads_the_log_and_the_set_without_changing_anything() -> None:
     assert any("journalctl -k" in x and "safo-broker-egress-observe" in x for x in lines())
-    assert any("nft list set inet safo_broker_egress vendor_v4" in x for x in lines())
+    assert any("nft list table inet safo_broker_egress" in x for x in lines())
 
 
 def test_the_vendor_restriction_section_is_dated_and_marks_what_is_unverified() -> None:
@@ -93,3 +93,14 @@ def test_the_installer_helper_is_staged_hashed_and_installed_from_one_root_owned
     assert stage + "safo-broker-egress" in final
     assert "reviewed/checkout" not in final
     assert any("sha256sum" in x and stage + "safo-broker-egress" in x for x in cmds)
+
+
+def test_the_observe_criterion_is_an_empty_log_because_vendor_traffic_is_accepted_before_logging() -> None:
+    text = doc()
+    assert "never appears in this log" in text
+    assert "every destination it shows is a vendor address" not in text
+    assert "nothing unexplained" in text
+    # explicit checks before and after the switch to drop mode
+    assert any("nft list table inet safo_broker_egress" in x for x in lines())
+    assert any("systemctl status safo-broker-egress-refresh.timer" in x or "list-timers" in x for x in lines())
+    assert "deliberately blocked probe" in text

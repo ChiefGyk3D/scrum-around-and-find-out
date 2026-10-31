@@ -18,7 +18,6 @@ table inet safo_broker_egress {
 	chain out {
 		type filter hook output priority filter; policy accept;
 		meta skuid != @SERVICE_UID@ return
-		ct state established,related accept
 		ip daddr @vendor_v4 tcp dport 443 counter accept
 		@FINAL_RULE@
 	}

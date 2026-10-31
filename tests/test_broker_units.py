@@ -79,7 +79,7 @@ def test_service_has_no_forbidden_key() -> None:
     binds = [v for s, k, v in triples if k in ("BindPaths", "BindReadOnlyPaths")]
     assert binds[0] == "/etc/safo/egress/hosts:/etc/hosts"
     assert [k for s, k, v in triples if k == "BindReadOnlyPaths"]
-    assert [v for s, k, v in triples if k == "RestrictAddressFamilies"] == ["AF_UNIX AF_INET"]
+    assert [v for s, k, v in triples if k == "RestrictAddressFamilies"] == ["AF_INET"]
     # no address allow or deny list (the vendor addresses are not fixed; the design says so)
     assert not {"IPAddressAllow", "IPAddressDeny"} & keys
 
@@ -280,3 +280,9 @@ def test_the_egress_units_run_the_separately_installed_root_helper_not_the_relea
             assert line.lstrip("-").startswith("/usr/local/sbin/safo-broker-egress "), line
             assert "/opt/safo-broker" not in line
             assert "--rules" not in line
+
+
+def test_the_broker_cannot_create_or_connect_unix_sockets() -> None:
+    """It serves from the listener systemd hands it and talks to the vendor over IPv4 only, so no other local service
+    can be asked to make a connection for it. A server that needs Unix sockets needs a reviewed policy change."""
+    assert values("safo-broker.service", "RestrictAddressFamilies") == ["AF_INET"]

@@ -233,10 +233,9 @@ def test_the_ruleset_allows_only_tcp_443_to_the_set_and_gives_the_uid_no_dns() -
     accepts = [
         x.strip() for x in rules.splitlines() if x.strip().endswith(" accept") and not x.strip().startswith("type ")
     ]
-    assert accepts == [
-        "ct state established,related accept",
-        "ip daddr @vendor_v4 tcp dport 443 counter accept",
-    ]
+    # no established/related shortcut: a connection opened while the table was missing must not outlive the rebuild
+    assert accepts == ["ip daddr @vendor_v4 tcp dport 443 counter accept"]
+    assert "ct state" not in rules
     assert "dport 53" not in rules
     assert "ip6" not in rules  # IPv6 is not allowed, so the final rule drops it
     assert "table inet" in rules  # one table covers both families

@@ -207,18 +207,22 @@ def steps(login: str) -> tuple[Step, ...]:
             "This loads an nftables table that matches only the broker's service user (port 443 to a set of vendor "
             "addresses that a timer refreshes every five minutes; no DNS and no IPv6 for that user) and writes the "
             "hosts view the broker unit bind-mounts. In observe mode nothing is blocked. Run it before the socket "
-            "step, and read the two check lines at the end: the set must hold addresses, and after some paid-path "
-            "dry runs the log must show no unexpected destinations.",
+            "step. The checks at the end: the table must exist and the set must hold addresses, and the timer must "
+            "be scheduled. Traffic to the vendor set is accepted before the logging rule, so it never appears in "
+            "this log; the log shows only what the rules would drop.",
             (
                 ssh("systemctl enable --now safo-broker-egress.service safo-broker-egress-refresh.timer"),
-                ssh("nft list set inet safo_broker_egress vendor_v4"),
+                ssh("nft list table inet safo_broker_egress"),
+                ssh("systemctl list-timers safo-broker-egress-refresh.timer"),
                 ssh("journalctl -k --since -1day --grep safo-broker-egress-observe"),
             ),
             "Adds one firewall table that applies only to the service user's own connections, and a timer. Other "
             "users and the rest of the machine are not matched. The service user does not exist as a login and "
             "nothing runs as it yet, so nothing is affected until the broker starts.",
             (ssh("systemctl disable --now safo-broker-egress-refresh.timer safo-broker-egress.service"),),
-            "Stopping the egress service deletes the table. A reboot also clears it when the service is disabled.",
+            "Stopping the egress service deletes the table. A reboot also clears it when the service is disabled. If "
+            "something else reloads the firewall and removes the table, the next timer run (within five minutes) "
+            "puts it back; check the table again after any firewall change.",
         ),
         Step(
             "Enable the socket",
@@ -311,9 +315,13 @@ def render(*, maintainer: str) -> str:
         "",
         "## Observe, then drop",
         "",
-        "Keep the egress control in observe mode for about a week of real use, and read the log line from the egress "
-        "step. When every destination it shows is a vendor address, run the drop-mode step. If a call fails in drop "
-        "mode, the rollback line puts it back in observe mode at once.",
+        "Keep the egress control in observe mode for about a week of real use. Because vendor traffic is accepted "
+        "before the logging rule, a clean week is an empty log: read the log line from the egress step and "
+        "investigate every entry until there is nothing unexplained. Also check that the table exists, the set "
+        "holds addresses and the timer is scheduled. Then run the drop-mode step, and afterwards make a deliberately "
+        "blocked probe: a connection from the service user to a destination outside the set, which must now be "
+        "dropped and logged with the drop prefix. If a call fails in drop mode, the rollback line puts it back in "
+        "observe mode at once.",
         "",
     ]
     return "\n".join(out)

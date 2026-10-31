@@ -4,7 +4,9 @@
 # nftables ruleset keyed on this unit's user (port 443 to a refreshed set of vendor addresses only, no DNS, no IPv6) and
 # writes the hosts view bind-mounted over /etc/hosts below, so this service resolves the vendor name without DNS. The
 # service is bound to that unit (it starts only with it and stops when it stops) and cannot reach a resolver, bus or name-
-# cache socket: those directories are inaccessible and /etc/nsswitch.conf is a files-only copy.
+# cache socket: those directories are inaccessible and /etc/nsswitch.conf is a files-only copy. It also cannot create or
+# connect Unix sockets at all (AF_INET only): it serves from the listener systemd hands it, so no other local service can
+# be asked to make a connection for it. A server design that needs Unix sockets needs a reviewed change of this line.
 # There is no start condition on the root-owned enable switch: the broker reads the switch on every request, answers
 # status and dry run while it is absent, and answers every paid call as disabled before it writes the ledger or reads the key.
 [Unit]
@@ -47,7 +49,7 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictAddressFamilies=AF_INET
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

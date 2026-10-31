@@ -50,7 +50,7 @@ REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Service", "ProtectControlGroups", "yes"),
     ("Service", "ProtectClock", "yes"),
     ("Service", "ProtectHostname", "yes"),
-    ("Service", "RestrictAddressFamilies", "AF_UNIX AF_INET"),
+    ("Service", "RestrictAddressFamilies", "AF_INET"),
     ("Service", "RestrictNamespaces", "yes"),
     ("Service", "RestrictRealtime", "yes"),
     ("Service", "RestrictSUIDSGID", "yes"),

@@ -49,7 +49,9 @@ FINAL_RULES = {
 }
 # The service user may open new TCP connections to port 443 of the addresses in the set and nothing else: no DNS (the
 # hosts view names the vendor), no IPv6 (the set is IPv4 only, so the final rule catches it), no loopback, no other
-# port. Other users are not matched. Vendor traffic is accepted before the logging rule, so it never appears in the log.
+# port, and no established/related shortcut (every packet is judged by the destination rule, so a connection opened
+# while the table was missing does not survive its rebuild). Other users are not matched. Vendor traffic is accepted
+# before the logging rule, so it never appears in the log.
 RULES_TEMPLATE = """table inet safo_broker_egress
 delete table inet safo_broker_egress
 table inet safo_broker_egress {
@@ -61,7 +63,6 @@ table inet safo_broker_egress {
 	chain out {
 		type filter hook output priority filter; policy accept;
 		meta skuid != @SERVICE_UID@ return
-		ct state established,related accept
 		ip daddr @vendor_v4 tcp dport 443 counter accept
 		@FINAL_RULE@
 	}
