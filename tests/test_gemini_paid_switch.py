@@ -219,6 +219,7 @@ def test_issuing_an_approval_is_refused_while_it_is_off_even_without_the_cli(
     store = gemini.open_store(gemini_locations, cfg.ledger, str(gemini_locations.home / "key"), "test-key-a")
     with pytest.raises(RefusedError, match="paid use is disabled"):
         store.issue(
+            prompt="Summarize the public advisories.",
             model=MODEL,
             max_usd=Decimal("1"),
             job="j",

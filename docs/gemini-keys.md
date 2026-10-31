@@ -154,7 +154,7 @@ requirement, and when a Tier 2 credential is enrolled. It fails when no usable k
    safo --dry-run gemini approve --model gemini-3.6-flash --prompt-file prompt.txt --max-output-tokens 1000 --max-usd 1.50 --job key-test --quote "key test" --quoted-at 2026-10-29T15:00:00Z
    ```
 
-   At a terminal, type `approve key-test`, touch the key (and give the PIN if you set one). The dry run signs a throw-away
+   At a terminal, read the whole prompt and digest it prints (they are what a real approval signs; prompts over 4000 characters are refused), type `approve key-test`, touch the key (and give the PIN if you set one). The dry run signs a throw-away
    text in another namespace (`safo-gemini-approval-dryrun`), verifies it against the enrolled key, prints the label,
    fingerprint and whether it saw the touch and the PIN, and writes no record and no ledger row. Use a current
    `--quoted-at` (within the last 24 hours, UTC).
@@ -206,8 +206,9 @@ A key is lost or stolen: **revoke first, investigate second.**
 - [ ] Fingerprints written down off this machine.
 - [ ] The revocation file exists (it may be empty; without it every approval is refused).
 - [ ] A `--dry-run` approval worked with each key.
-- [ ] You know the rule: **touch the key only after reading the quota line and the quote, and never for a prompt you did
-      not start.**
+- [ ] You know the rule: **touch the key only after reading the quota line, the quote and the whole prompt and its digest
+      and never for a prompt you did not start.** The signature covers that exact prompt (payload version 2);
+      an approval from before that change is refused and needs a fresh one.
 - [ ] The vendor-side monthly limit is still set (it is the backstop for everything this gate cannot see).
 
 ## What the tests could not prove (software key versus a real sk key)

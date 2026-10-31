@@ -18,6 +18,7 @@ has said yes in his own message, and he touches the key only after reading the q
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import os
 import re
@@ -32,6 +33,7 @@ from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.gemini import (
     DEFAULT_TTL_MINUTES,
+    MAX_APPROVED_PROMPT_CHARS,
     MAX_PROMPT_BYTES,
     ApprovalStore,
     GeminiConfig,
@@ -46,8 +48,10 @@ from safo.gemini import (
     money,
     open_store,
     paid_quota,
+    prompt_binding,
     quota_line,
     snapshot,
+    too_long,
     usd_amount,
 )
 from safo.modes import LocalMode, register_local
@@ -163,10 +167,22 @@ def approve_flow(
     pass anything else. The ceiling flag comes from the ledger here, never from the caller."""
     if not ctx.dry_run:
         gemini.require_paid()  # a dry run spends nothing and writes nothing, so it can still test a key
-    line = quota_line(cfg, req, ctx.now)  # first: an approval is refused when the line cannot be produced
+    # One plain copy of the request and the clock, taken once: the display, the digest and the signature all come from
+    # these, never from the caller's objects again.
+    req = gemini.canonical_request(req)
+    now = gemini.plain_time(ctx.now, "now")
+    snapshot_raw = gemini.prompt_bytes(req.prompt)  # exact str only; the bytes are the single source
+    if not snapshot_raw:
+        raise ConfigError("approve needs --prompt-file: an approval covers the exact prompt that `ask` will read")
+    text = bytes.decode(snapshot_raw, "utf-8")
+    req = dataclasses.replace(req, prompt=text)
+    if len(text) > MAX_APPROVED_PROMPT_CHARS:
+        raise RefusedError(too_long(len(text)))
+    digest, size = prompt_binding(text)  # the same bytes `ask` sends, from the same file
+    line = quota_line(cfg, req, now)  # first: an approval is refused when the line cannot be produced
     ctx.say(line)
     amount = usd_amount(args.max_usd, "--max-usd")
-    estimate = estimate_usd(cfg, req, ctx.now)
+    estimate = estimate_usd(cfg, req, now)
     if estimate > cfg.job_cap:
         raise RefusedError(
             f"the estimate {money(estimate)} USD is over the {money(cfg.job_cap)} USD job cap; lower the output limit"
@@ -175,7 +191,7 @@ def approve_flow(
         raise RefusedError(
             f"the estimate {money(estimate)} USD is over the amount to be approved ({money(amount)} USD)"
         )
-    beyond = paid_quota(cfg, snapshot(Ledger(cfg.ledger).read()), req, ctx.now).beyond
+    beyond = paid_quota(cfg, snapshot(Ledger(cfg.ledger).read()), req, now).beyond
     try:
         quoted = dt.datetime.strptime(args.quoted_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.UTC)
     except ValueError:
@@ -187,13 +203,20 @@ def approve_flow(
         )
     phrase = f"approve {req.job}"
     ctx.say(f"quote of his message ({args.quoted_at}): {args.quote}")
+    ctx.say(f"prompt: {len(text)} characters, {size} bytes, SHA-256 {digest}")
+    ctx.say("--- the WHOLE prompt starts (line by line; non-ASCII and control characters are escaped) ---")
+    for number, row in enumerate(text.split("\n"), 1):
+        ctx.say(f"{number:4d}| {row!a}")
+    ctx.say("--- the prompt ends ---")
     ctx.say(
         f"you are approving up to {money(amount)} USD on {req.model} for job {req.job}"
         + (" and it PASSES the monthly ceiling" if beyond else "")
     )
     ctx.say(
-        "your security key will blink next. Touch it only because you have just read the quota line and the quote "
-        "above and they are right; if you did not start this, do not touch it."
+        "your security key will blink next. Touch it only because you have just read the quota line, the quote and "
+        "the whole prompt and its digest above and they are right; the signature covers that exact prompt and no "
+        "other. "
+        "If you did not start this, do not touch it."
     )
     if confirm(f"type exactly `{phrase}` to approve, anything else cancels: ").strip() != phrase:
         raise RefusedError("not confirmed; no approval record was written")
@@ -205,7 +228,7 @@ def approve_flow(
             raise RefusedError("signing is not set up (signing.key and signing.principal in gemini.yaml)")
         text = geminisign.canonical({"dry_run": True, "job": req.job})
         armor = geminisign.sign(store.signing_key, text.encode(), geminisign.DRYRUN_NAMESPACE, ctx.env)
-        who = geminisign.verify(trust, text.encode(), armor, namespace=geminisign.DRYRUN_NAMESPACE, now=ctx.now)
+        who = geminisign.verify(trust, text.encode(), armor, namespace=geminisign.DRYRUN_NAMESPACE, now=now)
         if who.label != store.signing_principal:
             raise RefusedError("the key that signed is not the principal named in gemini.yaml")
         ctx.say(
@@ -220,9 +243,10 @@ def approve_flow(
         job=req.job,
         quote=args.quote,
         quoted_at=quoted,
-        now=ctx.now,
+        now=now,
         ttl_minutes=args.ttl_minutes,
         beyond_ceiling=beyond,
+        prompt=text,
         issue_ref=args.issue,
     )
     ctx.say(

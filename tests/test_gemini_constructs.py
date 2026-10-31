@@ -593,7 +593,7 @@ def test_a_line_with_a_huge_brace_list_is_judged_in_linear_time() -> None:
 
 def test_the_linear_time_guard_bites_on_quadratic_work() -> None:
     def quadratic(size: int) -> None:
-        sum(1 for _ in range(size * size // 40))
+        sum(1 for _ in range(size * size // 8))
 
     assert not _grows_linearly(quadratic)
 

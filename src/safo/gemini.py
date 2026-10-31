@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import hashlib
+import hmac
 import http.client
 import importlib
 import json
@@ -64,6 +65,8 @@ RECORD_ID = re.compile(r"[A-Za-z0-9_-]{8,64}")
 JOB_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 PLAIN_KEY = re.compile(r"[\x21-\x7e]{16,512}")
 MAX_PROMPT_BYTES = 200_000
+APPROVAL_VERSION = 2  # version 1 signed no prompt digest: it is refused, never read as unbound (#217)
+PROMPT_DIGEST = re.compile(r"[0-9a-f]{64}")
 MAX_QUOTE = 500
 MAX_TTL_MINUTES = 60  # a signed approval is short-lived: the touch happens just before the job
 DEFAULT_TTL_MINUTES = 10  # the default; the window in which a replay against a rewound ledger could work
@@ -613,6 +616,9 @@ class Snapshot:
         tuple[str, str, int], ...
     ] = ()  # (nonce, principal, position in `order`) of every approval_issued row
     used: tuple[tuple[str, str], ...] = ()  # (nonce, principal) of every approval a call has spent
+    issued_prompts: tuple[
+        tuple[str, int], ...
+    ] = ()  # (prompt digest, prompt bytes) of each approval_issued row, same order as `issued`; ("", -1) when absent
 
 
 def _bad(number: int) -> RefusedError:
@@ -627,6 +633,7 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
     order = tuple(str(row["hash"]) for row in rows if isinstance(row.get("hash"), str))
     heads = frozenset(order)
     issued: list[tuple[str, str, int]] = []
+    issued_prompts: list[tuple[str, int]] = []
     for number, row in enumerate(rows, 1):
         kind = row.get("type")
         try:
@@ -653,6 +660,10 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
                 if not isinstance(nonce, str) or not isinstance(principal, str):
                     raise ValueError("issued")
                 issued.append((nonce, principal, order.index(row["hash"]) if row.get("hash") in heads else -1))
+                digest, size = row.get("prompt_sha256"), row.get("prompt_bytes")  # a row from before #217 has neither
+                issued_prompts.append(
+                    (digest if type(digest) is str else "", size if type(size) is int and size >= 0 else -1)
+                )
             elif kind == "approval_used":
                 nonce, principal = row["nonce"], row["principal"]
                 if not isinstance(nonce, str) or not isinstance(principal, str) or any(n == nonce for n, _ in used):
@@ -684,7 +695,7 @@ def snapshot(rows: list[dict[str, Any]]) -> Snapshot:
         calls.append(call)
     if ends:
         raise _bad(0)  # an end with no start
-    return Snapshot(tuple(calls), tuple(manual), heads, order, tuple(issued), tuple(used))
+    return Snapshot(tuple(calls), tuple(manual), heads, order, tuple(issued), tuple(used), tuple(issued_prompts))
 
 
 # -- quota lines and the free-tier gate ----------------------------------------------------------------------------
@@ -798,6 +809,94 @@ def paid_quota(cfg: GeminiConfig, snap: Snapshot, req: Request, now: dt.datetime
     return PaidQuota(req.model, month_spent(snap, now), estimate_usd(cfg, req, now), cfg.job_cap, cfg.month_cap)
 
 
+MAX_APPROVED_PROMPT_CHARS = 4000  # the signer reads the whole prompt, so an approval covers no more than this
+
+
+def too_long(characters: int) -> str:
+    return (
+        f"the prompt is {characters} characters; an approval covers at most {MAX_APPROVED_PROMPT_CHARS}, because the "
+        "person signing must be able to read all of it. Shorten the prompt or split the job"
+    )
+
+
+def prompt_bytes(prompt: str) -> bytes:
+    """The one snapshot of a prompt: its strict UTF-8 bytes (a lone surrogate is a refusal)."""
+    if type(prompt) is not str:
+        raise RefusedError("the prompt is not plain text, so nothing was sent")
+    try:
+        return str.encode(prompt, "utf-8")
+    except UnicodeEncodeError:
+        raise RefusedError("the prompt is not valid text (a lone surrogate), so nothing was approved or sent") from None
+
+
+def prompt_binding(prompt: str) -> tuple[str, int]:
+    """What a signed approval covers: the lowercase hex SHA-256 of the exact UTF-8 bytes of the prompt the wrapper
+    sends, and their count. No normalization, no trimming: a changed byte, a trailing newline or another Unicode form
+    of the same text is a different prompt (docs/gemini.md)."""
+    try:
+        raw = str.encode(prompt, "utf-8")
+    except UnicodeEncodeError:
+        raise RefusedError("the prompt is not valid text (a lone surrogate), so nothing was approved or sent") from None
+    return hashlib.sha256(raw).hexdigest(), len(raw)
+
+
+def plain_str(value: object, name: str) -> str:
+    """A caller's string as a plain `str`: exact type only, copied through bytes so nothing of the caller's object is
+    left. The refusal names the field and never echoes the value."""
+    if type(value) is not str:
+        raise RefusedError(f"{name} is not a plain text value, so nothing was done")
+    try:
+        return bytes.decode(str.encode(value, "utf-8"), "utf-8")
+    except UnicodeEncodeError:
+        raise RefusedError(f"{name} is not valid text, so nothing was done") from None
+
+
+def plain_int(value: object, name: str) -> int:
+    """A caller's integer as a plain `int`: exact type (a bool or a subclass is refused), copied through bytes."""
+    if type(value) is not int:
+        raise RefusedError(f"{name} is not a plain whole number, so nothing was done")
+    try:
+        return int.from_bytes(int.to_bytes(value, 8, "big", signed=True), "big", signed=True)
+    except OverflowError:
+        raise RefusedError(f"{name} is out of range, so nothing was done") from None
+
+
+def plain_time(value: object, name: str) -> dt.datetime:
+    """A caller's time as a plain UTC `datetime`: exact type and a plain fixed-offset zone."""
+    if type(value) is not dt.datetime or type(value.tzinfo) is not dt.timezone:
+        raise RefusedError(f"{name} is not a plain time with a time zone, so nothing was done")
+    return dt.datetime.astimezone(value, dt.UTC)
+
+
+def canonical_request(req: Request) -> Request:
+    """The one entry copy of a request, built from base types only. Every later use reads this copy and never the
+    caller's object (a frozen dataclass can still be altered, and a `str` or `int` subclass can lie in ==, !=, hash,
+    format, str, bool, len and index). Anything but the exact expected types is refused (#217)."""
+    if type(req) is not Request:
+        raise RefusedError("the request is not a plain request, so nothing was done")
+    fields = {name: object.__getattribute__(req, name) for name in ("model", "prompt", "tier", "job", "approval")}
+    out_tokens = object.__getattribute__(req, "max_output_tokens")
+    return Request(
+        model=plain_str(fields["model"], "model"),
+        prompt=bytes.decode(prompt_bytes(fields["prompt"]), "utf-8"),
+        tier=plain_str(fields["tier"], "tier"),
+        job=plain_str(fields["job"], "job"),
+        approval=plain_str(fields["approval"], "approval"),
+        max_output_tokens=plain_int(out_tokens, "max_output_tokens"),
+    )
+
+
+def digests_equal(left: object, right: object) -> bool:
+    """Equality for the prompt digest: both sides must be exactly `str` (not a subclass that can bend ==, != or
+    encode), compared as bytes through the base type's own methods and a constant-time compare."""
+    if type(left) is not str or type(right) is not str:
+        return False
+    try:
+        return hmac.compare_digest(str.encode(left, "utf-8"), str.encode(right, "utf-8"))
+    except UnicodeEncodeError:
+        return False
+
+
 def _check_request(cfg: GeminiConfig, req: Request) -> None:
     if req.tier not in TIERS:
         raise RefusedError("the tier is free or paid")
@@ -817,6 +916,8 @@ def _check_request(cfg: GeminiConfig, req: Request) -> None:
 
 def quota_line(cfg: GeminiConfig, req: Request, now: dt.datetime) -> str:
     """The line printed before any approval and before any call. It cannot be produced without the numbers."""
+    req = canonical_request(req)
+    now = plain_time(now, "now")
     _check_request(cfg, req)
     snap = snapshot(Ledger(cfg.ledger).read())
     if req.tier == "free":
@@ -915,6 +1016,8 @@ class Approval:
     principal: str = ""  # the enrolled key that signed it
     ledger_head: str = ""  # the ledger chain head it was signed against
     hardware: bool = False
+    prompt_sha256: str = ""  # SHA-256 (hex) of the exact prompt bytes the signature covers
+    prompt_bytes: int = 0  # and their count
 
 
 def open_store(
@@ -937,8 +1040,9 @@ class ApprovalStore:
     (see `safo.geminisign`). A record with no signature, or any older unsigned format, authorizes nothing. Single use:
     the nonce is spent in the hash-chained ledger (authoritative) and by a `.used` marker beside the file.
 
-    A record is the maintainer's signature over his quoted words, the amount, the job and a ledger head. The quote is
-    there so he can check afterwards what he approved."""
+    A record is the maintainer's signature over his quoted words, the amount, the job, a ledger head and the digest and
+    length of the exact prompt (payload version 2, #217). The quote is there so he can check afterwards what he
+    approved."""
 
     def __init__(
         self,
@@ -967,11 +1071,31 @@ class ApprovalStore:
         now: dt.datetime,
         ttl_minutes: int,
         beyond_ceiling: bool,
+        prompt: str,
         issue_ref: str = "",
     ) -> Approval:
         from safo import geminisign
 
         require_paid()
+        # One plain copy of every argument (exact types only); nothing below reads the caller's objects (#217).
+        model = plain_str(model, "model")
+        job = plain_str(job, "job")
+        quote = plain_str(quote, "quote")
+        issue_ref = plain_str(issue_ref, "issue_ref")
+        if type(max_usd) is not Decimal:
+            raise RefusedError("max_usd is not a plain decimal amount, so nothing was done")
+        max_usd = Decimal(format(max_usd, "f")) if max_usd.is_finite() else max_usd
+        ttl_minutes = plain_int(ttl_minutes, "ttl_minutes")
+        if type(beyond_ceiling) is not bool:
+            raise RefusedError("beyond_ceiling is not a plain true or false, so nothing was done")
+        beyond_ceiling = bool.__and__(beyond_ceiling, True)
+        quoted_at = plain_time(quoted_at, "quoted_at")
+        now = plain_time(now, "now")
+        prompt_raw = prompt_bytes(prompt)
+        prompt_text = bytes.decode(prompt_raw, "utf-8")
+        prompt_digest, prompt_size = prompt_binding(prompt_text)
+        if len(prompt_text) > MAX_APPROVED_PROMPT_CHARS:
+            raise RefusedError(too_long(len(prompt_text)))
         if not MODEL_NAME.fullmatch(model):
             raise ConfigError("approval: the model name is not a plain model name")
         if not JOB_NAME.fullmatch(job):
@@ -999,7 +1123,7 @@ class ApprovalStore:
             head = ledger.ensure_chain(stamp(now))  # the chain must exist so the signature has something to bind
         nonce = secrets.token_hex(8)
         data = {
-            "version": 1,
+            "version": APPROVAL_VERSION,
             "nonce": nonce,
             "model": model,
             "max_usd": str(max_usd),
@@ -1012,6 +1136,8 @@ class ApprovalStore:
             "ledger_head": head,
             "issue": issue_ref[:80],
             "principal": self.signing_principal,
+            "prompt_sha256": prompt_digest,
+            "prompt_bytes": prompt_size,
         }
         payload = geminisign.canonical(data)
         armor = geminisign.sign(self.signing_key, payload.encode(), geminisign.NAMESPACE, self.env)
@@ -1035,6 +1161,8 @@ class ApprovalStore:
                     "model": model,
                     "max_usd": str(max_usd),
                     "expires_at": data["expires_at"],
+                    "prompt_sha256": prompt_digest,
+                    "prompt_bytes": prompt_size,
                 }
             )
         return record
@@ -1068,8 +1196,27 @@ class ApprovalStore:
         )  # raises RefusedError when it does not verify
         try:
             data = loads(text)
-            if not isinstance(data, dict) or geminisign.canonical(data) != text or data.get("version") != 1:
+            if not isinstance(data, dict) or geminisign.canonical(data) != text:
                 raise ValueError("record")
+            version = data.get("version")
+            if type(version) is int and version == 1:
+                raise RefusedError(
+                    "this approval is in an older format (version 1) with no prompt binding, so it authorizes nothing; "
+                    "ask for a fresh one"
+                )
+            if type(version) is not int or version != APPROVAL_VERSION:
+                raise RefusedError("this approval is of a version this program does not accept; ask for a fresh one")
+            digest, size = data.get("prompt_sha256"), data.get("prompt_bytes")
+            if (
+                type(digest) is not str
+                or PROMPT_DIGEST.fullmatch(digest) is None
+                or type(size) is not int
+                or not 0 <= size <= MAX_PROMPT_BYTES
+            ):
+                raise RefusedError(
+                    "this approval carries no valid prompt digest and length (prompt_sha256, prompt_bytes), so it is "
+                    "not bound to a prompt and authorizes nothing; ask for a fresh one"
+                )
             if data["nonce"] != record_id or data["principal"] != who.label:
                 raise ValueError("nonce")
             quoted = _parse_stamp(data["quoted_at"])
@@ -1098,6 +1245,8 @@ class ApprovalStore:
                 who.label,
                 data["ledger_head"],
                 who.hardware,
+                digest,
+                size,
             )
         except (ValueError, KeyError, ConfigError):
             raise RefusedError("the signed approval is malformed or outside the caps; ask for a fresh one") from None
@@ -1127,11 +1276,24 @@ def ledger_problem(record: Approval, snap: Snapshot) -> str | None:
             "this approval was signed against a ledger head that is not in the current ledger chain: "
             "the ledger was replaced or rewound; ask for a fresh approval"
         )
-    issued = next((pos for nonce, who, pos in snap.issued if nonce == record.id and who == record.principal), None)
-    if issued is None or issued <= snap.order.index(record.ledger_head):
+    found = next(
+        (
+            (pos, prompt)
+            for (nonce, who, pos), prompt in zip(snap.issued, snap.issued_prompts, strict=False)
+            if nonce == record.id and who == record.principal
+        ),
+        None,
+    )
+    if found is None or found[0] <= snap.order.index(record.ledger_head):
         return (
             "this approval's own issuance row is not in the ledger chain after the head it was signed against: "
             "the ledger was rewound; ask for a fresh approval"
+        )
+    digest, size = found[1]
+    if not digests_equal(digest, record.prompt_sha256) or size != record.prompt_bytes:
+        return (
+            "this approval's issuance row in the ledger does not carry the prompt digest and length the approval "
+            "was signed with; ask for a fresh approval"
         )
     return None
 
@@ -1169,6 +1331,12 @@ def _gate_paid(
         raise RefusedError(problem)
     if now >= record.expires_at:
         raise RefusedError("this approval record has expired; ask for a fresh one")
+    digest, size = prompt_binding(req.prompt)  # recomputed from the prompt about to be sent, never from the record
+    if not digests_equal(record.prompt_sha256, digest) or record.prompt_bytes != size:
+        raise RefusedError(
+            "this approval does not cover this prompt: it was signed for different prompt bytes; "
+            "an approval is for the exact prompt the maintainer saw, so ask for a fresh one"
+        )
     if record.model != req.model:
         raise RefusedError(f"this approval record is for another model than {req.model}")
     if not req.job or record.job != req.job:
@@ -1483,14 +1651,24 @@ def _reason(body: object) -> str:
     return f" {status}" if isinstance(status, str) and re.fullmatch(r"[A-Z_]{3,40}", status) else ""
 
 
-def _post(cfg: GeminiConfig, req: Request, key: str) -> tuple[int, Mapping[str, str], bytes]:
-    """One POST. A failure before the request leaves is RefusedError; after it, the caller treats it as unknown."""
+def _post(
+    cfg: GeminiConfig, req: Request, key: str, prompt: bytes, approved: str | None = None
+) -> tuple[int, Mapping[str, str], bytes]:
+    """One POST. A failure before the request leaves is RefusedError; after it, the caller treats it as unknown.
+
+    `prompt` is the one snapshot of the prompt bytes taken at the start of `ask`; the body is built from it and from
+    nothing else. For a paid call `approved` is the digest the approval was signed with, and the prompt text found in
+    the finished body is hashed once more: a body that differs from what was approved is refused before it is sent."""
     body = json.dumps(
         {
-            "contents": [{"role": "user", "parts": [{"text": req.prompt}]}],
+            "contents": [{"role": "user", "parts": [{"text": bytes.decode(prompt, "utf-8")}]}],
             "generationConfig": {"maxOutputTokens": req.max_output_tokens or cfg.max_output_tokens},
         }
     ).encode()
+    if approved is not None:
+        text = loads(body)["contents"][0]["parts"][0]["text"]
+        if not digests_equal(hashlib.sha256(str.encode(text, "utf-8")).hexdigest(), approved):
+            raise RefusedError("the request body is not the prompt the approval covers; nothing was sent")
     conn = _connection(cfg)
     try:
         try:
@@ -1526,6 +1704,11 @@ def ask(
     now: dt.datetime,
 ) -> Reply:
     """Send one request, once, or say which gate stopped it."""
+    # One plain copy of every field, taken once at the entry. Nothing below reads the caller's object again, and the
+    # body is built from the prompt bytes snapshotted here (#217).
+    req = canonical_request(req)
+    now = plain_time(now, "now")
+    prompt_raw = str.encode(req.prompt, "utf-8")
     if req.tier == "paid":
         require_paid()  # before anything else: the paid path is off unless the root-owned switch says it is on
     _check_request(cfg, req)
@@ -1558,6 +1741,8 @@ def ask(
                     "tier": 1,
                     "key_kind": "hardware" if record.hardware else "software",
                     "job": req.job,
+                    "prompt_sha256": record.prompt_sha256,
+                    "prompt_bytes": record.prompt_bytes,
                 }
             )
         else:
@@ -1603,7 +1788,7 @@ def ask(
             return "(the quota line could not be rebuilt)"
 
     try:
-        status, headers, raw = _post(cfg, req, key)
+        status, headers, raw = _post(cfg, req, key, prompt_raw, record.prompt_sha256 if record else None)
     except RefusedError:
         finish("not_sent", None, None, None, Decimal(0))
         raise

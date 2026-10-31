@@ -374,16 +374,18 @@ no key.
 ## What a signed approval binds
 
 The approval keeps the shape `safo gemini approve` makes today (canonical JSON, signed with `ssh-keygen -Y sign` in the `safo-gemini-approval`
-namespace) and the broker verifies the same properties. The design assumes #217 lands first and adds the prompt
-digest (`prompt_sha256`, the SHA-256 of the exact prompt bytes, UTF-8) on both tiers. The broker adds a schema
-`version: 2` with the fields a priced image call needs, so that nothing which changes the cost is outside the
-signature:
+namespace) and the broker verifies the same properties. #217 has shipped the prompt binding: payload `version: 2` carries
+`prompt_sha256` (lowercase hex SHA-256 of the exact UTF-8 prompt bytes) and `prompt_bytes` (their count) on both tiers,
+and the client refuses to approve a prompt of more than 4000 characters (the signer reads the whole prompt). The broker
+adds a schema `version: 3` with the fields a priced image call needs, so that nothing which changes the cost is
+outside the signature:
 
 `version`, `nonce`, `epoch`, `model`, `kind`, `count`, `image_size`, `aspect_ratio`, `max_output_tokens`,
-`thinking_level`, `max_usd`, `job`, `prompt_sha256`, `quote`, `quoted_at`, `created`, `expires_at`, `beyond_ceiling`, `ledger_head`,
-`issue`, `principal`.
+`thinking_level`, `max_usd`, `job`, `prompt_sha256`, `prompt_bytes`, `quote`, `quoted_at`, `created`, `expires_at`,
+`beyond_ceiling`, `ledger_head`, `issue`, `principal`.
 
-If #217 names the digest field differently, this page follows #217; the broker build starts only after #217 merges.
+`prompt_sha256` and `prompt_bytes` keep the names and meaning #217 shipped. Version 2 records (text only, from today's
+code) are refused by a broker that speaks version 3, with a message to ask for a fresh approval.
 
 The broker checks, in this order, and stops at the first failure (each refusal before the key is read):
 
@@ -392,7 +394,7 @@ The broker checks, in this order, and stops at the first failure (each refusal b
 2. The peer uid is allowed; the frame and fields are well formed.
 3. The signature verifies against the allowed signers (key by key, window, namespace, hardware flags, `require-pin`)
    and the key is not in the revocation list. Both files are re-read on every request.
-4. The signed text is canonical, `version` is 2, `epoch` equals the broker's, and the `nonce` is in `issued/`,
+4. The signed text is canonical, `version` is 3, `epoch` equals the broker's, and the `nonce` is in `issued/`,
    unexpired, not in `used/` and not in the ledger as used.
 5. `model`, `job`, `kind`, `count`, `image_size`, `aspect_ratio`, `max_output_tokens` and `thinking_level` of the
    request equal the signed ones; the broker's own SHA-256 of the received prompt equals `prompt_sha256`.
@@ -408,7 +410,7 @@ The broker checks, in this order, and stops at the first failure (each refusal b
 
 1. Client: `begin` (the broker answers with a nonce, its ledger head, the typical estimate, the reservation and the quota
    line).
-2. Client: `approve` shows the quota line, the quote, the digest, the size, the beginning of the prompt and (for images) the model, size and count; the maintainer types `approve JOB` and
+2. Client: `approve` shows the quota line, the quote, the digest, the size, the whole prompt (at most 4000 characters, escaped) and (for images) the model, size and count; the maintainer types `approve JOB` and
    touches the key; the client keeps the signed approval in the existing approvals folder as a convenience (it is a
    transport copy and carries no authority).
 3. Client: `call` with the prompt and the approval.
@@ -945,7 +947,7 @@ No test uses the real key, the real vendor, the real `/etc/safo`, a real hardwar
 
 ## Build plan: small pull requests, a review gate between each
 
-Prerequisite: **#217 has merged** (the prompt digest in the signed approval). The image vertical slice (phases 1 to 5)
+Prerequisite: #217 (the prompt digest in the signed approval, payload version 2), merged with PR #226. The image vertical slice (phases 1 to 5)
 comes first, because the blocked projects need generated images; the text path is added after. Each phase is its own
 pull request with tests first, and **no phase starts until the previous one has passed review**; phases 1 to 3 add no
 service and spend nothing.
@@ -953,7 +955,7 @@ service and spend nothing.
 | Phase | What lands | Gate before the next |
 |---|---|---|
 | 0 | This design and the threat model (documents only) | The maintainer answers the decisions below; a cyber-tier review of the design |
-| 1 | The broker core as a library, no socket, no systemd: state directory checks, the ledger shared with today's code, issue and consume of nonces, recovery, spend-before-call, the signed approval schema version 2 and its verification, the reservation and typical-estimate arithmetic for `image` and `text`, with the hermetic fakes | Review of the state machine and the crash tests |
+| 1 | The broker core as a library, no socket, no systemd: state directory checks, the ledger shared with today's code, issue and consume of nonces, recovery, spend-before-call, the signed approval schema version 3 (extending the version 2 of #217) and its verification, the reservation and typical-estimate arithmetic for `image` and `text`, with the hermetic fakes | Review of the state machine and the crash tests |
 | 2 | The call pipeline against the fake vendor: request builders per kind, the image response handling (magic bytes, limits, receipts), 429 and ambiguous outcomes. Reservation, reconciliation, breach and suspension. The response parser targets the vendor's documented shape and refuses any shape it has not been shown | Review |
 | 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, idle exit, the operations, logging allowlist; fake socket peers and a fuzz test of the framing | Review of the parser and the limits |
 | 4 | The thin client: `approve` and `ask --paid` go through the socket, safe image writing and sidecars, the guard's `check`, **removal of the in-process paid path**, the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |

@@ -8,9 +8,12 @@ the paid call is refused with nothing sent.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
+import hashlib
 import json
 import secrets
+import unicodedata
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -35,7 +38,10 @@ from safo.gemini import (
     stamp,
 )
 
+PROMPT = "Summarize these public advisories."
+
 KEY_ARGS: dict[str, Any] = {
+    "prompt": PROMPT,
     "model": MODEL,
     "max_usd": Decimal("1.50"),
     "job": "job-1",
@@ -75,7 +81,7 @@ def keys(_prompt: str) -> str:
 def paid(record_id: str, **kw: Any) -> Request:
     args: dict[str, Any] = {
         "model": MODEL,
-        "prompt": "Summarize these public advisories.",
+        "prompt": PROMPT,
         "tier": "paid",
         "job": "job-1",
         "approval": record_id,
@@ -91,7 +97,7 @@ def payload_for(store: ApprovalStore, **over: Any) -> dict[str, Any]:
     with store.ledger.lock():
         head = store.ledger.ensure_chain(stamp(NOW))
     data: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "nonce": secrets.token_hex(8),
         "model": MODEL,
         "max_usd": "1.50",
@@ -104,6 +110,8 @@ def payload_for(store: ApprovalStore, **over: Any) -> dict[str, Any]:
         "ledger_head": head,
         "issue": "",
         "principal": "test-key-a",
+        "prompt_sha256": hashlib.sha256(PROMPT.encode()).hexdigest(),
+        "prompt_bytes": len(PROMPT.encode()),
     }
     data.update(over)
     return data
@@ -504,3 +512,471 @@ def test_a_replaced_ledger_is_caught_by_the_height_record_when_that_was_left_alo
     with pytest.raises(RefusedError, match="height"):
         Ledger(cfg.ledger).append({"type": "usage", "date": "2026-10-29", "amount_usd": 0, "note": "fresh start"})
     assert server.requests == []
+
+
+# -- the signature binds the prompt (#217) ---------------------------------------------------------------------------
+
+A_PROMPT = "Summarize these public advisories."
+NFC = unicodedata.normalize("NFC", "Résumé of the public advisories.")
+NFD = unicodedata.normalize("NFD", NFC)
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def forge_issued(
+    store: ApprovalStore, data: dict[str, Any], *, key: str, row: dict[str, Any] | None = None, with_row: bool = True
+) -> str:
+    """Forge a signed record AND the ledger issuance row after its head, so only the fields under test can refuse it."""
+    nonce = forge(store, data, key=key)
+    assert store.ledger is not None
+    if with_row:
+        issued = {"type": "approval_issued", "nonce": nonce, "principal": "test-key-a", "ts": stamp(NOW)}
+        issued.update({"prompt_sha256": data.get("prompt_sha256", ""), "prompt_bytes": data.get("prompt_bytes", 0)})
+        issued.update(row or {})
+        with store.ledger.lock():
+            store.ledger.append(issued)
+    return nonce
+
+
+def test_the_issued_payload_and_ledger_row_carry_the_prompt_digest_and_length(
+    cfg: GeminiConfig, store: ApprovalStore
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    data = json.loads(json.loads((store.folder / f"{record.id}.json").read_text())["payload"])
+    assert data["version"] == 2
+    assert data["prompt_sha256"] == sha(A_PROMPT) and data["prompt_bytes"] == len(A_PROMPT.encode())
+    assert record.prompt_sha256 == sha(A_PROMPT) and record.prompt_bytes == len(A_PROMPT.encode())
+    row = next(r for r in ledger_rows(cfg.ledger, everything=True) if r["type"] == "approval_issued")
+    assert row["prompt_sha256"] == sha(A_PROMPT) and row["prompt_bytes"] == len(A_PROMPT.encode())
+
+
+@pytest.mark.parametrize(
+    ("approved", "sent"),
+    [
+        pytest.param(A_PROMPT, A_PROMPT.replace("public", "publiC"), id="one-byte"),
+        pytest.param(A_PROMPT, A_PROMPT + "\n", id="trailing-newline"),
+        pytest.param(A_PROMPT, A_PROMPT[:-1], id="shorter"),
+        pytest.param(NFC, NFD, id="unicode-normalization"),
+        pytest.param(NFD, NFC, id="unicode-normalization-reverse"),
+    ],
+)
+def test_an_approval_for_one_prompt_is_refused_for_another_and_is_not_spent(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, approved: str, sent: str
+) -> None:
+    assert approved != sent and sha(approved) != sha(sent)
+    record = store.issue(**{**KEY_ARGS, "prompt": approved})
+    refuse_and_send_nothing(cfg, server, store, record.id, "prompt", prompt=sent)
+    assert not store.is_used(record.id), "a refused prompt must not burn the approval"
+    assert not [r for r in ledger_rows(cfg.ledger, everything=True) if r["type"] == "approval_used"]
+    ask(cfg, paid(record.id, prompt=approved), store=store, key_for=keys, now=NOW)  # the exact prompt still works
+    assert len(server.requests) == 1
+
+
+def test_a_mismatch_says_the_approval_does_not_cover_this_prompt(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    with pytest.raises(RefusedError, match="does not cover this prompt"):
+        ask(cfg, paid(record.id, prompt=A_PROMPT + " "), store=store, key_for=keys, now=NOW)
+
+
+@pytest.mark.parametrize("missing", ["prompt_sha256", "prompt_bytes"])
+def test_a_validly_signed_approval_without_the_prompt_field_is_refused(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str, missing: str
+) -> None:
+    data = payload_for(store)
+    del data[missing]
+    nonce = forge_issued(store, data, key=key)
+    refuse_and_send_nothing(cfg, server, store, nonce, "prompt")
+    assert "prompt" in str(approval_problem(store, nonce, NOW))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("ab" * 31, id="short"),
+        pytest.param("AB" * 32, id="uppercase"),
+        pytest.param("zz" * 32, id="not-hex"),
+        pytest.param(5, id="not-text"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_a_malformed_digest_in_a_signed_approval_is_refused(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str, bad: object
+) -> None:
+    nonce = forge_issued(store, payload_for(store, prompt_sha256=bad), key=key)
+    refuse_and_send_nothing(cfg, server, store, nonce, "prompt")
+
+
+@pytest.mark.parametrize("bad", [-1, True, "3", None, 10**9])
+def test_a_malformed_prompt_length_in_a_signed_approval_is_refused(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str, bad: object
+) -> None:
+    nonce = forge_issued(store, payload_for(store, prompt_bytes=bad), key=key)
+    refuse_and_send_nothing(cfg, server, store, nonce, "prompt")
+
+
+def test_a_right_digest_with_a_wrong_signed_length_is_refused(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str
+) -> None:
+    nonce = forge_issued(store, payload_for(store, prompt_bytes=len(PROMPT) + 1), key=key)
+    refuse_and_send_nothing(cfg, server, store, nonce, "prompt")
+
+
+@pytest.mark.parametrize("old", [1, 0, 3, "2", None])
+def test_an_approval_of_another_version_fails_closed_with_a_clear_message(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str, old: object
+) -> None:
+    nonce = forge_issued(store, payload_for(store, version=old), key=key)
+    refuse_and_send_nothing(cfg, server, store, nonce, "older format|version")
+    assert "fresh" in str(approval_problem(store, nonce, NOW))
+
+
+def test_a_version_one_approval_is_never_read_as_unbound(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str
+) -> None:
+    data = payload_for(store, version=1)
+    del data["prompt_sha256"], data["prompt_bytes"]  # exactly what the old code signed
+    nonce = forge_issued(store, data, key=key, with_row=False)
+    refuse_and_send_nothing(cfg, server, store, nonce, "no prompt binding")
+
+
+def test_the_positive_control_a_forged_record_with_a_matching_row_is_accepted(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str
+) -> None:
+    nonce = forge_issued(store, payload_for(store), key=key)
+    ask(cfg, paid(nonce), store=store, key_for=keys, now=NOW)
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param({"prompt_sha256": sha("another prompt")}, id="other-digest"),
+        pytest.param({"prompt_sha256": ""}, id="empty-digest"),
+        pytest.param({"prompt_sha256": None}, id="null-digest"),
+        pytest.param({"prompt_bytes": 1}, id="other-length"),
+        pytest.param({"prompt_bytes": None}, id="no-length"),
+    ],
+)
+def test_a_signed_digest_that_the_nonce_record_does_not_confirm_is_refused(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str, row: dict[str, Any]
+) -> None:
+    nonce = forge_issued(store, payload_for(store), key=key, row=row)
+    refuse_and_send_nothing(cfg, server, store, nonce, "issuance")
+
+
+def test_an_issuance_row_without_the_digest_does_not_confirm_the_approval(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, key: str
+) -> None:
+    data = payload_for(store)
+    nonce = forge(store, data, key=key)
+    assert store.ledger is not None
+    with store.ledger.lock():  # a row from before the field existed
+        store.ledger.append({"type": "approval_issued", "nonce": nonce, "principal": "test-key-a", "ts": stamp(NOW)})
+    refuse_and_send_nothing(cfg, server, store, nonce, "issuance")
+
+
+def test_a_replay_still_fails_and_a_mismatch_does_not_hide_it(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    ask(cfg, paid(record.id), store=store, key_for=keys, now=NOW)
+    assert ask_again_refused(cfg, store, record.id)
+    with pytest.raises(RefusedError, match="already used"):
+        ask(cfg, paid(record.id, prompt="something else"), store=store, key_for=keys, now=NOW)
+    assert len(server.requests) == 1
+
+
+def test_expiry_is_unchanged_by_the_binding(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+    record = store.issue(**{**KEY_ARGS, "ttl_minutes": 10})
+    ask(cfg, paid(record.id), store=store, key_for=keys, now=NOW + dt.timedelta(minutes=9))
+    again = store.issue(**{**KEY_ARGS, "ttl_minutes": 10})
+    with pytest.raises(RefusedError, match="expired"):
+        ask(cfg, paid(again.id), store=store, key_for=keys, now=NOW + dt.timedelta(minutes=10))
+
+
+def test_the_digest_is_compared_with_compare_digest_on_bytes(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hmac
+
+    calls: list[tuple[object, object]] = []
+    real = hmac.compare_digest
+
+    def spy(a: Any, b: Any) -> bool:
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(hmac, "compare_digest", spy)
+    record = store.issue(**KEY_ARGS)
+    ask(cfg, paid(record.id), store=store, key_for=keys, now=NOW)
+    digest = sha(A_PROMPT).encode()
+    assert [c for c in calls if c == (digest, digest)], "the digest was compared as bytes with compare_digest"
+    assert all(type(a) is bytes and type(b) is bytes for a, b in calls)
+
+
+def test_a_str_subclass_cannot_bend_the_digest_comparison() -> None:
+    from safo.gemini import digests_equal
+
+    class Liar(str):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+        def encode(self, *args: Any, **kw: Any) -> bytes:
+            return b"x" * 64
+
+        __hash__ = str.__hash__
+
+    good = sha(A_PROMPT)
+    assert digests_equal(good, good)
+    assert not digests_equal(Liar("0" * 64), good) and not digests_equal(good, Liar(good))
+    assert not digests_equal(good, sha("other")) and not digests_equal(good, "") and not digests_equal(good, 5)
+
+
+def test_the_free_path_needs_no_approval_and_leaves_no_binding(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    reply = ask(
+        cfg,
+        Request(model=MODEL, prompt="What changed in the CVE list?", tier="free"),
+        store=store,
+        key_for=keys,
+        now=NOW,
+    )
+    assert reply.text and len(server.requests) == 1
+    assert not [r for r in ledger_rows(cfg.ledger, everything=True) if r["type"].startswith("approval")]
+
+
+def test_the_issued_payload_satisfies_the_passkey_expect_mapping(store: ApprovalStore) -> None:
+    from safo import geminipasskey
+    from safo.geminipasskey import Tier2Refused
+
+    record = store.issue(**KEY_ARGS)
+    text = json.loads((store.folder / f"{record.id}.json").read_text())["payload"]
+    expect = {"nonce": record.id, "model": MODEL, "prompt_sha256": sha(A_PROMPT)}
+    geminipasskey._check_approval(text, expect, NOW)  # same field name, same digest form: no refusal
+    with pytest.raises(Tier2Refused, match="prompt_sha256"):
+        geminipasskey._check_approval(text, {**expect, "prompt_sha256": sha(A_PROMPT + "\n")}, NOW)
+
+
+def test_issue_refuses_a_prompt_that_cannot_be_encoded(store: ApprovalStore) -> None:
+    with pytest.raises(RefusedError, match="prompt"):
+        store.issue(**{**KEY_ARGS, "prompt": "lone \ud800 surrogate"})
+
+
+# -- one snapshot of the prompt, and a last check at the send boundary (#217) ----------------------------------------
+
+
+def test_a_prompt_swapped_after_the_gate_is_not_what_is_sent(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    req = paid(record.id)
+    real = ApprovalStore.consume
+
+    def hostile(self: ApprovalStore, record_id: str) -> None:
+        real(self, record_id)
+        object.__setattr__(req, "prompt", "a different paid prompt")  # after the gate, before the send
+
+    monkeypatch.setattr(ApprovalStore, "consume", hostile)
+    ask(cfg, req, store=store, key_for=keys, now=NOW)
+    assert req.prompt == "a different paid prompt", "the swap happened"
+    assert len(server.requests) == 1
+    assert json.dumps(server.requests).count("a different paid prompt") == 0
+    assert A_PROMPT in json.dumps(server.requests)
+
+
+def test_a_prompt_swapped_by_a_ledger_hook_is_not_what_is_sent(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    req = paid(record.id)
+    real = Ledger.append
+
+    def hostile(self: Ledger, row: dict[str, Any], *, ts: str = "") -> str:
+        if row.get("type") == "call_start":
+            object.__setattr__(req, "prompt", "a different paid prompt")
+        return real(self, row, ts=ts)
+
+    monkeypatch.setattr(Ledger, "append", hostile)
+    ask(cfg, req, store=store, key_for=keys, now=NOW)
+    assert "a different paid prompt" not in json.dumps(server.requests) and A_PROMPT in json.dumps(server.requests)
+
+
+def test_the_send_boundary_refuses_a_body_that_is_not_the_approved_prompt(
+    cfg: GeminiConfig, server: FakeGemini
+) -> None:
+    from safo import gemini
+
+    approved = sha(A_PROMPT)
+    with pytest.raises(RefusedError, match="not the prompt the approval covers"):
+        gemini._post(cfg, paid("x" * 16), "FAKE-KEY-for-tests-0123456789", b"another prompt", approved)
+    assert server.requests == []
+    status, _, _ = gemini._post(cfg, paid("x" * 16), "FAKE-KEY-for-tests-0123456789", A_PROMPT.encode(), approved)
+    assert status == 200 and len(server.requests) == 1
+
+
+def test_issue_refuses_a_prompt_over_the_character_limit(store: ApprovalStore) -> None:
+    store.issue(**{**KEY_ARGS, "prompt": "w" * 4000})
+    with pytest.raises(RefusedError, match="at most 4000"):
+        store.issue(**{**KEY_ARGS, "prompt": "w" * 4001})
+
+
+class _LiesInLen(str):
+    def __len__(self) -> int:
+        return 1
+
+
+class _LiesLong(str):
+    def __len__(self) -> int:
+        return 5000
+
+
+class _LiesInEncode(str):
+    def encode(self, *args: Any, **kw: Any) -> bytes:
+        return b"x"
+
+
+@pytest.mark.parametrize(
+    "liar",
+    [
+        pytest.param(_LiesInLen("w" * 4001), id="len-1-over-limit"),
+        pytest.param(_LiesLong("short prompt"), id="len-5000-short"),
+        pytest.param(_LiesInEncode("another prompt"), id="lying-encode"),
+        pytest.param(b"bytes prompt", id="bytes"),
+        pytest.param(7, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_the_store_accepts_only_an_exact_str_prompt(store: ApprovalStore, liar: Any) -> None:
+    with pytest.raises(RefusedError, match="plain text"):
+        store.issue(**{**KEY_ARGS, "prompt": liar})
+    assert not store.folder.exists() or list(store.folder.glob("*.json")) == []
+
+
+# -- every caller-supplied field is copied through base types once, at the entry (#217) ------------------------------
+
+
+def _liar(base: type, text: Any) -> Any:
+    """A subclass whose comparison, formatting, hashing, indexing, truth and length all lie."""
+
+    class Liar(base):  # type: ignore[misc]
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+        def __format__(self, spec: str) -> str:
+            return "unapproved-expensive-model"
+
+        def __str__(self) -> str:
+            return "unapproved-expensive-model"
+
+        def __hash__(self) -> int:
+            return 1
+
+        def __index__(self) -> int:
+            return 1_000_000
+
+        def __bool__(self) -> bool:
+            return False
+
+        def __len__(self) -> int:
+            return 1
+
+    return Liar(text)
+
+
+REQUEST_FIELDS: dict[str, tuple[type, Any]] = {
+    "model": (str, MODEL),
+    "prompt": (str, PROMPT),
+    "tier": (str, "paid"),
+    "job": (str, "job-1"),
+    "approval": (str, "0123456789abcdef"),
+    "max_output_tokens": (int, 500),
+}
+
+
+@pytest.mark.parametrize("field", sorted(REQUEST_FIELDS))
+def test_a_lying_subclass_in_any_request_field_is_refused_at_the_entry_and_nothing_is_written(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, field: str
+) -> None:
+    base, value = REQUEST_FIELDS[field]
+    record = store.issue(**KEY_ARGS)
+    good = paid(record.id)
+    bad = dataclasses.replace(good, **swap(field, _liar(base, value)))
+    rows_before = ledger_rows(cfg.ledger, everything=True)
+    with pytest.raises(RefusedError, match=field) as err:
+        ask(cfg, bad, store=store, key_for=keys, now=NOW)
+    assert "unapproved-expensive-model" not in str(err.value), "the refusal does not echo the value"
+    assert server.requests == [] and not store.is_used(record.id)
+    assert ledger_rows(cfg.ledger, everything=True) == rows_before
+    for wrong in (b"x", 7, None, 1.5, True) if base is str else ("x", 1.5, None, True, b"1"):
+        with pytest.raises(RefusedError, match=field):
+            ask(cfg, dataclasses.replace(good, **swap(field, wrong)), store=store, key_for=keys, now=NOW)
+    assert server.requests == []
+
+
+def swap(field: str, value: Any) -> dict[str, Any]:
+    return {field: value}
+
+
+def test_a_request_subclass_is_refused(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+    class Sub(Request):
+        pass
+
+    record = store.issue(**KEY_ARGS)
+    good = paid(record.id)
+    with pytest.raises(RefusedError, match="request"):
+        ask(cfg, Sub(**dataclasses.asdict(good)), store=store, key_for=keys, now=NOW)
+    assert server.requests == []
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("model", _liar(str, MODEL)),
+        ("job", _liar(str, "job-1")),
+        ("quote", _liar(str, "yes")),
+        ("issue_ref", _liar(str, "o/r#1")),
+        ("max_usd", _liar(Decimal, "1.5")),
+        ("ttl_minutes", _liar(int, 10)),
+        ("beyond_ceiling", 1),
+        ("quoted_at", _liar(str, "2026-10-30")),
+        ("now", NOW.replace(tzinfo=None)),
+    ],
+)
+def test_the_store_refuses_a_lying_argument_and_writes_nothing(store: ApprovalStore, field: str, wrong: Any) -> None:
+    with pytest.raises(RefusedError, match=field):
+        store.issue(**{**KEY_ARGS, field: wrong})
+    assert not store.folder.exists() or list(store.folder.glob("*.json")) == []
+
+
+def test_the_model_is_one_plain_string_in_the_url_the_body_the_ledger_and_the_signed_payload(
+    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
+) -> None:
+    record = store.issue(**KEY_ARGS)
+    ask(cfg, paid(record.id, max_output_tokens=300), store=store, key_for=keys, now=NOW)
+    signed = json.loads(json.loads((store.folder / f"{record.id}.json").read_text())["payload"])
+    rows = ledger_rows(cfg.ledger, everything=True)
+    issued = next(r for r in rows if r["type"] == "approval_issued")
+    started = next(r for r in rows if r["type"] == "call_start")
+    sent = server.requests[0]
+    assert signed["model"].encode() == issued["model"].encode() == started["model"].encode() == MODEL.encode()
+    assert f"/v1beta/models/{MODEL}:generateContent".encode() in json.dumps(sent).encode()
+    assert signed["job"].encode() == started["job"].encode() == b"job-1"
+    assert json.dumps(sent).count('"maxOutputTokens": 300') == 1
+
+
+def test_the_config_values_that_reach_a_request_are_exact_base_types(cfg: GeminiConfig) -> None:
+    assert type(cfg.max_output_tokens) is int and type(cfg.endpoint) is str
+    assert all(type(k) is str for k in cfg.prices) and all(type(k) is str for k in cfg.free)
+    assert type(cfg.job_cap) is Decimal and type(cfg.month_cap) is Decimal
