@@ -23,7 +23,7 @@ rewinds the ledger, the height record and the used markers together, and the led
 rule that the state directory is never restored into a running broker, and root's reconciliation against the vendor
 billing page. A high-water record kept outside the broker user's reach is a design question for a later phase.
 
-Not built yet: the socket server, the real transport, the client, the units, the installer and the administration command. Where the phase-1 code adds something the design did
+Not built yet: the socket server, the real transport, the client, the units and the installer. The administration command is described under "Administration" below. Where the phase-1 code adds something the design did
 not name, it is listed in the pull request: a `call_sent` row written before the connection opens, suspensions kept as
 chained ledger rows instead of a separate state file, and two reply codes (`model_refused`, `prices_expired`).
 
@@ -319,7 +319,7 @@ check must leave the previous release active and the version file unchanged.
 The whole design assumes the maintainer's account, and every agent running as it, has **no way to become root**. The
 installer's checks reduce the chance that this is false; they cannot prove it, and this page does not claim they do.
 
-**What `safo-broker-admin check-install` checks (phase 5), reporting each hit for the maintainer to fix or explain in
+**What the administration command's `check-install` checks (phase 5), reporting each hit for the maintainer to fix or explain in
 writing, and failing while any hit is unexplained:**
 
 - `sudo -l -U LOGIN`: any rule at all for the account, `NOPASSWD` or not, including command-specific rules (a rule for
@@ -490,7 +490,7 @@ most) is counted that was not spent. The benefit is that no crash can allow a re
 - The reply is lost with the connection. The broker keeps no copy of text or images, so the maintainer asks again with
   a new approval, after root has cleared the suspension if the call was ambiguous. The amount counted is the
   reservation; what the vendor actually billed is learned from its billing page.
-- The maintainer reads the vendor billing page and root enters the real amount with the root-only `usage` command, which
+- The maintainer reads the vendor billing page and root enters the real amount with `clear --actual` of the root-only administration command, which
   resolves the ambiguous call; the client has no way to write a `usage` row.
 - Power loss is the same case, so the `fsync` of the file and its directory completes before the connection to the
   vendor is opened.
@@ -574,7 +574,7 @@ interim images are billed as image output. The design therefore does not trust t
    implausible is not reconciled at all: it is an ambiguous call (rule 7).
 6. **A breach stops the model.** If the actual cost is above the reservation, the actual is recorded and counted, the
    receipt says `breach: true`, and the broker **suspends that model**: further calls for it are refused, across restarts,
-   until root clears the suspension (`safo-broker-admin clear-suspend MODEL`) after reading the vendor billing page.
+   until root clears the suspension (`clear MODEL` of the administration command) after reading the vendor billing page.
 7. **An ambiguous call is a loss of knowledge, so it also stops the model.** A call is ambiguous when the request left (or
    may have left) and the broker cannot establish what was billed: the broker crashes or loses power after the spend is
    written, the request times out, the connection drops, the answer is unreadable or oversized, a 5xx or 408 or redirect
@@ -582,8 +582,8 @@ interim images are billed as image output. The design therefore does not trust t
    counted as spent**; appends an `ambiguous_call` row; and **suspends that model** with a state file written before
    anything else is allowed to proceed. After a crash the same happens at the next start: recovery finds every
    `call_start` with no `call_end`, appends `ambiguous_call`, and suspends the model before the socket serves anything.
-   A restart never clears a suspension; only root does, with `clear-suspend`, after the maintainer has read the vendor
-   billing page and entered the real amount (`safo-broker-admin usage`), which appends an `ambiguous_resolved` row that
+   A restart never clears a suspension; only root does, with `clear`, after the maintainer has read the vendor
+   billing page and entered the real amount (`clear --actual`), which appends an `ambiguous_resolved` row that
    replaces the reservation with the real figure. Definite non-billing outcomes (a 429, a definite 4xx, a refusal before
    the request left) are not ambiguous and do not suspend. The price of this rule is availability: a vendor 5xx or a
    crash takes that model off until root acts.
@@ -763,7 +763,87 @@ spend.
 - **State backups:** `/var/lib/safo-broker` is not restored from backup into a running broker. A restore rewinds the
   consumption records and the month's spend; the longest a signed approval lives is 60 minutes, so after any restore the
   maintainer reconciles spend against the vendor billing page and enters the difference with `usage` before turning the
-  switch back on. The root-only `safo-broker-admin` command (phase 5) documents it.
+  switch back on. The root-only administration command (see "Administration") documents it.
+
+## Administration
+
+The administration command is `safo.broker.admin`, run by root and nobody else. It is the only way back from a
+suspension, and the only place root enters a real amount. It runs with the release's own interpreter, isolated, and it
+refuses to start any other way:
+
+```text
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin status'
+```
+
+`-I` keeps the working directory, the user site and every `PYTHON` environment variable out of the module search path,
+so nothing the shell can reach is imported while the process is root. The interpreter path above is **inferred** from
+the install chain (the installer, phase 5, fixes the real one); a console-script wrapper, if one is added, must be
+root-owned, name that interpreter by full path and pass `-I`. The command reads nothing from standard input: a
+confirmation is a typed argument, so it behaves the same with input from `/dev/null`.
+
+**How root gets at the ledger.** The ledger refuses any file that does not belong to the effective uid, and the state
+directory belongs to `safo-broker`. The command therefore reads the root-owned files first (the enable switch and the
+floor), then drops to `safo-broker`: it moves to `/`, sets the umask to 077, empties the supplementary groups, sets the
+group and then the user, reads all three ids of each back, and proves it cannot return to root. If any step fails, the
+command stops before it opens the ledger. After that it uses the ledger exactly as the service does, with the same lock,
+and every file it writes belongs to `safo-broker`. The ledger's owner rule is unchanged. (A ledger mode that accepted
+euid 0 was rejected: it widens the rule the service depends on, and files root created would be refused by the service.)
+
+Commands (every line is for the maintainer's account; each runs `sudo` on the broker host):
+
+```text
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin status'
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin usage'
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin usage --month 2026-10'
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin check-install'
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin clear MODEL'
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin clear MODEL --confirm CALL_ID'
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin clear MODEL --confirm CALL_ID --actual CALL_ID=0.25 --reason "billing page 2026-10-31"'
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin reconcile'
+ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin reconcile --billing-usd 3.75 --month 2026-10 --reason "billing page 2026-10-31"'
+```
+
+- **status** prints the month and its spend, the open calls, the suspended models with the call ids that suspended them,
+  the enable switch, the schema version and floor, the broker version floor, and the row count. No prompt text and no key
+  is ever in the ledger or in this output.
+- **usage** prints the month per job, the adjustments root entered, and the total, the same figure the caps use.
+- **check-install** is read-only. It checks that `/opt/safo-broker/current` is a symbolic link to a version folder inside
+  `releases/`, owned by root and closed to group and others, that `/var/lib/safo-broker-install/version` and
+  `/etc/safo/broker-min-version` are readable root-owned versions, and that the release is not below the floor, not
+  newer than the record, and the floor is not above the record. A release below the highest recorded version is noted, not
+  failed (an allowed downgrade). It exits 1 on any failure.
+- **clear MODEL** first prints the record of every call that suspended the model (call id, model, job, kind
+  `ambiguous` or `breach`, start time, reserved amount, state, counted amount, recorded actual) and changes nothing.
+  Read the vendor billing page, then repeat the command with `--confirm CALL_ID` for **every** call id printed. The
+  confirmation is checked against the ledger under the lock, so a call that suspended the model after you looked makes
+  it refuse. An ambiguous call is settled at its **whole reservation**, so clearing never frees budget. Only if you
+  read a lower real figure off the billing page, add `--actual CALL_ID=USD --reason TEXT` for that call: the call then
+  counts that figure (never below usage already recorded for it, and a breach takes no figure because it already counts
+  its actual). The command appends one record, with the real uid and the `SUDO_UID` it came from and the time, then the
+  figure, then the clearing, in a single write.
+- **reconcile** reports where the ledger, the used markers and the clock disagree (a marker with no ledger row, a call
+  with no marker, a marker that differs, open calls, ambiguous calls with no real amount, a ledger newer than the clock,
+  a ledger that fails its chain, head or height checks). It exits 1 when it found something. It changes nothing unless you
+  give `--billing-usd`, the vendor's billed total for the month (default the current one): if that is higher than the
+  ledger counts, the difference is added as a record; if it is equal or lower, nothing is written. A month can only be
+  raised, never lowered.
+
+**After a state restore.** Stop the broker (`systemctl stop safo-broker.socket safo-broker.service`), run `reconcile`
+with the billing total for the current month and for the month before, start the broker (its start-up recovery makes
+any open call ambiguous), run `status`, and turn the switch back on only when `status` and the billing page agree. A
+restore rewinds the ledger, the height record and the markers together, so only the billing page can show the gap;
+reconcile can add the gap, and it cannot detect it alone.
+
+**Blast radius.** The command can clear a model's suspension and can raise a month's spend. It cannot lower a month, free
+budget, send a call, read the key, or change the switch, the floor or any root-owned file. A wrong `--actual` that is too
+low would lower one ambiguous call's count; that is why it needs a reason, is recorded with your uid, and why the
+vendor-side monthly limit (decision 14) stays set.
+
+**Rollback.** Ledger rows are never edited or removed. A `clear` cannot be undone, but the model is stopped again by the
+next ambiguous call or breach. A wrongly entered `reconcile` addition cannot be removed; it stays counted until the
+month ends, which errs toward spending less. A wrongly entered lower `--actual` is corrected by the next reconcile with
+the right billing total. A write cut by a crash leaves the model suspended or cleared, never half of each (tested at
+every row boundary); run the same command again.
 
 ## The root-owned enable switch
 
@@ -1014,7 +1094,7 @@ service and spend nothing.
 | 2 | The call pipeline against the fake vendor: request builders per kind, the image response handling (magic bytes, limits, receipts), 429 and ambiguous outcomes. Reservation, reconciliation, breach and suspension. The response parser targets the vendor's documented shape and refuses any shape it has not been shown | Review |
 | 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, idle exit, the operations, logging allowlist; fake socket peers and a fuzz test of the framing | Review of the parser and the limits |
 | 4 | The thin client: `approve` and `ask --paid` go through the socket, safe image writing and sidecars, the guard's `check`, **removal of the in-process paid path**, the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |
-| 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, `safo-broker-admin` (`check-install` with the root-door checks, `status`, `usage`, `reconcile`, `clear-suspend`), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
+| 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that so far covers the release link, the record and the floor; the root-door checks remain), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
 | 6 | **Cyber-tier security review** of the broker and the signed-approval verification (issue step 3) | Clean review |
 | 7 | The maintainer does the root setup and the dry run, then creates the switch (issue step 5). The first calls use Nano Banana 2 Lite to record the real response shape and to observe the output cap; root then sets `cap_verified` for each model observed; a fixture PR follows | The maintainer's own run; the observation reviewed |
 | 8 | Text paid calls through the same path, the `usage` workflow, then the optional count-per-approval and passkey wiring if the maintainer wants them | Review per item |

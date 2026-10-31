@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Paid Gemini broker, administration command (#262): `python -I -m safo.broker.admin` with `status`, `usage`,
+  `check-install`, `clear` and `reconcile`, run by root. It reads the root-owned files, then drops to the service user
+  (groups emptied, group, user, read back, regain probe) before opening the ledger, so the ledger's owner rule is
+  unchanged; it refuses to start unless Python is isolated. `clear` prints the call records, needs the typed call ids,
+  settles an ambiguous call at its whole reservation unless root names a verified amount with a reason, and records the
+  uid and time in a new `admin_action` ledger row. `reconcile` reports mismatches and can only raise a month. Paid use
+  stays disabled.
+
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
 - Paid Gemini broker, phase 1 (#205): the core library under `src/safo/broker/`. Integer micro-dollar arithmetic and the
   worst-case reservation (prompt bytes plus 64 tokens at one token per byte, the output cap, two interim images), the
