@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TextIO
 
-from safo import __version__, compat, credentials, guardlog, output
+from safo import __version__, compat, credentials, guardlog, output, wrapper
 from safo.context import Context, LocalContext
 from safo.errors import EXIT_INTERRUPTED, EXIT_UNKNOWN, ConfigError, SafoError
 from safo.graphql import GRAPHQL_URL, Client
@@ -190,4 +190,9 @@ def run() -> None:
         # global option first, the words apart): the guard answers, or fails visibly, and ends the process once. A
         # person at a terminal still gets argparse's usage and help.
         raise SystemExit(hooks.guard_command(guard_words))
+    code = wrapper.enter(
+        words, os.environ
+    )  # the research wrapper: refuse startup variables, then re-run isolated (#221)
+    if code is not None:
+        raise SystemExit(code)
     raise SystemExit(main())
