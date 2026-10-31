@@ -12,6 +12,22 @@
   vendor call: paid use stays disabled. `Ledger` in `gemini.py` gains `append_many` and an overridable empty-ledger
   hook, and `valid_quote` is shared; the existing behavior is unchanged.
 
+- Paid Gemini broker, phase 2 (#258): the call pipeline in `src/safo/broker/`, tested against a fake vendor with no
+  socket and no key. Approval verification runs `ssh-keygen -Y verify` through the existing fixed-argument verifier with
+  the namespace fixed in code, requires the canonical signed text and the signer named inside it, and checks revocation
+  again under the ledger lock just before the spend. `begin` issues broker-chosen nonces (at most four outstanding). A
+  call reserves the worst case before anything is sent, builds the request from a fixed template, sends through an
+  injected transport, and settles from the reported usage; a timeout, transport error, redirect, 5xx, short, oversized
+  or malformed answer, a reply for another model or unusable usage leaves the call ambiguous and the model suspended
+  until root clears it. A reply over the signed output cap is a breach, recorded at the cap or the reported usage
+  (whichever is higher), and suspends the model. Image replies accept only PNG, JPEG or WebP: the container is walked to
+  its real end (an allow-list of segments and chunks, each with a body of exactly its shape; one image, no trailing data, no
+  animation, checksums and exact decoded size where the format has them, no Exif, XMP or compressed metadata), the declared size is capped, and nothing but the checked bytes is passed on. Review fixes: the approval must come from a hardware key with a
+  touch (no software opt-in in the broker path); the issued record binds the maximum, the ceiling flag, the ledger head
+  and the creation time; a model with an unverified output cap is refused above 2 USD whatever the job cap is; a
+  temporary file left in `issued/` by a kill no longer stops `begin` or the start-up flush. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
+  `pre_spend` hook. Paid use stays disabled.
+
 - Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
   generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed
   time with the budget any more; what they prove is the behavior (the one complete JSON line, the exit status 0 or 2,

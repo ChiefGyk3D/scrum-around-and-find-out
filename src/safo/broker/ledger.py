@@ -221,7 +221,10 @@ def _end(rec: CallRecord, row: dict[str, Any]) -> None:
         raise _corrupt()
     if status != "ok" and (actual != 0 or row["breach"]):
         raise _corrupt()
-    if row["breach"] != (actual > rec.reserved_micro) or row["released_micro"] != max(rec.reserved_micro - actual, 0):
+    # an actual above the reservation is always a breach; a breach inside the reservation is an output-cap breach
+    if (actual > rec.reserved_micro and not row["breach"]) or row["released_micro"] != max(
+        rec.reserved_micro - actual, 0
+    ):
         raise _corrupt()
     rec.state = advance(rec.state, CallState.SETTLED)
     rec.actual_micro = actual
@@ -444,9 +447,18 @@ class CallLedger:
             return self._view()
 
     def reserve(
-        self, req: BrokerRequest, approval: ApprovalV3, policy: Policy, *, epoch: str, now: dt.datetime
+        self,
+        req: BrokerRequest,
+        approval: ApprovalV3,
+        policy: Policy,
+        *,
+        epoch: str,
+        now: dt.datetime,
+        pre_spend: Callable[[], None] | None = None,
     ) -> Ticket:
-        """Check, then spend first. Everything from the nonce check to the markers is one critical section."""
+        """Check, then spend first. Everything from the nonce check to the markers is one critical section.
+        `pre_spend` runs inside it, after the replay and suspension checks and just before the spend is written: the
+        pipeline uses it to check revocation and the issued nonce at the last moment. It raises to refuse."""
         now = self._now(now)
         req = canonical_broker_request(req)
         check_binding(approval, req, epoch=epoch, now=now)
@@ -468,6 +480,8 @@ class CallLedger:
                 beyond_ceiling=approval.beyond_ceiling,
                 month_spent_micro=view.month_spent(now),
             )
+            if pre_spend is not None:
+                pre_spend()
             call_id = secrets.token_hex(16)
             rows = _spend_rows(
                 stamp, call_id, approval.nonce, epoch, req, priced.prompt_sha256, priced.prompt_bytes, reserved
@@ -490,9 +504,13 @@ class CallLedger:
             self.ledger.append_many([_row("call_sent", self._stamp(now, view, strict=False), call_id=call_id)])
             self._fault("after_sent")
 
-    def settle(self, call_id: str, status: str, actual_micro: int, now: dt.datetime) -> Settlement:
+    def settle(
+        self, call_id: str, status: str, actual_micro: int, now: dt.datetime, *, cap_breach: bool = False
+    ) -> Settlement:
         """Record the outcome against the reservation the LEDGER holds (never a figure the caller supplies for it).
-        An actual above the reservation is a breach: it is counted in full and the model is suspended in one append."""
+        An actual above the reservation is a breach: it is counted in full and the model is suspended in one append.
+        `cap_breach` is the same outcome for a reply that went over the signed output cap while the money stayed inside
+        the reservation (decision 13): the call is recorded as a breach and the model is suspended all the same."""
         if status not in ("ok", "not_sent", "rate_limited", "vendor_refused") or type(actual_micro) is not int:
             raise IllegalTransition("a call ends with ok, not_sent, rate_limited or vendor_refused and a whole amount")
         if not 0 <= actual_micro <= MAX_MICRO or (status != "ok" and actual_micro != 0):
@@ -508,7 +526,9 @@ class CallLedger:
                     "only a call that never left ends as not_sent, and a sent call is never not_sent"
                 )
             stamp = self._stamp(now, view, strict=False)
-            breach = actual_micro > rec.reserved_micro
+            if cap_breach and status != "ok":
+                raise IllegalTransition("only a call that returned an answer can breach the output cap")
+            breach = actual_micro > rec.reserved_micro or cap_breach
             released = max(rec.reserved_micro - actual_micro, 0)
             rows = [
                 _row(
