@@ -18,6 +18,7 @@ from fakevendor import (
     JPEG_APP0,
     SOS,
     chunk,
+    idat,
     ihdr,
     jpeg,
     jpeg_of,
@@ -124,7 +125,7 @@ def test_fill_bytes_before_a_marker_are_not_accepted() -> None:
 
 def test_a_plain_png_and_one_with_ancillary_chunks_pass() -> None:
     assert sniff(png(11, 12)).height == 12
-    with_text = png_of(ihdr(2, 3), chunk(b"tEXt", b"k\x00v"), IDAT, chunk(b"tIME", b"\x00" * 7), IEND)
+    with_text = png_of(ihdr(2, 3), chunk(b"tEXt", b"k\x00v"), idat(2, 3), chunk(b"tIME", b"\x00" * 7), IEND)
     assert (sniff(with_text).width, sniff(with_text).height) == (2, 3)
 
 
@@ -160,7 +161,7 @@ def test_an_animation_or_an_unknown_critical_chunk_is_refused() -> None:
 def test_image_data_must_be_present_and_in_one_run() -> None:
     refuses(png_of(ihdr(), IEND))
     refuses(png_of(ihdr(), IDAT, chunk(b"tEXt", b"a"), IDAT, IEND))
-    assert sniff(png_of(ihdr(), IDAT, IDAT, IEND)).width == 1
+    assert sniff(png_of(ihdr(), idat(1, 1, split=3), IEND)).width == 1
 
 
 def test_a_chunk_name_must_be_letters_and_a_length_must_fit() -> None:
@@ -271,3 +272,43 @@ def test_compressed_metadata_and_unknown_ancillary_chunks_are_refused(kind: byte
 )
 def test_the_listed_plain_ancillary_chunks_are_accepted(kind: bytes) -> None:
     assert sniff(png_of(ihdr(), chunk(kind, b"abc"), IDAT, IEND)).width == 1
+
+
+# -- PNG image data must be what the header says --------------------------------------------------------------------
+
+
+def test_image_data_that_inflates_far_beyond_the_declared_size_is_refused() -> None:
+    bomb = chunk(b"IDAT", zlib.compress(b"\x00" * 64_000_000, 9))  # a 1x1 header over sixty-four megabytes of rows
+    refuses(png_of(ihdr(1, 1), bomb, IEND))
+
+
+def test_image_data_with_too_few_rows_or_too_many_is_refused() -> None:
+    refuses(png_of(ihdr(4, 4), idat(4, 3), IEND))
+    refuses(png_of(ihdr(4, 4), idat(4, 5), IEND))
+    refuses(png_of(ihdr(4, 4), idat(5, 4), IEND))
+    assert sniff(png_of(ihdr(4, 4), idat(4, 4), IEND)).width == 4
+
+
+def test_a_truncated_or_padded_deflate_stream_is_refused() -> None:
+    whole = zlib.compress(b"\x00\x00")
+    refuses(png_of(ihdr(), chunk(b"IDAT", whole[:-3]), IEND))  # cut short: no end of stream
+    refuses(png_of(ihdr(), chunk(b"IDAT", whole + b"junk"), IEND))  # data after the end of the stream
+    refuses(png_of(ihdr(), chunk(b"IDAT", b"not deflate at all"), IEND))
+    refuses(png_of(ihdr(), chunk(b"IDAT", b""), IEND))
+
+
+def test_the_rows_are_sized_by_colour_type_and_depth_and_may_span_several_chunks() -> None:
+    assert sniff(png_of(ihdr(3, 2, depth=16, color=6), idat(3, 2, channels=4, depth=16), IEND)).width == 3
+    assert sniff(png_of(ihdr(5, 2, depth=1, color=0), idat(5, 2, channels=1, depth=1), IEND)).width == 5
+    assert sniff(png_of(ihdr(3, 2, depth=8, color=2), idat(3, 2, channels=3, depth=8), IEND)).width == 3
+    assert sniff(png_of(ihdr(3, 2, depth=8, color=4), idat(3, 2, channels=2, depth=8), IEND)).width == 3
+    assert sniff(png_of(ihdr(30, 20), idat(30, 20, split=7), IEND)).height == 20
+    refuses(png_of(ihdr(3, 2, depth=16, color=6), idat(3, 2, channels=3, depth=16), IEND))
+
+
+def test_an_interlaced_png_is_refused() -> None:
+    refuses(png_of(ihdr(inter=1), IDAT, IEND))
+
+
+def test_a_declared_size_over_the_limit_is_refused_before_the_data_is_looked_at() -> None:
+    refuses(png_of(ihdr(8193, 1), chunk(b"IDAT", b"x"), IEND))

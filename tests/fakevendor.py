@@ -60,9 +60,18 @@ def png_of(*chunks: bytes) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + b"".join(chunks)
 
 
+def idat(width: int = 1, height: int = 1, *, channels: int = 1, depth: int = 8, split: int = 0) -> bytes:
+    """Image data chunk(s) holding exactly the rows an 8-bit grey (or `channels` x `depth`) image of that size has."""
+    row = (max(width, 0) * channels * depth + 7) // 8
+    data = zlib.compress(b"\x00" * (max(height, 0) * (1 + row)), 1)
+    if split:
+        return chunk(b"IDAT", data[:split]) + chunk(b"IDAT", data[split:])
+    return chunk(b"IDAT", data)
+
+
 def png(width: int = 1, height: int = 1, extra: bytes = b"") -> bytes:
     """A valid PNG; `extra` is raw bytes placed between the image data and the end chunk."""
-    return png_of(ihdr(width, height), IDAT, extra, IEND)
+    return png_of(ihdr(width, height), idat(width, height), extra, IEND)
 
 
 def jseg(marker: int, payload: bytes) -> bytes:

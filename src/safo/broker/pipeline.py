@@ -36,6 +36,7 @@ from safo.broker.issue import Issuer
 from safo.broker.ledger import CallLedger, Ticket
 from safo.broker.money import MICRO, ceil_div
 from safo.broker.policy import BrokerRequest, Policy, Priced, canonical_broker_request
+from safo.broker.states import CallState
 from safo.broker.vendor import (
     RawReply,
     Reply,
@@ -164,7 +165,14 @@ class Pipeline:
         self.faults("after_send")
         if self.mono() - start > self.deadline:  # the answer came after the deadline: treated as no answer
             return self._ambiguous(ticket, req, priced, "timeout")
-        return self._classify(req, ticket, priced, vendor, raw)
+        try:
+            return self._classify(req, ticket, priced, vendor, raw)
+        except Exception:
+            # Whatever went wrong while reading the answer, the request has left: if the call is still open it is
+            # ambiguous. If it was already settled the error is about something after that, and is raised as it is.
+            if self.ledger.view().calls[ticket.call_id].state is CallState.SENT:
+                return self._ambiguous(ticket, req, priced, "unreadable")
+            raise
 
     # -- classifying the answer
 
@@ -186,7 +194,9 @@ class Pipeline:
         if len(raw.body) > vendor.max_reply_bytes:
             return self._ambiguous(ticket, req, priced, "unreadable")
         length = _header(raw.headers, "content-length") if isinstance(raw.headers, Mapping) else None
-        if length is not None and (not length.isascii() or not length.isdigit() or int(length) != len(raw.body)):
+        if length is not None and (
+            not length.isascii() or not length.isdigit() or len(length) > 12 or int(length) != len(raw.body)
+        ):
             return self._ambiguous(ticket, req, priced, "unreadable")  # a short or padded body
         try:
             reply = parse_reply(req, raw.body, priced.prompt_bytes)

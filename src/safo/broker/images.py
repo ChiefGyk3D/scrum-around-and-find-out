@@ -13,6 +13,8 @@ and markers the format puts there, so that what was checked is what a viewer wou
 * a segment or chunk that is not on the format's allow-list is refused (a JPEG marker nobody needs, a PNG chunk we do
   not know or one that holds compressed metadata, an animation, a WebP chunk that is not metadata or the one image),
   and so is a PNG chunk with a wrong checksum;
+* the PNG image data is inflated in small steps, and thrown away, to check that it is exactly the rows the header
+  declares (a small file that inflates to a huge buffer is refused; an interlaced PNG is refused);
 * the width and height are read from the one frame header the walk accepted (PNG `IHDR`, the JPEG frame header, the
   WebP image chunk, which must agree with the `VP8X` canvas) and capped, per side and in pixels;
 * the base64 text must be canonical (the encoding of the bytes it decodes to), so no bit is hidden in padding.
@@ -46,6 +48,7 @@ _JPEG_EOI = 0xD9
 _JPEG_NEXT_MARKER = re.compile(
     rb"\xff[^\x00\xd0-\xd7]"
 )  # in entropy data: FF 00 is a stuffed byte, FF D0..D7 a restart
+_PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 _PNG_DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
 _PNG_CHUNKS = (
     frozenset(  # the palette and the plain (not compressed) ancillary chunks; zTXt, iTXt and iCCP are left out
@@ -109,6 +112,8 @@ def _png(data: bytes) -> ImageInfo:
     size_all = len(data)
     pos = len(PNG_SIGNATURE)
     dims: tuple[int, int] | None = None
+    rows = 0  # the bytes the image data must inflate to
+    data_parts: list[bytes] = []
     run = 0  # 0: no image data yet, 1: inside the run of IDAT chunks, 2: the run is over
     for _ in range(_MAX_CHUNKS):
         if pos + 12 > size_all:
@@ -121,18 +126,21 @@ def _png(data: bytes) -> ImageInfo:
         if int.from_bytes(data[end : end + 4], "big") != zlib.crc32(data[pos + 4 : end]):
             raise _no("the image has a chunk with a wrong checksum")
         if dims is None:  # the first chunk is the header and nothing else may be first
-            dims = _png_header(kind, data[pos + 8 : end])
+            dims, rows = _png_header(kind, data[pos + 8 : end])
+            _check_dims("image/png", *dims)  # before any image data is inflated
         elif kind in _PNG_NEVER:
             raise _no("the image has a second header or is an animation")
         elif kind == b"IDAT":
             if run == 2:
                 raise _no("the image data of the PNG is not in one run")
             run = 1
+            data_parts.append(data[pos + 8 : end])
         else:
             run = 2 if run else 0
             if kind == b"IEND":
                 if size or run != 2 or end + 4 != size_all:
                     raise _no("the image does not end where a PNG ends")
+                _check_rows(data_parts, rows)
                 return _check_dims("image/png", *dims)
             if kind not in _PNG_CHUNKS:  # compressed metadata can expand without limit later, so it is not passed on
                 raise _no("the image has a chunk this program does not accept")
@@ -140,13 +148,37 @@ def _png(data: bytes) -> ImageInfo:
     raise _no("the image has too many chunks")
 
 
-def _png_header(kind: bytes, body: bytes) -> tuple[int, int]:
+def _png_header(kind: bytes, body: bytes) -> tuple[tuple[int, int], int]:
+    """The size and the number of bytes the image data must inflate to: one filter byte and the packed samples for
+    each row. An interlaced image is refused, so the figure is exact."""
     if kind != b"IHDR" or len(body) != 13:
         raise _no("the image is not a well formed PNG")
     depth, color, method, filtering, interlace = body[8], body[9], body[10], body[11], body[12]
-    if depth not in _PNG_DEPTHS.get(color, ()) or method != 0 or filtering != 0 or interlace not in (0, 1):
-        raise _no("the image is not a well formed PNG")
-    return int.from_bytes(body[0:4], "big"), int.from_bytes(body[4:8], "big")
+    if depth not in _PNG_DEPTHS.get(color, ()) or method != 0 or filtering != 0 or interlace != 0:
+        raise _no("the image is not a well formed PNG, or is interlaced")
+    width, height = int.from_bytes(body[0:4], "big"), int.from_bytes(body[4:8], "big")
+    return (width, height), height * (1 + (width * _PNG_CHANNELS[color] * depth + 7) // 8)
+
+
+def _check_rows(parts: list[bytes], expected: int) -> None:
+    """Inflate the image data in small steps, throwing the output away, and stop at once if it passes the size the
+    header declares: a small file that inflates to a huge buffer is refused here, not in whatever draws it later."""
+    stream = zlib.decompressobj()
+    total = 0
+    try:
+        for part in parts:
+            if stream.eof and part:
+                raise _no("the image data is not the size the image declares")
+            buffer = part
+            while buffer and not stream.eof:
+                total += len(stream.decompress(buffer, 65536))
+                if total > expected:
+                    raise _no("the image data is larger than the image declares")
+                buffer = stream.unconsumed_tail
+    except zlib.error:
+        raise _no("the image data is not a deflate stream") from None
+    if not stream.eof or stream.unused_data or total != expected:
+        raise _no("the image data is not the size the image declares")
 
 
 # -- JPEG ----------------------------------------------------------------------------------------------------------

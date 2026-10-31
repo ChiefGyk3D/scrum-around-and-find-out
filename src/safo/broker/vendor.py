@@ -231,7 +231,10 @@ def _image_reply(data: Any, req: BrokerRequest, prompt_bytes: int) -> Reply:
 
 def _finish(req: BrokerRequest, usage: Usage, pieces: list[str], returned: int, found: list[dict[str, Any]]) -> Reply:
     text = "".join(pieces)
-    size = len(text.encode("utf-8"))
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeEncodeError:  # a JSON escape can spell a lone surrogate, which is not text
+        raise Unreadable("unreadable") from None
     if size > MAX_TEXT_BYTES:
         raise Unreadable("unreadable")
     if req.kind == "text" and usage.output_tokens < size // 8:

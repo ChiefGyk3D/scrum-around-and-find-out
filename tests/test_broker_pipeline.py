@@ -17,6 +17,7 @@ from fakevendor import jpeg, png, webp
 from geminidata import make_key
 from pipedata import IMAGE_MODEL, IMAGE_PROMPT, Rig, image_req, text_req
 from safo import gemini
+from safo.broker import pipeline as pipeline_module
 from safo.broker import vendor as vendor_module
 from safo.broker.errors import IllegalTransition, Refused
 from safo.broker.ledger import FAULT_POINTS, CallLedger
@@ -793,3 +794,48 @@ def test_a_reply_with_no_image_is_not_held_to_an_image_size(rig: Rig) -> None:
     rig.vendor.part = {"type": "text", "text": "I cannot draw that"}
     rig.vendor.tokens_out = 5
     assert rig.run(image_req()).code == "vendor_refused"
+
+
+def test_a_lone_surrogate_in_the_answer_text_makes_the_call_ambiguous(rig: Rig) -> None:
+    rig.vendor.body = (
+        b'{"modelVersion":"flat-test","candidates":[{"content":{"parts":[{"text":"\\ud800 abc"}]}}],'
+        b'"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}'
+    )
+    assert_ambiguous(rig, rig.run(text_req()), "unreadable")
+
+
+@pytest.mark.parametrize(
+    "length",
+    [
+        pytest.param("9" * 5000, id="5000-digits"),
+        pytest.param("9" * 13, id="13-digits"),
+        pytest.param("1" + "0" * 40, id="41-digits"),
+    ],
+)
+def test_a_content_length_with_an_absurd_number_of_digits_makes_the_call_ambiguous(rig: Rig, length: str) -> None:
+    rig.vendor.headers = {"Content-Length": length}
+    assert_ambiguous(rig, rig.run(text_req()), "unreadable")
+
+
+def test_anything_that_goes_wrong_while_reading_the_answer_makes_the_call_ambiguous_not_open(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: Any) -> Any:
+        raise RuntimeError("a parser bug")
+
+    monkeypatch.setattr("safo.broker.pipeline.parse_reply", broken)
+    assert_ambiguous(rig, rig.run(text_req()), "unreadable")
+    assert rig.ledger.view().suspended != {}
+
+
+def test_an_error_after_the_call_is_settled_does_not_turn_it_into_an_ambiguous_one(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("receipt bug")
+
+    monkeypatch.setattr(pipeline_module.Pipeline, "_receipt", broken)
+    with pytest.raises(RuntimeError, match="receipt bug"):
+        rig.run(text_req())
+    rec = only_call(rig)
+    assert rec.state is CallState.SETTLED and not rec.ambiguous and rec.actual_micro is not None
