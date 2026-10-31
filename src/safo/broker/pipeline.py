@@ -194,9 +194,7 @@ class Pipeline:
         if len(raw.body) > vendor.max_reply_bytes:
             return self._ambiguous(ticket, req, priced, "unreadable")
         length = _header(raw.headers, "content-length") if isinstance(raw.headers, Mapping) else None
-        if length is not None and (
-            not length.isascii() or not length.isdigit() or len(length) > 12 or int(length) != len(raw.body)
-        ):
+        if length is not None and (not length.isascii() or not length.isdigit() or int(length) != len(raw.body)):
             return self._ambiguous(ticket, req, priced, "unreadable")  # a short or padded body
         try:
             reply = parse_reply(req, raw.body, priced.prompt_bytes)

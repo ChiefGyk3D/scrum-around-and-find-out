@@ -310,3 +310,29 @@ def test_an_answer_that_names_no_model_is_unreadable() -> None:
         with pytest.raises(Unreadable) as err:
             parse(kind, data)
         assert err.value.reason == "unreadable"
+
+
+GOOD_TEXT = (
+    b'{"modelVersion":"flat-test","candidates":[{"content":{"parts":[{"text":"hi"}]}}],'
+    b'"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}%s}'
+)
+
+
+def test_a_reply_that_is_otherwise_good_is_read() -> None:
+    assert parse("text", GOOD_TEXT % b"").text == "hi"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        b',"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}',  # the same key twice, a lower bill second
+        b',"modelVersion":"flat-test"',
+        b',"extra":NaN',
+        b',"extra":Infinity',
+        b',"extra":-Infinity',
+    ],
+)
+def test_a_duplicate_key_or_a_non_finite_number_is_unreadable_even_when_the_rest_is_good(extra: bytes) -> None:
+    with pytest.raises(Unreadable) as err:
+        parse("text", GOOD_TEXT % extra)
+    assert err.value.reason == "unreadable"

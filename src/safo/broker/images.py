@@ -59,7 +59,6 @@ _PNG_DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: 
 _PNG_SBIT_LEN = {0: 1, 2: 3, 3: 3, 4: 2, 6: 4}
 _PNG_BEFORE_DATA = frozenset({b"PLTE", b"tRNS", b"bKGD", b"sBIT", b"gAMA", b"cHRM", b"sRGB", b"pHYs", b"cICP"})
 _PNG_AFTER_OK = frozenset({b"tEXt", b"tIME"})
-_PNG_NEVER = frozenset({b"acTL", b"fcTL", b"fdAT", b"IHDR"})  # animation, and a second header
 
 
 class ImageRefused(Exception):
@@ -132,7 +131,7 @@ def _png(data: bytes) -> ImageInfo:
         size = int.from_bytes(data[pos : pos + 4], "big")
         kind = data[pos + 4 : pos + 8]
         end = pos + 8 + size
-        if size > 0x7FFFFFFF or end + 4 > size_all or not kind.isalpha() or kind[2] & 0x20:
+        if size > 0x7FFFFFFF or end + 4 > size_all or not kind.isalpha():
             raise _no("the image is not a well formed PNG")
         if int.from_bytes(data[end : end + 4], "big") != zlib.crc32(data[pos + 4 : end]):
             raise _no("the image has a chunk with a wrong checksum")
@@ -140,8 +139,6 @@ def _png(data: bytes) -> ImageInfo:
         if dims is None:  # the first chunk is the header and nothing else may be first
             dims, rows, state = _png_header(kind, body)
             _check_dims("image/png", *dims)  # before any image data is inflated
-        elif kind in _PNG_NEVER:
-            raise _no("the image has a second header or is an animation")
         elif kind == b"IDAT":
             if run == 2:
                 raise _no("the image data of the PNG is not in one run")

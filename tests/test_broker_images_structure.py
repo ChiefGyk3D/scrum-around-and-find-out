@@ -360,3 +360,79 @@ def test_a_bad_filter_byte_is_found_in_a_row_that_straddles_the_inflation_steps(
 def test_all_five_filter_types_pass() -> None:
     for value in range(5):
         assert sniff(rows_png(2, 2, 1, value)).width == 2
+
+
+# -- things that only a second look catches ------------------------------------------------------------------------
+
+
+def test_a_frame_header_of_a_kind_that_is_not_accepted_is_refused_even_after_a_good_one() -> None:
+    refuses(jpeg_of(JPEG_APP0, sof(3, 2), sof(3, 2, marker=0xC3), SOS))
+    refuses(jpeg_of(JPEG_APP0, sof(3, 2), sof(3, 2, marker=0xCA), SOS))
+    refuses(jpeg_of(JPEG_APP0, sof(3, 2), sof(3, 2, marker=0xC9), SOS))
+
+
+def test_an_unknown_segment_is_refused_even_when_its_body_looks_like_a_frame_header() -> None:
+    body = sof(3, 2)[4:]
+    for marker in (0xF0, 0xDC, 0xC8, 0xCC, 0xE1, 0xE2):
+        refuses(jpeg_of(JPEG_APP0, sof(3, 2), jseg(marker, body), SOS))
+
+
+def test_a_jfif_header_of_the_right_length_with_a_thumbnail_size_is_refused() -> None:
+    plain = b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01"
+    assert sniff(jpeg_of(jseg(0xE0, plain + b"\x00\x00"), sof(), SOS)).width == 1
+    refuses(jpeg_of(jseg(0xE0, plain + b"\x01\x00"), sof(), SOS))
+    refuses(jpeg_of(jseg(0xE0, plain + b"\x00\x01"), sof(), SOS))
+
+
+def test_junk_after_the_end_of_the_deflate_stream_in_a_later_data_chunk_is_refused() -> None:
+    refuses(png_of(ihdr(), idat(), chunk(b"IDAT", b"junk"), IEND))
+    refuses(png_of(ihdr(), idat(), chunk(b"IDAT", zlib.compress(b"\x00\x00")), IEND))
+
+
+def test_image_data_split_by_another_chunk_is_refused_even_when_the_stream_is_whole() -> None:
+    whole = zlib.compress(b"\x00\x00")
+    first, second = chunk(b"IDAT", whole[:4]), chunk(b"IDAT", whole[4:])
+    assert sniff(png_of(ihdr(), first, second, IEND)).width == 1
+    refuses(png_of(ihdr(), first, chunk(b"tEXt", b"k\x00v"), second, IEND))
+
+
+def test_the_check_on_the_image_data_stops_inflating_at_the_declared_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bomb is not inflated to the end and then found too big: the work stops within a step of the declared size."""
+    made: list[Counting] = []
+    real = zlib.decompressobj
+
+    class Counting:
+        def __init__(self) -> None:
+            self.inner = real()
+            self.produced = 0
+            made.append(self)
+
+        def decompress(self, data: bytes, max_length: int = 0) -> bytes:
+            out = self.inner.decompress(data, max_length)
+            self.produced += len(out)
+            return out
+
+        @property
+        def eof(self) -> bool:
+            return self.inner.eof
+
+        @property
+        def unconsumed_tail(self) -> bytes:
+            return self.inner.unconsumed_tail
+
+        @property
+        def unused_data(self) -> bytes:
+            return self.inner.unused_data
+
+    monkeypatch.setattr("safo.broker.images.zlib.decompressobj", Counting)
+    bomb = chunk(b"IDAT", zlib.compress(b"\x00" * 40_000_000, 9))
+    refuses(png_of(ihdr(), bomb, IEND))
+    assert len(made) == 1 and made[0].produced <= 2 + 65536
+
+
+def test_a_padding_byte_after_an_odd_webp_chunk_is_zero() -> None:
+    payload = vp8l_payload(1, 1)
+    assert len(payload) == 5
+    body = b"WEBP" + b"VP8L" + struct.pack("<I", 5) + payload
+    assert sniff(b"RIFF" + struct.pack("<I", len(body) + 1) + body + b"\x00").width == 1
+    refuses(b"RIFF" + struct.pack("<I", len(body) + 1) + body + b"\x01")

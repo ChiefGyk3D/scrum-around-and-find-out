@@ -49,10 +49,14 @@ pipeline, the vendor request templates and reply parser, the image checks, and t
   thinking and image tokens together). A reply over it is a breach: recorded at the cap or the reported usage, whichever
   is higher, the model suspended, even when the money stays inside the reservation (`cap_verified` false).
 - **Images** (`images.py`, `vendor.py`): one image per call, PNG, JPEG or WebP only, found by the first bytes and matching
-  the named type. The broker still decodes no pixels, but it walks each container to its real end by lengths and markers,
-  so nothing can be appended or hidden (PNG data is inflated in small steps, and thrown away, to check it is exactly
-  the declared rows; Exif, XMP, compressed metadata and animations are refused), and caps the declared size (8192 per side, 2^25 pixels) and the bytes (24 MiB).
-  An image that fails is not passed on, and its cost is still counted from usage.
+  the named type. The broker decodes no pixels and is not a decoder, but it walks each container to its real end by
+  lengths and markers as an allow-list: every segment or chunk is a known type whose body has exactly its shape (JPEG
+  tables and headers, a plain JFIF header, PNG chunks with checksums, rows that inflate to exactly the declared size
+  with a real filter type, a plain WebP or the extended header and the one image). Exif, XMP, ICC and compressed
+  metadata, animations, thumbnails and anything appended are refused, and the declared size is capped (8192 per side,
+  2^25 pixels, 24 MiB). The compressed bitstream itself (JPEG entropy data, WebP codec data) is not validated, so a
+  well-framed file can still fail to decode in a viewer: images stay untrusted output. An image that fails is not
+  passed on, and its cost is still counted from usage.
 
 Where phase 2 read the design and had to choose, it is listed in the pull request. Still unverified: the real response
 shapes. The text shape is the one the existing wrapper already reads; the image shape is inferred from the vendor SDK examples
