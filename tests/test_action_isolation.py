@@ -18,6 +18,8 @@ from typing import Any
 import pytest
 import yaml
 
+from gitrepo import git, make_repo
+
 ROOT = Path(__file__).parent.parent
 STEPS: list[dict[str, Any]] = yaml.safe_load((ROOT / "action.yml").read_text())["runs"]["steps"]
 BOARD = (ROOT / "tests" / "data" / "board.yaml").read_text()
@@ -103,11 +105,19 @@ def test_the_preflight_step_never_imports_the_workspace(workspace: Path, venv: P
         "REPOSITORY_OWNER": "acme",
         "REPO_PRIVATE": "true",
         "SAFO_DRY_RUN": "false",
+        "EVENT_NAME": "push",
+        "GITHUB_REF": "refs/heads/main",
+        "DEFAULT_BRANCH": "main",
+        "IS_FORK": "false",
+        "REPO_IS_FORK": "false",
+        "RUNNER_TEMP": str(workspace.parent),
         "GITHUB_OUTPUT": str(workspace.parent / "output"),
     }
+    make_repo(workspace, {})  # the board file is read from the commit, so the workspace is a checkout of one
+    extra["GITHUB_SHA"] = git(workspace, "rev-parse", "HEAD")
     done = run_step("Preflight", workspace, venv, extra)
     assert done.returncode == 0, done.stdout + done.stderr
-    assert (workspace.parent / "output").read_text() == "repositories=widgets,manuals\n"
+    assert "repositories=widgets,manuals\n" in (workspace.parent / "output").read_text()
     assert_untouched(workspace)
 
 
