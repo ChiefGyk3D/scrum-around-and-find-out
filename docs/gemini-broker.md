@@ -209,7 +209,7 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
   broker/                          root:root 0700
     paid-key                       root:root 0600   the encrypted credential
 /opt/safo-broker/                  root:root 0755   releases/VERSION (a venv of locked wheels plus the broker source, read-only) and the symlink current
-/var/lib/safo-broker-install/version  root:root 0644   the highest broker version ever installed (monotonic)
+/var/lib/safo-broker-install/version  root:root 0600   the highest broker version ever installed (monotonic)
 /etc/systemd/system/
   safo-broker.socket               root:root 0644
   safo-broker.service              root:root 0644
@@ -266,7 +266,7 @@ it still leaves to a human.
    signed tag's name (a leading `v` and three dotted numbers) and cross-checked against the package's own `__version__`, read from the source
    without importing it. A mismatch is refused. The `VERSION` argument on the command line is only an expected value that
    must equal the tag's; there is no separately supplied VERSION file.
-4. **Refuses a rollback.** `/var/lib/safo-broker-install/version` (root:root 0644) holds the highest version ever
+4. **Refuses a rollback.** `/var/lib/safo-broker-install/version` (root:root 0600) holds the highest version ever
    installed. A version below it is refused, and the same version is refused unless root passes `--reinstall`. Going
    down needs root to pass `--allow-downgrade VERSION` explicitly; the installer logs it to the journal and to a
    root-owned log. A second root-owned file, `/etc/safo/broker-min-version`, is a floor: after a fix for a flaw, root
@@ -320,6 +320,96 @@ tag whose name disagrees with the code's version, a dependency with only a sourc
 build backend may run), a source path supplied by the caller (ignored), and a broker started below the floor each refuse;
 a correct signed tag installs. Failure injection at each of build, verification, unit install, restart and the post-start
 check must leave the previous release active and the version file unchanged.
+
+## Install (phase 5 status)
+
+What phase 5 puts in the tree, all testable without root and none of it run on a real machine yet:
+
+- `packaging/systemd/safo-broker.socket` and `packaging/systemd/safo-broker.service`: the two units from "The unit files
+  and their hardening", plus `ReadWritePaths=` for the state directory only, the bind mounts and hidden sockets described under the egress control, no start condition on the root-owned
+  switch (the broker reads the switch on every request, answers status and dry run while it is absent and answers every paid
+  call as disabled before the ledger is written or the key is read; decided 2026-10-31), an `ExecStartPre` floor check (the `floor` module of the broker package, which refuses to start a release below
+  `/etc/safo/broker-min-version`, the second layer behind the installer), and explicit start and stop timeouts.
+  `tests/test_broker_units.py` checks every hardening line by name (removing one fails a test), runs `systemd-analyze verify` and `systemd-analyze security --offline` where the tool exists (the
+  tests skip, with the reason shown, when it does not), and fails if the exposure score rises above 2.0.
+- `packaging/broker-requirements.txt`: the hash-locked wheel list the installer reads. Wheel hashes only.
+- `packaging/safo_broker_install.py`: `safo-broker-install`, standard library only, so root can copy the one file to
+  `/usr/local/sbin`. Commands: `plan` (prints the setup runbook, never runs it), `install VERSION` (a dry run unless
+  `--apply`; `--reinstall`, `--allow-downgrade VERSION`), and `rollback` (`--to VERSION`). The chain is the one in
+  "Install and update chain": the source comes from a fixed URL and a single tag fetch (no option or variable changes it),
+  the signed annotated tag object is verified against `/etc/safo/broker-release-signers`, the version comes from the tag
+  and is cross-checked with `__version__`, the floor and the highest-installed record are checked, wheels are fetched with
+  `--only-binary=:all: --require-hashes --no-deps --isolated` and every file is re-checked against the lock, the release
+  is built in a staging directory with a manifest, made read-only, and activated with a rename over a temporary link.
+- `src/safo/broker/runbook.py`: the one-time root setup as full `ssh -t host 'sudo ...'` lines, each step with its blast
+  radius and rollback. The paid key is typed at a hidden prompt on the remote terminal and never appears in the text. The
+  switch is left off.
+
+**Egress control for the service user.** The units alone do not limit where the service can connect, so phase 5 also
+ships an nftables table keyed on the service user, three small units and a root helper that is **not part of any
+release**: root installs it once from a reviewed copy (the runbook stages, hashes and installs it like the installer), so a
+new release cannot change what root does with network-administration rights. The ruleset is a constant inside the helper:
+
+- The table lets the service user open new connections only to port 443 of a named set of vendor IPv4 addresses.
+  Everything else from that user is logged and, in drop mode, dropped, including IPv6, DNS, loopback and every other
+  port; there is no established-connection shortcut, so a connection opened while the table was missing does not
+  survive the rebuild. Other users are not matched.
+- A root timer runs the helper every minute. It reads the vendor host name from the root-owned
+  egress config file under `/etc/safo` (the name is in no unit and no command line), validates every address (public IPv4
+  only: no private, loopback, link-local, multicast, reserved or carrier-grade range; an empty, oversized or
+  malformed answer is refused), swaps the set in one flush-and-add transaction, and rewrites a fixed-size hosts view.
+  On any error nothing changes and the previous set and hosts view stay; an address that is not refreshed expires from
+  the set after an hour.
+- The broker unit bind-mounts that hosts view read-only over `/etc/hosts` and a files-only name service switch file read-only
+  over its usual place under `/etc`, and hides the resolver, bus, name-cache and private-manager socket directories, so the
+  service resolves the vendor name from the generated file and cannot ask another process to resolve anything else.
+- The broker unit is bound to the egress unit and ordered after it: it starts only with the rules loaded and stops when
+  they are stopped.
+- The shipped default is observe mode (log, then let through). After about a week with only vendor addresses in the log,
+  one line in the root-owned config switches to drop mode; the runbook has the steps, blast radius and rollback.
+
+What it does not do: a service that reaches the vendor front end can still use the key there (spend) and can use the
+vendor as a dead drop; a root-level compromise removes the control; and the table can be missing for up to a minute
+after an outside firewall reload until the next timer run rebuilds it. The broker unit's address-family line allows only
+IPv4 sockets, but it limits the `socket()` call only (see the systemd manual on execution settings): `socketpair()` and `io_uring` are
+not covered, so it does not make Unix sockets impossible. The socket server is expected to serve from the listener
+systemd passes in and to create no Unix sockets of its own (no socket pairs, no io_uring, no default asyncio loop); a
+design that needs them needs a reviewed change of that line. The vendor-side key restriction in the runbook bounds what a leaked key can reach.
+Unverified until a run on a throwaway machine: that the two read-only bind mounts work under `ProtectSystem=strict` with
+`/etc/safo` read-only (the design reading says they do, because the source is read through the host path and the
+destination mounts are read-only); if they do not, move the hosts view to a directory under `/run` and change both
+paths together. Also unverified: the egress units under a real system, and nft loading on a real kernel (the ruleset is
+only syntax-checked, inside a private user and network namespace).
+
+**Not proven in the sandbox experiment.** The parent-directory ownership walk of `read_trust_file` was shimmed there,
+because a user-mode sandbox shows root-owned directories as owned by the overflow user. It is to be proven in phase 7, on
+the real host, with the real root-owned `/etc/safo` tree.
+
+**Unit policy.** The installer checks every release's units against a fixed policy after the signature verifies: units are
+read as printable ASCII with newline-only line breaks, no backslash anywhere (so no continuation or escape can make two
+readers disagree), each section once; every key must be pinned to exact values or be `Description` or `Documentation`
+(an allowlist, so an unknown key is refused); the ordering and dependency keys are pinned. Where `systemd-analyze` exists it
+also verifies the staged units, requires the broker service's hardening checks to resolve as set, and enforces an exposure
+budget per unit. Nothing is started.
+
+Beyond the design text, the installer also refuses: a signed tag object stored under a different tag name (the object
+carries its own name, which must equal the requested tag); a signature block that is not an SSH signature (so a GPG
+signature checked against whatever keyring root has is never consulted); a symlink or submodule anywhere in the release
+tree; a wheel with a `.pth` file, a scripts directory, console or GUI entry points, a link member or an unsafe member
+path; a wheel that would install a package named `safo` over the broker's own code; a missing or unusable floor file; and
+a missing version file when a release is already installed. A release directory is named for its version; when
+`--reinstall` installs a version that is already present, the new directory gets a numbered suffix.
+
+**Known limit of the post-start check.** Until the socket server exists (phase 3), the installer's health check can only
+ask systemd whether the socket is enabled and active; it cannot ask the broker for `status`, because the socket server is
+not built yet. A first install therefore records its version without the broker having answered. The check is a replaceable hook; phase 3 wires in a bounded `status` request that must name the expected
+release, and until then a freshly installed release is exercised only by its offline self-test and the maintainer's
+dry run.
+
+**Run it first on a throwaway machine.** Until the maintainer has run the installer and the units on a throwaway VM, these
+are unverified: that `MemoryDenyWriteExecute=yes` lets `ssh-keygen` run under the service, that `@system-service` allows
+`memfd_create`, that `LoadCredentialEncrypted=` hands the key to the service user only, that the owner and mode of the
+socket let the client group connect, and that the service skips its start cleanly when the switch file is absent.
 
 ## The root-door precondition (a documented residual risk)
 
