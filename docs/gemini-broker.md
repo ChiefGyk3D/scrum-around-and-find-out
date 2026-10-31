@@ -3,8 +3,8 @@
 > **Status: phase 1 of the build plan is in the tree; the rest is design.** The core library under `src/safo/broker/`
 > exists (see "Phase 1 status" below). There is no socket, no service, no unit, no installer and no vendor call, so
 > paid use stays disabled by the root-owned switch (see [Gemini](gemini.md)) until the broker is built, reviewed and
-> enabled by the maintainer. This page is the design for issue #205 (steps 1 and 2); the risks are in [the broker
-> threat model](gemini-broker-threat-model.md). Nothing here is a promise about code that does not exist yet; the
+> enabled by the maintainer. This page is the design for issue #205 (steps 1 and 2); the risks are in
+> [the broker threat model](gemini-broker-threat-model.md). Nothing here is a promise about code that does not exist yet; the
 > claims about what code does today are checked against the tree, and the claims about the vendor were read from the
 > vendor pages on 2026-10-30 (marked **verified** with the page, or **unverified**).
 
