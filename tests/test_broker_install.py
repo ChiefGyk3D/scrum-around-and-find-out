@@ -1070,3 +1070,33 @@ def test_the_log_and_the_version_record_are_root_only(world: World) -> None:
     assert stat.S_IMODE(world.layout.version_file.stat().st_mode) == 0o600
     # the unit files stay 0644 on purpose: they hold no secret and `systemctl cat` must work for the maintainer
     assert stat.S_IMODE((world.layout.unit_dir / "safo-broker.service").stat().st_mode) == 0o644
+
+
+# ---- CI finding: Python 3.14 venvs also hold a pi-named interpreter link, and free-threaded builds a "t" suffix ------
+
+
+@pytest.mark.parametrize("name", ["python", "python3", "python3.14", "python3.14t", "𝜋thon", "𝜋thon3", "𝜋thon3.14t"])
+def test_every_interpreter_link_a_venv_makes_is_accepted(tmp_path: Path, name: str) -> None:
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / name).symlink_to("/usr/bin/python3")
+    install.check_venv_bin(bin_dir)
+    install.check_links(tmp_path)
+
+
+@pytest.mark.parametrize("name", ["pythonx", "python3.14tt", "𝜋thonx", "𝜋", "Python", "evil", "python3.14.sh"])
+def test_other_names_in_the_venv_bin_are_still_refused(tmp_path: Path, name: str) -> None:
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / name).symlink_to("/usr/bin/python3")
+    with pytest.raises(InstallError):
+        install.check_venv_bin(bin_dir)
+        install.check_links(tmp_path)
+
+
+def test_a_regular_file_with_the_pi_name_is_refused(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "𝜋thon").write_text("#!/bin/sh\n")
+    with pytest.raises(InstallError, match="not a symlink"):
+        install.check_venv_bin(bin_dir)

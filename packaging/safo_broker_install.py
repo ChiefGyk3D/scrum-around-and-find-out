@@ -138,6 +138,9 @@ FAULT_POINTS = (
     "after_version_write",
 )
 
+# The interpreter links `venv` makes: python, python3, python3.14, a trailing t on free-threaded builds and, from 3.14,
+# a link named with the Greek pi letter (U+1D70B).
+INTERPRETER_LINK = re.compile("(?:python|\U0001d70bthon)[0-9.]*t?")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 RELEASE_RE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.r([0-9]+))?")
 TAG_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
@@ -993,7 +996,7 @@ def check_venv_bin(bin_dir: Path) -> None:
     """Nothing but what `venv` itself creates may sit in bin/, and the interpreter names must still be links."""
     for entry in bin_dir.iterdir():
         name = entry.name
-        if re.fullmatch(r"python[0-9.]*", name):
+        if INTERPRETER_LINK.fullmatch(name):
             if not entry.is_symlink():
                 msg = f"venv/bin/{name} is not a symlink after the install; refused"
                 raise InstallError(msg)
@@ -1005,7 +1008,10 @@ def check_venv_bin(bin_dir: Path) -> None:
 def check_links(release: Path) -> None:
     """The only links in a staged tree are the ones `venv` makes. Run before anything is chmod-ed."""
     for rel, p in _walk(release):
-        if p.is_symlink() and not (rel == "venv/lib64" or re.fullmatch(r"venv/bin/python[0-9.]*", rel)):
+        if p.is_symlink() and not (
+            rel == "venv/lib64"
+            or (rel.startswith("venv/bin/") and INTERPRETER_LINK.fullmatch(rel.removeprefix("venv/bin/")))
+        ):
             msg = f"staged tree has an unexpected symlink at {rel}"
             raise InstallError(msg)
 
