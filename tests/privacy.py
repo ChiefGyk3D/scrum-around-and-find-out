@@ -104,6 +104,7 @@ BROKER_DOC_NAMES = {
     "sockets.target",
     "network-online.target",
     "safo.broker",
+    "safo.broker.admin",  # the administration command, run as python -I -m safo.broker.admin
 }
 
 ALLOWED_HOSTS = {

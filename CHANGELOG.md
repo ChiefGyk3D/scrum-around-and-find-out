@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Paid Gemini broker, administration command (#262): `python -I -m safo.broker.admin` with `status`, `usage`,
+  `check-install`, `clear` and `reconcile`, run by root. It reads the root-owned files, then drops to the service user
+  (groups emptied, group, user, read back, regain probe) before opening the ledger, so the ledger's owner rule is
+  unchanged; it refuses to start unless Python is isolated. `clear` prints the call records, needs the typed call ids,
+  settles an ambiguous call at its whole reservation unless root names a verified amount with a reason, and records the
+  uid and time in a new `admin_action` ledger row. `reconcile` reports mismatches and can only raise a month. Paid use
+  stays disabled.
 - Paid Gemini broker, phase 5 (#261): the systemd units and the installer, none of it run on a real machine yet. New
   `packaging/systemd/` socket and service units for a dedicated unprivileged user (strong sandboxing, an encrypted
   credential for the paid key, the root-owned switch as a start condition), `packaging/broker-requirements.txt` (hash-locked
@@ -20,7 +27,6 @@
   support, libfido2, the udev rule, a visible hardware key, the allowed-signers file (root, 0644, namespace on every
   line), the enable switch, the service user and the state directory modes. It writes nothing, makes no network or
   vendor call, and prints no key or file content. It is not wired into `safo gemini` yet. Paid use stays disabled.
-
 
 - Tests: the random-output tests in `tests/test_protection.py` no longer depend on chance (#247). `_random_token` draws only from `secrets.randbelow`, and the tests inject a scripted or seeded source (and spy on the default one) instead of hoping two real draws differ or that a statistic stays under a bound.
 - Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor above 2 (standard input only for `approve`), the `safo` package that launched it pinned first on the import path, and a fresh private working directory; the child verifies its own environment and directory instead of trusting the interpreter flag, and the mode is read by the real parser. No signing provider library or askpass program is passed on. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
