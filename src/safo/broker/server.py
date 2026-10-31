@@ -353,9 +353,8 @@ class Server:
         self._slots = threading.BoundedSemaphore(config.max_concurrent_calls)
         self._in_flight = 0
         self._stopping = False
-        self._wake_r, self._wake_w = socket.socketpair()
-        self._wake_r.setblocking(False)
-        self._wake_w.setblocking(False)
+        # the stop wakeup is a pipe: no socket call of any kind, so a seccomp or address-family filter cannot touch it
+        self._wake_r, self._wake_w = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
         self.peak_open = 0
 
     def _spend_gate(self) -> None:
@@ -383,15 +382,30 @@ class Server:
     def stop(self) -> None:
         """Stop accepting. Safe from a signal handler: it sets a flag and writes one byte to a pipe."""
         self._stopping = True
-        with contextlib.suppress(OSError):
-            self._wake_w.send(b"x")
+        fd = self._wake_w
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.write(fd, b"x")
+
+    def close(self) -> None:
+        """Close the stop pipe (idempotent). `serve` does it when it returns."""
+        for name in ("_wake_r", "_wake_w"):
+            fd = getattr(self, name, -1)
+            setattr(self, name, -1)
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+
+    def __del__(self) -> None:
+        self.close()
 
     def serve(self, listener: socket.socket) -> int:
         """Accept until `stop`, then wait for the calls in flight (up to `grace_seconds`) and return how many were
         abandoned. The listener is not closed: under socket activation it belongs to systemd."""
         listener.setblocking(False)
         while not self._stopping:
-            ready, _, _ = select.select([listener, self._wake_r], [], [])
+            watched: list[int | socket.socket] = [listener, self._wake_r]
+            ready, _, _ = select.select(watched, [], [])
             if self._stopping or listener not in ready:
                 continue
             try:
@@ -467,6 +481,7 @@ class Server:
         if alive:
             self._record_interrupted()
         self.log.event("stopped", abandoned=len(alive))
+        self.close()
         return len(alive)
 
     def _record_interrupted(self) -> None:

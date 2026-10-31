@@ -105,7 +105,7 @@ key, no timing assertions): the wire format, the server, the entry point and the
 
 Where phase 3 read the design and had to choose, it is listed in the pull request. Not built: the idle exit, the audit copy
 `approvals/NONCE.json` of the design, the installer and units, the admin command (so nothing can yet clear a suspension),
-and the client. The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
+and the client. The stop wakeup is a pipe, so the server module makes no `socket()` or `socketpair()` call of its own. `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit (the pytest wrapper skips, with the reason, where there is no user service manager). The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
 
 ## The requirement
 

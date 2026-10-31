@@ -1246,3 +1246,76 @@ def test_the_server_refuses_more_than_one_paid_call_in_flight() -> None:
     for more in (0, 2, 3, 8):  # the design: one paid vendor call in flight, never more
         with pytest.raises(ConfigError):
             ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=more)
+
+
+# -- no socket call of any kind in the server module ---------------------------------------------------------------
+
+
+def test_the_server_module_makes_no_socket_or_socketpair_call_while_it_serves_and_stops(
+    tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unit restricts address families and may filter more; the stop wakeup must be a pipe, not a socketpair. The
+    guard raises for a `socket.socket(...)` or `socket.socketpair()` call made from the server module itself (the
+    standard library's own `accept` and the test's client calls are not the server module and still work)."""
+    real_socket = socket.socket
+    real_pair = socket.socketpair
+
+    class Guard(real_socket):  # type: ignore[misc,valid-type]  # a subclass of the real class, to watch its callers
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            if str(sys._getframe(1).f_globals.get("__name__")) == "safo.broker.server":
+                raise AssertionError("the server module made a socket() call")
+            super().__init__(*args, **kwargs)
+
+    def guarded_pair(*args: Any, **kwargs: Any) -> Any:
+        if str(sys._getframe(1).f_globals.get("__name__")) == "safo.broker.server":
+            raise AssertionError("the server module made a socketpair() call")
+        return real_pair(*args, **kwargs)
+
+    listener = real_socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(tmp_path / "g.sock"))
+    listener.listen(4)
+    monkeypatch.setattr(socket, "socket", Guard)
+    monkeypatch.setattr(socket, "socketpair", guarded_pair)
+    env = Env(rig)  # builds the Server: its stop wakeup is made here
+    result: list[int] = []
+    thread = threading.Thread(target=lambda: result.append(env.server.serve(listener)))
+    thread.start()
+    client = real_socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(str(tmp_path / "g.sock"))
+    client.sendall(protocol.frame(protocol.request_body("status"), protocol.MAX_REQUEST_FRAME))
+    client.shutdown(socket.SHUT_WR)
+    assert json.loads(split_frames(read_all(client))[0])["ok"] is True
+    client.close()
+    env.server.stop()
+    thread.join()
+    listener.close()
+    assert result == [0]
+    pair_a, pair_b = real_pair()  # a socketpair made by a test is not the server module: the guard lets it through
+    pair_a.close()
+    pair_b.close()
+
+
+def test_the_stop_pipe_is_closed_when_serve_returns_and_a_late_stop_writes_nowhere(tmp_path: Path, env: Env) -> None:
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(tmp_path / "p.sock"))
+    listener.listen(1)
+    read_fd, write_fd = env.server._wake_r, env.server._wake_w
+    env.server.stop()
+    assert env.server.serve(listener) == 0
+    listener.close()
+    for fd in (read_fd, write_fd):
+        with pytest.raises(OSError):
+            os.fstat(fd)  # both ends are closed
+    # the number of the old write end is now somebody else's descriptor: a late stop (a signal after the end) must not
+    # write into it
+    other_r, other_w = os.pipe2(os.O_NONBLOCK)
+    os.dup2(other_w, write_fd)
+    try:
+        env.server.stop()
+        with pytest.raises(BlockingIOError):
+            os.read(other_r, 1)
+    finally:
+        os.close(write_fd)
+        os.close(other_r)
+        os.close(other_w)
+    env.server.close()  # idempotent
