@@ -651,9 +651,10 @@ def _random_token() -> str:
     """A path component of 6 to 24 characters from letters, digits, `_`, `.` and `-`, any of them first (so a leading
     dot, digit, dash or capital is as likely as a lowercase letter) and never made only of dots. Not hexadecimal: a
     class like `[0-9a-f]*` or `[a-z]*` must not own it by construction."""
-    chars = [secrets.choice(_ALPHABET) for _ in range(6 + secrets.randbelow(19))]
+    # One randomness seam, `secrets.randbelow`, looked up at call time so a test can inject or spy on it.
+    chars = [_ALPHABET[secrets.randbelow(len(_ALPHABET))] for _ in range(6 + secrets.randbelow(19))]
     if not any(c in _ALNUM for c in chars):
-        chars[-1] = secrets.choice(_ALNUM)
+        chars[-1] = _ALNUM[secrets.randbelow(len(_ALNUM))]
     return "".join(chars)
 
 
