@@ -106,6 +106,7 @@ key, no timing assertions): the wire format, the server, the entry point and the
 
 Where phase 3 read the design and had to choose, it is listed in the pull request. Not built: the idle exit, the audit copy
 `approvals/NONCE.json` of the design, the installer and units, the admin command (so nothing can yet clear a suspension),
+<<<<<<< HEAD
 and the client (phase 4b, below). The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
 
 ### Phase 4b status
@@ -116,6 +117,9 @@ described in "The client" below. What is **not** done: wiring it into the comman
 wired yet"), the dispatch guard's `check`, removal of the in-process paid path, and the free-path independence tests;
 those are the rest of phase 4. The safe image writer is phase 4a, a separate branch; until it is in the tree the client
 uses a small marked adapter with the same signature.
+=======
+and the client. The stop wakeup is a pipe, so the server module makes no `socket()` or `socketpair()` call of its own. `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit (the pytest wrapper skips, with the reason, where there is no user service manager). The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
+>>>>>>> origin/feat/259-broker-phase3
 
 ## The requirement
 
@@ -832,6 +836,36 @@ The broker never sends a path or a file name. The client:
   `NAME.receipt.json` (mode 0600, same exclusive create) holding the receipt, the digest, the cost and `reviewed: false`;
 - checks that the output directory is writable **before** it asks for the call, so a full disk does not discard an image
   that has already been paid for; if the write still fails, the message says money was spent and gives the digest.
+
+### Writing an image on the client (phase 4a)
+
+`src/safo/broker/imagewrite.py` is the one place the client puts a returned image on disk. It does not depend on the
+socket or the protocol; it takes the bytes and the limits as arguments (defaults: `png`, `jpeg` and `webp`, 24 MiB).
+
+- `write_image(data, directory, stem, max_bytes, allowed=...)` sniffs the type from the first bytes and ignores any
+  name or type the server or the caller supplied. Empty, oversize and every other type are refused before the file
+  system is touched. The file name is made here: the stem cut to `[A-Za-z0-9_-]` (48 characters at most, so a dot, a
+  slash, a NUL or a Unicode look-alike becomes `_`), 8 random hex digits, and `png`, `jpg` or `webp` from the sniffed
+  type. It returns only the final path.
+- The directory is opened one component at a time from `/` with `O_NOFOLLOW | O_DIRECTORY`, so a symlink anywhere in
+  the path (the last component included) is refused, as are a relative path, `..`, a FIFO or a file. It must belong to
+  the caller and must not be group or world writable unless it has the sticky bit. The file is created relative to that
+  descriptor, so swapping the path after the check changes nothing.
+- The bytes go to a temporary name (`O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600 and then `fchmod` 0600, so the umask has
+  no say), are flushed with `fsync`, and are linked to the final name; `link` never replaces anything, so an existing
+  file (a symlink, a FIFO, a device) is skipped, not followed. Then the temporary name is removed and the directory is
+  flushed. Any failure, including `KeyboardInterrupt`, removes the temporary file and the final name (only if it is
+  still the file this call made), so there is never a partial file at the final name. A full disk is an
+  `ImageWriteError` whose message is a fixed sentence with the errno name. Because a failure after the link removes the
+  link, the caller keeps the bytes in memory and the receipt digest to report that money was spent.
+- `default_output_dir()` returns `$XDG_STATE_HOME/safo/gemini-images` (else `~/.local/state/safo/gemini-images`),
+  created with mode 0700 whatever the umask. It is the state directory and not the pictures directory on purpose: desktop
+  shells index and thumbnail the pictures directory, which would open the image. A symlink, a wrong owner, a state
+  directory writable by others, or a `safo` or `gemini-images` directory with any group or world access is refused.
+- `print_summary(path, data)` prints one line, `saved N bytes, type T: PATH`, from the bytes already in memory. It never
+  opens, previews or parses the file, and escapes the path.
+- Tests: `tests/test_broker_imagewrite.py` (planted links and FIFOs, an existing file, a directory swapped between steps
+  through the injected step hook, hostile stems, a fake full disk, a crash at every step, umask 0 and 077).
 
 ### The safety side
 

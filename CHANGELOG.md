@@ -4,6 +4,13 @@
 
 - Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor above 2 (standard input only for `approve`), the `safo` package that launched it pinned first on the import path, and a fresh private working directory; the child verifies its own environment and directory instead of trusting the interpreter flag, and the mode is read by the real parser. No signing provider library or askpass program is passed on. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
+- Paid Gemini broker, phase 4a (#260): `src/safo/broker/imagewrite.py`, the client's safe image writer, with no socket
+  or protocol dependency. `write_image` takes the type from the first bytes (png, jpeg, webp; 24 MiB by default), makes
+  the file name itself from a restricted stem, a random suffix and a fixed extension, opens the output directory
+  component by component with `O_NOFOLLOW | O_DIRECTORY`, writes through a 0600 temporary file relative to the
+  directory descriptor, `fsync`s, links it into place without replacing anything and leaves no file behind on any
+  failure. `default_output_dir` makes a private 0700 directory under the user state directory, and `print_summary`
+  prints one line without opening the image. Paid use stays disabled.
 - Paid Gemini broker, phase 1 (#205): the core library under `src/safo/broker/`. Integer micro-dollar arithmetic and the
   worst-case reservation (prompt bytes plus 64 tokens at one token per byte, the output cap, two interim images), the
   per-job cap (2.50 USD in the testing phase) and monthly ceiling (10 USD), the model allow-list with Pro and Nano Banana
@@ -49,7 +56,7 @@
   words only, and on SIGTERM lets calls in flight finish and records any still open after the grace period as
   ambiguous. `python -I -m safo.broker` wires it: the epoch, switch, key and `broker.yaml` readers, no-core and
   not-dumpable hardening, a scrubbed environment, the checked HTTPS transport to the vendor, and recovery before the
-  first accept. Paid use stays disabled.
+  first accept. The stop wakeup is a pipe, not a socket pair, so the unit's address-family or system-call filters never touch it; `scripts/broker_sandbox_check.py` (with a pytest wrapper that skips, with its reason, where there is no user systemd manager) runs the real start-up flow as a socket-activated user unit under the unit's hardening properties, in error-number and kill modes and with `~socketpair` filtered, and fails for an injected socket, socketpair or recvmsg call. Paid use stays disabled.
 
 - Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
   generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed
