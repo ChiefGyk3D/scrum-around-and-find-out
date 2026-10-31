@@ -2,7 +2,7 @@
 """The guard keeps denying paid use outside the broker flow (#287). The broker entries (`paid`, `paid-dryrun`) are paid
 action words: a command that uses one, written out, built at run time, spread over a variable or split across
 arguments, is denied or treated as unreadable exactly like the same shape with `approve` on main. Nothing is allowed
-through in a brief; the real command a person types at a terminal is not a brief and is not blocked by the shell check."""
+through in a brief; the real command a person types at a terminal is not a brief, and the shell check lets it pass."""
 
 from __future__ import annotations
 
