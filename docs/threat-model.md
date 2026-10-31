@@ -8,6 +8,9 @@ This page is about the step. The model itself is an [OWASP Threat Dragon](https:
 kept in the repository, and checking that the file is well formed and moves with the code is a reusable workflow in
 [git-your-ship-together](https://github.com/ChiefGyk3D/git-your-ship-together) (`threat-model.yml`), not something SAFO builds.
 
+SAFO's own model, for the whole of SAFO, is [SAFO threat model](safo-threat-model.md), kept as the Threat Dragon file
+[docs/threat-model/safo.threat-dragon.json](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/threat-model/safo.threat-dragon.json).
+
 ## The line
 
 An issue carrying the configured label has, on a line by itself, one of:
