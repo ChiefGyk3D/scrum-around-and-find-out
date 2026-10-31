@@ -86,7 +86,7 @@ class CallRecord:
     resolved_micro: int | None = None
     ambiguous: bool = False
     breach: bool = False
-    last_row: dt.datetime | None = None  # the time of the call's latest send, end or ambiguity row
+    last_row: dt.datetime | None = None  # the time of the row that ended or made the call ambiguous
 
     @property
     def month(self) -> str:
@@ -202,7 +202,6 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
                     raise _corrupt()
             elif kind == "call_sent":
                 rec.state = advance(rec.state, CallState.SENT)
-                rec.last_row = when
             elif kind == "call_end":
                 _end(rec, row)
                 rec.last_row = when

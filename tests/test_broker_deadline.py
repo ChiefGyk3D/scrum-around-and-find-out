@@ -5,6 +5,7 @@ time and no address is contacted."""
 
 from __future__ import annotations
 
+import http.client
 import socket
 from collections.abc import Callable
 from typing import Any
@@ -333,3 +334,38 @@ def test_time_spent_in_the_set_up_after_the_tcp_connect_is_checked_before_the_se
     with pytest.raises(TransportTimeout):
         transport(clock, Arm()).send(request(25.0))
     assert fake.socks[0].closed and fake.socks[0].sent == []
+
+
+def test_a_flag_raised_during_the_set_up_after_the_tcp_connect_also_stops_the_send(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    fake = net(monkeypatch, clock, {ADDRS[0]: "ok"})
+    arm = Arm()
+    fake.on_setup = lambda: arm.fire() if arm.fire else None  # the watchdog fires; the clock itself has not moved
+    with pytest.raises(TransportTimeout):
+        transport(clock, arm).send(request(25.0))
+    assert fake.socks[0].closed and fake.socks[0].sent == []
+
+
+def test_the_tls_connection_checks_the_deadline_after_its_handshake_too(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    closed: list[int] = []
+
+    def slow_handshake(self: Any) -> None:  # stands in for connect + TLS wrap in the standard class
+        clock.now += 26.0
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", slow_handshake)
+    monkeypatch.setattr(netguard.PinnedHTTPSConnection, "close", lambda self: closed.append(1))
+    conn = netguard.PinnedHTTPSConnection("example.test", 443, timeout=25.0)
+    conn.bind_deadline(clock() + 25.0, clock)
+    with pytest.raises(TimeoutError):
+        conn.connect()
+    assert closed == [1]
+    flagged = netguard.PinnedHTTPSConnection("example.test", 443, timeout=25.0)
+    flagged.bind_deadline(clock() + 25.0, clock, lambda: True)
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", lambda self: None)
+    with pytest.raises(TimeoutError):
+        flagged.connect()
+    unbound = netguard.PinnedHTTPSConnection("example.test", 443, timeout=25.0)
+    unbound.connect()  # no deadline bound: nothing to check
