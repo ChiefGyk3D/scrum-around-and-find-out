@@ -66,7 +66,7 @@ DECODE = re.compile(
 )
 SINK_RE = re.compile(SINK)
 SHELL_WILD = frozenset("$*?[]{}`%")
-RISKY_ACTIONS = ("ask", "approve")
+RISKY_ACTIONS = ("ask", "approve", "paid-dryrun")  # bare `paid` is an action word elsewhere, see _RISK_TOKEN (#287)
 ACTIONS = ("ask", "approve", "quota", "paid", "paid-dryrun")  # paid and paid-dryrun: the broker entries (#287)
 # inline code in prose that wraps a known word, an option or a file name; any other word in backticks runs as a command
 MARKDOWN_WORD = re.compile(
@@ -598,8 +598,10 @@ _LOOP_NAME = re.compile(r"(?<![\w-])for\s+([A-Za-z_]\w*)\s+in\b")
 _READ_NAME = re.compile(r"(?<![\w-])read\s+(?:-\w+\s+)*([A-Za-z_]\w*)")
 _REFERENCE = re.compile(r"\$\{?[!#]?([A-Za-z_][A-Za-z0-9_]*)")
 _ANSI_ESCAPE = re.compile(r"\$'[^']*\\[^']*'")
-_RISK_TOKEN = re.compile(r"--paid|--approval|--cap(?![\w-])|(?<![\w-])(?:ask|approve)\b")
-_PAID_TOKEN = re.compile(r"--paid|(?<![\w-])approve\b")
+_RISK_TOKEN = re.compile(
+    r"--paid|--approval|--cap(?![\w-])|--max-usd|--job(?![\w-])|(?<![\w-])(?:ask|approve|paid-dryrun|paid(?=\s+-))(?![\w-])"
+)
+_PAID_TOKEN = re.compile(r"--paid|(?<![\w-])(?:approve|paid-dryrun|paid(?=\s+-))(?![\w-])")
 _GEMINI_WORD = re.compile(r"\b(?:safo|gemini)\b|--paid|--approval|--cap(?![\w-])")
 _SHELL_C = re.compile(
     r"(?<![\w-])(?:bash|sh|zsh|dash|ksh|csh|tcsh|fish|pwsh|python[\d.]*|perl|ruby|node|php|lua)\b(?:\s+-{1,2}[\w-]+)*"
@@ -709,7 +711,7 @@ def _expansion_at_command(text: str) -> bool:
     return False
 
 
-_GEMINI_OPTION = re.compile(r"--paid|--approval|--cap(?![\w-])")
+_GEMINI_OPTION = re.compile(r"--paid|--approval|--cap(?![\w-])|--max-usd|--job(?![\w-])")
 _RISK_OPTION = re.compile(
     r"(?<![\w-])--paid(?![\w-])|(?<![\w-])--approval(?![\w-])|(?<![\w-])--cap(?![\w-])|(?<![\w-])approve(?![\w-])"
 )  # exact tokens: --cap-add is not one, and approve is a word of its own
@@ -902,7 +904,7 @@ def _findings(
     lines = joined.splitlines()
     whole = "\n".join(_views(line)[2] for line in lines)
     runtime_scan = bool(re.search(r"\bgemini\b", whole)) and bool(
-        re.search(r"(?<![\w-])(?:ask|approve)\b|--paid", whole)
+        re.search(r"(?<![\w-])(?:ask|approve|paid-dryrun|paid(?=\s+-))(?![\w-])|--paid", whole)
     )
     steps: list[Step] = []
     flags: dict[str, int] = {}
