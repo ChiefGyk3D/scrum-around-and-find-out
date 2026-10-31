@@ -1333,5 +1333,5 @@ def test_the_stop_pipe_is_closed_when_serve_returns_and_a_late_stop_writes_nowhe
 
 
 def test_the_real_socket_tests_are_served_as_the_user_who_runs_them() -> None:
-    assert UID == os.getuid()  # a runner's uid is rarely 1000: a fixed number made six of these fail in CI
+    assert os.getuid() == UID  # a runner's uid is rarely 1000: a fixed number made six of these fail in CI
     assert peer_credentials(socket.socketpair()[0]).uid == UID

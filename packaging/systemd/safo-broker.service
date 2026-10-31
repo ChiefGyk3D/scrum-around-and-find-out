@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+# Installed by root to /etc/systemd/system/. Design: docs/gemini-broker.md ("The unit files and their hardening").
+# Egress: the vendor addresses are not fixed, so IPAddressAllow= is not used. Instead safo-broker-egress.service loads an
+# nftables ruleset keyed on this unit's user (port 443 to a refreshed set of vendor addresses only, no DNS, no IPv6) and
+# writes the hosts view bind-mounted over /etc/hosts below, so this service resolves the vendor name without DNS. The
+# service is bound to that unit (it starts only with it and stops when it stops) and cannot reach a resolver, bus or name-
+# cache socket: those directories are inaccessible and /etc/nsswitch.conf is a files-only copy. RestrictAddressFamilies=
+# AF_INET limits the socket() call only (man systemd.exec): the service cannot create a Unix socket with socket(), but
+# socketpair() and io_uring are not covered by it, so this line alone does not make Unix sockets impossible. The server
+# is expected to serve from the listener systemd hands it and to create no Unix sockets of its own (no socket pairs, no
+# io_uring); a design that needs them needs a reviewed change of this line.
+# recvmsg and recvmmsg are denied too: a descriptor passed over the listener would be a socket with someone else's uid,
+# which the egress rule does not match. Plain read and recv on the listener are unaffected.
+# There is no start condition on the root-owned enable switch: the broker reads the switch on every request, answers
+# status and dry run while it is absent, and answers every paid call as disabled before it writes the ledger or reads the key.
+[Unit]
+Description=SAFO Gemini broker
+Requires=safo-broker.socket
+BindsTo=safo-broker-egress.service
+After=network-online.target safo-broker.socket safo-broker-egress.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=safo-broker
+Group=safo-broker
+ExecStartPre=/opt/safo-broker/current/venv/bin/python -I -m safo.broker.floor
+ExecStart=/opt/safo-broker/current/venv/bin/python -I -m safo.broker
+LoadCredentialEncrypted=paid-key:/etc/safo/broker/paid-key
+StateDirectory=safo-broker
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/safo-broker
+ReadOnlyPaths=/etc/safo /opt/safo-broker
+BindReadOnlyPaths=/etc/safo/egress/hosts:/etc/hosts
+BindReadOnlyPaths=/opt/safo-broker/current/meta/packaging/etc/nsswitch.conf:/etc/nsswitch.conf
+InaccessiblePaths=-/run/systemd/resolve -/run/dbus -/run/nscd -/run/avahi-daemon -/run/systemd/private
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateMounts=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=~recvmsg recvmmsg
+SystemCallErrorNumber=EPERM
+DevicePolicy=closed
+KeyringMode=private
+RemoveIPC=yes
+LimitCORE=0
+LimitNOFILE=64
+TasksMax=32
+MemoryMax=512M
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+Restart=on-failure
+RestartSec=2s

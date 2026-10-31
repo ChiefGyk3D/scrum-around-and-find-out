@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# Installed by root to /etc/systemd/system/. Loads the egress rules for the broker's service user and fills the vendor
+# address set and the hosts view once; the timer keeps them fresh. The broker is bound to this unit and starts only with
+# it. Runs as root with only CAP_NET_ADMIN, from a helper that root installed once from a reviewed copy: the helper is
+# not part of the release tree, so a new release cannot change what root does here.
+[Unit]
+Description=SAFO broker egress rules
+Before=safo-broker.service
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/safo-broker-egress load
+ExecStart=-/usr/local/sbin/safo-broker-egress refresh
+ExecStop=/usr/local/sbin/safo-broker-egress unload
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/safo/egress
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

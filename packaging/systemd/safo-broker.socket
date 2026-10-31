@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Installed by root to /etc/systemd/system/. Design: docs/gemini-broker.md ("The unit files and their hardening").
+# The socket sits directly in /run (root, 0755) so no parent directory can be too closed for the group.
+# MaxConnections= is left out on purpose: it has no effect with Accept=no; the broker bounds connections itself.
+[Unit]
+Description=SAFO Gemini broker socket
+
+[Socket]
+ListenStream=/run/safo-broker.sock
+SocketUser=root
+SocketGroup=safo-broker-clients
+SocketMode=0660
+Accept=no
+Backlog=16
+
+[Install]
+WantedBy=sockets.target
