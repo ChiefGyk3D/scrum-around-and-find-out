@@ -748,3 +748,15 @@ def test_a_failure_path_never_puts_a_vendor_body_or_prompt_in_a_result_or_the_le
     assert "SENTINEL" not in shown
     ledger_text = (rig.ledger.dir / "ledger.jsonl").read_text()
     assert "SENTINEL" not in ledger_text and "go ahead" not in ledger_text
+
+
+def test_only_a_call_that_returned_an_answer_can_breach_the_output_cap(tmp_path: Path) -> None:
+    ledger = CallLedger(tmp_path / "state")
+    ledger.open()
+    req = flat_request(1000)
+    ticket = ledger.reserve(req, approval(req), policy(), epoch=EPOCH, now=NOW)
+    ledger.mark_sent(ticket.call_id, NOW)
+    with pytest.raises(IllegalTransition, match="breach"):
+        ledger.settle(ticket.call_id, "rate_limited", 0, NOW, cap_breach=True)
+    assert ledger.view().calls[ticket.call_id].state is CallState.SENT
+    assert ledger.settle(ticket.call_id, "ok", 10, NOW, cap_breach=True).breach

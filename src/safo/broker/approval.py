@@ -8,8 +8,8 @@ adds what a socket-facing caller needs around it:
 
 * the namespace is a constant here, never a parameter: a signature made for any other purpose (the dry-run namespace
   included) is refused by our own comparison and by `ssh-keygen -n`;
-* the bytes that are verified are the bytes that are parsed: the text is encoded to ASCII once (the canonical form is
-  ASCII only, so anything else cannot be a canonical approval), verified, and only then decoded and parsed again;
+* the bytes that are verified are the text that is parsed: it must be an exact `str` that encodes to ASCII (the
+  canonical form is ASCII only, so anything else cannot be a canonical approval), and the same value is parsed;
 * the strict version 3 loader then requires the text to BE the canonical form, so a different spelling of the same
   approval cannot carry a valid signature;
 * the key that verified must be the principal named inside the signed text;
@@ -63,7 +63,7 @@ def verify_approval(payload: object, signature: object, trust: geminisign.Trust,
         if _revoked(trust, signature):
             raise Refused("revoked", "the key that signed this approval has been revoked") from None
         raise _bad() from None
-    approval = parse_approval(bytes.decode(raw, "ascii"))
+    approval = parse_approval(payload)  # an exact str, so these are the characters whose bytes were verified
     if approval.principal != who.label:
         raise _bad("the key that signed is not the principal named in the approval")
     return approval

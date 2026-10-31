@@ -7,6 +7,8 @@ two bytes of a JPEG and read the first frame header)."""
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from fakevendor import (
@@ -225,3 +227,17 @@ def test_the_lossy_header_is_read_and_its_start_code_is_checked() -> None:
     ok = riff(wchunk(b"VP8 ", frame))
     assert (sniff(ok).width, sniff(ok).height) == (64, 32)
     refuses(riff(wchunk(b"VP8 ", frame.replace(b"\x9d\x01\x2a", b"\x00\x00\x00"))))
+
+
+def test_a_frame_header_whose_length_does_not_match_its_component_count_is_refused() -> None:
+    body = struct.pack(">BHHB", 8, 1, 1, 1) + b"\x01\x11\x00"
+    refuses(jpeg_of(jseg(0xC0, body + b"extra"), SOS))  # longer than one component needs
+    refuses(jpeg_of(jseg(0xC0, body[:-3] + b"\x00" * 6 + b""), SOS))  # says one component, carries two
+    refuses(jpeg_of(jseg(0xC0, struct.pack(">BHHB", 8, 1, 1, 0)), SOS))  # no components
+    refuses(jpeg_of(jseg(0xC0, struct.pack(">BHHB", 12, 1, 1, 1) + b"\x01\x11\x00"), SOS))  # precision 12
+
+
+def test_a_lossless_header_with_a_nonzero_version_is_refused() -> None:
+    versioned = b"\x2f" + (1 << 29).to_bytes(4, "little")
+    refuses(riff(wchunk(b"VP8L", versioned)))
+    assert sniff(riff(wchunk(b"VP8L", vp8l_payload(2, 2)))).width == 2

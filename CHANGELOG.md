@@ -10,6 +10,19 @@
   vendor call: paid use stays disabled. `Ledger` in `gemini.py` gains `append_many` and an overridable empty-ledger
   hook, and `valid_quote` is shared; the existing behavior is unchanged.
 
+- Paid Gemini broker, phase 2 (#258): the call pipeline in `src/safo/broker/`, tested against a fake vendor with no
+  socket and no key. Approval verification runs `ssh-keygen -Y verify` through the existing fixed-argument verifier with
+  the namespace fixed in code, requires the canonical signed text and the signer named inside it, and checks revocation
+  again under the ledger lock just before the spend. `begin` issues broker-chosen nonces (at most four outstanding). A
+  call reserves the worst case before anything is sent, builds the request from a fixed template, sends through an
+  injected transport, and settles from the reported usage; a timeout, transport error, redirect, 5xx, short, oversized
+  or malformed answer, a reply for another model or unusable usage leaves the call ambiguous and the model suspended
+  until root clears it. A reply over the signed output cap is a breach, recorded at the cap or the reported usage
+  (whichever is higher), and suspends the model. Image replies accept only PNG, JPEG or WebP: the container is walked to
+  its real end (one image, no trailing data, no animation, checksums where the format has them), the declared size is
+  capped, and nothing but the checked bytes is passed on. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
+  `pre_spend` hook. Paid use stays disabled.
+
 - Tests: the linear-time guard in `tests/test_gemini_constructs.py` counts executed lines instead of reading a clock, so machine speed, load and Python version cannot flip it; its negative case runs a quadratic brace scan (#248).
 - Gemini approvals: hardened what a signed paid approval binds (#217). Approval payload version 2 carries a prompt digest
   (`prompt_sha256`, `prompt_bytes`) on both approval tiers; `approve` shows the digest and the whole prompt (approvals are refused above 4000 characters), the paid gate

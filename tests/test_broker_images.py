@@ -145,3 +145,17 @@ def test_a_name_or_path_cannot_reach_the_result() -> None:
     image = decode_part(3, "image/png", b64(png()))
     assert set(vars(image)) == {"index", "mime", "data", "sha256", "width", "height"}
     assert image.index == 3
+
+
+def test_characters_outside_the_base64_alphabet_are_named_as_such_not_silently_dropped() -> None:
+    good = b64(png())
+    for bad in (good.replace("A", "-", 1), good[:10] + " " + good[10:], good + "\n", "!" + good):
+        with pytest.raises(ImageRefused, match="not base64"):
+            decode_part(0, "image/png", bad)
+
+
+def test_the_byte_limit_is_exactly_twenty_four_mebibytes() -> None:
+    limit = 24 * 1024 * 1024
+    assert limit == images.MAX_IMAGE_BYTES
+    with pytest.raises(ImageRefused, match="size limit"):
+        sniff(png(extra=b"\x00" * limit))
