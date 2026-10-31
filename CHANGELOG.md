@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: the linear-time guard in `tests/test_gemini_constructs.py` counts executed lines instead of reading a clock, so machine speed, load and Python version cannot flip it; its negative case runs a quadratic brace scan (#248).
 - Gemini approvals: hardened what a signed paid approval binds (#217). Approval payload version 2 carries a prompt digest
   (`prompt_sha256`, `prompt_bytes`) on both approval tiers; `approve` shows the digest and the whole prompt (approvals are refused above 4000 characters), the paid gate
   recomputes it from the prompt it is about to send and refuses on any mismatch, missing digest or older payload version,
