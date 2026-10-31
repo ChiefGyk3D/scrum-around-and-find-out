@@ -1131,3 +1131,97 @@ def test_a_failure_to_examine_the_new_file_still_removes_it(out: Path, monkeypat
         write_image(PNG, str(out), "cat")
     monkeypatch.undo()
     assert names(out) == []
+
+
+def test_a_failing_fchmod_on_a_new_directory_closes_its_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fds() -> set[str]:
+        return set(os.listdir("/proc/self/fd"))
+
+    before = fds()
+
+    def boom(fd: int, mode: int) -> None:
+        raise OSError(errno.EIO, "I/O error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fchmod", boom)
+        with pytest.raises(UnsafeDirectory):
+            default_output_dir(state_home=None, home=str(tmp_path))
+    assert fds() == before
+
+    def crash(fd: int, mode: int) -> None:
+        raise Boom
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fchmod", crash)
+        with pytest.raises(Boom):
+            default_output_dir(state_home=None, home=str(tmp_path / "other"))
+    assert fds() == before
+
+
+def test_the_rollback_is_flushed_to_the_directory_too(out: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    syncs: list[int] = []
+    real = os.fsync
+
+    def count(fd: int) -> None:
+        syncs.append(fd)
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", count)
+    with pytest.raises(Boom):
+        write_image(PNG, str(out), "cat", _step=raiser("dir-synced", Boom()))
+    assert len(syncs) == 3  # the file, the directory, and the directory again after the final name was removed
+    assert syncs[1] == syncs[2]
+    assert names(out) == []
+
+
+def test_a_failing_directory_sync_during_rollback_does_not_replace_the_error(
+    out: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(fd: int) -> None:
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(os, "fsync", broken)
+    with pytest.raises(ImageWriteError) as caught:
+        write_image(PNG, str(out), "cat")
+    assert "EIO" in str(caught.value)
+
+
+def spy_directory_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make closing the output directory (the last directory opened) fail after it really closes."""
+    real_open, real_close = os.open, os.close
+    directories: list[int] = []
+
+    def spy_open(path: Any, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if flags & os.O_DIRECTORY:
+            directories.append(fd)
+        return fd
+
+    def spy_close(fd: int) -> None:
+        real_close(fd)
+        if directories and fd == directories[-1]:
+            raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "close", spy_close)
+
+
+def test_a_failing_close_of_the_directory_does_not_replace_the_error(
+    out: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy_directory_close(monkeypatch)
+    with pytest.raises(Boom):
+        write_image(PNG, str(out), "cat", _step=raiser("written", Boom()))
+    monkeypatch.undo()
+    assert names(out) == []
+
+
+def test_a_failing_close_of_the_directory_after_success_is_not_an_error(
+    out: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy_directory_close(monkeypatch)
+    path = write_image(PNG, str(out), "cat")
+    monkeypatch.undo()
+    assert Path(path).read_bytes() == PNG

@@ -191,9 +191,15 @@ def _open_chain(parts: list[str], *, create: bool, check: Callable[[int, int, os
                     raise _unsafe() from None
                 try:
                     child = os.open(part, _DIR_FLAGS, dir_fd=fd)
-                    os.fchmod(child, 0o700)
                 except OSError:
                     raise _unsafe() from None
+                try:
+                    os.fchmod(child, 0o700)
+                except BaseException as exc:
+                    os.close(child)
+                    if isinstance(exc, OSError):
+                        raise _unsafe() from None
+                    raise
             except OSError:
                 raise _unsafe() from None  # a link (ELOOP), a file or FIFO (ENOTDIR), or no access
             os.close(fd)
@@ -306,11 +312,17 @@ def write_image(
             else:  # the descriptor could not be examined; the name was made a moment ago with O_EXCL
                 with contextlib.suppress(OSError):
                     os.unlink(tmp_name, dir_fd=dirfd)
-        os.close(dirfd)
+        # Make the removal durable too, best effort, so a power loss cannot bring a rolled-back file back. A failure
+        # here or in close must not replace the error being reported.
+        with contextlib.suppress(OSError):
+            os.fsync(dirfd)
+        with contextlib.suppress(OSError):
+            os.close(dirfd)
         if isinstance(exc, OSError):
             raise _io_error(exc) from None
         raise
-    os.close(dirfd)
+    with contextlib.suppress(OSError):  # the file is complete and durable; a close error says nothing about it
+        os.close(dirfd)
     return os.path.join("/" + "/".join(parts), final_name)
 
 
