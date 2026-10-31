@@ -72,7 +72,7 @@ Built and tested over socketpairs and a temporary unix socket, with the fake ven
 key, no timing assertions): the wire format, the server, the entry point and the readers around it.
 
 - **`protocol.py`** is the wire format and nothing else, importable by a thin client unchanged (standard library and
-  `safo.bounded` only). Frames, limits, the field table per operation, `parse_request`, `request_body` (what a client
+  the repository's bounded JSON loader only). Frames, limits, the field table per operation, `parse_request`, `request_body` (what a client
   builds, validated by the same parser), the reply codes with their exit status and one sentence each, `parse_reply`
   (what a client reads). `rate_limited`, `vendor_refused` and `outcome_unknown` are now in the core code list.
 - **`server.py`.** The listening descriptor comes from systemd: `LISTEN_PID` must be this process, `LISTEN_FDS` exactly

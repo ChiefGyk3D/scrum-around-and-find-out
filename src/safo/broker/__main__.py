@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, MutableMapping
 from pathlib import Path
 
-from safo import geminisign
+from safo import geminisign, output
 from safo.broker import runtime
 from safo.broker.issue import Issuer
 from safo.broker.ledger import CallLedger
@@ -107,7 +107,7 @@ def main() -> int:
         runtime.harden_process()
         return run(os.environ, pid=os.getpid())
     except (SafoError, OSError, ValueError) as exc:
-        print(f"safo-broker: cannot start ({type(exc).__name__})", file=sys.stderr)  # the class only, never a message
+        output.write(sys.stderr, f"safo-broker: cannot start ({type(exc).__name__})")  # the class only, never a message
         return EXIT_FAILED
 
 
