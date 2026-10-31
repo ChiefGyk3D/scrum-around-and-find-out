@@ -8,7 +8,7 @@
   wheels), `packaging/safo_broker_install.py` (`safo-broker-install`: dry run by default; verifies a signed annotated tag against a
   root-owned signers file; wheels only, with hashes required; floor and monotonic version checks; a staged, read-only,
   manifest-checked release activated by an atomic symlink swap; automatic and manual rollback; never touches the state
-  directory) `safo.broker.floor` (the broker refuses to start below the root-owned version floor) and `safo.broker.runbook` (the one-time root setup as copy-paste lines with blast radius and rollback, printed
+  directory), `safo.broker.floor` (the broker refuses to start below the root-owned version floor) and `safo.broker.runbook` (the one-time root setup as copy-paste lines with blast radius and rollback, printed
   and never run). Paid use stays disabled.
 
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
