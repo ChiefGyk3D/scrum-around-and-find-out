@@ -168,7 +168,7 @@ class Policy:
             raise Refused("over_job_cap", "the worst case is over the per-job cap")
         if reserved_micro > max_micro:
             raise Refused("over_approved", "the worst case is over the approved maximum")
-        # Past the monthly ceiling the call is refused UNLESS the signed approval says beyond_ceiling (design: extra block).
+        # Over the monthly ceiling: refused unless the signed approval says beyond_ceiling (the extra-block rule).
         if month_spent_micro + reserved_micro > self.caps.month_micro and not beyond_ceiling:
             raise Refused(
                 "needs_block_approval", "this call would pass the monthly ceiling and the approval does not say so"
