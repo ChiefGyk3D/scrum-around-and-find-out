@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Gemini enrollment preparation (#263): `docs/gemini-enrollment.md`, a copy-paste maintainer runbook (enroll one or two
+  FIDO2 keys for approvals, a pass or fail table for testing a second device, a separate release-signing key, the
+  root-owned allowed-signers lines with the namespace restriction, rotate and revoke), each step with its blast radius,
+  rollback and expected output, and every command and flag checked against the vendor pages on 2026-10-31 (unverified
+  items are marked). `src/safo/gemini_preflight.py` is a read-only preflight (`python -m safo.gemini_preflight`): ssh sk
+  support, libfido2, the udev rule, a visible hardware key, the allowed-signers file (root, 0644, namespace on every
+  line), the enable switch, the service user and the state directory modes. It writes nothing, makes no network or
+  vendor call, and prints no key or file content. It is not wired into `safo gemini` yet. Paid use stays disabled.
+
+
 - Tests: the random-output tests in `tests/test_protection.py` no longer depend on chance (#247). `_random_token` draws only from `secrets.randbelow`, and the tests inject a scripted or seeded source (and spy on the default one) instead of hoping two real draws differ or that a statistic stays under a bound.
 - Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor above 2 (standard input only for `approve`), the `safo` package that launched it pinned first on the import path, and a fresh private working directory; the child verifies its own environment and directory instead of trusting the interpreter flag, and the mode is read by the real parser. No signing provider library or askpass program is passed on. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
