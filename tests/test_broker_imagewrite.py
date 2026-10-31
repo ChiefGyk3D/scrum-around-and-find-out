@@ -1117,3 +1117,17 @@ def test_default_dir_refuses_the_wrong_owner_below_the_base(tmp_path: Path, monk
     monkeypatch.setattr(imagewrite, "_mine", mine_until_base)
     with pytest.raises(UnsafeDirectory):
         default_output_dir(state_home=str(state), home=str(tmp_path))
+
+
+def test_a_failure_to_examine_the_new_file_still_removes_it(out: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    watch_fds(monkeypatch)
+
+    def boom(fd: int) -> os.stat_result:
+        raise Boom
+
+    real_fstat = os.fstat
+    monkeypatch.setattr(os, "fstat", lambda fd: boom(fd) if fd in watched else real_fstat(fd))
+    with pytest.raises(Boom):
+        write_image(PNG, str(out), "cat")
+    monkeypatch.undo()
+    assert names(out) == []

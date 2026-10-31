@@ -298,11 +298,14 @@ def write_image(
         if fd >= 0:
             with contextlib.suppress(OSError):
                 os.close(fd)
-        if tmp_ident is not None:
-            if final_name is not None:
-                _unlink_if_same(dirfd, final_name, tmp_ident)
-            if tmp_name is not None:
+        if tmp_ident is not None and final_name is not None:
+            _unlink_if_same(dirfd, final_name, tmp_ident)
+        if tmp_name is not None:
+            if tmp_ident is not None:
                 _unlink_if_same(dirfd, tmp_name, tmp_ident)
+            else:  # the descriptor could not be examined; the name was made a moment ago with O_EXCL
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name, dir_fd=dirfd)
         os.close(dirfd)
         if isinstance(exc, OSError):
             raise _io_error(exc) from None
