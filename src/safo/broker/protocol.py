@@ -52,6 +52,11 @@ ASPECT = re.compile(r"[0-9]{1,2}:[0-9]{1,2}")
 USD = re.compile(r"(0|[1-9][0-9]{0,8})(?:\.[0-9]{1,6})?")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 MIME = re.compile(r"[a-z]{1,16}/[a-z0-9.+-]{1,32}")
+HEX32 = re.compile(r"[0-9a-f]{32}")
+HEAD = re.compile(r"[0-9a-f]{0,64}")
+STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+VERSION_TEXT = re.compile(r"[0-9A-Za-z.+-]{1,32}")
+MAX_RETRY_AFTER = 86_400
 
 # -- reply codes ---------------------------------------------------------------------------------------------------
 
@@ -299,6 +304,42 @@ def _attachment_ok(item: object) -> bool:
     )
 
 
+def _tokens(value: object) -> bool:
+    return value is None or _is_int(value, 0, 2**40)
+
+
+_RECEIPT: dict[str, Callable[[object], bool]] = {
+    "call_id": lambda v: _matches(v, HEX32),
+    "nonce": lambda v: _matches(v, NONCE),
+    "epoch": lambda v: _matches(v, HEX32),
+    "model": lambda v: _matches(v, MODEL_NAME),
+    "kind": lambda v: v in ("text", "image") and type(v) is str,
+    "count": lambda v: _is_int(v, 0, 16),
+    "image_size": lambda v: v == "" or _matches(v, IMAGE_SIZE),
+    "prompt_sha256": lambda v: _matches(v, SHA256),
+    "tokens_in": _tokens,
+    "tokens_out": _tokens,
+    "reserved_usd": lambda v: _matches(v, USD),
+    "actual_usd": lambda v: _matches(v, USD),
+    "released_usd": lambda v: _matches(v, USD),
+    "breach": lambda v: type(v) is bool,
+    "cap_breach": lambda v: type(v) is bool,
+    "estimated": lambda v: type(v) is bool,
+    "extra_images": lambda v: _is_int(v, 0, 64),
+    "images": lambda v: type(v) is list and len(v) <= MAX_ATTACHMENTS and all(_attachment_ok(i) for i in v),
+    "month_spent_after": lambda v: _matches(v, USD),
+    "ledger_head_after": lambda v: _matches(v, HEAD),
+    "broker_version": lambda v: _matches(v, VERSION_TEXT),
+    "ts": lambda v: _matches(v, STAMP),
+}
+RECEIPT_KEYS = frozenset(_RECEIPT)
+_RECEIPT_CODES = (*CALL_CODES, "internal")  # the error codes that can follow a spend
+
+
+def _receipt_ok(value: object) -> bool:
+    return type(value) is dict and set(value) == RECEIPT_KEYS and all(_RECEIPT[k](v) for k, v in value.items())
+
+
 def parse_reply(body: bytes) -> dict[str, Any]:
     """What a client reads: the reply object, or `ProtocolError("bad_request")` when it is not a well-formed version 1
     reply. A failure reply must carry a known code with its own exit status and sentence; a success reply's
@@ -319,6 +360,8 @@ def parse_reply(body: bytes) -> dict[str, Any]:
             raise ProtocolError("bad_request")
         if not all(_attachment_ok(item) for item in attachments):
             raise ProtocolError("bad_request")
+        if "receipt" in data and not _receipt_ok(data["receipt"]):
+            raise ProtocolError("bad_request")
         return data
     if "attachments" in data:  # only a success carries any
         raise ProtocolError("bad_request")
@@ -327,6 +370,21 @@ def parse_reply(body: bytes) -> dict[str, Any]:
         raise ProtocolError("bad_request")
     status, message = REPLY_CODES[code]
     if data.get("exit") != status or type(data["exit"]) is not int or data.get("message") != message:
+        raise ProtocolError("bad_request")
+    allowed = {"v", "ok", "code", "message", "exit"}
+    if code in _RECEIPT_CODES:
+        allowed.add("receipt")
+    if code == "rate_limited":
+        allowed.add("retry_after")
+    if code == "unsupported_version":
+        allowed.add("supported")
+    if set(data) - allowed:
+        raise ProtocolError("bad_request")
+    if "receipt" in data and not _receipt_ok(data["receipt"]):
+        raise ProtocolError("bad_request")
+    if "retry_after" in data and not _is_int(data["retry_after"], 0, MAX_RETRY_AFTER):
+        raise ProtocolError("bad_request")
+    if "supported" in data and data["supported"] != list(SUPPORTED):
         raise ProtocolError("bad_request")
     return data
 
