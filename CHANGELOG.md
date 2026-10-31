@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor and a fresh private working directory. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
 - Tests: the linear-time guard in `tests/test_gemini_constructs.py` counts executed lines instead of reading a clock, so machine speed, load and Python version cannot flip it; its negative case runs a quadratic brace scan (#248).
 - Gemini approvals: hardened what a signed paid approval binds (#217). Approval payload version 2 carries a prompt digest
   (`prompt_sha256`, `prompt_bytes`) on both approval tiers; `approve` shows the digest and the whole prompt (approvals are refused above 4000 characters), the paid gate

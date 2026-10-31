@@ -279,6 +279,30 @@ unreadable or oversized stops the call; `private_terms: none` is the written opt
 statement by the caller: no code can know that a text is public, so these checks only catch what looks like a secret or
 matches a term the maintainer listed.
 
+## The wrapper's own process (#221)
+
+`safo gemini ...` does not trust the process it was started in. At the entry, before it reads a config, a prompt or a key:
+
+- **It refuses to run** when an interpreter startup variable (any name starting `PYTHON`, such as `PYTHONPATH`,
+  `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`) or a shell startup variable (`BASH_ENV`, `ENV`) is set. The error names
+  the variables, never their values, and nothing runs. Unset them and run again.
+- **It re-starts itself** as `<absolute interpreter> -I -m safo ...`: no user site, no `PYTHON*` variables, no current
+  directory on the import path. A failure to start the child stops the call; it never falls back to running in place.
+- **The child's environment is an allow-list**, built in the `wrapper` module, never a copy of yours: `PATH` fixed to
+  `/usr/local/bin:/usr/bin:/bin`, `LANG` and `LC_ALL` fixed to the UTF-8 C locale, `TMPDIR` set to the child's own directory, and
+  `HOME` from the account database. Per action, and only that action: `ask` receives the secret-store token variable (the
+  one secret it needs, when you set it); `approve` receives the variables `ssh-keygen` needs to sign (`SSH_AUTH_SOCK`,
+  `SSH_SK_PROVIDER`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`, `DISPLAY`, `WAYLAND_DISPLAY`, `TERM`). Proxy variables,
+  `LD_*`, `XDG_*`, the other secret-store variables, tokens and every other secret are dropped. The secret tool must
+  therefore be found in one of the three fixed PATH directories.
+- **The child runs with no shell**, a fixed argument vector, a fresh private (mode 0700) working directory under
+  `~/.local/state/safo/wrapper` that is removed afterward, and `close_fds`, so a descriptor inherited from the caller does not reach it. `--prompt-file`
+  and the `keys propose` file are made absolute before the directory changes.
+
+This is not a sandbox: the child runs as your user. It stops an environment, a working directory or an inherited
+descriptor from changing what the wrapper imports, executes or reads. `tests/test_wrapper_isolation.py` runs a fake child
+that dumps its environment and import path under a hostile environment.
+
 ## The key
 
 Keys live in Doppler project `image-gen`: config `prd` is the free key, config `prd_paid` the paid one. `gemini.yaml` holds
