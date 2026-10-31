@@ -11,7 +11,8 @@ process with SIGSYS instead of failing with an error. `--extra-filter` adds one 
 
 Needs a user systemd manager (`systemd-run --user`). Exit status: 0 passed, 1 failed, 3 not available here (with the
 reason on standard error). The pytest wrapper, tests/test_broker_sandbox.py, is opt-in (SAFO_SANDBOX_CHECK=1) and skips
-with the reason otherwise. Every step has a timeout and the whole check a total deadline: a hang is exit 1 naming the step.
+with the reason otherwise. Every step has a timeout and the whole check a total deadline: a hang is exit 1 naming
+the step.
 
 User mode differs from the shipped unit in what it cannot reproduce: no `User=`, no encrypted credential, no root-owned
 files (a harness shim reports the scratch directory's parents as root-owned), `RestrictAddressFamilies=AF_INET` so any
