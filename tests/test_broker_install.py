@@ -873,7 +873,9 @@ def test_a_version_recorded_during_the_review_is_honored_before_the_swap(world: 
 def test_the_self_test_runs_as_the_service_user_in_an_empty_network_namespace_when_root() -> None:
     py = Path("/r/venv/bin/python")
     as_root = install.self_test_argv(py, ("safo.broker", "yaml"), as_service_user=True)
-    assert as_root[:2] == [install.UNSHARE, "--net"]
+    assert as_root[: 1 + len(install.SELF_TEST_NAMESPACES)] == [install.UNSHARE, *install.SELF_TEST_NAMESPACES]
+    for flag in ("--net", "--ipc", "--uts", "--pid", "--fork", "--mount-proc"):
+        assert flag in as_root
     assert install.RUNUSER in as_root
     assert as_root[as_root.index("-u") + 1] == install.SERVICE_USER
     assert as_root[-4:-1] == [str(py), "-I", "-c"]

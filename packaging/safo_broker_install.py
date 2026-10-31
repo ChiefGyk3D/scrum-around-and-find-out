@@ -71,6 +71,9 @@ UNIT_NAMES = (
 )
 EGRESS_RULES_REL = "packaging/nftables/safo-broker.nft"
 EGRESS_HELPER = "/usr/local/sbin/safo-broker-egress"
+# The staged tree is tried in private network, IPC, UTS and PID namespaces (with a fresh /proc): no network, no shared
+# memory, and no way to signal or see the live broker's processes.
+SELF_TEST_NAMESPACES = ("--net", "--ipc", "--uts", "--pid", "--fork", "--mount-proc")
 NSSWITCH_REL = "packaging/etc/nsswitch.conf"
 EGRESS_RESTART = ["try-restart", "safo-broker-egress.service", "safo-broker-egress-refresh.timer"]
 # Exposure budget per unit (systemd-analyze security, offline): a rise past it means a hardening line was lost.
@@ -1117,7 +1120,7 @@ def self_test_argv(python: Path, modules: Sequence[str], *, as_service_user: boo
     in the release or its dependencies can neither read root's files nor reach the network."""
     argv = [str(python), "-I", "-c", "import " + ", ".join(modules)]
     if as_service_user:
-        argv = [UNSHARE, "--net", "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
+        argv = [UNSHARE, *SELF_TEST_NAMESPACES, "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
     return argv
 
 
@@ -1132,7 +1135,7 @@ def broker_modules(release: Path) -> list[str]:
 def entry_self_test_argv(python: Path, *, as_service_user: bool) -> list[str]:
     argv = [str(python), "-I", "-m", "safo.broker", "--self-test"]
     if as_service_user:
-        argv = [UNSHARE, "--net", "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
+        argv = [UNSHARE, *SELF_TEST_NAMESPACES, "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
     return argv
 
 
