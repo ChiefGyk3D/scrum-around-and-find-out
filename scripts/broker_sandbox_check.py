@@ -10,7 +10,9 @@ process with SIGSYS instead of failing with an error. `--extra-filter` adds one 
 (socket, socketpair or recvmsg) that the check must catch.
 
 Needs a user systemd manager (`systemd-run --user`). Exit status: 0 passed, 1 failed, 3 not available here (with the
-reason on standard error). The pytest wrapper, tests/test_broker_sandbox.py, skips with that reason.
+reason on standard error). The pytest wrapper, tests/test_broker_sandbox.py, is opt-in (SAFO_SANDBOX_CHECK=1) and skips
+with the reason otherwise. Every step has a timeout and the whole check a total deadline: a hang is exit 1 naming
+the step.
 
 User mode differs from the shipped unit in what it cannot reproduce: no `User=`, no encrypted credential, no root-owned
 files (a harness shim reports the scratch directory's parents as root-owned), `RestrictAddressFamilies=AF_INET` so any
@@ -21,11 +23,13 @@ replacement for the throwaway-machine run of phase 5.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import json
 import os
 import pwd
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -80,6 +84,18 @@ ERRNO_PROPERTY = "SystemCallErrorNumber=EPERM"  # left out in kill mode: a filte
 
 Check = Callable[[dict[str, Any], list[bytes]], bool]
 
+PROBE_TIMEOUT = 10.0  # the user-manager probe, per command
+STEP_TIMEOUT = 60.0  # any one command or socket exchange of the check
+TOTAL_TIMEOUT = 240.0  # the whole check: a hang can never use up a job
+
+
+class StepTimeout(Exception):
+    """A step ran past its own timeout or the check's total deadline. Carries the name of the step."""
+
+    def __init__(self, step: str) -> None:
+        super().__init__(step)
+        self.step = step
+
 
 @dataclasses.dataclass
 class Outcome:
@@ -88,47 +104,98 @@ class Outcome:
     log: str
 
 
+def _run_bounded(args: tuple[str, ...], timeout: float) -> subprocess.CompletedProcess[str] | None:
+    """Run a command in its own process group and kill the whole group at the timeout. None means it timed out."""
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - a fixed argument vector, no shell
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(args, 127, "", type(exc).__name__)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        return None
+    return subprocess.CompletedProcess(args, proc.returncode, out, err)
+
+
 def unavailable_reason() -> str | None:
-    """Why the check cannot run here, or None."""
+    """Why the check cannot run here, or None. The user manager must really work: a probe command has to run to the end
+    inside PROBE_TIMEOUT, and `systemctl --user is-system-running` has to answer running or degraded."""
     if shutil.which("systemd-run") is None or shutil.which("systemctl") is None:
         return "systemd-run is not installed"
-    try:
-        done = subprocess.run(
-            ["systemd-run", "--user", "--pipe", "--wait", "--collect", "-q", "/bin/true"],  # noqa: S607 - from PATH
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return "systemd-run --user did not answer"
-    if done.returncode != 0:
+    probe = _run_bounded(("systemd-run", "--user", "--pipe", "--wait", "--collect", "-q", "/bin/true"), PROBE_TIMEOUT)
+    if probe is None:
+        return f"systemd-run --user did not answer within {PROBE_TIMEOUT:g} seconds"
+    if probe.returncode != 0:
         return "systemd-run --user is unavailable (no user service manager in this session)"
+    state = _run_bounded(("systemctl", "--user", "is-system-running"), PROBE_TIMEOUT)
+    if state is None:
+        return f"systemctl --user did not answer within {PROBE_TIMEOUT:g} seconds"
+    answer = state.stdout.strip()
+    if answer not in ("running", "degraded"):
+        return f"the user service manager is not running (it says {answer or 'nothing'!r})"
     return None
 
 
-def _run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, timeout=60, check=False)  # noqa: S603 - fixed vector
+class Clock:
+    """The total deadline of one check; each step gets the smaller of its own timeout and what is left."""
+
+    def __init__(self, total: float) -> None:
+        self.end = time.monotonic() + total
+
+    def left(self, step: str, limit: float) -> float:
+        remaining = self.end - time.monotonic()
+        if remaining <= 0:
+            raise StepTimeout(step)
+        return min(limit, remaining)
+
+
+def _run(*args: str, step: str = "", clock: Clock | None = None) -> subprocess.CompletedProcess[str]:
+    label = step or args[0]
+    limit = clock.left(label, STEP_TIMEOUT) if clock else STEP_TIMEOUT
+    done = _run_bounded(args, limit)
+    if done is None:
+        raise StepTimeout(label)
+    return done
 
 
 def _journal(name: str) -> str:
     """The last lines the user manager logged for a unit that failed (what systemd says, not what the service says)."""
-    done = _run("journalctl", "--user", "-u", f"{name}.service", "-u", f"{name}.socket", "-n", "15", "--no-pager")
+    try:
+        done = _run("journalctl", "--user", "-u", f"{name}.service", "-u", f"{name}.socket", "-n", "15", "--no-pager")
+    except StepTimeout:
+        return "\n--- journal --- (timed out)"
     return "\n--- journal ---\n" + (done.stdout or done.stderr)[-1500:]
 
 
-def _exchange(sock_path: str, body: bytes) -> tuple[dict[str, Any], list[bytes]]:
+def _exchange(sock_path: str, body: bytes, clock: Clock, step: str) -> tuple[dict[str, Any], list[bytes]]:
     from safo.broker import protocol
 
+    def recv_bounded(sock: socket.socket) -> Callable[[int], bytes]:
+        def recv(count: int) -> bytes:
+            sock.settimeout(clock.left(step, STEP_TIMEOUT))  # one deadline for the whole exchange, not per read
+            return sock.recv(count)
+
+        return recv
+
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(60)
-        sock.connect(sock_path)
-        sock.sendall(protocol.frame(body, protocol.MAX_REQUEST_FRAME))
-        sock.shutdown(socket.SHUT_WR)
-        reply = protocol.parse_reply(protocol.read_frame(sock.recv, protocol.MAX_REPLY_FRAME))
-        frames = [
-            protocol.read_frame(sock.recv, protocol.MAX_ATTACHMENT_FRAME)
-            for _ in range(protocol.attachment_count(reply))
-        ]
+        sock.settimeout(clock.left(step, STEP_TIMEOUT))
+        try:
+            sock.connect(sock_path)
+            sock.sendall(protocol.frame(body, protocol.MAX_REQUEST_FRAME))
+            sock.shutdown(socket.SHUT_WR)
+            recv = recv_bounded(sock)
+            reply = protocol.parse_reply(protocol.read_frame(recv, protocol.MAX_REPLY_FRAME))
+            frames = [
+                protocol.read_frame(recv, protocol.MAX_ATTACHMENT_FRAME)
+                for _ in range(protocol.attachment_count(reply))
+            ]
+        except TimeoutError:
+            raise StepTimeout(step) from None
     return reply, frames
 
 
@@ -153,6 +220,7 @@ def run_check(*, kill: bool = False, extra_filter: str = "", mutate: str = "none
     log = work / "service.log"
     steps: list[str] = []
     ok = True
+    clock = Clock(TOTAL_TIMEOUT)
 
     def step(label: str, good: bool, detail: str = "") -> None:
         nonlocal ok
@@ -203,14 +271,17 @@ def run_check(*, kill: bool = False, extra_filter: str = "", mutate: str = "none
             "-I",
             str(SERVE),
         ]
-        started = _run(*command)
+        started = _run(*command, step="start the socket unit", clock=clock)
         step("start the socket unit", started.returncode == 0, started.stderr.strip()[:120])
         if started.returncode != 0:
             return Outcome(False, steps, started.stderr)
 
         def attempt(label: str, op: str, check: Check | None = None, **fields: Any) -> dict[str, Any]:
             try:
-                reply, frames = _exchange(sock_path, protocol.request_body(op, **fields))
+                reply, frames = _exchange(sock_path, protocol.request_body(op, **fields), clock, label)
+            except StepTimeout:
+                step(label, False, "timed out")
+                return {}
             except Exception as exc:  # the service died, was killed, or answered badly
                 step(label, False, type(exc).__name__)
                 return {}
@@ -264,7 +335,11 @@ def run_check(*, kill: bool = False, extra_filter: str = "", mutate: str = "none
                 ),
                 **call_fields(req, approval, rig.sign(approval)),
             )
-        stopped = _run("systemctl", "--user", "stop", f"{name}.service")
+        try:
+            stopped = _run("systemctl", "--user", "stop", f"{name}.service", step="SIGTERM stop", clock=clock)
+        except StepTimeout:
+            step("SIGTERM stop", False, "timed out")
+            return Outcome(False, steps, "")
         step("SIGTERM stop", stopped.returncode == 0, stopped.stderr.strip()[:120])
         time.sleep(0.2)
         text_log = log.read_text() if log.exists() else ""
@@ -272,10 +347,13 @@ def run_check(*, kill: bool = False, extra_filter: str = "", mutate: str = "none
         step("the server exited 0 after the stop", "serve exit 0" in text_log, last)
         step("no traceback in the service log", "Traceback" not in text_log)
         return Outcome(ok, steps, text_log if ok else text_log + _journal(name))
+    except StepTimeout as exc:
+        step(exc.step, False, "timed out")
+        return Outcome(False, steps, "")
     finally:
         for unit in (f"{name}.socket", f"{name}.service"):
-            _run("systemctl", "--user", "stop", unit)
-            _run("systemctl", "--user", "reset-failed", unit)
+            for verb in ("stop", "reset-failed"):  # cleanup is bounded too, outside the check's deadline
+                _run_bounded(("systemctl", "--user", verb, unit), 20.0)
         shutil.rmtree(work, ignore_errors=True)
 
 

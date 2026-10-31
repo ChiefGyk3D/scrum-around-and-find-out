@@ -39,7 +39,7 @@ from safo.broker.server import (
 from safo.broker.transport import VENDOR_HOST, VENDOR_PORT, HttpsTransport, default_arm
 from safo.broker.vendor import TransportError, TransportTimeout, VendorRequest
 from safo.errors import ConfigError, SafoError
-from serverdata import call_fields, split_frames
+from serverdata import call_fields, join_or_fail, split_frames
 
 PID = 31337
 UID = os.geteuid()
@@ -452,7 +452,7 @@ def vendor() -> Iterator[tuple[int, type[Vendor]]]:
     thread.start()
     yield httpd.server_address[1], Vendor
     httpd.shutdown()
-    thread.join()
+    join_or_fail(thread)
     httpd.server_close()
 
 
@@ -716,6 +716,7 @@ class Tree:
 
     def connect(self) -> socket.socket:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(60)
         client.connect(str(self.tmp / "l.sock"))
         return client
 
@@ -771,7 +772,7 @@ def test_the_service_starts_serves_a_status_and_stops_clean(tree: Tree) -> None:
     assert data["epoch"] == (tree.state / "epoch").read_text().strip() and "month_cap" in data
     assert sorted(environ) == ["CREDENTIALS_DIRECTORY", "STATE_DIRECTORY"]  # scrubbed; LISTEN_* consumed
     server.stop()
-    thread.join()
+    join_or_fail(thread)
     assert box[1] == 0
 
 
@@ -787,7 +788,7 @@ def test_the_switch_file_is_read_per_request_by_the_running_service(tree: Tree) 
     write_config(tree.switch, "enabled\n")
     assert json.loads(ask(tree, begin)[0])["ok"] is True
     box[0].stop()
-    thread.join()
+    join_or_fail(thread)
 
 
 def begin_for(tree: Tree, req: Any) -> dict[str, Any]:
@@ -840,7 +841,7 @@ def test_a_whole_paid_call_through_the_entry_point_with_the_fake_vendor(tree: Tr
     req = text_req()
     reply = json.loads(ask(tree, call_body(key, req, begin_for(tree, req)))[0])
     box[0].stop()
-    thread.join()
+    join_or_fail(thread)
     assert reply["ok"] is True, reply
     assert reply["text"] == "a short answer" and len(vendor.requests) == 1
 
@@ -857,7 +858,7 @@ def test_the_start_recovers_an_interrupted_call_and_empties_the_issued_table(tre
     (call,) = view.calls.values()
     assert call.ambiguous and view.suspended and not list((tree.state / "issued").iterdir())
     box[0].stop()
-    thread.join()
+    join_or_fail(thread)
 
 
 def test_a_stop_with_a_call_still_in_flight_exits_failed(tree: Tree, key: Path) -> None:
@@ -881,7 +882,7 @@ def test_a_stop_with_a_call_still_in_flight_exits_failed(tree: Tree, key: Path) 
     client.sendall(protocol.frame(body, protocol.MAX_REQUEST_FRAME))
     assert entered.wait(30)
     box[0].stop()
-    thread.join()
+    join_or_fail(thread)
     release.set()
     client.close()
     assert box[1] == entry.EXIT_FAILED

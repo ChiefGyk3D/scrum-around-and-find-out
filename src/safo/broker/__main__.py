@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """`python -I -m safo.broker`: the unit's ExecStart. Reads the root-owned config, opens the private state directory,
 recovers (open calls become ambiguous before anything is served), takes the socket systemd passes and serves until
-SIGTERM. Every setup failure exits 4 with the exception class on standard error and nothing else."""
+SIGTERM. Every setup failure exits 4 with the exception class on standard error and nothing else.
+
+`--self-test` is what the installer runs in the staged release before it is activated: it imports every module of the
+broker package and exits 0 only if all of them import. Any other argument is refused with status 2."""
 
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import logging
 import os
+import pkgutil
 import signal
 import sys
 import time
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable, MutableMapping, Sequence
 from pathlib import Path
 
 from safo import geminisign, output
@@ -104,7 +109,25 @@ def run(
         restore()
 
 
-def main() -> int:
+def self_test() -> int:
+    package = importlib.import_module("safo.broker")
+    for info in pkgutil.iter_modules(package.__path__):
+        if info.name == "__main__":
+            continue
+        try:
+            importlib.import_module(f"safo.broker.{info.name}")
+        except Exception as exc:
+            output.write(sys.stderr, f"self-test failed: safo.broker.{info.name}: {type(exc).__name__}")
+            return 1
+    return 0
+
+
+def main(argv: Sequence[str] = ()) -> int:
+    if list(argv) == ["--self-test"]:
+        return self_test()
+    if argv:
+        output.write(sys.stderr, "safo.broker takes no arguments except --self-test")
+        return 2
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s")
     try:
         runtime.harden_process()
@@ -115,4 +138,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

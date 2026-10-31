@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Paid Gemini broker, phase 5 (#261): the systemd units and the installer, none of it run on a real machine yet. New
+  `packaging/systemd/` socket and service units for a dedicated unprivileged user (strong sandboxing, an encrypted
+  credential for the paid key, the root-owned switch as a start condition), `packaging/broker-requirements.txt` (hash-locked
+  wheels), `packaging/safo_broker_install.py` (`safo-broker-install`: dry run by default; verifies a signed annotated tag against a
+  root-owned signers file; wheels only, with hashes required; floor and monotonic version checks; a staged, read-only,
+  manifest-checked release activated by an atomic symlink swap; automatic and manual rollback; never touches the state
+  directory), `safo.broker.floor` (the broker refuses to start below the root-owned version floor) and `safo.broker.runbook` (the one-time root setup as copy-paste lines with blast radius and rollback, printed
+  and never run). Also an egress control for the service user (an nftables table, a refresh timer, a hosts view and a files-only name
+  service configuration; observe mode first), a fixed unit policy the installer enforces, a real self-test of the staged
+  release, a hardware-key requirement for release signers and a trusted-interpreter check. Paid use stays disabled.
+- Gemini enrollment preparation (#263): `docs/gemini-enrollment.md`, a copy-paste maintainer runbook (enroll one or two
+  FIDO2 keys for approvals, a pass or fail table for testing a second device, a separate release-signing key, the
+  root-owned allowed-signers lines with the namespace restriction, rotate and revoke), each step with its blast radius,
+  rollback and expected output, and every command and flag checked against the vendor pages on 2026-10-31 (unverified
+  items are marked). `src/safo/gemini_preflight.py` is a read-only preflight (`python -m safo.gemini_preflight`): ssh sk
+  support, libfido2, the udev rule, a visible hardware key, the allowed-signers file (root, 0644, namespace on every
+  line), the enable switch, the service user and the state directory modes. It writes nothing, makes no network or
+  vendor call, and prints no key or file content. It is not wired into `safo gemini` yet. Paid use stays disabled.
+
+
 - Tests: the random-output tests in `tests/test_protection.py` no longer depend on chance (#247). `_random_token` draws only from `secrets.randbelow`, and the tests inject a scripted or seeded source (and spy on the default one) instead of hoping two real draws differ or that a statistic stays under a bound.
 - Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor above 2 (standard input only for `approve`), the `safo` package that launched it pinned first on the import path, and a fresh private working directory; the child verifies its own environment and directory instead of trusting the interpreter flag, and the mode is read by the real parser. No signing provider library or askpass program is passed on. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
@@ -42,8 +62,8 @@
   `ssh-keygen -Y sign` signer, sends one `call` and reads one reply, maps every reply code to an exit status and one safe
   message, refuses a reply whose receipt does not name the request, never retries a call that may have been sent and never
   falls back to the free tier. The socket path comes from a root-owned or user file, never from the environment, and must
-  be a root-owned socket. Images go through a writer with the phase 4a signature (a small marked adapter until 4a is in
-  the tree) and are never opened or parsed. Not yet wired into `safo gemini`; paid use stays disabled.
+  be a root-owned socket. Images go through a writer with the phase 4a signature (the phase 4a writer when it is in the tree, else a
+  small marked adapter) and are never opened or parsed. Not yet wired into `safo gemini`; paid use stays disabled.
 - Paid Gemini broker, phase 3 (#259): the socket server in `src/safo/broker/`, tested over socketpairs and a temporary
   unix socket against the fake vendor, with injected clocks and no network. `protocol.py` is the wire format on its own
   (length-prefixed frames, the 1 MiB request and 256 KiB reply limits, a versioned envelope, strict field tables, one
@@ -57,7 +77,7 @@
   words only, and on SIGTERM lets calls in flight finish and records any still open after the grace period as
   ambiguous. `python -I -m safo.broker` wires it: the epoch, switch, key and `broker.yaml` readers, no-core and
   not-dumpable hardening, a scrubbed environment, the checked HTTPS transport to the vendor, and recovery before the
-  first accept. The stop wakeup is a pipe, not a socket pair, so the unit's address-family or system-call filters never touch it; `scripts/broker_sandbox_check.py` (with a pytest wrapper that skips, with its reason, where there is no user systemd manager) runs the real start-up flow as a socket-activated user unit under the unit's hardening properties, in error-number and kill modes and with `~socketpair` filtered, and fails for an injected socket, socketpair or recvmsg call. Paid use stays disabled.
+  first accept. The stop wakeup is a pipe, not a socket pair, so the unit's address-family or system-call filters never touch it; `scripts/broker_sandbox_check.py` (with an opt-in pytest wrapper, `SAFO_SANDBOX_CHECK=1`, that skips with its reason otherwise; every step has a timeout and the check a total deadline) runs the real start-up flow as a socket-activated user unit under the unit's hardening properties, in error-number and kill modes and with `~socketpair` filtered, and fails for an injected socket, socketpair or recvmsg call. Paid use stays disabled.
 
 - Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
   generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed
