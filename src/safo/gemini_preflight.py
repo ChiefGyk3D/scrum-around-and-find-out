@@ -607,7 +607,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output.write(sys.stderr, USAGE)
         return 2
     return main_with(
-        Locations(key_file=key_file),
+        Locations(key_file=key_file) if key_file is not None else Locations(),
         default_runner,
         default_lookup,
         out=sys.stdout,
