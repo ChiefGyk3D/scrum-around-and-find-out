@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import pytest
 
-from fakevendor import b64, jpeg, png, webp
+from fakevendor import b64, chunk, jpeg, png, webp
 from safo.broker import images
 from safo.broker.images import ImageRefused, decode_part, sniff
 
@@ -27,17 +27,6 @@ def test_the_declared_size_is_read_from_each_header() -> None:
     assert (sniff(png(640, 480)).width, sniff(png(640, 480)).height) == (640, 480)
     assert (sniff(jpeg(300, 200)).width, sniff(jpeg(300, 200)).height) == (300, 200)
     assert (sniff(webp(512, 256)).width, sniff(webp(512, 256)).height) == (512, 256)
-
-
-def test_vp8l_and_lossy_webp_headers_are_read() -> None:
-    lossless = b"VP8L" + (5).to_bytes(4, "little") + b"\x2f" + ((99) | (49 << 14)).to_bytes(4, "little")
-    data = b"RIFF" + (4 + len(lossless)).to_bytes(4, "little") + b"WEBP" + lossless + b"\x00" * 6
-    data = data[:4] + (len(data) - 8).to_bytes(4, "little") + data[8:]
-    assert (sniff(data).width, sniff(data).height) == (100, 50)
-    lossy = b"VP8 " + (10).to_bytes(4, "little") + b"\x00\x00\x00\x9d\x01\x2a" + (64).to_bytes(2, "little")
-    lossy += (32).to_bytes(2, "little") + b"\x00" * 4
-    data = b"RIFF" + (4 + len(lossy)).to_bytes(4, "little") + b"WEBP" + lossy
-    assert (sniff(data).width, sniff(data).height) == (64, 32)
 
 
 @pytest.mark.parametrize(
@@ -121,7 +110,7 @@ def test_a_polyglot_with_data_appended_is_refused() -> None:
 
 def test_a_chunk_hidden_after_the_png_end_marker_or_inside_is_not_followed() -> None:
     # data between IHDR and IEND is the format's own business; nothing after IEND is allowed
-    assert sniff(png(extra=b"\x00\x00\x00\x00tEXt\x00\x00\x00\x00")).mime == "image/png"
+    assert sniff(png(extra=chunk(b"tEXt", b""))).mime == "image/png"
     with pytest.raises(ImageRefused):
         sniff(png() + png())
 

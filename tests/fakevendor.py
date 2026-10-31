@@ -40,25 +40,73 @@ class FakeClock:
 # -- tiny valid files ----------------------------------------------------------------------------------------------
 
 
-def png(width: int = 1, height: int = 1, extra: bytes = b"") -> bytes:
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+def chunk(kind: bytes, data: bytes, crc: int | None = None) -> bytes:
+    """One PNG chunk; the CRC is right unless a wrong one is given."""
+    check = zlib.crc32(kind + data) if crc is None else crc
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", check)
 
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
-    body = chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"\x00\x00")) + extra
-    return b"\x89PNG\r\n\x1a\n" + body + chunk(b"IEND", b"")
+
+def ihdr(
+    width: int = 1, height: int = 1, *, depth: int = 8, color: int = 0, comp: int = 0, filt: int = 0, inter: int = 0
+) -> bytes:
+    return chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, depth, color, comp, filt, inter))
+
+
+IDAT = chunk(b"IDAT", zlib.compress(b"\x00\x00"))
+IEND = chunk(b"IEND", b"")
+
+
+def png_of(*chunks: bytes) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + b"".join(chunks)
+
+
+def png(width: int = 1, height: int = 1, extra: bytes = b"") -> bytes:
+    """A valid PNG; `extra` is raw bytes placed between the image data and the end chunk."""
+    return png_of(ihdr(width, height), IDAT, extra, IEND)
+
+
+def jseg(marker: int, payload: bytes) -> bytes:
+    return bytes([0xFF, marker]) + struct.pack(">H", len(payload) + 2) + payload
+
+
+def sof(width: int = 1, height: int = 1, marker: int = 0xC0) -> bytes:
+    return jseg(marker, struct.pack(">BHHB", 8, height, width, 1) + b"\x01\x11\x00")
+
+
+SOS = jseg(0xDA, b"\x01\x01\x00\x00\x3f\x00")
+JPEG_APP0 = jseg(0xE0, b"JFIF\x00")
+
+
+def jpeg_of(*segments: bytes, scan: bytes = b"\x00", end: bytes = b"\xff\xd9") -> bytes:
+    """SOI, the given segments in order, entropy data, then `end` (the EOI unless a test says otherwise)."""
+    return b"\xff\xd8" + b"".join(segments) + scan + end
 
 
 def jpeg(width: int = 1, height: int = 1) -> bytes:
-    sof = b"\xff\xc0" + struct.pack(">HBHHB", 11, 8, height, width, 1) + b"\x01\x11\x00"
-    sos = b"\xff\xda" + struct.pack(">H", 8) + b"\x01\x01\x00\x00\x3f\x00" + b"\x00"
-    return b"\xff\xd8\xff\xe0" + struct.pack(">H", 4) + b"\x00\x00" + sof + sos + b"\xff\xd9"
+    return jpeg_of(JPEG_APP0, sof(width, height), SOS)
+
+
+def vp8l_payload(width: int, height: int) -> bytes:
+    return b"\x2f" + ((width - 1) | ((height - 1) << 14)).to_bytes(4, "little")
+
+
+def riff(*chunks: bytes) -> bytes:
+    body = b"WEBP" + b"".join(chunks)
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def wchunk(kind: bytes, payload: bytes) -> bytes:
+    pad = b"\x00" if len(payload) % 2 else b""
+    return kind + struct.pack("<I", len(payload)) + payload + pad
+
+
+def vp8x(width: int, height: int, flags: int = 0) -> bytes:
+    body = bytes([flags]) + b"\x00\x00\x00" + (width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little")
+    return wchunk(b"VP8X", body)
 
 
 def webp(width: int = 1, height: int = 1) -> bytes:
-    chunk = b"VP8X" + struct.pack("<I", 10) + b"\x00\x00\x00\x00" + (width - 1).to_bytes(3, "little")
-    chunk += (height - 1).to_bytes(3, "little")
-    return b"RIFF" + struct.pack("<I", 4 + len(chunk)) + b"WEBP" + chunk
+    return riff(vp8x(width, height), wchunk(b"VP8L", vp8l_payload(width, height)))
 
 
 def b64(data: bytes) -> str:

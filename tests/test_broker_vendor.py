@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from brokerdata import table
-from fakevendor import b64, jpeg, png
+from fakevendor import b64, chunk, jpeg, png
 from pipedata import IMAGE_MODEL, image_req, text_req
 from safo.broker import vendor
 from safo.broker.vendor import Unreadable, Usage, actual_cost, build_request, parse_reply, retry_after_seconds
@@ -254,7 +254,7 @@ def test_no_image_at_all_is_an_answer_with_no_images() -> None:
 
 
 def test_the_image_body_may_be_far_larger_than_a_text_body() -> None:
-    big = png(extra=b"\x00\x00\x00\x00tEXt\x00\x00\x00\x00" * 3)
+    big = png(extra=chunk(b"tEXt", b"") * 3)
     data = reply("image", outputs=[{"type": "image", "data": b64(big), "mime_type": "image/png"}])
     padded = json.dumps(data).encode() + b" " * (vendor.TEXT_BODY_CAP + 10)
     assert len(parse("image", padded).images) == 1
