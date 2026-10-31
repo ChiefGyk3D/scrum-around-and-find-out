@@ -576,7 +576,7 @@ def test_attachments_are_described_and_counted() -> None:
         [{**GOOD_ATTACHMENT, "bytes": 0}],
         [{**GOOD_ATTACHMENT, "bytes": p.MAX_ATTACHMENT_FRAME + 1}],
         [{**GOOD_ATTACHMENT, "bytes": True}],
-        [{**GOOD_ATTACHMENT, "index": 2}],
+        [{**GOOD_ATTACHMENT, "index": 1}],
         [{**GOOD_ATTACHMENT, "index": -1}],
         [{**GOOD_ATTACHMENT, "sha256": "AB" * 32}],
         [{**GOOD_ATTACHMENT, "sha256": "ab" * 31}],

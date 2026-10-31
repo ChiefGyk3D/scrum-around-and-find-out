@@ -292,7 +292,7 @@ def _attachment_ok(item: object) -> bool:
     return (
         type(item) is dict
         and set(item) == {"index", "mime", "bytes", "sha256"}
-        and _is_int(item["index"], 0, MAX_ATTACHMENTS)
+        and _is_int(item["index"], 0, MAX_ATTACHMENTS - 1)
         and _matches(item["mime"], MIME)
         and _is_int(item["bytes"], 1, MAX_ATTACHMENT_FRAME)
         and _matches(item["sha256"], SHA256)
