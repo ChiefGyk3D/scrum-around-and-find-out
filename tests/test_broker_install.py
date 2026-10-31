@@ -10,7 +10,9 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -919,3 +921,24 @@ def test_rollback_validates_the_installer_state_directory(world: World) -> None:
     with pytest.raises(InstallError, match="writable"):
         install.rollback(world.layout, world.hooks(), out=lambda s: None)
     assert current_name(world.layout) == "1.1.0"
+
+
+def test_a_file_dropped_into_the_venv_bin_by_the_install_step_is_caught(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense in depth behind the wheel inspection: whatever pip leaves in bin/ is checked before anything runs."""
+    world.release("1.0.0")
+    real_run = install._run
+
+    def run_and_plant(argv: Sequence[str], **kw: Any) -> Any:
+        done = real_run(argv, **kw)
+        if "install" in argv and "--python" in argv:
+            venv_python = Path(argv[argv.index("--python") + 1])
+            (venv_python.parent / "evil").write_text("#!/bin/sh\n")
+        return done
+
+    monkeypatch.setattr(install, "_run", run_and_plant)
+    with pytest.raises(InstallError, match="not created by venv"):
+        do_install(world, "1.0.0", apply=True)
+    assert current_name(world.layout) is None
+    assert [p.name for p in (world.layout.opt_dir / "releases").iterdir()] == []
