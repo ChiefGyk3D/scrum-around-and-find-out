@@ -1156,3 +1156,31 @@ def test_a_client_that_leaves_after_the_count_does_not_hold_a_place(rig: Rig) ->
     assert env.server.calls_in_flight == 0 and len(rig.ledger.view().calls) == 1  # it was reserved, so it counts
     rig.pipeline.faults = lambda point: None
     assert env.call(text_req(job="job-two")).code == "busy"
+
+
+@pytest.mark.parametrize("budget", ["max_calls_per_minute", "max_calls_per_day"])
+def test_a_call_not_yet_reserved_still_counts_against_the_budget(rig: Rig, budget: str) -> None:
+    env = Env(rig, max_concurrent_calls=2, call_per_minute=100, **{budget: 1})
+    entered = threading.Event()
+    release = threading.Event()
+    seen: list[int] = []
+
+    def hold(point: str) -> None:
+        if point == "after_verify" and not seen:  # the first call stops here: verified, nothing reserved yet
+            seen.append(1)
+            entered.set()
+            release.wait(30)
+
+    rig.pipeline.faults = hold
+    first_req = text_req(job="job-first")
+    payload, signature = rig.approved(first_req)
+    body = protocol.request_body("call", **call_fields(first_req, payload, signature))
+    box: list[Any] = []
+    worker = threading.Thread(target=lambda: box.append(exchange(env.server, body)))
+    worker.start()
+    assert entered.wait(30)
+    assert rig.ledger.view().calls == {}  # really not reserved
+    assert env.call(text_req(job="job-second")).code == "busy"
+    release.set()
+    worker.join()
+    assert box[0].code == "ok" and len(rig.vendor.requests) == 1
