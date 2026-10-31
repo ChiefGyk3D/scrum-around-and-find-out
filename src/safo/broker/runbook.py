@@ -76,21 +76,35 @@ def steps(login: str) -> tuple[Step, ...]:
         ),
         Step(
             "Install the installer (the first copy, from a checkout you have read)",
-            "Later installer versions arrive inside signed releases. This first copy is trust on first use, so read "
-            "the "
-            "file and compare its hash before root copies it. Replace /path/to/reviewed/checkout with the checkout you "
-            "reviewed; the installer needs python3 with pip and venv available (the last line checks pip).",
+            "Later installer versions arrive inside signed releases. This first copy is trust on first use. The "
+            "checkout "
+            "is writable by your account, so root first takes one copy into a root-only folder, and you read, hash and "
+            "install that same root-owned copy; nothing is read from the checkout twice. Replace "
+            "/path/to/reviewed/checkout with the checkout you reviewed. The installer needs python3 with pip and venv "
+            "available (the last line checks pip).",
             (
-                ssh("sha256sum /path/to/reviewed/checkout/src/safo/broker/install.py"),
+                ssh("install -d -m 0700 -o root -g root /var/lib/safo-broker-install/stage"),
                 ssh(
-                    "install -m 0755 -o root -g root /path/to/reviewed/checkout/src/safo/broker/install.py "
+                    "install -m 0600 -o root -g root /path/to/reviewed/checkout/packaging/safo_broker_install.py "
+                    "/var/lib/safo-broker-install/stage/safo-broker-install"
+                ),
+                ssh("sha256sum /var/lib/safo-broker-install/stage/safo-broker-install"),
+                ssh("less /var/lib/safo-broker-install/stage/safo-broker-install"),
+                ssh(
+                    "install -m 0755 -o root -g root /var/lib/safo-broker-install/stage/safo-broker-install "
                     "/usr/local/sbin/safo-broker-install"
                 ),
+                ssh("rm -r /var/lib/safo-broker-install/stage"),
                 ssh("/usr/bin/python3 -I -m pip --version"),
             ),
             "One root-run program is added. It does nothing until you run it, and it refuses to touch the state "
             "directory.",
-            (ssh("rm /usr/local/sbin/safo-broker-install"),),
+            (
+                ssh("rm /usr/local/sbin/safo-broker-install"),
+                ssh("rm -rf /var/lib/safo-broker-install/stage"),
+            ),
+            "Compare the hash with the one you recorded when you reviewed the checkout. If the two differ, stop here "
+            "and do not run the install line.",
         ),
         Step(
             "Create the credential for the paid key",

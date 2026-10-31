@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from safo.broker.install import Hooks, Layout, default_fetch, default_self_test, make_hooks
+from safo_broker_install import Hooks, Layout, default_fetch, default_self_test, make_hooks
 from unitdata import UNIT_DIR
 
 GIT_ENV = {

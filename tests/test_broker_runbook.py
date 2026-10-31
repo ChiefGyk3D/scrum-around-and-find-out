@@ -8,7 +8,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from safo.broker import install, runbook
+import safo_broker_install as install
+from safo.broker import runbook
 
 
 def text() -> str:
@@ -166,3 +167,23 @@ def test_the_quoting_survives_a_local_shell_parse() -> None:
     for line in command_lines(text()):
         remote = shlex.split(line)[3]
         shlex.split(remote)  # raises on unbalanced quotes
+
+
+def test_the_installer_is_read_and_installed_from_one_root_owned_copy() -> None:
+    """Never hash a file in a folder the maintainer can write and then copy it in a second command."""
+    doc = text()
+    lines = command_lines(doc)
+    stage = "/var/lib/safo-broker-install/stage/safo-broker-install"
+    take = next(i for i, line in enumerate(lines) if "packaging/safo_broker_install.py" in line)
+    hash_ = next(i for i, line in enumerate(lines) if "sha256sum" in line)
+    final = next(
+        i
+        for i, line in enumerate(lines)
+        if "/usr/local/sbin/safo-broker-install'" in line and "install -m 0755" in line
+    )
+    assert take < hash_ < final
+    assert stage in lines[hash_]
+    assert stage in lines[final]
+    assert "reviewed/checkout" not in lines[hash_]
+    assert "reviewed/checkout" not in lines[final]
+    assert sum("reviewed/checkout" in line for line in lines) == 1  # the checkout is read exactly once

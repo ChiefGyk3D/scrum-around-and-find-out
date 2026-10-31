@@ -57,6 +57,7 @@ SSH_KEYGEN = "/usr/bin/ssh-keygen"
 SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze"
 RUNUSER = "/usr/sbin/runuser"
+UNSHARE = "/usr/bin/unshare"
 SERVICE_USER = "safo-broker"
 UNIT_NAMES = ("safo-broker.service", "safo-broker.socket")
 UNIT_EXEC_PREFIX = "/opt/safo-broker/current"
@@ -715,14 +716,22 @@ def default_verify_units(unit_dir: Path, release: Path) -> None:
         raise InstallError(msg)
 
 
+def self_test_argv(python: Path, modules: Sequence[str], *, as_service_user: bool) -> list[str]:
+    """The self-test command. As root it drops to the service user and into an empty network namespace, so import-time
+    code in the release or its dependencies can neither read root's files nor reach the network."""
+    argv = [str(python), "-I", "-c", "import " + ", ".join(modules)]
+    if as_service_user:
+        argv = [UNSHARE, "--net", "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
+    return argv
+
+
 def default_self_test(
     modules: Sequence[str] = ("safo.broker", "yaml"), *, use_runuser: bool | None = None
 ) -> Callable[[Path], None]:
     def self_test(release: Path) -> None:
         python = release / "venv" / "bin" / "python"
-        argv = [str(python), "-I", "-c", "import " + ", ".join(modules)]
-        if use_runuser if use_runuser is not None else os.geteuid() == 0:
-            argv = [RUNUSER, "-u", SERVICE_USER, "--", *argv]
+        root = use_runuser if use_runuser is not None else os.geteuid() == 0
+        argv = self_test_argv(python, modules, as_service_user=root)
         done = _run(argv, env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}, cwd=Path("/"), timeout=120)
         if done.returncode != 0:
             tail = " | ".join(done.stderr.strip().splitlines()[-2:])
@@ -1100,21 +1109,12 @@ def single_instance(layout: Layout) -> Iterator[None]:
         os.close(fd)
 
 
-def install(
-    version: str,
-    layout: Layout,
-    hooks: Hooks,
-    *,
-    apply: bool = False,
-    reinstall: bool = False,
-    allow_downgrade: str | None = None,
-    out: Callable[[str], None] = print,
-) -> Report:
+def check_policy(
+    version: str, layout: Layout, reinstall: bool, allow_downgrade: str | None
+) -> tuple[tuple[int, int, int] | None, bool]:
+    """Read the floor and the highest-installed record now and decide. Returns (highest, is_a_downgrade)."""
     ver = parse_version(version)
-    tag = f"v{version}"
-    check_trusted(layout.signers, layout, "release signers file")
     floor = read_floor(layout)
-    check_trusted(layout.opt_dir, layout, "install directory", want_dir=True)
     highest = read_highest(layout)
     if ver < floor:
         msg = f"version {version} is below the floor {fmt(floor)}; refused (the floor cannot be passed with a flag)"
@@ -1132,8 +1132,50 @@ def install(
         elif ver == highest and not reinstall:
             msg = f"version {version} is the same as the highest installed; pass --reinstall to install it again"
             raise InstallError(msg)
-    if apply:
-        layout.work_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return highest, downgrade
+
+
+def prepare_state(layout: Layout) -> None:
+    """The installer's own directories must be root-owned and closed before anything is written there."""
+    check_trusted(layout.version_file.parent, layout, "installer state directory", want_dir=True)
+    layout.work_dir.mkdir(mode=0o700, exist_ok=True)
+    check_trusted(layout.work_dir, layout, "work directory", want_dir=True)
+    if os.path.lexists(layout.log_file):
+        check_trusted(layout.log_file, layout, "install log")
+
+
+def install(
+    version: str,
+    layout: Layout,
+    hooks: Hooks,
+    *,
+    apply: bool = False,
+    reinstall: bool = False,
+    allow_downgrade: str | None = None,
+    out: Callable[[str], None] = print,
+) -> Report:
+    parse_version(version)
+    if not apply:
+        return _install(version, layout, hooks, False, reinstall, allow_downgrade, out)
+    # the lock comes first: the policy files are read, re-read and acted on while no other install can run
+    prepare_state(layout)
+    with single_instance(layout):
+        return _install(version, layout, hooks, True, reinstall, allow_downgrade, out)
+
+
+def _install(
+    version: str,
+    layout: Layout,
+    hooks: Hooks,
+    apply: bool,
+    reinstall: bool,
+    allow_downgrade: str | None,
+    out: Callable[[str], None],
+) -> Report:
+    tag = f"v{version}"
+    check_trusted(layout.signers, layout, "release signers file")
+    check_trusted(layout.opt_dir, layout, "install directory", want_dir=True)
+    check_policy(version, layout, reinstall, allow_downgrade)
     work = Path(tempfile.mkdtemp(prefix="install-", dir=layout.work_dir if apply else None))
     try:
         hooks.fetch(tag, work / "repo")
@@ -1176,21 +1218,20 @@ def install(
         if hooks.confirm(f"Type the version to continue: {version}").strip() != version:
             msg = "not confirmed: the typed version did not match; nothing was changed"
             raise InstallError(msg)
-        with single_instance(layout):
-            release_dir = activate(
-                layout,
-                hooks,
-                version=version,
-                commit=info.commit,
-                signer=info.signer,
-                files=files,
-                lock=lock,
-                download_dir=download_dir,
-                work=work,
-                highest=highest,
-                downgrade=downgrade,
-                out=out,
-            )
+        release_dir = activate(
+            layout,
+            hooks,
+            version=version,
+            commit=info.commit,
+            signer=info.signer,
+            files=files,
+            lock=lock,
+            download_dir=download_dir,
+            work=work,
+            reinstall=reinstall,
+            allow_downgrade=allow_downgrade,
+            out=out,
+        )
         return Report(version, info.commit, info.signer, True, review, release_dir)
     except subprocess.TimeoutExpired:
         msg = "a command timed out"
@@ -1210,8 +1251,8 @@ def activate(
     lock: Lock,
     download_dir: Path,
     work: Path,
-    highest: tuple[int, int, int] | None,
-    downgrade: bool,
+    reinstall: bool,
+    allow_downgrade: str | None,
     out: Callable[[str], None],
 ) -> Path:
     fd = open_opt(layout)
@@ -1239,6 +1280,8 @@ def activate(
                 version=version,
                 home=work,
             )
+            # the policy files are read again now, under the lock, after the human review and the build
+            highest, downgrade = check_policy(version, layout, reinstall, allow_downgrade)
             os.rename(stage, final)
             hooks.fault("after_build")
         except Exception as exc:

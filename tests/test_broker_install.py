@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
+import safo_broker_install as install
 from installdata import SimulatedCrash, World, git, lock_text, make_key, make_wheel, make_world
-from safo.broker import install
-from safo.broker.install import FAULT_POINTS, InstallError, Layout
+from safo_broker_install import FAULT_POINTS, InstallError, Layout
 
 
 @pytest.fixture
@@ -97,6 +97,7 @@ def test_wrong_confirmation_stops_before_any_change(world: World) -> None:
         do_install(world, "1.0.0", apply=True)
     after = world.tree_snapshot(world.root)
     assert after.pop("var/lib/safo-broker-install/work")[0] == "dir"  # the installer's own, empty, work directory
+    after.pop("var/lib/safo-broker-install/install.lock")  # the empty lock file
     assert after == before
     assert list(world.layout.work_dir.iterdir()) == []
 
@@ -778,3 +779,92 @@ def test_cli_dry_run_default_and_plan(world: World, capsys: pytest.CaptureFixtur
     assert "ssh -t host 'sudo " in capsys.readouterr().out
     assert install.main(["install", "9.9.9"], layout=world.layout, hooks=world.hooks()) == 1
     assert "refused" in capsys.readouterr().err
+
+
+# ---- review round 1: state directory, locking, stale policy, self-test sandbox -------------------------------------
+
+
+def test_refuses_a_work_directory_the_group_can_write(world: World) -> None:
+    world.release("1.0.0")
+    world.layout.work_dir.mkdir(mode=0o700)
+    world.layout.work_dir.chmod(0o770)
+    with pytest.raises(InstallError, match="writable"):
+        do_install(world, "1.0.0", apply=True)
+    assert current_name(world.layout) is None
+
+
+def test_refuses_a_work_directory_that_is_a_symlink(world: World, tmp_path: Path) -> None:
+    world.release("1.0.0")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    world.layout.work_dir.symlink_to(elsewhere)
+    with pytest.raises(InstallError, match="symlink"):
+        do_install(world, "1.0.0", apply=True)
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_refuses_an_installer_state_directory_the_group_can_write(world: World) -> None:
+    world.release("1.0.0")
+    world.layout.version_file.parent.chmod(0o775)
+    with pytest.raises(InstallError, match="writable"):
+        do_install(world, "1.0.0", apply=True)
+
+
+def test_a_second_install_while_one_holds_the_lock_is_refused(world: World) -> None:
+    import fcntl
+
+    world.release("1.0.0")
+    fd = os.open(world.layout.version_file.parent / "install.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(InstallError, match="another install"):
+            do_install(world, "1.0.0", apply=True)
+        with pytest.raises(InstallError, match="another install"):
+            install.rollback(world.layout, world.hooks(), out=lambda s: None)
+    finally:
+        os.close(fd)
+    assert current_name(world.layout) is None
+    do_install(world, "1.0.0", apply=True)  # the lock is gone with the holder
+    assert current_name(world.layout) == "1.0.0"
+
+
+def test_a_floor_raised_during_the_review_is_honored_before_the_swap(world: World) -> None:
+    world.release("1.0.0")
+
+    def raise_floor_then_confirm(prompt: str) -> str:
+        world.layout.floor_file.write_text("1.0.1\n")  # root raises the floor while the review is open
+        return "1.0.0"
+
+    with pytest.raises(InstallError, match="floor"):
+        install.install(
+            "1.0.0", world.layout, world.hooks(confirm=raise_floor_then_confirm), apply=True, out=lambda s: None
+        )
+    assert current_name(world.layout) is None
+    assert not world.layout.version_file.exists()
+    assert [p.name for p in (world.layout.opt_dir / "releases").iterdir()] == []
+
+
+def test_a_version_recorded_during_the_review_is_honored_before_the_swap(world: World) -> None:
+    world.release("1.0.0")
+
+    def record_a_higher_version(prompt: str) -> str:
+        world.layout.version_file.write_text("2.0.0\n")
+        world.layout.version_file.chmod(0o644)
+        return "1.0.0"
+
+    with pytest.raises(InstallError, match="lower"):
+        install.install(
+            "1.0.0", world.layout, world.hooks(confirm=record_a_higher_version), apply=True, out=lambda s: None
+        )
+    assert current_name(world.layout) is None
+
+
+def test_the_self_test_runs_as_the_service_user_in_an_empty_network_namespace_when_root() -> None:
+    py = Path("/r/venv/bin/python")
+    as_root = install.self_test_argv(py, ("safo.broker", "yaml"), as_service_user=True)
+    assert as_root[:2] == [install.UNSHARE, "--net"]
+    assert install.RUNUSER in as_root
+    assert as_root[as_root.index("-u") + 1] == install.SERVICE_USER
+    assert as_root[-4:-1] == [str(py), "-I", "-c"]
+    plain = install.self_test_argv(py, ("safo.broker",), as_service_user=False)
+    assert plain == [str(py), "-I", "-c", "import safo.broker"]

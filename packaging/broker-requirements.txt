@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Hash-locked wheels for the broker environment. The installer (safo.broker.install) refuses anything not listed here:
+# Hash-locked wheels for the broker environment. The installer (packaging/safo_broker_install.py) refuses anything not listed here:
 # no source distribution, no unhashed line, no URL. Wheel hashes only (every one is also in requirements.txt).
 # Regenerate by choosing the wheel files from the index for the pinned version; never add an sdist hash.
 --index-url https://pypi.org/simple/

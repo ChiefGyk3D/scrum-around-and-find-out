@@ -291,7 +291,7 @@ What phase 5 puts in the tree, all testable without root and none of it run on a
   one fails a test), runs `systemd-analyze verify` and `systemd-analyze security --offline` where the tool exists (the
   tests skip, with the reason shown, when it does not), and fails if the exposure score rises above 2.0.
 - `packaging/broker-requirements.txt`: the hash-locked wheel list the installer reads. Wheel hashes only.
-- `src/safo/broker/install.py`: `safo-broker-install`, standard library only, so root can copy the one file to
+- `packaging/safo_broker_install.py`: `safo-broker-install`, standard library only, so root can copy the one file to
   `/usr/local/sbin`. Commands: `plan` (prints the setup runbook, never runs it), `install VERSION` (a dry run unless
   `--apply`; `--reinstall`, `--allow-downgrade VERSION`), and `rollback` (`--to VERSION`). The chain is the one in
   "Install and update chain": the source comes from a fixed URL and a single tag fetch (no option or variable changes it),
@@ -308,8 +308,8 @@ carries its own name, which must equal the requested tag); a signature block tha
 signature checked against whatever keyring root has is never consulted); a symlink or submodule anywhere in the release
 tree; a wheel with a `.pth` file, a scripts directory, console or GUI entry points, a link member or an unsafe member
 path; a wheel that would install a package named `safo` over the broker's own code; a missing or unusable floor file; and
-a missing version file when a release is already installed. Release directories are named `VERSION`, or `VERSION.rN` when
-`--reinstall` installs a version that is already present.
+a missing version file when a release is already installed. A release directory is named for its version; when
+`--reinstall` installs a version that is already present, the new directory gets a numbered suffix.
 
 **Run it first on a throwaway machine.** Until the maintainer has run the installer and the units on a throwaway VM, these
 are unverified: that `MemoryDenyWriteExecute=yes` lets `ssh-keygen` run under the service, that `@system-service` allows

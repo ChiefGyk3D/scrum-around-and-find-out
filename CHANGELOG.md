@@ -5,7 +5,7 @@
 - Paid Gemini broker, phase 5 (#261): the systemd units and the installer, none of it run on a real machine yet. New
   `packaging/systemd/` socket and service units for a dedicated unprivileged user (strong sandboxing, an encrypted
   credential for the paid key, the root-owned switch as a start condition), `packaging/broker-requirements.txt` (hash-locked
-  wheels), `safo.broker.install` (`safo-broker-install`: dry run by default; verifies a signed annotated tag against a
+  wheels), `packaging/safo_broker_install.py` (`safo-broker-install`: dry run by default; verifies a signed annotated tag against a
   root-owned signers file; wheels only, with hashes required; floor and monotonic version checks; a staged, read-only,
   manifest-checked release activated by an atomic symlink swap; automatic and manual rollback; never touches the state
   directory) and `safo.broker.runbook` (the one-time root setup as copy-paste lines with blast radius and rollback, printed
