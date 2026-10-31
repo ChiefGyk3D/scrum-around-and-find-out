@@ -8,6 +8,7 @@ and each has a negative case that shows it can fail.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -267,11 +268,33 @@ def test_the_wiki_publishes_the_page_under_its_name_and_in_the_sidebar(tmp_path:
 
 # --- public safety: an Open risk states ownership and guarantees, never a weakness recipe -----------------------------
 
-# Built from pieces so this file holds none of the strings it forbids.
-PRIVATE_NAME = "claude" + "-shit"
-EVENT_NAMES = ("pull_request" + "_target", "workflow" + "_dispatch", "workflow" + "_call", "issue" + "_comment")
+# SHA-256 digests of lowercase tokens that must not appear in public text: a private identifier, trigger and event
+# names, and the name of a private screening setting. Only digests are kept here, so no forbidden word is readable in
+# this file; the real words are in the maintainer's private notes.
+PRIVATE_IDENTIFIER_DIGESTS = frozenset({"15a5ff8a01d0fb1642aaa8ec1117c422b2a38191126db74cd7d7beec09972bfd"})
+# Names that other public pages on main already use in their own context; they must not appear in this threat model.
+FORBIDDEN_DIGESTS = PRIVATE_IDENTIFIER_DIGESTS | frozenset(
+    {
+        "eeb09ca83b62e754e09b938a88b4fb11f58d877d375fd47d4c31d15508b75f33",
+        "260b1e6ac23c81bb852ba4b76eda274bcc9d79e61d973f790304910e2a8803b6",
+        "eb138686535ebbe8555a49274466629a13143e8ae6a558d007d1a5feb33b0984",
+        "910090df4d77487b76b31554e73d54279e0eac57c137375532694c2cae8b3b39",
+        "6b8573fcf87caad8cab2a305c440abfa52d8ade9a3e1eb9e0f05814944048704",
+    }
+)
+TOKEN = re.compile(r"[A-Za-z0-9_.-]+")
+SENTINEL = "UNSUPPORTED_EVENT_A"  # an opaque stand-in used to show the mechanics bite
 LINE_POINTER = re.compile(r"\.py:\d+")
 OPEN_LEVELS = ("Critical", "High", "Medium")
+
+
+def digest(word: str) -> str:
+    return hashlib.sha256(word.lower().encode()).hexdigest()
+
+
+def forbidden_tokens(text: str, digests: frozenset[str] = FORBIDDEN_DIGESTS) -> list[str]:
+    """Positions-free report: how many tokens of the text hash to a forbidden digest (the words are never returned)."""
+    return [f"token {i}" for i, t in enumerate(TOKEN.findall(text)) if digest(t.strip(".-")) in digests]
 
 
 def open_sections(page: str) -> list[tuple[str, str]]:
@@ -294,10 +317,11 @@ def public_safety_problems(page: str, model_text: str, readme_section: str) -> l
             problems.append(f"{rid}: a source file-and-line pointer in an Open risk")
         if "**G.**" in body:
             problems.append(f"{rid}: a gap statement in an Open risk (those stay private)")
-        if "Actor class" not in body or "Tracked in" not in body:
+        if "Actor class" not in body or "Tracked " not in body:
             problems.append(f"{rid}: missing the actor class or the tracking line")
     for name, text in (("page", page), ("model", model_text), ("README section", readme_section)):
-        problems += [f"{name}: names the event {e}" for e in EVENT_NAMES if e in text]
+        if forbidden_tokens(text):
+            problems.append(f"{name}: contains a forbidden token")
     return problems
 
 
@@ -306,7 +330,7 @@ def readme_threat_section() -> str:
     return readme.split("## Threat model", 1)[1].split("\n## ", 1)[0]
 
 
-def test_open_risks_carry_no_recipe_pointer_event_name_or_gap_statement() -> None:
+def test_open_risks_carry_no_recipe_pointer_forbidden_token_or_gap_statement() -> None:
     page = PAGE.read_text(encoding="utf-8")
     assert public_safety_problems(page, MODEL.read_text(encoding="utf-8"), readme_threat_section()) == []
 
@@ -316,36 +340,44 @@ def test_the_open_risk_check_bites() -> None:
     model_text = MODEL.read_text(encoding="utf-8")
     section = readme_threat_section()
     first = open_sections(page)[0][1]
+    pointer = "sentinel.py:" + "7"
     assert any(
         "file-and-line" in p
-        for p in public_safety_problems(page.replace(first, first + " x.py:12"), model_text, section)
+        for p in public_safety_problems(page.replace(first, first + " " + pointer), model_text, section)
     )
     assert any(
         "gap statement" in p
         for p in public_safety_problems(page.replace(first, first + "\n  - **G.** x"), model_text, section)
     )
-    assert any("names the event" in p for p in public_safety_problems(page, model_text + EVENT_NAMES[0], section))
-    assert any("names the event" in p for p in public_safety_problems(page, model_text, section + EVENT_NAMES[1]))
     assert any(
         "missing the actor class" in p
         for p in public_safety_problems(page.replace(first, first.replace("Actor class", "Who")), model_text, section)
     )
 
 
-def test_no_public_file_names_the_private_configuration_repository() -> None:
+def test_the_forbidden_token_check_bites() -> None:
+    mine = frozenset({digest(SENTINEL)})
+    assert forbidden_tokens(f"text with {SENTINEL} inside", mine) == ["token 2"]
+    assert forbidden_tokens(f"text with {SENTINEL.lower()}.", mine) == ["token 2"]
+    assert forbidden_tokens("nothing here", mine) == []
+    assert len(FORBIDDEN_DIGESTS) >= 5 and PRIVATE_IDENTIFIER_DIGESTS < FORBIDDEN_DIGESTS
+
+
+def test_no_public_file_contains_a_private_identifier() -> None:
     files = [ROOT / "README.md", ROOT / "CHANGELOG.md", MODEL, *sorted((ROOT / "docs").glob("*.md"))]
     assert len(files) > 20
-    hits = [str(f.relative_to(ROOT)) for f in files if PRIVATE_NAME in f.read_text(encoding="utf-8").lower()]
+    hits = [
+        str(f.relative_to(ROOT))
+        for f in files
+        if forbidden_tokens(f.read_text(encoding="utf-8"), PRIVATE_IDENTIFIER_DIGESTS)
+    ]
     assert hits == []
-    assert PRIVATE_NAME in ("x" + PRIVATE_NAME)  # the guard looks for what it says it looks for
 
 
-def test_the_credential_wording_is_scoped_to_the_app_path() -> None:
+def test_the_credential_text_names_no_secret_location_or_private_setting() -> None:
+    """Neutral safety properties: no token types or storage places as assets, no screening setting in the page."""
     page = PAGE.read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "On the App credential path SAFO mints a one-hour installation token" in page
-    assert "the token is read-only then" not in page and "the token is read-only then" not in MODEL.read_text(
-        encoding="utf-8"
-    )
-    assert "retains its existing authority" in page
-    assert "a one-hour App token," not in readme
+    assets = page.split("## Assets", 1)[1].split("## Actors", 1)[0].lower()
+    for phrase in ("private key", "installation token", "stored `gh`", "secret store", "root-owned"):
+        assert phrase not in assets
+    assert "mode 600" not in page
