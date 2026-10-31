@@ -2,8 +2,8 @@
 """The vendor side of a call: the fixed request templates, the transport interface, the reply parser and the cost.
 
 Nothing here opens a socket. A `Transport` is injected (a fake in the tests; the pinned HTTPS connection in a later
-phase). The request body is built from a fixed template per kind out of the canonical request and the price table, and
-from nothing a client supplied except the prompt text, the size, the aspect ratio and the signed limits.
+phase). The request body is built from a fixed template per kind out of the canonical request and the price table, plus
+nothing a client supplied except the prompt text, the size, the aspect ratio and the signed limits.
 
 The reply parser targets one shape per kind and refuses any other (docs/gemini-broker.md, "Images"). The text shape is
 the one `safo.gemini` already reads. The image shape (an `outputs` list of `text` and `image` items with inline base64

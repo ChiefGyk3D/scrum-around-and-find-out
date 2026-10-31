@@ -54,7 +54,7 @@ pipeline, the vendor request templates and reply parser, the image checks, and t
   An image that fails is not passed on, and its cost is still counted from usage.
 
 Where phase 2 read the design and had to choose, it is listed in the pull request. Still unverified: the real response
-shapes. The text shape is the one `safo.gemini` already reads; the image shape is inferred from the vendor SDK examples
+shapes. The text shape is the one the existing wrapper already reads; the image shape is inferred from the vendor SDK examples
 and the parser refuses any other, so a real reply that differs makes the call ambiguous until phase 7 records it.
 
 The maintainer decided on 2026-10-30 that the paid path must be finished, because other projects are blocked on it.
