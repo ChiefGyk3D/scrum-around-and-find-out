@@ -35,6 +35,14 @@ SHAPES = [
     "safo gemini $X {w}\n",
     "safo gemini $X --job j --max-usd 1\n",
     "printf '%s\\n' {w} | xargs -n1 safo gemini\n",
+    # prose-looking and table-looking lines that hold a real command (the neutralizing rewrite must not hide them)
+    "| step | `echo {w} | xargs safo gemini` |\n",
+    "| step | `safo gemini {w} --model m --job j --max-usd 1` |\n",
+    "| a | b |\n| `safo gemini x {w}` | `echo {w} | xargs safo gemini` |\n",
+    "safo gemini x {w}\n",
+    "the user then runs safo gemini {w} --model m\n",
+    "note: echo ok | safo gemini x {w}\n",
+    "echo {w} | sh -c 'xargs safo gemini'\n",
 ]
 
 

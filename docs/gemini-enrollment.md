@@ -508,7 +508,7 @@ describes, then review what was released. Blast radius: which code root will ins
 
 ## Related root step (not part of enrollment)
 
-The paid API key goes in with `systemd-creds encrypt --name=paid-key --with-key=host`, as in [Gemini broker](gemini-broker.md).
+The API key of the broker goes in with `systemd-creds encrypt --name=paid-key --with-key=host`, as in [Gemini broker](gemini-broker.md).
 Both flags were found in the `systemd-creds(1)` manual (systemd 262) on 2026-10-31: `--name=` sets the credential name
 embedded in the file (and checked at decrypt), and `--with-key=` selects the key (host, and a TPM2 option). That
 procedure is not repeated here, and the preflight does not read the credential.

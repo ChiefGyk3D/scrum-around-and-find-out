@@ -78,7 +78,7 @@ root**, not writable by group or others, under directories that are root-owned a
 writes to them. That stops an agent running as the maintainer from enrolling its own key. No flag, environment variable or
 `gemini.yaml` setting moves them or relaxes the rules; only a test, through the `fixed_locations` function argument, can.
 Several keys can be enrolled, each under its own label; see [Gemini keys](gemini-keys.md) for adding, rotating, backing up
-and revoking them. Only hardware keys (`ed25519-sk`, `ecdsa-sk`) count for a paid approval (the broker refuses a software
+and revoking them. Only hardware keys (`ed25519-sk`, `ecdsa-sk`) count for an approval (the broker refuses a software
 key), and a key with `no-touch-required` is refused when the file is loaded.
 
 What `ssh-keygen -Y verify` does not say, the code reads from the public signature itself: the signer's key (so the

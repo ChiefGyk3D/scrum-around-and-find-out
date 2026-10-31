@@ -73,15 +73,6 @@ MARKDOWN_WORD = re.compile(
     r"^`(?:ask|approve|quota|paid|paid-dryrun|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
 )
 VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
-# The bare word `paid` is also ordinary English ("the paid tier"), unlike `ask` and `approve` in this grammar. A line
-# that is prose (no run-time construct on it, or a markdown table row) has the bare word neutralized before any scan;
-# every other line keeps it, so `echo paid | xargs safo gemini`, `A=paid`, `eval` of a string and `safo gemini paid`
-# stay read.
-# `paid-dryrun`, `--paid` and the broker options are never neutralized.
-_BARE_PAID = re.compile(r"(?<![\w-])paid(?![\w-])")
-_RUNTIME_SIGNAL = re.compile(
-    r"\bxargs\b|\beval\b|(?<![\w-])-c\b|\s\|\s|\$|=\s*[\"']?paid(?![\w-])|\bgemini\s+paid\b|\bfor\b.*\bin\b"
-)
 # Every detector pattern, so the cheap prefilter below can never miss what a detector would catch. A new detector regex
 # must be added here (a test fails otherwise); the second field names it.
 # words built with escapes, printf -v, ANSI-C quoting: a brief that has them is read even without a Gemini word
@@ -221,14 +212,6 @@ _FAIL_CLOSED = [
 ]
 
 TermsSource = tuple[re.Pattern[str], ...] | Callable[[], tuple[re.Pattern[str], ...]]
-
-
-def _neutral_prose(line: str) -> str:
-    """A prose line has the bare word `paid` replaced (see `_BARE_PAID`); a line with a run-time construct, or that is
-    not a markdown table row but holds the Gemini command group before the word, is returned unchanged."""
-    if _BARE_PAID.search(line) is None or (_RUNTIME_SIGNAL.search(line) and not line.lstrip().startswith("|")):
-        return line
-    return _BARE_PAID.sub("p-id", line)
 
 
 def findings(
@@ -918,7 +901,7 @@ def _findings(
 
     tick()
     joined = _join(prompt)
-    lines = [_neutral_prose(line) for line in joined.splitlines()]
+    lines = joined.splitlines()
     whole = "\n".join(_views(line)[2] for line in lines)
     runtime_scan = bool(re.search(r"\bgemini\b", whole)) and bool(
         re.search(r"(?<![\w-])(?:ask|approve|paid-dryrun|paid)(?![\w-])|--paid", whole)

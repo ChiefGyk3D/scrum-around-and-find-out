@@ -24,7 +24,7 @@ Nothing here uses a serial number, a hostname or a machine name: keys are named 
 | Tier | What signs | Status |
 |---|---|---|
 | 1 (recommended, the default) | A hardware security key (`ed25519-sk` or `ecdsa-sk`) through OpenSSH, a touch for every approval, a PIN if you require one | Built and tested (with software keys; see "What the tests could not prove") |
-| 2 (opt-in, off) | A WebAuthn passkey assertion (ES256 or EdDSA), checked with the optional `safo[passkeys]` extra | Verification built and tested with real signatures; enrollment page and approval wiring **not built**, and paid use is disabled, so it authorizes nothing today. See [Gemini passkeys](gemini-passkeys.md) |
+| 2 (opt-in, off) | A WebAuthn passkey assertion (ES256 or EdDSA), checked with the optional `safo[passkeys]` extra | Verification built and tested with real signatures; enrollment page and approval wiring **not built**, so it authorizes nothing today. See [Gemini passkeys](gemini-passkeys.md) |
 | Other | A software key (a file) or an agent-held key | Refused unless a written per-key opt-in; `keys check` warns loudly |
 
 ## The trust files
