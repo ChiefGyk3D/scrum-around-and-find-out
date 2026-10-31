@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from safo.errors import SafoError
 
-# The reply codes the design lists (docs/gemini-broker.md, "The socket protocol"), plus the two marked (added).
+# The reply codes the design lists (docs/gemini-broker.md, "The socket protocol"), plus the five marked (added).
 CODES = frozenset(
     {
         "bad_request",
@@ -26,6 +26,11 @@ CODES = frozenset(
         "internal",
         "model_refused",  # (added) a model the broker will not call: Pro class, or not in the allow-list
         "prices_expired",  # (added) the price table is past its valid_through
+        # (added, phase 3) the three a finished call returns in CallResult.code; the design table lists them but the
+        # phase 1 code list did not
+        "rate_limited",
+        "vendor_refused",
+        "outcome_unknown",
     }
 )
 
