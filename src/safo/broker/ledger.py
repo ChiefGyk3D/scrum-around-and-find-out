@@ -556,6 +556,8 @@ class CallLedger:
                 data = self._read_marker(nonce)
                 if data is None:
                     raise LedgerError("a used marker has no ledger row and cannot be read; root must look at it")
+                if data["ts"][:7] != stamp[:7]:  # rebuilding it now would move the charge into another month
+                    raise LedgerError("a used marker from an earlier month has no ledger row; root must reconcile it")
                 cid, model = data["call_id"], data["model"]
                 start = _row("call_start", stamp, **{k: data[k] for k in data if k not in ("v", "ts")})
                 used = _row(

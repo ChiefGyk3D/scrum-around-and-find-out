@@ -1192,3 +1192,23 @@ def test_a_marker_that_disagrees_with_the_ledger_stops_recovery(tmp_path: Path) 
             ledger.recover(NOW)
     marker.write_text(json.dumps(data))
     assert ledger.recover(NOW) == [t.call_id]  # the call was still reserved, so recovery makes it ambiguous
+
+
+def test_a_marker_only_recovery_never_moves_a_charge_into_another_month(tmp_path: Path) -> None:
+    ledger = new_ledger(tmp_path)
+    october = dt.datetime(2026, 10, 31, 23, 0, tzinfo=dt.UTC)
+    reserve(
+        ledger,
+        5000,
+        now=october,
+        created=october - dt.timedelta(minutes=1),
+        expires_at=october + dt.timedelta(minutes=9),
+    )
+    for name in ("ledger.jsonl", "ledger.jsonl.head", "height"):
+        (state_dir(tmp_path) / name).unlink()
+    november = dt.datetime(2026, 11, 1, 0, 5, tzinfo=dt.UTC)
+    with pytest.raises(LedgerError):
+        ledger.recover(november)
+    assert not (state_dir(tmp_path) / "ledger.jsonl").exists()
+    ledger.recover(october + dt.timedelta(minutes=30))  # the same month rebuilds it
+    assert ledger.view().month_spent(october) == 5000
