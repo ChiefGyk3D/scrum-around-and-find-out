@@ -9,9 +9,14 @@ disk, and it decides everything about the file itself:
 * the file name is built here: a stem cut down to ``[A-Za-z0-9_-]`` (at most 48 characters), a fixed suffix of 8 random
   hex digits and an extension from a fixed map. No path or name from a reply can reach the file system;
 * the output directory is reached one component at a time from ``/`` with ``O_NOFOLLOW | O_DIRECTORY`` (so a symlink in
-  any component, the last one included, is refused), must belong to the caller and must not be group or world writable
-  unless it is sticky; the file is then created relative to that descriptor, so swapping the path afterwards changes
-  nothing;
+  any component, the last one included, is refused), and the last component must belong to the caller and be mode 0700
+  EXACTLY (no group or world access of any kind, no sticky bit; #287); the file is then created relative to that
+  descriptor, so swapping the path afterwards changes nothing;
+* when the caller passes the digest the broker's receipt names (``expected_sha256``), the bytes are hashed and compared
+  BEFORE the file system is touched; a mismatch writes nothing;
+* ``write_receipt_file`` writes the receipt sidecar beside the image (``NAME.receipt.json``): the same directory rules,
+  an exclusive create with mode 0600, never a replacement, and only for a small JSON object whose ``reviewed`` is
+  exactly ``false``;
 * the bytes go to a temporary name (``O_CREAT | O_EXCL | O_NOFOLLOW``, mode 0600, fixed with ``fchmod`` so the umask has
   no say), are flushed with ``fsync``, and are linked to the final name (``link`` never replaces an existing name),
   then the temporary name is removed and the directory is flushed. On any failure, ``BaseException`` included, nothing
@@ -25,6 +30,8 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
+import hmac
 import os
 import re
 import secrets
@@ -33,6 +40,7 @@ import sys
 from collections.abc import Callable, Collection
 from typing import TextIO
 
+from safo.bounded import loads
 from safo.broker.errors import BrokerError
 from safo.output import write
 
@@ -61,6 +69,9 @@ _PNG = b"\x89PNG\r\n\x1a\n"
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _UNSAFE_STEM = re.compile(r"[^A-Za-z0-9_-]")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+_IMAGE_NAME = re.compile(r"[A-Za-z0-9_-]{1,48}-[0-9a-f]{8}\.(?:png|jpg|webp)|[A-Za-z0-9_-]{1,64}\.(?:png|jpg|webp)")
+MAX_RECEIPT_FILE = 65_536
 
 Step = Callable[[str], None]
 
@@ -115,6 +126,13 @@ def _check_config(max_bytes: object, allowed: object) -> Collection[str]:
     return frozenset(allowed)
 
 
+def _check_digest(data: bytes, expected: object) -> None:
+    if type(expected) is not str or _DIGEST.fullmatch(expected) is None:
+        raise ImageRejected("the expected digest is not a lowercase SHA-256")
+    if not hmac.compare_digest(hashlib.sha256(data).hexdigest(), expected):
+        raise ImageRejected("the image does not match the digest in the receipt")
+
+
 def _accept(data: object, max_bytes: int, allowed: Collection[str]) -> str:
     if not isinstance(data, bytes):
         raise ImageRejected("the image is not a byte string")
@@ -150,9 +168,8 @@ def _mine(st: os.stat_result) -> bool:
 
 
 def _check_write_dir(st: os.stat_result) -> None:
-    """Owned by the caller; group or world writable only with the sticky bit."""
-    mode = st.st_mode
-    if not _mine(st) or (mode & 0o022 and not mode & stat.S_ISVTX):
+    """Owned by the caller and mode 0700 exactly: the documented contract, the stricter reading (#287)."""
+    if not _mine(st) or stat.S_IMODE(st.st_mode) != 0o700:
         raise _unsafe()
 
 
@@ -237,6 +254,7 @@ def write_image(
     max_bytes: int = MAX_IMAGE_BYTES,
     *,
     allowed: Collection[str] = ALLOWED_TYPES,
+    expected_sha256: str | None = None,
     _step: Step | None = None,
 ) -> str:
     """Write ``data`` into ``directory`` under a name made here, and return the final path.
@@ -244,10 +262,15 @@ def write_image(
     ``stem`` is cut down to ``[A-Za-z0-9_-]``; the extension follows the sniffed type. ``max_bytes`` and ``allowed``
     default to the broker's own limits. Raises ImageRejected for bytes it will not write, UnsafeDirectory for a
     directory it will not trust and ImageWriteError for anything the disk refuses. A failure leaves no file behind.
+
+    ``expected_sha256`` (lowercase hex) is the digest the broker's receipt names: when given, the bytes must hash to it
+    exactly or ImageRejected is raised before the file system is touched.
     """
     step = _step or _no_step
     kinds = _check_config(max_bytes, allowed)
     kind = _accept(data, max_bytes, kinds)
+    if expected_sha256 is not None:
+        _check_digest(data, expected_sha256)
     clean = _clean_stem(stem)
     extension = EXTENSIONS[kind]
     parts = _split(directory)
@@ -326,6 +349,67 @@ def write_image(
     with contextlib.suppress(OSError):  # the file is complete and durable; a close error says nothing about it
         os.close(dirfd)
     return os.path.join("/" + "/".join(parts), final_name)
+
+
+def write_receipt_file(image_path: str, data: bytes) -> str:
+    """Write ``<image_path>.receipt.json`` beside an image this module wrote, and return its path.
+
+    ``data`` must be a JSON object of at most 64 KiB whose ``reviewed`` is exactly ``false``: the file is a reminder
+    that nobody has looked at the image yet, and a sidecar that says otherwise is refused. The directory rules are the
+    image's (reached from ``/`` without a link, ours, mode 0700); the create is exclusive with mode 0600, an existing
+    name or a planted link is an error and nothing is replaced. A failure leaves no sidecar.
+    """
+    if not isinstance(image_path, str) or "\x00" in image_path or not image_path.startswith("/"):
+        raise ImageWriteError("the image path is not an absolute path")
+    parts = _split(os.path.dirname(image_path))
+    name = os.path.basename(image_path)
+    if _IMAGE_NAME.fullmatch(name) is None or os.path.dirname(image_path).rstrip("/") != "/" + "/".join(parts):
+        raise ImageWriteError("the image path is not a file this writer made")
+    if not isinstance(data, bytes) or not 0 < len(data) <= MAX_RECEIPT_FILE:
+        raise ImageWriteError("the receipt file is empty or too large")
+    try:
+        document = loads(data)
+    except (ValueError, RecursionError):
+        raise ImageWriteError("the receipt file is not JSON") from None
+    if not isinstance(document, dict) or document.get("reviewed") is not False:
+        raise ImageWriteError("the receipt file must be a JSON object that says reviewed: false")
+    dirfd = _open_chain(parts, create=False, check=lambda i, last, st: _check_write_dir(st) if i == last else None)
+    target = name + ".receipt.json"
+    made: tuple[int, int] | None = None
+    fd = -1
+    try:
+        try:
+            fd = os.open(target, _FILE_FLAGS, 0o600, dir_fd=dirfd)
+        except FileExistsError:
+            raise ImageWriteError("a receipt file with that name already exists; nothing was replaced") from None
+        st = os.fstat(fd)
+        made = (st.st_dev, st.st_ino)
+        os.fchmod(fd, 0o600)
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view):
+            written = os.write(fd, view[offset:])
+            if written <= 0:
+                raise ImageWriteError("the disk accepted no more bytes")
+            offset += written
+        os.fsync(fd)
+        closing, fd = fd, -1
+        os.close(closing)
+        os.fsync(dirfd)
+    except BaseException as exc:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if made is not None:
+            _unlink_if_same(dirfd, target, made)
+        with contextlib.suppress(OSError):
+            os.close(dirfd)
+        if isinstance(exc, OSError):
+            raise _io_error(exc) from None
+        raise
+    with contextlib.suppress(OSError):
+        os.close(dirfd)
+    return os.path.join("/" + "/".join(parts), target)
 
 
 def default_output_dir(*, state_home: str | None = None, home: str | None = None, _step: Step | None = None) -> str:

@@ -372,15 +372,25 @@ def test_group_or_world_writable_directory_is_refused(tmp_path: Path, mode: int)
     assert names(d) == []
 
 
-@pytest.mark.parametrize("mode", [0o1777, 0o1770, 0o1707, 0o1722])
-def test_writable_with_sticky_bit_and_owned_by_us_is_accepted(tmp_path: Path, mode: int) -> None:
+@pytest.mark.parametrize("mode", [0o1777, 0o1770, 0o1707, 0o1722, 0o1700])
+def test_a_sticky_directory_is_refused_even_when_owned_by_us(tmp_path: Path, mode: int) -> None:
+    """The documented contract is mode 0700 exactly (#287): sticky is not a substitute for private."""
     d = make_dir(tmp_path / "sticky", mode)
-    assert write_image(PNG, str(d), "cat").startswith(str(d))
+    with pytest.raises(UnsafeDirectory):
+        write_image(PNG, str(d), "cat")
+    assert names(d) == []
 
 
-@pytest.mark.parametrize("mode", [0o700, 0o750, 0o755])
-def test_private_or_readable_directory_is_accepted(tmp_path: Path, mode: int) -> None:
-    d = make_dir(tmp_path / "ok", mode)
+@pytest.mark.parametrize("mode", [0o750, 0o755, 0o740, 0o705, 0o710])
+def test_a_directory_others_can_enter_or_read_is_refused(tmp_path: Path, mode: int) -> None:
+    d = make_dir(tmp_path / "open", mode)
+    with pytest.raises(UnsafeDirectory):
+        write_image(PNG, str(d), "cat")
+    assert names(d) == []
+
+
+def test_exactly_0700_is_accepted(tmp_path: Path) -> None:
+    d = make_dir(tmp_path / "ok", 0o700)
     assert write_image(PNG, str(d), "cat").startswith(str(d))
 
 
@@ -1033,16 +1043,16 @@ OTHER = MINE + 1
     ("mode", "uid", "ok"),
     [
         (0o700, MINE, True),
-        (0o755, MINE, True),
+        (0o755, MINE, False),  # the contract is 0700 exactly (#287)
         (0o700, OTHER, False),
         (0o755, OTHER, False),
         (0o770, MINE, False),
         (0o707, MINE, False),
         (0o720, MINE, False),
         (0o702, MINE, False),
-        (0o1777, MINE, True),
+        (0o1777, MINE, False),
         (0o1777, OTHER, False),
-        (0o1770, MINE, True),
+        (0o1770, MINE, False),
         (0o2770, MINE, False),
     ],
 )

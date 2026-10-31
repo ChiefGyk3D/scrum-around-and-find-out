@@ -112,10 +112,12 @@ and the client (phase 4b, below). The stop wakeup is a pipe, so the server modul
 
 The thin client, `src/safo/broker/client.py`, built and tested with a scripted fake broker, the real server over
 socketpairs (a software key, the fake vendor) and a temporary unix socket, with injected clocks and no network. It is
-described in "The client" below. What is **not** done: wiring it into the command line (see "Where the client is not
-wired yet"), the dispatch guard's `check`, removal of the in-process paid path, and the free-path independence tests;
-those are the rest of phase 4. The safe image writer of phase 4a is now in the tree and `default_writer()` uses it; the small marked adapter
-(`adapter_write_image`) remains only as a fallback and for tests, and can be deleted later.
+described in "The client" below. **Phase 4 is finished by #287:** the client is wired into the command line
+(`safo gemini paid` and `safo gemini paid-dryrun`), the in-process paid path is **deleted** from the free-tier module and the
+Gemini command group (not just disabled), and the dispatch guard denies every paid step because no approval record
+exists any more. The safe image writer of phase 4a is in the tree and `default_writer()` and `default_sidecar()` use it;
+the small marked adapter (`adapter_write_image`, `adapter_write_sidecar`) remains only as a fallback and for tests, and can be
+deleted later.
 
 ## The requirement
 
@@ -173,9 +175,9 @@ does not remove the need to trust either (see [the threat model](gemini-broker-t
 ```text
  maintainer account (agents also run here)            safo-broker (unprivileged system user)
  +-----------------------------------+  unix socket  +----------------------------------------+
- | safo gemini approve  (hardware    |<------------->| verify signature (root-owned signers)  |
- |   key touch, builds signed text)  |  framed JSON  | single-use nonce, expiry, caps, digest |
- | safo gemini ask --paid (client)   |  + binary     | ledger + consumption records (own dir) |
+ | safo gemini paid (client; the     |<------------->| verify signature (root-owned signers)  |
+ |   hardware key touch signs)       |  framed JSON  | single-use nonce, expiry, caps, digest |
+ | safo gemini paid-dryrun           |  + binary     | ledger + consumption records (own dir) |
  | writes images to a fixed folder   |               | paid key (systemd credential, in RAM)  |
  +-----------------------------------+               | one HTTPS call to the pinned vendor    |
                                                      +----------------------------------------+
@@ -230,8 +232,9 @@ installer phase turns them into a script with checks):
 
    (`--name=paid-key` is needed because the file name is otherwise embedded as the credential name; the manual says so.
    Use `--with-key=host+tpm2` on a machine with a TPM.)
-4. **Delete the old key.** Revoke the old paid key at the vendor and delete the `prd_paid` config from the secret
-   store. Until that is done, "the account cannot call the vendor directly" is false.
+4. **Delete the old key.** Revoke the old paid key at the vendor and delete the old paid config from the secret
+   store. Nothing in this program reads it any more (#287 deleted the code that did), but until it is revoked,
+   "the account cannot call the vendor directly" is false.
 5. **Install the broker code, config and units** with `safo-broker-install` (see "Install and update chain"), then
    `systemctl enable --now safo-broker.socket`.
 6. **Enroll the signing keys and create the switch** as in [Gemini keys](gemini-keys.md). The switch is the last step.
@@ -271,7 +274,11 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
 - `broker.yaml` is root-owned because **prices and caps decide how much a call may cost**. If the maintainer's
   account could edit the price table, a price of zero would make every reservation zero. The per-job cap (2 USD) and the
   monthly ceiling (10 USD) stay constants in the code that a config may lower and never raise, as today. The broker
-  loads `broker.yaml` through the same ownership walk as the trust files, on every request.
+  loads `broker.yaml` through the same ownership walk as the trust files, **once, when the service starts**; the prices,
+  caps, model list, allowed uids and limits it read stay in force until the service is restarted
+  (`systemctl restart safo-broker.service`), so a tightening in the file (a lower cap, a removed model, a removed uid) is
+  **not live until then**. A bad file stops the start, so the old policy is never replaced by half a new one.
+  What *is* read on every request: the enable switch, the allowed-signers file and the revocation list.
 - The broker runs code from `/opt/safo-broker`, not from the maintainer's checkout or virtualenv, because code the
   maintainer's account can write is code an agent can change. Updating it is a root-run install from a hardware-key
   signed tag, never from a folder the account can write (see "Install and update chain").
@@ -583,7 +590,7 @@ no key.
 
 ## What a signed approval binds
 
-The approval keeps the shape `safo gemini approve` makes today (canonical JSON, signed with `ssh-keygen -Y sign` in the `safo-gemini-approval`
+The approval keeps the shape the removed local `approve` made (canonical JSON, signed with `ssh-keygen -Y sign` in the `safo-gemini-approval`
 namespace) and the broker verifies the same properties. #217 has shipped the prompt binding: payload `version: 2` carries
 `prompt_sha256` (lowercase hex SHA-256 of the exact UTF-8 prompt bytes) and `prompt_bytes` (their count) on both tiers,
 and the client refuses to approve a prompt of more than 4000 characters (the signer reads the whole prompt). The broker
@@ -735,10 +742,22 @@ the type the first bytes name. A receipt file, `NAME.receipt.json`, is written b
 --quote Q --quoted-at T --prompt-file F [--issue I] [--image-size S --aspect-ratio R --count N]`. The prompt comes from a
 file, never from the command line.
 
-**Where the client is not wired yet.** `safo gemini ask --paid` and `safo gemini approve` still use the in-process path,
-which stays disabled by the switch. Wiring the client in needs the wrapper to hand `ask` the signing variables and a
-standard input (today only `approve` gets them) and the dispatch guard to learn the new step, and both were being changed
-by other work, so the client ships as a module with the entry above.
+**Where the client is wired (#287).** The paid entries of the Gemini command group are `safo gemini paid ...` (the same
+arguments as the module entry above, one call) and `safo gemini paid-dryrun [--job LABEL]` (below). They run `run_paid` and
+`run_dryrun` through the wrapper, which hands only these two actions the signing variables (`SSH_AUTH_SOCK`, `DISPLAY`,
+`WAYLAND_DISPLAY`, `TERM`) and a standard input, and no secret at all. There is no other paid path in the program: the
+in-process one (`ask --paid`, the local `approve`, the approval records and their folder, the paid spend counter, the paid
+key read and the `paid_config`, `signing`, caps and price settings of `gemini.yaml`) was deleted. `--paid`, `--approval`,
+`--cap` and `approve` are still parsed, only so the dispatch guard reads a brief that names them as a paid step, and the
+command refuses them with a pointer to `paid`. The guard now denies every paid step (a `gemini: paid` line, `--paid`,
+`approve`, `paid`, `paid-dryrun` with a prompt) with "paid use exists only through the broker", whatever approval id it
+names, because a paid call needs a touch at a terminal and cannot be part of a brief.
+
+**The dry run.** `run_dryrun` signs one throw-away text (`{"dry_run":true,"job":LABEL}`) in the dry-run namespace after
+the person types `dryrun LABEL` and touches the key, sends the `dryrun` operation and prints the principal, the
+fingerprint, hardware or software, the touch and PIN flags, and whether the broker's switch is on. The broker verifies it
+with the same rules as an approval (hardware key, touch), records nothing and spends nothing; a dry-run signature is
+refused as an approval and the other way round by the namespace.
 
 ## Cost
 
@@ -940,16 +959,19 @@ are refused. That also keeps images the maintainer holds out of the prompt.
 
 The broker never sends a path or a file name. The client:
 
-- writes only into **one output directory the maintainer sets** (`image_output_dir` in `gemini.yaml`: an absolute path,
-  owned by the maintainer, mode 0700, not a symlink, checked when the config loads and again at write time);
+- writes only into **one output directory the maintainer sets** (`image_output_dir` in `broker-client.yaml`: an absolute
+  path, owned by the maintainer, mode 0700 exactly, not a symlink, checked before the call is asked for and again by the
+  writer at write time);
 - builds each file name itself from a fixed pattern: UTC time, the job name (already restricted to `[A-Za-z0-9._-]`), the
   first 8 characters of the nonce, the image index, and an extension chosen from the broker's confirmed MIME type through
   a fixed map (`png`, `jpg`, `webp`); nothing from the reply is used in a name;
 - opens the directory once and creates the file relative to that descriptor with `O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY`
   and mode 0600, so it **never overwrites** and never follows a link; an existing name is an error, not a retry with a
   new name that hides the clash;
-- re-hashes the bytes it received and compares with the receipt's `sha256` before writing, and writes a sidecar
-  `NAME.receipt.json` (mode 0600, same exclusive create) holding the receipt, the digest, the cost and `reviewed: false`;
+- re-hashes the bytes it received and compares with the receipt's `sha256` before writing (the client does it in
+  `_save_image`, and the writer does it again when it is given `expected_sha256`), and writes a sidecar
+  `NAME.receipt.json` (mode 0600, same exclusive create, by `write_receipt_file`) holding the receipt, the digest, the
+  cost and `reviewed: false`;
 - checks that the output directory is writable **before** it asks for the call, so a full disk does not discard an image
   that has already been paid for; if the write still fails, the message says money was spent and gives the digest.
 
@@ -958,15 +980,21 @@ The broker never sends a path or a file name. The client:
 `src/safo/broker/imagewrite.py` is the one place the client puts a returned image on disk. It does not depend on the
 socket or the protocol; it takes the bytes and the limits as arguments (defaults: `png`, `jpeg` and `webp`, 24 MiB).
 
-- `write_image(data, directory, stem, max_bytes, allowed=...)` sniffs the type from the first bytes and ignores any
+- `write_image(data, directory, stem, max_bytes, allowed=..., expected_sha256=None)` sniffs the type from the first bytes and ignores any
   name or type the server or the caller supplied. Empty, oversize and every other type are refused before the file
   system is touched. The file name is made here: the stem cut to `[A-Za-z0-9_-]` (48 characters at most, so a dot, a
   slash, a NUL or a Unicode look-alike becomes `_`), 8 random hex digits, and `png`, `jpg` or `webp` from the sniffed
   type. It returns only the final path.
 - The directory is opened one component at a time from `/` with `O_NOFOLLOW | O_DIRECTORY`, so a symlink anywhere in
-  the path (the last component included) is refused, as are a relative path, `..`, a FIFO or a file. It must belong to
-  the caller and must not be group or world writable unless it has the sticky bit. The file is created relative to that
-  descriptor, so swapping the path after the check changes nothing.
+  the path (the last component included) is refused, as are a relative path, `..`, a FIFO or a file. The last component
+  must belong to the caller and be mode **0700 exactly**: any group or world access, and the sticky bit, are refused (the
+  stricter reading of the contract, #287; a sticky shared directory is not a private one). The file is created relative to
+  that descriptor, so swapping the path after the check changes nothing. When `expected_sha256` (lowercase hex) is given,
+  the bytes are hashed and compared before the file system is touched, and a mismatch writes nothing.
+- `write_receipt_file(image_path, data)` writes `<image_path>.receipt.json` beside an image this writer made: the same
+  directory rules, an exclusive create with mode 0600 (an existing name or a planted link is an error, nothing is
+  replaced), only for a JSON object of at most 64 KiB whose `reviewed` is exactly `false`, and only for a name of the shape
+  `write_image` makes. A failure leaves no sidecar.
 - The bytes go to a temporary name (`O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600 and then `fchmod` 0600, so the umask has
   no say), are flushed with `fsync`, and are linked to the final name; `link` never replaces anything, so an existing
   file (a symlink, a FIFO, a device) is skipped, not followed. Then the temporary name is removed and the directory is
@@ -1133,9 +1161,9 @@ every row boundary); run the same command again.
 
 `/etc/safo/gemini-paid-enabled` is read by the broker **on every request, never cached**, through the same ownership
 walk as the trust files. Anything but the single line `enabled` (absent, wrong owner, writable, a link, other text) is
-disabled: the broker answers `disabled` to every operation except `status` and `dryrun`, before it opens `broker.yaml`
-beyond what it needs and **before it reads the key**. The client reads the same file for a friendlier message and the
-dispatch guard keeps blocking paid steps, but neither is the control; the broker is. The broker does not create or
+disabled: the broker answers `disabled` to every operation except `status` and `dryrun`, before it touches the
+ledger or the vendor and **before it reads the key**. The client does not read the file and the
+dispatch guard blocks every paid step whatever the switch says, but neither is the control; the broker is. The broker does not create or
 change the file, and no socket request, flag, environment variable or `gemini.yaml` setting can turn it on. Stopping the
 units is the second, harder off switch (see "Revocation and key rotation").
 
@@ -1313,7 +1341,7 @@ a fake peer that fails the test if anything connects.
 
 The dry run tests the **hardware key** and the broker's verification, not the vendor:
 
-1. The dry run of `safo gemini approve` (the global `--dry-run` flag) signs a throw-away text in the `safo-gemini-approval-dryrun` namespace (the
+1. `safo gemini paid-dryrun` signs a throw-away text in the `safo-gemini-approval-dryrun` namespace (the
    key blinks; the maintainer touches it).
 2. The client sends it in a `dryrun` request. The broker verifies it against the root-owned signers and revocations
    exactly as for a real approval and replies with the label, the fingerprint, whether the touch and PIN flags were
@@ -1377,7 +1405,7 @@ service and spend nothing.
 | 1 | The broker core as a library, no socket, no systemd: state directory checks, the ledger shared with today's code, issue and consume of nonces, recovery, spend-before-call, the signed approval schema version 3 (extending the version 2 of #217) and its verification, the reservation and typical-estimate arithmetic for `image` and `text`, with the hermetic fakes | Review of the state machine and the crash tests |
 | 2 | The call pipeline against the fake vendor: request builders per kind, the image response handling (magic bytes, limits, receipts), 429 and ambiguous outcomes. Reservation, reconciliation, breach and suspension. The response parser targets the vendor's documented shape and refuses any shape it has not been shown | Review |
 | 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, idle exit, the operations, logging allowlist; fake socket peers and a fuzz test of the framing | Review of the parser and the limits |
-| 4 | The thin client: `approve` and `ask --paid` go through the socket, safe image writing and sidecars, the guard's `check`, **removal of the in-process paid path**, the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |
+| 4 | The thin client: `safo gemini paid` and `paid-dryrun` go through the socket, safe image writing and sidecars, **removal of the in-process paid path** (done in #287: deleted, with a guard test that no module outside the broker can name the vendor, a paid model or the key header), the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |
 | 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that covers the release link, the record, the floor, the installed units against the signed release, the egress helper and the switch; the root-door checks remain a manual review), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
 | 6 | **Cyber-tier security review** of the broker and the signed-approval verification (issue step 3) | Clean review |
 | 7 | The maintainer does the root setup and the dry run, then creates the switch (issue step 5). The first calls use Nano Banana 2 Lite to record the real response shape and to observe the output cap; root then sets `cap_verified` for each model observed; a fixture PR follows | The maintainer's own run; the observation reviewed |

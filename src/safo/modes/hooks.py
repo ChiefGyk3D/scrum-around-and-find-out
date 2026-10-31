@@ -40,7 +40,6 @@ from safo.agentsfile import AgentsFile
 from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
-from safo.gemini import approval_problem
 from safo.guardlog import (
     APPEND_LOCK_TIMEOUT,
     MODES,
@@ -1091,22 +1090,10 @@ def private_terms_provider() -> tuple[re.Pattern[str], ...]:
 
 
 def approval_checker(ctx: LocalContext) -> ApprovalCheck | None:
-    """How the guard asks whether a Gemini approval record is live. None when the folder cannot be named, which the
-    rule treats as no record (a paid step is then blocked). While paid use is switched off, every paid step is refused
-    with that reason."""
-    try:
-        enabled = gemini.paid_enabled()
-    except Exception:  # a switch check that fails is "disabled": the hook never fails open
-        enabled = False
-    if not enabled:
-        return gemini.DisabledCheck()
-    try:
-        loc = gemini.fixed_locations()
-        store = gemini.open_store(loc, gemini.load_config(loc.config, loc.home).ledger)
-    except ConfigError:
-        return None
-    now = ctx.now
-    return lambda record_id: approval_problem(store, record_id, now)
+    """What the guard is given for a paid Gemini step: a refusal, always (#287). The paid path exists only through the
+    broker client (`safo gemini paid`), which needs a person's touch on a security key at a terminal, so no brief can
+    carry a paid step and no approval record is looked up."""
+    return gemini.PaidOnlyThroughBroker()
 
 
 _TOO_LARGE = (

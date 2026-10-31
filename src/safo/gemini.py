@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A Gemini client that cannot spend money on its own (#200, #195, #196).
+"""The free-tier Gemini client, for public-material research (#200, #195, #196, #287).
 
-Gemini is a free-only provider for public-material research. The free tier may train on prompts and be read by people,
-so nothing private goes to it. Three gates sit in code, never in a model:
+Gemini here is free-only. The free tier may train on prompts and be read by people, so nothing private goes to it. The
+gates sit in code, never in a model:
 
 * the free tier follows the maintainer's own rate limits (requests and input tokens per minute, requests per day, the
   day ending at midnight Pacific), counted from a local, append-only ledger; a 429 stops the job and never falls
-  through to the paid tier;
-* a paid call needs its own approval record (a quote of the maintainer's message and its time), single use, bound to a
-  model and a job, expiring with the job; the estimate must fit 2 USD per job and 10 USD per month, and past the month
-  the record must say so;
-* the key is read by name from the secret store at call time and held only for the one request.
+  through to a paid call;
+* the free key is read by name from the secret store at call time and held only for the one request;
+* a paid request cannot be made here at all: `ask` refuses one before it reads anything. The paid path exists only
+  through the broker (`safo.broker`, docs/gemini-broker.md), which alone holds the paid key.
 
 A request is sent once. After the request leaves, a timeout, a 5xx, a closed connection, a redirect or an unreadable
-answer is UNKNOWN, not failed: it is recorded as ambiguous (a paid one counts its estimate as spent) and never
-repeated. There is no retry and so no backoff to bound.
+answer is UNKNOWN, not failed: it is recorded as ambiguous and never repeated. There is no retry and so no backoff to
+bound.
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ import sys
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -55,9 +54,7 @@ from safo.termsearch import TERMS_CHUNK as TERMS_CHUNK  # re-exported for the te
 from safo.trust import read_trusted_regular_file
 
 VENDOR_HOST = "generativelanguage.googleapis.com"
-JOB_CAP = Decimal("2")  # per job, in USD: a configuration may lower it, never raise it
-MONTH_CAP = Decimal("10")  # per month, in USD; past it every further block needs its own approval
-BLOCK = Decimal("2")
+JOB_CAP = Decimal("2")  # the most a brief may declare for a paid step (the guard grammar); the broker enforces its own
 PACIFIC = ZoneInfo("America/Los_Angeles")
 TIERS = ("free", "paid")
 MODEL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -65,7 +62,6 @@ RECORD_ID = re.compile(r"[A-Za-z0-9_-]{8,64}")
 JOB_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 PLAIN_KEY = re.compile(r"[\x21-\x7e]{16,512}")
 MAX_PROMPT_BYTES = 200_000
-APPROVAL_VERSION = 2  # version 1 signed no prompt digest: it is refused, never read as unbound (#217)
 PROMPT_DIGEST = re.compile(r"[0-9a-f]{64}")
 MAX_QUOTE = 500
 MAX_TTL_MINUTES = 60  # a signed approval is short-lived: the touch happens just before the job
@@ -183,33 +179,17 @@ class FreeLimits:
 
 
 @dataclass(frozen=True)
-class Price:
-    input_per_mtok: Decimal
-    output_per_mtok: Decimal
-    valid_through: dt.date
-    image: bool = False
-
-
-@dataclass(frozen=True)
 class GeminiConfig:
     endpoint: str
-    price_source: str
-    price_checked: dt.date
     project: str
     free_config: str
-    paid_config: str
     key_name: str
-    job_cap: Decimal
-    month_cap: Decimal
-    block: Decimal
     ledger: Path
     timeout_seconds: float
     max_output_tokens: int
     free: Mapping[str, FreeLimits]
-    prices: Mapping[str, Price]
+    image_models: frozenset[str] = frozenset()  # paid-only models: the free tier refuses them by name
     private_terms: str = "default"  # none, default (the fixed privacy-terms.txt) or an absolute path
-    signing_key: str = ""  # the key file (or agent-held public key) `ssh-keygen -Y sign` is given; never opened here
-    signing_principal: str = ""  # the enrolled label that key signs as; written into the signed text and checked
 
 
 def _endpoint(r: Reader, value: object) -> str:
@@ -240,66 +220,45 @@ def parse_config(data: object, source: str = "gemini config", home: Path | None 
         {
             "version",
             "endpoint",
-            "price_source",
-            "price_checked",
             "secrets",
-            "caps",
             "ledger",
             "timeout_seconds",
             "max_output_tokens",
             "free",
-            "paid",
+            "image_models",
             "private_terms",
-            "signing",
         },
-        {"version", "endpoint", "price_source", "price_checked", "secrets", "free", "paid"},
+        {"version", "endpoint", "secrets", "free"},
     )
     if top["version"] != 1:
         raise r.fail("version", "only version 1 is supported")
+    # The free key only. The paid key is not named here or anywhere outside the broker's own credential (#287), so a
+    # `paid_config` setting is refused as an unknown key.
     sec = r.mapping(
         top["secrets"],
         "secrets",
-        {"project", "free_config", "paid_config", "key_name"},
-        {"project", "free_config", "paid_config", "key_name"},
+        {"project", "free_config", "key_name"},
+        {"project", "free_config", "key_name"},
     )
     names = {k: r.string(sec[k], f"secrets.{k}") for k in sec}
     for key, name in names.items():
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
             raise r.fail(f"secrets.{key}", "expected a plain name (letters, digits, . _ -)")
-    caps = r.mapping(top.get("caps", {}), "caps", {"job_usd", "month_usd", "block_usd"})
-    job = _decimal(caps.get("job_usd", JOB_CAP), "caps.job_usd")
-    month = _decimal(caps.get("month_usd", MONTH_CAP), "caps.month_usd")
-    block = _decimal(caps.get("block_usd", BLOCK), "caps.block_usd")
-    for label, amount, ceiling in (
-        ("job_usd", job, JOB_CAP),
-        ("month_usd", month, MONTH_CAP),
-        ("block_usd", block, BLOCK),
-    ):
-        if amount <= 0 or amount > ceiling:
-            raise r.fail(f"caps.{label}", f"a cap may be lowered, never raised: it is at most {ceiling} USD")
-    prices: dict[str, Price] = {}
-    for model, raw in r.mapping(top["paid"], "paid", set(top["paid"] or {})).items():
-        where = f"paid.{model}"
-        if not MODEL_NAME.fullmatch(str(model)):
-            raise r.fail(where, "not a model name")
-        m = r.mapping(
-            raw,
-            where,
-            {"input_per_mtok", "output_per_mtok", "valid_through", "modality"},
-            {"input_per_mtok", "output_per_mtok", "valid_through"},
-        )
-        prices[str(model)] = Price(
-            _decimal(m["input_per_mtok"], f"{where}.input_per_mtok", maximum=Decimal(1000)),
-            _decimal(m["output_per_mtok"], f"{where}.output_per_mtok", maximum=Decimal(1000)),
-            r.date(m["valid_through"], f"{where}.valid_through"),
-            r.choice(m.get("modality", "text"), f"{where}.modality", ("text", "image")) == "image",
-        )
+    images: set[str] = set()
+    raw_images = top.get("image_models", [])
+    if not isinstance(raw_images, list):
+        raise r.fail("image_models", "expected a list of model names")
+    for position, model in enumerate(raw_images):
+        name = r.string(model, f"image_models[{position}]")
+        if not MODEL_NAME.fullmatch(name):
+            raise r.fail(f"image_models[{position}]", "not a model name")
+        images.add(name)
     free: dict[str, FreeLimits] = {}
     for model, raw in r.mapping(top["free"], "free", set(top["free"] or {})).items():
         where = f"free.{model}"
         if not MODEL_NAME.fullmatch(str(model)):
             raise r.fail(where, "not a model name")
-        if prices.get(str(model), Price(Decimal(0), Decimal(0), dt.date.min)).image:
+        if str(model) in images:
             raise r.fail(where, "image generation is paid-only: its free quota is zero")
         m = r.mapping(raw, where, {"rpm", "tpm", "rpd"}, {"rpm", "tpm", "rpd"})
         free[str(model)] = FreeLimits(
@@ -318,35 +277,20 @@ def parse_config(data: object, source: str = "gemini config", home: Path | None 
         raise r.fail("private_terms", "expected none, default or an absolute path")
     if not ledger.is_absolute():
         raise r.fail("ledger", "expected an absolute path")
-    signing = r.mapping(top.get("signing", {}), "signing", {"key", "principal"})
-    signing_key = r.string(signing["key"], "signing.key") if "key" in signing else ""
-    principal = r.string(signing["principal"], "signing.principal") if "principal" in signing else ""
-    if principal and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", principal):
-        raise r.fail("signing.principal", "expected the label of an enrolled key, such as yubikey-a")
-    if signing_key and (not signing_key.startswith("/") or "\x00" in signing_key):
-        raise r.fail("signing.key", "expected an absolute path to a key file")
     timeout = top.get("timeout_seconds", 60)
     if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not 1 <= timeout <= 300:
         raise r.fail("timeout_seconds", "expected a number from 1 to 300")
     return GeminiConfig(
         _endpoint(r, top["endpoint"]),
-        r.string(top["price_source"], "price_source"),
-        r.date(top["price_checked"], "price_checked"),
         names["project"],
         names["free_config"],
-        names["paid_config"],
         names["key_name"],
-        job,
-        month,
-        block,
         ledger,
         float(timeout),
         r.integer(top.get("max_output_tokens", 2048), "max_output_tokens", minimum=1),
         free,
-        prices,
+        frozenset(images),
         terms,
-        signing_key,
-        principal,
     )
 
 
@@ -773,37 +717,6 @@ def free_quota(cfg: GeminiConfig, snap: Snapshot, model: str, now: dt.datetime) 
 
 
 @dataclass(frozen=True)
-class PaidQuota:
-    model: str
-    spent: Decimal
-    estimate: Decimal
-    job_cap: Decimal
-    month_cap: Decimal
-
-    @property
-    def after(self) -> Decimal:
-        return self.spent + self.estimate
-
-    @property
-    def beyond(self) -> bool:
-        return self.after > self.month_cap
-
-    def line(self) -> str:
-        return (
-            f"QUOTA paid {self.model}: spent {money(self.spent)} of {money(self.month_cap)} USD this month "
-            f"(UTC calendar month); this job's estimate {money(self.estimate)} USD of the {money(self.job_cap)} USD "
-            f"job cap; running total after this job {money(self.after)} of {money(self.month_cap)}; "
-            f"beyond ceiling: {'YES' if self.beyond else 'no'}"
-        )
-
-
-def month_spent(snap: Snapshot, now: dt.datetime) -> Decimal:
-    key = now.astimezone(dt.UTC).strftime("%Y-%m")
-    total = sum((c.spent for c in snap.calls if c.tier == "paid" and c.when.strftime("%Y-%m") == key), Decimal(0))
-    return total + sum((amount for date, amount in snap.manual if date[:7] == key), Decimal(0))
-
-
-@dataclass(frozen=True)
 class Request:
     model: str
     prompt: str
@@ -811,25 +724,6 @@ class Request:
     job: str = ""
     approval: str = ""
     max_output_tokens: int = 0
-
-
-def estimate_usd(cfg: GeminiConfig, req: Request, now: dt.datetime) -> Decimal:
-    """An upper bound: the prompt overestimated, and every output token the request allows."""
-    price = cfg.prices.get(req.model)
-    if price is None:
-        raise RefusedError(f"the quota line cannot be produced: no price is configured for {req.model}")
-    if price.valid_through < now.astimezone(dt.UTC).date():
-        raise RefusedError(
-            f"the price table for {req.model} is out of date (valid through {price.valid_through}); "
-            f"re-read {cfg.price_source} and update the table before any paid call"
-        )
-    out = req.max_output_tokens or cfg.max_output_tokens
-    total = Decimal(estimate_input_tokens(req.prompt)) * price.input_per_mtok + Decimal(out) * price.output_per_mtok
-    return (total / Decimal(1_000_000)).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
-
-
-def paid_quota(cfg: GeminiConfig, snap: Snapshot, req: Request, now: dt.datetime) -> PaidQuota:
-    return PaidQuota(req.model, month_spent(snap, now), estimate_usd(cfg, req, now), cfg.job_cap, cfg.month_cap)
 
 
 MAX_APPROVED_PROMPT_CHARS = 4000  # the signer reads the whole prompt, so an approval covers no more than this
@@ -943,12 +837,12 @@ def quota_line(cfg: GeminiConfig, req: Request, now: dt.datetime) -> str:
     now = plain_time(now, "now")
     _check_request(cfg, req)
     snap = snapshot(Ledger(cfg.ledger).read())
-    if req.tier == "free":
-        return free_quota(cfg, snap, req.model, now).line()
-    return paid_quota(cfg, snap, req, now).line()
+    if req.tier != "free":
+        raise RefusedError(PAID_ELSEWHERE)
+    return free_quota(cfg, snap, req.model, now).line()
 
 
-# -- approvals -----------------------------------------------------------------------------------------------------
+# -- locations -----------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -966,8 +860,6 @@ class Locations:
     trust_uid: int = 0  # the owner the two files above must have
     require_hardware: bool = True  # only sk keys, unless a key carries the written opt-in; a test may turn this off
     revocation_required: bool = True  # a missing revocation list refuses every approval; a test may turn this off
-    # the paid path is off unless this root-owned file says `enabled`; absence means disabled
-    paid_switch: Path = Path("/etc/safo/gemini-paid-enabled")
 
     @property
     def height_dir(self) -> Path:
@@ -975,39 +867,20 @@ class Locations:
         return self.approvals.parent / "heights"
 
 
-PAID_DISABLED = (
-    "paid use is disabled: the maintainer enables it only after the replay-state hardening ships (follow-up #205); "
-    "the free tier is unaffected"
+PAID_ELSEWHERE = (
+    "paid use exists only through the broker: run `safo gemini paid` (docs/gemini-broker.md); "
+    "this command sends free-tier requests only"
 )
 
 
-def paid_enabled() -> bool:
-    """True only when the root-owned switch file exists, passes the same ownership walk as the trust files, and says
-    `enabled`. Anything else (absent, wrong owner, writable, a symlink into a writable place, other text) is disabled.
-    No flag, environment variable or user-editable setting is consulted."""
-    from safo import geminisign
+class PaidOnlyThroughBroker:
+    """What the dispatch guard is given for every paid step: refused, with the reason. A brief cannot carry a paid step
+    at all, because a paid call needs a person's touch on a security key at a terminal, in the broker client."""
 
-    try:
-        loc = fixed_locations()
-        data = geminisign.read_trust_file(loc.paid_switch, loc.trust_uid, "paid-use switch")
-        lines = [x.strip() for x in data.decode("utf-8", "replace").splitlines() if x.strip() and not x.startswith("#")]
-    except Exception:  # any failure to read the switch is "disabled", the safe answer
-        return False
-    return lines == ["enabled"]
-
-
-def require_paid() -> None:
-    if not paid_enabled():
-        raise RefusedError(PAID_DISABLED)
-
-
-class DisabledCheck:
-    """What the dispatch guard is given while paid use is off: every paid step is refused with the reason."""
-
-    disabled = PAID_DISABLED
+    disabled = PAID_ELSEWHERE
 
     def __call__(self, record_id: str) -> str | None:
-        return PAID_DISABLED
+        return PAID_ELSEWHERE
 
 
 def fixed_locations() -> Locations:
@@ -1024,363 +897,8 @@ def fixed_locations() -> Locations:
     )
 
 
-@dataclass(frozen=True)
-class Approval:
-    id: str  # the nonce
-    model: str
-    max_usd: Decimal
-    job: str
-    quote: str
-    quoted_at: dt.datetime
-    created: dt.datetime
-    expires_at: dt.datetime
-    beyond_ceiling: bool
-    issue: str = ""
-    principal: str = ""  # the enrolled key that signed it
-    ledger_head: str = ""  # the ledger chain head it was signed against
-    hardware: bool = False
-    prompt_sha256: str = ""  # SHA-256 (hex) of the exact prompt bytes the signature covers
-    prompt_bytes: int = 0  # and their count
-
-
-def open_store(
-    loc: Locations,
-    ledger: Path | None,
-    signing_key: str = "",
-    signing_principal: str = "",
-    env: Mapping[str, str] | None = None,
-) -> ApprovalStore:
-    """The one way to build an approval store: trust files and strictness from the fixed locations."""
-    from safo import geminisign
-
-    trust = geminisign.Trust(loc.signers, loc.revoked, loc.trust_uid, loc.require_hardware, loc.revocation_required)
-    return ApprovalStore(loc.approvals, trust, ledger, signing_key, signing_principal, env or {})
-
-
-class ApprovalStore:
-    """One signed JSON file per approval in a private folder. The file is `{"payload": <canonical JSON text>,
-    "signature": <SSH signature>}`; nothing in it counts until the signature verifies against an enrolled PUBLIC key
-    (see `safo.geminisign`). A record with no signature, or any older unsigned format, authorizes nothing. Single use:
-    the nonce is spent in the hash-chained ledger (authoritative) and by a `.used` marker beside the file.
-
-    A record is the maintainer's signature over his quoted words, the amount, the job, a ledger head and the digest and
-    length of the exact prompt (payload version 2, #217). The quote is there so he can check afterwards what he
-    approved."""
-
-    def __init__(
-        self,
-        folder: Path,
-        trust: Any = None,
-        ledger: Path | None = None,
-        signing_key: str = "",
-        signing_principal: str = "",
-        env: Mapping[str, str] | None = None,
-    ) -> None:
-        self.folder = folder
-        self.signing_principal = signing_principal
-        self.trust = trust
-        self.ledger = Ledger(ledger) if ledger is not None else None
-        self.signing_key = signing_key
-        self.env = env or {}
-
-    def issue(
-        self,
-        *,
-        model: str,
-        max_usd: Decimal,
-        job: str,
-        quote: str,
-        quoted_at: dt.datetime,
-        now: dt.datetime,
-        ttl_minutes: int,
-        beyond_ceiling: bool,
-        prompt: str,
-        issue_ref: str = "",
-    ) -> Approval:
-        from safo import geminisign
-
-        require_paid()
-        # One plain copy of every argument (exact types only); nothing below reads the caller's objects (#217).
-        model = plain_str(model, "model")
-        job = plain_str(job, "job")
-        quote = plain_str(quote, "quote")
-        issue_ref = plain_str(issue_ref, "issue_ref")
-        if type(max_usd) is not Decimal:
-            raise RefusedError("max_usd is not a plain decimal amount, so nothing was done")
-        max_usd = Decimal(format(max_usd, "f")) if max_usd.is_finite() else max_usd
-        ttl_minutes = plain_int(ttl_minutes, "ttl_minutes")
-        if type(beyond_ceiling) is not bool:
-            raise RefusedError("beyond_ceiling is not a plain true or false, so nothing was done")
-        beyond_ceiling = bool.__and__(beyond_ceiling, True)
-        quoted_at = plain_time(quoted_at, "quoted_at")
-        now = plain_time(now, "now")
-        prompt_raw = prompt_bytes(prompt)
-        prompt_text = bytes.decode(prompt_raw, "utf-8")
-        prompt_digest, prompt_size = prompt_binding(prompt_text)
-        if len(prompt_text) > MAX_APPROVED_PROMPT_CHARS:
-            raise RefusedError(too_long(len(prompt_text)))
-        if not MODEL_NAME.fullmatch(model):
-            raise ConfigError("approval: the model name is not a plain model name")
-        if not JOB_NAME.fullmatch(job):
-            raise ConfigError("approval: the job is a plain name (letters, digits, . _ -), at most 64 characters")
-        if not max_usd.is_finite() or not 0 < max_usd <= JOB_CAP:
-            raise ConfigError(f"approval: the amount is above 0 and at most the {money(JOB_CAP)} USD job cap")
-        if not valid_quote(quote):
-            raise ConfigError(f"approval: the quote is the maintainer's message, 1 to {MAX_QUOTE} characters, one line")
-        if quoted_at > now + dt.timedelta(minutes=1) or quoted_at < now - dt.timedelta(hours=24):
-            raise ConfigError("approval: the quote's time is in the future or more than a day old; ask again")
-        if not 1 <= ttl_minutes <= MAX_TTL_MINUTES:
-            raise ConfigError(f"approval: the record lives 1 to {MAX_TTL_MINUTES} minutes")
-        if self.trust is None or self.ledger is None or not self.signing_key or not self.signing_principal:
-            raise ConfigError(
-                "approval: signing is not set up (signing.key and signing.principal in gemini.yaml, and the "
-                "allowed-signers file); "
-                "see docs/gemini.md"
-            )
-        ledger = self.ledger
-        with ledger.lock():
-            head = ledger.ensure_chain(stamp(now))  # the chain must exist so the signature has something to bind
-        nonce = secrets.token_hex(8)
-        data = {
-            "version": APPROVAL_VERSION,
-            "nonce": nonce,
-            "model": model,
-            "max_usd": str(max_usd),
-            "job": job,
-            "quote": quote,
-            "quoted_at": stamp(quoted_at),
-            "created": stamp(now),
-            "expires_at": stamp(now + dt.timedelta(minutes=ttl_minutes)),
-            "beyond_ceiling": beyond_ceiling,
-            "ledger_head": head,
-            "issue": issue_ref[:80],
-            "principal": self.signing_principal,
-            "prompt_sha256": prompt_digest,
-            "prompt_bytes": prompt_size,
-        }
-        payload = geminisign.canonical(data)
-        armor = geminisign.sign(self.signing_key, payload.encode(), geminisign.NAMESPACE, self.env)
-        signer = geminisign.verify(self.trust, payload.encode(), armor, now=now)
-        if signer.label != self.signing_principal:
-            raise RefusedError("the key that signed is not the principal named in gemini.yaml; no approval was written")
-        path = self.folder / f"{nonce}.json"
-        write_text(path, json.dumps({"payload": payload, "signature": armor}, sort_keys=True) + "\n")
-        record = self.load(nonce, now)
-        with ledger.lock():
-            ledger.append(
-                {
-                    "type": "approval_issued",
-                    "ts": stamp(now),
-                    "nonce": nonce,
-                    "principal": signer.label,
-                    "fingerprint": signer.fingerprint,
-                    "tier": 1,
-                    "key_kind": "hardware" if signer.hardware else "software",
-                    "job": job,
-                    "model": model,
-                    "max_usd": str(max_usd),
-                    "expires_at": data["expires_at"],
-                    "prompt_sha256": prompt_digest,
-                    "prompt_bytes": prompt_size,
-                }
-            )
-        return record
-
-    def load(self, record_id: str, now: dt.datetime | None = None) -> Approval:
-        from safo import geminisign
-
-        if not RECORD_ID.fullmatch(record_id):
-            raise RefusedError("a paid call needs an approval record: pass its id")
-        if self.trust is None:
-            raise RefusedError("signed approvals are not set up: there is no allowed-signers file to check against")
-        try:
-            outer = loads(read_bounded(self.folder / f"{record_id}.json", 16384))
-        except FileNotFoundError:
-            raise RefusedError("there is no approval record with that id; a paid call needs one") from None
-        except (OSError, ValueError, UnicodeError):
-            raise RefusedError("the approval record cannot be read; ask for a fresh one") from None
-        if (
-            not isinstance(outer, dict)
-            or set(outer) != {"payload", "signature"}
-            or not isinstance(outer["payload"], str)
-            or not isinstance(outer["signature"], str)
-        ):
-            raise RefusedError(
-                "this approval record is not a signed approval (an unsigned record authorizes nothing); "
-                "ask for a fresh one"
-            )
-        text, armor = outer["payload"], outer["signature"]
-        who = geminisign.verify(
-            self.trust, text.encode(), armor, now=now
-        )  # raises RefusedError when it does not verify
-        try:
-            data = loads(text)
-            if not isinstance(data, dict) or geminisign.canonical(data) != text:
-                raise ValueError("record")
-            version = data.get("version")
-            if type(version) is int and version == 1:
-                raise RefusedError(
-                    "this approval is in an older format (version 1) with no prompt binding, so it authorizes nothing; "
-                    "ask for a fresh one"
-                )
-            if type(version) is not int or version != APPROVAL_VERSION:
-                raise RefusedError("this approval is of a version this program does not accept; ask for a fresh one")
-            digest, size = data.get("prompt_sha256"), data.get("prompt_bytes")
-            if (
-                type(digest) is not str
-                or PROMPT_DIGEST.fullmatch(digest) is None
-                or type(size) is not int
-                or not 0 <= size <= MAX_PROMPT_BYTES
-            ):
-                raise RefusedError(
-                    "this approval carries no valid prompt digest and length (prompt_sha256, prompt_bytes), so it is "
-                    "not bound to a prompt and authorizes nothing; ask for a fresh one"
-                )
-            if data["nonce"] != record_id or data["principal"] != who.label:
-                raise ValueError("nonce")
-            quoted = _parse_stamp(data["quoted_at"])
-            created = _parse_stamp(data["created"])
-            expires = _parse_stamp(data["expires_at"])
-            if quoted is None or created is None or expires is None or not isinstance(data["beyond_ceiling"], bool):
-                raise ValueError("record")
-            if not MODEL_NAME.fullmatch(str(data["model"])) or not JOB_NAME.fullmatch(str(data["job"])):
-                raise ValueError("names")
-            max_usd = _decimal(data["max_usd"], "max_usd")
-            if not 0 < max_usd <= JOB_CAP or not isinstance(data["ledger_head"], str) or not data["ledger_head"]:
-                raise ValueError("amount")
-            if expires <= created or expires - created > dt.timedelta(minutes=MAX_TTL_MINUTES):
-                raise ValueError("lifetime")
-            return Approval(
-                record_id,
-                str(data["model"]),
-                max_usd,
-                str(data["job"]),
-                str(data["quote"]),
-                quoted,
-                created,
-                expires,
-                data["beyond_ceiling"],
-                str(data.get("issue", "")),
-                who.label,
-                data["ledger_head"],
-                who.hardware,
-                digest,
-                size,
-            )
-        except (ValueError, KeyError, ConfigError):
-            raise RefusedError("the signed approval is malformed or outside the caps; ask for a fresh one") from None
-
-    def is_used(self, record_id: str) -> bool:
-        return os.path.lexists(self.folder / f"{record_id}.used")
-
-    def consume(self, record_id: str) -> None:
-        """Atomic: the marker is created exclusively, so two callers cannot both spend one record. The ledger row that
-        spends the nonce for good is written by the caller under the ledger lock."""
-        ensure_dir(self.folder)
-        try:
-            fd = os.open(self.folder / f"{record_id}.used", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        except FileExistsError:
-            raise RefusedError("this approval record was already used; each paid call needs a fresh one") from None
-        except OSError:
-            raise RefusedError("the approval record cannot be marked used; nothing was sent") from None
-        os.close(fd)
-
-
-def ledger_problem(record: Approval, snap: Snapshot) -> str | None:
-    """Why the ledger does not back this approval, or None. The approval must have been signed against a head that is
-    in the chain, and its own `approval_issued` row (written when it was signed, by the same principal) must come after
-    that head: a ledger rewound to the signed head has lost that row, so the approval is not replayable against it."""
-    if record.ledger_head not in snap.heads:
-        return (
-            "this approval was signed against a ledger head that is not in the current ledger chain: "
-            "the ledger was replaced or rewound; ask for a fresh approval"
-        )
-    found = next(
-        (
-            (pos, prompt)
-            for (nonce, who, pos), prompt in zip(snap.issued, snap.issued_prompts, strict=False)
-            if nonce == record.id and who == record.principal
-        ),
-        None,
-    )
-    if found is None or found[0] <= snap.order.index(record.ledger_head):
-        return (
-            "this approval's own issuance row is not in the ledger chain after the head it was signed against: "
-            "the ledger was rewound; ask for a fresh approval"
-        )
-    digest, size = found[1]
-    if not digests_equal(digest, record.prompt_sha256) or size != record.prompt_bytes:
-        return (
-            "this approval's issuance row in the ledger does not carry the prompt digest and length the approval "
-            "was signed with; ask for a fresh approval"
-        )
-    return None
-
-
-def approval_problem(store: ApprovalStore, record_id: str, now: dt.datetime) -> str | None:
-    """Why a record cannot be used now, or None when it is live. For the dispatch guard; it spends nothing."""
-    try:
-        record = store.load(record_id, now)
-        if store.is_used(record_id):
-            return "this approval record was already used"
-        if now >= record.expires_at:
-            return "this approval record has expired"
-        if store.ledger is not None:
-            snap = snapshot(store.ledger.read())
-            if any(nonce == record_id for nonce, _ in snap.used):
-                return "this approval record was already used"
-            problem = ledger_problem(record, snap)
-            if problem:
-                return problem
-    except GeminiError as err:
-        return str(err)
-    return None
-
-
-def _gate_paid(
-    cfg: GeminiConfig, store: ApprovalStore, snap: Snapshot, req: Request, now: dt.datetime
-) -> tuple[Approval, Decimal]:
-    if not req.approval:
-        raise RefusedError("a paid call needs an approval record (--approval ID); none was given")
-    record = store.load(req.approval, now)
-    if store.is_used(record.id) or any(nonce == record.id for nonce, _ in snap.used):
-        raise RefusedError("this approval record was already used; each paid call needs a fresh one")
-    problem = ledger_problem(record, snap)
-    if problem:
-        raise RefusedError(problem)
-    if now >= record.expires_at:
-        raise RefusedError("this approval record has expired; ask for a fresh one")
-    digest, size = prompt_binding(req.prompt)  # recomputed from the prompt about to be sent, never from the record
-    if not digests_equal(record.prompt_sha256, digest) or record.prompt_bytes != size:
-        raise RefusedError(
-            "this approval does not cover this prompt: it was signed for different prompt bytes; "
-            "an approval is for the exact prompt the maintainer saw, so ask for a fresh one"
-        )
-    if record.model != req.model:
-        raise RefusedError(f"this approval record is for another model than {req.model}")
-    if not req.job or record.job != req.job:
-        raise RefusedError("this approval record is for another job; an approval is not inherited")
-    quota = paid_quota(cfg, snap, req, now)
-    if quota.estimate > cfg.job_cap:
-        raise RefusedError(
-            f"the estimate {money(quota.estimate)} USD is over the {money(cfg.job_cap)} USD job cap; "
-            "lower the output limit"
-        )
-    if quota.estimate > record.max_usd:
-        raise RefusedError(
-            f"the estimate {money(quota.estimate)} USD is over the approved {money(record.max_usd)} USD; ask again"
-        )
-    if quota.beyond and not record.beyond_ceiling:
-        raise RefusedError(
-            f"this job would pass the {money(cfg.month_cap)} USD monthly ceiling ({money(quota.after)} in all); "
-            f"past it every further {money(cfg.block)} USD needs its own approval that says so (--beyond-ceiling)"
-        )
-    return record, quota.estimate
-
-
 def _gate_free(cfg: GeminiConfig, snap: Snapshot, req: Request, now: dt.datetime) -> None:
-    price = cfg.prices.get(req.model)
-    if price is not None and price.image:
+    if req.model in cfg.image_models:
         raise RefusedError("image generation is paid-only: its free quota is zero")
     quota = free_quota(cfg, snap, req.model, now)
     tokens = estimate_input_tokens(req.prompt)
@@ -1600,14 +1118,17 @@ KeyProvider = Callable[[str], str]
 
 
 def doppler_key_provider(cfg: GeminiConfig, env: Mapping[str, str]) -> KeyProvider:
-    """The key for a tier, read by NAME from Doppler at call time. The value comes back on a pipe: it is never in
-    argv, never in a file and never in a message. Only the names are on the command line."""
+    """The FREE key, read by NAME from Doppler at call time. The value comes back on a pipe: it is never in argv,
+    never in a file and never in a message. Only the names are on the command line. There is no paid key to read here:
+    the paid key exists only in the broker's own credential (#287), so any other tier is refused."""
 
     def read(tier: str) -> str:
+        if tier != "free":
+            raise RefusedError(PAID_ELSEWHERE)
         exe = find_executable("doppler", env)
         if exe is None:
             raise RefusedError("the secret tool (doppler) was not found on PATH; no key was read")
-        config = cfg.free_config if tier == "free" else cfg.paid_config
+        config = cfg.free_config
         argv = [exe, "secrets", "get", cfg.key_name, "--plain", "--project", cfg.project, "--config", config]
         child = {
             k: v for k, v in env.items() if k in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME")
@@ -1670,24 +1191,18 @@ def _reason(body: object) -> str:
     return f" {status}" if isinstance(status, str) and re.fullmatch(r"[A-Z_]{3,40}", status) else ""
 
 
-def _post(
-    cfg: GeminiConfig, req: Request, key: str, prompt: bytes, approved: str | None = None
-) -> tuple[int, Mapping[str, str], bytes]:
-    """One POST. A failure before the request leaves is RefusedError; after it, the caller treats it as unknown.
+def _post(cfg: GeminiConfig, req: Request, key: str, prompt: bytes) -> tuple[int, Mapping[str, str], bytes]:
+    """One POST of a free-tier request. A failure before the request leaves is RefusedError; after it, the caller
+    treats it as unknown.
 
     `prompt` is the one snapshot of the prompt bytes taken at the start of `ask`; the body is built from it and from
-    nothing else. For a paid call `approved` is the digest the approval was signed with, and the prompt text found in
-    the finished body is hashed once more: a body that differs from what was approved is refused before it is sent."""
+    nothing else."""
     body = json.dumps(
         {
             "contents": [{"role": "user", "parts": [{"text": bytes.decode(prompt, "utf-8")}]}],
             "generationConfig": {"maxOutputTokens": req.max_output_tokens or cfg.max_output_tokens},
         }
     ).encode()
-    if approved is not None:
-        text = loads(body)["contents"][0]["parts"][0]["text"]
-        if not digests_equal(hashlib.sha256(str.encode(text, "utf-8")).hexdigest(), approved):
-            raise RefusedError("the request body is not the prompt the approval covers; nothing was sent")
     conn = _connection(cfg)
     try:
         try:
@@ -1718,66 +1233,44 @@ def ask(
     cfg: GeminiConfig,
     req: Request,
     *,
-    store: ApprovalStore,
     key_for: KeyProvider,
     now: dt.datetime,
 ) -> Reply:
-    """Send one request, once, or say which gate stopped it."""
+    """Send one free-tier request, once, or say which gate stopped it. A paid request is refused first of all: the
+    paid path exists only through the broker."""
     # One plain copy of every field, taken once at the entry. Nothing below reads the caller's object again, and the
     # body is built from the prompt bytes snapshotted here (#217).
     req = canonical_request(req)
     now = plain_time(now, "now")
+    if req.tier != "free":
+        raise RefusedError(PAID_ELSEWHERE)  # before anything else: no gate is run and no key is read for it
     prompt_raw = str.encode(req.prompt, "utf-8")
-    if req.tier == "paid":
-        require_paid()  # before anything else: the paid path is off unless the root-owned switch says it is on
     _check_request(cfg, req)
     terms = load_private_terms(cfg.private_terms, fixed_locations().terms if cfg.private_terms == "default" else None)
     if private_term_hit(terms, [req.prompt, fold(req.prompt)]):
         raise RefusedError("the prompt matches one of the maintainer's private terms; nothing was sent")
     ledger = Ledger(cfg.ledger)
     snap = snapshot(ledger.read())
-    if req.tier == "paid":
-        _gate_paid(cfg, store, snap, req, now)
-    else:
-        if req.model not in cfg.free:
-            raise RefusedError(f"the model {req.model} is not configured for the free tier")
-        _gate_free(cfg, snap, req, now)
-    key = key_for(req.tier)  # only now: a refused call never reads a key
+    if req.model not in cfg.free:
+        raise RefusedError(f"the model {req.model} is not configured for the free tier")
+    _gate_free(cfg, snap, req, now)
+    key = key_for("free")  # only now: a refused call never reads a key
     call_id = secrets.token_hex(6)
     with ledger.lock():
         snap = snapshot(ledger.read())  # again, under the lock: another caller may have used the room
-        record: Approval | None = None
-        est = Decimal(0)
-        if req.tier == "paid":
-            record, est = _gate_paid(cfg, store, snap, req, now)
-            store.consume(record.id)  # spent before the request leaves, so a crash can never allow a replay
-            ledger.append(
-                {
-                    "type": "approval_used",
-                    "ts": stamp(now),
-                    "nonce": record.id,
-                    "principal": record.principal,
-                    "tier": 1,
-                    "key_kind": "hardware" if record.hardware else "software",
-                    "job": req.job,
-                    "prompt_sha256": record.prompt_sha256,
-                    "prompt_bytes": record.prompt_bytes,
-                }
-            )
-        else:
-            _gate_free(cfg, snap, req, now)
+        _gate_free(cfg, snap, req, now)
         ledger.append(
             {
                 "type": "call_start",
                 "call_id": call_id,
                 "ts": stamp(now),
                 "date": stamp(now)[:10],
-                "tier": req.tier,
+                "tier": "free",
                 "model": req.model,
                 "est_input_tokens": estimate_input_tokens(req.prompt),
-                "est_usd": float(est),
+                "est_usd": 0.0,
                 "job": req.job,
-                "approval": record.id if record else "",
+                "approval": "",
             }
         )
 
@@ -1799,15 +1292,12 @@ def ask(
 
     def line_now() -> str:
         try:
-            current = snapshot(ledger.read())
-            if req.tier == "free":
-                return free_quota(cfg, current, req.model, now).line()
-            return paid_quota(cfg, current, req, now).line()
+            return free_quota(cfg, snapshot(ledger.read()), req.model, now).line()
         except (GeminiError, ConfigError):
             return "(the quota line could not be rebuilt)"
 
     try:
-        status, headers, raw = _post(cfg, req, key, prompt_raw, record.prompt_sha256 if record else None)
+        status, headers, raw = _post(cfg, req, key, prompt_raw)
     except RefusedError:
         finish("not_sent", None, None, None, Decimal(0))
         raise
@@ -1823,7 +1313,7 @@ def ask(
         except (ValueError, UnicodeError):
             reason = ""
         raise RateLimitStopError(
-            f"Gemini answered 429{reason}: the job is stopped, not retried, and never falls through to the paid tier."
+            f"Gemini answered 429{reason}: the job is stopped, not retried, and never falls through to a paid call."
             f"{_retry_after(headers.get('retry-after'))} {line_now()}"
         )
     if 300 <= status < 400 or status >= 500 or status == 408 or len(raw) > MAX_BYTES:
@@ -1848,28 +1338,6 @@ def ask(
     except (ValueError, UnicodeError, KeyError, IndexError, TypeError, AttributeError):
         finish("ambiguous", status, None, None, None)
         raise _unknown(cfg, "unreadable answer", line_now()) from None
-    actual: Decimal | None
-    price = cfg.prices.get(req.model)
-    if req.tier == "free":
-        actual = Decimal(0)
-    elif prompt_tokens is not None and out_tokens is not None and price is not None:
-        # What was reported, never less than a floor from the sizes of what was sent and received, and when the
-        # reported counts are implausibly low for those sizes the estimate (an upper bound) stands instead.
-        prompt_floor = len(req.prompt.encode("utf-8")) // 8
-        out_floor = len(text.encode("utf-8")) // 8
-        low = prompt_tokens < prompt_floor or out_tokens < out_floor
-        used_in, used_out = max(prompt_tokens, prompt_floor), max(out_tokens, out_floor)
-        actual = (Decimal(used_in) * price.input_per_mtok + Decimal(used_out) * price.output_per_mtok) / Decimal(
-            1_000_000
-        )
-        if low:
-            actual = max(actual, est)
-    else:
-        actual = None  # no usage in the answer: the estimate stands as the spend
-    finish("ok", status, prompt_tokens, out_tokens, actual)
+    finish("ok", status, prompt_tokens, out_tokens, Decimal(0))
     note = "" if text else "the answer held no text (the vendor may have blocked it)"
-    if req.tier == "paid" and actual is None:
-        note = (note + "; " if note else "") + "no usage came back, so the estimate counts as spent"
-    return Reply(
-        text, prompt_tokens, out_tokens, actual if actual is not None else est, actual is None, line_now(), note
-    )
+    return Reply(text, prompt_tokens, out_tokens, Decimal(0), False, line_now(), note)

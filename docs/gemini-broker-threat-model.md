@@ -166,8 +166,9 @@ control, or a command that reads the installed system), then the residual risk.
   from hash-locked wheels** (`--only-binary=:all:`, `--require-hashes`, `--no-deps`), so no build backend runs as root;
   the broker's own source is copied, not built. The release is staged read-only, verified offline (ownership, file hashes,
   units, a self-test as the broker user), activated by an atomic symlink swap, and rolled back automatically on any
-  failure. `broker.yaml` is read through the ownership walk on every request; prices carry `valid_through`; caps in
-  config can only lower the constants.
+  failure. `broker.yaml` is read through the ownership walk once, when the service starts (a change needs `systemctl restart
+  safo-broker.service`; the switch, the allowed signers and the revocation list are the files read on every request);
+  prices carry `valid_through`; caps in config can only lower the constants.
 - **Verification.** Planned installer tests against a throwaway git repository with test keys: an unsigned tag, a
   lightweight tag, a tag signed by a key that is not a release key (including an approval key), a tag name that
   disagrees with the code's version, a lower and an equal version, a downgrade with and without the explicit flag, a

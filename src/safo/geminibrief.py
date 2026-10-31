@@ -66,11 +66,11 @@ DECODE = re.compile(
 )
 SINK_RE = re.compile(SINK)
 SHELL_WILD = frozenset("$*?[]{}`%")
-RISKY_ACTIONS = ("ask", "approve")
-ACTIONS = ("ask", "approve", "quota")
+RISKY_ACTIONS = ("ask", "approve", "paid", "paid-dryrun")  # the broker entries are paid action words (#287)
+ACTIONS = ("ask", "approve", "quota", "paid", "paid-dryrun")  # paid and paid-dryrun: the broker entries (#287)
 # inline code in prose that wraps a known word, an option or a file name; any other word in backticks runs as a command
 MARKDOWN_WORD = re.compile(
-    r"^`(?:ask|approve|quota|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
+    r"^`(?:ask|approve|quota|paid|paid-dryrun|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
 )
 VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
 # Every detector pattern, so the cheap prefilter below can never miss what a detector would catch. A new detector regex
@@ -406,7 +406,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
         cached = _PARSE_CACHE[text]
         return None if cached is None else dataclasses.replace(cached, line=line)
     # deferred: the Gemini mode builds argparse, which the guard's entry point must not load at import
-    from safo.modes.gemini import BriefParseError, brief_namespace
+    from safo.modes.gemini import PAID_ACTIONS, BriefParseError, brief_namespace
 
     try:
         ns = brief_namespace(span)
@@ -423,7 +423,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
             step = None  # not a step: it prints the quota line and sends nothing
         else:
             step = Step(
-                bool(ns.paid) or ns.action == "approve",
+                bool(ns.paid) or ns.action in ("approve", *PAID_ACTIONS),
                 ns.cap or ns.max_usd or None,
                 ns.approval or None,
                 line=line,
@@ -598,8 +598,10 @@ _LOOP_NAME = re.compile(r"(?<![\w-])for\s+([A-Za-z_]\w*)\s+in\b")
 _READ_NAME = re.compile(r"(?<![\w-])read\s+(?:-\w+\s+)*([A-Za-z_]\w*)")
 _REFERENCE = re.compile(r"\$\{?[!#]?([A-Za-z_][A-Za-z0-9_]*)")
 _ANSI_ESCAPE = re.compile(r"\$'[^']*\\[^']*'")
-_RISK_TOKEN = re.compile(r"--paid|--approval|--cap(?![\w-])|(?<![\w-])(?:ask|approve)\b")
-_PAID_TOKEN = re.compile(r"--paid|(?<![\w-])approve\b")
+_RISK_TOKEN = re.compile(
+    r"--paid|--approval|--cap(?![\w-])|--max-usd|--job(?![\w-])|(?<![\w-])(?:ask|approve|paid-dryrun|paid)(?![\w-])"
+)
+_PAID_TOKEN = re.compile(r"--paid|(?<![\w-])(?:approve|paid-dryrun|paid)(?![\w-])")
 _GEMINI_WORD = re.compile(r"\b(?:safo|gemini)\b|--paid|--approval|--cap(?![\w-])")
 _SHELL_C = re.compile(
     r"(?<![\w-])(?:bash|sh|zsh|dash|ksh|csh|tcsh|fish|pwsh|python[\d.]*|perl|ruby|node|php|lua)\b(?:\s+-{1,2}[\w-]+)*"
@@ -709,7 +711,7 @@ def _expansion_at_command(text: str) -> bool:
     return False
 
 
-_GEMINI_OPTION = re.compile(r"--paid|--approval|--cap(?![\w-])")
+_GEMINI_OPTION = re.compile(r"--paid|--approval|--cap(?![\w-])|--max-usd|--job(?![\w-])")
 _RISK_OPTION = re.compile(
     r"(?<![\w-])--paid(?![\w-])|(?<![\w-])--approval(?![\w-])|(?<![\w-])--cap(?![\w-])|(?<![\w-])approve(?![\w-])"
 )  # exact tokens: --cap-add is not one, and approve is a word of its own
@@ -902,7 +904,7 @@ def _findings(
     lines = joined.splitlines()
     whole = "\n".join(_views(line)[2] for line in lines)
     runtime_scan = bool(re.search(r"\bgemini\b", whole)) and bool(
-        re.search(r"(?<![\w-])(?:ask|approve)\b|--paid", whole)
+        re.search(r"(?<![\w-])(?:ask|approve|paid-dryrun|paid)(?![\w-])|--paid", whole)
     )
     steps: list[Step] = []
     flags: dict[str, int] = {}

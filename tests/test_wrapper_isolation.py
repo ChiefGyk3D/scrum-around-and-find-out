@@ -135,15 +135,19 @@ def test_the_one_secret_the_call_needs_is_the_only_secret_that_passes(fake: Path
     assert ask["DOPPLER_TOKEN"] == "the-one-key-reader"
     assert set(ask) == {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "DOPPLER_TOKEN"}
     # no other action reads the key, so no other action receives it
-    for action in ("quota", "usage", "keys"):
+    for action in ("quota", "keys", "paid", "paid-dryrun"):
         other = cast(dict[str, str], run_fake(fake, source, action)["env"])
         assert "DOPPLER_TOKEN" not in other
 
 
-def test_approve_passes_only_what_the_security_key_signature_needs(fake: Path, planted: dict[str, Path]) -> None:
+@pytest.mark.parametrize("action", ["paid", "paid-dryrun"])
+def test_the_paid_commands_pass_only_what_the_security_key_signature_needs(
+    fake: Path, planted: dict[str, Path], action: str
+) -> None:
     source = {**hostile_env(planted), "SSH_AUTH_SOCK": "/run/agent.sock", "TERM": "xterm", "DOPPLER_TOKEN": "k"}
-    env = cast(dict[str, str], run_fake(fake, source, "approve")["env"])
-    # a provider library or an askpass program named by the caller would be loaded or run by ssh-keygen: never passed
+    env = cast(dict[str, str], run_fake(fake, source, action)["env"])
+    # a provider library or an askpass program named by the caller would be loaded or run by ssh-keygen: never passed,
+    # and the paid commands hold no secret at all, not even the free key's token
     assert set(env) == {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SSH_AUTH_SOCK", "TERM"}
     assert env["SSH_AUTH_SOCK"] == "/run/agent.sock"
 
@@ -404,6 +408,8 @@ def test_run_hands_the_gemini_command_to_the_wrapper_first(monkeypatch: pytest.M
     from safo import cli
 
     monkeypatch.setattr(sys, "argv", ["safo", "gemini", "quota", "--model", "m"])
+    for name in [k for k in os.environ if k.startswith(wrapper.STARTUP_PREFIXES) or k in wrapper.STARTUP_NAMES]:
+        monkeypatch.delenv(name)  # a CI runner sets some (the early refusal would answer first, which is its job)
     monkeypatch.setattr(wrapper, "enter", lambda words, env: 9 if next(iter(words)) == "gemini" else None)
     with pytest.raises(SystemExit) as stop:
         cli.run()
@@ -443,9 +449,10 @@ def run_with_stdin(action: str, data: str) -> str:
     return done.stdout.strip()
 
 
-def test_only_approve_receives_standard_input() -> None:
-    assert run_with_stdin("approve", "yes\n") == repr("yes\n")
-    for action in ("quota", "ask", "usage", "keys"):
+def test_only_the_paid_commands_receive_standard_input() -> None:
+    for action in ("paid", "paid-dryrun"):
+        assert run_with_stdin(action, "yes\n") == repr("yes\n")
+    for action in ("quota", "ask", "approve", "keys"):
         assert run_with_stdin(action, "yes\n") == repr("")
 
 

@@ -98,22 +98,21 @@ def test_the_gemini_page_states_the_gates_and_is_linked() -> None:
         "public material",
         "used for training",
         "429",
-        "never falls through to paid",
+        "never falls through to a paid call",
         "approval record",
-        "signed approval",
+        "only through the broker",
         "hardware",
         "single-use",
         "2 usd per job",
         "10 usd per month",
         "ledger",
         "midnight pacific",
-        "price_checked",
         "redirect",
         "not replayed",
         "doppler",
-        "prd_paid",
+        "no paid key here",
         "image generation is paid-only",
-        "safo gemini approve",
+        "safo gemini paid-dryrun",
         "same user",
         "social engineering",
         "terminal",
@@ -131,9 +130,9 @@ def test_the_gemini_page_states_the_gates_and_is_linked() -> None:
 def test_the_example_config_parses_with_the_vendor_endpoint_and_tiny_free_limits() -> None:
     data = yaml.safe_load((ROOT / "examples" / "gemini.example.yaml").read_text(encoding="utf-8"))
     cfg = parse_config(data, "example", Path("/nonexistent"))
-    assert cfg.endpoint == f"https://{VENDOR_HOST}" and cfg.job_cap == 2 and cfg.month_cap == 10
+    assert cfg.endpoint == f"https://{VENDOR_HOST}"
     assert cfg.free and all(f.rpm == 1 and f.rpd == 1 for f in cfg.free.values()), "an uncopied example cannot overrun"
-    assert set(cfg.free) <= set(cfg.prices)
+    assert not set(cfg.free) & cfg.image_models
     assert str(cfg.ledger).endswith("gemini-spend-ledger.jsonl")
 
 

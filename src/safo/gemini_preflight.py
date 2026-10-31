@@ -13,12 +13,18 @@ It prints one line per check, `PASS`, `WARN` or `FAIL`, then a summary, and retu
 failed (1 when anything failed, or anything warned with `strict`). Output carries names, counts, modes, owners and line
 numbers only: never a key line, a key type's key material, or file content.
 
-This module is standalone. It is not wired into `safo gemini`, so it does not touch the broker phases that are still in
-review; wiring it is a small follow-up once they are merged.
+The hardware-key check ties the key to the enrollment: a visible authenticator alone only warns. It passes when a
+hardware key in the agent, or the public half of `--key-file` (the approval key file of broker-client.yaml), matches by
+fingerprint a key enrolled in the allowed-signers file. It prints the principal's label and key type, never a key.
+
+This module is standalone: run it with `python -m safo.gemini_preflight [--strict] [--key-file /absolute/path]`.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import os
 import pwd
 import re
@@ -42,6 +48,9 @@ READ_ONLY_COMMANDS: tuple[tuple[str, ...], ...] = (
 )
 _TOKEN = re.compile(r'(?:[^\s"]|"[^"]*")+')
 _FLAGS = {"--strict", "--enabling", "--ack-observe-mode"}
+USAGE = (
+    "usage: python -m safo.gemini_preflight [--strict] [--enabling] [--ack-observe-mode] [--key-file /absolute/path]"
+)
 _RUN_SECONDS = 10
 _MAX_FILE_BYTES = 65_536
 
@@ -75,6 +84,7 @@ class Locations:
     trust_uid: int = 0  # the owner the trust files must have: root. Only a test passes another.
     vendor_id: str = "1050"  # USB vendor id of the key class whose udev rule is looked for (Yubico)
     namespace: str = NAMESPACE
+    key_file: Path | None = None  # the approval key file in broker-client.yaml; only its public half (.pub) is read
 
 
 def default_runner(argv: Sequence[str]) -> RunResult:
@@ -164,19 +174,131 @@ def check_udev_rule(loc: Locations) -> Check:
     )
 
 
-def check_hardware_key(runner: Runner) -> Check:
+def fingerprint(b64: str) -> str | None:
+    """`SHA256:...` of a public key's base64 blob (what `ssh-keygen -l` prints), or None when it is not base64."""
+    try:
+        blob = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not blob:
+        return None
+    return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+
+
+@dataclass(frozen=True)
+class PublicKey:
+    key_type: str
+    fingerprint: str
+
+
+def _public_key(line: str) -> PublicKey | None:
+    """`TYPE BASE64 [comment]` as `ssh-add -L` and a `.pub` file print it."""
+    parts = line.split()
+    if len(parts) < 2:
+        return None
+    digest = fingerprint(parts[1])
+    return None if digest is None else PublicKey(parts[0], digest)
+
+
+def _enrolled(loc: Locations) -> dict[str, tuple[str, str]]:
+    """fingerprint -> (principal, key type) for each key line of the allowed-signers file; empty if it cannot be read.
+    The structure check of the file itself is `check_allowed_signers`; this only links a key to a name."""
+    try:
+        st = loc.allowed_signers.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_FILE_BYTES:
+            return {}
+        text = loc.allowed_signers.read_text(errors="replace")
+    except OSError:
+        return {}
+    found: dict[str, tuple[str, str]] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        tokens = _TOKEN.findall(stripped)
+        for index, token in enumerate(tokens[1:], 1):
+            if token.startswith(("ssh-", "ecdsa-", "sk-")) and index + 1 < len(tokens):
+                digest = fingerprint(tokens[index + 1])
+                if digest is not None:
+                    found[digest] = (tokens[0], token)
+                break
+    return found
+
+
+def _key_file_public(loc: Locations) -> tuple[PublicKey | None, str]:
+    """The configured approval key's public half, read from `<key_file>.pub` (or the file itself when it is a .pub). The
+    key file itself is never opened: it may be a private key or an sk key handle."""
+    if loc.key_file is None:
+        return None, ""
+    path = loc.key_file if loc.key_file.suffix == ".pub" else loc.key_file.with_name(loc.key_file.name + ".pub")
+    try:
+        st = path.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_FILE_BYTES:
+            return None, "the public half of the configured key file is not a small regular file"
+        first = path.read_text(errors="replace").splitlines()[:1]
+    except (OSError, IndexError):
+        return None, "the public half of the configured key file cannot be read"
+    key = _public_key(first[0]) if first else None
+    return (key, "") if key is not None else (None, "the public half of the configured key file is not a public key")
+
+
+def check_hardware_key(runner: Runner, loc: Locations | None = None) -> Check:
+    """A visible authenticator is not enough: pass only when a key the agent holds, or the configured key file's
+    public half, is a hardware key type AND matches (by fingerprint) a key enrolled in the allowed-signers file. When
+    a key file is configured it is the only key judged, because it is the one that signs. Anything else is a warning
+    that says which link is missing (#287, D4)."""
     name = "hardware-key"
     token = _ask(runner, ("fido2-token", "-L"))
     devices = 0
     if token is not None and token.returncode == 0:
         devices = sum(1 for line in token.stdout.splitlines() if line.startswith("/dev/") or "vendor=" in line)
     agent = _ask(runner, ("ssh-add", "-L"))
-    agent_keys = 0
+    visible: list[tuple[str, PublicKey]] = []
     if agent is not None and agent.returncode == 0:
-        agent_keys = sum(1 for line in agent.stdout.splitlines() if line.split(" ", 1)[0] in SK_TYPES)
-    if devices or agent_keys:
+        for line in agent.stdout.splitlines():
+            key = _public_key(line)
+            if key is not None:
+                visible.append(("agent", key))
+    file_note = ""
+    if loc is not None:
+        from_file, file_note = _key_file_public(loc)
+        if loc.key_file is not None:  # the configured file is what signs, so it is the key that must be enrolled
+            visible = [("key file", from_file)] if from_file is not None else []
+    hardware = [(origin, k) for origin, k in visible if k.key_type in SK_TYPES]
+    software = [(origin, k) for origin, k in visible if k.key_type not in SK_TYPES]
+    if loc is not None and hardware:
+        enrolled = _enrolled(loc)
+        for origin, key in hardware:
+            who = enrolled.get(key.fingerprint)
+            if who is not None and who[1] in SK_TYPES:
+                return Check(
+                    name,
+                    "pass",
+                    f"the {origin} holds an sk key that matches enrolled signer {who[0]} ({who[1]}); "
+                    f"{devices} authenticator(s) visible to fido2-token",
+                )
         return Check(
-            name, "pass", f"{devices} authenticator(s) visible to fido2-token, {agent_keys} sk key(s) in the agent"
+            name,
+            "warn",
+            f"{len(hardware)} hardware key(s) visible, but no allowed-signers entry matches the visible key: enroll it "
+            "or load the enrolled one (docs/gemini-enrollment.md)",
+        )
+    if loc is None and (devices or hardware):  # no locations to compare with: say what could not be checked
+        return Check(
+            name, "warn", "a key is visible, but it cannot be tied to an enrolled signer without the enrollment"
+        )
+    if software:
+        return Check(
+            name, "warn", "the visible key is not a hardware key type (the broker refuses software keys for approvals)"
+        )
+    if file_note:
+        return Check(name, "warn", file_note)
+    if devices:
+        return Check(
+            name,
+            "warn",
+            f"{devices} authenticator(s) visible to fido2-token, but it cannot be tied to an enrolled signer: no sk "
+            "key is in the agent (load it with ssh-add) and no key file was given (--key-file)",
         )
     if token is None and agent is None:
         return Check(
@@ -431,7 +553,7 @@ def run_preflight(
         check_ssh_sk_support(loc, runner),
         check_libfido2(runner),
         check_udev_rule(loc),
-        check_hardware_key(runner),
+        check_hardware_key(runner, loc),
         check_allowed_signers(loc),
         check_switch(loc),
         check_egress_mode(loc, enabling=enabling, ack_observe=ack_observe),
@@ -473,11 +595,19 @@ def main_with(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    key_file: Path | None = None
+    if "--key-file" in args:
+        at = args.index("--key-file")
+        if at + 1 >= len(args) or not args[at + 1].startswith("/"):
+            output.write(sys.stderr, USAGE)
+            return 2
+        key_file = Path(args[at + 1])
+        del args[at : at + 2]
     if any(a not in _FLAGS for a in args):
-        output.write(sys.stderr, "usage: python -m safo.gemini_preflight [--strict] [--enabling] [--ack-observe-mode]")
+        output.write(sys.stderr, USAGE)
         return 2
     return main_with(
-        Locations(),
+        Locations(key_file=key_file) if key_file is not None else Locations(),
         default_runner,
         default_lookup,
         out=sys.stdout,

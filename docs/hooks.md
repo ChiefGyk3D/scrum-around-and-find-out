@@ -198,7 +198,7 @@ Exemptions are never silent:
 ## The sixth and seventh rules: Gemini
 
 Two rules protect money and privacy for the Gemini provider ([Gemini](gemini.md)). Unlike the five above, they deny
-**even in warn mode**: a paid step with no approval record is blocked, not noted, and private material for the free tier
+**even in warn mode**: a paid step is blocked, not noted (since #287 every paid step is, because the only paid path is the broker, which needs a touch at a terminal), and private material for the free tier
 is blocked, not noted. The log records `gemini-paid` or `gemini-material` and never the brief; the denial message names
 the missing thing and never repeats the brief's text.
 
@@ -318,8 +318,8 @@ guard's deadline is blocked, and so is a private-terms file that does not load o
 (see [Gemini](gemini.md)). Every block names the line, the reason and the fix. A false positive is a block, not a leak;
 the test suite runs the guard over the repository's own docs and sets a ceiling on false positives. It is a speed bump
 against an honest or prompt-injected model writing a brief, not a sandbox, and raw SDK use outside a brief or a shell command is out of its
-reach. The guard is not the gate that holds: the approval record, the caps and the free-tier limits are enforced again by
-the wrapper itself, which raises before any request when a paid call has no live record. When the dispatch event cannot be
+reach. The guard is not the gate that holds: the free-tier limits are enforced again by the wrapper itself, and a request for money
+is refused before any request is made; the only such path is the broker, which verifies a fresh signature per call. When the dispatch event cannot be
 read (over 1 MiB, not valid JSON, cut short, or timed out), or `agents.yaml` cannot be loaded, these two rules still
 run or are applied as a literal check (see Failing safe).
 
@@ -337,11 +337,11 @@ A hook sits inside someone's session, so every error lets the work through, visi
   answer). When the event itself cannot be used, the decision is never made from a prefix. An event over 1 MiB is read
   to its end, up to 8 MiB and 4 seconds, and the whole stream is checked for Gemini markers as it goes (the end of each
   chunk is carried into the next, so a marker cannot hide at a boundary): the words `safo` and `gemini` both seen, the
-  vendor host, an SDK name, the paid config name, or a decode-to-shell form, after the same normalization the brief scan
+  vendor host, an SDK name, the config name of the second key, or a decode-to-shell form, after the same normalization the brief scan
   uses (fullwidth and look-alike letters folded, invisible characters removed, quotes and backslashes removed, JSON
   escapes such as `\n` and `\uXXXX` decoded). The event scan also denies what the brief scan's flow rule blocks, without
   lines (more than 2000 assigned names, the brief scan's own cap, or more than 50000 referenced names is itself a marker, never a
-  silent stop; a risk token together with any expansion anywhere in the stream is one too, as is a brace expansion inside a word that holds `--`, `appro`, `cap` or `paid`): an ANSI-C word with an escape, `printf -v` with escapes, or a name assigned anywhere and referenced anywhere while
+  silent stop; a risk token together with any expansion anywhere in the stream is one too, as is a brace expansion inside a word that holds `--`, `appro`, `cap` or the word for billing): an ANSI-C word with an escape, `printf -v` with escapes, or a name assigned anywhere and referenced anywhere while
   `safo`, `gemini` or escape-built words are named. A marker anywhere is **denied** with the diagnostic kept. An event longer
   than 8 MiB, or one that does not finish arriving or cannot be checked within the time, is **denied** as too large or
   incomplete to check. Only an oversized event whose whole stream was read and checked and held no marker is the degraded
