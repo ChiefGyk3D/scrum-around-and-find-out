@@ -118,15 +118,19 @@ def steps(login: str) -> tuple[Step, ...]:
             "--with-key=host+tpm2 instead of --with-key=host on a machine with a TPM.",
             (
                 ssh(
-                    'bash -c "umask 077; read -rs -p \\"paid key: \\" K; echo; '
+                    'bash -c "set -euo pipefail; umask 077; rm -f /etc/safo/broker/paid-key.new; '
+                    'read -rs -p \\"paid key: \\" K; echo; '
                     'printf %s \\"\\$K\\" | systemd-creds encrypt --name=paid-key --with-key=host - '
-                    '/etc/safo/broker/paid-key; unset K; chmod 0600 /etc/safo/broker/paid-key"'
+                    "/etc/safo/broker/paid-key.new; unset K; chmod 0600 /etc/safo/broker/paid-key.new; "
+                    "systemd-creds decrypt --name=paid-key /etc/safo/broker/paid-key.new /dev/null; "
+                    'mv /etc/safo/broker/paid-key.new /etc/safo/broker/paid-key"'
                 ),
                 ssh("systemd-creds decrypt --name=paid-key /etc/safo/broker/paid-key /dev/null && echo credential-ok"),
             ),
             "One 0600 root file. The key is never in a command line, in the environment or on disk in clear. Nothing "
-            "uses it yet.",
-            (ssh("rm -f /etc/safo/broker/paid-key"),),
+            "uses it yet. The script stops at the first error and replaces an older credential only after the new "
+            "one decrypts.",
+            (ssh("rm -f /etc/safo/broker/paid-key /etc/safo/broker/paid-key.new"),),
             "Delete the old paid key at the vendor and its secret-store entry afterwards; until then the account can "
             "still call the vendor directly.",
         ),

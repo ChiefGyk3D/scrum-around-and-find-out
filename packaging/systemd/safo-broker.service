@@ -17,6 +17,7 @@ StartLimitBurst=5
 Type=simple
 User=safo-broker
 Group=safo-broker
+ExecStartPre=/opt/safo-broker/current/venv/bin/python -I -m safo.broker.floor
 ExecStart=/opt/safo-broker/current/venv/bin/python -I -m safo.broker
 LoadCredentialEncrypted=paid-key:/etc/safo/broker/paid-key
 StateDirectory=safo-broker

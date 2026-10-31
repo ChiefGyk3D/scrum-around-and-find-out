@@ -102,7 +102,10 @@ def test_the_key_is_read_on_the_remote_tty_and_never_appears() -> None:
         'printf %s "$K" | systemd-creds encrypt --name=paid-key --with-key=host - /etc/safo/broker/paid-key' in script
     )
     assert "unset K" in script
-    assert "chmod 0600 /etc/safo/broker/paid-key" in script
+    assert "set -euo pipefail" in script
+    assert script.rindex("systemd-creds decrypt") < script.index(
+        "mv /etc/safo/broker/paid-key.new /etc/safo/broker/paid-key"
+    )
     assert "host+tpm2" in doc  # the TPM variant is mentioned
 
 
@@ -138,7 +141,7 @@ def test_no_secret_no_real_host_no_address() -> None:
     assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", doc), "an IPv4 address"
     assert not re.search(r"\b[0-9a-f]{2}(:[0-9a-f]{2}){5}\b", doc), "a MAC address"
     hosts = {h for h in re.findall(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", doc)}
-    allowed_suffixes = (".py", ".sock", ".socket", ".service", ".yaml", ".log", ".md", ".sha256", ".invalid")
+    allowed_suffixes = (".new", ".py", ".sock", ".socket", ".service", ".yaml", ".log", ".md", ".sha256", ".invalid")
     for h in hosts:
         if re.fullmatch(r"[0-9.]+", h):
             continue

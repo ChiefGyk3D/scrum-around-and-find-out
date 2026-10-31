@@ -17,6 +17,7 @@ REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Service", "Type", "simple"),
     ("Service", "User", "safo-broker"),
     ("Service", "Group", "safo-broker"),
+    ("Service", "ExecStartPre", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.floor"),
     ("Service", "ExecStart", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker"),
     ("Service", "LoadCredentialEncrypted", "paid-key:/etc/safo/broker/paid-key"),
     ("Service", "StateDirectory", "safo-broker"),

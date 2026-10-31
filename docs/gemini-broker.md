@@ -287,8 +287,9 @@ What phase 5 puts in the tree, all testable without root and none of it run on a
 
 - `packaging/systemd/safo-broker.socket` and `packaging/systemd/safo-broker.service`: the two units from "The unit files
   and their hardening", plus `ReadWritePaths=` for the state directory only, `ConditionPathExists=` on the root-owned
-  switch, and explicit start and stop timeouts. `tests/test_broker_units.py` checks every hardening line by name (removing
-  one fails a test), runs `systemd-analyze verify` and `systemd-analyze security --offline` where the tool exists (the
+  switch, an `ExecStartPre` floor check (the `floor` module of the broker package, which refuses to start a release below
+  `/etc/safo/broker-min-version`, the second layer behind the installer), and explicit start and stop timeouts.
+  `tests/test_broker_units.py` checks every hardening line by name (removing one fails a test), runs `systemd-analyze verify` and `systemd-analyze security --offline` where the tool exists (the
   tests skip, with the reason shown, when it does not), and fails if the exposure score rises above 2.0.
 - `packaging/broker-requirements.txt`: the hash-locked wheel list the installer reads. Wheel hashes only.
 - `packaging/safo_broker_install.py`: `safo-broker-install`, standard library only, so root can copy the one file to
