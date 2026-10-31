@@ -660,7 +660,7 @@ def unix_server(tmp_path: Path, env: Env, **kw: Any) -> tuple[socket.socket, thr
     path = str(tmp_path / "s.sock")
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(path)
-    listener.listen(16)
+    listener.listen(128)  # more than the clients of any test: a full backlog would refuse a connect
     result: list[int] = []
     thread = threading.Thread(target=lambda: result.append(env.server.serve(listener)))
     thread.start()
