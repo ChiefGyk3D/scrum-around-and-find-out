@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Gemini enrollment preparation (#263): `docs/gemini-enrollment.md`, a copy-paste maintainer runbook (enroll one or two
+  FIDO2 keys for approvals, a pass or fail table for testing a second device, a separate release-signing key, the
+  root-owned allowed-signers lines with the namespace restriction, rotate and revoke), each step with its blast radius,
+  rollback and expected output, and every command and flag checked against the vendor pages on 2026-10-31 (unverified
+  items are marked). `src/safo/gemini_preflight.py` is a read-only preflight (`python -m safo.gemini_preflight`): ssh sk
+  support, libfido2, the udev rule, a visible hardware key, the allowed-signers file (root, 0644, namespace on every
+  line), the enable switch, the service user and the state directory modes. It writes nothing, makes no network or
+  vendor call, and prints no key or file content. It is not wired into `safo gemini` yet. Paid use stays disabled.
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
 - Paid Gemini broker, phase 1 (#205): the core library under `src/safo/broker/`. Integer micro-dollar arithmetic and the
   worst-case reservation (prompt bytes plus 64 tokens at one token per byte, the output cap, two interim images), the
