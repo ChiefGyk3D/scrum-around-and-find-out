@@ -18,6 +18,11 @@ sent, settled, ambiguous, suspended, cleared) with every other pair rejected; th
 ledger rows, parsed strictly; and a ledger that records the spend before a call is sent, reads back as ambiguous or
 settled after any interruption, and refuses a rolled-back, edited, truncated or world-readable state directory.
 
+Known limit, as the design already says under "Backup key": restoring the whole state directory from an earlier copy
+rewinds the ledger, the height record and the used markers together, and the ledger cannot see that. The defense is the
+rule that the state directory is never restored into a running broker, and root's reconciliation against the vendor
+billing page. A high-water record kept outside the broker user's reach is a design question for a later phase.
+
 Not built yet: signature verification of the approval (it uses the existing verifier and the root-owned trust files, in
 the socket phase), nonce issue (`begin`), the vendor request builders and response handling, the socket server, the
 client, the units, the installer and the administration command. Where the phase-1 code adds something the design did

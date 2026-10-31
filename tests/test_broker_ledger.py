@@ -1160,3 +1160,35 @@ def test_the_lock_is_released_after_a_refusal_and_after_a_crash(tmp_path: Path) 
     assert after_restart(ledger).view()
     with pytest.raises(Refused):
         reserve(CallLedger(ledger.dir), 100)  # suspended, but the lock was free to find that out
+
+
+# -- the signed ledger head, and a marker that disagrees with the ledger -------------------------------------------
+
+
+def test_a_signed_ledger_head_must_be_one_the_ledger_had(tmp_path: Path) -> None:
+    ledger = new_ledger(tmp_path)
+    req = flat_request(1000)
+    ledger.reserve(req, approval(req), policy(), epoch=EPOCH, now=NOW)  # the genesis sentinel: the chain start
+    head = ledger.view().head
+    req2 = flat_request(1000)
+    ledger.reserve(req2, approval(req2, ledger_head=head), policy(), epoch=EPOCH, now=NOW)  # a real, older head
+    for bad in ("f" * 64, "1" * 64, "", head[:-1] + ("0" if head[-1] != "0" else "1")):
+        req3 = flat_request(1000)
+        before = (state_dir(tmp_path) / "ledger.jsonl").read_bytes()
+        with pytest.raises(Refused) as err:
+            ledger.reserve(req3, approval(req3, ledger_head=bad), policy(), epoch=EPOCH, now=NOW)
+        assert err.value.code == "bad_approval"
+        assert (state_dir(tmp_path) / "ledger.jsonl").read_bytes() == before
+
+
+def test_a_marker_that_disagrees_with_the_ledger_stops_recovery(tmp_path: Path) -> None:
+    ledger = new_ledger(tmp_path)
+    t, appr, _ = reserve(ledger, 5000)
+    marker = state_dir(tmp_path) / "used" / appr.nonce
+    data = json.loads(marker.read_text())
+    for field, value in (("reserved_micro", 1), ("model", "gemini-3.6-flash"), ("job", "other"), ("call_id", "e" * 32)):
+        marker.write_text(json.dumps({**data, field: value}))
+        with pytest.raises(LedgerError):
+            ledger.recover(NOW)
+    marker.write_text(json.dumps(data))
+    assert ledger.recover(NOW) == [t.call_id]  # the call was still reserved, so recovery makes it ambiguous

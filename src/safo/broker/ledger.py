@@ -43,6 +43,7 @@ from safo.broker.records import (
 from safo.broker.states import CallState, advance
 from safo.guardlog import ensure_dir, file_lock, write_text
 
+GENESIS = "0" * 64  # the ledger head before any row exists
 LEDGER_NAME = "ledger.jsonl"
 FLOOR_NAME = "schema_version"
 USED_DIR = "used"
@@ -109,6 +110,7 @@ class LedgerView:
     last_ts: dt.datetime | None
     head: str
     rows: int
+    hashes: frozenset[str] = frozenset()  # the hash of every chained row: a signed `ledger_head` must be one of them
 
     def month_spent(self, now: dt.datetime) -> int:
         key = now.astimezone(dt.UTC).strftime("%Y-%m")
@@ -204,7 +206,10 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
             raise _corrupt() from None
     if pending is not None or used:
         raise _corrupt()
-    return LedgerView(calls, frozenset(nonces), {m: tuple(v) for m, v in suspended.items()}, last, head, len(rows))
+    hashes = frozenset(row["hash"] for row in rows)
+    return LedgerView(
+        calls, frozenset(nonces), {m: tuple(v) for m, v in suspended.items()}, last, head, len(rows), hashes
+    )
 
 
 def _end(rec: CallRecord, row: dict[str, Any]) -> None:
@@ -450,6 +455,9 @@ class CallLedger:
         with self._locked():
             view = self._view()
             stamp = self._stamp(now, view, strict=True)
+            if approval.ledger_head != GENESIS and approval.ledger_head not in view.hashes:
+                # a head the ledger never had (forged, or from another ledger); the genesis sentinel is the chain start
+                raise Refused("bad_approval", "this approval was made for another ledger state; ask for a fresh one")
             if approval.nonce in view.spent_nonces or self.marker_exists(approval.nonce):
                 raise Refused("used", "this approval was already used")
             if req.model in view.suspended:
@@ -543,6 +551,7 @@ class CallLedger:
             known = {c.nonce for c in view.calls.values()}
             for nonce in self._marker_names():
                 if nonce in known:
+                    self._marker_agrees(view, nonce)
                     continue
                 data = self._read_marker(nonce)
                 if data is None:
@@ -574,6 +583,22 @@ class CallLedger:
                 self._ensure_marker(rec)
             self._raise_floor()
         return handled
+
+    def _marker_agrees(self, view: LedgerView, nonce: str) -> None:
+        """A whole marker must say what the ledger says about the same call (a marker is not a place to hide a lower
+        figure, nor a different call). A partial marker is rewritten from the ledger later."""
+        data = self._read_marker(nonce)
+        if data is None:
+            return
+        rec = view.calls.get(data["call_id"])
+        same = rec is not None and (rec.nonce, rec.model, rec.job, rec.reserved_micro) == (
+            nonce,
+            data["model"],
+            data["job"],
+            data["reserved_micro"],
+        )
+        if not same:
+            raise LedgerError("a used marker disagrees with the ledger; root must look at it")
 
     def _ensure_marker(self, rec: CallRecord) -> None:
         if not self.marker_exists(rec.nonce):
