@@ -684,7 +684,7 @@ def test_previous_releases_are_kept_and_old_ones_pruned(world: World) -> None:
 
 def test_rollback_swaps_back_and_restores_the_units(world: World) -> None:
     world.release("1.0.0")
-    world.release("1.1.0", units={"safo-broker.socket": "[Unit]\nDescription=SAFO Gemini broker socket v2\n"})
+    world.release("1.1.0", units={"safo-broker.socket": socket_v2()})
     do_install(world, "1.0.0", apply=True)
     do_install(world, "1.1.0", apply=True)
     assert "v2" in (world.layout.unit_dir / "safo-broker.socket").read_text()
@@ -755,8 +755,17 @@ def test_the_installer_never_touches_the_state_directory(world: World) -> None:
     assert world.tree_snapshot(world.state_dir) == before
 
 
+def socket_v2() -> str:
+    from unitdata import read
+
+    return read("safo-broker.socket").replace("SAFO Gemini broker socket", "SAFO Gemini broker socket v2")
+
+
 def test_the_installer_source_never_names_the_state_directory() -> None:
     source = Path(install.__file__).read_text()
+    # the unit policy table must name the one writable path the units may grant; no code path uses it
+    head, _, rest = source.partition("UNIT_POLICY: dict")
+    source = head + rest.partition("FORBIDDEN_UNIT_KEYS")[2]
     assert '"/var/lib/safo-broker"' not in source
     assert "'/var/lib/safo-broker'" not in source
     assert "/var/lib/safo-broker/" not in source

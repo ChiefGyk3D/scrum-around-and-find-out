@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import difflib
 import errno
 import fcntl
@@ -62,6 +63,7 @@ UNSHARE = "/usr/bin/unshare"
 SERVICE_USER = "safo-broker"
 UNIT_NAMES = ("safo-broker.service", "safo-broker.socket")
 UNIT_EXEC_PREFIX = "/opt/safo-broker/current"
+SK_KEY_TYPES = ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")  # hardware keys only, by default
 LOCK_REL = "packaging/broker-requirements.txt"
 TREE_PATHS = ("src/safo", "packaging", "pyproject.toml")
 BUILD_CONTROL = ("pyproject.toml", "packaging")
@@ -118,6 +120,8 @@ class Layout:
     unit_dir: Path = Path("/etc/systemd/system")
     anchor: Path = Path("/")  # parent checks stop here (inclusive)
     uid: int = 0
+    key_types: tuple[str, ...] = SK_KEY_TYPES  # key types a release signer may have; root can change it explicitly
+    check_python: bool = True  # the interpreter the release venv links to must be a trusted one
 
 
 @dataclass(frozen=True)
@@ -434,6 +438,167 @@ def extract_tree(repo: Path, commit: str, dest: Path, home: Path) -> dict[str, b
 
 
 # ---- the lock and the wheels -----------------------------------------------------------------------------------
+
+
+# The hardening that every release must keep, whatever the release says. tests/test_broker_install_gates.py pins this
+# table to the one the unit tests use, so a change to the shipped units must change both.
+UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "safo-broker.service": (
+        ("Unit", "Requires", "safo-broker.socket"),
+        ("Unit", "ConditionPathExists", "/etc/safo/gemini-paid-enabled"),
+        ("Unit", "StartLimitIntervalSec", "60"),
+        ("Unit", "StartLimitBurst", "5"),
+        ("Service", "Type", "simple"),
+        ("Service", "User", "safo-broker"),
+        ("Service", "Group", "safo-broker"),
+        ("Service", "ExecStartPre", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.floor"),
+        ("Service", "ExecStart", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker"),
+        ("Service", "LoadCredentialEncrypted", "paid-key:/etc/safo/broker/paid-key"),
+        ("Service", "StateDirectory", "safo-broker"),
+        ("Service", "StateDirectoryMode", "0700"),
+        ("Service", "ReadWritePaths", "/var/lib/safo-broker"),
+        ("Service", "ReadOnlyPaths", "/etc/safo /opt/safo-broker"),
+        ("Service", "UMask", "0077"),
+        ("Service", "Environment", "PYTHONDONTWRITEBYTECODE=1"),
+        ("Service", "NoNewPrivileges", "yes"),
+        ("Service", "CapabilityBoundingSet", ""),
+        ("Service", "AmbientCapabilities", ""),
+        ("Service", "PrivateTmp", "yes"),
+        ("Service", "PrivateDevices", "yes"),
+        ("Service", "PrivateMounts", "yes"),
+        ("Service", "ProtectSystem", "strict"),
+        ("Service", "ProtectHome", "yes"),
+        ("Service", "ProtectProc", "invisible"),
+        ("Service", "ProcSubset", "pid"),
+        ("Service", "ProtectKernelTunables", "yes"),
+        ("Service", "ProtectKernelModules", "yes"),
+        ("Service", "ProtectKernelLogs", "yes"),
+        ("Service", "ProtectControlGroups", "yes"),
+        ("Service", "ProtectClock", "yes"),
+        ("Service", "ProtectHostname", "yes"),
+        ("Service", "RestrictAddressFamilies", "AF_UNIX AF_INET AF_INET6"),
+        ("Service", "RestrictNamespaces", "yes"),
+        ("Service", "RestrictRealtime", "yes"),
+        ("Service", "RestrictSUIDSGID", "yes"),
+        ("Service", "LockPersonality", "yes"),
+        ("Service", "MemoryDenyWriteExecute", "yes"),
+        ("Service", "SystemCallArchitectures", "native"),
+        ("Service", "SystemCallFilter", "@system-service"),
+        ("Service", "SystemCallFilter", "~@privileged @resources"),
+        ("Service", "SystemCallErrorNumber", "EPERM"),
+        ("Service", "DevicePolicy", "closed"),
+        ("Service", "KeyringMode", "private"),
+        ("Service", "RemoveIPC", "yes"),
+        ("Service", "LimitCORE", "0"),
+        ("Service", "LimitNOFILE", "64"),
+        ("Service", "TasksMax", "32"),
+        ("Service", "MemoryMax", "512M"),
+        ("Service", "TimeoutStartSec", "30s"),
+        ("Service", "TimeoutStopSec", "15s"),
+        ("Service", "Restart", "on-failure"),
+        ("Service", "RestartSec", "2s"),
+    ),
+    "safo-broker.socket": (
+        ("Socket", "ListenStream", "/run/safo-broker.sock"),
+        ("Socket", "SocketUser", "root"),
+        ("Socket", "SocketGroup", "safo-broker-clients"),
+        ("Socket", "SocketMode", "0660"),
+        ("Socket", "Accept", "no"),
+        ("Socket", "Backlog", "16"),
+        ("Install", "WantedBy", "sockets.target"),
+    ),
+}
+
+FORBIDDEN_UNIT_KEYS = (
+    "DynamicUser",
+    "PrivateUsers",
+    "EnvironmentFile",
+    "PassEnvironment",
+    "PermissionsStartOnly",
+    "BindPaths",
+    "BindReadOnlyPaths",
+    "SupplementaryGroups",
+    "TemporaryFileSystem",
+)
+
+
+def parse_unit_text(text: str) -> list[tuple[str, str, str]]:
+    """(section, key, value) in file order, joining backslash continuations the way systemd does."""
+    triples: list[tuple[str, str, str]] = []
+    section = ""
+    for raw in re.sub(r"\\\r?\n", "", text).splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            triples.append((section, key.strip(), value.strip()))
+    return triples
+
+
+def enforce_unit_policy(units: dict[str, str]) -> None:
+    """Refuse a release whose units weaken the fixed policy: every policy key must carry exactly the policy values (so a
+    later assignment, an empty reset or a second section cannot override), no other Exec line may exist (none can carry
+    a privilege or error-ignoring prefix), and a short list of widening keys is refused outright."""
+    for name in UNIT_NAMES:
+        if name not in units:
+            msg = f"unit policy: {name} is missing from the release"
+            raise InstallError(msg)
+        triples = parse_unit_text(units[name])
+        policy = UNIT_POLICY[name]
+        wanted: dict[tuple[str, str], list[str]] = {}
+        for section, key, value in policy:
+            wanted.setdefault((section, key), []).append(value)
+        for (section, key), values in wanted.items():
+            actual = [v for s_, k, v in triples if s_ == section and k == key]
+            if actual != values:
+                msg = f"unit policy: {name} [{section}] {key} must be exactly {values!r}, the release has {actual!r}"
+                raise InstallError(msg)
+        policy_keys = {k for _, k in wanted}
+        for section, key, _value in triples:
+            if key in FORBIDDEN_UNIT_KEYS or (key.startswith("Exec") and key not in policy_keys):
+                msg = f"unit policy: {name} [{section}] {key} is not allowed"
+                raise InstallError(msg)
+
+
+def check_signer_key_types(path: Path, allowed: Sequence[str]) -> None:
+    """Every key in the release signers file must be of an allowed type (hardware keys by default)."""
+    found = 0
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        types = [t for t in line.split() if re.fullmatch(r"(sk-)?(ssh|ecdsa)-[A-Za-z0-9@.-]+", t)]
+        if not types or any(t not in allowed for t in types):
+            msg = (
+                f"the release signers file has a key that is not a hardware key of an allowed type "
+                f"({', '.join(allowed)}); root can name other types with --release-key-type"
+            )
+            raise InstallError(msg)
+        found += 1
+    if not found:
+        msg = "the release signers file has no keys"
+        raise InstallError(msg)
+
+
+def check_interpreter(path: Path | str, *, uid: int, anchor: Path = Path("/")) -> None:
+    """The interpreter the service will run must resolve to a root-owned file in a closed path."""
+    resolved = Path(os.path.realpath(path))
+    try:
+        check_trusted(resolved, Layout(uid=uid, anchor=anchor), "interpreter")
+    except InstallError as exc:
+        msg = f"the interpreter {resolved} is not trustworthy: {exc}"
+        raise InstallError(msg) from None
+
+
+def check_venv_interpreter(expected: Path | str, venv_python: Path | str) -> None:
+    if os.path.realpath(expected) != os.path.realpath(venv_python):
+        found = os.path.realpath(venv_python)
+        msg = f"the release venv links to the interpreter {found}, not {os.path.realpath(expected)}"
+        raise InstallError(msg)
 
 
 def normalize(name: str) -> str:
@@ -756,18 +921,38 @@ def self_test_argv(python: Path, modules: Sequence[str], *, as_service_user: boo
     return argv
 
 
-def default_self_test(
-    modules: Sequence[str] = ("safo.broker", "yaml"), *, use_runuser: bool | None = None
-) -> Callable[[Path], None]:
+def broker_modules(release: Path) -> list[str]:
+    """The broker package and every module in it (except the entry point), found in the staged tree."""
+    package = _site_packages(release) / "safo" / "broker"
+    names = ["safo.broker"]
+    names += [f"safo.broker.{p.stem}" for p in sorted(package.glob("*.py")) if p.stem not in ("__init__", "__main__")]
+    return sorted(names)
+
+
+def entry_self_test_argv(python: Path, *, as_service_user: bool) -> list[str]:
+    argv = [str(python), "-I", "-m", "safo.broker", "--self-test"]
+    if as_service_user:
+        argv = [UNSHARE, "--net", "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
+    return argv
+
+
+def default_self_test(modules: Sequence[str] = ("yaml",), *, use_runuser: bool | None = None) -> Callable[[Path], None]:
+    """Import every broker module and every extra module, then run the real entry point in its self-test mode, both as
+    the service user (when root) and without network."""
+
     def self_test(release: Path) -> None:
         python = release / "venv" / "bin" / "python"
         root = use_runuser if use_runuser is not None else os.geteuid() == 0
-        argv = self_test_argv(python, modules, as_service_user=root)
-        done = _run(argv, env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}, cwd=Path("/"), timeout=120)
-        if done.returncode != 0:
-            tail = " | ".join(done.stderr.strip().splitlines()[-2:])
-            msg = f"the staged tree failed its self-test: {tail}"
-            raise InstallError(msg)
+        env = {"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
+        for argv in (
+            self_test_argv(python, [*broker_modules(release), *modules], as_service_user=root),
+            entry_self_test_argv(python, as_service_user=root),
+        ):
+            done = _run(argv, env=env, cwd=Path("/"), timeout=120)
+            if done.returncode != 0:
+                tail = " | ".join(done.stderr.strip().splitlines()[-2:])
+                msg = f"the staged tree failed its self-test: {tail}"
+                raise InstallError(msg)
 
     return self_test
 
@@ -1085,6 +1270,8 @@ def _build_release(
 ) -> None:
     stage.mkdir(mode=0o755)
     venv.EnvBuilder(with_pip=False, symlinks=True, clear=False, system_site_packages=False).create(stage / "venv")
+    if layout.check_python:
+        check_venv_interpreter(sys.executable, stage / "venv" / "bin" / "python")
     site = _site_packages(stage)
     install_lock = home / "install-lock.txt"
     install_lock.write_text(render_lock(lock, with_index=False))
@@ -1218,6 +1405,7 @@ def _install(
 ) -> Report:
     tag = f"v{version}"
     check_trusted(layout.signers, layout, "release signers file")
+    check_signer_key_types(layout.signers, layout.key_types)
     check_trusted(layout.opt_dir, layout, "install directory", want_dir=True)
     check_policy(version, layout, reinstall, allow_downgrade)
     work = Path(tempfile.mkdtemp(prefix="install-", dir=layout.work_dir if apply else None))
@@ -1231,6 +1419,7 @@ def _install(
                 f"the signed tag says {version} but the package's __version__ is {m[1] if m else 'unreadable'}; refused"
             )
             raise InstallError(msg)
+        enforce_unit_policy({n: files[f"packaging/systemd/{n}"].decode("utf-8", "replace") for n in UNIT_NAMES})
         lock = parse_lock(files[LOCK_REL].decode("utf-8", "replace"))
         download_dir = work / "wheels"
         download_dir.mkdir(mode=0o700)
@@ -1299,6 +1488,8 @@ def activate(
     allow_downgrade: str | None,
     out: Callable[[str], None],
 ) -> Path:
+    if layout.check_python:
+        check_interpreter(sys.executable, uid=layout.uid, anchor=layout.anchor)
     fd = open_opt(layout)
     try:
         clean_stale(layout)
@@ -1491,6 +1682,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_inst.add_argument("--apply", action="store_true")
     p_inst.add_argument("--reinstall", action="store_true")
     p_inst.add_argument("--allow-downgrade", metavar="VERSION")
+    p_inst.add_argument(
+        "--release-key-type",
+        action="append",
+        metavar="TYPE",
+        help="key type a release signer may have (repeatable); the default is hardware keys only",
+    )
     p_roll = sub.add_parser("rollback", help="activate the previous (or a named) installed release")
     p_roll.add_argument("--to", metavar="VERSION")
     return parser
@@ -1500,6 +1697,8 @@ def main(argv: Sequence[str] | None = None, *, layout: Layout | None = None, hoo
     parser = build_parser()
     args = parser.parse_args(argv)
     layout = layout or Layout()
+    if args.command == "install" and args.release_key_type:
+        layout = dataclasses.replace(layout, key_types=tuple(args.release_key_type))
     if args.command == "plan":
         return cmd_plan(args.maintainer, print)
     if (args.command == "rollback" or args.apply) and os.geteuid() != layout.uid:

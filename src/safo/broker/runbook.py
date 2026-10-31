@@ -137,13 +137,12 @@ def steps(login: str) -> tuple[Step, ...]:
         Step(
             "Enroll the release signing key and set the version floor",
             "Only a tag signed by a key in this file installs. Use the public half of a release key kept apart from "
-            "the "
-            "approval keys, and replace the placeholder with the key field (the type is ssh-ed25519 here; change it "
-            "for "
-            "another key type).",
+            "the approval keys, and replace the placeholder with the key field. The installer accepts only hardware "
+            "key types here (sk-ssh-ed25519 and sk-ecdsa), so a software key is refused.",
             (
                 ssh(
-                    'sh -c "printf \\"%s namespaces=\\\\042git\\\\042 %s %s\\\\n\\" release-signer ssh-ed25519 '
+                    'sh -c "printf \\"%s namespaces=\\\\042git\\\\042 %s %s\\\\n\\" release-signer '
+                    "sk-ssh-ed25519@openssh.com "
                     f'{PASTE_KEY} > /etc/safo/broker-release-signers && chmod 0644 /etc/safo/broker-release-signers"'
                 ),
                 ssh(

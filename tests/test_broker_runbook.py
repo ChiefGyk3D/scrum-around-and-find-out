@@ -11,6 +11,8 @@ from pathlib import Path
 import safo_broker_install as install
 from safo.broker import runbook
 
+KEY_TYPE = "sk-ssh-ed25519@openssh.com"  # a key type name, not a host
+
 
 def text() -> str:
     return runbook.render(maintainer="MAINTAINER_LOGIN")
@@ -127,7 +129,10 @@ def test_the_allowed_signers_file_is_created_with_the_git_namespace_and_a_placeh
     target = tmp_path / "signers"
     remote = remote.replace("/etc/safo/broker-release-signers", str(target))
     subprocess.run(["sh", "-c", remote], check=True, stdin=subprocess.DEVNULL, timeout=30)  # noqa: S603, S607 - fixed test string, temp path
-    assert target.read_text() == 'release-signer namespaces="git" ssh-ed25519 PASTE_RELEASE_PUBLIC_KEY_HERE\n'
+    assert (
+        target.read_text()
+        == 'release-signer namespaces="git" sk-ssh-ed25519@openssh.com PASTE_RELEASE_PUBLIC_KEY_HERE\n'
+    )
     assert oct(target.stat().st_mode & 0o777) == "0o644"
 
 
@@ -140,14 +145,16 @@ def test_no_secret_no_real_host_no_address() -> None:
     assert not re.search(r"\b[A-Za-z0-9_-]{32,}\b", doc.replace("/", " ")), "a long token-like string"
     assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", doc), "an IPv4 address"
     assert not re.search(r"\b[0-9a-f]{2}(:[0-9a-f]{2}){5}\b", doc), "a MAC address"
-    hosts = {h for h in re.findall(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", doc)}
+    hosts = {h for h in re.findall(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", doc.replace(KEY_TYPE, ""))}
     allowed_suffixes = (".new", ".py", ".sock", ".socket", ".service", ".yaml", ".log", ".md", ".sha256", ".invalid")
     for h in hosts:
         if re.fullmatch(r"[0-9.]+", h):
             continue
         assert h.endswith(allowed_suffixes), f"looks like a hostname: {h}"
     assert " host " in doc  # the placeholder is what is used
-    assert "@" not in re.sub(r"MAINTAINER_LOGIN", "", doc.replace("ssh -t host", "")), "no user@host forms"
+    assert "@" not in re.sub(r"MAINTAINER_LOGIN", "", doc.replace("ssh -t host", "").replace(KEY_TYPE, "")), (
+        "no user@host forms"
+    )
 
 
 def test_the_maintainer_login_is_validated() -> None:

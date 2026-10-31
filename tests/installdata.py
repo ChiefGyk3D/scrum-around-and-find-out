@@ -234,6 +234,8 @@ def make_world(tmp_path: Path, *, with_wheel: bool = True) -> World:
         unit_dir=root / "etc" / "systemd" / "system",
         anchor=root,
         uid=os.getuid(),
+        key_types=("ssh-ed25519",),  # the throwaway signing key is a software key
+        check_python=False,  # this machine's interpreter is root-owned, the test user is not
     )
     for d in (etc, layout.opt_dir, layout.version_file.parent, layout.unit_dir):
         d.mkdir(parents=True)

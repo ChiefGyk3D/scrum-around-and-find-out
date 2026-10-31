@@ -25,6 +25,7 @@ REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Service", "ReadWritePaths", "/var/lib/safo-broker"),
     ("Service", "ReadOnlyPaths", "/etc/safo /opt/safo-broker"),
     ("Service", "UMask", "0077"),
+    ("Service", "Environment", "PYTHONDONTWRITEBYTECODE=1"),
     ("Service", "NoNewPrivileges", "yes"),
     ("Service", "CapabilityBoundingSet", ""),
     ("Service", "AmbientCapabilities", ""),
