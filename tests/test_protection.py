@@ -1015,6 +1015,15 @@ def scripted(*values: int) -> Callable[[int], int]:
     return randbelow
 
 
+def hashed(seed: int) -> Callable[[int], int]:
+    """A reproducible `randbelow`: draw number k of this seed is a SHA-256 of both, reduced to the range."""
+    import hashlib
+    import itertools
+
+    count = itertools.count()
+    return lambda n: int.from_bytes(hashlib.sha256(f"{seed}-{next(count)}".encode()).digest(), "big") % n
+
+
 def _token_with(monkeypatch: pytest.MonkeyPatch, source: Callable[[int], int]) -> str:
     from safo import protection
 
@@ -1034,11 +1043,9 @@ def _assert_token_statistics(tokens: list[str]) -> None:
 
 def test_the_random_tokens_are_not_hexadecimal_and_start_anywhere(monkeypatch: pytest.MonkeyPatch) -> None:
     """Over a fixed seeded source the statistics are a fixed outcome, not a chance. (Seed 247 was run and passes.)"""
-    import random
-
     from safo import protection
 
-    monkeypatch.setattr(protection.secrets, "randbelow", random.Random(247).randrange)
+    monkeypatch.setattr(protection.secrets, "randbelow", hashed(247))
     _assert_token_statistics([protection._random_token() for _ in range(600)])
 
 
@@ -1077,7 +1084,7 @@ def test_a_token_made_only_of_punctuation_gets_an_alphanumeric_last_character(mo
 def test_the_default_token_source_is_secrets_randbelow_and_is_drawn_from_every_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A spy (it delegates to the real source) shows the default path draws once for the length and once per character."""
+    """A spy (it delegates to the real source): the default path draws once for the length, once per character."""
     from safo import protection
 
     real, calls = protection.secrets.randbelow, []
@@ -1126,11 +1133,9 @@ def _assert_fresh_names(paths: list[str]) -> None:
 
 
 def _fresh_names_from(monkeypatch: pytest.MonkeyPatch, seed: int) -> list[str]:
-    import random
-
     from safo import protection
 
-    monkeypatch.setattr(protection.secrets, "randbelow", random.Random(seed).randrange)
+    monkeypatch.setattr(protection.secrets, "randbelow", hashed(seed))
     return protection.fresh_workflow_paths()
 
 
@@ -1145,11 +1150,9 @@ def test_the_fresh_names_are_made_from_the_random_source(monkeypatch: pytest.Mon
 def test_the_fresh_names_differ_from_one_run_to_the_next_while_the_source_advances(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import random
-
     from safo import protection
 
-    monkeypatch.setattr(protection.secrets, "randbelow", random.Random(3).randrange)
+    monkeypatch.setattr(protection.secrets, "randbelow", hashed(3))
     first, second = protection.fresh_workflow_paths(), protection.fresh_workflow_paths()
     assert first != second and not set(first) & set(second)
     _assert_fresh_names(first)
