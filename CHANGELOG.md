@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Threat model for SAFO as a whole (#228): `docs/safo-threat-model.md` (assets, actors, trust boundaries, 25 ranked risks,
+  each with a mitigation marked verified or inferred, a verification and a residual risk) and the OWASP Threat Dragon file
+  `docs/threat-model/safo.threat-dragon.json`. The paid Gemini broker keeps its own model. Linked from the README, the wiki
+  home and `docs/threat-model.md`; the wiki page is `Safo-threat-model`. `tests/test_safo_threat_model.py` keeps the page,
+  the file, the links and the named tests in step.
 - Action: the trust the Action places in its caller is hardened. A credential (the secret-manager fetch, a literal
   `private-key` and the `token` input) is now used only on an event the preflight positively classifies as trusted:
   `push` to the default branch or a tag, `schedule`, `workflow_dispatch`, `issues` and `workflow_run` on the default
