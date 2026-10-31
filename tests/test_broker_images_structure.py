@@ -436,3 +436,8 @@ def test_a_padding_byte_after_an_odd_webp_chunk_is_zero() -> None:
     body = b"WEBP" + b"VP8L" + struct.pack("<I", 5) + payload
     assert sniff(b"RIFF" + struct.pack("<I", len(body) + 1) + body + b"\x00").width == 1
     refuses(b"RIFF" + struct.pack("<I", len(body) + 1) + body + b"\x01")
+
+
+def test_a_jfif_minor_version_above_two_is_refused() -> None:
+    refuses(jpeg_of(jseg(0xE0, b"JFIF\x00\x01\x03\x00\x00\x01\x00\x01\x00\x00"), sof(), SOS))
+    assert sniff(jpeg_of(jseg(0xE0, b"JFIF\x00\x01\x02\x00\x00\x01\x00\x01\x00\x00"), sof(), SOS)).width == 1
