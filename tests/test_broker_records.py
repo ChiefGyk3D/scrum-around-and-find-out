@@ -274,6 +274,15 @@ ROW_SAMPLES: dict[str, dict[str, Any]] = {
     "suspended": {"call_id": ID, "model": FLAT, "reason": "breach"},
     "ambiguous_resolved": {"call_id": ID, "actual_micro": 4},
     "suspension_cleared": {"model": FLAT},
+    "admin_action": {
+        "action": "clear",
+        "uid": 0,
+        "sudo_uid": 1000,
+        "model": FLAT,
+        "month": "",
+        "add_micro": 0,
+        "reason": "billing page",
+    },
 }
 
 
@@ -311,6 +320,13 @@ def test_each_row_field_rejects_wrong_types_and_ranges(kind: str) -> None:
                 continue
             if (kind, name, wrong) == ("call_start", "image_size", ""):
                 continue  # an empty size is what a text call records
+            if kind == "admin_action" and (name, wrong) in {
+                ("sudo_uid", -1),  # no sudo
+                ("reason", ""),
+                ("month", ""),  # a clear names no month
+                ("model", ""),  # an adjustment names no model
+            }:
+                continue
             bad = copy.deepcopy(row(kind))
             bad[name] = wrong
             with pytest.raises(LedgerError):
