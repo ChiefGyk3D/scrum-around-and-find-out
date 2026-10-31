@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The Gemini wrapper (#200): free-tier limits, the paid gate, the ledger, the transport.
+"""The Gemini wrapper (#200): free-tier limits, the ledger, the transport (the paid path is the broker's, #287).
 
 Hermetic: a fake Gemini on loopback, a temporary ledger and config, a fake key. Every check that protects money has a
 test that fails when the check is removed.
@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-import json
 import os
 import stat
 from collections.abc import Iterator
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +35,6 @@ from geminidata import (
 )
 from safo.errors import ConfigError
 from safo.gemini import (
-    ApprovalStore,
     GeminiConfig,
     Ledger,
     Locations,
@@ -48,7 +45,6 @@ from safo.gemini import (
     ask,
     doppler_key_provider,
     load_config,
-    open_store,
     quota_line,
 )
 from safo.gemini import fixed_locations as real_fixed_locations  # bound before the autouse seam replaces it
@@ -70,14 +66,8 @@ def cfg(tmp_path: Path, server: FakeGemini, ledger: Path) -> GeminiConfig:
     return load_config(write_config(tmp_path / "gemini.yaml", server.url, ledger))
 
 
-@pytest.fixture
-def store(cfg: GeminiConfig, gemini_locations: Locations) -> ApprovalStore:
-    """A store that signs with the test's software key (enrolled as test-key-a in the fixed allowed-signers file)."""
-    return open_store(gemini_locations, cfg.ledger, str(gemini_locations.home / "key"), "test-key-a")
-
-
 class Keys:
-    """A key provider that records which tier was asked for, so a test can prove paid was never touched."""
+    """A key provider that records which tier was asked for, so a test can prove a paid key was never asked for."""
 
     def __init__(self) -> None:
         self.asked: list[str] = []
@@ -91,44 +81,30 @@ def free(prompt: str = "What changed in the CVE list?", **kw: Any) -> Request:
     return Request(**{"model": MODEL, "prompt": prompt, "tier": "free", **kw})
 
 
-PAID_PROMPT = "Summarize these public advisories."
-
-
-def approve(store: ApprovalStore, **kw: Any) -> str:
-    args: dict[str, Any] = {
-        "prompt": PAID_PROMPT,
-        "model": MODEL,
-        "max_usd": Decimal("1.50"),
-        "job": "job-1",
-        "quote": "yes, spend up to 1.50 on this research",
-        "quoted_at": NOW - dt.timedelta(minutes=5),
-        "now": NOW,
-        "ttl_minutes": 60,
-        "beyond_ceiling": False,
-    }
-    args.update(kw)
-    return store.issue(**args).id
-
-
-def paid(approval: str, **kw: Any) -> Request:
-    args: dict[str, Any] = {
-        "model": MODEL,
-        "prompt": PAID_PROMPT,
-        "tier": "paid",
-        "job": "job-1",
-        "approval": approval,
-        "max_output_tokens": 500,
-    }
-    args.update(kw)
-    return Request(**args)
-
-
 # -- configuration -------------------------------------------------------------------------------------------------
 
 
-def test_the_config_loads_and_carries_the_price_date(cfg: GeminiConfig) -> None:
-    assert cfg.price_checked == dt.date(2026, 10, 29)
-    assert cfg.free[MODEL].rpm == 3 and cfg.prices[MODEL].input_per_mtok == Decimal("0.75")
+def test_the_config_loads_with_its_free_limits_and_no_paid_setting(cfg: GeminiConfig) -> None:
+    assert cfg.free[MODEL].rpm == 3 and cfg.image_models == frozenset({IMAGE_MODEL})
+    assert not hasattr(cfg, "paid_config") and not hasattr(cfg, "prices") and not hasattr(cfg, "signing_key")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"caps": {"job_usd": 2}},
+        {"paid": {MODEL: {"input_per_mtok": 1, "output_per_mtok": 2, "valid_through": "2026-12-31"}}},
+        {"signing": {"key": "/x", "principal": "p"}},
+        {"price_source": "https://example.com"},
+    ],
+)
+def test_the_settings_that_belonged_to_the_in_process_paid_path_are_refused(
+    tmp_path: Path, ledger: Path, extra: dict[str, Any]
+) -> None:
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(config_dict("http://127.0.0.1:9", ledger, **extra)))
+    with pytest.raises(ConfigError):
+        load_config(path)
 
 
 def test_the_free_limits_are_supplied_never_guessed(tmp_path: Path, ledger: Path) -> None:
@@ -137,17 +113,6 @@ def test_the_free_limits_are_supplied_never_guessed(tmp_path: Path, ledger: Path
     path = tmp_path / "c.yaml"
     path.write_text(yaml.safe_dump(data))
     with pytest.raises(ConfigError, match="rpd"):
-        load_config(path)
-
-
-@pytest.mark.parametrize(
-    "caps",
-    [{"job_usd": 2.01, "month_usd": 10, "block_usd": 2}, {"job_usd": 2, "month_usd": 10.5, "block_usd": 2}],
-)
-def test_a_config_cannot_raise_the_caps(tmp_path: Path, ledger: Path, caps: dict[str, float]) -> None:
-    path = tmp_path / "c.yaml"
-    path.write_text(yaml.safe_dump(config_dict("http://127.0.0.1:9", ledger, caps=caps)))
-    with pytest.raises(ConfigError, match="cap"):
         load_config(path)
 
 
@@ -194,30 +159,12 @@ def test_a_free_line_cannot_be_made_without_the_maintainers_numbers(cfg: GeminiC
         quota_line(other, free(), NOW)
 
 
-def test_the_paid_quota_line_shows_spent_estimate_total_and_the_ceiling(
-    cfg: GeminiConfig, store: ApprovalStore
-) -> None:
-    seed(cfg.ledger, start_row(minutes_ago(2000), tier="paid", usd=3.25, call_id="p"))
-    line = quota_line(cfg, paid(approve(store)), NOW)
-    assert line.startswith(f"QUOTA paid {MODEL}:")
-    assert "spent 3.25 of 10.00 USD this month" in line
-    assert "of the 2.00 USD job cap" in line and "after this job" in line
-    assert "beyond ceiling: no" in line
-
-
-def test_beyond_ceiling_is_marked_once_the_month_passes_ten(cfg: GeminiConfig, store: ApprovalStore) -> None:
-    seed(cfg.ledger, start_row(minutes_ago(2000), tier="paid", usd=10.0, call_id="p"))
-    assert "beyond ceiling: YES" in quota_line(cfg, paid(approve(store)), NOW)
-
-
 # -- free tier -----------------------------------------------------------------------------------------------------
 
 
-def test_a_free_call_sends_one_request_with_the_free_key_and_logs_usage(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_a_free_call_sends_one_request_with_the_free_key_and_logs_usage(cfg: GeminiConfig, server: FakeGemini) -> None:
     keys = Keys()
-    reply = ask(cfg, free(), store=store, key_for=keys, now=NOW)
+    reply = ask(cfg, free(), key_for=keys, now=NOW)
     assert reply.text == "A cited answer." and keys.asked == ["free"]
     assert len(server.requests) == 1
     path, headers, body = server.requests[0]
@@ -231,133 +178,113 @@ def test_a_free_call_sends_one_request_with_the_free_key_and_logs_usage(
     assert rows[1]["actual_usd"] == 0 and rows[0]["est_usd"] == 0
 
 
-def test_the_key_never_reaches_the_ledger_or_the_reply(cfg: GeminiConfig, store: ApprovalStore) -> None:
-    reply = ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+def test_the_key_never_reaches_the_ledger_or_the_reply(cfg: GeminiConfig) -> None:
+    reply = ask(cfg, free(), key_for=Keys(), now=NOW)
     assert FAKE_KEY not in cfg.ledger.read_text() and FAKE_KEY not in repr(reply)
 
 
-def test_a_new_ledger_is_private_and_existing_lines_are_never_changed(cfg: GeminiConfig, store: ApprovalStore) -> None:
-    ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+def test_a_new_ledger_is_private_and_existing_lines_are_never_changed(cfg: GeminiConfig) -> None:
+    ask(cfg, free(), key_for=Keys(), now=NOW)
     assert stat.S_IMODE(os.stat(cfg.ledger).st_mode) == 0o600
     before = cfg.ledger.read_bytes()
-    ask(cfg, free(), store=store, key_for=Keys(), now=NOW + dt.timedelta(minutes=5))
+    ask(cfg, free(), key_for=Keys(), now=NOW + dt.timedelta(minutes=5))
     assert cfg.ledger.read_bytes().startswith(before) and len(cfg.ledger.read_bytes()) > len(before)
 
 
-def test_the_per_minute_request_limit_stops_before_anything_is_sent(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_the_per_minute_request_limit_stops_before_anything_is_sent(cfg: GeminiConfig, server: FakeGemini) -> None:
     for i in range(3):
         seed(cfg.ledger, start_row(minutes_ago(0.2 * (i + 1)), call_id=f"r{i}"))
     with pytest.raises(RefusedError, match="per minute"):
-        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free(), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
-def test_requests_older_than_a_minute_do_not_count_toward_the_minute(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_requests_older_than_a_minute_do_not_count_toward_the_minute(cfg: GeminiConfig, server: FakeGemini) -> None:
     for i in range(3):
         seed(cfg.ledger, start_row(minutes_ago(1.5 + i), call_id=f"r{i}"))
-    ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+    ask(cfg, free(), key_for=Keys(), now=NOW)
     assert len(server.requests) == 1
 
 
-def test_the_per_day_limit_resets_at_midnight_pacific(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_the_per_day_limit_resets_at_midnight_pacific(cfg: GeminiConfig, server: FakeGemini) -> None:
     just_after = dt.datetime(2026, 10, 30, 7, 5, tzinfo=dt.UTC)  # 00:05 Pacific
     for i in range(5):  # all before midnight Pacific, yet within the last 24 hours
         seed(cfg.ledger, start_row(dt.datetime(2026, 10, 30, 6, 50 - i, tzinfo=dt.UTC), call_id=f"r{i}"))
-    ask(cfg, free(), store=store, key_for=Keys(), now=just_after)
+    ask(cfg, free(), key_for=Keys(), now=just_after)
     assert len(server.requests) == 1
     for i in range(5):  # five calls after midnight Pacific fill the day
         seed(cfg.ledger, start_row(dt.datetime(2026, 10, 30, 7, 1, i, tzinfo=dt.UTC), call_id=f"n{i}"))
     with pytest.raises(RefusedError, match="per day"):
-        ask(cfg, free(), store=store, key_for=Keys(), now=just_after + dt.timedelta(minutes=1))
+        ask(cfg, free(), key_for=Keys(), now=just_after + dt.timedelta(minutes=1))
     assert len(server.requests) == 1
 
 
-def test_the_input_token_limit_counts_this_prompt_too(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_the_input_token_limit_counts_this_prompt_too(cfg: GeminiConfig, server: FakeGemini) -> None:
     seed(cfg.ledger, start_row(minutes_ago(0.3), tokens=990, call_id="big"))
     with pytest.raises(RefusedError, match="input tokens"):
-        ask(cfg, free("x" * 200), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free("x" * 200), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
-def test_a_429_is_final_and_never_falls_through_to_paid(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_a_429_is_final_and_never_falls_through_to_a_paid_call(cfg: GeminiConfig, server: FakeGemini) -> None:
     server.status = 429
     server.body = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "quota"}}
     server.headers_out = {"Retry-After": "30"}
     keys = Keys()
-    approval = approve(store)  # an approval exists, and must still not be used by a free call
     with pytest.raises(RateLimitStopError) as stopped:
-        ask(cfg, free(), store=store, key_for=keys, now=NOW)
+        ask(cfg, free(), key_for=keys, now=NOW)
     assert len(server.requests) == 1, "no retry"
     assert keys.asked == ["free"], "the paid key is never fetched"
     assert "QUOTA free" in str(stopped.value) and "stopped" in str(stopped.value)
     assert ledger_rows(cfg.ledger)[-1]["status"] == "rate_limited"
-    assert not (store.folder / f"{approval}.used").exists()
 
 
-def test_a_rate_limited_call_still_counts_toward_the_local_counter(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_a_rate_limited_call_still_counts_toward_the_local_counter(cfg: GeminiConfig, server: FakeGemini) -> None:
     server.status = 429
     with pytest.raises(RateLimitStopError):
-        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free(), key_for=Keys(), now=NOW)
     assert "requests per minute 1 of 3" in quota_line(cfg, free(), NOW)
 
 
-def test_image_models_are_paid_only(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+def test_image_models_are_paid_only(cfg: GeminiConfig, server: FakeGemini) -> None:
     other = dataclasses.replace(cfg, free={**cfg.free, IMAGE_MODEL: cfg.free[MODEL]})
     with pytest.raises(RefusedError, match="paid"):
-        ask(other, Request(model=IMAGE_MODEL, prompt="p", tier="free"), store=store, key_for=Keys(), now=NOW)
+        ask(other, Request(model=IMAGE_MODEL, prompt="p", tier="free"), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
-def test_an_unlisted_model_is_refused(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+def test_an_unlisted_model_is_refused(cfg: GeminiConfig, server: FakeGemini) -> None:
     with pytest.raises(RefusedError, match="not configured"):
-        ask(cfg, Request(model="gemini-9", prompt="p", tier="free"), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, Request(model="gemini-9", prompt="p", tier="free"), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
-def test_a_model_name_cannot_rewrite_the_url(cfg: GeminiConfig, store: ApprovalStore) -> None:
+def test_a_model_name_cannot_rewrite_the_url(cfg: GeminiConfig) -> None:
     with pytest.raises(RefusedError, match="model"):
-        ask(cfg, Request(model="../x?key=1", prompt="p", tier="free"), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, Request(model="../x?key=1", prompt="p", tier="free"), key_for=Keys(), now=NOW)
 
 
-def test_a_prompt_with_a_secret_shape_is_refused_before_sending(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_a_prompt_with_a_secret_shape_is_refused_before_sending(cfg: GeminiConfig, server: FakeGemini) -> None:
     for secret in ("AIza" + "A" * 35, "ghp_" + "a" * 36, "-----BEGIN RSA PRIVATE KEY-----"):
         with pytest.raises(RefusedError, match="secret"):
-            ask(cfg, free(f"look at {secret}"), store=store, key_for=Keys(), now=NOW)
+            ask(cfg, free(f"look at {secret}"), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
 # -- transport -----------------------------------------------------------------------------------------------------
 
 
-def test_a_redirect_is_refused_and_the_second_server_never_sees_the_key(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_a_redirect_is_refused_and_the_second_server_never_sees_the_key(cfg: GeminiConfig, server: FakeGemini) -> None:
     with FakeGemini().serve() as elsewhere:
         server.redirect_to = elsewhere.url + "/steal"
         with pytest.raises(OutcomeUnknownError):
-            ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+            ask(cfg, free(), key_for=Keys(), now=NOW)
         assert elsewhere.requests == []
     assert len(server.requests) == 1
 
 
 @pytest.mark.parametrize("fault", ["drop", "500", "garbage", "huge"])
-def test_an_ambiguous_outcome_is_never_replayed(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, fault: str
-) -> None:
+def test_an_ambiguous_outcome_is_never_replayed(cfg: GeminiConfig, server: FakeGemini, fault: str) -> None:
     if fault == "drop":
         server.drop = True
     elif fault == "500":
@@ -367,151 +294,40 @@ def test_an_ambiguous_outcome_is_never_replayed(
     else:
         server.raw = b"{" + b" " * 2_000_000 + b"}"
     with pytest.raises(OutcomeUnknownError, match="not repeated"):
-        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free(), key_for=Keys(), now=NOW)
     assert len(server.requests) == 1
     assert ledger_rows(cfg.ledger)[-1]["status"] == "ambiguous"
 
 
-def test_a_timeout_after_sending_is_ambiguous_and_bounded(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_a_timeout_after_sending_is_ambiguous_and_bounded(cfg: GeminiConfig, server: FakeGemini) -> None:
     server.stall = 1.5
     quick = dataclasses.replace(cfg, timeout_seconds=0.3)
     with pytest.raises(OutcomeUnknownError):
-        ask(quick, free(), store=store, key_for=Keys(), now=NOW)
+        ask(quick, free(), key_for=Keys(), now=NOW)
     assert len(server.requests) == 1
 
 
-def test_a_definite_client_error_is_reported_without_a_retry(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
+def test_a_definite_client_error_is_reported_without_a_retry(cfg: GeminiConfig, server: FakeGemini) -> None:
     server.status = 400
     server.body = {"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "bad shape"}}
     with pytest.raises(RefusedError, match="400"):
-        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free(), key_for=Keys(), now=NOW)
     assert len(server.requests) == 1
     assert ledger_rows(cfg.ledger)[-1]["status"] == "http_error"
 
 
-# -- the paid gate -------------------------------------------------------------------------------------------------
+# -- the ledger ----------------------------------------------------------------------------------------------------
 
 
-def test_a_paid_call_without_an_approval_is_refused(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
-    keys = Keys()
-    with pytest.raises(RefusedError, match="approval"):
-        ask(cfg, paid(""), store=store, key_for=keys, now=NOW)
-    with pytest.raises(RefusedError, match="approval"):
-        ask(cfg, paid("0123456789abcdef"), store=store, key_for=keys, now=NOW)
-    assert server.requests == [] and keys.asked == []
-
-
-def test_an_approved_paid_call_logs_estimate_and_actual_and_spends_the_record(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
-    approval = approve(store)
-    keys = Keys()
-    reply = ask(cfg, paid(approval), store=store, key_for=keys, now=NOW)
-    assert keys.asked == ["paid"] and len(server.requests) == 1
-    assert server.requests[0][2]["generationConfig"]["maxOutputTokens"] == 500
-    start, end = ledger_rows(cfg.ledger)
-    assert start["tier"] == "paid" and start["approval"] == approval and start["est_usd"] > 0
-    expected = (Decimal(10) * Decimal("0.75") + Decimal(20) * Decimal("3.75")) / Decimal(1_000_000)
-    assert Decimal(str(end["actual_usd"])) == expected and reply.cost_usd == expected
-    assert Decimal(str(start["est_usd"])) >= expected, "the estimate is an upper bound"
-    assert (store.folder / f"{approval}.used").exists()
-
-
-def test_an_approval_is_single_use(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
-    approval = approve(store)
-    ask(cfg, paid(approval), store=store, key_for=Keys(), now=NOW)
-    with pytest.raises(RefusedError, match="already used"):
-        ask(cfg, paid(approval), store=store, key_for=Keys(), now=NOW)
-    assert len(server.requests) == 1
-
-
-def test_an_expired_approval_is_refused(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
-    approval = approve(store, ttl_minutes=10)
-    with pytest.raises(RefusedError, match="expired"):
-        ask(cfg, paid(approval), store=store, key_for=Keys(), now=NOW + dt.timedelta(minutes=11))
-    assert server.requests == []
-
-
-@pytest.mark.parametrize("field", ["model", "job"])
-def test_an_approval_is_for_its_own_model_and_job(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, field: str
-) -> None:
-    approval = approve(store)
-    cfg2 = dataclasses.replace(cfg, prices={**cfg.prices, "other": cfg.prices[MODEL]})
-    request = paid(approval, **({"model": "other"} if field == "model" else {"job": "job-2"}))
-    with pytest.raises(RefusedError, match=field):
-        ask(cfg2, request, store=store, key_for=Keys(), now=NOW)
-    assert server.requests == []
-
-
-def test_the_job_cap_of_two_dollars_is_a_hard_limit(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
-    with pytest.raises(ConfigError, match="2"):
-        approve(store, max_usd=Decimal("2.01"))
-    approval = approve(store, max_usd=Decimal("2.00"))
-    # 600k tokens of output at 3.75 per million is 2.25 USD: over the cap whatever was approved
-    with pytest.raises(RefusedError, match="job cap"):
-        ask(cfg, paid(approval, max_output_tokens=600_000), store=store, key_for=Keys(), now=NOW)
-    assert server.requests == [] and not (store.folder / f"{approval}.used").exists()
-
-
-def test_the_estimate_must_fit_the_approved_amount(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
-    approval = approve(store, max_usd=Decimal("0.01"))
-    with pytest.raises(RefusedError, match="approved"):
-        ask(cfg, paid(approval, max_output_tokens=10_000), store=store, key_for=Keys(), now=NOW)
-    assert server.requests == []
-
-
-def test_the_monthly_ceiling_needs_an_explicit_beyond_ceiling_approval(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
-    seed(cfg.ledger, start_row(minutes_ago(3000), tier="paid", usd=9.999, call_id="p"))
-    plain = approve(store)
-    with pytest.raises(RefusedError, match="ceiling"):
-        ask(cfg, paid(plain), store=store, key_for=Keys(), now=NOW)
-    assert server.requests == [] and not (store.folder / f"{plain}.used").exists()
-    beyond = approve(store, beyond_ceiling=True)
-    ask(cfg, paid(beyond), store=store, key_for=Keys(), now=NOW)
-    assert len(server.requests) == 1
-
-
-def test_an_ambiguous_paid_call_counts_its_estimate_as_spent(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
-    server.status = 503
-    approval = approve(store)
-    with pytest.raises(OutcomeUnknownError):
-        ask(cfg, paid(approval), store=store, key_for=Keys(), now=NOW)
-    assert "spent 0.001884 of 10.00" in quota_line(cfg, paid(approve(store)), NOW)
-    assert (store.folder / f"{approval}.used").exists(), "an ambiguous call does not free its approval for a replay"
-
-
-def test_a_stale_price_table_refuses_a_paid_estimate(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
-    later = NOW + dt.timedelta(days=90)  # past the table's valid_through of 2026-12-31
-    approval = approve(store, now=later, quoted_at=later - dt.timedelta(minutes=5))
-    with pytest.raises(RefusedError, match="price"):
-        ask(cfg, paid(approval), store=store, key_for=Keys(), now=later)
-    assert server.requests == []
-
-
-def test_a_corrupt_ledger_stops_every_call(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
+def test_a_corrupt_ledger_stops_every_call(cfg: GeminiConfig, server: FakeGemini) -> None:
     cfg.ledger.parent.mkdir(parents=True, exist_ok=True)
     cfg.ledger.write_text('{"type": "funding", "amount_usd": 25}\nnot json\n')
     with pytest.raises(RefusedError, match="ledger"):
-        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free(), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
-def test_the_maintainers_own_rows_do_not_break_the_ledger(cfg: GeminiConfig, store: ApprovalStore) -> None:
+def test_the_maintainers_own_rows_do_not_break_the_ledger(cfg: GeminiConfig) -> None:
     seed(
         cfg.ledger,
         [
@@ -519,7 +335,7 @@ def test_the_maintainers_own_rows_do_not_break_the_ledger(cfg: GeminiConfig, sto
             {"date": "2026-10-29", "type": "usage", "amount_usd": 1.5, "note": "vendor-observed"},
         ],
     )
-    assert "spent 1.50 of 10.00" in quota_line(cfg, paid(approve(store)), NOW)
+    assert "requests per minute 0 of 3" in quota_line(cfg, free(), NOW)
 
 
 def test_a_ledger_that_is_a_symlink_is_refused(tmp_path: Path) -> None:
@@ -534,44 +350,6 @@ def test_a_ledger_that_is_a_symlink_is_refused(tmp_path: Path) -> None:
 def test_tests_never_write_the_real_ledger(cfg: GeminiConfig, tmp_path: Path) -> None:
     assert str(cfg.ledger).startswith(str(tmp_path))
     assert "safo-dev" not in str(cfg.ledger)
-
-
-# -- approvals -----------------------------------------------------------------------------------------------------
-
-
-def test_an_approval_carries_the_quote_and_time(store: ApprovalStore) -> None:
-    approval = store.issue(
-        prompt=PAID_PROMPT,
-        model=MODEL,
-        max_usd=Decimal("1"),
-        job="j",
-        quote="go ahead, one dollar",
-        quoted_at=NOW - dt.timedelta(minutes=1),
-        now=NOW,
-        ttl_minutes=30,
-        beyond_ceiling=False,
-    )
-    data = json.loads(json.loads((store.folder / f"{approval.id}.json").read_text())["payload"])
-    assert data["quote"] == "go ahead, one dollar" and data["quoted_at"].startswith("2026-10-29T19:59")
-    assert stat.S_IMODE(os.stat(store.folder / f"{approval.id}.json").st_mode) == 0o600
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        {"quote": ""},
-        {"quote": "x" * 600},
-        {"quoted_at": NOW + dt.timedelta(minutes=5)},
-        {"quoted_at": NOW - dt.timedelta(days=2)},
-        {"ttl_minutes": 0},
-        {"ttl_minutes": 5000},
-        {"job": ""},
-        {"max_usd": Decimal(0)},
-    ],
-)
-def test_an_approval_needs_a_real_quote_time_job_and_amount(store: ApprovalStore, bad: dict[str, Any]) -> None:
-    with pytest.raises(ConfigError):
-        approve(store, **bad)
 
 
 # -- the key -------------------------------------------------------------------------------------------------------
@@ -589,8 +367,10 @@ def test_the_key_is_read_by_name_from_doppler_without_argv_exposure(cfg: GeminiC
     argv = record.read_text().split()
     assert "GEMINI_API_KEY" in argv and "image-gen" in argv and "prd" in argv and "prd_paid" not in argv
     assert FAKE_KEY not in argv
-    assert provider("paid") == FAKE_KEY
-    assert "prd_paid" in record.read_text().split()
+    record.unlink()
+    with pytest.raises(RefusedError, match="broker"):
+        provider("paid")  # there is no paid key to read here: the secret tool is not even run
+    assert not record.exists()
 
 
 def test_a_missing_secret_tool_is_a_refusal_not_a_leak(cfg: GeminiConfig) -> None:
@@ -634,23 +414,23 @@ def test_the_default_ledger_is_under_the_fixed_home(tmp_path: Path) -> None:
     assert default_ledger(tmp_path) == tmp_path / ".local" / "share" / "safo" / "gemini-spend-ledger.jsonl"
 
 
-def test_a_missing_ledger_is_refused_when_another_exists_beside_it(cfg: GeminiConfig, store: ApprovalStore) -> None:
+def test_a_missing_ledger_is_refused_when_another_exists_beside_it(cfg: GeminiConfig) -> None:
     other = cfg.ledger.parent.parent / "older" / cfg.ledger.name
     other.parent.mkdir(parents=True)
     other.write_text('{"type": "usage", "date": "2026-10-29", "amount_usd": 5}\n')
     with pytest.raises(RefusedError, match="another ledger"):
-        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free(), key_for=Keys(), now=NOW)
     assert not cfg.ledger.exists()
 
 
-def test_an_unknown_ledger_row_type_is_reported(cfg: GeminiConfig, store: ApprovalStore) -> None:
+def test_an_unknown_ledger_row_type_is_reported(cfg: GeminiConfig) -> None:
     seed(cfg.ledger, [{"date": "2026-10-29", "type": "usgae", "amount_usd": 9}])
     with pytest.raises(RefusedError, match="unknown"):
         quota_line(cfg, free(), NOW)
 
 
 def test_two_callers_racing_for_the_last_room_cannot_both_proceed(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, monkeypatch: pytest.MonkeyPatch
+    cfg: GeminiConfig, server: FakeGemini, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     real = Ledger.read
     calls = {"n": 0}
@@ -664,67 +444,43 @@ def test_two_callers_racing_for_the_last_room_cannot_both_proceed(
 
     monkeypatch.setattr(Ledger, "read", racing)
     with pytest.raises(RefusedError, match="per minute"):
-        ask(cfg, free(), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free(), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
-def test_zero_token_counts_on_a_paid_answer_do_not_record_zero_spend(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore
-) -> None:
-    server.body = {
-        "candidates": [{"content": {"parts": [{"text": "word " * 400}]}}],
-        "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0},
-    }
-    approval = approve(store, prompt="x" * 900)
-    reply = ask(cfg, paid(approval, prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
-    start, end = ledger_rows(cfg.ledger)
-    assert end["actual_usd"] > 0 and Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
-    assert reply.cost_usd > 0
-
-
-def test_plausible_counts_are_recorded_as_reported(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
-    ask(cfg, paid(approve(store)), store=store, key_for=Keys(), now=NOW)
-    _, end = ledger_rows(cfg.ledger)
-    assert (
-        Decimal(str(end["actual_usd"])) == (Decimal(10) * Decimal("0.75") + Decimal(20) * Decimal("3.75")) / 1_000_000
-    )
-
-
-def test_the_prompt_is_checked_against_the_private_terms(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path
-) -> None:
+def test_the_prompt_is_checked_against_the_private_terms(cfg: GeminiConfig, server: FakeGemini, tmp_path: Path) -> None:
     terms = tmp_path / "terms.txt"
     terms.write_text("# mine\nacme-internal\n")
     withterms = dataclasses.replace(cfg, private_terms=str(terms))
     with pytest.raises(RefusedError, match="private term") as err:
-        ask(withterms, free("about ACME-Internal tooling"), store=store, key_for=Keys(), now=NOW)
+        ask(withterms, free("about ACME-Internal tooling"), key_for=Keys(), now=NOW)
     assert "acme" not in str(err.value).lower()
-    ask(withterms, free("about public things"), store=store, key_for=Keys(), now=NOW)
+    ask(withterms, free("about public things"), key_for=Keys(), now=NOW)
     assert len(server.requests) == 1
 
 
 @pytest.mark.parametrize("content", [None, "(unclosed\n", "x" * 70_000])
 @hard_timeout(30)
 def test_an_unreadable_or_invalid_terms_file_stops_the_call(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path, content: str | None
+    cfg: GeminiConfig, server: FakeGemini, tmp_path: Path, content: str | None
 ) -> None:
     terms = tmp_path / "terms.txt"
     if content is not None:
         terms.write_text(content)
     broken = dataclasses.replace(cfg, private_terms=str(terms))
     with pytest.raises(RefusedError, match="private terms"):
-        ask(broken, free(), store=store, key_for=Keys(), now=NOW)
+        ask(broken, free(), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
 def test_the_default_terms_file_is_the_fixed_one(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, gemini_locations: Locations
+    cfg: GeminiConfig, server: FakeGemini, gemini_locations: Locations
 ) -> None:
     default = dataclasses.replace(cfg, private_terms="default")
     with pytest.raises(RefusedError, match="private terms"):
-        ask(default, free(), store=store, key_for=Keys(), now=NOW)
+        ask(default, free(), key_for=Keys(), now=NOW)
     gemini_locations.terms.write_text("zzz-private\n")
-    ask(default, free(), store=store, key_for=Keys(), now=NOW)
+    ask(default, free(), key_for=Keys(), now=NOW)
     assert len(server.requests) == 1
 
 
@@ -733,31 +489,6 @@ def test_the_config_accepts_only_none_default_or_an_absolute_terms_path(tmp_path
     path.write_text(yaml.safe_dump(config_dict("http://127.0.0.1:9", ledger, private_terms="relative.txt")))
     with pytest.raises(ConfigError, match="private_terms"):
         load_config(path)
-
-
-def test_a_bidi_control_in_the_quote_is_refused(store: ApprovalStore) -> None:
-    with pytest.raises(ConfigError, match="quote"):
-        approve(store, quote="yes\u202e up to 1.50")
-
-
-def test_a_zero_prompt_count_alone_is_not_trusted(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
-    server.body = {
-        "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
-        "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 5},
-    }
-    ask(cfg, paid(approve(store, prompt="x" * 900), prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
-    start, end = ledger_rows(cfg.ledger)
-    assert Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
-
-
-def test_a_zero_output_count_alone_is_not_trusted(cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore) -> None:
-    server.body = {
-        "candidates": [{"content": {"parts": [{"text": "word " * 400}]}}],
-        "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 0},
-    }
-    ask(cfg, paid(approve(store, prompt="x" * 900), prompt="x" * 900), store=store, key_for=Keys(), now=NOW)
-    start, end = ledger_rows(cfg.ledger)
-    assert Decimal(str(end["actual_usd"])) == Decimal(str(start["est_usd"]))
 
 
 @hard_timeout(30)
@@ -778,20 +509,20 @@ def test_the_terms_loader_refuses_dangerous_shapes_and_accepts_plain_ones(tmp_pa
 
 @hard_timeout(30)
 def test_the_wrapper_matches_private_terms_on_the_folded_prompt(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path
+    cfg: GeminiConfig, server: FakeGemini, tmp_path: Path
 ) -> None:
     terms = tmp_path / "terms.txt"
     terms.write_text("acme-internal\n")
     withterms = dataclasses.replace(cfg, private_terms=str(terms))
     for disguised in ("about \u0430cme-internal", "about ac\u200bme-internal"):
         with pytest.raises(RefusedError, match="private term"):
-            ask(withterms, free(disguised), store=store, key_for=Keys(), now=NOW)
+            ask(withterms, free(disguised), key_for=Keys(), now=NOW)
     assert server.requests == []
 
 
 def test_ask_refuses_a_prompt_with_a_lone_surrogate_cleanly(
-    cfg: GeminiConfig, server: FakeGemini, store: ApprovalStore, tmp_path: Path
+    cfg: GeminiConfig, server: FakeGemini, tmp_path: Path
 ) -> None:
     with pytest.raises(RefusedError, match="not valid text"):
-        ask(cfg, free("x \ud800 foo"), store=store, key_for=Keys(), now=NOW)
+        ask(cfg, free("x \ud800 foo"), key_for=Keys(), now=NOW)
     assert server.requests == []

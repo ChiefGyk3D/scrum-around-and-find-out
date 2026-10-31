@@ -66,11 +66,11 @@ DECODE = re.compile(
 )
 SINK_RE = re.compile(SINK)
 SHELL_WILD = frozenset("$*?[]{}`%")
-RISKY_ACTIONS = ("ask", "approve")
-ACTIONS = ("ask", "approve", "quota")
+RISKY_ACTIONS = ("ask", "approve", "paid", "paid-dryrun")  # approve, paid and paid-dryrun: the paid entries (#287)
+ACTIONS = ("ask", "approve", "quota", "paid", "paid-dryrun")
 # inline code in prose that wraps a known word, an option or a file name; any other word in backticks runs as a command
 MARKDOWN_WORD = re.compile(
-    r"^`(?:ask|approve|quota|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
+    r"^`(?:ask|approve|quota|paid|paid-dryrun|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
 )
 VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
 # Every detector pattern, so the cheap prefilter below can never miss what a detector would catch. A new detector regex
@@ -406,7 +406,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
         cached = _PARSE_CACHE[text]
         return None if cached is None else dataclasses.replace(cached, line=line)
     # deferred: the Gemini mode builds argparse, which the guard's entry point must not load at import
-    from safo.modes.gemini import BriefParseError, brief_namespace
+    from safo.modes.gemini import PAID_ACTIONS, BriefParseError, brief_namespace
 
     try:
         ns = brief_namespace(span)
@@ -423,7 +423,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
             step = None  # not a step: it prints the quota line and sends nothing
         else:
             step = Step(
-                bool(ns.paid) or ns.action == "approve",
+                bool(ns.paid) or ns.action in ("approve", *PAID_ACTIONS),
                 ns.cap or ns.max_usd or None,
                 ns.approval or None,
                 line=line,

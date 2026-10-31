@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The research wrapper's own process: an isolated interpreter, a sanitized environment, a confined directory (#221).
 
-`safo gemini ...` is where the gates are (docs/gemini.md), and it holds the key for one call. The installed `safo`
-script starts a plain interpreter, so a caller's environment has already acted by the time any of this code runs. So the
-wrapper does two things at the entry, before it reads a config, a prompt or a key:
+`safo gemini ...` is where the gates are (docs/gemini.md). The free command holds the free key for one call; the paid
+commands (`paid`, `paid-dryrun`) hold no key at all, they are the broker client and sign through `ssh-keygen`
+(#287). The wrapper does two things at the entry, before it reads a config, a prompt or a key:
 
 * REFUSES to run when an interpreter startup variable (any `PYTHON*`), a shell startup variable (`BASH_ENV`, `ENV`)
   or a loader variable (`LD_*` and kin) is set. It names the variables, never their values, and runs nothing.
@@ -13,8 +13,20 @@ wrapper does two things at the entry, before it reads a config, a prompt or a ke
   action the few variables that action needs), a fresh private directory as its working directory, and no inherited
   descriptor.
 
-This is not a sandbox: the child runs as the same user. It closes the ways an environment, a working directory or a
-descriptor handed down by the caller could change what the wrapper imports, executes or reads.
+What the refusal covers, and what it cannot (#267):
+
+* COVERED: the child. It is started with `-I` and an allow-list environment, so nothing the caller set reaches the
+  code that reads the config, the prompt or a key, and a caller's working directory, user site and `PYTHON*`
+  variables cannot change what it imports.
+* COVERED, as early as this program can: the refusal runs as the first statement of `safo.cli.run` (`early_refusal`,
+  for any command line that names the `gemini` mode), before the hook clock, the guard entry or any parsing, and again
+  in `enter` on the parsed command.
+* NOT COVERED: anything that acts before the first line of this program. The installed `safo` console script starts a
+  PLAIN interpreter, so `sitecustomize` and `usercustomize`, `.pth` files, modules found through `PYTHONPATH`, and the
+  loader (`LD_PRELOAD`) have already run in the parent by then; refusing afterwards names the variable and stops the
+  command, but cannot undo what already ran. The parent and the caller are the same user (this is not a sandbox), so
+  this is defense in depth. The fix is a launcher that starts `python -I` before importing anything of ours; that is
+  the tracked follow-up #267.
 """
 
 from __future__ import annotations
@@ -47,10 +59,12 @@ STARTUP_PREFIXES = ("PYTHON", "LD_")
 # what already ran; it is defense in depth, and the child never receives them.
 STARTUP_NAMES = frozenset({"BASH_ENV", "ENV", "GCONV_PATH", "LOCPATH", "NLSPATH"})
 
-# What each action may receive beyond the fixed variables. `ask` reads the key through the secret tool, which takes
-# its own token from here; `approve` runs ssh-keygen to sign with the security key. Nothing else carries over.
+# What each action may receive beyond the fixed variables. `ask` reads the FREE key through the secret tool, which takes
+# its own token from here; `paid` and `paid-dryrun` run ssh-keygen to sign with the security key and hold no key.
+# Nothing else carries over.
 _SIGNING = ("SSH_AUTH_SOCK", "DISPLAY", "WAYLAND_DISPLAY", "TERM")
-EXTRA_NAMES: Mapping[str, tuple[str, ...]] = {"ask": ("DOPPLER_TOKEN",), "approve": _SIGNING}
+EXTRA_NAMES: Mapping[str, tuple[str, ...]] = {"ask": ("DOPPLER_TOKEN",), "paid": _SIGNING, "paid-dryrun": _SIGNING}
+ASKS_A_PERSON = ("paid", "paid-dryrun")  # the actions that read the person's answer from standard input
 
 
 class WrapperError(SafoError):
@@ -178,13 +192,13 @@ def launch(
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run the entry point in a child: `-I`, an allow-list environment, a fresh private working directory, no shell,
-    no inherited descriptor above 2, and standard input only for `approve` (which asks the person a question).
+    no inherited descriptor above 2, and standard input only for `paid` and `paid-dryrun` (which ask the person).
     `entry` is a seam for a test's fake child."""
     exe = python or sys.executable
     if not exe or not os.path.isabs(exe) or not os.path.isfile(exe) or not os.access(exe, os.X_OK):
         raise WrapperError("the interpreter cannot be found by an absolute path; nothing was run")
     scratch = tempfile.mkdtemp(prefix="run-", dir=scratch_root(account_home()))  # mode 0700, owned by this user
-    stdin = _inherit(0) if action == "approve" else subprocess.DEVNULL
+    stdin = _inherit(0) if action in ASKS_A_PERSON else subprocess.DEVNULL
     try:
         return subprocess.run(  # noqa: S603 - absolute interpreter, fixed words and the caller's own arguments, no shell
             [exe, "-I", *(default_entry() if entry is None else entry), *words],
@@ -250,6 +264,20 @@ def _same_command(before: argparse.Namespace, after: argparse.Namespace) -> bool
 def _refuse(text: str) -> int:
     output.write(sys.stderr, f"error: refused: {text}")
     return EXIT_UNKNOWN
+
+
+def early_refusal(words: Sequence[str], env: Mapping[str, str]) -> int | None:
+    """The refusal as early as this program can make it: the first statement of `safo.cli.run`, before the hook
+    clock, the guard entry or any parsing. It looks only for the word `gemini` among the arguments (a superset of
+    the real mode test, which needs the parser), so a startup variable beside such a command line is refused with
+    nothing else run. None when nothing is wrong here; `enter` then makes the exact check. It cannot see what ran
+    before this program started (see the module docstring)."""
+    if "gemini" not in words:
+        return None
+    bad = startup_variables(env)
+    if bad:
+        return _refuse(f"startup variable(s) set: {', '.join(bad)}. Unset them and run again; nothing was run.")
+    return None
 
 
 def enter(words: Sequence[str], env: Mapping[str, str]) -> int | None:

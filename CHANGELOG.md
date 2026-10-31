@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Paid Gemini: the in-process paid path is deleted and the broker is the only way to a paid call (#287). Removed from
+  `safo.gemini` and `safo gemini`: the paid branch of `ask`, the approval store and its records, the local `approve` and
+  its dry run, the paid spend counter and quota line, the paid key read, the root-owned in-process paid switch, the
+  `usage` action, and the `paid_config`, `signing`, caps, `price_source`, `price_checked` and `paid` settings of
+  `gemini.yaml` (a file that still has one is refused; the new optional `image_models` list names paid-only models the free
+  tier must refuse). `ask --paid`, `--approval`, `--cap` and `approve` are still parsed, only so the dispatch guard keeps
+  reading them as paid steps, and the command refuses them. New: `safo gemini paid` (one paid call through the broker
+  client) and `safo gemini paid-dryrun` (sign a throw-away text in the dry-run namespace and ask the broker to verify it:
+  no call, no charge); the wrapper hands only these two actions the signing variables and a standard input. The dispatch
+  guard now denies every paid step (it no longer looks up an approval record) and recognizes `paid` and `paid-dryrun`
+  as paid actions. A test fails if any module outside `safo.broker` (other than the free-tier module and the guard's own
+  deny patterns) names the vendor host, a paid model or the key header. Broker client: `run_dryrun`.
+  Also in this change: the image writer takes the stricter reading of its contract (output directory mode 0700 exactly,
+  an optional `expected_sha256` checked before anything is written, and `write_receipt_file` for the exclusive 0600
+  `reviewed: false` sidecar, which the client now uses); the wrapper's startup-variable refusal also runs as the first
+  statement of `safo.cli.run`, and the docs say precisely what it covers and what it cannot (the installed script starts
+  a plain interpreter; the launcher follow-up is #267); the preflight's hardware-key check passes only when the visible
+  key matches an enrolled signer (new `--key-file`), and a visible device alone is a warning; and the docs now say
+  that `broker.yaml` is read once when the broker starts (a change needs a restart), while the switch, the allowed signers
+  and the revocation list are read on every request. The paid API key exists only in the broker's credential.
 - Paid Gemini broker, administration command (#262): `python -I -m safo.broker.admin` with `status`, `usage`,
   `check-install`, `clear` and `reconcile`, run by root. It reads the root-owned files, then drops to the service user
   (groups emptied, group, user, read back, regain probe) before opening the ledger, so the ledger's owner rule is

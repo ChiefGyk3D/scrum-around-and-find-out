@@ -21,7 +21,10 @@ prompt bytes); otherwise it is discarded. Text from the broker is printed only t
 every control and format character. Nothing in this module logs, prints a prompt or an answer to a diagnostic stream,
 reads a key, opens an image, or imports the free-tier call. The wire format is `safo.broker.protocol`, used unchanged.
 
-Run it as `python3 -I -m safo.broker.client ...` (see `main`). It is not wired into `safo gemini` yet (docs).
+Run it as `python3 -I -m safo.broker.client ...` (see `main`), or through the paid entries of the Gemini command group,
+`safo gemini paid ...` and `safo gemini paid-dryrun` (#287): they call `run_paid` and `run_dryrun` below, and there is
+no other paid path in the program. `run_dryrun` asks the broker's `dryrun` operation to check one throw-away
+signature, so the signer, the enrollment and the broker's switch are tested without a call or a charge.
 """
 
 from __future__ import annotations
@@ -304,6 +307,19 @@ def default_writer() -> ImageWriter:
     return writer
 
 
+def default_sidecar() -> Callable[[str, bytes], str]:
+    """`safo.broker.imagewrite.write_receipt_file` (exclusive, mode 0600, `reviewed: false`, the image's directory
+    rules); the adapter above stays only as a fallback and for tests."""
+    try:
+        module = importlib.import_module("safo.broker.imagewrite")
+    except ModuleNotFoundError as err:
+        if err.name != "safo.broker.imagewrite":
+            raise
+        return adapter_write_sidecar
+    sidecar: Callable[[str, bytes], str] = module.write_receipt_file
+    return sidecar
+
+
 # -- the signer --------------------------------------------------------------------------------------------------------
 
 
@@ -317,6 +333,19 @@ def default_signer(cfg: ClientConfig, env: Mapping[str, str]) -> Callable[[bytes
 
     def sign(payload: bytes) -> str:
         return geminisign.sign(key, payload, geminisign.NAMESPACE, env)
+
+    return sign
+
+
+def default_dry_signer(cfg: ClientConfig, env: Mapping[str, str]) -> Callable[[bytes], str]:
+    """The same signer in the dry-run namespace: a signature made for a dry run cannot approve a call, and the other
+    way round."""
+    if not cfg.signing_key:
+        raise ClientError(SIGNING_MISSING)
+    key = cfg.signing_key
+
+    def sign(payload: bytes) -> str:
+        return geminisign.sign(key, payload, geminisign.DRYRUN_NAMESPACE, env)
 
     return sign
 
@@ -348,6 +377,7 @@ class Deps:
     terms: Callable[[str], None]
     confirm: Callable[[str], str]
     interactive: bool
+    dry_sign: Callable[[bytes], str] | None = None  # the signer for the dry-run namespace; None where no key is set
 
 
 @dataclasses.dataclass(frozen=True)
@@ -868,6 +898,10 @@ def _save_image(
     kind = sniff_image_type(data)
     if kind is None or _KINDS[kind] != described["mime"]:
         raise _NotSaved("the bytes are not the type the broker named")
+    if (
+        hashlib.sha256(data).hexdigest() != described["sha256"]
+    ):  # the receipt's digest, checked again just before writing
+        raise _NotSaved("the bytes do not match the digest in the receipt")
     stamp = deps.now().astimezone(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     stem = f"{stamp}-{c.job}-{r['nonce'][:8]}-{described['index']}"
     try:
@@ -1020,6 +1054,96 @@ def _run(params: PaidParams, cfg: ClientConfig, deps: Deps, out: TextIO, err: Te
     return _failure(err, reply, want)
 
 
+# -- the dry run -------------------------------------------------------------------------------------------------------
+
+DRYRUN_JOB = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}")
+
+
+def _dryrun_answer(body: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The broker's dry-run answer, or None when it is not exactly the shape the broker sends."""
+    if set(body) != {"v", "ok", "principal", "fingerprint", "hardware", "touch", "pin", "enabled"}:
+        return None
+    if type(body["principal"]) is not str or _PRINCIPAL.fullmatch(body["principal"]) is None:
+        return None
+    if type(body["fingerprint"]) is not str or _FINGERPRINT.fullmatch(body["fingerprint"]) is None:
+        return None
+    if any(type(body[k]) is not bool for k in ("hardware", "touch", "pin", "enabled")):
+        return None
+    return dict(body)
+
+
+def run_dryrun(cfg: ClientConfig, deps: Deps, out: TextIO, err: TextIO, job: str = "signer-check") -> int:
+    """Test the whole signing chain against the broker without a call, a reservation or a charge: sign one throw-away
+    text in the dry-run namespace (a touch), send it with the `dryrun` operation and print what the broker made of it.
+    The broker spends and records nothing, and a dry-run signature cannot approve a call."""
+    try:
+        if DRYRUN_JOB.fullmatch(job) is None:
+            raise ClientError("the job is a plain name (letters, digits, . _ -)")
+        if not cfg.signing_key or not cfg.principal or deps.dry_sign is None:
+            raise ClientError(SIGNING_MISSING)
+        if not deps.interactive:
+            raise ClientError("the dry run needs a person at a terminal: standard input and output must both be one")
+        text = geminisign.canonical({"dry_run": True, "job": job})
+        say(out, f"dry run: you are about to sign this throw-away text, which approves nothing: {text}")
+        phrase = f"dryrun {job}"
+        if deps.confirm(f"type exactly `{phrase}` to continue, anything else cancels: ").strip() != phrase:
+            raise ClientError("not confirmed; nothing was signed")
+        try:
+            armor = deps.dry_sign(text.encode("ascii"))
+            if (
+                type(armor) is not str
+                or not armor.isascii()
+                or len(armor) > geminisign.SIGNATURE_BYTES
+                or geminisign.parse_signature(armor).namespace != geminisign.DRYRUN_NAMESPACE
+            ):
+                raise ClientError("the signer returned something that is not a dry-run signature")
+        except ClientError:
+            raise
+        except (SafoError, OSError, ValueError):
+            raise ClientError(
+                "the security key did not sign (not attached, not touched in time, or cancelled)"
+            ) from None
+        body = _body("dryrun", approval={"payload": text, "signature": armor})
+        chan = _open(deps, "nothing was signed for a call")
+        begun = deps.mono()
+        try:
+            try:
+                send_request(chan, body)
+                reply = read_reply(chan, begun + BEGIN_SECONDS, deps.mono)
+            except (_Lost, KeyboardInterrupt):
+                raise ClientError("no usable reply to the dry run arrived; nothing was spent") from None
+        finally:
+            chan.close()
+        if reply.body["ok"] is not True:
+            code = reply.body["code"]
+            status, sentence = protocol.REPLY_CODES[code]
+            raise ClientError(f"{code}: {sentence}; nothing was spent", status)
+        answer = _dryrun_answer(reply.body)
+        if answer is None:
+            raise ClientError("the broker's dry-run answer is not well formed")
+        say(
+            out,
+            f"dry run: the broker verified the signature. principal {answer['principal']}, {answer['fingerprint']}, "
+            f"{'hardware key' if answer['hardware'] else 'SOFTWARE key'}, "
+            f"touch {'seen' if answer['touch'] else 'not shown'}, PIN {'seen' if answer['pin'] else 'not shown'}.",
+        )
+        say(
+            out,
+            "paid use is enabled in the broker"
+            if answer["enabled"]
+            else "paid use is DISABLED in the broker (the switch)",
+        )
+        say(out, "No call was made, nothing was reserved or spent, and no approval was recorded.")
+        return EXIT_OK
+    except SafoError as problem:
+        say(err, f"error: {problem}")
+        return problem.exit_code
+    except KeyboardInterrupt:
+        say(err, "interrupted; nothing was spent")
+        return EXIT_INTERRUPTED
+
+
 # -- the command line --------------------------------------------------------------------------------------------------
 
 
@@ -1074,10 +1198,11 @@ def default_deps(cfg: ClientConfig, env: Mapping[str, str], stdin: TextIO, out: 
     return Deps(
         connect=lambda: connect_unix(cfg.socket),
         sign=default_signer(cfg, env),
+        dry_sign=default_dry_signer(cfg, env),
         now=lambda: dt.datetime.now(dt.UTC),
         mono=time.monotonic,
         writer=default_writer(),
-        sidecar=adapter_write_sidecar,
+        sidecar=default_sidecar(),
         check_dir=check_image_dir,
         terms=default_terms(cfg, home / ".config" / "safo" / "privacy-terms.txt"),
         confirm=confirm,

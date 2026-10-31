@@ -8,6 +8,9 @@ list, and never prints a secret or a key line.
 
 from __future__ import annotations
 
+import base64
+import dataclasses
+import hashlib
 import io
 import os
 import stat
@@ -20,7 +23,9 @@ from safo import gemini_preflight as pf
 
 NS = "safo-gemini-approval"
 # built from pieces at run time so no key-shaped literal sits in the tree (the secret scan reads every commit)
-KEY_B64 = "".join(["AAAA", "GnNrLXNzaC1lZDI1NTE5QG9w", "ZW5zc2guY29tAAAA", "I" + "Placeholder" * 4])
+KEY_B64 = "".join(
+    ["AAAA", "GnNrLXNzaC1lZDI1NTE5QG9w", "ZW5zc2guY29tAAAA", "I" + "Placeholder" * 4 + "AAA"]
+)  # 92 characters: a whole number of base64 quanta
 SECRET = "BEGIN OPENSSH PRIVATE KEY topsecretmaterial"
 ALLOWED_COMMANDS = {
     ("ssh", "-Q", "key"),
@@ -43,7 +48,7 @@ class FakeRunner:
                 0, "\tlibfido2.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libfido2.so.1\n"
             ),
             ("fido2-token", "-L"): pf.RunResult(0, "/dev/hidraw3: vendor=0x1050, product=0x0407 (Yubico YubiKey)\n"),
-            ("ssh-add", "-L"): pf.RunResult(1, "The agent has no identities.\n"),
+            ("ssh-add", "-L"): pf.RunResult(0, f"sk-ssh-ed25519@openssh.com {KEY_B64} comment\n"),
         }
         base.update(answers or {})
         self.answers = base
@@ -157,24 +162,76 @@ def test_no_udev_rule_for_the_key_class_warns(tmp_path: Path) -> None:
     assert pf.exit_code(pf.run_preflight(loc, FakeRunner(), lookup_ok), strict=True) == 1
 
 
-def test_a_key_visible_through_fido2_token_passes(tmp_path: Path) -> None:
+def test_a_key_in_the_agent_that_matches_an_enrolled_signer_passes(tmp_path: Path) -> None:
     got = by_name(pf.run_preflight(make_tree(tmp_path), FakeRunner(), lookup_ok))
     assert got["hardware-key"].status == "pass"
+    assert "yubikey-a" in got["hardware-key"].detail and "enrolled" in got["hardware-key"].detail
 
 
-def test_a_key_visible_only_in_the_agent_passes(tmp_path: Path) -> None:
-    runner = FakeRunner(
-        {
-            ("fido2-token", "-L"): pf.RunResult(0, ""),
-            ("ssh-add", "-L"): pf.RunResult(0, f"sk-ssh-ed25519@openssh.com {KEY_B64} comment\n"),
-        }
-    )
+def test_an_authenticator_alone_cannot_be_tied_to_an_enrolled_signer(tmp_path: Path) -> None:
+    """The finding D4 case: a visible device passed before; now it warns, because nothing links it to the enrollment."""
+    runner = FakeRunner({("ssh-add", "-L"): pf.RunResult(1, "The agent has no identities.\n")})
     got = by_name(pf.run_preflight(make_tree(tmp_path), runner, lookup_ok))
+    assert got["hardware-key"].status == "warn"
+    assert "cannot be tied to an enrolled signer" in got["hardware-key"].detail
+
+
+def test_a_visible_key_that_no_allowed_signers_line_matches_warns_clearly(tmp_path: Path) -> None:
+    other = base64.b64encode(b"\x00\x00\x00\x1bsk-ssh-ed25519@openssh.com" + b"\x01" * 40).decode()
+    runner = FakeRunner({("ssh-add", "-L"): pf.RunResult(0, f"sk-ssh-ed25519@openssh.com {other} c\n")})
+    got = by_name(pf.run_preflight(make_tree(tmp_path), runner, lookup_ok))
+    assert got["hardware-key"].status == "warn"
+    assert "no allowed-signers entry matches the visible key" in got["hardware-key"].detail
+    assert other not in pf.render(pf.run_preflight(make_tree(tmp_path / "again"), runner, lookup_ok))
+
+
+def test_the_configured_key_file_is_matched_against_the_enrollment(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    runner = FakeRunner({("ssh-add", "-L"): pf.RunResult(1, "The agent has no identities.\n")})
+    pub = tmp_path / "approval_key.pub"
+    pub.write_text(f"sk-ssh-ed25519@openssh.com {KEY_B64} comment\n")
+    got = by_name(pf.run_preflight(dataclasses.replace(loc, key_file=tmp_path / "approval_key"), runner, lookup_ok))
     assert got["hardware-key"].status == "pass"
+    assert "key file" in got["hardware-key"].detail and "yubikey-a" in got["hardware-key"].detail
+
+
+def test_a_configured_key_file_that_is_not_enrolled_warns(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    runner = FakeRunner({("ssh-add", "-L"): pf.RunResult(1, "The agent has no identities.\n")})
+    other = base64.b64encode(b"\x00\x00\x00\x1bsk-ssh-ed25519@openssh.com" + b"\x02" * 40).decode()
+    pub = tmp_path / "approval_key.pub"
+    pub.write_text(f"sk-ssh-ed25519@openssh.com {other} comment\n")
+    got = by_name(pf.run_preflight(dataclasses.replace(loc, key_file=pub), runner, lookup_ok))
+    assert got["hardware-key"].status == "warn"
+    assert "no allowed-signers entry matches the visible key" in got["hardware-key"].detail
+
+
+def test_a_configured_key_file_with_a_software_key_type_warns(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    pub = tmp_path / "soft.pub"
+    pub.write_text(f"ssh-ed25519 {KEY_B64} comment\n")
+    got = by_name(pf.run_preflight(dataclasses.replace(loc, key_file=pub), FakeRunner(), lookup_ok))
+    assert "not a hardware key type" in got["hardware-key"].detail
+
+
+def test_an_enrolled_software_key_never_makes_the_check_pass(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path, signers_lines=[f'soft namespaces="{NS}" ssh-ed25519 {KEY_B64}'])
+    runner = FakeRunner({("ssh-add", "-L"): pf.RunResult(0, f"ssh-ed25519 {KEY_B64} comment\n")})
+    got = by_name(pf.run_preflight(loc, runner, lookup_ok))
+    assert got["hardware-key"].status == "warn"
+
+
+def test_the_fingerprint_is_the_sha256_of_the_decoded_blob() -> None:
+    blob = b"\x00\x00\x00\x0bsk-ssh-test" + bytes(range(20))
+    expected = "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+    assert pf.fingerprint(base64.b64encode(blob).decode()) == expected
+    assert pf.fingerprint("not base64 !!") is None
 
 
 def test_no_key_visible_warns(tmp_path: Path) -> None:
-    runner = FakeRunner({("fido2-token", "-L"): pf.RunResult(0, "")})
+    runner = FakeRunner(
+        {("fido2-token", "-L"): pf.RunResult(0, ""), ("ssh-add", "-L"): pf.RunResult(1, "no identities\n")}
+    )
     got = by_name(pf.run_preflight(make_tree(tmp_path), runner, lookup_ok))
     assert got["hardware-key"].status == "warn"
 

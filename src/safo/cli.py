@@ -180,6 +180,9 @@ def person_at_a_terminal() -> bool:
 
 
 def run() -> None:
+    early = wrapper.early_refusal(sys.argv[1:], os.environ)  # first of all: a startup variable beside `gemini` (#267)
+    if early is not None:
+        raise SystemExit(early)
     hooks.arm_process_clock()  # the guard's budget counts from the start of the process
     words = sys.argv[1:]
     HookSafeParser.armed = not person_at_a_terminal()  # a host: no usage, error or help text on the hook commands

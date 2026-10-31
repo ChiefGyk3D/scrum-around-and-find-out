@@ -1,12 +1,17 @@
 # Gemini keys
 
-> **Status.** These steps are **needed only when paid use is enabled**. The free research path needs no key and no root
-> file, and paid use is disabled by a root-owned switch until a state authority outside the maintainer's account
-> exists (see [Gemini](gemini.md)). The setup is kept so it is ready, and `keys check` and a dry run of `safo gemini approve` can
-> test a key while the switch is off.
+> **Status.** These steps are **needed only for paid use**, which exists only through the broker
+> ([Gemini broker](gemini-broker.md)). The free research path needs no key of this kind and no root file. `keys check` and
+> `safo gemini paid-dryrun` test a key while the broker's switch is off.
 
 Who may approve paid Gemini spend, and how to add, rotate, back up and revoke the keys that do. Read
 [Gemini](gemini.md) first for what a signed approval is and what it cannot do.
+
+**Two kinds of key, kept apart.** The keys on this page are your **approval keys** (security keys that sign). The **paid
+API key** is a different thing: it exists **only in the broker's own credential** (an encrypted root-owned file systemd
+hands to the broker user), never in `gemini.yaml`, the secret manager configs this program reads, the environment or
+any file your account owns. If you still have an old paid API key in a secret manager config from before the broker,
+revoke or rotate it at the vendor; the broker's setup runbook says how, and nothing in this program reads it any more.
 
 **Marks used here.** *Verified* means read from the real source named, on the date given, or run on this machine.
 *Inferred* means reasoned from verified facts and not run. *Unverified* means neither. Commands come from `man
@@ -74,7 +79,7 @@ Enrolling one (the loopback enrollment page is **not built yet**; the trust-file
 
    Without the policy line the passkey is ignored and `keys check` says so. A passkey is revoked by the SHA-256
    fingerprint of its public key in the revocation file.
-4. Run `safo gemini keys check`. Paid use stays disabled by its own switch whatever you enroll.
+4. Run `safo gemini keys check`. Paid use stays disabled by the broker's own switch whatever you enroll.
 
 **Warning for agent-held keys that are not FIDO keys** (for example a fingerprint reader that holds an SSH key in an agent
 with a cooldown): they are not Tier 1 and not Tier 2. A process that can reach the agent can sign again inside the
@@ -93,7 +98,7 @@ safo gemini keys propose ~/.ssh/KEYFILE.pub --label yubikey-a   # prints the exa
 requirement, and when a Tier 2 credential is enrolled. It fails when no usable key is enrolled, when a key carries
 `no-touch-required`, or when the revocation file is missing.
 
-## Setup: the first key (only when paid use is enabled; needs your touch; the agent does not do this)
+## Setup: the first key (for paid use through the broker; needs your touch; the agent does not do this)
 
 1. **Check OpenSSH.** `ssh -V` must be 8.2 or newer for FIDO keys, and 8.4 or newer for `verify-required` (verified,
    Yubico page, 2026-10-29). The build must have FIDO support (`ssh-keygen -t ed25519-sk` says so if not).
@@ -138,9 +143,11 @@ requirement, and when a Tier 2 credential is enrolled. It fails when no usable k
    Paste the line `propose` printed. If the key was made with `verify-required`, add the line
    `# safo: yubikey-a require-pin` beneath it. (`install`, `sudoedit`, `cp -a` and `diff` are standard tools; they were
    not run for this page. Inferred.)
-5. **Tell safo which key signs.** In `~/.config/safo/gemini.yaml`:
+5. **Tell the broker client which key signs.** In `~/.config/safo/broker-client.yaml` (not `gemini.yaml`: that file no
+   longer has a `signing` block, and a file that still has one is refused):
 
    ```yaml
+   version: 1
    signing:
      key: /path/to/safo_gemini_yubikey_a
      principal: yubikey-a
@@ -150,14 +157,18 @@ requirement, and when a Tier 2 credential is enrolled. It fails when no usable k
 
    ```bash
    safo gemini keys check
-   # a dry run of safo gemini approve: it signs a throw-away text, spends nothing and writes nothing
-   safo --dry-run gemini approve --model gemini-3.6-flash --prompt-file prompt.txt --max-output-tokens 1000 --max-usd 1.50 --job key-test --quote "key test" --quoted-at 2026-10-29T15:00:00Z
+   # a dry run through the broker: it signs a throw-away text, spends nothing and records nothing
+   safo gemini paid-dryrun --job key-test
+   # the readiness checks, tied to the enrollment (add --key-file for the file named in broker-client.yaml)
+   python3 -m safo.gemini_preflight --key-file /path/to/safo_gemini_yubikey_a
    ```
 
-   At a terminal, read the whole prompt and digest it prints (they are what a real approval signs; prompts over 4000 characters are refused), type `approve key-test`, touch the key (and give the PIN if you set one). The dry run signs a throw-away
-   text in another namespace (`safo-gemini-approval-dryrun`), verifies it against the enrolled key, prints the label,
-   fingerprint and whether it saw the touch and the PIN, and writes no record and no ledger row. Use a current
-   `--quoted-at` (within the last 24 hours, UTC).
+   At a terminal, type `dryrun key-test`, touch the key (and give the PIN if you set one). The dry run signs a throw-away
+   text in another namespace (`safo-gemini-approval-dryrun`), sends it to the broker's `dryrun` operation, which verifies it
+   against the enrolled key, and prints the label, the fingerprint, whether it saw the touch and the PIN, and whether paid
+   use is switched on in the broker. It writes no approval and no ledger row, and it cannot approve a call. The preflight's
+   hardware-key line passes only when the key in the agent or in the key file matches a key enrolled in the allowed-signers
+   file; a visible device alone is a warning.
 
 ## Several keys: add, rotate, back up
 
@@ -165,8 +176,8 @@ requirement, and when a Tier 2 credential is enrolled. It fails when no usable k
   if the other is lost. Enroll the second the same way (own label, own `application=` name, own `.pub`).
 - **Record the fingerprints** from `safo gemini keys list` somewhere other than this machine, next to where each key
   lives. You need a fingerprint to revoke a key whose `.pub` you no longer have.
-- **Which key signs** is `signing.principal` in `gemini.yaml`. To use the second key, change `key:` and `principal:`.
-- **Rotate** a key: enroll the new one (steps 2-6), switch `gemini.yaml`, confirm a dry run, then revoke the old one
+- **Which key signs** is `signing.principal` in `broker-client.yaml`. To use the second key, change `key:` and `principal:`.
+- **Rotate** a key: enroll the new one (steps 2-6), switch `broker-client.yaml`, confirm a dry run, then revoke the old one
   (below) and keep its line in the allowed-signers file so the history still reads.
 - **A key per desktop** is fine (a Yubikey on one machine, a second on another); each is a separate label.
 - **Resident or not.** A non-resident key (no `-O resident`) keeps its credential reference only in the handle file, so
@@ -192,10 +203,10 @@ A key is lost or stolen: **revoke first, investigate second.**
    The line is `SHA256:...` (the fingerprint) or the whole public key line. A line that is neither stops every approval
    until you fix it.
 3. Run `safo gemini keys list`: the key shows `REVOKED`. Any unspent approval it signed is now refused.
-4. Look for what it did: the ledger's `approval_issued` and `approval_used` rows name the principal; compare with the
-   vendor billing page, and add any spend the ledger missed with `safo gemini usage`.
+4. Look for what it did: the broker's ledger names the principal of every approval it accepted (read it with the broker's
+   root-only admin command); compare with the vendor billing page.
 5. If the stolen key could have been used with its PIN, change the PIN (the vendor's manager tool). If you suspect the
-   paid API key was exposed, rotate it in the secret store.
+   paid API key was exposed, rotate it at the vendor and replace the broker's credential (the setup runbook).
 6. Enroll a replacement (steps 2-6 above).
 
 ## Checklist
@@ -205,10 +216,10 @@ A key is lost or stolen: **revoke first, investigate second.**
 - [ ] Files in `/etc/safo` are owned by root, mode 644, and `ls -l` shows it.
 - [ ] Fingerprints written down off this machine.
 - [ ] The revocation file exists (it may be empty; without it every approval is refused).
-- [ ] A `--dry-run` approval worked with each key.
+- [ ] `safo gemini paid-dryrun` worked with each key.
 - [ ] You know the rule: **touch the key only after reading the quota line, the quote and the whole prompt and its digest
-      and never for a prompt you did not start.** The signature covers that exact prompt (payload version 2);
-      an approval from before that change is refused and needs a fresh one.
+      and never for a prompt you did not start.** The signature covers that exact prompt (its digest is in the text);
+      an approval from an older format is refused and needs a fresh one.
 - [ ] The vendor-side monthly limit is still set (it is the backstop for everything this gate cannot see).
 
 ## What the tests could not prove (software key versus a real sk key)
@@ -225,7 +236,7 @@ checks. What differs with a real `ed25519-sk` key:
   not say it checks, and it documents `no-touch-required` only for certificates and key generation). The code does not
   rely on it: it checks the flag.
 - Key generation, the touch, the PIN prompt and a device with FIDO support were never run here, and no hardware key was
-  attached. Run the dry run (step 6) with each key as the real test.
+  attached. Run the dry run (step 6, `safo gemini paid-dryrun`) with each key as the real test.
 
 ## Yubico security keys (OpenSSH sk keys)
 
