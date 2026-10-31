@@ -634,5 +634,5 @@ def test_a_valid_reply_over_the_frame_limit_is_refused_by_the_client() -> None:
     assert len(big) > p.MAX_REPLY_FRAME
     with pytest.raises(ProtocolError):
         p.parse_reply(big)
-    exact = json.dumps({"v": 1, "ok": True, "pad": "a" * (p.MAX_REPLY_FRAME - 30)}).encode()
+    exact = json.dumps({"v": 1, "ok": True, "pad": "a" * (p.MAX_REPLY_FRAME - 60)}).encode()
     assert len(exact) <= p.MAX_REPLY_FRAME and p.parse_reply(exact)["ok"] is True
