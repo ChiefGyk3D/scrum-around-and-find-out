@@ -2,9 +2,7 @@
 
 ## Unreleased
 
-<<<<<<< HEAD
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
-=======
 - Paid Gemini broker, phase 1 (#205): the core library under `src/safo/broker/`. Integer micro-dollar arithmetic and the
   worst-case reservation (prompt bytes plus 64 tokens at one token per byte, the output cap, two interim images), the
   per-job cap (2.50 USD in the testing phase) and monthly ceiling (10 USD), the model allow-list with Pro and Nano Banana
@@ -13,7 +11,6 @@
   vendor call: paid use stays disabled. `Ledger` in `gemini.py` gains `append_many` and an overridable empty-ledger
   hook, and `valid_quote` is shared; the existing behavior is unchanged.
 
->>>>>>> origin/main
 - Tests: the linear-time guard in `tests/test_gemini_constructs.py` counts executed lines instead of reading a clock, so machine speed, load and Python version cannot flip it; its negative case runs a quadratic brace scan (#248).
 - Gemini approvals: hardened what a signed paid approval binds (#217). Approval payload version 2 carries a prompt digest
   (`prompt_sha256`, `prompt_bytes`) on both approval tiers; `approve` shows the digest and the whole prompt (approvals are refused above 4000 characters), the paid gate
