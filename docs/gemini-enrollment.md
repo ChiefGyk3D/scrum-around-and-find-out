@@ -444,12 +444,12 @@ key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. The label is the 
    and after `git verify-tag` the installer also refuses a signature whose reported key type is a certificate. To retire a
    key, delete its line.
 
-The enable switch `/etc/safo/gemini-paid-enabled` is created by the **last step** of the root runbook, after the dry run,
-and by no other line. That line runs the preflight first (`python -I -m safo.gemini_preflight --enabling`, as root, from the
-installed release) and writes the file only if it exits 0. The preflight reports the switch as `absent` (pass) and as
-`present` (warn: the content is not read, because the broker, not the preflight, decides). Its `egress-mode` line reads the
-root-owned egress config and prints the mode word only: `drop` passes; `observe` warns while paid use is off and **fails**
-when the switch is being created (`--enabling`) or already exists; a missing or unusable config fails in that case too.
+The enable switch /etc/safo/gemini-paid-enabled is created by the **last step** of the root runbook, after the dry run,
+and by no other line. That line runs the preflight first (python -I -m safo.gemini_preflight --enabling, as root, from the
+installed release) and writes the file only if it exits 0. The preflight reports the switch as absent (pass) and as
+present (warn: the content is not read, because the broker, not the preflight, decides). Its egress-mode line reads the
+root-owned egress config and prints the mode word only: drop passes; observe warns while paid use is off and **fails**
+when the switch is being created (--enabling) or already exists; a missing or unusable config fails in that case too.
 
 The one way past the observe-mode failure is the flag `--ack-observe-mode`, which you add to that line yourself. Observe
 mode logs and accepts, so a code execution bug in the broker could send the paid key to any IPv4 address until you switch

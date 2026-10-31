@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -247,7 +249,7 @@ def test_the_key_type_that_verified_must_be_a_plain_allowed_key_not_a_certificat
     if ok:
         install.check_reported_key_type(reported, allowed)
     else:
-        with pytest.raises(InstallError, match=r"certificate|not an allowed"):
+        with pytest.raises(InstallError, match="certificate" if "CERT" in reported else "not an allowed"):
             install.check_reported_key_type(reported, allowed)
 
 
@@ -341,3 +343,27 @@ def test_a_failed_install_on_a_first_install_stops_the_egress_units_it_started(w
     first_stop = world.calls.index(stops[0])
     reload_after = [i for i, c in enumerate(world.calls) if c == ("daemon-reload",) and i > first_stop]
     assert reload_after, "the units are stopped before the reload that forgets them"
+
+
+def test_verify_tag_refuses_a_signature_that_ssh_keygen_reports_as_made_through_a_certificate(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real verification passes (a software key in the file, types opened for it); only the reported type is changed
+    to what a certificate-authority line would print, so this proves verify_tag itself applies the check."""
+    world.release("1.0.0")
+    real = install._run
+
+    def run(
+        argv: Sequence[str], *, env: dict[str, str], cwd: Path | None = None, timeout: int = 300
+    ) -> subprocess.CompletedProcess[str]:
+        done = real(argv, env=env, cwd=cwd, timeout=timeout)
+        if "verify-tag" in argv:
+            done.stderr = done.stderr.replace("with ED25519 key", "with ED25519-CERT key")
+            done.stdout = done.stdout.replace("with ED25519 key", "with ED25519-CERT key")
+        return done
+
+    ok = install.verify_tag(world.repo, "v1.0.0", world.layout, world.root)  # unmodified: passes
+    assert ok.signer.split()[1] == "ED25519"
+    monkeypatch.setattr(install, "_run", run)
+    with pytest.raises(InstallError, match="certificate"):
+        install.verify_tag(world.repo, "v1.0.0", world.layout, world.root)
