@@ -14,6 +14,7 @@ import pwd
 import site
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import cast
 
@@ -100,6 +101,8 @@ def hostile_env(planted: dict[str, Path]) -> dict[str, str]:
         "DOPPLER_CONFIG_DIR": str(planted["cwd"]),
         "DOPPLER_API_HOST": "http://127.0.0.1:9",
         "SSH_SK_PROVIDER": "/nonexistent/evil.so",
+        "SSH_ASKPASS": "/nonexistent/evil",
+        "SSH_ASKPASS_REQUIRE": "force",
     }
 
 
@@ -140,7 +143,8 @@ def test_the_one_secret_the_call_needs_is_the_only_secret_that_passes(fake: Path
 def test_approve_passes_only_what_the_security_key_signature_needs(fake: Path, planted: dict[str, Path]) -> None:
     source = {**hostile_env(planted), "SSH_AUTH_SOCK": "/run/agent.sock", "TERM": "xterm", "DOPPLER_TOKEN": "k"}
     env = cast(dict[str, str], run_fake(fake, source, "approve")["env"])
-    assert set(env) == {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SSH_AUTH_SOCK", "SSH_SK_PROVIDER", "TERM"}
+    # a provider library or an askpass program named by the caller would be loaded or run by ssh-keygen: never passed
+    assert set(env) == {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SSH_AUTH_SOCK", "TERM"}
     assert env["SSH_AUTH_SOCK"] == "/run/agent.sock"
 
 
@@ -237,15 +241,120 @@ def test_other_commands_and_clean_environments_are_not_refused(monkeypatch: pyte
     assert seen == [["gemini", "quota", "--model", "m"]]
 
 
+def clean_child(monkeypatch: pytest.MonkeyPatch, action: str) -> dict[str, str]:
+    """Become, in this process, what a real isolated child is: its directory, allow-list environment and flag."""
+    scratch = tempfile.mkdtemp(prefix="run-", dir=wrapper.scratch_root(wrapper.account_home()))
+    monkeypatch.chdir(scratch)
+    monkeypatch.setattr(wrapper, "isolated", lambda: True)
+    return wrapper.child_env(action, {}, scratch)
+
+
 def test_the_isolated_child_runs_in_process_and_does_not_start_another(monkeypatch: pytest.MonkeyPatch) -> None:
     def no_launch(*args: object, **kw: object) -> subprocess.CompletedProcess[str]:
         pytest.fail("a child started a child")
 
-    monkeypatch.setattr(wrapper, "isolated", lambda: True)
+    env = clean_child(monkeypatch, "quota")
     monkeypatch.setattr(wrapper, "launch", no_launch)
-    assert wrapper.enter(["gemini", "quota", "--model", "m"], {"PATH": "/usr/bin"}) is None
+    assert wrapper.enter(["gemini", "quota", "--model", "m"], env) is None
     # and an isolated process still refuses a startup variable in its own environment
-    assert wrapper.enter(["gemini", "quota", "--model", "m"], {"PYTHONPATH": "/x"}) == 2
+    assert wrapper.enter(["gemini", "quota", "--model", "m"], {**env, "PYTHONPATH": "/x"}) == 2
+
+
+def test_a_forged_isolation_marker_with_a_dirty_environment_is_refused_not_trusted(
+    monkeypatch: pytest.MonkeyPatch, planted: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    def no_launch(*args: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        pytest.fail("ran with a forged marker")
+
+    monkeypatch.setattr(wrapper, "isolated", lambda: True)  # `python -I -m safo ...` run by hand, in a dirty place
+    monkeypatch.setattr(wrapper, "launch", no_launch)
+    dirty = {k: v for k, v in hostile_env(planted).items() if not k.startswith(("PYTHON", "BASH_ENV", "ENV"))}
+    assert wrapper.enter(["gemini", "quota", "--model", "m"], dirty) == 2
+    assert "isolated child" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["extra_key", "path", "home", "lang", "tmpdir", "missing_key", "cwd_elsewhere", "extra_for_other_action"],
+)
+def test_each_way_the_environment_or_directory_differs_from_the_allow_list_is_refused(
+    damage: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env = clean_child(monkeypatch, "quota")
+    if damage == "extra_key":
+        env["HTTPS_PROXY"] = "http://127.0.0.1:9"
+    elif damage == "path":
+        env["PATH"] = "/usr/bin"
+    elif damage == "home":
+        env["HOME"] = "/elsewhere"
+    elif damage == "lang":
+        env["LANG"] = "en_US.UTF-8"
+    elif damage == "tmpdir":
+        env["TMPDIR"] = str(tmp_path)
+    elif damage == "missing_key":
+        del env["LC_ALL"]
+    elif damage == "cwd_elsewhere":
+        monkeypatch.chdir(tmp_path)
+    elif damage == "extra_for_other_action":
+        env["DOPPLER_TOKEN"] = "k"  # only `ask` may carry it
+    assert wrapper.enter(["gemini", "quota", "--model", "m"], env) == 2
+
+
+ARGV_SHAPES = [
+    ["gemini", "quota", "--model", "m"],
+    ["--dry-run", "gemini", "quota", "--model", "m"],
+    ["--board", "b.yaml", "gemini", "quota", "--model", "m"],
+    ["--board=b.yaml", "gemini", "quota", "--model", "m"],
+    ["--bo", "b.yaml", "gemini", "quota", "--model", "m"],  # an abbreviation of --board
+    ["--bo=b.yaml", "gemini", "quota", "--model", "m"],
+    ["--gh", "someone", "gemini", "quota", "--model", "m"],  # an abbreviation of --gh-user
+    ["--gh-user=someone", "gemini", "quota", "--model", "m"],
+    ["--dry", "gemini", "quota", "--model", "m"],  # an abbreviation of --dry-run
+    ["--board", "gemini", "validate"],  # a value that looks like the mode
+    ["--board=gemini", "validate"],
+    ["--bo", "gemini", "validate"],
+    ["--gh", "gemini", "validate"],
+    ["--board", "x", "validate", "gemini"],
+    ["validate", "--board", "gemini"],
+    ["gemini", "--help"],
+    ["--version"],
+    ["--nonsense", "gemini", "quota"],
+    ["gemini"],
+    ["gemini", "bogus"],
+    ["--", "gemini", "quota", "--model", "m"],
+    [],
+]
+
+
+@pytest.mark.parametrize("words", ARGV_SHAPES, ids=[" ".join(w) or "empty" for w in ARGV_SHAPES])
+def test_the_wrapper_starts_exactly_when_the_real_parser_says_the_mode_is_gemini(
+    words: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextlib
+    import io
+
+    from safo import cli
+
+    parser, _ = cli.build_parser()
+    with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+        try:
+            real = parser.parse_args(words).mode
+        except SystemExit:
+            real = None
+    launched: list[list[str]] = []
+
+    def fake_launch(w: list[str], env: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        launched.append(w)
+        return subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(wrapper, "launch", fake_launch)
+    monkeypatch.setattr(wrapper, "isolated", lambda: False)
+    code = wrapper.enter(words, {"PATH": "/usr/bin", "PYTHONPATH": "/x"})
+    if real == "gemini":
+        assert code == 2 and launched == [], "a gemini command must be refused here, never run in place"
+        assert wrapper.enter(words, {"PATH": "/usr/bin"}) == 0 and len(launched) == 1
+    else:
+        assert code is None and launched == []
 
 
 def test_relative_paths_are_made_absolute_before_the_working_directory_changes(
@@ -293,3 +402,69 @@ def test_run_hands_the_gemini_command_to_the_wrapper_first(monkeypatch: pytest.M
     with pytest.raises(SystemExit) as stop:
         cli.run()
     assert stop.value.code == 9
+
+
+def test_the_default_entry_pins_the_package_that_launched_it() -> None:
+    import safo
+
+    entry = wrapper.default_entry()
+    root = entry[2]
+    assert entry[0] == "-c" and entry[1] == wrapper.BOOT
+    assert os.path.samefile(os.path.join(root, "safo"), os.path.dirname(os.path.abspath(safo.__file__)))
+
+
+def test_a_real_child_passes_its_own_shape_check(planted: dict[str, Path]) -> None:
+    """The real child (no fake) must recognize itself: it reaches the config read, not the refusal."""
+    done = wrapper.launch(["gemini", "quota", "--model", "m"], hostile_env(planted), action="quota", capture=True)
+    assert "not the isolated child" not in done.stderr
+    assert "refused: startup" not in done.stderr
+
+
+STDIN_DUMP = "import sys; print(repr(sys.stdin.read()))"
+
+
+def run_with_stdin(action: str, data: str) -> str:
+    code = (
+        "import subprocess, sys\n"
+        "from safo import wrapper\n"
+        f"done = wrapper.launch(['x'], {{}}, action={action!r}, entry=('-c', {STDIN_DUMP!r}), capture=True)\n"
+        "sys.stdout.write(done.stdout)\n"
+    )
+    done = subprocess.run(  # noqa: S603 - this interpreter and a fixed program, no shell
+        [sys.executable, "-c", code], input=data, capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
+
+
+def test_only_approve_receives_standard_input() -> None:
+    assert run_with_stdin("approve", "yes\n") == repr("yes\n")
+    for action in ("quota", "ask", "usage", "keys"):
+        assert run_with_stdin(action, "yes\n") == repr("")
+
+
+def test_a_closed_standard_descriptor_is_replaced_not_left_for_the_next_open() -> None:
+    code = (
+        "import os, sys\n"
+        "from safo import wrapper\n"
+        "os.close(2)\n"
+        "d = wrapper.launch(['x'], {}, action='quota', entry=('-c', 'import os; print(os.fstat(2).st_rdev != 0)'),"
+        " capture=False)\n"
+        "sys.exit(d.returncode)\n"
+    )
+    done = subprocess.run(  # noqa: S603 - this interpreter and a fixed program, no shell
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "True"  # fd 2 in the child is /dev/null (a character device), not closed or reused
+
+
+def test_the_scratch_parent_refuses_a_symlink_in_its_path(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".local").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (home / ".local" / "state").symlink_to(elsewhere)
+    with pytest.raises(wrapper.WrapperError, match="scratch"):
+        wrapper.scratch_root(str(home))
+    assert list(elsewhere.iterdir()) == []
