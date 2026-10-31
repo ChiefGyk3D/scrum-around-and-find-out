@@ -15,6 +15,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [SAFO threat model](safo-threat-model.md): the threat model of SAFO as a whole: assets, actors, trust boundaries, 25 ranked risks, a mitigation and a verification for each, and what SAFO does not guarantee.
 - [Gemini](gemini.md): the free-only provider for public material, and the approval gate on every paid call.
 - [Gemini keys](gemini-keys.md): enrolling, rotating, backing up and revoking the security keys that sign paid approvals.
+- [Gemini enrollment](gemini-enrollment.md): the maintainer runbook: enroll hardware keys, test a second device, make a release key, build the root-owned signer lines, rotate and revoke; plus a read-only preflight.
 - [Gemini passkeys](gemini-passkeys.md): the opt-in passkey tier: real ES256 and EdDSA verification (optional `safo[passkeys]` extra); enrollment and approval wiring not built.
 - [Gemini broker](gemini-broker.md): the design of the privileged broker that will hold the paid key, the approval records and the spend ledger, with image generation as the first case. Design only.
 - [Gemini broker threat model](gemini-broker-threat-model.md): assets, actors, ranked risks, mitigations and verifications for that design.
