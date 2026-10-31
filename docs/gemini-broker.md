@@ -105,7 +105,7 @@ key, no timing assertions): the wire format, the server, the entry point and the
 
 Where phase 3 read the design and had to choose, it is listed in the pull request. Not built: the idle exit, the audit copy
 `approvals/NONCE.json` of the design, the installer and units, the admin command (so nothing can yet clear a suspension),
-and the client. The stop wakeup is a pipe, so the server module makes no `socket()` or `socketpair()` call of its own. `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit (the pytest wrapper skips, with the reason, where there is no user service manager). The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
+and the client. The stop wakeup is a pipe, so the server module makes no `socket()` or `socketpair()` call of its own. `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit. Run it locally with `python scripts/broker_sandbox_check.py [--kill] [--extra-filter '~socketpair'] [--mutate recvmsg]` (exit 0 passed, 1 failed, 3 not available), or through pytest with `SAFO_SANDBOX_CHECK=1 pytest tests/test_broker_sandbox.py`. The pytest wrapper is opt-in: without that variable it skips (hosted CI runners do not behave like a desktop user manager), and with it, it still skips with a reason unless a probe shows the user manager works. Every command and socket exchange of the check has a timeout and the whole check a total deadline, so it reports the step that timed out instead of hanging. The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
 
 ## The requirement
 

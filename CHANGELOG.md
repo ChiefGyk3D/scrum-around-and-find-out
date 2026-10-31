@@ -59,7 +59,7 @@
   words only, and on SIGTERM lets calls in flight finish and records any still open after the grace period as
   ambiguous. `python -I -m safo.broker` wires it: the epoch, switch, key and `broker.yaml` readers, no-core and
   not-dumpable hardening, a scrubbed environment, the checked HTTPS transport to the vendor, and recovery before the
-  first accept. The stop wakeup is a pipe, not a socket pair, so the unit's address-family or system-call filters never touch it; `scripts/broker_sandbox_check.py` (with a pytest wrapper that skips, with its reason, where there is no user systemd manager) runs the real start-up flow as a socket-activated user unit under the unit's hardening properties, in error-number and kill modes and with `~socketpair` filtered, and fails for an injected socket, socketpair or recvmsg call. Paid use stays disabled.
+  first accept. The stop wakeup is a pipe, not a socket pair, so the unit's address-family or system-call filters never touch it; `scripts/broker_sandbox_check.py` (with an opt-in pytest wrapper, `SAFO_SANDBOX_CHECK=1`, that skips with its reason otherwise; every step has a timeout and the check a total deadline) runs the real start-up flow as a socket-activated user unit under the unit's hardening properties, in error-number and kill modes and with `~socketpair` filtered, and fails for an injected socket, socketpair or recvmsg call. Paid use stays disabled.
 
 - Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
   generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed

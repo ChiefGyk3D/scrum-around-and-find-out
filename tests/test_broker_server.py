@@ -34,7 +34,7 @@ from safo.broker.server import (
     peer_credentials,
 )
 from safo.broker.states import CallState
-from serverdata import CRED, UID, Env, FakeConn, call_fields, exchange, split_frames, state_snapshot
+from serverdata import CRED, UID, Env, FakeConn, call_fields, exchange, join_or_fail, split_frames, state_snapshot
 
 
 @pytest.fixture(scope="module")
@@ -669,6 +669,7 @@ def unix_server(tmp_path: Path, env: Env, **kw: Any) -> tuple[socket.socket, thr
 
 def connect(tmp_path: Path) -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(60)
     sock.connect(str(tmp_path / "s.sock"))
     return sock
 
@@ -707,7 +708,7 @@ def test_a_peer_with_the_wrong_uid_is_refused_and_nothing_is_read(tmp_path: Path
     reply = read_all(client)  # the server answers and closes before we send a byte
     client.close()
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
     frames = split_frames(reply)
     assert json.loads(frames[0])["code"] == "unauthorized_peer" and len(frames) == 1
@@ -724,7 +725,7 @@ def test_a_peer_whose_credentials_cannot_be_read_is_closed_without_a_reply(tmp_p
     assert read_all(client) == b""
     client.close()
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
 
 
@@ -739,7 +740,7 @@ def test_the_wrong_uid_gets_no_work_done_even_with_a_valid_call(tmp_path: Path, 
         client.sendall(protocol.frame(body, protocol.MAX_REQUEST_FRAME))  # too late: nobody is reading
     client.close()
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
     assert env.rig.vendor.requests == [] and env.rig.ledger.view().calls == {}
 
@@ -757,7 +758,7 @@ def test_a_ninth_connection_and_a_third_from_one_uid_are_closed_unread(tmp_path:
     for sock in held:
         sock.close()
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
 
 
@@ -771,7 +772,7 @@ def test_a_third_connection_from_one_uid_is_closed_unread(tmp_path: Path, env: E
     for sock in held:
         sock.close()
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
 
 
@@ -786,7 +787,7 @@ def test_counts_return_to_zero_and_a_new_connection_is_served_after_the_old_ones
         assert json.loads(split_frames(read_all(client))[0])["ok"] is True
         client.close()
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
     assert env.server.open_connections == 0
 
@@ -819,9 +820,9 @@ def test_many_clients_at_once_each_get_a_reply_or_a_clean_close(tmp_path: Path, 
     for w in workers:
         w.start()
     for w in workers:
-        w.join()
+        join_or_fail(w)
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
     assert len(outcomes) == 40 and "ok" in outcomes and env.server.peak_open <= 8
     assert env.server.open_connections == 0 and state_snapshot(rig)[1] == []
@@ -917,7 +918,7 @@ def test_a_stop_mid_call_lets_the_call_finish_and_answer(tmp_path: Path, env: En
     )
     reply = read_all(client)
     client.close()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
     assert json.loads(split_frames(reply)[0])["ok"] is True and result == [0]
     assert only_call(env.rig).state is CallState.SETTLED
@@ -926,7 +927,7 @@ def test_a_stop_mid_call_lets_the_call_finish_and_answer(tmp_path: Path, env: En
 def test_a_stopped_server_accepts_no_new_connection(tmp_path: Path, env: Env) -> None:
     listener, thread, _ = unix_server(tmp_path, env)
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     late = connect(tmp_path)  # the kernel queues it; nobody serves it
     late.settimeout(0.2)
     with pytest.raises(TimeoutError):
@@ -956,7 +957,7 @@ def test_a_call_still_open_when_the_grace_runs_out_ends_ambiguous_never_free(tmp
     )
     assert entered.wait(30)
     env.server.stop()
-    thread.join()  # serve returns although the call is still in flight
+    join_or_fail(thread)  # serve returns although the call is still in flight
     assert result == [1]
     rec = only_call(rig)
     assert rec.ambiguous and rec.unresolved and rec.state is CallState.SUSPENDED
@@ -972,6 +973,8 @@ def test_a_call_still_open_when_the_grace_runs_out_ends_ambiguous_never_free(tmp
 
 
 def test_a_real_sigterm_during_a_call_stops_the_server_after_the_call_settles(tmp_path: Path, env: Env) -> None:
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("a signal handler can only be installed from the main thread (this runner worker is not one)")
     restore = install_signal_handlers(env.server, (signal.SIGTERM,))
     try:
         env.rig.vendor.on_send = lambda _: os.kill(os.getpid(), signal.SIGTERM)
@@ -986,7 +989,7 @@ def test_a_real_sigterm_during_a_call_stops_the_server_after_the_call_settles(tm
         )
         reply = read_all(client)
         client.close()
-        thread.join()
+        join_or_fail(thread)
         listener.close()
     finally:
         restore()
@@ -1070,14 +1073,14 @@ def run_together(env: Env, reqs: list[Any]) -> list[Any]:
     results: list[Any] = [None] * len(bodies)
 
     def go(index: int) -> None:
-        start.wait()
+        start.wait(60)
         results[index] = exchange(env.server, bodies[index], cred=PeerCred(1, UID, UID))
 
     workers = [threading.Thread(target=go, args=(i,)) for i in range(len(bodies))]
     for w in workers:
         w.start()
     for w in workers:
-        w.join()
+        join_or_fail(w)
     return results
 
 
@@ -1126,7 +1129,7 @@ def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(r
     assert entered.wait(30)
     rest = run_together(env, [text_req(job=f"job-{i}") for i in range(2)])  # one slot is left
     release.set()
-    worker.join()
+    join_or_fail(worker)
     assert [r.code for r in rest] == ["busy", "busy"] and box[0].code == "ok"
     assert len(rig.vendor.requests) == 1
 
@@ -1183,7 +1186,7 @@ def test_a_call_not_yet_reserved_still_counts_against_the_budget(rig: Rig, budge
     assert rig.ledger.view().calls == {}  # really not reserved
     assert env.call(text_req(job="job-second")).code == "busy"
     release.set()
-    worker.join()
+    join_or_fail(worker)
     assert box[0].code == "ok" and len(rig.vendor.requests) == 1
 
 
@@ -1281,13 +1284,14 @@ def test_the_server_module_makes_no_socket_or_socketpair_call_while_it_serves_an
     thread = threading.Thread(target=lambda: result.append(env.server.serve(listener)))
     thread.start()
     client = real_socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(60)
     client.connect(str(tmp_path / "g.sock"))
     client.sendall(protocol.frame(protocol.request_body("status"), protocol.MAX_REQUEST_FRAME))
     client.shutdown(socket.SHUT_WR)
     assert json.loads(split_frames(read_all(client))[0])["ok"] is True
     client.close()
     env.server.stop()
-    thread.join()
+    join_or_fail(thread)
     listener.close()
     assert result == [0]
     pair_a, pair_b = real_pair()  # a socketpair made by a test is not the server module: the guard lets it through

@@ -40,6 +40,12 @@ class Res:
         return self.frames[1:]
 
 
+def join_or_fail(thread: threading.Thread, seconds: float = 60.0) -> None:
+    """Join a helper thread; a thread that does not end is a failed test, not a hung run."""
+    thread.join(seconds)
+    assert not thread.is_alive(), "a helper thread did not end within its time limit"
+
+
 def split_frames(raw: bytes) -> list[bytes]:
     frames: list[bytes] = []
     pos = 0
@@ -91,6 +97,7 @@ def exchange(
     before: Callable[[socket.socket], None] | None = None,
 ) -> Res:
     client, peer = socket.socketpair()
+    client.settimeout(60)  # a server that never answers fails the test instead of hanging it
     worker = threading.Thread(target=server.handle_connection, args=(peer, cred))
     worker.start()
     try:
@@ -196,4 +203,16 @@ def state_snapshot(rig: Rig) -> tuple[bytes, list[str], list[str]]:
     )
 
 
-__all__ = ["CRED", "UID", "Env", "FakeConn", "Path", "Res", "call_fields", "exchange", "image_req", "text_req"]
+__all__ = [
+    "CRED",
+    "UID",
+    "Env",
+    "FakeConn",
+    "Path",
+    "Res",
+    "call_fields",
+    "exchange",
+    "image_req",
+    "join_or_fail",
+    "text_req",
+]
