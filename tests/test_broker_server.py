@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import socket
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -1053,3 +1054,105 @@ def test_serverconfig_defaults_are_the_design_numbers() -> None:
     assert (cfg.begin_per_minute, cfg.call_per_minute) == (6, 10)
     assert (cfg.max_calls_per_minute, cfg.max_calls_per_day) == (5, 20)
     assert dt.timedelta(seconds=cfg.grace_seconds) > dt.timedelta(seconds=120)  # more than a slow image call
+
+
+# -- the call budget under concurrency -----------------------------------------------------------------------------
+
+
+def run_together(env: Env, reqs: list[Any]) -> list[Any]:
+    """Each request is approved first, then all are released together through a barrier."""
+    bodies = []
+    for req in reqs:
+        payload, signature = env.rig.approved(req)
+        bodies.append(protocol.request_body("call", **call_fields(req, payload, signature)))
+    start = threading.Barrier(len(bodies))
+    results: list[Any] = [None] * len(bodies)
+
+    def go(index: int) -> None:
+        start.wait()
+        results[index] = exchange(env.server, bodies[index], cred=PeerCred(1, UID, UID))
+
+    workers = [threading.Thread(target=go, args=(i,)) for i in range(len(bodies))]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    return results
+
+
+def force_overlap(env: Env, n: int) -> None:
+    """Make every request finish its budget count before any of them can go on: the count reads the ledger, so the
+    ledger read inside the count waits for the others (a barrier that gives up if the code serializes them)."""
+    real = env.rig.ledger.view
+    gate = threading.Barrier(n)
+
+    def view() -> Any:
+        if sys._getframe(1).f_code.co_name == "_check_call_budget":
+            with contextlib.suppress(threading.BrokenBarrierError):
+                gate.wait(timeout=0.5)
+        return real()
+
+    env.rig.ledger.view = view  # type: ignore[method-assign]  # the overlap to force
+
+
+@pytest.mark.parametrize("budget", ["max_calls_per_minute", "max_calls_per_day"])
+def test_concurrent_clients_never_pass_the_call_budget(rig: Rig, budget: str) -> None:
+    env = Env(rig, max_concurrent_calls=4, call_per_minute=100, max_calls_per_minute=2, max_calls_per_day=2)
+    force_overlap(env, 4)
+    results = run_together(env, [text_req(job=f"job-{i}") for i in range(4)])
+    codes = sorted(r.code for r in results)
+    assert codes == ["busy", "busy", "ok", "ok"]
+    assert len(rig.vendor.requests) == 2 and len(rig.ledger.view().calls) == 2
+    assert env.server.calls_in_flight == 0
+
+
+def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(rig: Rig) -> None:
+    env = Env(rig, max_concurrent_calls=3, call_per_minute=100, max_calls_per_minute=1)
+    release = threading.Event()
+    entered = threading.Event()
+
+    def hold(_: Any) -> None:
+        entered.set()
+        release.wait(30)
+
+    rig.vendor.on_send = hold
+    first_req = text_req(job="job-first")
+    payload, signature = rig.approved(first_req)
+    first_body = protocol.request_body("call", **call_fields(first_req, payload, signature))
+    box: list[Any] = []
+    worker = threading.Thread(target=lambda: box.append(exchange(env.server, first_body)))
+    worker.start()
+    assert entered.wait(30)
+    rest = run_together(env, [text_req(job=f"job-{i}") for i in range(2)])
+    release.set()
+    worker.join()
+    assert [r.code for r in rest] == ["busy", "busy"] and box[0].code == "ok"
+    assert len(rig.vendor.requests) == 1
+
+
+def test_a_call_that_fails_before_the_reservation_gives_its_place_back(rig: Rig) -> None:
+    env = Env(rig, max_concurrent_calls=2, max_calls_per_minute=1)
+
+    def die(point: str) -> None:
+        raise RuntimeError("SENTINEL")
+
+    rig.pipeline.faults = die
+    assert env.call(text_req()).code == "internal"  # fails after the check, before anything is reserved
+    assert env.server.calls_in_flight == 0
+    rig.pipeline.faults = lambda point: None
+    assert env.call(text_req(job="job-two")).code == "ok"  # the failed one was not counted against the budget
+
+
+def test_a_client_that_leaves_after_the_count_does_not_hold_a_place(rig: Rig) -> None:
+    env = Env(rig, max_concurrent_calls=2, max_calls_per_minute=1)
+    req = text_req()
+    payload, signature = rig.approved(req)
+    body = protocol.request_body("call", **call_fields(req, payload, signature))
+
+    def leave(client: socket.socket) -> None:
+        rig.pipeline.faults = lambda point: client.shutdown(socket.SHUT_RDWR) if point == "after_verify" else None
+
+    exchange(env.server, body, before=leave, half_close=False)
+    assert env.server.calls_in_flight == 0 and len(rig.ledger.view().calls) == 1  # it was reserved, so it counts
+    rig.pipeline.faults = lambda point: None
+    assert env.call(text_req(job="job-two")).code == "busy"

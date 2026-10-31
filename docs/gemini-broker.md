@@ -1,7 +1,7 @@
 # Gemini broker: design for the paid path
 
-> **Status: phases 1 and 2 of the build plan are in the tree; the rest is design.** The core library and the call
-> pipeline under `src/safo/broker/` exist (see "Phase 1 status" and "Phase 2 status" below). There is no socket, no service, no unit, no installer and no vendor call, so
+> **Status: phases 1 to 3 of the build plan are in the tree; the rest is design.** The core library, the call
+> pipeline and the socket server under `src/safo/broker/` exist (see "Phase 1 status" to "Phase 3 status" below). There is no unit, no installer, no client and no vendor call has ever been made, so
 > paid use stays disabled by the root-owned switch (see [Gemini](gemini.md)) until the broker is built, reviewed and
 > enabled by the maintainer. This page is the design for issue #205 (steps 1 and 2); the risks are in
 > [the broker threat model](gemini-broker-threat-model.md). Nothing here is a promise about code that does not exist yet; the
@@ -65,6 +65,40 @@ and the parser refuses any other, so a real reply that differs makes the call am
 The maintainer decided on 2026-10-30 that the paid path must be finished, because other projects are blocked on it.
 The first thing those projects need is **quality image generation**, which is paid-only (the free tier gives none). So
 this design treats an image call as the first-class case and text as the simpler case that rides the same path.
+
+### Phase 3 status
+
+Built and tested over socketpairs and a temporary unix socket, with the fake vendor and injected clocks (no network, no
+key, no timing assertions): the wire format, the server, the entry point and the readers around it.
+
+- **`protocol.py`** is the wire format and nothing else, importable by a thin client unchanged (standard library and
+  `safo.bounded` only). Frames, limits, the field table per operation, `parse_request`, `request_body` (what a client
+  builds, validated by the same parser), the reply codes with their exit status and one sentence each, `parse_reply`
+  (what a client reads). `rate_limited`, `vendor_refused` and `outcome_unknown` are now in the core code list.
+- **`server.py`.** The listening descriptor comes from systemd: `LISTEN_PID` must be this process, `LISTEN_FDS` exactly
+  `1`, the descriptor a listening unix stream socket; the variables are removed and the descriptor made non-inheritable.
+  The peer's uid (`SO_PEERCRED`) must be in `server.allowed_uids` of the root-owned `broker.yaml`; another uid gets one
+  `unauthorized_peer` frame and nothing is read. At most 8 connections and 2 per uid, a ninth or third is closed unread.
+  One request frame is read under a 5 second whole-frame deadline; a reply is one JSON frame (5 seconds) and then one
+  frame per attachment (each write must progress within 10 seconds, the frame within 60). A missed deadline or a broken
+  connection drops the connection. Operations: `status`, `begin`, `call`, `check`, `dryrun`. Root's `clear` is **not** on
+  the socket (phase 5). While the switch is off, every operation but `status` and `dryrun` answers `disabled`; the switch
+  is read on every request. Per peer and per minute: 6 `begin`, 10 `call` attempts, 30 of each other operation; a refusal
+  is `busy`. One paid call is in flight at once (`max_concurrent_calls`; a second `call` is `busy` after `slot_wait`
+  seconds, default 0), the slot is released before the reply is written, and vendor calls started are counted from the
+  ledger (5 a minute, 20 a day). The server logs numbers and enumerated words from an allowlist of field names.
+- **Stopping.** SIGTERM stops accepting, lets calls in flight finish and answer, and waits `grace_seconds` (default 150).
+  A call still open after that is made ambiguous (the reservation stays counted, the model is suspended) and the exit
+  status is 4. A call killed some other way is made ambiguous by `recover` at the next start, before the first accept.
+- **`python -I -m safo.broker`** reads `/etc/safo/broker.yaml` (sections `server`, `prices`, `caps`, `deadline_seconds`),
+  the state directory and credential directory systemd passes, creates the epoch once in the state directory, sets
+  no-core and not-dumpable, scrubs the environment, recovers, flushes the issued table and serves. `transport.py` is the
+  HTTPS transport to the vendor: constant host, the checked pinned connection, no redirect followed, the answer capped, the
+  key in the `x-goog-api-key` header only and read for every request.
+
+Where phase 3 read the design and had to choose, it is listed in the pull request. Not built: the idle exit, the audit copy
+`approvals/NONCE.json` of the design, the installer and units, the admin command (so nothing can yet clear a suspension),
+and the client. The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
 
 ## The requirement
 

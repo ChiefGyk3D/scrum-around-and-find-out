@@ -630,25 +630,30 @@ class Server:
         req = self._shape(f, prompt=f["prompt"])
         if not self._slots.acquire(timeout=self.cfg.slot_wait):
             raise Refused("busy", "a paid call is already in flight")
-        with self._lock:
-            self._in_flight += 1
+        admitted = False
         try:
-            self._check_call_budget()
+            with self._lock:  # the count and the entry are one step: nobody else is counted in between
+                self._check_call_budget(self._in_flight)
+                self._in_flight += 1
+                admitted = True
             result = self.pipeline.call(req, f["approval"]["payload"], f["approval"]["signature"])
         finally:
-            with self._lock:
-                self._in_flight -= 1
+            if admitted:
+                with self._lock:
+                    self._in_flight -= 1
             self._slots.release()  # before the reply is written
         return self._call_outcome(result)
 
-    def _check_call_budget(self) -> None:
+    def _check_call_budget(self, pending: int) -> None:
         """Vendor calls started in the last minute and the last day (read from the ledger, so a restart does not
-        reset them). The slot is held, so no other call can start between this count and the reservation."""
+        reset them), plus `pending`: the calls already past this check whose reservation may not be written yet (one
+        that has been written is counted twice, which only makes the budget stricter, never looser). The caller holds
+        the budget lock from this count until the call is entered, and never across the vendor call."""
         now = self.pipeline.wall()
         started = [c.started for c in self.pipeline.ledger.view().calls.values()]
-        if sum(1 for s in started if now - s < dt.timedelta(minutes=1)) >= self.cfg.max_calls_per_minute:
+        if pending + sum(1 for s in started if now - s < dt.timedelta(minutes=1)) >= self.cfg.max_calls_per_minute:
             raise Refused("busy", "too many paid calls this minute")
-        if sum(1 for s in started if now - s < dt.timedelta(days=1)) >= self.cfg.max_calls_per_day:
+        if pending + sum(1 for s in started if now - s < dt.timedelta(days=1)) >= self.cfg.max_calls_per_day:
             raise Refused("busy", "too many paid calls today")
 
     def _call_outcome(self, result: CallResult) -> Outcome:

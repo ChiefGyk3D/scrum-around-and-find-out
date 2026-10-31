@@ -75,6 +75,7 @@ def test_the_one_listening_descriptor_is_adopted_and_the_variables_are_removed(
 ) -> None:
     fd, orig = listening
     environ = env_for() | {"OTHER": "kept"}
+    os.set_inheritable(fd, True)  # as a descriptor passed by an exec would be
     adopted = adopt_listener(environ, PID, first_fd=fd)
     assert adopted.fileno() == fd and adopted.getsockname() == orig.getsockname()
     assert environ == {"OTHER": "kept"}
@@ -139,6 +140,16 @@ def test_a_connected_or_unbound_socket_is_not_a_listener() -> None:
         refuses(env_for(), os.dup(idle.fileno()))
     finally:
         idle.close()
+
+
+def test_a_listening_seqpacket_socket_is_not_a_stream_listener(tmp_path: Path) -> None:
+    seq = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    seq.bind(str(tmp_path / "q.sock"))
+    seq.listen(1)
+    try:
+        refuses(env_for(), os.dup(seq.fileno()))
+    finally:
+        seq.close()
 
 
 def test_a_listening_inet_or_datagram_socket_is_refused() -> None:
