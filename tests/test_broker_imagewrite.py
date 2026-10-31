@@ -722,7 +722,7 @@ def test_descriptors_are_all_closed_after_a_crash_and_after_success(out: Path) -
             write_image(PNG, str(out), "cat", _step=raiser(step, Boom()))
     write_image(PNG, str(out), "cat")
     # listing /proc/self/fd opens one descriptor of its own, so compare the sets without it
-    assert len(open_fds() - base) <= 1
+    assert open_fds() == base
 
 
 def test_crash_after_the_link_does_not_unlink_a_replaced_final(out: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1018,7 +1018,7 @@ def test_a_crash_inside_the_directory_walk_closes_every_descriptor(out: Path, mo
         patch.setattr(os, "fstat", boom)
         with pytest.raises(Boom):
             write_image(PNG, str(out), "cat")
-    assert len(fds() - before) <= 1  # the listing itself holds one
+    assert fds() == before
 
 
 def fake_stat(mode: int, uid: int) -> os.stat_result:
