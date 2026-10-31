@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Installed by root to /etc/systemd/system/. Design: docs/gemini-broker.md ("The unit files and their hardening").
-# Egress: the service needs outbound HTTPS to the one vendor host, whose addresses are not fixed, so there is no
-# IPAddressAllow= (it would break calls or be wrong). An optional host firewall rule that lets only this uid reach port
-# 443 is a good extra and is left to the maintainer's network setup; see the runbook note.
+# Egress: the vendor addresses are not fixed, so IPAddressAllow= is not used. Instead safo-broker-egress.service loads an
+# nftables ruleset keyed on this unit's user (port 443 to a refreshed set of vendor addresses only, no DNS, no IPv6) and
+# writes the hosts view bind-mounted over /etc/hosts below, so this service resolves the vendor name without DNS. The
+# service requires that unit and will not start without it.
 # ConditionPathExists= makes the service skip its start while the root-owned switch file is absent. The broker still
 # reads the switch on every request and requires the single line "enabled"; the condition is a second, outer layer.
 [Unit]
 Description=SAFO Gemini broker
 Requires=safo-broker.socket
-After=network-online.target safo-broker.socket
+Requires=safo-broker-egress.service
+After=network-online.target safo-broker.socket safo-broker-egress.service
 ConditionPathExists=/etc/safo/gemini-paid-enabled
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -24,6 +26,7 @@ StateDirectory=safo-broker
 StateDirectoryMode=0700
 ReadWritePaths=/var/lib/safo-broker
 ReadOnlyPaths=/etc/safo /opt/safo-broker
+BindReadOnlyPaths=/etc/safo/egress/hosts:/etc/hosts
 UMask=0077
 Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=yes
@@ -42,7 +45,7 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

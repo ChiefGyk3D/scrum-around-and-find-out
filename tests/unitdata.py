@@ -11,6 +11,7 @@ UNIT_DIR = REPO / "packaging" / "systemd"
 # (section, key, value): every line must be present exactly as written. Multi-valued keys list each value.
 REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Unit", "Requires", "safo-broker.socket"),
+    ("Unit", "Requires", "safo-broker-egress.service"),
     ("Unit", "ConditionPathExists", "/etc/safo/gemini-paid-enabled"),
     ("Unit", "StartLimitIntervalSec", "60"),
     ("Unit", "StartLimitBurst", "5"),
@@ -24,6 +25,7 @@ REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Service", "StateDirectoryMode", "0700"),
     ("Service", "ReadWritePaths", "/var/lib/safo-broker"),
     ("Service", "ReadOnlyPaths", "/etc/safo /opt/safo-broker"),
+    ("Service", "BindReadOnlyPaths", "/etc/safo/egress/hosts:/etc/hosts"),
     ("Service", "UMask", "0077"),
     ("Service", "Environment", "PYTHONDONTWRITEBYTECODE=1"),
     ("Service", "NoNewPrivileges", "yes"),
@@ -42,7 +44,7 @@ REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Service", "ProtectControlGroups", "yes"),
     ("Service", "ProtectClock", "yes"),
     ("Service", "ProtectHostname", "yes"),
-    ("Service", "RestrictAddressFamilies", "AF_UNIX AF_INET AF_INET6"),
+    ("Service", "RestrictAddressFamilies", "AF_UNIX AF_INET"),
     ("Service", "RestrictNamespaces", "yes"),
     ("Service", "RestrictRealtime", "yes"),
     ("Service", "RestrictSUIDSGID", "yes"),
@@ -73,6 +75,100 @@ REQUIRED_SOCKET: tuple[tuple[str, str, str], ...] = (
     ("Socket", "Accept", "no"),
     ("Socket", "Backlog", "16"),
     ("Install", "WantedBy", "sockets.target"),
+)
+
+REQUIRED_EGRESS: tuple[tuple[str, str, str], ...] = (
+    ("Service", "Type", "oneshot"),
+    ("Service", "RemainAfterExit", "yes"),
+    (
+        "Service",
+        "ExecStart",
+        "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress load --rules "
+        "/opt/safo-broker/current/meta/packaging/nftables/safo-broker.nft",
+    ),
+    ("Service", "ExecStart", "-/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh"),
+    ("Service", "ExecStop", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress unload"),
+    ("Service", "TimeoutStartSec", "60s"),
+    ("Service", "TimeoutStopSec", "30s"),
+    ("Service", "UMask", "0077"),
+    ("Service", "NoNewPrivileges", "yes"),
+    ("Service", "CapabilityBoundingSet", "CAP_NET_ADMIN"),
+    ("Service", "PrivateTmp", "yes"),
+    ("Service", "PrivateDevices", "yes"),
+    ("Service", "ProtectSystem", "strict"),
+    ("Service", "ProtectHome", "yes"),
+    ("Service", "ReadWritePaths", "/etc/safo/egress"),
+    ("Service", "ProtectKernelTunables", "yes"),
+    ("Service", "ProtectKernelModules", "yes"),
+    ("Service", "ProtectKernelLogs", "yes"),
+    ("Service", "ProtectControlGroups", "yes"),
+    ("Service", "ProtectClock", "yes"),
+    ("Service", "ProtectHostname", "yes"),
+    ("Service", "RestrictAddressFamilies", "AF_UNIX AF_NETLINK AF_INET"),
+    ("Service", "RestrictNamespaces", "yes"),
+    ("Service", "RestrictRealtime", "yes"),
+    ("Service", "RestrictSUIDSGID", "yes"),
+    ("Service", "LockPersonality", "yes"),
+    ("Service", "MemoryDenyWriteExecute", "yes"),
+    ("Service", "SystemCallArchitectures", "native"),
+    ("Service", "SystemCallFilter", "@system-service"),
+    ("Service", "SystemCallErrorNumber", "EPERM"),
+    ("Install", "WantedBy", "multi-user.target"),
+)
+
+REQUIRED_REFRESH: tuple[tuple[str, str, str], ...] = (
+    ("Unit", "Requires", "safo-broker-egress.service"),
+    ("Service", "Type", "oneshot"),
+    ("Service", "ExecStart", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh"),
+    ("Service", "TimeoutStartSec", "60s"),
+    ("Service", "UMask", "0077"),
+    ("Service", "NoNewPrivileges", "yes"),
+    ("Service", "CapabilityBoundingSet", "CAP_NET_ADMIN"),
+    ("Service", "PrivateTmp", "yes"),
+    ("Service", "PrivateDevices", "yes"),
+    ("Service", "ProtectSystem", "strict"),
+    ("Service", "ProtectHome", "yes"),
+    ("Service", "ReadWritePaths", "/etc/safo/egress"),
+    ("Service", "ProtectKernelTunables", "yes"),
+    ("Service", "ProtectKernelModules", "yes"),
+    ("Service", "ProtectKernelLogs", "yes"),
+    ("Service", "ProtectControlGroups", "yes"),
+    ("Service", "ProtectClock", "yes"),
+    ("Service", "ProtectHostname", "yes"),
+    ("Service", "RestrictAddressFamilies", "AF_UNIX AF_NETLINK AF_INET"),
+    ("Service", "RestrictNamespaces", "yes"),
+    ("Service", "RestrictRealtime", "yes"),
+    ("Service", "RestrictSUIDSGID", "yes"),
+    ("Service", "LockPersonality", "yes"),
+    ("Service", "MemoryDenyWriteExecute", "yes"),
+    ("Service", "SystemCallArchitectures", "native"),
+    ("Service", "SystemCallFilter", "@system-service"),
+    ("Service", "SystemCallErrorNumber", "EPERM"),
+)
+
+REQUIRED_TIMER: tuple[tuple[str, str, str], ...] = (
+    ("Timer", "OnBootSec", "1min"),
+    ("Timer", "OnUnitActiveSec", "5min"),
+    ("Timer", "AccuracySec", "10s"),
+    ("Timer", "Unit", "safo-broker-egress-refresh.service"),
+    ("Install", "WantedBy", "timers.target"),
+)
+
+REQUIRED_BY_UNIT = {
+    "safo-broker.service": REQUIRED_SERVICE,
+    "safo-broker.socket": REQUIRED_SOCKET,
+    "safo-broker-egress.service": REQUIRED_EGRESS,
+    "safo-broker-egress-refresh.service": REQUIRED_REFRESH,
+    "safo-broker-egress-refresh.timer": REQUIRED_TIMER,
+}
+
+# Keys a release may add without being pinned: they describe or order the unit and grant nothing.
+HARMLESS_KEYS = (
+    ("Unit", "Description"),
+    ("Unit", "Documentation"),
+    ("Unit", "Before"),
+    ("Unit", "After"),
+    ("Unit", "Wants"),
 )
 
 # Keys that must never appear: each would widen the sandbox or add a way around it.

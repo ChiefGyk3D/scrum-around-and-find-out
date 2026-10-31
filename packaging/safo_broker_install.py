@@ -38,6 +38,7 @@ import difflib
 import errno
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -61,7 +62,53 @@ SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze"
 RUNUSER = "/usr/sbin/runuser"
 UNSHARE = "/usr/bin/unshare"
 SERVICE_USER = "safo-broker"
-UNIT_NAMES = ("safo-broker.service", "safo-broker.socket")
+UNIT_NAMES = (
+    "safo-broker.service",
+    "safo-broker.socket",
+    "safo-broker-egress.service",
+    "safo-broker-egress-refresh.service",
+    "safo-broker-egress-refresh.timer",
+)
+EGRESS_RULES_REL = "packaging/nftables/safo-broker.nft"
+EGRESS_RESTART = ["try-restart", "safo-broker-egress.service", "safo-broker-egress-refresh.timer"]
+# Exposure budget per unit (systemd-analyze security, offline): a rise past it means a hardening line was lost.
+EXPOSURE_BUDGET = {
+    "safo-broker.service": 2.0,
+    "safo-broker-egress.service": 3.0,
+    "safo-broker-egress-refresh.service": 3.0,
+}
+# Checks systemd must resolve as set for the broker service, whatever the file text says.
+RESOLVED_MUST_BE_SET = (
+    "NoNewPrivileges=",
+    "PrivateTmp=",
+    "PrivateDevices=",
+    "PrivateMounts=",
+    "ProtectSystem=",
+    "ProtectHome=",
+    "ProtectKernelTunables=",
+    "ProtectKernelModules=",
+    "ProtectKernelLogs=",
+    "ProtectControlGroups=",
+    "ProtectClock=",
+    "ProtectHostname=",
+    "ProtectProc=",
+    "ProcSubset=",
+    "MemoryDenyWriteExecute=",
+    "LockPersonality=",
+    "RestrictSUIDSGID=",
+    "RestrictRealtime=",
+    "RestrictNamespaces=~user",
+    "SystemCallArchitectures=",
+    "RemoveIPC=",
+    "KeyringMode=",
+    "UMask=",
+    "AmbientCapabilities=",
+    "CapabilityBoundingSet=~CAP_SYS_ADMIN",
+    "CapabilityBoundingSet=~CAP_NET_ADMIN",
+    "RestrictAddressFamilies=~AF_PACKET",
+    "RestrictAddressFamilies=~AF_NETLINK",
+)
+
 UNIT_EXEC_PREFIX = "/opt/safo-broker/current"
 SK_KEY_TYPES = ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")  # hardware keys only, by default
 LOCK_REL = "packaging/broker-requirements.txt"
@@ -430,7 +477,13 @@ def extract_tree(repo: Path, commit: str, dest: Path, home: Path) -> dict[str, b
         target = dest / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(blob.stdout)
-    for need in ("src/safo/__init__.py", LOCK_REL, "pyproject.toml", *(f"packaging/systemd/{u}" for u in UNIT_NAMES)):
+    for need in (
+        "src/safo/__init__.py",
+        LOCK_REL,
+        "pyproject.toml",
+        EGRESS_RULES_REL,
+        *(f"packaging/systemd/{u}" for u in UNIT_NAMES),
+    ):
         if need not in files:
             msg = f"the release tree has no {need}"
             raise InstallError(msg)
@@ -445,6 +498,7 @@ def extract_tree(repo: Path, commit: str, dest: Path, home: Path) -> dict[str, b
 UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
     "safo-broker.service": (
         ("Unit", "Requires", "safo-broker.socket"),
+        ("Unit", "Requires", "safo-broker-egress.service"),
         ("Unit", "ConditionPathExists", "/etc/safo/gemini-paid-enabled"),
         ("Unit", "StartLimitIntervalSec", "60"),
         ("Unit", "StartLimitBurst", "5"),
@@ -458,6 +512,7 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Service", "StateDirectoryMode", "0700"),
         ("Service", "ReadWritePaths", "/var/lib/safo-broker"),
         ("Service", "ReadOnlyPaths", "/etc/safo /opt/safo-broker"),
+        ("Service", "BindReadOnlyPaths", "/etc/safo/egress/hosts:/etc/hosts"),
         ("Service", "UMask", "0077"),
         ("Service", "Environment", "PYTHONDONTWRITEBYTECODE=1"),
         ("Service", "NoNewPrivileges", "yes"),
@@ -476,7 +531,7 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Service", "ProtectControlGroups", "yes"),
         ("Service", "ProtectClock", "yes"),
         ("Service", "ProtectHostname", "yes"),
-        ("Service", "RestrictAddressFamilies", "AF_UNIX AF_INET AF_INET6"),
+        ("Service", "RestrictAddressFamilies", "AF_UNIX AF_INET"),
         ("Service", "RestrictNamespaces", "yes"),
         ("Service", "RestrictRealtime", "yes"),
         ("Service", "RestrictSUIDSGID", "yes"),
@@ -507,60 +562,160 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Socket", "Backlog", "16"),
         ("Install", "WantedBy", "sockets.target"),
     ),
+    "safo-broker-egress.service": (
+        ("Service", "Type", "oneshot"),
+        ("Service", "RemainAfterExit", "yes"),
+        (
+            "Service",
+            "ExecStart",
+            "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress load --rules "
+            "/opt/safo-broker/current/meta/packaging/nftables/safo-broker.nft",
+        ),
+        ("Service", "ExecStart", "-/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh"),
+        ("Service", "ExecStop", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress unload"),
+        ("Service", "TimeoutStartSec", "60s"),
+        ("Service", "TimeoutStopSec", "30s"),
+        ("Service", "UMask", "0077"),
+        ("Service", "NoNewPrivileges", "yes"),
+        ("Service", "CapabilityBoundingSet", "CAP_NET_ADMIN"),
+        ("Service", "PrivateTmp", "yes"),
+        ("Service", "PrivateDevices", "yes"),
+        ("Service", "ProtectSystem", "strict"),
+        ("Service", "ProtectHome", "yes"),
+        ("Service", "ReadWritePaths", "/etc/safo/egress"),
+        ("Service", "ProtectKernelTunables", "yes"),
+        ("Service", "ProtectKernelModules", "yes"),
+        ("Service", "ProtectKernelLogs", "yes"),
+        ("Service", "ProtectControlGroups", "yes"),
+        ("Service", "ProtectClock", "yes"),
+        ("Service", "ProtectHostname", "yes"),
+        ("Service", "RestrictAddressFamilies", "AF_UNIX AF_NETLINK AF_INET"),
+        ("Service", "RestrictNamespaces", "yes"),
+        ("Service", "RestrictRealtime", "yes"),
+        ("Service", "RestrictSUIDSGID", "yes"),
+        ("Service", "LockPersonality", "yes"),
+        ("Service", "MemoryDenyWriteExecute", "yes"),
+        ("Service", "SystemCallArchitectures", "native"),
+        ("Service", "SystemCallFilter", "@system-service"),
+        ("Service", "SystemCallErrorNumber", "EPERM"),
+        ("Install", "WantedBy", "multi-user.target"),
+    ),
+    "safo-broker-egress-refresh.service": (
+        ("Unit", "Requires", "safo-broker-egress.service"),
+        ("Service", "Type", "oneshot"),
+        ("Service", "ExecStart", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh"),
+        ("Service", "TimeoutStartSec", "60s"),
+        ("Service", "UMask", "0077"),
+        ("Service", "NoNewPrivileges", "yes"),
+        ("Service", "CapabilityBoundingSet", "CAP_NET_ADMIN"),
+        ("Service", "PrivateTmp", "yes"),
+        ("Service", "PrivateDevices", "yes"),
+        ("Service", "ProtectSystem", "strict"),
+        ("Service", "ProtectHome", "yes"),
+        ("Service", "ReadWritePaths", "/etc/safo/egress"),
+        ("Service", "ProtectKernelTunables", "yes"),
+        ("Service", "ProtectKernelModules", "yes"),
+        ("Service", "ProtectKernelLogs", "yes"),
+        ("Service", "ProtectControlGroups", "yes"),
+        ("Service", "ProtectClock", "yes"),
+        ("Service", "ProtectHostname", "yes"),
+        ("Service", "RestrictAddressFamilies", "AF_UNIX AF_NETLINK AF_INET"),
+        ("Service", "RestrictNamespaces", "yes"),
+        ("Service", "RestrictRealtime", "yes"),
+        ("Service", "RestrictSUIDSGID", "yes"),
+        ("Service", "LockPersonality", "yes"),
+        ("Service", "MemoryDenyWriteExecute", "yes"),
+        ("Service", "SystemCallArchitectures", "native"),
+        ("Service", "SystemCallFilter", "@system-service"),
+        ("Service", "SystemCallErrorNumber", "EPERM"),
+    ),
+    "safo-broker-egress-refresh.timer": (
+        ("Timer", "OnBootSec", "1min"),
+        ("Timer", "OnUnitActiveSec", "5min"),
+        ("Timer", "AccuracySec", "10s"),
+        ("Timer", "Unit", "safo-broker-egress-refresh.service"),
+        ("Install", "WantedBy", "timers.target"),
+    ),
 }
 
-FORBIDDEN_UNIT_KEYS = (
-    "DynamicUser",
-    "PrivateUsers",
-    "EnvironmentFile",
-    "PassEnvironment",
-    "PermissionsStartOnly",
-    "BindPaths",
-    "BindReadOnlyPaths",
-    "SupplementaryGroups",
-    "TemporaryFileSystem",
+# Keys a release may add without their being pinned: they describe or order the unit and grant nothing.
+HARMLESS_KEYS = (
+    ("Unit", "Description"),
+    ("Unit", "Documentation"),
+    ("Unit", "Before"),
+    ("Unit", "After"),
+    ("Unit", "Wants"),
 )
+UNIT_SECTIONS = {
+    "safo-broker.service": ("Unit", "Service"),
+    "safo-broker.socket": ("Unit", "Socket", "Install"),
+    "safo-broker-egress.service": ("Unit", "Service", "Install"),
+    "safo-broker-egress-refresh.service": ("Unit", "Service"),
+    "safo-broker-egress-refresh.timer": ("Unit", "Timer", "Install"),
+}
+KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 
 
-def parse_unit_text(text: str) -> list[tuple[str, str, str]]:
-    """(section, key, value) in file order, joining backslash continuations the way systemd does."""
+def parse_unit_text(name: str, raw: str | bytes) -> list[tuple[str, str, str]]:
+    """Read a unit file the one way every reader agrees on: printable ASCII and newlines only (so no carriage return,
+    NUL, vertical tab, form feed, unicode separator or byte-order mark can make two readers split lines differently), no
+    backslash at all (so no continuation and no escape), newline-only line splitting, known section names, each section
+    once, and every other line a `Key=value` setting."""
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            msg = f"unit policy: {name} is not valid UTF-8"
+            raise InstallError(msg) from None
+    else:
+        text = raw
+    for ch in text:
+        if ch not in "\n\t" and not (" " <= ch <= "~" and ch != "\\"):
+            msg = f"unit policy: {name} has a disallowed character (U+{ord(ch):04X}); ASCII, tab and newline only"
+            raise InstallError(msg)
     triples: list[tuple[str, str, str]] = []
     section = ""
-    for raw in re.sub(r"\\\r?\n", "", text).splitlines():
-        line = raw.strip()
-        if not line or line.startswith(("#", ";")):
+    seen: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip(" \t")
+        if not stripped or stripped.startswith(("#", ";")):
             continue
-        if line.startswith("[") and line.endswith("]"):
-            section = line[1:-1]
+        if stripped.startswith("["):
+            if not stripped.endswith("]") or stripped[1:-1] not in UNIT_SECTIONS[name] or stripped[1:-1] in seen:
+                msg = f"unit policy: {name} has an unknown, repeated or malformed section header {stripped[:40]!r}"
+                raise InstallError(msg)
+            section = stripped[1:-1]
+            seen.append(section)
             continue
-        key, sep, value = line.partition("=")
-        if sep:
-            triples.append((section, key.strip(), value.strip()))
+        key, sep, value = stripped.partition("=")
+        key = key.strip(" \t")
+        if not sep or not section or not KEY_RE.fullmatch(key):
+            msg = f"unit policy: {name} has a line that is not a setting inside a section: {stripped[:40]!r}"
+            raise InstallError(msg)
+        triples.append((section, key, value.strip(" \t")))
     return triples
 
 
-def enforce_unit_policy(units: dict[str, str]) -> None:
-    """Refuse a release whose units weaken the fixed policy: every policy key must carry exactly the policy values (so a
-    later assignment, an empty reset or a second section cannot override), no other Exec line may exist (none can carry
-    a privilege or error-ignoring prefix), and a short list of widening keys is refused outright."""
+def enforce_unit_policy(units: dict[str, str] | dict[str, bytes] | dict[str, str | bytes]) -> None:
+    """Refuse a release whose units are not exactly the policy: every (section, key) must be pinned in UNIT_POLICY or be
+    in HARMLESS_KEYS (an allowlist, so an unknown key is refused), and every pinned key must carry exactly the pinned
+    values in order, so a later assignment, an empty reset or a repeat cannot override."""
     for name in UNIT_NAMES:
         if name not in units:
             msg = f"unit policy: {name} is missing from the release"
             raise InstallError(msg)
-        triples = parse_unit_text(units[name])
-        policy = UNIT_POLICY[name]
+        triples = parse_unit_text(name, units[name])
         wanted: dict[tuple[str, str], list[str]] = {}
-        for section, key, value in policy:
+        for section, key, value in UNIT_POLICY[name]:
             wanted.setdefault((section, key), []).append(value)
+        for section, key, _value in triples:
+            if (section, key) not in wanted and (section, key) not in HARMLESS_KEYS:
+                msg = f"unit policy: {name} [{section}] {key} is not in the allowed set"
+                raise InstallError(msg)
         for (section, key), values in wanted.items():
             actual = [v for s_, k, v in triples if s_ == section and k == key]
             if actual != values:
                 msg = f"unit policy: {name} [{section}] {key} must be exactly {values!r}, the release has {actual!r}"
-                raise InstallError(msg)
-        policy_keys = {k for _, k in wanted}
-        for section, key, _value in triples:
-            if key in FORBIDDEN_UNIT_KEYS or (key.startswith("Exec") and key not in policy_keys):
-                msg = f"unit policy: {name} [{section}] {key} is not allowed"
                 raise InstallError(msg)
 
 
@@ -895,6 +1050,9 @@ def remove_tree(path: Path) -> None:
 
 
 def default_verify_units(unit_dir: Path, release: Path) -> None:
+    """Ask systemd itself, without starting anything: `verify` on the staged copies must print nothing about unknown or
+    ignored settings, the broker service must resolve every hardening check in RESOLVED_MUST_BE_SET as set, and each
+    unit's offline exposure score must stay within its budget."""
     if not os.access(SYSTEMD_ANALYZE, os.X_OK):
         msg = "systemd-analyze is not available, so the staged units cannot be verified; refused"
         raise InstallError(msg)
@@ -905,16 +1063,48 @@ def default_verify_units(unit_dir: Path, release: Path) -> None:
             target = Path(tmp) / name
             target.write_text(text)
             paths.append(str(target))
-        done = _run([SYSTEMD_ANALYZE, "verify", "--man=no", *paths], env=_clean_env(Path(tmp)), timeout=120)
-    noise = done.stderr + done.stdout
-    if done.returncode != 0 or "Unknown" in noise:
-        msg = f"systemd-analyze verify failed: {' | '.join(noise.strip().splitlines()[-3:])}"
-        raise InstallError(msg)
+        env = _clean_env(Path(tmp))
+        done = _run([SYSTEMD_ANALYZE, "verify", "--man=no", *paths], env=env, timeout=120)
+        noise = done.stderr + done.stdout
+        if done.returncode != 0 or re.search(
+            r"Unknown|Ignoring|Invalid|Failed to parse|Missing|outside of section|deprecated", noise
+        ):
+            msg = f"systemd-analyze verify failed: {' | '.join(noise.strip().splitlines()[-3:])}"
+            raise InstallError(msg)
+        for name, budget in EXPOSURE_BUDGET.items():
+            path = str(Path(tmp) / name)
+            score = _run([SYSTEMD_ANALYZE, "security", "--offline=true", "--no-pager", path], env=env, timeout=120)
+            m = re.search(r"Overall exposure level for \S+: ([0-9.]+)", score.stdout)
+            if score.returncode != 0 or not m or float(m[1]) > budget:
+                level = m[1] if m else "unknown"
+                msg = f"systemd resolves {name} to an exposure level of {level}, over its budget {budget}; refused"
+                raise InstallError(msg)
+        resolved = _run(
+            [
+                SYSTEMD_ANALYZE,
+                "security",
+                "--offline=true",
+                "--no-pager",
+                "--json=short",
+                str(Path(tmp) / "safo-broker.service"),
+            ],
+            env=env,
+            timeout=120,
+        )
+        try:
+            checks = {c["name"]: bool(c["set"]) for c in json.loads(resolved.stdout)}
+        except (ValueError, KeyError, TypeError):
+            msg = "systemd-analyze security gave no readable result for the broker service; refused"
+            raise InstallError(msg) from None
+        missing = [n for n in RESOLVED_MUST_BE_SET if not checks.get(n)]
+        if missing:
+            msg = f"systemd does not resolve these checks as set for the broker service: {', '.join(missing)}; refused"
+            raise InstallError(msg)
 
 
 def self_test_argv(python: Path, modules: Sequence[str], *, as_service_user: bool) -> list[str]:
-    """The self-test command. As root it drops to the service user and into an empty network namespace, so import-time
-    code in the release or its dependencies can neither read root's files nor reach the network."""
+    """The import check. As root it drops to the service user and into an empty network namespace, so import-time code
+    in the release or its dependencies can neither read root's files nor reach the network."""
     argv = [str(python), "-I", "-c", "import " + ", ".join(modules)]
     if as_service_user:
         argv = [UNSHARE, "--net", "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
@@ -1126,6 +1316,9 @@ def write_units(layout: Layout, units: dict[str, bytes | None], hooks: Hooks | N
 def reload_and_restart(hooks: Hooks) -> str:
     if hooks.systemctl(["daemon-reload"]) != 0:
         msg = "systemctl daemon-reload failed"
+        raise RuntimeError(msg)
+    if hooks.systemctl(EGRESS_RESTART) != 0:
+        msg = "systemctl try-restart of the egress units failed"
         raise RuntimeError(msg)
     if hooks.systemctl(["try-restart", "safo-broker.socket", "safo-broker.service"]) != 0:
         msg = "systemctl try-restart failed"
@@ -1419,7 +1612,7 @@ def _install(
                 f"the signed tag says {version} but the package's __version__ is {m[1] if m else 'unreadable'}; refused"
             )
             raise InstallError(msg)
-        enforce_unit_policy({n: files[f"packaging/systemd/{n}"].decode("utf-8", "replace") for n in UNIT_NAMES})
+        enforce_unit_policy({n: files[f"packaging/systemd/{n}"] for n in UNIT_NAMES})
         lock = parse_lock(files[LOCK_REL].decode("utf-8", "replace"))
         download_dir = work / "wheels"
         download_dir.mkdir(mode=0o700)
@@ -1584,8 +1777,9 @@ def restore(
             drop_link(fd, "previous")
         write_units(layout, old_units)
         reloaded = hooks.systemctl(["daemon-reload"]) == 0
+        egress_ok = hooks.systemctl(EGRESS_RESTART) == 0
         restarted = hooks.systemctl(["try-restart", "safo-broker.socket", "safo-broker.service"]) == 0
-        if not (reloaded and restarted):
+        if not (reloaded and egress_ok and restarted):
             problems.append("systemctl could not reload or restart after the rollback")
     except Exception as exc:
         problems.append(f"restore error {type(exc).__name__}")

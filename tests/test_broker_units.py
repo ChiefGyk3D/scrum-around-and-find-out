@@ -11,6 +11,7 @@ import pytest
 
 from unitdata import (
     FORBIDDEN_SERVICE_KEYS,
+    REQUIRED_BY_UNIT,
     REQUIRED_SERVICE,
     REQUIRED_SOCKET,
     UNIT_DIR,
@@ -20,13 +21,11 @@ from unitdata import (
 )
 
 ANALYZE = shutil.which("systemd-analyze")
-ALL_REQUIRED = [("safo-broker.service", r) for r in REQUIRED_SERVICE] + [
-    ("safo-broker.socket", r) for r in REQUIRED_SOCKET
-]
+ALL_REQUIRED = [(unit, r) for unit, rows in REQUIRED_BY_UNIT.items() for r in rows]
 
 
 def test_the_unit_files_exist_and_are_collected() -> None:
-    assert sorted(p.name for p in UNIT_DIR.iterdir()) == ["safo-broker.service", "safo-broker.socket"]
+    assert sorted(p.name for p in UNIT_DIR.iterdir()) == sorted(REQUIRED_BY_UNIT)
     assert len(ALL_REQUIRED) > 50  # the guard looks at something
 
 
@@ -38,11 +37,16 @@ def test_socket_has_every_required_line() -> None:
     assert missing(read("safo-broker.socket"), REQUIRED_SOCKET) == []
 
 
+@pytest.mark.parametrize("unit", sorted(REQUIRED_BY_UNIT))
+def test_every_unit_has_every_required_line(unit: str) -> None:
+    assert missing(read(unit), REQUIRED_BY_UNIT[unit]) == []
+
+
 @pytest.mark.parametrize(("unit", "line"), ALL_REQUIRED, ids=[f"{u}:{r[1]}={r[2]}"[:70] for u, r in ALL_REQUIRED])
 def test_removing_any_required_line_is_caught(unit: str, line: tuple[str, str, str]) -> None:
     """The negative case: delete exactly one required line from a copy of the shipped file, and the check names it."""
     section, key, value = line
-    required = REQUIRED_SERVICE if unit.endswith(".service") else REQUIRED_SOCKET
+    required = REQUIRED_BY_UNIT[unit]
     kept: list[str] = []
     removed = 0
     current = ""
@@ -71,12 +75,16 @@ def test_service_has_no_forbidden_key() -> None:
     assert [v for s, k, v in triples if k == "Environment"] == ["PYTHONDONTWRITEBYTECODE=1"]
     # the only writable path is the state directory
     assert [v for s, k, v in triples if k == "ReadWritePaths"] == ["/var/lib/safo-broker"]
+    # the hosts view is the only bind mount, read-only, from the egress directory over /etc/hosts
+    assert [v for s, k, v in triples if k.startswith("Bind")] == ["/etc/safo/egress/hosts:/etc/hosts"]
+    assert [k for s, k, v in triples if k == "BindReadOnlyPaths"]
+    assert [v for s, k, v in triples if k == "RestrictAddressFamilies"] == ["AF_UNIX AF_INET"]
     # no address allow or deny list (the vendor addresses are not fixed; the design says so)
     assert not {"IPAddressAllow", "IPAddressDeny"} & keys
 
 
 def test_the_key_never_appears_in_a_unit() -> None:
-    for name in ("safo-broker.service", "safo-broker.socket"):
+    for name in REQUIRED_BY_UNIT:
         text = read(name)
         assert "AIza" not in text
         assert "Environment=" not in text.replace("Environment=PYTHONDONTWRITEBYTECODE=1", "")
@@ -95,7 +103,7 @@ def _stage(tmp_path: Path) -> Path:
     stub.chmod(0o755)
     out = tmp_path / "units"
     out.mkdir()
-    for name in ("safo-broker.service", "safo-broker.socket"):
+    for name in REQUIRED_BY_UNIT:
         text = read(name).replace("/opt/safo-broker/current/venv/bin/python", str(stub))
         (out / name).write_text(text)
     return out
@@ -107,7 +115,7 @@ def _stage(tmp_path: Path) -> Path:
 def test_systemd_analyze_verify_accepts_the_units(tmp_path: Path) -> None:
     out = _stage(tmp_path)
     done = subprocess.run(  # noqa: S603 - absolute-or-PATH systemd-analyze, fixed argv, no shell, files in tmp_path
-        [str(ANALYZE), "verify", "--man=no", str(out / "safo-broker.service"), str(out / "safo-broker.socket")],
+        [str(ANALYZE), "verify", "--man=no", *(str(out / n) for n in REQUIRED_BY_UNIT)],
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,

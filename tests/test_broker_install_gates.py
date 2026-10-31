@@ -13,7 +13,6 @@ import pytest
 import safo_broker_install as install
 from installdata import World, make_world
 from safo_broker_install import InstallError
-from unitdata import REQUIRED_SERVICE, REQUIRED_SOCKET, read
 
 
 @pytest.fixture
@@ -194,101 +193,3 @@ def test_the_runbook_template_installs_a_hardware_key_type() -> None:
     line = next(x for x in doc.splitlines() if "broker-release-signers" in x and "printf" in x)
     assert "sk-ssh-ed25519@openssh.com" in line
     assert "release-signer ssh-ed25519" not in line
-
-
-# ---- L4: a fixed policy on the unit files, enforced after the signature verifies --------------------------------
-
-
-def service() -> str:
-    return read("safo-broker.service")
-
-
-def socket_unit() -> str:
-    return read("safo-broker.socket")
-
-
-def test_the_installer_policy_is_exactly_what_the_unit_tests_pin() -> None:
-    assert set(install.UNIT_POLICY["safo-broker.service"]) == set(REQUIRED_SERVICE)
-    assert set(install.UNIT_POLICY["safo-broker.socket"]) == set(REQUIRED_SOCKET)
-
-
-def test_the_shipped_units_satisfy_the_policy() -> None:
-    install.enforce_unit_policy({"safo-broker.service": service(), "safo-broker.socket": socket_unit()})
-
-
-def refused(service_text: str, socket_text: str | None = None) -> str:
-    with pytest.raises(InstallError, match="unit policy") as exc:
-        install.enforce_unit_policy(
-            {"safo-broker.service": service_text, "safo-broker.socket": socket_text or socket_unit()}
-        )
-    return str(exc.value)
-
-
-@pytest.mark.parametrize(("section", "key", "value"), REQUIRED_SERVICE)
-def test_dropping_any_required_service_line_is_refused(section: str, key: str, value: str) -> None:
-    lines = service().splitlines()
-    cut = [x for x in lines if x.strip() != f"{key}={value}"]
-    assert len(cut) == len(lines) - 1
-    assert key in refused("\n".join(cut) + "\n")
-
-
-def test_dropping_a_socket_line_is_refused() -> None:
-    cut = "\n".join(x for x in socket_unit().splitlines() if not x.startswith("SocketMode")) + "\n"
-    assert "SocketMode" in refused(service(), cut)
-
-
-@pytest.mark.parametrize(
-    "extra",
-    [
-        "NoNewPrivileges=no",  # a later assignment wins in systemd
-        "ProtectSystem=full",
-        "User=root",
-        "SystemCallFilter=",  # an empty value resets the list
-        "CapabilityBoundingSet=CAP_SYS_ADMIN",
-        "ExecStartPre=/bin/sh -c evil",
-        "ExecStartPre=+/bin/sh -c evil",
-        "ExecStartPost=/bin/sh -c evil",
-        "ExecStop=/bin/sh -c evil",
-        "ExecCondition=/bin/true",
-        "ReadWritePaths=/etc",
-        "BindPaths=/etc",
-        "DynamicUser=yes",
-        "EnvironmentFile=/etc/evil",
-        "Environment=LD_PRELOAD=/tmp/x",
-        "SupplementaryGroups=disk",
-        "AmbientCapabilities=CAP_NET_ADMIN",
-    ],
-)
-def test_a_weakening_line_added_to_the_service_is_refused(extra: str) -> None:
-    text = service().replace("[Service]\n", f"[Service]\n{extra}\n").rstrip("\n") + f"\n{extra}\n"
-    refused(text)
-
-
-@pytest.mark.parametrize("prefix", ["+", "!", "!!", "-", "@", ":", "|"])
-def test_an_exec_line_may_not_carry_a_privilege_or_error_prefix(prefix: str) -> None:
-    text = service().replace(
-        "ExecStartPre=/opt/safo-broker/current/venv/bin/python -I -m safo.broker.floor",
-        f"ExecStartPre={prefix}/opt/safo-broker/current/venv/bin/python -I -m safo.broker.floor",
-    )
-    assert "ExecStartPre" in refused(text)
-
-
-def test_a_line_continuation_cannot_hide_an_override() -> None:
-    text = service().rstrip("\n") + "\nNoNewPrivileges=\\\nno\n"
-    refused(text)
-
-
-def test_a_second_service_section_cannot_override() -> None:
-    text = service().rstrip("\n") + "\n[Service]\nPrivateTmp=no\n"
-    refused(text)
-
-
-def test_a_release_with_a_weakened_unit_is_refused_before_anything_is_built(world: World) -> None:
-    weak = service().replace("ProtectSystem=strict", "ProtectSystem=no")
-    world.release("1.0.0", units={"safo-broker.service": weak})
-    with pytest.raises(InstallError, match="unit policy"):
-        install.install("1.0.0", world.layout, world.hooks(), out=lambda s: None)  # a dry run is enough
-    with pytest.raises(InstallError, match="unit policy"):
-        install.install("1.0.0", world.layout, world.hooks(), apply=True, out=lambda s: None)
-    assert current_name(world) is None
-    assert [p.name for p in (world.layout.opt_dir / "releases").iterdir()] == []

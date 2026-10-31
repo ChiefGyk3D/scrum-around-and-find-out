@@ -29,7 +29,7 @@ def _version(text: str) -> tuple[int, int, int] | None:
     return (a, b, c)
 
 
-def _entry(path: Path, uid: int, *, want_dir: bool) -> str | None:
+def entry_problem(path: Path, uid: int, *, want_dir: bool) -> str | None:
     try:
         st = os.lstat(path)
     except OSError:
@@ -47,10 +47,10 @@ def _entry(path: Path, uid: int, *, want_dir: bool) -> str | None:
 
 def check(floor_path: Path, version: str, *, uid: int = 0, anchor: Path = Path("/")) -> str | None:
     """Return the reason the broker must not start, or None when it may. Anything unclear refuses."""
-    problem = _entry(floor_path, uid, want_dir=False)
+    problem = entry_problem(floor_path, uid, want_dir=False)
     parent = floor_path.parent
     while problem is None:
-        problem = _entry(parent, uid, want_dir=True)
+        problem = entry_problem(parent, uid, want_dir=True)
         if parent == anchor or parent == parent.parent:
             break
         parent = parent.parent

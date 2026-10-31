@@ -166,8 +166,9 @@ class World:
             "pyproject.toml": f'[project]\nname = "safo"\nversion = "{version}"\n',
             "packaging/broker-requirements.txt": lock if lock is not None else self.default_lock(),
         }
-        for name in ("safo-broker.service", "safo-broker.socket"):
-            files[f"packaging/systemd/{name}"] = (units or {}).get(name) or (UNIT_DIR / name).read_text()
+        for unit in sorted(UNIT_DIR.iterdir()):
+            files[f"packaging/systemd/{unit.name}"] = (units or {}).get(unit.name) or unit.read_text()
+        files["packaging/nftables/safo-broker.nft"] = (UNIT_DIR.parent / "nftables" / "safo-broker.nft").read_text()
         files.update(extra or {})
         for rel, text in files.items():
             target = self.repo / rel
