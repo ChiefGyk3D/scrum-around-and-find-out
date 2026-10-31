@@ -13,6 +13,13 @@
 
 - Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor above 2 (standard input only for `approve`), the `safo` package that launched it pinned first on the import path, and a fresh private working directory; the child verifies its own environment and directory instead of trusting the interpreter flag, and the mode is read by the real parser. No signing provider library or askpass program is passed on. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
+- Paid Gemini broker, phase 4a (#260): `src/safo/broker/imagewrite.py`, the client's safe image writer, with no socket
+  or protocol dependency. `write_image` takes the type from the first bytes (png, jpeg, webp; 24 MiB by default), makes
+  the file name itself from a restricted stem, a random suffix and a fixed extension, opens the output directory
+  component by component with `O_NOFOLLOW | O_DIRECTORY`, writes through a 0600 temporary file relative to the
+  directory descriptor, `fsync`s, links it into place without replacing anything and leaves no file behind on any
+  failure. `default_output_dir` makes a private 0700 directory under the user state directory, and `print_summary`
+  prints one line without opening the image. Paid use stays disabled.
 - Paid Gemini broker, phase 1 (#205): the core library under `src/safo/broker/`. Integer micro-dollar arithmetic and the
   worst-case reservation (prompt bytes plus 64 tokens at one token per byte, the output cap, two interim images), the
   per-job cap (2.50 USD in the testing phase) and monthly ceiling (10 USD), the model allow-list with Pro and Nano Banana
