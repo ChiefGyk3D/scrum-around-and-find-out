@@ -146,7 +146,8 @@ def test_no_secret_no_real_host_no_address() -> None:
     assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", doc), "an IPv4 address"
     assert not re.search(r"\b[0-9a-f]{2}(:[0-9a-f]{2}){5}\b", doc), "a MAC address"
     hosts = {h for h in re.findall(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", doc.replace(KEY_TYPE, ""))}
-    allowed_suffixes = (".new", ".py", ".sock", ".socket", ".service", ".yaml", ".log", ".md", ".sha256", ".invalid")
+    allowed_suffixes = (".conf", ".timer", ".new", ".py", ".sock", ".socket", ".service")
+    allowed_suffixes = (*allowed_suffixes, ".yaml", ".log", ".md", ".sha256", ".invalid")
     for h in hosts:
         if re.fullmatch(r"[0-9.]+", h):
             continue

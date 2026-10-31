@@ -67,15 +67,20 @@ def steps(login: str) -> tuple[Step, ...]:
             "Trust files, the encrypted credential, the releases and the installer's version record live here.",
             (
                 ssh(
-                    "install -d -m 0755 -o root -g root /etc/safo /opt/safo-broker /opt/safo-broker/releases "
-                    "/var/lib/safo-broker-install"
+                    "install -d -m 0755 -o root -g root /etc/safo /etc/safo/egress /opt/safo-broker "
+                    "/opt/safo-broker/releases /var/lib/safo-broker-install"
                 ),
                 ssh("install -d -m 0700 -o root -g root /etc/safo/broker"),
             ),
             "Empty directories owned by root. If /etc/safo already exists from the approval keys, install -d leaves "
             "its "
             "contents alone but sets its mode to 0755.",
-            (ssh("rmdir /opt/safo-broker/releases /opt/safo-broker /etc/safo/broker /var/lib/safo-broker-install"),),
+            (
+                ssh(
+                    "rmdir /opt/safo-broker/releases /opt/safo-broker /etc/safo/egress /etc/safo/broker "
+                    "/var/lib/safo-broker-install"
+                ),
+            ),
             "Do not make the state directory: systemd creates it (StateDirectory=) at the first service start.",
         ),
         Step(
@@ -170,9 +175,42 @@ def steps(login: str) -> tuple[Step, ...]:
             "delete the unit files and the release directory under /opt/safo-broker/releases.",
         ),
         Step(
+            "Name the vendor host for the egress control (observe mode)",
+            "The egress rules need the vendor API host name from a root-owned file, so the name is in no unit and no "
+            "command line. Replace PASTE_VENDOR_API_HOST_HERE with the host named in the design page, section "
+            "'The transport to the vendor'. The file starts in observe mode: connections outside the allowed set "
+            "are logged and let through.",
+            (
+                ssh(
+                    'sh -c "printf \\"VENDOR_HOST=PASTE_VENDOR_API_HOST_HERE\\\\nMODE=observe\\\\n\\" '
+                    '> /etc/safo/broker-egress.conf && chmod 0644 /etc/safo/broker-egress.conf"'
+                ),
+            ),
+            "One small root file. Nothing reads it until the egress service runs.",
+            (ssh("rm /etc/safo/broker-egress.conf"),),
+        ),
+        Step(
+            "Turn the egress control on, in observe mode",
+            "This loads an nftables table that matches only the broker's service user (port 443 to a set of vendor "
+            "addresses that a timer refreshes every five minutes; no DNS and no IPv6 for that user) and writes the "
+            "hosts view the broker unit bind-mounts. In observe mode nothing is blocked. Run it before the socket "
+            "step, and read the two check lines at the end: the set must hold addresses, and after some paid-path "
+            "dry runs the log must show no unexpected destinations.",
+            (
+                ssh("systemctl enable --now safo-broker-egress.service safo-broker-egress-refresh.timer"),
+                ssh("nft list set inet safo_broker_egress vendor_v4"),
+                ssh("journalctl -k --since -1day --grep safo-broker-egress-observe"),
+            ),
+            "Adds one firewall table that applies only to the service user's own connections, and a timer. Other "
+            "users and the rest of the machine are not matched. The service user does not exist as a login and "
+            "nothing runs as it yet, so nothing is affected until the broker starts.",
+            (ssh("systemctl disable --now safo-broker-egress-refresh.timer safo-broker-egress.service"),),
+            "Stopping the egress service deletes the table. A reboot also clears it when the service is disabled.",
+        ),
+        Step(
             "Enable the socket",
             "The socket starts the service on demand. The service also needs the switch file to exist, which this "
-            "runbook does not create.",
+            "runbook does not create. The broker unit requires the egress service and will not start without it.",
             (ssh("systemctl enable --now safo-broker.socket"),),
             "A listening socket in /run owned by root with the client group. No service runs and the paid key is not "
             "read until the switch exists.",
@@ -185,6 +223,23 @@ def steps(login: str) -> tuple[Step, ...]:
             "Read-only.",
             (ssh("true"),),
             "Nothing to undo; the rollback line above is a no-op.",
+        ),
+        Step(
+            "Switch the egress control to drop mode (after about a week of clean observation)",
+            "Run this only after the observe log shows nothing but vendor addresses. In drop mode a connection from "
+            "the broker's service user to anything outside the allowed set is logged and dropped.",
+            (
+                ssh("sed -i s/^MODE=observe/MODE=drop/ /etc/safo/broker-egress.conf"),
+                ssh("systemctl restart safo-broker-egress.service"),
+                ssh("journalctl -k --since -10min --grep safo-broker-egress-drop"),
+            ),
+            "Only the broker's own connections are affected. If the vendor changes addresses faster than the "
+            "refresh timer, or the timer stops, calls fail closed until the next good refresh (the previous set "
+            "expires after an hour).",
+            (
+                ssh("sed -i s/^MODE=drop/MODE=observe/ /etc/safo/broker-egress.conf"),
+                ssh("systemctl restart safo-broker-egress.service"),
+            ),
         ),
     )
 
@@ -206,6 +261,7 @@ def render(*, maintainer: str) -> str:
         "- Create a new paid key in the vendor console on another device. Do not reuse the old one.",
         "- Have a release signing key (a hardware key, separate from the approval keys) and its public half ready.",
         "- Run these on a virtual console or another machine's shell, not in a desktop terminal where an agent runs.",
+        "- Restrict the new key at the vendor as described in the last sections before the broker first uses it.",
         "",
     ]
     for number, step in enumerate(steps(maintainer), start=1):
@@ -220,11 +276,28 @@ def render(*, maintainer: str) -> str:
         "the keys guide describes, after the dry",
         "run with a real key. While it is absent the service will not start, so no call can reach the vendor.",
         "",
-        "## Optional extra",
+        "## Restrict the new key at the vendor (the vendor documentation, read 2026-10-31)",
         "",
-        "A host firewall rule that lets only the broker user reach port 443 is a good second layer. The vendor "
-        "addresses",
-        "are not fixed, so the unit does not pin them; the rule belongs to your own network setup.",
+        "Verified on the vendor's Gemini API key page on 2026-10-31:",
+        "",
+        "- Keys created in the vendor's AI Studio since 2026-05-28 are authorization keys, bound to a service account "
+        "and restricted to the Gemini API by default. The API rejects unrestricted standard keys.",
+        "- To restrict a standard key to the Gemini API only: on the API Keys page in AI Studio, find the key marked "
+        "Unrestricted, choose Add restrictions, select Restrict to Gemini API only, then Restrict key. You need the "
+        "permission to update API "
+        "keys on the project.",
+        "- Set billing alerts in the cloud console, and after a suspected leak: create a new key, switch the broker to "
+        "it, disable the old key, then review billing.",
+        "",
+        "Not verified, so do not rely on it: whether the optional IP-address application restriction applies to "
+        "authorization keys, and any vendor-side hard spend cap. The IP restriction would also need a fixed egress "
+        "address, which a roaming machine does not have.",
+        "",
+        "## Observe, then drop",
+        "",
+        "Keep the egress control in observe mode for about a week of real use, and read the log line from the egress "
+        "step. When every destination it shows is a vendor address, run the drop-mode step. If a call fails in drop "
+        "mode, the rollback line puts it back in observe mode at once.",
         "",
     ]
     return "\n".join(out)
