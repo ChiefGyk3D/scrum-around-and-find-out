@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+# Installed by root to /etc/systemd/system/. Design: docs/gemini-broker.md ("The unit files and their hardening").
+# Egress: the service needs outbound HTTPS to the one vendor host, whose addresses are not fixed, so there is no
+# IPAddressAllow= (it would break calls or be wrong). An optional host firewall rule that lets only this uid reach port
+# 443 is a good extra and is left to the maintainer's network setup; see the runbook note.
+# ConditionPathExists= makes the service skip its start while the root-owned switch file is absent. The broker still
+# reads the switch on every request and requires the single line "enabled"; the condition is a second, outer layer.
+[Unit]
+Description=SAFO Gemini broker
+Requires=safo-broker.socket
+After=network-online.target safo-broker.socket
+ConditionPathExists=/etc/safo/gemini-paid-enabled
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=safo-broker
+Group=safo-broker
+ExecStart=/opt/safo-broker/current/venv/bin/python -I -m safo.broker
+LoadCredentialEncrypted=paid-key:/etc/safo/broker/paid-key
+StateDirectory=safo-broker
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/safo-broker
+ReadOnlyPaths=/etc/safo /opt/safo-broker
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateMounts=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+DevicePolicy=closed
+KeyringMode=private
+RemoveIPC=yes
+LimitCORE=0
+LimitNOFILE=64
+TasksMax=32
+MemoryMax=512M
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+Restart=on-failure
+RestartSec=2s
