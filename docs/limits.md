@@ -44,7 +44,7 @@ This is a limit of composite actions, not something SAFO can close from inside o
 new private directory, checks it, and runs isolated Python, which stops a hostile checkout from shadowing an import and
 stops a planted venv. It does not stop a process an earlier step left running as the same user. Put the Action in a job of
 its own, give that job only the permissions it needs, and let nothing untrusted run in it first. See
-[Adopting](adoption.md) for the caller workflow.
+[Adopting](adoption.md) for the caller workflow and [The Action](action.md) for what the Action checks on the event and the revision.
 
 ## Accepted residuals
 

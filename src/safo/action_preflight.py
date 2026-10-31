@@ -13,7 +13,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
-from safo import compat, credentials, output
+from safo import action_trust, compat, credentials, output
 from safo.credentials import APP, PAT
 from safo.errors import ConfigError, MalformedDataError, SafoError
 from safo.modes import LocalMode, load_all
@@ -55,7 +55,18 @@ READS = (
     "DOPPLER_CONFIG",
     "EVENT_NAME",
     "IS_FORK",
+    "GITHUB_SHA",
+    "GITHUB_REF",
+    "DEFAULT_BRANCH",
+    "TRUSTED_REF",
+    "ALLOW_FORK_PRT",
+    "REPO_IS_FORK",
+    "ALLOW_FORK_REPO",
+    "PR_HEAD_SHA",
+    "RUNNER_TEMP",
 )
+BOARD_LIMIT = 1024 * 1024  # the loader's own size limit
+BODY_LIMIT = 65_536  # GitHub's limit on an update body (status.MAX_BODY_BYTES)
 _CLIENT_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _SLUG = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -86,7 +97,10 @@ def workspace_path(env: Mapping[str, str], text: str, label: str) -> str:
     return real
 
 
-def check_board_source(env: Mapping[str, str]) -> Board:
+def check_board_source(
+    env: Mapping[str, str], revision: action_trust.Revision | None = None, outputs: dict[str, str] | None = None
+) -> Board:
+    """The board. With a credential in play the file is read from the trusted revision, not from the workspace."""
     mode = env.get("SAFO_MODE", "")
     file, url = env.get("SAFO_BOARD", ""), env.get("SAFO_PROJECT_URL", "")
     if file and url:
@@ -97,7 +111,13 @@ def check_board_source(env: Mapping[str, str]) -> Board:
         if mode not in BOARD_LESS_MODES:
             raise ConfigError(f"mode {mode} needs board-file: the board-less inputs describe no fields to check")
         return compat.board_from_env(env)
-    return load_board(workspace_path(env, file, "board-file"))
+    if revision is None:
+        real = workspace_path(env, file, "board-file")
+    else:
+        real = revision.materialize(env, file, "board-file", BOARD_LIMIT, "board.yaml")
+    if outputs is not None:
+        outputs["board-file"] = real
+    return load_board(real)
 
 
 def check_repositories(text: str) -> list[str]:
@@ -208,15 +228,30 @@ def check_app_identifier(env: Mapping[str, str]) -> None:
         raise ConfigError("app-id must be a whole number")
 
 
-def check(env: Mapping[str, str]) -> str:
-    """Refuse anything wrong; return the repositories the installation token is to be limited to."""
+def check(env: Mapping[str, str], outputs: dict[str, str] | None = None) -> str:
+    """Refuse anything wrong; return the repositories the installation token is to be limited to.
+
+    `outputs` collects what later steps use: `board-file` and `status-body-file` (the files to read) and
+    `credentials` (`allowed` only when the event is classified as trusted and a credential may be used).
+    """
+    out = outputs if outputs is not None else {}
     mode = env.get("SAFO_MODE", "")
     if mode not in MODES:
         raise ConfigError(f"mode {shown(mode)} is not one of {', '.join(sorted(MODES))}")
     boolean(env, "SAFO_DRY_RUN", "dry-run", default="")
-    board = check_board_source(env)
+    revision = None
+    if mode != "validate":
+        # Allow-list first: an event that is not positively trusted gets no credential path and no file read.
+        trust = action_trust.classify(env)
+        revision = action_trust.trusted_revision(env, trust)
+        out["trust"] = f"event {trust.event}, ref {trust.ref}, trusted revision {revision.sha[:12]}: {trust.why}"
+    board = check_board_source(env, revision, out)
     if env.get("SAFO_STATUS_BODY_FILE"):
-        workspace_path(env, env["SAFO_STATUS_BODY_FILE"], "status-body-file")
+        body = env["SAFO_STATUS_BODY_FILE"]
+        if revision is None:
+            out["status-body-file"] = workspace_path(env, body, "status-body-file")
+        else:
+            out["status-body-file"] = revision.materialize(env, body, "status-body-file", BODY_LIMIT, "status-body.md")
     check_status_state(env)
     if mode == "validate":
         return ""
@@ -231,11 +266,6 @@ def check(env: Mapping[str, str]) -> str:
         raise ConfigError("the doppler inputs supply an App key; they cannot be combined with the token input")
     if from_doppler and has_key:
         raise ConfigError("pass the App key as private-key or from Doppler, not both")
-    fork_pull_request = boolean(env, "IS_FORK", "fork flag") and env.get("EVENT_NAME") == "pull_request"
-    if fork_pull_request and (has_key or has_token):
-        raise ConfigError("a pull request from a fork never receives a literal private-key or token input")
-    if from_doppler and fork_pull_request:
-        raise ConfigError("a pull request from a fork never receives the App key: no Doppler fetch")
     if not (has_key or has_token or from_doppler):
         raise ConfigError(
             "no credential: pass client-id with private-key (or Doppler), or token for a user-owned board"
@@ -247,14 +277,19 @@ def check(env: Mapping[str, str]) -> str:
         kind = APP
     # Only the kind matters to the rules, never the secret.
     credentials.check_for_board(credentials.Credentials("preflight", kind), board.project.owner_type, env)
+    out["credentials"] = "allowed"
     return "" if has_token else token_scope(env, board, explicit)
 
 
 def main() -> int:
     try:
-        scope = check(dict(os.environ))
+        outputs: dict[str, str] = {}
+        scope = check(dict(os.environ), outputs)
+        if outputs.get("trust"):
+            output.notice(sys.stdout, outputs["trust"])
         if os.environ.get("GITHUB_OUTPUT"):
-            output.set_output(os.environ["GITHUB_OUTPUT"], "repositories", scope)
+            for name, value in {"repositories": scope, **{k: v for k, v in outputs.items() if k != "trust"}}.items():
+                output.set_output(os.environ["GITHUB_OUTPUT"], name, value)
     except SafoError as err:
         output.annotation(sys.stderr, str(err))
         return err.exit_code

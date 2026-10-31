@@ -13,6 +13,8 @@
 #      secret read from the fetch step's outputs; nothing is exported to the job environment);
 #   2. `token`, a fine-grained personal access token, for a USER-owned board only (Apps cannot write those). It is
 #      refused for an organization-owned board unless `allow-token-for-org` is "true".
+# A credential is used only on an event the preflight classifies as trusted (docs/action.md), and board-file and
+# status-body-file are read from the revision `trusted-ref` binds (default: github.sha), not from the working tree.
 # There is no other fallback. The token's permissions are named, not inherited: organization Projects (read for
 # audit and for any dry run, write otherwise), Issues read, Pull requests read. Inputs reach the shell only through
 # environment variables, never by template expansion into a script, and every credential is masked before use.
@@ -52,7 +54,7 @@ inputs:
     description: 'Set to "true" to accept a personal access token for an organization-owned board.'
     default: "false"
   dry-run:
-    description: 'Read the board and print every change instead of making it ("true" or "false"). The token is then read-only.'
+    description: 'Read the board and print every change instead of making it ("true" or "false"). On the App credential path the minted token is then read-only (Projects read); a personal access token keeps the permissions it was created with.'
     default: "false"
   doppler-project:
     description: Doppler project slug holding the App private key as PROJECTS_APP_PRIVATE_KEY. Set with doppler-config and doppler-identity-id.
@@ -63,6 +65,15 @@ inputs:
   doppler-identity-id:
     description: Doppler Service Account Identity UUID for OIDC. The caller needs id-token write.
     default: ""
+  trusted-ref:
+    description: 'The revision the board file and the status body file are read from: a full commit id, or a full refs/heads or refs/tags name that the checkout holds. Empty means the commit this run is on (github.sha). The files are read from that commit, never from the working tree, and must be regular files there. For pull_request_target, workflow_run and issues runs it must be the commit the run is on.'
+    default: ""
+  allow-fork-pull-request-target:
+    description: 'Set to "true" to let a pull request from a fork, handled under pull_request_target, use a credential. Leave false unless the job has no checkout of pull request code and nothing from the pull request runs in it.'
+    default: "false"
+  allow-fork-repository:
+    description: 'Set to "true" to let a repository that is itself a fork use a credential. Leave false unless this fork holds its own credential for this purpose.'
+    default: "false"
   python-version:
     description: Python used to run safo (3.11 or newer).
     default: "3.13"
@@ -125,16 +136,6 @@ runs:
         python -I "$ACTION_PATH/src/safo/venv_check.py" installed "$VENV"
         echo "venv=$VENV" >> "$GITHUB_OUTPUT"
 
-    - name: Mask the credentials
-      shell: bash
-      env:
-        VENV: ${{ steps.install.outputs.venv }}
-        PRIVATE_KEY: ${{ inputs.private-key }}
-        TOKEN: ${{ inputs.token }}
-      run: |
-        set -euo pipefail
-        "$VENV/bin/python" -I -m safo.action_mask
-
     - name: Preflight, the inputs and the credential, before anything is minted
       id: preflight
       shell: bash
@@ -169,13 +170,33 @@ runs:
         DOPPLER_PROJECT: ${{ inputs.doppler-project }}
         DOPPLER_CONFIG: ${{ inputs.doppler-config }}
         EVENT_NAME: ${{ github.event_name }}
-        IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        REPO_IS_FORK: ${{ github.event.repository.fork }}
+        ALLOW_FORK_REPO: ${{ inputs.allow-fork-repository }}
+        IS_FORK: ${{ (github.event.pull_request != null && github.event.pull_request.head.repo.full_name != github.repository) || (github.event.workflow_run != null && github.event.workflow_run.head_repository.full_name != github.repository) }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_REF: ${{ github.ref }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        TRUSTED_REF: ${{ inputs.trusted-ref }}
+        ALLOW_FORK_PRT: ${{ inputs.allow-fork-pull-request-target }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        RUNNER_TEMP: ${{ runner.temp }}
       run: |
         set -euo pipefail
         "$VENV/bin/python" -I -m safo.action_preflight
 
+    - name: Mask the credentials
+      if: ${{ steps.preflight.outputs.credentials == 'allowed' }}
+      shell: bash
+      env:
+        VENV: ${{ steps.install.outputs.venv }}
+        PRIVATE_KEY: ${{ inputs.private-key }}
+        TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        "$VENV/bin/python" -I -m safo.action_mask
+
     - name: Fetch the App key from Doppler (OIDC)
-      if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+      if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && steps.preflight.outputs.credentials == 'allowed' }}
       id: doppler
       uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
       with:
@@ -185,7 +206,7 @@ runs:
         doppler-config: ${{ inputs.doppler-config }}
 
     - name: Mask the Doppler key
-      if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+      if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && steps.preflight.outputs.credentials == 'allowed' }}
       shell: bash
       env:
         VENV: ${{ steps.install.outputs.venv }}
@@ -196,7 +217,7 @@ runs:
 
     - name: Mint a one-hour installation token
       id: app
-      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id != '' && (inputs.private-key != '' || steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY != '') }}
+      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id != '' && (inputs.private-key != '' || steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY != '') && steps.preflight.outputs.credentials == 'allowed' }}
       uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
       with:
         client-id: ${{ inputs.client-id }}
@@ -209,7 +230,7 @@ runs:
 
     - name: Mint a one-hour installation token (deprecated app-id)
       id: app_legacy
-      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id == '' && inputs.app-id != '' && (inputs.private-key != '' || steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY != '') }}
+      if: ${{ inputs.mode != 'validate' && inputs.token == '' && inputs.client-id == '' && inputs.app-id != '' && (inputs.private-key != '' || steps.doppler.outputs.PROJECTS_APP_PRIVATE_KEY != '') && steps.preflight.outputs.credentials == 'allowed' }}
       uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
       with:
         app-id: ${{ inputs.app-id }}
@@ -235,12 +256,12 @@ runs:
       env:
         VENV: ${{ steps.install.outputs.venv }}
         SAFO_MODE: ${{ inputs.mode }}
-        SAFO_BOARD: ${{ inputs.board-file }}
-        SAFO_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token || inputs.token }}
+        SAFO_BOARD: ${{ steps.preflight.outputs.board-file }}
+        SAFO_TOKEN: ${{ steps.preflight.outputs.credentials == 'allowed' && (steps.app.outputs.token || steps.app_legacy.outputs.token || inputs.token) || '' }}
         SAFO_TOKEN_KIND: ${{ (steps.app.outputs.token || steps.app_legacy.outputs.token) && 'app' || 'token' }}
         SAFO_ALLOW_TOKEN_FOR_ORG: ${{ inputs.allow-token-for-org }}
         SAFO_DRY_RUN: ${{ inputs.dry-run }}
-        SAFO_STATUS_BODY_FILE: ${{ inputs.status-body-file }}
+        SAFO_STATUS_BODY_FILE: ${{ steps.preflight.outputs.status-body-file }}
         SAFO_STATUS_STATE: ${{ inputs.status-state }}
         SAFO_PROJECT_URL: ${{ inputs.project-url }}
         SAFO_STATUS_FIELD: ${{ inputs.status-field }}

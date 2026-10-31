@@ -135,7 +135,8 @@ safo --board board.yaml reconcile              # add missing items, mark closed 
 safo route research                            # recommend an agent for a task shape
 ```
 
-As an Action, see [docs/adoption.md](docs/adoption.md): `ChiefGyk3D/scrum-around-and-find-out@<sha>` with a
+As an Action, see [docs/adoption.md](docs/adoption.md) and, for what it trusts from its caller,
+[docs/action.md](docs/action.md): `ChiefGyk3D/scrum-around-and-find-out@<sha>` with a
 bring-your-own GitHub App. There is no hosted service. The reference for the file is [docs/board-yaml.md](docs/board-yaml.md).
 
 ## Relationship to git-your-ship-together
@@ -164,6 +165,7 @@ replaced are gone.
 - [Agents-status](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Agents-status)
 - [Lessons](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Lessons)
 - [Measurements](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Measurements)
+- [Action](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Action)
 - [Adoption](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Adoption)
 - [Approvals](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Approvals)
 - [Privacy](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Privacy)

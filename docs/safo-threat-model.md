@@ -82,20 +82,20 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 | 1 | S01 | Prompt injection: attacker-written text reaches a model that holds tool access | High | Actor class: any contributor to a repository an agent reads. | Open | #81, #61, #123, #230 |
 | 2 | S02 | Guard files, state and hook wiring share an account with the agents the guard governs | High | Actor class: a process of the maintainer's account. | Open | #61, #130, #231 |
 | 3 | S03 | The maintainer's stored GitHub login is broad and shared with the account's processes | High | Actor class: a process of the maintainer's account, or theft of the login. | Open | #82, #232 |
-| 4 | S05 | Action credentials and the caller's workflow: data leakage of the Action's credentials | High | Actor class: an outside contributor or a compromised dependency; the exposure depends on how the caller wires the workflow. | Open | #236, ChiefGyk3D/git-your-ship-together#251 |
-| 5 | S12 | Board writes: where the board file and the events come from | Medium | Actor class: a contributor whose change is merged, or a caller that is wired loosely. | Open | #236 |
-| 6 | S24 | The caller-supplied personal access token path of the Action | High | Actor class: a caller using the token input, plus a leak of the token or a broad grant. | Open | #242 |
-| 7 | S04 | The approval token and the routing rules rest on model-written text | Medium | Actor class: an agent that writes a brief. | Open | #81 |
-| 8 | S06 | Supply chain: an upstream release that SAFO runs or installs | Critical | Actor class: compromise of an upstream release process. | Open | #216, #162, #163, #165, #233 |
-| 9 | S07 | Handoff evidence: whether a review report matches the current head and its author | High | Actor class: comment rights as the maintainer's account, or any push after a review. | Open | #106, #160 |
-| 10 | S08 | Guard enforcement: error, timeout and the limits of a text scanner | Medium | Actor class: an agent with shell access. | Open | #130, #188 |
-| 11 | S09 | Data leakage: maintainer private identifiers (asset A7) or unfixed-finding detail reach a public artifact | High | Actor class: the maintainer or an agent; no attacker is needed. | Open | #123, #234 |
-| 12 | S10 | Data leakage to a model host: private text sent to a host that should not receive it | Medium | Actor class: an agent that writes a brief or a prompt file. | Open | docs/gemini.md, #235 |
-| 13 | S23 | Local model server: confidentiality of prompts and integrity of results on the local path | Medium | Actor class: a foothold on the home network or the model server. | Open | #241 |
-| 14 | S25 | Local model answer integrity: a local answer applied without review | Medium | Actor class: an ordinary model error, or the actor of S23. | Open | #243 |
-| 15 | S11 | Config sync: private SAFO material pushed to a remote | Medium | Actor class: the maintainer; no attacker is needed. | Open | maintainer-only tracking |
-| 16 | S13 | GitHub rate limits and outages stall the board, audits and lookups | Medium | Actor class: none needed. | Open | #204 |
-| 17 | S14 | GitHub behavior or schema changes and a check's answer | Medium | Actor class: a change on GitHub's side. | Open | #238 |
+| 4 | S24 | The caller-supplied personal access token path of the Action | High | Actor class: a caller using the token input, plus a leak of the token or a broad grant. | Open | #242 |
+| 5 | S04 | The approval token and the routing rules rest on model-written text | Medium | Actor class: an agent that writes a brief. | Open | #81 |
+| 6 | S06 | Supply chain: an upstream release that SAFO runs or installs | Critical | Actor class: compromise of an upstream release process. | Open | #216, #162, #163, #165, #233 |
+| 7 | S07 | Handoff evidence: whether a review report matches the current head and its author | High | Actor class: comment rights as the maintainer's account, or any push after a review. | Open | #106, #160 |
+| 8 | S08 | Guard enforcement: error, timeout and the limits of a text scanner | Medium | Actor class: an agent with shell access. | Open | #130, #188 |
+| 9 | S09 | Data leakage: maintainer private identifiers (asset A7) or unfixed-finding detail reach a public artifact | High | Actor class: the maintainer or an agent; no attacker is needed. | Open | #123, #234 |
+| 10 | S10 | Data leakage to a model host: private text sent to a host that should not receive it | Medium | Actor class: an agent that writes a brief or a prompt file. | Open | docs/gemini.md, #235 |
+| 11 | S23 | Local model server: confidentiality of prompts and integrity of results on the local path | Medium | Actor class: a foothold on the home network or the model server. | Open | #241 |
+| 12 | S25 | Local model answer integrity: a local answer applied without review | Medium | Actor class: an ordinary model error, or the actor of S23. | Open | #243 |
+| 13 | S11 | Config sync: private SAFO material pushed to a remote | Medium | Actor class: the maintainer; no attacker is needed. | Open | maintainer-only tracking |
+| 14 | S13 | GitHub rate limits and outages stall the board, audits and lookups | Medium | Actor class: none needed. | Open | #204 |
+| 15 | S14 | GitHub behavior or schema changes and a check's answer | Medium | Actor class: a change on GitHub's side. | Open | #238 |
+| 16 | S05 | Action credentials and the caller's workflow: data leakage of the Action's credentials | High | Actor class: an outside contributor or a compromised dependency; the exposure depends on how the caller wires the workflow (docs/action.md). | Mitigated | #236 (closed by PR #244); ChiefGyk3D/git-your-ship-together#251 (open follow-up) |
+| 17 | S12 | Board writes: where the board file and the events come from | Medium | Actor class: a contributor whose change is merged, or a caller that is wired loosely (docs/action.md). | Mitigated | #236 (closed by PR #244) |
 | 18 | S15 | Persona, template, agents.yaml or promotion evidence is changed to steer agents | High | A merged pull request with the owner's review, or write access to the local files (S02). | Mitigated | none needed (accepted residual in docs/limits.md) |
 | 19 | S16 | A convenience call to the local model evicts a production model | Medium | A routing or configuration mistake. | Mitigated | #191 |
 | 20 | S17 | A write is repeated or its outcome is guessed after an ambiguous failure | Low | A network fault or a rate-limit response at the wrong moment. | Mitigated | none needed (mitigated) |
@@ -151,42 +151,9 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 - **Residual risk:** Open. Owner: the maintainer. Tracked in #82, #232. The statements under Mitigation describe what the repository tests exercise today; they are not a wider guarantee.
 - **Tracking:** #82, #232.
 
-### S05: Action credentials and the caller's workflow: data leakage of the Action's credentials
-
-- **Impact:** High. **Rank:** 4. **Status:** Open. **STRIDE:** Information disclosure.
-- **Abuse case:** Asset at risk: the Action's credentials. Actor class: an outside contributor or a dependency of the caller's workflow. Consequence: the credentials are exposed, or a write is steered by untrusted content.
-- **Prerequisites:** Actor class: an outside contributor or a compromised dependency; the exposure depends on how the caller wires the workflow.
-- **Mitigation (V verified, I inferred):**
-  - **V.** For a fork's pull request the preflight refuses credential inputs (src/safo/action_preflight.py). SAFO's claim is limited to that case; see the trust boundary of the Action in docs/limits.md.
-  - **V.** Credentials are masked before use, one line at a time, and the masking command prints no value (src/safo/action_mask.py).
-  - **V.** The App credential path has its own scoped permissions and lifetime (action.yml); the personal-token path is caller-scoped and is covered by S24.
-  - **V.** SAFO installs into a fresh hash-pinned venv, runs isolated Python and checks the venv before and after (action.yml, src/safo/venv_check.py).
-  - **V.** The local modes are refused before anything is minted (action_preflight.py).
-  - **V.** Inputs reach the shell through environment variables, and the actions in this repository are pinned by commit (action.yml, .github/workflows).
-- **Verification:** tests/test_action.py (the fork case), tests/test_preflight.py, tests/test_mask.py, tests/test_venv_check.py, tests/test_action_isolation.py, tests/test_workflows.py.
-- **Residual risk:** Open. Owner: the maintainer. Tracked in #236, ChiefGyk3D/git-your-ship-together#251. The statements under Mitigation describe what the repository tests exercise today; they are not a wider guarantee.
-- **Tracking:** #236, ChiefGyk3D/git-your-ship-together#251.
-
-### S12: Board writes: where the board file and the events come from
-
-- **Impact:** Medium. **Rank:** 5. **Status:** Open. **STRIDE:** Tampering.
-- **Abuse case:** Asset at risk: the Project board and its cards. Actor class: an outside contributor or a misconfigured caller. Consequence: a write the maintainer did not intend.
-- **Prerequisites:** Actor class: a contributor whose change is merged, or a caller that is wired loosely.
-- **Mitigation (V verified, I inferred):**
-  - **V.** The loader refuses duplicate keys, anchors, aliases, merge keys, files over 1 MiB and nesting over 64, and caps its lists (docs/board-yaml.md).
-  - **V.** The board file and the status file must resolve to a path inside the workspace (src/safo/action_preflight.py).
-  - **V.** `sync` treats the event payload as a pointer, reads the live state and writes nothing when they contradict (docs/board-yaml.md).
-  - **V.** `reconcile` and `sync` write what a rule can decide and print the rest as `HUMAN` lines; `bootstrap` does not edit an existing field's options (docs/no-hidden-work.md, docs/adoption.md).
-  - **V.** A dry run sends no mutation (src/safo/graphql.py); the token behind it is described under S03 and S24.
-  - **V.** `safo protection` checks that board.yaml and CODEOWNERS have an owner (docs/adoption.md).
-  - **V.** Adoption asks for the App to be installed on selected repositories (docs/adoption.md).
-- **Verification:** tests/test_schema.py, test_duplicate_keys.py, test_schema_caps.py, test_sync.py, test_reconcile.py, test_bootstrap.py, test_codeowners_check.py.
-- **Residual risk:** Open. Owner: the maintainer. Tracked in #236. The statements under Mitigation describe what the repository tests exercise today; they are not a wider guarantee.
-- **Tracking:** #236.
-
 ### S24: The caller-supplied personal access token path of the Action
 
-- **Impact:** High. **Rank:** 6. **Status:** Open. **STRIDE:** Elevation of privilege.
+- **Impact:** High. **Rank:** 4. **Status:** Open. **STRIDE:** Elevation of privilege.
 - **Abuse case:** Asset at risk: the repositories and board the token can reach. Actor class: a caller who supplies a token, or whoever obtains it. Consequence: the token's own authority and lifetime apply, and SAFO does not narrow them.
 - **Prerequisites:** Actor class: a caller using the token input, plus a leak of the token or a broad grant.
 - **Mitigation (V verified, I inferred):**
@@ -199,7 +166,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S04: The approval token and the routing rules rest on model-written text
 
-- **Impact:** Medium. **Rank:** 7. **Status:** Open. **STRIDE:** Spoofing.
+- **Impact:** Medium. **Rank:** 5. **Status:** Open. **STRIDE:** Spoofing.
 - **Abuse case:** Asset at risk: model-tier spend and routing discipline. Actor class: a prompt-injected or careless agent. Consequence: a dispatch goes ahead that a person did not approve.
 - **Prerequisites:** Actor class: an agent that writes a brief.
 - **Mitigation (V verified, I inferred):**
@@ -212,7 +179,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S06: Supply chain: an upstream release that SAFO runs or installs
 
-- **Impact:** Critical. **Rank:** 8. **Status:** Open. **STRIDE:** Tampering.
+- **Impact:** Critical. **Rank:** 6. **Status:** Open. **STRIDE:** Tampering.
 - **Abuse case:** Asset at risk: the Action's credentials and the maintainer's machine. Actor class: a compromised upstream maintainer or release. Consequence: code runs with the credentials or as the guard.
 - **Prerequisites:** Actor class: compromise of an upstream release process.
 - **Mitigation (V verified, I inferred):**
@@ -226,7 +193,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S07: Handoff evidence: whether a review report matches the current head and its author
 
-- **Impact:** High. **Rank:** 9. **Status:** Open. **STRIDE:** Spoofing.
+- **Impact:** High. **Rank:** 7. **Status:** Open. **STRIDE:** Spoofing.
 - **Abuse case:** Asset at risk: the merge decision. Actor class: an agent commenting through the maintainer's account, or an ordinary later push. Consequence: a pull request looks reviewed when it was not reviewed at its current head.
 - **Prerequisites:** Actor class: comment rights as the maintainer's account, or any push after a review.
 - **Mitigation (V verified, I inferred):**
@@ -241,7 +208,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S08: Guard enforcement: error, timeout and the limits of a text scanner
 
-- **Impact:** Medium. **Rank:** 10. **Status:** Open. **STRIDE:** Denial of service.
+- **Impact:** Medium. **Rank:** 8. **Status:** Open. **STRIDE:** Denial of service.
 - **Abuse case:** Asset at risk: the guard's rules (waiting, vendor-API use, tracking). Actor class: an agent that writes shell commands. Consequence: a rule does not apply to a call.
 - **Prerequisites:** Actor class: an agent with shell access.
 - **Mitigation (V verified, I inferred):**
@@ -257,7 +224,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S09: Data leakage: maintainer private identifiers (asset A7) or unfixed-finding detail reach a public artifact
 
-- **Impact:** High. **Rank:** 11. **Status:** Open. **STRIDE:** Information disclosure.
+- **Impact:** High. **Rank:** 9. **Status:** Open. **STRIDE:** Information disclosure.
 - **Abuse case:** Asset at risk: asset A7 and unfixed-finding detail. Actor class: the maintainer or an agent, by a slip. Consequence: private material appears in a public artifact.
 - **Prerequisites:** Actor class: the maintainer or an agent; no attacker is needed.
 - **Mitigation (V verified, I inferred):**
@@ -271,7 +238,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S10: Data leakage to a model host: private text sent to a host that should not receive it
 
-- **Impact:** Medium. **Rank:** 12. **Status:** Open. **STRIDE:** Information disclosure.
+- **Impact:** Medium. **Rank:** 10. **Status:** Open. **STRIDE:** Information disclosure.
 - **Abuse case:** Asset at risk: private text in briefs and prompts. Actor class: a careless or prompt-injected agent. Consequence: material reaches a third-party service or a host the configuration did not intend.
 - **Prerequisites:** Actor class: an agent that writes a brief or a prompt file.
 - **Mitigation (V verified, I inferred):**
@@ -285,7 +252,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S23: Local model server: confidentiality of prompts and integrity of results on the local path
 
-- **Impact:** Medium. **Rank:** 13. **Status:** Open. **STRIDE:** Spoofing.
+- **Impact:** Medium. **Rank:** 11. **Status:** Open. **STRIDE:** Spoofing.
 - **Abuse case:** Asset at risk: prompt confidentiality and result integrity on the local model path. Actor class: a compromised or LAN-adjacent model server. Consequence: prompts are observed or the output is chosen by someone other than the maintainer.
 - **Prerequisites:** Actor class: a foothold on the home network or the model server.
 - **Mitigation (V verified, I inferred):**
@@ -298,7 +265,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S25: Local model answer integrity: a local answer applied without review
 
-- **Impact:** Medium. **Rank:** 14. **Status:** Open. **STRIDE:** Tampering.
+- **Impact:** Medium. **Rank:** 12. **Status:** Open. **STRIDE:** Tampering.
 - **Abuse case:** Asset at risk: decisions and documents that use a local answer. Actor class: a model error or a compromised model server. Consequence: a wrong or chosen answer is applied or published.
 - **Prerequisites:** Actor class: an ordinary model error, or the actor of S23.
 - **Mitigation (V verified, I inferred):**
@@ -311,7 +278,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S11: Config sync: private SAFO material pushed to a remote
 
-- **Impact:** Medium. **Rank:** 15. **Status:** Open. **STRIDE:** Information disclosure.
+- **Impact:** Medium. **Rank:** 13. **Status:** Open. **STRIDE:** Information disclosure.
 - **Abuse case:** Asset at risk: asset A7 and the maintainer's local configuration. Actor class: the maintainer, by a slip, or a wider-than-intended sync scope. Consequence: a private file leaves the laptop for a hosted remote.
 - **Prerequisites:** Actor class: the maintainer; no attacker is needed.
 - **Mitigation (V verified, I inferred):**
@@ -323,7 +290,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S13: GitHub rate limits and outages stall the board, audits and lookups
 
-- **Impact:** Medium. **Rank:** 16. **Status:** Open. **STRIDE:** Denial of service.
+- **Impact:** Medium. **Rank:** 14. **Status:** Open. **STRIDE:** Denial of service.
 - **Abuse case:** Asset at risk: availability of the board, the audits and the guard's lookups. Actor class: none; ordinary heavy use. Consequence: work stalls or, in `block` mode, a dispatch is denied.
 - **Prerequisites:** Actor class: none needed.
 - **Mitigation (V verified, I inferred):**
@@ -337,7 +304,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 
 ### S14: GitHub behavior or schema changes and a check's answer
 
-- **Impact:** Medium. **Rank:** 17. **Status:** Open. **STRIDE:** Tampering.
+- **Impact:** Medium. **Rank:** 15. **Status:** Open. **STRIDE:** Tampering.
 - **Abuse case:** Asset at risk: the assurance the checks give. Actor class: GitHub, by changing its behavior. Consequence: a check could report a pass when it should say it cannot tell.
 - **Prerequisites:** Actor class: a change on GitHub's side.
 - **Mitigation (V verified, I inferred):**
@@ -347,6 +314,40 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 - **Verification:** tests/test_malformed_nodes.py; tests/test_items_strict.py; tests/test_protection.py; tests/test_graphql_framing.py.
 - **Residual risk:** Open. Owner: the maintainer. Tracked in #238. The statements under Mitigation describe what the repository tests exercise today; they are not a wider guarantee.
 - **Tracking:** #238.
+
+### S05: Action credentials and the caller's workflow: data leakage of the Action's credentials
+
+- **Impact:** High. **Rank:** 16. **Status:** Mitigated. **STRIDE:** Information disclosure.
+- **Abuse case:** Asset at risk: the Action's credentials. Actor class: an outside contributor or a dependency of the caller's workflow. Consequence: the credentials are exposed, or a write is steered by untrusted content.
+- **Prerequisites:** Actor class: an outside contributor or a compromised dependency; the exposure depends on how the caller wires the workflow (docs/action.md).
+- **Mitigation (V verified, I inferred):**
+  - **V.** The preflight checks the trigger against an allow-list of trusted events and refs before any credential is fetched, minted or used; an event not on the list gets no credential path (docs/action.md, src/safo/action_trust.py).
+  - **V.** The preflight is the first step after the install and receives whether a key and a token were given, not their values; the masking, secret-fetch, token-mint and run steps wait for its verdict (docs/action.md).
+  - **V.** Credentials are masked before use, one line at a time, and the masking command prints no value (src/safo/action_mask.py).
+  - **V.** The App credential path has its own scoped permissions and lifetime (action.yml); the personal-token path is caller-scoped and is covered by S24.
+  - **V.** SAFO installs into a fresh hash-pinned venv, runs isolated Python and checks the venv before and after (action.yml, src/safo/venv_check.py).
+  - **V.** The local modes are refused before anything is minted (src/safo/action_preflight.py).
+  - **V.** Inputs reach the shell through environment variables, and the actions in this repository are pinned by commit (action.yml, .github/workflows).
+- **Verification:** tests/test_action_trust.py, tests/test_action.py, tests/test_preflight.py, tests/test_mask.py, tests/test_venv_check.py, tests/test_action_isolation.py, tests/test_workflows.py.
+- **Residual risk:** Mitigated for the covered cases (docs/action.md, What is guaranteed). Callers that run untrusted code in the job that holds the credentials are outside what a composite action can stop (docs/action.md, docs/limits.md); the personal-token path is S24. The caller lint is the open follow-up. The repository tests exercise this behavior under the tested conditions.
+- **Tracking:** #236 (closed by PR #244); ChiefGyk3D/git-your-ship-together#251 (open follow-up).
+
+### S12: Board writes: where the board file and the events come from
+
+- **Impact:** Medium. **Rank:** 17. **Status:** Mitigated. **STRIDE:** Tampering.
+- **Abuse case:** Asset at risk: the Project board and its cards. Actor class: an outside contributor or a misconfigured caller. Consequence: a write the maintainer did not intend.
+- **Prerequisites:** Actor class: a contributor whose change is merged, or a caller that is wired loosely (docs/action.md).
+- **Mitigation (V verified, I inferred):**
+  - **V.** With a credential in play the board file and the status-body file are read from the git object database at the committed revision the caller binds, not from the working tree; a path that is unsafe, a link or a directory is refused (docs/action.md, src/safo/action_trust.py).
+  - **V.** The loader refuses duplicate keys, anchors, aliases, merge keys, files over 1 MiB and nesting over 64, and caps its lists (docs/board-yaml.md).
+  - **V.** `sync` treats the event payload as a pointer, reads the live state and writes nothing when they contradict (docs/board-yaml.md).
+  - **V.** `reconcile` and `sync` write what a rule can decide and print the rest as `HUMAN` lines; `bootstrap` does not edit an existing field's options (docs/no-hidden-work.md, docs/adoption.md).
+  - **V.** A dry run sends no mutation (src/safo/graphql.py); the token behind it is described under S03 and S24 (docs/action.md, Dry run).
+  - **V.** `safo protection` checks that board.yaml and CODEOWNERS have an owner (docs/adoption.md).
+  - **V.** Adoption asks for the App to be installed on selected repositories (docs/adoption.md).
+- **Verification:** tests/test_action_trust.py, tests/test_schema.py, test_duplicate_keys.py, test_schema_caps.py, test_sync.py, test_reconcile.py, test_bootstrap.py, test_codeowners_check.py.
+- **Residual risk:** Mitigated for the covered cases. The caller chooses the trusted revision and the Action holds it to the documented rules and no further (docs/action.md, What is not guaranteed). The repository tests exercise this behavior under the tested conditions.
+- **Tracking:** #236 (closed by PR #244).
 
 ### S15: Persona, template, agents.yaml or promotion evidence is changed to steer agents
 
@@ -457,8 +458,9 @@ untested paths.
 
 What the repository tests exercise today:
 
-- For a fork's pull request the Action refuses credential inputs; SAFO's claim is limited to that case (see the trust
-  boundary of the Action in [Limits](limits.md)). Credentials are masked before use. The App credential path has its own
+- The Action checks the trigger against an allow-list before it fetches, mints or uses a credential, and reads the board
+  file from the committed revision the caller binds ([The Action](action.md)); it cannot stop a step that runs untrusted
+  code in the same job ([Limits](limits.md)). Credentials are masked before use. The App credential path has its own
   scoped permissions and lifetime; the personal-token path is caller-scoped (S24).
 - A write to GitHub is not replayed after the request went out; an ambiguous answer is an unknown outcome and the caller
   re-reads. A redirect is not followed with a token or a prompt.
@@ -486,8 +488,8 @@ Existing issues are linked in the register above. The follow-up work this model 
 | S01 | #230 | Fence GitHub text in briefs and local prompts; flag a brief that pastes issue, PR or comment text bare |
 | S02 | #231 | Guard launcher integrity: verify the identity of the program the hook runs and report it in safo hooks status |
 | S03 | #232 | safo doctor: report the scopes of the stored GitHub login and warn on more than SAFO needs |
-| S05 | ChiefGyk3D/git-your-ship-together#251 | Caller lint for jobs in the Action's callers (GYST) |
-| S05, S12 | #236 | Hardening: Action caller trust and provenance |
+| S05 | ChiefGyk3D/git-your-ship-together#251 | Caller lint for jobs in the Action's callers (GYST; open follow-up) |
+| S05, S12 | #236 | Hardening: Action caller trust and provenance (merged: PR #244) |
 | S06 | #233 | Install and update path: pin a commit for pipx and git installs; doctor prints the installed version or commit |
 | S09 | #234 | Local pre-push check that runs the private-terms scan before a public push, commit messages included |
 | S10 | #235 | safo local run: refuse a prompt that carries a secret shape or a private term |
