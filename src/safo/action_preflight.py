@@ -60,6 +60,8 @@ READS = (
     "DEFAULT_BRANCH",
     "TRUSTED_REF",
     "ALLOW_FORK_PRT",
+    "REPO_IS_FORK",
+    "ALLOW_FORK_REPO",
     "PR_HEAD_SHA",
     "RUNNER_TEMP",
 )

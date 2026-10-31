@@ -26,7 +26,14 @@ PULL = "refs/pull/7/merge"
 
 
 def trust_env(event: str, ref: str, fork: str = "false", **more: str) -> dict[str, str]:
-    return {"EVENT_NAME": event, "GITHUB_REF": ref, "DEFAULT_BRANCH": "main", "IS_FORK": fork, **more}
+    return {
+        "EVENT_NAME": event,
+        "GITHUB_REF": ref,
+        "DEFAULT_BRANCH": "main",
+        "IS_FORK": fork,
+        "REPO_IS_FORK": "false",
+        **more,
+    }
 
 
 # (event, ref, fork flag, accepted)
@@ -94,12 +101,36 @@ def test_the_table_has_both_outcomes_and_every_accepted_event_is_in_it() -> None
     assert {row[0] for row in TABLE if row[3]} == {"push", "schedule", DISPATCH, "issues", WFR, PR, PRT}
 
 
-@pytest.mark.parametrize("missing", ["EVENT_NAME", "GITHUB_REF", "DEFAULT_BRANCH", "IS_FORK"])
+@pytest.mark.parametrize("missing", ["EVENT_NAME", "GITHUB_REF", "DEFAULT_BRANCH", "IS_FORK", "REPO_IS_FORK"])
 def test_a_missing_value_is_refused_not_assumed(missing: str) -> None:
     env = trust_env("push", MAIN)
     del env[missing]
     with pytest.raises(ConfigError):
         action_trust.classify(env)
+
+
+@pytest.mark.parametrize("default", ["", "Main", "ma in", "main\n", "m\u0430in"])
+def test_a_schedule_needs_a_valid_default_branch_and_an_exact_match(default: str) -> None:
+    with pytest.raises(ConfigError):
+        action_trust.classify({**trust_env("schedule", MAIN), "DEFAULT_BRANCH": default})
+
+
+@pytest.mark.parametrize("event", ["push", "schedule", DISPATCH, "issues", WFR, PR, PRT])
+def test_a_repository_that_is_itself_a_fork_gets_no_credential_unless_the_caller_allows_it(event: str) -> None:
+    ref = {PR: PULL, DISPATCH: MAIN}.get(event, MAIN)
+    env = {**trust_env(event, ref), "REPO_IS_FORK": "true"}
+    with pytest.raises(ConfigError, match="itself a fork"):
+        action_trust.classify(env)
+    with pytest.raises(ConfigError, match="itself a fork"):
+        action_trust.classify({**env, "ALLOW_FORK_REPO": "TRUE"})
+    assert action_trust.classify({**env, "ALLOW_FORK_REPO": "true"}).event == event
+
+
+@pytest.mark.parametrize("flag", ["", "True", "1"])
+def test_the_repository_fork_flag_is_exactly_true_or_false(flag: str) -> None:
+    with pytest.raises(ConfigError, match="repository fork flag"):
+        probe = {**trust_env("push", MAIN), "REPO_IS_FORK": flag}
+        action_trust.classify(probe)
 
 
 @pytest.mark.parametrize("flag", ["", "True", "1", "yes", "false "])

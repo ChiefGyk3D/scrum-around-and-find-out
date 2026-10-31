@@ -71,6 +71,9 @@ inputs:
   allow-fork-pull-request-target:
     description: 'Set to "true" to let a pull request from a fork, handled under pull_request_target, use a credential. Leave false unless the job has no checkout of pull request code and nothing from the pull request runs in it.'
     default: "false"
+  allow-fork-repository:
+    description: 'Set to "true" to let a repository that is itself a fork use a credential. Leave false unless this fork holds its own credential for this purpose.'
+    default: "false"
   python-version:
     description: Python used to run safo (3.11 or newer).
     default: "3.13"
@@ -133,16 +136,6 @@ runs:
         python -I "$ACTION_PATH/src/safo/venv_check.py" installed "$VENV"
         echo "venv=$VENV" >> "$GITHUB_OUTPUT"
 
-    - name: Mask the credentials
-      shell: bash
-      env:
-        VENV: ${{ steps.install.outputs.venv }}
-        PRIVATE_KEY: ${{ inputs.private-key }}
-        TOKEN: ${{ inputs.token }}
-      run: |
-        set -euo pipefail
-        "$VENV/bin/python" -I -m safo.action_mask
-
     - name: Preflight, the inputs and the credential, before anything is minted
       id: preflight
       shell: bash
@@ -177,6 +170,8 @@ runs:
         DOPPLER_PROJECT: ${{ inputs.doppler-project }}
         DOPPLER_CONFIG: ${{ inputs.doppler-config }}
         EVENT_NAME: ${{ github.event_name }}
+        REPO_IS_FORK: ${{ github.event.repository.fork }}
+        ALLOW_FORK_REPO: ${{ inputs.allow-fork-repository }}
         IS_FORK: ${{ (github.event.pull_request != null && github.event.pull_request.head.repo.full_name != github.repository) || (github.event.workflow_run != null && github.event.workflow_run.head_repository.full_name != github.repository) }}
         GITHUB_SHA: ${{ github.sha }}
         GITHUB_REF: ${{ github.ref }}
@@ -188,6 +183,17 @@ runs:
       run: |
         set -euo pipefail
         "$VENV/bin/python" -I -m safo.action_preflight
+
+    - name: Mask the credentials
+      if: ${{ steps.preflight.outputs.credentials == 'allowed' }}
+      shell: bash
+      env:
+        VENV: ${{ steps.install.outputs.venv }}
+        PRIVATE_KEY: ${{ inputs.private-key }}
+        TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        "$VENV/bin/python" -I -m safo.action_mask
 
     - name: Fetch the App key from Doppler (OIDC)
       if: ${{ inputs.mode != 'validate' && inputs.private-key == '' && inputs.token == '' && inputs.doppler-identity-id != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && steps.preflight.outputs.credentials == 'allowed' }}
@@ -251,7 +257,7 @@ runs:
         VENV: ${{ steps.install.outputs.venv }}
         SAFO_MODE: ${{ inputs.mode }}
         SAFO_BOARD: ${{ steps.preflight.outputs.board-file }}
-        SAFO_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token || inputs.token }}
+        SAFO_TOKEN: ${{ steps.preflight.outputs.credentials == 'allowed' && (steps.app.outputs.token || steps.app_legacy.outputs.token || inputs.token) || '' }}
         SAFO_TOKEN_KIND: ${{ (steps.app.outputs.token || steps.app_legacy.outputs.token) && 'app' || 'token' }}
         SAFO_ALLOW_TOKEN_FOR_ORG: ${{ inputs.allow-token-for-org }}
         SAFO_DRY_RUN: ${{ inputs.dry-run }}

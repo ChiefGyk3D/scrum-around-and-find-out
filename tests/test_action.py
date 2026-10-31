@@ -208,7 +208,7 @@ def test_no_secrets_context_and_no_literal_key_anywhere() -> None:
 
 
 def test_the_credentials_are_masked_before_anything_else_can_print_them() -> None:
-    first_use = min(index("preflight"), STEPS.index(next(s for s in STEPS if s.get("id") == "app")))
+    first_use = min(index("Doppler (OIDC)"), STEPS.index(next(s for s in STEPS if s.get("id") == "app")))
     mask = index("Mask the credentials")
     assert mask < first_use
     env = step("Mask the credentials")["env"]
@@ -394,7 +394,7 @@ def test_the_lock_is_hashed_and_pinned() -> None:
 
 def test_python_is_set_up_before_anything_runs_it() -> None:
     setup = next(i for i, s in enumerate(STEPS) if str(s.get("uses", "")).startswith("actions/setup-python@"))
-    assert setup < index("Install SAFO") < index("Mask the credentials") < index("preflight")
+    assert setup < index("Install SAFO") < index("preflight") < index("Mask the credentials")
 
 
 # -- what the Action trusts from its caller ------------------------------------------------------------------------
@@ -442,3 +442,28 @@ def test_the_dry_run_description_says_the_read_only_token_is_the_app_path_only()
     text = INPUTS["dry-run"]["description"]
     assert "App" in text and "personal access token" in text and "keeps the permissions" in text
     assert not text.rstrip().endswith("The token is then read-only.")
+
+
+def test_no_credential_value_reaches_a_process_before_the_preflight_verdict() -> None:
+    """The preflight runs first and is handed booleans only; the mask step, the fetch, the mint and the run step all
+    wait for its verdict, and the run step gets an empty token unless the verdict is `allowed`."""
+    verdict = index("preflight")
+    for i, s in enumerate(STEPS):
+        text = str(s.get("env", "")) + str(s.get("with", ""))
+        carries = "inputs.private-key" in text or "inputs.token" in text or "PROJECTS_APP_PRIVATE_KEY" in text
+        if i < verdict:
+            assert not carries, s.get("name")
+    compact = {k: v.replace(" ", "") for k, v in step("preflight")["env"].items()}
+    assert (
+        compact["HAS_PRIVATE_KEY"] == "${{inputs.private-key!=''}}" and compact["HAS_TOKEN"] == "${{inputs.token!=''}}"
+    )
+    assert "steps.preflight.outputs.credentials=='allowed'" in step("Mask the credentials")["if"].replace(" ", "")
+    token = step("Run safo")["env"]["SAFO_TOKEN"].replace(" ", "")
+    assert token.startswith("${{steps.preflight.outputs.credentials=='allowed'&&(") and token.endswith("||''}}")
+
+
+def test_the_repository_fork_flag_and_its_opt_out_reach_the_preflight() -> None:
+    compact = {k: v.replace(" ", "") for k, v in step("preflight")["env"].items()}
+    assert compact["REPO_IS_FORK"] == "${{github.event.repository.fork}}"
+    assert compact["ALLOW_FORK_REPO"] == "${{inputs.allow-fork-repository}}"
+    assert INPUTS["allow-fork-repository"]["default"] == "false"

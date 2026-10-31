@@ -15,15 +15,21 @@ trimming or normalization. A value that is missing or not exactly `true` or `fal
 | Event | Trusted when |
 | --- | --- |
 | `push` | the ref is the default branch or a tag, and the run did not come from a fork |
-| `schedule` | the ref is the default branch |
+| `schedule` | the ref is the default branch (the repository's default branch must be present in the event) |
 | `workflow_dispatch` | the ref is a branch or tag of this repository (GitHub offers manual runs only to users with write access) |
 | `issues`, `workflow_run` | the ref is the default branch and the run did not come from a fork |
 | `pull_request` | the pull request is from this repository |
 | `pull_request_target` | the ref is the default branch and the pull request is from this repository; a pull request from a fork only when `allow-fork-pull-request-target` is `"true"` |
 
+A repository that is itself a fork receives no credential on any event unless `allow-fork-repository` is `"true"`.
+
 Every other event is refused for a run that needs a credential. That includes events that can carry pull request
 content, reusable-workflow callers and manual events from a fork. The `validate` mode uses no credential and runs on any
 event.
+
+**No credential value reaches a process before the verdict.** The preflight is the first step after the install and
+receives only whether a key and a token were given, never their values. The step that masks the credentials, the
+secret-manager fetch, the token mint and the run step wait for its verdict, and `validate` runs with no token.
 
 **The board file and the status-body file come from a revision the caller binds.** With a credential in play the
 preflight reads both files from the git object database at the trusted revision, never from the working tree, and hands

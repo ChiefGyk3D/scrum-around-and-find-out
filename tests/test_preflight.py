@@ -33,6 +33,7 @@ BASE = {
     "GITHUB_REF": "refs/heads/main",
     "DEFAULT_BRANCH": "main",
     "IS_FORK": "false",
+    "REPO_IS_FORK": "false",
     "GITHUB_SHA": "a" * 40,
 }
 

@@ -68,6 +68,10 @@ def classify(env: Mapping[str, str]) -> Trust:
     """
     event, ref = env.get("EVENT_NAME", ""), env.get("GITHUB_REF", "")
     fork = _flag(env, "IS_FORK", "the fork flag")
+    if _flag(env, "REPO_IS_FORK", "the repository fork flag") and env.get("ALLOW_FORK_REPO", "false") != "true":
+        raise ConfigError(
+            "a repository that is itself a fork receives no credential unless allow-fork-repository is true"
+        )
     default = _default_ref(env)
     on_default = bool(default) and ref == default
     refusal = (
@@ -99,7 +103,7 @@ def classify(env: Mapping[str, str]) -> Trust:
         if (on_default or _TAG.fullmatch(ref)) and not fork:
             return Trust(event, ref, "push to the default branch or a tag")
     elif event == "schedule":
-        if (on_default or (not default and _BRANCH.fullmatch(ref))) and not fork:
+        if on_default and not fork:
             return Trust(event, ref, "scheduled run on the default branch")
     elif event == "workflow_dispatch":
         if (_BRANCH.fullmatch(ref) or _TAG.fullmatch(ref)) and not fork:

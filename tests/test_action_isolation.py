@@ -109,6 +109,7 @@ def test_the_preflight_step_never_imports_the_workspace(workspace: Path, venv: P
         "GITHUB_REF": "refs/heads/main",
         "DEFAULT_BRANCH": "main",
         "IS_FORK": "false",
+        "REPO_IS_FORK": "false",
         "RUNNER_TEMP": str(workspace.parent),
         "GITHUB_OUTPUT": str(workspace.parent / "output"),
     }
