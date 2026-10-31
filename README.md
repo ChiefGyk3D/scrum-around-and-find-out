@@ -177,6 +177,7 @@ replaced are gone.
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)
+- [Gemini enrollment](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-enrollment)
 - [Gemini passkeys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-passkeys)
 - [Gemini broker](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker)
 - [Gemini broker threat model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker-threat-model)
