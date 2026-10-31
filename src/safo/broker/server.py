@@ -113,7 +113,7 @@ class ServerConfig:
             raise ConfigError("broker server: allowed_uids is a non-empty list of user ids")
         _count(self.max_connections, "max_connections", 1, 64)
         _count(self.max_per_uid, "max_per_uid", 1, 64)
-        _count(self.max_concurrent_calls, "max_concurrent_calls", 1, 2)  # 512 MiB unit: two image calls at most
+        _count(self.max_concurrent_calls, "max_concurrent_calls", 1, 1)  # the design: one paid call in flight, ever
         for name in ("begin_per_minute", "call_per_minute", "other_per_minute"):
             _count(getattr(self, name), name, 1, 10_000)
         _count(self.max_calls_per_minute, "max_calls_per_minute", 1, 1_000)

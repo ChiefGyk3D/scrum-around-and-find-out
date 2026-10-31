@@ -521,7 +521,7 @@ def test_a_second_call_while_one_is_in_flight_is_busy_not_queued(env: Env) -> No
 
 
 def test_two_calls_run_together_when_the_config_allows_two(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=2)
+    env = Env(rig, slots=2)
     second: list[Any] = []
     started: list[int] = []
 
@@ -1098,7 +1098,7 @@ def force_overlap(env: Env, n: int) -> None:
 
 @pytest.mark.parametrize("budget", ["max_calls_per_minute", "max_calls_per_day"])
 def test_concurrent_clients_never_pass_the_call_budget(rig: Rig, budget: str) -> None:
-    env = Env(rig, max_concurrent_calls=2, call_per_minute=100, max_calls_per_minute=1, max_calls_per_day=1)
+    env = Env(rig, slots=2, call_per_minute=100, max_calls_per_minute=1, max_calls_per_day=1)
     force_overlap(env, 3)
     results = run_together(env, [text_req(job=f"job-{i}") for i in range(3)])
     codes = sorted(r.code for r in results)
@@ -1108,7 +1108,7 @@ def test_concurrent_clients_never_pass_the_call_budget(rig: Rig, budget: str) ->
 
 
 def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=2, call_per_minute=100, max_calls_per_minute=1)
+    env = Env(rig, slots=2, call_per_minute=100, max_calls_per_minute=1)
     release = threading.Event()
     entered = threading.Event()
 
@@ -1132,7 +1132,7 @@ def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(r
 
 
 def test_a_call_that_fails_before_the_reservation_gives_its_place_back(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=2, max_calls_per_minute=1)
+    env = Env(rig, slots=2, max_calls_per_minute=1)
 
     def die(point: str) -> None:
         raise RuntimeError("SENTINEL")
@@ -1145,7 +1145,7 @@ def test_a_call_that_fails_before_the_reservation_gives_its_place_back(rig: Rig)
 
 
 def test_a_client_that_leaves_after_the_count_does_not_hold_a_place(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=2, max_calls_per_minute=1)
+    env = Env(rig, slots=2, max_calls_per_minute=1)
     req = text_req()
     payload, signature = rig.approved(req)
     body = protocol.request_body("call", **call_fields(req, payload, signature))
@@ -1161,7 +1161,7 @@ def test_a_client_that_leaves_after_the_count_does_not_hold_a_place(rig: Rig) ->
 
 @pytest.mark.parametrize("budget", ["max_calls_per_minute", "max_calls_per_day"])
 def test_a_call_not_yet_reserved_still_counts_against_the_budget(rig: Rig, budget: str) -> None:
-    env = Env(rig, max_concurrent_calls=2, call_per_minute=100, **{budget: 1})
+    env = Env(rig, slots=2, call_per_minute=100, **{budget: 1})
     entered = threading.Event()
     release = threading.Event()
     seen: list[int] = []
@@ -1239,9 +1239,9 @@ def test_a_stop_during_verification_stops_the_spend(env: Env) -> None:
     assert env.rig.vendor.requests == [] and state_snapshot(env.rig) == before
 
 
-def test_the_server_refuses_more_concurrent_calls_than_the_memory_bound() -> None:
+def test_the_server_refuses_more_than_one_paid_call_in_flight() -> None:
     from safo.errors import ConfigError
 
-    ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=2)
+    ServerConfig(allowed_uids=frozenset({1}), slots=2)
     with pytest.raises(ConfigError):
         ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=3)

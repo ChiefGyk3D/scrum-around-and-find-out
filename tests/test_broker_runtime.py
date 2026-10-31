@@ -182,11 +182,11 @@ def test_the_server_section_loads_with_defaults(tmp_path: Path) -> None:
 def test_every_server_key_can_be_set(tmp_path: Path) -> None:
     text = (
         "server:\n  allowed_uids: [5, 6]\n  max_connections: 3\n  max_per_uid: 1\n  read_deadline: 2\n"
-        "  max_concurrent_calls: 2\n  begin_per_minute: 4\n  slot_wait: 1.5\n"
+        "  max_concurrent_calls: 1\n  begin_per_minute: 4\n  slot_wait: 1.5\n"
     )
     cfg = load_config(write_config(tmp_path / "b.yaml", text), UID)
     assert cfg.allowed_uids == {5, 6} and cfg.max_connections == 3 and cfg.max_per_uid == 1
-    assert cfg.read_deadline == 2.0 and cfg.max_concurrent_calls == 2 and cfg.begin_per_minute == 4
+    assert cfg.read_deadline == 2.0 and cfg.max_concurrent_calls == 1 and cfg.begin_per_minute == 4
     assert cfg.slot_wait == 1.5
 
 
@@ -213,6 +213,7 @@ def test_every_server_key_can_be_set(tmp_path: Path) -> None:
         "server:\n  allowed_uids: [1]\n  max_calls_per_minute: 0\n",
         "server:\n  allowed_uids: [1]\n  max_concurrent_calls: 9\n",
         "server:\n  allowed_uids: [1]\n  max_concurrent_calls: 3\n",
+        "server:\n  allowed_uids: [1]\n  max_concurrent_calls: 2\n",
         "server: []\n",
         "server:\n  allowed_uids: [1]\n  allowed_uids: [2]\n",
         "server: &a\n  allowed_uids: [1]\nother: *a\n",
