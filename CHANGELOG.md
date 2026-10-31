@@ -19,8 +19,8 @@
   or malformed answer, a reply for another model or unusable usage leaves the call ambiguous and the model suspended
   until root clears it. A reply over the signed output cap is a breach, recorded at the cap or the reported usage
   (whichever is higher), and suspends the model. Image replies accept only PNG, JPEG or WebP: the container is walked to
-  its real end (one image, no trailing data, no animation, checksums where the format has them), the declared size is
-  capped, and nothing but the checked bytes is passed on. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
+  its real end (one image, no trailing data, no animation, checksums and exact decoded size where the format has them, no Exif,
+  XMP or compressed metadata), the declared size is capped, and nothing but the checked bytes is passed on. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
   `pre_spend` hook. Paid use stays disabled.
 
 - Tests: the linear-time guard in `tests/test_gemini_constructs.py` counts executed lines instead of reading a clock, so machine speed, load and Python version cannot flip it; its negative case runs a quadratic brace scan (#248).

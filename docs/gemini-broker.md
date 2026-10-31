@@ -50,7 +50,8 @@ pipeline, the vendor request templates and reply parser, the image checks, and t
   is higher, the model suspended, even when the money stays inside the reservation (`cap_verified` false).
 - **Images** (`images.py`, `vendor.py`): one image per call, PNG, JPEG or WebP only, found by the first bytes and matching
   the named type. The broker still decodes no pixels, but it walks each container to its real end by lengths and markers,
-  so nothing can be appended or hidden, and caps the declared size (8192 per side, 2^25 pixels) and the bytes (24 MiB).
+  so nothing can be appended or hidden (PNG data is inflated in small steps, and thrown away, to check it is exactly
+  the declared rows; Exif, XMP, compressed metadata and animations are refused), and caps the declared size (8192 per side, 2^25 pixels) and the bytes (24 MiB).
   An image that fails is not passed on, and its cost is still counted from usage.
 
 Where phase 2 read the design and had to choose, it is listed in the pull request. Still unverified: the real response

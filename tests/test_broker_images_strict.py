@@ -58,11 +58,26 @@ def test_stuffed_bytes_restart_markers_and_several_scans_are_part_of_a_valid_jpe
     assert (sniff(two_scans).width, sniff(two_scans).height) == (5, 6)
 
 
-def test_a_thumbnail_inside_a_segment_does_not_end_the_image_and_is_not_read_as_the_frame() -> None:
-    thumb = b"\xff\xd8" + sof(4000, 4000) + b"\xff\xd9"  # a whole small JPEG inside an APP1 payload, EOI and all
-    data = jpeg_of(jseg(0xE1, b"Exif\x00\x00" + thumb), sof(3, 2), SOS)
-    info = sniff(data)
+def test_an_end_marker_inside_a_comment_does_not_end_the_image_and_is_not_read_as_the_frame() -> None:
+    inside = jseg(0xFE, b"note \xff\xd9 and \xff\xc0\x00\x0b\x08\x0f\xa0\x0f\xa0\x01\x01\x11\x00 ok")
+    info = sniff(jpeg_of(inside, sof(3, 2), SOS))
     assert (info.width, info.height) == (3, 2)
+
+
+def test_a_second_image_hidden_in_a_metadata_segment_is_refused() -> None:
+    thumb = b"\xff\xd8\xff\xc0" + sof(4000, 4000)[4:] + b"\xff\xd9"
+    refuses(jpeg_of(jseg(0xE1, b"Exif\x00\x00" + thumb), sof(3, 2), SOS))  # a thumbnail in the Exif segment
+    refuses(jpeg_of(jseg(0xE1, b"Exif\x00\x00"), sof(3, 2), SOS))  # the whole Exif segment is not passed on
+    refuses(jpeg_of(jseg(0xED, b"Photoshop 3.0\x00" + thumb), sof(3, 2), SOS))
+    refuses(jpeg_of(jseg(0xFE, b"comment " + thumb), sof(3, 2), SOS))
+    refuses(jpeg_of(jseg(0xE2, b"ICC_PROFILE\x00" + thumb), sof(3, 2), SOS))
+
+
+@pytest.mark.parametrize("marker", [0xE1, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEF])
+def test_only_the_plain_application_segments_are_accepted(marker: int) -> None:
+    refuses(jpeg_of(jseg(marker, b"data"), sof(), SOS))
+    for ok in (0xE0, 0xE2, 0xEE, 0xFE):
+        assert sniff(jpeg_of(jseg(ok, b"data"), sof(), SOS)).width == 1
 
 
 def test_data_hidden_after_a_real_end_marker_is_refused_even_when_the_file_still_ends_in_an_end_marker() -> None:
@@ -186,7 +201,7 @@ def lossless(width: int = 1, height: int = 1) -> bytes:
 
 def test_plain_and_extended_webp_pass_with_their_metadata_chunks() -> None:
     assert (sniff(riff(lossless(20, 30))).width, sniff(riff(lossless(20, 30))).height) == (20, 30)
-    full = riff(vp8x(4, 5), wchunk(b"ICCP", b"icc"), lossless(4, 5), wchunk(b"EXIF", b"e"), wchunk(b"XMP ", b"xy"))
+    full = riff(vp8x(4, 5), wchunk(b"ICCP", b"icc"), lossless(4, 5))
     assert (sniff(full).width, sniff(full).height) == (4, 5)
     assert sniff(webp(64, 32)).mime == "image/webp"
 
@@ -245,7 +260,7 @@ def test_a_lossless_header_with_a_nonzero_version_is_refused() -> None:
     assert sniff(riff(wchunk(b"VP8L", vp8l_payload(2, 2)))).width == 2
 
 
-@pytest.mark.parametrize("kind", [b"zTXt", b"iTXt", b"iCCP", b"abCD", b"prVt"])
+@pytest.mark.parametrize("kind", [b"zTXt", b"iTXt", b"iCCP", b"abCD", b"prVt", b"eXIf", b"caBX"])
 def test_compressed_metadata_and_unknown_ancillary_chunks_are_refused(kind: bytes) -> None:
     """A tiny chunk can expand to a huge buffer in whatever reads the metadata later, so it is never passed on."""
     refuses(png_of(ihdr(), chunk(kind, b"k\x00\x00" + zlib.compress(b"\x00" * 1_000_000)), IDAT, IEND))
@@ -253,22 +268,7 @@ def test_compressed_metadata_and_unknown_ancillary_chunks_are_refused(kind: byte
 
 
 @pytest.mark.parametrize(
-    "kind",
-    [
-        b"tEXt",
-        b"tIME",
-        b"pHYs",
-        b"sRGB",
-        b"gAMA",
-        b"cHRM",
-        b"sBIT",
-        b"bKGD",
-        b"tRNS",
-        b"hIST",
-        b"eXIf",
-        b"cICP",
-        b"caBX",
-    ],
+    "kind", [b"tEXt", b"tIME", b"pHYs", b"sRGB", b"gAMA", b"cHRM", b"sBIT", b"bKGD", b"tRNS", b"hIST", b"cICP"]
 )
 def test_the_listed_plain_ancillary_chunks_are_accepted(kind: bytes) -> None:
     assert sniff(png_of(ihdr(), chunk(kind, b"abc"), IDAT, IEND)).width == 1
@@ -318,3 +318,16 @@ def test_image_data_that_would_inflate_past_the_limit_is_refused_without_inflati
     with pytest.raises(ImageRefused, match="over the limit"):
         sniff(png_of(ihdr(8192, 4096, depth=16, color=6), chunk(b"IDAT", b"x"), IEND))
     assert sniff(png_of(ihdr(4096, 4096, depth=8, color=6), idat(4096, 4096, channels=4), IEND)).width == 4096
+
+
+@pytest.mark.parametrize("hidden", [b"\xff\xd8\xff\xd9", b"\x89PNG\r\n\x1a\n", b"RIFF\x04\x00\x00\x00WEBP"])
+def test_a_plain_chunk_that_carries_another_image_is_refused(hidden: bytes) -> None:
+    refuses(png_of(ihdr(), chunk(b"tEXt", b"k\x00" + hidden), IDAT, IEND))
+    refuses(png_of(ihdr(), IDAT, chunk(b"tIME", hidden), IEND))
+    refuses(riff(vp8x(1, 1), wchunk(b"ICCP", hidden), lossless()))
+
+
+def test_webp_exif_and_xmp_are_not_passed_on() -> None:
+    refuses(riff(vp8x(1, 1), wchunk(b"EXIF", b"e"), lossless()))
+    refuses(riff(vp8x(1, 1), lossless(), wchunk(b"XMP ", b"x")))
+    assert sniff(riff(vp8x(1, 1), wchunk(b"ICCP", b"icc"), lossless())).width == 1

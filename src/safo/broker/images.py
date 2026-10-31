@@ -41,9 +41,8 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _MAX_SEGMENTS = 1024
 _MAX_CHUNKS = 100_000
 _JPEG_SOF = frozenset({0xC0, 0xC1, 0xC2})  # baseline, extended sequential, progressive (Huffman, 8 bit)
-_JPEG_TABLES = frozenset(
-    {0xDB, 0xC4, 0xDD, 0xFE, *range(0xE0, 0xF0)}
-)  # quantization, Huffman, restart interval, comment, APPn
+_JPEG_TABLES = frozenset({0xDB, 0xC4, 0xDD})  # quantization, Huffman, restart interval
+_JPEG_META = frozenset({0xE0, 0xE2, 0xEE, 0xFE})  # JFIF, ICC profile, Adobe flag, comment: no Exif, XMP or Photoshop
 _JPEG_SCAN = 0xDA
 _JPEG_EOI = 0xD9
 _JPEG_NEXT_MARKER = re.compile(
@@ -51,28 +50,12 @@ _JPEG_NEXT_MARKER = re.compile(
 )  # in entropy data: FF 00 is a stuffed byte, FF D0..D7 a restart
 _PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 _PNG_DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
-_PNG_CHUNKS = (
-    frozenset(  # the palette and the plain (not compressed) ancillary chunks; zTXt, iTXt and iCCP are left out
-        {
-            b"PLTE",
-            b"tEXt",
-            b"tIME",
-            b"pHYs",
-            b"sRGB",
-            b"gAMA",
-            b"cHRM",
-            b"sBIT",
-            b"bKGD",
-            b"tRNS",
-            b"hIST",
-            b"eXIf",
-            b"cICP",
-        }
-        | {b"caBX"}
-    )
+_PNG_PLAIN = frozenset(  # plain ancillary chunks, searched for a second image; no compressed text or profile, no Exif
+    {b"tEXt", b"tIME", b"pHYs", b"sRGB", b"gAMA", b"cHRM", b"sBIT", b"bKGD", b"tRNS", b"hIST", b"cICP"}
 )
+_PNG_CHUNKS = _PNG_PLAIN | {b"PLTE"}
 _PNG_NEVER = frozenset({b"acTL", b"fcTL", b"fdAT", b"IHDR"})  # animation, and a second header
-_WEBP_META = frozenset({b"ICCP", b"ALPH", b"EXIF", b"XMP "})
+_WEBP_META = frozenset({b"ICCP", b"ALPH"})  # no Exif and no XMP
 
 
 class ImageRefused(Exception):
@@ -98,6 +81,12 @@ class Image:
 
 def _no(why: str) -> ImageRefused:
     return ImageRefused(why)
+
+
+def _embeds_image(body: bytes) -> bool:
+    """Does metadata carry the start of another image (a thumbnail)? The walk skips metadata by its length, so a second
+    image hidden in it would not be checked: it is refused instead."""
+    return b"\xff\xd8\xff" in body or PNG_SIGNATURE in body or (b"RIFF" in body and b"WEBP" in body)
 
 
 def _check_dims(mime: str, width: int, height: int) -> ImageInfo:
@@ -145,6 +134,8 @@ def _png(data: bytes) -> ImageInfo:
                 return _check_dims("image/png", *dims)
             if kind not in _PNG_CHUNKS:  # compressed metadata can expand without limit later, so it is not passed on
                 raise _no("the image has a chunk this program does not accept")
+            if kind in _PNG_PLAIN and _embeds_image(data[pos + 8 : end]):
+                raise _no("the image carries another image in a metadata chunk")
         pos = end + 4
     raise _no("the image has too many chunks")
 
@@ -203,12 +194,14 @@ def _jpeg(data: bytes) -> ImageInfo:
             if frame is None or not scans or pos + 2 != total:
                 raise _no("the image does not end where a JPEG ends")
             return _check_dims("image/jpeg", *frame)
-        if marker not in _JPEG_TABLES and marker not in _JPEG_SOF and marker != _JPEG_SCAN:
+        if marker not in _JPEG_TABLES | _JPEG_META | _JPEG_SOF and marker != _JPEG_SCAN:
             raise _no("the image has a segment this program does not accept")
         size = int.from_bytes(data[pos + 2 : pos + 4], "big")
         end = pos + 2 + size
         if pos + 4 > total or size < 2 or end > total:
             raise _no("the image is not a well formed JPEG")
+        if marker in _JPEG_META and _embeds_image(data[pos + 4 : end]):
+            raise _no("the image carries another image in a metadata segment")
         if marker in _JPEG_SOF:
             components = data[pos + 9] if size >= 8 else 0
             if frame is not None or data[pos + 4] != 8 or not 1 <= components <= 4 or size != 8 + 3 * components:
@@ -256,6 +249,8 @@ def _webp(data: bytes) -> ImageInfo:
             raise _no("the image is an animation or has a malformed header")
         if any(kind not in _WEBP_META and kind not in (b"VP8 ", b"VP8L") for kind, _ in chunks[1:]):
             raise _no("the image has a chunk this program does not accept")
+        if any(kind == b"ICCP" and _embeds_image(body) for kind, body in chunks[1:]):
+            raise _no("the image carries another image in a metadata chunk")
         canvas = (1 + int.from_bytes(head[4:7], "little"), 1 + int.from_bytes(head[7:10], "little"))
         if canvas != (width, height):
             raise _no("the image canvas does not match the image")
