@@ -16,6 +16,7 @@ from pathlib import Path
 
 from safo import geminisign, output
 from safo.broker import runtime
+from safo.broker.approval import Verifier
 from safo.broker.issue import Issuer
 from safo.broker.ledger import CallLedger
 from safo.broker.pipeline import DEFAULT_DEADLINE_SECONDS, Pipeline
@@ -45,6 +46,7 @@ def run(
     trust_uid: int = 0,
     require_hardware: bool = True,  # a test seam: software keys stand in for a hardware key
     first_fd: int = 3,
+    verifier: Verifier = geminisign.verify,  # a test seam: the stand-in for the authenticator
     transport: Transport | None = None,
     on_ready: Callable[[Server], None] | None = None,
     handle_signals: bool = True,
@@ -83,6 +85,7 @@ def run(
         wall=wall,
         mono=time.monotonic,
         deadline_seconds=float(deadline),
+        verifier=verifier,
     )
     ledger.recover(wall())  # before anything is served: every open call becomes ambiguous
     pipeline.issuer.flush()  # a restart empties the issued table

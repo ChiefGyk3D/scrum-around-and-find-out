@@ -627,3 +627,12 @@ def test_a_thin_client_can_import_it_with_nothing_else_of_ours() -> None:
         [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
     )
     assert done.stdout.strip() == "safo,safo.bounded,safo.broker,safo.broker.protocol"
+
+
+def test_a_valid_reply_over_the_frame_limit_is_refused_by_the_client() -> None:
+    big = json.dumps({"v": 1, "ok": True, "pad": "a" * p.MAX_REPLY_FRAME}).encode()
+    assert len(big) > p.MAX_REPLY_FRAME
+    with pytest.raises(ProtocolError):
+        p.parse_reply(big)
+    exact = json.dumps({"v": 1, "ok": True, "pad": "a" * (p.MAX_REPLY_FRAME - 30)}).encode()
+    assert len(exact) <= p.MAX_REPLY_FRAME and p.parse_reply(exact)["ok"] is True

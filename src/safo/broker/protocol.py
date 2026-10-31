@@ -303,7 +303,7 @@ def parse_reply(body: bytes) -> dict[str, Any]:
     """What a client reads: the reply object, or `ProtocolError("bad_request")` when it is not a well-formed version 1
     reply. A failure reply must carry a known code with its own exit status and sentence; a success reply's
     `attachments`, when present, must be a short list of well-formed descriptions."""
-    if type(body) is not bytes or len(body) == 0 <= MAX_REPLY_FRAME:
+    if type(body) is not bytes or len(body) == 0 or len(body) > MAX_REPLY_FRAME:
         raise ProtocolError("bad_request")
     try:
         data = loads(body)

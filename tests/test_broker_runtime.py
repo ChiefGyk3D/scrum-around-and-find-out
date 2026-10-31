@@ -23,7 +23,7 @@ import yaml
 from brokerdata import Crash, CrashAt, prices_data
 from fakevendor import FakeVendor
 from geminidata import make_key, signers_line
-from pipedata import LABEL, Rig, text_req
+from pipedata import LABEL, Rig, as_hardware, text_req
 from safo import gemini, geminisign
 from safo.broker import __main__ as entry
 from safo.broker import protocol, runtime
@@ -605,6 +605,7 @@ class Tree:
             switch=self.switch,
             trust_uid=UID,
             require_hardware=False,
+            verifier=as_hardware,
             first_fd=self.fd,
             transport=transport,
             handle_signals=False,
@@ -719,7 +720,7 @@ def call_body(key: Path, req: Any, begin: dict[str, Any]) -> bytes:
             "prompt_bytes": len(req.prompt),
             "quote": "go ahead",
             "quoted_at": gemini.stamp(now - dt.timedelta(minutes=1)),
-            "created": gemini.stamp(now - dt.timedelta(minutes=1)),
+            "created": gemini.stamp(now),
             "expires_at": gemini.stamp(now + dt.timedelta(minutes=9)),
             "beyond_ceiling": begin["beyond_ceiling"],
             "ledger_head": begin["ledger_head"],

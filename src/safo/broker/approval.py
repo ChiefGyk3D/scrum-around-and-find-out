@@ -91,7 +91,12 @@ def verify_approval(
 
 
 def verify_dryrun(
-    payload: object, signature: object, trust: geminisign.Trust, *, now: dt.datetime
+    payload: object,
+    signature: object,
+    trust: geminisign.Trust,
+    *,
+    now: dt.datetime,
+    verifier: Verifier = geminisign.verify,
 ) -> geminisign.Verified:
     """The key that signed a throw-away text in the dry-run namespace, or `Refused`. The same file checks, key window,
     touch and PIN rules as a real approval, and the same sealed `ssh-keygen`; but the text is not parsed (it is only a
@@ -110,8 +115,11 @@ def verify_dryrun(
     except UnicodeEncodeError:
         raise _bad("the signed text is not plain ASCII") from None
     try:
-        return geminisign.verify(trust, raw, signature, namespace=geminisign.DRYRUN_NAMESPACE, now=when)
+        who = verifier(trust, raw, signature, namespace=geminisign.DRYRUN_NAMESPACE, now=when)
     except (RefusedError, ConfigError, OSError, ValueError, UnicodeError):
         if _revoked(trust, signature):
             raise Refused("revoked", "the key that signed this approval has been revoked") from None
         raise _bad() from None
+    if not who.hardware or who.user_present is not True:  # the dry run tests the hardware key, as a real approval does
+        raise _bad("a paid approval needs a hardware key and a touch")
+    return who

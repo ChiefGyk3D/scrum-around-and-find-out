@@ -343,6 +343,7 @@ class Server:
         self.peer_cred = peer_cred
         self.mono = mono
         self.log = AuditLog(logger)
+        pipeline.spend_gate = self._spend_gate
         self._limits = RateLimiter(mono)
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
@@ -356,6 +357,12 @@ class Server:
         self._wake_r.setblocking(False)
         self._wake_w.setblocking(False)
         self.peak_open = 0
+
+    def _spend_gate(self) -> None:
+        """Run by the pipeline under the ledger lock, just before the spend: root may have switched paid use off while
+        the approval was being verified (a slow `ssh-keygen`)."""
+        if not self.switch():
+            raise Refused("disabled", "paid use is disabled")
 
     # -- observers (for the tests and the log)
 
@@ -614,7 +621,11 @@ class Server:
 
     def _dryrun(self, f: dict[str, Any]) -> Outcome:
         who = verify_dryrun(
-            f["approval"]["payload"], f["approval"]["signature"], self.pipeline.trust, now=self.pipeline.wall()
+            f["approval"]["payload"],
+            f["approval"]["signature"],
+            self.pipeline.trust,
+            now=self.pipeline.wall(),
+            verifier=self.pipeline.verifier,
         )
         fields = {
             "principal": who.label,

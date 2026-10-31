@@ -215,6 +215,7 @@ def test_a_whole_call_through_the_socket_from_begin_to_receipt(env: Env) -> None
         0,
         begin["thinking_level"],
         begin["beyond_ceiling"],
+        2_500_000,
     )
     text = env.rig.text(req, offer)
     res = env.ask("call", **call_fields(req, text, env.rig.sign(text)))
@@ -322,7 +323,7 @@ def test_dryrun_verifies_a_throwaway_signature_and_changes_nothing(env: Env) -> 
     res = env.ask("dryrun", approval=dry(env))
     assert res.code == "ok"
     assert res.json["principal"] == "yubikey-a" and res.json["fingerprint"].startswith("SHA256:")
-    assert res.json["hardware"] is False and res.json["touch"] is None and res.json["pin"] is None
+    assert res.json["hardware"] is True and res.json["touch"] is True and res.json["pin"] is False  # the rig's stand-in
     assert res.json["enabled"] is True and env.rig.vendor.requests == []
     assert state_snapshot(env.rig) == before
 
@@ -1184,3 +1185,34 @@ def test_a_call_not_yet_reserved_still_counts_against_the_budget(rig: Rig, budge
     release.set()
     worker.join()
     assert box[0].code == "ok" and len(rig.vendor.requests) == 1
+
+
+def test_dryrun_with_a_key_that_is_not_a_touched_hardware_key_is_refused(env: Env) -> None:
+    env.rig.pipeline.verifier = geminisign.verify  # the real check: this test key is a software key
+    assert env.ask("dryrun", approval=dry(env)).code == "bad_approval"
+
+
+def test_the_switch_turning_off_during_verification_stops_the_spend(env: Env) -> None:
+    def flip(point: str) -> None:
+        if point == "after_verify":
+            env.enabled = False  # root switches paid use off while this request is being checked
+
+    env.rig.pipeline.faults = flip
+    req = text_req()
+    payload, signature = env.rig.approved(req)
+    before = state_snapshot(env.rig)
+    res = env.ask("call", **call_fields(req, payload, signature))
+    assert res.code == "disabled" and env.rig.vendor.requests == [] and state_snapshot(env.rig) == before
+    assert env.server.calls_in_flight == 0
+
+
+def test_the_switch_is_looked_at_again_under_the_ledger_lock(env: Env) -> None:
+    seen: list[bool] = []
+
+    def switch() -> bool:
+        seen.append(True)
+        return True
+
+    env.server.switch = switch
+    assert env.call(text_req()).code == "ok"
+    assert len(seen) == 2  # once at the door, once just before the spend
