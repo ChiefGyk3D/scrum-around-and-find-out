@@ -30,6 +30,7 @@ MAX_RATE_MICRO = 1_000 * MICRO  # a rate above 1000 USD per million tokens is a 
 MAX_TOKENS = 10_000_000
 MAX_IMAGES = 4
 MAX_INTERIM = 4
+IMAGE_FIGURE_TOLERANCE_PERCENT = 5  # how far below tokens x rate a stated per-image figure may sit
 THINKING_LEVELS = ("none", "minimal", "low", "medium", "high")
 
 
@@ -95,6 +96,21 @@ def _date(r: Reader, value: object, path: str) -> dt.date:
     return r.date(value, path)
 
 
+def _check_image_figure(r: Reader, path: str, usd: int, tokens: int, rate: int) -> None:
+    """The stated per-image figure must agree with what the reservation charges for the same image: the token count
+    times the image rate, rounded up. Above it, a call could bill (and be counted) beyond its reservation; far below
+    it, one of the three numbers is wrong. Both are refused."""
+    by_tokens = ceil_div(tokens * rate, MICRO)
+    if usd > by_tokens:
+        raise r.fail(path, f"the per-image figure is above its token price ({tokens} tokens x the image rate)")
+    if usd * 100 < by_tokens * (100 - IMAGE_FIGURE_TOLERANCE_PERCENT):
+        raise r.fail(
+            path,
+            f"the per-image figure is more than {IMAGE_FIGURE_TOLERANCE_PERCENT} percent below its token price "
+            f"({tokens} tokens x the image rate)",
+        )
+
+
 def _model(r: Reader, name: str, data: object) -> ModelPrice:
     path = f"models.{name}"
     allowed = {
@@ -143,6 +159,8 @@ def _model(r: Reader, name: str, data: object) -> ModelPrice:
             raise r.fail(
                 path, "an image model lists image_output_per_mtok and the same sizes in image_usd and image_tokens"
             )
+        for size, usd in sizes_usd.items():
+            _check_image_figure(r, f"{path}.image_usd.{size}", usd, sizes_tokens[size], image_rate)
     elif sizes_usd or sizes_tokens or image_rate:
         raise r.fail(path, "a text model has no image prices")
     return ModelPrice(

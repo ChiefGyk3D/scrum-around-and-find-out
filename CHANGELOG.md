@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Paid Gemini broker, accounting and transport hardening (#289): a call that straddles the UTC month boundary now counts
+  in the month it was reserved in and also in the later month it ended in (and, while open, at its reservation), so the
+  new month's cap sees it; a price table whose per-image figure disagrees with its token price (above it, or more than
+  5 percent below it) is refused at load; and the call deadline now covers the name lookup and every connect attempt
+  (each attempt gets the time left, no address is tried after the deadline, a late connection is closed before any byte
+  is sent). The pinned HTTP(S) connections take an optional deadline; without one they behave as before. Paid use
+  stays disabled.
+
 - Paid Gemini broker, administration command (#262): `python -I -m safo.broker.admin` with `status`, `usage`,
   `check-install`, `clear` and `reconcile`, run by root. It reads the root-owned files, then drops to the service user
   (groups emptied, group, user, read back, regain probe) before opening the ledger, so the ledger's owner rule is
