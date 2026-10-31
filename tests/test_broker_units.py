@@ -106,6 +106,7 @@ def _stage(tmp_path: Path) -> Path:
     out.mkdir()
     for name in REQUIRED_BY_UNIT:
         text = read(name).replace("/opt/safo-broker/current/venv/bin/python", str(stub))
+        text = text.replace("/usr/local/sbin/safo-broker-egress", str(stub))
         (out / name).write_text(text)
     return out
 
@@ -226,7 +227,7 @@ def test_in_a_private_mount_namespace_only_the_vendor_host_resolves(tmp_path: Pa
         pytest.skip("unprivileged user and mount namespaces are unavailable here; name resolution is not exercised")
     import sys
 
-    from safo.broker import egress
+    import safo_broker_egress as egress
 
     host = "api.vendor.example.invalid"
     hosts = tmp_path / "hosts"
@@ -257,3 +258,25 @@ def test_in_a_private_mount_namespace_only_the_vendor_host_resolves(tmp_path: Pa
     if done.returncode != 0 and "mount" in done.stderr:
         pytest.skip(f"bind mounts are not permitted in a user namespace here ({done.stderr.strip()[:80]})")
     assert done.stdout.split() == ["142.250.80.10", "other-failed"], (done.stdout, done.stderr)
+
+
+# ---- the switch is read by the broker on every request, not by a start condition (issue 270, decision 1) ------------
+
+
+def test_the_service_has_no_start_condition_so_status_and_dry_run_can_answer_with_the_switch_absent() -> None:
+    for unit in REQUIRED_BY_UNIT:
+        keys = {k for _s, k, _v in parse_unit(read(unit))}
+        assert not {k for k in keys if k.startswith(("Condition", "Assert"))}, unit
+    assert "paid-enabled" not in "\n".join(
+        line for line in read("safo-broker.service").splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def test_the_egress_units_run_the_separately_installed_root_helper_not_the_release() -> None:
+    for unit in ("safo-broker-egress.service", "safo-broker-egress-refresh.service"):
+        execs = [v for _s, k, v in parse_unit(read(unit)) if k.startswith("Exec")]
+        assert execs
+        for line in execs:
+            assert line.lstrip("-").startswith("/usr/local/sbin/safo-broker-egress "), line
+            assert "/opt/safo-broker" not in line
+            assert "--rules" not in line

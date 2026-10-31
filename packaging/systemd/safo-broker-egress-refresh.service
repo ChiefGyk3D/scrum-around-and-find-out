@@ -8,7 +8,7 @@ After=safo-broker-egress.service network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh
+ExecStart=/usr/local/sbin/safo-broker-egress refresh
 TimeoutStartSec=60s
 UMask=0077
 NoNewPrivileges=yes

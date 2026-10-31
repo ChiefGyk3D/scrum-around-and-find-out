@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Installed by root to /etc/systemd/system/. Loads the egress rules for the broker's service user and fills the vendor
-# address set and the hosts view once; the timer keeps them fresh. The broker requires this unit and will not start
-# without it. Runs as root with only CAP_NET_ADMIN; the code is the signed release.
+# address set and the hosts view once; the timer keeps them fresh. The broker is bound to this unit and starts only with
+# it. Runs as root with only CAP_NET_ADMIN, from a helper that root installed once from a reviewed copy: the helper is
+# not part of the release tree, so a new release cannot change what root does here.
 [Unit]
 Description=SAFO broker egress rules
 Before=safo-broker.service
@@ -10,9 +11,9 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress load --rules /opt/safo-broker/current/meta/packaging/nftables/safo-broker.nft
-ExecStart=-/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh
-ExecStop=/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress unload
+ExecStart=/usr/local/sbin/safo-broker-egress load
+ExecStart=-/usr/local/sbin/safo-broker-egress refresh
+ExecStop=/usr/local/sbin/safo-broker-egress unload
 TimeoutStartSec=60s
 TimeoutStopSec=30s
 UMask=0077

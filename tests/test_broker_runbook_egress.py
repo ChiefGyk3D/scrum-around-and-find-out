@@ -72,3 +72,24 @@ def test_the_vendor_restriction_section_is_dated_and_marks_what_is_unverified() 
     assert "Restrict to Gemini API only" in text
     assert "Not verified" in text
     assert "spend cap" in text
+
+
+def test_the_runbook_does_not_say_the_service_waits_for_the_switch() -> None:
+    text = doc()
+    assert "will not start" not in text.replace("will not start without it", "")
+    assert "answers disabled" in text or "answered as disabled" in text
+    assert "dry run" in text
+    # the switch is still created last, by the keys guide, after the dry run with a real key
+    assert text.index("Create it last") < text.index("answered as disabled") or "answered as disabled" not in text
+
+
+def test_the_installer_helper_is_staged_hashed_and_installed_from_one_root_owned_copy() -> None:
+    cmds = lines()
+    stage = "/var/lib/safo-broker-install/stage/"
+    take = [x for x in cmds if "reviewed/checkout" in x]
+    assert len(take) == 2  # the installer and the egress helper, each read from the checkout exactly once
+    assert any("packaging/safo_broker_egress.py" in x for x in take)
+    final = next(x for x in cmds if "/usr/local/sbin/safo-broker-egress'" in x and "install -m 0755" in x)
+    assert stage + "safo-broker-egress" in final
+    assert "reviewed/checkout" not in final
+    assert any("sha256sum" in x and stage + "safo-broker-egress" in x for x in cmds)

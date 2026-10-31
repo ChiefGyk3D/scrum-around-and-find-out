@@ -17,10 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from safo.broker import egress
-from safo.broker.egress import EgressError
+import safo_broker_egress as egress
+from safo_broker_egress import EgressError
 
 REPO = Path(__file__).resolve().parent.parent
+UID = os.getuid()
 TEMPLATE = REPO / "packaging" / "nftables" / "safo-broker.nft"
 HOST = "api.vendor.example.invalid"
 GOOD = ["142.250.80.10", "142.250.80.11"]
@@ -204,6 +205,13 @@ def test_the_template_has_exactly_the_two_placeholders() -> None:
     assert "@vendor_v4" in text
 
 
+def test_the_reference_file_and_the_constant_root_runs_render_identically() -> None:
+    for mode in egress.MODES:
+        assert egress.render_rules(TEMPLATE.read_text(), uid=1234, mode=mode) == egress.render_rules(
+            egress.RULES_TEMPLATE, uid=1234, mode=mode
+        )
+
+
 def test_observe_mode_logs_then_accepts_and_drop_mode_logs_then_drops() -> None:
     template = TEMPLATE.read_text()
     observe = egress.render_rules(template, uid=1234, mode="observe")
@@ -281,29 +289,30 @@ def test_nft_accepts_both_rendered_rulesets_and_rejects_a_broken_one() -> None:
         assert done.returncode == 0, done.stderr
     broken = egress.render_rules(TEMPLATE.read_text(), uid=1234, mode="drop").replace("tcp dport 443", "tcp dprt 443")
     assert nft_check(broken).returncode != 0
-    script = egress.set_script(GOOD)
-    # the refresh transaction also parses, against the table the ruleset makes
-    done = nft_check(egress.render_rules(TEMPLATE.read_text(), uid=1234, mode="drop") + script)
+    rules = egress.render_rules(egress.RULES_TEMPLATE, uid=1234, mode="drop")
+    # the whole refresh transaction parses: the table is rebuilt and the set is filled in one script
+    done = nft_check(egress.refresh_script(rules, GOOD))
     assert done.returncode == 0, done.stderr
 
 
 # ---- the atomic set swap --------------------------------------------------------------------------------------------
 
 
-def test_the_set_swap_is_one_flush_and_add_transaction() -> None:
-    script = egress.set_script(GOOD)
-    lines = script.strip().splitlines()
-    assert lines == [
-        "flush set inet safo_broker_egress vendor_v4",
-        "add element inet safo_broker_egress vendor_v4 { 142.250.80.10, 142.250.80.11 }",
-    ]
+def test_the_refresh_rebuilds_the_whole_table_with_the_set_in_one_transaction() -> None:
+    rules = egress.render_rules(egress.RULES_TEMPLATE, uid=1234, mode="observe")
+    script = egress.refresh_script(rules, GOOD)
+    lines = script.splitlines()
+    assert lines[:2] == ["table inet safo_broker_egress", "delete table inet safo_broker_egress"]
+    assert lines[-1] == "add element inet safo_broker_egress vendor_v4 { 142.250.80.10, 142.250.80.11 }"
+    assert script.index("delete table") < script.index("hook output") < script.index("add element")
 
 
-def test_the_set_script_refuses_anything_that_is_not_a_validated_address() -> None:
+def test_the_refresh_script_refuses_anything_that_is_not_a_validated_address() -> None:
+    rules = egress.render_rules(egress.RULES_TEMPLATE, uid=1234, mode="drop")
     with pytest.raises(EgressError):
-        egress.set_script(["8.8.8.8", "1.1.1.1 }; flush ruleset; {"])
+        egress.refresh_script(rules, ["8.8.8.8", "1.1.1.1 }; flush ruleset; {"])
     with pytest.raises(EgressError):
-        egress.set_script([])
+        egress.refresh_script(rules, [])
 
 
 # ---- the hosts view -------------------------------------------------------------------------------------------------
@@ -326,16 +335,46 @@ def test_the_hosts_content_for_an_empty_set_has_only_localhost() -> None:
 
 def test_the_hosts_file_is_written_in_place_with_a_group_readable_mode(tmp_path: Path) -> None:
     path = tmp_path / "hosts"
-    egress.write_hosts(path, egress.hosts_content(HOST, GOOD), gid=os.getgid())
+    egress.write_hosts(path, egress.hosts_content(HOST, GOOD), uid=UID, gid=os.getgid())
     inode = path.stat().st_ino
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
     assert path.stat().st_size == egress.HOSTS_SIZE
-    egress.write_hosts(path, egress.hosts_content(HOST, ["142.250.80.99"]), gid=os.getgid())
+    egress.write_hosts(path, egress.hosts_content(HOST, ["142.250.80.99"]), uid=UID, gid=os.getgid())
     # a bind mount of a single file is pinned to the inode, so the update must not replace the file
     assert path.stat().st_ino == inode
     assert "142.250.80.99" in path.read_text()
     assert "142.250.80.10" not in path.read_text()
     assert path.stat().st_size == egress.HOSTS_SIZE
+
+
+def test_the_hosts_writer_refuses_a_file_owned_by_someone_else_and_takes_ownership_of_a_new_one(tmp_path: Path) -> None:
+    path = tmp_path / "hosts"
+    with pytest.raises(EgressError, match="not owned"):
+        egress.write_hosts(path, egress.hosts_content(HOST, GOOD), uid=UID + 1, gid=os.getgid())
+    path = tmp_path / "other"
+    path.write_text("x")
+    with pytest.raises(EgressError, match="not owned"):
+        egress.write_hosts(path, egress.hosts_content(HOST, GOOD), uid=UID + 1, gid=os.getgid())
+    assert path.read_text() == "x"
+
+
+def test_a_short_write_is_continued_and_a_zero_write_is_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = os.pwrite
+
+    def short(fd: int, data: bytes, offset: int) -> int:
+        return real(fd, data[:1000], offset)
+
+    monkeypatch.setattr(os, "pwrite", short)
+    path = tmp_path / "hosts"
+    data = egress.hosts_content(HOST, GOOD)
+    egress.write_hosts(path, data, uid=UID, gid=os.getgid())
+    assert path.read_bytes() == data
+
+    monkeypatch.setattr(os, "pwrite", lambda fd, data, offset: 0)
+    with pytest.raises(EgressError, match="completely"):
+        egress.write_hosts(tmp_path / "hosts2", data, uid=UID, gid=os.getgid())
 
 
 def test_the_hosts_writer_refuses_a_symlink_and_wrong_sized_data(tmp_path: Path) -> None:
@@ -344,10 +383,10 @@ def test_the_hosts_writer_refuses_a_symlink_and_wrong_sized_data(tmp_path: Path)
     link = tmp_path / "link"
     link.symlink_to(real)
     with pytest.raises(EgressError):
-        egress.write_hosts(link, egress.hosts_content(HOST, GOOD), gid=os.getgid())
+        egress.write_hosts(link, egress.hosts_content(HOST, GOOD), uid=UID, gid=os.getgid())
     assert real.read_text() == "x"
     with pytest.raises(EgressError):
-        egress.write_hosts(tmp_path / "h", b"short", gid=os.getgid())
+        egress.write_hosts(tmp_path / "h", b"short", uid=UID, gid=os.getgid())
 
 
 # ---- the refresher: failure modes keep the previous set ------------------------------------------------------------
@@ -379,19 +418,23 @@ def setup(tmp_path: Path, answers: Sequence[object] | Exception) -> tuple[Fake, 
     hosts.parent.mkdir()
     fake = Fake(answers)
     cfg = egress.Config(host=HOST, mode="observe")
-    egress.write_hosts(hosts, egress.hosts_content(HOST, ["142.250.80.1"]), gid=os.getgid())
+    egress.write_hosts(hosts, egress.hosts_content(HOST, ["142.250.80.1"]), uid=UID, gid=os.getgid())
     return fake, hosts, cfg
 
 
 def run_refresh(fake: Fake, hosts: Path, cfg: egress.Config) -> list[str]:
-    return egress.refresh(cfg, resolver=fake.resolver, nft=fake.nft, hosts_path=hosts, gid=os.getgid())
+    return egress.refresh(
+        cfg, resolver=fake.resolver, nft=fake.nft, hosts_path=hosts, uid=UID, service_uid=1234, gid=os.getgid()
+    )
 
 
 def test_a_good_answer_swaps_the_set_and_the_hosts_view(tmp_path: Path) -> None:
     fake, hosts, cfg = setup(tmp_path, GOOD)
     assert run_refresh(fake, hosts, cfg) == GOOD
     assert len(fake.scripts) == 1  # one transaction
-    assert "flush set" in fake.scripts[0]
+    assert "delete table" in fake.scripts[0]
+    assert "add element" in fake.scripts[0]
+    assert "meta skuid != 1234 return" in fake.scripts[0]
     assert "142.250.80.11" in hosts.read_text()
 
 
@@ -460,7 +503,12 @@ def test_load_applies_the_rendered_rules_and_creates_the_hosts_file(tmp_path: Pa
     fake = Fake(GOOD)
     hosts = tmp_path / "hosts"
     egress.load(
-        egress.Config(host=HOST, mode="observe"), TEMPLATE, uid=1234, nft=fake.nft, hosts_path=hosts, gid=os.getgid()
+        egress.Config(host=HOST, mode="observe"),
+        service_uid=1234,
+        nft=fake.nft,
+        hosts_path=hosts,
+        uid=UID,
+        gid=os.getgid(),
     )
     assert len(fake.scripts) == 1
     assert "meta skuid != 1234 return" in fake.scripts[0]
@@ -468,9 +516,14 @@ def test_load_applies_the_rendered_rules_and_creates_the_hosts_file(tmp_path: Pa
     assert hosts.stat().st_size == egress.HOSTS_SIZE
     assert [x for x in hosts.read_text().splitlines() if x and not x.startswith("#")] == ["127.0.0.1 localhost"]
     # loading again never empties a view the refresher has filled
-    egress.write_hosts(hosts, egress.hosts_content(HOST, GOOD), gid=os.getgid())
+    egress.write_hosts(hosts, egress.hosts_content(HOST, GOOD), uid=UID, gid=os.getgid())
     egress.load(
-        egress.Config(host=HOST, mode="drop"), TEMPLATE, uid=1234, nft=fake.nft, hosts_path=hosts, gid=os.getgid()
+        egress.Config(host=HOST, mode="drop"),
+        service_uid=1234,
+        nft=fake.nft,
+        hosts_path=hosts,
+        uid=UID,
+        gid=os.getgid(),
     )
     assert "142.250.80.10" in hosts.read_text()
 
@@ -512,10 +565,10 @@ def test_main_refuses_unknown_commands_and_reports_errors(capsys: pytest.Capture
 
 
 def test_main_render_prints_the_ruleset_for_review_without_root(capsys: pytest.CaptureFixture[str]) -> None:
-    assert egress.main(["render", "--rules", str(TEMPLATE), "--uid", "1234", "--mode", "observe"]) == 0
+    assert egress.main(["render", "--uid", "1234", "--mode", "observe"]) == 0
     out = capsys.readouterr().out
     assert "meta skuid != 1234 return" in out
-    assert egress.main(["render", "--rules", str(TEMPLATE), "--uid", "1234", "--mode", "nope"]) == 1
+    assert egress.main(["render", "--uid", "1234", "--mode", "nope"]) == 1
 
 
 def test_the_module_cannot_run_anything_but_the_fixed_nft_binary() -> None:
@@ -523,3 +576,17 @@ def test_the_module_cannot_run_anything_but_the_fixed_nft_binary() -> None:
     assert source.count("subprocess.run(") == 1
     for banned in ("shell" + "=True", "os." + "system", "os." + "popen", "eval" + "(", "exec" + "("):
         assert banned not in source
+
+
+def test_the_helper_is_standalone_and_never_imports_the_release() -> None:
+    source = Path(egress.__file__).read_text()
+    assert "from safo" not in source
+    assert "import safo\n" not in source
+    assert source.startswith("#!/usr/bin/python3 -I\n")
+
+
+def test_a_refresh_rebuilds_a_table_that_was_removed_from_outside(tmp_path: Path) -> None:
+    """The transaction starts by adding and deleting the table, so a missing table is created again."""
+    fake, hosts, cfg = setup(tmp_path, GOOD)
+    run_refresh(fake, hosts, cfg)
+    assert fake.scripts[0].startswith("table inet safo_broker_egress\ndelete table inet safo_broker_egress\n")

@@ -201,7 +201,8 @@ def test_the_installer_is_read_and_installed_from_one_root_owned_copy() -> None:
     assert stage in lines[final]
     assert "reviewed/checkout" not in lines[hash_]
     assert "reviewed/checkout" not in lines[final]
-    assert sum("reviewed/checkout" in line for line in lines) == 1  # the checkout is read exactly once
+    installer = [x for x in lines if "safo_broker_install.py" in x]
+    assert sum("reviewed/checkout" in line for line in installer) == 1  # the checkout is read exactly once
 
 
 def test_root_commands_run_with_a_fixed_environment_and_a_locked_down_pager() -> None:

@@ -1,16 +1,21 @@
+#!/usr/bin/python3 -I
 # SPDX-License-Identifier: Apache-2.0
-"""Egress control for the broker's service user (docs/gemini-broker.md, "Install (phase 5 status)").
+"""safo-broker-egress: the root helper for the broker's egress control (docs/gemini-broker.md, "Install (phase 5
+status)").
 
-Root runs this from the release, from three systemd units: `load` installs the nftables ruleset and an empty hosts view,
-`refresh` (a timer, every five minutes) resolves the vendor host from the root-owned config, validates every address,
-swaps the nft set in one transaction and rewrites the hosts view the broker's unit bind-mounts over /etc/hosts, and
-`unload` removes the table. The service user may then open new connections only to port 443 of those addresses, and
-needs no DNS, because the hosts view already names them.
+Installed once by root from a reviewed copy to /usr/local/sbin, like the installer, and NOT run from the release tree:
+the egress units call this file, so a new release cannot change what root does with CAP_NET_ADMIN. The ruleset is a
+constant in this file (packaging/nftables/safo-broker.nft is the reviewed reference copy and a test keeps them equal).
+The only inputs are the numeric uid of the service user, the mode (observe or drop) and the vendor host, read from the
+root-owned /etc/safo/broker-egress.conf, which no unit or command line names.
 
-Fail closed in the useful direction: on an empty answer, an implausible answer, any address that is not a public IPv4
-address, or a resolver or nft error, nothing is changed and the previous set and hosts view stay. The vendor host
-name is read from /etc/safo/broker-egress.conf and is not in any unit or command line. Standard library plus the
-single output path; the only program it runs is nft, by absolute path, with a fixed argument list.
+Commands: `load` installs the ruleset and an empty hosts view. `refresh` (a timer, every five minutes) resolves the
+vendor host, validates every address, and re-applies the whole table with the new set in ONE nft transaction (so a table
+that was removed or replaced from outside is rebuilt, and the set is never half-updated), then rewrites the hosts view
+the broker unit bind-mounts over /etc/hosts. `unload` removes the table. `render` prints the ruleset for review.
+
+On an empty answer, an implausible answer, any address that is not a public IPv4 address, or a resolver error, nothing
+is changed. Standard library only; the only program it runs is nft, by absolute path, with a fixed argument list.
 """
 
 from __future__ import annotations
@@ -27,9 +32,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-
-from safo import output
-from safo.broker.floor import entry_problem
+from typing import TextIO
 
 NFT = "/usr/sbin/nft"
 CONF = Path("/etc/safo/broker-egress.conf")
@@ -44,6 +47,26 @@ FINAL_RULES = {
     "observe": 'counter log prefix "safo-broker-egress-observe " accept',
     "drop": 'counter log prefix "safo-broker-egress-drop " drop',
 }
+# The service user may open new TCP connections to port 443 of the addresses in the set and nothing else: no DNS (the
+# hosts view names the vendor), no IPv6 (the set is IPv4 only, so the final rule catches it), no loopback, no other
+# port. Other users are not matched. Vendor traffic is accepted before the logging rule, so it never appears in the log.
+RULES_TEMPLATE = """table inet safo_broker_egress
+delete table inet safo_broker_egress
+table inet safo_broker_egress {
+	set vendor_v4 {
+		type ipv4_addr
+		flags timeout
+		timeout 1h
+	}
+	chain out {
+		type filter hook output priority filter; policy accept;
+		meta skuid != @SERVICE_UID@ return
+		ct state established,related accept
+		ip daddr @vendor_v4 tcp dport 443 counter accept
+		@FINAL_RULE@
+	}
+}
+"""
 ADDRESS = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}")
 HOST = re.compile(r"(?=.{3,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]*[a-z0-9])?")
 CONF_LINE = re.compile(r"([A-Z_]+)=(.*)")
@@ -61,6 +84,31 @@ class Config:
 
 Nft = Callable[[str], None]
 Resolver = Callable[[str], Sequence[object]]
+
+
+def say(stream: TextIO, text: str) -> None:
+    """One printable line: control characters are replaced, so nothing in an error can start a second line."""
+    clean = "".join(c if " " <= c <= "~" else "?" for c in text)
+    print(clean, file=stream)
+
+
+# ---- trusted files ---------------------------------------------------------------------------------------------------
+
+
+def entry_problem(path: Path, uid: int, *, want_dir: bool) -> str | None:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return f"{path} is missing"
+    if stat.S_ISLNK(st.st_mode):
+        return f"{path} is a symlink"
+    if not (stat.S_ISDIR(st.st_mode) if want_dir else stat.S_ISREG(st.st_mode)):
+        return f"{path} is not a regular {'directory' if want_dir else 'file'}"
+    if st.st_uid != uid:
+        return f"{path} is not owned by the trusted user"
+    if st.st_mode & 0o022:
+        return f"{path} is writable by its group or others"
+    return None
 
 
 # ---- validation -----------------------------------------------------------------------------------------------------
@@ -142,7 +190,7 @@ def read_config(path: Path, *, uid: int = 0, anchor: Path = Path("/")) -> Config
     return Config(host=host, mode=mode)
 
 
-# ---- the ruleset, the set swap and the hosts view -------------------------------------------------------------
+# ---- the ruleset, the refresh transaction and the hosts view -------------------------------------------------------
 
 
 def render_rules(template: str, *, uid: object, mode: str) -> str:
@@ -160,13 +208,14 @@ def render_rules(template: str, *, uid: object, mode: str) -> str:
     return "".join(x + "\n" for x in text.splitlines() if not x.lstrip().startswith("#"))
 
 
-def set_script(addresses: Sequence[str]) -> str:
-    """One nft transaction: empty the set and fill it, so the set is never half-updated."""
+def refresh_script(rules: str, addresses: Sequence[str]) -> str:
+    """The whole table, rebuilt with the new set, as one nft transaction: it replaces a table that is missing or was
+    changed from outside, and the set is never half-updated."""
     if not addresses:
         msg = "no addresses to put in the set"
         raise EgressError(msg)
     checked = [validate_address(a) for a in addresses]
-    return f"flush set inet {TABLE} {SET}\nadd element inet {TABLE} {SET} {{ {', '.join(checked)} }}\n"
+    return f"{rules}add element inet {TABLE} {SET} {{ {', '.join(checked)} }}\n"
 
 
 def hosts_content(host: str, addresses: Sequence[str]) -> bytes:
@@ -184,9 +233,10 @@ def hosts_content(host: str, addresses: Sequence[str]) -> bytes:
     return (base + "#" + "x" * (remaining - 2) + "\n").encode("ascii")
 
 
-def write_hosts(path: Path, data: bytes, *, gid: int) -> None:
+def write_hosts(path: Path, data: bytes, *, uid: int, gid: int) -> None:
     """Rewrite the hosts view in place. The unit bind-mounts this one file, and a bind mount of a file follows the
-    inode, so the file must never be replaced by a rename. Group-readable by the service group, nothing else."""
+    inode, so the file must never be replaced by a rename. The file must already be ours (or new); it ends up owned by
+    `uid`, group `gid`, mode 0640, so the service group can read it and nobody else."""
     if len(data) != HOSTS_SIZE:
         msg = "the hosts view has the wrong size"
         raise EgressError(msg)
@@ -200,9 +250,18 @@ def write_hosts(path: Path, data: bytes, *, gid: int) -> None:
         if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
             msg = "the hosts view is not a plain file"
             raise EgressError(msg)
-        os.fchown(fd, -1, gid)
+        if st.st_uid != uid:
+            msg = "the hosts view is not owned by the trusted user"
+            raise EgressError(msg)
+        os.fchown(fd, uid, gid)
         os.fchmod(fd, 0o640)
-        os.pwrite(fd, data, 0)
+        done = 0
+        while done < len(data):  # a short write is continued, not accepted
+            written = os.pwrite(fd, data[done:], done)
+            if written <= 0:
+                msg = "the hosts view could not be written completely"
+                raise EgressError(msg)
+            done += written
         if st.st_size != HOSTS_SIZE:
             os.ftruncate(fd, HOSTS_SIZE)
         os.fsync(fd)
@@ -245,8 +304,11 @@ def default_resolver(host: str) -> list[object]:
     return [info[4][0] for info in infos]
 
 
-def refresh(config: Config, *, resolver: Resolver, nft: Nft, hosts_path: Path, gid: int) -> list[str]:
-    """Resolve, validate, then swap the set and rewrite the hosts view. Any failure before the swap changes nothing."""
+def refresh(
+    config: Config, *, resolver: Resolver, nft: Nft, hosts_path: Path, uid: int, service_uid: int, gid: int
+) -> list[str]:
+    """Resolve, validate, rebuild the table with the new set in one transaction, then rewrite the hosts view. Any
+    failure before the transaction changes nothing."""
     try:
         raw = resolver(config.host)
     except EgressError:
@@ -256,15 +318,16 @@ def refresh(config: Config, *, resolver: Resolver, nft: Nft, hosts_path: Path, g
         raise EgressError(msg) from None
     addresses = validate_answers(raw)
     data = hosts_content(config.host, addresses)
-    nft(set_script(addresses))
-    write_hosts(hosts_path, data, gid=gid)
+    rules = render_rules(RULES_TEMPLATE, uid=service_uid, mode=config.mode)
+    nft(refresh_script(rules, addresses))
+    write_hosts(hosts_path, data, uid=uid, gid=gid)
     return addresses
 
 
-def load(config: Config, template_path: Path, *, uid: int, nft: Nft, hosts_path: Path, gid: int) -> None:
-    nft(render_rules(template_path.read_text(), uid=uid, mode=config.mode))
+def load(config: Config, *, service_uid: int, nft: Nft, hosts_path: Path, uid: int, gid: int) -> None:
+    nft(render_rules(RULES_TEMPLATE, uid=service_uid, mode=config.mode))
     if not os.path.lexists(hosts_path):
-        write_hosts(hosts_path, hosts_content(config.host, []), gid=gid)
+        write_hosts(hosts_path, hosts_content(config.host, []), uid=uid, gid=gid)
 
 
 def unload(*, nft: Nft) -> None:
@@ -299,34 +362,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     rest = args[1:]
     try:
         if command == "render":
-            options = parse_options(rest, ("--rules", "--uid", "--mode"))
-            if options is None or set(options) != {"--rules", "--uid", "--mode"}:
-                output.write(sys.stderr, "usage: render --rules FILE --uid N --mode observe|drop")
+            options = parse_options(rest, ("--uid", "--mode"))
+            if options is None or set(options) != {"--uid", "--mode"}:
+                say(sys.stderr, "usage: render --uid N --mode observe|drop")
                 return 2
-            text = render_rules(Path(options["--rules"]).read_text(), uid=int(options["--uid"]), mode=options["--mode"])
+            text = render_rules(RULES_TEMPLATE, uid=int(options["--uid"]), mode=options["--mode"])
             for line in text.splitlines():
-                output.write(sys.stdout, line)
+                say(sys.stdout, line)
             return 0
-        if command == "load":
-            options = parse_options(rest, ("--rules",))
-            if options is None or set(options) != {"--rules"}:
-                output.write(sys.stderr, "usage: load --rules FILE")
-                return 2
-            uid, gid = service_ids()
-            load(read_config(CONF), Path(options["--rules"]), uid=uid, nft=run_nft, hosts_path=HOSTS, gid=gid)
-            return 0
-        if command == "refresh" and not rest:
-            _uid, gid = service_ids()
-            found = refresh(read_config(CONF), resolver=default_resolver, nft=run_nft, hosts_path=HOSTS, gid=gid)
-            output.write(sys.stderr, f"egress set refreshed: {len(found)} addresses")
+        if command in ("load", "refresh") and not rest:
+            service_uid, gid = service_ids()
+            config = read_config(CONF)
+            if command == "load":
+                load(config, service_uid=service_uid, nft=run_nft, hosts_path=HOSTS, uid=0, gid=gid)
+                return 0
+            found = refresh(
+                config,
+                resolver=default_resolver,
+                nft=run_nft,
+                hosts_path=HOSTS,
+                uid=0,
+                service_uid=service_uid,
+                gid=gid,
+            )
+            say(sys.stderr, f"egress set refreshed: {len(found)} addresses")
             return 0
         if command == "unload" and not rest:
             unload(nft=run_nft)
             return 0
     except (EgressError, ValueError, OSError) as exc:
-        output.write(sys.stderr, f"egress: {exc}")
+        say(sys.stderr, f"egress: {exc}")
         return 1
-    output.write(sys.stderr, "usage: safo.broker.egress load --rules FILE | refresh | unload | render ...")
+    say(sys.stderr, "usage: safo-broker-egress load | refresh | unload | render --uid N --mode M")
     return 2
 
 

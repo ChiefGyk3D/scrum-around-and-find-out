@@ -286,8 +286,9 @@ check must leave the previous release active and the version file unchanged.
 What phase 5 puts in the tree, all testable without root and none of it run on a real machine yet:
 
 - `packaging/systemd/safo-broker.socket` and `packaging/systemd/safo-broker.service`: the two units from "The unit files
-  and their hardening", plus `ReadWritePaths=` for the state directory only, the bind mounts and hidden sockets described under the egress control, `ConditionPathExists=` on the root-owned
-  switch, an `ExecStartPre` floor check (the `floor` module of the broker package, which refuses to start a release below
+  and their hardening", plus `ReadWritePaths=` for the state directory only, the bind mounts and hidden sockets described under the egress control, no start condition on the root-owned
+  switch (the broker reads the switch on every request, answers status and dry run while it is absent and answers every paid
+  call as disabled before the ledger is written or the key is read; decided 2026-10-31), an `ExecStartPre` floor check (the `floor` module of the broker package, which refuses to start a release below
   `/etc/safo/broker-min-version`, the second layer behind the installer), and explicit start and stop timeouts.
   `tests/test_broker_units.py` checks every hardening line by name (removing one fails a test), runs `systemd-analyze verify` and `systemd-analyze security --offline` where the tool exists (the
   tests skip, with the reason shown, when it does not), and fails if the exposure score rises above 2.0.
@@ -305,8 +306,9 @@ What phase 5 puts in the tree, all testable without root and none of it run on a
   switch is left off.
 
 **Egress control for the service user.** The units alone do not limit where the service can connect, so phase 5 also
-ships an nftables table keyed on the service user, three small units and a root helper (the `egress` module of the
-broker package, run from the signed release):
+ships an nftables table keyed on the service user, three small units and a root helper that is **not part of any
+release**: root installs it once from a reviewed copy (the runbook stages, hashes and installs it like the installer), so a
+new release cannot change what root does with network-administration rights. The ruleset is a constant inside the helper:
 
 - The table lets the service user open new connections only to port 443 of a named set of vendor IPv4 addresses.
   Everything else from that user is logged and, in drop mode, dropped, including IPv6, DNS, loopback and every other
@@ -350,9 +352,8 @@ a missing version file when a release is already installed. A release directory 
 `--reinstall` installs a version that is already present, the new directory gets a numbered suffix.
 
 **Known limit of the post-start check.** Until the socket server exists (phase 3), the installer's health check can only
-ask systemd whether the socket is enabled and active; it cannot ask the broker for `status`. With the switch file absent
-the service is skipped by its start condition, so a first install records its version without the broker having
-answered. The check is a replaceable hook; phase 3 wires in a bounded `status` request that must name the expected
+ask systemd whether the socket is enabled and active; it cannot ask the broker for `status`, because the socket server is
+not built yet. A first install therefore records its version without the broker having answered. The check is a replaceable hook; phase 3 wires in a bounded `status` request that must name the expected
 release, and until then a freshly installed release is exercised only by its offline self-test and the maintainer's
 dry run.
 

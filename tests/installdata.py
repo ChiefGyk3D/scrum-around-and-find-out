@@ -237,8 +237,13 @@ def make_world(tmp_path: Path, *, with_wheel: bool = True) -> World:
         anchor=root,
         uid=os.getuid(),
         key_types=("ssh-ed25519",),  # the throwaway signing key is a software key
+        egress_helper=root / "usr" / "local" / "sbin" / "safo-broker-egress",
         check_python=False,  # this machine's interpreter is root-owned, the test user is not
     )
+    layout.egress_helper.parent.mkdir(parents=True)
+    layout.egress_helper.parent.chmod(0o755)
+    layout.egress_helper.write_text("#!/bin/sh\n")
+    layout.egress_helper.chmod(0o755)
     for d in (etc, layout.opt_dir, layout.version_file.parent, layout.unit_dir):
         d.mkdir(parents=True)
         d.chmod(0o755)

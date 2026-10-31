@@ -193,3 +193,31 @@ def test_the_runbook_template_installs_a_hardware_key_type() -> None:
     line = next(x for x in doc.splitlines() if "broker-release-signers" in x and "printf" in x)
     assert "sk-ssh-ed25519@openssh.com" in line
     assert "release-signer ssh-ed25519" not in line
+
+
+# ---- the egress helper is installed once by root, never from a release ------------------------------------------
+
+
+def test_apply_refuses_when_the_egress_helper_is_missing_or_not_trusted(world: World) -> None:
+    world.release("1.0.0")
+    helper = world.layout.egress_helper
+    helper.chmod(0o775)  # writable by the group
+    with pytest.raises(InstallError, match="egress helper"):
+        install.install("1.0.0", world.layout, world.hooks(), apply=True, out=lambda s: None)
+    helper.chmod(0o644)  # not executable
+    with pytest.raises(InstallError, match="not executable"):
+        install.install("1.0.0", world.layout, world.hooks(), apply=True, out=lambda s: None)
+    helper.unlink()
+    with pytest.raises(InstallError, match="egress helper"):
+        install.install("1.0.0", world.layout, world.hooks(), apply=True, out=lambda s: None)
+    assert current_name(world) is None
+
+
+def test_a_release_cannot_replace_the_helper_and_the_units_name_it_by_a_fixed_path(world: World) -> None:
+    world.release("1.0.0")
+    install.install("1.0.0", world.layout, world.hooks(), apply=True, out=lambda s: None)
+    release = world.layout.opt_dir / "releases" / "1.0.0"
+    assert not list(release.rglob("safo-broker-egress"))  # nothing in the release is the helper
+    units = (release / "units" / "safo-broker-egress.service").read_text()
+    assert "ExecStart=/usr/local/sbin/safo-broker-egress load" in units
+    assert world.layout.egress_helper.read_text() == "#!/bin/sh\n"  # untouched by the install

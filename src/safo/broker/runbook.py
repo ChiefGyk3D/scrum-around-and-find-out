@@ -84,36 +84,49 @@ def steps(login: str) -> tuple[Step, ...]:
             "Do not make the state directory: systemd creates it (StateDirectory=) at the first service start.",
         ),
         Step(
-            "Install the installer (the first copy, from a checkout you have read)",
-            "Later installer versions arrive inside signed releases. This first copy is trust on first use. The "
-            "checkout "
-            "is writable by your account, so root first takes one copy into a root-only folder, and you read, hash and "
-            "install that same root-owned copy; nothing is read from the checkout twice. Replace "
-            "/path/to/reviewed/checkout with the checkout you reviewed. The installer needs python3 with pip and venv "
-            "available (the last line checks pip).",
+            "Install the installer and the egress helper (the first copies, from a checkout you have read)",
+            "Later installer versions arrive inside signed releases. These first copies are trust on first use, and "
+            "the egress helper is never part of a release: it is the only code root runs from a timer, so it changes "
+            "only when you install a new reviewed copy yourself. The checkout is writable by your account, so root "
+            "first takes one copy of each file into a root-only folder, and you read, hash and install those same "
+            "root-owned copies; nothing is read from the checkout twice. Replace /path/to/reviewed/checkout with the "
+            "checkout you reviewed. The installer needs python3 with pip and venv available (the last line checks "
+            "pip).",
             (
                 ssh("install -d -m 0700 -o root -g root /var/lib/safo-broker-install/stage"),
                 ssh(
                     "install -m 0600 -o root -g root /path/to/reviewed/checkout/packaging/safo_broker_install.py "
                     "/var/lib/safo-broker-install/stage/safo-broker-install"
                 ),
-                ssh("sha256sum /var/lib/safo-broker-install/stage/safo-broker-install"),
+                ssh(
+                    "install -m 0600 -o root -g root /path/to/reviewed/checkout/packaging/safo_broker_egress.py "
+                    "/var/lib/safo-broker-install/stage/safo-broker-egress"
+                ),
+                ssh(
+                    "sha256sum /var/lib/safo-broker-install/stage/safo-broker-install "
+                    "/var/lib/safo-broker-install/stage/safo-broker-egress"
+                ),
                 ssh("less /var/lib/safo-broker-install/stage/safo-broker-install", env=PAGER_ENV),
+                ssh("less /var/lib/safo-broker-install/stage/safo-broker-egress", env=PAGER_ENV),
                 ssh(
                     "install -m 0755 -o root -g root /var/lib/safo-broker-install/stage/safo-broker-install "
                     "/usr/local/sbin/safo-broker-install"
                 ),
+                ssh(
+                    "install -m 0755 -o root -g root /var/lib/safo-broker-install/stage/safo-broker-egress "
+                    "/usr/local/sbin/safo-broker-egress"
+                ),
                 ssh("rm -r /var/lib/safo-broker-install/stage"),
                 ssh("/usr/bin/python3 -I -m pip --version"),
             ),
-            "One root-run program is added. It does nothing until you run it, and it refuses to touch the state "
-            "directory.",
+            "Two root-run programs are added. Neither does anything until it is run or a unit calls it, and the "
+            "installer refuses to touch the state directory.",
             (
-                ssh("rm /usr/local/sbin/safo-broker-install"),
+                ssh("rm /usr/local/sbin/safo-broker-install /usr/local/sbin/safo-broker-egress"),
                 ssh("rm -rf /var/lib/safo-broker-install/stage"),
             ),
-            "Compare the hash with the one you recorded when you reviewed the checkout. If the two differ, stop here "
-            "and do not run the install line.",
+            "Compare the hashes with the ones you recorded when you reviewed the checkout. If either differs, stop "
+            "here and do not run the install line.",
         ),
         Step(
             "Create the credential for the paid key",
@@ -209,11 +222,12 @@ def steps(login: str) -> tuple[Step, ...]:
         ),
         Step(
             "Enable the socket",
-            "The socket starts the service on demand. The service also needs the switch file to exist, which this "
-            "runbook does not create. The broker unit requires the egress service and will not start without it.",
+            "The socket starts the service on demand. The broker reads the switch file on every request, so with the "
+            "switch absent it still answers status and dry run and refuses every paid call as disabled; this runbook "
+            "never creates the switch. The broker unit is bound to the egress service and starts only with it.",
             (ssh("systemctl enable --now safo-broker.socket"),),
-            "A listening socket in /run owned by root with the client group. No service runs and the paid key is not "
-            "read until the switch exists.",
+            "A listening socket in /run owned by root with the client group. The service starts on the first request. "
+            "While the switch is absent the paid key is not read and nothing reaches the vendor.",
             (ssh("systemctl disable --now safo-broker.socket safo-broker.service"),),
         ),
         Step(
@@ -274,7 +288,9 @@ def render(*, maintainer: str) -> str:
         "",
         "This runbook never creates the root-owned switch file, /etc/safo/gemini-paid-enabled. Create it last, as "
         "the keys guide describes, after the dry",
-        "run with a real key. While it is absent the service will not start, so no call can reach the vendor.",
+        "run with a real key. While it is absent the broker answers status and dry run, and every paid call is "
+        "answered as "
+        "disabled before the ledger is written or the key is read, so no call can reach the vendor.",
         "",
         "## Restrict the new key at the vendor (the vendor documentation, read 2026-10-31)",
         "",

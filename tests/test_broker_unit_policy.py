@@ -172,6 +172,10 @@ def test_whitespace_around_the_equals_sign_cannot_hide_a_value() -> None:
 
 
 DENYLISTED = [
+    "ConditionPathExists=/etc/safo/gemini-paid-enabled",
+    "ConditionPathExists=!/etc/nowhere",
+    "AssertPathExists=/etc/safo/gemini-paid-enabled",
+    "ConditionFileNotEmpty=/etc/x",
     "LoadCredential=paid:/etc/shadow",
     "SetCredential=a:b",
     "ImportCredential=*",
@@ -452,3 +456,10 @@ def test_the_resolver_paths_cannot_be_dropped_or_narrowed() -> None:
         "safo-broker.service",
         base.replace("/opt/safo-broker/current/meta/packaging/etc/nsswitch.conf", "/etc/nsswitch.conf"),
     )
+
+
+def test_the_start_condition_on_the_switch_cannot_come_back_in_a_release() -> None:
+    base = read("safo-broker.service")
+    text = base.replace("[Unit]\n", "[Unit]\nConditionPathExists=/etc/safo/gemini-paid-enabled\n", 1)
+    message = refused("safo-broker.service", text)
+    assert "ConditionPathExists" in message

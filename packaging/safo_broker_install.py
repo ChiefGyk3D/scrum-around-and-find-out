@@ -70,6 +70,7 @@ UNIT_NAMES = (
     "safo-broker-egress-refresh.timer",
 )
 EGRESS_RULES_REL = "packaging/nftables/safo-broker.nft"
+EGRESS_HELPER = "/usr/local/sbin/safo-broker-egress"
 NSSWITCH_REL = "packaging/etc/nsswitch.conf"
 EGRESS_RESTART = ["try-restart", "safo-broker-egress.service", "safo-broker-egress-refresh.timer"]
 # Exposure budget per unit (systemd-analyze security, offline): a rise past it means a hardening line was lost.
@@ -170,6 +171,7 @@ class Layout:
     uid: int = 0
     key_types: tuple[str, ...] = SK_KEY_TYPES  # key types a release signer may have; root can change it explicitly
     check_python: bool = True  # the interpreter the release venv links to must be a trusted one
+    egress_helper: Path = Path("/usr/local/sbin/safo-broker-egress")  # installed once by root; the egress units run it
 
 
 @dataclass(frozen=True)
@@ -501,7 +503,6 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Unit", "Requires", "safo-broker.socket"),
         ("Unit", "BindsTo", "safo-broker-egress.service"),
         ("Unit", "After", "network-online.target safo-broker.socket safo-broker-egress.service"),
-        ("Unit", "ConditionPathExists", "/etc/safo/gemini-paid-enabled"),
         ("Unit", "StartLimitIntervalSec", "60"),
         ("Unit", "StartLimitBurst", "5"),
         ("Service", "Type", "simple"),
@@ -579,14 +580,9 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Unit", "After", "network-online.target"),
         ("Service", "Type", "oneshot"),
         ("Service", "RemainAfterExit", "yes"),
-        (
-            "Service",
-            "ExecStart",
-            "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress load --rules "
-            "/opt/safo-broker/current/meta/packaging/nftables/safo-broker.nft",
-        ),
-        ("Service", "ExecStart", "-/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh"),
-        ("Service", "ExecStop", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress unload"),
+        ("Service", "ExecStart", "/usr/local/sbin/safo-broker-egress load"),
+        ("Service", "ExecStart", "-/usr/local/sbin/safo-broker-egress refresh"),
+        ("Service", "ExecStop", "/usr/local/sbin/safo-broker-egress unload"),
         ("Service", "TimeoutStartSec", "60s"),
         ("Service", "TimeoutStopSec", "30s"),
         ("Service", "UMask", "0077"),
@@ -618,7 +614,7 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Unit", "Requires", "safo-broker-egress.service"),
         ("Unit", "After", "safo-broker-egress.service network-online.target"),
         ("Service", "Type", "oneshot"),
-        ("Service", "ExecStart", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh"),
+        ("Service", "ExecStart", "/usr/local/sbin/safo-broker-egress refresh"),
         ("Service", "TimeoutStartSec", "60s"),
         ("Service", "UMask", "0077"),
         ("Service", "NoNewPrivileges", "yes"),
@@ -1072,6 +1068,7 @@ def default_verify_units(unit_dir: Path, release: Path) -> None:
         paths = []
         for name in UNIT_NAMES:
             text = (unit_dir / name).read_text().replace(UNIT_EXEC_PREFIX, str(release))
+            text = text.replace(EGRESS_HELPER, str(release / "venv" / "bin" / "python"))  # a stand-in that exists
             target = Path(tmp) / name
             target.write_text(text)
             paths.append(str(target))
@@ -1695,6 +1692,10 @@ def activate(
 ) -> Path:
     if layout.check_python:
         check_interpreter(sys.executable, uid=layout.uid, anchor=layout.anchor)
+    check_trusted(layout.egress_helper, layout, "egress helper")
+    if not os.access(layout.egress_helper, os.X_OK):
+        msg = f"the egress helper {layout.egress_helper} is not executable; install it first (see the runbook)"
+        raise InstallError(msg)
     fd = open_opt(layout)
     try:
         clean_stale(layout)
