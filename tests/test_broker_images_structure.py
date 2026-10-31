@@ -5,6 +5,7 @@ the walk skips by its length may carry another image. An allow-list per format, 
 from __future__ import annotations
 
 import struct
+import zlib
 
 import pytest
 
@@ -330,3 +331,32 @@ def test_the_reserved_bytes_of_the_extended_header_are_zero() -> None:
 )
 def test_a_lossy_frame_header_must_be_a_key_frame_with_a_partition_that_fits(frame: bytes) -> None:
     refuses(riff(wchunk(b"VP8 ", frame)))
+
+
+# -- PNG filter bytes ----------------------------------------------------------------------------------------------
+
+
+def rows_png(width: int, height: int, bad_row: int | None = None, bad_value: int = 5) -> bytes:
+    row = b"\x00" * (1 + width)
+    raw = bytearray(row * height)
+    if bad_row is not None:
+        raw[bad_row * (1 + width)] = bad_value
+    return png_of(ihdr(width, height), chunk(b"IDAT", zlib.compress(bytes(raw), 1)), IEND)
+
+
+def test_every_row_starts_with_a_filter_byte_that_exists() -> None:
+    assert sniff(rows_png(3, 3)).width == 3
+    for value in (5, 6, 17, 255):
+        refuses(rows_png(1, 1, 0, value))
+        refuses(rows_png(3, 3, 2, value))
+
+
+def test_a_bad_filter_byte_is_found_in_a_row_that_straddles_the_inflation_steps() -> None:
+    assert sniff(rows_png(5000, 100)).width == 5000
+    for row in (0, 12, 13, 57, 99):  # 64 KiB steps do not line up with 5001-byte rows
+        refuses(rows_png(5000, 100, row))
+
+
+def test_all_five_filter_types_pass() -> None:
+    for value in range(5):
+        assert sniff(rows_png(2, 2, 1, value)).width == 2

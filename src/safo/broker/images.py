@@ -154,7 +154,7 @@ def _png(data: bytes) -> ImageInfo:
                     raise _no("the image does not end where a PNG ends")
                 if state.color == 3 and not state.palette:
                     raise _shape()
-                _check_rows(data_parts, rows)
+                _check_rows(data_parts, rows, rows // dims[1])
                 return _check_dims("image/png", *dims)
             _png_chunk(kind, body, state, before_data=run == 0)
         pos = end + 4
@@ -231,9 +231,10 @@ def _png_chunk(kind: bytes, body: bytes, st: _PngState, *, before_data: bool) ->
             raise _shape()
 
 
-def _check_rows(parts: list[bytes], expected: int) -> None:
+def _check_rows(parts: list[bytes], expected: int, row_length: int) -> None:
     """Inflate the image data in small steps, throwing the output away, and stop at once if it passes the size the
-    header declares: a small file that inflates to a huge buffer is refused here, not in whatever draws it later."""
+    header declares: a small file that inflates to a huge buffer is refused here, not in whatever draws it later.
+    The first byte of every row is its filter type, which is 0 to 4; anything else is not a PNG row."""
     stream = zlib.decompressobj()
     total = 0
     try:
@@ -242,7 +243,11 @@ def _check_rows(parts: list[bytes], expected: int) -> None:
                 raise _no("the image data is not the size the image declares")
             buffer = part
             while buffer and not stream.eof:
-                total += len(stream.decompress(buffer, 65536))
+                out = stream.decompress(buffer, 65536)
+                first = -total % row_length  # where the next row starts in this piece
+                if out[first::row_length] and max(out[first::row_length]) > 4:
+                    raise _no("the image data has a row with a filter type that does not exist")
+                total += len(out)
                 if total > expected:
                     raise _no("the image data is larger than the image declares")
                 buffer = stream.unconsumed_tail
