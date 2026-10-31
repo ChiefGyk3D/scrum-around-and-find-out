@@ -1088,7 +1088,8 @@ def test_a_write_cut_at_every_byte_recovers_to_a_state_that_is_never_free_budget
             (call,) = view.calls.values()
             assert call.state is CallState.SUSPENDED
             assert view.month_spent(NOW) >= 5000  # the reservation never drops out
-            if stage == "breach" and cut >= complete_at:
+            end_row_at = len(post) - len(post.splitlines(keepends=True)[-1])
+            if stage == "breach" and cut >= end_row_at - 1:  # the breach row is whole: its cost stays counted
                 assert not call.ambiguous and view.month_spent(NOW) == 9000
             else:
                 assert call.ambiguous and view.month_spent(NOW) == 5000

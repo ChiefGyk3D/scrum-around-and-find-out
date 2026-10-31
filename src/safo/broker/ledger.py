@@ -544,6 +544,7 @@ class CallLedger:
         with self._locked():
             self._check_tree()
             self._repair_tail()
+            self._complete_breach(now)
             view = self._view()
             stamp = self._stamp(now, view, strict=False)
             rows: list[dict[str, Any]] = []
@@ -586,6 +587,26 @@ class CallLedger:
             self._raise_floor()
         return handled
 
+    def _complete_breach(self, now: dt.datetime) -> None:
+        """A breach `call_end` is whole but its `suspended` companion was cut off: the actual cost is known and must
+        stay counted, so the missing row is written (never the whole breach dropped back to its lower reservation)."""
+        try:
+            rows = self.ledger.state().rows
+        except gemini.RefusedError as err:
+            raise LedgerError(str(err)) from None
+        if not rows or rows[-1].get("type") != "call_end" or rows[-1].get("breach") is not True:
+            return
+        end = rows[-1]
+        start = next(
+            (r for r in rows if r.get("type") == "call_start" and r.get("call_id") == end.get("call_id")), None
+        )
+        last = parse_stamp(end.get("ts"))
+        if start is None or last is None:
+            raise LedgerError("the broker ledger is not consistent with the call state machine; root must look at it")
+        when = gemini.stamp(max(now, last))
+        suspended = _row("suspended", when, call_id=end["call_id"], model=start["model"], reason="breach")
+        self.ledger.append_many([suspended])
+
     def _marker_agrees(self, view: LedgerView, nonce: str) -> None:
         """A whole marker must say what the ledger says about the same call (a marker is not a place to hide a lower
         figure, nor a different call). A partial marker is rewritten from the ledger later."""
@@ -618,7 +639,8 @@ class CallLedger:
         """An append is one write and then one fsync, and a vendor call follows only after both. A crash during the
         write can leave a last line that is cut short, or a group of rows whose first row is whole and whose second is
         missing: `approval_used` and `call_start`, a breach `call_end` and its `suspended`, or an `ambiguous_call` and
-        its `suspended`. Neither can have been followed by a vendor call, so removing them frees nothing. Only an
+        its `suspended`. Neither can have been followed by a vendor call, so removing them frees nothing (a breach
+        `call_end` is the exception: it is kept and its `suspended` is written by `_complete_breach`). Only an
         unreadable unterminated last line and a dangling first row of a group are removed; damage anywhere else stays
         a LedgerError."""
         path = self.dir / LEDGER_NAME
@@ -776,4 +798,4 @@ def _dangling(line: bytes) -> bool:
     if not isinstance(row, dict):
         return False
     kind = row.get("type")
-    return kind in ("approval_used", "ambiguous_call") or (kind == "call_end" and row.get("breach") is True)
+    return kind in ("approval_used", "ambiguous_call")
