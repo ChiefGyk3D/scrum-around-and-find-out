@@ -249,9 +249,13 @@ def test_preflight_is_handed_the_environment_it_reads_and_no_secret_value() -> N
 
 def test_the_board_less_inputs_reach_preflight_and_run_identically() -> None:
     pre, run = step("preflight")["env"], step("Run safo")["env"]
-    names = [n for n in run if n.startswith("SAFO_") and n not in {"SAFO_TOKEN", "SAFO_TOKEN_KIND"}]
+    # the two file inputs reach the run step as the paths the preflight read from the trusted revision (see below)
+    names = [
+        n
+        for n in run
+        if n.startswith("SAFO_") and n not in {"SAFO_TOKEN", "SAFO_TOKEN_KIND", "SAFO_BOARD", "SAFO_STATUS_BODY_FILE"}
+    ]
     assert {
-        "SAFO_BOARD",
         "SAFO_PROJECT_URL",
         "SAFO_DEFAULT_AREA",
         "SAFO_STATUS_DONE",
@@ -259,7 +263,7 @@ def test_the_board_less_inputs_reach_preflight_and_run_identically() -> None:
     } <= set(names)
     for name in names:
         assert pre[name] == run[name], name
-    assert {"SAFO_MODE", "SAFO_DRY_RUN", "SAFO_STATUS_STATE", "SAFO_STATUS_BODY_FILE"} <= set(names)
+    assert {"SAFO_MODE", "SAFO_DRY_RUN", "SAFO_STATUS_STATE"} <= set(names)
 
 
 def test_the_token_goes_to_python_in_the_environment_with_its_kind() -> None:
@@ -331,6 +335,7 @@ def test_doppler_runs_only_with_an_identity_and_never_with_a_literal_key_or_a_fo
     assert "inputs.private-key==''" in condition
     assert "inputs.mode!='validate'" in condition
     assert "github.event.pull_request.head.repo.full_name" in condition
+    assert "steps.preflight.outputs.credentials=='allowed'" in condition
     assert s["with"]["auth-method"] == "oidc" and s.get("id") == "doppler"
     assert s["with"]["doppler-identity-id"] == "${{ inputs.doppler-identity-id }}"
 
@@ -390,3 +395,50 @@ def test_the_lock_is_hashed_and_pinned() -> None:
 def test_python_is_set_up_before_anything_runs_it() -> None:
     setup = next(i for i, s in enumerate(STEPS) if str(s.get("uses", "")).startswith("actions/setup-python@"))
     assert setup < index("Install SAFO") < index("Mask the credentials") < index("preflight")
+
+
+# -- what the Action trusts from its caller ------------------------------------------------------------------------
+
+
+def test_the_run_step_reads_the_board_and_the_status_body_from_the_preflights_trusted_copies() -> None:
+    run, pre = step("Run safo")["env"], step("preflight")["env"]
+    assert run["SAFO_BOARD"].replace(" ", "") == "${{steps.preflight.outputs.board-file}}"
+    assert run["SAFO_STATUS_BODY_FILE"].replace(" ", "") == "${{steps.preflight.outputs.status-body-file}}"
+    # the caller's paths reach the preflight and nothing else
+    assert pre["SAFO_BOARD"].replace(" ", "") == "${{inputs.board-file}}"
+    assert pre["SAFO_STATUS_BODY_FILE"].replace(" ", "") == "${{inputs.status-body-file}}"
+    assert "inputs.board-file" not in str(run) and "inputs.status-body-file" not in str(run)
+
+
+def test_every_step_that_fetches_mints_or_masks_a_credential_waits_for_the_preflights_verdict() -> None:
+    gated = [
+        s for s in STEPS if s.get("id") in ("doppler", "app", "app_legacy") or "Mask the Doppler" in s.get("name", "")
+    ]
+    assert len(gated) == 4
+    for s in gated:
+        assert "steps.preflight.outputs.credentials=='allowed'" in s["if"].replace(" ", ""), s["name"]
+
+
+def test_the_preflight_is_handed_the_facts_the_trust_decision_needs() -> None:
+    env = step("preflight")["env"]
+    compact = {k: v.replace(" ", "") for k, v in env.items()}
+    assert compact["EVENT_NAME"] == "${{github.event_name}}"
+    assert compact["GITHUB_REF"] == "${{github.ref}}" and compact["GITHUB_SHA"] == "${{github.sha}}"
+    assert compact["DEFAULT_BRANCH"] == "${{github.event.repository.default_branch}}"
+    assert compact["TRUSTED_REF"] == "${{inputs.trusted-ref}}"
+    assert compact["ALLOW_FORK_PRT"] == "${{inputs.allow-fork-pull-request-target}}"
+    # the fork flag covers every event that carries a pull request or a workflow run, not one event name
+    assert "github.event.pull_request.head.repo.full_name" in compact["IS_FORK"]
+    assert "github.event.workflow_run.head_repository.full_name" in compact["IS_FORK"]
+    assert "github.event_name==" not in compact["IS_FORK"]
+
+
+def test_the_new_inputs_fail_closed_by_default() -> None:
+    assert INPUTS["trusted-ref"]["default"] == "" and "github.sha" in INPUTS["trusted-ref"]["description"]
+    assert INPUTS["allow-fork-pull-request-target"]["default"] == "false"
+
+
+def test_the_dry_run_description_says_the_read_only_token_is_the_app_path_only() -> None:
+    text = INPUTS["dry-run"]["description"]
+    assert "App" in text and "personal access token" in text and "keeps the permissions" in text
+    assert not text.rstrip().endswith("The token is then read-only.")

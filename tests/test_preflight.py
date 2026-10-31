@@ -3,14 +3,17 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 import yaml
 
-from safo import action_preflight
+from gitrepo import make_repo
+from safo import action_preflight, action_trust
 from safo.errors import ConfigError
 
 ROOT = Path(__file__).parent.parent
@@ -26,12 +29,34 @@ BASE = {
     "REPO_PRIVATE": "true",
     "GITHUB_WORKSPACE": str(ROOT),
     "SAFO_DRY_RUN": "false",
+    "EVENT_NAME": "push",
+    "GITHUB_REF": "refs/heads/main",
+    "DEFAULT_BRANCH": "main",
+    "IS_FORK": "false",
+    "GITHUB_SHA": "a" * 40,
 }
+
+
+class WorkspaceRevision(action_trust.Revision):
+    """Stands in for a git checkout in the tests that are about scope and credentials, not about where a file comes
+    from: it serves the workspace file under the same containment rule. The real git reads are in test_action_trust."""
+
+    def blob(self, path: str, label: str, limit: int) -> bytes:
+        real = action_preflight.workspace_path({"GITHUB_WORKSPACE": self.workspace}, path, label)
+        try:
+            return Path(real).read_bytes()
+        except OSError:
+            raise ConfigError(f"{label} is not a file in the trusted revision") from None
 
 
 @pytest.fixture(autouse=True)
 def _workspace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(ROOT)
+
+    def revision(env: dict[str, str], trust: action_trust.Trust) -> action_trust.Revision:
+        return WorkspaceRevision(os.path.realpath(env.get("GITHUB_WORKSPACE") or os.getcwd()), env["GITHUB_SHA"], True)
+
+    monkeypatch.setattr(action_trust, "trusted_revision", revision)
 
 
 def env(**changes: str) -> dict[str, str]:
@@ -156,7 +181,7 @@ def test_the_board_less_url_is_validated() -> None:
 @pytest.mark.parametrize("path", ["/etc/passwd", "../x.md", "a/../../x.md", "~/x.md", "-x.md", "a\nb"])
 def test_a_status_body_file_must_stay_inside_the_workspace(path: str) -> None:
     refused("status-body-file", SAFO_STATUS_BODY_FILE=path)
-    action_preflight.check(env(SAFO_STATUS_BODY_FILE="reports/update.md"))
+    action_preflight.check(env(SAFO_STATUS_BODY_FILE="README.md"))
 
 
 # -- app-owner: GYST issue 139 -------------------------------------------------------------------------------------
@@ -251,27 +276,33 @@ def test_doppler_is_not_used_for_a_token() -> None:
 
 
 def test_a_fork_pull_request_never_fetches_the_key() -> None:
-    refused("fork", **DOPPLER, EVENT_NAME="pull_request", IS_FORK="true")
-    action_preflight.check(env(**DOPPLER, EVENT_NAME="pull_request", IS_FORK="false"))
+    pr = {"EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/7/merge"}
+    refused("fork", **DOPPLER, **pr, IS_FORK="true")
+    action_preflight.check(env(**DOPPLER, **pr, IS_FORK="false"))
 
 
 # -- through the shell entry point --------------------------------------------------------------------------------
 
 
 def run_main(**changes: str) -> subprocess.CompletedProcess[str]:
-    full = {
-        "PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin",
-        "PYTHONPATH": str(ROOT / "src"),
-        **env(**changes),
-    }
-    return subprocess.run(
-        [sys.executable, "-m", "safo.action_preflight"], env=full, capture_output=True, text=True, cwd=ROOT
-    )
+    """The real entry point against a real one-commit repository that holds the board file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "ws"
+        sha = make_repo(ws, {BOARD: (ROOT / BOARD).read_text()})
+        full = {
+            "PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin",
+            "PYTHONPATH": str(ROOT / "src"),
+            **env(GITHUB_WORKSPACE=str(ws), GITHUB_SHA=sha, RUNNER_TEMP=tmp, **changes),
+        }
+        return subprocess.run(
+            [sys.executable, "-m", "safo.action_preflight"], env=full, capture_output=True, text=True, cwd=ws
+        )
 
 
 def test_main_exits_0_clean_and_2_with_one_annotation() -> None:
     ok = run_main()
-    assert ok.returncode == 0 and ok.stdout == "" and ok.stderr == ""
+    assert ok.returncode == 0 and ok.stderr == ""
+    assert ok.stdout.startswith("::notice title=safo::event push, ref refs/heads/main") and ok.stdout.count("\n") == 1
     bad = run_main(HAS_PRIVATE_KEY="false")
     assert bad.returncode == 2 and bad.stdout == ""
     assert bad.stderr.startswith("::error title=safo::") and bad.stderr.count("\n") == 1
@@ -385,7 +416,10 @@ def test_a_token_or_a_validate_run_has_nothing_to_scope() -> None:
 def test_main_writes_the_scope_to_the_step_output_file(tmp_path: Path) -> None:
     out = tmp_path / "out"
     done = run_main(GITHUB_OUTPUT=str(out))
-    assert done.returncode == 0 and out.read_text() == "repositories=widgets,manuals\n"
+    assert done.returncode == 0
+    lines = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    assert lines["repositories"] == "widgets,manuals" and lines["credentials"] == "allowed"
+    assert Path(lines["board-file"]).name == "board.yaml" and "status-body-file" not in lines
 
 
 def test_main_writes_no_output_when_it_refuses(tmp_path: Path) -> None:
@@ -452,9 +486,10 @@ def test_the_status_state_is_only_a_status_input() -> None:
 @pytest.mark.parametrize("kw", [{"HAS_PRIVATE_KEY": "true"}, {"HAS_PRIVATE_KEY": "false", "HAS_TOKEN": "true"}])
 def test_a_literal_key_or_token_on_a_fork_pull_request_is_refused(kw: dict[str, str]) -> None:
     extra = {"SAFO_ALLOW_TOKEN_FOR_ORG": "true"}
-    refused("fork", **kw, **extra, EVENT_NAME="pull_request", IS_FORK="true")
-    action_preflight.check(env(**kw, **extra, EVENT_NAME="pull_request", IS_FORK="false"))
-    action_preflight.check(env(**kw, **extra, EVENT_NAME="push", IS_FORK="true"))
+    pr = {"EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/7/merge"}
+    refused("fork", **kw, **extra, **pr, IS_FORK="true")
+    action_preflight.check(env(**kw, **extra, **pr, IS_FORK="false"))
+    refused("classify", **kw, **extra, EVENT_NAME="push", IS_FORK="true")
     action_preflight.check(env(**kw, **extra))
 
 

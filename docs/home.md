@@ -17,6 +17,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Gemini passkeys](gemini-passkeys.md): the opt-in passkey tier: real ES256 and EdDSA verification (optional `safo[passkeys]` extra); enrollment and approval wiring not built.
 - [Gemini broker](gemini-broker.md): the design of the privileged broker that will hold the paid key, the approval records and the spend ledger, with image generation as the first case. Design only.
 - [Gemini broker threat model](gemini-broker-threat-model.md): assets, actors, ranked risks, mitigations and verifications for that design.
+- [The Action](action.md): what it trusts from its caller: the trusted events, the bound revision the board file is read from, and what is and is not guaranteed.
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
 - [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
 - [Look before instructing](look-before-instructing.md): prior art, then the vendor's docs page, then the live system; never a click path from memory.

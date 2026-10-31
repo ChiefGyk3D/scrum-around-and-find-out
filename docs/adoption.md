@@ -66,6 +66,7 @@ jobs:
         with:
           mode: ${{ github.event_name == 'issues' && 'sync' || 'reconcile' }}
           board-file: board.yaml
+          trusted-ref: ${{ github.sha }}
           client-id: ${{ vars.BOARD_APP_CLIENT_ID }}
           private-key: ${{ secrets.BOARD_APP_PRIVATE_KEY }}
 ```
@@ -73,6 +74,8 @@ jobs:
 Pin by commit with the version in a comment; Dependabot moves both. Pull requests reach the board through the weekly
 `reconcile`. To react to pull-request events as well, use `pull_request_target` and read the trust boundary below first:
 the board-less inputs (`project-url` and the status inputs, no `board-file`) exist for that job, which needs no checkout.
+What the Action trusts from the caller, and what it guarantees, is on [The Action](action.md): a credential is used only
+on the listed events, and the board file is read from the commit named by `trusted-ref` (default: the commit the run is on).
 
 ## 5. Optional: the agent plugins
 

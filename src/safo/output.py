@@ -53,6 +53,11 @@ def annotation(stream: TextIO, message: str) -> None:
     print(f"::error title=safo::{line(message)}", file=stream)
 
 
+def notice(stream: TextIO, message: str) -> None:
+    """A notice annotation, escaped like every other line."""
+    print(f"::notice title=safo::{line(message)}", file=stream)
+
+
 def mask(stream: TextIO, value: str) -> None:
     """Tell the runner to hide `value` in every later log line, one command per non-blank line (a PEM key is many).
 
