@@ -221,3 +221,42 @@ def test_a_release_cannot_replace_the_helper_and_the_units_name_it_by_a_fixed_pa
     units = (release / "units" / "safo-broker-egress.service").read_text()
     assert "ExecStart=/usr/local/sbin/safo-broker-egress load" in units
     assert world.layout.egress_helper.read_text() == "#!/bin/sh\n"  # untouched by the install
+
+
+# ---- rolling back past the egress units stops them first ----------------------------------------------------------
+
+
+def test_units_that_the_target_lacks_are_stopped_in_dependency_order_before_their_files_go(world: World) -> None:
+    old: dict[str, bytes | None] = dict.fromkeys(install.UNIT_NAMES, b"x")
+    new = dict(old)
+    for name in (
+        "safo-broker-egress.service",
+        "safo-broker-egress-refresh.service",
+        "safo-broker-egress-refresh.timer",
+    ):
+        new[name] = None
+    install.stop_retired_units(world.hooks(), old, new)
+    assert world.calls == [
+        ("stop", "safo-broker-egress-refresh.timer"),
+        ("stop", "safo-broker-egress-refresh.service"),
+        ("stop", "safo-broker-egress.service"),
+    ]
+
+
+def test_nothing_is_stopped_when_no_unit_goes_away(world: World) -> None:
+    same: dict[str, bytes | None] = dict.fromkeys(install.UNIT_NAMES, b"x")
+    install.stop_retired_units(world.hooks(), same, dict(same))
+    assert world.calls == []
+
+
+def test_a_failed_install_on_a_first_install_stops_the_egress_units_it_started(world: World) -> None:
+    world.release("1.0.0")
+    world.health_fails = True
+    with pytest.raises(InstallError, match="rolled back"):
+        install.install("1.0.0", world.layout, world.hooks(), apply=True, out=lambda s: None)
+    stops = [c for c in world.calls if c[0] == "stop"]
+    assert ("stop", "safo-broker-egress-refresh.timer") in stops
+    assert ("stop", "safo-broker-egress.service") in stops
+    first_stop = world.calls.index(stops[0])
+    reload_after = [i for i, c in enumerate(world.calls) if c == ("daemon-reload",) and i > first_stop]
+    assert reload_after, "the units are stopped before the reload that forgets them"

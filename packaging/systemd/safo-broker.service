@@ -7,6 +7,8 @@
 # cache socket: those directories are inaccessible and /etc/nsswitch.conf is a files-only copy. It also cannot create or
 # connect Unix sockets at all (AF_INET only): it serves from the listener systemd hands it, so no other local service can
 # be asked to make a connection for it. A server design that needs Unix sockets needs a reviewed change of this line.
+# recvmsg and recvmmsg are denied too: a descriptor passed over the listener would be a socket with someone else's uid,
+# which the egress rule does not match. Plain read and recv on the listener are unaffected.
 # There is no start condition on the root-owned enable switch: the broker reads the switch on every request, answers
 # status and dry run while it is absent, and answers every paid call as disabled before it writes the ledger or reads the key.
 [Unit]
@@ -58,6 +60,7 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+SystemCallFilter=~recvmsg recvmmsg
 SystemCallErrorNumber=EPERM
 DevicePolicy=closed
 KeyringMode=private

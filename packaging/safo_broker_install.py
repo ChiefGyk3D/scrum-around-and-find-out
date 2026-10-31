@@ -553,6 +553,7 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Service", "SystemCallArchitectures", "native"),
         ("Service", "SystemCallFilter", "@system-service"),
         ("Service", "SystemCallFilter", "~@privileged @resources"),
+        ("Service", "SystemCallFilter", "~recvmsg recvmmsg"),
         ("Service", "SystemCallErrorNumber", "EPERM"),
         ("Service", "DevicePolicy", "closed"),
         ("Service", "KeyringMode", "private"),
@@ -642,7 +643,7 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
     ),
     "safo-broker-egress-refresh.timer": (
         ("Timer", "OnBootSec", "1min"),
-        ("Timer", "OnUnitActiveSec", "5min"),
+        ("Timer", "OnUnitActiveSec", "1min"),
         ("Timer", "AccuracySec", "10s"),
         ("Timer", "Unit", "safo-broker-egress-refresh.service"),
         ("Install", "WantedBy", "timers.target"),
@@ -1768,6 +1769,23 @@ def activate(
         os.close(fd)
 
 
+RETIRE_ORDER = (
+    "safo-broker-egress-refresh.timer",
+    "safo-broker-egress-refresh.service",
+    "safo-broker-egress.service",
+)
+
+
+def stop_retired_units(hooks: Hooks, before: dict[str, bytes | None], after: dict[str, bytes | None]) -> list[str]:
+    """Stop the units that exist now but will not exist after the change, while their files are still there (a unit
+    whose file is gone keeps running and can no longer be stopped by name). Dependents first. Returns the failures."""
+    failed = []
+    for name in RETIRE_ORDER:
+        if before.get(name) is not None and after.get(name) is None and hooks.systemctl(["stop", name]) != 0:
+            failed.append(name)
+    return failed
+
+
 def restore(
     layout: Layout,
     hooks: Hooks,
@@ -1788,6 +1806,9 @@ def restore(
             set_link(fd, "previous", old_prev_target)
         else:
             drop_link(fd, "previous")
+        stuck = stop_retired_units(hooks, read_units(layout.unit_dir), old_units)
+        if stuck:
+            problems.append(f"could not stop {', '.join(stuck)}; stop them by hand")
         write_units(layout, old_units)
         reloaded = hooks.systemctl(["daemon-reload"]) == 0
         egress_ok = hooks.systemctl(EGRESS_RESTART) == 0
@@ -1847,7 +1868,12 @@ def rollback(layout: Layout, hooks: Hooks, *, to: str | None = None, out: Callab
             try:
                 set_link(fd, "current", f"releases/{name}")
                 set_link(fd, "previous", old_target or f"releases/{current}")
-                write_units(layout, read_units(target_dir / "units"))
+                target_units = read_units(target_dir / "units")
+                stuck = stop_retired_units(hooks, old_units, target_units)
+                if stuck:
+                    msg = f"could not stop {', '.join(stuck)} before rolling back past them"
+                    raise RuntimeError(msg)
+                write_units(layout, target_units)
                 detail = reload_and_restart(hooks)
             except Exception as exc:
                 note = restore(layout, hooks, fd, old_target, old_prev_target, old_units, None)

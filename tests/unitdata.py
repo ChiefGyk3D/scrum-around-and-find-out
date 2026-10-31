@@ -59,6 +59,7 @@ REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Service", "SystemCallArchitectures", "native"),
     ("Service", "SystemCallFilter", "@system-service"),
     ("Service", "SystemCallFilter", "~@privileged @resources"),
+    ("Service", "SystemCallFilter", "~recvmsg recvmmsg"),
     ("Service", "SystemCallErrorNumber", "EPERM"),
     ("Service", "DevicePolicy", "closed"),
     ("Service", "KeyringMode", "private"),
@@ -152,7 +153,7 @@ REQUIRED_REFRESH: tuple[tuple[str, str, str], ...] = (
 
 REQUIRED_TIMER: tuple[tuple[str, str, str], ...] = (
     ("Timer", "OnBootSec", "1min"),
-    ("Timer", "OnUnitActiveSec", "5min"),
+    ("Timer", "OnUnitActiveSec", "1min"),
     ("Timer", "AccuracySec", "10s"),
     ("Timer", "Unit", "safo-broker-egress-refresh.service"),
     ("Install", "WantedBy", "timers.target"),

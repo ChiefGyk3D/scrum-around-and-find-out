@@ -219,13 +219,15 @@ def test_observe_mode_logs_then_accepts_and_drop_mode_logs_then_drops() -> None:
     assert "@SERVICE_UID@" not in observe + drop
     assert "@FINAL_RULE@" not in observe + drop
     assert "meta skuid != 1234 return" in observe
-    last_observe = [x.strip() for x in observe.splitlines() if "log prefix" in x]
-    last_drop = [x.strip() for x in drop.splitlines() if "log prefix" in x]
-    assert last_observe == ['counter log prefix "safo-broker-egress-observe " accept']
-    assert last_drop == ['counter log prefix "safo-broker-egress-drop " drop']
-    # the only difference between the two modes is the final rule
+    for text, prefix, action in ((observe, "observe", "accept"), (drop, "drop", "drop")):
+        tail = [x.strip() for x in text.splitlines()][-4:-2]  # the two final rules, before the closing braces
+        assert tail[0] == f'limit rate 10/minute burst 10 packets log prefix "safo-broker-egress-{prefix} "', tail
+        assert tail[1] == f"counter {action}", tail
+    # the log is rate limited, the verdict is not: a flood cannot fill the log and still gets the verdict
+    assert sum("log prefix" in x for x in observe.splitlines()) == 1
+    # the only difference between the two modes is the final pair of rules
     diff = [(a, b) for a, b in zip(observe.splitlines(), drop.splitlines(), strict=True) if a != b]
-    assert len(diff) == 1
+    assert len(diff) == 2
 
 
 def test_the_ruleset_allows_only_tcp_443_to_the_set_and_gives_the_uid_no_dns() -> None:
@@ -589,3 +591,48 @@ def test_a_refresh_rebuilds_a_table_that_was_removed_from_outside(tmp_path: Path
     fake, hosts, cfg = setup(tmp_path, GOOD)
     run_refresh(fake, hosts, cfg)
     assert fake.scripts[0].startswith("table inet safo_broker_egress\ndelete table inet safo_broker_egress\n")
+
+
+def test_a_hosts_write_failure_puts_the_previous_set_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The set and the hosts view change together or not at all: if the view cannot be written, the set is restored."""
+    fake, hosts, cfg = setup(tmp_path, GOOD)
+    before = hosts.read_bytes()
+
+    def boom(*a: object, **k: object) -> None:
+        msg = "disk full"
+        raise EgressError(msg)
+
+    monkeypatch.setattr(egress, "write_hosts", boom)
+    with pytest.raises(EgressError, match="disk full"):
+        run_refresh(fake, hosts, cfg)
+    assert len(fake.scripts) == 2  # the new set, then the previous one
+    assert "142.250.80.10" in fake.scripts[0]
+    assert fake.scripts[1].rstrip().endswith("{ 142.250.80.1 }")  # the address the previous view named
+    assert "142.250.80.10" not in fake.scripts[1]
+    assert hosts.read_bytes() == before
+
+
+def test_a_failed_refresh_with_no_previous_addresses_leaves_an_empty_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, hosts, cfg = setup(tmp_path, GOOD)
+    egress.write_hosts(hosts, egress.hosts_content(HOST, []), uid=UID, gid=os.getgid())
+
+    def boom(*a: object, **k: object) -> None:
+        msg = "disk full"
+        raise EgressError(msg)
+
+    monkeypatch.setattr(egress, "write_hosts", boom)
+    with pytest.raises(EgressError):
+        run_refresh(fake, hosts, cfg)
+    assert "add element" not in fake.scripts[1]
+    assert "delete table" in fake.scripts[1]
+
+
+def test_the_addresses_a_hosts_view_names_are_read_back_for_the_restore() -> None:
+    data = egress.hosts_content(HOST, GOOD)
+    assert egress.addresses_in_hosts(data, HOST) == GOOD
+    assert egress.addresses_in_hosts(egress.hosts_content(HOST, []), HOST) == []
+    assert (
+        egress.addresses_in_hosts(b"garbage\n10.0.0.1 " + HOST.encode() + b"\n", HOST) == []
+    )  # nothing invalid is trusted

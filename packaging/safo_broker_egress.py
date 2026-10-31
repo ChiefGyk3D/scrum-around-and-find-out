@@ -9,7 +9,7 @@ constant in this file (packaging/nftables/safo-broker.nft is the reviewed refere
 The only inputs are the numeric uid of the service user, the mode (observe or drop) and the vendor host, read from the
 root-owned /etc/safo/broker-egress.conf, which no unit or command line names.
 
-Commands: `load` installs the ruleset and an empty hosts view. `refresh` (a timer, every five minutes) resolves the
+Commands: `load` installs the ruleset and an empty hosts view. `refresh` (a timer, every minute) resolves the
 vendor host, validates every address, and re-applies the whole table with the new set in ONE nft transaction (so a table
 that was removed or replaced from outside is rebuilt, and the set is never half-updated), then rewrites the hosts view
 the broker unit bind-mounts over /etc/hosts. `unload` removes the table. `render` prints the ruleset for review.
@@ -43,9 +43,11 @@ SET = "vendor_v4"
 MAX_ADDRESSES = 16
 HOSTS_SIZE = 4096
 MODES = ("observe", "drop")
+# The log is rate limited, the verdict is not: a flood of refused packets cannot fill the log or the journal, and every
+# one of them still gets the verdict.
 FINAL_RULES = {
-    "observe": 'counter log prefix "safo-broker-egress-observe " accept',
-    "drop": 'counter log prefix "safo-broker-egress-drop " drop',
+    "observe": 'limit rate 10/minute burst 10 packets log prefix "safo-broker-egress-observe "\n\t\tcounter accept',
+    "drop": 'limit rate 10/minute burst 10 packets log prefix "safo-broker-egress-drop "\n\t\tcounter drop',
 }
 # The service user may open new TCP connections to port 443 of the addresses in the set and nothing else: no DNS (the
 # hosts view names the vendor), no IPv6 (the set is IPv4 only, so the final rule catches it), no loopback, no other
@@ -219,6 +221,19 @@ def refresh_script(rules: str, addresses: Sequence[str]) -> str:
     return f"{rules}add element inet {TABLE} {SET} {{ {', '.join(checked)} }}\n"
 
 
+def addresses_in_hosts(data: bytes, host: str) -> list[str]:
+    """The valid vendor addresses a hosts view names; anything else in it is ignored, never trusted."""
+    found: list[str] = []
+    for line in data.decode("ascii", "replace").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == host:
+            try:
+                found.append(validate_address(parts[0]))
+            except EgressError:
+                continue
+    return found
+
+
 def hosts_content(host: str, addresses: Sequence[str]) -> bytes:
     """The hosts view: localhost and the validated vendor addresses, padded with a comment to a fixed size so an
     in-place rewrite never changes the file's length."""
@@ -320,8 +335,22 @@ def refresh(
     addresses = validate_answers(raw)
     data = hosts_content(config.host, addresses)
     rules = render_rules(RULES_TEMPLATE, uid=service_uid, mode=config.mode)
+    try:
+        previous = hosts_path.read_bytes()
+    except OSError:
+        previous = b""
     nft(refresh_script(rules, addresses))
-    write_hosts(hosts_path, data, uid=uid, gid=gid)
+    try:
+        write_hosts(hosts_path, data, uid=uid, gid=gid)
+    except EgressError as exc:
+        # the set and the view change together or not at all: put the set back to what the old view names
+        old = addresses_in_hosts(previous, config.host)
+        try:
+            nft(refresh_script(rules, old) if old else rules)
+        except EgressError:
+            msg = f"{exc}; the previous set could not be restored either"
+            raise EgressError(msg) from None
+        raise
     return addresses
 
 

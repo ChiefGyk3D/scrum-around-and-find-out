@@ -286,3 +286,14 @@ def test_the_broker_cannot_create_or_connect_unix_sockets() -> None:
     """It serves from the listener systemd hands it and talks to the vendor over IPv4 only, so no other local service
     can be asked to make a connection for it. A server that needs Unix sockets needs a reviewed policy change."""
     assert values("safo-broker.service", "RestrictAddressFamilies") == ["AF_INET"]
+
+
+def test_the_broker_cannot_receive_descriptors_over_its_listener() -> None:
+    """A socket handed over with SCM_RIGHTS keeps its creator's uid, which the egress rule does not match, so the
+    receive calls that carry descriptors are denied. Plain reads and recv on the inherited listener are unaffected."""
+    filters = values("safo-broker.service", "SystemCallFilter")
+    assert filters == ["@system-service", "~@privileged @resources", "~recvmsg recvmmsg"]
+
+
+def test_the_egress_set_is_refreshed_every_minute() -> None:
+    assert values("safo-broker-egress-refresh.timer", "OnUnitActiveSec") == ["1min"]

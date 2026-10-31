@@ -143,7 +143,7 @@ def test_no_secret_no_real_host_no_address() -> None:
     assert not re.search(r"ssh-(ed25519|rsa) AAAA[0-9A-Za-z+/]{20,}", doc)
     assert not re.search(r"sk-[A-Za-z0-9]{20,}", doc)
     assert not re.search(r"\b[A-Za-z0-9_-]{32,}\b", doc.replace("/", " ")), "a long token-like string"
-    assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", doc), "an IPv4 address"
+    assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", re.sub(r"203\.0\.113\.\d{1,3}", "", doc)), "an IPv4 address"
     assert not re.search(r"\b[0-9a-f]{2}(:[0-9a-f]{2}){5}\b", doc), "a MAC address"
     hosts = {h for h in re.findall(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", doc.replace(KEY_TYPE, ""))}
     allowed_suffixes: tuple[str, ...] = (".conf", ".timer", ".new", ".py", ".sock", ".socket", ".service")

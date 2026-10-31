@@ -314,7 +314,7 @@ new release cannot change what root does with network-administration rights. The
   Everything else from that user is logged and, in drop mode, dropped, including IPv6, DNS, loopback and every other
   port; there is no established-connection shortcut, so a connection opened while the table was missing does not
   survive the rebuild. Other users are not matched.
-- A root timer runs the helper every five minutes. It reads the vendor host name from the root-owned
+- A root timer runs the helper every minute. It reads the vendor host name from the root-owned
   egress config file under `/etc/safo` (the name is in no unit and no command line), validates every address (public IPv4
   only: no private, loopback, link-local, multicast, reserved or carrier-grade range; an empty, oversized or
   malformed answer is refused), swaps the set in one flush-and-add transaction, and rewrites a fixed-size hosts view.
@@ -329,7 +329,7 @@ new release cannot change what root does with network-administration rights. The
   one line in the root-owned config switches to drop mode; the runbook has the steps, blast radius and rollback.
 
 What it does not do: a service that reaches the vendor front end can still use the key there (spend) and can use the
-vendor as a dead drop; a root-level compromise removes the control; and the table can be missing for up to five minutes
+vendor as a dead drop; a root-level compromise removes the control; and the table can be missing for up to a minute
 after an outside firewall reload until the next timer run rebuilds it. The broker unit allows only IPv4 sockets (no
 Unix sockets at all), so the socket server must serve from the listener systemd passes in and must not create Unix
 sockets (no socket pairs, no default asyncio loop); a design that needs them needs a reviewed change of that line. The vendor-side key restriction in the runbook bounds what a leaked key can reach.

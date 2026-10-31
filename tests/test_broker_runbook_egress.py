@@ -104,3 +104,14 @@ def test_the_observe_criterion_is_an_empty_log_because_vendor_traffic_is_accepte
     assert any("nft list table inet safo_broker_egress" in x for x in lines())
     assert any("systemctl status safo-broker-egress-refresh.timer" in x or "list-timers" in x for x in lines())
     assert "deliberately blocked probe" in text
+
+
+def test_the_drop_step_runs_a_blocked_probe_as_the_service_user_and_reads_the_drop_log() -> None:
+    drop_lines = [x for x in lines() if "MODE=drop" in x or "safo-broker-egress-drop" in x or "/dev/tcp/" in x]
+    probe = next(x for x in drop_lines if "/dev/tcp/" in x)
+    assert "runuser -u safo-broker" in probe
+    assert "timeout" in probe
+    assert "203.0.113." in probe  # the documentation range: never a real destination
+    assert any("safo-broker-egress-drop" in x for x in drop_lines)
+    text = doc()
+    assert "nothing but vendor addresses" not in text

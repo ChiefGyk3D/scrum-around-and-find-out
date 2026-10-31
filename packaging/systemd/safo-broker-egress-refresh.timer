@@ -4,7 +4,7 @@ Description=SAFO broker egress set refresh timer
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=5min
+OnUnitActiveSec=1min
 AccuracySec=10s
 Unit=safo-broker-egress-refresh.service
 

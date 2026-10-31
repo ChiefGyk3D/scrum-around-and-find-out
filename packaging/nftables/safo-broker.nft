@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Egress control for the broker's service user. Loaded by safo-broker-egress.service (python -I -m safo.broker.egress
 # load), which fills in the two placeholders below: the numeric uid of the service user, and the final rule, which is
-# the OBSERVE rule (log, then let through) or the DROP rule (log, then drop), chosen by MODE in the root-owned
+# the OBSERVE pair (log at a limited rate, then let through) or the DROP pair (log at a limited rate, then drop), chosen by MODE in the root-owned
 # /etc/safo/broker-egress.conf. The shipped default is observe.
 #
 # The service user may open new TCP connections to port 443 of the addresses in the set and nothing else. It gets no DNS

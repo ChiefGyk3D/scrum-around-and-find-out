@@ -205,7 +205,7 @@ def steps(login: str) -> tuple[Step, ...]:
         Step(
             "Turn the egress control on, in observe mode",
             "This loads an nftables table that matches only the broker's service user (port 443 to a set of vendor "
-            "addresses that a timer refreshes every five minutes; no DNS and no IPv6 for that user) and writes the "
+            "addresses that a timer refreshes every minute; no DNS and no IPv6 for that user) and writes the "
             "hosts view the broker unit bind-mounts. In observe mode nothing is blocked. Run it before the socket "
             "step. The checks at the end: the table must exist and the set must hold addresses, and the timer must "
             "be scheduled. Traffic to the vendor set is accepted before the logging rule, so it never appears in "
@@ -221,7 +221,7 @@ def steps(login: str) -> tuple[Step, ...]:
             "nothing runs as it yet, so nothing is affected until the broker starts.",
             (ssh("systemctl disable --now safo-broker-egress-refresh.timer safo-broker-egress.service"),),
             "Stopping the egress service deletes the table. A reboot also clears it when the service is disabled. If "
-            "something else reloads the firewall and removes the table, the next timer run (within five minutes) "
+            "something else reloads the firewall and removes the table, the next timer run (within a minute) "
             "puts it back; check the table again after any firewall change.",
         ),
         Step(
@@ -244,16 +244,21 @@ def steps(login: str) -> tuple[Step, ...]:
         ),
         Step(
             "Switch the egress control to drop mode (after about a week of clean observation)",
-            "Run this only after the observe log shows nothing but vendor addresses. In drop mode a connection from "
-            "the broker's service user to anything outside the allowed set is logged and dropped.",
+            "Run this only after a clean observation week (an empty observe log, a table that exists, a set that holds "
+            "addresses, a scheduled timer). In drop mode a connection from the broker's service user to anything "
+            "outside the allowed set is logged at a limited rate and dropped. The third line is a deliberately "
+            "blocked probe: the service user tries to connect to a documentation address that is never in the set; "
+            "it must fail after the timeout, and the last line must then show the drop log entry. If either does not "
+            "happen, run the rollback lines.",
             (
                 ssh("sed -i s/^MODE=observe/MODE=drop/ /etc/safo/broker-egress.conf"),
                 ssh("systemctl restart safo-broker-egress.service"),
-                ssh("journalctl -k --since -10min --grep safo-broker-egress-drop"),
+                ssh('timeout 5 runuser -u safo-broker -- /usr/bin/bash -c "echo probe > /dev/tcp/203.0.113.1/443"'),
+                ssh("journalctl -k --since -2min --grep safo-broker-egress-drop"),
             ),
             "Only the broker's own connections are affected. If the vendor changes addresses faster than the "
-            "refresh timer, or the timer stops, calls fail closed until the next good refresh (the previous set "
-            "expires after an hour).",
+            "refresh timer (every minute), or the timer stops, calls fail closed until the next good refresh (the "
+            "previous set expires after an hour).",
             (
                 ssh("sed -i s/^MODE=drop/MODE=observe/ /etc/safo/broker-egress.conf"),
                 ssh("systemctl restart safo-broker-egress.service"),
