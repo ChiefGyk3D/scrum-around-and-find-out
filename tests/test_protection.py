@@ -998,17 +998,101 @@ def test_the_real_file_check_stands_on_its_own(monkeypatch: pytest.MonkeyPatch) 
     assert code == 1 and failed_ids(out) == ["codeowners-workflows"]
 
 
-def test_the_random_tokens_are_not_hexadecimal_and_start_anywhere() -> None:
-    from safo.protection import _random_token
+# The token and name tests never rely on real randomness. `secrets.randbelow` is the only source `_random_token`
+# draws from, and each test injects a scripted or seeded one. Real draws are only spied on, never asserted to differ.
+_TOKEN_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
 
-    tokens = [_random_token() for _ in range(600)]
+
+def scripted(*values: int) -> Callable[[int], int]:
+    """A `randbelow` that answers with the given values in order and checks each one is in range."""
+    remaining = list(values)
+
+    def randbelow(n: int) -> int:
+        value = remaining.pop(0)
+        assert 0 <= value < n, (value, n)
+        return value
+
+    return randbelow
+
+
+def _token_with(monkeypatch: pytest.MonkeyPatch, source: Callable[[int], int]) -> str:
+    from safo import protection
+
+    monkeypatch.setattr(protection.secrets, "randbelow", source)
+    return protection._random_token()
+
+
+def _assert_token_statistics(tokens: list[str]) -> None:
     assert all(6 <= len(t) <= 24 for t in tokens)
-    assert all(set(t) <= set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") for t in tokens)
+    assert all(set(t) <= set(_TOKEN_CHARS) for t in tokens)
     assert all(any(c.isalnum() for c in t) and t not in (".", "..") for t in tokens)
     firsts = {t[0] for t in tokens}
     assert {"."} <= firsts and any(c.isdigit() for c in firsts) and any(c.isupper() for c in firsts) and "-" in firsts
     assert sum(1 for t in tokens if set(t) <= set("0123456789abcdef")) < 3  # a hex-only token is the rare accident
     assert sum(1 for t in tokens if t.islower() and t.isalpha()) < 3
+
+
+def test_the_random_tokens_are_not_hexadecimal_and_start_anywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over a fixed seeded source the statistics are a fixed outcome, not a chance. (Seed 247 was run and passes.)"""
+    import random
+
+    from safo import protection
+
+    monkeypatch.setattr(protection.secrets, "randbelow", random.Random(247).randrange)
+    _assert_token_statistics([protection._random_token() for _ in range(600)])
+
+
+def test_the_token_statistics_check_bites_on_a_broken_generator() -> None:
+    import itertools
+
+    hex_only = ["".join(c) for c in itertools.islice(itertools.product("0123456789abcdef", repeat=6), 600)]
+    lower_only = ["abcdefghij"] * 600
+    constant = ["Ab3.-_xyz"] * 600
+    for broken in (hex_only, lower_only, constant):
+        with pytest.raises(AssertionError):
+            _assert_token_statistics(broken)
+
+
+@pytest.mark.parametrize(
+    ("script", "expected_first"),
+    [(63, "."), (64, "-"), (52, "0"), (61, "9"), (26, "A"), (0, "a"), (62, "_")],
+)
+def test_a_token_can_start_with_any_character_of_the_alphabet(
+    monkeypatch: pytest.MonkeyPatch, script: int, expected_first: str
+) -> None:
+    token = _token_with(monkeypatch, scripted(0, script, *[0] * 5))
+    assert token == expected_first + "aaaaa"  # the first draw is the length: 6 characters
+
+
+def test_a_token_is_6_to_24_characters_and_every_character_is_one_draw(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _token_with(monkeypatch, scripted(0, *[0] * 6)) == "aaaaaa"
+    assert _token_with(monkeypatch, scripted(18, *range(24))) == "abcdefghijklmnopqrstuvwx"
+
+
+def test_a_token_made_only_of_punctuation_gets_an_alphanumeric_last_character(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _token_with(monkeypatch, scripted(0, 63, 63, 63, 63, 63, 63, 5)) == ".....f"
+    assert _token_with(monkeypatch, scripted(0, 64, 64, 64, 64, 64, 62, 5)) == "-----f"
+
+
+def test_the_default_token_source_is_secrets_randbelow_and_is_drawn_from_every_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spy (it delegates to the real source) shows the default path draws once for the length and once per character."""
+    from safo import protection
+
+    real, calls = protection.secrets.randbelow, []
+
+    def spy(n: int) -> int:
+        calls.append(n)
+        return real(n)
+
+    monkeypatch.setattr(protection.secrets, "randbelow", spy)
+    for _ in range(3):
+        before = len(calls)
+        token = protection._random_token()
+        drawn = calls[before:]
+        assert drawn[0] == 19 and all(n == len(_TOKEN_CHARS) for n in drawn[1 : 1 + len(token)])
+        assert len(token) + 1 <= len(drawn) <= len(token) + 2  # one more draw only for the no-alphanumeric repair
 
 
 def test_class_patterns_that_would_own_every_hex_or_lowercase_probe_cannot_pass() -> None:
@@ -1032,16 +1116,71 @@ def test_a_class_pattern_in_a_codeowners_file_is_cannot_tell_never_a_pass(body: 
 HEAD_OWNERS = "/board.yaml @o\n/.github/CODEOWNERS @o\n"
 
 
-def test_the_default_fresh_names_differ_on_every_run() -> None:
-    from safo.protection import fresh_workflow_paths
+def _assert_fresh_names(paths: list[str]) -> None:
+    assert len(paths) == len(set(paths)) == 21
+    assert all(p.startswith(".github/workflows/") for p in paths)
+    assert {p.count("/") for p in paths} == {2, 3, 4}  # flat, one deep and two deep
+    assert len({p.split("/")[2][:2] for p in paths}) > 8  # no fixed prefix a rule could own
+    assert not any(p.split("/")[2].startswith(("zz", "probe")) for p in paths)
+    assert any(p.endswith(".yml") for p in paths) and any(p.endswith(".yaml") for p in paths)
 
-    first, second = fresh_workflow_paths(), fresh_workflow_paths()
-    assert first != second and len(first) == len(set(first)) == 21
-    assert all(p.startswith(".github/workflows/") for p in first)
-    assert {p.count("/") for p in first} == {2, 3, 4}  # flat, one deep and two deep
-    assert len({p.split("/")[2][:2] for p in first}) > 8  # no fixed prefix a rule could own
-    assert not any(p.split("/")[2].startswith(("zz", "probe")) for p in first)
-    assert any(p.endswith(".yml") for p in first) and any(p.endswith(".yaml") for p in first)
+
+def _fresh_names_from(monkeypatch: pytest.MonkeyPatch, seed: int) -> list[str]:
+    import random
+
+    from safo import protection
+
+    monkeypatch.setattr(protection.secrets, "randbelow", random.Random(seed).randrange)
+    return protection.fresh_workflow_paths()
+
+
+def test_the_fresh_names_are_made_from_the_random_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The names are a function of the injected draws: the same draws give the same names, different draws differ."""
+    one, again, other = (_fresh_names_from(monkeypatch, seed) for seed in (1, 1, 2))
+    assert one == again and one != other
+    _assert_fresh_names(one)
+    _assert_fresh_names(other)
+
+
+def test_the_fresh_names_differ_from_one_run_to_the_next_while_the_source_advances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import random
+
+    from safo import protection
+
+    monkeypatch.setattr(protection.secrets, "randbelow", random.Random(3).randrange)
+    first, second = protection.fresh_workflow_paths(), protection.fresh_workflow_paths()
+    assert first != second and not set(first) & set(second)
+    _assert_fresh_names(first)
+    _assert_fresh_names(second)
+
+
+def test_the_default_fresh_names_draw_new_randomness_on_every_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spy on the default source (it delegates to the real one): each run draws again, for all 21 names."""
+    from safo import protection
+
+    real, calls = protection.secrets.randbelow, []
+
+    def spy(n: int) -> int:
+        calls.append(n)
+        return real(n)
+
+    monkeypatch.setattr(protection.secrets, "randbelow", spy)
+    protection.fresh_workflow_paths()
+    first_run = len(calls)
+    # 33 tokens a run (3 rounds of 1+1+1+2+2+2+3), each at least a length draw and six character draws.
+    assert first_run >= 33 * 7
+    protection.fresh_workflow_paths()
+    assert len(calls) - first_run >= 33 * 7  # the second run drew again from the same source
+
+
+def test_the_fresh_names_check_bites_on_a_source_that_ignores_the_draws(monkeypatch: pytest.MonkeyPatch) -> None:
+    from safo import protection
+
+    monkeypatch.setattr(protection.secrets, "randbelow", lambda n: 0)
+    with pytest.raises(AssertionError):
+        _assert_fresh_names(protection.fresh_workflow_paths())
 
 
 @pytest.mark.parametrize(
