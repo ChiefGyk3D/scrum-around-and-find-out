@@ -1,11 +1,33 @@
 # Gemini broker: design for the paid path
 
-> **Status: design only.** No broker code exists. Paid use stays disabled by the root-owned switch
-> (see [Gemini](gemini.md)) until the broker is built, reviewed and enabled by the maintainer. This page is the design
-> for issue #205 (steps 1 and 2); the risks are in [the broker threat model](gemini-broker-threat-model.md). Nothing
-> here is a promise about code that does not exist yet; the claims about what code does today are checked against the
-> tree, and the claims about the vendor were read from the vendor pages on 2026-10-30 (marked **verified** with the
-> page, or **unverified**).
+> **Status: phase 1 of the build plan is in the tree; the rest is design.** The core library under `src/safo/broker/`
+> exists (see "Phase 1 status" below). There is no socket, no service, no unit, no installer and no vendor call, so
+> paid use stays disabled by the root-owned switch (see [Gemini](gemini.md)) until the broker is built, reviewed and
+> enabled by the maintainer. This page is the design for issue #205 (steps 1 and 2); the risks are in
+> [the broker threat model](gemini-broker-threat-model.md). Nothing here is a promise about code that does not exist yet; the
+> claims about what code does today are checked against the tree, and the claims about the vendor were read from the
+> vendor pages on 2026-10-30 (marked **verified** with the page, or **unverified**).
+
+### Phase 1 status
+
+Built and tested (pure functions and a file ledger, no network): integer micro-dollar money; the price table loader
+and the worst-case reservation `A + B + C`, each part rounded up; the per-job cap (2.50 USD in the testing phase) and
+the monthly ceiling (10 USD) with the extra-block flag, which a configuration may lower and never raise; the model
+allow-list and the refusal of Pro-class models until their output cap is verified; the call state machine (reserved,
+sent, settled, ambiguous, suspended, cleared) with every other pair rejected; the schema version 3 approval text and
+ledger rows, parsed strictly; and a ledger that records the spend before a call is sent, reads back as ambiguous or
+settled after any interruption, and refuses a rolled-back, edited, truncated or world-readable state directory.
+
+Known limit, as the design already says under "Backup key": restoring the whole state directory from an earlier copy
+rewinds the ledger, the height record and the used markers together, and the ledger cannot see that. The defense is the
+rule that the state directory is never restored into a running broker, and root's reconciliation against the vendor
+billing page. A high-water record kept outside the broker user's reach is a design question for a later phase.
+
+Not built yet: signature verification of the approval (it uses the existing verifier and the root-owned trust files, in
+the socket phase), nonce issue (`begin`), the vendor request builders and response handling, the socket server, the
+client, the units, the installer and the administration command. Where the phase-1 code adds something the design did
+not name, it is listed in the pull request: a `call_sent` row written before the connection opens, suspensions kept as
+chained ledger rows instead of a separate state file, and two reply codes (`model_refused`, `prices_expired`).
 
 The maintainer decided on 2026-10-30 that the paid path must be finished, because other projects are blocked on it.
 The first thing those projects need is **quality image generation**, which is paid-only (the free tier gives none). So

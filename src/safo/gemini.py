@@ -154,6 +154,15 @@ def _parse_stamp(text: object) -> dt.datetime | None:
         return None
 
 
+def valid_quote(quote: str) -> bool:
+    """The maintainer's quote in an approval: 1 to MAX_QUOTE characters, one line, no control or format marks."""
+    return not (
+        not quote.strip()
+        or len(quote) > MAX_QUOTE
+        or any(ord(c) < 32 or unicodedata.category(c) in ("Cf", "Cc", "Zl", "Zp") for c in quote)
+    )
+
+
 def has_secret_shape(text: str) -> bool:
     return any(shape.search(text) for shape in SECRET_SHAPES)
 
@@ -404,17 +413,22 @@ class Ledger:
         self._check_height(state, [r for r in state.rows if isinstance(r.get("hash"), str)])
         return state
 
+    def _absent(self) -> LedgerState:
+        """The ledger file does not exist: an empty state, unless a sibling ledger of the same name suggests the real
+        one is elsewhere. A subclass with a fixed home may override it."""
+        others = sorted(p for p in self.path.parent.parent.glob(f"*/{self.path.name}") if p != self.path)
+        if others:
+            raise RefusedError(
+                "this ledger does not exist yet, but another ledger with the same name does: starting an empty "
+                "one would read 0 spent. Move the real one here, or point `ledger:` in gemini.yaml at it"
+            ) from None
+        return LedgerState([], False, "", 0, hashlib.sha256(b"").hexdigest())
+
     def _load(self) -> LedgerState:
         try:
             raw = read_bounded(self.path, MAX_FILE_BYTES + 1)
         except FileNotFoundError:
-            others = sorted(p for p in self.path.parent.parent.glob(f"*/{self.path.name}") if p != self.path)
-            if others:
-                raise RefusedError(
-                    "this ledger does not exist yet, but another ledger with the same name does: starting an empty "
-                    "one would read 0 spent. Move the real one here, or point `ledger:` in gemini.yaml at it"
-                ) from None
-            return LedgerState([], False, "", 0, hashlib.sha256(b"").hexdigest())
+            return self._absent()
         except OSError:
             raise RefusedError(
                 "the spend ledger is not a plain readable file (a link, a pipe or no permission)"
@@ -522,6 +536,13 @@ class Ledger:
     def append(self, row: dict[str, Any], *, ts: str = "") -> str:
         """Append one chained row (starting the chain first when it has not begun) and return its hash. The caller holds
         `lock()`; the chain is checked before anything is written, so a broken ledger takes no new rows."""
+        return self.append_many([row], ts=ts)
+
+    def append_many(self, rows: list[dict[str, Any]], *, ts: str = "") -> str:
+        """Append chained rows in ONE write and one fsync (all of them are on disk or, after a crash, a torn last line
+        that holds none of them whole), and return the hash of the last. The caller holds `lock()`."""
+        if not rows:
+            raise ValueError("no rows to append")
         state = self.state()
         lines: list[dict[str, Any]] = []
         previous = state.head
@@ -535,11 +556,13 @@ class Ledger:
             start["hash"] = _chain_hash(start)
             lines.append(start)
             previous = str(start["hash"])
-        full = {**row, "prev_hash": previous}
-        full["hash"] = _chain_hash(full)
-        lines.append(full)
+        for row in rows:
+            full = {**row, "prev_hash": previous}
+            full["hash"] = _chain_hash(full)
+            lines.append(full)
+            previous = str(full["hash"])
         self._write_lines(lines, state.chained + len(lines))
-        return str(full["hash"])
+        return previous
 
     def _write_lines(self, lines: list[dict[str, Any]], count: int) -> None:
         try:
@@ -1102,11 +1125,7 @@ class ApprovalStore:
             raise ConfigError("approval: the job is a plain name (letters, digits, . _ -), at most 64 characters")
         if not max_usd.is_finite() or not 0 < max_usd <= JOB_CAP:
             raise ConfigError(f"approval: the amount is above 0 and at most the {money(JOB_CAP)} USD job cap")
-        if (
-            not quote.strip()
-            or len(quote) > MAX_QUOTE
-            or any(ord(c) < 32 or unicodedata.category(c) in ("Cf", "Cc", "Zl", "Zp") for c in quote)
-        ):
+        if not valid_quote(quote):
             raise ConfigError(f"approval: the quote is the maintainer's message, 1 to {MAX_QUOTE} characters, one line")
         if quoted_at > now + dt.timedelta(minutes=1) or quoted_at < now - dt.timedelta(hours=24):
             raise ConfigError("approval: the quote's time is in the future or more than a day old; ask again")
