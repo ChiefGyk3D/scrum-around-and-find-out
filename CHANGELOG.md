@@ -62,6 +62,14 @@
   temporary file left in `issued/` by a kill no longer stops `begin` or the start-up flush. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
   `pre_spend` hook. Paid use stays disabled.
 
+- Paid Gemini broker, phase 4b (#260): the thin client, `src/safo/broker/client.py`, run as `python3 -I -m
+  safo.broker.client`. It checks everything it can alone, asks the broker for `begin`, builds the signed approval text,
+  shows the person that text (every signed field, the cost, and the whole prompt, escaped), signs through the existing
+  `ssh-keygen -Y sign` signer, sends one `call` and reads one reply, maps every reply code to an exit status and one safe
+  message, refuses a reply whose receipt does not name the request, never retries a call that may have been sent and never
+  falls back to the free tier. The socket path comes from a root-owned or user file, never from the environment, and must
+  be a root-owned socket. Images go through a writer with the phase 4a signature (the phase 4a writer when it is in the tree, else a
+  small marked adapter) and are never opened or parsed. Not yet wired into `safo gemini`; paid use stays disabled.
 - Paid Gemini broker, phase 3 (#259): the socket server in `src/safo/broker/`, tested over socketpairs and a temporary
   unix socket against the fake vendor, with injected clocks and no network. `protocol.py` is the wire format on its own
   (length-prefixed frames, the 1 MiB request and 256 KiB reply limits, a versioned envelope, strict field tables, one
