@@ -10,6 +10,8 @@
   uid and time in a new `admin_action` ledger row. `reconcile` reports mismatches and can only raise a month. Paid use
   stays disabled.
 
+
+- Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor above 2 (standard input only for `approve`), the `safo` package that launched it pinned first on the import path, and a fresh private working directory; the child verifies its own environment and directory instead of trusting the interpreter flag, and the mode is read by the real parser. No signing provider library or askpass program is passed on. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
 - CI: the security workflow's pip-audit now audits `requirements-passkey.txt` as well as `requirements.txt`, and `tests/test_workflows.py` fails when a hash-locked runtime requirements file at the root is left out of the audit (#216).
 - Paid Gemini broker, phase 1 (#205): the core library under `src/safo/broker/`. Integer micro-dollar arithmetic and the
   worst-case reservation (prompt bytes plus 64 tokens at one token per byte, the output cap, two interim images), the
@@ -35,6 +37,13 @@
   temporary file left in `issued/` by a kill no longer stops `begin` or the start-up flush. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
   `pre_spend` hook. Paid use stays disabled.
 
+- Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
+  generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed
+  time with the budget any more; what they prove is the behavior (the one complete JSON line, the exit status 0 or 2,
+  the process ending by itself with the blocked call still blocked, no post-delivery step started after an overrun, the
+  budget counted from the process start). The in-process tests use the injected clock, or a call that blocks until the
+  test releases it, instead of a stopwatch, and the order of the budget points is checked as arithmetic for any host
+  timeout. Nothing was skipped, and the guard is unchanged.
 - Tests: the linear-time guard in `tests/test_gemini_constructs.py` counts executed lines instead of reading a clock, so machine speed, load and Python version cannot flip it; its negative case runs a quadratic brace scan (#248).
 - Gemini approvals: hardened what a signed paid approval binds (#217). Approval payload version 2 carries a prompt digest
   (`prompt_sha256`, `prompt_bytes`) on both approval tiers; `approve` shows the digest and the whole prompt (approvals are refused above 4000 characters), the paid gate
