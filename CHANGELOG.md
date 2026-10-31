@@ -12,6 +12,15 @@
   and never run). Also an egress control for the service user (an nftables table, a refresh timer, a hosts view and a files-only name
   service configuration; observe mode first), a fixed unit policy the installer enforces, a real self-test of the staged
   release, a hardware-key requirement for release signers and a trusted-interpreter check. Paid use stays disabled.
+- Gemini enrollment preparation (#263): `docs/gemini-enrollment.md`, a copy-paste maintainer runbook (enroll one or two
+  FIDO2 keys for approvals, a pass or fail table for testing a second device, a separate release-signing key, the
+  root-owned allowed-signers lines with the namespace restriction, rotate and revoke), each step with its blast radius,
+  rollback and expected output, and every command and flag checked against the vendor pages on 2026-10-31 (unverified
+  items are marked). `src/safo/gemini_preflight.py` is a read-only preflight (`python -m safo.gemini_preflight`): ssh sk
+  support, libfido2, the udev rule, a visible hardware key, the allowed-signers file (root, 0644, namespace on every
+  line), the enable switch, the service user and the state directory modes. It writes nothing, makes no network or
+  vendor call, and prints no key or file content. It is not wired into `safo gemini` yet. Paid use stays disabled.
+
 
 - Tests: the random-output tests in `tests/test_protection.py` no longer depend on chance (#247). `_random_token` draws only from `secrets.randbelow`, and the tests inject a scripted or seeded source (and spy on the default one) instead of hoping two real draws differ or that a statistic stays under a bound.
 - Gemini wrapper hardening (#221): `safo gemini` refuses to run when an interpreter startup variable (`PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is set, then re-runs itself as `python -I -m safo` by the absolute interpreter path, with an allow-list environment (fixed PATH, locale and temporary directory; the secret-store token for `ask` only, the signing variables for `approve` only), no shell, no inherited descriptor above 2 (standard input only for `approve`), the `safo` package that launched it pinned first on the import path, and a fresh private working directory; the child verifies its own environment and directory instead of trusting the interpreter flag, and the mode is read by the real parser. No signing provider library or askpass program is passed on. Proxies, `LD_*`, `XDG_*` and the other secret-store variables no longer reach the wrapper. See `docs/gemini.md`.
@@ -30,6 +39,22 @@
   records the spend before a call is sent and recovers any interruption as ambiguous or settled. No socket, service or
   vendor call: paid use stays disabled. `Ledger` in `gemini.py` gains `append_many` and an overridable empty-ledger
   hook, and `valid_quote` is shared; the existing behavior is unchanged.
+
+- Paid Gemini broker, phase 2 (#258): the call pipeline in `src/safo/broker/`, tested against a fake vendor with no
+  socket and no key. Approval verification runs `ssh-keygen -Y verify` through the existing fixed-argument verifier with
+  the namespace fixed in code, requires the canonical signed text and the signer named inside it, and checks revocation
+  again under the ledger lock just before the spend. `begin` issues broker-chosen nonces (at most four outstanding). A
+  call reserves the worst case before anything is sent, builds the request from a fixed template, sends through an
+  injected transport, and settles from the reported usage; a timeout, transport error, redirect, 5xx, short, oversized
+  or malformed answer, a reply for another model or unusable usage leaves the call ambiguous and the model suspended
+  until root clears it. A reply over the signed output cap is a breach, recorded at the cap or the reported usage
+  (whichever is higher), and suspends the model. Image replies accept only PNG, JPEG or WebP: the container is walked to
+  its real end (an allow-list of segments and chunks, each with a body of exactly its shape; one image, no trailing data, no
+  animation, checksums and exact decoded size where the format has them, no Exif, XMP or compressed metadata), the declared size is capped, and nothing but the checked bytes is passed on. Review fixes: the approval must come from a hardware key with a
+  touch (no software opt-in in the broker path); the issued record binds the maximum, the ceiling flag, the ledger head
+  and the creation time; a model with an unverified output cap is refused above 2 USD whatever the job cap is; a
+  temporary file left in `issued/` by a kill no longer stops `begin` or the start-up flush. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
+  `pre_spend` hook. Paid use stays disabled.
 
 - Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
   generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed

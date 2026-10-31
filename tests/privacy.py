@@ -71,6 +71,11 @@ DOCUMENT_KEYS = {
     "safo.guard",  # the guard's entry module, `python -m safo.guard`
     "github.sha",  # the Actions context value for the commit a run is on, in the caller examples
     "safo.modes.hooks",  # the module that holds the legacy guard routing
+    "gpg.format",  # git config keys named in docs/gemini-enrollment.md (SSH-signed release tags)
+    "gpg.ssh.allowedsignersfile",
+    "user.signingkey",
+    "user.name",
+    "user.email",
 }
 FILE_SUFFIXES = {
     "md",
@@ -84,6 +89,7 @@ FILE_SUFFIXES = {
     "toml",
     "lock",
     "pub",
+    "rules",  # a udev rules file, named in docs/gemini-enrollment.md
 }  # pub: a public key file
 
 # Names that only the two broker documents may use. Scoped by file, not global: the same text in any other file is

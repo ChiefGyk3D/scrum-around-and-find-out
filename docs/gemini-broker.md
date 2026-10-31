@@ -1,7 +1,7 @@
 # Gemini broker: design for the paid path
 
-> **Status: phase 1 of the build plan is in the tree; the rest is design.** The core library under `src/safo/broker/`
-> exists (see "Phase 1 status" below). There is no socket, no service, no unit, no installer and no vendor call, so
+> **Status: phases 1 and 2 of the build plan are in the tree; the rest is design.** The core library and the call
+> pipeline under `src/safo/broker/` exist (see "Phase 1 status" and "Phase 2 status" below). There is no socket, no service, no unit, no installer and no vendor call, so
 > paid use stays disabled by the root-owned switch (see [Gemini](gemini.md)) until the broker is built, reviewed and
 > enabled by the maintainer. This page is the design for issue #205 (steps 1 and 2); the risks are in
 > [the broker threat model](gemini-broker-threat-model.md). Nothing here is a promise about code that does not exist yet; the
@@ -23,11 +23,51 @@ rewinds the ledger, the height record and the used markers together, and the led
 rule that the state directory is never restored into a running broker, and root's reconciliation against the vendor
 billing page. A high-water record kept outside the broker user's reach is a design question for a later phase.
 
-Not built yet: signature verification of the approval (it uses the existing verifier and the root-owned trust files, in
-the socket phase), nonce issue (`begin`), the vendor request builders and response handling, the socket server, the
-client, the units, the installer and the administration command. Where the phase-1 code adds something the design did
+Not built yet: the socket server, the real transport, the client, the units, the installer and the administration command. Where the phase-1 code adds something the design did
 not name, it is listed in the pull request: a `call_sent` row written before the connection opens, suspensions kept as
 chained ledger rows instead of a separate state file, and two reply codes (`model_refused`, `prices_expired`).
+
+### Phase 2 status
+
+Built and tested against a fake vendor (no socket, no key, no network): approval verification, `begin`, the call
+pipeline, the vendor request templates and reply parser, the image checks, and the output-cap rule.
+
+- **Approval verification** (`approval.py`). The signed text is encoded to ASCII once, verified by `ssh-keygen -Y verify`
+  through the existing verifier (absolute path, fixed argument vector, no shell, a two-entry environment, signers line
+  and signature sealed in memory), and only then parsed again. The namespace is a constant in code. The text must be the
+  canonical form and the key that verified must be the principal named in it. The key must be a hardware key and the
+  signature must show a touch: a software key is refused even when root enrolled it with the written opt-in in the
+  shared signers file (decision 9). Revocation is checked again under the ledger lock, just before the spend.
+- **`begin`** (`issue.py`) writes `issued/NONCE` (private, at most four outstanding, ten minute life); a call needs its
+  nonce there, unexpired, and an approval that agrees with what was asked for: every field that changes the cost
+  (the maximum, the monthly-ceiling flag as the broker computed it at `begin`, the ledger head `begin` gave, and a
+  creation time no earlier than the nonce). A client cannot sign a different maximum or a ceiling flag of its own. A
+  restart flushes the table; a temporary file left by a killed write is recognized by its name and removed under the
+  issue lock, and any other stray file still stops the table.
+- **The pipeline** (`pipeline.py`): verify, reserve (the spend and the markers are written first), build the request
+  from a fixed template, write `call_sent`, send through an injected transport, classify, settle or make ambiguous. A
+  429 and a definite 4xx settle at zero. Everything after the request may have left that does not tell what was billed
+  is ambiguous: the full reservation stays counted and the model is suspended. A failure after the spend and before the
+  send settles as `not_sent`. Tests kill the process at every step and check that the result is unspent, settled or
+  ambiguous, never free budget.
+- **The output cap** (decision 13): the signed `max_output_tokens` is always sent and checked against the reply (text,
+  thinking and image tokens together). A reply over it is a breach: recorded at the cap or the reported usage, whichever
+  is higher, the model suspended, even when the money stays inside the reservation (`cap_verified` false).
+  Decision 13 is its own rule and does not move with the job cap: a model whose cap is not verified is refused when its
+  worst case is over 2 USD (Nano Banana 2 at about 2.10 USD, Pro), at a job cap of 2.00, 2.50 or 5.00 alike.
+- **Images** (`images.py`, `vendor.py`): one image per call, PNG, JPEG or WebP only, found by the first bytes and matching
+  the named type. The broker decodes no pixels and is not a decoder, but it walks each container to its real end by
+  lengths and markers as an allow-list: every segment or chunk is a known type whose body has exactly its shape (JPEG
+  tables and headers, a plain JFIF header, PNG chunks with checksums, rows that inflate to exactly the declared size
+  with a real filter type, a plain WebP or the extended header and the one image). Exif, XMP, ICC and compressed
+  metadata, animations, thumbnails and anything appended are refused, and the declared size is capped (8192 per side,
+  2^25 pixels, 24 MiB). The compressed bitstream itself (JPEG entropy data, WebP codec data) is not validated, so a
+  well-framed file can still fail to decode in a viewer: images stay untrusted output. An image that fails is not
+  passed on, and its cost is still counted from usage.
+
+Where phase 2 read the design and had to choose, it is listed in the pull request. Still unverified: the real response
+shapes. The text shape is the one the existing wrapper already reads; the image shape is inferred from the vendor SDK examples
+and the parser refuses any other, so a real reply that differs makes the call ambiguous until phase 7 records it.
 
 The maintainer decided on 2026-10-30 that the paid path must be finished, because other projects are blocked on it.
 The first thing those projects need is **quality image generation**, which is paid-only (the free tier gives none). So
