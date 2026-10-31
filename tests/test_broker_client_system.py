@@ -606,8 +606,12 @@ def test_the_socket_path_the_command_line_connects_to_ignores_the_environment(
 
 
 def test_the_module_can_be_run_as_a_script_and_prints_usage() -> None:
-    done = subprocess.run(
-        [sys.executable, "-I", "-m", "safo.broker.client", "--help"], capture_output=True, text=True, check=False
+    source = str(Path(client.__file__).resolve().parents[2])  # the tree under test, found by path
+    code = (
+        "import sys; sys.path.insert(0, sys.argv.pop(1)); from safo.broker.client import main; raise SystemExit(main())"
+    )
+    done = subprocess.run(  # noqa: S603 - this interpreter with fixed arguments, no shell
+        [sys.executable, "-I", "-c", code, source, "--help"], capture_output=True, text=True, check=False, env={}
     )
     assert done.returncode == 0 and "--max-usd" in done.stdout
 

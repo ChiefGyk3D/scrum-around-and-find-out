@@ -64,7 +64,6 @@ BEGIN_SECONDS = 30.0
 SEND_SECONDS = 10.0
 DEFAULT_REPLY_SECONDS = 240.0  # the broker's call deadline is 180 seconds by default, then up to 60 for an image
 APPROVAL_TTL = dt.timedelta(minutes=gemini.DEFAULT_TTL_MINUTES)
-MAX_RETRY_AFTER = 86_400
 CHARGED = "THE CALL MAY HAVE BEEN CHARGED"
 NO_FALLBACK = "the call was not retried and the free tier was not used"
 SIGNING_MISSING = "signing is not set up (signing.key and signing.principal in broker-client.yaml)"
@@ -812,7 +811,9 @@ def _failure(err: TextIO, reply: Reply, want: Want) -> int:
         for line in receipt_lines(r):
             say(err, line)
     hint = reply.body.get("retry_after")
-    if code == "rate_limited" and type(hint) is int and 0 <= hint <= MAX_RETRY_AFTER:
+    if (
+        code == "rate_limited" and type(hint) is int
+    ):  # the shared parser already refuses a hint that is not an int from 0 to 86400
         say(err, f"retry hint from the vendor: {hint} seconds (information only; nothing was repeated)")
     say(err, NO_FALLBACK)
     return status

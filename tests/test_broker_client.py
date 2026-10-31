@@ -392,10 +392,12 @@ def test_rate_limited_shows_the_retry_hint_and_asks_for_nothing_more(rig: d.Rig)
 
 
 @pytest.mark.parametrize("hint", [-1, 86_401, "30", 1.5, True, None])
-def test_a_bad_retry_hint_is_not_shown(rig: d.Rig, hint: Any) -> None:
+def test_a_bad_retry_hint_makes_the_whole_reply_a_bad_reply(rig: d.Rig, hint: Any) -> None:
     rig.broker.answer("call", d.err("rate_limited", receipt=d.receipt(), retry_after=hint))
-    assert rig.run() == 3
-    assert "retry hint" not in rig.err.getvalue()
+    assert rig.run() == 4, "the shared parser refuses it; it is neither a rate limit nor a success"
+    text = rig.err.getvalue()
+    assert "malformed reply" in text and CHARGED in text and "retry hint" not in text
+    assert "rate_limited" not in text and rig.broker.ops == ["begin", "call"]
 
 
 def test_outcome_unknown_says_it_was_counted_and_not_repeated(rig: d.Rig) -> None:
