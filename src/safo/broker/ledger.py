@@ -134,9 +134,7 @@ class LedgerView:
         """What the month of `now` counts. A call still open that was reserved in an earlier month is in flight across
         the boundary: it counts here too, at its reservation, until it ends."""
         key = now.astimezone(dt.UTC).strftime("%Y-%m")
-        in_flight = sum(
-            c.counted_micro for c in self.open_calls() if key not in c.months and c.month < key
-        )
+        in_flight = sum(c.counted_micro for c in self.open_calls() if key not in c.months and c.month < key)
         return self.month_total(key) + in_flight
 
     def open_calls(self) -> list[CallRecord]:

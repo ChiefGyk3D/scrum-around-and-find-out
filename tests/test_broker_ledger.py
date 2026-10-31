@@ -274,7 +274,7 @@ def test_months_are_counted_apart_by_utc_calendar_month(tmp_path: Path) -> None:
         expires_at=first + dt.timedelta(minutes=5),
         created=last - dt.timedelta(minutes=1),
     )
-    ledger.mark_sent(old.call_id, last)  # settled inside its own month: it does not straddle (test_broker_month_boundary)
+    ledger.mark_sent(old.call_id, last)  # settled inside its own month: it does not straddle
     ledger.settle(old.call_id, "ok", 4000, last)
     reserve(ledger, 7000, caps=SMALL, now=first, expires_at=first + dt.timedelta(minutes=5), created=last)
     view = ledger.view()
