@@ -1242,6 +1242,7 @@ def test_a_stop_during_verification_stops_the_spend(env: Env) -> None:
 def test_the_server_refuses_more_than_one_paid_call_in_flight() -> None:
     from safo.errors import ConfigError
 
-    ServerConfig(allowed_uids=frozenset({1}), slots=2)
-    with pytest.raises(ConfigError):
-        ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=3)
+    ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=1)
+    for more in (0, 2, 3, 8):  # the design: one paid vendor call in flight, never more
+        with pytest.raises(ConfigError):
+            ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=more)
