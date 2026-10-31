@@ -112,6 +112,8 @@ def scratch_root(home: str) -> str:
                 st = os.fstat(fd)
                 if st.st_uid != os.geteuid() or st.st_mode & 0o022:
                     raise WrapperError("the wrapper's scratch folder is not private to this user; nothing was run")
+            # 0o700 is owner-only, and a directory needs the x bit.
+            # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
             os.fchmod(fd, 0o700)
         finally:
             os.close(fd)
