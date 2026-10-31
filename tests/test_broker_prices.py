@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import datetime as dt
 from fractions import Fraction
 from typing import Any
@@ -146,7 +147,9 @@ def test_the_largest_allowed_inputs_do_not_overflow() -> None:
         body["output_token_limit"] = 10_000_000
         if body["kind"] == "image":
             body["image_output_per_mtok"] = "1000"
-            body["image_tokens"] = {k: 10_000_000 for k in body["image_tokens"]}
+            # 1,000,000 tokens at the top rate is 1000 USD, the most a per-image figure can state (and must agree with)
+            body["image_tokens"] = {k: 1_000_000 for k in body["image_tokens"]}
+            body["image_usd"] = {k: "1000" for k in body["image_usd"]}
     biggest = 0
     for price in parse_prices(data).models.values():
         if price.valid_through < TODAY:
@@ -312,3 +315,79 @@ def test_the_yaml_loader_applies_the_hostile_input_rules() -> None:
         with pytest.raises(ConfigError):
             load_prices_text(text)
         assert name
+
+
+# -- the per-image figure must agree with the token price (#289 A2) ------------------------------------------------
+# NB21 1K: 1120 tokens at 30.00 per million tokens is 33,600 micro-dollars; the stated per-image figure may be at most
+# that (the reservation is built from tokens, so a dearer figure would bill above it) and at least 95 percent of it.
+
+
+def with_usd(**sizes: str) -> dict[str, Any]:
+    data = copy.deepcopy(prices_data())
+    data["models"][NB21]["image_usd"].update(sizes)
+    return data
+
+
+def test_a_per_image_figure_above_the_token_price_is_refused() -> None:
+    with pytest.raises(ConfigError, match=r"image_usd\.1K"):
+        parse_prices(with_usd(**{"1K": "0.033601"}))  # one micro-dollar over 1120 x 30
+
+
+def test_the_per_image_figure_equal_to_the_token_price_is_accepted() -> None:
+    assert parse_prices(with_usd(**{"1K": "0.0336"})).models[NB21].image_usd["1K"] == 33_600
+
+
+def test_a_table_that_undercharges_per_token_by_a_wide_margin_is_refused() -> None:
+    data = copy.deepcopy(prices_data())
+    data["models"][NB21]["image_output_per_mtok"] = "3.00"  # tokens now price an image at a tenth of the figure
+    with pytest.raises(ConfigError, match="image_usd"):
+        parse_prices(data)
+
+
+def test_the_documented_pro_shape_with_a_dearer_rate_loads() -> None:
+    assert parse_prices(prices_data()).models[PRO_IMG].image_usd["1K"] == 134_000
+
+
+def test_a_per_image_figure_far_below_the_token_price_is_refused() -> None:
+    with pytest.raises(ConfigError, match=r"image_usd\.1K"):
+        parse_prices(with_usd(**{"1K": "0.0100"}))
+
+
+def test_the_tolerance_below_the_token_price_is_five_percent_inclusive() -> None:
+    assert parse_prices(with_usd(**{"1K": "0.03192"})).models[NB21].image_usd["1K"] == 31_920  # exactly 95 percent
+    with pytest.raises(ConfigError):
+        parse_prices(with_usd(**{"1K": "0.031919"}))
+
+
+def test_every_size_is_checked_not_only_the_first() -> None:
+    for size, bad in (("1K", "0.2"), ("2K", "0.2"), ("4K", "0.2")):
+        with pytest.raises(ConfigError, match=rf"image_usd\.{size}"):
+            parse_prices(with_usd(**{size: bad}))
+
+
+def test_the_token_count_side_is_checked_too() -> None:
+    data = copy.deepcopy(prices_data())
+    data["models"][NB21]["image_tokens"]["4K"] = 20_000  # tokens now price 4K at 0.60 against a stated 0.113
+    with pytest.raises(ConfigError, match=r"image_usd\.4K"):
+        parse_prices(data)
+
+
+def test_a_text_model_has_no_figure_to_check_and_still_loads() -> None:
+    assert FLAT in table().models and table().models[FLAT].image_usd == {}
+
+
+def test_the_reservation_is_never_below_the_per_image_floor_the_month_counts() -> None:
+    for name, price in table().models.items():
+        for size, usd in price.image_usd.items():
+            for cap_verified in (False, True):
+                p = dataclasses.replace(price, cap_verified=cap_verified)
+                got = reserve_amount(
+                    p,
+                    kind="image",
+                    prompt_bytes=0,
+                    max_output_tokens=price.image_tokens[size] + price.min_text_tokens,
+                    image_size=size,
+                    count=1,
+                    today=TODAY,
+                ).total_micro
+                assert got >= usd, (name, size, cap_verified)

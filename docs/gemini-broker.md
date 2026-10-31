@@ -627,10 +627,23 @@ The broker checks, in this order, and stops at the first failure (each refusal b
 4. Broker, under the state lock: verify (above); **write the spend first**: append `approval_used` and `call_start`
    (with the reservation) to the ledger, create `used/NONCE` with `O_EXCL`, `fsync` the files and the directory.
 5. Broker, outside the state lock but inside the one-call slot: read the key, send **one** request, with the deadline
-   from `broker.yaml` (images are slow; the default is 180 seconds), no retry.
+   from `broker.yaml` (images are slow; the default is 180 seconds), no retry. The deadline is one budget for the
+   whole call: the name lookup, every address the connection tries in turn, the TLS handshake, the send and the reply.
+   Each connect attempt gets the lesser of its own timeout and the time left, no further address is tried once nothing
+   is left, and a connection that is made after the deadline is closed before a single byte is written. A request
+   therefore never leaves after the deadline, and a call that runs out of time while connecting is treated like any
+   other missed deadline (an ambiguous outcome; the model is suspended).
 6. Broker: classify the answer, append `call_end` with the actual cost and the amount released from the reservation
    (see "Cost"; a breach or an ambiguous outcome also suspends the model), `fsync`, **release the call slot**, then write the reply under the
    write deadline.
+
+**Months and the midnight boundary.** The month is the UTC calendar month. A call belongs to the month it was
+**reserved** in. A call that ends (answer, failure or ambiguity) in a **later** month than it was reserved in is also
+counted in that later month, at the figure it ends with, so the new month's ceiling and extra-block rule always see
+money that left before midnight; and while such a call is still open, the new month counts it at its reservation.
+The check therefore uses the stricter of the two months: one straddling call may be counted in two months, never in
+too few, and a month's total still only ever grows. A clock that goes
+backward cannot move a row into an earlier month: a reservation is refused, and the other steps take the last row's time.
 
 **Crash and power loss, the stated choice: spend is recorded BEFORE the vendor call.** The cost is that a crash between
 step 4 and the vendor request charges the month for a call that may never have left: at most one reservation (2 USD at
@@ -873,7 +886,10 @@ prices:
 ```
 
 These numbers show the shape and what the pages said on 2026-10-30; the shipped example is filled in by re-reading them.
-A size missing from `image_usd` and `image_tokens` for a model is refused. A model whose token count for a size the
+A size missing from `image_usd` and `image_tokens` for a model is refused. The stated per-image figure must also agree
+with the token price the reservation uses: `image_usd[size]` may not be above `image_tokens[size] x
+image_output_per_mtok` (rounded up), and may not be more than 5 percent below it. A table that breaks either rule is
+refused at load, so no call can bill above its reservation because two numbers in the table disagree. A model whose token count for a size the
 page does not state (Nano Banana Pro states per-image prices, not token counts) cannot be listed until the count is
 read from the vendor. Prices change; a table past its `valid_through` refuses every paid call.
 
