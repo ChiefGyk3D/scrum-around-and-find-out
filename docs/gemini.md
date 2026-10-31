@@ -287,7 +287,8 @@ matches a term the maintainer listed.
   abbreviations, `=` forms and a value that looks like a mode are read exactly as the command reads them); there is no
   second scanner to disagree with it.
 - **It refuses to run** when an interpreter startup variable (any name starting `PYTHON`, such as `PYTHONPATH`,
-  `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`) or a shell startup variable (`BASH_ENV`, `ENV`) is set. The error names
+  `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`), a shell startup variable (`BASH_ENV`, `ENV`) or a loader or locale
+  search variable (any `LD_*`, `GCONV_PATH`, `LOCPATH`, `NLSPATH`) is set. The error names
   the variables, never their values, and nothing runs. Unset them and run again.
 - **It re-starts itself** as `<absolute interpreter> -I -c <boot> <package folder> ...`: no user site, no `PYTHON*`
   variables, no current directory on the import path, and the `safo` package that launched it is first on the path, so no

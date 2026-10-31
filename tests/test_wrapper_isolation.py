@@ -215,6 +215,12 @@ def test_the_real_entry_point_starts_in_an_isolated_interpreter(planted: dict[st
         "PYTHONWARNINGS",
         "BASH_ENV",
         "ENV",
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "GCONV_PATH",
+        "LOCPATH",
+        "NLSPATH",
     ],
 )
 def test_startup_variables_are_refused_by_name_and_nothing_runs(
@@ -237,7 +243,7 @@ def test_other_commands_and_clean_environments_are_not_refused(monkeypatch: pyte
 
     monkeypatch.setattr(wrapper, "launch", fake_launch)
     assert wrapper.enter(["--dry-run", "validate"], {"PYTHONPATH": "/x"}) is None  # not the research wrapper
-    assert wrapper.enter(["gemini", "quota", "--model", "m"], {"PATH": "/usr/bin", "LD_PRELOAD": "/x"}) == 7
+    assert wrapper.enter(["gemini", "quota", "--model", "m"], {"PATH": "/usr/bin", "HTTPS_PROXY": "/x"}) == 7
     assert seen == [["gemini", "quota", "--model", "m"]]
 
 
@@ -268,7 +274,7 @@ def test_a_forged_isolation_marker_with_a_dirty_environment_is_refused_not_trust
 
     monkeypatch.setattr(wrapper, "isolated", lambda: True)  # `python -I -m safo ...` run by hand, in a dirty place
     monkeypatch.setattr(wrapper, "launch", no_launch)
-    dirty = {k: v for k, v in hostile_env(planted).items() if not k.startswith(("PYTHON", "BASH_ENV", "ENV"))}
+    dirty = {k: v for k, v in hostile_env(planted).items() if k not in wrapper.startup_variables(hostile_env(planted))}
     assert wrapper.enter(["gemini", "quota", "--model", "m"], dirty) == 2
     assert "isolated child" in capsys.readouterr().err
 
@@ -468,3 +474,17 @@ def test_the_scratch_parent_refuses_a_symlink_in_its_path(tmp_path: Path) -> Non
     with pytest.raises(wrapper.WrapperError, match="scratch"):
         wrapper.scratch_root(str(home))
     assert list(elsewhere.iterdir()) == []
+
+
+def test_a_rewrite_that_changes_the_command_is_refused_not_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Global-option values and positional values that equal `propose` must not move the rewrite onto the action word."""
+    monkeypatch.chdir(tmp_path)
+    tricky = ["--board", "propose", "gemini", "keys", "propose", "propose", "--label", "x"]
+    try:
+        out = wrapper.absolutize(tricky)
+    except wrapper.WrapperError:
+        return  # fail closed is acceptable
+    before, after = wrapper.parsed(tricky), wrapper.parsed(out)
+    assert before is not None and after is not None
+    assert after.keys_action == "propose" and after.board == before.board
+    assert after.keys_file == f"{tmp_path}/propose"

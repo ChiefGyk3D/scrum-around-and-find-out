@@ -5,8 +5,8 @@
 script starts a plain interpreter, so a caller's environment has already acted by the time any of this code runs. So the
 wrapper does two things at the entry, before it reads a config, a prompt or a key:
 
-* REFUSES to run when an interpreter startup variable (any `PYTHON*`) or a shell startup variable (`BASH_ENV`, `ENV`) is
-  set. It names the variables, never their values, and runs nothing.
+* REFUSES to run when an interpreter startup variable (any `PYTHON*`), a shell startup variable (`BASH_ENV`, `ENV`)
+  or a loader variable (`LD_*` and kin) is set. It names the variables, never their values, and runs nothing.
 * RE-STARTS itself as `<absolute interpreter> -I -c <boot> ...`: no user site, no `PYTHON*` variables, no current
   directory on the import path. The child gets an argument vector of fixed words (no shell), only the variables on an
   allow-list (a fixed PATH, locale and temporary directory, the account's home from the account database, and per
@@ -42,8 +42,10 @@ BOOT = "import sys; sys.path.insert(0, sys.argv.pop(1)); from safo.cli import ru
 
 # Variables that act on an interpreter or a shell before any code of ours runs. A prefix for the interpreter's, since
 # the list grows (PYTHONPATH, PYTHONSTARTUP, PYTHONHOME, PYTHONUSERBASE, PYTHONINSPECT, ...).
-STARTUP_PREFIX = "PYTHON"
-STARTUP_NAMES = frozenset({"BASH_ENV", "ENV"})
+STARTUP_PREFIXES = ("PYTHON", "LD_")
+# `LD_*` and the C library's loader and locale search paths act before Python starts, so refusing them here cannot undo
+# what already ran; it is defense in depth, and the child never receives them.
+STARTUP_NAMES = frozenset({"BASH_ENV", "ENV", "GCONV_PATH", "LOCPATH", "NLSPATH"})
 
 # What each action may receive beyond the fixed variables. `ask` reads the key through the secret tool, which takes
 # its own token from here; `approve` runs ssh-keygen to sign with the security key. Nothing else carries over.
@@ -63,7 +65,7 @@ def isolated() -> bool:
 
 def startup_variables(env: Mapping[str, str]) -> list[str]:
     """The names (sorted) of the startup variables set in this environment."""
-    return sorted(k for k in env if k.startswith(STARTUP_PREFIX) or k in STARTUP_NAMES)
+    return sorted(k for k in env if k.startswith(STARTUP_PREFIXES) or k in STARTUP_NAMES)
 
 
 def default_entry() -> tuple[str, ...]:
@@ -226,7 +228,21 @@ def absolutize(words: Sequence[str]) -> list[str]:
         elif word == "propose" and ns.keys_action == "propose":
             after_propose = True
         i += 1
+    again = parsed(out)
+    if again is None or not _same_command(ns, again):
+        raise WrapperError("the file paths could not be made absolute without changing the command; nothing was run")
     return out
+
+
+def _same_command(before: argparse.Namespace, after: argparse.Namespace) -> bool:
+    """The rewritten command line means the same thing: every field equal, the two file fields now absolute."""
+    a, b = vars(before), vars(after)
+    if a.keys() != b.keys():
+        return False
+    paths = ("prompt_file", "keys_file")
+    if any(b[k] != _absolute(a[k]) for k in paths):
+        return False
+    return all(a[k] == b[k] for k in a if k not in paths)
 
 
 def _refuse(text: str) -> int:
