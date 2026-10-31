@@ -34,6 +34,7 @@ from brokerdata import (
     prices_data,
     state_dir,
 )
+from safo import output
 from safo.broker import admin
 from safo.broker.errors import IllegalTransition, LedgerError
 from safo.broker.ledger import AdminWho, CallLedger
@@ -354,7 +355,7 @@ def test_all_output_goes_through_the_output_module(tmp_path: Path, monkeypatch: 
     def record(stream: Any, text: str) -> None:
         seen.append(text)
 
-    monkeypatch.setattr(admin.output, "write", record)
+    monkeypatch.setattr(output, "write", record)
     out, err = io.StringIO(), io.StringIO()
     for argv in (["status"], ["usage"], ["check-install"], ["reconcile"], ["clear", FLAT], ["bogus"]):
         admin.run(argv, ops=FakeOps().as_ops(), paths=paths(tmp_path), env={}, now=LATER, out=out, err=err)
