@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from geminidata import make_key, signers_line
-from pipedata import LABEL, Rig, text_req
+from pipedata import LABEL, Rig, as_hardware, text_req
 from safo import geminisign
 from safo.broker.approval import verify_approval
 from safo.broker.errors import Refused
@@ -43,7 +43,7 @@ def code_of(call: Any) -> str:
 
 
 def check(rig: Rig, text: object, sig: object) -> ApprovalV3:
-    return verify_approval(text, sig, rig.trust, now=rig.clock.wall())
+    return verify_approval(text, sig, rig.trust, now=rig.clock.wall(), verifier=as_hardware)
 
 
 def good(rig: Rig, **over: Any) -> tuple[str, str]:
@@ -132,13 +132,19 @@ def test_a_missing_or_group_writable_trust_file_fails_closed(rig: Rig) -> None:
 def test_trust_files_owned_by_someone_else_fail_closed(rig: Rig) -> None:
     text, sig = good(rig)
     other = geminisign.Trust(rig.signers, rig.revoked, 4242, False, False)
-    assert code_of(partial(verify_approval, text, sig, other, now=rig.clock.wall())) == "bad_approval"
+    assert (
+        code_of(partial(verify_approval, text, sig, other, now=rig.clock.wall(), verifier=as_hardware))
+        == "bad_approval"
+    )
 
 
 def test_a_software_key_without_the_written_opt_in_is_refused_when_hardware_is_required(rig: Rig) -> None:
     text, sig = good(rig)
     strict = geminisign.Trust(rig.signers, rig.revoked, rig.trust.uid, True, False)
-    assert code_of(partial(verify_approval, text, sig, strict, now=rig.clock.wall())) == "bad_approval"
+    assert (
+        code_of(partial(verify_approval, text, sig, strict, now=rig.clock.wall(), verifier=as_hardware))
+        == "bad_approval"
+    )
 
 
 def test_a_key_outside_its_validity_window_is_refused(rig: Rig, key: Path) -> None:
@@ -193,7 +199,7 @@ def test_a_signed_text_with_an_extra_or_missing_field_is_refused(rig: Rig) -> No
 def test_a_plain_time_is_required(rig: Rig) -> None:
     text, sig = good(rig)
     naive = dt.datetime(2026, 10, 30, 12, 0, 0)
-    assert code_of(partial(verify_approval, text, sig, rig.trust, now=naive)) == "bad_request"
+    assert code_of(partial(verify_approval, text, sig, rig.trust, now=naive, verifier=as_hardware)) == "bad_request"
 
 
 def test_no_message_echoes_the_text_or_the_signature(rig: Rig) -> None:

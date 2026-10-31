@@ -215,6 +215,7 @@ def test_a_whole_call_through_the_socket_from_begin_to_receipt(env: Env) -> None
         0,
         begin["thinking_level"],
         begin["beyond_ceiling"],
+        2_500_000,
     )
     text = env.rig.text(req, offer)
     res = env.ask("call", **call_fields(req, text, env.rig.sign(text)))
@@ -322,7 +323,7 @@ def test_dryrun_verifies_a_throwaway_signature_and_changes_nothing(env: Env) -> 
     res = env.ask("dryrun", approval=dry(env))
     assert res.code == "ok"
     assert res.json["principal"] == "yubikey-a" and res.json["fingerprint"].startswith("SHA256:")
-    assert res.json["hardware"] is False and res.json["touch"] is None and res.json["pin"] is None
+    assert res.json["hardware"] is True and res.json["touch"] is True and res.json["pin"] is False  # the rig's stand-in
     assert res.json["enabled"] is True and env.rig.vendor.requests == []
     assert state_snapshot(env.rig) == before
 
@@ -520,7 +521,7 @@ def test_a_second_call_while_one_is_in_flight_is_busy_not_queued(env: Env) -> No
 
 
 def test_two_calls_run_together_when_the_config_allows_two(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=2)
+    env = Env(rig, slots=2)
     second: list[Any] = []
     started: list[int] = []
 
@@ -1097,17 +1098,17 @@ def force_overlap(env: Env, n: int) -> None:
 
 @pytest.mark.parametrize("budget", ["max_calls_per_minute", "max_calls_per_day"])
 def test_concurrent_clients_never_pass_the_call_budget(rig: Rig, budget: str) -> None:
-    env = Env(rig, max_concurrent_calls=4, call_per_minute=100, max_calls_per_minute=2, max_calls_per_day=2)
-    force_overlap(env, 4)
-    results = run_together(env, [text_req(job=f"job-{i}") for i in range(4)])
+    env = Env(rig, slots=2, call_per_minute=100, max_calls_per_minute=1, max_calls_per_day=1)
+    force_overlap(env, 3)
+    results = run_together(env, [text_req(job=f"job-{i}") for i in range(3)])
     codes = sorted(r.code for r in results)
-    assert codes == ["busy", "busy", "ok", "ok"]
-    assert len(rig.vendor.requests) == 2 and len(rig.ledger.view().calls) == 2
+    assert codes == ["busy", "busy", "ok"]
+    assert len(rig.vendor.requests) == 1 and len(rig.ledger.view().calls) == 1
     assert env.server.calls_in_flight == 0
 
 
 def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=3, call_per_minute=100, max_calls_per_minute=1)
+    env = Env(rig, slots=2, call_per_minute=100, max_calls_per_minute=1)
     release = threading.Event()
     entered = threading.Event()
 
@@ -1123,7 +1124,7 @@ def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(r
     worker = threading.Thread(target=lambda: box.append(exchange(env.server, first_body)))
     worker.start()
     assert entered.wait(30)
-    rest = run_together(env, [text_req(job=f"job-{i}") for i in range(2)])
+    rest = run_together(env, [text_req(job=f"job-{i}") for i in range(2)])  # one slot is left
     release.set()
     worker.join()
     assert [r.code for r in rest] == ["busy", "busy"] and box[0].code == "ok"
@@ -1131,7 +1132,7 @@ def test_concurrent_clients_with_a_call_still_in_flight_stay_inside_the_budget(r
 
 
 def test_a_call_that_fails_before_the_reservation_gives_its_place_back(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=2, max_calls_per_minute=1)
+    env = Env(rig, slots=2, max_calls_per_minute=1)
 
     def die(point: str) -> None:
         raise RuntimeError("SENTINEL")
@@ -1144,7 +1145,7 @@ def test_a_call_that_fails_before_the_reservation_gives_its_place_back(rig: Rig)
 
 
 def test_a_client_that_leaves_after_the_count_does_not_hold_a_place(rig: Rig) -> None:
-    env = Env(rig, max_concurrent_calls=2, max_calls_per_minute=1)
+    env = Env(rig, slots=2, max_calls_per_minute=1)
     req = text_req()
     payload, signature = rig.approved(req)
     body = protocol.request_body("call", **call_fields(req, payload, signature))
@@ -1160,7 +1161,7 @@ def test_a_client_that_leaves_after_the_count_does_not_hold_a_place(rig: Rig) ->
 
 @pytest.mark.parametrize("budget", ["max_calls_per_minute", "max_calls_per_day"])
 def test_a_call_not_yet_reserved_still_counts_against_the_budget(rig: Rig, budget: str) -> None:
-    env = Env(rig, max_concurrent_calls=2, call_per_minute=100, **{budget: 1})
+    env = Env(rig, slots=2, call_per_minute=100, **{budget: 1})
     entered = threading.Event()
     release = threading.Event()
     seen: list[int] = []
@@ -1184,3 +1185,64 @@ def test_a_call_not_yet_reserved_still_counts_against_the_budget(rig: Rig, budge
     release.set()
     worker.join()
     assert box[0].code == "ok" and len(rig.vendor.requests) == 1
+
+
+def test_dryrun_with_a_key_that_is_not_a_touched_hardware_key_is_refused(env: Env) -> None:
+    env.rig.pipeline.verifier = geminisign.verify  # the real check: this test key is a software key
+    assert env.ask("dryrun", approval=dry(env)).code == "bad_approval"
+
+
+def test_the_switch_turning_off_during_verification_stops_the_spend(env: Env) -> None:
+    def flip(point: str) -> None:
+        if point == "after_verify":
+            env.enabled = False  # root switches paid use off while this request is being checked
+
+    env.rig.pipeline.faults = flip
+    req = text_req()
+    payload, signature = env.rig.approved(req)
+    before = state_snapshot(env.rig)
+    res = env.ask("call", **call_fields(req, payload, signature))
+    assert res.code == "disabled" and env.rig.vendor.requests == [] and state_snapshot(env.rig) == before
+    assert env.server.calls_in_flight == 0
+
+
+def test_the_switch_is_looked_at_again_under_the_ledger_lock(env: Env) -> None:
+    seen: list[bool] = []
+
+    def switch() -> bool:
+        seen.append(True)
+        return True
+
+    env.server.switch = switch
+    assert env.call(text_req()).code == "ok"
+    assert len(seen) == 2  # once at the door, once just before the spend
+
+
+def test_after_a_stop_no_admitted_connection_can_begin_or_spend(env: Env) -> None:
+    req = text_req()
+    payload, signature = env.rig.approved(req)
+    before = state_snapshot(env.rig)
+    env.server.stop()
+    base = {"job": "j", "kind": "text", "max_output_tokens": 5, "prompt_bytes": 5, "max_usd": "2"}
+    assert env.ask("begin", model="flat-test", **base).code == "busy"
+    assert env.ask("call", **call_fields(req, payload, signature)).code == "busy"
+    assert env.rig.vendor.requests == [] and state_snapshot(env.rig) == before
+    assert env.ask("status").code == "ok" and env.ask("check", nonce="0123456789abcdef").code == "ok"
+
+
+def test_a_stop_during_verification_stops_the_spend(env: Env) -> None:
+    env.rig.pipeline.faults = lambda point: env.server.stop() if point == "after_verify" else None
+    req = text_req()
+    payload, signature = env.rig.approved(req)
+    before = state_snapshot(env.rig)
+    assert env.ask("call", **call_fields(req, payload, signature)).code == "busy"
+    assert env.rig.vendor.requests == [] and state_snapshot(env.rig) == before
+
+
+def test_the_server_refuses_more_than_one_paid_call_in_flight() -> None:
+    from safo.errors import ConfigError
+
+    ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=1)
+    for more in (0, 2, 3, 8):  # the design: one paid vendor call in flight, never more
+        with pytest.raises(ConfigError):
+            ServerConfig(allowed_uids=frozenset({1}), max_concurrent_calls=more)

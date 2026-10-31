@@ -54,7 +54,7 @@ def split_frames(raw: bytes) -> list[bytes]:
 class Env:
     """A server wired to a rig. `enabled` and `key_loaded` are what the root-owned switch and the key reader answer."""
 
-    def __init__(self, rig: Rig, **config: Any) -> None:
+    def __init__(self, rig: Rig, slots: int = 1, **config: Any) -> None:
         self.rig = rig
         self.enabled = True
         self.key_loaded = True
@@ -66,6 +66,8 @@ class Env:
             key_loaded=lambda: self.key_loaded,
             mono=rig.clock.mono,
         )
+        if slots != 1:  # test only: the config refuses more than one call in flight; this exercises the budget lock
+            self.server._slots = threading.BoundedSemaphore(slots)
 
     def exchange(self, body: bytes | None = None, *, raw: bytes | None = None, uid: int = UID, **kw: Any) -> Res:
         """One connection over a socketpair: send, read until the server closes."""

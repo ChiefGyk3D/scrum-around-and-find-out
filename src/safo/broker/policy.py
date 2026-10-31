@@ -23,6 +23,9 @@ JOB_CAP_MICRO = (
 )
 MONTH_CAP_MICRO = 10 * MICRO  # per month; past it every call needs an approval that says so
 BLOCK_MICRO = 2 * MICRO
+# Decision 13: a model whose output cap is not yet shown to hold is refused when its worst case passes this figure.
+# It is its own constant and does not move with the job cap, which was raised for the testing phase.
+UNVERIFIED_LIMIT_MICRO = 2 * MICRO
 MAX_COUNT_PER_APPROVAL = 1  # decision 7: one image and one approval per call
 PRO_CLASS = re.compile(r"(?:^|[-._])pro(?:$|[-._])")
 ASPECT = re.compile(r"[0-9]{1,2}:[0-9]{1,2}")
@@ -159,7 +162,14 @@ class Policy:
             count=req.count,
             today=now.astimezone(dt.UTC).date(),
         )
+        self.check_unverified(price, reservation.total_micro)
         return Priced(price, reservation, digest, size)
+
+    @staticmethod
+    def check_unverified(price: ModelPrice, reserved_micro: int) -> None:
+        """Decision 13: an unverified output cap and a worst case over 2 USD is refused, whatever the job cap is."""
+        if not price.cap_verified and reserved_micro > UNVERIFIED_LIMIT_MICRO:
+            raise Refused("model_refused", "this model is refused until its output cap is shown to hold")
 
     def check_caps(self, reserved_micro: int, *, max_micro: int, beyond_ceiling: bool, month_spent_micro: int) -> None:
         """Refuse a reservation above the job cap, the signed maximum, or the month's room. A reservation exactly at a

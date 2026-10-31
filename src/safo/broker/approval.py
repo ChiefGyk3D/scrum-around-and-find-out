@@ -13,18 +13,30 @@ adds what a socket-facing caller needs around it:
 * the strict version 3 loader then requires the text to BE the canonical form, so a different spelling of the same
   approval cannot carry a valid signature;
 * the key that verified must be the principal named inside the signed text;
+* the signing key must be a hardware key and the signature must show a touch: a software key is refused even
+  when root wrote the opt-in for it in the shared signers file (decision 9, hardware keys only). There is no opt-in
+  in this path;
 * every failure is one `Refused`. Nothing a client sent is echoed.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+from typing import Protocol
 
 from safo import geminisign
 from safo.broker.errors import Refused
 from safo.broker.records import MAX_APPROVAL_BYTES, ApprovalV3, parse_approval
 from safo.errors import ConfigError
 from safo.gemini import RefusedError, plain_time
+
+
+class Verifier(Protocol):
+    """`geminisign.verify`. A test supplies a stand-in for the authenticator; production never does."""
+
+    def __call__(
+        self, trust: geminisign.Trust, payload: bytes, armor: str, *, namespace: str, now: dt.datetime
+    ) -> geminisign.Verified: ...
 
 
 def _bad(message: str = "the approval is not signed by a key that may approve; ask for a fresh one") -> Refused:
@@ -42,7 +54,14 @@ def _revoked(trust: geminisign.Trust, signature: str) -> bool:
         return False
 
 
-def verify_approval(payload: object, signature: object, trust: geminisign.Trust, *, now: dt.datetime) -> ApprovalV3:
+def verify_approval(
+    payload: object,
+    signature: object,
+    trust: geminisign.Trust,
+    *,
+    now: dt.datetime,
+    verifier: Verifier = geminisign.verify,
+) -> ApprovalV3:
     """The approval a hardware key signed, or `Refused`. `payload` is the canonical signed text and `signature` the
     SSH signature armor. Fails closed: any problem with the files, the key, the signature or the text is a refusal."""
     try:
@@ -58,11 +77,13 @@ def verify_approval(payload: object, signature: object, trust: geminisign.Trust,
     except UnicodeEncodeError:
         raise _bad("the signed text is not the canonical form") from None
     try:
-        who = geminisign.verify(trust, raw, signature, namespace=geminisign.NAMESPACE, now=when)
+        who = verifier(trust, raw, signature, namespace=geminisign.NAMESPACE, now=when)
     except (RefusedError, ConfigError, OSError, ValueError, UnicodeError):
         if _revoked(trust, signature):
             raise Refused("revoked", "the key that signed this approval has been revoked") from None
         raise _bad() from None
+    if not who.hardware or who.user_present is not True:
+        raise _bad("a paid approval needs a hardware key and a touch")
     approval = parse_approval(payload)  # an exact str, so these are the characters whose bytes were verified
     if approval.principal != who.label:
         raise _bad("the key that signed is not the principal named in the approval")
@@ -70,7 +91,12 @@ def verify_approval(payload: object, signature: object, trust: geminisign.Trust,
 
 
 def verify_dryrun(
-    payload: object, signature: object, trust: geminisign.Trust, *, now: dt.datetime
+    payload: object,
+    signature: object,
+    trust: geminisign.Trust,
+    *,
+    now: dt.datetime,
+    verifier: Verifier = geminisign.verify,
 ) -> geminisign.Verified:
     """The key that signed a throw-away text in the dry-run namespace, or `Refused`. The same file checks, key window,
     touch and PIN rules as a real approval, and the same sealed `ssh-keygen`; but the text is not parsed (it is only a
@@ -89,8 +115,11 @@ def verify_dryrun(
     except UnicodeEncodeError:
         raise _bad("the signed text is not plain ASCII") from None
     try:
-        return geminisign.verify(trust, raw, signature, namespace=geminisign.DRYRUN_NAMESPACE, now=when)
+        who = verifier(trust, raw, signature, namespace=geminisign.DRYRUN_NAMESPACE, now=when)
     except (RefusedError, ConfigError, OSError, ValueError, UnicodeError):
         if _revoked(trust, signature):
             raise Refused("revoked", "the key that signed this approval has been revoked") from None
         raise _bad() from None
+    if not who.hardware or who.user_present is not True:  # the dry run tests the hardware key, as a real approval does
+        raise _bad("a paid approval needs a hardware key and a touch")
+    return who

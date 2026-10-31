@@ -627,3 +627,143 @@ def test_a_thin_client_can_import_it_with_nothing_else_of_ours() -> None:
         [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
     )
     assert done.stdout.strip() == "safo,safo.bounded,safo.broker,safo.broker.protocol"
+
+
+def test_a_valid_reply_over_the_frame_limit_is_refused_by_the_client() -> None:
+    big = json.dumps({"v": 1, "ok": True, "pad": "a" * p.MAX_REPLY_FRAME}).encode()
+    assert len(big) > p.MAX_REPLY_FRAME
+    with pytest.raises(ProtocolError):
+        p.parse_reply(big)
+    exact = json.dumps({"v": 1, "ok": True, "pad": "a" * (p.MAX_REPLY_FRAME - 60)}).encode()
+    assert len(exact) <= p.MAX_REPLY_FRAME and p.parse_reply(exact)["ok"] is True
+
+
+def test_an_error_reply_announces_no_attachments() -> None:
+    body = json.loads(p.error_body("busy"))
+    body["attachments"] = [GOOD_ATTACHMENT] * 5000
+    with pytest.raises(ProtocolError):
+        p.parse_reply(json.dumps(body).encode())
+    body["attachments"] = []
+    with pytest.raises(ProtocolError):
+        p.parse_reply(json.dumps(body).encode())
+
+
+def test_attachment_count_is_zero_unless_the_reply_is_a_success() -> None:
+    assert p.attachment_count({"ok": False, "attachments": [GOOD_ATTACHMENT]}) == 0
+    assert p.attachment_count({"attachments": [GOOD_ATTACHMENT]}) == 0
+    assert p.attachment_count({"ok": True, "attachments": [GOOD_ATTACHMENT]}) == 1
+
+
+GOOD_RECEIPT: dict[str, Any] = {
+    "call_id": "ab" * 16,
+    "nonce": "cd" * 16,
+    "epoch": "ef" * 16,
+    "model": "flat-test",
+    "kind": "text",
+    "count": 0,
+    "image_size": "",
+    "prompt_sha256": "12" * 32,
+    "tokens_in": 8,
+    "tokens_out": None,
+    "reserved_usd": "0.005074",
+    "actual_usd": "0.000058",
+    "released_usd": "0",
+    "breach": False,
+    "cap_breach": False,
+    "estimated": True,
+    "extra_images": 0,
+    "images": [],
+    "month_spent_after": "0.000058",
+    "ledger_head_after": "",
+    "broker_version": "0.1.2",
+    "ts": "2026-10-30T12:00:00Z",
+}
+
+
+def error_with(code: str = "outcome_unknown", **extra: Any) -> bytes:
+    data = json.loads(p.error_body(code))
+    data.update(extra)
+    return json.dumps(data).encode()
+
+
+def test_an_empty_reply_and_one_over_the_cap_are_each_refused_for_their_own_reason() -> None:
+    with pytest.raises(ProtocolError):
+        p.parse_reply(b"")
+    with pytest.raises(ProtocolError):
+        p.parse_reply(b" " * (p.MAX_REPLY_FRAME + 1))
+    assert p.parse_reply(p.ok_body({}))["ok"] is True
+
+
+def test_a_documented_receipt_is_accepted_in_success_and_error_replies() -> None:
+    assert p.parse_reply(p.ok_body({"receipt": GOOD_RECEIPT, "text": "x", "attachments": []}))["ok"] is True
+    for code in ("outcome_unknown", "vendor_refused", "rate_limited", "internal"):
+        assert p.parse_reply(error_with(code, receipt=GOOD_RECEIPT))["code"] == code
+    withimg = {**GOOD_RECEIPT, "images": [GOOD_ATTACHMENT], "tokens_out": 5}
+    assert p.parse_reply(p.ok_body({"receipt": withimg, "attachments": [GOOD_ATTACHMENT]}))["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda r: r.pop("call_id"),
+        lambda r: r.update(extra=1),
+        lambda r: r.update(call_id="nope"),
+        lambda r: r.update(nonce="A" * 32),
+        lambda r: r.update(model="Bad Model"),
+        lambda r: r.update(kind="audio"),
+        lambda r: r.update(count=True),
+        lambda r: r.update(count=-1),
+        lambda r: r.update(prompt_sha256="12"),
+        lambda r: r.update(tokens_in="8"),
+        lambda r: r.update(tokens_in=-1),
+        lambda r: r.update(tokens_out=True),
+        lambda r: r.update(reserved_usd="1e3"),
+        lambda r: r.update(actual_usd=0.5),
+        lambda r: r.update(released_usd="-1"),
+        lambda r: r.update(month_spent_after=None),
+        lambda r: r.update(breach="no"),
+        lambda r: r.update(cap_breach=0),
+        lambda r: r.update(estimated=None),
+        lambda r: r.update(extra_images=1.5),
+        lambda r: r.update(images="x"),
+        lambda r: r.update(images=[GOOD_ATTACHMENT, GOOD_ATTACHMENT]),
+        lambda r: r.update(ledger_head_after="zz"),
+        lambda r: r.update(broker_version=""),
+        lambda r: r.update(broker_version="x" * 33),
+        lambda r: r.update(broker_version="1.0\n"),
+        lambda r: r.update(ts="yesterday"),
+        lambda r: r.update(epoch="ef"),
+    ],
+)
+def test_a_receipt_off_the_documented_shape_is_refused(mutate: Any) -> None:
+    receipt = json.loads(json.dumps(GOOD_RECEIPT))
+    mutate(receipt)
+    with pytest.raises(ProtocolError):
+        p.parse_reply(error_with(receipt=receipt))
+    with pytest.raises(ProtocolError):
+        p.parse_reply(json.dumps({"v": 1, "ok": True, "receipt": receipt}).encode())
+
+
+@pytest.mark.parametrize("value", [0, 30, 86_400])
+def test_retry_after_is_a_whole_number_of_seconds_up_to_a_day(value: int) -> None:
+    assert p.parse_reply(error_with("rate_limited", receipt=GOOD_RECEIPT, retry_after=value))["retry_after"] == value
+
+
+@pytest.mark.parametrize("value", [-1, 86_401, True, 1.5, "30", None, [30]])
+def test_any_other_retry_after_is_refused(value: Any) -> None:
+    with pytest.raises(ProtocolError):
+        p.parse_reply(error_with("rate_limited", receipt=GOOD_RECEIPT, retry_after=value))
+
+
+def test_error_replies_carry_only_the_extras_that_belong_to_their_code() -> None:
+    with pytest.raises(ProtocolError):
+        p.parse_reply(error_with("busy", receipt=GOOD_RECEIPT))  # no call happened
+    with pytest.raises(ProtocolError):
+        p.parse_reply(error_with("outcome_unknown", retry_after=5))  # only a 429 has one
+    with pytest.raises(ProtocolError):
+        p.parse_reply(error_with("busy", surprise=1))
+    with pytest.raises(ProtocolError):
+        p.parse_reply(error_with("busy", supported=[1]))
+    assert p.parse_reply(p.error_body("unsupported_version"))["supported"] == [1]
+    with pytest.raises(ProtocolError):
+        p.parse_reply(error_with("unsupported_version", supported=[2]))

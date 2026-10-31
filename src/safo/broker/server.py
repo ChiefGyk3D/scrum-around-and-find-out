@@ -113,7 +113,7 @@ class ServerConfig:
             raise ConfigError("broker server: allowed_uids is a non-empty list of user ids")
         _count(self.max_connections, "max_connections", 1, 64)
         _count(self.max_per_uid, "max_per_uid", 1, 64)
-        _count(self.max_concurrent_calls, "max_concurrent_calls", 1, 8)
+        _count(self.max_concurrent_calls, "max_concurrent_calls", 1, 1)  # the design: one paid call in flight, ever
         for name in ("begin_per_minute", "call_per_minute", "other_per_minute"):
             _count(getattr(self, name), name, 1, 10_000)
         _count(self.max_calls_per_minute, "max_calls_per_minute", 1, 1_000)
@@ -343,6 +343,7 @@ class Server:
         self.peer_cred = peer_cred
         self.mono = mono
         self.log = AuditLog(logger)
+        pipeline.spend_gate = self._spend_gate
         self._limits = RateLimiter(mono)
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
@@ -356,6 +357,14 @@ class Server:
         self._wake_r.setblocking(False)
         self._wake_w.setblocking(False)
         self.peak_open = 0
+
+    def _spend_gate(self) -> None:
+        """Run by the pipeline under the ledger lock, just before the spend: root may have switched paid use off while
+        the approval was being verified (a slow `ssh-keygen`)."""
+        if self._stopping:
+            raise Refused("busy", "the broker is stopping")
+        if not self.switch():
+            raise Refused("disabled", "paid use is disabled")
 
     # -- observers (for the tests and the log)
 
@@ -524,6 +533,8 @@ class Server:
 
     def _dispatch(self, request: Request, uid: int) -> Outcome:
         op = request.op
+        if self._stopping and op in ("begin", "call"):  # a connection admitted before the stop cannot start new work
+            return _fail("busy")
         if op not in ("status", "dryrun") and not self.switch():
             return _fail("disabled")
         limits = {
@@ -614,7 +625,11 @@ class Server:
 
     def _dryrun(self, f: dict[str, Any]) -> Outcome:
         who = verify_dryrun(
-            f["approval"]["payload"], f["approval"]["signature"], self.pipeline.trust, now=self.pipeline.wall()
+            f["approval"]["payload"],
+            f["approval"]["signature"],
+            self.pipeline.trust,
+            now=self.pipeline.wall(),
+            verifier=self.pipeline.verifier,
         )
         fields = {
             "principal": who.label,

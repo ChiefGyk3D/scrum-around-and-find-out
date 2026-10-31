@@ -29,7 +29,7 @@ import datetime as dt
 from collections.abc import Callable, Mapping
 
 from safo import gemini, geminisign
-from safo.broker.approval import verify_approval
+from safo.broker.approval import Verifier, verify_approval
 from safo.broker.errors import Refused
 from safo.broker.images import Image
 from safo.broker.issue import Issuer
@@ -114,7 +114,9 @@ class Pipeline:
         mono: Callable[[], float],
         deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
         faults: Faults | None = None,
+        verifier: Verifier = geminisign.verify,
     ) -> None:
+        self.verifier = verifier
         self.ledger = ledger
         self.policy = policy
         self.issuer = issuer
@@ -125,17 +127,19 @@ class Pipeline:
         self.mono = mono
         self.deadline = deadline_seconds
         self.faults: Faults = faults or (lambda point: None)
+        self.spend_gate: Callable[[], None] = lambda: None  # the server sets it: raises Refused when paid use is off
 
     # -- the call
 
     def call(self, req: BrokerRequest, payload: str, signature: str) -> CallResult:
         req = canonical_broker_request(req)
-        approval = verify_approval(payload, signature, self.trust, now=self.wall())
+        approval = verify_approval(payload, signature, self.trust, now=self.wall(), verifier=self.verifier)
         self.faults("after_verify")
 
         def last_look() -> None:  # under the ledger lock, just before the spend: a key revoked a moment ago is caught
+            self.spend_gate()
             now = self.wall()
-            verify_approval(payload, signature, self.trust, now=now)
+            verify_approval(payload, signature, self.trust, now=now, verifier=self.verifier)
             self.issuer.check(approval, now=now)
 
         ticket = self.ledger.reserve(req, approval, self.policy, epoch=self.epoch, now=self.wall(), pre_spend=last_look)
