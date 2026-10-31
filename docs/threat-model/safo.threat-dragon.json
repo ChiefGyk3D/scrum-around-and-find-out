@@ -21,12 +21,20 @@
               "description": "Issue, pull request and comment text is written by anyone and read by models and by SAFO."
             },
             "position": {
-              "x": 20,
-              "y": 20
+              "x": 40,
+              "y": 40
             },
             "size": {
-              "width": 330,
-              "height": 560
+              "width": 920,
+              "height": 220
+            },
+            "zIndex": 0,
+            "attrs": {
+              "label": {
+                "text": "Public GitHub content to agents",
+                "refX": 16,
+                "refY": 12
+              }
             }
           },
           {
@@ -37,12 +45,20 @@
               "description": "Agents and the guard share one user id: files, settings, `gh` login."
             },
             "position": {
-              "x": 380,
-              "y": 20
+              "x": 40,
+              "y": 300
             },
             "size": {
-              "width": 560,
-              "height": 560
+              "width": 1300,
+              "height": 640
+            },
+            "zIndex": 3,
+            "attrs": {
+              "label": {
+                "text": "The maintainer's account and laptop",
+                "refX": 16,
+                "refY": 12
+              }
             }
           },
           {
@@ -53,12 +69,20 @@
               "description": "The job that holds the Action's credentials versus anything else that runs in or before it."
             },
             "position": {
-              "x": 970,
-              "y": 20
+              "x": 1060,
+              "y": 40
             },
             "size": {
-              "width": 300,
-              "height": 260
+              "width": 280,
+              "height": 220
+            },
+            "zIndex": 1,
+            "attrs": {
+              "label": {
+                "text": "The CI job (Action)",
+                "refX": 16,
+                "refY": 12
+              }
             }
           },
           {
@@ -69,12 +93,20 @@
               "description": "Prompts leave the laptop for a LAN host that also serves production services."
             },
             "position": {
-              "x": 970,
-              "y": 300
+              "x": 1060,
+              "y": 1000
             },
             "size": {
-              "width": 300,
-              "height": 140
+              "width": 600,
+              "height": 200
+            },
+            "zIndex": 5,
+            "attrs": {
+              "label": {
+                "text": "The local model server",
+                "refX": 16,
+                "refY": "86%"
+              }
             }
           },
           {
@@ -85,12 +117,20 @@
               "description": "Package index, Actions, GYST workflows, DoIA releases, install sources."
             },
             "position": {
-              "x": 20,
-              "y": 600
+              "x": 1440,
+              "y": 40
             },
             "size": {
-              "width": 560,
-              "height": 140
+              "width": 570,
+              "height": 220
+            },
+            "zIndex": 2,
+            "attrs": {
+              "label": {
+                "text": "Upstream releases",
+                "refX": 16,
+                "refY": 12
+              }
             }
           },
           {
@@ -101,12 +141,20 @@
               "description": "Files that leave the laptop for a private remote, and docs that leave for the public wiki."
             },
             "position": {
-              "x": 600,
-              "y": 600
+              "x": 40,
+              "y": 1000
             },
             "size": {
-              "width": 670,
-              "height": 140
+              "width": 600,
+              "height": 200
+            },
+            "zIndex": 4,
+            "attrs": {
+              "label": {
+                "text": "Private configuration sync and public publishing",
+                "refX": 16,
+                "refY": "86%"
+              }
             }
           },
           {
@@ -118,12 +166,19 @@
               "threats": []
             },
             "position": {
-              "x": 60,
-              "y": 80
+              "x": 400,
+              "y": 120
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "An outside contributor"
+              }
             }
           },
           {
@@ -135,12 +190,19 @@
               "threats": []
             },
             "position": {
-              "x": 60,
-              "y": 300
+              "x": 80,
+              "y": 120
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "GitHub itself"
+              }
             }
           },
           {
@@ -177,12 +239,19 @@
               ]
             },
             "position": {
-              "x": 60,
-              "y": 440
+              "x": 720,
+              "y": 120
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "GitHub API and public\ncontent"
+              }
             }
           },
           {
@@ -194,12 +263,19 @@
               "threats": []
             },
             "position": {
-              "x": 410,
-              "y": 60
+              "x": 720,
+              "y": 580
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "The maintainer"
+              }
             }
           },
           {
@@ -211,12 +287,19 @@
               "threats": []
             },
             "position": {
-              "x": 410,
-              "y": 200
+              "x": 400,
+              "y": 380
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "The maintainer's own\nagents, including a\nprompt-injected one"
+              }
             }
           },
           {
@@ -228,12 +311,19 @@
               "threats": []
             },
             "position": {
-              "x": 410,
-              "y": 340
+              "x": 1100,
+              "y": 580
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "A compromised GitHub\ntoken, or another process\non the same account"
+              }
             }
           },
           {
@@ -245,12 +335,19 @@
               "threats": []
             },
             "position": {
-              "x": 1000,
-              "y": 460
+              "x": 1420,
+              "y": 1060
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "A compromised or\nLAN-adjacent model server"
+              }
             }
           },
           {
@@ -287,12 +384,19 @@
               ]
             },
             "position": {
-              "x": 640,
-              "y": 120
+              "x": 110,
+              "y": 350
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 140,
+              "height": 140
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 12,
+                "text": "Dispatch guard\nand hooks"
+              }
             }
           },
           {
@@ -317,12 +421,19 @@
               ]
             },
             "position": {
-              "x": 640,
-              "y": 260
+              "x": 1130,
+              "y": 750
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 140,
+              "height": 140
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 12,
+                "text": "Routing, usage\nmeter and\nlocal modes"
+              }
             }
           },
           {
@@ -347,12 +458,19 @@
               ]
             },
             "position": {
-              "x": 640,
-              "y": 400
+              "x": 750,
+              "y": 350
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 140,
+              "height": 140
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 12,
+                "text": "Handoff\nevidence and\nprofiles"
+              }
             }
           },
           {
@@ -377,12 +495,19 @@
               ]
             },
             "position": {
-              "x": 640,
-              "y": 500
+              "x": 80,
+              "y": 580
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "Guard files and settings"
+              }
             }
           },
           {
@@ -419,12 +544,19 @@
               ]
             },
             "position": {
-              "x": 410,
-              "y": 480
+              "x": 1100,
+              "y": 380
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "Credentials"
+              }
             }
           },
           {
@@ -521,12 +653,19 @@
               ]
             },
             "position": {
-              "x": 1000,
-              "y": 70
+              "x": 1130,
+              "y": 90
             },
             "size": {
-              "width": 220,
-              "height": 90
+              "width": 140,
+              "height": 140
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 12,
+                "text": "Action and\nboard modes"
+              }
             }
           },
           {
@@ -551,12 +690,19 @@
               ]
             },
             "position": {
-              "x": 1000,
-              "y": 330
+              "x": 1100,
+              "y": 1060
             },
             "size": {
-              "width": 170,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "Local model server\n(Ollama)"
+              }
             }
           },
           {
@@ -581,12 +727,19 @@
               ]
             },
             "position": {
-              "x": 1000,
-              "y": 180
+              "x": 720,
+              "y": 1060
             },
             "size": {
-              "width": 220,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "Model providers"
+              }
             }
           },
           {
@@ -598,12 +751,19 @@
               "threats": []
             },
             "position": {
-              "x": 60,
-              "y": 640
+              "x": 1480,
+              "y": 120
             },
             "size": {
-              "width": 220,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "A compromised dependency,\nAction or reusable\nworkflow"
+              }
             }
           },
           {
@@ -628,12 +788,19 @@
               ]
             },
             "position": {
-              "x": 320,
-              "y": 640
+              "x": 1830,
+              "y": 90
             },
             "size": {
-              "width": 220,
-              "height": 70
+              "width": 140,
+              "height": 140
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 12,
+                "text": "Install and\nupdate path"
+              }
             }
           },
           {
@@ -658,12 +825,19 @@
               ]
             },
             "position": {
-              "x": 640,
-              "y": 640
+              "x": 80,
+              "y": 1060
             },
             "size": {
-              "width": 220,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "Private configuration sync"
+              }
             }
           },
           {
@@ -675,22 +849,43 @@
               "threats": []
             },
             "position": {
-              "x": 1000,
-              "y": 640
+              "x": 400,
+              "y": 1060
             },
             "size": {
-              "width": 220,
-              "height": 70
+              "width": 200,
+              "height": 80
+            },
+            "zIndex": 10,
+            "attrs": {
+              "text": {
+                "fontSize": 14,
+                "text": "Public repositories and\nwiki"
+              }
             }
           },
           {
             "id": "f-text",
             "shape": "flow",
             "source": {
-              "cell": "a-outsider"
+              "cell": "a-outsider",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 20,
+                  "dy": 0
+                }
+              }
             },
             "target": {
-              "cell": "a-agent"
+              "cell": "a-agent",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 20,
+                  "dy": 0
+                }
+              }
             },
             "data": {
               "name": "Issue, pull request and comment text",
@@ -709,6 +904,32 @@
                   "mitigation": "Partial. Controls: [V] In the tested cases handoff evidence ignores comments whose author is not an OWNER, MEMBER or COLLABORATOR (docs/handoff.md, src/safo/modes/handoff.py). [V] `safo profiles brief` puts task text between random-id fences and refuses a value that can close its own fence (src/safo/brief.py). It claims structure only. [V] The status headline model sees four counts and no card titles (src/safo/headline.py). [V] `audit` and the threat-model check read single anchored lines and not free text (src/safo/threatmodel.py). [V] The maintainer merges; `safo protection` reads back code-owner review and the `CI green` gate (docs/adoption.md). Verification: tests/test_handoff_check.py::test_a_report_from_an_untrusted_author_is_ignored; tests/test_brief_fill.py; tests/test_status_headline.py; `safo protection --repo OWNER/NAME` exits 0. No test can show that a model resists an instruction; none is claimed. Residual: Open. Owner: the maintainer. Tracked in #81, #61, #123, #230. The statements under Mitigation describe what the repository tests exercise today; they are not a wider guarantee."
                 }
               ]
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.7,
+                "attrs": {
+                  "label": {
+                    "text": "Issue text"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
@@ -724,6 +945,32 @@
               "name": "Comments, timeline, branch protection",
               "description": "Read by handoff, audit and protection.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "Comments"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
@@ -739,51 +986,202 @@
               "name": "Briefs and shell commands",
               "description": "Model-written text the guard judges.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "Briefs"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
             "id": "f-edit",
             "shape": "flow",
             "source": {
-              "cell": "a-agent"
+              "cell": "a-agent",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": -80,
+                  "dy": 0
+                }
+              }
             },
             "target": {
-              "cell": "s-guardfiles"
+              "cell": "s-guardfiles",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 0,
+                  "dy": -20
+                }
+              }
             },
             "data": {
               "name": "Writes by the maintainer's account",
               "description": "See the same-user limit in docs/hooks.md.",
               "threats": []
+            },
+            "vertices": [
+              {
+                "x": 420,
+                "y": 600
+              }
+            ],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.25,
+                "attrs": {
+                  "label": {
+                    "text": "File edits"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
             "id": "f-state",
             "shape": "flow",
             "source": {
-              "cell": "p-guard"
+              "cell": "p-guard",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": -20,
+                  "dy": 0
+                }
+              }
             },
             "target": {
-              "cell": "s-guardfiles"
+              "cell": "s-guardfiles",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": -20,
+                  "dy": 0
+                }
+              }
             },
             "data": {
               "name": "Guard reads config, writes state and log",
               "description": "Directory trust checks apply.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "State, log"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
             "id": "f-cred",
             "shape": "flow",
             "source": {
-              "cell": "s-secrets"
+              "cell": "s-secrets",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 20,
+                  "dy": 0
+                }
+              }
             },
             "target": {
-              "cell": "p-action"
+              "cell": "p-action",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 20,
+                  "dy": 0
+                }
+              }
             },
             "data": {
               "name": "Credentials into the job",
               "description": "See S05 and S24.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.4,
+                "attrs": {
+                  "label": {
+                    "text": "Credentials"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
@@ -799,16 +1197,56 @@
               "name": "GraphQL and REST calls",
               "description": "Redirect and replay handling is covered by tests.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.6,
+                "attrs": {
+                  "label": {
+                    "text": "API calls"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
             "id": "f-model",
             "shape": "flow",
             "source": {
-              "cell": "p-router"
+              "cell": "p-router",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": -20,
+                  "dy": 0
+                }
+              }
             },
             "target": {
-              "cell": "e-ollama"
+              "cell": "e-ollama",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": -20,
+                  "dy": 0
+                }
+              }
             },
             "data": {
               "name": "Prompts to the local model",
@@ -851,6 +1289,32 @@
                   "mitigation": "Partial. Controls: [V] Code groups and counts and the model writes prose over a correct structure; a status headline is used if it is one plain line whose numbers are the computed counts (docs/local-llm.md, src/safo/headline.py). [V] Field values a reviewer checked are applied from a triage draft (docs/routing.md, issue-triage shape). [V] Review of a local answer before it is applied is a required operating procedure (docs/local-llm.md). Verification: tests/test_status_headline.py; tests/test_local_run.py. Residual: Open. Owner: the maintainer. Tracked in #243. The statements under Mitigation describe what the repository tests exercise today; they are not a wider guarantee."
                 }
               ]
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "Prompts"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
@@ -860,12 +1324,50 @@
               "cell": "a-lanserver"
             },
             "target": {
-              "cell": "p-router"
+              "cell": "p-router",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 0,
+                  "dy": 20
+                }
+              }
             },
             "data": {
               "name": "Replies, probe answers and observed prompts",
               "description": "Prompts to the local model server and its answers.",
               "threats": []
+            },
+            "vertices": [
+              {
+                "x": 1520,
+                "y": 840
+              }
+            ],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.734,
+                "attrs": {
+                  "label": {
+                    "text": "Replies"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
@@ -875,22 +1377,78 @@
               "cell": "a-agent"
             },
             "target": {
-              "cell": "e-providers"
+              "cell": "e-providers",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": -80,
+                  "dy": 0
+                }
+              }
             },
             "data": {
               "name": "Briefs to hosted models",
               "description": "Gemini free tier for public material only.",
               "threats": []
+            },
+            "vertices": [
+              {
+                "x": 500,
+                "y": 980
+              },
+              {
+                "x": 740,
+                "y": 980
+              }
+            ],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.3095,
+                "attrs": {
+                  "label": {
+                    "text": "Briefs"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
             "id": "f-publish",
             "shape": "flow",
             "source": {
-              "cell": "a-agent"
+              "cell": "a-agent",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 80,
+                  "dy": 0
+                }
+              }
             },
             "target": {
-              "cell": "f-publish-target"
+              "cell": "f-publish-target",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 80,
+                  "dy": 0
+                }
+              }
             },
             "data": {
               "name": "Commits, docs, issues, comments",
@@ -909,6 +1467,32 @@
                   "mitigation": "Partial. Controls: [V] tests/test_privacy.py scans docs/, examples/, README.md and agents.yaml for the generic patterns it lists; failures do not repeat the matched text. [V] Private screening data is managed outside public artifacts (docs/privacy.md). [V] Unfixed findings are kept only in approved private channels; a public issue carries a safe summary (docs/security-findings.md). [V] The guard log does not store a brief or a prompt (docs/hooks.md). Verification: tests/test_privacy.py; the private screening check is run before publication. Residual: Open. Owner: the maintainer. Tracked in #123, #234. The statements under Mitigation describe what the repository tests exercise today; they are not a wider guarantee."
                 }
               ]
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "Commits, docs"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
@@ -924,21 +1508,87 @@
               "name": "Releases and workflow refs",
               "description": "Pinned by hash or commit where the repository controls it.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "Releases"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
             "id": "f-upstream2",
             "shape": "flow",
             "source": {
-              "cell": "a-dep"
+              "cell": "a-dep",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 0,
+                  "dy": -20
+                }
+              }
             },
             "target": {
-              "cell": "p-action"
+              "cell": "p-action",
+              "anchor": {
+                "name": "center",
+                "args": {
+                  "dx": 0,
+                  "dy": -20
+                }
+              }
             },
             "data": {
               "name": "Dependencies and Actions in the Action job",
               "description": "Hash-locked.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.4,
+                "attrs": {
+                  "label": {
+                    "text": "Packages"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
@@ -954,6 +1604,32 @@
               "name": "Configuration sync",
               "description": "What is pushed is not verified here.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "Config sync"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           },
           {
@@ -969,6 +1645,32 @@
               "name": "Use of a stolen token or the account's login",
               "description": "Scope decides the damage.",
               "threats": []
+            },
+            "vertices": [],
+            "connector": "normal",
+            "router": {
+              "name": "normal"
+            },
+            "zIndex": 20,
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "Token use"
+                  }
+                }
+              }
+            ],
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": null
+              }
             }
           }
         ]

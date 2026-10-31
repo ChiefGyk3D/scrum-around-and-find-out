@@ -13,6 +13,7 @@ import importlib.util
 import json
 import re
 import shutil
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -381,3 +382,109 @@ def test_the_credential_text_names_no_secret_location_or_private_setting() -> No
     for phrase in ("private key", "installation token", "stored `gh`", "secret store", "root-owned"):
         assert phrase not in assets
     assert "mode 600" not in page
+
+
+# --- diagram layout (issue 246): shapes inside their boundary, no overlaps, flows clear of shapes -------------------
+
+NODE_SHAPES = ("actor", "process", "store")
+
+
+def _diagram(model: dict[str, Any]) -> list[dict[str, Any]]:
+    cells: list[dict[str, Any]] = model["detail"]["diagrams"][0]["cells"]
+    return cells
+
+
+def _box(c: dict[str, Any]) -> tuple[float, float, float, float]:
+    x, y = c["position"]["x"], c["position"]["y"]
+    return (x, y, x + c["size"]["width"], y + c["size"]["height"])
+
+
+def _anchor(c: dict[str, Any], end: dict[str, Any]) -> tuple[float, float]:
+    x0, y0, x1, y1 = _box(c)
+    args = end.get("anchor", {}).get("args", {})
+    return ((x0 + x1) / 2 + args.get("dx", 0), (y0 + y1) / 2 + args.get("dy", 0))
+
+
+def _overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def layout_problems(model: dict[str, Any], margin: int = 20) -> list[str]:
+    """Geometry the diagram must keep: every node inside one boundary with a margin, nothing overlapping, every flow
+    drawn as axis-aligned legs that do not pass through a node other than its two ends."""
+    cells = _diagram(model)
+    by = {c["id"]: c for c in cells}
+    nodes = [c for c in cells if c["shape"] in NODE_SHAPES]
+    boundaries = [c for c in cells if c["shape"].startswith("trust-boundary")]
+    problems: list[str] = []
+    if not nodes or not boundaries:
+        return ["no nodes or no boundaries collected"]
+    for c in nodes + boundaries:
+        if "position" not in c or "size" not in c:
+            problems.append(f"{c['id']}: no position or size")
+    if problems:
+        return problems
+    for n in nodes:
+        nb = _box(n)
+        homes = [b["id"] for b in boundaries if _overlap(nb, _box(b))]
+        inside = [
+            b["id"]
+            for b in boundaries
+            if _box(b)[0] + margin <= nb[0]
+            and _box(b)[1] + margin <= nb[1]
+            and nb[2] <= _box(b)[2] - margin
+            and nb[3] <= _box(b)[3] - margin
+        ]
+        if len(homes) > 1:
+            problems.append(f"{n['id']} touches several boundaries {homes}")
+        if homes and homes != inside:
+            problems.append(f"{n['id']} is not fully inside {homes} with a margin of {margin}")
+    for i, a in enumerate(nodes):
+        for b in nodes[i + 1 :]:
+            if _overlap(_box(a), _box(b)):
+                problems.append(f"{a['id']} overlaps {b['id']}")
+    for i, a in enumerate(boundaries):
+        for b in boundaries[i + 1 :]:
+            if _overlap(_box(a), _box(b)):
+                problems.append(f"boundary {a['id']} overlaps {b['id']}")
+    for f in (c for c in cells if c["shape"] == "flow"):
+        s, t = by[f["source"]["cell"]], by[f["target"]["cell"]]
+        pts = [_anchor(s, f["source"])] + [(v["x"], v["y"]) for v in f.get("vertices", [])] + [_anchor(t, f["target"])]
+        for p, q in pairwise(pts):
+            if p[0] != q[0] and p[1] != q[1]:
+                problems.append(f"{f['id']} has a slanted leg {p}->{q}")
+            seg = (min(p[0], q[0]), min(p[1], q[1]), max(p[0], q[0]), max(p[1], q[1]))
+            for n in nodes:
+                if n["id"] in (s["id"], t["id"]):
+                    continue
+                nx0, ny0, nx1, ny1 = _box(n)
+                if seg[0] < nx1 and nx0 < seg[2] and seg[1] < ny1 and ny0 < seg[3]:
+                    problems.append(f"{f['id']} passes through {n['id']}")
+    return problems
+
+
+def test_diagram_layout_is_clean() -> None:
+    """Pins geometry only (issue 246): nothing clipped, overlapping or crossed by a flow."""
+    assert layout_problems(json.loads(MODEL.read_text(encoding="utf-8"))) == []
+
+
+def test_layout_guard_bites() -> None:
+    """A node dragged over a neighbor, out of its boundary, or onto a flow is reported."""
+    model = json.loads(MODEL.read_text(encoding="utf-8"))
+    cells = {c["id"]: c for c in _diagram(model)}
+    moved = json.loads(json.dumps(model))
+    mc = {c["id"]: c for c in _diagram(moved)}
+    mc["a-agent"]["position"] = dict(cells["p-guard"]["position"])
+    assert any("overlaps" in p for p in layout_problems(moved))
+    moved = json.loads(json.dumps(model))
+    mc = {c["id"]: c for c in _diagram(moved)}
+    mc["a-maint"]["position"] = {"x": 1200, "y": 560}  # straddles the user boundary's right edge
+    assert any("not fully inside" in p for p in layout_problems(moved))
+    moved = json.loads(json.dumps(model))
+    mc = {c["id"]: c for c in _diagram(moved)}
+    mc["f-edit"]["vertices"] = [{"x": 1000, "y": 1000}, {"x": 820, "y": 1000}]  # slanted legs
+    assert any("slanted" in p for p in layout_problems(moved))
+    moved = json.loads(json.dumps(model))
+    mc = {c["id"]: c for c in _diagram(moved)}
+    mc["f-edit"]["vertices"] = [{"x": 500, "y": 620}, {"x": 820, "y": 620}]  # runs through the maintainer actor
+    assert any("passes through" in p for p in layout_problems(moved))

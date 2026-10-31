@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- SAFO threat model diagram (#246): the Threat Dragon file opened as an unreadable tangle. Rebuilt the geometry only: six
+  aligned boundary boxes with room around their contents, every shape inside its own boundary on a 20 px grid, flows as
+  straight or right-angle lines with explicit vertices (none through a shape), short flow labels on clear stretches, and
+  the shape and boundary names drawn on the canvas. Ids, names, descriptions, threats and mitigations are unchanged.
+  `tests/test_safo_threat_model.py` gains a layout guard (containment, overlap, flow clearance) with a negative case.
+  Checked by opening the file in Threat Dragon 2.6.2 in a headless browser (`scripts/threat_dragon_shots.py`).
 - Threat model for SAFO as a whole (#228): `docs/safo-threat-model.md` (assets, actors, trust boundaries, 25 ranked risks,
   each with a mitigation marked verified or inferred, a verification and a residual risk) and the OWASP Threat Dragon file
   `docs/threat-model/safo.threat-dragon.json`. The paid Gemini broker keeps its own model. Linked from the README, the wiki
