@@ -34,6 +34,7 @@ from dataclasses import dataclass
 MAX_IMAGE_BYTES = 24 * 1024 * 1024  # decoded
 MAX_IMAGE_B64 = 4 * ((MAX_IMAGE_BYTES + 2) // 3)
 MAX_SIDE = 8192
+MAX_INFLATED = 128 * 1024 * 1024  # PNG rows the data may inflate to (4096 x 4096 at 8 bytes a pixel)
 MAX_PIXELS = 2**25  # 33,554,432: 8192 x 4096; the largest listed size (4K) is 4096 x 4096
 MIME_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -157,7 +158,10 @@ def _png_header(kind: bytes, body: bytes) -> tuple[tuple[int, int], int]:
     if depth not in _PNG_DEPTHS.get(color, ()) or method != 0 or filtering != 0 or interlace != 0:
         raise _no("the image is not a well formed PNG, or is interlaced")
     width, height = int.from_bytes(body[0:4], "big"), int.from_bytes(body[4:8], "big")
-    return (width, height), height * (1 + (width * _PNG_CHANNELS[color] * depth + 7) // 8)
+    rows = height * (1 + (width * _PNG_CHANNELS[color] * depth + 7) // 8)
+    if rows > MAX_INFLATED:  # bounds the work of the check below: nothing larger is ever inflated
+        raise _no("the image declares a size over the limit")
+    return (width, height), rows
 
 
 def _check_rows(parts: list[bytes], expected: int) -> None:

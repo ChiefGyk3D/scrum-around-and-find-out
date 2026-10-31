@@ -178,7 +178,9 @@ def _usage(block: object, names: tuple[str, str, str], prompt_bytes: int) -> Usa
 
 
 def _same_model(value: object, model: str) -> None:
-    if value is not None and (type(value) is not str or value != model):
+    """The answer must name the model that was asked for, exactly. An answer that names none is not trusted either:
+    it could come from another model, which would be priced here at this model's rates."""
+    if type(value) is not str or value != model:
         raise Unreadable("unreadable")
 
 
@@ -274,13 +276,14 @@ def parse_reply(req: BrokerRequest, body: bytes, prompt_bytes: int) -> Reply:
 # -- the cost ------------------------------------------------------------------------------------------------------
 
 
-def actual_cost(price: ModelPrice, usage: Usage, parts_returned: int) -> int:
+def actual_cost(price: ModelPrice, usage: Usage, parts_returned: int, image_size: str = "") -> int:
     """What the reported usage bills, in micro-dollars, rounded up. Output tokens of every kind are priced at the dearer
     output rate, the same rate the reservation uses, so this is never below the true figure for a mixed answer. The
     month counts at least the smallest per-image figure for each image item returned."""
     rate = max(price.text_output_per_mtok, price.image_output_per_mtok)
     cost = ceil_div(usage.input_tokens * price.input_per_mtok, MICRO) + ceil_div(usage.output_tokens * rate, MICRO)
-    floor = parts_returned * min(price.image_usd.values()) if price.image_usd else 0
+    each = price.image_usd.get(image_size, min(price.image_usd.values())) if price.image_usd else 0
+    floor = parts_returned * each
     return max(cost, floor)
 
 

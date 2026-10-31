@@ -539,6 +539,7 @@ def test_a_reply_with_no_image_is_refused_with_its_cost_counted(rig: Rig) -> Non
 
 def test_a_second_identical_part_is_dropped_the_first_kept_and_both_are_billed(rig: Rig) -> None:
     rig.vendor.mode = "duplicated_part"
+    rig.vendor.tokens_out = 2 * 1120 + 50  # two 1K images' worth of tokens
     result = rig.run(image_req())
     assert result.code == "ok" and len(result.images) == 1 and result.receipt.extra_images == 1
     assert only_call(rig).actual_micro >= 2 * 33_600  # the floor counts every image item that came back
@@ -546,6 +547,7 @@ def test_a_second_identical_part_is_dropped_the_first_kept_and_both_are_billed(r
 
 def test_more_images_than_were_approved_are_never_decoded(rig: Rig) -> None:
     rig.vendor.extra_parts = [{"type": "image", "data": "!!not base64!!", "mime_type": "image/png"}] * 3
+    rig.vendor.tokens_out = 4 * 1120 + 50
     result = rig.run(image_req())
     assert result.code == "ok" and len(result.images) == 1 and result.receipt.extra_images == 3
 
@@ -839,3 +841,39 @@ def test_an_error_after_the_call_is_settled_does_not_turn_it_into_an_ambiguous_o
         rig.run(text_req())
     rec = only_call(rig)
     assert rec.state is CallState.SETTLED and not rec.ambiguous and rec.actual_micro is not None
+
+
+def test_a_text_answer_that_names_no_model_is_ambiguous(rig: Rig) -> None:
+    rig.vendor.body = (
+        b'{"candidates":[{"content":{"parts":[{"text":"hello there"}]}}],'
+        b'"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}'
+    )
+    assert_ambiguous(rig, rig.run(text_req()), "unreadable")
+
+
+def test_an_image_answer_that_names_no_model_is_ambiguous(rig: Rig) -> None:
+    from fakevendor import b64
+
+    item = {"type": "image", "data": b64(png()), "mime_type": "image/png"}
+    rig.vendor.body = json.dumps(
+        {"outputs": [item], "usage": {"total_input_tokens": 10, "total_output_tokens": 1300}}
+    ).encode()
+    assert_ambiguous(rig, rig.run(image_req()), "unreadable")
+
+
+def test_two_images_cannot_be_paid_for_at_the_token_count_of_one(rig: Rig) -> None:
+    """One 4K image is 3780 tokens. Two image parts with that figure are under-reported by half."""
+    rig.vendor.mode = "duplicated_part"
+    rig.vendor.tokens_out = 3780
+    assert_ambiguous(rig, rig.run(image_req(image_size="4K", max_output_tokens=5000)), "usage")
+
+
+def test_two_images_that_report_enough_tokens_are_recorded_at_the_requested_size_each(
+    tmp_path: Path, key: Path
+) -> None:
+    rig = Rig(tmp_path, key)
+    rig.vendor.mode = "duplicated_part"
+    rig.vendor.tokens_out = 2 * 3780
+    result = rig.run(image_req(image_size="4K", max_output_tokens=9000))
+    assert result.code == "ok" and result.receipt.extra_images == 1
+    assert result.receipt.actual_micro >= 2 * 113_000  # two 4K figures, whatever the tokens cost

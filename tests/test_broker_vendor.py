@@ -292,3 +292,21 @@ def test_the_month_counts_at_least_the_smallest_per_image_figure_for_each_image(
 )  # fmt: skip
 def test_retry_after_is_a_finite_figure_under_a_day(value: str | None, want: int | None) -> None:
     assert retry_after_seconds(value) == want
+
+
+def test_the_floor_for_an_image_is_the_figure_for_the_size_that_was_asked_for() -> None:
+    price = table().models[IMAGE_MODEL]  # 1K 0.0336, 2K 0.0504, 4K 0.113
+    assert actual_cost(price, Usage(0, 0), 2, "4K") == 2 * 113_000
+    assert actual_cost(price, Usage(0, 0), 1, "2K") == 50_400
+    assert actual_cost(price, Usage(0, 0), 1, "") == 33_600  # no size known: the smallest figure
+
+
+def test_an_answer_that_names_no_model_is_unreadable() -> None:
+    text = reply("text")
+    text.pop("modelVersion")
+    image = reply("image")
+    image.pop("model")
+    for kind, data in (("text", text), ("image", image)):
+        with pytest.raises(Unreadable) as err:
+            parse(kind, data)
+        assert err.value.reason == "unreadable"

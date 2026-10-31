@@ -312,3 +312,9 @@ def test_an_interlaced_png_is_refused() -> None:
 
 def test_a_declared_size_over_the_limit_is_refused_before_the_data_is_looked_at() -> None:
     refuses(png_of(ihdr(8193, 1), chunk(b"IDAT", b"x"), IEND))
+
+
+def test_image_data_that_would_inflate_past_the_limit_is_refused_without_inflating_it() -> None:
+    with pytest.raises(ImageRefused, match="over the limit"):
+        sniff(png_of(ihdr(8192, 4096, depth=16, color=6), chunk(b"IDAT", b"x"), IEND))
+    assert sniff(png_of(ihdr(4096, 4096, depth=8, color=6), idat(4096, 4096, channels=4), IEND)).width == 4096
