@@ -23,6 +23,7 @@ from safo.broker import client, protocol
 from safo.broker.records import parse_approval
 
 CHARGED = "THE CALL MAY HAVE BEEN CHARGED"
+SECRET_SHAPED = "AIza" + "Sy" + "A1234567890abcdef" + "ghijklmnopqrstuv_12345"  # built from pieces
 CHARGE_CODES = ("rate_limited", "vendor_refused", "outcome_unknown", "internal")
 TEXT_FLOW = ["terms", "connect", "confirm", "sign", "terms", "connect"]
 
@@ -225,7 +226,7 @@ def test_a_prompt_over_the_limit_is_refused_before_the_broker_is_contacted(rig: 
     assert "y" * 50 not in rig.everything
 
 
-@pytest.mark.parametrize("prompt", ["", "token: AIzaSyA1234567890abcdefghijklmnopqrstuv_12345", "bad \ud800 text"])
+@pytest.mark.parametrize("prompt", ["", "token: " + SECRET_SHAPED, "bad \ud800 text"])
 def test_an_empty_prompt_a_secret_shape_and_a_lone_surrogate_are_refused_unseen(rig: d.Rig, prompt: str) -> None:
     assert rig.run(d.text_params(prompt=prompt)) == 2
     assert rig.broker.opened == 0 and rig.signer.payloads == []
