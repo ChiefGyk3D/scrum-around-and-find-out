@@ -633,7 +633,6 @@ def test_the_linear_time_guard_bites_on_quadratic_work(monkeypatch: pytest.Monke
     assert not _grows_linearly(_brace_lines, (_GEMINIBRIEF, __file__)), "a quadratic scan is caught"
 
 
-
 def test_a_line_past_the_length_bound_that_could_hold_a_risk_token_is_unreadable_not_cut() -> None:
     long = "$BIN " + "x " * 5000 + "--paid\n"
     assert GEMINI_PAID in rules(long + PUBLIC)
