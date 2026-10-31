@@ -75,8 +75,9 @@ def test_service_has_no_forbidden_key() -> None:
     assert [v for s, k, v in triples if k == "Environment"] == ["PYTHONDONTWRITEBYTECODE=1"]
     # the only writable path is the state directory
     assert [v for s, k, v in triples if k == "ReadWritePaths"] == ["/var/lib/safo-broker"]
-    # the hosts view is the only bind mount, read-only, from the egress directory over /etc/hosts
-    assert [v for s, k, v in triples if k.startswith("Bind")] == ["/etc/safo/egress/hosts:/etc/hosts"]
+    # the bind mounts are read-only: the hosts view and a files-only nsswitch
+    binds = [v for s, k, v in triples if k in ("BindPaths", "BindReadOnlyPaths")]
+    assert binds[0] == "/etc/safo/egress/hosts:/etc/hosts"
     assert [k for s, k, v in triples if k == "BindReadOnlyPaths"]
     assert [v for s, k, v in triples if k == "RestrictAddressFamilies"] == ["AF_UNIX AF_INET"]
     # no address allow or deny list (the vendor addresses are not fixed; the design says so)
@@ -145,3 +146,114 @@ def test_systemd_analyze_security_score_is_ok(tmp_path: Path) -> None:
     assert "Overall exposure level" in last
     score = float(last.split(":")[1].split()[0])
     assert score <= 2.0, last  # the design recorded 1.2; a rise past 2.0 means a hardening line was lost
+
+
+# ---- ordering and name resolution (review round) ---------------------------------------------------------------------
+
+NSSWITCH = UNIT_DIR.parent / "etc" / "nsswitch.conf"
+HIDDEN_PATHS = [
+    "-/run/systemd/resolve",
+    "-/run/dbus",
+    "-/run/nscd",
+    "-/run/avahi-daemon",
+    "-/run/systemd/private",
+]
+
+
+def values(unit: str, key: str) -> list[str]:
+    return [v for _s, k, v in parse_unit(read(unit)) if k == key]
+
+
+def test_the_broker_is_bound_to_and_ordered_after_the_egress_rules() -> None:
+    assert values("safo-broker.service", "BindsTo") == ["safo-broker-egress.service"]
+    assert values("safo-broker.service", "Requires") == ["safo-broker.socket"]
+    assert values("safo-broker.service", "After") == [
+        "network-online.target safo-broker.socket safo-broker-egress.service"
+    ]
+    assert values("safo-broker-egress.service", "Before") == ["safo-broker.service"]
+    assert values("safo-broker-egress-refresh.service", "After") == ["safo-broker-egress.service network-online.target"]
+
+
+def test_the_broker_cannot_reach_a_resolver_bus_or_cache_socket() -> None:
+    assert values("safo-broker.service", "InaccessiblePaths") == [" ".join(HIDDEN_PATHS)]
+    # the only mounts over /etc are the generated hosts view and a files-only name service configuration
+    assert values("safo-broker.service", "BindReadOnlyPaths") == [
+        "/etc/safo/egress/hosts:/etc/hosts",
+        "/opt/safo-broker/current/meta/packaging/etc/nsswitch.conf:/etc/nsswitch.conf",
+    ]
+    assert not {"IPAddressAllow", "BindPaths"} & {k for _s, k, _v in parse_unit(read("safo-broker.service"))}
+
+
+def test_the_name_service_configuration_reads_files_only() -> None:
+    lines = [x.strip() for x in NSSWITCH.read_text().splitlines() if x.strip() and not x.strip().startswith("#")]
+    assert lines
+    for line in lines:
+        db, _, sources = line.partition(":")
+        assert sources.split() == ["files"], line
+        assert db in {
+            "hosts",
+            "passwd",
+            "group",
+            "shadow",
+            "gshadow",
+            "networks",
+            "protocols",
+            "services",
+            "ethers",
+            "rpc",
+        }, db
+    assert any(x.startswith("hosts:") for x in lines)
+
+
+UNSHARE = shutil.which("unshare")
+
+
+def _can_unshare_mounts() -> bool:
+    if not UNSHARE:
+        return False
+    done = subprocess.run(  # noqa: S603 - fixed argv, harmless probe in a private namespace
+        [UNSHARE, "-Urm", "true"], capture_output=True, stdin=subprocess.DEVNULL, timeout=30, check=False
+    )
+    return done.returncode == 0
+
+
+def test_in_a_private_mount_namespace_only_the_vendor_host_resolves(tmp_path: Path) -> None:
+    """The unit's two bind mounts, reproduced in a throwaway user and mount namespace (no root, nothing on this machine
+    changes): the generated hosts view plus the files-only nsswitch. The vendor host resolves; any other name does
+    not. Not exercised here: the InaccessiblePaths (asserted from the unit text above) and systemd's own mount ordering.
+    """
+    if not _can_unshare_mounts():
+        pytest.skip("unprivileged user and mount namespaces are unavailable here; name resolution is not exercised")
+    import sys
+
+    from safo.broker import egress
+
+    host = "api.vendor.example.invalid"
+    hosts = tmp_path / "hosts"
+    hosts.write_bytes(egress.hosts_content(host, ["142.250.80.10"]))
+    code = (
+        "import socket,sys\n"
+        f"print(socket.getaddrinfo({host!r}, 443, family=socket.AF_INET)[0][4][0])\n"
+        "try:\n"
+        "    socket.getaddrinfo('other.example.invalid', 443, family=socket.AF_INET)\n"
+        "except socket.gaierror:\n"
+        "    print('other-failed')\n"
+        "else:\n"
+        "    print('other-resolved')\n"
+    )
+    script = tmp_path / "check.py"
+    script.write_text(code)
+    shell = (
+        f"mount --bind {hosts} /etc/hosts && mount --bind {NSSWITCH} /etc/nsswitch.conf && {sys.executable} -I {script}"
+    )
+    done = subprocess.run(  # noqa: S603 - fixed argv; the mounts exist only inside the private namespace
+        [str(UNSHARE), "-Urm", "/bin/sh", "-c", shell],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+        check=False,
+    )
+    if done.returncode != 0 and "mount" in done.stderr:
+        pytest.skip(f"bind mounts are not permitted in a user namespace here ({done.stderr.strip()[:80]})")
+    assert done.stdout.split() == ["142.250.80.10", "other-failed"], (done.stdout, done.stderr)

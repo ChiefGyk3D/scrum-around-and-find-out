@@ -3,13 +3,14 @@
 # Egress: the vendor addresses are not fixed, so IPAddressAllow= is not used. Instead safo-broker-egress.service loads an
 # nftables ruleset keyed on this unit's user (port 443 to a refreshed set of vendor addresses only, no DNS, no IPv6) and
 # writes the hosts view bind-mounted over /etc/hosts below, so this service resolves the vendor name without DNS. The
-# service requires that unit and will not start without it.
+# service is bound to that unit (it starts only with it and stops when it stops) and cannot reach a resolver, bus or name-
+# cache socket: those directories are inaccessible and /etc/nsswitch.conf is a files-only copy.
 # ConditionPathExists= makes the service skip its start while the root-owned switch file is absent. The broker still
 # reads the switch on every request and requires the single line "enabled"; the condition is a second, outer layer.
 [Unit]
 Description=SAFO Gemini broker
 Requires=safo-broker.socket
-Requires=safo-broker-egress.service
+BindsTo=safo-broker-egress.service
 After=network-online.target safo-broker.socket safo-broker-egress.service
 ConditionPathExists=/etc/safo/gemini-paid-enabled
 StartLimitIntervalSec=60
@@ -27,6 +28,8 @@ StateDirectoryMode=0700
 ReadWritePaths=/var/lib/safo-broker
 ReadOnlyPaths=/etc/safo /opt/safo-broker
 BindReadOnlyPaths=/etc/safo/egress/hosts:/etc/hosts
+BindReadOnlyPaths=/opt/safo-broker/current/meta/packaging/etc/nsswitch.conf:/etc/nsswitch.conf
+InaccessiblePaths=-/run/systemd/resolve -/run/dbus -/run/nscd -/run/avahi-daemon -/run/systemd/private
 UMask=0077
 Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=yes

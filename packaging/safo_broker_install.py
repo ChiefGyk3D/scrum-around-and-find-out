@@ -70,6 +70,7 @@ UNIT_NAMES = (
     "safo-broker-egress-refresh.timer",
 )
 EGRESS_RULES_REL = "packaging/nftables/safo-broker.nft"
+NSSWITCH_REL = "packaging/etc/nsswitch.conf"
 EGRESS_RESTART = ["try-restart", "safo-broker-egress.service", "safo-broker-egress-refresh.timer"]
 # Exposure budget per unit (systemd-analyze security, offline): a rise past it means a hardening line was lost.
 EXPOSURE_BUDGET = {
@@ -498,7 +499,8 @@ def extract_tree(repo: Path, commit: str, dest: Path, home: Path) -> dict[str, b
 UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
     "safo-broker.service": (
         ("Unit", "Requires", "safo-broker.socket"),
-        ("Unit", "Requires", "safo-broker-egress.service"),
+        ("Unit", "BindsTo", "safo-broker-egress.service"),
+        ("Unit", "After", "network-online.target safo-broker.socket safo-broker-egress.service"),
         ("Unit", "ConditionPathExists", "/etc/safo/gemini-paid-enabled"),
         ("Unit", "StartLimitIntervalSec", "60"),
         ("Unit", "StartLimitBurst", "5"),
@@ -513,6 +515,16 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Service", "ReadWritePaths", "/var/lib/safo-broker"),
         ("Service", "ReadOnlyPaths", "/etc/safo /opt/safo-broker"),
         ("Service", "BindReadOnlyPaths", "/etc/safo/egress/hosts:/etc/hosts"),
+        (
+            "Service",
+            "BindReadOnlyPaths",
+            "/opt/safo-broker/current/meta/packaging/etc/nsswitch.conf:/etc/nsswitch.conf",
+        ),
+        (
+            "Service",
+            "InaccessiblePaths",
+            "-/run/systemd/resolve -/run/dbus -/run/nscd -/run/avahi-daemon -/run/systemd/private",
+        ),
         ("Service", "UMask", "0077"),
         ("Service", "Environment", "PYTHONDONTWRITEBYTECODE=1"),
         ("Service", "NoNewPrivileges", "yes"),
@@ -563,6 +575,8 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Install", "WantedBy", "sockets.target"),
     ),
     "safo-broker-egress.service": (
+        ("Unit", "Before", "safo-broker.service"),
+        ("Unit", "After", "network-online.target"),
         ("Service", "Type", "oneshot"),
         ("Service", "RemainAfterExit", "yes"),
         (
@@ -602,6 +616,7 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
     ),
     "safo-broker-egress-refresh.service": (
         ("Unit", "Requires", "safo-broker-egress.service"),
+        ("Unit", "After", "safo-broker-egress.service network-online.target"),
         ("Service", "Type", "oneshot"),
         ("Service", "ExecStart", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh"),
         ("Service", "TimeoutStartSec", "60s"),
@@ -642,9 +657,6 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
 HARMLESS_KEYS = (
     ("Unit", "Description"),
     ("Unit", "Documentation"),
-    ("Unit", "Before"),
-    ("Unit", "After"),
-    ("Unit", "Wants"),
 )
 UNIT_SECTIONS = {
     "safo-broker.service": ("Unit", "Service"),

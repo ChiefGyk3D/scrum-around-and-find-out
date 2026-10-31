@@ -11,7 +11,8 @@ UNIT_DIR = REPO / "packaging" / "systemd"
 # (section, key, value): every line must be present exactly as written. Multi-valued keys list each value.
 REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Unit", "Requires", "safo-broker.socket"),
-    ("Unit", "Requires", "safo-broker-egress.service"),
+    ("Unit", "BindsTo", "safo-broker-egress.service"),
+    ("Unit", "After", "network-online.target safo-broker.socket safo-broker-egress.service"),
     ("Unit", "ConditionPathExists", "/etc/safo/gemini-paid-enabled"),
     ("Unit", "StartLimitIntervalSec", "60"),
     ("Unit", "StartLimitBurst", "5"),
@@ -26,6 +27,12 @@ REQUIRED_SERVICE: tuple[tuple[str, str, str], ...] = (
     ("Service", "ReadWritePaths", "/var/lib/safo-broker"),
     ("Service", "ReadOnlyPaths", "/etc/safo /opt/safo-broker"),
     ("Service", "BindReadOnlyPaths", "/etc/safo/egress/hosts:/etc/hosts"),
+    ("Service", "BindReadOnlyPaths", "/opt/safo-broker/current/meta/packaging/etc/nsswitch.conf:/etc/nsswitch.conf"),
+    (
+        "Service",
+        "InaccessiblePaths",
+        "-/run/systemd/resolve -/run/dbus -/run/nscd -/run/avahi-daemon -/run/systemd/private",
+    ),
     ("Service", "UMask", "0077"),
     ("Service", "Environment", "PYTHONDONTWRITEBYTECODE=1"),
     ("Service", "NoNewPrivileges", "yes"),
@@ -78,6 +85,8 @@ REQUIRED_SOCKET: tuple[tuple[str, str, str], ...] = (
 )
 
 REQUIRED_EGRESS: tuple[tuple[str, str, str], ...] = (
+    ("Unit", "Before", "safo-broker.service"),
+    ("Unit", "After", "network-online.target"),
     ("Service", "Type", "oneshot"),
     ("Service", "RemainAfterExit", "yes"),
     (
@@ -118,6 +127,7 @@ REQUIRED_EGRESS: tuple[tuple[str, str, str], ...] = (
 
 REQUIRED_REFRESH: tuple[tuple[str, str, str], ...] = (
     ("Unit", "Requires", "safo-broker-egress.service"),
+    ("Unit", "After", "safo-broker-egress.service network-online.target"),
     ("Service", "Type", "oneshot"),
     ("Service", "ExecStart", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.egress refresh"),
     ("Service", "TimeoutStartSec", "60s"),
@@ -163,13 +173,7 @@ REQUIRED_BY_UNIT = {
 }
 
 # Keys a release may add without being pinned: they describe or order the unit and grant nothing.
-HARMLESS_KEYS = (
-    ("Unit", "Description"),
-    ("Unit", "Documentation"),
-    ("Unit", "Before"),
-    ("Unit", "After"),
-    ("Unit", "Wants"),
-)
+HARMLESS_KEYS = (("Unit", "Description"), ("Unit", "Documentation"))
 
 # Keys that must never appear: each would widen the sandbox or add a way around it.
 FORBIDDEN_SERVICE_KEYS = ("DynamicUser", "PrivateUsers", "EnvironmentFile", "PermissionsStartOnly", "PassEnvironment")

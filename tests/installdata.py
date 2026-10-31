@@ -169,6 +169,7 @@ class World:
         for unit in sorted(UNIT_DIR.iterdir()):
             files[f"packaging/systemd/{unit.name}"] = (units or {}).get(unit.name) or unit.read_text()
         files["packaging/nftables/safo-broker.nft"] = (UNIT_DIR.parent / "nftables" / "safo-broker.nft").read_text()
+        files["packaging/etc/nsswitch.conf"] = (UNIT_DIR.parent / "etc" / "nsswitch.conf").read_text()
         files.update(extra or {})
         for rel, text in files.items():
             target = self.repo / rel

@@ -416,3 +416,39 @@ def test_the_systemd_cross_check_refuses_a_weakened_service_even_if_the_policy_w
         (units / name).write_text(text)
     with pytest.raises(InstallError, match="exposure"):
         install.default_verify_units(units, release)
+
+
+@pytest.mark.parametrize("key", ["After", "Before", "Wants"])
+def test_ordering_and_wants_are_pinned_not_free(key: str) -> None:
+    assert ("Unit", key) not in HARMLESS_KEYS
+    text = read("safo-broker.service").replace("[Unit]\n", f"[Unit]\n{key}=something-else.target\n", 1)
+    refused("safo-broker.service", text)
+
+
+def test_the_broker_cannot_lose_its_dependency_on_the_egress_rules() -> None:
+    base = read("safo-broker.service")
+    refused("safo-broker.service", base.replace("BindsTo=safo-broker-egress.service\n", ""))
+    refused(
+        "safo-broker.service",
+        base.replace(
+            "After=network-online.target safo-broker.socket safo-broker-egress.service",
+            "After=network-online.target safo-broker.socket",
+        ),
+    )
+    refused(
+        "safo-broker.service", base.replace("BindsTo=safo-broker-egress.service", "Wants=safo-broker-egress.service")
+    )
+    refused(
+        "safo-broker-egress.service", read("safo-broker-egress.service").replace("Before=safo-broker.service\n", "")
+    )
+
+
+def test_the_resolver_paths_cannot_be_dropped_or_narrowed() -> None:
+    base = read("safo-broker.service")
+    for hidden in ("-/run/systemd/resolve", "-/run/dbus", "-/run/nscd", "-/run/avahi-daemon", "-/run/systemd/private"):
+        refused("safo-broker.service", base.replace(f" {hidden}", "").replace(f"{hidden} ", ""))
+    refused("safo-broker.service", base.replace("InaccessiblePaths=", "InaccessiblePaths=/tmp "))
+    refused(
+        "safo-broker.service",
+        base.replace("/opt/safo-broker/current/meta/packaging/etc/nsswitch.conf", "/etc/nsswitch.conf"),
+    )
