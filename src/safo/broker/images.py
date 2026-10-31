@@ -10,9 +10,9 @@ and markers the format puts there, so that what was checked is what a viewer wou
 * the walk must land exactly on the end of the data: a JPEG on its end marker (found by skipping segment lengths and
   the entropy-coded data, never by looking at the last two bytes), a PNG on a zero-length `IEND` chunk, a WebP on the
   RIFF length. Anything after it, a second image, a second frame header or a segment whose length overruns is refused;
-* a segment or chunk that is not on the format's allow-list is refused (a JPEG marker nobody needs, a PNG critical
-  chunk we do not know, an animation, a WebP chunk that is not metadata or the one image), and so is a PNG chunk with
-  a wrong checksum;
+* a segment or chunk that is not on the format's allow-list is refused (a JPEG marker nobody needs, a PNG chunk we do
+  not know or one that holds compressed metadata, an animation, a WebP chunk that is not metadata or the one image),
+  and so is a PNG chunk with a wrong checksum;
 * the width and height are read from the one frame header the walk accepted (PNG `IHDR`, the JPEG frame header, the
   WebP image chunk, which must agree with the `VP8X` canvas) and capped, per side and in pixels;
 * the base64 text must be canonical (the encoding of the bytes it decodes to), so no bit is hidden in padding.
@@ -47,6 +47,26 @@ _JPEG_NEXT_MARKER = re.compile(
     rb"\xff[^\x00\xd0-\xd7]"
 )  # in entropy data: FF 00 is a stuffed byte, FF D0..D7 a restart
 _PNG_DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
+_PNG_CHUNKS = (
+    frozenset(  # the palette and the plain (not compressed) ancillary chunks; zTXt, iTXt and iCCP are left out
+        {
+            b"PLTE",
+            b"tEXt",
+            b"tIME",
+            b"pHYs",
+            b"sRGB",
+            b"gAMA",
+            b"cHRM",
+            b"sBIT",
+            b"bKGD",
+            b"tRNS",
+            b"hIST",
+            b"eXIf",
+            b"cICP",
+        }
+        | {b"caBX"}
+    )
+)
 _PNG_NEVER = frozenset({b"acTL", b"fcTL", b"fdAT", b"IHDR"})  # animation, and a second header
 _WEBP_META = frozenset({b"ICCP", b"ALPH", b"EXIF", b"XMP "})
 
@@ -114,7 +134,7 @@ def _png(data: bytes) -> ImageInfo:
                 if size or run != 2 or end + 4 != size_all:
                     raise _no("the image does not end where a PNG ends")
                 return _check_dims("image/png", *dims)
-            if not kind[0] & 0x20 and kind != b"PLTE":  # a critical chunk this code does not know
+            if kind not in _PNG_CHUNKS:  # compressed metadata can expand without limit later, so it is not passed on
                 raise _no("the image has a chunk this program does not accept")
         pos = end + 4
     raise _no("the image has too many chunks")

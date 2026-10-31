@@ -192,6 +192,8 @@ class Pipeline:
             reply = parse_reply(req, raw.body, priced.prompt_bytes)
         except Unreadable as err:
             return self._ambiguous(ticket, req, priced, err.reason)
+        if reply.parts_returned and reply.usage.output_tokens < priced.price.image_tokens.get(req.image_size, 0):
+            return self._ambiguous(ticket, req, priced, "usage")  # an image of this size is at least this many tokens
         cost = actual_cost(priced.price, reply.usage, reply.parts_returned)
         if reply.cap_exceeded:  # decision 13: recorded at the cap or the reported usage, whichever is higher
             out_rate = max(priced.price.text_output_per_mtok, priced.price.image_output_per_mtok)

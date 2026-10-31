@@ -760,3 +760,36 @@ def test_only_a_call_that_returned_an_answer_can_breach_the_output_cap(tmp_path:
         ledger.settle(ticket.call_id, "rate_limited", 0, NOW, cap_breach=True)
     assert ledger.view().calls[ticket.call_id].state is CallState.SENT
     assert ledger.settle(ticket.call_id, "ok", 10, NOW, cap_breach=True).breach
+
+
+@pytest.mark.parametrize("tokens_out", [0, 1, 100, 1119])
+def test_an_image_whose_reported_output_is_below_the_size_it_must_have_is_ambiguous(rig: Rig, tokens_out: int) -> None:
+    """A 1K image is 1120 output tokens. A figure below that cannot be true, so the cost is not taken from it."""
+    rig.vendor.tokens_out = tokens_out
+    assert_ambiguous(rig, rig.run(image_req()), "usage")
+
+
+def test_an_image_at_exactly_the_size_it_must_have_is_priced_from_its_usage(rig: Rig) -> None:
+    rig.vendor.tokens_out = 1120
+    assert rig.run(image_req()).code == "ok"
+
+
+def test_a_large_image_is_not_accepted_on_the_figure_of_a_small_one(rig: Rig) -> None:
+    """4K is 3780 output tokens on this model: a reply that reports the 1K figure would be recorded far too low."""
+    req = image_req(image_size="4K", max_output_tokens=5000)
+    rig.vendor.tokens_out = 1200
+    assert_ambiguous(rig, rig.run(req), "usage")
+
+
+def test_a_large_image_at_its_own_size_is_recorded_at_more_than_the_smallest_figure(tmp_path: Path, key: Path) -> None:
+    rig = Rig(tmp_path, key)
+    rig.vendor.tokens_out = 3780
+    result = rig.run(image_req(image_size="4K", max_output_tokens=5000))
+    assert result.code == "ok" and result.receipt.actual_micro >= 3780 * 30  # at the image output rate
+    assert result.receipt.actual_micro > 33_600
+
+
+def test_a_reply_with_no_image_is_not_held_to_an_image_size(rig: Rig) -> None:
+    rig.vendor.part = {"type": "text", "text": "I cannot draw that"}
+    rig.vendor.tokens_out = 5
+    assert rig.run(image_req()).code == "vendor_refused"

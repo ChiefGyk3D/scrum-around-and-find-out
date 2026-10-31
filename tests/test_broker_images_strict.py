@@ -8,6 +8,7 @@ two bytes of a JPEG and read the first frame header)."""
 from __future__ import annotations
 
 import struct
+import zlib
 
 import pytest
 
@@ -241,3 +242,32 @@ def test_a_lossless_header_with_a_nonzero_version_is_refused() -> None:
     versioned = b"\x2f" + (1 << 29).to_bytes(4, "little")
     refuses(riff(wchunk(b"VP8L", versioned)))
     assert sniff(riff(wchunk(b"VP8L", vp8l_payload(2, 2)))).width == 2
+
+
+@pytest.mark.parametrize("kind", [b"zTXt", b"iTXt", b"iCCP", b"abCD", b"prVt"])
+def test_compressed_metadata_and_unknown_ancillary_chunks_are_refused(kind: bytes) -> None:
+    """A tiny chunk can expand to a huge buffer in whatever reads the metadata later, so it is never passed on."""
+    refuses(png_of(ihdr(), chunk(kind, b"k\x00\x00" + zlib.compress(b"\x00" * 1_000_000)), IDAT, IEND))
+    refuses(png_of(ihdr(), IDAT, chunk(kind, b"x"), IEND))
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        b"tEXt",
+        b"tIME",
+        b"pHYs",
+        b"sRGB",
+        b"gAMA",
+        b"cHRM",
+        b"sBIT",
+        b"bKGD",
+        b"tRNS",
+        b"hIST",
+        b"eXIf",
+        b"cICP",
+        b"caBX",
+    ],
+)
+def test_the_listed_plain_ancillary_chunks_are_accepted(kind: bytes) -> None:
+    assert sniff(png_of(ihdr(), chunk(kind, b"abc"), IDAT, IEND)).width == 1
