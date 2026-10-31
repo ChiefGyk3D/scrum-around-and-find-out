@@ -1295,27 +1295,34 @@ def test_the_server_module_makes_no_socket_or_socketpair_call_while_it_serves_an
     pair_b.close()
 
 
-def test_the_stop_pipe_is_closed_when_serve_returns_and_a_late_stop_writes_nowhere(tmp_path: Path, env: Env) -> None:
+def test_the_stop_pipe_is_closed_when_serve_returns_and_a_late_stop_writes_nowhere(
+    tmp_path: Path, env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(tmp_path / "p.sock"))
     listener.listen(1)
     read_fd, write_fd = env.server._wake_r, env.server._wake_w
+    closed: list[int] = []
+    written: list[int] = []
+    real_close, real_write = os.close, os.write
+
+    def spy_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    def spy_write(fd: int, data: Any) -> int:
+        written.append(fd)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "close", spy_close)
+    monkeypatch.setattr(os, "write", spy_write)
     env.server.stop()
     assert env.server.serve(listener) == 0
     listener.close()
-    for fd in (read_fd, write_fd):
-        with pytest.raises(OSError):
-            os.fstat(fd)  # both ends are closed
-    # the number of the old write end is now somebody else's descriptor: a late stop (a signal after the end) must not
-    # write into it
-    other_r, other_w = os.pipe2(os.O_NONBLOCK)
-    os.dup2(other_w, write_fd)
-    try:
-        env.server.stop()
-        with pytest.raises(BlockingIOError):
-            os.read(other_r, 1)
-    finally:
-        os.close(write_fd)
-        os.close(other_r)
-        os.close(other_w)
+    assert {read_fd, write_fd} <= set(closed)  # both ends were closed when serve returned
+    assert (env.server._wake_r, env.server._wake_w) == (-1, -1)
+    assert written == [write_fd]  # the one stop before serve
+    env.server.stop()  # a late stop (a signal after the end) writes nowhere: the number may be someone else's now
+    assert written == [write_fd]
     env.server.close()  # idempotent
+    assert closed.count(read_fd) == 1
