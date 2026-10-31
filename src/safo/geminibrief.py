@@ -66,13 +66,22 @@ DECODE = re.compile(
 )
 SINK_RE = re.compile(SINK)
 SHELL_WILD = frozenset("$*?[]{}`%")
-RISKY_ACTIONS = ("ask", "approve", "paid-dryrun")  # bare `paid` is an action word elsewhere, see _RISK_TOKEN (#287)
+RISKY_ACTIONS = ("ask", "approve", "paid", "paid-dryrun")  # the broker entries are paid action words (#287)
 ACTIONS = ("ask", "approve", "quota", "paid", "paid-dryrun")  # paid and paid-dryrun: the broker entries (#287)
 # inline code in prose that wraps a known word, an option or a file name; any other word in backticks runs as a command
 MARKDOWN_WORD = re.compile(
     r"^`(?:ask|approve|quota|paid|paid-dryrun|gemini|safo|--[a-z-]{1,30}|[\w.-]{0,60}[./][\w./-]{0,100})`[.,:;)]*$"
 )
 VENDOR_RE = re.compile(re.escape(VENDOR_HOST))
+# The bare word `paid` is also ordinary English ("the paid tier"), unlike `ask` and `approve` in this grammar. A line
+# that is prose (no run-time construct on it, or a markdown table row) has the bare word neutralized before any scan;
+# every other line keeps it, so `echo paid | xargs safo gemini`, `A=paid`, `eval` of a string and `safo gemini paid`
+# stay read.
+# `paid-dryrun`, `--paid` and the broker options are never neutralized.
+_BARE_PAID = re.compile(r"(?<![\w-])paid(?![\w-])")
+_RUNTIME_SIGNAL = re.compile(
+    r"\bxargs\b|\beval\b|(?<![\w-])-c\b|\s\|\s|\$|=\s*[\"']?paid(?![\w-])|\bgemini\s+paid\b|\bfor\b.*\bin\b"
+)
 # Every detector pattern, so the cheap prefilter below can never miss what a detector would catch. A new detector regex
 # must be added here (a test fails otherwise); the second field names it.
 # words built with escapes, printf -v, ANSI-C quoting: a brief that has them is read even without a Gemini word
@@ -212,6 +221,14 @@ _FAIL_CLOSED = [
 ]
 
 TermsSource = tuple[re.Pattern[str], ...] | Callable[[], tuple[re.Pattern[str], ...]]
+
+
+def _neutral_prose(line: str) -> str:
+    """A prose line has the bare word `paid` replaced (see `_BARE_PAID`); a line with a run-time construct, or that is
+    not a markdown table row but holds the Gemini command group before the word, is returned unchanged."""
+    if _BARE_PAID.search(line) is None or (_RUNTIME_SIGNAL.search(line) and not line.lstrip().startswith("|")):
+        return line
+    return _BARE_PAID.sub("p-id", line)
 
 
 def findings(
@@ -599,9 +616,9 @@ _READ_NAME = re.compile(r"(?<![\w-])read\s+(?:-\w+\s+)*([A-Za-z_]\w*)")
 _REFERENCE = re.compile(r"\$\{?[!#]?([A-Za-z_][A-Za-z0-9_]*)")
 _ANSI_ESCAPE = re.compile(r"\$'[^']*\\[^']*'")
 _RISK_TOKEN = re.compile(
-    r"--paid|--approval|--cap(?![\w-])|--max-usd|--job(?![\w-])|(?<![\w-])(?:ask|approve|paid-dryrun|paid(?=\s+-))(?![\w-])"
+    r"--paid|--approval|--cap(?![\w-])|--max-usd|--job(?![\w-])|(?<![\w-])(?:ask|approve|paid-dryrun|paid)(?![\w-])"
 )
-_PAID_TOKEN = re.compile(r"--paid|(?<![\w-])(?:approve|paid-dryrun|paid(?=\s+-))(?![\w-])")
+_PAID_TOKEN = re.compile(r"--paid|(?<![\w-])(?:approve|paid-dryrun|paid)(?![\w-])")
 _GEMINI_WORD = re.compile(r"\b(?:safo|gemini)\b|--paid|--approval|--cap(?![\w-])")
 _SHELL_C = re.compile(
     r"(?<![\w-])(?:bash|sh|zsh|dash|ksh|csh|tcsh|fish|pwsh|python[\d.]*|perl|ruby|node|php|lua)\b(?:\s+-{1,2}[\w-]+)*"
@@ -901,10 +918,10 @@ def _findings(
 
     tick()
     joined = _join(prompt)
-    lines = joined.splitlines()
+    lines = [_neutral_prose(line) for line in joined.splitlines()]
     whole = "\n".join(_views(line)[2] for line in lines)
     runtime_scan = bool(re.search(r"\bgemini\b", whole)) and bool(
-        re.search(r"(?<![\w-])(?:ask|approve|paid-dryrun|paid(?=\s+-))(?![\w-])|--paid", whole)
+        re.search(r"(?<![\w-])(?:ask|approve|paid-dryrun|paid)(?![\w-])|--paid", whole)
     )
     steps: list[Step] = []
     flags: dict[str, int] = {}
