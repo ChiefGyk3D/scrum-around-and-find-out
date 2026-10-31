@@ -85,7 +85,7 @@ def test_the_wiki_caller_is_pinned_and_only_the_publish_call_can_write() -> None
 
 
 def audited_lock_files(path: Path) -> set[str]:
-    """The requirement files the GYST security caller hands to pip-audit: its input plus any `--requirement` in the extra args."""
+    """The requirement files the GYST security caller gives pip-audit: the input plus any extra `--requirement`."""
     inputs = load(path)["jobs"]["security"]["with"]
     named = {str(inputs["pip-audit-requirements"])}
     extra = str(inputs.get("pip-audit-extra-args", "")).split()
