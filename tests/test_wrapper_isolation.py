@@ -408,6 +408,8 @@ def test_run_hands_the_gemini_command_to_the_wrapper_first(monkeypatch: pytest.M
     from safo import cli
 
     monkeypatch.setattr(sys, "argv", ["safo", "gemini", "quota", "--model", "m"])
+    for name in [k for k in os.environ if k.startswith(wrapper.STARTUP_PREFIXES) or k in wrapper.STARTUP_NAMES]:
+        monkeypatch.delenv(name)  # a CI runner sets some (the early refusal would answer first, which is its job)
     monkeypatch.setattr(wrapper, "enter", lambda words, env: 9 if next(iter(words)) == "gemini" else None)
     with pytest.raises(SystemExit) as stop:
         cli.run()
