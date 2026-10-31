@@ -83,7 +83,7 @@ def sof(width: int = 1, height: int = 1, marker: int = 0xC0) -> bytes:
 
 
 SOS = jseg(0xDA, b"\x01\x01\x00\x00\x3f\x00")
-JPEG_APP0 = jseg(0xE0, b"JFIF\x00")
+JPEG_APP0 = jseg(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")  # a plain JFIF header, no thumbnail
 
 
 def jpeg_of(*segments: bytes, scan: bytes = b"\x00", end: bytes = b"\xff\xd9") -> bytes:

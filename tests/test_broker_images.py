@@ -110,7 +110,7 @@ def test_a_polyglot_with_data_appended_is_refused() -> None:
 
 def test_a_chunk_hidden_after_the_png_end_marker_or_inside_is_not_followed() -> None:
     # data between IHDR and IEND is the format's own business; nothing after IEND is allowed
-    assert sniff(png(extra=chunk(b"tEXt", b""))).mime == "image/png"
+    assert sniff(png(extra=chunk(b"tEXt", b"k\x00v"))).mime == "image/png"
     with pytest.raises(ImageRefused):
         sniff(png() + png())
 

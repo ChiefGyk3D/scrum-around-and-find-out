@@ -254,7 +254,7 @@ def test_no_image_at_all_is_an_answer_with_no_images() -> None:
 
 
 def test_the_image_body_may_be_far_larger_than_a_text_body() -> None:
-    big = png(extra=chunk(b"tEXt", b"") * 3)
+    big = png(extra=chunk(b"tEXt", b"k\x00v") * 3)
     data = reply("image", outputs=[{"type": "image", "data": b64(big), "mime_type": "image/png"}])
     padded = json.dumps(data).encode() + b" " * (vendor.TEXT_BODY_CAP + 10)
     assert len(parse("image", padded).images) == 1

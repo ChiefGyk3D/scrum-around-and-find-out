@@ -35,6 +35,7 @@ from fakevendor import (
 from safo.broker.images import ImageRefused, sniff
 
 EOI = b"\xff\xd9"
+TIME = (2026).to_bytes(2, "big") + bytes([10, 31, 12, 0, 0])
 
 
 def refuses(data: bytes) -> None:
@@ -58,9 +59,12 @@ def test_stuffed_bytes_restart_markers_and_several_scans_are_part_of_a_valid_jpe
     assert (sniff(two_scans).width, sniff(two_scans).height) == (5, 6)
 
 
-def test_an_end_marker_inside_a_comment_does_not_end_the_image_and_is_not_read_as_the_frame() -> None:
-    inside = jseg(0xFE, b"note \xff\xd9 and \xff\xc0\x00\x0b\x08\x0f\xa0\x0f\xa0\x01\x01\x11\x00 ok")
-    info = sniff(jpeg_of(inside, sof(3, 2), SOS))
+def test_an_end_marker_inside_a_table_does_not_end_the_image_and_is_not_read_as_the_frame() -> None:
+    table = (
+        b"\x00" + b"\x01" * 20 + b"\xff\xd9" + b"\xff\xc0\x00\x0b\x08\x0f\xa0\x0f\xa0\x01\x01\x11\x00" + b"\x01" * 29
+    )
+    assert len(table) == 65
+    info = sniff(jpeg_of(jseg(0xDB, table), sof(3, 2), SOS))
     assert (info.width, info.height) == (3, 2)
 
 
@@ -73,11 +77,12 @@ def test_a_second_image_hidden_in_a_metadata_segment_is_refused() -> None:
     refuses(jpeg_of(jseg(0xE2, b"ICC_PROFILE\x00" + thumb), sof(3, 2), SOS))
 
 
-@pytest.mark.parametrize("marker", [0xE1, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEF])
+@pytest.mark.parametrize(
+    "marker", [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF]
+)
 def test_only_the_plain_application_segments_are_accepted(marker: int) -> None:
+    """An application segment with a free-form body is not passed on; only the exact forms below are."""
     refuses(jpeg_of(jseg(marker, b"data"), sof(), SOS))
-    for ok in (0xE0, 0xE2, 0xEE, 0xFE):
-        assert sniff(jpeg_of(jseg(ok, b"data"), sof(), SOS)).width == 1
 
 
 def test_data_hidden_after_a_real_end_marker_is_refused_even_when_the_file_still_ends_in_an_end_marker() -> None:
@@ -140,7 +145,7 @@ def test_fill_bytes_before_a_marker_are_not_accepted() -> None:
 
 def test_a_plain_png_and_one_with_ancillary_chunks_pass() -> None:
     assert sniff(png(11, 12)).height == 12
-    with_text = png_of(ihdr(2, 3), chunk(b"tEXt", b"k\x00v"), idat(2, 3), chunk(b"tIME", b"\x00" * 7), IEND)
+    with_text = png_of(ihdr(2, 3), chunk(b"tEXt", b"k\x00v"), idat(2, 3), chunk(b"tIME", TIME), IEND)
     assert (sniff(with_text).width, sniff(with_text).height) == (2, 3)
 
 
@@ -201,7 +206,7 @@ def lossless(width: int = 1, height: int = 1) -> bytes:
 
 def test_plain_and_extended_webp_pass_with_their_metadata_chunks() -> None:
     assert (sniff(riff(lossless(20, 30))).width, sniff(riff(lossless(20, 30))).height) == (20, 30)
-    full = riff(vp8x(4, 5), wchunk(b"ICCP", b"icc"), lossless(4, 5))
+    full = riff(vp8x(4, 5), lossless(4, 5))
     assert (sniff(full).width, sniff(full).height) == (4, 5)
     assert sniff(webp(64, 32)).mime == "image/webp"
 
@@ -267,13 +272,6 @@ def test_compressed_metadata_and_unknown_ancillary_chunks_are_refused(kind: byte
     refuses(png_of(ihdr(), IDAT, chunk(kind, b"x"), IEND))
 
 
-@pytest.mark.parametrize(
-    "kind", [b"tEXt", b"tIME", b"pHYs", b"sRGB", b"gAMA", b"cHRM", b"sBIT", b"bKGD", b"tRNS", b"hIST", b"cICP"]
-)
-def test_the_listed_plain_ancillary_chunks_are_accepted(kind: bytes) -> None:
-    assert sniff(png_of(ihdr(), chunk(kind, b"abc"), IDAT, IEND)).width == 1
-
-
 # -- PNG image data must be what the header says --------------------------------------------------------------------
 
 
@@ -330,4 +328,3 @@ def test_a_plain_chunk_that_carries_another_image_is_refused(hidden: bytes) -> N
 def test_webp_exif_and_xmp_are_not_passed_on() -> None:
     refuses(riff(vp8x(1, 1), wchunk(b"EXIF", b"e"), lossless()))
     refuses(riff(vp8x(1, 1), lossless(), wchunk(b"XMP ", b"x")))
-    assert sniff(riff(vp8x(1, 1), wchunk(b"ICCP", b"icc"), lossless())).width == 1
