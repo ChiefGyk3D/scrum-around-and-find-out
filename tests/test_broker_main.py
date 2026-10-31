@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The broker entry point: until the socket server exists it refuses to run, and its self-test imports every module."""
+"""The broker entry point: with no arguments it starts the service (and fails closed with status 4 when systemd did not
+hand it a socket), and its self-test imports every module."""
 
 from __future__ import annotations
 
 import importlib
+import os
 import pkgutil
 import subprocess
 import sys
@@ -11,11 +13,17 @@ import sys
 import pytest
 
 from safo.broker import __main__ as entry
+from safo.broker import runtime
 
 
-def test_without_arguments_it_refuses_with_a_clear_status(capsys: pytest.CaptureFixture[str]) -> None:
-    assert entry.main([]) == entry.NOT_IMPLEMENTED
-    assert "not implemented" in capsys.readouterr().err
+def test_without_a_socket_from_systemd_it_fails_closed_with_status_4(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(runtime, "harden_process", lambda: None)
+    monkeypatch.setattr(os, "environ", {})
+    assert entry.main([]) == entry.EXIT_FAILED == 4
+    err = capsys.readouterr().err
+    assert "cannot start (ListenError)" in err and err.count("\n") == 1
 
 
 def test_unknown_arguments_are_refused(capsys: pytest.CaptureFixture[str]) -> None:
@@ -39,7 +47,9 @@ def test_the_self_test_fails_when_a_module_does_not_import(monkeypatch: pytest.M
     assert entry.main(["--self-test"]) == 1
 
 
-def test_running_it_as_the_service_does_exits_with_the_status() -> None:
+def test_running_it_as_the_service_does_exits_with_the_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LISTEN_PID", raising=False)
+    monkeypatch.delenv("LISTEN_FDS", raising=False)
     done = subprocess.run(
         [sys.executable, "-I", "-m", "safo.broker"],
         capture_output=True,
@@ -48,7 +58,8 @@ def test_running_it_as_the_service_does_exits_with_the_status() -> None:
         timeout=60,
         check=False,
     )
-    assert done.returncode == entry.NOT_IMPLEMENTED
+    assert done.returncode == entry.EXIT_FAILED, done.stderr  # no socket was passed: refused, not hung
+    assert "ListenError" in done.stderr
     done = subprocess.run(
         [sys.executable, "-I", "-m", "safo.broker", "--self-test"],
         capture_output=True,

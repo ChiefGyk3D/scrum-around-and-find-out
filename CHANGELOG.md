@@ -56,6 +56,21 @@
   temporary file left in `issued/` by a kill no longer stops `begin` or the start-up flush. `CallLedger.settle` gains `cap_breach` and `reserve` gains a
   `pre_spend` hook. Paid use stays disabled.
 
+- Paid Gemini broker, phase 3 (#259): the socket server in `src/safo/broker/`, tested over socketpairs and a temporary
+  unix socket against the fake vendor, with injected clocks and no network. `protocol.py` is the wire format on its own
+  (length-prefixed frames, the 1 MiB request and 256 KiB reply limits, a versioned envelope, strict field tables, one
+  fixed sentence per reply code; a thin client imports it unchanged). The core code list gains `rate_limited`,
+  `vendor_refused` and `outcome_unknown`. `server.py` takes the descriptor systemd passes (exactly one listening unix
+  stream socket for this pid, else it refuses), checks the peer uid with `SO_PEERCRED` against the root-owned list,
+  reads one request under a whole-frame deadline, runs the operations (`status`, `begin`, `call`, `check`, `dryrun`),
+  writes one reply and closes. It fails closed: a malformed request changes no state and makes no vendor call. It
+  enforces the connection caps, per-peer rate limits, one paid call in flight (released before the reply is written)
+  and per-minute and per-day call budgets, checks the root-owned switch on every request, logs numbers and enumerated
+  words only, and on SIGTERM lets calls in flight finish and records any still open after the grace period as
+  ambiguous. `python -I -m safo.broker` wires it: the epoch, switch, key and `broker.yaml` readers, no-core and
+  not-dumpable hardening, a scrubbed environment, the checked HTTPS transport to the vendor, and recovery before the
+  first accept. The stop wakeup is a pipe, not a socket pair, so the unit's address-family or system-call filters never touch it; `scripts/broker_sandbox_check.py` (with an opt-in pytest wrapper, `SAFO_SANDBOX_CHECK=1`, that skips with its reason otherwise; every step has a timeout and the check a total deadline) runs the real start-up flow as a socket-activated user unit under the unit's hardening properties, in error-number and kill modes and with `~socketpair` filtered, and fails for an injected socket, socketpair or recvmsg call. Paid use stays disabled.
+
 - Tests: the guard emit-first tests no longer depend on machine load (#251). The real-process children run with a
   generous scaled budget (15 s) and an event-driven wait of 90 s on the test side, and no assertion compares an elapsed
   time with the budget any more; what they prove is the behavior (the one complete JSON line, the exit status 0 or 2,
