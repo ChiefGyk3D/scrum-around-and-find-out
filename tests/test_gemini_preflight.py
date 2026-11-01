@@ -121,6 +121,7 @@ def make_tree(tmp_path: Path, *, signers_lines: list[str] | None = None) -> pf.L
     return pf.Locations(
         broker_config=broker,
         client_config=client,
+        client_root_config=root / "etc-client" / "broker-client.yaml",  # absent unless a test writes it
         allowed_signers=signers,
         switch=etc / "gemini-paid-enabled",
         egress_conf=conf,
@@ -863,7 +864,12 @@ def test_the_client_config_is_judged_on_the_opened_descriptor_not_on_a_path_look
 ) -> None:
     loc = client_tree(tmp_path, ["h"])
 
-    def no_lookup(*args: object, **kw: object) -> None:
+    real_lstat = os.lstat
+
+    def no_lookup(path: object, *args: object, **kw: object) -> os.stat_result:
+        # the root-owned override is a different file, which the client's own loader looks up by name (#303)
+        if Path(str(path)) == loc.client_root_config:
+            return real_lstat(str(path))
         raise AssertionError("a path was inspected by name instead of by the opened descriptor")
 
     monkeypatch.setattr(os, "lstat", no_lookup)
@@ -1025,3 +1031,49 @@ def test_preflight_calls_the_brokers_parser_and_has_no_parser_of_its_own(
     assert source.count("geminisign.parse_signers(") == 2  # the readiness check and the key-to-name link
     for own_parser in ("no-touch-required", "cert-authority", "valid-before", "KEY_TYPES", "_line_namespace_problem"):
         assert own_parser not in source, own_parser
+
+
+# -- setup-command hardening (#303) ------------------------------------------------------------------------------------
+
+
+def test_the_enabling_preflight_requires_the_named_maintainer_in_allowed_uids(tmp_path: Path) -> None:
+    loc = dataclasses.replace(make_tree(tmp_path), maintainer_uid=1000)
+    assert broker_check(loc).status == "pass"  # the tree lists 1000
+    wrong = dataclasses.replace(loc, maintainer_uid=1001)
+    got = broker_check(wrong)
+    assert got.status == "fail" and "1001" in got.detail, got
+    loc.broker_config.write_text(loc.broker_config.read_text().replace("allowed_uids: [1000]", "allowed_uids: [1001]"))
+    got = broker_check(loc)  # the list is not empty but names someone else
+    assert got.status == "fail", got
+
+
+def test_an_extra_allowed_uid_is_flagged_when_a_maintainer_is_named(tmp_path: Path) -> None:
+    loc = dataclasses.replace(make_tree(tmp_path), maintainer_uid=1000)
+    loc.broker_config.write_text(
+        loc.broker_config.read_text().replace("allowed_uids: [1000]", "allowed_uids: [1000, 1001]")
+    )
+    got = broker_check(loc)
+    assert got.status == "warn" and "1001" in got.detail, got
+    without = dataclasses.replace(loc, maintainer_uid=None)
+    assert broker_check(without).status == "pass"  # no maintainer named: the old rule (nonempty) alone
+
+
+def test_the_client_config_check_applies_the_root_owned_override_like_the_client(tmp_path: Path) -> None:
+    loc = make_tree(tmp_path)
+    assert client_check(loc).status == "pass"  # no override file
+    root = loc.client_root_config
+    root.parent.mkdir(parents=True)
+    root.write_text("version: 1\nsocket: /run/safo-broker/broker.sock\n")
+    root.chmod(0o644)
+    loc = dataclasses.replace(loc, trust_uid=os.getuid())
+    assert client_check(loc).status == "pass"  # a valid override
+    root.write_text("version: 1\nunknown_setting: 1\n")
+    got = client_check(loc)
+    assert got.status == "fail" and "load" in got.detail, got
+    root.write_text("version: 1\nsocket: relative/path\n")
+    assert client_check(loc).status == "fail"
+    root.write_text("version: 1\nsocket: /run/safo-broker/broker.sock\n")
+    root.chmod(0o666)  # an override others can write is refused by the client's own reader
+    assert client_check(loc).status == "fail"
+    root.chmod(0o644)
+    assert client_check(loc).status == "pass"

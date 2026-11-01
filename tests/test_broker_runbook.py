@@ -325,9 +325,11 @@ def test_a_step_creates_the_broker_config_before_the_socket_and_the_enable_switc
     assert "install -m 0644 -o root -g root /dev/stdin /etc/safo/broker.yaml.new" in command  # root-owned, 0644
     assert command.index("test ! -e /etc/safo/broker.yaml") < command.index("install -m 0644") < command.index("mv ")
     assert "mv /etc/safo/broker.yaml.new /etc/safo/broker.yaml" in command  # atomic: a rename in one directory
-    assert "<<EOF\n" in command and command.endswith("\nEOF\n'")  # a here-document, closed
-    assert "allowed_uids: [$(id -u MAINTAINER_LOGIN)]" in command  # the number is asked of the machine at run time
-    assert "MAINTAINER_LOGIN]" not in command.replace("$(id -u MAINTAINER_LOGIN)]", "")  # never the name in the list
+    assert '<<"EOF"\n' in command and command.endswith("\nEOF\n'")  # a quoted here-document, closed
+    assert command.count("$(id -u MAINTAINER_LOGIN)") == 1  # the number is asked of the machine at run time
+    assert command.index("$(id -u MAINTAINER_LOGIN)") < command.index('<<"EOF"')  # ... outside the file text
+    assert "allowed_uids: [ACCOUNT_UID_HERE]" in command  # the file text carries a mark, never an expansion
+    assert "MAINTAINER_LOGIN]" not in command  # never the name in the list
     note = step[step.index("Note:") :]
     assert "~/.config/safo/broker-client.yaml" in note and "0600" in note  # and the user's own client config
 
@@ -346,8 +348,8 @@ def test_the_config_here_document_runs_and_writes_a_root_file_with_the_account_i
     command = next(c for c in command_lines(config_step(doc)) if "broker.yaml.new" in c)
     remote = shlex.split(command)[3].removeprefix("sudo " + runbook.ENV + " ")
     target = tmp_path / "broker.yaml"
-    head, body = remote.split("<<EOF\n", 1)  # only the command is pointed at the temporary path, not the text
-    local = head.replace("-o root -g root ", "").replace("/etc/safo/broker.yaml", str(target)) + "<<EOF\n" + body
+    head, body = remote.split('<<"EOF"\n', 1)  # only the command is pointed at the temporary path, not the text
+    local = head.replace("-o root -g root ", "").replace("/etc/safo/broker.yaml", str(target)) + '<<"EOF"\n' + body
     subprocess.run(["sh", "-c", local], check=True, stdin=subprocess.DEVNULL, timeout=30)  # noqa: S603, S607 - fixed test string, temp path
     assert target.read_text() == runbook.broker_config(str(os.getuid()))
     assert oct(target.stat().st_mode & 0o777) == "0o644" and not (tmp_path / "broker.yaml.new").exists()
@@ -367,3 +369,82 @@ def test_the_enable_step_is_still_last_and_its_preflight_checks_the_users_client
         assert banned not in line, banned
     assert line.count("$(") == 1  # the one expansion is the numeric id
     assert doc.rindex("### Step ") < doc.index(line)
+
+
+# -- setup-command hardening (#303): embedded file text never reaches a shell as code ----------------------------------
+
+EXPANSION_CHARS = ("$", "`", "\\")
+HEREDOC_START = re.compile(r"<<-?(?P<delim>\S+)\n")
+
+
+def heredocs(command: str) -> list[tuple[str, str, str]]:
+    """(the raw delimiter word, its body, the command words before it) for every here-document in one command."""
+    found = []
+    for match in HEREDOC_START.finditer(command):
+        word = match.group("delim")
+        name = word.strip("\"'\\")
+        rest = command[match.end() :]
+        body = rest.split("\n" + name + "\n", 1)[0] + "\n" if ("\n" + name + "\n") in rest else rest
+        found.append((word, body, command[: match.start()]))
+    return found
+
+
+def embedded_problems(commands: list[str]) -> list[str]:
+    """Ways here-document text could be read by a shell: an unquoted delimiter, or an expansion form in the body."""
+    problems = []
+    for command in commands:
+        for word, body, _ in heredocs(command):
+            if word[0] not in "\"'\\":
+                problems.append(f"unquoted delimiter {word}")
+            problems += [f"{ch!r} in the embedded text" for ch in EXPANSION_CHARS if ch in body]
+    return problems
+
+
+def test_no_runbook_command_can_expand_embedded_text() -> None:
+    commands = command_lines(text())
+    assert any(heredocs(c) for c in commands), "the runbook has a here-document to judge"
+    assert not embedded_problems(commands)
+    # the source text itself has no expansion form either, so it is also safe if some other writer quotes it differently
+    assert not [ch for ch in EXPANSION_CHARS if ch in runbook.BROKER_CONFIG]
+    assert runbook.BROKER_CONFIG.count(runbook.UID_MARK) == 1
+
+
+def test_the_embedded_text_check_bites() -> None:
+    good = text()
+    config = next(c for c in command_lines(good) if "broker.yaml.new" in c)
+    assert not embedded_problems([config])
+    assert embedded_problems([config.replace('<<"EOF"', "<<EOF")]), "an unquoted delimiter"
+    for form in ("$(touch x)", "`touch x`", "${HOME}", "$HOME", "\\$x"):
+        poisoned = config.replace("server:\n", f"# {form}\nserver:\n", 1)
+        assert poisoned != config
+        assert embedded_problems([poisoned]), form
+
+
+def test_the_only_expansion_outside_embedded_text_is_the_numeric_id() -> None:
+    for command in command_lines(text()):
+        for _, _, head in heredocs(command):
+            assert head.count("$(") == 1 and "$(id -u MAINTAINER_LOGIN)" in head, head
+            assert "`" not in head
+
+
+def test_the_config_command_does_not_run_embedded_text_at_all(tmp_path: Path) -> None:
+    """Run the real command with a poisoned config text: nothing in the text is expanded or executed."""
+    import getpass
+
+    login = getpass.getuser()
+    if not runbook.LOGIN.fullmatch(login):
+        import pytest
+
+        pytest.skip("the local login name is not a plain login name")
+    marker = tmp_path / "ran"
+    poison = f"# $(touch {marker}) `touch {marker}` ${{HOME}} \\n\n"
+    command = next(c for c in command_lines(runbook.render(maintainer=login)) if "broker.yaml.new" in c)
+    remote = shlex.split(command)[3].removeprefix("sudo " + runbook.ENV + " ")
+    head, body = remote.split('<<"EOF"\n', 1)
+    target = tmp_path / "broker.yaml"
+    local = (
+        head.replace("-o root -g root ", "").replace("/etc/safo/broker.yaml", str(target)) + '<<"EOF"\n' + poison + body
+    )
+    subprocess.run(["sh", "-c", local], check=True, stdin=subprocess.DEVNULL, timeout=30)  # noqa: S603, S607 - fixed test string, temp path
+    assert not marker.exists()
+    assert target.read_text().startswith(poison)
