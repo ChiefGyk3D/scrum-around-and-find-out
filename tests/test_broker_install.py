@@ -768,35 +768,43 @@ def socket_v2() -> str:
 LIVE_STATE = "/var/lib/safo-broker"
 
 
+ALLOWED_STATE_USES = (
+    # the empty in-memory mount list
+    'f"TemporaryFileSystem={STATE_DIR}:mode=0700 {CONFIG_DIR}:mode=0755 {RUN_DIR}:mode=0755"',
+    # the environment value handed to the sandboxed process
+    'wrap += ["-E", f"STATE_DIRECTORY={STATE_DIR}", "-E", "PYTHONDONTWRITEBYTECODE=1", "-E", "PATH=/usr/bin:/bin"]',
+)
+
+
 def state_directory_uses(source: str) -> list[str]:
     """Every place the source names the live state directory, by literal or through the STATE_DIR constant, that is not
-    one of the three allowed: the unit policy table, the constant's own definition, and the sandbox property list and
-    wrapper (where it only becomes an empty in-memory mount and an environment value)."""
+    allowed: the unit policy table, the constant's own definition, and the exact statements in ALLOWED_STATE_USES. A
+    use anywhere else, even in the same function, is reported."""
     import ast
 
+    exact = {ast.dump(ast.parse(text).body[0]) for text in ALLOWED_STATE_USES}
+    exact |= {ast.dump(ast.parse(text, mode="eval").body) for text in ALLOWED_STATE_USES if text.startswith("f")}
     tree = ast.parse(source)
-    allowed_literal_roots = {"UNIT_POLICY", "STATE_DIR"}
-    allowed_name_roots = {"SELF_TEST_PROPERTIES", "sandboxed"}
     found: list[str] = []
 
-    def target_names(node: ast.AST) -> set[str]:
+    def roots_of(node: ast.AST) -> set[str]:
         if isinstance(node, ast.Assign):
             return {t.id for t in node.targets if isinstance(t, ast.Name)}
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             return {node.target.id}
-        if isinstance(node, ast.FunctionDef):
-            return {node.name}
         return set()
 
     def visit(node: ast.AST, roots: set[str]) -> None:
-        roots = roots | target_names(node)
+        if ast.dump(node) in exact:
+            return
+        roots = roots | roots_of(node)
+        line = getattr(node, "lineno", 0)
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             v = node.value
-            if (v == LIVE_STATE or v.startswith(LIVE_STATE + "/")) and not roots & allowed_literal_roots:
-                found.append(f"line {node.lineno}: literal")
-        is_use = isinstance(node, ast.Name) and node.id == "STATE_DIR"
-        if is_use and not roots & allowed_name_roots and "STATE_DIR" not in roots:
-            found.append(f"line {getattr(node, 'lineno', 0)}: STATE_DIR")
+            if (v == LIVE_STATE or v.startswith(LIVE_STATE + "/")) and not roots & {"UNIT_POLICY", "STATE_DIR"}:
+                found.append(f"line {line}: literal")
+        if isinstance(node, ast.Name) and node.id == "STATE_DIR" and "STATE_DIR" not in roots:
+            found.append(f"line {line}: STATE_DIR")
         for child in ast.iter_child_nodes(node):
             visit(child, roots)
 
@@ -814,10 +822,17 @@ def test_the_state_directory_guard_bites_on_a_later_use_of_the_constant_or_the_l
     source = Path(install.__file__).read_text()
     via_constant = source + "\n\ndef read_live() -> bytes:\n    return (Path(STATE_DIR) / 'x').read_bytes()\n"
     via_literal = source + "\n\ndef read_live2() -> bytes:\n    return Path('/var/lib/safo-broker/x').read_bytes()\n"
-    via_sandbox_scope_leak = source + "\n\ndef sandboxed2() -> str:\n    return STATE_DIR\n"
+    anchor = '    wrap = [SYSTEMD_RUN, "--quiet"'
+    assert anchor in source
+    in_the_exempted_function = source.replace(anchor, "    (Path(STATE_DIR) / 'x').read_bytes()\n" + anchor, 1)
+    in_the_exempted_tuple = source.replace(
+        '    "DynamicUser=yes",', '    str(Path(STATE_DIR) / "x"),\n    "DynamicUser=yes",', 1
+    )
+    assert in_the_exempted_tuple != source
     assert any("STATE_DIR" in f for f in state_directory_uses(via_constant))
     assert any("literal" in f for f in state_directory_uses(via_literal))
-    assert state_directory_uses(via_sandbox_scope_leak) != []
+    assert any("STATE_DIR" in f for f in state_directory_uses(in_the_exempted_function))
+    assert any("STATE_DIR" in f for f in state_directory_uses(in_the_exempted_tuple))
 
 
 def test_apply_as_a_non_root_user_is_refused_by_the_cli(world: World) -> None:
