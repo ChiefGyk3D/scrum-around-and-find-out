@@ -1078,7 +1078,7 @@ suspension, and the only place root enters a real amount. It runs with the relea
 refuses to start any other way:
 
 ```text
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin status'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin status'
 ```
 
 `-I` keeps the working directory, the user site and every `PYTHON` environment variable out of the module search path,
@@ -1098,15 +1098,15 @@ euid 0 was rejected: it widens the rule the service depends on, and files root c
 Commands (every line is for the maintainer's account; each runs `sudo` on the broker host):
 
 ```text
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin status'
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin usage'
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin usage --month 2026-10'
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin check-install'
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin clear MODEL'
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin clear MODEL --confirm CALL_ID'
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin clear MODEL --confirm CALL_ID --actual CALL_ID=0.25 --reason "billing page 2026-10-31"'
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin reconcile'
-ssh -t host 'sudo /opt/safo-broker/current/bin/python -I -m safo.broker.admin reconcile --billing-usd 3.75 --month 2026-10 --reason "billing page 2026-10-31"'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin status'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin usage'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin usage --month 2026-10'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin check-install'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin clear MODEL'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin clear MODEL --confirm CALL_ID'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin clear MODEL --confirm CALL_ID --actual CALL_ID=0.25 --reason "billing page 2026-10-31"'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin reconcile'
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin reconcile --billing-usd 3.75 --month 2026-10 --reason "billing page 2026-10-31"'
 ```
 
 - **status** prints the month and its spend, the open calls, the suspended models with the call ids that suspended them,

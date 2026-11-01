@@ -130,7 +130,7 @@ def test_the_line_that_creates_the_switch_cannot_run_unless_the_preflight_passes
     line = next(x for x in switch_lines(doc) if "printf" in x)
     pre = "safo.gemini_preflight --enabling"
     assert pre in line
-    assert "/opt/safo-broker/current/bin/python -I -m" in line  # root runs the installed, reviewed copy, isolated
+    assert "/opt/safo-broker/current/venv/bin/python -I -m" in line  # root runs the installed, reviewed copy, isolated
     assert line.index(pre) < line.index("&&") < line.index("printf") < line.index("gemini-paid-enabled")
     assert line.count("&&") >= 2 and "||" not in line and ";" not in line
     assert "--ack-observe-mode" not in line  # the acknowledgement is never in a pasteable line
@@ -259,3 +259,21 @@ def test_root_commands_run_with_a_fixed_environment_and_a_locked_down_pager() ->
         assert need in pager
     # nothing relies on an unqualified program name picked up from the remote session: the PATH is the fixed one
     assert not any("PATH=$" in line or 'PATH="$' in line for line in lines)
+
+
+INTERPRETER = re.compile(r"/opt/safo-broker/[A-Za-z0-9_./-]*/python[0-9.]*")
+
+
+def test_every_interpreter_path_in_the_runbook_is_the_one_the_installer_builds() -> None:
+    """#298 (1): the runbook named current/bin/python, which the installer never builds; it builds only current/venv/bin."""
+    named = set(INTERPRETER.findall(text()))
+    assert named, "the runbook names the installed interpreter at least once (the enable step)"
+    built = install.RELEASE_INTERPRETER
+    assert built == f"{install.UNIT_EXEC_PREFIX}/venv/bin/python"
+    assert named == {built}
+    # the installer really creates venv/bin/python inside a release, and `current` points at that release
+    source = Path(install.__file__).read_text()
+    assert 'stage / "venv" / "bin" / "python"' in source
+    # and the unit files the installer writes use the same interpreter
+    units = [path.read_text() for path in sorted((Path(install.__file__).parent / "systemd").glob("*.service"))]
+    assert any(f"ExecStart={built} -I -m safo.broker\n" in unit for unit in units)

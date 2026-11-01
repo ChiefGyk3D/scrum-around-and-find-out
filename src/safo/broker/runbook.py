@@ -18,6 +18,9 @@ from dataclasses import dataclass
 
 LOGIN = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 PASTE_KEY = "PASTE_RELEASE_PUBLIC_KEY_HERE"
+# The installer builds exactly one interpreter per release (venv/bin/python) and points `current` at the release; a test
+# pins this string to the installer's own constant.
+RELEASE_PYTHON = "/opt/safo-broker/current/venv/bin/python"
 
 
 @dataclass(frozen=True)
@@ -284,7 +287,7 @@ def steps(login: str) -> tuple[Step, ...]:
             "before this step.",
             (
                 ssh(
-                    'sh -c "/opt/safo-broker/current/bin/python -I -m safo.gemini_preflight --enabling '
+                    f'sh -c "{RELEASE_PYTHON} -I -m safo.gemini_preflight --enabling '
                     '&& printf \\"enabled\\\\n\\" > /etc/safo/gemini-paid-enabled '
                     '&& chmod 0644 /etc/safo/gemini-paid-enabled"'
                 ),
