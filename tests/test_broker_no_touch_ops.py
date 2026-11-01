@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """What a process that reaches the broker socket can do WITHOUT a signed approval (#299).
 
-The terminal-only start of the broker client and the guard's text patterns are defense in depth: a program running as
-the maintainer can open a pseudo terminal, and can talk to the socket without the client at all. What holds is the
-broker: a spend needs an approval signed with the hardware key, and that needs a touch (and a PIN when the key
+The terminal-only start of the broker client and the guard's text patterns are defense in depth: a program running
+as the maintainer can open a pseudo terminal, and can talk to the socket without the client at all. What holds is
+the broker: a spend needs an approval signed with the hardware key, and that needs a touch (and a PIN when the key
 requires one). This file pins the list of what is reachable without one, so the documentation
-(docs/gemini-broker.md) cannot drift from the code, and proves that none of it spends, suspends a model or writes the ledger."""
+(docs/gemini-broker.md) cannot drift from the code, and proves that none of it spends, suspends a model or writes
+the ledger."""
 
 from __future__ import annotations
 
