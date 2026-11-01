@@ -113,7 +113,8 @@ preflight below).
    summary: 3 pass, 4 warn, 4 fail; exit 1
    ```
 
-   The two `FAIL` lines are expected until the root setup and step d are done. Run it again at the end. Blast radius:
+   The four `FAIL` lines are expected until step d (`allowed-signers`), the root setup (`broker-config` and
+   `service-user`) and your own client config (`client-config`) are done. Run it again at the end. Blast radius:
    none (read only; the tests run it on a read-only tree). Rollback: none needed.
 
 ## Step a. Enroll one or two FIDO2 keys for approvals
