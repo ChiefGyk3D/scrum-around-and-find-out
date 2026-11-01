@@ -297,11 +297,9 @@ more forms are denied without a name on the page: a word built with escapes (an 
 or backtick. Nothing is resolved: a variable's value is never looked up.
 
 One narrow relaxation exists (#264), and nothing else is relaxed: a brief that quotes this denial word for word is
-prose, not a Gemini step. The exact fixed sentence (the current text and the older text, one alternative per phrase
-class) is removed before the brief is read, and anything beside it is still read. A here-document written into a file
-is not relaxed: the command text cannot show whether the file is a regular file, so every such command is judged by
-the strict rule. When the strict rule blocks a job that needs escapes in a file, create the file with the Write or Edit
-tool and then run it; the denial says so.
+prose, not a Gemini step. The exact fixed sentence (one alternative per phrase class) is removed before the brief is
+read, and anything beside it is still read. A here-document written into a file is not relaxed: every such command is
+judged by the strict rule. The denial only points to the wrapper and gives no other instruction.
 
 Nothing else is exempt: not the wrapper, not a working directory, not a tool name, not this repository. `safo gemini ...`
 commands as documented name none of the protected names, so the check does not touch them; a command that does spell one

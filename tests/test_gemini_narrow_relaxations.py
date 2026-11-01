@@ -2,8 +2,8 @@
 """The one narrow relaxation of the shell rule (#264), and proof that nothing wider got through.
 
 A brief that quotes the guard's own denial text word for word is not read as a Gemini step. A here-document written
-into a file is NOT relaxed: the file may be a named pipe or a symlink that a shell reads, which the command text cannot
-show, so every such command is judged by the strict rule exactly as before.
+into a file is NOT relaxed: every such command is judged by the strict rule exactly as before.
+The quoted text is the base text only (3c5b8d8); the denial only points to the wrapper and gives no other instruction.
 Names are built at run time so scanners stay quiet about this file.
 """
 
@@ -24,19 +24,14 @@ CLASSES = [
     geminibrief.SHELL_TOOL,
     geminibrief.SHELL_UNVERIFIED,
 ]
-OLD_DENIAL = (
-    "gemini-material: this shell command names {}, so it is denied; call Gemini only through the wrapper, "
-    "`safo gemini ask --model M --prompt-file F ...` (docs/gemini.md)"
-)
 
 # -- 1. a brief that quotes the denial ---------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("klass", CLASSES)
 @pytest.mark.parametrize("frame", ["The guard says: {}", 'It said "{}" and stopped.', "It said `{}`.", "> {}"])
-@pytest.mark.parametrize("template", [SHELL_DENIAL, OLD_DENIAL], ids=["current", "old"])
-def test_a_brief_that_quotes_the_denial_text_is_not_a_gemini_step(klass: str, frame: str, template: str) -> None:
-    brief = "Fix the rule.\n" + frame.format(template.format(klass)) + "\nRepair it and keep the true positives."
+def test_a_brief_that_quotes_the_denial_text_is_not_a_gemini_step(klass: str, frame: str) -> None:
+    brief = "Fix the rule.\n" + frame.format(SHELL_DENIAL.format(klass)) + "\nRepair it and keep the true positives."
     assert geminibrief.findings(brief) == []
 
 
@@ -63,8 +58,22 @@ def test_nothing_but_the_exact_sentence_is_removed(brief: str) -> None:
     assert geminibrief.findings(brief) != []
 
 
-def test_the_denial_says_how_to_do_the_job_without_the_shell() -> None:
-    assert "Write" in SHELL_DENIAL and "Edit" in SHELL_DENIAL and "run" in SHELL_DENIAL
+def _advises_writing_a_file_and_running_it(text: str) -> bool:
+    low = text.lower()
+    return ("write" in low or "edit" in low or "create the file" in low) and "run it" in low
+
+
+def test_the_denial_does_not_advise_writing_a_file_and_running_it() -> None:
+    assert not _advises_writing_a_file_and_running_it(SHELL_DENIAL)
+
+
+def test_the_advice_check_bites_and_a_quote_of_the_withdrawn_text_is_not_exempt() -> None:
+    withdrawn = SHELL_DENIAL.format(geminibrief.SHELL_TOOL) + (
+        "; to put text with escapes in a file, create the file with the Write or Edit tool and then run it"
+    )
+    assert _advises_writing_a_file_and_running_it(withdrawn)
+    assert geminibrief.findings("It said: " + withdrawn + "\nsafo gemini ask --model m --prompt-file p") != []
+    assert geminibrief.DENIAL_QUOTE.fullmatch(withdrawn.split("gemini-material: ", 1)[1]) is None
 
 
 # -- 2. a here-document written into a file is not relaxed ----------------------------------------------------------
@@ -72,8 +81,8 @@ def test_the_denial_says_how_to_do_the_job_without_the_shell() -> None:
 BODY = "def test_bytes():\n    assert b'\\x68ttp' == b'http'  # go, node and curl are only words here"
 
 
-# A file named in a command may be a named pipe or a symlink that a shell reads, so the guard cannot know from the
-# command text that a here-document body is inert. Every one of these shapes is therefore judged by the strict rule.
+# The command text cannot show what kind of file a here-document is written into. Every one of these shapes is
+# therefore judged by the strict rule.
 @pytest.mark.parametrize(
     "command",
     [
@@ -90,7 +99,7 @@ BODY = "def test_bytes():\n    assert b'\\x68ttp' == b'http'  # go, node and cur
         f"tee -a <<'EOF'\n{BODY}\nEOF",
         f"tee -i <<'EOF'\n{BODY}\nEOF",
         f"tee -a -a <<'EOF'\n{BODY}\nEOF",
-        # a target under /dev, and a FIFO-style or symlink-style path
+        # a target under /dev, and other special-looking paths
         f"cat > /dev/stdout <<'EOF'\n{BODY}\nEOF",
         f"tee /dev/fd/1 <<'EOF'\n{BODY}\nEOF",
         f"cat > /var/example/run.fifo <<'EOF'\n{BODY}\nEOF",
