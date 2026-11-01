@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Broker admin docs: what to do when start-up recovery refuses a used marker from an earlier month that has no ledger row (#278). The refusal is unchanged and is now pinned by a test; an automated repair step was deferred for a simpler design.
 - Wording (#302): the remaining 2 USD per job texts now say 2.50 USD, the testing-phase job cap: `agents.yaml` (paid limit and constraint) and the generated `docs/routing.md`, `docs/hooks.md`, the two guard messages in `geminibrief.py`, and the brief grammar `JOB_CAP` (now 2.50, so a brief may declare the same cap the broker allows; the guard test boundary moved to 2.50/2.51). Kept at 2 USD on purpose: the decision 13 constant and the extra block.
 - Setup-command hardening (#303). The runbook step that writes the broker configuration no longer lets file text reach a shell: the here-document delimiter is quoted and the one numeric account id is passed as an argument; a test renders every runbook command and fails if an expansion form can appear in embedded text. The enabling preflight now requires the named maintainer account in the broker config's allowed list (and warns on extra accounts), and its client-config check uses the client's own loader including the root-owned override. The no-image-library import check now rejects import indirection and walks nested packages.
 - Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
