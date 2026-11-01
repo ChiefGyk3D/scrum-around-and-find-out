@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Installer hardening (#284). The installer self-test now runs the staged release in a transient systemd sandbox with an empty
+  state directory when run as root, and with an empty private state directory of its own otherwise. Tests use an injected
+  runner; none needs root or systemd.
 - Setup hardening follow-up (#303). Enabling-gate and import-check hardening; details are tracked privately until reviewed.
 - Admin `check-install` root-door checks (#293). The broker administration command now runs nine read-only checks for the
   root-door items the docs list, each answering `pass`, `warn` or `fail` in one sentence: sudo rules (sudoers and
