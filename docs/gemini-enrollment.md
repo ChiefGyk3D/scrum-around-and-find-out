@@ -550,11 +550,9 @@ first real call, which is phase 7 itself and needs the unmerged broker code.
 **The root-door check (after the install, before the dry run).** The whole design assumes the maintainer's account has
 no way to become root. The administration command checks the installation and then looks, read-only, for the doors the
 broker page lists: sudo rules, root-equivalent groups, polkit rules, root-run paths the account can write, setuid files no
-package owns, and a leftover old secret-store credential. Run it through `sudo` so that it knows which account to judge:
-
-```text
-ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin check-install'
-```
+package owns, and a leftover old secret-store credential. Run it through `sudo` so that it knows which account to judge, with the `check-install` line from the Administration
+section of [Gemini broker](gemini-broker.md) (a full `ssh -t host 'sudo ...'` command, using the release's own
+interpreter).
 
 Expected: every line starts with `pass`, `warn` or `fail`, and the last line starts with `limits:`. Any `fail` makes the
 command exit 1: fix it, or write down why it is accepted, before the dry run. A `warn` on `credential` means the old key
