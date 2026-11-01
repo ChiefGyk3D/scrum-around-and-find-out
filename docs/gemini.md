@@ -70,7 +70,7 @@ there looking active.
   read as paid steps and denied. This is the guard grammar after #287: the guard no longer looks up an approval record,
   because no such record exists any more.
 
-The caps (2 USD per job, 10 USD per month), the price table, the approval text (version 3, with the prompt digest and the
+The caps (2.50 USD per job in the testing phase, 10 USD per month), the price table, the approval text (version 3, with the prompt digest and the
 nonce), the single-use and replay rules, the spend ledger and the image handling are the broker's, and are documented in
 [Gemini broker](gemini-broker.md) and [its threat model](gemini-broker-threat-model.md).
 

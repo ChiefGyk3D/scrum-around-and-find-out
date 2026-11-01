@@ -25,7 +25,7 @@ Nothing here uses a serial number, a hostname or a machine name: keys are named 
 |---|---|---|
 | 1 (recommended, the default) | A hardware security key (`ed25519-sk` or `ecdsa-sk`) through OpenSSH, a touch for every approval, a PIN if you require one | Built and tested (with software keys; see "What the tests could not prove") |
 | 2 (opt-in, off) | A WebAuthn passkey assertion (ES256 or EdDSA), checked with the optional `safo[passkeys]` extra | Verification built and tested with real signatures; enrollment page and approval wiring **not built**, so it authorizes nothing today. See [Gemini passkeys](gemini-passkeys.md) |
-| Other | A software key (a file) or an agent-held key | Refused unless a written per-key opt-in; `keys check` warns loudly |
+| Other | A software key (a file) or an agent-held key | Enrollable only with a written per-key opt-in, and `keys check` warns loudly; **the broker refuses it for every paid approval whatever the opt-in says** (hardware key and touch only, decision 9) |
 
 ## The trust files
 
@@ -84,7 +84,7 @@ Enrolling one (the loopback enrollment page is **not built yet**; the trust-file
 **Warning for agent-held keys that are not FIDO keys** (for example a fingerprint reader that holds an SSH key in an agent
 with a cooldown): they are not Tier 1 and not Tier 2. A process that can reach the agent can sign again inside the
 cooldown without a new touch, so "one touch per approval" does not hold. They are refused unless you write the per-key
-`allow-software` opt-in, and `keys check` warns. Prefer a hardware security key.
+`allow-software` opt-in, and `keys check` warns; and even then the broker refuses it for a paid approval. Prefer a hardware security key.
 
 ## Read-only commands
 
@@ -275,8 +275,8 @@ signature format.
 
 **What that means for approvals.** The Immurok is **not an sk key**, so it cannot be a Tier 1 key, and an agent-held key
 with a cooldown can sign again inside the window without a new touch, which breaks "one touch per approval". It is
-therefore a *non-hardware-approval* key to this code: refused unless you add the per-key opt-in
-`# safo: LABEL allow-software` for it, and `keys check` will warn loudly. It is a good fit for what the vendor built it
+therefore a *non-hardware-approval* key to this code: it can be enrolled only with the per-key opt-in
+`# safo: LABEL allow-software`, `keys check` will warn loudly, and the broker refuses it for every paid approval anyway. It is a good fit for what the vendor built it
 for (a human gate on `sudo`, `git push` and secret reads in a wrapped command), not for paid-spend approval.
 
 **What to test before opting it in** (nothing was connected or installed to write this):
