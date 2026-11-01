@@ -257,12 +257,18 @@ class _Scan:
         self.limit = limit
         self.count = 0
         self.problems: list[str] = []
+        self.boundaries: list[str] = []
         self.limited = False
 
     def walk(self, root: Path) -> Iterator[tuple[str, os.stat_result]]:
-        stack = [str(root)]
+        try:
+            root_device = os.lstat(root).st_dev
+        except OSError:
+            self.problems.append(f"{_show(root)} cannot be examined")
+            return
+        stack = [(str(root), root_device)]
         while stack:
-            folder = stack.pop()
+            folder, device = stack.pop()
             try:
                 names = _listdir(folder)
             except OSError:
@@ -281,13 +287,18 @@ class _Scan:
                     continue
                 yield entry_path, info
                 if stat.S_ISDIR(info.st_mode):
-                    stack.append(entry_path)
+                    if info.st_dev != device:  # another filesystem (an automount point is one): never listed
+                        self.boundaries.append(_show(entry_path))
+                    else:
+                        stack.append((entry_path, device))
 
     def failure(self, what: str) -> str | None:
         if self.limited:
             return f"{what} stopped at the limit of {self.limit} entries, so it was not completed"
         if self.problems:
             return _sentence(f"{what} could not read", self.problems)
+        if self.boundaries:
+            return _sentence(f"{what} reached a mount point it does not enter, at", self.boundaries, f"; {HUMAN}")
         return None
 
 
@@ -304,6 +315,18 @@ class _Who:
     gids: frozenset[int]
     logins: frozenset[str] = frozenset()  # every login that maps to the uid
     homes: tuple[str, ...] = ()
+    root_names: frozenset[str] = frozenset()  # every name the account database maps to uid 0
+    known_names: frozenset[str] = frozenset()  # every name in the account database
+
+    def classify(self, user: str) -> str:
+        """root, other or unknown for a user as written in a unit or crontab: a name is looked up in the account
+        database (every name that maps to uid 0 is root), a number is a uid, anything else cannot be placed."""
+        user = user.strip()
+        if re.fullmatch(r"\+?[0-9]+", user):
+            return "root" if int(user) == 0 else "other"
+        if user in self.root_names or user == "root":
+            return "root"
+        return "other" if user in self.known_names else "unknown"
 
     def can_write(self, info: os.stat_result) -> bool:
         mode = info.st_mode
@@ -352,12 +375,14 @@ def _check_nsswitch(door: DoorPaths, trust: int) -> None:
 def _load_who(door: DoorPaths, trust: int, uid: int) -> _Who:
     _check_nsswitch(door, trust)
     accounts: list[list[str]] = []
+    every: list[list[str]] = []
     for number, raw in enumerate(_text(door.passwd, "the account database", trust).splitlines(), 1):
         if not raw.strip() or raw.startswith("#"):
             continue
         parts = raw.split(":")
         if len(parts) != 7 or not parts[2].isdigit() or not parts[3].isdigit():
             raise _Problem(f"the account database cannot be read (line {number} is malformed)")
+        every.append(parts)
         if int(parts[2]) == uid:
             accounts.append(parts)
     if not accounts:
@@ -378,7 +403,9 @@ def _load_who(door: DoorPaths, trust: int, uid: int) -> _Who:
         if int(parts[2]) in primary or logins & set(members):
             names.add(parts[0])
             gids.add(int(parts[2]))
-    return _Who(login, uid, gid, home, frozenset(names), frozenset(gids), logins, homes)
+    root_names = frozenset(a[0] for a in every if int(a[2]) == 0)
+    known = frozenset(a[0] for a in every)
+    return _Who(login, uid, gid, home, frozenset(names), frozenset(gids), logins, homes, root_names, known)
 
 
 # -- the checks -----------------------------------------------------------------------------------------------------
@@ -948,7 +975,10 @@ def _unit_hits(
             merged[key] = []
         else:
             merged.setdefault(key, []).append(value)
-    root_unit = socket or user in ("", "root", "0") or bool(re.search(r"[%$\"'\\]", user))
+    kind = "root" if socket or user == "" or re.search(r"[%$\"'\\]", user) else who.classify(user)
+    if kind == "unknown":
+        return f"runs as {_show(user)}, which the account database does not know; {HUMAN}"
+    root_unit = kind == "root"
     for key, values in merged.items():
         for value in values:
             if key in UNIT_KEYS:
@@ -1101,7 +1131,12 @@ def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], flo
             continue
         fields = line.split(None, 2 if line.startswith("@") else 6)
         index = 1 if line.startswith("@") else 5
-        if len(fields) <= index + 1 or fields[index] != "root":
+        if len(fields) <= index + 1:
+            continue
+        kind = who.classify(fields[index])
+        if kind == "unknown":
+            return f"has a job for {_show(fields[index])}, which the account database does not know; {HUMAN}"
+        if kind != "root":
             continue
         command = fields[index + 1]
         argv = None if _SHELL_SYNTAX.search(command) else _split_command(command)

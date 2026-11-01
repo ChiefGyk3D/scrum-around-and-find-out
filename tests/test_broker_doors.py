@@ -55,7 +55,8 @@ class World:
         self.t = folder(tmp / "w")
         self.home = folder(self.t / "home" / "maint")
         self.passwd = put(
-            self.t / "passwd", f"root:x:0:0::/root:/bin/sh\nmaint:x:{maint}:{GID}::{self.home}:/bin/bash\n"
+            self.t / "passwd",
+            f"root:x:0:0::/root:/bin/sh\nnobody:x:65534:65534::/nonexistent:/usr/sbin/nologin\nother:x:2001:2001::/nonexistent:/bin/sh\nmaint:x:{maint}:{GID}::{self.home}:/bin/bash\n",
         )
         self.group = put(self.t / "group", f"root:x:0:\nmaint:x:{GID}:\nusers:x:100:maint\n")
         sudoers_text = f"Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n#includedir {self.t}/sudoers.d\n"
@@ -2129,3 +2130,89 @@ def test_hardening_a_short_clean_link_chain_passes_and_a_masked_unit_still_does(
     (w.cron_d / "x").symlink_to(w.t / "lib" / "one")
     (w.units / "masked.service").symlink_to("/dev/null")
     assert status(w.run(), "jobs") == "pass"
+
+
+# -- hardening, round 7 ------------------------------------------------------------
+
+
+def add_account(w: World, line: str) -> None:
+    put(w.passwd, w.passwd.read_text() + line + "\n")
+
+
+@pytest.mark.parametrize("user", ["toor", "0", "00", "+0", '"toor"'])
+def test_hardening_a_unit_user_that_maps_to_uid_zero_is_root(w: World, user: str) -> None:
+    add_account(w, "toor:x:0:0::/root:/bin/sh")
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", unit(str(payload), user=user))
+    assert status(w.run(), "jobs") == "fail"
+
+
+@pytest.mark.parametrize("user", ["nobody", "other", "65534", "1000"])
+def test_hardening_known_and_numeric_other_users_are_not_root(w: World, user: str) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", unit(str(payload), user=user))
+    assert status(w.run(), "jobs") == "pass"
+
+
+@pytest.mark.parametrize("user", ["ghost", "-1", "a b", "0x0"])
+def test_hardening_a_unit_user_nobody_can_place_needs_a_human(w: World, user: str) -> None:
+    put(w.units / "a.service", unit("/bin/true", user=user))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_a_cron_user_that_maps_to_uid_zero_is_root(w: World) -> None:
+    add_account(w, "toor:x:0:0::/root:/bin/sh")
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.cron_d / "x", f"@reboot toor {payload}\n")
+    assert status(w.run(), "jobs") == "fail"
+    put(w.cron_d / "x", f"17 * * * * toor {payload}\n")
+    assert status(w.run(), "jobs") == "fail"
+    put(w.cron_d / "x", f"17 * * * * 0 {payload}\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_cron_user_that_is_known_and_not_root_is_skipped_and_unknown_needs_a_human(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.cron_d / "x", f"17 * * * * other {payload}\n")
+    assert status(w.run(), "jobs") == "pass"
+    put(w.cron_d / "x", f"17 * * * * ghost {payload}\n")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_a_walk_does_not_enter_another_device(w: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    mnt = folder(w.etc / "mnt")
+    put(mnt / "inside", "x", 0o666)  # would be a finding if the walk entered
+    real = os.lstat
+
+    def fake(path: Any, *args: Any, **kw: Any) -> os.stat_result:
+        info = real(path, *args, **kw)
+        if str(path) == str(mnt):
+            values = list(info)[:10]
+            values[2] += 1  # st_dev
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(os, "lstat", fake)
+    found = w.run()
+    assert status(found, "writable") == "fail" and "mount point" in found["writable"].text
+    assert "inside" not in found["writable"].text and "needs to look" in found["writable"].text
+
+
+def test_hardening_the_setuid_and_polkit_walks_do_not_enter_another_device(
+    w: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mnt = folder(w.usr / "mnt")
+    real = os.lstat
+
+    def fake(path: Any, *args: Any, **kw: Any) -> os.stat_result:
+        info = real(path, *args, **kw)
+        if str(path) == str(mnt):
+            values = list(info)[:10]
+            values[2] += 1
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(os, "lstat", fake)
+    assert status(w.run(), "setuid") == "fail"
