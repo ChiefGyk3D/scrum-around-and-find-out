@@ -1387,24 +1387,6 @@ ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.adm
   give `--billing-usd`, the vendor's billed total for the month (default the current one): if that is higher than the
   ledger counts, the difference is added as a record; if it is equal or lower, nothing is written. A month can only be
   raised, never lowered.
-- **reconcile --adopt-marker NONCE --reason TEXT** repairs the one case start-up recovery refuses: a used marker from an
-  earlier month that has no ledger row ("root must reconcile it"). Spend is recorded before the vendor call, so that
-  marker is money that may have left; the repair can only raise. Run it first without the confirmation: it prints the
-  marker, including a digest of its whole contents, and records nothing. Then repeat it with `--confirm DIGEST
-  --confirm-model MODEL --confirm-month YYYY-MM --confirm-usd USD`, each typed from what you read. The marker is read
-  once more under the ledger lock and charged only if its digest, model, month and amount are exactly what you gave; a
-  marker changed since you read it, or while the command was working, is refused and nothing is written. In one append it
-  then adds the marker's whole reservation to the month the marker was written in (less whatever a `--billing-usd` figure entered after the marker was written already added to that month, so
-  the call is counted once; a figure entered before the marker is not credited, and a month is never lowered), and gives the call its rows now, held ambiguous at that
-  reservation, so the model stays stopped and the current month also holds it until you run `clear` for the call (with
-  a verified `--actual` if the billing page shows less). The marker file is never rewritten or removed, because deleting
-  it would free the approval to be used again. It refuses a marker that is not whole and strict, one dated this month
-  (recovery handles it) or after it, a nonce the ledger already knows, and a call id already recorded.
-  **What this does not prove.** A marker carries no signature. The command trusts it only as far as the folder's
-  permissions do: every read requires a regular file owned by the broker's own user with no group or other access, and
-  the command runs after dropping to that user, so only the broker user (and root) can have made it. Nothing here shows
-  the broker wrote a particular marker, so check the model, month and amount against the vendor billing page before you
-  confirm them.
 
 **After a state restore.** Stop the broker (`systemctl stop safo-broker.socket safo-broker.service`), run `reconcile`
 with the billing total for the current month and for the month before, start the broker (its start-up recovery makes

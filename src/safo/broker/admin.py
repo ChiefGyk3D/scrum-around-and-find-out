@@ -52,7 +52,7 @@ from typing import Any, NoReturn, TextIO
 
 from safo import gemini, geminisign, output
 from safo.broker.errors import BrokerError, LedgerError
-from safo.broker.ledger import AdminWho, CallLedger, CallRecord, Confirmed, LedgerView
+from safo.broker.ledger import AdminWho, CallLedger, CallRecord, LedgerView
 from safo.broker.money import MoneyError, format_usd, parse_usd
 from safo.broker.policy import MONTH_CAP_MICRO
 from safo.broker.records import MONTH, SCHEMA_VERSION, UID_MAX
@@ -78,10 +78,7 @@ USAGE = (
     "       python -I -m safo.broker.admin check-install\n"
     "       python -I -m safo.broker.admin clear MODEL --confirm CALL_ID [--confirm CALL_ID ...]"
     " [--actual CALL_ID=USD ... --reason TEXT]\n"
-    "       python -I -m safo.broker.admin reconcile [--month YYYY-MM] [--billing-usd USD --reason TEXT]\n"
-    "       python -I -m safo.broker.admin reconcile --adopt-marker NONCE --reason TEXT\n"
-    "       python -I -m safo.broker.admin reconcile --adopt-marker NONCE --reason TEXT --confirm DIGEST"
-    " --confirm-model MODEL --confirm-month YYYY-MM --confirm-usd USD"
+    "       python -I -m safo.broker.admin reconcile [--month YYYY-MM] [--billing-usd USD --reason TEXT]"
 )
 
 
@@ -538,52 +535,13 @@ def _clear(
     return 0
 
 
-def _adopt(
-    ledger: CallLedger, args: argparse.Namespace, who: AdminWho, now: dt.datetime, out: TextIO, err: TextIO
-) -> int:
-    nonce = args.adopt_marker
-    if not args.reason:
-        raise AdminError("adopting a marker needs --reason")
-    for line in ledger.marker_record(nonce):
-        output.write(out, line)
-    named = (args.confirm, args.confirm_model, args.confirm_month, args.confirm_usd)
-    if any(item is None for item in named):
-        output.write(
-            err,
-            "not adopted: read the record above, then repeat it with --confirm DIGEST --confirm-model MODEL"
-            " --confirm-month YYYY-MM --confirm-usd USD",
-        )
-        return 2
-    if MONTH.fullmatch(args.confirm_month) is None:
-        raise AdminError("a month is written YYYY-MM")
-    try:
-        amount = parse_usd(args.confirm_usd)
-    except MoneyError:
-        raise AdminError("the amount is a plain amount in dollars with up to six decimals") from None
-    confirmed = Confirmed(args.confirm, args.confirm_model, args.confirm_month, amount)
-    done = ledger.admin_adopt_marker(nonce, args.reason, who, now, confirmed)
-    output.write(out, f"adopted: {done.nonce} call {done.call_id} model {done.model}")
-    output.write(out, f"adopted_month: {done.month}")
-    output.write(out, f"adopted_usd: {format_usd(done.added_micro)}")
-    if not done.added_micro:
-        output.write(out, "a billing figure entered after the marker covers the call; it was not added a second time")
-    output.write(out, "the call is held ambiguous and the model stays stopped until: clear MODEL --confirm CALL_ID")
-    return 0
-
-
-def _reconcile(
-    ledger: CallLedger, args: argparse.Namespace, who: AdminWho, now: dt.datetime, out: TextIO, err: TextIO
-) -> int:
+def _reconcile(ledger: CallLedger, args: argparse.Namespace, who: AdminWho, now: dt.datetime, out: TextIO) -> int:
     billing = None
     if args.billing_usd is not None:
         try:
             billing = parse_usd(args.billing_usd)
         except MoneyError:
             raise AdminError("the billing figure is a plain amount in dollars with up to six decimals") from None
-    if args.adopt_marker is not None:
-        if billing is not None or args.month is not None:
-            raise AdminError("adopting a marker takes no month and no billing figure")
-        return _adopt(ledger, args, who, now, out, err)
     month = args.month or _month_key(now)
     if MONTH.fullmatch(month) is None:
         raise AdminError("a month is written YYYY-MM")
@@ -629,11 +587,6 @@ def _parser() -> argparse.ArgumentParser:
     rec.add_argument("--month")
     rec.add_argument("--billing-usd")
     rec.add_argument("--reason", default="")
-    rec.add_argument("--adopt-marker")
-    rec.add_argument("--confirm")
-    rec.add_argument("--confirm-model")
-    rec.add_argument("--confirm-month")
-    rec.add_argument("--confirm-usd")
     return parser
 
 
@@ -693,7 +646,7 @@ def _run(
         return 0
     if args.cmd == "clear":
         return _clear(ledger, args, who, now, out, err)
-    return _reconcile(ledger, args, who, now, out, err)
+    return _reconcile(ledger, args, who, now, out)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
