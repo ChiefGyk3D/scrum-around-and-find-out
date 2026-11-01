@@ -2312,3 +2312,69 @@ def test_hardening_default_system_trees_name_the_usual_roots() -> None:
     d = DoorPaths()
     for name in ("/usr", "/etc", "/opt", "/lib", "/boot", "/sbin", "/bin"):
         assert Path(name) in d.system_trees
+
+
+# -- hardening, round 8: links in the walked trees --------------------------------------------------
+
+
+def test_hardening_a_dangling_link_into_a_folder_the_account_can_write_is_found(w: World) -> None:
+    writable = folder(w.t / "wr", 0o777)
+    (w.usr / "l").symlink_to(writable / "later")
+    found = w.run()
+    assert status(found, "trees") == "fail" and "l" in found["trees"].text
+    (w.usr / "l").unlink()
+    (w.usr / "l").symlink_to(w.home / "later")
+    assert status(w.run(), "trees") == "fail"
+
+
+def test_hardening_a_dangling_link_into_a_safe_folder_passes(w: World) -> None:
+    (w.usr / "l").symlink_to(folder(w.t / "safe") / "later")
+    assert status(w.run(), "trees") == "pass"
+
+
+@needs_nonroot
+def test_hardening_a_link_whose_target_cannot_be_examined_needs_a_human(w: World) -> None:
+    locked = folder(w.t / "locked", 0o000)
+    (w.usr / "l").symlink_to(locked / "inside")
+    try:
+        found = w.run()
+        assert status(found, "trees") == "fail" and "needs to look" in found["trees"].text
+    finally:
+        locked.chmod(0o755)
+
+
+def test_hardening_a_link_loop_in_a_tree_needs_a_human(w: World) -> None:
+    (w.usr / "a").symlink_to(w.usr / "b")
+    (w.usr / "b").symlink_to(w.usr / "a")
+    found = w.run()
+    assert status(found, "trees") == "fail" and "needs to look" in found["trees"].text
+
+
+def test_hardening_a_link_to_a_folder_outside_the_trees_needs_a_human(w: World) -> None:
+    (w.usr / "out").symlink_to(folder(w.t / "outside"))
+    found = w.run()
+    assert status(found, "trees") == "fail" and "outside the walked trees" in found["trees"].text
+    (w.usr / "out").unlink()
+    (w.usr / "in").symlink_to(folder(w.usr / "sub"))
+    assert status(w.run(), "trees") == "pass"
+
+
+def test_hardening_a_writable_intermediate_hop_of_a_link_in_a_tree_is_found(w: World) -> None:
+    writable = folder(w.t / "wr", 0o777)
+    safe = put(w.t / "lib" / "ok", "x")
+    (writable / "hop").symlink_to(safe)
+    (w.usr / "l").symlink_to(writable / "hop")
+    found = w.run()
+    assert status(found, "trees") == "fail" and "hop" in found["trees"].text
+
+
+def test_hardening_a_long_link_chain_in_a_tree_fails_closed(w: World) -> None:
+    previous = put(w.t / "lib" / "ok", "x")
+    for index in range(doors.MAX_LINK_HOPS + 2):
+        link = w.t / "chain" / f"l{index}"
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(previous)
+        previous = link
+    (w.usr / "l").symlink_to(previous)
+    found = w.run()
+    assert status(found, "trees") == "fail" and "needs to look" in found["trees"].text

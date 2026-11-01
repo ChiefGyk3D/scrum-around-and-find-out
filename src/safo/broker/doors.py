@@ -725,12 +725,14 @@ def _check_trees(door: DoorPaths, who: _Who) -> Finding:
     """The invariant behind the named checks: walk the system trees (bounded, never across a device, never following a
     link) and report any entry the account can write, and any link inside whose target the account can reach."""
     hits: list[str] = []
+    human: list[str] = []
     cache: dict[str, os.stat_result | None] = {}
     floor = str(door.chain_floor)
     failures: list[str] = []
     try:
         roots = list(door.system_trees)
         real = {r: os.path.realpath(r) for r in roots}
+        inside_trees = tuple(r.rstrip("/") + "/" for r in real.values())
         for root in roots:
             try:
                 info = os.lstat(root)
@@ -754,13 +756,22 @@ def _check_trees(door: DoorPaths, who: _Who) -> Finding:
             scan = _Scan(door.max_entries)
             for path, entry in scan.walk(root):
                 if stat.S_ISLNK(entry.st_mode):
-                    target = os.path.realpath(path)
+                    found, final = _follow_links(Path(path), who, cache, floor, dangling_ok=True)
+                    if found:
+                        (human if HUMAN in found else hits).append(f"{_show(path)} {found}")
+                        continue
                     try:
-                        reach = os.stat(target)
+                        reach = os.stat(final)
+                    except FileNotFoundError:
+                        continue
                     except OSError:
-                        continue  # a link to nothing leads nowhere
-                    if _in_home(target, who) or who.can_write(reach) or _chain_writable(target, who, cache, floor):
+                        human.append(f"{_show(path)} has a link target that cannot be examined; {HUMAN}")
+                        continue
+                    target = os.path.realpath(final)
+                    if who.can_write(reach):
                         hits.append(f"{_show(path)} (a link to {_show(target)})")
+                    elif stat.S_ISDIR(reach.st_mode) and not (target + "/").startswith(inside_trees):
+                        human.append(f"{_show(path)} leads to a folder outside the walked trees; {HUMAN}")
                 elif who.can_write(entry):
                     hits.append(_show(path))
             failure = scan.failure(f"the scan of {_show(root)}")
@@ -776,6 +787,8 @@ def _check_trees(door: DoorPaths, who: _Who) -> Finding:
             "fail",
             _sentence(f"the account can write or redirect {len(hits)} entries in the system trees, for example", hits),
         )
+    if human:
+        return Finding("trees", "fail", _sentence("links in the system trees that this check cannot judge:", human))
     return Finding("trees", "pass", "the account can write nothing in the system trees that were walked")
 
 
@@ -796,6 +809,8 @@ def _chain_writable(path: str, who: _Who, cache: dict[str, os.stat_result | None
                     cache[prefix] = os.lstat(prefix)
                 except FileNotFoundError:
                     cache[prefix] = None
+                except OSError:
+                    raise _Problem(f"{_show(prefix)} cannot be examined; {HUMAN}") from None
             info = cache[prefix]
             if info is None:
                 break
@@ -1223,7 +1238,9 @@ def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], flo
 MAX_LINK_HOPS = 4
 
 
-def _follow_links(path: Path, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> tuple[str | None, str]:
+def _follow_links(
+    path: Path, who: _Who, cache: dict[str, os.stat_result | None], floor: str, dangling_ok: bool = False
+) -> tuple[str | None, str]:
     """Follow a chain of symbolic links one hop at a time. Every hop (and the folders above it) must be out of the
     account's reach and out of its home; a chain longer than a few hops, a loop or a link that does not resolve goes
     to a human. Returns (a finding or None, the final path)."""
@@ -1239,8 +1256,12 @@ def _follow_links(path: Path, who: _Who, cache: dict[str, os.stat_result | None]
             return f"links through {_show(current)}, which the account can replace through {_show(writable)}", current
         try:
             info = os.lstat(current)
-        except OSError:
+        except FileNotFoundError:
+            if dangling_ok:  # the target is not there, but the checks above ran on where it would be
+                return None, current
             return f"has a link that does not resolve ({_show(current)}); {HUMAN}", current
+        except OSError:
+            return f"has a link that cannot be examined ({_show(current)}); {HUMAN}", current
         if not stat.S_ISLNK(info.st_mode):
             return None, current
         if current in seen:
