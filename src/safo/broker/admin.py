@@ -80,7 +80,8 @@ USAGE = (
     " [--actual CALL_ID=USD ... --reason TEXT]\n"
     "       python -I -m safo.broker.admin reconcile [--month YYYY-MM] [--billing-usd USD --reason TEXT]\n"
     "       python -I -m safo.broker.admin reconcile --adopt-marker NONCE --reason TEXT\n"
-    "         [--confirm DIGEST --confirm-model MODEL --confirm-month YYYY-MM --confirm-usd USD]"
+    "       python -I -m safo.broker.admin reconcile --adopt-marker NONCE --reason TEXT --confirm DIGEST"
+    " --confirm-model MODEL --confirm-month YYYY-MM --confirm-usd USD"
 )
 
 
