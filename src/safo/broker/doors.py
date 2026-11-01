@@ -636,7 +636,10 @@ _SHELL_SYNTAX = re.compile(r"[;|&`$()<>\\%\n*?\[\]{}~!#]")  # also glob, brace, 
 PYTHON_FLAGS = frozenset({"-I", "-u", "-B", "-s", "-S", "-O", "-OO", "-q", "--"})  # python -s is "no user site"
 WRAPPER_FLAGS = frozenset({"-i", "--"})
 NO_FLAGS = frozenset({"--"})  # shells and every other interpreter: no option is known to be harmless (-s reads stdin)
-WRAPPERS = frozenset({"env", "nice", "ionice", "timeout", "nohup", "setsid", "flock", "stdbuf", "xargs", "time"})
+# wrappers with no positional arguments of their own: the first positional is the program they run. Every other wrapper
+# (flock has a lock file, timeout a duration, xargs and ionice take values) is handled as an interpreter: each of its
+# arguments must be a known-harmless flag or an absolute path to an existing regular file, else a human looks.
+WRAPPERS = frozenset({"env", "nice", "nohup", "setsid", "time"})
 
 
 def _safe_flags(base: str) -> frozenset[str]:
@@ -681,7 +684,15 @@ def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | N
                     candidates.append(value)
                 continue
             own = _candidates_hit(candidates, who, cache, floor)
-            return own or _command_hit(argv[index:], who, cache, floor)
+            if own:
+                return own
+            try:
+                runnable = stat.S_ISREG(os.stat(arg).st_mode) and os.stat(arg).st_mode & 0o111
+            except OSError:
+                runnable = 0
+            if arg.startswith("/") and not runnable:
+                return f"runs {_show(arg)}, which is not an existing executable file; {HUMAN}"
+            return _command_hit(argv[index:], who, cache, floor)
         return f"runs {_show(first)} without a command; {HUMAN}"
     if base in INTERPRETERS:
         found_script = False

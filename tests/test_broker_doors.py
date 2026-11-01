@@ -1119,7 +1119,7 @@ def test_hardening_interpreter_script_in_a_writable_folder_fails(w: World) -> No
 def test_hardening_interpreter_with_a_safe_script_passes(w: World) -> None:
     script = put(w.t / "bin" / "ok.py", "x = 1\n")
     put(w.units / "a.service", unit(f"/usr/bin/python3 -I {script}"))
-    put(w.units / "b.service", unit(f"/usr/bin/env FOO=1 {script}"))
+    put(w.units / "b.service", unit(f"/usr/bin/env FOO=1 /usr/bin/python3 {script}"))
     assert status(w.run(), "jobs") == "pass"
 
 
@@ -1548,3 +1548,35 @@ def test_hardening_a_nested_script_in_the_home_is_still_found(w: World) -> None:
     put(w.units / "a.service", unit(f"/usr/bin/env -i /bin/sh -- {payload}"))
     found = w.run()
     assert status(found, "jobs") == "fail" and "home" in found["jobs"].text
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "/usr/bin/timeout 5 /bin/true",
+        "/usr/bin/timeout -s KILL 5 /bin/true",
+        "/usr/bin/flock {lock} /bin/sh -s {ok}",
+        "/usr/bin/flock -n {lock} {ok}",
+        "/usr/bin/flock {lock} -c x",
+        "/usr/bin/flock {lock} sh {ok}",
+        "/usr/bin/ionice -c3 {ok}",
+        "/usr/bin/stdbuf -oL {ok}",
+        "/usr/bin/env -i /usr/bin/timeout 5 {ok}",
+        "/usr/bin/env -i /usr/bin/flock {lock} /bin/sh -s {ok}",
+        "/usr/bin/env -i {plain}",
+        "/usr/bin/nice -n 5 {ok}",
+    ],
+)
+def test_hardening_wrappers_with_their_own_positional_arguments_need_a_human(w: World, line: str) -> None:
+    ok = put(w.t / "bin" / "ok.sh", "true\n", 0o755)
+    lock = put(w.t / "bin" / "x.lock", "")
+    plain = put(w.t / "bin" / "plain.txt", "x", 0o644)
+    put(w.units / "a.service", unit(line.format(ok=ok, lock=lock, plain=plain)))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_a_plain_wrapper_still_runs_an_executable_through_the_path_checks(w: World) -> None:
+    ok = put(w.t / "bin" / "ok.sh", "true\n", 0o755)
+    put(w.units / "a.service", unit(f"/usr/bin/env -i /usr/bin/nice {ok}"))
+    assert status(w.run(), "jobs") == "pass"
