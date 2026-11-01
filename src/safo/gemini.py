@@ -54,7 +54,7 @@ from safo.termsearch import TERMS_CHUNK as TERMS_CHUNK  # re-exported for the te
 from safo.trust import read_trusted_regular_file
 
 VENDOR_HOST = "generativelanguage.googleapis.com"
-JOB_CAP = Decimal("2.50")  # the most a brief may declare for a paid step (the guard grammar); same as the broker testing-phase job cap
+JOB_CAP = Decimal("2.50")  # the most a brief may declare for a paid step (guard grammar); the testing-phase job cap
 PACIFIC = ZoneInfo("America/Los_Angeles")
 TIERS = ("free", "paid")
 MODEL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
