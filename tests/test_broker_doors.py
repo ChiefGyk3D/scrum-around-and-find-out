@@ -59,6 +59,7 @@ class World:
         sudoers_text = f"Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n#includedir {self.t}/sudoers.d\n"
         self.sudoers = put(self.t / "sudoers", sudoers_text, 0o440)
         self.sudoers_d = folder(self.t / "sudoers.d", 0o750)
+        self.nss = put(self.t / "nsswitch.conf", "passwd: files systemd\ngroup: files [NOTFOUND=return] systemd\n")
         self.polkit = folder(self.t / "polkit")
         self.etc = folder(self.t / "etc")
         self.opt = folder(self.t / "opt")
@@ -83,6 +84,8 @@ class World:
             cron_files=(self.crontab,),
             cron_dirs=(self.cron_d,),
             ld_preload=self.preload,
+            nsswitch=self.nss,
+            chain_floor=self.t,
             setuid_roots=(self.usr,),
             dpkg_info=self.dpkg,
             credential_paths=(".doppler", ".config/doppler"),
@@ -704,3 +707,183 @@ def test_the_module_opens_nothing_for_writing() -> None:
         "chown(",
     ):
         assert word not in source, word
+
+
+# -- review round: five fail-open gaps -------------------------------------------------------------------------------
+
+
+def as_owner(w: World) -> None:
+    """Make the test user the maintainer (the files the tests create belong to the test user)."""
+    put(w.passwd, f"maint:x:{UID}:{GID + 7}::{w.home}:/bin/bash\n")
+
+
+def test_a_file_the_maintainer_owns_counts_as_writable_whatever_its_mode(w: World) -> None:
+    as_owner(w)
+    put(w.opt / "tool", "x", 0o000)
+    found = w.run(who=UID)
+    assert status(found, "writable") == "fail" and "tool" in found["writable"].text
+
+
+def test_a_root_script_the_maintainer_owns_with_a_read_only_mode_fails(w: World) -> None:
+    as_owner(w)
+    script = put(w.t / "bin" / "job.sh", "#!/bin/sh\n", 0o555)
+    put(w.units / "a.service", unit(str(script)))
+    assert status(w.run(who=UID), "jobs") == "fail"
+
+
+def test_a_setuid_file_the_maintainer_owns_with_a_closed_mode_fails(w: World) -> None:
+    as_owner(w)
+    (w.usr / "ls").chmod(0o4555)
+    assert status(w.run(who=UID), "setuid") == "fail"
+
+
+def test_a_missing_script_in_a_folder_the_account_can_write_fails(w: World) -> None:
+    folder(w.t / "wr", 0o777)
+    put(w.units / "a.service", unit(str(w.t / "wr" / "later.sh")))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_a_missing_script_in_a_sticky_world_writable_folder_fails(w: World) -> None:
+    folder(w.t / "stk", 0o1777)
+    put(w.units / "a.service", unit(str(w.t / "stk" / "later.sh")))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_a_root_job_running_an_existing_file_from_a_sticky_folder_fails(w: World) -> None:
+    folder(w.t / "stk", 0o1777)
+    script = put(w.t / "stk" / "job.sh", "#!/bin/sh\n", 0o755)
+    put(w.units / "a.service", unit(str(script)))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "stk" in found["jobs"].text
+    put(w.cron_d / "job", f"@reboot root {script}\n")
+    put(w.units / "a.service", unit("/bin/true"))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_a_missing_script_in_a_closed_folder_is_still_ignored(w: World) -> None:
+    folder(w.t / "closed", 0o755)
+    put(w.units / "a.service", unit(str(w.t / "closed" / "later.sh")))
+    assert status(w.run(), "jobs") == "pass"
+
+
+def test_a_symlinked_unit_to_a_writable_folder_fails(w: World) -> None:
+    writable = folder(w.t / "wr", 0o777)
+    target = put(writable / "real.service", unit("/bin/true"), 0o644)
+    (w.units / "a.service").symlink_to(target)
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "a.service" in found["jobs"].text
+
+
+def test_a_symlinked_unit_to_the_home_fails(w: World) -> None:
+    target = put(w.home / "real.service", unit("/bin/true"))
+    (w.units / "a.service").symlink_to(target)
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "home" in found["jobs"].text
+
+
+def test_a_symlinked_unit_to_a_safe_file_is_read_like_any_unit(w: World) -> None:
+    safe = put(w.t / "lib" / "ok.service", unit("/bin/true"))
+    (w.units / "a.service").symlink_to(safe)
+    assert status(w.run(), "jobs") == "pass"
+    bad = put(w.t / "lib" / "bad.service", unit(str(w.home / "run.sh")))
+    (w.units / "b.service").symlink_to(bad)
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_a_masked_unit_is_fine_but_a_link_that_does_not_resolve_fails_closed(w: World) -> None:
+    (w.units / "masked.service").symlink_to("/dev/null")
+    assert status(w.run(), "jobs") == "pass"
+    (w.units / "dangling.service").symlink_to(w.t / "nowhere.service")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "does not resolve" in found["jobs"].text
+
+
+def test_a_drop_in_that_runs_a_writable_script_fails(w: World) -> None:
+    script = put(w.t / "bin" / "job.sh", "#!/bin/sh\n", 0o777)
+    put(w.units / "a.service.d" / "override.conf", unit(str(script)))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "override.conf" in found["jobs"].text
+
+
+def test_a_symlinked_drop_in_folder_fails_and_a_clean_one_passes(w: World) -> None:
+    put(w.units / "a.service.d" / "override.conf", "[Service]\nEnvironment=X=1\n")
+    assert status(w.run(), "jobs") == "pass"
+    real = folder(w.t / "dropins")
+    (w.units / "b.service.d").symlink_to(real)
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_a_polkit_rule_returning_a_quoted_yes_for_the_login_fails(w: World) -> None:
+    put(w.polkit / "50-x.rules", 'polkit.addRule(function(a, s) { if (s.user == "maint") { return "yes"; } });\n')
+    assert status(w.run(), "polkit") == "fail"
+
+
+def test_a_polkit_grant_that_names_nobody_by_a_literal_fails_closed(w: World) -> None:
+    put(w.polkit / "50-x.rules", "polkit.addRule(function(a, s) { return polkit.Result.YES; });\n")
+    assert status(w.run(), "polkit") == "fail"
+    put(w.polkit / "50-x.rules", 'var who = lookup(); if (subject.user == who) { return "yes"; }\n')
+    assert status(w.run(), "polkit") == "fail"
+
+
+def test_a_polkit_grant_for_another_named_user_still_only_warns(w: World) -> None:
+    put(w.polkit / "50-x.rules", 'if (subject.isInGroup("printers")) { return polkit.Result.YES; }\n')
+    assert status(w.run(), "polkit") == "warn"
+
+
+def second_login(w: World) -> None:
+    put(w.passwd, w.passwd.read_text() + f"maint2:x:{MAINT}:{GID}::{w.t / 'home' / 'maint2'}:/bin/sh\n")
+
+
+def test_a_second_login_for_the_same_uid_is_judged_in_the_group_database(w: World) -> None:
+    second_login(w)
+    put(w.group, w.group.read_text() + "docker:x:900:maint2\n")
+    found = w.run()
+    assert status(found, "groups") == "fail" and "docker" in found["groups"].text
+
+
+def test_a_second_login_for_the_same_uid_is_judged_in_sudoers(w: World) -> None:
+    second_login(w)
+    put(w.sudoers_d / "10", "maint2 ALL=(ALL) ALL\n", 0o440)
+    assert status(w.run(), "sudo") == "fail"
+
+
+def test_a_second_login_for_the_same_uid_is_judged_in_polkit(w: World) -> None:
+    second_login(w)
+    put(w.polkit / "50-x.rules", rule("maint2"))
+    assert status(w.run(), "polkit") == "fail"
+
+
+def test_a_second_login_home_is_searched_for_the_old_credential(w: World) -> None:
+    second_login(w)
+    folder(w.t / "home" / "maint2" / ".doppler")
+    assert status(w.run(), "credential") == "warn"
+
+
+def test_a_second_login_with_a_second_primary_group_is_judged(w: World) -> None:
+    put(w.passwd, w.passwd.read_text() + f"maint2:x:{MAINT}:901::{w.t}:/bin/sh\n")
+    put(w.group, w.group.read_text() + "disk:x:901:\n")
+    assert status(w.run(), "groups") == "fail"
+
+
+@pytest.mark.parametrize(
+    "line", ["passwd: files ldap", "passwd: sss files", "passwd: compat nis", "group: files winbind"]
+)
+def test_accounts_from_a_source_other_than_files_fail_closed(w: World, line: str) -> None:
+    db = line.split(":")[0]
+    other = "group" if db == "passwd" else "passwd"
+    put(w.nss, f"{line}\n{other}: files\n")
+    found = w.run()
+    assert {status(found, n) for n in ("sudo", "groups", "writable", "credential")} == {"fail"}
+    assert "source other than local files" in found["groups"].text
+
+
+def test_a_missing_or_incomplete_name_service_file_fails_closed(w: World) -> None:
+    put(w.nss, "passwd: files\n")
+    assert status(w.run(), "groups") == "fail"
+    w.nss.unlink()
+    assert status(w.run(), "groups") == "fail"
+
+
+def test_comments_and_actions_in_the_name_service_file_are_understood(w: World) -> None:
+    put(w.nss, "# x\npasswd: compat systemd # trailing\ngroup: files [SUCCESS=merge] systemd\nhosts: dns\n")
+    assert status(w.run(), "groups") == "pass"

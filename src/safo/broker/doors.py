@@ -81,6 +81,10 @@ class DoorPaths:
     cron_files: tuple[Path, ...] = (Path("/etc/crontab"),)
     cron_dirs: tuple[Path, ...] = (Path("/etc/cron.d"),)
     ld_preload: Path = Path("/etc/ld.so.preload")
+    nsswitch: Path = Path("/etc/nsswitch.conf")
+    # path components at or below this folder are judged for "can the account replace this"; "/" judges them all
+    # (a test points it at its temporary tree, whose parents are not the machine's)
+    chain_floor: Path = Path("/")
     setuid_roots: tuple[Path, ...] = (
         Path("/usr"),
         Path("/opt"),
@@ -227,37 +231,66 @@ class _Scan:
 
 @dataclasses.dataclass(frozen=True)
 class _Who:
-    login: str
+    login: str  # the first login for the uid, for messages
     uid: int
     gid: int
-    home: str
+    home: str  # the first home
     group_names: frozenset[str]
     gids: frozenset[int]
+    logins: frozenset[str] = frozenset()  # every login that maps to the uid
+    homes: tuple[str, ...] = ()
 
     def can_write(self, info: os.stat_result) -> bool:
         mode = info.st_mode
-        if info.st_uid == self.uid and mode & 0o200:
+        if info.st_uid == self.uid:  # the owner can change the mode, so the mode bits do not matter
             return True
         if info.st_gid in self.gids and mode & 0o020:
             return True
         return bool(mode & 0o002)
 
 
+_PLAIN_SOURCES = ("files", "compat", "systemd")  # systemd supplies dynamic and transient users, not real accounts
+
+
+def _check_nsswitch(door: DoorPaths, trust: int) -> None:
+    """Fail closed when accounts or groups can come from a source this check does not read (ldap, sss, nis...)."""
+    seen = set[str]()
+    for raw in _text(door.nsswitch, "the name service switch file", trust).splitlines():
+        line = raw.split("#", 1)[0].strip()
+        database, _, rest = line.partition(":")
+        if database.strip() not in ("passwd", "group"):
+            continue
+        seen.add(database.strip())
+        sources = [t for t in re.sub(r"\[[^\]]*\]", " ", rest).split() if t]
+        odd = [t for t in sources if t not in _PLAIN_SOURCES]
+        if odd or not sources:
+            raise _Problem(
+                f"the {database.strip()} database can come from a source other than local files "
+                f"({_show(' '.join(odd) or 'none named')}), which this check does not read"
+            )
+    if seen != {"passwd", "group"}:
+        raise _Problem("the name service switch file cannot be read (it does not name the passwd and group databases)")
+
+
 def _load_who(door: DoorPaths, trust: int, uid: int) -> _Who:
-    account = None
+    _check_nsswitch(door, trust)
+    accounts: list[list[str]] = []
     for number, raw in enumerate(_text(door.passwd, "the account database", trust).splitlines(), 1):
         if not raw.strip() or raw.startswith("#"):
             continue
         parts = raw.split(":")
         if len(parts) != 7 or not parts[2].isdigit() or not parts[3].isdigit():
             raise _Problem(f"the account database cannot be read (line {number} is malformed)")
-        if int(parts[2]) == uid and account is None:
-            account = parts
-    if account is None:
+        if int(parts[2]) == uid:
+            accounts.append(parts)
+    if not accounts:
         raise _Problem(f"the account database cannot be read (user id {uid} is not in it)")
-    login, gid, home = account[0], int(account[3]), account[5]
+    login, gid, home = accounts[0][0], int(accounts[0][3]), accounts[0][5]
+    logins = frozenset(a[0] for a in accounts)
+    homes = tuple(dict.fromkeys(a[5] for a in accounts))
+    primary = {int(a[3]) for a in accounts}
     names = set[str]()
-    gids = {gid}
+    gids = set(primary)
     for number, raw in enumerate(_text(door.group, "the group database", trust).splitlines(), 1):
         if not raw.strip() or raw.startswith("#"):
             continue
@@ -265,10 +298,10 @@ def _load_who(door: DoorPaths, trust: int, uid: int) -> _Who:
         if len(parts) != 4 or not parts[2].isdigit():
             raise _Problem(f"the group database cannot be read (line {number} is malformed)")
         members = [m for m in parts[3].split(",") if m]
-        if int(parts[2]) == gid or login in members:
+        if int(parts[2]) in primary or logins & set(members):
             names.add(parts[0])
             gids.add(int(parts[2]))
-    return _Who(login, uid, gid, home, frozenset(names), frozenset(gids))
+    return _Who(login, uid, gid, home, frozenset(names), frozenset(gids), logins, homes)
 
 
 # -- the checks -----------------------------------------------------------------------------------------------------
@@ -352,7 +385,7 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
     matched: set[str] = set()
 
     def applies(member: str) -> bool:
-        if member in ("ALL", who.login, f"#{who.uid}") or member in matched:
+        if member == "ALL" or member in who.logins or member == f"#{who.uid}" or member in matched:
             return True
         if member.startswith("%#"):
             return member[2:].isdigit() and int(member[2:]) in who.gids
@@ -362,7 +395,7 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
     while changed:
         changed = False
         for name, listed in aliases.items():
-            if name not in matched and any(applies(m) for m in members):
+            if name not in matched and any(applies(m) for m in listed):
                 matched.add(name)
                 changed = True
     hits = sorted({source for source, users in rules if any(applies(m) for m in _members(users))})
@@ -375,7 +408,9 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
     return Finding("sudo", "pass", "no sudoers rule names the account, one of its groups or ALL")
 
 
-_YES = re.compile(r"polkit\.Result\.YES|Result(?:Any|Inactive|Active)\s*=\s*yes", re.IGNORECASE)
+_YES = re.compile(r"polkit\.Result\.YES|[\"']yes[\"']|Result(?:Any|Inactive|Active)\s*=\s*yes", re.IGNORECASE)
+# a rule that names, by a quoted literal, who it is for: subject.user == "x", subject.isInGroup("x")
+_SUBJECT = re.compile(r"subject\.(?:user|isInGroup|groups)[^\n;{]*[\"'][\w.-]+[\"']")
 
 
 def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
@@ -396,12 +431,14 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
                 text = _text(Path(path), f"polkit file {_show(path)}", None)
                 if not _YES.search(text):
                     continue
-                names = [who.login, *sorted(who.group_names)]
+                names = [*sorted(who.logins), *sorted(who.group_names)]
                 quoted = any(re.search(r"[\"']" + re.escape(n) + r"[\"']", text) for n in names)
                 pkla = any(
                     re.search(r"unix-(?:user|group):" + re.escape(n) + r"(?![\w.-])", text) for n in names
                 ) or re.search(r"unix-(?:user|group):\*", text)
-                (hits if quoted or pkla else others).append(_show(path))
+                # a grant in a rules file that names nobody by a literal cannot be attributed: fail closed
+                unattributed = path.endswith(".rules") and not _SUBJECT.search(text)
+                (hits if quoted or pkla or unattributed else others).append(_show(path))
     except _Problem as problem:
         return Finding("polkit", "fail", str(problem))
     failure = scan.failure("the polkit scan")
@@ -450,12 +487,18 @@ def _check_writable(door: DoorPaths, who: _Who, extra: Sequence[Path]) -> Findin
     return Finding("writable", "pass", "the account can write nothing under the root-run folders that were scanned")
 
 
-def _chain_writable(path: str, who: _Who, cache: dict[str, os.stat_result | None]) -> str | None:
-    """The first component of `path` (a path, or a folder above it) that the account can write; None when none."""
+def _chain_writable(path: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str = "/") -> str | None:
+    """The first component of `path` (a path, or a folder above it) that the account can write; None when none.
+
+    A component that does not exist yet counts through its nearest existing parent: if the account can create entries
+    there, it can create the missing one. A sticky world-writable folder counts too: it stops the account replacing
+    another user's file in it, but a root job that runs from there is still the account's to plant."""
     for candidate in (path, os.path.realpath(path)):
         parts = Path(candidate).parts
         for index in range(1, len(parts) + 1):
             prefix = str(Path(*parts[:index]))
+            if floor != "/" and prefix != floor and not prefix.startswith(floor.rstrip("/") + "/"):
+                continue
             if prefix not in cache:
                 try:
                     cache[prefix] = os.lstat(prefix)
@@ -466,8 +509,7 @@ def _chain_writable(path: str, who: _Who, cache: dict[str, os.stat_result | None
                 break
             if stat.S_ISLNK(info.st_mode):
                 continue
-            sticky_foreign = stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX and info.st_uid != who.uid
-            if who.can_write(info) and not sticky_foreign:  # a sticky folder lets the account add, not replace
+            if who.can_write(info):
                 return prefix
     return None
 
@@ -476,7 +518,11 @@ def _under(path: str, home: str) -> bool:
     return bool(home) and (path == home or path.startswith(home.rstrip("/") + "/"))
 
 
-def _unit_hits(text: str, who: _Who, cache: dict[str, os.stat_result | None]) -> str | None:
+def _in_home(path: str, who: _Who) -> bool:
+    return any(_under(path, h) for h in who.homes)
+
+
+def _unit_hits(text: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
     user = ""
     entries: list[tuple[str, str]] = []
     for line in _logical_lines(text):
@@ -494,15 +540,40 @@ def _unit_hits(text: str, who: _Who, cache: dict[str, os.stat_result | None]) ->
             first = value.lstrip("-").split(None, 1)[0] if value.lstrip("-") else ""
         if not first.startswith("/"):
             continue
-        if _under(first, who.home):
+        if _in_home(first, who):
             return f"reads or runs {_show(first)} from the account's home"
-        writable = _chain_writable(first, who, cache)
+        writable = _chain_writable(first, who, cache, floor)
         if writable is not None:
             return f"runs {_show(first)}, which the account can replace through {_show(writable)}"
     return None
 
 
-def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None]) -> str | None:
+def _unit_file_hit(path: Path, name: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
+    """A unit file or drop-in. A link is resolved: its target (and every folder on the way) must be out of the account's
+    reach, else the link is a finding; one that does not resolve fails closed. A link to /dev/null is a masked unit."""
+    real = str(path)
+    info = _lstat(path, f"unit {_show(name)}")
+    if stat.S_ISLNK(info.st_mode):
+        real = os.path.realpath(path)
+        if real == os.devnull:
+            return None
+        try:
+            target = os.stat(real)
+        except OSError:
+            raise _Problem(f"unit {_show(name)} cannot be read (its link does not resolve)") from None
+        if not stat.S_ISREG(target.st_mode):
+            raise _Problem(f"unit {_show(name)} cannot be read (its link does not lead to a regular file)")
+        if _in_home(real, who):
+            return f"is a link to {_show(real)}, under the account's home"
+        writable = _chain_writable(str(path), who, cache, floor)
+        if writable is not None:
+            return f"is a link to {_show(real)}, which the account can replace through {_show(writable)}"
+    elif not stat.S_ISREG(info.st_mode):
+        raise _Problem(f"unit {_show(name)} cannot be read (it is not a regular file)")
+    return _unit_hits(_text(Path(real), f"unit {_show(name)}", None), who, cache, floor)
+
+
+def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or CRON_VAR.match(line):
@@ -512,10 +583,10 @@ def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None]) -> 
         if len(fields) <= index + 1 or fields[index] != "root":
             continue
         command = fields[index + 1].split(None, 1)[0]
-        if _under(command, who.home):
+        if _in_home(command, who):
             return f"runs {_show(command)} from the account's home as root"
         if command.startswith("/"):
-            writable = _chain_writable(command, who, cache)
+            writable = _chain_writable(command, who, cache, floor)
             if writable is not None:
                 return f"runs {_show(command)} as root, which the account can replace through {_show(writable)}"
     return None
@@ -524,17 +595,23 @@ def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None]) -> 
 def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
     cache: dict[str, os.stat_result | None] = {}
     hits: list[str] = []
+    floor = str(door.chain_floor)
     try:
         for folder in door.unit_dirs:
             if not _folder_state(folder, f"unit folder {_show(folder)}"):
                 continue
             for name in sorted(os.listdir(folder)):
                 path = folder / name
-                if not name.endswith(".service") or stat.S_ISLNK(_lstat(path, f"unit {_show(name)}").st_mode):
-                    continue
-                found = _unit_hits(_text(path, f"unit {_show(name)}", None), who, cache)
-                if found:
-                    hits.append(f"unit {_show(name)} {found}")
+                if name.endswith(".service"):
+                    found = _unit_file_hit(path, name, who, cache, floor)
+                    if found:
+                        hits.append(f"unit {_show(name)} {found}")
+                elif name.endswith(".d") and _folder_state(path, f"drop-in folder {_show(name)}"):
+                    for conf in sorted(os.listdir(path)):
+                        if conf.endswith(".conf"):
+                            found = _unit_file_hit(path / conf, f"{name}/{conf}", who, cache, floor)
+                            if found:
+                                hits.append(f"drop-in {_show(name)}/{_show(conf)} {found}")
         files = list(door.cron_files)
         for folder in door.cron_dirs:
             if _folder_state(folder, f"cron folder {_show(folder)}"):
@@ -546,7 +623,7 @@ def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
                 continue
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
                 continue
-            found = _cron_hit(_text(path, f"cron file {_show(path.name)}", None), who, cache)
+            found = _cron_hit(_text(path, f"cron file {_show(path.name)}", None), who, cache, floor)
             if found:
                 hits.append(f"cron file {_show(path.name)} {found}")
     except _Problem as problem:
@@ -674,15 +751,15 @@ def _check_suid(door: DoorPaths, who: _Who) -> Finding:
 
 
 def _check_credential(door: DoorPaths, who: _Who) -> Finding:
-    if not who.home.startswith("/") or who.home == "/":
+    if any(not h.startswith("/") or h == "/" for h in who.homes):
         return Finding(
             "credential",
             "fail",
             "the account database records no usable home folder, so the old credential was not looked for",
         )
     found: list[str] = []
-    for rel in door.credential_paths:
-        path = Path(who.home) / rel
+    for rel, home in ((r, h) for h in who.homes for r in door.credential_paths):
+        path = Path(home) / rel
         try:
             os.lstat(path)
         except (FileNotFoundError, NotADirectoryError):
