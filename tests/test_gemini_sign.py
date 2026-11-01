@@ -336,6 +336,32 @@ def test_propose_works_before_any_trust_file_exists(rig: Rig) -> None:
     assert not rig.signers.exists()  # still writes nothing
 
 
+def test_propose_decides_from_one_open_of_the_trust_file_not_a_check_then_use(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lexists-then-read pair lets the file appear in between and skip the checks (#263 review). The absence is now
+    learned from the one hardened open, which raises a distinct error."""
+    real = os.path.lexists
+
+    def spy(path: object) -> bool:
+        assert Path(str(path)) != rig.signers, "propose looked at the signers path before opening it"
+        return real(path)
+
+    monkeypatch.setattr(os.path, "lexists", spy)
+    assert geminisign.propose_line(rig.trust(), rig.b.with_suffix(".pub"), "backup-1")
+    rig.signers.unlink()
+    assert geminisign.propose_line(rig.trust(), rig.b.with_suffix(".pub"), "backup-1")
+    assert issubclass(geminisign.MissingTrustFile, RefusedError)
+    with pytest.raises(geminisign.MissingTrustFile):
+        geminisign.read_trust_file(rig.signers, os.geteuid(), "x")
+
+
+def test_propose_still_refuses_when_only_the_revocation_list_is_missing(rig: Rig) -> None:
+    trust = geminisign.Trust(rig.signers, rig.revoked, os.geteuid(), False, True)  # a missing list is refused
+    with refused("revocation list"):
+        geminisign.propose_line(trust, rig.b.with_suffix(".pub"), "backup-1")
+
+
 def test_propose_still_refuses_a_trust_file_that_is_there_but_unsafe(rig: Rig) -> None:
     rig.signers.chmod(0o666)
     with refused("writable"):
