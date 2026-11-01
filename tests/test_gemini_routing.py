@@ -44,7 +44,7 @@ def test_the_agent_is_free_only_for_public_material_and_says_how_it_stops() -> N
         "never falls through",
         "approval record",
         "paid use is disabled",
-        "2 usd",
+        "2.50 usd",
         "10 usd",
         "image generation is paid",
         "private",

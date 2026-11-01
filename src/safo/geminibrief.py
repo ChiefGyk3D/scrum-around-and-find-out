@@ -172,13 +172,13 @@ def _declared(rest: str, line: int) -> Step | None:
 
 def _cap_problem(value: str | None) -> str | None:
     if value is None:
-        return "a paid step states its cap (cap=USD) and the cap is at most 2 USD"
+        return "a paid step states its cap (cap=USD) and the cap is at most 2.50 USD"
     try:
         cap = Decimal(value)
     except InvalidOperation:
         return "the cap of a paid step is not a number"
     if not cap.is_finite() or cap <= 0 or cap > JOB_CAP:
-        return "the cap of a paid step is above 0 and at most 2 USD"
+        return "the cap of a paid step is above 0 and at most 2.50 USD"
     return None
 
 
