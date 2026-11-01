@@ -1421,6 +1421,24 @@ any open call ambiguous), run `status`, and turn the switch back on only when `s
 restore rewinds the ledger, the height record and the markers together, so only the billing page can show the gap;
 reconcile can add the gap, and it cannot detect it alone.
 
+**A used marker from an earlier month with no ledger row.** Start-up recovery stops with "a used marker from an earlier month
+has no ledger row; root must reconcile it" and the broker does not start. What it means: the broker records a spend
+before it calls the vendor, and it writes the used marker right after. A marker with no ledger row means the ledger lost
+rows (a restore, or a cut write) after a call may have gone out, so money may have been spent that the ledger does not
+show. Recovery will not rebuild it, because the rebuilt row would carry today's time and move the charge into the wrong
+month. Nothing in the administration command repairs it automatically; that step was deferred for a simpler design.
+What the maintainer does, with the switch off and the broker stopped:
+
+1. Run `reconcile` and read which marker it names. Read the marker's written time (its `ts` field) to learn the month.
+2. Open the vendor billing page for that month and read the billed total. The billing page is the authority; the marker
+   only says that a call may have been made.
+3. Record it with the existing step: `reconcile --billing-usd TOTAL --month YYYY-MM --reason TEXT`. It adds the gap
+   between the billed total and what the ledger counts for that month, and never lowers a month.
+4. Do not delete or edit the marker: it is what keeps that one approval from being used again. The broker keeps refusing
+   to start until you resolve the marker yourself, which is a maintainer decision outside this command. Setting it aside
+   makes that one approval usable again, so do it only when you are sure the approval can no longer be presented, and
+   keep the switch off until then.
+
 **Blast radius.** The command can clear a model's suspension and can raise a month's spend. It cannot lower a month, free
 budget, send a call, read the key, or change the switch, the floor or any root-owned file. A wrong `--actual` that is too
 low would lower one ambiguous call's count; that is why it needs a reason, is recorded with your uid, and why the
