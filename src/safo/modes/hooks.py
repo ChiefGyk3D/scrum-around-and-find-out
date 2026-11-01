@@ -231,7 +231,7 @@ class EventScan:
                     self.conceal and "printf" in view and re.search(r"printf\s+-v\b", view) is not None
                 ):
                     self.hit = True
-            if "broker" in view and geminibrief.broker_module_route(view.splitlines(), self._tick):
+            if geminibrief.has_route_hint(view) and geminibrief.broker_module_route(view.splitlines(), self._tick):
                 self.hit = True  # the broker client module run directly (#299), like a paid word
             if not self.capped:
                 if "=" in view:

@@ -445,3 +445,115 @@ def test_no_route_pattern_has_a_length_bound_that_could_skip_a_match() -> None:
     assert len(patterns) >= 10, "something was collected"
     assert [n for n, p in patterns.items() if bound.search(p.pattern)] == []
     assert bound.search("[^;]{0,300}")  # the negative case: the guard does see a bound
+
+
+# -- a line over the cap is refused when ANY route hint is in it, in any spelling (#299) ------------------------------
+# The rule: a line over LINE_CAP is judged after it is normalized (quotes, backslashes and invisible characters removed,
+# whitespace squeezed, plus-joined pieces joined, dot and parent segments collapsed). If any hint a route rule uses is
+# in the result, the line is refused unread; a long line with none of them (ordinary prose or data) is not.
+
+
+def test_the_hint_list_is_the_union_of_what_the_route_rules_need() -> None:
+    assert set(geminibrief._ROUTE_HINTS) >= {
+        "broker",
+        "client",
+        "python",
+        "runpy",
+        "safo",
+        "importlib",
+        "__import__",
+        "import_module",
+        "run_",
+        "exec",
+        "eval",
+    }
+
+
+@pytest.mark.parametrize("hint", geminibrief._ROUTE_HINTS)
+def test_an_over_cap_line_with_any_route_hint_is_refused_at_the_bound_plus_one(hint: str) -> None:
+    cap = geminibrief.LINE_CAP
+    pad = "z" * (cap - len(hint) - 1)
+    at_cap = f"{pad} {hint}"
+    assert len(at_cap) == cap
+    assert geminibrief.broker_module_route([at_cap + "z"]) is True  # one past the cap: refused, not skipped
+    assert geminibrief.shell_command_class(at_cap + "z") is not None
+    assert "gemini-paid" in rules(at_cap + "z\n")
+
+
+@pytest.mark.parametrize("hint", ["broker", "importlib", "run_module", "exec"])
+def test_an_over_cap_line_with_a_plus_joined_hint_is_refused(hint: str) -> None:
+    half = len(hint) // 2
+    line = "z" * geminibrief.LINE_CAP + f" {hint[:half]} + {hint[half:]}"
+    assert geminibrief.broker_module_route([line]) is True
+    quoted = "z" * geminibrief.LINE_CAP + f" \"{hint[:half]}\" + '{hint[half:]}'"
+    assert geminibrief.broker_module_route([quoted]) is True
+
+
+def test_an_over_cap_line_with_no_route_hint_is_not_refused() -> None:
+    prose = ("The quick brown fox jumps over the lazy dog. " * 120)[: geminibrief.LINE_CAP + 1]
+    assert len(prose) > geminibrief.LINE_CAP
+    for hint in geminibrief._ROUTE_HINTS:
+        assert hint not in prose
+    assert geminibrief.broker_module_route([prose]) is False
+    assert geminibrief.broker_module_route(["x = 1;" * 2000]) is False
+
+
+# -- an expansion anywhere in a word that starts a flag cluster ending in m (#299) -----------------------------------
+
+EXPANDED_WORDS = [
+    "python3 -I -m$M --model m",  # the module glued to the flag
+    "python3 -mfoo$X --model m",  # m, text, then an expansion
+    "python3 -mfoo.bar${X:-y} --model m",
+    "python3 -I -m${M:-safo.bro}ker.client",
+    "python3 -I -m$(echo x) --model m",
+    "python3 -I -m`echo x` --model m",
+    "python3 -$Xm foo --model m",  # an expansion inside the cluster, before the m
+    "python3 -I$Xm foo --model m",
+    "python3 -I -m'$M' --model m",  # quoted forms
+    'python3 -I -m"$M" --model m',
+    "python3 -I -m ${A${B}} --model m",  # nested, in the following word
+    "python3 -I -m foo$X --model m",  # the following word, as before
+    "python3 -I -m $M --model m",
+    "python3 -I -m `echo x` --model m",
+]
+EXPANDED_COUNT = 14
+
+
+def test_the_expanded_word_table_is_not_trimmed() -> None:
+    assert len(EXPANDED_WORDS) == EXPANDED_COUNT and len(set(EXPANDED_WORDS)) == EXPANDED_COUNT
+
+
+@pytest.mark.parametrize("command", EXPANDED_WORDS)
+def test_a_module_word_with_an_expansion_anywhere_is_unreadable_while_the_broker_is_named(command: str) -> None:
+    text = "# safo broker note\n" + command + "\n"
+    assert "gemini-paid" in rules(text), command
+    assert geminibrief.shell_command_class(text) == geminibrief.SHELL_BROKER_MODULE, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -I -m pytest tests",
+        "python3 -I -m pytest -k 'a or b' tests",
+        "python3 -c 'print(1)' $X",
+        "python3 -m ruff check .",
+        "python3 -W error -m pytest",
+    ],
+)
+def test_a_plain_module_word_stays_allowed_while_the_broker_is_named(command: str) -> None:
+    text = "# safo broker note\n" + command + "\n"
+    assert geminibrief.shell_command_class(text) is None, command
+
+
+@pytest.mark.parametrize("hint", ["importlib", "client", "exec", "python"])
+def test_the_oversized_event_scan_holds_an_over_cap_line_with_a_route_hint(hint: str) -> None:
+    import time
+
+    from safo.modes.hooks import EventScan
+
+    scan = EventScan(time.monotonic() + 30)
+    scan.feed(("z" * (geminibrief.LINE_CAP + 1) + f" {hint}").encode())
+    assert scan.hit
+    quiet = EventScan(time.monotonic() + 30)
+    quiet.feed(("z" * (geminibrief.LINE_CAP + 1) + " plain words").encode())
+    assert not quiet.hit

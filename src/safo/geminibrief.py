@@ -267,7 +267,7 @@ def relevant(text: str) -> bool:
     for line in _join(text).splitlines():
         norm, _, low, pre_low, pre_raw = _views(line)
         raw = norm.lower()
-        if _risk_line(norm, low):
+        if _risk_line(norm, low) or has_route_hint(low) or has_route_hint(pre_low):
             return True
         for name, pattern in PREFILTER:
             if name == "conceal":
@@ -680,15 +680,11 @@ def _expanded(v: str) -> bool:
         for i, word in enumerate(words):
             if not word.startswith("-") or word.startswith("--"):
                 continue
-            cut = next((j for j, c in enumerate(word) if c in _BM_EXPANSION), -1)
-            if cut >= 0 and _BM_MFLAG.fullmatch(word[:cut]):
-                return True  # `-m$M`
-            if (
-                cut < 0
-                and _BM_MFLAG.fullmatch(word)
-                and i + 1 < len(words)
-                and any(c in words[i + 1] for c in _BM_EXPANSION)
-            ):
+            if any(c in word for c in _BM_EXPANSION):
+                return (
+                    True  # `-m$M`, `-mfoo$X`, `-$Xm`: a flag word that holds an expansion may spell `-m` and a module
+                )
+            if _BM_MFLAG.fullmatch(word) and i + 1 < len(words) and any(c in words[i + 1] for c in _BM_EXPANSION):
                 return True  # `-m $M`
     return False
 
@@ -722,13 +718,20 @@ _ROUTE_HINTS = (
     "exec",
     "eval",
 )
-_LONG_LINE_HINTS = ("broker", "python", "runpy")  # a line over LINE_CAP with one of these could hold the pattern
+
+
+def has_route_hint(text: str) -> bool:
+    """Whether any hint a route rule needs is in the text once its pieces are joined (quotes, backslashes and plus signs
+    between strings removed, dot and parent path segments collapsed)."""
+    flat = _flat_paths(_compact(_strip(text)))
+    return any(h in flat for h in _ROUTE_HINTS)
 
 
 def broker_module_route(views: Sequence[str], tick: Callable[[], None] | None = None) -> bool:
     """True when these lines (cleaned lower-case views, one per line, of a brief or of one Bash command) run the broker
     client module directly or build the command that would, so that it cannot be read. Every bound fails closed: a
-    line over LINE_CAP that could hold the pattern, or more than MAX_ROUTE_LINES candidate lines, is refused unread.
+    line over LINE_CAP is refused unread when ANY route hint is in its normalized form (so are more than
+    MAX_ROUTE_LINES candidate lines); a long line with none of them cannot hold the pattern and is not refused.
     Each line is squeezed and its path read the short way before it is judged; `tick` is called once per line and once
     per whole-text rule (it raises when the guard deadline has passed)."""
     step = tick if tick is not None else (lambda: None)
@@ -736,12 +739,13 @@ def broker_module_route(views: Sequence[str], tick: Callable[[], None] | None = 
     short: list[str] = []
     for v in views:
         step()
-        if len(v) > LINE_CAP:
-            if any(h in v for h in _LONG_LINE_HINTS):
-                return True  # not read, and it could hold the pattern: refused
-            continue
         flat = _flat_paths(_compact(_strip(v)))
-        if any(h in flat for h in _ROUTE_HINTS):
+        hinted = any(h in flat for h in _ROUTE_HINTS)  # (`has_route_hint`, with the joined line kept for the rules)
+        if len(v) > LINE_CAP:
+            if hinted:
+                return True  # not read, and a route hint is in it in some spelling: refused, not skipped
+            continue
+        if hinted:
             short.append(flat)
             if len(short) > MAX_ROUTE_LINES:
                 return True  # more candidates than are read: refused, never skipped
@@ -1182,23 +1186,9 @@ def _findings(
 def _scan_broker_module(lines: list[str], steps: list[Step], tick: Callable[[], None]) -> None:
     """A brief that runs the broker client module directly is a paid step, like one that writes `safo gemini paid`."""
     views: list[str] = []
-    for number, line in enumerate(lines, 1):
+    for line in lines:
         tick()
-        if (
-            len(line) > LINE_CAP
-        ):  # not read (the scan above blocks it when it mentions Gemini); a module name is a mention
-            low = line.lower()
-            if "broker" in low and "client" in low:
-                steps.append(
-                    Step(
-                        unreadable=True,
-                        line=number,
-                        why=f"the line is longer than {LINE_CAP} characters and names the broker client, so it was "
-                        "not read; put it on a shorter line",
-                    )
-                )
-            continue
-        _, _, low, pre_low, _ = _views(line)
+        _, _, low, pre_low, _ = _views(line)  # a long line too: the route detector refuses it when a hint is in it
         views.extend((low, pre_low))
     if broker_module_route(views, tick):
         steps.append(Step(paid=True, matched=MATCH_MODULE))
