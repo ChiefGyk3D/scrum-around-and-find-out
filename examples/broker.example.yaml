@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it
 # once, at start; restart the service after any change. It is root-owned because prices and caps decide what a call
 # may cost. docs/gemini-broker.md ("The price table", "What lives where") explains every part.

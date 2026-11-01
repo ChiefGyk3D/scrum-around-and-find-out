@@ -25,7 +25,7 @@ RELEASE_PYTHON = "/opt/safo-broker/current/venv/bin/python"
 UID_MARK = "ACCOUNT_UID_HERE"
 # The broker config, written by the "Create the broker configuration" step. This text is also
 # examples/broker.example.yaml
-# (a test requires the two to be the same apart from the account id), and it loads through safo.broker.config. It has
+# (a test requires the two to be the same apart from the licence line and the account id), and it loads through safo.broker.config. It has
 # no dollar sign, backtick or backslash, so the unquoted here-document expands only the id the step inserts.
 BROKER_CONFIG = """\
 # /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it
@@ -387,7 +387,7 @@ def steps(login: str) -> tuple[Step, ...]:
             "it. Nothing reads it until the service starts. The caps in it can only lower the built-in ones.",
             (ssh("rm -f /etc/safo/broker.yaml /etc/safo/broker.yaml.new"),),
             "Your own client config is not a root step: copy examples/broker-client.example.yaml to "
-            "~/.config/safo/broker-client.yaml (a 0700 directory, a 0600 file), replace USER with your login, and set "
+            "~/.config/safo/broker-client.yaml (a 0700 directory, a 0600 file), replace the path with yours, and set "
             "the key and principal under signing. The preflight in the last step checks that it loads. To change the "
             "broker config later, edit it as root, keep it root-owned and not group or other writable, and restart "
             "the service.",

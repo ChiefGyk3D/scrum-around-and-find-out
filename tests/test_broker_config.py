@@ -167,7 +167,9 @@ def test_the_runbook_step_writes_exactly_the_example_with_the_uid_filled_in(tmp_
     """One source of truth: the here-document in the runbook and examples/broker.example.yaml are the same text, apart
     from the line that holds the account id (`$(id -u LOGIN)` in the runbook, a sample number in the example)."""
     template = runbook.broker_config("1000")
-    assert template == BROKER_EXAMPLE.read_text()
+    assert (
+        BROKER_EXAMPLE.read_text() == "# SPDX-License-Identifier: Apache-2.0\n" + template
+    )  # the licence line is the only extra
     rendered = runbook.render(maintainer="alice")
     assert runbook.broker_config("$(id -u alice)") in rendered  # the id is asked of the machine, never typed or named
     path = tmp_path / "etc"
