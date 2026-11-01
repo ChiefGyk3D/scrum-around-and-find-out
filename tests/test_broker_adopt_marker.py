@@ -105,7 +105,7 @@ def test_adopting_changes_nothing_without_the_confirmation_or_with_a_wrong_one(t
     seeded(tmp_path)
     make_stray(tmp_path)
     before = ledger_bytes(tmp_path)
-    code, out, err = adopt(tmp_path, confirm=None)
+    code, out, err = adopt(tmp_path, confirm=False)
     assert code == 2 and "--confirm" in err and STRAY in out  # the record is shown
     c = confirmed_for(tmp_path)
     base = ["reconcile", "--adopt-marker", STRAY, "--reason", "r"]
