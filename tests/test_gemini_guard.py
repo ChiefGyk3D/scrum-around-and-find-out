@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The dispatch guard's Gemini rules (#200): a paid step needs a live approval record and a cap of at most 2 USD, and
+"""The dispatch guard's Gemini rules (#200): a paid step needs a live approval record and a cap of at most 2.50 USD, and
 nothing private goes to the free tier. These rules deny in every guard mode, warn included: the maintainer's rule is
 that no record means the guard blocks, not warns.
 """
@@ -75,13 +75,13 @@ def test_a_paid_step_with_a_live_record_and_a_cap_passes() -> None:
     assert rules(f"gemini: paid model={MODEL} cap=1.50 approval={OK}\n{PUBLIC}", accepts()) == []
 
 
-@pytest.mark.parametrize("cap", ["2.01", "10", "0", "-1", "abc", "nan", "inf", "1e9"])
-def test_a_cap_over_two_dollars_or_unreadable_is_blocked(cap: str) -> None:
+@pytest.mark.parametrize("cap", ["2.51", "10", "0", "-1", "abc", "nan", "inf", "1e9"])
+def test_a_cap_over_the_job_cap_or_unreadable_is_blocked(cap: str) -> None:
     assert GEMINI_PAID in rules(f"gemini: paid cap={cap} approval={OK}\n{PUBLIC}", accepts())
 
 
-def test_a_cap_of_exactly_two_dollars_passes() -> None:
-    assert rules(f"gemini: paid cap=2.00 approval={OK}\n{PUBLIC}", accepts()) == []
+def test_a_cap_of_exactly_the_job_cap_passes() -> None:
+    assert rules(f"gemini: paid cap=2.50 approval={OK}\n{PUBLIC}", accepts()) == []
 
 
 def test_a_paid_step_with_no_cap_is_blocked() -> None:

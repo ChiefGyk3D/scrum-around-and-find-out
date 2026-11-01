@@ -26,8 +26,9 @@ RELEASE_PYTHON = "/opt/safo-broker/current/venv/bin/python"
 UID_MARK = "ACCOUNT_UID_HERE"
 # The broker config, written by the "Create the broker configuration" step. This text is also
 # examples/broker.example.yaml (a test requires the two to be the same apart from the licence line and the account
-# id), and it loads through safo.broker.config. It has no dollar sign, backtick or backslash, so the unquoted
-# here-document expands only the id the step inserts.
+# id), and it loads through safo.broker.config. It has no dollar sign, backtick or backslash, and the step writes it
+# through a here-document with a quoted delimiter, so no shell ever reads it as code; the one number it needs
+# is passed to the command as an argument and swapped in for the mark by sed.
 BROKER_CONFIG = """\
 # /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it
 # once, at start; restart the service after any change. It is root-owned because prices and caps decide what a call
@@ -371,15 +372,17 @@ def steps(login: str) -> tuple[Step, ...]:
             "socket, the caps, the price table and the call deadline. The here-document writes the file next to its "
             "final name and renames it, so the service never sees half a file, and it refuses to replace a file that "
             "exists. The line asks the machine for your numeric account id with id -u (a number, never a name) and "
-            "writes it into allowed_uids. The prices were read from the vendor pricing page on 2026-10-31 and "
+            "writes it into allowed_uids. The file text sits in a quoted here-document, so nothing in it is "
+            "ever expanded or run. The prices were read from the vendor pricing page on 2026-10-31 and "
             "run to the valid_through dates in the file; read the page again and correct the file (as root, then "
             "restart the service) before you rely on a figure.",
             (
                 ssh(
                     'sh -c "test ! -e /etc/safo/broker.yaml '
-                    "&& install -m 0644 -o root -g root /dev/stdin /etc/safo/broker.yaml.new "
-                    '&& mv /etc/safo/broker.yaml.new /etc/safo/broker.yaml" <<EOF\n'
-                    + broker_config(f"$(id -u {login})")
+                    f"&& sed s/{UID_MARK}/\\$1/ "
+                    "| install -m 0644 -o root -g root /dev/stdin /etc/safo/broker.yaml.new "
+                    f'&& mv /etc/safo/broker.yaml.new /etc/safo/broker.yaml" sh $(id -u {login}) <<"EOF"\n'
+                    + BROKER_CONFIG
                     + "EOF",
                     heredoc=True,
                 ),
@@ -447,7 +450,8 @@ def steps(login: str) -> tuple[Step, ...]:
             "written only if that exits 0. The preflight fails while the egress control is in observe mode, when the "
             "egress config is missing or unusable, when /etc/safo/broker.yaml is missing, not root-owned, "
             "writable by group "
-            "or others, refused by the broker's own loader or lists no allowed uid, when your "
+            "or others, refused by the broker's own loader, lists no allowed uid or lists any account but yours, "
+            "when your "
             "~/.config/safo/broker-client.yaml is missing or does not load (the line passes your numeric id and the "
             "preflight finds your home itself), and on any other failed check. Run the dry run with a real key "
             "before this step.",
