@@ -276,10 +276,10 @@ sections that follow agree with it.
   `no-touch-required`, certificates and duplicates, and the broker accepts only hardware keys from it even when a
   software key has the written opt-in.
 - **`check-install` coverage.** It checks the release link and folder, the version record, the floor, the five installed
-  unit files against the signed release and its manifest, the egress helper and the switch and egress mode. It does **not**
-  check the root-door items (sudo rules, group membership, polkit rules, writable root-run paths, setuid files, a leftover
-  old secret-store credential); its output ends with a line saying so. A read-only check for those is **not built yet**
-  (issue #293).
+  unit files against the signed release and its manifest, the egress helper and the switch and egress mode. Since #293 it
+  also runs nine read-only root-door checks (see "The root-door precondition"), each answering `pass`, `warn` or `fail`
+  in one sentence; a `fail` makes the command exit 1, a `warn` does not. The output ends with a `limits:` line: a pass is
+  "no door found by these checks", never "no door".
 - **The paid commands and the removed path.** `safo gemini paid` and `safo gemini paid-dryrun` run the broker client.
   The in-process paid path is deleted (#287), the dispatch guard denies every paid step in a brief, and the only paid route
   is the broker.
@@ -670,16 +670,42 @@ absent (there is no start condition on the switch; decided 2026-10-31).
 The whole design assumes the maintainer's account, and every agent running as it, has **no way to become root**. The
 installer's checks reduce the chance that this is false; they cannot prove it, and this page does not claim they do.
 
-**What `check-install` does not check yet.** The list below is the manual review the maintainer does. A read-only code
-check for these items is **not built yet** and is tracked as issue #293 (sudo rules, group membership, polkit rules,
-writable root-run paths, setuid files, and a leftover old secret-store credential). Today the administration command
-`check-install` (run as `python -I -m safo.broker.admin check-install`) checks the release link, the version record, the
-floor, the installed unit files against the signed release, the egress helper and the switch (see the administration
-section), and its output ends with a line saying that these root-door items are not checked. It does not run `sudo -l`,
-read group or polkit data, or walk the file system. Until it does, treat a passing `check-install` as "the installation
-matches the signed release", never as "no door to root exists".
+**What `check-install` checks (issue #293).** The administration command `check-install` (run as
+`python -I -m safo.broker.admin check-install`) checks the installation (see the administration section) and then runs
+the root-door checks in `src/safo/broker/doors.py`, for the account named by `SUDO_UID` (run it through `sudo`; without
+it, or when the user name sudo reports does not belong to the user id, every account check fails and says why). The checks are strictly read-only: files are read without following a
+final symbolic link, folders are listed, nothing is modified except possibly access times and **no program is run**, so there is no `sudo -l`; the
+sudoers files themselves are read and parsed. Each check gives one finding, and a path that cannot be read, has the wrong
+owner, is writable by others, is a symbolic link where a file belongs, is missing where it must exist, or is a scan that
+hit its entry limit is a `fail`, never a pass:
 
-**The root-door review (manual today; each hit is fixed or explained in writing):**
+| Finding | What it reads | Fails when | Warns when |
+|---|---|---|---|
+| `sudo` | `/etc/sudoers` and `/etc/sudoers.d` (names sudo reads), `User_Alias`, line continuations | a rule names the login, its uid, `ALL`, a group the account is in, or an alias of those; a file or folder is not root-owned and closed, is a link, or an include cannot be followed | (never: an unknown account is a fail) |
+| `groups` | `/etc/passwd`, `/etc/group` | the account is in `root`, `sudo`, `wheel`, `admin`, `docker`, `lxd`, `lxc`, `libvirt`, `disk` or `shadow` (primary or supplementary), or is uid 0 | (never: an unknown account is a fail) |
+| `polkit` | `*.rules` and `*.pkla` under the polkit folders | a rule granting without a password (a yes result, also written as a quoted yes) names a login of the uid or one of its groups (or every user), or a rules file is not exactly the strict allowlist shape (one or more addRule calls over a function of action and subject whose only statements are `if` conditions joined by `&&`, each term a user test, a group test or an action-id test against a quoted literal, with at least one user or group test, and a yes return as the whole body; no comments, else, ternary, `|`, `!` or other statements), which is reported as needing a human look | a rule grants without a password and names only other users or groups |
+| `writable` | a bounded walk of `/etc`, `/usr/local`, `/opt`, the systemd unit folder, polkit, the cron and `at` spools, and the broker's own folders | the account owns any entry (whatever its mode: the owner can change it) or can write it through its group or world bits; symbolic links are not followed | (never: an unknown account is a fail) |
+| `jobs` | root-run `.service` files and `/etc/crontab`, `/etc/cron.d` | a root job runs a file, or a file not yet created, whose path (a folder above it, a unit link's target or the folders on its way) the account owns or can write, sticky world-writable folders included, or reads or runs something under the account's home. Unit links and the `.conf` files in unit drop-in folders are read too; a link that does not resolve fails closed (a link to `/dev/null` is a masked unit). A shell, interpreter or wrapper is followed to the paths among its arguments; a command line with code in a string, a relative name or shell syntax is reported as needing a human look. Runtime and transient unit folders are read too | (never: an unknown account is a fail) |
+| `preload` | the dynamic linker preload file in `/etc` | it is a link, not root-owned or writable by others | it lists a library |
+| `setuid` | a bounded walk of `/usr`, `/opt` and the merged `/bin`, `/sbin`, `/lib*`, against the package file lists in `/var/lib/dpkg/info` (read as files, `dpkg` is not run) | a setuid or setgid file no package owns, any such file or a file with capabilities that the account can write, or the package lists cannot be read | a file with capabilities that no package owns |
+| `trees` | a bounded walk of `/usr`, `/etc`, `/opt`, the library, boot and binary trees, never across a device and never following a link | any entry the account can write or own, or a link inside whose target is under the account's home or can be reached or written by the account; the walk stops at its entry limit or a mount point, which is reported as needing a human look | the account is unknown |
+| `credential` | the secret store tool's local settings folders in the account's home (`.doppler` and `.config/doppler`; these locations are inferred, not read from a vendor page) | the home cannot be examined | one of them exists: revoke the old key at the vendor, then delete it |
+
+A clean result is printed as `nothing found`, not as a bare pass: this checker is a heuristic snapshot, and a clean
+result is not proof that no door exists. Root-run units are judged as systemd merges them (the base file and every
+drop-in, in file name order, the last assignment winning), in every unit folder including the runtime, control, attached
+and generator ones; the generator program folders are scanned for anything the account can write. A command whose program
+is not a known interpreter has every argument looked at, and an argument that cannot be placed goes to a human. Polkit
+action policy files are read too: a default of `yes` for any class of user is a finding, and a value or markup that
+cannot be read goes to a human. If the sudoers database is configured with a source other than local files, the `sudo`
+check fails closed. Files and folders are opened without moving their access time where the kernel allows it (the owner and root); where it is refused, reading or listing may update an access time. The checks change no file contents and run no program, but they are not claimed to be free of every filesystem side effect. Every login that maps to the account's uid is judged, in the group, sudoers and polkit checks and for the credential. If
+the name service switch file in `/etc` gives the passwd, group, shadow, gshadow or initgroups database a source other than `files` or
+`compat` (for example `ldap`, `sss`, `nis`, `systemd`), or any file sits in `/etc/userdb`, `/run/userdb` or
+`/run/systemd/userdb` (systemd user records, home-directory users), every account check fails closed, because accounts and
+groups could then exist that these checks do not read. A sudoers rule for a netgroup (`+name`) fails closed for the same reason. The scan roots are fixed in code and no flag moves them. A clean machine of the Debian family is the model; a machine
+that does not keep package file lists there, or whose package database is not root-owned and closed to the account, fails the `setuid` check when it has any setuid file, by design.
+
+**Still a manual review (the checks above do not replace it; each hit is fixed or explained in writing):**
 
 - `sudo -l -U LOGIN`: any rule at all for the account, `NOPASSWD` or not, including command-specific rules (a rule for
   one command can be an editor, a service manager or an installer with a shell escape); and `sudo -n true`.
@@ -1371,7 +1397,8 @@ ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.adm
   others, and it reports the switch state (a switch file that is present but is not exactly `enabled`, or not root-owned,
   fails because the broker would treat it as off) and the egress mode. It notes, without failing, an enabled switch with the
   egress control in observe mode (the preflight owns that decision), and it fails if the switch is enabled but the egress
-  config cannot be read. It exits 1 on any failure. It does not check the root-door items listed above.
+  config cannot be read. It then prints the nine root-door findings (`pass`, `warn` or `fail`, one sentence each; see
+  "The root-door precondition") and a `limits:` line. It exits 1 on any failure, including a root-door `fail`.
 - **clear MODEL** first prints the record of every call that suspended the model (call id, model, job, kind
   `ambiguous` or `breach`, start time, reserved amount, state, counted amount, recorded actual) and changes nothing.
   Read the vendor billing page, then repeat the command with `--confirm CALL_ID` for **every** call id printed. The
@@ -1709,7 +1736,7 @@ service and spend nothing.
 | 2 | The call pipeline against the fake vendor: request builders per kind, the image response handling (magic bytes, limits, receipts), 429 and ambiguous outcomes. Reservation, reconciliation, breach and suspension. The response parser targets the vendor's documented shape and refuses any shape it has not been shown | Review |
 | 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, the operations, logging allowlist; fake socket peers. The idle exit is not built yet; the framing fuzz is built (`tests/test_broker_framing_fuzz.py`) | Review of the parser and the limits |
 | 4 | The thin client: `safo gemini paid` and `paid-dryrun` go through the socket, safe image writing and sidecars, **removal of the in-process paid path** (done in #287: deleted, with a guard test that no module outside the broker can name the vendor, a paid model or the key header), the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |
-| 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that covers the release link, the record, the floor, the installed units against the signed release, the egress helper and the switch; the root-door checks remain a manual review), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
+| 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that covers the release link, the record, the floor, the installed units against the signed release, the egress helper and the switch, and, since #293, the read-only root-door checks), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
 | 6 | **Cyber-tier security review** of the broker and the signed-approval verification (issue step 3). Done; its findings were fixed in #288 and #289 | Clean review |
 | 7 | The maintainer does the root setup and the dry run, then creates the switch (issue step 5). The first calls use Nano Banana 2 Lite to record the real response shape and to observe the output cap; root then sets `cap_verified` for each model observed; a fixture PR follows | The maintainer's own run; the observation reviewed |
 | 8 | Text paid calls through the same path, the `usage` workflow, then the optional count-per-approval and passkey wiring if the maintainer wants them | Review per item |
