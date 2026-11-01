@@ -45,6 +45,7 @@ NFT = "/usr/sbin/nft"
 CONF = Path("/etc/safo/broker-egress.conf")
 HOSTS = Path("/etc/safo/egress/hosts")
 LOCK = Path("/etc/safo/egress/lock")
+SET_LIFETIME = 3600  # seconds: the set timeout in the ruleset; an address older than this is never put back
 REFRESH_AFTER = 55.0  # seconds: `tick` resolves again when the hosts view is at least this old
 SERVICE_USER = "safo-broker"
 TABLE = "safo_broker_egress"
@@ -221,14 +222,16 @@ def render_rules(template: str, *, uid: object, mode: str) -> str:
     return "".join(x + "\n" for x in text.splitlines() if not x.lstrip().startswith("#"))
 
 
-def refresh_script(rules: str, addresses: Sequence[str]) -> str:
+def refresh_script(rules: str, addresses: Sequence[str], *, timeout: int | None = None) -> str:
     """The whole table, rebuilt with the new set, as one nft transaction: it replaces a table that is missing or was
     changed from outside, and the set is never half-updated."""
     if not addresses:
         msg = "no addresses to put in the set"
         raise EgressError(msg)
     checked = [validate_address(a) for a in addresses]
-    return f"{rules}add element inet {TABLE} {SET} {{ {', '.join(checked)} }}\n"
+    suffix = "" if timeout is None else f" timeout {int(timeout)}s"
+    items = ", ".join(a + suffix for a in checked)
+    return f"{rules}add element inet {TABLE} {SET} {{ {items} }}\n"
 
 
 def addresses_in_hosts(data: bytes, host: str) -> list[str]:
@@ -346,22 +349,32 @@ def live_problem(listing: str | None, *, service_uid: int, mode: str, addresses:
     return None
 
 
-def read_view(hosts_path: Path, host: str) -> list[str]:
+def read_view(hosts_path: Path, host: str, *, now: float) -> tuple[list[str], int]:
+    """The addresses the hosts view names and the seconds they have left. The view's write time is when they were
+    resolved: once SET_LIFETIME has passed (or the time is in the future, or unknown) none of them is trusted again, so
+    a restore can never keep an address alive past the expiry the set would have given it."""
     try:
-        return addresses_in_hosts(hosts_path.read_bytes(), host)
+        age = now - hosts_path.stat().st_mtime
+        data = hosts_path.read_bytes()
     except OSError:
-        return []
+        return [], 0
+    if not 0 <= age < SET_LIFETIME:
+        return [], 0
+    return addresses_in_hosts(data, host), max(1, int(SET_LIFETIME - age))
 
 
-def ensure(config: Config, *, lister: Lister, nft: Nft, hosts_path: Path, service_uid: int) -> str | None:
+def ensure(
+    config: Config, *, lister: Lister, nft: Nft, hosts_path: Path, service_uid: int, now: float | None = None
+) -> str | None:
     """If the live table is not the reviewed one, put it back in one transaction, filled from the addresses the hosts
-    view names (the last good answer; nothing is resolved here). Returns the reason it was put back, else None."""
-    addresses = read_view(hosts_path, config.host)
+    view names while they are still within their lifetime (the last good answer; nothing is resolved here). Returns the
+    reason it was put back, else None."""
+    addresses, left = read_view(hosts_path, config.host, now=time.time() if now is None else now)
     problem = live_problem(lister(), service_uid=service_uid, mode=config.mode, addresses=addresses)
     if problem is None:
         return None
     rules = render_rules(RULES_TEMPLATE, uid=service_uid, mode=config.mode)
-    nft(refresh_script(rules, addresses) if addresses else rules)
+    nft(refresh_script(rules, addresses, timeout=left) if addresses else rules)
     return problem
 
 

@@ -726,7 +726,8 @@ def test_ensure_rebuilds_a_removed_table_from_the_hosts_view_without_resolving(t
     assert egress.ensure(cfg, lister=lab.lister, nft=lab.nft, hosts_path=hosts, service_uid=SUID)
     assert len(lab.scripts) == 1
     assert lab.scripts[0].startswith("table inet safo_broker_egress\ndelete table inet safo_broker_egress\n")
-    assert lab.scripts[0].rstrip().endswith("{ 142.250.80.10, 142.250.80.11 }")
+    assert "vendor_v4 { 142.250.80.10 timeout " in lab.scripts[0]
+    assert ", 142.250.80.11 timeout " in lab.scripts[0]
 
 
 def test_ensure_rebuilds_a_tampered_table_and_an_unreadable_view_gives_an_empty_set(tmp_path: Path) -> None:
@@ -873,8 +874,34 @@ def test_main_tick_checks_every_time_but_resolves_only_when_the_view_is_old(
     monkeypatch.setattr(egress, "list_table", lab.lister)
     monkeypatch.setattr(egress, "run_nft", lab.nft)
     monkeypatch.setattr(egress, "default_resolver", resolver)
+
+    def fake_refresh(cfg: egress.Config, *, resolver: egress.Resolver, **kw: object) -> list[str]:
+        return egress.validate_answers(resolver(cfg.host))
+
+    monkeypatch.setattr(egress, "refresh", fake_refresh)  # writing the view as root is covered by the refresh tests
     assert egress.main(["tick"]) == 0  # the view was just written: put the table back, do not resolve
     assert asked == [] and len(lab.scripts) == 1
     os.utime(hosts, (1.0, 1.0))
     assert egress.main(["tick"]) == 0  # an old view: put the table back and resolve
-    assert asked == [HOST] and len(lab.scripts) == 3
+    assert asked == [HOST] and len(lab.scripts) == 2  # the aged view is not put back with addresses
+
+
+def test_an_aged_view_is_not_put_back_and_a_young_one_keeps_only_its_remaining_time(tmp_path: Path) -> None:
+    """Restoring must not extend an address past the lifetime the set would have given it."""
+    _fake, hosts, cfg = setup(tmp_path, GOOD)
+    egress.write_hosts(hosts, egress.hosts_content(HOST, GOOD), uid=UID, gid=os.getgid())
+    os.utime(hosts, (10_000.0, 10_000.0))
+    old = Lab(None)
+    now = 10_000.0 + egress.SET_LIFETIME
+    assert egress.ensure(cfg, lister=old.lister, nft=old.nft, hosts_path=hosts, service_uid=SUID, now=now)
+    assert "add element" not in old.scripts[0]  # past its lifetime: an empty set
+    young = Lab(None)
+    assert egress.ensure(cfg, lister=young.lister, nft=young.nft, hosts_path=hosts, service_uid=SUID, now=10_600.0)
+    assert "142.250.80.10 timeout 3000s, 142.250.80.11 timeout 3000s" in young.scripts[0]
+    future = Lab(None)
+    assert egress.ensure(cfg, lister=future.lister, nft=future.nft, hosts_path=hosts, service_uid=SUID, now=9_000.0)
+    assert "add element" not in future.scripts[0]  # dated in the future: not trusted
+    # an expired set that is already empty is a good table, so nothing is rewritten every ten seconds
+    quiet = Lab(listing(addrs=[], mode="observe"))
+    assert egress.ensure(cfg, lister=quiet.lister, nft=quiet.nft, hosts_path=hosts, service_uid=SUID, now=now) is None
+    assert quiet.scripts == []
