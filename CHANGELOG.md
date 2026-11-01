@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Installer hardening (#284). The installer self-test now runs the staged release in a transient systemd sandbox with an empty
+  state directory when run as root, and with an empty private state directory of its own otherwise. Tests use an injected
+  runner; none needs root or systemd.
 - Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
   which the installer never builds (it builds `current/venv/bin/python`): the runbook, the admin docs and a new test that
   compares every interpreter path in the runbook with the installer's own constant now agree. Nothing created the broker

@@ -59,8 +59,7 @@ GIT = "/usr/bin/git"
 SSH_KEYGEN = "/usr/bin/ssh-keygen"
 SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze"
-RUNUSER = "/usr/sbin/runuser"
-UNSHARE = "/usr/bin/unshare"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
 SERVICE_USER = "safo-broker"
 UNIT_NAMES = (
     "safo-broker.service",
@@ -71,9 +70,31 @@ UNIT_NAMES = (
 )
 EGRESS_RULES_REL = "packaging/nftables/safo-broker.nft"
 EGRESS_HELPER = "/usr/local/sbin/safo-broker-egress"
-# The staged tree is tried in private network, IPC, UTS and PID namespaces (with a fresh /proc): no network, no shared
-# memory, and no way to signal or see the live broker's processes.
-SELF_TEST_NAMESPACES = ("--net", "--ipc", "--uts", "--pid", "--fork", "--mount-proc")
+# The staged tree is tried in a transient systemd sandbox: the service user, no network, private IPC and /tmp, a read-only
+# file system, and empty in-memory directories where the live state and the root-owned config would be. It can see and
+# change nothing the running broker owns.
+# begin sandbox paths (the only place besides the unit policy that names the live state directory: it is hidden, not used)
+STATE_DIR = "/var/lib/safo-broker"
+CONFIG_DIR = "/etc/safo"
+SELF_TEST_PROPERTIES = (
+    f"User={SERVICE_USER}",
+    "PrivateNetwork=yes",
+    "PrivateIPC=yes",
+    "PrivateTmp=yes",
+    "PrivateDevices=yes",
+    "ProtectSystem=strict",
+    "ProtectHome=yes",
+    "ProtectProc=invisible",
+    "ProcSubset=pid",
+    "ProtectHostname=yes",
+    "NoNewPrivileges=yes",
+    "CapabilityBoundingSet=",
+    "RestrictAddressFamilies=AF_UNIX",
+    "MemoryMax=1G",
+    "RuntimeMaxSec=120",
+    f"TemporaryFileSystem={STATE_DIR}:mode=0700 {CONFIG_DIR}:mode=0755",
+)
+# end sandbox paths
 NSSWITCH_REL = "packaging/etc/nsswitch.conf"
 EGRESS_RESTART = ["try-restart", "safo-broker-egress.service", "safo-broker-egress-refresh.timer"]
 # Exposure budget per unit (systemd-analyze security, offline): a rise past it means a hardening line was lost.
@@ -1167,13 +1188,20 @@ def default_verify_units(unit_dir: Path, release: Path) -> None:
             raise InstallError(msg)
 
 
+def sandboxed(argv: list[str]) -> list[str]:
+    """Wrap a command in the transient sandbox. The state directory it is told about is the empty in-memory one."""
+    wrap = [SYSTEMD_RUN, "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec"]
+    for prop in SELF_TEST_PROPERTIES:
+        wrap += ["-p", prop]
+    wrap += ["-E", f"STATE_DIRECTORY={STATE_DIR}", "-E", "PYTHONDONTWRITEBYTECODE=1", "-E", "PATH=/usr/bin:/bin"]
+    return [*wrap, "--working-directory=/", "--", *argv]
+
+
 def self_test_argv(python: Path, modules: Sequence[str], *, as_service_user: bool) -> list[str]:
-    """The import check. As root it drops to the service user and into an empty network namespace, so import-time code
-    in the release or its dependencies can neither read root's files nor reach the network."""
+    """The import check. As root it runs in the sandbox, so import-time code in the release or its dependencies can
+    neither read root's or the broker's files nor reach the network."""
     argv = [str(python), "-I", "-c", "import " + ", ".join(modules)]
-    if as_service_user:
-        argv = [UNSHARE, *SELF_TEST_NAMESPACES, "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
-    return argv
+    return sandboxed(argv) if as_service_user else argv
 
 
 def broker_modules(release: Path) -> list[str]:
@@ -1186,28 +1214,32 @@ def broker_modules(release: Path) -> list[str]:
 
 def entry_self_test_argv(python: Path, *, as_service_user: bool) -> list[str]:
     argv = [str(python), "-I", "-m", "safo.broker", "--self-test"]
-    if as_service_user:
-        argv = [UNSHARE, *SELF_TEST_NAMESPACES, "--", RUNUSER, "-u", SERVICE_USER, "--", *argv]
-    return argv
+    return sandboxed(argv) if as_service_user else argv
 
 
-def default_self_test(modules: Sequence[str] = ("yaml",), *, use_runuser: bool | None = None) -> Callable[[Path], None]:
-    """Import every broker module and every extra module, then run the real entry point in its self-test mode, both as
-    the service user (when root) and without network."""
+def default_self_test(
+    modules: Sequence[str] = ("yaml",),
+    *,
+    use_runuser: bool | None = None,
+    run: Callable[..., subprocess.CompletedProcess[str]] = _run,
+) -> Callable[[Path], None]:
+    """Import every broker module and every extra module, then run the real entry point in its self-test mode, both in
+    the transient sandbox (when root) and with an empty state directory of their own (when not)."""
 
     def self_test(release: Path) -> None:
         python = release / "venv" / "bin" / "python"
         root = use_runuser if use_runuser is not None else os.geteuid() == 0
-        env = {"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
-        for argv in (
-            self_test_argv(python, [*broker_modules(release), *modules], as_service_user=root),
-            entry_self_test_argv(python, as_service_user=root),
-        ):
-            done = _run(argv, env=env, cwd=Path("/"), timeout=120)
-            if done.returncode != 0:
-                tail = " | ".join(done.stderr.strip().splitlines()[-2:])
-                msg = f"the staged tree failed its self-test: {tail}"
-                raise InstallError(msg)
+        with tempfile.TemporaryDirectory(prefix="safo-selftest-") as empty_state:
+            env = {"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1", "STATE_DIRECTORY": empty_state}
+            for argv in (
+                self_test_argv(python, [*broker_modules(release), *modules], as_service_user=root),
+                entry_self_test_argv(python, as_service_user=root),
+            ):
+                done = run(argv, env=env, cwd=Path("/"), timeout=120)
+                if done.returncode != 0:
+                    tail = " | ".join(done.stderr.strip().splitlines()[-2:])
+                    msg = f"the staged tree failed its self-test: {tail}"
+                    raise InstallError(msg)
 
     return self_test
 

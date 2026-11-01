@@ -766,6 +766,11 @@ def test_the_installer_source_never_names_the_state_directory() -> None:
     # the unit policy table must name the one writable path the units may grant; no code path uses it
     head, _, rest = source.partition("UNIT_POLICY: dict")
     source = head + rest.partition("FORBIDDEN_UNIT_KEYS")[2]
+    # the sandbox block hides the directory under an empty in-memory mount; it is the one other place the path appears
+    before, _, after = source.partition("# begin sandbox paths")
+    block, _, after = after.partition("# end sandbox paths")
+    assert "TemporaryFileSystem={STATE_DIR}" in block and "ReadWritePaths" not in block and "BindPaths" not in block
+    source = before + after
     assert '"/var/lib/safo-broker"' not in source
     assert "'/var/lib/safo-broker'" not in source
     assert "/var/lib/safo-broker/" not in source
@@ -870,17 +875,78 @@ def test_a_version_recorded_during_the_review_is_honored_before_the_swap(world: 
     assert current_name(world.layout) is None
 
 
-def test_the_self_test_runs_as_the_service_user_in_an_empty_network_namespace_when_root() -> None:
+def sandbox_props(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "-p"]
+
+
+def test_the_self_test_runs_in_a_transient_sandbox_as_the_service_user_when_root() -> None:
     py = Path("/r/venv/bin/python")
     as_root = install.self_test_argv(py, ("safo.broker", "yaml"), as_service_user=True)
-    assert as_root[: 1 + len(install.SELF_TEST_NAMESPACES)] == [install.UNSHARE, *install.SELF_TEST_NAMESPACES]
-    for flag in ("--net", "--ipc", "--uts", "--pid", "--fork", "--mount-proc"):
+    assert as_root[0] == install.SYSTEMD_RUN
+    for flag in ("--wait", "--pipe", "--collect"):
         assert flag in as_root
-    assert install.RUNUSER in as_root
-    assert as_root[as_root.index("-u") + 1] == install.SERVICE_USER
+    props = sandbox_props(as_root)
+    for wanted in (
+        f"User={install.SERVICE_USER}",
+        "PrivateNetwork=yes",
+        "PrivateTmp=yes",
+        "PrivateDevices=yes",
+        "NoNewPrivileges=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=yes",
+        "CapabilityBoundingSet=",
+    ):
+        assert wanted in props
     assert as_root[-4:-1] == [str(py), "-I", "-c"]
     plain = install.self_test_argv(py, ("safo.broker",), as_service_user=False)
     assert plain == [str(py), "-I", "-c", "import safo.broker"]
+
+
+def test_the_sandbox_replaces_the_live_state_and_config_with_empty_directories() -> None:
+    py = Path("/r/venv/bin/python")
+    for argv in (
+        install.self_test_argv(py, ("safo.broker",), as_service_user=True),
+        install.entry_self_test_argv(py, as_service_user=True),
+    ):
+        props = sandbox_props(argv)
+        tmpfs = [p for p in props if p.startswith("TemporaryFileSystem=")]
+        assert len(tmpfs) == 1
+        mounted = tmpfs[0].removeprefix("TemporaryFileSystem=").split()
+        assert any(m.split(":")[0] == install.STATE_DIR for m in mounted)
+        assert any(m.split(":")[0] == install.CONFIG_DIR for m in mounted)
+        assert f"STATE_DIRECTORY={install.STATE_DIR}" in argv
+        assert not any(p.startswith(("ReadWritePaths=", "BindPaths=", "StateDirectory=")) for p in props)
+
+
+def test_the_unprivileged_self_test_gets_an_empty_state_directory_of_its_own(tmp_path: Path) -> None:
+    seen: list[dict[str, str]] = []
+    listing: list[list[str]] = []
+
+    def fake_run(argv: Any, *, env: dict[str, str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(dict(env))
+        state = Path(env["STATE_DIRECTORY"])
+        listing.append(sorted(p.name for p in state.iterdir()))
+        assert state.is_absolute() and state.stat().st_mode & 0o077 == 0
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    release = tmp_path / "rel"
+    (release / "venv" / "bin").mkdir(parents=True)
+    (release / "venv" / "lib" / "python3" / "site-packages" / "safo" / "broker").mkdir(parents=True)
+    test = install.default_self_test(("yaml",), use_runuser=False, run=fake_run)
+    test(release)
+    assert len(seen) == 2 and listing == [[], []]
+    assert not Path(seen[0]["STATE_DIRECTORY"]).exists()
+
+
+def test_a_failed_sandboxed_self_test_fails_the_install_and_names_no_state(tmp_path: Path) -> None:
+    def failing(argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", "boom\n")
+
+    release = tmp_path / "rel"
+    (release / "venv" / "bin").mkdir(parents=True)
+    (release / "venv" / "lib" / "python3" / "site-packages" / "safo" / "broker").mkdir(parents=True)
+    with pytest.raises(InstallError, match="self-test"):
+        install.default_self_test(use_runuser=True, run=failing)(release)
 
 
 # ---- review round 2: wheel data schemes, venv bin, rollback state directory ------------------------------------------
