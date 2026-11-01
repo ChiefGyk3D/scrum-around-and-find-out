@@ -2,7 +2,7 @@
 
 This is the copy-paste runbook for the maintainer-side setup of the paid Gemini broker: enroll hardware keys for
 approvals, test a second device, make a separate release-signing key, build the root-owned allowed-signers lines, and
-rotate or revoke. It is the preparation for phase 7 and does not depend on the unmerged broker code: every command here
+rotate or revoke. It is the preparation for phase 7 and does not depend on the broker code: every command here
 uses OpenSSH, git and libfido2 tools, not the broker. The design is in [Gemini broker](gemini-broker.md),
 [Gemini keys](gemini-keys.md) and [Gemini passkeys](gemini-passkeys.md); this page does not change it.
 
@@ -230,7 +230,7 @@ Two more checks, by hand. Sign again and confirm it asks for a touch and the PIN
 `verify-required` requires verification for each signature). Then unplug the key and confirm the sign command fails.
 
 The manual does not say that `-Y verify` reports the PIN check, so a green verify does not prove the PIN was asked. The
-safo dry run reads the authenticator flags and prints touch and PIN, and that is the proof once phases 2 and 5 are merged.
+safo dry run reads the authenticator flags and prints touch and PIN, and that is the proof (`safo gemini paid-dryrun`, built and merged).
 
 For the structure-only check, `ssh-keygen -Y check-novalidate -n NAMESPACE -s SIGFILE < msg` does not validate that a
 signature comes from an authorized signer (manual). Run with a software key it printed a Good line and exited 0.
@@ -368,13 +368,13 @@ The approval file is `/etc/safo/gemini-allowed-signers`: root-owned, mode 0644, 
 key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. The label is the principal. Never write a line without the
 `namespaces=` option: a key without it is accepted by OpenSSH for any namespace, and the broker refuses the line.
 
-1. **Print the line.** Preferred, once the keys command is merged:
+1. **Print the line.** Preferred (`safo gemini keys propose` is built and merged; it works before the files of step 2 exist):
 
    ```bash
    safo gemini keys propose ~/.ssh/safo/safo_gemini_a.pub --label yubikey-a
    ```
 
-   Cross-check, or use if the command is not yet available:
+   Cross-check (the two lines must be the same):
 
    ```bash
    printf '%s namespaces="safo-gemini-approval" %s\n' yubikey-a "$(cut -d' ' -f1,2 ~/.ssh/safo/safo_gemini_a.pub)"
@@ -436,7 +436,7 @@ key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. The label is the 
    The preflight line `allowed-signers` must read `PASS`, with every key line bound to the approval namespace, root-owned,
    mode 0644. Do not sign any other text in the real approval namespace: a signature there is what the broker is built to
    accept once the payload is right. The `--dry-run` approve in the keys page (section "Test without spending") is the
-   proof that matters once the broker is merged.
+   proof that matters, now that the broker is merged.
 
 5. **The release signers file** is the same shape with the other namespace, and its own file, installed by root the same
    way: `/etc/safo/broker-release-signers`, lines `release-key namespaces="git" KEYTYPE BASE64`, root-owned, mode 0644.
@@ -546,7 +546,7 @@ procedure is not repeated here, and the preflight does not read the credential.
 1. Step 0 (packages, udev, preflight). 2. Step a (keys A and B), test a4. 3. Step b (optional, any time). 4. Step c.
 5. The root setup in [Gemini broker](gemini-broker.md) (user, folders, the paid key). 6. Step d (the files). 7. Install
 the broker and run the preflight again. 8. The dry run. 9. Only then the switch, and the first real call, which
-is phase 7 itself and needs the unmerged broker code.
+is phase 7 itself and needs the maintainer's real key and a vendor call.
 
 ## Not verified
 
