@@ -209,7 +209,7 @@ spelling; a command that parser rejects is treated as a paid, unapproved step. `
 refuses when its estimate is over it.
 
 6. **`gemini-paid`.** A paid step (`paid`, `--paid`, `tier=paid`, or the paid secret-store config `prd_paid` named anywhere
-   in the brief) is refused outright, with a message that says paid use is disabled and names the rule, the line and the class of phrase that matched (a `safo gemini` command, a `gemini:` declaration, or the paid config name; never the brief's own words or arguments), while the root-owned paid-use switch is off (the
+   in the brief) is refused outright, with a message that says paid use is disabled and names the rule, the line and the class of phrase that matched (a wrapper command, a declaration line, or the paid config name; never the brief's own words or arguments), while the root-owned paid-use switch is off (the
    default; see [Gemini](gemini.md)). Once it is on, a paid step states a cap above 0 and at most 2.50 USD and an approval id whose record exists, carries a valid signature by an
    enrolled security key (see [Gemini](gemini.md)), was signed against a ledger head that is still in the ledger chain, has
    not expired and has not been used (its nonce is not spent in the ledger). A check that raises, or a guard with no approval folder to look in, blocks.
@@ -217,7 +217,16 @@ refuses when its estimate is over it.
    token, a private key block) anywhere in the brief, or a match for one of the maintainer's private terms (the terms the fixed Gemini config names, by
    default `privacy-terms.txt` beside it, loaded by the same strict loader the wrapper uses; no environment variable
    changes it; read, never written, never repeated), blocks it. A mention that sends nothing (an `approve` or `quota`
-   command with no prompt file) does not need the line. The vendor host written out in a brief is blocked too: call Gemini only through `safo gemini`.
+   command with no prompt file) does not need the line. The vendor host written out in a brief is blocked too: call Gemini only through the wrapper.
+
+**The guard's own messages are plain text that is safe to quote.** An agent that is denied tends to quote the denial
+back in a brief or a command, so a message holds nothing any detector reacts to: no backtick, no command text, no
+quotes, dollar signs or escapes, no vendor, key or host name, and it never opens a line with a declaration. The rule
+name is written `rule gemini-material: ...` or `rule gemini-paid: ...` for the same reason, and the denial is prefixed
+`guard hook:`, which names no tool. The messages point to [Gemini](gemini.md) for the accepted forms instead of spelling
+a command out. A test enumerates every message the guard can produce and runs the real detectors over each one, quoted
+bare, in double and single quotes, as a blockquote and as a list item; a control proves the detectors still fire on a
+real step beside such a quote. Nothing is relaxed: the detectors are unchanged.
 
 What the guard covers is stated narrowly, because it is a speed bump and the wrapper holds the gates. After folding the
 text (NFKD with invisible, combining and control characters removed, NFKC, common Cyrillic and Greek look-alike letters

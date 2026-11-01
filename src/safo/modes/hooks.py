@@ -448,7 +448,7 @@ def diagnostic(
     }
     if deny:  # the Gemini rules deny even when the rest is degraded; the diagnostic stays in the same answer
         data["hookSpecificOutput"]["permissionDecision"] = "deny"
-        data["hookSpecificOutput"]["permissionDecisionReason"] = "safo hooks guard: " + deny
+        data["hookSpecificOutput"]["permissionDecisionReason"] = GEMINI_DENY_PREFIX + deny
     emit_then_persist(ctx, run, data, folder, record)
 
 
@@ -1103,22 +1103,25 @@ def approval_checker(ctx: LocalContext) -> ApprovalCheck | None:
 
 
 _TOO_LARGE = (
-    "gemini-material: the dispatch event is too large to check (over 8 MiB), so it is denied; "
+    "rule gemini-material: the dispatch event is too large to check (over 8 MiB), so it is denied; "
     "shorten the brief or remove the Gemini step"
 )
 _UNVERIFIABLE = (
-    "gemini-material: the dispatch event is too large or incomplete to check (it did not finish arriving in time), so "
-    "it is denied; shorten the brief or remove the Gemini step"
+    "rule gemini-material: the dispatch event is too large or incomplete to check (it did not finish arriving in "
+    "time), so it is denied; shorten the brief or remove the Gemini step"
 )
 _UNREADABLE = (
-    "gemini-material: the dispatch event could not be read (too large, not valid JSON or not complete) and it names "
-    "Gemini, so it is denied; shorten the brief or remove the Gemini step"
+    "rule gemini-material: the dispatch event could not be read (too large, not valid JSON or not complete) and it "
+    "names Gemini, so it is denied; shorten the brief or remove the Gemini step"
 )
 
 
+GEMINI_DENY_PREFIX = "guard hook: "  # no tool name in it, so a quoted denial names nothing a detector reads
+GEMINI_CHECK_FAILED = "rule gemini-paid: the Gemini check failed, so the brief is blocked"
+
 SHELL_DENIAL = (
-    "gemini-material: this shell command names {}, so it is denied; call Gemini only through the wrapper, "
-    "`safo gemini ask --model M --prompt-file F ...` (docs/gemini.md)"
+    "rule gemini-material: this shell command names {}, so it is denied; call Gemini only through the wrapper; "
+    "see docs/gemini.md"
 )
 
 
@@ -1132,8 +1135,8 @@ def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: floa
             prompt if isinstance(prompt, str) else "", approval_checker(ctx), private_terms_provider, deadline
         )
     except Exception:
-        return "gemini-paid: the Gemini check failed, so the brief is blocked"
-    return "; ".join(f"{rule}: {why}" for rule, why in found)
+        return GEMINI_CHECK_FAILED
+    return "; ".join(f"rule {rule}: {why}" for rule, why in found)
 
 
 def shell_vendor_check(payload: dict[str, Any]) -> None:

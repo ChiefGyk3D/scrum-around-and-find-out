@@ -47,8 +47,8 @@ GEMINI_PAID = "gemini-paid"
 GEMINI_MATERIAL = "gemini-material"
 GEMINI_RULES = (GEMINI_PAID, GEMINI_MATERIAL)
 # the phrase classes a paid-use denial names; fixed text, so a denial never repeats a word of the brief
-MATCH_COMMAND = "a `safo gemini` command"
-MATCH_DECLARATION = "a `gemini:` declaration"
+MATCH_COMMAND = "a wrapper command"
+MATCH_DECLARATION = "a declaration line"
 MATCH_CONFIG = "the paid config name"
 MATCH_MODULE = "the broker client module"
 
@@ -105,10 +105,7 @@ WILD_NAMES = {
     "`": "a command substitution",
     "%": "a format string",
 }
-FIX = (
-    "reword the mention (keep `safo`, `gemini` and ask/approve out of one line), or write the step as one plain "
-    "`safo gemini ask --model M ...` command, or as a `gemini: free` or `gemini: paid cap=USD approval=ID` line"
-)
+FIX = "reword the line, or write the step in one of the forms docs/gemini.md describes"
 
 ApprovalCheck = Callable[[str], str | None]
 
@@ -198,7 +195,7 @@ def _paid_problem(step: Step, check: ApprovalCheck | None) -> str | None:
         return f"{where}{problem}"
     record = step.approval
     if not record or not RECORD_ID.fullmatch(record):
-        return f"{where}a paid Gemini step needs a live approval record (approval=ID from `safo gemini approve`)"
+        return f"{where}a paid Gemini step needs a live approval record (see docs/gemini.md)"
     if check is None:
         return f"{where}a paid Gemini step needs a live approval record, and none can be checked here"
     try:
@@ -393,7 +390,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
             return Step(
                 unreadable=True,
                 line=line,
-                why=f"the command has {char!r} inside an argument (a quoted operator or redirection)",
+                why="the command has a quoted operator or redirection inside an argument",
                 matched=shown,
             )
     for char, name in WILD_NAMES.items():
@@ -401,7 +398,7 @@ def _command_step(span: list[str], line: int, problems: tuple[str, ...] = ()) ->
             return Step(
                 unreadable=True,
                 line=line,
-                why=f"the command has {char!r} ({name}), which the shell expands first",
+                why=f"the command has {name}, which the shell expands first",
                 matched=shown,
             )
     if text in _PARSE_CACHE:
@@ -494,7 +491,7 @@ def _commands(text: str, number: int, steps: list[Step], budget: list[int], dept
                 problems.append("a word with a quote or backslash in the middle of it")
             for char in OPCHARS:
                 if char in nxt.value:
-                    problems.append(f"{char!r} inside quotes")
+                    problems.append("an operator character inside quotes")
             span.append(nxt.value.rstrip("?!.,") or nxt.value)
             word_end = nxt.end
             i += 1
@@ -543,8 +540,8 @@ def _scan_line(
             Step(
                 unreadable=True,
                 line=number,
-                why="the line runs safo through a variable, function, xargs, eval or -c while the brief names "
-                "Gemini and an action, so the command cannot be read",
+                why="the line runs the wrapper indirectly (through a variable, a function or another command) while "
+                "the brief names Gemini and an action, so the command cannot be read",
             )
         )
     if "safo" not in low and "gemini" not in low:
@@ -1096,8 +1093,7 @@ def _findings(
                     unreadable=True,
                     line=number,
                     why=f"the brief uses {name}, so it cannot be read as one command; a Gemini command built from "
-                    "variables, escapes or substitutions is blocked by design: write one plain "
-                    "`safo gemini ask --model M ...` command",
+                    "variables, escapes or substitutions is blocked by design: write one plain command",
                 )
             )
             break
@@ -1142,14 +1138,14 @@ def _findings(
     if "vendor" in flags:
         add(
             GEMINI_MATERIAL,
-            f"line {flags['vendor']}: call Gemini only through `safo gemini`, never the vendor API or its SDK directly",
+            f"line {flags['vendor']}: call Gemini only through the wrapper, never the vendor API or its SDK directly",
         )
     if sends:
         if not materials or any(m != "public" for m in materials):
             add(
                 GEMINI_MATERIAL,
-                "a Gemini step needs the line `gemini-material: public` (private or sensitive material never goes to "
-                "it); add it, or remove the Gemini step",
+                "a Gemini step needs a material line that declares the material public (see docs/gemini.md); private "
+                "or sensitive material never goes to it; add the line, or remove the Gemini step",
             )
         if has_secret_shape(prompt):
             add(
@@ -1170,7 +1166,7 @@ def _findings(
                     if private_term_hit(loaded, [joined, whole], limit):
                         add(
                             GEMINI_MATERIAL,
-                            "the brief matches one of the maintainer's private terms; remove it before any Gemini step",
+                            "the brief matches one of the private terms; remove it before any Gemini step",
                         )
                 except TermsCheckError as err:
                     add(GEMINI_MATERIAL, str(err))

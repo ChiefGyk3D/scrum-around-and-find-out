@@ -432,9 +432,9 @@ def test_the_prose_exemptions_do_not_open_a_bypass() -> None:
 def test_every_block_says_the_line_the_reason_and_how_to_fix_it() -> None:
     found = dict(findings("fine line\nsafo gemini ask --paid --mod m\n" + PUBLIC, accepts()))
     text = found[GEMINI_PAID]
-    assert "line 2" in text and "safo gemini ask" in text and "gemini: paid" in text
+    assert "line 2" in text and "docs/gemini.md" in text
     material = dict(findings("fine line\ngemini: free\n", accepts()))[GEMINI_MATERIAL]
-    assert "gemini-material: public" in material
+    assert "material line" in material and "public" in material
     long_line = dict(findings("ok\n" + "safo " * 2000 + "\n" + PUBLIC, accepts()))[GEMINI_PAID]
     assert "line 2" in long_line and "shorter" in long_line
 
@@ -835,7 +835,7 @@ def test_quoting_cannot_hide_an_option_or_stretch_the_window(line: str) -> None:
 
 def test_a_quoted_operator_is_named_in_the_message() -> None:
     text = dict(findings('safo gemini ask --model m --material "a;b"\n' + PUBLIC, accepts()))[GEMINI_PAID]
-    assert "';'" in text and "quote" in text
+    assert "operator" in text and "quote" in text
 
 
 LINKS = [
@@ -931,7 +931,7 @@ def test_a_star_in_a_gemini_word_is_not_a_path() -> None:
 
 def test_an_unreadable_step_says_which_form_made_it_so() -> None:
     cases = {
-        "safo gemini ask --model $M --paid\n": "'$'",
+        "safo gemini ask --model $M --paid\n": "expansion",
         "safo gemini ask --pai --model m\n": "option",
         "safo gemini ask 'x\n": "quote",
     }

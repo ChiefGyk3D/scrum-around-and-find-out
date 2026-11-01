@@ -24,7 +24,7 @@ def test_denial_names_rule_line_and_command_class() -> None:
     reasons = paid(PUBLIC + "safo gemini ask --paid --model m --prompt-file p\n")
     assert len(reasons) == 1
     assert "line 2: paid use exists only through the broker" in reasons[0]
-    assert "rule gemini-paid" in reasons[0] and "matched: a `safo gemini` command" in reasons[0]
+    assert "rule gemini-paid" in reasons[0] and "matched: a wrapper command" in reasons[0]
 
 
 def test_denial_names_the_config_class() -> None:
@@ -35,7 +35,7 @@ def test_denial_names_the_config_class() -> None:
 
 def test_denial_names_the_declaration_class() -> None:
     reasons = paid(PUBLIC + "gemini: paid cap=1 approval=abc\n")
-    assert len(reasons) == 1 and "a `gemini:` declaration" in reasons[0]
+    assert len(reasons) == 1 and "a declaration line" in reasons[0]
     assert "approval=abc" not in reasons[0]
 
 

@@ -868,7 +868,7 @@ class Locations:
 
 
 PAID_ELSEWHERE = (
-    "paid use exists only through the broker: run `safo gemini paid` (docs/gemini-broker.md); "
+    "paid use exists only through the broker client, which a person runs at a terminal (docs/gemini-broker.md); "
     "this command sends free-tier requests only"
 )
 
