@@ -1221,7 +1221,15 @@ _NETWORK_TOOL = re.compile(
 # One narrow relaxation (#264); everything else about the rule above is unchanged: a brief that quotes the guard's own
 # denial word for word. The sentence is the base text only, with one alternative per class constant, so the gap holds
 # nothing a brief could hide a step in. A test keeps it equal to `modes.hooks.SHELL_DENIAL`.
-_DENIAL_CLASSES = (SHELL_VENDOR, SHELL_KEY, SHELL_STORE, SHELL_BUILT, SHELL_TOOL, SHELL_UNVERIFIED)
+_DENIAL_CLASSES = (
+    SHELL_VENDOR,
+    SHELL_KEY,
+    SHELL_STORE,
+    SHELL_BUILT,
+    SHELL_TOOL,
+    SHELL_BROKER_MODULE,
+    SHELL_UNVERIFIED,
+)
 DENIAL_QUOTE = re.compile(
     r"this shell command names (?:"
     + "|".join(re.escape(c) for c in _DENIAL_CLASSES)

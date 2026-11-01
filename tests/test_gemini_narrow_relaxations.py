@@ -22,6 +22,7 @@ CLASSES = [
     geminibrief.SHELL_STORE,
     geminibrief.SHELL_BUILT,
     geminibrief.SHELL_TOOL,
+    geminibrief.SHELL_BROKER_MODULE,
     geminibrief.SHELL_UNVERIFIED,
 ]
 
