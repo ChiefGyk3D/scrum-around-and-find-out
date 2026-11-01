@@ -179,7 +179,7 @@ def test_every_key_of_the_example_client_config_has_a_comment() -> None:
 
 def test_the_runbook_step_writes_exactly_the_example_with_the_uid_filled_in(tmp_path: Path) -> None:
     """One source of truth: the here-document in the runbook and examples/broker.example.yaml are the same text, apart
-    from the line that holds the account id (a mark the step swaps for `id -u LOGIN`, a sample number in the example)."""
+    from the line that holds the account id (a mark the step swaps for `id -u LOGIN`, a sample in the example)."""
     template = runbook.broker_config("1000")
     shipped = BROKER_EXAMPLE.read_text()
     assert shipped == "# SPDX-License-Identifier: Apache-2.0\n" + runbook.broker_config("")  # only the licence line
