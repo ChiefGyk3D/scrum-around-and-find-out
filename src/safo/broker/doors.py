@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import itertools
 import os
 import re
 import shlex
@@ -105,7 +106,7 @@ class DoorPaths:
         Path("/run/systemd/system-generators"),
         Path("/usr/lib/systemd/system-environment-generators"),
     )
-    # in systemd's search order, highest priority first (a drop-in file name seen in an earlier folder masks later ones)
+    # in systemd's search order, highest priority first
     unit_dirs: tuple[Path, ...] = (
         Path("/etc/systemd/system.control"),
         Path("/run/systemd/system.control"),
@@ -857,6 +858,8 @@ def _folder_contents_hit(folder: str, who: _Who, cache: dict[str, os.stat_result
             real = os.path.realpath(path)
             if not os.path.exists(real):
                 return f"{_show(folder)} holds a link, {_show(path)}, that does not resolve; {HUMAN}"
+            if os.path.isdir(real):
+                return f"{_show(folder)} holds a link, {_show(path)}, to a folder; {HUMAN}"
             if _in_home(real, who) or _chain_writable(real, who, cache, floor) is not None:
                 return f"{_show(folder)} holds a link, {_show(path)}, that leads where the account can reach"
         elif who.can_write(info):
@@ -1033,29 +1036,31 @@ def _unit_findings(
         template = f"{instance.group(1)}@.{instance.group(3)}" if instance else None
         names = [unit] + ([template] if template else [])
         confs: list[tuple[str, Path]] = []
-        seen: set[str] = set()
-        for dname, dpath in dropdirs:  # in folder priority order: the first file of a name masks the others
+        for dname, dpath in dropdirs:  # every file from every folder, even one a higher folder would mask
             if any(_applies(n, dname) for n in names):
-                for conf in sorted(os.listdir(dpath)):
-                    if conf.endswith(".conf") and conf not in seen:
-                        seen.add(conf)
-                        confs.append((conf, dpath / conf))
+                confs.extend((c, dpath / c) for c in sorted(os.listdir(dpath)) if c.endswith(".conf"))
         confs.sort(key=lambda item: item[0])  # systemd reads them in file name order, whatever the folder
         base_files: list[Path | None] = [*bases.get(unit, [])] or ([*bases.get(template or "", [])] or [None])
         if instance and base_files == [None]:
             raise _Problem(f"unit {_show(unit)} is a template instance and its template base file is missing")
         label = f"unit {_show(unit)}" + (f" with drop-ins {_show(', '.join(c for c, _ in confs))}" if confs else "")
+        # same-named files from several folders: judge in folder order, then with each such group reversed
+        reversed_groups = [
+            c for _, grp in itertools.groupby(confs, key=lambda item: item[0]) for c in reversed(list(grp))
+        ]
         for base in base_files:
-            assignments: list[tuple[str, str]] = []
-            found: str | None = None
-            for fname, fpath in ([(unit, base)] if base else []) + confs:
-                part, found = _fragment(fpath, fname, HANDLED_UNITS[kind], who, cache, floor)
+            for ordering in (confs, reversed_groups):
+                assignments: list[tuple[str, str]] = []
+                found: str | None = None
+                for fname, fpath in ([(unit, base)] if base else []) + ordering:
+                    part, found = _fragment(fpath, fname, HANDLED_UNITS[kind], who, cache, floor)
+                    if found:
+                        break
+                    assignments.extend(part)
+                found = found or _unit_hits(assignments, who, cache, floor, socket=kind == "socket")
                 if found:
+                    hits.append(f"{label} {found}")
                     break
-                assignments.extend(part)
-            found = found or _unit_hits(assignments, who, cache, floor, socket=kind == "socket")
-            if found:
-                hits.append(f"{label} {found}")
     return hits, unhandled
 
 

@@ -1832,15 +1832,14 @@ def test_hardening_only_the_service_section_is_read(w: World) -> None:
     assert status(w.run(), "jobs") == "fail"
 
 
-def test_hardening_a_drop_in_name_in_a_higher_priority_folder_masks_the_same_name_below(w: World) -> None:
+def test_hardening_every_drop_in_of_a_name_is_checked_even_if_a_higher_folder_would_mask_it(w: World) -> None:
     payload = put(w.home / "payload", "x", 0o755)
     high = folder(w.t / "high")
     put(w.units / "a.service", unit(str(payload), user="nobody"))
     dropin(w, "a.service", "10-x.conf", "[Service]\nUser=root\n")
-    assert status(w.run(unit_dirs=(w.units,)), "jobs") == "fail"
     dropin(w, "a.service", "10-x.conf", "[Service]\nUser=nobody\n", high)
-    assert status(w.run(unit_dirs=(high, w.units)), "jobs") == "pass"  # the higher folder's 10-x.conf wins
-    assert status(w.run(unit_dirs=(w.units, high)), "jobs") == "fail"  # here the other one is higher
+    assert status(w.run(unit_dirs=(high, w.units)), "jobs") == "fail"
+    assert status(w.run(unit_dirs=(w.units, high)), "jobs") == "fail"
 
 
 def test_hardening_socket_unit_commands_run_as_root_and_their_drop_ins_are_read(w: World) -> None:
@@ -1948,3 +1947,19 @@ def test_hardening_an_unreadable_folder_argument_needs_a_human(w: World) -> None
         assert status(w.run(), "jobs") == "fail"
     finally:
         (data / "locked").chmod(0o755)
+
+
+def test_hardening_a_link_to_a_folder_inside_a_folder_argument_needs_a_human(w: World) -> None:
+    data = folder(w.t / "data")
+    inner = folder(w.t / "elsewhere")
+    (data / "l").symlink_to(inner)
+    put(w.units / "a.service", unit(f"/bin/true {data}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "to a folder" in found["jobs"].text
+
+
+def test_hardening_a_link_to_a_folder_cycle_does_not_hang(w: World) -> None:
+    data = folder(w.t / "data")
+    (data / "self").symlink_to(data)
+    put(w.units / "a.service", unit(f"/bin/true {data}"))
+    assert status(w.run(), "jobs") == "fail"
