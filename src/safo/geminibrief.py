@@ -615,12 +615,15 @@ _PAID_TOKEN = re.compile(r"--paid|(?<![\w-])(?:approve|paid-dryrun|paid)(?![\w-]
 _BM_DOT = r"safo\.broker\.client"
 _BM_NAME = r"safo[./]broker[./]client"
 _BM_PY = r"(?<![\w-])python[\d.]*(?![\w-])"
+_BM_PY_RE = re.compile(_BM_PY)
 # interpreter options before a script (not -m: that names a module). The alternatives start differently, and an
 # option's value cannot start with a dash, so the repetition cannot backtrack badly on a long run of options.
 _BM_OPTS = r"(?:\s+(?:-[wx](?:\s*[^\s-]\S*)?|-[a-ln-vyz]\w*|--[\w-]+))*"
 _BM_ENTRY = re.compile(r"(?<![\w-])-[a-z]*m\s*=?\s*" + _BM_DOT + r"(?![\w-])")
 _BM_SCRIPT = re.compile(_BM_PY + _BM_OPTS + r"\s+\S*safo/broker/client\.py")
-_BM_LOCAL = re.compile(_BM_PY + _BM_OPTS + r"\s+(?:\./)?client\.py")
+_BM_LOCAL = re.compile(_BM_PY + _BM_OPTS + r"\s+(?:\S*/)?client\.py")  # a script named client.py, run beside the broker
+_BM_ANY_M = re.compile(r"(?<![\w-])-[a-z]*m\s*=?\s*(?:\w+\.)*client(?![\w.-])")  # -m whose last part is client
+_BM_DYNAMIC = re.compile(r"runpy|importlib|__import__|import_module|run_module|run_path|(?<![\w-])(?:exec|eval)\s*\(")
 _BM_IMPORT = re.compile(
     r"(?<![\w.-])(?:import|from)\s+" + _BM_DOT + r"(?![\w-])"
     r"|(?<![\w.-])from\s+safo\.broker\s+import\s+[^;\n]*(?<![\w-])client(?![\w-])"
@@ -638,6 +641,20 @@ _BM_RUNTIME = re.compile(RUNTIME_FORMS.pattern + r"|`")
 _BM_FEED = re.compile(r"(?<![\w-])(?:xargs|eval|exec)(?![\w-])|(?<![\w-])-c\b")
 _BM_EXPANDED = re.compile(_BM_PY + r"[^;|&\n]*?(?<![\w-])-[a-z]*m\s*[^\s;|&]*[$`{]")
 _BM_OPTION = re.compile(r"--(?:max-usd|max-output-tokens|quote|quoted-at|job)(?![\w-])")
+
+
+def _flat_paths(v: str) -> str:
+    """A name or path written the long way, read the short way: joined string pieces, repeated slashes, `/./` and `x/../` segments collapsed, so
+    `src//safo/./broker/other/../client.py` is `src/safo/broker/client.py`. Bounded: the line is at most LINE_CAP."""
+    v = re.sub(r"\s*\+\s*", "", v)  # `"saf" + "o.broker"` read as one string (the quotes are already gone)
+    v = re.sub(r"/{2,}", "/", v)
+    for _ in range(8):
+        flat = re.sub(r"/\.(?=/)", "", v)
+        flat = re.sub(r"/[^/\s.][^/\s]*/\.\.(?=/|\s|$)", "", flat)
+        if flat == v:
+            break
+        v = flat
+    return v
 
 
 def _broker_module_line(v: str) -> bool:
@@ -659,9 +676,14 @@ def broker_module_route(views: Sequence[str]) -> bool:
     whole = "\n".join(views)
     if "broker" in whole and any(len(v) > LINE_CAP for v in views):
         return True  # a long line is not read; naming the broker beside one is refused rather than guessed at
-    short = [v for v in views if len(v) <= LINE_CAP]
+    short = [_flat_paths(v) for v in views if len(v) <= LINE_CAP]
+    whole = "\n".join(short)
     if any(_broker_module_line(v) for v in short):
         return True
+    if "broker" in whole and any(_BM_ANY_M.search(v) for v in short):
+        return True  # `-m x.y.client`, `-m client` beside the broker: the module by any leading parts
+    if _BM_WORDS[0].search(whole) and _BM_DYNAMIC.search(whole) and (_BM_PY_RE.search(whole) or "runpy" in whole):
+        return True  # an import decided at run time, in a command that names safo: the name may be built from parts
     if all(w.search(whole) for w in _BM_WORDS[:2]) and any(_BM_EXPANDED.search(v) for v in short):
         return True  # `python3 -m $1$2` while `safo` and `broker` are named: the module is built at run time
     return "broker" in whole and any(_BM_LOCAL.search(v) for v in short)  # `cd src/safo/broker && python3 client.py`

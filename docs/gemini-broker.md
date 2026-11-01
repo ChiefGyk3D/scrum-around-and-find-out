@@ -120,7 +120,9 @@ the small marked adapter (`adapter_write_image`, `adapter_write_sidecar`) remain
 deleted later.
 
 The client module also has a command-line entry of its own (run as a module with the isolated interpreter), which
-skips the wrapper's sanitized environment, private directory and closed descriptors. That entry is for a person at a terminal only: the dispatch guard
+skips the wrapper's sanitized environment, private directory and closed descriptors. That entry is for a person at a terminal only: it refuses to start without a controlling terminal and a terminal
+on standard input and output, or with an interpreter or loader startup variable set (the wrapper's own paid commands call
+the client in-process and are not affected), and the dispatch guard
 reads it as a paid command word (denied in a brief, unreadable in run-time forms) and the Bash check refuses it for an
 agent, in every spelling that runs the module or its file. The paid entries of the Gemini command group stay the way an
 agent-run session reaches the client, and they still need a touch on the security key at a terminal.

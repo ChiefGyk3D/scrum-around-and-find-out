@@ -5,7 +5,11 @@
 - Review items of the phase 6 fixes (#299), all tested red first. The broker client's own module entry is now a paid
   command word like `paid`: the dispatch guard denies it in a brief (also built at run time, wrapped in `eval`,
   `bash -c` or `xargs`, imported, or started by file) and the Bash check refuses it for an agent; naming the module or its
-  file in prose, or checking or reading the file, stays allowed, and `safo gemini paid` is unchanged. The oversized-event
+  file in prose, or checking or reading the file, stays allowed, and `safo gemini paid` is unchanged. The module also refuses to start
+  directly unless a person is at a terminal (a controlling terminal, a terminal on standard input and output, no
+  startup variable), so a spelling the text patterns miss still does not run for an agent; script paths are read after
+  collapsing repeated slashes and dot and parent segments, and a `-m` value ending in `client` counts while the broker
+  is named. The oversized-event
   scan treats it the same way, and the guard's test shape list now has an exact count with no skip. The preflight's
   allowed-signers check and its key-to-name link call the broker's own parser, so a file the broker refuses cannot pass
   the readiness check. `check-install` reads the egress config by the helper's rules (a duplicate key, a missing or bad

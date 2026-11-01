@@ -151,8 +151,28 @@ MODULE_SHAPES = [
     'python3 -I -c \'import importlib; importlib.import_module("safo.broker." + "client").main()\'\n',
     "python3 - <<EOF\nimport {m}\nEOF\n",
     "python3 -I -m $1$2 --model m\nset -- safo.broker. client\n",
+    # script paths that are not normalized: repeated slashes, dot segments, parent segments, an absolute path
+    "python3 -I src//safo/broker/client.py --model m\n",
+    "python3 -I src/safo/./broker/client.py --model m\n",
+    "python3 -I src/safo/other/../broker/client.py --model m\n",
+    "python3 -I /home/u/src/safo///broker//client.py --model m\n",
+    "python3 -I ./src/safo/broker/./client.py --model m\n",
+    "cd src/safo/broker && python3 -I ../broker/client.py --model m\n",
+    "cd src/safo/broker && python3 -I ./client.py --model m\n",
+    # a -m value that ends in client with other leading parts, while the broker is named
+    "python3 -I -m other.broker.client --model m\n",
+    "cd src && python3 -I -m safo.broker.client --model m\n",
+    "cd src/safo/broker && python3 -I -m client --model m\n",
+    "python3 -I -m x.y.client --model m # the broker client\n",
+    # a name built from parts, and dynamic imports
+    'python3 -I -c \'import importlib; n = "safo." + "broker." + "cli" + "ent"; importlib.import_module(n).main()\'\n',
+    'python3 -I -c \'__import__("safo" + ".broker" + ".client")\'\n',
+    'python3 -I -c \'exec("import safo.broker." + "client")\'\n',
+    'python3 -I -c \'import runpy; runpy.run_module("saf" + "o.broker.cli" + "ent", run_name="__main__")\'\n',
+    "python3 - <<EOF\nimport importlib\nn = 'safo.' + 'broker'\nm = importlib.import_module(n + '.cl' + 'ient')\nEOF\n",
+    'python3 -I -c \'import importlib; importlib.import_module("saf" + "o.br" + "oker.client")\'\n',
 ]
-MODULE_SHAPE_COUNT = 38  # exact: a shape removed or added must change this number on purpose
+MODULE_SHAPE_COUNT = 55  # exact: a shape removed or added must change this number on purpose
 
 
 def test_the_module_shape_list_has_exactly_the_expected_shapes() -> None:
@@ -189,6 +209,11 @@ def test_the_shell_class_for_the_module_entry_is_a_fixed_phrase_that_repeats_not
         "python3 -I -m safo.broker\n",
         "python3 -m pytest -k client tests\n",
         "python3 -m venv .venv && .venv/bin/python -m pip install -e .\n",
+        "python3 -m pytest tests/test_broker_client.py\n",
+        "python3 -m mypy src/safo//broker/../broker/client.py\n",
+        "python3 -I -m other.module --x\n",
+        "python3 -c 'import importlib; print(importlib.import_module(\"json\").__name__)'\n",
+        "python3 scripts/other_client.py\n",
     ],
 )
 def test_naming_the_module_or_its_file_without_running_it_stays_allowed(text: str) -> None:
