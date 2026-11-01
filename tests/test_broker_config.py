@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from safo.broker import client, config, runbook
+from safo.broker.errors import Refused
 from safo.broker.pipeline import DEFAULT_DEADLINE_SECONDS
 from safo.broker.policy import JOB_CAP_MICRO, MONTH_CAP_MICRO
 from safo.broker.server import ServerConfig
@@ -177,3 +178,32 @@ def test_the_runbook_step_writes_exactly_the_example_with_the_uid_filled_in(tmp_
     (path / "broker.yaml").write_text(template)
     (path / "broker.yaml").chmod(0o644)
     assert load(path / "broker.yaml").server.allowed_uids == frozenset({1000})
+
+
+def test_no_model_in_the_example_is_one_decision_13_keeps_refused(tmp_path: Path) -> None:
+    """The shipped table lists only models the policy accepts at their largest size with the cap still unverified."""
+    from safo.broker.policy import UNVERIFIED_LIMIT_MICRO, is_pro_class
+    from safo.broker.prices import reserve_amount
+
+    cfg = load(installed(tmp_path))
+    today = dt.date(2026, 10, 31)
+    assert cfg.policy.prices.models
+    for name, price in cfg.policy.prices.models.items():
+        assert not is_pro_class(name), name
+        for size in price.image_tokens:
+            reserved = reserve_amount(
+                price,
+                kind="image",
+                prompt_bytes=200_000,
+                max_output_tokens=price.output_token_limit,
+                image_size=size,
+                count=1,
+                today=today,
+            ).total_micro
+            assert reserved <= UNVERIFIED_LIMIT_MICRO, (name, size, reserved)
+            cfg.policy.check_unverified(price, reserved)  # the policy itself agrees: no model_refused
+    # and the negative case: the same check does refuse a model whose worst case is over the limit
+    worst = max(m.output_token_limit for m in cfg.policy.prices.models.values())
+    big = dataclasses.replace(next(iter(cfg.policy.prices.models.values())), output_token_limit=worst * 4)
+    with pytest.raises(Refused, match="refused until its output cap"):
+        cfg.policy.check_unverified(big, UNVERIFIED_LIMIT_MICRO + 1)

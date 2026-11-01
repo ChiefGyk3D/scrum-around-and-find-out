@@ -1,13 +1,18 @@
 # Gemini broker: design for the paid path
 
-> **Status: phases 1 to 3 and the client module of phase 4 are in the tree; the rest is design.** The core library, the
-> call pipeline, the socket server and the thin client under `src/safo/broker/` exist (see "Phase 1 status" to
-> "Phase 4b status" below). There is no unit, no installer and no `safo gemini` wiring, and no vendor call has ever been made, so
-> paid use stays disabled by the root-owned switch (see [Gemini](gemini.md)) until the broker is built, reviewed and
-> enabled by the maintainer. This page is the design for issue #205 (steps 1 and 2); the risks are in
-> [the broker threat model](gemini-broker-threat-model.md). Nothing here is a promise about code that does not exist yet; the
-> claims about what code does today are checked against the tree, and the claims about the vendor were read from the
-> vendor pages on 2026-10-30 (marked **verified** with the page, or **unverified**).
+> **Status: the broker is built and merged; it has never been run on a real machine and has never made a vendor call.**
+> The core library, the call pipeline, the socket server, the entry point, the thin client, the safe image writer, the
+> root-only administration command, the installer, the units, the egress control, the setup runbook and the preflight
+> are all in the tree (see "Phase 1 status" to "Phase 4b status" and "Install (phase 5 status)" below), the `safo gemini
+> paid` commands are wired to the client, and the old in-process paid path is deleted (#287). Paid use stays disabled by
+> the root-owned switch (see [Gemini](gemini.md)) until the maintainer does the root setup, the dry run and the first
+> real call (phase 7). This page is the design for issue #205 and was aligned with the code on 2026-10-31 (issue #273):
+> where the build chose differently from the first design, this page now says what the code does, and the maintainer
+> accepted those choices on 2026-10-31 (issues #256, #270 and #273; see "Design points settled on 2026-10-31"). The
+> risks are in [the broker threat model](gemini-broker-threat-model.md). Text that describes something not built is marked
+> **not built yet**, with the issue where one exists. The claims about what code does were checked against the tree, and
+> the claims about the vendor were read from the vendor pages on 2026-10-30 (marked **verified** with the page, or
+> **unverified**).
 
 ### Phase 1 status
 
@@ -24,9 +29,10 @@ rewinds the ledger, the height record and the used markers together, and the led
 rule that the state directory is never restored into a running broker, and root's reconciliation against the vendor
 billing page. A high-water record kept outside the broker user's reach is a design question for a later phase.
 
-Not built yet: the socket server, the real transport, the client, the units and the installer. The administration command is described under "Administration" below. Where the phase-1 code adds something the design did
-not name, it is listed in the pull request: a `call_sent` row written before the connection opens, suspensions kept as
-chained ledger rows instead of a separate state file, and two reply codes (`model_refused`, `prices_expired`).
+Phase 1 added three things the first design did not name, all accepted on 2026-10-31: a `call_sent` row written before
+the connection opens, suspensions kept as chained ledger rows (`suspended`, `suspension_cleared`) instead of a separate
+state file, and two reply codes (`model_refused`, `prices_expired`). The later phases (socket server, transport, client,
+units, installer, administration command) are described in their own sections below.
 
 ### Phase 2 status
 
@@ -54,20 +60,28 @@ pipeline, the vendor request templates and reply parser, the image checks, and t
 - **The output cap** (decision 13): the signed `max_output_tokens` is always sent and checked against the reply (text,
   thinking and image tokens together). A reply over it is a breach: recorded at the cap or the reported usage, whichever
   is higher, the model suspended, even when the money stays inside the reservation (`cap_verified` false).
-  Decision 13 is its own rule and does not move with the job cap: a model whose cap is not verified is refused when its
-  worst case is over 2 USD (Nano Banana 2 at about 2.10 USD, Pro), at a job cap of 2.00, 2.50 or 5.00 alike.
+  Decision 13 is its own rule and does not move with the job cap (the constant is 2 USD and is separate from the
+  2.50 USD testing-phase job cap): a Pro-class model (a name with `pro` as a word, such as Nano Banana Pro) is refused
+  whatever it would cost while its table entry says `cap_verified: false`, and any other model whose cap is not verified
+  is refused when its worst case is over 2 USD (Nano Banana 2 at about 2.10 USD), at a job cap of 2.00, 2.50 or 5.00
+  alike. Both refusals answer `model_refused`.
 - **Images** (`images.py`, `vendor.py`): one image per call, PNG, JPEG or WebP only, found by the first bytes and matching
   the named type. The broker decodes no pixels and is not a decoder, but it walks each container to its real end by
   lengths and markers as an allow-list: every segment or chunk is a known type whose body has exactly its shape (JPEG
   tables and headers, a plain JFIF header, PNG chunks with checksums, rows that inflate to exactly the declared size
-  with a real filter type, a plain WebP or the extended header and the one image). Exif, XMP, ICC and compressed
-  metadata, animations, thumbnails and anything appended are refused, and the declared size is capped (8192 per side,
-  2^25 pixels, 24 MiB). The compressed bitstream itself (JPEG entropy data, WebP codec data) is not validated, so a
+  with a real filter type, a plain WebP or the extended header and the one image). Exif, XMP, ICC profiles, C2PA
+  (content credentials) and compressed text, animations, thumbnails, a WebP with a separate alpha chunk and anything
+  appended are refused, and the declared size is capped (8192 per side, 2^25 pixels, 24 MiB). This may refuse a genuine
+  vendor image that carries such metadata. That is a deliberate fail-closed choice: the maintainer ruled on 2026-10-31
+  to keep it strict, record the real reply shape in the first real call (phase 7), and loosen only what that evidence
+  shows is normal. A reply that names no model, or a model other than the one asked for (for example with a version
+  suffix), is treated the same way: the call is ambiguous and the model is suspended until phase 7 records the real
+  shape. The compressed bitstream itself (JPEG entropy data, WebP codec data) is not validated, so a
   well-framed file can still fail to decode in a viewer: images stay untrusted output. An image that fails is not
   passed on, and its cost is still counted from usage.
 
-Where phase 2 read the design and had to choose, it is listed in the pull request. Still unverified: the real response
-shapes. The text shape is the one the existing wrapper already reads; the image shape is inferred from the vendor SDK examples
+Where phase 2 read the design and had to choose, the maintainer accepted the choices on 2026-10-31 (issue #273, listed
+under "Design points settled on 2026-10-31"). Still unverified: the real response shapes. The text shape is the one the existing wrapper already reads; the image shape is inferred from the vendor SDK examples
 and the parser refuses any other, so a real reply that differs makes the call ambiguous until phase 7 records it.
 
 The maintainer decided on 2026-10-30 that the paid path must be finished, because other projects are blocked on it.
@@ -104,9 +118,11 @@ key, no timing assertions): the wire format, the server, the entry point and the
   HTTPS transport to the vendor: constant host, the checked pinned connection, no redirect followed, the answer capped, the
   key in the `x-goog-api-key` header only and read for every request.
 
-Where phase 3 read the design and had to choose, it is listed in the pull request. Not built: the idle exit, the audit copy
-`approvals/NONCE.json` of the design, the installer and units, the admin command (so nothing can yet clear a suspension),
-and the client (phase 4b, below). The stop wakeup is a pipe, so the server module makes no `socket()` or `socketpair()` call of its own. `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit. Run it locally with `python scripts/broker_sandbox_check.py [--kill] [--extra-filter '~socketpair'] [--mutate recvmsg]` (exit 0 passed, 1 failed, 3 not available), or through pytest with `SAFO_SANDBOX_CHECK=1 pytest tests/test_broker_sandbox.py`. The pytest wrapper is opt-in: without that variable it skips (hosted CI runners do not behave like a desktop user manager), and with it, it still skips with a reason unless a probe shows the user manager works. Every command and socket exchange of the check has a timeout and the whole check a total deadline, so it reports the step that timed out instead of hanging. The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
+Where phase 3 read the design and had to choose, the choices were accepted on 2026-10-31. **Not built yet:** the idle exit
+(the service, once started by the first connection, keeps running until it is stopped) and the audit copy
+`approvals/NONCE.json` of the first design (the broker does not store the signed text, and the client keeps no
+copy either). The installer, the units, the administration command and the client were built in later phases and are
+described below. The stop wakeup is a pipe, so the server module makes no `socket()` or `socketpair()` call of its own. `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit. Run it locally with `python scripts/broker_sandbox_check.py [--kill] [--extra-filter '~socketpair'] [--mutate recvmsg]` (exit 0 passed, 1 failed, 3 not available), or through pytest with `SAFO_SANDBOX_CHECK=1 pytest tests/test_broker_sandbox.py`. The pytest wrapper is opt-in: without that variable it skips (hosted CI runners do not behave like a desktop user manager), and with it, it still skips with a reason unless a probe shows the user manager works. Every command and socket exchange of the check has a timeout and the whole check a total deadline, so it reports the step that timed out instead of hanging. The transport has only been run against loopback; TLS to the real host is unverified until phase 7.
 
 ### Phase 4b status
 
@@ -118,6 +134,141 @@ Gemini command group (not just disabled), and the dispatch guard denies every pa
 exists any more. The safe image writer of phase 4a is in the tree and `default_writer()` and `default_sidecar()` use it;
 the small marked adapter (`adapter_write_image`, `adapter_write_sidecar`) remains only as a fallback and for tests, and can be
 deleted later.
+
+### Design points settled on 2026-10-31
+
+The builds of phases 1, 2 and 5 left about 30 smaller design points open (issues #256, #270 and #273). The maintainer
+ruled on 2026-10-31: all of them are **accepted as built**, and three rulings add to that. The unit start condition on the root-owned
+enable switch is dropped (issue #270, question 1): status and dry run answer while the switch is off, and every paid
+call answers `disabled`. A model whose output cap is not verified stays refused, independent of the testing job cap
+(issue #256, question 1). A reply that names no model or another model, and an image that carries metadata, stay
+refused until the first real call records the real reply shape (issue #273, question 11). Image pixel validation is
+accepted for now (issue #274, closed). This section says what the code does for each point, one item at a time; the
+sections that follow agree with it.
+
+- **Job cap.** The per-job cap is **2.50 USD in the testing phase** (a constant in code that a configuration may lower and
+  never raise). The older wording of 2.00 USD is gone. The monthly ceiling is 10 USD and the extra block is 2 USD.
+  Decision 13 has its own constant of 2 USD, which does not move with the job cap.
+- **Reply codes and when each is returned.** `bad_request`: a field is missing, of the wrong type or outside its range, the
+  thinking level is not the one the broker sends for the model, the size is not offered, the count is not 1, the output
+  limit is outside what the model allows, or the prompt is too large or has a secret shape. `too_large`: a frame over its
+  limit. `unsupported_version`, `unauthorized_peer`: before anything is read. `disabled`: the switch is not exactly
+  `enabled` (every operation except `status` and `dryrun`). `bad_approval`: the signature, the key type, the touch, the
+  principal, the version, the epoch, the nonce (not issued, or changed since `begin`) or the ledger head does not check
+  out. `revoked`, `used`, `digest_mismatch`, `model_mismatch`, `job_mismatch`: as named. `expired`: the approval is past
+  its expiry or the issued nonce is past its ten minutes. `over_job_cap`, `over_approved`, `needs_block_approval`: a cap
+  (below). `model_suspended`: a breach or an ambiguous call stopped the model. `model_refused`: the model is not in the
+  table or decision 13 applies. `prices_expired`: the table is past `valid_through`. `busy`: a call is in flight, the
+  broker is stopping, a rate limit or a call budget applies, the ledger lock could not be taken in time, or too many
+  nonces are outstanding. `rate_limited` (exit 3): the vendor answered 429. `vendor_refused`: the vendor answered a
+  definite 4xx other than 429 and 408, or the answer was readable but an image failed the checks or fewer images came
+  back than approved (the cost is counted from usage). `outcome_unknown` (exit 4): the request left and the result
+  cannot be told. `internal` (exit 4): the broker failed after the spend, the clock is earlier than the last ledger row
+  (below), or the answer was paid for and does not fit the reply frame (below).
+- **`month_cap` versus `needs_block_approval`.** `needs_block_approval` is the only code the broker returns when a call
+  would pass the monthly ceiling without an approval that says so. `month_cap` is in the code list (the first design
+  listed it) and has a sentence, but **nothing returns it**; the number called `month_cap` in the `status` reply is the
+  ceiling in USD. A call can meet `needs_block_approval` at `call` time only if the month grew after `begin`, because
+  `begin` already sets the `beyond_ceiling` flag in the offer.
+- **The further-block rule as built.** Past the 10 USD ceiling there is a flag and no per-block limit. `begin` sets
+  `beyond_ceiling` when the month total plus the reservation passes the ceiling; the approval carries the flag, and the
+  broker accepts it. Each such call needs its own approval that says so, and it is still bound by the job cap and the signed
+  maximum, but nothing counts 2 USD blocks. The `status` reply shows the block size (`block`, 2 USD) for information only.
+- **The monotonic version rule as built.** Ledger rows carry a schema version and a time, and neither may ever go
+  backward (a ledger where they do is refused as corrupt). A floor file `schema_version` in the state directory only rises,
+  and a state directory marked with a newer version is not read by older code. The installer keeps a separate record of the
+  highest broker version ever installed, written only after the new release has started (see "Install and update
+  chain"), and the broker refuses to start below the root-owned floor.
+- **Ledger head semantics.** `begin` hands out the ledger head, and the approval must carry exactly the head in the issued
+  record. At `call` the ledger accepts the chain start (all zeros) **or any hash the ledger has held**, not only the
+  newest head, so other calls that finished between `begin` and `call` do not invalidate an approval. A head the ledger
+  never had (forged, or from another ledger) is `bad_approval`.
+- **The `call_sent` row.** The state machine needs a row between the spend and the answer that the first design did not
+  list. `call_sent` is written and synced before the connection to the vendor opens. After it, no outcome may be `not_sent`,
+  so a connection that fails after `call_sent` (including a refused connect) is **ambiguous**: the whole reservation stays
+  counted and the model is suspended until root clears it. The maintainer accepted this cost.
+- **Text and image approval fields.** A text approval carries 19 fields: `version`, `nonce`, `epoch`, `model`, `kind`,
+  `max_output_tokens`, `thinking_level`, `max_usd`, `job`, `prompt_sha256`, `prompt_bytes`, `quote`, `quoted_at`,
+  `created`, `expires_at`, `beyond_ceiling`, `ledger_head`, `issue` and `principal`. An image approval adds exactly
+  `count`, `image_size` and `aspect_ratio`. Any other key set is refused, and the text must be the canonical form.
+- **Thinking level for models without levels.** A table entry that lists no `thinking_levels` sends `none`: the approval
+  and the request carry `thinking_level: none`, and the vendor body has no thinking setting at all. A model that lists
+  levels sends the one named in `thinking_level_sent`, which must be one of them (the table, not the client, decides;
+  the first example uses `minimal`). A request that names any other level is `bad_request`.
+- **Count fixed at 1.** One image per call and one approval per call. `MAX_COUNT_PER_APPROVAL` is 1 in the policy and the
+  wire format carries at most one attachment, whatever `max_images` says (the table field is bounded by 4 and the policy
+  by 1). Text has no count.
+- **The typical-token estimate versus the reservation.** The typical estimate shown at `approve` is an estimate: the
+  prompt at **three bytes a token**, plus the per-image figure, plus the minimum text allowance. It enforces nothing. The
+  reservation, which enforces every cap, charges **one token per byte plus 64** for input, which is a true upper bound.
+- **The clock-backward refusal.** A reservation whose time is earlier than the last ledger row is refused with `internal`
+  (the sentence says the clock is earlier than the last ledger row), so a clock set back cannot move a spend into an
+  earlier month. The other steps (the answer, an ambiguity, recovery) take the last row time instead, so a call
+  that is open still ends.
+- **The pre-spend hook.** `reserve` takes a hook that runs inside the ledger lock, after the replay, suspension and cap
+  checks and just before the spend is written. The pipeline uses it to look once more: the spend gate (switch, stopping),
+  the signature and revocation again, and the issued nonce. Two consequences: a key revoked a moment ago is caught, and a
+  second full signature verification (a run of `ssh-keygen`) happens while the lock is held, which can hold the lock
+  longer than its 10 second wait, so another request can answer `busy`.
+- **Nonce lifetime versus approval lifetime.** An issued nonce lives **10 minutes** from `begin`. The client signs an
+  approval that expires at the earlier of ten minutes after it was created and the nonce expiry. The format allows an
+  approval to live up to 60 minutes, but the nonce expiry ends the call first (`expired`), so in practice no approval
+  outlives its nonce.
+- **Slot wait.** One paid call is in flight (`max_concurrent_calls` is fixed at 1). A second `call` waits `slot_wait`
+  seconds for the slot, **default 0**, then answers `busy`; it never queues. The range is 0 to 60 seconds.
+- **Per-peer rate limits and caps** (the defaults in the `server` section of `broker.yaml`): per peer uid and per minute, 6
+  `begin`, 10 `call` attempts and 30 of each other operation (`status`, `check`, `dryrun`); a refusal is `busy`. At most
+  4 nonces outstanding. At most 8 open connections and 2 per uid. Vendor calls started: 5 a minute and 20 a day, counted
+  from the ledger, so a restart does not reset them. Deadlines: 5 seconds for the request frame, 5 seconds for the reply
+  frame, 10 seconds of progress per write and 60 seconds per attachment frame.
+- **The 256 KiB reply frame versus the 200,000 byte text answer.** The broker accepts a text answer of up to 200,000
+  bytes (more is unreadable and ambiguous), but the JSON reply frame is limited to 262,144 bytes and the reply is written as
+  ASCII with every non-ASCII character as an escape (six bytes, twelve outside the basic plane). An answer that does not fit the frame cannot be sent: the
+  reply is **`internal` with the receipt**. The call was paid for and the answer is not delivered (the broker keeps no copy).
+- **Image metadata refusal.** Exif, XMP, ICC profiles, C2PA (content credentials) and compressed text chunks are refused, and
+  so is a WebP with a separate alpha chunk (the extended WebP header may set only the alpha flag, with the one image).
+  This may refuse a genuine image. It is deliberate and stays until the first real call records what the real images
+  carry (issue #273, question 13).
+- **The month boundary.** The month is the UTC calendar month. A call counts in the month it was reserved in. A call that
+  ends in a later month counts in **both** months (at the figure it ends with), and while it is open the new month counts it
+  at its reservation, so one straddling call can be counted twice and never too few times.
+- **The price-table consistency rule.** For each image size, the stated per-image figure may not be above the token count
+  times the image output rate (rounded up), and may not be more than **5 percent** below it. A table that breaks either
+  rule is refused when the broker starts. Sizes missing from either map are refused too.
+- **The single connect deadline.** `deadline_seconds` (default 180, from 1 to 600) is one budget for the whole vendor call:
+  the name lookup, every address tried, the TLS handshake, the send and the reply. No address is tried once nothing is
+  left, and a connection made after the deadline is closed before any byte is written.
+- **Egress control, observe mode and the order rule.** The nftables control has two modes, observe (log, then let
+  through) and drop. Observe mode does not stop the key from leaving. The enable switch is created **only by the last step
+  of the runbook, after the read-only preflight passes** (`--enabling`), and the preflight fails while the mode is observe.
+  Observe mode needs an explicit acknowledgement (`--ack-observe-mode`, added by hand) after an empty observe log through a
+  full dry run, and the runbook says to switch to drop after the first clean real call at the latest.
+- **Grace and stop timeout.** On SIGTERM the broker stops accepting and waits `grace_seconds` for calls in flight: default
+  150, **at most 300** (the config refuses more). The unit sets `TimeoutStopSec=360`, above the longest drain plus a margin,
+  so systemd does not kill the process before it records the calls still open.
+- **Signers file strictness.** The release signers file (`/etc/safo/broker-release-signers`) is read line by line: each
+  line must be exactly `PRINCIPAL namespaces="git" KEYTYPE BASE64` with an optional comment, one plain principal, a
+  hardware key type (root can name other types with `--release-key-type`), no `cert-authority`, no other option, and a
+  signature made through a certificate is refused. The installer enforces this; the first design left it as a runbook
+  convention. The approval signers file (`/etc/safo/gemini-allowed-signers`) must bind every key with
+  `namespaces="safo-gemini-approval"`, accepts only the window options `valid-after` and `valid-before`, refuses
+  `no-touch-required`, certificates and duplicates, and the broker accepts only hardware keys from it even when a
+  software key has the written opt-in.
+- **`check-install` coverage.** It checks the release link and folder, the version record, the floor, the five installed
+  unit files against the signed release and its manifest, the egress helper and the switch and egress mode. It does **not**
+  check the root-door items (sudo rules, group membership, polkit rules, writable root-run paths, setuid files, a leftover
+  old secret-store credential); its output ends with a line saying so. A read-only check for those is **not built yet**
+  (issue #293).
+- **The paid commands and the removed path.** `safo gemini paid` and `safo gemini paid-dryrun` run the broker client.
+  The in-process paid path is deleted (#287), the dispatch guard denies every paid step in a brief, and the only paid route
+  is the broker.
+- **What remains unverified.** Everything that needs a real run: the real vendor response shapes for text and for images,
+  that the vendor honors `max_output_tokens` and the thinking level on image models (interim images included), whether
+  interim images are billed as image output, the effect of the units on a real machine (`MemoryDenyWriteExecute` with
+  `ssh-keygen`, `memfd_create` under the system-call filter, `LoadCredentialEncrypted=`, the read-only bind mounts under
+  `ProtectSystem=strict`, the socket owner and mode), nft loading on a real kernel, the egress units under a real system,
+  TLS to the real host, the parent-directory ownership walk on a real `/etc/safo`, and that the free key's project has
+  billing disabled. Nothing has been installed or run on a real machine, and no vendor call has been made.
 
 ## The requirement
 
@@ -155,8 +306,8 @@ does not remove the need to trust either (see [the threat model](gemini-broker-t
   maintainer's account and **not root**. Root is not needed: the broker reads root-owned public files, writes its own
   state directory, holds one credential that systemd hands it, and makes one outbound HTTPS call. Running as a
   non-root user means a bug in the broker does not give root.
-- **Started by a systemd socket unit** on a local Unix socket. The service starts on the first connection and exits
-  after an idle period; the socket stays.
+- **Started by a systemd socket unit** on a local Unix socket. The service starts on the first connection and keeps
+  running until it is stopped or fails (`Restart=on-failure`); an idle exit is **not built yet**. The socket stays.
 - **It holds the paid key.** The key reaches it only as a systemd credential (below). The maintainer's account never
   reads it.
 - **It owns the state:** the approval consumption records and the spend ledger, in a directory writable only by
@@ -165,7 +316,7 @@ does not remove the need to trust either (see [the threat model](gemini-broker-t
   are root-owned files, with the same `ssh-keygen` sealed-input approach as today ([Gemini](gemini.md), "Inputs to
   ssh-keygen are sealed").
 - **It enforces** the single-use nonce, the expiry, the model and job, the prompt digest, and the per-job and monthly
-  caps and the extra-block rule, by **reserving the worst-case cost** of each call before it is sent (see "Cost").
+  caps and the extra-block flag, by **reserving the worst-case cost** of each call before it is sent (see "Cost").
 - **It makes the vendor call itself**, to a destination fixed in code, writes the ledger, and returns only the
   response (text or image bytes) and a receipt.
 - **The maintainer's wrapper becomes a thin client.** It builds the approval (the touch), sends one request, receives
@@ -202,8 +353,9 @@ the process boundary, `LimitCORE=0`, `PR_SET_DUMPABLE` off, and a different user
 machine has a TPM (the credential then also needs the TPM to decrypt). The encryption defends the file against a disk
 image, a backup, or a stray `cat` by root. It is not the access control: the file's owner, mode and directory are.
 
-**What the maintainer does once as root** (commands are inferred from the manuals and not yet run end to end; the
-installer phase turns them into a script with checks):
+**What the maintainer does once as root** (commands are inferred from the manuals and not yet run end to end;
+`safo-broker-install plan` prints the full setup as `ssh -t host 'sudo ...'` lines, each with its blast radius and
+rollback, from `src/safo/broker/runbook.py`; nothing in the program runs them):
 
 1. **Create a new key for the broker; do not reuse the old one.** A key the maintainer's account has ever read is
    exposed to that account. In the vendor console, create a new API key in the paid project, restrict it to the
@@ -237,7 +389,8 @@ installer phase turns them into a script with checks):
    "the account cannot call the vendor directly" is false.
 5. **Install the broker code, config and units** with `safo-broker-install` (see "Install and update chain"), then
    `systemctl enable --now safo-broker.socket`.
-6. **Enroll the signing keys and create the switch** as in [Gemini keys](gemini-keys.md). The switch is the last step.
+6. **Enroll the signing keys and create the switch** as in [Gemini keys](gemini-keys.md). The switch is created only by the
+   last runbook step, after the read-only preflight passes (see "Egress control for the service user").
 
 **A precondition the design cannot prove.** The maintainer's account must not have root through another door. The
 installer checks for many such doors and cannot prove there are none; see "The root-door precondition" below for the
@@ -253,28 +406,36 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
   gemini-revoked-signers           root:root 0644   revoked keys (existing; may be empty; missing refuses all)
   gemini-paid-enabled              root:root 0644   the enable switch (existing; says "enabled")
   broker.yaml                      root:root 0644   caps, model allowlist, prices, allowed uids, limits, timeouts
-                                                    (written by the runbook; the same text is examples/broker.example.yaml)
+                                                    (sections server, prices, caps, deadline_seconds; written by the
+                                                    runbook, and the same text is examples/broker.example.yaml)
+  broker-egress config file        root:root 0644   the vendor host name and MODE=observe or MODE=drop (egress control)
+  egress/                          root-owned       the hosts view the egress helper writes and the broker unit bind-mounts
   broker/                          root:root 0700
     paid-key                       root:root 0600   the encrypted credential
-/opt/safo-broker/                  root:root 0755   releases/VERSION (a venv of locked wheels plus the broker source, read-only) and the symlink current
-/var/lib/safo-broker-install/version  root:root 0600   the highest broker version ever installed (monotonic)
+/opt/safo-broker/                  root:root 0755   releases/VERSION (a venv of locked wheels plus the broker source, read-only; a reinstall
+                                                    of the same version gets a numbered suffix) and the symlinks current and previous
+/var/lib/safo-broker-install/version   root:root 0600   the highest broker version ever installed (monotonic)
+/var/lib/safo-broker-install/ (a log file)   root-owned   one line per install, rollback and downgrade
+/usr/local/sbin/safo-broker-install        root:root 0755   the installer
+/usr/local/sbin/safo-broker-egress         root:root 0755   the egress helper (installed once by root; not part of any release)
 /etc/systemd/system/
   safo-broker.socket               root:root 0644
   safo-broker.service              root:root 0644
 /var/lib/safo-broker/              safo-broker:safo-broker 0700   (StateDirectory=)
   epoch                            0600   a random id made once, in every receipt
-  ledger.jsonl and its head file   0600   the hash-chained ledger (today's row format, plus the new rows below)
+  ledger.jsonl (and a head file and a lock file beside it)   0600   the hash-chained ledger
   height                           0600   the highest chain height seen
-  issued/NONCE                     0600   a nonce the broker handed out and has not seen spent
+  schema_version                   0600   the ledger schema floor; it only rises
+  issued/NONCE, issued.lock        0600   a nonce the broker handed out and has not seen spent
   used/NONCE                       0600   created with O_EXCL when a nonce is spent
-  approvals/NONCE.json             0600   the signed text and signature as presented, for audit
+  (approvals/NONCE.json, an audit copy of the signed text, is not built yet)
 /run/safo-broker.sock              root:safo-broker-clients 0660   made by the socket unit; /run is root 0755, so no parent can block it
 /run/credentials/safo-broker.service/paid-key   readable by safo-broker only; made by systemd at start
 ```
 
 - `broker.yaml` is root-owned because **prices and caps decide how much a call may cost**. If the maintainer's
-  account could edit the price table, a price of zero would make every reservation zero. The per-job cap (2 USD) and the
-  monthly ceiling (10 USD) stay constants in the code that a config may lower and never raise, as today. The broker
+  account could edit the price table, a price of zero would make every reservation zero. The per-job cap (2.50 USD in the
+  testing phase) and the monthly ceiling (10 USD) stay constants in the code that a config may lower and never raise. The broker
   loads `broker.yaml` through the same ownership walk as the trust files, **once, when the service starts**; the prices,
   caps, model list, allowed uids and limits it read stay in force until the service is restarted
   (`systemctl restart safo-broker.service`), so a tightening in the file (a lower cap, a removed model, a removed uid) is
@@ -283,9 +444,11 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
 - The broker runs code from `/opt/safo-broker`, not from the maintainer's checkout or virtualenv, because code the
   maintainer's account can write is code an agent can change. Updating it is a root-run install from a hardware-key
   signed tag, never from a folder the account can write (see "Install and update chain").
-- The ledger keeps today's hash-chained row format so the existing reader code is shared, not copied. It adds row
-  types for the broker (`nonce_issued`, `ambiguous_call`, `ambiguous_resolved`) and fields for images and reservations (below). A model
-  suspension (see "Cost") is a file in the state directory that a restart does not remove.
+- The ledger keeps today's hash-chained row format so the existing reader code is shared, not copied. Its row types are
+  `approval_used`, `call_start`, `call_sent`, `call_end`, `ambiguous_call`, `suspended`, `ambiguous_resolved`,
+  `suspension_cleared` and `admin_action`, all at schema version 3. A nonce handed out by `begin` is a file under
+  `issued/`, not a ledger row. A model suspension (see "Cost") is a pair of ledger rows (`suspended`, then
+  `suspension_cleared` when root clears it), so a restart does not remove it.
 - The maintainer reads spend through the socket (`status`), not by reading the directory.
 
 ## Install and update chain
@@ -319,9 +482,9 @@ it still leaves to a human.
    without importing it. A mismatch is refused. The `VERSION` argument on the command line is only an expected value that
    must equal the tag's; there is no separately supplied VERSION file.
 4. **Refuses a rollback.** `/var/lib/safo-broker-install/version` (root:root 0600) holds the highest version ever
-   installed. A version below it is refused, and the same version is refused unless root passes `--reinstall`. Going
-   down needs root to pass `--allow-downgrade VERSION` explicitly; the installer logs it to the journal and to a
-   root-owned log. A second root-owned file, `/etc/safo/broker-min-version`, is a floor: after a fix for a flaw, root
+   installed. A version below it is refused, and the same version is refused unless root passes `--reinstall` (the new
+   release folder then gets a numbered suffix). Going down at install time needs root to pass `--allow-downgrade VERSION`
+   explicitly; the installer prints it and appends it to the root-owned install log. A second root-owned file, `/etc/safo/broker-min-version`, is a floor: after a fix for a flaw, root
    raises it, and **the broker itself refuses to start below it**.
 5. **Shows the review and waits.** It prints the old and new versions, the tag's signer label and fingerprint, the commit
    hash, and: the diff of **every packaging and build-control file** changed since the installed release (`pyproject.toml`,
@@ -343,13 +506,17 @@ it still leaves to a human.
    `/opt/safo-broker/current`, and the unit's `ExecStart` runs through it. Before activation the installer, offline:
    checks the ownership walk of the whole staged tree; re-hashes every installed file against a manifest generated from
    the verified commit; runs `systemd-analyze verify` on the staged units; and runs a self-test of the staged tree as the
-   `safo-broker` user with a fake key, a fake vendor and no network. Only then does it swap the symlink with an atomic
-   rename, install the units (written under a temporary name and renamed), reload systemd and restart the service, and
-   check that `status` answers.
+   `safo-broker` user in private network, IPC, UTS and PID namespaces (the self-test imports every broker module; it
+   uses no key and no vendor). Only then does it swap the symlink with an atomic rename, install the units (written
+   under a temporary name and renamed), reload systemd and restart the service, and run the post-start check. The check
+   as built asks systemd whether `safo-broker.socket` is enabled and active; a bounded `status` request that must name
+   the expected release is **not built yet** (accepted as built on 2026-10-31, issue #270 question 5).
 8. **Rolls back automatically.** A failure in the build, the verification, the unit install, the restart or the
    post-start `status` check swaps the symlink back to the previous release, restores the previous release's units,
-   restarts, and reports what failed. The previous two releases are kept. The monotonic version file is written only
-   after the new release has started and answered, so a failed install does not raise the floor.
+   restarts, and reports what failed. The current release and the newest two others are kept. The monotonic version file
+   is written only after the new release has started and the post-start check passed, so a failed install does not raise
+   the record. A manual `rollback` (optionally `--to VERSION`) is an explicit root command: it respects the floor, never
+   lowers the version file, and is logged.
 
 **A second layer, for any prebuilt artifact.** If a release ever ships a prebuilt wheel or archive, root verifies a
 build attestation (a sigstore attestation made by the release workflow) against the pinned identity of that workflow
@@ -365,7 +532,8 @@ and the cyber-tier review are the controls for that. It does not protect against
 key whose PIN is known, or against a maintainer who types the version without reading the diff. The first install is
 trust on first use of a tag the maintainer has reviewed.
 
-**Verification (planned, phase 5).** Installer tests against a temporary tree and a throwaway git repository with test
+**Verification (built in phase 5).** `tests/test_broker_install.py`, `tests/test_broker_install_gates.py` and
+`tests/test_broker_unit_policy.py` run installer tests against a temporary tree and a throwaway git repository with test
 keys: an unsigned tag, a tag signed by a key not in the signers file, a tag signed by an approval key (wrong file), a
 lower version, an equal version, a downgrade with and without the flag, a tampered requirements hash, a lightweight tag, a
 tag whose name disagrees with the code's version, a dependency with only a source distribution (pip must refuse it and no
@@ -377,8 +545,8 @@ check must leave the previous release active and the version file unchanged.
 
 What phase 5 puts in the tree, all testable without root and none of it run on a real machine yet:
 
-- `packaging/systemd/safo-broker.socket` and `packaging/systemd/safo-broker.service`: the two units from "The unit files
-  and their hardening", plus `ReadWritePaths=` for the state directory only, the bind mounts and hidden sockets described under the egress control, no start condition on the root-owned
+- `packaging/systemd/safo-broker.socket` and `packaging/systemd/safo-broker.service`, with the egress units beside them
+  (five unit files, all in "The unit files and their hardening"), including `ReadWritePaths=` for the state directory only, the bind mounts and hidden sockets described under the egress control, no start condition on the root-owned
   switch (the broker reads the switch on every request, answers status and dry run while it is absent and answers every paid
   call as disabled before the ledger is written or the key is read; decided 2026-10-31), an `ExecStartPre` floor check (the `floor` module of the broker package, which refuses to start a release below
   `/etc/safo/broker-min-version`, the second layer behind the installer), and explicit start and stop timeouts.
@@ -387,7 +555,9 @@ What phase 5 puts in the tree, all testable without root and none of it run on a
 - `packaging/broker-requirements.txt`: the hash-locked wheel list the installer reads. Wheel hashes only.
 - `packaging/safo_broker_install.py`: `safo-broker-install`, standard library only, so root can copy the one file to
   `/usr/local/sbin`. Commands: `plan` (prints the setup runbook, never runs it), `install VERSION` (a dry run unless
-  `--apply`; `--reinstall`, `--allow-downgrade VERSION`), and `rollback` (`--to VERSION`). The chain is the one in
+  `--apply`; `--reinstall`, `--allow-downgrade VERSION`, `--release-key-type`), and `rollback` (`--to VERSION`). The install review
+  diffs everything under `packaging` plus `pyproject.toml` and the broker source as build control. The release signers file
+  must hold exact hardware-key lines with `namespaces="git"` (see "Design points settled on 2026-10-31"). The chain is the one in
   "Install and update chain": the source comes from a fixed URL and a single tag fetch (no option or variable changes it),
   the signed annotated tag object is verified against `/etc/safo/broker-release-signers`, the version comes from the tag
   and is cross-checked with `__version__`, the floor and the highest-installed record are checked, wheels are fetched with
@@ -461,28 +631,32 @@ path; a wheel that would install a package named `safo` over the broker's own co
 a missing version file when a release is already installed. A release directory is named for its version; when
 `--reinstall` installs a version that is already present, the new directory gets a numbered suffix.
 
-**Known limit of the post-start check.** Until the socket server exists (phase 3), the installer's health check can only
-ask systemd whether the socket is enabled and active; it cannot ask the broker for `status`, because the socket server is
-not built yet. A first install therefore records its version without the broker having answered. The check is a replaceable hook; phase 3 wires in a bounded `status` request that must name the expected
-release, and until then a freshly installed release is exercised only by its offline self-test and the maintainer's
-dry run.
+**Known limit of the post-start check.** The installer's health check asks systemd whether the socket is enabled and
+active. It does not ask the broker for `status`, so a first install records its version without the broker having
+answered, and a first install before the runbook enables the socket reports the check as skipped, which is not a pass.
+The check is a replaceable hook. A bounded `status` request that must name the expected release is **not built yet**; the
+maintainer accepted the socket check as built on 2026-10-31 (issue #270 question 5). Until then a freshly installed
+release is exercised only by its offline self-test and the maintainer's dry run.
 
 **Run it first on a throwaway machine.** Until the maintainer has run the installer and the units on a throwaway VM, these
 are unverified: that `MemoryDenyWriteExecute=yes` lets `ssh-keygen` run under the service, that `@system-service` allows
 `memfd_create`, that `LoadCredentialEncrypted=` hands the key to the service user only, that the owner and mode of the
-socket let the client group connect, and that the service skips its start cleanly when the switch file is absent.
+socket let the client group connect, and that the broker starts and answers `status` and `dryrun` while the switch file is
+absent (there is no start condition on the switch; decided 2026-10-31).
 
 ## The root-door precondition (a documented residual risk)
 
 The whole design assumes the maintainer's account, and every agent running as it, has **no way to become root**. The
 installer's checks reduce the chance that this is false; they cannot prove it, and this page does not claim they do.
 
-**What `check-install` does not check yet.** The list below is the manual review the maintainer does (and the planned
-scope of a later phase). Today `safo-broker-admin check-install` checks the release link, the version record, the floor, the
-installed unit files, the egress helper and the switch (see the administration section), and its output ends with a line
-saying that these root-door items are not checked. It does not run `sudo -l`, read group or polkit data, or walk the
-file system. Until it does, treat a passing `check-install` as "the installation matches the signed release", never as
-"no door to root exists".
+**What `check-install` does not check yet.** The list below is the manual review the maintainer does. A read-only code
+check for these items is **not built yet** and is tracked as issue #293 (sudo rules, group membership, polkit rules,
+writable root-run paths, setuid files, and a leftover old secret-store credential). Today the administration command
+`check-install` (run as `python -I -m safo.broker.admin check-install`) checks the release link, the version record, the
+floor, the installed unit files against the signed release, the egress helper and the switch (see the administration
+section), and its output ends with a line saying that these root-door items are not checked. It does not run `sudo -l`,
+read group or polkit data, or walk the file system. Until it does, treat a passing `check-install` as "the installation
+matches the signed release", never as "no door to root exists".
 
 **The root-door review (manual today; each hit is fixed or explained in writing):**
 
@@ -541,7 +715,7 @@ One request, one reply, then the broker closes the connection. Version 1.
 duplicate-key check, no `NaN` or `Infinity`, and no key outside the table for its operation. An unknown key is
 `bad_request`, not ignored. Strings that name things (model, job, ids) are checked against the same patterns the
 signed approval uses (`[a-z0-9._-]` names, at most 64 characters). The prompt is a string of at most 200,000 bytes
-UTF-8 after decoding (the limit the wrapper has today).
+UTF-8 after decoding (the limit the wrapper has today). `count` is 1 in practice (see "Approvals and batches").
 
 **Versioning.** Every request carries `"v": 1`. A broker that does not speak the version replies
 `{"v": 1, "ok": false, "code": "unsupported_version", "supported": [1]}`. Within a version, fields are never added
@@ -559,9 +733,9 @@ exact request. The pid is logged as a number and never trusted.
 
 | `op` | Request fields | Reply fields (when `ok` is true) | What it does |
 |---|---|---|---|
-| `status` | none | `enabled`, `key_loaded`, `epoch`, `ledger_head`, `month_spent`, `month_cap`, `block`, `prices_valid_through`, `suspended` (the models stopped by a breach or an ambiguous call), `line` | Reads state; spends nothing. Works when disabled, and says so. |
+| `status` | none | `enabled`, `key_loaded`, `epoch`, `ledger_head`, `month_spent`, `month_cap` (the monthly ceiling in USD, not an error code), `block` (the 2 USD block size, for information), `prices_valid_through`, `suspended` (the models stopped by a breach or an ambiguous call), `line` | Reads state; spends nothing. Works when disabled, and says so. |
 | `begin` | `model`, `job`, `kind`, `count`, `image_size`, `aspect_ratio`, `prompt_bytes`, `max_output_tokens`, `max_usd` (not less than the reservation) | `nonce`, `epoch`, `expires_at`, `ledger_head`, `estimate_usd`, `reserve_usd`, `thinking_level`, `beyond_ceiling`, `line` | Hands out a broker-chosen nonce and the numbers the approval must carry, after checking the request against the caps. Writes `issued/NONCE`. |
-| `call` | the same fields, plus `prompt`, `approval` (`payload`, `signature`) | `receipt`, `text`, `attachments` | Verifies, spends, calls the vendor, records, returns. |
+| `call` | the same fields (without `prompt_bytes` and `max_usd`), plus `prompt`, `approval` (`payload`, `signature`) | `receipt`, `text`, `attachments` | Verifies, spends, calls the vendor, records, returns. |
 | `check` | `nonce` | `state` (`live`, `used`, `expired`, `unknown`) | For the dispatch guard: is this approval still live? Spends nothing. |
 | `dryrun` | `approval` signed in the dry-run namespace | `principal`, `fingerprint`, `hardware`, `touch`, `pin`, `enabled` | Verifies a throw-away signature; no state, no vendor call. |
 
@@ -576,72 +750,96 @@ the key. `code` and `exit`:
 | `bad_request`, `too_large`, `unsupported_version`, `unauthorized_peer` | 2 | The request was refused before any state changed |
 | `disabled` | 2 | The root-owned switch is not `enabled` |
 | `bad_approval`, `revoked`, `expired`, `used`, `digest_mismatch`, `model_mismatch`, `job_mismatch` | 2 | The approval does not cover this request |
-| `over_job_cap`, `over_approved`, `needs_block_approval`, `month_cap`, `model_suspended` | 2 | A cap, or a suspension after a breach, stops it |
-| `busy` | 2 | A paid call is already in flight, or a rate limit applies |
+| `over_job_cap`, `over_approved`, `needs_block_approval`, `model_suspended` | 2 | A cap, or a suspension after a breach, stops it |
+| `month_cap` | 2 | In the code list and the reply table, but **nothing returns it**; `needs_block_approval` is the code for the monthly ceiling |
+| `model_refused`, `prices_expired` | 2 | The model is not in the table or decision 13 refuses it; the price table is past `valid_through` |
+| `busy` | 2 | A paid call is already in flight, the broker is stopping, a rate limit or call budget applies, the ledger lock was not free in time, or too many nonces are outstanding |
 | `rate_limited` | 3 | The vendor answered 429; **final**, never retried, never falls through to another tier |
 | `vendor_refused` | 2 | A definite vendor 4xx other than 429; not repeated |
 | `outcome_unknown` | 4 | The request left and its result cannot be told; recorded as spent at the reservation, the model suspended until root clears it; not repeated |
-| `internal` | 4 | The broker failed; state is described in "Crash and power loss" |
+| `internal` | 4 | The broker failed after the spend (state in "Crash and power loss"); or the clock is earlier than the last ledger row (a reservation refuses); or a paid answer does not fit the 256 KiB reply frame, in which case the reply carries the receipt: **paid but not delivered** |
 
 **Receipt** (in the `call` reply, and written by the client beside each image): `call_id`, `nonce`, `epoch`, `model`,
 `kind`, `count`, `image_size`, `prompt_sha256`, `tokens_in`, `tokens_out`, `reserved_usd`, `actual_usd`, `released_usd`,
-`breach` (true when the actual passed the reservation), `estimated` (true when the reservation stood in for a missing or
-implausible usage figure), `month_spent_after`, `ledger_head_after`,
-`images` (for each: `index`, `mime`, `bytes`, `sha256`), `broker_version`, `ts`. It holds no prompt text, no quote and
+`breach` (true when the actual passed the reservation), `cap_breach` (true when the answer went over the signed output
+limit, even if the money stayed inside the reservation), `estimated` (true when the reservation stood in for a missing or
+implausible usage figure), `extra_images` (image items beyond the approved count, dropped), `month_spent_after`,
+`ledger_head_after`, `images` (for each: `index`, `mime`, `bytes`, `sha256`), `broker_version`, `ts`. It holds no prompt text, no quote and
 no key.
 
 ## What a signed approval binds
 
 The approval keeps the shape the removed local `approve` made (canonical JSON, signed with `ssh-keygen -Y sign` in the `safo-gemini-approval`
-namespace) and the broker verifies the same properties. #217 has shipped the prompt binding: payload `version: 2` carries
+namespace) and the broker verifies the same properties. #217 shipped the prompt binding: payload `version: 2` carried
 `prompt_sha256` (lowercase hex SHA-256 of the exact UTF-8 prompt bytes) and `prompt_bytes` (their count) on both tiers,
 and the client refuses to approve a prompt of more than 4000 characters (the signer reads the whole prompt). The broker
 adds a schema `version: 3` with the fields a priced image call needs, so that nothing which changes the cost is
-outside the signature:
+outside the signature.
 
-`version`, `nonce`, `epoch`, `model`, `kind`, `count`, `image_size`, `aspect_ratio`, `max_output_tokens`,
-`thinking_level`, `max_usd`, `job`, `prompt_sha256`, `prompt_bytes`, `quote`, `quoted_at`, `created`, `expires_at`,
-`beyond_ceiling`, `ledger_head`, `issue`, `principal`.
+**Text approval** (`kind` is `text`), exactly 19 fields: `version`, `nonce`, `epoch`, `model`, `kind`,
+`max_output_tokens`, `thinking_level`, `max_usd`, `job`, `prompt_sha256`, `prompt_bytes`, `quote`, `quoted_at`,
+`created`, `expires_at`, `beyond_ceiling`, `ledger_head`, `issue`, `principal`.
 
-`prompt_sha256` and `prompt_bytes` keep the names and meaning #217 shipped. Version 2 records (text only, from today's
-code) are refused by a broker that speaks version 3, with a message to ask for a fresh approval.
+**Image approval** (`kind` is `image`): the same 19 and, in addition, `count`, `image_size` and `aspect_ratio`. Any other
+set of keys is `bad_approval`, and the text must be the canonical form (the exact bytes that were signed). The signed
+`max_usd` is the one the offer named; `thinking_level` is `none` for a model that lists no levels.
 
-The broker checks, in this order, and stops at the first failure (each refusal before the key is read):
+`prompt_sha256` and `prompt_bytes` keep the names and meaning #217 shipped. Version 1 and version 2 records (text only,
+from the removed local code) are refused by a broker that speaks version 3, with a message to ask for a fresh approval.
 
-1. The switch file passes the root-owned walk and says `enabled`; `broker.yaml` loads; prices are not past their
-   `valid_through`.
-2. The peer uid is allowed; the frame and fields are well formed.
-3. The signature verifies against the allowed signers (key by key, window, namespace, hardware flags, `require-pin`)
-   and the key is not in the revocation list. Both files are re-read on every request.
-4. The signed text is canonical, `version` is 3, `epoch` equals the broker's, and the `nonce` is in `issued/`,
-   unexpired, not in `used/` and not in the ledger as used.
-5. `model`, `job`, `kind`, `count`, `image_size`, `aspect_ratio`, `max_output_tokens` and `thinking_level` of the
-   request equal the signed ones; the broker's own SHA-256 of the received prompt equals `prompt_sha256`.
-6. The broker **computes the reservation itself** (worst-case cost, see "Cost") from its own price table and the
-   request, never from a number the client sent. The reservation must be at most the signed `max_usd` and at most the
-   job cap; the month total plus the reservation must fit the ceiling, or `beyond_ceiling` must be true in the signed text (the extra-block rule: past 10 USD
-   a month, each further 2 USD block needs its own approval that says so).
-7. The prompt passes the shape check for secrets (the same patterns as today, run by the broker on the received
-   text), as defense in depth. The maintainer's private-terms check runs in the client, before `approve` and before
+As built, the checks run in this order and stop at the first failure (each refusal before the key is read):
+
+1. The server: it is not stopping; the peer uid is allowed (checked when the connection is accepted); the frame and fields
+   are well formed; the per-peer rate limit and the call budget (5 a minute, 20 a day) have room; the switch file passes the
+   root-owned walk and says exactly `enabled` (else `disabled`); one slot is free. `status` and `dryrun` skip the switch.
+2. The prompt passes the size limit and the shape check for secrets (the same patterns as today, run by the broker on the
+   received text), as defense in depth. The maintainer's private-terms check runs in the client, before `approve` and before
    the send (see "Images").
+3. The signature verifies against the allowed signers (key by key, window, namespace, hardware key, touch, `require-pin`)
+   and the key is not in the revocation list (`revoked`). Both files are re-read on every request. The key that signed must
+   be the principal named in the text.
+4. The signed text is canonical and `version` is 3.
+5. Binding: `epoch` equals the broker's; the approval is not expired (`expired`) and not dated more than a minute ahead;
+   the broker's own SHA-256 and byte count of the received prompt equal `prompt_sha256` and `prompt_bytes`
+   (`digest_mismatch`); `model` and `job` equal the request's (`model_mismatch`, `job_mismatch`); `kind`, `count`,
+   `image_size`, `aspect_ratio`, `max_output_tokens` and `thinking_level` equal the request's (`bad_approval`).
+6. Pricing: the model is in the table (`model_refused`), the thinking level is the one the table sends, the table is not
+   past `valid_through` (`prices_expired`), the size and output limit are allowed, and the broker **computes the
+   reservation itself** (worst-case cost, see "Cost") from its own table and the request, never from a number the
+   client sent. Decision 13 is applied here.
+7. Under the ledger lock: the signed `ledger_head` is the chain start or a hash the ledger has held; the nonce is not
+   spent (`used`: a marker file, or a ledger row); the model is not suspended; the reservation is at most the job cap
+   (`over_job_cap`) and at most the signed `max_usd` (`over_approved`); and the month total plus the reservation fits the
+   ceiling or `beyond_ceiling` is true in the signed text (`needs_block_approval`).
+8. Still under the lock, the pre-spend hook (see "A call, step by step"): the spend gate again (stopping, the switch),
+   the signature and revocation again, and the issued nonce: present, unexpired and agreeing with what `begin` handed out.
+9. Only then is the spend written.
 
 ## A call, step by step
 
 1. Client: `begin` (the broker answers with a nonce, its ledger head, the typical estimate, the reservation and the quota
    line).
 2. Client: `approve` shows the quota line, the quote, the digest, the size, the whole prompt (at most 4000 characters, escaped) and (for images) the model, size and count; the maintainer types `approve JOB` and
-   touches the key; the client keeps the signed approval in the existing approvals folder as a convenience (it is a
-   transport copy and carries no authority).
+   touches the key. The client keeps no copy of the signed approval; it goes to the broker in the `call` request and
+   nowhere else.
 3. Client: `call` with the prompt and the approval.
-4. Broker, under the state lock: verify (above); **write the spend first**: append `approval_used` and `call_start`
-   (with the reservation) to the ledger, create `used/NONCE` with `O_EXCL`, `fsync` the files and the directory.
+4. Broker, under the state lock: verify (above), including the **pre-spend hook**, which runs inside the lock just before
+   the spend: the spend gate, a second full signature and revocation check, and the issued-nonce check (so a key revoked
+   a moment ago is caught; a second run of `ssh-keygen` while the lock is held can make another request wait the 10
+   second lock timeout and answer `busy`). Then **write the spend first**: append `approval_used` and `call_start`
+   (with the reservation) to the ledger, create `used/NONCE` with `O_EXCL`, `fsync` the files and the directory. The issued
+   nonce file is removed once the spend is recorded.
 5. Broker, outside the state lock but inside the one-call slot: read the key, send **one** request, with the deadline
    from `broker.yaml` (images are slow; the default is 180 seconds), no retry. The deadline is one budget for the
    whole call: the name lookup, every address the connection tries in turn, the TLS handshake, the send and the reply.
    Each connect attempt gets the lesser of its own timeout and the time left, no further address is tried once nothing
    is left, and a connection that is made after the deadline is closed before a single byte is written. A request
    therefore never leaves after the deadline, and a call that runs out of time while connecting is treated like any
-   other missed deadline (an ambiguous outcome; the model is suspended).
+   other missed deadline (an ambiguous outcome; the model is suspended). The same holds for a connection that fails
+   outright: `call_sent` was written before the connection opened, so no connect failure can end as `not_sent`, and it
+   is ambiguous too (accepted 2026-10-31). The one deadline is `deadline_seconds` of `broker.yaml` (1 to 600).
+   The row `call_sent` (between the spend and the answer; the first design did not list it) is written and synced after
+   the request is built and before the connection opens.
 6. Broker: classify the answer, append `call_end` with the actual cost and the amount released from the reservation
    (see "Cost"; a breach or an ambiguous outcome also suspends the model), `fsync`, **release the call slot**, then write the reply under the
    write deadline.
@@ -652,11 +850,12 @@ counted in that later month, at the figure it ends with, so the new month's ceil
 money that left before midnight; and while such a call is still open, the new month counts it at its reservation.
 The check therefore uses the stricter of the two months: one straddling call may be counted in two months, never in
 too few, and a month's total still only ever grows. A clock that goes
-backward cannot move a row into an earlier month: a reservation is refused, and the other steps take the last row's time.
+backward cannot move a row into an earlier month: a reservation is refused with `internal` (the clock is earlier than the last ledger row), and the
+other steps take the last row's time.
 
 **Crash and power loss, the stated choice: spend is recorded BEFORE the vendor call.** The cost is that a crash between
-step 4 and the vendor request charges the month for a call that may never have left: at most one reservation (2 USD at
-most) is counted that was not spent. The benefit is that no crash can allow a replay or an undercount. The rules:
+step 4 and the vendor request charges the month for a call that may never have left: at most one reservation (2.50 USD at
+most in the testing phase) is counted that was not spent. The benefit is that no crash can allow a replay or an undercount. The rules:
 
 - A crash before step 4 completes: nothing was recorded and nothing left, so the approval is still usable.
 - A crash after step 4: the nonce is spent, and because nothing can say whether the request left or what it was billed,
@@ -668,7 +867,7 @@ most) is counted that was not spent. The benefit is that no crash can allow a re
   a new approval, after root has cleared the suspension if the call was ambiguous. The amount counted is the
   reservation; what the vendor actually billed is learned from its billing page.
 - The maintainer reads the vendor billing page and root enters the real amount with `clear --actual` of the root-only administration command, which
-  resolves the ambiguous call; the client has no way to write a `usage` row.
+  resolves the ambiguous call; the client has no way to write an `ambiguous_resolved` row.
 - Power loss is the same case, so the `fsync` of the file and its directory completes before the connection to the
   vendor is opened.
 
@@ -768,9 +967,9 @@ The broker does not enforce a cost bound by estimating. It **reserves the worst 
 before the call, and reconciles afterwards. Two numbers are kept apart:
 
 - the **typical estimate**, shown to the maintainer so he knows what a call normally costs;
-- the **reservation**, the most the request as the broker will send it can bill. The signed `max_usd`, the job cap (2
-  USD) and the monthly ceiling (10 USD, with the extra-block rule) are all checked against the **reservation**, never
-  the estimate. A call whose reservation does not fit is refused before the key is read.
+- the **reservation**, the most the request as the broker will send it can bill. The signed `max_usd`, the job cap (2.50
+  USD in the testing phase) and the monthly ceiling (10 USD, with the extra-block flag) are all checked against the
+  **reservation**, never the estimate. A call whose reservation does not fit is refused before the key is read.
 
 `reservation = A + B + C`
 
@@ -778,7 +977,7 @@ before the call, and reconciles afterwards. Two numbers are kept apart:
   bound**, because a token stands for at least one byte, so no tokenizer can produce more tokens than bytes; the fixed 64
   is a margin for tokens the vendor adds around a request (inferred, not shown by any page; the margin is small against
   any realistic price). The earlier "three bytes a token" rule is an estimate and is **not** used for the reservation
-  (it stays in the typical estimate shown to the maintainer). The alternative, calling the vendor's token-counting
+  (it stays in the typical estimate shown to the maintainer, where the prompt is `ceil(bytes / 3)` tokens). The alternative, calling the vendor's token-counting
   endpoint first, was rejected: it is a second vendor call with its own failure and ambiguity cases, its answer can
   differ from the billed count, and the byte bound needs neither. The cost of the byte bound is a larger reservation for
   long prompts (at most 0.40 USD for a 200,000 byte prompt on the dearest input rate listed), which `approve` shows.
@@ -816,10 +1015,11 @@ interim images are billed as image output. The design therefore does not trust t
 
 ### The rules
 
-1. **The broker sends the caps itself.** The request builder for an image call always sends
-   `max_output_tokens = M` and, for a model that lists levels, the lowest listed `thinking_level` (`minimal`). The client
-   cannot change either. `M` and the level are in the signed text. For Nano Banana Pro no level can be sent, so only `M`
-   limits it.
+1. **The broker sends the caps itself.** The request builder always sends `max_output_tokens = M` and, for a model whose
+   table entry lists thinking levels, the `thinking_level_sent` of that entry (the first example table uses `minimal`);
+   a model that lists no levels sends `none`, which the vendor body leaves out. The client cannot change either: a
+   request that names another level is `bad_request`. `M` and the level are in the signed text. For Nano Banana Pro no
+   level can be sent, so only `M` limits it.
 2. **`M` has a floor and a ceiling.** The floor is the image's token count for the signed size plus a minimum text
    allowance (default 512 tokens), so a cap that would truncate the image before it exists is refused rather than
    billed for nothing; the ceiling is the model's documented output limit.
@@ -832,22 +1032,28 @@ interim images are billed as image output. The design therefore does not trust t
    uses the model's documented output limit instead of `M`, and C is added. The arithmetic for a 1K image, from the
    vendor's per-token prices of 2026-10-30 (input negligible): Nano Banana 2.1, B 0.983 plus C 0.067 is **1.05 USD**; Nano
    Banana 2 Lite, B 0.123 plus C 0.067 is **0.19 USD**; Nano Banana 2, B 1.966 plus C 0.134 is **2.10 USD, over the 2 USD
-   job cap, so refused** until its cap is verified; Nano Banana Pro, B 3.93 alone is **over the cap, refused**. That is
-   deliberate: the design does not admit a model whose worst case it cannot fit under the approval.
+   limit of decision 13, so refused** until its cap is verified (it would fit the 2.50 USD testing-phase job cap, which
+   is why decision 13 is its own rule); Nano Banana Pro, B 3.93 alone is **over the job cap and is refused as a Pro-class
+   model** whatever it would cost. That is deliberate: the design does not admit a model whose worst case it cannot fit
+   under the approval, and the maintainer confirmed on 2026-10-31 that the newer image model stays refused until the output
+   cap is verified.
 5. **Reconcile after.** From the usage the vendor returns (input, text and thinking, image output tokens) at the
-   table's prices the broker computes the actual cost and records `reserved_usd`, `actual_usd` and
+   table's prices the broker computes the actual cost (output tokens of every kind at the dearer output rate, the same rate
+   the reservation uses, which may over-count a mixed answer) and records `reserved_usd`, `actual_usd` and
    `released_usd = reserved - actual`. The month then counts the actual, never less than a floor from the number of
-   images returned times the smallest per-image figure for the model. A response whose usage is missing, malformed or
-   implausible is not reconciled at all: it is an ambiguous call (rule 7).
+   images returned times the per-image figure for the **requested size**. A response whose usage is missing, malformed
+   or implausible is not reconciled at all: it is an ambiguous call (rule 7). Implausible means: input tokens below the
+   prompt bytes divided by 8; for a text call, output tokens below the answer bytes divided by 8; for an image call,
+   output tokens below the images returned times the token count of the requested size.
 6. **A breach stops the model.** If the actual cost is above the reservation, the actual is recorded and counted, the
    receipt says `breach: true`, and the broker **suspends that model**: further calls for it are refused, across restarts,
    until root clears the suspension (`clear MODEL` of the administration command) after reading the vendor billing page.
 7. **An ambiguous call is a loss of knowledge, so it also stops the model.** A call is ambiguous when the request left (or
    may have left) and the broker cannot establish what was billed: the broker crashes or loses power after the spend is
    written, the request times out, the connection drops, the answer is unreadable or oversized, a 5xx or 408 or redirect
-   comes back, or the usage figures are missing, malformed or implausible. The broker then: keeps the **full reservation
-   counted as spent**; appends an `ambiguous_call` row; and **suspends that model** with a state file written before
-   anything else is allowed to proceed. After a crash the same happens at the next start: recovery finds every
+   comes back, a text answer is over 200,000 bytes, the answer names no model or another model, or the usage figures are
+   missing, malformed or implausible. The broker then: keeps the **full reservation counted as spent**; appends an
+   `ambiguous_call` row and a `suspended` row in one write, before anything else is allowed to proceed. After a crash the same happens at the next start: recovery finds every
    `call_start` with no `call_end`, appends `ambiguous_call`, and suspends the model before the socket serves anything.
    A restart never clears a suspension; only root does, with `clear`, after the maintainer has read the vendor
    billing page and entered the real amount (`clear --actual`), which appends an `ambiguous_resolved` row that
@@ -911,11 +1117,18 @@ prices:
       max_images: 1
 ```
 
-These numbers show the shape and what the pages said on 2026-10-30; the shipped example is filled in by re-reading them.
-A size missing from `image_usd` and `image_tokens` for a model is refused. The stated per-image figure must also agree
+These numbers show the shape and what the pages said on 2026-10-30. An example `broker.yaml` ships as
+`examples/broker.example.yaml` (the runbook writes the same text), with prices read from the vendor pricing page on
+2026-10-31. It lists **only** Nano Banana 2.1 and Nano Banana 2 Lite. Nano Banana 2 and Nano Banana Pro are left out on
+purpose: decision 13 refuses them until their output cap is shown to hold (Nano Banana 2 at about 2.10 USD worst case,
+Pro as a Pro-class model, and Pro states per-image prices without token counts, so it cannot be listed). A test checks
+that every model in the example passes the unverified-cap limit at its largest size. Root re-reads the vendor pages
+before relying on any figure. The two maps `image_usd` and `image_tokens` must list the same sizes, and a size missing from them is refused for
+that model. The stated per-image figure must also agree
 with the token price the reservation uses: `image_usd[size]` may not be above `image_tokens[size] x
-image_output_per_mtok` (rounded up), and may not be more than 5 percent below it. A table that breaks either rule is
-refused at load, so no call can bill above its reservation because two numbers in the table disagree. A model whose token count for a size the
+image_output_per_mtok` (rounded up), and may not be more than **5 percent** below it. A table that breaks either rule is
+refused at load (the service does not start), so no call can bill above its reservation because two numbers in the table
+disagree. A model whose token count for a size the
 page does not state (Nano Banana Pro states per-image prices, not token counts) cannot be listed until the count is
 read from the vendor. Prices change; a table past its `valid_through` refuses every paid call.
 
@@ -940,7 +1153,7 @@ builder per `kind`. **The request shape is verified against the page; the respon
 generated images as base64 data blocks, but the exact JSON field names for the REST response were not in the text read.
 The parser is therefore written in phase 2 against the shape in the vendor's SDK examples and **rejects any shape it has
 not been shown**; the real response is recorded in phase 7 by the first calls, which use Nano Banana 2 Lite (its
-worst-case reservation is 0.12 USD), and turned into a fixture before any other model is used.
+worst-case reservation is about 0.19 USD while its cap is unverified), and turned into a fixture before any other model is used.
 
 Phase 1 of the image path is **text-to-image only: no input images**. Editing and reference images (the page allows many)
 are refused. That also keeps images the maintainer holds out of the prompt.
@@ -949,17 +1162,24 @@ are refused. That also keeps images the maintainer holds out of the prompt.
 
 - **Vendor answer cap for images:** 32 MiB for the whole HTTP body (the text cap of 1 MiB is far too small), read in a
   bounded loop; more is `outcome_unknown` as for text, because the request left.
-- **Maximum images per call:** `max_images` in the price table, at most 4, and 1 in the first release. More images than
-  the approved `count` in a reply is an error: the extra bytes are dropped and the receipt says so; the cost is counted
-  from usage.
+- **Maximum images per call: 1.** The price table has a `max_images` field (at most 4), but the policy fixes `count`
+  at 1 (`MAX_COUNT_PER_APPROVAL`) and the wire format carries at most one attachment, so a larger number in the table
+  changes nothing. More image items than the approved `count` in a reply: the extra items are dropped without being
+  decoded and the receipt says how many (`extra_images`); the cost is counted from usage. Fewer images than approved is
+  `vendor_refused`, with the cost counted.
 - **Format allowlist and magic bytes.** The vendor names a MIME type for each image. The broker accepts only
   `image/png`, `image/jpeg` and `image/webp`, and checks that the decoded bytes start with the matching signature
   (`89 50 4E 47 0D 0A 1A 0A` for PNG, `FF D8 FF` for JPEG, `RIFF` plus `WEBP` at offset 8 for WebP). A mismatch, another
   type, or an empty or oversized image (over 24 MiB decoded) is refused as `vendor_refused` with the cost counted
-  from usage, and no bytes go to the client.
-- **The broker never parses an image.** It does not decode pixels, read metadata, resize or re-encode. It base64-decodes,
-  checks the first bytes and the size, hashes the bytes, and hands them on. Parsing is where image-library bugs live, and
-  the broker holds the key. The client does not parse them either.
+  from usage, and no bytes go to the client. The same answer applies to an image that fails the container walk.
+- **The broker decodes no pixels and uses no image library, but it does walk the container.** It requires canonical
+  base64, takes the format from the first bytes (which must match the MIME type the vendor named), and walks the file
+  from its first byte to its real end by lengths and markers as an allow-list: every segment or chunk must be a known
+  type with exactly its shape, and anything after the end is refused (see "Phase 2 status"). Exif, XMP, ICC profiles,
+  C2PA (content credentials), compressed text, animations, a WebP with a separate alpha chunk, and anything appended
+  are refused, and the width and height are capped (8192 per side, 2^25 pixels). This is accepted for now (issue #274,
+  closed); the entropy-coded data is not validated, so images stay untrusted output. It then hashes the bytes and
+  hands them on. The client does not parse them.
 - **Receipt per image:** `index`, `mime` (the one the magic check confirmed), `bytes`, `sha256`.
 
 ### Safe writing by the client
@@ -1039,12 +1259,12 @@ socket or the protocol; it takes the bytes and the limits as arguments (defaults
 ### Approvals and batches
 
 An approval names the model, the kind, the count, the size and the maximum cost, and **covers exactly one call**.
-Recommendation: **one image per call and one approval per call** in the first release (`count` fixed at 1), because it
-makes the signed text a precise statement of what is bought. Several images are several approvals, which is several
-touches. If touch fatigue becomes the real cost, the next step is an approval that names a count up to 4 and one call
-that must return at most that many images, with `max_usd` covering `count` times the per-image figure; it is still one
-call. Whether the vendor returns several images from one call is **unverified**, so that step waits for a recorded real
-response. An approval that covers "up to N calls" is not offered: it is the shape that turns one touch into unbounded
+**As built: one image per call and one approval per call** (`count` fixed at 1 by the policy, the wire format and the
+client), because it makes the signed text a precise statement of what is bought. Several images are several approvals, which is several
+touches. If touch fatigue becomes the real cost, the next step (**not built yet**) is an approval that names a count up to 4 and
+one call that must return at most that many images, with `max_usd` covering `count` times the per-image figure; it is
+still one call. Whether the vendor returns several images from one call is **unverified**, so that step waits for a
+recorded real response. An approval that covers "up to N calls" is not offered: it is the shape that turns one touch into unbounded
 spend.
 
 ## Revocation and key rotation
@@ -1075,8 +1295,8 @@ spend.
   root's recovery separate from the hardware keys, or losing the keys also loses the recovery.
 - **State backups:** `/var/lib/safo-broker` is not restored from backup into a running broker. A restore rewinds the
   consumption records and the month's spend; the longest a signed approval lives is 60 minutes, so after any restore the
-  maintainer reconciles spend against the vendor billing page and enters the difference with `usage` before turning the
-  switch back on. The root-only administration command (see "Administration") documents it.
+  maintainer reconciles spend against the vendor billing page and enters the difference with `reconcile --billing-usd`
+  before turning the switch back on. The root-only administration command (see "Administration") documents it.
 
 ## Administration
 
@@ -1089,8 +1309,8 @@ ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.adm
 ```
 
 `-I` keeps the working directory, the user site and every `PYTHON` environment variable out of the module search path,
-so nothing the shell can reach is imported while the process is root. The interpreter path above is **inferred** from
-the install chain (the installer, phase 5, fixes the real one); a console-script wrapper, if one is added, must be
+so nothing the shell can reach is imported while the process is root. The interpreter path above is the one the installer builds
+(`current/venv/bin/python`, the same one the unit runs); a console-script wrapper, if one is added, must be
 root-owned, name that interpreter by full path and pass `-I`. The command reads nothing from standard input: a
 confirmation is a typed argument, so it behaves the same with input from `/dev/null`.
 
@@ -1176,9 +1396,12 @@ units is the second, harder off switch (see "Revocation and key rotation").
 
 ## The unit files and their hardening
 
-These are the files the build will ship, in full. The option names were checked against the systemd 257 manuals on this
-machine on 2026-10-30; whether each one is accepted and has the intended effect is checked by `systemd-analyze` in CI
-and by a run on a throwaway machine in phase 5 (below), and until then is **unverified**.
+These are the files in `packaging/systemd/`, which the installer verifies and installs (the text below was copied from
+them on 2026-10-31; the names of the egress units, the floor module and the name service switch file are written as
+placeholders in angle brackets, because the repository's hygiene scan refuses those dotted names on a public page). `tests/test_broker_units.py` checks every hardening line of the service by name, and the installer's
+unit policy pins the values. The option names were checked against the systemd 257 manuals on this machine on 2026-10-30;
+whether each one is accepted and has the intended effect on a real machine is checked by `systemd-analyze` in CI and by a
+run on a throwaway machine in phase 7, and until then is **unverified**.
 
 `/etc/systemd/system/safo-broker.socket`. The socket sits directly in `/run` (root, mode 0755), so there is no
 parent directory that could be too closed for the group to reach it (an automatically created parent is owned by root
@@ -1201,13 +1424,19 @@ Backlog=16
 WantedBy=sockets.target
 ```
 
-`/etc/systemd/system/safo-broker.service`:
+`/etc/systemd/system/safo-broker.service`. There is **no start condition on the root-owned enable switch** (decided
+2026-10-31): the broker reads the switch on every request, answers `status` and `dryrun` while it is off or absent, and
+answers every paid call as `disabled` before it writes the ledger or reads the key. The unit is bound to the egress unit
+and ordered after it, runs the floor check before it starts, bind-mounts the generated hosts view and a files-only name
+service switch file read-only, and allows only IPv4 sockets (which limits the `socket()` call only; see the egress
+section):
 
 ```ini
 [Unit]
 Description=SAFO Gemini broker
 Requires=safo-broker.socket
-After=network-online.target
+BindsTo=<the egress service unit>
+After=network-online.target safo-broker.socket <the egress service unit>
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -1215,10 +1444,16 @@ StartLimitBurst=5
 Type=simple
 User=safo-broker
 Group=safo-broker
+ExecStartPre=/opt/safo-broker/current/venv/bin/python -I -m <the floor module of the broker package>
 ExecStart=/opt/safo-broker/current/venv/bin/python -I -m safo.broker
 LoadCredentialEncrypted=paid-key:/etc/safo/broker/paid-key
 StateDirectory=safo-broker
 StateDirectoryMode=0700
+ReadWritePaths=/var/lib/safo-broker
+ReadOnlyPaths=/etc/safo /opt/safo-broker
+BindReadOnlyPaths=/etc/safo/egress/hosts:/etc/hosts
+BindReadOnlyPaths=/opt/safo-broker/current/meta/packaging/etc/<the files-only name service switch file>:/etc/<that file name>
+InaccessiblePaths=-/run/systemd/resolve -/run/dbus -/run/nscd -/run/avahi-daemon -/run/systemd/private
 UMask=0077
 Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=yes
@@ -1229,7 +1464,6 @@ PrivateDevices=yes
 PrivateMounts=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadOnlyPaths=/etc/safo /opt/safo-broker
 ProtectProc=invisible
 ProcSubset=pid
 ProtectKernelTunables=yes
@@ -1238,7 +1472,7 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -1247,6 +1481,7 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+SystemCallFilter=~recvmsg recvmmsg
 SystemCallErrorNumber=EPERM
 DevicePolicy=closed
 KeyringMode=private
@@ -1255,38 +1490,51 @@ LimitCORE=0
 LimitNOFILE=64
 TasksMax=32
 MemoryMax=512M
+TimeoutStartSec=30s
+TimeoutStopSec=360s
 Restart=on-failure
 RestartSec=2s
 ```
 
+The three egress units (the egress service, its refresh service and its refresh timer) load and refresh the nftables table and the hosts view (see "Egress control for the
+service user"); they run the root helper `/usr/local/sbin/safo-broker-egress`, which is not part of any release. The
+installer checks all five units against a fixed policy (see "Unit policy").
+
 | Option | Why |
 |---|---|
 | `User=`, `Group=`, no `DynamicUser` | A fixed, unprivileged, non-root user owns the state directory across restarts; a dynamic user would lose the ownership the state relies on. |
+| `BindsTo=` and `After=` the egress unit | The broker starts only with the egress rules loaded and stops when they are stopped. |
+| `ExecStartPre=` the `floor` module | Refuses to start a release below `/etc/safo/broker-min-version` (the second layer behind the installer). |
 | `LoadCredentialEncrypted=` | The only route for the key: PID 1 decrypts into a directory only the service user reads. The key is never in the environment (`/proc/PID/environ`) or in an argument. |
-| `StateDirectory=`, `StateDirectoryMode=0700`, `UMask=0077` | The one writable place; nothing outside the broker user can read or write it. |
+| `StateDirectory=`, `StateDirectoryMode=0700`, `UMask=0077`, `ReadWritePaths=` | The one writable place; nothing outside the broker user can read or write it. |
 | `NoNewPrivileges`, empty `CapabilityBoundingSet`, empty `AmbientCapabilities` | The broker needs no capability; a bug cannot gain one through a setuid program. |
 | `PrivateTmp`, `PrivateDevices`, `PrivateMounts`, `DevicePolicy=closed` | No shared `/tmp` with the maintainer's processes, no device nodes, a private mount namespace. |
 | `ProtectSystem=strict`, `ProtectHome=yes`, `ReadOnlyPaths=` | The whole file system is read-only except the state directory; the maintainer's home is not visible, so the broker cannot be talked into reading or writing there. The code and the config are read-only to it. |
+| `BindReadOnlyPaths=` (hosts view, name service switch file), `InaccessiblePaths=` | The service resolves the vendor name from the generated file only and cannot ask a resolver, name cache or bus. |
 | `ProtectProc=invisible`, `ProcSubset=pid` | Other users' processes are hidden from the broker. |
 | `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname` | None of these is needed; each closes a class of damage after a compromise. |
-| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` | The socket and the outbound HTTPS only; no raw, packet or netlink sockets. |
+| `RestrictAddressFamilies=AF_INET` | Outbound IPv4 HTTPS only. The listening socket comes from systemd, so the service needs no `AF_UNIX`, and no raw, packet, netlink or IPv6 socket. It limits the `socket()` call only. |
 | `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality` | Cuts off namespace, scheduling and setuid tricks. |
-| `MemoryDenyWriteExecute=yes` | No writable-and-executable memory. It applies to child processes too, so `ssh-keygen` (run for verification) must work under it; this is checked in phase 5 and is the first thing to relax with a stated reason if `ssh-keygen` needs it, never silently. |
-| `SystemCallArchitectures=native`, `SystemCallFilter=@system-service`, `~@privileged @resources`, `SystemCallErrorNumber=EPERM` | An allowlist of ordinary service calls with the privileged and resource-control groups removed; a denied call returns an error instead of killing the process. The sealed memory files used for `ssh-keygen` need `memfd_create`; whether `@system-service` includes it is **unverified** and checked in phase 5. |
+| `MemoryDenyWriteExecute=yes` | No writable-and-executable memory. It applies to child processes too, so `ssh-keygen` (run for verification) must work under it; this is checked on a throwaway machine and is the first thing to relax with a stated reason if `ssh-keygen` needs it, never silently. |
+| `SystemCallArchitectures=native`, `SystemCallFilter=@system-service`, `~@privileged @resources`, `~recvmsg recvmmsg`, `SystemCallErrorNumber=EPERM` | An allowlist of ordinary service calls with the privileged and resource-control groups removed, and descriptor passing over the listener denied (a passed socket would carry someone else's uid, which the egress rule does not match); a denied call returns an error instead of killing the process. The sealed memory files used for `ssh-keygen` need `memfd_create`; whether `@system-service` includes it is **unverified**. |
 | `RemoveIPC=yes`, `KeyringMode=private` | No leftover shared memory, a private kernel keyring. |
 | `LimitCORE=0` | No core dump that could hold the key. |
 | `LimitNOFILE=64`, `TasksMax=32`, `MemoryMax=512M` | Bounds on a runaway or a flood; 512 MiB covers a few 24 MiB images and one 32 MiB vendor body at a time. |
+| `TimeoutStartSec=30s`, `TimeoutStopSec=360s` | The stop timeout is above the longest drain (the config caps the grace at 300 seconds), so systemd does not kill a call before it is recorded. |
 | `Restart=on-failure` with `StartLimitBurst=` and `StartLimitIntervalSec=` in `[Unit]` | A crash restarts at most five times a minute, then stays down and loud. |
 | `Requires=safo-broker.socket` | The service is only ever started by the socket. |
 
 A unit check does not prove the group can connect, so the first-run test is part of the runbook: after the next login,
 `namei -l /run/safo-broker.sock` must show every parent traversable and the socket as `srw-rw---- root
-safo-broker-clients`, and `safo gemini status` as the maintainer must print `key_loaded` and the switch state through
-the socket (inferred commands; the installer in phase 5 runs the same connection as the account and the group).
+safo-broker-clients`, and `safo gemini paid-dryrun` as the maintainer must reach the broker through the socket and print
+whether the switch is on (inferred commands). A command-line wrapper for the `status` operation (which reports
+`key_loaded`) is **not built yet**; the installer does not run the connection as the account and the group.
 
-`systemd-analyze verify` on these two files accepted every option (after `StartLimit*` was moved to `[Unit]`, where it
-belongs) and `systemd-analyze security --offline=true` scored the service 1.2 ("OK") on this machine on 2026-10-30. The
-checks it still marks are the ones the broker needs (local and Internet sockets, the host network, no `IPAddressDeny`, the host
+`systemd-analyze verify` on the first two files accepted every option (after `StartLimit*` was moved to `[Unit]`, where it
+belongs) and `systemd-analyze security --offline=true` scored the first design of the service 1.2 ("OK") on this machine
+on 2026-10-30. The shipped service has more lines (the egress binding and the bind mounts); the installer and
+`tests/test_broker_units.py` hold it to an exposure level of at most 2.0 where `systemd-analyze` is available (the
+tests skip, with the reason shown, where it is not). The checks it still marks are the ones the broker needs (local and Internet sockets, the host network, no `IPAddressDeny`, the host
 root directory, other users visible). The score is a lint, not a proof.
 
 Not used, with the reason: `IPAddressAllow` (the vendor's addresses are not fixed, so an allowlist would break calls or
@@ -1320,11 +1568,15 @@ answer is size-capped; connect and read timeouts apply. The key goes in the `x-g
 
 ## Rate limits and the vendor 429
 
-- **One paid vendor call in flight.** A second `call` gets `busy` at once; it does not queue.
-- Broker limits, in `broker.yaml` (defaults): `begin` 6 per minute, `call` attempts (including ones that fail
-  verification, which each cost a process start) 10 per minute, at most 4 nonces outstanding, `max_calls_per_minute` and
-  `max_calls_per_day` for vendor calls (default 5 and 20), 8 open connections and 2 per uid (enforced by the broker, see
-  "The socket protocol"), 5 seconds to send a request, the write deadlines above.
+- **One paid vendor call in flight.** A second `call` waits `slot_wait` seconds for the slot (default 0, at most 60) and
+  then gets `busy`; it never queues.
+- Broker limits, in the `server` section of `broker.yaml` (defaults), per peer uid per minute: `begin_per_minute` 6,
+  `call_per_minute` 10 (call attempts, including ones that fail verification, which each cost a `ssh-keygen` run) and
+  `other_per_minute` 30 (`status`, `check`, `dryrun`); at most 4 nonces outstanding (fixed in code);
+  `max_calls_per_minute` and `max_calls_per_day` for vendor calls started (default 5 and 20, counted from the ledger);
+  `max_connections` 8 and `max_per_uid` 2 (enforced by the broker, see "The socket protocol"); 5 seconds to send a
+  request (`read_deadline`), the write deadlines above, and `grace_seconds` (default 150, at most 300). `max_concurrent_calls`
+  is fixed at 1.
 - **Same-uid denial of service is accepted residual risk.** The one uid allowed to connect can fill the four outstanding
   nonces, spend the `begin` budget or keep connections open until their deadlines. It costs no money and cannot
   authorize a call; the per-minute limits and deadlines bound how long it lasts, and `systemctl restart
@@ -1364,6 +1616,11 @@ the steps above.
 
 ## Test plan (hermetic)
 
+This is the plan the build followed; the tests are `tests/test_broker_*.py` and `tests/test_gemini_*.py`. One item
+is **not built yet**: the run on a throwaway VM or container (the opt-in
+`scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit instead).
+The randomized framing fuzz (`tests/test_broker_framing_fuzz.py`, fixed seed, bounded), the static no-image-library check
+(`tests/test_broker_no_image_library.py`) and the free path with a dead broker socket (`tests/test_gemini_cli.py`) are built.
 No test uses the real key, the real vendor, the real `/etc/safo`, a real hardware key or the maintainer's state. Fakes:
 
 - **A fake vendor server** on loopback, scripted per test: a good text answer, a good image answer (with a PNG, JPEG and
@@ -1411,20 +1668,23 @@ service and spend nothing.
 | 0 | This design and the threat model (documents only) | The maintainer answers the decisions below; a cyber-tier review of the design |
 | 1 | The broker core as a library, no socket, no systemd: state directory checks, the ledger shared with today's code, issue and consume of nonces, recovery, spend-before-call, the signed approval schema version 3 (extending the version 2 of #217) and its verification, the reservation and typical-estimate arithmetic for `image` and `text`, with the hermetic fakes | Review of the state machine and the crash tests |
 | 2 | The call pipeline against the fake vendor: request builders per kind, the image response handling (magic bytes, limits, receipts), 429 and ambiguous outcomes. Reservation, reconciliation, breach and suspension. The response parser targets the vendor's documented shape and refuses any shape it has not been shown | Review |
-| 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, idle exit, the operations, logging allowlist; fake socket peers and a fuzz test of the framing | Review of the parser and the limits |
+| 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, the operations, logging allowlist; fake socket peers. The idle exit is not built yet; the framing fuzz is built (`tests/test_broker_framing_fuzz.py`) | Review of the parser and the limits |
 | 4 | The thin client: `safo gemini paid` and `paid-dryrun` go through the socket, safe image writing and sidecars, **removal of the in-process paid path** (done in #287: deleted, with a guard test that no module outside the broker can name the vendor, a paid model or the key header), the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |
 | 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that covers the release link, the record, the floor, the installed units against the signed release, the egress helper and the switch; the root-door checks remain a manual review), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
-| 6 | **Cyber-tier security review** of the broker and the signed-approval verification (issue step 3) | Clean review |
+| 6 | **Cyber-tier security review** of the broker and the signed-approval verification (issue step 3). Done; its findings were fixed in #288 and #289 | Clean review |
 | 7 | The maintainer does the root setup and the dry run, then creates the switch (issue step 5). The first calls use Nano Banana 2 Lite to record the real response shape and to observe the output cap; root then sets `cap_verified` for each model observed; a fixture PR follows | The maintainer's own run; the observation reviewed |
 | 8 | Text paid calls through the same path, the `usage` workflow, then the optional count-per-approval and passkey wiring if the maintainer wants them | Review per item |
 
-The smallest thing useful to the blocked projects is the result of phases 1 to 7: one text-to-image call per approval,
+**Status on 2026-10-31:** phases 1 to 5 and the phase 6 fixes are merged. The throwaway-VM run of phase 5 and phases 7 and
+8 are not done: nothing has run on a real machine. The smallest thing useful to the blocked projects is the result of phases 1 to 7: one text-to-image call per approval,
 one image per call, written to a fixed folder with a receipt. Nothing in it needs the text path.
 
 ## Decisions for the maintainer
 
 The maintainer approved decisions 1 to 11 as recommended on 2026-10-30 (decision 10 is restated below after the design
-review). Decisions 12 to 14 came out of that review and are **open**.
+review). Decisions 12 to 14 came out of that review. Decision 13 was confirmed on 2026-10-31 (issue #256): it holds,
+independent of the testing-phase job cap. No ruling on decisions 12 and 14 is recorded in the issues read for this
+alignment, so they are shown as recommended and not yet confirmed.
 
 | # | Decision | Recommendation |
 |---|---|---|
@@ -1434,20 +1694,27 @@ review). Decisions 12 to 14 came out of that review and are **open**.
 | 4 | Who may talk to the socket: the maintainer's uid, by a uid list in `broker.yaml` plus the socket group | Yes; accept that this cannot tell an agent from the wrapper, and rely on the signature |
 | 5 | The broker hands out the nonce (`begin`), so an approval can only be made for a request the broker has seen | Yes |
 | 6 | Crash rule: spend is recorded before the vendor call and an interrupted call counts at its reservation | Yes |
-| 7 | Images first, text-to-image only, one image and one approval per call; a count per approval only later, and "up to N calls" never | Yes |
+| 7 | Images first, text-to-image only, one image and one approval per call; a count per approval only later (not built yet), and "up to N calls" never | Yes |
 | 8 | Image output: a fixed folder of the maintainer's choosing, files 0600, never overwritten, a sidecar receipt, never auto-opened by an agent | Yes; name the folder when phase 4 is built |
 | 9 | Broker v1 accepts hardware-key (Tier 1) approvals only; passkeys wait until their approval wiring exists | Yes |
 | 10 | Broker code is installed by root from a hardware-key signed annotated tag verified against a root-owned signers file, from hash-locked wheels only (no build backend as root), staged and activated atomically with automatic rollback, never from a folder the maintainer's account can write; no rollback of version without an explicit root flag; the diff and every dependency change are read before every install ("Install and update chain") | Yes |
 | 11 | Remote broker on the lab machine, as a later option | Not now |
 | 12 | Whether to enroll a separate hardware key (or keys) for signing broker releases, kept apart from the approval keys | Yes: a release key and an approval key are different powers; a second touch per release is the price |
-| 13 | Nano Banana Pro and Nano Banana 2 are refused until the output cap is shown to hold (their unverified worst cases are over the 2 USD job cap). Start with Nano Banana 2.1 and Lite and revisit the others with evidence | Yes; the others only if the quality of 2.1 is not enough |
+| 13 | Nano Banana Pro and Nano Banana 2 are refused until the output cap is shown to hold (a Pro-class model whatever its cost; any other model when its unverified worst case is over 2 USD, which is its own constant and does not move with the 2.50 USD testing-phase job cap). Start with Nano Banana 2.1 and Lite and revisit the others with evidence | Yes (confirmed 2026-10-31); the others only if the quality of 2.1 is not enough |
 | 14 | Accept the root-door precondition as a documented residual risk: with any root door open the caps are advisory against a deliberate local attacker, and the vendor-side monthly limit is the only hard backstop | Yes, and keep the vendor-side limit set |
 
 ## What this page does not claim
 
-- That any of it is built or run. Everything in "Build plan" is future.
+- That any of it has been run. The code is built and tested with fakes (no real key, vendor, hardware key or
+  `/etc/safo`); nothing has been installed or run on a real machine, and no vendor call has been made. Phases 7 and 8 of
+  the "Build plan", the idle exit, the audit copy of the signed text, the root-door checks
+  (#293), a `status` request in the installer health check, a command-line wrapper for `status`, and a count above 1 per
+  approval are **not built yet**.
 - That the root account, the kernel, systemd or `ssh-keygen` are trustworthy. The design needs them to be.
 - That a human who touches the key for a prompt he did not read is protected. See the threat model's residual risk.
-- The response shape of the vendor's image call, whether the vendor honors `max_output_tokens` on image models, the cost of a metadata request, whether `@system-service` allows
-  `memfd_create`, whether `MemoryDenyWriteExecute` is compatible with `ssh-keygen` here, and whether the free key's
-  project has billing disabled: **unverified**, each with the phase that checks it.
+- The response shape of the vendor's text and image calls, whether the vendor honors `max_output_tokens` and the
+  thinking level on image models (interim images included), whether interim images are billed as image output, the cost
+  of a metadata request, whether `@system-service` allows `memfd_create`, whether `MemoryDenyWriteExecute` is compatible
+  with `ssh-keygen` here, the read-only bind mounts under `ProtectSystem=strict`, nft loading on a real kernel, TLS to the
+  real host, the root-owned ownership walk on a real `/etc/safo`, and whether the free key's project has billing disabled:
+  **unverified**, each with the phase that checks it (phase 7).

@@ -17,6 +17,20 @@
   `issued.lock` is now answered `busy` (it was `internal`). New tests the design promised: a seeded, bounded framing fuzz
   for the protocol and the server frame reader, a static check that nothing the broker loads imports an image library
   (allow-list over the import graph), and a free-path test with a broker socket that is absent or refuses.
+- Docs: the paid Gemini broker design page and its threat model now say what the code does (#273, with #256 and #270).
+  Documentation only, no code change. The 2.50 USD testing-phase job cap replaces the older 2.00 USD wording; the page lists
+  the reply codes and when each is returned (`month_cap` is in the list and nothing returns it; `needs_block_approval` is the
+  monthly-ceiling code), the further-block flag with no per-block limit, the monotonic version and ledger head rules as
+  built, the `call_sent` row, the text and image approval field sets, `none` as the thinking level of a model without levels,
+  `count` fixed at 1, the typical estimate (three bytes a token) versus the reservation (one token per byte plus 64), the
+  clock-backward refusal, the pre-spend hook, the 10 minute nonce versus the approval lifetime, the slot wait, the per-peer
+  limits, the 256 KiB reply frame versus the 200,000 byte answer (paid but not delivered, `internal` with the receipt), the
+  image metadata refusals, the month-boundary rule, the 5 percent price-table rule, the single connect deadline, the egress
+  observe mode and the order rule for the enable switch, the 300 second grace cap and 360 second stop timeout, the strict
+  signers file, what `check-install` covers (the rest is issue #293), and what stays unverified. The shipped units are
+  quoted in full, the unit start condition on the switch is gone from the text (decided 2026-10-31), and text for things not
+  built is marked "not built yet". Threat model: each planned verification now names the test files, or says not built yet.
+
 - Paid Gemini: the in-process paid path is deleted and the broker is the only way to a paid call (#287). Removed from
   `safo.gemini` and `safo gemini`: the paid branch of `ask`, the approval store and its records, the local `approve` and
   its dry run, the paid spend counter and quota line, the paid key read, the root-owned in-process paid switch, the
