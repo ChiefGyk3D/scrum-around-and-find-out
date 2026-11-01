@@ -827,7 +827,8 @@ def test_a_polkit_grant_that_names_nobody_by_a_literal_fails_closed(w: World) ->
 
 
 def test_a_polkit_grant_for_another_named_user_still_only_warns(w: World) -> None:
-    put(w.polkit / "50-x.rules", 'if (subject.isInGroup("printers")) { return polkit.Result.YES; }\n')
+    body = 'if (subject.isInGroup("printers")) { return polkit.Result.YES; }'
+    put(w.polkit / "50-x.rules", f"polkit.addRule(function(action, subject) {{\n{body}\n}});\n")
     assert status(w.run(), "polkit") == "warn"
 
 
@@ -946,7 +947,7 @@ def test_a_sudoers_rule_for_a_netgroup_fails_closed(w: World) -> None:
     ],
 )
 def test_a_polkit_grant_not_guarded_by_a_positive_literal_test_fails_closed(w: World, body: str) -> None:
-    put(w.polkit / "50-x.rules", f"polkit.addRule(function(a, subject) {{\n{body}\n}});\n")
+    put(w.polkit / "50-x.rules", f"polkit.addRule(function(action, subject) {{\n{body}\n}});\n")
     assert status(w.run(), "polkit") == "fail"
 
 
@@ -959,5 +960,79 @@ def test_a_polkit_grant_not_guarded_by_a_positive_literal_test_fails_closed(w: W
     ],
 )
 def test_a_polkit_grant_guarded_by_a_positive_literal_for_someone_else_only_warns(w: World, body: str) -> None:
-    put(w.polkit / "50-x.rules", f"polkit.addRule(function(a, subject) {{\n{body}\n}});\n")
+    put(w.polkit / "50-x.rules", f"polkit.addRule(function(action, subject) {{\n{body}\n}});\n")
     assert status(w.run(), "polkit") == "warn"
+
+
+# -- review round 3: the strict polkit allowlist ----------------------------------------------------------------------
+
+WRAP = "polkit.addRule(function(action, subject) {{\n{}\n}});\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        WRAP.format('if (subject.user == "o") { return polkit.Result.YES; } else { return polkit.Result.YES; }'),
+        WRAP.format('return subject.user == "o" ? polkit.Result.YES : polkit.Result.NO;'),
+        "// note\n" + WRAP.format('if (subject.user == "o") { return polkit.Result.YES; }'),
+        WRAP.format('/* c */ if (subject.user == "o") { return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user == "o") { return polkit.Result.YES; } // c'),
+        WRAP.format('if (subject.user == "o}{") { return polkit.Result.YES; }'),
+        WRAP.format('var s = "if (x) {"; if (subject.user == "o") { return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user == "o" | subject.local) { return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user == "o" || subject.local) { return polkit.Result.YES; }'),
+        WRAP.format('if (!subject.isInGroup("g")) { return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user != "o") { return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user == "o" && subject.local == true) { return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user == "o" && 1 + 1 == 2) { return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user == "o") { log("x"); return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user == "o") { return polkit.Result.YES; }\nreturn polkit.Result.YES;'),
+        WRAP.format('if (subject.user == "o") { return polkit.Result.YES; }\nif (x) { return polkit.Result.YES; }'),
+        WRAP.format('if (action.id == "a.b") { return polkit.Result.YES; }'),
+        WRAP.format('if (subject.user == "o") { if (subject.local) { return polkit.Result.YES; } }'),
+        WRAP.format('if (subject.user == "o") return polkit.Result.YES; return polkit.Result.YES;'),
+        WRAP.format("if (subject.user == 'o\"') { return polkit.Result.YES; }"),
+        'polkit.addRule(function(a, s) { if (s.user == "o") { return polkit.Result.YES; } });\n',
+        WRAP.format('if (subject.user == "o") { return polkit.Result.YES; }') + "var x = 1;\n",
+        WRAP.format('if (subject.user == "o") { return polkit.Result.YES; }').replace("function(", "function (a,"),
+    ],
+)
+def test_a_polkit_file_outside_the_strict_shape_fails_as_needing_a_human(w: World, text: str) -> None:
+    put(w.polkit / "50-x.rules", text)
+    found = w.run()
+    assert status(found, "polkit") == "fail" and "needs to look" in found["polkit"].text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'if (subject.user == "o") { return polkit.Result.YES; }',
+        "if (subject.user === 'o') return polkit.Result.YES;",
+        'if (subject.isInGroup("g") && action.id == "a.b-c") { return "yes"; }',
+        'if (action.id == "a.b" && subject.user == "o" && subject.isInGroup("g")) { return polkit.Result.YES; }',
+        'if (subject.user == "o") { return polkit.Result.YES; }\nif (subject.user == "p") { return polkit.Result.YES; }',
+    ],
+)
+def test_a_polkit_file_in_the_strict_shape_for_other_principals_only_warns(w: World, body: str) -> None:
+    put(w.polkit / "50-x.rules", WRAP.format(body))
+    assert status(w.run(), "polkit") == "warn"
+
+
+def test_two_rules_in_one_strict_file_are_accepted_and_a_bad_second_one_is_not(w: World) -> None:
+    good = WRAP.format('if (subject.user == "o") { return polkit.Result.YES; }')
+    put(w.polkit / "50-x.rules", good + good)
+    assert status(w.run(), "polkit") == "warn"
+    put(w.polkit / "50-x.rules", good + WRAP.format("return polkit.Result.YES;"))
+    assert status(w.run(), "polkit") == "fail"
+
+
+def test_a_strict_file_that_names_the_account_group_still_fails(w: World) -> None:
+    put(w.polkit / "50-x.rules", WRAP.format('if (subject.isInGroup("users")) { return polkit.Result.YES; }'))
+    found = w.run()
+    assert status(found, "polkit") == "fail" and "needs to look" not in found["polkit"].text
+
+
+def test_an_oversized_polkit_file_is_not_attributed(w: World) -> None:
+    body = "\n".join(['if (subject.user == "o") { return polkit.Result.YES; }'] * 5000)
+    put(w.polkit / "50-x.rules", WRAP.format(body))
+    assert status(w.run(), "polkit") == "fail"

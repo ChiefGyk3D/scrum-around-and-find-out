@@ -427,29 +427,32 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
 
 
 _YES = re.compile(r"polkit\.Result\.YES|[\"']yes[\"']|Result(?:Any|Inactive|Active)\s*=\s*yes", re.IGNORECASE)
-# a rule that names, by a quoted literal, who it is for: subject.user == "x", subject.isInGroup("x")
-_IF = re.compile(r"\bif\s*\(")
-_POSITIVE = re.compile(r"subject\.user\s*===?\s*[\"'][\w.-]+[\"']|subject\.isInGroup\(\s*[\"'][\w.-]+[\"']\s*\)")
+# The ONLY shape of rules file that counts as attributed to another principal. The whole file must be one or more
+#     polkit.addRule(function(action, subject) { if (TERM && TERM ...) { return polkit.Result.YES; } ... });
+# where a TERM is `subject.user == "x"`, `subject.isInGroup("x")` or `action.id == "x"` (literals are word characters,
+# dots and dashes), and the body of each `if` is the yes return and nothing else. Comments, else, ternaries, `||`, `!`,
+# other comparisons, arithmetic, extra statements and any other shape do not match, and a file that does not match is a
+# door a human has to look at.
+_Q = r"""(?:"[\w.-]+"|'[\w.-]+')"""
+_TERM = rf"(?:subject\.user[ \t]*===?[ \t]*{_Q}|subject\.isInGroup\([ \t]*{_Q}[ \t]*\)|action\.id[ \t]*===?[ \t]*{_Q})"
+_RET = r"""return[ \t]+(?:polkit\.Result\.YES|"yes"|'yes')[ \t]*;"""
+_STMT = rf"if[ \t]*\([ \t]*{_TERM}(?:[ \t]*&&[ \t]*{_TERM})*[ \t]*\)\s*(?:\{{\s*{_RET}\s*\}}|{_RET})"
+_RULE = rf"polkit\.addRule\(\s*function\s*\(\s*action\s*,\s*subject\s*\)\s*\{{\s*(?:{_STMT}\s*)+\}}\s*\)\s*;"
+_RULES_FILE = re.compile(rf"\s*(?:{_RULE}\s*)+")
+_STATEMENT = re.compile(_STMT)
+_SUBJECT_TERM = re.compile(rf"subject\.user[ \t]*===?[ \t]*({_Q})|subject\.isInGroup\([ \t]*({_Q})[ \t]*\)")
+MAX_RULES_FILE = 100_000
 
 
-def _grants_attributed(text: str) -> bool:
-    """True when every grant in a rules file sits under an `if` whose condition has a positive test of the user or a
-    group against a literal, and has no negation and no or-clause. Anything else cannot be attributed."""
-    for grant in _YES.finditer(text):
-        guards = list(_IF.finditer(text, 0, grant.start()))
-        if not guards:
+def _grants_attributed(text: str, who: _Who) -> bool:
+    """True only for the strict shape above, with a user or group test in every `if` that is not the account's."""
+    if len(text) > MAX_RULES_FILE or _RULES_FILE.fullmatch(text) is None:
+        return False
+    for statement in _STATEMENT.finditer(text):
+        tests = [(m.group(1) or m.group(2))[1:-1] for m in _SUBJECT_TERM.finditer(statement.group())]
+        if not tests:  # only `action.id` tests: the grant is for everyone
             return False
-        segment = text[guards[-1].end() : grant.start()]
-        opener = re.search(r"\{|\breturn\b", segment)
-        if opener is None:
-            return False
-        condition, tail = segment[: opener.start()], segment[opener.start() :]
-        # the guard must still enclose the grant: an earlier, closed `if` block guards nothing
-        if opener.group() == "{" and tail.count("{") - tail.count("}") < 1:
-            return False
-        if opener.group() != "{" and ";" in tail:
-            return False
-        if "!" in condition or "||" in condition or not _POSITIVE.search(condition):
+        if any(t in who.logins or t in who.group_names for t in tests):
             return False
     return True
 
@@ -458,6 +461,7 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
     scan = _Scan(door.max_entries)
     hits: list[str] = []
     others: list[str] = []
+    human: list[str] = []
     try:
         for folder in door.polkit_dirs:
             if not _folder_state(folder, f"polkit folder {_show(folder)}"):
@@ -477,9 +481,13 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
                 pkla = any(
                     re.search(r"unix-(?:user|group):" + re.escape(n) + r"(?![\w.-])", text) for n in names
                 ) or re.search(r"unix-(?:user|group):\*", text)
-                # a grant in a rules file that names nobody by a literal cannot be attributed: fail closed
-                unattributed = path.endswith(".rules") and not _grants_attributed(text)
-                (hits if quoted or pkla or unattributed else others).append(_show(path))
+                # a grant in a rules file of any other shape cannot be attributed: fail closed
+                if quoted or pkla:
+                    hits.append(_show(path))
+                elif path.endswith(".rules") and not _grants_attributed(text, who):
+                    human.append(_show(path))
+                else:
+                    others.append(_show(path))
     except _Problem as problem:
         return Finding("polkit", "fail", str(problem))
     failure = scan.failure("the polkit scan")
@@ -490,6 +498,16 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
             "polkit",
             "fail",
             _sentence("polkit grants the account or one of its groups an action without a password in", hits),
+        )
+    if human:
+        return Finding(
+            "polkit",
+            "fail",
+            _sentence(
+                "polkit rules file",
+                human,
+                " grants without a password in a shape this check cannot attribute; a human needs to look",
+            ),
         )
     if others:
         return Finding(
