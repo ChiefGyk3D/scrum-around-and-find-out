@@ -52,7 +52,8 @@ class Finding:
     text: str
 
     def line(self) -> str:
-        return f"{self.status}: {self.name}: {self.text}"
+        label = "nothing found" if self.status == "pass" else self.status  # a clean result is not proof
+        return f"{label}: {self.name}: {self.text}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -84,6 +85,14 @@ class DoorPaths:
         Path("/run/systemd/generator"),
         Path("/run/systemd/generator.early"),
         Path("/run/systemd/generator.late"),
+        Path("/run/systemd/system.control"),
+        Path("/run/systemd/system.attached"),
+        Path("/etc/systemd/system.control"),
+        Path("/etc/systemd/system.attached"),
+        Path("/usr/lib/systemd/system-generators"),
+        Path("/usr/local/lib/systemd/system-generators"),
+        Path("/run/systemd/system-generators"),
+        Path("/usr/lib/systemd/system-environment-generators"),
     )
     unit_dirs: tuple[Path, ...] = (
         Path("/etc/systemd/system"),
@@ -94,10 +103,15 @@ class DoorPaths:
         Path("/run/systemd/generator"),
         Path("/run/systemd/generator.early"),
         Path("/run/systemd/generator.late"),
+        Path("/run/systemd/system.control"),
+        Path("/run/systemd/system.attached"),
+        Path("/etc/systemd/system.control"),
+        Path("/etc/systemd/system.attached"),
     )
     cron_files: tuple[Path, ...] = (Path("/etc/crontab"),)
     cron_dirs: tuple[Path, ...] = (Path("/etc/cron.d"),)
     ld_preload: Path = Path("/etc/ld.so.preload")
+    polkit_action_dirs: tuple[Path, ...] = (Path("/usr/share/polkit-1/actions"), Path("/etc/polkit-1/actions"))
     nsswitch: Path = Path("/etc/nsswitch.conf")
     # systemd's user and group record folders (JSON user records, homed users): any record there is an account or group
     # this check does not read, so a record fails closed; a folder that is absent is fine
@@ -168,8 +182,12 @@ def _read(path: Path, what: str, trust: int | None) -> bytes:
         raise _Problem(f"{what} cannot be read (it is not owned by root)")
     if trust is not None and info.st_mode & 0o022:
         raise _Problem(f"{what} cannot be read (it is writable by its group or by others)")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:  # reading must not even move the access time; the kernel allows this to the owner and to root
+            fd = os.open(path, flags | getattr(os, "O_NOATIME", 0))
+        except PermissionError:
+            fd = os.open(path, flags)
     except OSError:
         raise _Problem(f"{what} cannot be read (it cannot be opened)") from None
     try:
@@ -373,10 +391,25 @@ def _members(text: str) -> list[str]:
     return [m for m in re.split(r"[,\s]+", text) if m and not m.startswith("!")]
 
 
+def _check_sudoers_source(door: DoorPaths, trust: int) -> None:
+    """Fail closed when the sudoers rules can come from a source other than local files (sss, ldap...)."""
+    for raw in _text(door.nsswitch, "the name service switch file", trust).splitlines():
+        database, _, rest = raw.split("#", 1)[0].partition(":")
+        if database.strip() != "sudoers":
+            continue
+        sources = [t for t in re.sub(r"\[[^\]]*\]", " ", rest).split() if t]
+        if sources != ["files"]:
+            raise _Problem(
+                "sudo rules can come from a source other than local files "
+                f"({_show(' '.join(sources) or 'none named')}), which this check does not read"
+            )
+
+
 def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
     sources: list[tuple[str, list[str]]] = []
     problems: list[str] = []
     try:
+        _check_sudoers_source(door, trust)
         sources.append(("the sudoers file", _logical_lines(_text(door.sudoers, "the sudoers file", trust))))
         if _folder_state(door.sudoers_d, "the sudoers directory"):
             info = os.lstat(door.sudoers_d)
@@ -444,6 +477,24 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
     return Finding("sudo", "pass", "no sudoers rule names the account, one of its groups or ALL")
 
 
+_ALLOW = re.compile(r"<allow_(any|inactive|active)\s*>(.*?)</allow_\1\s*>", re.DOTALL)
+_AUTH_VALUES = frozenset({"no", "auth_self", "auth_admin", "auth_self_keep", "auth_admin_keep"})
+
+
+def _policy_verdict(text: str) -> str:
+    """grant (a default that needs no authentication), human (a default or markup this check cannot read) or none."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    if "<![CDATA[" in text or "<!ENTITY" in text:
+        return "human"
+    found = _ALLOW.findall(text)
+    if text.count("<allow_") != len(found):
+        return "human"
+    values = [value.strip().lower() for _, value in found]
+    if "yes" in values:
+        return "grant"
+    return "human" if any(v not in _AUTH_VALUES for v in values) else "none"
+
+
 _PKLA_YES = re.compile(r"Result(?:Any|Inactive|Active)\s*=\s*yes", re.IGNORECASE)
 # The ONLY shape of rules file this check can judge. The whole file must be one or more
 #     polkit.addRule(function(action, subject) { if (TERM && TERM ...) { return RESULT; } ... });
@@ -497,9 +548,10 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
     hits: list[str] = []
     others: list[str] = []
     human: list[str] = []
+    defaults: list[str] = []
     open_to_account: list[str] = []
     try:
-        for folder in door.polkit_dirs:
+        for folder in (*door.polkit_dirs, *door.polkit_action_dirs):
             if not _folder_state(folder, f"polkit folder {_show(folder)}"):
                 continue
             reach = _chain_writable(str(folder), who, cache, str(door.chain_floor))
@@ -508,13 +560,17 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
             for path, info in scan.walk(folder):
                 if not stat.S_ISLNK(info.st_mode) and who.can_write(info):
                     open_to_account.append(_show(path))
-                if not path.endswith((".rules", ".pkla")):
+                if not path.endswith((".rules", ".pkla", ".policy")):
                     continue
                 if stat.S_ISLNK(info.st_mode):
                     raise _Problem(f"polkit file {_show(path)} cannot be read (it is a symbolic link)")
                 if not stat.S_ISREG(info.st_mode):
                     continue
                 text = _text(Path(path), f"polkit file {_show(path)}", None)
+                if path.endswith(".policy"):
+                    verdict = _policy_verdict(text)
+                    {"grant": defaults, "human": human}.get(verdict, []).append(_show(path))
+                    continue
                 if path.endswith(".rules"):
                     verdict = _classify_rules(text, who)
                     {"hit": hits, "human": human, "warn": others}.get(verdict, []).append(_show(path))
@@ -539,12 +595,20 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
             "fail",
             _sentence("polkit grants the account or one of its groups an action without a password in", hits),
         )
+    if defaults:
+        return Finding(
+            "polkit",
+            "fail",
+            _sentence(
+                "a polkit action policy default grants an active user an action without authentication in", defaults
+            ),
+        )
     if human:
         return Finding(
             "polkit",
             "fail",
             _sentence(
-                "polkit rules file",
+                "polkit file",
                 human,
                 " is in a shape this check cannot judge; a human needs to look",
             ),
@@ -567,7 +631,10 @@ def _check_writable(door: DoorPaths, who: _Who, extra: Sequence[Path]) -> Findin
         for root in (*door.writable_roots, *extra):
             if not _folder_state(root, f"root-run folder {_show(root)}"):
                 continue
-            if who.can_write(os.lstat(root)):
+            above = _chain_writable(str(root), who, {}, str(door.chain_floor))
+            if above is not None:
+                hits.append(_show(above))
+            elif who.can_write(os.lstat(root)):
                 hits.append(_show(root))
             for path, info in scan.walk(root):
                 if not stat.S_ISLNK(info.st_mode) and who.can_write(info):
@@ -663,6 +730,7 @@ def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | N
     if not first.startswith("/"):
         return f"runs {_show(first)}, which is not an absolute path; {HUMAN}"
     candidates = [first]
+    folders: list[str] = []  # candidates that may be a folder rather than a file
     base = re.sub(r"[0-9.]+$", "", os.path.basename(first))
     if base in TEXT_FIRST:
         return f"runs {_show(first)}, which takes its program text from the command line; {HUMAN}"
@@ -716,11 +784,32 @@ def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | N
             candidates.append(arg)
         if not found_script:
             return f"runs {_show(first)} without a script path; {HUMAN}"
-    return _candidates_hit(candidates, who, cache, floor)
+    else:  # a program this check does not know may load code from any argument: look at every one
+        for arg in argv[1:]:
+            if _SHELL_SYNTAX.search(arg):
+                return f"runs {_show(first)} with {_show(arg)}, which uses shell syntax; {HUMAN}"
+            if arg.startswith("-"):
+                attached = re.fullmatch(r"-[A-Za-z]+(/.*)", arg)
+                value = attached.group(1) if attached else arg.partition("=")[2]
+                if value.startswith("/"):
+                    candidates.append(value)
+                    folders.append(value)
+                elif "/" in value:
+                    return f"runs {_show(first)} with {_show(arg)}, which names a relative path; {HUMAN}"
+            elif arg.startswith("/"):
+                candidates.append(arg)
+                folders.append(arg)
+            elif not arg.isdigit():
+                return f"runs {_show(first)} with {_show(arg)}, which this check cannot place; {HUMAN}"
+    return _candidates_hit(candidates, who, cache, floor, folders)
 
 
 def _candidates_hit(
-    candidates: list[str], who: _Who, cache: dict[str, os.stat_result | None], floor: str
+    candidates: list[str],
+    who: _Who,
+    cache: dict[str, os.stat_result | None],
+    floor: str,
+    folders: Sequence[str] = (),
 ) -> str | None:
     for candidate in candidates:
         if _in_home(candidate, who):
@@ -730,7 +819,8 @@ def _candidates_hit(
             return f"runs {_show(candidate)}, which the account can replace through {_show(writable)}"
     for candidate in candidates:  # a path that is not there is never treated as safe
         try:
-            regular = stat.S_ISREG(os.stat(candidate).st_mode)
+            mode = os.stat(candidate).st_mode
+            regular = stat.S_ISREG(mode) or (stat.S_ISDIR(mode) and candidate in folders)
         except OSError:
             regular = False
         if not regular:
@@ -745,59 +835,85 @@ def _split_command(text: str) -> list[str] | None:
         return None
 
 
-def _unit_hits(text: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
-    user = ""
-    entries: list[tuple[str, str]] = []
+SINGLE_KEYS = frozenset({"StandardInput", "StandardInputText", "StandardInputData", "WorkingDirectory"})
+
+
+def _assignments(text: str) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
     for line in _logical_lines(text):
+        if line.startswith(("#", ";")):
+            continue
         key, _, value = line.partition("=")
         key, value = key.strip(), value.strip()
+        if key == "User" or key in UNIT_KEYS or key in HOME_KEYS or key in STDIN_KEYS:
+            found.append((key, value))
+    return found
+
+
+def _unit_hits(
+    assignments: list[tuple[str, str]], who: _Who, cache: dict[str, os.stat_result | None], floor: str
+) -> str | None:
+    """The merged unit: the base file and its drop-ins in order, the last assignment winning for a single-value key,
+    an empty assignment clearing a list, and every other assignment adding to it."""
+    user = ""
+    merged: dict[str, list[str]] = {}
+    for key, value in assignments:
         if key == "User":
             user = value
-        elif key in UNIT_KEYS or key in HOME_KEYS or key in STDIN_KEYS:
-            entries.append((key, value))
-    if user not in ("", "root", "0"):
+        elif key in SINGLE_KEYS:
+            merged[key] = [value] if value else []
+        elif not value:
+            merged[key] = []
+        else:
+            merged.setdefault(key, []).append(value)
+    if user not in ("", "root", "0") and not re.search(r"[%$]", user):
         return None
-    for key, value in entries:
-        if key in STDIN_KEYS:
-            if key == "StandardInput" and value in ("", "null"):
-                continue
-            if key == "StandardInput" and value.startswith("file:") and value[5:].startswith("/"):
-                hit = _candidates_hit([value[5:]], who, cache, floor)
-                if hit:
-                    return hit
-                continue
-            return f"feeds {_show(key)} to a root job ({_show(value[:40])}); {HUMAN}"
-        if key in HOME_KEYS:
-            first = value.lstrip("-").split(None, 1)[0] if value.lstrip("-") else ""
-            if not first.startswith("/"):
-                continue
-            if _in_home(first, who):
-                return f"reads or runs {_show(first)} from the account's home"
-            writable = _chain_writable(first, who, cache, floor)
-            if writable is not None:
-                return f"runs {_show(first)}, which the account can replace through {_show(writable)}"
-            continue
-        body = value.lstrip("-:+!")
-        if not body:  # an empty value resets the list
-            continue
-        argv = None if body.startswith("@") else _split_command(body)
-        if argv is None or ";" in argv:
-            return f"has a command line this check cannot read ({_show(body.split(None, 1)[0])}); {HUMAN}"
-        hit = _command_hit(argv, who, cache, floor)
-        if hit:
-            return hit
+    for key, values in merged.items():
+        for value in values:
+            hit = _entry_hit(key, value, who, cache, floor)
+            if hit:
+                return hit
     return None
 
 
-def _unit_file_hit(path: Path, name: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
-    """A unit file or drop-in. A link is resolved: its target (and every folder on the way) must be out of the account's
-    reach, else the link is a finding; one that does not resolve fails closed. A link to /dev/null is a masked unit."""
+def _entry_hit(key: str, value: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
+    if key in STDIN_KEYS:
+        if key == "StandardInput" and value in ("", "null"):
+            return None
+        if key == "StandardInput" and value.startswith("file:") and value[5:].startswith("/"):
+            return _candidates_hit([value[5:]], who, cache, floor)
+        return f"feeds {_show(key)} to a root job ({_show(value[:40])}); {HUMAN}"
+    if key in HOME_KEYS:
+        first = value.lstrip("-").split(None, 1)[0] if value.lstrip("-") else ""
+        if not first.startswith("/"):
+            return None
+        if _in_home(first, who):
+            return f"reads or runs {_show(first)} from the account's home"
+        writable = _chain_writable(first, who, cache, floor)
+        if writable is not None:
+            return f"runs {_show(first)}, which the account can replace through {_show(writable)}"
+        return None
+    body = value.lstrip("-:+!")
+    if not body:
+        return None
+    argv = None if body.startswith("@") else _split_command(body)
+    if argv is None or ";" in argv:
+        return f"has a command line this check cannot read ({_show(body.split(None, 1)[0])}); {HUMAN}"
+    return _command_hit(argv, who, cache, floor)
+
+
+def _fragment(
+    path: Path, name: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str
+) -> tuple[list[tuple[str, str]], str | None]:
+    """The assignments of a unit file or drop-in, or a finding. A link is resolved: its target (and every folder on the
+    way) must be out of the account's reach, else the link is a finding; one that does not resolve fails closed. A link
+    to /dev/null is a masked unit and has no assignments."""
     real = str(path)
     info = _lstat(path, f"unit {_show(name)}")
     if stat.S_ISLNK(info.st_mode):
         real = os.path.realpath(path)
         if real == os.devnull:
-            return None
+            return [], None
         try:
             target = os.stat(real)
         except OSError:
@@ -805,13 +921,58 @@ def _unit_file_hit(path: Path, name: str, who: _Who, cache: dict[str, os.stat_re
         if not stat.S_ISREG(target.st_mode):
             raise _Problem(f"unit {_show(name)} cannot be read (its link does not lead to a regular file)")
         if _in_home(real, who):
-            return f"is a link to {_show(real)}, under the account's home"
+            return [], f"is a link to {_show(real)}, under the account's home"
         writable = _chain_writable(str(path), who, cache, floor)
         if writable is not None:
-            return f"is a link to {_show(real)}, which the account can replace through {_show(writable)}"
+            return [], f"is a link to {_show(real)}, which the account can replace through {_show(writable)}"
     elif not stat.S_ISREG(info.st_mode):
         raise _Problem(f"unit {_show(name)} cannot be read (it is not a regular file)")
-    return _unit_hits(_text(Path(real), f"unit {_show(name)}", None), who, cache, floor)
+    return _assignments(_text(Path(real), f"unit {_show(name)}", None)), None
+
+
+def _applies(unit: str, dropin: str) -> bool:
+    """Whether the drop-in folder `dropin` (its name without .d) belongs to `unit`, as systemd matches them."""
+    if dropin in (unit, "service"):
+        return True
+    return dropin.endswith("-.service") and unit.startswith(dropin[: -len(".service")])
+
+
+def _unit_findings(door: DoorPaths, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> list[str]:
+    bases: dict[str, list[Path]] = {}
+    dropdirs: list[tuple[str, Path]] = []
+    for folder in door.unit_dirs:
+        if not _folder_state(folder, f"unit folder {_show(folder)}"):
+            continue
+        for name in sorted(os.listdir(folder)):
+            path = folder / name
+            if name.endswith(".service"):
+                bases.setdefault(name, []).append(path)
+            elif (name.endswith(".service.d") or name == "service.d") and _folder_state(
+                path, f"drop-in folder {_show(name)}"
+            ):
+                dropdirs.append((name[:-2], path))
+    units = set(bases) | {d for d, _ in dropdirs if d.endswith(".service") and not d.endswith("-.service")}
+    hits: list[str] = []
+    for unit in sorted(units):
+        confs: list[tuple[str, Path]] = []
+        for dname, dpath in dropdirs:
+            if _applies(unit, dname):
+                confs.extend((c, dpath / c) for c in sorted(os.listdir(dpath)) if c.endswith(".conf"))
+        confs.sort(key=lambda item: item[0])  # systemd reads them in file name order, whatever the folder
+        label = f"unit {_show(unit)}" + (f" with drop-ins {_show(', '.join(c for c, _ in confs))}" if confs else "")
+        base_files: list[Path | None] = [*bases.get(unit, [])] or [None]
+        for base in base_files:
+            assignments: list[tuple[str, str]] = []
+            found: str | None = None
+            for fname, fpath in ([(unit, base)] if base else []) + confs:
+                part, found = _fragment(fpath, fname, who, cache, floor)
+                if found:
+                    break
+                assignments.extend(part)
+            found = found or _unit_hits(assignments, who, cache, floor)
+            if found:
+                hits.append(f"{label} {found}")
+    return hits
 
 
 def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
@@ -838,21 +999,7 @@ def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
     hits: list[str] = []
     floor = str(door.chain_floor)
     try:
-        for folder in door.unit_dirs:
-            if not _folder_state(folder, f"unit folder {_show(folder)}"):
-                continue
-            for name in sorted(os.listdir(folder)):
-                path = folder / name
-                if name.endswith(".service"):
-                    found = _unit_file_hit(path, name, who, cache, floor)
-                    if found:
-                        hits.append(f"unit {_show(name)} {found}")
-                elif name.endswith(".d") and _folder_state(path, f"drop-in folder {_show(name)}"):
-                    for conf in sorted(os.listdir(path)):
-                        if conf.endswith(".conf"):
-                            found = _unit_file_hit(path / conf, f"{name}/{conf}", who, cache, floor)
-                            if found:
-                                hits.append(f"drop-in {_show(name)}/{_show(conf)} {found}")
+        hits.extend(_unit_findings(door, who, cache, floor))
         files = list(door.cron_files)
         for folder in door.cron_dirs:
             if _folder_state(folder, f"cron folder {_show(folder)}"):

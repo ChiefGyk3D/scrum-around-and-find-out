@@ -690,7 +690,14 @@ hit its entry limit is a `fail`, never a pass:
 | `setuid` | a bounded walk of `/usr`, `/opt` and the merged `/bin`, `/sbin`, `/lib*`, against the package file lists in `/var/lib/dpkg/info` (read as files, `dpkg` is not run) | a setuid or setgid file no package owns, any such file or a file with capabilities that the account can write, or the package lists cannot be read | a file with capabilities that no package owns |
 | `credential` | the secret store tool's local settings folders in the account's home (`.doppler` and `.config/doppler`; these locations are inferred, not read from a vendor page) | the home cannot be examined | one of them exists: revoke the old key at the vendor, then delete it |
 
-Every login that maps to the account's uid is judged, in the group, sudoers and polkit checks and for the credential. If
+A clean result is printed as `nothing found`, not as a bare pass: this checker is a heuristic snapshot, and a clean
+result is not proof that no door exists. Root-run units are judged as systemd merges them (the base file and every
+drop-in, in file name order, the last assignment winning), in every unit folder including the runtime, control, attached
+and generator ones; the generator program folders are scanned for anything the account can write. A command whose program
+is not a known interpreter has every argument looked at, and an argument that cannot be placed goes to a human. Polkit
+action policy files are read too: a default of `yes` for any class of user is a finding, and a value or markup that
+cannot be read goes to a human. If the sudoers database is configured with a source other than local files, the `sudo`
+check fails closed. Files are opened without moving their access time where the kernel allows it. Every login that maps to the account's uid is judged, in the group, sudoers and polkit checks and for the credential. If
 the name service switch file in `/etc` gives the passwd, group, shadow, gshadow or initgroups database a source other than `files` or
 `compat` (for example `ldap`, `sss`, `nis`, `systemd`), or any file sits in `/etc/userdb`, `/run/userdb` or
 `/run/systemd/userdb` (systemd user records, home-directory users), every account check fails closed, because accounts and

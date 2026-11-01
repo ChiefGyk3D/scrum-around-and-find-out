@@ -87,6 +87,7 @@ class World:
             cron_dirs=(self.cron_d,),
             ld_preload=self.preload,
             nsswitch=self.nss,
+            polkit_action_dirs=(self.t / "actions",),
             userdb_dirs=(self.t / "userdb",),
             chain_floor=self.t,
             setuid_roots=(self.usr,),
@@ -129,7 +130,11 @@ def test_every_finding_is_one_plain_sentence(w: World) -> None:
     put(w.sudoers_d / "x", "maint ALL=(ALL) NOPASSWD: ALL\n", 0o440)
     for f in w.run().values():
         assert f.status in ("pass", "warn", "fail")
-        assert f.text and "\n" not in f.text and f.line() == f"{f.status}: {f.name}: {f.text}"
+        assert (
+            f.text
+            and "\n" not in f.text
+            and f.line() == f"{'nothing found' if f.status == 'pass' else f.status}: {f.name}: {f.text}"
+        )
 
 
 # -- the maintainer account ----------------------------------------------------------------------------------------
@@ -1580,3 +1585,203 @@ def test_hardening_a_plain_wrapper_still_runs_an_executable_through_the_path_che
     ok = put(w.t / "bin" / "ok.sh", "true\n", 0o755)
     put(w.units / "a.service", unit(f"/usr/bin/env -i /usr/bin/nice {ok}"))
     assert status(w.run(), "jobs") == "pass"
+
+
+# -- hardening, merged units and the rest ------------------------------------------------------------
+
+
+def dropin(w: World, unit_name: str, conf: str, text: str, where: Path | None = None) -> None:
+    put((where or w.units) / f"{unit_name}.d" / conf, text)
+
+
+def test_hardening_a_drop_in_that_makes_the_unit_run_as_root_is_merged(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", unit(str(payload), user="maint"))
+    assert status(w.run(), "jobs") == "pass"
+    dropin(w, "a.service", "10-root.conf", "[Service]\nUser=root\n")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "10-root.conf" in found["jobs"].text
+
+
+def test_hardening_a_drop_in_that_drops_root_or_clears_the_command_is_merged(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", unit(str(payload)))
+    assert status(w.run(), "jobs") == "fail"
+    dropin(w, "a.service", "10-user.conf", "[Service]\nUser=nobody\n")
+    assert status(w.run(), "jobs") == "pass"
+    (w.units / "a.service.d" / "10-user.conf").unlink()
+    dropin(w, "a.service", "10-clear.conf", "[Service]\nExecStart=\nExecStart=/bin/true\n")
+    assert status(w.run(), "jobs") == "pass"
+
+
+def test_hardening_drop_ins_apply_in_file_name_order_across_folders(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    other = folder(w.t / "units2")
+    put(w.units / "a.service", unit(str(payload)))
+    dropin(w, "a.service", "20-b.conf", "[Service]\nUser=nobody\n")
+    dropin(w, "a.service", "10-a.conf", "[Service]\nUser=root\n", other)
+    assert status(w.run(unit_dirs=(w.units, other)), "jobs") == "pass"  # 20 wins: not root
+    dropin(w, "a.service", "30-c.conf", "[Service]\nUser=root\n", other)
+    assert status(w.run(unit_dirs=(w.units, other)), "jobs") == "fail"  # 30 wins: root
+
+
+@pytest.mark.parametrize("folder_name", ["service.d", "a-.service.d", "a-b.service.d"])
+def test_hardening_type_and_prefix_drop_ins_apply_to_matching_units(w: World, folder_name: str) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a-b.service", unit(str(payload), user="maint"))
+    put(w.units / folder_name / "10-root.conf", "[Service]\nUser=root\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_prefix_drop_in_does_not_apply_to_other_units(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "c.service", unit(str(payload), user="maint"))
+    put(w.units / "a-.service.d" / "10-root.conf", "[Service]\nUser=root\n")
+    assert status(w.run(), "jobs") == "pass"
+
+
+def test_hardening_a_drop_in_without_a_base_unit_is_judged_by_itself(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    dropin(w, "lonely.service", "10-x.conf", unit(str(payload)))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_the_last_standard_input_assignment_wins(w: World) -> None:
+    infile = put(w.home / "in.txt", "x")
+    put(w.units / "a.service", unit("/bin/true") + f"StandardInput=file:{infile}\n")
+    assert status(w.run(), "jobs") == "fail"
+    dropin(w, "a.service", "10-x.conf", "[Service]\nStandardInput=null\n")
+    assert status(w.run(), "jobs") == "pass"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "-jar {payload}",
+        "--classpath={payload}",
+        "-cp{payload}",
+        "-Dx={payload}",
+        "run {payload}",
+    ],
+)
+def test_hardening_an_unknown_program_has_every_argument_looked_at(w: World, tail: str) -> None:
+    payload = put(w.home / "root.jar", "x")
+    put(w.units / "a.service", unit("/bin/true " + tail.format(payload=payload)))
+    assert status(w.run(), "jobs") == "fail"
+
+
+@pytest.mark.parametrize(
+    "tail", ["-jar rel.jar", "start", "--path=rel/x", "$X", "/nonexistent/file", "-v /nonexistent"]
+)
+def test_hardening_an_unknown_program_with_unplaceable_arguments_needs_a_human(w: World, tail: str) -> None:
+    put(w.units / "a.service", unit("/bin/true " + tail))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_an_unknown_program_with_plain_arguments_passes(w: World) -> None:
+    conf = put(w.t / "bin" / "x.conf", "x")
+    put(w.units / "a.service", unit(f"/bin/true -D --port=80 --config={conf} 5 {w.t / 'bin'}"))
+    assert status(w.run(), "jobs") == "pass"
+
+
+def test_hardening_sudoers_from_a_non_file_source_fails_closed(w: World) -> None:
+    for line in ("sudoers: files sss", "sudoers: sss", "sudoers: ldap files", "sudoers:"):
+        put(w.nss, f"passwd: files\ngroup: files\n{line}\n")
+        found = w.run()
+        assert status(found, "sudo") == "fail" and "source other than local files" in found["sudo"].text
+        assert status(found, "groups") == "pass"
+    put(w.nss, "passwd: files\ngroup: files\nsudoers: files [SUCCESS=return]\n")
+    assert status(w.run(), "sudo") == "pass"
+
+
+def test_hardening_default_paths_cover_the_remaining_unit_and_generator_locations() -> None:
+    d = DoorPaths()
+    for name in ("system.control", "system.attached"):
+        assert Path("/run/systemd") / name in d.unit_dirs
+        assert Path("/etc/systemd") / name in d.unit_dirs
+        assert Path("/run/systemd") / name in d.writable_roots
+    for base in ("/usr/lib", "/usr/local/lib", "/run"):
+        assert Path(base) / "systemd" / "system-generators" in d.writable_roots
+    assert Path("/usr/share/polkit-1/actions") in d.polkit_action_dirs
+
+
+def test_hardening_a_generator_the_account_can_write_fails(w: World) -> None:
+    gen = folder(w.t / "gens")
+    put(gen / "g", "#!/bin/sh\n", 0o777)
+    assert status(w.run(writable_roots=(gen,)), "writable") == "fail"
+
+
+def test_hardening_a_writable_folder_above_a_generator_folder_fails(w: World) -> None:
+    parent = folder(w.t / "sysd", 0o777)
+    gen = folder(parent / "system-generators")
+    assert status(w.run(writable_roots=(gen,)), "writable") == "fail"
+
+
+def policy(*defaults: str) -> str:
+    return '<policyconfig><action id="a"><defaults>' + "".join(defaults) + "</defaults></action></policyconfig>"
+
+
+@pytest.mark.parametrize("which", ["allow_any", "allow_inactive", "allow_active"])
+def test_hardening_an_action_default_that_needs_no_authentication_fails(w: World, which: str) -> None:
+    put(w.t / "actions" / "x.policy", policy(f"<{which}>yes</{which}>"))
+    found = w.run()
+    assert status(found, "polkit") == "fail" and "x.policy" in found["polkit"].text
+    assert "grants an active user" in found["polkit"].text
+
+
+def test_hardening_action_defaults_that_ask_for_authentication_pass(w: World) -> None:
+    text = policy(
+        "<allow_any>no</allow_any>",
+        "<allow_inactive>auth_admin</allow_inactive>",
+        "<allow_active>auth_admin_keep</allow_active>",
+    )
+    put(w.t / "actions" / "x.policy", "<!-- <allow_active>yes</allow_active> -->" + text)
+    assert status(w.run(), "polkit") == "pass"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        policy("<allow_active>sometimes</allow_active>"),
+        policy("<allow_active>&amp;</allow_active>"),
+        policy("<allow_active>yes"),
+        "<![CDATA[x]]>" + policy("<allow_active>no</allow_active>"),
+        '<!DOCTYPE x [<!ENTITY e "yes">]>' + policy("<allow_active>&e;</allow_active>"),
+    ],
+)
+def test_hardening_an_action_policy_it_cannot_read_needs_a_human(w: World, text: str) -> None:
+    put(w.t / "actions" / "x.policy", text)
+    assert status(w.run(), "polkit") == "fail"
+
+
+def test_hardening_reads_do_not_move_access_times(w: World) -> None:
+    files = [w.passwd, w.group, w.sudoers, w.polkit / "a.rules"]
+    put(files[-1], "")
+    for path in files:
+        os.utime(path, ns=(10**9, 2 * 10**9))
+    before = [os.stat(p).st_atime_ns for p in files]
+    w.run()
+    assert [os.stat(p).st_atime_ns for p in files] == before
+
+
+def test_hardening_reads_ask_for_no_access_time_update_and_fall_back_when_refused(
+    w: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    noatime = getattr(os, "O_NOATIME", 0)
+    if not noatime:
+        pytest.skip("this platform has no O_NOATIME")
+    real_open = os.open
+    seen: list[int] = []
+
+    def refuse(path: Any, flags: int, *args: Any, **kw: Any) -> int:
+        if str(path).startswith(str(w.t)) and not flags & (os.O_DIRECTORY):
+            seen.append(flags)
+            if flags & noatime:
+                raise PermissionError(errno.EPERM, "refused")
+        return real_open(path, flags, *args, **kw)
+
+    monkeypatch.setattr(os, "open", refuse)
+    found = w.run()
+    assert seen and any(f & noatime for f in seen) and any(not f & noatime for f in seen)
+    assert status(found, "sudo") == "pass"

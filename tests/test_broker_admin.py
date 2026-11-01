@@ -1434,7 +1434,7 @@ def test_check_install_reports_every_root_door_check_and_passes_on_a_clean_machi
     code, out, _ = run(tmp_path, "check-install")
     assert code == 0
     for name in DOOR_NAMES:
-        assert f"pass: {name}: " in out
+        assert f"nothing found: {name}: " in out
     assert "not checked here" not in out
     assert out.rstrip().splitlines()[-1].startswith("limits: ")
 
@@ -1469,7 +1469,7 @@ def test_check_install_fails_when_the_maintainer_cannot_be_identified(tmp_path: 
     assert out_code == 1
     for name in ("sudo", "groups", "polkit", "writable", "jobs", "setuid", "credential"):
         assert f"fail: {name}: " in out
-    assert "pass: preload: " in out
+    assert "nothing found: preload: " in out
 
 
 def test_check_install_scans_the_brokers_own_folders_for_writable_paths(tmp_path: Path) -> None:
