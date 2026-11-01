@@ -690,11 +690,25 @@ def test_a_file_the_broker_accepts_passes_the_readiness_check(tmp_path: Path, na
     assert got["allowed-signers"].status == "pass", (name, got["allowed-signers"].detail)
 
 
-def test_preflight_calls_the_brokers_parser_and_has_no_parser_of_its_own() -> None:
-    """One implementation: the module calls the broker's parser, and holds no option, key-type or label table."""
+def test_preflight_calls_the_brokers_parser_and_has_no_parser_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One implementation: replace the broker's parser and the readiness check follows it; the module also holds no
+    option, key-type or label table of its own."""
     from safo import geminisign
+    from safo.gemini import RefusedError
 
-    assert pf.geminisign is geminisign
+    calls: list[int] = []
+
+    def refuse(text: str) -> list[geminisign.Enrolled]:
+        calls.append(len(text))
+        raise RefusedError("allowed-signers line 1: a stand-in refusal")
+
+    monkeypatch.setattr(geminisign, "parse_signers", refuse)
+    got = by_name(pf.run_preflight(make_tree(tmp_path), FakeRunner(), lookup_ok))  # a file the real parser accepts
+    assert calls, "preflight did not call the broker's parser"
+    assert got["allowed-signers"].status == "fail" and "stand-in refusal" in got["allowed-signers"].detail
+    assert got["hardware-key"].status != "pass"
     source = Path(pf.__file__).read_text()
     assert source.count("geminisign.parse_signers(") == 2  # the readiness check and the key-to-name link
     for own_parser in ("no-touch-required", "cert-authority", "valid-before", "KEY_TYPES", "_line_namespace_problem"):
