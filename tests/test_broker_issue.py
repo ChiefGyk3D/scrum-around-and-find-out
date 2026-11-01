@@ -259,3 +259,19 @@ def test_a_naive_time_is_refused(rig: Rig) -> None:
         rig.issuer.begin(text_req(), prompt_bytes=5, max_micro=2_500_000, now=dt.datetime(2026, 10, 30, 12))
     assert err.value.code == "bad_request"
     assert IMAGE_MODEL in policy().prices.models
+
+
+def test_a_lock_timeout_while_taking_the_issued_lock_is_busy_not_internal(rig: Rig) -> None:
+    """#298 (4): the issuer's own lock timing out answered `internal`; it is the same `busy` as the ledger lock."""
+    import fcntl
+
+    rig.ledger.lock_seconds = 0.05
+    lock = rig.ledger.dir / "issued.lock"
+    lock.touch(mode=0o600)
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert code_of(rig, text_req()) == "busy"
+    finally:
+        os.close(fd)
+    assert rig.offer(text_req()).nonce  # and once the lock is free the same request is served
