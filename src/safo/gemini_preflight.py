@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import hashlib
 import os
 import pwd
@@ -50,7 +51,7 @@ _TOKEN = re.compile(r'(?:[^\s"]|"[^"]*")+')
 _FLAGS = {"--strict", "--enabling", "--ack-observe-mode"}
 USAGE = (
     "usage: python -m safo.gemini_preflight [--strict] [--enabling] [--ack-observe-mode] [--key-file /absolute/path] "
-    "[--client-config /absolute/path]"
+    "[--client-config /absolute/path] [--maintainer-uid N]"
 )
 _RUN_SECONDS = 10
 _MAX_FILE_BYTES = 65_536
@@ -80,6 +81,7 @@ class Locations:
     egress_conf: Path = Path("/etc/safo/broker-egress.conf")
     broker_config: Path = Path("/etc/safo/broker.yaml")
     client_config: Path | None = None  # the maintainer's ~/.config/safo/broker-client.yaml; None: the caller's own home
+    maintainer_uid: int | None = None  # the account whose client config root may read (the runbook passes it)
     state_dir: Path = Path("/var/lib/safo-broker")
     udev_dirs: tuple[Path, ...] = (Path("/etc/udev/rules.d"), Path("/usr/lib/udev/rules.d"), Path("/lib/udev/rules.d"))
     sk_helper_dirs: tuple[Path, ...] = (Path("/usr/lib/openssh"), Path("/usr/libexec/openssh"), Path("/usr/libexec"))
@@ -549,9 +551,9 @@ def check_state_dir(loc: Locations, lookup: UserLookup) -> Check:
     )
 
 
-def _config_file_problem(path: Path, trust_uid: int, *, root_reads: bool = False) -> str | None:
+def _config_file_problem(path: Path, trust_uid: int) -> str | None:
     """Why a config file is not acceptable, in a fixed sentence, or None. Owner and write bits are judged from `lstat`;
-    the content is never read here. `root_reads`: the file belongs to the maintainer and root only reads it."""
+    the content is never read here."""
     try:
         st = path.lstat()
     except FileNotFoundError:
@@ -564,10 +566,7 @@ def _config_file_problem(path: Path, trust_uid: int, *, root_reads: bool = False
         return "is not a regular file"
     if st.st_size > _MAX_FILE_BYTES:
         return f"is larger than {_MAX_FILE_BYTES} bytes"
-    if root_reads:
-        if os.geteuid() not in (0, st.st_uid):
-            return f"is owned by another account (uid {st.st_uid})"
-    elif st.st_uid != trust_uid:
+    if st.st_uid != trust_uid:
         return f"has the wrong owner (uid {st.st_uid}, expected {trust_uid})"
     if st.st_mode & 0o022:
         return f"is writable by group or others (mode {stat.S_IMODE(st.st_mode):04o})"
@@ -610,25 +609,91 @@ def check_broker_config(loc: Locations) -> Check:
     )
 
 
+def _allowed_owners(loc: Locations) -> frozenset[int]:
+    """Who may own the client config. Not root: the caller only. Root: root, or the named maintainer, never any uid."""
+    euid = os.geteuid()
+    if euid != 0:
+        return frozenset({euid})
+    return frozenset({0} | ({loc.maintainer_uid} if loc.maintainer_uid is not None else set()))
+
+
+def _directory_problem(fd: int, owners: frozenset[int]) -> str | None:
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        return "a parent is not a directory"
+    if info.st_uid not in owners | {0}:
+        return "a parent directory has the wrong owner"
+    sticky_root = bool(info.st_mode & stat.S_ISVTX) and info.st_uid == 0
+    if info.st_mode & 0o022 and not sticky_root:
+        return "a parent directory is writable by group or others"
+    return None
+
+
+def _open_client_config(path: Path, owners: frozenset[int]) -> tuple[int | None, str | None]:
+    """Open the file the way the loaders do: every directory from the root is opened without following a link and
+    judged on its descriptor, then the file is opened without following a link and judged on ITS descriptor. Returns
+    the open descriptor, or a fixed sentence saying why not. The caller closes the descriptor."""
+    parts = path.parts
+    if not path.is_absolute() or len(parts) < 2:
+        return None, "is not an absolute path"
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    dir_fd = -1
+    try:
+        dir_fd = os.open(parts[0], flags)
+        for name in (None, *parts[1:-1]):
+            if name is not None:
+                nxt = os.open(name, flags, dir_fd=dir_fd)
+                os.close(dir_fd)
+                dir_fd = nxt
+            problem = _directory_problem(dir_fd, owners)
+            if problem:
+                return None, problem
+        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None, "absent"
+    except OSError as err:
+        if err.errno == errno.ELOOP:
+            return None, "is a symbolic link, or sits under one"
+        if err.errno == errno.ENOTDIR:
+            return None, "has a parent that is not a directory"
+        return None, "cannot be opened"
+    finally:
+        if dir_fd >= 0:
+            os.close(dir_fd)
+    info = os.fstat(file_fd)
+    problem = None
+    if not stat.S_ISREG(info.st_mode):
+        problem = "is not a regular file"
+    elif info.st_uid not in owners:
+        problem = f"has the wrong owner (uid {info.st_uid})"
+    elif info.st_mode & 0o022:
+        problem = f"is writable by group or others (mode {stat.S_IMODE(info.st_mode):04o})"
+    elif info.st_size > _MAX_FILE_BYTES:
+        problem = f"is larger than {_MAX_FILE_BYTES} bytes"
+    if problem:
+        os.close(file_fd)
+        return None, problem
+    return file_fd, None
+
+
 def check_client_config(loc: Locations) -> Check:
     """The maintainer's own client config exists and loads through the client's own parser."""
     name = "client-config"
     path = (
         loc.client_config if loc.client_config is not None else Path.home() / ".config" / "safo" / "broker-client.yaml"
     )
-    problem = _config_file_problem(path, loc.trust_uid, root_reads=True)
+    fd, problem = _open_client_config(path, _allowed_owners(loc))
     if problem == "absent":
         return Check(
             name,
             "fail",
             "the file does not exist (copy examples/broker-client.example.yaml to ~/.config/safo/broker-client.yaml)",
         )
-    if problem:
+    if fd is None:
         return Check(name, "fail", f"the file {problem}")
     try:
         from safo.broker import client
 
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         try:
             raw = os.read(fd, _MAX_FILE_BYTES + 1)
         finally:
@@ -712,11 +777,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         client_config = Path(args[at + 1])
         del args[at : at + 2]
+    maintainer_uid: int | None = None
+    if "--maintainer-uid" in args:
+        at = args.index("--maintainer-uid")
+        if at + 1 >= len(args) or re.fullmatch(r"[0-9]{1,9}", args[at + 1]) is None:
+            output.write(sys.stderr, USAGE)
+            return 2
+        maintainer_uid = int(args[at + 1])
+        del args[at : at + 2]
+        try:
+            home = pwd.getpwuid(maintainer_uid).pw_dir  # looked up here, in Python: it never goes through a shell
+        except (KeyError, OSError):
+            home = ""
+        if not home.startswith("/") or "\x00" in home:
+            output.write(sys.stderr, USAGE)
+            return 2
+        if client_config is None:
+            client_config = Path(home) / ".config" / "safo" / "broker-client.yaml"
     if any(a not in _FLAGS for a in args):
         output.write(sys.stderr, USAGE)
         return 2
     return main_with(
-        Locations(key_file=key_file, client_config=client_config) if (key_file or client_config) else Locations(),
+        Locations(key_file=key_file, client_config=client_config, maintainer_uid=maintainer_uid)
+        if (key_file or client_config or maintainer_uid is not None)
+        else Locations(),
         default_runner,
         default_lookup,
         out=sys.stdout,

@@ -446,13 +446,13 @@ def steps(login: str) -> tuple[Step, ...]:
             "egress config is missing or unusable, when /etc/safo/broker.yaml is missing, not root-owned, "
             "writable by group "
             "or others, refused by the broker's own loader or lists no allowed uid, when your "
-            "~/.config/safo/broker-client.yaml is missing or does not load (the line looks it up in your home "
-            "directory), and on any other failed check. Run the dry run with a real key "
+            "~/.config/safo/broker-client.yaml is missing or does not load (the line passes your numeric id and the "
+            "preflight finds your home itself), and on any other failed check. Run the dry run with a real key "
             "before this step.",
             (
                 ssh(
                     f'sh -c "{RELEASE_PYTHON} -I -m safo.gemini_preflight --enabling '
-                    f"--client-config $(getent passwd {login} | cut -d: -f6)/.config/safo/broker-client.yaml "
+                    f"--maintainer-uid $(id -u {login}) "
                     '&& printf \\"enabled\\\\n\\" > /etc/safo/gemini-paid-enabled '
                     '&& chmod 0644 /etc/safo/gemini-paid-enabled"'
                 ),

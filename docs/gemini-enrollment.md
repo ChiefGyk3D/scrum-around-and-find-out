@@ -458,7 +458,9 @@ checks `/etc/safo/broker.yaml` (written by the "Create the broker configuration"
 owns it, group and others cannot write it, it loads through the same loader the service uses, and it lists at least one
 allowed uid. `client-config` checks your own `~/.config/safo/broker-client.yaml` (copy `examples/broker-client.example.yaml`,
 mode 0600, in a 0700 directory, and set the key file and the principal): it exists and loads. Root runs the last step, so that
-line passes `--client-config` with the path to your home; run the preflight yourself without the flag and it looks in your own.
+line passes `--maintainer-uid $(id -u LOGIN)` (a number); the preflight looks up that account's home itself, opens the file
+without following links, judges the opened descriptor and every directory above it (none writable by group or others),
+and accepts only a file owned by root or that account. Run the preflight yourself without the flag and it looks in your own home.
 The interpreter in that line is the one the installer builds, `/opt/safo-broker/current/venv/bin/python`.
 
 The one way past the observe-mode failure is the flag `--ack-observe-mode`, which you add to that line yourself. Observe

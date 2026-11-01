@@ -359,7 +359,11 @@ def test_the_config_here_document_runs_and_writes_a_root_file_with_the_account_i
 def test_the_enable_step_is_still_last_and_its_preflight_checks_the_users_client_config() -> None:
     doc = text()
     line = next(x for x in switch_lines(doc) if "printf" in x)
-    assert "--client-config " in line and "/.config/safo/broker-client.yaml" in line
-    assert line.index("--client-config") < line.index("&&")
-    assert "getent passwd MAINTAINER_LOGIN" in line  # the maintainer's own home, not root's
+    # the preflight is told WHO the maintainer is by number; it looks the home up itself, in Python. No value read from
+    # a data file (the passwd file) ever reaches the root shell's command line.
+    assert "--maintainer-uid $(id -u MAINTAINER_LOGIN)" in line
+    assert line.index("--maintainer-uid") < line.index("&&")
+    for banned in ("getent", "cut ", "--client-config", "/etc/passwd", "~"):
+        assert banned not in line, banned
+    assert line.count("$(") == 1  # the one expansion is the numeric id
     assert doc.rindex("### Step ") < doc.index(line)

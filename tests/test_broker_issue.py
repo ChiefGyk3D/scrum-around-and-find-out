@@ -277,7 +277,9 @@ def test_a_lock_timeout_while_taking_the_issued_lock_is_busy_not_internal(rig: R
     assert rig.offer(text_req()).nonce  # and once the lock is free the same request is served
 
 
-def test_a_timeout_raised_inside_the_locked_body_is_not_turned_into_busy(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_timeout_raised_inside_the_locked_body_is_not_turned_into_busy(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Only the timeout of TAKING the lock is `busy`; a TimeoutError from the work under the lock is a bug and must
     surface as itself (the server answers it `internal`)."""
 

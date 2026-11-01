@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 import io
 import os
+import pwd
 import shutil
 import stat
 from collections.abc import Sequence
@@ -96,7 +97,9 @@ def make_tree(tmp_path: Path, *, signers_lines: list[str] | None = None) -> pf.L
     (state / "epoch").write_text("x")
     (state / "epoch").chmod(0o600)
     broker = etc / "broker.yaml"
-    broker.write_text((EXAMPLES / "broker.example.yaml").read_text().replace("allowed_uids: []", "allowed_uids: [1000]"))
+    broker.write_text(
+        (EXAMPLES / "broker.example.yaml").read_text().replace("allowed_uids: []", "allowed_uids: [1000]")
+    )
     broker.chmod(0o644)
     client = root / "home" / ".config" / "safo" / "broker-client.yaml"
     client.parent.mkdir(parents=True)
@@ -737,3 +740,114 @@ def test_loading_the_configs_opens_no_connection(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(socket, "create_connection", refuse)
     checks = pf.run_preflight(make_tree(tmp_path), FakeRunner(), lookup_ok)
     assert {c.status for c in checks} == {"pass"}
+
+
+# -- hardening of the client-config read (#298 review) ------------------------------------------------------------------
+
+WEIRD = ["a b", 'q"uote', "d$ollar", "back`tick", "new\nline", "semi;colon", "tab\there", "glob*", "(paren)"]
+
+
+def client_tree(tmp_path: Path, home_parts: list[str]) -> pf.Locations:
+    loc = make_tree(tmp_path)
+    home = tmp_path.joinpath("weird-home", *home_parts)
+    target = home / ".config" / "safo" / "broker-client.yaml"
+    target.parent.mkdir(parents=True)
+    shutil.copyfile(EXAMPLES / "broker-client.example.yaml", target)
+    target.chmod(0o600)
+    return dataclasses.replace(loc, client_config=target, maintainer_uid=os.getuid())
+
+
+def test_a_home_with_spaces_quotes_dollars_backticks_newlines_or_a_semicolon_is_read_as_data(tmp_path: Path) -> None:
+    """The home is a path in Python, never text in a shell: every awkward name loads and nothing is expanded."""
+    for number, name in enumerate(WEIRD):
+        loc = client_tree(tmp_path / str(number), [name])
+        got = client_check(loc)
+        assert got.status == "pass", (name, got)
+        assert name not in got.detail  # and the path is not echoed into the report
+
+
+def test_the_maintainer_uid_flag_finds_the_home_in_python_and_a_bad_value_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+    import unittest.mock as mock
+
+    seen: list[tuple[Path | None, int | None]] = []
+
+    def fake(loc: pf.Locations, runner: object, lookup: object, **kw: object) -> int:
+        seen.append((loc.client_config, loc.maintainer_uid))
+        return 0
+
+    for name in WEIRD:
+        home = f"/h/{name}"
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid, home=home: types.SimpleNamespace(pw_dir=home))
+        with mock.patch.object(pf, "main_with", fake):
+            assert pf.main(["--maintainer-uid", "1234"]) == 0
+        assert seen[-1] == (Path(home) / ".config" / "safo" / "broker-client.yaml", 1234)
+    with mock.patch.object(pf, "main_with", fake):
+        for bad in ("", "-1", "12a", "$(id -u)", "1;2", "99999999999", "1 2"):
+            assert pf.main(["--maintainer-uid", bad]) == 2, bad
+        assert pf.main(["--maintainer-uid"]) == 2
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: types.SimpleNamespace(pw_dir="relative/home"))
+        assert pf.main(["--maintainer-uid", "5"]) == 2  # a home that is not absolute is refused
+        monkeypatch.setattr(pwd, "getpwuid", mock.Mock(side_effect=KeyError("no such uid")))
+        assert pf.main(["--maintainer-uid", "5"]) == 2
+
+
+def test_the_client_config_is_judged_on_the_opened_descriptor_not_on_a_path_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loc = client_tree(tmp_path, ["h"])
+
+    def no_lookup(*args: object, **kw: object) -> None:
+        raise AssertionError("a path was inspected by name instead of by the opened descriptor")
+
+    monkeypatch.setattr(os, "lstat", no_lookup)
+    monkeypatch.setattr(Path, "lstat", no_lookup)
+    assert pf.check_client_config(loc).status == "pass"  # this check alone: the other checks do look files up
+
+
+def test_a_client_config_under_a_directory_others_can_write_is_not_trusted(tmp_path: Path) -> None:
+    loc = client_tree(tmp_path, ["h"])
+    assert loc.client_config is not None
+    home = loc.client_config.parents[2]
+    for mode in (0o777, 0o775, 0o757, 0o1777):  # a sticky bit does not help a directory this account owns
+        home.chmod(mode)
+        got = client_check(loc)
+        assert got.status == "fail" and "directory" in got.detail and "writable" in got.detail, (oct(mode), got)
+    home.chmod(0o700)
+    loc.client_config.parent.chmod(0o770)  # the directory that holds the file
+    assert client_check(loc).status == "fail"
+    loc.client_config.parent.chmod(0o700)
+    assert client_check(loc).status == "pass"
+
+
+def test_a_symbolic_link_in_the_file_or_in_a_parent_is_refused(tmp_path: Path) -> None:
+    loc = client_tree(tmp_path, ["h"])
+    assert loc.client_config is not None
+    real = loc.client_config.with_name("real.yaml")
+    loc.client_config.rename(real)
+    loc.client_config.symlink_to(real)
+    assert client_check(loc).status == "fail" and "link" in client_check(loc).detail
+    loc.client_config.unlink()
+    real.rename(loc.client_config)
+    home = loc.client_config.parents[2]
+    moved = home.with_name("moved")
+    home.rename(moved)
+    home.symlink_to(moved)
+    assert client_check(loc).status == "fail"
+
+
+def test_a_root_run_accepts_only_root_or_the_named_maintainer_as_the_file_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run as root the preflight must not accept a file owned by just any account."""
+    loc = client_tree(tmp_path, ["h"])
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    mine = os.getuid()
+    assert client_check(dataclasses.replace(loc, maintainer_uid=mine)).status == "pass"
+    for other in (None, mine + 1):
+        got = client_check(dataclasses.replace(loc, maintainer_uid=other))
+        assert got.status == "fail" and "owner" in got.detail, (other, got)
+    monkeypatch.setattr(os, "geteuid", lambda: mine)  # not root: only the caller's own file passes
+    assert client_check(dataclasses.replace(loc, maintainer_uid=mine + 1)).status == "pass"
