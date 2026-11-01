@@ -59,6 +59,17 @@ def imported_names(path: Path, name: str, is_package: bool) -> tuple[set[str], l
                 arg = node.args[0] if node.args else None
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     found.add(arg.value)
+                elif (
+                    isinstance(arg, ast.JoinedStr)
+                    and arg.values
+                    and isinstance(arg.values[0], ast.FormattedValue)
+                    and isinstance(arg.values[0].value, ast.Name)
+                    and arg.values[0].value.id == "__name__"
+                    and len(arg.values) > 1
+                    and isinstance(arg.values[1], ast.Constant)
+                    and str(arg.values[1].value).startswith(".")
+                ):
+                    continue  # f"{__name__}.x": a submodule of the package the file is in, which is walked already
                 elif isinstance(arg, ast.JoinedStr) and arg.values and isinstance(arg.values[0], ast.Constant):
                     prefix = str(arg.values[0].value)
                     if prefix.startswith("safo.broker."):
@@ -149,6 +160,10 @@ def test_the_check_fails_on_a_dynamic_import_it_cannot_judge(tmp_path: Path) -> 
     assert "cv2" in outside and not problems  # a literal name is judged like an import
     computed = build_tree(tmp_path / "b", "import importlib\nimportlib.import_module(name)\n")
     assert external_imports(computed, "safo.broker")[1], "a computed name is a problem"
+    own = build_tree(tmp_path / "d", "import importlib\nimportlib.import_module(f'{__name__}.x')\n")
+    assert not external_imports(own, "safo.broker")[1], "a submodule of the file's own package is judged by the walk"
+    other = build_tree(tmp_path / "e", "import importlib\nimportlib.import_module(f'{other}.x')\n")
+    assert external_imports(other, "safo.broker")[1], "a computed name from anything else is a problem"
     sneaky = build_tree(tmp_path / "c", "import importlib\nimportlib.import_module(f'cv{2}')\n")
     assert external_imports(sneaky, "safo.broker")[1]
 
