@@ -37,7 +37,18 @@ from safo import output
 MAX_FILE = 4_000_000  # bytes read from any one file; a bigger file is a fail
 BAD_GROUPS = ("root", "sudo", "wheel", "admin", "docker", "lxd", "lxc", "libvirt", "disk", "shadow")
 STDIN_KEYS = ("StandardInput", "StandardInputText", "StandardInputData")
-UNIT_KEYS = ("ExecStart", "ExecCondition", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost", "ExecReload")
+UNIT_KEYS = (
+    "ExecStart",
+    "ExecCondition",
+    "ExecStartPre",
+    "ExecStartPost",
+    "ExecStop",
+    "ExecStopPre",
+    "ExecStopPost",
+    "ExecReload",
+    "ExecStartChown",
+)
+HANDLED_UNITS = {"service": "Service", "socket": "Socket"}  # unit type -> the section that holds its commands
 HOME_KEYS = ("EnvironmentFile", "WorkingDirectory")
 CRON_VAR = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*=")
 EXAMPLES = 3
@@ -94,19 +105,20 @@ class DoorPaths:
         Path("/run/systemd/system-generators"),
         Path("/usr/lib/systemd/system-environment-generators"),
     )
+    # in systemd's search order, highest priority first (a drop-in file name seen in an earlier folder masks later ones)
     unit_dirs: tuple[Path, ...] = (
-        Path("/etc/systemd/system"),
-        Path("/usr/lib/systemd/system"),
-        Path("/usr/local/lib/systemd/system"),
-        Path("/run/systemd/system"),
-        Path("/run/systemd/transient"),
-        Path("/run/systemd/generator"),
-        Path("/run/systemd/generator.early"),
-        Path("/run/systemd/generator.late"),
-        Path("/run/systemd/system.control"),
-        Path("/run/systemd/system.attached"),
         Path("/etc/systemd/system.control"),
+        Path("/run/systemd/system.control"),
+        Path("/run/systemd/transient"),
+        Path("/run/systemd/generator.early"),
+        Path("/etc/systemd/system"),
         Path("/etc/systemd/system.attached"),
+        Path("/run/systemd/system"),
+        Path("/run/systemd/system.attached"),
+        Path("/run/systemd/generator"),
+        Path("/usr/local/lib/systemd/system"),
+        Path("/usr/lib/systemd/system"),
+        Path("/run/systemd/generator.late"),
     )
     cron_files: tuple[Path, ...] = (Path("/etc/crontab"),)
     cron_dirs: tuple[Path, ...] = (Path("/etc/cron.d"),)
@@ -825,7 +837,32 @@ def _candidates_hit(
             regular = False
         if not regular:
             return f"names {_show(candidate)}, which is not an existing regular file; {HUMAN}"
+    for candidate in folders:
+        if os.path.isdir(candidate):
+            hit = _folder_contents_hit(candidate, who, cache, floor)
+            if hit:
+                return hit
     return None
+
+
+FOLDER_ENTRY_LIMIT = 20_000
+
+
+def _folder_contents_hit(folder: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
+    """A folder named on a command line: nothing in it may be writable by the account, no link in it may lead somewhere
+    the account can reach, and the walk must finish, else a human looks."""
+    scan = _Scan(FOLDER_ENTRY_LIMIT)
+    for path, info in scan.walk(Path(folder)):
+        if stat.S_ISLNK(info.st_mode):
+            real = os.path.realpath(path)
+            if not os.path.exists(real):
+                return f"{_show(folder)} holds a link, {_show(path)}, that does not resolve; {HUMAN}"
+            if _in_home(real, who) or _chain_writable(real, who, cache, floor) is not None:
+                return f"{_show(folder)} holds a link, {_show(path)}, that leads where the account can reach"
+        elif who.can_write(info):
+            return f"{_show(folder)} holds {_show(path)}, which the account can write"
+    failure = scan.failure(f"the scan of {_show(folder)}")
+    return f"{failure}; {HUMAN}" if failure else None
 
 
 def _split_command(text: str) -> list[str] | None:
@@ -836,40 +873,61 @@ def _split_command(text: str) -> list[str] | None:
 
 
 SINGLE_KEYS = frozenset({"StandardInput", "StandardInputText", "StandardInputData", "WorkingDirectory"})
+EXEC_PREFIXES = "-:+!@"
 
 
-def _assignments(text: str) -> list[tuple[str, str]]:
+def _assignments(text: str, section: str) -> list[tuple[str, str]]:
+    """The assignments of one section, in order. Anything outside that section is ignored, as systemd ignores it."""
     found: list[tuple[str, str]] = []
+    current = ""
     for line in _logical_lines(text):
         if line.startswith(("#", ";")):
             continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            continue
+        if current != section:
+            continue
         key, _, value = line.partition("=")
         key, value = key.strip(), value.strip()
-        if key == "User" or key in UNIT_KEYS or key in HOME_KEYS or key in STDIN_KEYS:
+        if key in ("User", "PermissionsStartOnly") or key in UNIT_KEYS or key in HOME_KEYS or key in STDIN_KEYS:
             found.append((key, value))
     return found
 
 
 def _unit_hits(
-    assignments: list[tuple[str, str]], who: _Who, cache: dict[str, os.stat_result | None], floor: str
+    assignments: list[tuple[str, str]],
+    who: _Who,
+    cache: dict[str, os.stat_result | None],
+    floor: str,
+    socket: bool = False,
 ) -> str | None:
     """The merged unit: the base file and its drop-ins in order, the last assignment winning for a single-value key,
-    an empty assignment clearing a list, and every other assignment adding to it."""
+    an empty assignment clearing a list, and every other assignment adding to it. A command runs as root when the unit
+    does (a socket unit's commands always do), when it carries the plus or bang prefix, or, with PermissionsStartOnly,
+    when it is not the main command. Files the manager reads (environment, working folder, input) count whoever the
+    user is."""
     user = ""
+    start_only = False
     merged: dict[str, list[str]] = {}
     for key, value in assignments:
         if key == "User":
             user = value
+        elif key == "PermissionsStartOnly":
+            start_only = value.lower() not in ("false", "no", "0", "off", "")
         elif key in SINGLE_KEYS:
             merged[key] = [value] if value else []
         elif not value:
             merged[key] = []
         else:
             merged.setdefault(key, []).append(value)
-    if user not in ("", "root", "0") and not re.search(r"[%$]", user):
-        return None
+    root_unit = socket or user in ("", "root", "0") or bool(re.search(r"[%$]", user))
     for key, values in merged.items():
         for value in values:
+            if key in UNIT_KEYS:
+                prefix = value[: len(value) - len(value.lstrip(EXEC_PREFIXES))]
+                if not (root_unit or "+" in prefix or "!" in prefix or (start_only and key != "ExecStart")):
+                    continue
             hit = _entry_hit(key, value, who, cache, floor)
             if hit:
                 return hit
@@ -903,7 +961,7 @@ def _entry_hit(key: str, value: str, who: _Who, cache: dict[str, os.stat_result 
 
 
 def _fragment(
-    path: Path, name: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str
+    path: Path, name: str, section: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str
 ) -> tuple[list[tuple[str, str]], str | None]:
     """The assignments of a unit file or drop-in, or a finding. A link is resolved: its target (and every folder on the
     way) must be out of the account's reach, else the link is a finding; one that does not resolve fails closed. A link
@@ -927,52 +985,78 @@ def _fragment(
             return [], f"is a link to {_show(real)}, which the account can replace through {_show(writable)}"
     elif not stat.S_ISREG(info.st_mode):
         raise _Problem(f"unit {_show(name)} cannot be read (it is not a regular file)")
-    return _assignments(_text(Path(real), f"unit {_show(name)}", None)), None
+    return _assignments(_text(Path(real), f"unit {_show(name)}", None), section), None
 
 
 def _applies(unit: str, dropin: str) -> bool:
-    """Whether the drop-in folder `dropin` (its name without .d) belongs to `unit`, as systemd matches them."""
-    if dropin in (unit, "service"):
+    """Whether the drop-in folder `dropin` (its name without .d) belongs to `unit`, as systemd matches them: the unit's
+    own folder, the one for its whole type, and the ones for each leading part of its name up to a dash."""
+    kind = unit.rsplit(".", 1)[-1]
+    if dropin in (unit, kind):
         return True
-    return dropin.endswith("-.service") and unit.startswith(dropin[: -len(".service")])
+    suffix = "-." + kind
+    return dropin.endswith(suffix) and unit.startswith(dropin[: -len("." + kind)])
 
 
-def _unit_findings(door: DoorPaths, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> list[str]:
+_INSTANCE = re.compile(r"(.+)@(.+)\.([A-Za-z]+)")
+
+
+def _unit_findings(
+    door: DoorPaths, who: _Who, cache: dict[str, os.stat_result | None], floor: str
+) -> tuple[list[str], list[str]]:
     bases: dict[str, list[Path]] = {}
     dropdirs: list[tuple[str, Path]] = []
+    unhandled: list[str] = []
     for folder in door.unit_dirs:
         if not _folder_state(folder, f"unit folder {_show(folder)}"):
             continue
         for name in sorted(os.listdir(folder)):
             path = folder / name
-            if name.endswith(".service"):
+            if name.endswith(".d"):
+                label = name[:-2]
+                if not _folder_state(path, f"drop-in folder {_show(name)}"):
+                    continue
+                if label.rsplit(".", 1)[-1] in HANDLED_UNITS:
+                    dropdirs.append((label, path))
+                else:
+                    unhandled.append(_show(name))
+            elif "." in name and name.rsplit(".", 1)[-1] in HANDLED_UNITS:
                 bases.setdefault(name, []).append(path)
-            elif (name.endswith(".service.d") or name == "service.d") and _folder_state(
-                path, f"drop-in folder {_show(name)}"
-            ):
-                dropdirs.append((name[:-2], path))
-    units = set(bases) | {d for d, _ in dropdirs if d.endswith(".service") and not d.endswith("-.service")}
+    units = set(bases)
+    for label, _ in dropdirs:
+        if "." in label and not label.endswith("-." + label.rsplit(".", 1)[-1]):
+            units.add(label)
     hits: list[str] = []
     for unit in sorted(units):
+        kind = unit.rsplit(".", 1)[-1]
+        instance = _INSTANCE.fullmatch(unit)
+        template = f"{instance.group(1)}@.{instance.group(3)}" if instance else None
+        names = [unit] + ([template] if template else [])
         confs: list[tuple[str, Path]] = []
-        for dname, dpath in dropdirs:
-            if _applies(unit, dname):
-                confs.extend((c, dpath / c) for c in sorted(os.listdir(dpath)) if c.endswith(".conf"))
+        seen: set[str] = set()
+        for dname, dpath in dropdirs:  # in folder priority order: the first file of a name masks the others
+            if any(_applies(n, dname) for n in names):
+                for conf in sorted(os.listdir(dpath)):
+                    if conf.endswith(".conf") and conf not in seen:
+                        seen.add(conf)
+                        confs.append((conf, dpath / conf))
         confs.sort(key=lambda item: item[0])  # systemd reads them in file name order, whatever the folder
+        base_files: list[Path | None] = [*bases.get(unit, [])] or ([*bases.get(template or "", [])] or [None])
+        if instance and base_files == [None]:
+            raise _Problem(f"unit {_show(unit)} is a template instance and its template base file is missing")
         label = f"unit {_show(unit)}" + (f" with drop-ins {_show(', '.join(c for c, _ in confs))}" if confs else "")
-        base_files: list[Path | None] = [*bases.get(unit, [])] or [None]
         for base in base_files:
             assignments: list[tuple[str, str]] = []
             found: str | None = None
             for fname, fpath in ([(unit, base)] if base else []) + confs:
-                part, found = _fragment(fpath, fname, who, cache, floor)
+                part, found = _fragment(fpath, fname, HANDLED_UNITS[kind], who, cache, floor)
                 if found:
                     break
                 assignments.extend(part)
-            found = found or _unit_hits(assignments, who, cache, floor)
+            found = found or _unit_hits(assignments, who, cache, floor, socket=kind == "socket")
             if found:
                 hits.append(f"{label} {found}")
-    return hits
+    return hits, unhandled
 
 
 def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
@@ -997,9 +1081,11 @@ def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], flo
 def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
     cache: dict[str, os.stat_result | None] = {}
     hits: list[str] = []
+    unhandled: list[str] = []
     floor = str(door.chain_floor)
     try:
-        hits.extend(_unit_findings(door, who, cache, floor))
+        unit_hits, unhandled = _unit_findings(door, who, cache, floor)
+        hits.extend(unit_hits)
         files = list(door.cron_files)
         for folder in door.cron_dirs:
             if _folder_state(folder, f"cron folder {_show(folder)}"):
@@ -1020,6 +1106,12 @@ def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
         return Finding("jobs", "fail", "a unit or cron folder cannot be read (it cannot be listed)")
     if hits:
         return Finding("jobs", "fail", _sentence("a root-run job is open to the account:", hits))
+    if unhandled:
+        return Finding(
+            "jobs",
+            "warn",
+            _sentence("drop-in folders exist for unit types this check does not read:", unhandled),
+        )
     return Finding(
         "jobs",
         "pass",

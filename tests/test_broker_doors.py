@@ -1785,3 +1785,166 @@ def test_hardening_reads_ask_for_no_access_time_update_and_fall_back_when_refuse
     found = w.run()
     assert seen and any(f & noatime for f in seen) and any(not f & noatime for f in seen)
     assert status(found, "sudo") == "pass"
+
+
+# -- hardening, unit merging details ----------------------------------------------
+
+
+@pytest.mark.parametrize("prefix", ["+", "!", "!!", "-+", "+-"])
+def test_hardening_elevated_command_prefixes_run_as_root_whatever_the_user(w: World, prefix: str) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", unit(prefix + str(payload), user="nobody"))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_plain_command_of_another_user_is_not_a_root_job(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", unit(str(payload), user="nobody"))
+    assert status(w.run(), "jobs") == "pass"
+
+
+@pytest.mark.parametrize("key", ["ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost", "ExecReload"])
+def test_hardening_permissions_start_only_makes_the_other_commands_root(w: World, key: str) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    text = f"[Service]\nUser=nobody\nExecStart=/bin/true\n{key}={payload}\n"
+    put(w.units / "a.service", text)
+    assert status(w.run(), "jobs") == "pass"
+    put(w.units / "a.service", text + "PermissionsStartOnly=true\n")
+    assert status(w.run(), "jobs") == "fail"
+    put(w.units / "a.service", text + "PermissionsStartOnly=true\nPermissionsStartOnly=false\n")
+    assert status(w.run(), "jobs") == "pass"
+
+
+def test_hardening_files_the_manager_reads_count_whoever_the_user_is(w: World) -> None:
+    put(w.units / "a.service", unit("/bin/true", user="nobody") + f"EnvironmentFile={w.home}/env\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_only_the_service_section_is_read(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", f"[Unit]\nUser=root\nExecStart={payload}\n[Service]\nUser=nobody\nExecStart={payload}\n")
+    assert status(w.run(), "jobs") == "pass"
+    put(w.units / "a.service", f"User=root\nExecStart={payload}\n")
+    assert status(w.run(), "jobs") == "pass"
+    dropin(w, "a.service", "10-x.conf", "[Install]\nUser=root\n[Service]\nExecStart=\n")
+    assert status(w.run(), "jobs") == "pass"
+    put(w.units / "b.service", f"[Service]\nExecStart={payload}\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_drop_in_name_in_a_higher_priority_folder_masks_the_same_name_below(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    high = folder(w.t / "high")
+    put(w.units / "a.service", unit(str(payload), user="nobody"))
+    dropin(w, "a.service", "10-x.conf", "[Service]\nUser=root\n")
+    assert status(w.run(unit_dirs=(w.units,)), "jobs") == "fail"
+    dropin(w, "a.service", "10-x.conf", "[Service]\nUser=nobody\n", high)
+    assert status(w.run(unit_dirs=(high, w.units)), "jobs") == "pass"  # the higher folder's 10-x.conf wins
+    assert status(w.run(unit_dirs=(w.units, high)), "jobs") == "fail"  # here the other one is higher
+
+
+def test_hardening_socket_unit_commands_run_as_root_and_their_drop_ins_are_read(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.socket", f"[Socket]\nListenStream=/run/x\nExecStartPre={payload}\n")
+    assert status(w.run(), "jobs") == "fail"
+    put(w.units / "a.socket", "[Socket]\nListenStream=/run/x\n")
+    assert status(w.run(), "jobs") == "pass"
+    put(w.units / "a.socket.d" / "10-x.conf", f"[Socket]\nExecStopPost={payload}\n")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "10-x.conf" in found["jobs"].text
+    (w.units / "a.socket.d" / "10-x.conf").unlink()
+    put(w.units / "socket.d" / "10-y.conf", f"[Socket]\nExecStartChown={payload}\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_drop_in_folders_for_unread_unit_types_are_reported(w: World) -> None:
+    folder(w.units / "a.timer.d")
+    found = w.run()
+    assert status(found, "jobs") == "warn" and "a.timer.d" in found["jobs"].text
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "b.service", unit(str(payload)))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_template_instance_uses_the_template_base_and_both_drop_ins(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "t@.service", unit(str(payload), user="nobody"))
+    assert status(w.run(), "jobs") == "pass"
+    dropin(w, "t@x.service", "10-root.conf", "[Service]\nUser=root\n")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "t@x.service" in found["jobs"].text
+    (w.units / "t@x.service.d" / "10-root.conf").unlink()
+    dropin(w, "t@.service", "10-root.conf", "[Service]\nUser=root\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_prefix_drop_in_reaches_a_template_instance(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "t-u@.service", unit(str(payload), user="nobody"))
+    dropin(w, "t-u@x.service", "10-a.conf", "[Service]\nEnvironment=A=1\n")
+    assert status(w.run(), "jobs") == "pass"
+    put(w.units / "t-.service.d" / "10-root.conf", "[Service]\nUser=root\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_template_instance_without_its_template_base_fails_closed(w: World) -> None:
+    dropin(w, "t@x.service", "10-a.conf", "[Service]\nUser=nobody\n")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "template base file is missing" in found["jobs"].text
+
+
+def test_hardening_an_instance_file_of_its_own_is_used_before_the_template(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "t@.service", unit("/bin/true"))
+    put(w.units / "t@x.service", unit(str(payload)))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_folder_argument_with_a_writable_entry_fails(w: World) -> None:
+    data = folder(w.t / "data")
+    put(data / "ok", "x")
+    put(w.units / "a.service", unit(f"/bin/true {data}"))
+    assert status(w.run(), "jobs") == "pass"
+    put(data / "bad", "x", 0o666)
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "can write" in found["jobs"].text
+
+
+def test_hardening_a_folder_argument_with_a_link_into_reach_fails(w: World) -> None:
+    data = folder(w.t / "data")
+    (data / "l").symlink_to(w.home)
+    put(w.units / "a.service", unit(f"/bin/true {data}"))
+    assert status(w.run(), "jobs") == "fail"
+    (data / "l").unlink()
+    (data / "l").symlink_to(w.t / "nowhere")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_a_folder_argument_with_a_nested_writable_entry_fails(w: World) -> None:
+    data = folder(w.t / "data")
+    folder(data / "a" / "b")
+    put(data / "a" / "b" / "c", "x", 0o666)
+    put(w.units / "a.service", unit(f"/bin/true {data}"))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_folder_argument_too_big_to_walk_needs_a_human(w: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = folder(w.t / "data")
+    for i in range(5):
+        put(data / f"f{i}", "x")
+    monkeypatch.setattr(doors, "FOLDER_ENTRY_LIMIT", 3)
+    put(w.units / "a.service", unit(f"/bin/true {data}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+@needs_nonroot
+def test_hardening_an_unreadable_folder_argument_needs_a_human(w: World) -> None:
+    data = folder(w.t / "data")
+    folder(data / "locked", 0o000)
+    put(w.units / "a.service", unit(f"/bin/true {data}"))
+    try:
+        assert status(w.run(), "jobs") == "fail"
+    finally:
+        (data / "locked").chmod(0o755)
