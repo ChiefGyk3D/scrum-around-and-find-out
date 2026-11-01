@@ -24,9 +24,9 @@ RELEASE_PYTHON = "/opt/safo-broker/current/venv/bin/python"
 
 UID_MARK = "ACCOUNT_UID_HERE"
 # The broker config, written by the "Create the broker configuration" step. This text is also
-# examples/broker.example.yaml
-# (a test requires the two to be the same apart from the licence line and the account id), and it loads through safo.broker.config. It has
-# no dollar sign, backtick or backslash, so the unquoted here-document expands only the id the step inserts.
+# examples/broker.example.yaml (a test requires the two to be the same apart from the licence line and the account
+# id), and it loads through safo.broker.config. It has no dollar sign, backtick or backslash, so the unquoted
+# here-document expands only the id the step inserts.
 BROKER_CONFIG = """\
 # /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it
 # once, at start; restart the service after any change. It is root-owned because prices and caps decide what a call
