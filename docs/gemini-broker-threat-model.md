@@ -181,7 +181,7 @@ are `tests/test_broker_*.py` and `tests/test_gemini_*.py`.
   caller-supplied source path, and a broker started below the floor all refuse; failure injected at each install stage
   leaves the previous release active and the version file unchanged. `check-install` (`tests/test_broker_admin.py`) checks the
   release link and folder, the version record, the floor, the installed units against the signed release and its manifest,
-  the egress helper and the switch; it does not walk every path of the system (see R16).
+  the egress helper and the switch, and, since #293, runs the root-door checks (see R16).
 - **Residual.** The signed code and the wheels can still be bad: wheel code runs as the broker user, so the maintainer's
   reading of the diff and the dependency list, and the cyber-tier review, are the controls. A stolen release key whose
   PIN is known, or a maintainer who confirms without reading, defeats the gate. The first install is trust on first use of
@@ -330,15 +330,17 @@ are `tests/test_broker_*.py` and `tests/test_gemini_*.py`.
 
 ### R16. A root-equivalent door on the maintainer's account
 
-- **Mitigation.** The maintainer reviews by hand today (the administration command `check-install` does not do this yet; its output says so, and a read-only check is **not built yet**, issue #293) and fixes or explains in writing any hit: any `sudo` rule for the
+- **Mitigation.** The administration command `check-install` runs read-only checks for most of this since #293 (`src/safo/broker/doors.py`; see "The root-door precondition"), and the maintainer fixes or explains in writing any hit: any `sudo` rule for the
   account (`sudo -l -U`, not only `sudo -n true`), root-equivalent group membership (including `docker`, `lxd`, `disk`),
   polkit rules that grant the account actions, root-owned paths under `/etc`, `/usr/local`, `/opt` and the unit,
   cron and sudoers directories that the account can write, root-run units, timers and jobs that execute a file the
   account can write or read files from its home, and setuid, setgid or file-capability files not owned by a package.
   The design lists the review in full ("The root-door precondition").
-- **Verification.** Tests of a check against a fake sudoers output, a fake group database, a temporary tree with writable
-  root-run scripts and units, and a fake polkit directory are **not built yet** (issue #293). Commands on the installed
-  system: `sudo -l -U LOGIN`, `id -nG`.
+- **Verification.** `tests/test_broker_doors.py` runs each check against a temporary tree: fake sudoers files, a fake group
+  database, writable root-run scripts and units, fake polkit folders, setuid files with and without a package list, and
+  for each the hostile cases (a symbolic link, a wrong owner, a world-writable path, a missing path, an unreadable path),
+  plus a test that the module runs no program and opens nothing for writing. `tests/test_broker_admin.py` pins the wiring
+  into `check-install`. Commands on the installed system that the checks do not run: `sudo -l -U LOGIN`, `id -nG`.
 - **Residual (a documented, accepted risk).** The checks are partial and a snapshot. They cannot see a kernel or privileged
   service flaw, a package-owned setuid program with a local bug, a privileged socket the checks do not list, access control
   lists they do not read, a root process started later, or physical access. A clean report means "no door found by these

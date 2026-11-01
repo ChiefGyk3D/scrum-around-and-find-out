@@ -37,15 +37,20 @@ from brokerdata import (
 )
 from safo import output
 from safo.broker import admin
+from safo.broker.doors import DoorPaths
 from safo.broker.errors import IllegalTransition, LedgerError
 from safo.broker.ledger import AdminWho, CallLedger
 from safo.broker.money import MICRO, format_usd
 from safo.broker.policy import Caps, Policy
 from safo.broker.prices import parse_prices
 from safo.broker.states import CallState
+from test_broker_doors import World
 
 LATER = NOW + dt.timedelta(seconds=30)
-WHO = AdminWho(uid=0, sudo_uid=1000)
+SUDO_USER = (
+    4001  # the uid "sudo" reports; not a uid a test runner has, so files the tests create are not the maintainer's
+)
+WHO = AdminWho(uid=0, sudo_uid=SUDO_USER)
 BIG = Caps(job_micro=2_500_000, month_micro=10_000_000)
 SERVICE_UID = 4242
 SERVICE_GID = 4343
@@ -149,8 +154,28 @@ def two_models(caps: Caps | None = None) -> Policy:
     return Policy(parse_prices(data), caps or Caps())
 
 
+DOOR_WORLDS: dict[Path, World] = {}
+
+
+def door_paths(tmp: Path, **over: Any) -> DoorPaths:
+    """A clean fake machine for the root-door checks, with the scans that walk many files switched off (the door
+    checks have their own tests in test_broker_doors.py). The maintainer is the uid `run` passes as SUDO_UID."""
+    quiet: dict[str, Any] = {
+        "writable_roots": (),
+        "unit_dirs": (),
+        "cron_files": (),
+        "cron_dirs": (),
+        "setuid_roots": (),
+        "system_trees": (),
+    }
+    if tmp not in DOOR_WORLDS:  # built once per test: building it again would rewrite files and move their times
+        DOOR_WORLDS[tmp] = World(tmp / "doors", maint=SUDO_USER)
+    return DOOR_WORLDS[tmp].door(**(quiet | over))
+
+
 def paths(tmp: Path) -> admin.Paths:
     return admin.Paths(
+        door=door_paths(tmp),
         state_dir=state_dir(tmp),
         switch=tmp / "etc" / "gemini-paid-enabled",
         min_version=tmp / "etc" / "broker-min-version",
@@ -175,7 +200,7 @@ def run(
         list(argv),
         ops=(ops or FakeOps()).as_ops(),
         paths=paths(tmp),
-        env={"SUDO_UID": "1000"} if env is None else env,
+        env={"SUDO_UID": str(SUDO_USER), "SUDO_USER": "maint"} if env is None else env,
         now=now,
         out=out,
         err=err,
@@ -652,7 +677,7 @@ def test_clear_of_an_ambiguous_call_settles_it_at_the_whole_reservation(tmp_path
     assert action["type"] == "admin_action" and resolved["type"] == "ambiguous_resolved"
     assert cleared["type"] == "suspension_cleared"
     assert resolved["actual_micro"] == 5000
-    assert (action["action"], action["uid"], action["sudo_uid"], action["model"]) == ("clear", 0, 1000, FLAT)
+    assert (action["action"], action["uid"], action["sudo_uid"], action["model"]) == ("clear", 0, SUDO_USER, FLAT)
     assert action["ts"] == "2026-10-30T12:00:30Z"
 
 
@@ -1386,11 +1411,86 @@ def test_the_unit_list_here_equals_the_installers() -> None:
     assert admin.UNIT_NAMES == installer.UNIT_NAMES == UNIT_NAMES
 
 
-def test_check_install_does_not_claim_the_root_door_checks(tmp_path: Path) -> None:
-    """Honest output: the sudo, group, polkit and writable-path checks are not part of this command, and it says so."""
+# -- check-install runs the root-door checks (#293) ------------------------------------------------------------------
+
+DOOR_NAMES = ("sudo", "groups", "polkit", "writable", "jobs", "preload", "setuid", "credential", "trees")
+
+
+def run_with_door(tmp: Path, door: DoorPaths, *, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    code = admin.run(
+        ["check-install"],
+        ops=FakeOps().as_ops(),
+        paths=dataclasses.replace(paths(tmp), door=door),
+        env={"SUDO_UID": str(SUDO_USER), "SUDO_USER": "maint"} if env is None else env,
+        now=LATER,
+        out=out,
+        err=err,
+    )
+    return code, out.getvalue(), err.getvalue()
+
+
+def test_check_install_reports_every_root_door_check_and_passes_on_a_clean_machine(tmp_path: Path) -> None:
     install(tmp_path)
-    _code, out, _ = run(tmp_path, "check-install")
-    assert "not checked here: sudo rules, root-equivalent groups, polkit, writable root-run paths" in out
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 0
+    for name in DOOR_NAMES:
+        assert f"nothing found: {name}: " in out
+    assert "not checked here" not in out
+    assert out.rstrip().splitlines()[-1].startswith("limits: ")
+
+
+def test_a_root_door_failure_makes_check_install_exit_1(tmp_path: Path) -> None:
+    install(tmp_path)
+    (tmp_path / "doors" / "w" / "sudoers.d" / "10-me").write_text("ALL ALL=(ALL) NOPASSWD: ALL\n")
+    (tmp_path / "doors" / "w" / "sudoers.d" / "10-me").chmod(0o440)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "fail: sudo: " in out
+
+
+def test_a_root_door_warning_alone_keeps_exit_0_but_is_not_called_ok(tmp_path: Path) -> None:
+    install(tmp_path)
+    (tmp_path / "doors" / "w" / "home" / "maint" / ".doppler").mkdir()
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 0 and "warn: credential: " in out
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"SUDO_UID": str(SUDO_USER)},
+        {"SUDO_UID": str(SUDO_USER), "SUDO_USER": "someone-else"},
+        {"SUDO_USER": "maint"},
+    ],
+)
+def test_check_install_fails_when_the_maintainer_cannot_be_identified(tmp_path: Path, env: dict[str, str]) -> None:
+    install(tmp_path)
+    out_code, out, _ = run(tmp_path, "check-install", env=env)
+    assert out_code == 1
+    for name in ("sudo", "groups", "polkit", "writable", "jobs", "setuid", "credential", "trees"):
+        assert f"fail: {name}: " in out
+    assert "nothing found: preload: " in out
+
+
+def test_check_install_scans_the_brokers_own_folders_for_writable_paths(tmp_path: Path) -> None:
+    install(tmp_path)
+    release = tmp_path / "opt" / "releases" / "1.2.3"
+    release.chmod(0o755)
+    (release / "units" / "safo-broker.service").chmod(0o666)
+    code, out, _ = run_with_door(tmp_path, door_paths(tmp_path))
+    assert code == 1 and "fail: writable: " in out and "safo-broker.service" in out
+    state = state_dir(tmp_path)
+    assert str(state) not in out  # an unrelated folder is not named
+
+
+def test_check_install_door_checks_leave_the_ledger_and_the_tree_alone(tmp_path: Path) -> None:
+    install(tmp_path)
+    ops = FakeOps()
+    before = sorted(str(p) for p in tmp_path.rglob("*"))
+    code, _, _ = run(tmp_path, "check-install", ops=ops)
+    assert code == 0 and ops.log == []
+    assert sorted(str(p) for p in tmp_path.rglob("*")) == before
 
 
 # -- check-install reads the egress config by the helper's rules (#299) ------------------------------------------------
