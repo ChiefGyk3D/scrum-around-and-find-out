@@ -110,7 +110,7 @@ class Paths:
     egress_helper: Path = Path("/usr/local/sbin/safo-broker-egress")
     egress_conf: Path = Path("/etc/safo/broker-egress.conf")
     trust_uid: int = 0  # who must own the root files above
-    door: doors.DoorPaths = doors.DoorPaths()  # where the root-door checks look (#293)
+    door: doors.DoorPaths = dataclasses.field(default_factory=doors.DoorPaths)  # where the root-door checks look (#293)
 
 
 @dataclasses.dataclass(frozen=True)

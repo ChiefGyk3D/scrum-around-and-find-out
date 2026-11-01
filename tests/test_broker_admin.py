@@ -47,7 +47,9 @@ from safo.broker.states import CallState
 from test_broker_doors import World
 
 LATER = NOW + dt.timedelta(seconds=30)
-SUDO_USER = 4001  # the uid "sudo" reports; not a uid a test runner has, so files the tests create are not the maintainer's
+SUDO_USER = (
+    4001  # the uid "sudo" reports; not a uid a test runner has, so files the tests create are not the maintainer's
+)
 WHO = AdminWho(uid=0, sudo_uid=SUDO_USER)
 BIG = Caps(job_micro=2_500_000, month_micro=10_000_000)
 SERVICE_UID = 4242
@@ -158,7 +160,13 @@ DOOR_WORLDS: dict[Path, World] = {}
 def door_paths(tmp: Path, **over: Any) -> DoorPaths:
     """A clean fake machine for the root-door checks, with the scans that walk many files switched off (the door
     checks have their own tests in test_broker_doors.py). The maintainer is the uid `run` passes as SUDO_UID."""
-    quiet: dict[str, Any] = {"writable_roots": (), "unit_dirs": (), "cron_files": (), "cron_dirs": (), "setuid_roots": ()}
+    quiet: dict[str, Any] = {
+        "writable_roots": (),
+        "unit_dirs": (),
+        "cron_files": (),
+        "cron_dirs": (),
+        "setuid_roots": (),
+    }
     if tmp not in DOOR_WORLDS:  # built once per test: building it again would rewrite files and move their times
         DOOR_WORLDS[tmp] = World(tmp / "doors", maint=SUDO_USER)
     return DOOR_WORLDS[tmp].door(**(quiet | over))
@@ -1402,7 +1410,7 @@ def test_the_unit_list_here_equals_the_installers() -> None:
     assert admin.UNIT_NAMES == installer.UNIT_NAMES == UNIT_NAMES
 
 
-# -- check-install runs the root-door checks (#293) -----------------------------------------------------------------------
+# -- check-install runs the root-door checks (#293) ------------------------------------------------------------------
 
 DOOR_NAMES = ("sudo", "groups", "polkit", "writable", "jobs", "preload", "setuid", "credential")
 

@@ -6,7 +6,8 @@ The whole broker design assumes the maintainer's account has no way to become ro
 of door and returns ONE finding: `pass`, `warn` or `fail`, with one plain sentence.
 
 * **Read-only.** Files are opened read-only without following a final symbolic link; directories are listed with
-  `scandir`; metadata comes from `lstat`. No program is run (neither the sudo listing command nor the package manager), no privilege is requested, and
+  `scandir`; metadata comes from `lstat`. No program is run (neither the sudo listing command nor the package
+  manager), no privilege is requested, and
   nothing is written. The command is root-only for reasons of its own (it reads root-owned files); these checks need
   nothing a root-owned read does not already give them, and a path that cannot be read is a **fail**, never a pass.
 * **Fail closed.** A missing file that must exist, a file with the wrong owner, one that others can write, a symbolic
@@ -275,7 +276,9 @@ def _load_who(door: DoorPaths, trust: int, uid: int) -> _Who:
 
 def _check_groups(who: _Who) -> Finding:
     if who.uid == 0 or who.gid == 0:
-        return Finding("groups", "fail", f"the account {_show(who.login)} is root itself or has root as its primary group")
+        return Finding(
+            "groups", "fail", f"the account {_show(who.login)} is root itself or has root as its primary group"
+        )
     bad = sorted(name for name in who.group_names if name in BAD_GROUPS)
     if bad:
         return Finding("groups", "fail", f"the account is in root-equivalent groups: {', '.join(bad)}")
@@ -316,7 +319,9 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
             for name in sorted(os.listdir(door.sudoers_d)):
                 if "." in name or name.endswith("~"):  # sudo does not read these
                     continue
-                sources.append((name, _logical_lines(_text(door.sudoers_d / name, f"sudoers file {_show(name)}", trust))))
+                sources.append(
+                    (name, _logical_lines(_text(door.sudoers_d / name, f"sudoers file {_show(name)}", trust)))
+                )
     except _Problem as problem:
         return Finding("sudo", "fail", str(problem))
     except OSError:
@@ -356,7 +361,7 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
     changed = True
     while changed:
         changed = False
-        for name, members in aliases.items():
+        for name, listed in aliases.items():
             if name not in matched and any(applies(m) for m in members):
                 matched.add(name)
                 changed = True
@@ -364,7 +369,9 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
     if problems:
         return Finding("sudo", "fail", problems[0])
     if hits:
-        return Finding("sudo", "fail", _sentence("a sudoers rule applies to the account or one of its groups, in", hits))
+        return Finding(
+            "sudo", "fail", _sentence("a sudoers rule applies to the account or one of its groups, in", hits)
+        )
     return Finding("sudo", "pass", "no sudoers rule names the account, one of its groups or ALL")
 
 
@@ -401,9 +408,19 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
     if failure:
         return Finding("polkit", "fail", failure)
     if hits:
-        return Finding("polkit", "fail", _sentence("polkit grants the account or one of its groups an action without a password in", hits))
+        return Finding(
+            "polkit",
+            "fail",
+            _sentence("polkit grants the account or one of its groups an action without a password in", hits),
+        )
     if others:
-        return Finding("polkit", "warn", _sentence("polkit grants an action without a password in", others, "; check that it is not for the account"))
+        return Finding(
+            "polkit",
+            "warn",
+            _sentence(
+                "polkit grants an action without a password in", others, "; check that it is not for the account"
+            ),
+        )
     return Finding("polkit", "pass", "no polkit rule grants the account or its groups an action without a password")
 
 
@@ -425,7 +442,11 @@ def _check_writable(door: DoorPaths, who: _Who, extra: Sequence[Path]) -> Findin
     if failure:
         return Finding("writable", "fail", failure)
     if hits:
-        return Finding("writable", "fail", _sentence(f"the account can write {len(hits)} paths under root-run folders, for example", hits))
+        return Finding(
+            "writable",
+            "fail",
+            _sentence(f"the account can write {len(hits)} paths under root-run folders, for example", hits),
+        )
     return Finding("writable", "pass", "the account can write nothing under the root-run folders that were scanned")
 
 
@@ -537,7 +558,8 @@ def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
     return Finding(
         "jobs",
         "pass",
-        "no root-run unit or cron job runs a file the account can replace or reads from its home (first word of each command only)",
+        "no root-run unit or cron job runs a file the account can replace or reads from its home "
+        "(first word of each command only)",
     )
 
 
@@ -549,7 +571,9 @@ def _check_preload(door: DoorPaths, trust: int) -> Finding:
             return Finding("preload", "pass", "there is no dynamic linker preload file")
         return Finding("preload", "fail", str(problem))
     if any(x.strip() and not x.lstrip().startswith("#") for x in text.splitlines()):
-        return Finding("preload", "warn", "the preload file lists libraries that load into every program; check each is yours")
+        return Finding(
+            "preload", "warn", "the preload file lists libraries that load into every program; check each is yours"
+        )
     return Finding("preload", "pass", "the preload file is root-owned, closed to others and empty")
 
 
@@ -605,7 +629,9 @@ def _check_suid(door: DoorPaths, who: _Who) -> Finding:
                     for other in roots
                 )
                 if not inside:
-                    raise _Problem(f"scan folder {_show(root)} is a symbolic link that leads outside the other scan folders")
+                    raise _Problem(
+                        f"scan folder {_show(root)} is a symbolic link that leads outside the other scan folders"
+                    )
                 continue
             if not stat.S_ISDIR(info.st_mode):
                 raise _Problem(f"scan folder {_show(root)} is not a directory")
@@ -640,12 +666,20 @@ def _check_suid(door: DoorPaths, who: _Who) -> Finding:
     loose = [_show(p) for p, _ in capped if _merge(door, p) not in owned]
     if loose:
         return Finding("setuid", "warn", _sentence("files with capabilities that no package owns:", loose))
-    return Finding("setuid", "pass", f"{len(marked)} setuid or setgid files were found, all owned by a package and closed to the account")
+    return Finding(
+        "setuid",
+        "pass",
+        f"{len(marked)} setuid or setgid files were found, all owned by a package and closed to the account",
+    )
 
 
 def _check_credential(door: DoorPaths, who: _Who) -> Finding:
     if not who.home.startswith("/") or who.home == "/":
-        return Finding("credential", "fail", "the account database records no usable home folder, so the old credential was not looked for")
+        return Finding(
+            "credential",
+            "fail",
+            "the account database records no usable home folder, so the old credential was not looked for",
+        )
     found: list[str] = []
     for rel in door.credential_paths:
         path = Path(who.home) / rel
@@ -654,13 +688,19 @@ def _check_credential(door: DoorPaths, who: _Who) -> Finding:
         except (FileNotFoundError, NotADirectoryError):
             continue
         except OSError:
-            return Finding("credential", "fail", f"{_show(path)} cannot be examined, so the old credential was not looked for")
+            return Finding(
+                "credential", "fail", f"{_show(path)} cannot be examined, so the old credential was not looked for"
+            )
         found.append(_show(path))
     if found:
         return Finding(
             "credential",
             "warn",
-            _sentence("an old secret-store credential or setting is still on disk at", found, "; revoke it at the vendor, then delete it"),
+            _sentence(
+                "an old secret-store credential or setting is still on disk at",
+                found,
+                "; revoke it at the vendor, then delete it",
+            ),
         )
     return Finding("credential", "pass", "no old secret-store credential was found in the account's home")
 

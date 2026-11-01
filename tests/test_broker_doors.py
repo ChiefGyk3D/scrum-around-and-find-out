@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The read-only root-door checks behind `check-install` (issue #293, docs/gemini-broker.md, "The root-door precondition").
+"""The read-only root-door checks behind `check-install` (issue #293; docs/gemini-broker.md, root-door precondition).
 
 Every test builds a temporary tree and points the checks at it. The tests run as an ordinary user: the "root" files
 belong to the test user (the checks take the trusted uid as an argument) and the maintainer is a made-up account whose
@@ -52,7 +52,9 @@ class World:
     def __init__(self, tmp: Path, maint: int = MAINT) -> None:
         self.t = folder(tmp / "w")
         self.home = folder(self.t / "home" / "maint")
-        self.passwd = put(self.t / "passwd", f"root:x:0:0::/root:/bin/sh\nmaint:x:{maint}:{GID}::{self.home}:/bin/bash\n")
+        self.passwd = put(
+            self.t / "passwd", f"root:x:0:0::/root:/bin/sh\nmaint:x:{maint}:{GID}::{self.home}:/bin/bash\n"
+        )
         self.group = put(self.t / "group", f"root:x:0:\nmaint:x:{GID}:\nusers:x:100:maint\n")
         sudoers_text = f"Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n#includedir {self.t}/sudoers.d\n"
         self.sudoers = put(self.t / "sudoers", sudoers_text, 0o440)
@@ -129,7 +131,9 @@ def test_every_finding_is_one_plain_sentence(w: World) -> None:
 
 def test_an_unknown_maintainer_warns_instead_of_passing(w: World) -> None:
     found = w.run(who=None)
-    assert {status(found, n) for n in ("sudo", "groups", "writable", "jobs", "setuid", "credential", "polkit")} == {"warn"}
+    assert {status(found, n) for n in ("sudo", "groups", "writable", "jobs", "setuid", "credential", "polkit")} == {
+        "warn"
+    }
 
 
 def test_a_maintainer_missing_from_the_account_database_fails(w: World) -> None:
@@ -232,7 +236,9 @@ def test_an_include_outside_the_sudoers_directory_fails_closed(w: World) -> None
 # -- group membership ----------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["sudo", "wheel", "admin", "docker", "lxd", "lxc", "libvirt", "disk", "shadow", "root"])
+@pytest.mark.parametrize(
+    "name", ["sudo", "wheel", "admin", "docker", "lxd", "lxc", "libvirt", "disk", "shadow", "root"]
+)
 def test_a_root_equivalent_supplementary_group_fails(w: World, name: str) -> None:
     put(w.group, w.group.read_text() + f"{name}:x:900:other,maint\n")
     found = w.run()
@@ -594,7 +600,9 @@ def test_an_unreadable_directory_under_a_setuid_root_fails_closed(w: World) -> N
         (w.usr / "locked").chmod(0o755)
 
 
-def test_a_capability_file_no_package_owns_warns_and_a_writable_one_fails(w: World, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_capability_file_no_package_owns_warns_and_a_writable_one_fails(
+    w: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     put(w.usr / "capped", "x", 0o755)
     monkeypatch.setattr(doors, "_has_capability", lambda p: p.endswith("capped"))
     assert status(w.run(), "setuid") == "warn"
@@ -667,11 +675,32 @@ def test_the_checks_change_nothing(w: World) -> None:
 
 def test_the_module_cannot_run_a_program_or_ask_for_root() -> None:
     source = Path(doors.__file__).read_text()
-    for word in ("subprocess", "os.system", "os.popen", "os.exec", "os.spawn", "setuid(", "seteuid(", "sudo -", "pkexec"):
+    for word in (
+        "subprocess",
+        "os.system",
+        "os.popen",
+        "os.exec",
+        "os.spawn",
+        "setuid(",
+        "seteuid(",
+        "sudo -",
+        "pkexec",
+    ):
         assert word not in source, word
 
 
 def test_the_module_opens_nothing_for_writing() -> None:
     source = Path(doors.__file__).read_text()
-    for word in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "write_text", "write_bytes", "os.remove", "os.unlink", "chmod(", "chown("):
+    for word in (
+        "O_WRONLY",
+        "O_RDWR",
+        "O_CREAT",
+        "O_TRUNC",
+        "write_text",
+        "write_bytes",
+        "os.remove",
+        "os.unlink",
+        "chmod(",
+        "chown(",
+    ):
         assert word not in source, word
