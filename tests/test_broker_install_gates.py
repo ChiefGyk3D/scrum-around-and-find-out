@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import safo_broker_install as install
-from installdata import World, make_world
+from installdata import World, make_world, unconfined
 from safo_broker_install import InstallError
 
 
@@ -28,7 +28,7 @@ def current_name(w: World) -> str | None:
 
 
 def real_self_test(w: World, modules: tuple[str, ...] = ("fakedep",)) -> install.Hooks:
-    return w.hooks(self_test=install.default_self_test(modules, use_runuser=False))
+    return w.hooks(self_test=install.default_self_test(modules, use_runuser=False, wrap=unconfined))
 
 
 # ---- M4: the self-test imports every broker module and runs the entry in its self-test mode ----------------------
