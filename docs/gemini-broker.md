@@ -598,7 +598,10 @@ new release cannot change what root does with network-administration rights. The
   Everything else from that user is logged and, in drop mode, dropped, including IPv6, DNS, loopback and every other
   port; there is no established-connection shortcut, so a connection opened while the table was missing does not
   survive the rebuild. Other users are not matched.
-- A root timer runs the helper every minute. It reads the vendor host name from the root-owned
+- A root timer runs the helper every ten seconds. Each run first compares the live table with the reviewed ruleset and
+  the set with the hosts view, and rebuilds the whole table in one transaction if it was removed or changed from outside
+  (no DNS involved, so a failed lookup cannot leave a removed table removed). Once the hosts view is a minute old the
+  run also resolves the name. The resolving step reads the vendor host name from the root-owned
   egress config file under `/etc/safo` (the name is in no unit and no command line), validates every address (public IPv4
   only: no private, loopback, link-local, multicast, reserved or carrier-grade range; an empty, oversized or
   malformed answer is refused), swaps the set in one flush-and-add transaction, and rewrites a fixed-size hosts view.
