@@ -902,7 +902,7 @@ class CallLedger:
         """Root adopts a used marker from an EARLIER month that has no ledger row (start-up recovery refuses it, because
         rebuilding it now would move the charge into this month). Spend is recorded before the vendor call, so such a
         marker is money that may have left; it is never dropped and never lowers any month. In ONE append this adds the
-        marker's whole reservation to the month the marker belongs to (an `adjust`, which only ever raises) and gives the
+        marker's whole reservation to the month the marker belongs to (an `adjust`, which only raises) and gives the
         call its rows now, held ambiguous at that reservation, so the model stays stopped until root clears it with a
         verified figure. The marker file is read, never rewritten or removed. A marker that is not whole and strict, a
         month that is not before this one, a nonce the ledger knows and a call id it already holds are all refused."""
