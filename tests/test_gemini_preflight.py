@@ -618,7 +618,8 @@ def test_the_acknowledgement_turns_the_failure_into_a_warning_that_names_the_min
     got = egress(loc, enabling=True, ack_observe=True)
     assert got.status == "warn"
     assert "empty" in got.detail and "dry run" in got.detail and "drop" in got.detail
-    assert pf.exit_code(pf.run_preflight(loc, FakeRunner(), lookup_ok, enabling=True, ack_observe=True)) == 0
+    named = dataclasses.replace(loc, maintainer_uid=1000)
+    assert pf.exit_code(pf.run_preflight(named, FakeRunner(), lookup_ok, enabling=True, ack_observe=True)) == 0
 
 
 def test_the_acknowledgement_does_not_excuse_a_missing_or_unusable_config(tmp_path: Path) -> None:
@@ -657,11 +658,14 @@ def test_the_egress_report_never_prints_the_vendor_host_or_the_file(tmp_path: Pa
 def test_the_command_line_takes_the_two_flags_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     loc = make_tree(tmp_path)
     set_mode(loc, f"VENDOR_HOST={VENDOR}\nMODE=observe\n")
-    monkeypatch.setattr(pf, "Locations", lambda: loc)
+    monkeypatch.setattr(pf, "Locations", lambda **kw: dataclasses.replace(loc, maintainer_uid=kw.get("maintainer_uid")))
     monkeypatch.setattr(pf, "default_runner", FakeRunner())
     monkeypatch.setattr(pf, "default_lookup", lookup_ok)
-    assert pf.main(["--enabling"]) == 1
-    assert pf.main(["--enabling", "--ack-observe-mode"]) == 0
+    uid = "1000"  # the uid make_tree lists in the broker config; the account database is stubbed, not the host's
+    monkeypatch.setattr(pwd, "getpwuid", lambda _uid: type("Entry", (), {"pw_dir": str(tmp_path / "home")})())
+    assert pf.main(["--enabling", "--maintainer-uid", uid]) == 1
+    assert pf.main(["--enabling", "--ack-observe-mode"]) == 1  # no maintainer named: the run fails
+    assert pf.main(["--enabling", "--ack-observe-mode", "--maintainer-uid", uid]) == 0
     assert pf.main(["--ack-observe-mode"]) == 0
     assert pf.main(["--bogus"]) == 2
 
@@ -1047,15 +1051,54 @@ def test_the_enabling_preflight_requires_the_named_maintainer_in_allowed_uids(tm
     assert got.status == "fail", got
 
 
-def test_an_extra_allowed_uid_is_flagged_when_a_maintainer_is_named(tmp_path: Path) -> None:
+def test_an_extra_allowed_uid_fails_when_a_maintainer_is_named(tmp_path: Path) -> None:
     loc = dataclasses.replace(make_tree(tmp_path), maintainer_uid=1000)
     loc.broker_config.write_text(
         loc.broker_config.read_text().replace("allowed_uids: [1000]", "allowed_uids: [1000, 1001]")
     )
     got = broker_check(loc)
-    assert got.status == "warn" and "1001" in got.detail, got
+    assert got.status == "fail" and "1001" in got.detail, got
     without = dataclasses.replace(loc, maintainer_uid=None)
     assert broker_check(without).status == "pass"  # no maintainer named: the old rule (nonempty) alone
+
+
+def test_the_enable_line_creates_no_switch_when_the_config_admits_another_account(tmp_path: Path) -> None:
+    import io
+
+    loc = dataclasses.replace(make_tree(tmp_path), maintainer_uid=1000)
+    loc.broker_config.write_text(
+        loc.broker_config.read_text().replace("allowed_uids: [1000]", "allowed_uids: [1000, 1001]")
+    )
+    # no strict flag, like the runbook line: the exit code alone must stop the switch
+    code = pf.main_with(loc, FakeRunner(), lookup_ok, out=io.StringIO(), enabling=True, ack_observe=True)
+    assert code == 1
+    switch = tmp_path / "out" / "gemini-paid-enabled"
+    switch.parent.mkdir()
+    # the shape of the runbook line: the switch is written only when the preflight exits 0
+    if code == 0:
+        switch.write_text("enabled\n")
+    assert not switch.exists()
+
+
+def test_an_enabling_run_without_a_named_maintainer_fails_and_creates_no_switch(tmp_path: Path) -> None:
+    import io
+
+    loc = make_tree(tmp_path)
+    assert loc.maintainer_uid is None
+    loc.broker_config.write_text(
+        loc.broker_config.read_text().replace("allowed_uids: [1000]", "allowed_uids: [1000, 1001]")
+    )
+    checks = pf.run_preflight(loc, FakeRunner(), lookup_ok, enabling=True, ack_observe=True)
+    assert [c for c in checks if c.name == "maintainer-uid" and c.status == "fail"], pf.render(checks)
+    code = pf.main_with(loc, FakeRunner(), lookup_ok, out=io.StringIO(), enabling=True, ack_observe=True)
+    assert code == 1
+    switch = tmp_path / "out" / "gemini-paid-enabled"
+    switch.parent.mkdir()
+    if code == 0:  # the shape of the runbook line: the switch is written only when the preflight exits 0
+        switch.write_text("enabled\n")
+    assert not switch.exists()
+    plain = pf.run_preflight(loc, FakeRunner(), lookup_ok)  # outside the enabling run no maintainer is required
+    assert not [c for c in plain if c.name == "maintainer-uid"]
 
 
 def test_the_client_config_check_applies_the_root_owned_override_like_the_client(tmp_path: Path) -> None:

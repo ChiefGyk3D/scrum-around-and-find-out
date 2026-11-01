@@ -448,7 +448,8 @@ def steps(login: str) -> tuple[Step, ...]:
             "written only if that exits 0. The preflight fails while the egress control is in observe mode, when the "
             "egress config is missing or unusable, when /etc/safo/broker.yaml is missing, not root-owned, "
             "writable by group "
-            "or others, refused by the broker's own loader or lists no allowed uid, when your "
+            "or others, refused by the broker's own loader, lists no allowed uid or lists any account but yours, "
+            "when your "
             "~/.config/safo/broker-client.yaml is missing or does not load (the line passes your numeric id and the "
             "preflight finds your home itself), and on any other failed check. Run the dry run with a real key "
             "before this step.",

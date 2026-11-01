@@ -587,7 +587,10 @@ def check_broker_config(loc: Locations) -> Check:
         extra = sorted(loaded.server.allowed_uids - {loc.maintainer_uid})
         if extra:
             return Check(
-                name, "warn", f"loads, but allowed_uids also admits other account(s): {', '.join(map(str, extra))}"
+                name,
+                "fail",
+                f"allowed_uids also admits other account(s): {', '.join(map(str, extra))}; only the named "
+                "maintainer account may be listed before the switch is created",
             )
     return Check(
         name,
@@ -708,7 +711,13 @@ def check_client_config(loc: Locations) -> Check:
 def run_preflight(
     loc: Locations, runner: Runner, lookup: UserLookup, *, enabling: bool = False, ack_observe: bool = False
 ) -> list[Check]:
+    named = (
+        [Check("maintainer-uid", "fail", "an enabling run must name the maintainer account (--maintainer-uid N)")]
+        if enabling and loc.maintainer_uid is None
+        else []
+    )
     return [
+        *named,
         check_ssh_sk_support(loc, runner),
         check_libfido2(runner),
         check_udev_rule(loc),

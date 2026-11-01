@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Setup hardening follow-up (#303). Enabling-gate and import-check hardening; details are tracked privately until reviewed.
 - Admin `check-install` root-door checks (#293). The broker administration command now runs nine read-only checks for the
   root-door items the docs list, each answering `pass`, `warn` or `fail` in one sentence: sudo rules (sudoers and
   `sudoers.d`, aliases, groups), root-equivalent group membership, polkit rules that grant without a password, paths
