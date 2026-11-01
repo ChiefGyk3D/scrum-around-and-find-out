@@ -165,13 +165,22 @@ def parse_user_config(text: str) -> ClientConfig:
 
 
 def load_client_config(
-    *, home: Path, user_path: Path | None = None, root_path: Path = Path(ROOT_CONFIG), root_uid: int = BROKER_UID
+    *,
+    home: Path,
+    user_path: Path | None = None,
+    root_path: Path = Path(ROOT_CONFIG),
+    root_uid: int = BROKER_UID,
+    user_text: str | None = None,
 ) -> ClientConfig:
     """The client's settings: the user's file (private to the account), with the socket taken from the root-owned file
-    when that exists. No environment variable is read, so nothing a wrapper strips can name the socket."""
+    when that exists. No environment variable is read, so nothing a wrapper strips can name the socket. `user_text` is
+    the user's file content when the caller has already opened and checked it (the setup preflight does); it is then
+    parsed instead of reading the path, and the root file is applied the same way."""
     cfg = ClientConfig()
     where = user_path if user_path is not None else user_config_path(home)
-    if os.path.lexists(where):
+    if user_text is not None:
+        cfg = parse_user_config(user_text)
+    elif os.path.lexists(where):
         cfg = parse_user_config(read_trusted_regular_file(where, 65_536).decode("utf-8", "replace"))
     if os.path.lexists(root_path):
         text = geminisign.read_trust_file(root_path, root_uid, "broker client settings").decode("utf-8", "replace")

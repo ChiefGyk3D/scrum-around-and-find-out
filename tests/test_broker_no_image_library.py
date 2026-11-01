@@ -26,6 +26,21 @@ ALLOWED_THIRD_PARTY = {"yaml", "cryptography"}
 IMAGE_LIBRARIES = {"PIL", "imageio", "cv2", "numpy", "skimage", "scipy", "matplotlib", "wand", "pyvips", "pgmagick"}
 
 
+# Anything that can load code by a name computed at run time. A literal-argument call to the first two is judged like an
+# import; every other use of any of them, however it is aliased, is a problem the check cannot judge.
+IMPORT_FUNCS = {"import_module", "__import__"}
+INDIRECTION = IMPORT_FUNCS | {
+    "exec",
+    "eval",
+    "find_spec",
+    "spec_from_file_location",
+    "module_from_spec",
+    "SourceFileLoader",
+    "load_module",
+    "exec_module",
+}
+
+
 def module_file(src: Path, name: str) -> Path | None:
     base = src.joinpath(*name.split("."))
     for candidate in (base.with_suffix(".py"), base / "__init__.py"):
@@ -40,7 +55,22 @@ def imported_names(path: Path, name: str, is_package: bool) -> tuple[set[str], l
     found: set[str] = set()
     problems: list[str] = []
     package = name if is_package else name.rpartition(".")[0]
+    aliases = set(IMPORT_FUNCS)  # names the import functions are known by in this file
+    call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
     for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] in ("importlib", "builtins"):
+            aliases.update(a.asname for a in node.names if a.name in IMPORT_FUNCS and a.asname)
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(v, ast.Name | ast.Attribute)
+            and (getattr(v, "attr", None) or getattr(v, "id", "")) in IMPORT_FUNCS
+            for v in [node.value]
+        ):
+            aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name | ast.Attribute) and id(node) not in call_funcs:
+            ref = node.attr if isinstance(node, ast.Attribute) else node.id
+            if ref in INDIRECTION:
+                problems.append(f"{path.name}: {ref!r} is used other than as a direct call")
         if isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -55,7 +85,11 @@ def imported_names(path: Path, name: str, is_package: bool) -> tuple[set[str], l
         elif isinstance(node, ast.Call):
             func = node.func
             called = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
-            if called in ("import_module", "__import__"):
+            if any(isinstance(a, ast.Name) and a.id in ("importlib", "builtins") for a in node.args):
+                problems.append(f"{path.name}: the import machinery is passed to a call (getattr and the like)")
+            if called in INDIRECTION - IMPORT_FUNCS:
+                problems.append(f"{path.name}: a call to {called!r} can load code by a computed name")
+            elif called in aliases:
                 arg = node.args[0] if node.args else None
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     found.add(arg.value)
@@ -85,7 +119,15 @@ def external_imports(src: Path, entry_package: str) -> tuple[dict[str, set[str]]
     modules that import them, the dynamic-import problems, and how many safo modules were reached."""
     stdlib = set(sys.stdlib_module_names)
     entry_dir = src.joinpath(*entry_package.split("."))
-    todo = [f"{entry_package}.{p.stem}" for p in sorted(entry_dir.glob("*.py")) if p.stem != "__init__"]
+    todo = [
+        ".".join([entry_package, *p.relative_to(entry_dir).with_suffix("").parts])
+        for p in sorted(entry_dir.rglob("*.py"))
+        if p.stem != "__init__"
+    ]
+    todo += [  # every nested package too, so a module no import reaches is still judged
+        ".".join([entry_package, *p.relative_to(entry_dir).parent.parts])
+        for p in sorted(entry_dir.rglob("__init__.py"))
+    ]
     todo.append(entry_package)
     seen: set[str] = set()
     outside: dict[str, set[str]] = {}
@@ -173,3 +215,43 @@ def test_the_check_accepts_the_standard_library_the_project_and_the_allow_listed
     (src / "safo" / "broker" / "sibling.py").write_text("import json\n")
     outside, problems, reached = external_imports(src, "safo.broker")
     assert set(outside) == {"yaml"} and not problems and reached >= 4
+
+
+# -- indirection the check must not be blind to (#303) -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "from importlib import import_module as load\nImage = load('PIL.Image')\n",  # an alias of the import function
+        "import importlib\nload = importlib.import_module\nImage = load('PIL.Image')\n",  # assigned to another name
+        "import importlib as il\nIm = il.import_module('PIL.Image')\n",  # the module under another name
+        "import builtins\nIm = builtins.__import__('PIL')\n",
+        "import importlib\nfn = getattr(importlib, 'import_module')\nfn('PIL')\n",
+        "import importlib.util\nspec = importlib.util.find_spec('PIL')\n",
+        "exec('import PIL')\n",
+        "eval('__import__(\"PIL\")')\n",
+    ],
+)
+def test_the_check_fails_on_import_indirection(tmp_path: Path, body: str) -> None:
+    outside, problems, _ = external_imports(build_tree(tmp_path, body), "safo.broker")
+    assert problems or "PIL" in outside, body
+
+
+def test_the_check_walks_nested_broker_packages(tmp_path: Path) -> None:
+    src = build_tree(tmp_path, "import os\n")
+    nested = src / "safo" / "broker" / "deep" / "deeper"
+    nested.mkdir(parents=True)
+    (src / "safo" / "broker" / "deep" / "__init__.py").write_text("")
+    (nested / "__init__.py").write_text("")
+    (nested / "decoder.py").write_text("from PIL import Image\n")
+    outside, _, reached = external_imports(src, "safo.broker")
+    assert "PIL" in outside and reached >= 4
+
+
+def test_a_computed_name_outside_the_broker_prefix_is_still_a_problem(tmp_path: Path) -> None:
+    inside = "import importlib\nimportlib.import_module(f'safo.broker.{name}')\n"
+    # every nested package is walked, so a computed submodule of the broker is covered by the walk
+    assert not external_imports(build_tree(tmp_path / "a", inside), "safo.broker")[1]
+    leaving = "import importlib\nimportlib.import_module(f'safo.other.{name}')\n"
+    assert external_imports(build_tree(tmp_path / "b", leaving), "safo.broker")[1]
