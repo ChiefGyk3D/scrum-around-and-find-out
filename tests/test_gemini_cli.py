@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import os
+import shutil
+import socket
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,6 +30,7 @@ from geminidata import (
     start_row,
     write_config,
 )
+from safo.broker import client
 from safo.cli import main
 from safo.errors import ConfigError
 from safo.gemini import GeminiConfig, Locations, load_config
@@ -192,3 +198,54 @@ def test_a_stray_word_after_a_money_action_is_refused_like_any_unknown_argument(
         brief_namespace(["ask", "list", "--model", MODEL])
     code, _, err = rig.run("quota", "list", *rig.base())
     assert code == 2 and "unrecognized" in err
+
+
+@pytest.fixture(params=["absent", "refuses"])
+def dead_socket(request: pytest.FixtureRequest, rig: Rig, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A broker socket that does not exist, or one that exists and refuses (a socket file nobody listens on); the user
+    client config names it. Returns the list of broker connection attempts the free path makes (it must stay empty)."""
+    folder = Path(tempfile.mkdtemp(prefix="sd"))
+    path = folder / "b.sock"
+    if request.param == "refuses":
+        dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        dead.bind(str(path))
+        dead.close()  # the file stays, nothing listens: connect is refused
+    config = rig.home / ".config" / "safo"
+    config.mkdir(parents=True, exist_ok=True)
+    config.chmod(0o700)
+    (config / "broker-client.yaml").write_text(f"version: 1\nsocket: {path}\n")
+    (config / "broker-client.yaml").chmod(0o600)
+    attempts: list[str] = []
+    real = client.connect_unix
+
+    def spy(target: str, **kw: Any) -> socket.socket:
+        attempts.append(target)
+        return real(target, **kw)
+
+    monkeypatch.setattr(client, "connect_unix", spy)
+    monkeypatch.setattr(client, "ROOT_CONFIG", str(folder / "none.yaml"))
+    monkeypatch.setattr(client, "DEFAULT_SOCKET", str(path))
+    request.addfinalizer(lambda: shutil.rmtree(folder, ignore_errors=True))
+    return attempts
+
+
+def test_the_free_path_works_when_the_broker_socket_is_absent_or_refuses(rig: Rig, dead_socket: list[str]) -> None:
+    """#298 (5): the free tier never touches the broker, so a dead broker cannot take it down."""
+    code, out, _ = rig.run("quota", *rig.base())
+    assert code == 0 and f"QUOTA free {MODEL}" in out
+    code, out, err = rig.run("ask", *rig.base(), "--prompt-file", str(rig.prompt), "--material", "public")
+    assert code == 0, err
+    assert "A cited answer." in out and "cost 0.000000 USD" in out
+    assert dead_socket == [], "the free path opened a connection to the broker"
+    assert len(rig.server.requests) == 1  # and the free request really went to the (fake) free endpoint
+
+
+def test_the_dead_socket_is_really_dead_and_the_spy_sees_a_broker_connection(
+    rig: Rig, dead_socket: list[str]
+) -> None:
+    """The negative case: the same fixture makes a broker connection fail and be recorded, so the empty list above
+    means something."""
+    cfg = client.load_client_config(home=rig.home)
+    with pytest.raises(client.ClientError, match="not reachable"):
+        client.connect_unix(cfg.socket, owner=os.geteuid())
+    assert dead_socket == [cfg.socket]
