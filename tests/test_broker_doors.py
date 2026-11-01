@@ -2077,3 +2077,55 @@ def test_hardening_folder_listings_ask_for_no_access_time_update_and_fall_back(
     found = w.run()
     assert any(f & noatime for f in seen) and any(not f & noatime for f in seen)
     assert status(found, "jobs") == "pass"
+
+
+def test_hardening_a_writable_intermediate_link_hop_is_found_for_cron_and_units(w: World) -> None:
+    writable = folder(w.t / "wr", 0o777)
+    safe = put(w.t / "lib" / "tab", "17 * * * * root /bin/true\n")
+    (writable / "hop").symlink_to(safe)
+    (w.cron_d / "x").symlink_to(writable / "hop")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "hop" in found["jobs"].text
+    (w.cron_d / "x").unlink()
+    unit_file = put(w.t / "lib" / "u.service", unit("/bin/true"))
+    (writable / "uhop").symlink_to(unit_file)
+    (w.units / "a.service").symlink_to(writable / "uhop")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "uhop" in found["jobs"].text
+
+
+def test_hardening_a_hop_in_a_folder_the_account_owns_is_found_even_if_the_ends_are_safe(w: World) -> None:
+    mine = folder(w.t / "mine", 0o700)
+    safe = put(w.t / "lib" / "tab", "# nothing\n")
+    (mine / "hop").symlink_to(safe)
+    (w.cron_d / "x").symlink_to(mine / "hop")
+    assert status(w.run(), "jobs") == "pass"
+    put(w.passwd, f"maint:x:{UID}:{GID + 7}::{w.home}:/bin/bash\n")
+    assert status(w.run(who=UID), "jobs") == "fail"
+
+
+def test_hardening_link_chains_are_bounded_and_loops_need_a_human(w: World) -> None:
+    safe = put(w.t / "lib" / "tab", "# nothing\n")
+    previous = safe
+    for index in range(doors.MAX_LINK_HOPS + 2):
+        link = w.t / "chain" / f"l{index}"
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(previous)
+        previous = link
+    (w.cron_d / "x").symlink_to(previous)
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+    (w.cron_d / "x").unlink()
+    (w.t / "loop-a").symlink_to(w.t / "loop-b")
+    (w.t / "loop-b").symlink_to(w.t / "loop-a")
+    (w.cron_d / "y").symlink_to(w.t / "loop-a")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_a_short_clean_link_chain_passes_and_a_masked_unit_still_does(w: World) -> None:
+    safe = put(w.t / "lib" / "tab", "17 * * * * root /bin/true\n")
+    (w.t / "lib" / "one").symlink_to(safe)
+    (w.cron_d / "x").symlink_to(w.t / "lib" / "one")
+    (w.units / "masked.service").symlink_to("/dev/null")
+    assert status(w.run(), "jobs") == "pass"

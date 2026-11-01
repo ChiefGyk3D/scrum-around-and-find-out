@@ -996,6 +996,9 @@ def _fragment(
     real = str(path)
     info = _lstat(path, f"unit {_show(name)}")
     if stat.S_ISLNK(info.st_mode):
+        hit, _ = _follow_links(path, who, cache, floor)
+        if hit:
+            return [], hit
         real = os.path.realpath(path)
         if real == os.devnull:
             return [], None
@@ -1005,11 +1008,6 @@ def _fragment(
             raise _Problem(f"unit {_show(name)} cannot be read (its link does not resolve)") from None
         if not stat.S_ISREG(target.st_mode):
             raise _Problem(f"unit {_show(name)} cannot be read (its link does not lead to a regular file)")
-        if _in_home(real, who):
-            return [], f"is a link to {_show(real)}, under the account's home"
-        writable = _chain_writable(str(path), who, cache, floor)
-        if writable is not None:
-            return [], f"is a link to {_show(real)}, which the account can replace through {_show(writable)}"
     elif not stat.S_ISREG(info.st_mode):
         raise _Problem(f"unit {_show(name)} cannot be read (it is not a regular file)")
     return _assignments(_text(Path(real), f"unit {_show(name)}", None), section), None
@@ -1115,6 +1113,41 @@ def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], flo
     return None
 
 
+MAX_LINK_HOPS = 4
+
+
+def _follow_links(path: Path, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> tuple[str | None, str]:
+    """Follow a chain of symbolic links one hop at a time. Every hop (and the folders above it) must be out of the
+    account's reach and out of its home; a chain longer than a few hops, a loop or a link that does not resolve goes
+    to a human. Returns (a finding or None, the final path)."""
+    current = str(path)
+    seen: set[str] = set()
+    for _ in range(MAX_LINK_HOPS + 1):
+        if current == os.devnull:  # a masked unit
+            return None, current
+        if _in_home(current, who):
+            return f"is, or links through, {_show(current)}, under the account's home", current
+        writable = _chain_writable(current, who, cache, floor)
+        if writable is not None:
+            return f"links through {_show(current)}, which the account can replace through {_show(writable)}", current
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return f"has a link that does not resolve ({_show(current)}); {HUMAN}", current
+        if not stat.S_ISLNK(info.st_mode):
+            return None, current
+        if current in seen:
+            return f"has a link loop at {_show(current)}; {HUMAN}", current
+        seen.add(current)
+        try:
+            target = os.readlink(current)
+        except OSError:
+            return f"has a link that cannot be read ({_show(current)}); {HUMAN}", current
+        folder = os.path.realpath(os.path.dirname(current))
+        current = os.path.normpath(target if target.startswith("/") else os.path.join(folder, target))
+    return f"has a chain of more than {MAX_LINK_HOPS} links; {HUMAN}", current
+
+
 def _cron_file_hit(
     path: Path, info: os.stat_result, who: _Who, cache: dict[str, os.stat_result | None], floor: str
 ) -> str | None:
@@ -1122,19 +1155,16 @@ def _cron_file_hit(
     the account's reach, and a link that does not lead to a regular file goes to a human."""
     real = path
     if stat.S_ISLNK(info.st_mode):
-        resolved = os.path.realpath(path)
+        hit, final = _follow_links(path, who, cache, floor)
+        if hit:
+            return hit
         try:
-            regular = stat.S_ISREG(os.stat(resolved).st_mode)
+            regular = stat.S_ISREG(os.stat(final).st_mode)
         except OSError:
             regular = False
         if not regular:
             return f"is a link that does not lead to a regular file; {HUMAN}"
-        if _in_home(resolved, who):
-            return f"is a link to {_show(resolved)}, under the account's home"
-        writable = _chain_writable(str(path), who, cache, floor)
-        if writable is not None:
-            return f"is a link to {_show(resolved)}, which the account can replace through {_show(writable)}"
-        real = Path(resolved)
+        real = Path(os.path.realpath(path))
     elif not stat.S_ISREG(info.st_mode):
         return None
     return _cron_hit(_text(real, f"cron file {_show(path.name)}", None), who, cache, floor)
