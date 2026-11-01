@@ -60,7 +60,7 @@ def _names_import_machinery(node: ast.AST) -> bool:
         return isinstance(node.value, str) and node.value in INDIRECTION | {"importlib", "builtins"}
     if isinstance(node, ast.Name):
         return node.id in {"importlib", "builtins"}
-    return False
+    return isinstance(node, ast.Attribute) and node.attr in {"__dict__", "__builtins__"}
 
 
 def imported_names(path: Path, name: str, is_package: bool) -> tuple[set[str], list[str]]:
@@ -104,6 +104,10 @@ def imported_names(path: Path, name: str, is_package: bool) -> tuple[set[str], l
             called = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
             if any(isinstance(a, ast.Name) and a.id in ("importlib", "builtins") for a in node.args):
                 problems.append(f"{path.name}: the import machinery is passed to a call (getattr and the like)")
+            if isinstance(func, ast.Subscript | ast.Call) and any(
+                _names_import_machinery(sub) for sub in ast.walk(func)
+            ):
+                problems.append(f"{path.name}: a call on a lookup result that reaches the import machinery")
             if called in LOOKUP_FUNCS and any(_names_import_machinery(sub) for a in node.args for sub in ast.walk(a)):
                 problems.append(f"{path.name}: import machinery is looked up through a nested expression")
             if called in INDIRECTION - IMPORT_FUNCS:
@@ -296,6 +300,23 @@ def test_a_computed_name_outside_the_broker_prefix_is_still_a_problem(tmp_path: 
 def test_the_check_fails_on_nested_indirect_import_forms(tmp_path: Path, body: str) -> None:
     _, problems, _ = external_imports(build_tree(tmp_path, body), "safo.broker")
     assert problems, body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'import importlib\nimportlib.__dict__["import_module"]("PIL")\n',
+        'import builtins as b\nb.__dict__["__import__"]("PIL")\n',
+        'import sys as s\ns.modules["importlib"].import_module("PIL")\n',
+        'import importlib\nloader = importlib.__dict__["import_module"]\nloader("PIL")\n',
+        'import importlib\ntable = vars(importlib)\ntable["import_module"]("PIL")\n',
+        'import builtins\nbuiltins.__dict__.get("__import__")("PIL")\n',
+        'import importlib\nloaders = {"a": importlib.import_module}\nloaders["a"]("PIL")\n',
+    ],
+)
+def test_the_check_fails_on_subscript_and_dict_lookups(tmp_path: Path, body: str) -> None:
+    outside, problems, _ = external_imports(build_tree(tmp_path, body), "safo.broker")
+    assert problems or "PIL" in outside, body
 
 
 def test_an_ordinary_attribute_lookup_is_not_a_problem(tmp_path: Path) -> None:
