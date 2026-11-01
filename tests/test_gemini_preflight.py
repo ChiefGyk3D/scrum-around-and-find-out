@@ -661,7 +661,8 @@ def test_the_command_line_takes_the_two_flags_and_nothing_else(tmp_path: Path, m
     monkeypatch.setattr(pf, "Locations", lambda **kw: dataclasses.replace(loc, maintainer_uid=kw.get("maintainer_uid")))
     monkeypatch.setattr(pf, "default_runner", FakeRunner())
     monkeypatch.setattr(pf, "default_lookup", lookup_ok)
-    uid = str(os.getuid())
+    uid = "1000"  # the uid make_tree lists in the broker config; the account database is stubbed, not the host's
+    monkeypatch.setattr(pwd, "getpwuid", lambda _uid: type("Entry", (), {"pw_dir": str(tmp_path / "home")})())
     assert pf.main(["--enabling", "--maintainer-uid", uid]) == 1
     assert pf.main(["--enabling", "--ack-observe-mode"]) == 1  # no maintainer named: the run fails
     assert pf.main(["--enabling", "--ack-observe-mode", "--maintainer-uid", uid]) == 0
