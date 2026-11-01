@@ -166,6 +166,7 @@ def door_paths(tmp: Path, **over: Any) -> DoorPaths:
         "cron_files": (),
         "cron_dirs": (),
         "setuid_roots": (),
+        "system_trees": (),
     }
     if tmp not in DOOR_WORLDS:  # built once per test: building it again would rewrite files and move their times
         DOOR_WORLDS[tmp] = World(tmp / "doors", maint=SUDO_USER)
@@ -1412,7 +1413,7 @@ def test_the_unit_list_here_equals_the_installers() -> None:
 
 # -- check-install runs the root-door checks (#293) ------------------------------------------------------------------
 
-DOOR_NAMES = ("sudo", "groups", "polkit", "writable", "jobs", "preload", "setuid", "credential")
+DOOR_NAMES = ("sudo", "groups", "polkit", "writable", "jobs", "preload", "setuid", "credential", "trees")
 
 
 def run_with_door(tmp: Path, door: DoorPaths, *, env: dict[str, str] | None = None) -> tuple[int, str, str]:
@@ -1467,7 +1468,7 @@ def test_check_install_fails_when_the_maintainer_cannot_be_identified(tmp_path: 
     install(tmp_path)
     out_code, out, _ = run(tmp_path, "check-install", env=env)
     assert out_code == 1
-    for name in ("sudo", "groups", "polkit", "writable", "jobs", "setuid", "credential"):
+    for name in ("sudo", "groups", "polkit", "writable", "jobs", "setuid", "credential", "trees"):
         assert f"fail: {name}: " in out
     assert "nothing found: preload: " in out
 

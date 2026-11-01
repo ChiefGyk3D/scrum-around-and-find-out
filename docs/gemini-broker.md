@@ -277,7 +277,7 @@ sections that follow agree with it.
   software key has the written opt-in.
 - **`check-install` coverage.** It checks the release link and folder, the version record, the floor, the five installed
   unit files against the signed release and its manifest, the egress helper and the switch and egress mode. Since #293 it
-  also runs eight read-only root-door checks (see "The root-door precondition"), each answering `pass`, `warn` or `fail`
+  also runs nine read-only root-door checks (see "The root-door precondition"), each answering `pass`, `warn` or `fail`
   in one sentence; a `fail` makes the command exit 1, a `warn` does not. The output ends with a `limits:` line: a pass is
   "no door found by these checks", never "no door".
 - **The paid commands and the removed path.** `safo gemini paid` and `safo gemini paid-dryrun` run the broker client.
@@ -674,7 +674,7 @@ installer's checks reduce the chance that this is false; they cannot prove it, a
 `python -I -m safo.broker.admin check-install`) checks the installation (see the administration section) and then runs
 the root-door checks in `src/safo/broker/doors.py`, for the account named by `SUDO_UID` (run it through `sudo`; without
 it, or when the user name sudo reports does not belong to the user id, every account check fails and says why). The checks are strictly read-only: files are read without following a
-final symbolic link, folders are listed, nothing is written and **no program is run**, so there is no `sudo -l`; the
+final symbolic link, folders are listed, nothing is modified except possibly access times and **no program is run**, so there is no `sudo -l`; the
 sudoers files themselves are read and parsed. Each check gives one finding, and a path that cannot be read, has the wrong
 owner, is writable by others, is a symbolic link where a file belongs, is missing where it must exist, or is a scan that
 hit its entry limit is a `fail`, never a pass:
@@ -688,6 +688,7 @@ hit its entry limit is a `fail`, never a pass:
 | `jobs` | root-run `.service` files and `/etc/crontab`, `/etc/cron.d` | a root job runs a file, or a file not yet created, whose path (a folder above it, a unit link's target or the folders on its way) the account owns or can write, sticky world-writable folders included, or reads or runs something under the account's home. Unit links and the `.conf` files in unit drop-in folders are read too; a link that does not resolve fails closed (a link to `/dev/null` is a masked unit). A shell, interpreter or wrapper is followed to the paths among its arguments; a command line with code in a string, a relative name or shell syntax is reported as needing a human look. Runtime and transient unit folders are read too | (never: an unknown account is a fail) |
 | `preload` | the dynamic linker preload file in `/etc` | it is a link, not root-owned or writable by others | it lists a library |
 | `setuid` | a bounded walk of `/usr`, `/opt` and the merged `/bin`, `/sbin`, `/lib*`, against the package file lists in `/var/lib/dpkg/info` (read as files, `dpkg` is not run) | a setuid or setgid file no package owns, any such file or a file with capabilities that the account can write, or the package lists cannot be read | a file with capabilities that no package owns |
+| `trees` | a bounded walk of `/usr`, `/etc`, `/opt`, the library, boot and binary trees, never across a device and never following a link | any entry the account can write or own, or a link inside whose target is under the account's home or can be reached or written by the account; the walk stops at its entry limit or a mount point, which is reported as needing a human look | the account is unknown |
 | `credential` | the secret store tool's local settings folders in the account's home (`.doppler` and `.config/doppler`; these locations are inferred, not read from a vendor page) | the home cannot be examined | one of them exists: revoke the old key at the vendor, then delete it |
 
 A clean result is printed as `nothing found`, not as a bare pass: this checker is a heuristic snapshot, and a clean
@@ -1396,7 +1397,7 @@ ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.adm
   others, and it reports the switch state (a switch file that is present but is not exactly `enabled`, or not root-owned,
   fails because the broker would treat it as off) and the egress mode. It notes, without failing, an enabled switch with the
   egress control in observe mode (the preflight owns that decision), and it fails if the switch is enabled but the egress
-  config cannot be read. It then prints the eight root-door findings (`pass`, `warn` or `fail`, one sentence each; see
+  config cannot be read. It then prints the nine root-door findings (`pass`, `warn` or `fail`, one sentence each; see
   "The root-door precondition") and a `limits:` line. It exits 1 on any failure, including a root-door `fail`.
 - **clear MODEL** first prints the record of every call that suspended the model (call id, model, job, kind
   `ambiguous` or `breach`, start time, reserved amount, state, counted amount, recorded actual) and changes nothing.

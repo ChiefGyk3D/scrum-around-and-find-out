@@ -558,7 +558,7 @@ Expected: every line starts with `pass`, `warn` or `fail`, and the last line sta
 command exit 1: fix it, or write down why it is accepted, before the dry run. A `warn` on `credential` means the old key
 is still on disk: revoke it at the vendor, then delete it. A pass means "no door found by these checks", not "no door"
 ([Gemini broker](gemini-broker.md), "The root-door precondition"). Blast radius: none (read only; it runs no program and
-writes nothing). Rollback: none needed. Not run by the agent that wrote this page.
+modifies nothing except possibly access times). Rollback: none needed. Not run by the agent that wrote this page.
 
 ## Not verified
 

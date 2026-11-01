@@ -9,7 +9,8 @@ of door and returns ONE finding: `pass`, `warn` or `fail`, with one plain senten
   descriptor opened without moving the access time where the kernel allows it (otherwise listing may update it);
   metadata comes from `lstat`. No program is run (neither the sudo listing command nor the package
   manager), no privilege is requested, and
-  nothing is written. The command is root-only for reasons of its own (it reads root-owned files); these checks need
+  nothing is modified, except that where the kernel refuses to leave access times alone, reading or listing can update
+  them. The command is root-only for reasons of its own (it reads root-owned files); these checks need
   nothing a root-owned read does not already give them, and a path that cannot be read is a **fail**, never a pass.
 * **Fail closed.** A missing file that must exist, a file with the wrong owner, one that others can write, a symbolic
   link where a file belongs, a path that cannot be read, a malformed line and a scan that hits its entry limit are all
@@ -141,6 +142,19 @@ class DoorPaths:
         Path("/lib32"),
         Path("/lib64"),
         Path("/libx32"),
+    )
+    # the root-owned system trees: nothing in them may be writable by the account, whatever consumes it
+    system_trees: tuple[Path, ...] = (
+        Path("/usr"),
+        Path("/etc"),
+        Path("/opt"),
+        Path("/lib"),
+        Path("/lib32"),
+        Path("/lib64"),
+        Path("/libx32"),
+        Path("/boot"),
+        Path("/sbin"),
+        Path("/bin"),
     )
     dpkg_info: Path = Path("/var/lib/dpkg/info")
     # (old, new) prefixes: a merged-/usr system lists some files under /bin that the scan finds under /usr/bin
@@ -705,6 +719,64 @@ def _check_writable(door: DoorPaths, who: _Who, extra: Sequence[Path]) -> Findin
             _sentence(f"the account can write {len(hits)} paths under root-run folders, for example", hits),
         )
     return Finding("writable", "pass", "the account can write nothing under the root-run folders that were scanned")
+
+
+def _check_trees(door: DoorPaths, who: _Who) -> Finding:
+    """The invariant behind the named checks: walk the system trees (bounded, never across a device, never following a
+    link) and report any entry the account can write, and any link inside whose target the account can reach."""
+    hits: list[str] = []
+    cache: dict[str, os.stat_result | None] = {}
+    floor = str(door.chain_floor)
+    failures: list[str] = []
+    try:
+        roots = list(door.system_trees)
+        real = {r: os.path.realpath(r) for r in roots}
+        for root in roots:
+            try:
+                info = os.lstat(root)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError:
+                raise _Problem(f"system tree {_show(root)} cannot be read (it cannot be examined)") from None
+            if stat.S_ISLNK(info.st_mode):
+                inside = any(
+                    other != root and not os.path.islink(other) and (real[root] + "/").startswith(real[other] + "/")
+                    for other in roots
+                )
+                if not inside:
+                    raise _Problem(f"system tree {_show(root)} is a link that leads outside the other trees; {HUMAN}")
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                raise _Problem(f"system tree {_show(root)} is not a directory")
+            above = _chain_writable(str(root), who, cache, floor)
+            if above is not None:
+                hits.append(_show(above))
+            scan = _Scan(door.max_entries)
+            for path, entry in scan.walk(root):
+                if stat.S_ISLNK(entry.st_mode):
+                    target = os.path.realpath(path)
+                    try:
+                        reach = os.stat(target)
+                    except OSError:
+                        continue  # a link to nothing leads nowhere
+                    if _in_home(target, who) or who.can_write(reach) or _chain_writable(target, who, cache, floor):
+                        hits.append(f"{_show(path)} (a link to {_show(target)})")
+                elif who.can_write(entry):
+                    hits.append(_show(path))
+            failure = scan.failure(f"the scan of {_show(root)}")
+            if failure:
+                failures.append(failure)
+    except _Problem as problem:
+        return Finding("trees", "fail", str(problem))
+    if failures:
+        return Finding("trees", "fail", f"{failures[0]}; {HUMAN}")
+    if hits:
+        return Finding(
+            "trees",
+            "fail",
+            _sentence(f"the account can write or redirect {len(hits)} entries in the system trees, for example", hits),
+        )
+    return Finding("trees", "pass", "the account can write nothing in the system trees that were walked")
 
 
 def _chain_writable(path: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str = "/") -> str | None:
@@ -1394,7 +1466,7 @@ def _check_credential(door: DoorPaths, who: _Who) -> Finding:
     return Finding("credential", "pass", "no old secret-store credential was found in the account's home")
 
 
-_NEEDS_WHO = ("sudo", "groups", "polkit", "writable", "jobs", "setuid", "credential")
+_NEEDS_WHO = ("sudo", "groups", "polkit", "writable", "jobs", "setuid", "credential", "trees")
 
 
 def check_doors(
@@ -1436,6 +1508,8 @@ def check_doors(
             results.append(_check_jobs(door, who))
         elif name == "setuid":
             results.append(_check_suid(door, who, trust_uid))
+        elif name == "trees":
+            results.append(_check_trees(door, who))
         else:
             results.append(_check_credential(door, who))
     results.append(_check_preload(door, trust_uid))

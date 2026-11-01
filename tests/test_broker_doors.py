@@ -92,6 +92,7 @@ class World:
             userdb_dirs=(self.t / "userdb",),
             chain_floor=self.t,
             setuid_roots=(self.usr,),
+            system_trees=(self.usr, self.etc, self.opt),
             dpkg_info=self.dpkg,
             credential_paths=(".doppler", ".config/doppler"),
             merged_dirs=(),
@@ -123,7 +124,7 @@ def status(found: dict[str, Finding], name: str) -> str:
 
 def test_a_clean_machine_passes_every_check(w: World) -> None:
     found = w.run()
-    assert set(found) == {"sudo", "groups", "polkit", "writable", "jobs", "preload", "setuid", "credential"}
+    assert set(found) == {"sudo", "groups", "polkit", "writable", "jobs", "preload", "setuid", "credential", "trees"}
     assert {f.status for f in found.values()} == {"pass"}, [f.line() for f in found.values() if f.status != "pass"]
 
 
@@ -143,9 +144,9 @@ def test_every_finding_is_one_plain_sentence(w: World) -> None:
 
 def test_an_unknown_maintainer_fails_every_account_check(w: World) -> None:
     found = w.run(who=None)
-    assert {status(found, n) for n in ("sudo", "groups", "writable", "jobs", "setuid", "credential", "polkit")} == {
-        "fail"
-    }
+    assert {
+        status(found, n) for n in ("sudo", "groups", "writable", "jobs", "setuid", "credential", "polkit", "trees")
+    } == {"fail"}
 
 
 def test_a_maintainer_missing_from_the_account_database_fails(w: World) -> None:
@@ -2216,3 +2217,98 @@ def test_hardening_the_setuid_and_polkit_walks_do_not_enter_another_device(
 
     monkeypatch.setattr(os, "lstat", fake)
     assert status(w.run(), "setuid") == "fail"
+
+
+# -- hardening, round 8: the system trees --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["lib/udev/rules.d/99-x.rules", "lib/tmpfiles.d/x.conf", "lib/x86_64-linux-gnu/security/pam_x.so", "share/x/y"],
+)
+def test_hardening_a_file_the_account_can_write_anywhere_in_a_system_tree_is_found(w: World, relative: str) -> None:
+    put(w.usr / relative, "x", 0o666)
+    found = w.run()
+    assert status(found, "trees") == "fail" and relative.rsplit("/", 1)[-1] in found["trees"].text
+
+
+def test_hardening_a_clean_system_tree_passes(w: World) -> None:
+    put(w.usr / "lib" / "udev" / "rules.d" / "99-x.rules", "x")
+    put(w.usr / "lib" / "tmpfiles.d" / "x.conf", "x")
+    assert status(w.run(), "trees") == "pass"
+
+
+def test_hardening_group_and_owner_write_access_in_a_system_tree_is_found(w: World) -> None:
+    put(w.usr / "lib" / "a", "x", 0o664)  # the maintainer's primary group
+    assert status(w.run(), "trees") == "fail"
+    (w.usr / "lib" / "a").chmod(0o644)
+    put(w.passwd, f"maint:x:{UID}:{GID + 7}::{w.home}:/bin/bash\n")
+    put(w.usr / "lib" / "b", "x", 0o000)
+    assert status(w.run(who=UID), "trees") == "fail"
+
+
+def test_hardening_a_link_in_a_system_tree_to_something_the_account_can_write_is_found(w: World) -> None:
+    writable = put(w.t / "wr" / "target", "x", 0o666)
+    (w.usr / "l1").symlink_to(writable)
+    found = w.run()
+    assert status(found, "trees") == "fail" and "l1" in found["trees"].text
+    (w.usr / "l1").unlink()
+    (w.usr / "l2").symlink_to(put(w.home / "f", "x"))
+    assert status(w.run(), "trees") == "fail"
+    (w.usr / "l2").unlink()
+    (w.usr / "l3").symlink_to(folder(w.t / "wrdir", 0o777))
+    assert status(w.run(), "trees") == "fail"
+
+
+def test_hardening_links_to_safe_or_missing_targets_do_not_fail(w: World) -> None:
+    (w.usr / "l1").symlink_to(put(w.t / "lib" / "ok", "x"))
+    (w.usr / "l2").symlink_to(w.t / "nowhere")
+    assert status(w.run(), "trees") == "pass"
+
+
+def test_hardening_a_system_tree_walk_over_its_limit_is_a_human_look_item(w: World) -> None:
+    for i in range(6):
+        put(w.usr / f"f{i}", "x")
+    found = w.run(max_entries=3)
+    assert status(found, "trees") == "fail" and "needs to look" in found["trees"].text
+
+
+def test_hardening_a_system_tree_that_is_a_link_is_skipped_inside_another_tree_and_fails_outside(w: World) -> None:
+    link = w.t / "bin-link"
+    link.symlink_to(w.usr)
+    assert status(w.run(system_trees=(w.usr, link)), "trees") == "pass"
+    assert status(w.run(system_trees=(link,)), "trees") == "fail"
+    assert status(w.run(system_trees=(w.usr, w.t / "nothing")), "trees") == "pass"
+
+
+def test_hardening_a_system_tree_whose_parent_folder_the_account_can_write_fails(w: World) -> None:
+    parent = folder(w.t / "parent", 0o777)
+    inner = folder(parent / "usr")
+    assert status(w.run(system_trees=(inner,)), "trees") == "fail"
+
+
+def test_hardening_the_system_tree_walk_does_not_enter_another_device(
+    w: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mnt = folder(w.usr / "mnt")
+    put(mnt / "inside", "x", 0o666)
+    real = os.lstat
+
+    def fake(path: Any, *args: Any, **kw: Any) -> os.stat_result:
+        info = real(path, *args, **kw)
+        if str(path) == str(mnt):
+            values = list(info)[:10]
+            values[2] += 1
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(os, "lstat", fake)
+    found = w.run()
+    assert status(found, "trees") == "fail" and "needs to look" in found["trees"].text
+    assert "inside" not in found["trees"].text
+
+
+def test_hardening_default_system_trees_name_the_usual_roots() -> None:
+    d = DoorPaths()
+    for name in ("/usr", "/etc", "/opt", "/lib", "/boot", "/sbin", "/bin"):
+        assert Path(name) in d.system_trees
