@@ -106,6 +106,11 @@ WILD_NAMES = {
     "%": "a format string",
 }
 FIX = "reword the line, or write the step in one of the forms docs/gemini.md describes"
+PAID_DISABLED = (
+    "paid use exists only through the broker client, which a person runs at a terminal (docs/gemini-broker.md); "
+    "this command sends free-tier requests only"
+)
+TERMS_CHECK_FAILED = "the private terms check could not finish, so the brief counts as a match"
 
 ApprovalCheck = Callable[[str], str | None]
 
@@ -184,7 +189,7 @@ def _paid_problem(step: Step, check: ApprovalCheck | None) -> str | None:
     disabled = getattr(check, "disabled", None)
     if isinstance(disabled, str):
         found = "; ".join(x for x in (step.why, step.matched) if x)
-        return f"{where}{disabled} [rule gemini-paid, matched: {found}]" if found else f"{where}{disabled}"
+        return f"{where}{PAID_DISABLED} [rule gemini-paid, matched: {found}]" if found else f"{where}{PAID_DISABLED}"
     if step.unreadable:
         return (
             f"{where}{step.why or 'this Gemini step could not be read exactly as the CLI reads it'}, so it is treated "
@@ -202,7 +207,7 @@ def _paid_problem(step: Step, check: ApprovalCheck | None) -> str | None:
         why = check(record)
     except Exception:
         return f"{where}the approval record could not be checked, so the paid step is blocked"
-    return f"{where}the approval record is not usable: {why}" if why else None
+    return f"{where}the approval record is not usable (see docs/gemini.md)" if why else None
 
 
 _FAIL_CLOSED = [
@@ -1156,8 +1161,8 @@ def _findings(
             tick()
             try:
                 loaded = terms() if callable(terms) else terms
-            except Exception as err:  # the loader's message names no brief text; any failure blocks
-                add(GEMINI_MATERIAL, f"the private terms could not be loaded ({err}); fix the terms file")
+            except Exception:  # any failure blocks; the exception text is never put in a message
+                add(GEMINI_MATERIAL, "the private terms could not be loaded; fix the terms file")
                 loaded = ()
             if loaded:
                 left = (deadline - time.monotonic()) if deadline is not None else TERMS_SECONDS_DEFAULT
@@ -1168,8 +1173,8 @@ def _findings(
                             GEMINI_MATERIAL,
                             "the brief matches one of the private terms; remove it before any Gemini step",
                         )
-                except TermsCheckError as err:
-                    add(GEMINI_MATERIAL, str(err))
+                except TermsCheckError:
+                    add(GEMINI_MATERIAL, TERMS_CHECK_FAILED)
     for step in steps[: MAX_CANDIDATES + 5]:
         tick()
         if step.paid or step.unreadable:

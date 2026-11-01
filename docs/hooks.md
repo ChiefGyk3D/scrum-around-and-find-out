@@ -219,14 +219,17 @@ refuses when its estimate is over it.
    changes it; read, never written, never repeated), blocks it. A mention that sends nothing (an `approve` or `quota`
    command with no prompt file) does not need the line. The vendor host written out in a brief is blocked too: call Gemini only through the wrapper.
 
-**The guard's own messages are plain text that is safe to quote.** An agent that is denied tends to quote the denial
-back in a brief or a command, so a message holds nothing any detector reacts to: no backtick, no command text, no
-quotes, dollar signs or escapes, no vendor, key or host name, and it never opens a line with a declaration. The rule
-name is written `rule gemini-material: ...` or `rule gemini-paid: ...` for the same reason, and the denial is prefixed
-`guard hook:`, which names no tool. The messages point to [Gemini](gemini.md) for the accepted forms instead of spelling
-a command out. A test enumerates every message the guard can produce and runs the real detectors over each one, quoted
-bare, in double and single quotes, as a blockquote and as a list item; a control proves the detectors still fire on a
-real step beside such a quote. Nothing is relaxed: the detectors are unchanged.
+**The messages the Gemini guard emits are written to be safe to quote.** An agent that is denied tends to quote the
+denial back in a brief or a command, so each message avoids what the detectors read: no backtick, no command text, no
+quotes, dollar signs or escapes, no vendor, key or host name, and no line that opens with a declaration. The rule name
+is written `rule gemini-material: ...` or `rule gemini-paid: ...` for the same reason, and the denial is prefixed
+`guard hook:`, which names no tool. The messages point to [Gemini](gemini.md) for the accepted forms instead of
+spelling a command out. The only things put into a message are fixed phrases, line numbers and counts; text that comes
+from a checker, a loader or an exception is never put in. A test collects the message constants and the findings the
+brief check returns for a set of representative briefs (including checkers and loaders that fail or return hostile
+text), then runs the real detectors over each one quoted bare, in double and single quotes, as a blockquote and as a
+list item, and a control shows the detectors still fire on a real step beside such a quote. That is coverage of those
+cases, not a proof for every possible input. The detectors are unchanged.
 
 What the guard covers is stated narrowly, because it is a speed bump and the wrapper holds the gates. After folding the
 text (NFKD with invisible, combining and control characters removed, NFKC, common Cyrillic and Greek look-alike letters

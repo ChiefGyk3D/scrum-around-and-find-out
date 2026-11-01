@@ -52,7 +52,7 @@ def _boom() -> tuple[re.Pattern[str], ...]:
 def _briefs() -> list[tuple[str, Any, Any, float | None]]:
     """Representative briefs, one per producing branch: (text, approval check, terms, deadline)."""
     paid = PaidOnlyThroughBroker()
-    approved = PAID_STEP + " --approval apr-1"
+    approved = PAID_STEP + " --approval approval-0001"
     return [
         (STEP, None, (), None),
         (STEP, paid, (), None),
@@ -63,6 +63,9 @@ def _briefs() -> list[tuple[str, Any, Any, float | None]]:
         (approved, None, (), None),
         (approved, _raises, (), None),
         (approved, _expired, (), None),
+        ("eval safo gemini ask --model m --prompt-file p", None, (), None),
+        ("xargs safo gemini ask --model m --prompt-file p", None, (), None),
+        ("bash -c 'safo gemini ask --model m --prompt-file p'", None, (), None),
         ("safo gemini ask --bogus", None, (), None),
         ("safo gemini ask --model", None, (), None),
         ("safo gemini bogus", None, (), None),
@@ -92,7 +95,7 @@ def _briefs() -> list[tuple[str, Any, Any, float | None]]:
 def all_messages() -> list[str]:
     msgs: list[str] = [hooks._TOO_LARGE, hooks._UNVERIFIABLE, hooks._UNREADABLE, hooks.GEMINI_CHECK_FAILED]
     msgs += [hooks.SHELL_DENIAL.format(c) for c in SHELL_CLASSES]
-    msgs += [PAID_ELSEWHERE]
+    msgs += [PAID_ELSEWHERE, gb.PAID_DISABLED, gb.TERMS_CHECK_FAILED, gb.FIX]
     msgs += [why for _, why in gb._FAIL_CLOSED]
     for text, check, terms, deadline in _briefs():
         found = gb.findings(text, check, terms, deadline)
@@ -156,3 +159,67 @@ def test_the_marker_check_bites_on_a_message_that_holds_one() -> None:
     bad = "this names `safo gemini ask --model M` and " + KEY
     assert MARKER.search(bad) and "safo gemini" in bad.lower()
     assert DECLARATION_START.match("gemini-material: public")
+
+
+# -- text from a checker, a loader or an exception never reaches a message ---------------------------------------
+
+HOSTILE = "`" + "id" + "` " + "$" + "(" + "x" + ") " + KEY + " 'q' \"r\" example.test"
+HOSTILE_PARTS = ("`", "$(", KEY, "example.test", "'q'")
+APPROVED = PAID_STEP + " --approval approval-0001"
+
+
+class _Disabled:
+    disabled = HOSTILE
+
+    def __call__(self, record: str) -> str | None:
+        return HOSTILE
+
+
+def _hostile_terms() -> tuple[re.Pattern[str], ...]:
+    raise RuntimeError(HOSTILE)
+
+
+def _hostile_why(record: str) -> str | None:
+    return HOSTILE
+
+
+def _hostile_raise(record: str) -> str | None:
+    raise RuntimeError(HOSTILE)
+
+
+def _hostile_messages() -> list[str]:
+    out: list[str] = []
+    for check in (_hostile_why, _hostile_raise, _Disabled()):
+        out += [why for _, why in gb.findings(APPROVED, check)]
+    out += [why for _, why in gb.findings(STEP, None, _hostile_terms)]
+    return out
+
+
+def test_the_checker_branches_really_run() -> None:
+    messages = _hostile_messages()
+    joined = " ".join(messages)
+    assert "the approval record is not usable" in joined
+    assert "the approval record could not be checked" in joined
+    assert "the private terms could not be loaded" in joined
+    assert "paid use exists only through the broker client" in joined
+
+
+def test_hostile_text_from_a_checker_or_loader_never_reaches_a_message() -> None:
+    messages = _hostile_messages()
+    assert len(messages) >= 4, messages
+    for message in messages:
+        assert not any(part in message for part in HOSTILE_PARTS), message
+        for form in quoted(message) + quoted(f"rule gemini-paid: {message}"):
+            assert gb.findings(form) == [], form
+            assert gb.shell_command_class(form) is None, form
+            assert gb.shell_command_class("echo " + form) is None, form
+
+
+def test_the_hostile_text_would_be_caught_if_it_did_reach_a_message() -> None:
+    bad = "the private terms could not be loaded (" + HOSTILE + "); fix the terms file"
+    assert any(part in bad for part in HOSTILE_PARTS)
+    assert gb.shell_command_class(KEY) is not None
+
+
+def test_the_two_paid_texts_are_the_same() -> None:
+    assert gb.PAID_DISABLED == PAID_ELSEWHERE
