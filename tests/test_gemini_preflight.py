@@ -14,6 +14,7 @@ import hashlib
 import io
 import os
 import stat
+import struct
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -22,10 +23,22 @@ import pytest
 from safo import gemini_preflight as pf
 
 NS = "safo-gemini-approval"
-# built from pieces at run time so no key-shaped literal sits in the tree (the secret scan reads every commit)
-KEY_B64 = "".join(
-    ["AAAA", "GnNrLXNzaC1lZDI1NTE5QG9w", "ZW5zc2guY29tAAAA", "I" + "Placeholder" * 4 + "AAA"]
-)  # 92 characters: a whole number of base64 quanta
+
+
+# built at run time so no key-shaped literal sits in the tree (the secret scan reads every commit); each is a public key
+# blob of exactly the shape its type has, which is what the broker's own parser demands
+def _string(data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + data
+
+
+def _blob(*parts: bytes) -> str:
+    return base64.b64encode(b"".join(_string(p) for p in parts)).decode()
+
+
+SK = "sk-ssh-ed25519@openssh.com"
+KEY_B64 = _blob(SK.encode(), bytes(range(32)), b"ssh:")  # an sk key
+KEY_B2_B64 = _blob(SK.encode(), bytes(range(64, 96)), b"ssh:")  # another sk key
+KEY_SOFT_B64 = _blob(b"ssh-ed25519", bytes(range(100, 132)))  # a software key
 VENDOR = "api" + ".vendor.example"  # a stand-in host name; the report must never print it
 SECRET = "BEGIN OPENSSH PRIVATE KEY topsecretmaterial"
 ALLOWED_COMMANDS = {
@@ -220,8 +233,8 @@ def test_a_configured_key_file_with_a_software_key_type_warns(tmp_path: Path) ->
 
 
 def test_an_enrolled_software_key_never_makes_the_check_pass(tmp_path: Path) -> None:
-    loc = make_tree(tmp_path, signers_lines=[f'soft namespaces="{NS}" ssh-ed25519 {KEY_B64}'])
-    runner = FakeRunner({("ssh-add", "-L"): pf.RunResult(0, f"ssh-ed25519 {KEY_B64} comment\n")})
+    loc = make_tree(tmp_path, signers_lines=[f'soft namespaces="{NS}" ssh-ed25519 {KEY_SOFT_B64}'])
+    runner = FakeRunner({("ssh-add", "-L"): pf.RunResult(0, f"ssh-ed25519 {KEY_SOFT_B64} comment\n")})
     got = by_name(pf.run_preflight(loc, runner, lookup_ok))
     assert got["hardware-key"].status == "warn"
 
@@ -457,7 +470,12 @@ def test_nothing_secret_or_key_shaped_is_printed(tmp_path: Path) -> None:
 
 
 def test_the_module_never_imports_the_network_or_vendor_code() -> None:
+    # The one allowed import of the free-tier module is the refusal class the broker's parser raises (#299): the parser
+    # itself is the broker's, imported from `safo.geminisign`. Nothing else of `safo.gemini` may be named here.
+    allowed = "from safo.gemini import RefusedError\n"
     source = (Path(pf.__file__)).read_text()
+    assert source.count(allowed) == 1
+    source = source.replace(allowed, "")
     for banned in ("socket", "urllib", "http.client", "requests", "safo.gemini ", "import safo.broker"):
         assert banned not in source, banned
 
@@ -585,3 +603,99 @@ def test_the_command_line_takes_the_two_flags_and_nothing_else(tmp_path: Path, m
     assert pf.main(["--enabling", "--ack-observe-mode"]) == 0
     assert pf.main(["--ack-observe-mode"]) == 0
     assert pf.main(["--bogus"]) == 2
+
+
+# -- the allowed-signers check is the broker's own parser (#299) ------------------------------------------------------
+# The shapes the broker refuses at run time (`geminisign.parse_signers`) must fail the readiness check too. Each row is
+# a whole file; the first test proves the broker refuses it (so the table is not a guess), the second that preflight
+# refuses it and does not use it to say the key is enrolled.
+
+GOOD = f'yubikey-a namespaces="{NS}" {SK} {KEY_B64}'
+REFUSED_BY_THE_BROKER: dict[str, list[str]] = {
+    "no-touch-required": [f'a namespaces="{NS}",no-touch-required {SK} {KEY_B64}'],
+    "cert-authority": [f'a cert-authority,namespaces="{NS}" {SK} {KEY_B64}'],
+    "an unknown option": [f'a namespaces="{NS}",principals="x" {SK} {KEY_B64}'],
+    "a window that ends before it starts": [
+        f'a namespaces="{NS}",valid-after="20300101Z",valid-before="20200101Z" {SK} {KEY_B64}'
+    ],
+    "a window in local time": [f'a namespaces="{NS}",valid-after="20300101" {SK} {KEY_B64}'],
+    "an upper-case label": [f'Yubi namespaces="{NS}" {SK} {KEY_B64}'],
+    "a label with a comma": [f'a,b namespaces="{NS}" {SK} {KEY_B64}'],
+    "a key type the broker does not accept": [f'a namespaces="{NS}" ssh-rsa {KEY_B64}'],
+    "a key that does not match its type": [f'a namespaces="{NS}" ssh-ed25519 {KEY_B64}'],
+    "a key that is not base64": [f'a namespaces="{NS}" {SK} not*base64*at*all'],
+    "a truncated key": [f'a namespaces="{NS}" {SK} {KEY_B64[:-8]}'],
+    "a label used twice": [
+        f'a namespaces="{NS}" {SK} {KEY_B64}',
+        f'a namespaces="{NS}" {SK} {KEY_B2_B64}',
+    ],
+    "a key enrolled twice": [
+        f'a namespaces="{NS}" {SK} {KEY_B64}',
+        f'b namespaces="{NS}" {SK} {KEY_B64}',
+    ],
+    "an unknown safo directive": [GOOD, "# safo: yubikey-a frobnicate"],
+    "a directive for a label that is not enrolled": [GOOD, "# safo: nobody require-pin"],
+    "a line with too few fields": [f'a namespaces="{NS}"'],
+    "one good line and one refused line": [GOOD, f'b namespaces="{NS}",no-touch-required {SK} {KEY_B2_B64}'],
+}
+ACCEPTED_BY_THE_BROKER: dict[str, list[str]] = {
+    "one sk key": [GOOD],
+    "two sk keys": [GOOD, f'yubikey-b namespaces="{NS}" {SK} {KEY_B2_B64}'],
+    "a valid window": [f'a namespaces="{NS}",valid-after="20200101Z",valid-before="20300101Z" {SK} {KEY_B64}'],
+    "a directive for an enrolled label": [GOOD, "# safo: yubikey-a require-pin"],
+    "a software key": [f'soft namespaces="{NS}" ssh-ed25519 {KEY_SOFT_B64}'],
+}
+
+
+def broker_accepts(lines: list[str]) -> bool:
+    from safo import geminisign
+    from safo.gemini import RefusedError
+
+    try:
+        geminisign.parse_signers("\n".join(lines) + "\n")
+    except RefusedError:
+        return False
+    return True
+
+
+def test_the_parity_tables_are_not_trimmed() -> None:
+    assert len(REFUSED_BY_THE_BROKER) == 17
+    assert len(ACCEPTED_BY_THE_BROKER) == 5
+
+
+@pytest.mark.parametrize("name", list(REFUSED_BY_THE_BROKER))
+def test_the_broker_refuses_each_shape_in_the_table(name: str) -> None:
+    assert not broker_accepts(REFUSED_BY_THE_BROKER[name]), name
+
+
+@pytest.mark.parametrize("name", list(ACCEPTED_BY_THE_BROKER))
+def test_the_broker_accepts_each_good_shape_in_the_table(name: str) -> None:
+    assert broker_accepts(ACCEPTED_BY_THE_BROKER[name]), name
+
+
+@pytest.mark.parametrize("name", list(REFUSED_BY_THE_BROKER))
+def test_a_file_the_broker_refuses_fails_the_readiness_check(tmp_path: Path, name: str) -> None:
+    loc = make_tree(tmp_path, signers_lines=REFUSED_BY_THE_BROKER[name])
+    got = by_name(pf.run_preflight(loc, FakeRunner(), lookup_ok))
+    assert got["allowed-signers"].status == "fail", name
+    assert got["hardware-key"].status != "pass", name  # the agent holds the key, but the broker would not use the file
+    out = pf.render(pf.run_preflight(loc, FakeRunner(), lookup_ok))
+    assert KEY_B64 not in out and KEY_B2_B64 not in out and "not*base64" not in out
+
+
+@pytest.mark.parametrize("name", list(ACCEPTED_BY_THE_BROKER))
+def test_a_file_the_broker_accepts_passes_the_readiness_check(tmp_path: Path, name: str) -> None:
+    loc = make_tree(tmp_path, signers_lines=ACCEPTED_BY_THE_BROKER[name])
+    got = by_name(pf.run_preflight(loc, FakeRunner(), lookup_ok))
+    assert got["allowed-signers"].status == "pass", (name, got["allowed-signers"].detail)
+
+
+def test_preflight_calls_the_brokers_parser_and_has_no_parser_of_its_own() -> None:
+    """One implementation: the module calls the broker's parser, and holds no option, key-type or label table."""
+    from safo import geminisign
+
+    assert pf.geminisign is geminisign
+    source = Path(pf.__file__).read_text()
+    assert source.count("geminisign.parse_signers(") == 2  # the readiness check and the key-to-name link
+    for own_parser in ("no-touch-required", "cert-authority", "valid-before", "KEY_TYPES", "_line_namespace_problem"):
+        assert own_parser not in source, own_parser

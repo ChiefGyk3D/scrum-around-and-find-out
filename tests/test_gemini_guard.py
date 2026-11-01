@@ -601,6 +601,7 @@ PREFILTER_TRIGGERS = {
     "sdk": "import generativeai",
     "decode": "printf '\\x41' | sh",
     "conceal": "$'\\x73afo' ask --paid",
+    "broker module": "python3 -m safo.broker.client",
 }
 
 
@@ -630,6 +631,9 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "RECORD_ID",
         # the Bash command check (#209) is its own scan of a shell command, not a brief detector
         "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL",
+        # the broker client module reader (#299): gated by the "broker module" prefilter word or a risk line
+        "_BM_ENTRY", "_BM_SCRIPT", "_BM_LOCAL", "_BM_IMPORT", "_BM_CODE", "_BM_DOTTED", "_BM_PATH", "_BM_RUNTIME",
+        "_BM_FEED", "_BM_EXPANDED", "_BM_OPTION",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
     compiled = {n: v for n, v in vars(gb).items() if isinstance(v, re.Pattern)}
@@ -1397,6 +1401,7 @@ BLOCKED_SAMPLES = {
     "sdk": "import generativeai\n",
     "decode": "printf '\\x41' | sh\n",
     "conceal": "$'\\x73afo' $'\\x67emini' $'\\x61sk' $'\\x2d\\x2dpaid'\n",
+    "broker module": "python3 -I -m safo.broker.client --model m --job j\n",
     "variable flow": "A=safo\nB=gemini\n$A $B ask --paid\n",
     "risk option beside an expansion command": "$X $Y ask --paid\n",
     "a wrapper with options": "env -u FOO $BIN $SUB ask --paid --model m\n",

@@ -119,6 +119,12 @@ exists any more. The safe image writer of phase 4a is in the tree and `default_w
 the small marked adapter (`adapter_write_image`, `adapter_write_sidecar`) remains only as a fallback and for tests, and can be
 deleted later.
 
+The client module also has a command-line entry of its own (run as a module with the isolated interpreter), which
+skips the wrapper's sanitized environment, private directory and closed descriptors. That entry is for a person at a terminal only: the dispatch guard
+reads it as a paid command word (denied in a brief, unreadable in run-time forms) and the Bash check refuses it for an
+agent, in every spelling that runs the module or its file. The paid entries of the Gemini command group stay the way an
+agent-run session reaches the client, and they still need a touch on the security key at a terminal.
+
 ## The requirement
 
 Approval consumption, spend accounting and the paid API key must live under an authority outside the maintainer's

@@ -36,7 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from safo import output
+from safo import geminisign, output
+from safo.gemini import RefusedError
 
 NAMESPACE = "safo-gemini-approval"
 SK_TYPES = ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
@@ -201,8 +202,8 @@ def _public_key(line: str) -> PublicKey | None:
 
 
 def _enrolled(loc: Locations) -> dict[str, tuple[str, str]]:
-    """fingerprint -> (principal, key type) for each key line of the allowed-signers file; empty if it cannot be read.
-    The structure check of the file itself is `check_allowed_signers`; this only links a key to a name."""
+    """fingerprint -> (principal, key type) for each key of the allowed-signers file; empty if it cannot be read or the
+    broker would refuse it. The check of the file itself is `check_allowed_signers`; this only links a key to a name."""
     try:
         st = loc.allowed_signers.lstat()
         if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_FILE_BYTES:
@@ -210,19 +211,13 @@ def _enrolled(loc: Locations) -> dict[str, tuple[str, str]]:
         text = loc.allowed_signers.read_text(errors="replace")
     except OSError:
         return {}
-    found: dict[str, tuple[str, str]] = {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        tokens = _TOKEN.findall(stripped)
-        for index, token in enumerate(tokens[1:], 1):
-            if token.startswith(("ssh-", "ecdsa-", "sk-")) and index + 1 < len(tokens):
-                digest = fingerprint(tokens[index + 1])
-                if digest is not None:
-                    found[digest] = (tokens[0], token)
-                break
-    return found
+    try:
+        records = geminisign.parse_signers(
+            text
+        )  # the broker's own parser: a file it refuses enrolls nobody here either
+    except RefusedError:
+        return {}
+    return {record.fingerprint: (record.label, record.key_type) for record in records}
 
 
 def _key_file_public(loc: Locations) -> tuple[PublicKey | None, str]:
@@ -339,19 +334,6 @@ def _file_problem(path: Path, trust_uid: int) -> tuple[os.stat_result | None, st
     return st, None
 
 
-def _line_namespace_problem(line: str, namespace: str) -> bool:
-    """True when the line is NOT bound to exactly the namespace. The line is never returned or printed."""
-    tokens = _TOKEN.findall(line)
-    if len(tokens) < 3:
-        return True
-    options = tokens[1] if tokens[1] not in SK_TYPES and not tokens[1].startswith(("ssh-", "ecdsa-", "sk-")) else ""
-    for option in re.split(r",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)", options):
-        key, _, value = option.partition("=")
-        if key.lower() == "namespaces" and value.strip('"') == namespace:
-            return False
-    return True
-
-
 def check_allowed_signers(loc: Locations) -> Check:
     name = "allowed-signers"
     path = loc.allowed_signers
@@ -371,32 +353,25 @@ def check_allowed_signers(loc: Locations) -> Check:
         text = path.read_text(errors="replace")
     except OSError:
         return Check(name, "fail", "the file cannot be read")
-    keys = 0
-    bad: list[int] = []
-    secret_lines: list[int] = []
-    for number, line in enumerate(text.splitlines(), 1):
-        if "PRIVATE KEY" in line:
-            secret_lines.append(number)
-            continue
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        keys += 1
-        if _line_namespace_problem(stripped, loc.namespace):
-            bad.append(number)
+    secret_lines = [n for n, line in enumerate(text.splitlines(), 1) if "PRIVATE KEY" in line]
     if secret_lines:
         return Check(
             name,
             "fail",
             "private key text at line " + ", ".join(map(str, secret_lines)) + " (content not shown): remove it now",
         )
-    if keys == 0:
+    try:
+        keys = geminisign.parse_signers(text)  # the one parser the broker uses; no second reading of the file here
+    except RefusedError as problem:
+        return Check(name, "fail", f"the broker would refuse this file ({problem}; content not shown)")
+    if not keys:
         return Check(name, "fail", "the file has no key lines, so nothing can approve")
-    if bad:
-        return Check(
-            name, "fail", f'line {", ".join(map(str, bad))} lack(s) namespaces="{loc.namespace}" (content not shown)'
-        )
-    return Check(name, "pass", f'{keys} key line(s), each bound to namespaces="{loc.namespace}"; root-owned, mode 0644')
+    return Check(
+        name,
+        "pass",
+        f'{len(keys)} key line(s), each bound to namespaces="{loc.namespace}" and accepted by the broker parser; '
+        "root-owned, mode 0644",
+    )
 
 
 def check_switch(loc: Locations) -> Check:

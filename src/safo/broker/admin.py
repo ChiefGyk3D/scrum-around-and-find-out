@@ -302,6 +302,38 @@ def _check_units(paths: Paths, release: Path, name_version: str, facts: list[str
         facts.append(f"units: {good} match the signed release")
 
 
+# The egress config rules of `packaging/safo_broker_egress.py` (`read_config`), which is a root-run file that imports
+# nothing of this package, so the rules are kept here a second time and `tests/test_egress_config_parity.py` runs ONE
+# table of configs through both readers. A config the helper refuses must fail the check; "ok" on it would hide stale
+# rules.
+EGRESS_MODES = ("observe", "drop")
+_EGRESS_LINE = re.compile(r"([A-Z_]+)=(.*)")
+_EGRESS_HOST = re.compile(r"(?=.{3,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]*[a-z0-9])?")
+
+
+def parse_egress_config(text: str) -> tuple[str, str]:
+    """(vendor host, mode) of an egress config, by the helper's rules: only `VENDOR_HOST=...` and `MODE=...` lines
+    (blank lines and `#` comments aside), each at most once, a plausible host name, a known mode (a missing MODE is
+    `drop`, the fail-closed default). Raises ValueError, with a fixed reason that quotes nothing of the file, when the
+    helper would refuse it."""
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        found = _EGRESS_LINE.fullmatch(line)
+        if not found or found[1] not in ("VENDOR_HOST", "MODE") or found[1] in values:
+            raise ValueError("a line is not VENDOR_HOST=... or MODE=..., or repeats one")
+        values[found[1]] = found[2]
+    host = values.get("VENDOR_HOST", "")
+    mode = values.get("MODE", "drop")
+    if _EGRESS_HOST.fullmatch(host) is None or re.fullmatch(r"[0-9.]+", host):
+        raise ValueError("there is no plausible VENDOR_HOST")
+    if mode not in EGRESS_MODES:
+        raise ValueError(f"MODE is not one of {', '.join(EGRESS_MODES)}")
+    return host, mode
+
+
 def _check_switch_and_egress(paths: Paths, facts: list[str], fails: list[str], notes: list[str]) -> None:
     present = os.path.lexists(paths.switch)
     enabled = False
@@ -323,18 +355,23 @@ def _check_switch_and_egress(paths: Paths, facts: list[str], fails: list[str], n
                 "the switch file exists but the broker would treat it as off (not exactly enabled, or not root-owned)"
             )
     mode = ""
+    refused = ""
     try:
         conf = geminisign.read_trust_file(paths.egress_conf, paths.trust_uid, "egress config")
-        values = dict(
-            x.split("=", 1) for x in conf.decode("utf-8", "replace").splitlines() if re.fullmatch(r"[A-Z_]+=.*", x)
-        )
-        mode = values.get("MODE", "drop")
+        try:
+            mode = parse_egress_config(conf.decode("utf-8"))[1]
+        except UnicodeDecodeError:
+            refused = "it is not text"
+        except ValueError as problem:
+            refused = str(problem)
     except gemini.RefusedError:
         mode = ""
-    if mode in ("observe", "drop"):
+    if mode in EGRESS_MODES:
         facts.append(f"egress mode: {mode}")
         if enabled and mode == "observe":
             notes.append("paid use is enabled while the egress control is in observe mode (it logs and accepts)")
+    elif refused:
+        fails.append(f"the egress config is refused by the egress helper's rules: {refused}")
     elif enabled:
         fails.append("paid use is enabled but the egress config cannot be read or has no valid mode")
 

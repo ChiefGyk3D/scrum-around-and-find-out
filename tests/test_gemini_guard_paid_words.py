@@ -46,17 +46,28 @@ SHAPES = [
 ]
 
 
+SHAPE_COUNT = 21  # the exact size of SHAPES; a shape removed or added must change this number on purpose
+
+
+def test_the_shape_list_has_exactly_the_expected_shapes() -> None:
+    """The parametrized test below cannot pass by collecting less: the list is counted, and no shape repeats."""
+    assert len(SHAPES) == SHAPE_COUNT
+    assert len(set(SHAPES)) == SHAPE_COUNT
+
+
+def test_every_shape_is_denied_on_main_for_approve() -> None:
+    """The reference: each shape is a denied shape for `approve`. A shape that is not denied fails here, it is never
+    skipped, so the paid-word comparison below cannot lose a shape quietly."""
+    not_denied = [s for s in SHAPES if "gemini-paid" not in rules(s.format(w="approve"))]
+    assert not_denied == []
+    assert "gemini-paid" not in rules("echo hello\n")  # the negative case: the reference does tell denied from allowed
+
+
 @pytest.mark.parametrize("word", ["paid", "paid-dryrun"])
 @pytest.mark.parametrize("shape", SHAPES)
 def test_every_shape_denied_for_approve_is_denied_for_the_paid_words(shape: str, word: str) -> None:
-    reference = shape.format(w="approve")
-    if "gemini-paid" not in rules(reference):
-        pytest.skip("not a denied shape on main for approve either")
+    assert "gemini-paid" in rules(shape.format(w="approve")), shape
     assert "gemini-paid" in rules(shape.format(w=word)), shape.format(w=word)
-
-
-def test_the_reference_set_is_not_empty() -> None:
-    assert sum("gemini-paid" in rules(s.format(w="approve")) for s in SHAPES) >= 10
 
 
 @pytest.mark.parametrize("word", ["paid", "paid-dryrun"])
@@ -88,3 +99,128 @@ def test_the_real_broker_command_is_not_blocked_by_the_shell_check() -> None:
     assert geminibrief.shell_command_class(command) is None
     assert geminibrief.shell_command_class("safo gemini paid-dryrun") is None
     assert "gemini-paid" in rules(command + "\n")
+
+
+# -- the broker client's own module entry (#299) ----------------------------------------------------------------------
+# `python3 -I -m safo.broker.client` reaches the same paid call as `safo gemini paid`, but without the wrapper (its
+# sanitized environment, private directory and closed descriptors). It is a paid command word like `paid`: denied in a
+# brief, unreadable in run-time forms, and refused by the Bash check (an agent never runs it; a person types it at a
+# terminal, where no hook reads it). `safo gemini paid` itself stays allowed by the Bash check, as before.
+MODULE = "safo" + "." + "broker" + "." + "client"
+MODULE_PATH = "src/safo/broker/client.py"
+MODULE_SHAPES = [
+    # the entry itself, as the module docstring writes it, and spellings of the interpreter and the option
+    "python3 -I -m {m} --model m --job j --prompt-file p --max-usd 1\n",
+    "python -m {m} --model m\n",
+    "python3 -Im {m} --model m\n",
+    "/usr/bin/python3.12 -I -m {m} --model m --job j\n",
+    "env -i python3 -I -m {m} --model m\n",
+    "python3 -I -m '{m}' --model m\n",
+    'python3 -I -m "safo.broker.""client" --model m\n',
+    "python3 -I -m {m} --help\n",
+    # the wrapped and indirect forms of the paid-word list above
+    "A={m}; python3 -I -m $A --model m --job j --max-usd 1\n",
+    'eval "python3 -I -m {m} --model m --job j --max-usd 1"\n',
+    "eval 'python3 -I -m '{m}' --model m'\n",
+    "bash -c 'python3 -I -m {m} --model m --job j --max-usd 1'\n",
+    "echo {m} --model m --job j | xargs python3 -I -m\n",
+    "echo {m} | xargs -I{{}} python3 -I -m {{}} --model m --job j --max-usd 1\n",
+    "echo {m} | xargs python3 -m\n",
+    "echo --model m --job j --max-usd 1 > o; echo {m} | xargs python3 -m $(cat o)\n",
+    "for a in {m}; do python3 -I -m $a --model m; done\n",
+    "W={m}\npython3 -I -m $W --model m --job j --max-usd 1\n",
+    "python3 -I -m $X {m}\n",
+    "python3 -I -m $X --job j --max-usd 1\n",
+    "printf '%s\\n' {m} | xargs -n1 python3 -m\n",
+    "echo {m} | sh -c 'xargs python3 -m'\n",
+    # prose-looking and table-looking lines that hold a real command
+    "| step | `echo {m} | xargs python3 -m` |\n",
+    "| step | `python3 -I -m {m} --model m --job j --max-usd 1` |\n",
+    "| a | b |\n| `python3 -m {m}` | `echo {m} | xargs python3 -m` |\n",
+    "the user then runs python3 -I -m {m} --model m\n",
+    "note: echo ok | python3 -I -m {m}\n",
+    # other ways to start the same code
+    "python3 -I src/safo/broker/client.py --model m --job j\n",
+    "python3 -I -X dev src/safo/broker/client.py --model m\n",
+    "cd src/safo/broker && python3 -I client.py --model m\n",
+    "echo src/safo/broker/client.py | xargs python3 -I\n",
+    "python3 -I -c 'import {m} as c; c.main()'\n",
+    "python3 -I -c 'from safo.broker import client; client.main()'\n",
+    "python3 -I -c 'from {m} import main; main()'\n",
+    'python3 -I -c \'import runpy; runpy.run_module("{m}", run_name="__main__")\'\n',
+    'python3 -I -c \'import importlib; importlib.import_module("safo.broker." + "client").main()\'\n',
+    "python3 - <<EOF\nimport {m}\nEOF\n",
+    "python3 -I -m $1$2 --model m\nset -- safo.broker. client\n",
+]
+MODULE_SHAPE_COUNT = 38  # exact: a shape removed or added must change this number on purpose
+
+
+def test_the_module_shape_list_has_exactly_the_expected_shapes() -> None:
+    assert len(MODULE_SHAPES) == MODULE_SHAPE_COUNT
+    assert len(set(MODULE_SHAPES)) == MODULE_SHAPE_COUNT
+
+
+@pytest.mark.parametrize("shape", MODULE_SHAPES)
+def test_every_module_entry_shape_is_denied_in_a_brief(shape: str) -> None:
+    assert "gemini-paid" in rules(shape.format(m=MODULE)), shape
+
+
+@pytest.mark.parametrize("shape", MODULE_SHAPES)
+def test_every_module_entry_shape_is_refused_by_the_shell_check(shape: str) -> None:
+    assert geminibrief.shell_command_class(shape.format(m=MODULE)) is not None, shape
+
+
+def test_the_shell_class_for_the_module_entry_is_a_fixed_phrase_that_repeats_nothing() -> None:
+    found = geminibrief.shell_command_class(f"python3 -I -m {MODULE} --model secretmodelname")
+    assert found == geminibrief.SHELL_BROKER_MODULE
+    assert "secretmodelname" not in (found or "") and MODULE not in (found or "")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"The `{MODULE}` module signs the request and prints the receipt.\n",
+        f"Edit {MODULE_PATH} and run `python3 -m pytest tests/test_broker_client.py`.\n",
+        f"python3 -m mypy {MODULE_PATH}\n",
+        f"python3 -m ruff check {MODULE_PATH}\n",
+        f"git diff origin/main -- {MODULE_PATH}\n",
+        f"python3 -m pytest --cov={MODULE} tests\n",
+        "python3 -I -m safo.broker.admin check-install\n",
+        "python3 -I -m safo.broker\n",
+        "python3 -m pytest -k client tests\n",
+        "python3 -m venv .venv && .venv/bin/python -m pip install -e .\n",
+    ],
+)
+def test_naming_the_module_or_its_file_without_running_it_stays_allowed(text: str) -> None:
+    assert "gemini-paid" not in rules(text)
+    assert geminibrief.shell_command_class(text.strip("\n").replace("`", "")) is None
+
+
+def test_the_real_broker_command_is_still_allowed_by_the_shell_check_and_denied_in_a_brief() -> None:
+    """Unchanged: `safo gemini paid` is what a person types; only the module entry is newly refused."""
+    assert geminibrief.shell_command_class("safo gemini paid --model m --job j") is None
+    assert "gemini-paid" in rules("safo gemini paid --model m --job j\n")
+
+
+def test_a_long_run_of_interpreter_options_is_read_without_backtracking() -> None:
+    """The script-path reader repeats over interpreter options; a hostile run of them must not make it slow, whether
+    the path follows (denied) or not (allowed)."""
+    import time
+
+    options = "-x " * 1200
+    for tail, denied in (("src/safo/broker/client.py", True), ("src/safo/other.py", False)):
+        command = f"python3 {options}{tail}"
+        assert len(command) < geminibrief.LINE_CAP
+        start = time.monotonic()
+        found = geminibrief.shell_command_class(command)
+        assert time.monotonic() - start < 2.0
+        assert (found is not None) is denied, tail
+        if denied:
+            assert found == geminibrief.SHELL_BROKER_MODULE
+
+
+def test_a_long_line_that_names_the_broker_client_is_refused_unread() -> None:
+    line = "echo " + "x " * geminibrief.LINE_CAP + " broker client\n"
+    assert "gemini-paid" in rules(line)
+    assert geminibrief.shell_command_class(line) is not None
+    assert "gemini-paid" not in rules("echo " + "x " * geminibrief.LINE_CAP + "\n")

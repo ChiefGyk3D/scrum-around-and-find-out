@@ -28,7 +28,7 @@ import dataclasses
 import re
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import NamedTuple
@@ -50,6 +50,7 @@ GEMINI_RULES = (GEMINI_PAID, GEMINI_MATERIAL)
 MATCH_COMMAND = "a `safo gemini` command"
 MATCH_DECLARATION = "a `gemini:` declaration"
 MATCH_CONFIG = "the paid config name"
+MATCH_MODULE = "the broker client module"
 
 DECLARATION = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)?(?:#+\s*)?gemini(?:-step)?\s*:(?P<rest>.*)$", re.IGNORECASE)
 MATERIAL = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)?gemini-material\s*:\s*(?P<value>.*?)\s*$", re.IGNORECASE)
@@ -85,6 +86,7 @@ PREFILTER = (
     ("sdk", SDK),
     ("decode", DECODE),
     ("conceal", CONCEAL),
+    ("broker module", re.compile("broker")),
 )
 LINE_CAP = 4000  # a line longer than this that mentions anything above is blocked unread
 MAX_CANDIDATES = 50  # commands examined per brief; more than this is blocked
@@ -602,6 +604,69 @@ _RISK_TOKEN = re.compile(
     r"--paid|--approval|--cap(?![\w-])|--max-usd|--job(?![\w-])|(?<![\w-])(?:ask|approve|paid-dryrun|paid)(?![\w-])"
 )
 _PAID_TOKEN = re.compile(r"--paid|(?<![\w-])(?:approve|paid-dryrun|paid)(?![\w-])")
+# -- the broker client's own module entry (#299) ----------------------------------------------------------------------
+# `python3 -I -m safo.broker.client` runs the same paid call as `safo gemini paid`, but outside the wrapper (its
+# sanitized environment, private directory and closed descriptors). It is a paid command word: a brief that runs it, in
+# any spelling the Gemini commands are caught in, is denied; the Bash check refuses it for an agent. A person types it
+# at
+# a terminal, where no hook reads it. Naming the module or its file in prose, or reading or checking the file, is not
+# running it and stays allowed. Everything is read from the cleaned lower-case views, so quotes spliced into the name
+# do not hide it.
+_BM_DOT = r"safo\.broker\.client"
+_BM_NAME = r"safo[./]broker[./]client"
+_BM_PY = r"(?<![\w-])python[\d.]*(?![\w-])"
+# interpreter options before a script (not -m: that names a module). The alternatives start differently, and an
+# option's value cannot start with a dash, so the repetition cannot backtrack badly on a long run of options.
+_BM_OPTS = r"(?:\s+(?:-[wx](?:\s*[^\s-]\S*)?|-[a-ln-vyz]\w*|--[\w-]+))*"
+_BM_ENTRY = re.compile(r"(?<![\w-])-[a-z]*m\s*=?\s*" + _BM_DOT + r"(?![\w-])")
+_BM_SCRIPT = re.compile(_BM_PY + _BM_OPTS + r"\s+\S*safo/broker/client\.py")
+_BM_LOCAL = re.compile(_BM_PY + _BM_OPTS + r"\s+(?:\./)?client\.py")
+_BM_IMPORT = re.compile(
+    r"(?<![\w.-])(?:import|from)\s+" + _BM_DOT + r"(?![\w-])"
+    r"|(?<![\w.-])from\s+safo\.broker\s+import\s+[^;\n]*(?<![\w-])client(?![\w-])"
+    r"|(?:run_module|import_module|__import__)\W*" + _BM_DOT
+)
+_BM_CODE = re.compile(r"(?<![\w-])-[a-z]*c\b|runpy|import_module|__import__|importlib|exec\s*\(|<<")
+_BM_WORDS = (
+    re.compile(r"(?<![\w-])safo(?![\w-])"),
+    re.compile(r"(?<![\w-])broker(?![\w-])"),
+    re.compile(r"(?<![\w-])client(?![\w-])"),
+)
+_BM_DOTTED = re.compile(_BM_DOT + r"(?![\w-])")
+_BM_PATH = re.compile(r"safo/broker/client\.py")
+_BM_RUNTIME = re.compile(RUNTIME_FORMS.pattern + r"|`")
+_BM_FEED = re.compile(r"(?<![\w-])(?:xargs|eval|exec)(?![\w-])|(?<![\w-])-c\b")
+_BM_EXPANDED = re.compile(_BM_PY + r"[^;|&\n]*?(?<![\w-])-[a-z]*m\s*[^\s;|&]*[$`{]")
+_BM_OPTION = re.compile(r"--(?:max-usd|max-output-tokens|quote|quoted-at|job)(?![\w-])")
+
+
+def _broker_module_line(v: str) -> bool:
+    py = bool(re.search(_BM_PY, v) or "runpy" in v)
+    if _BM_ENTRY.search(v) or _BM_SCRIPT.search(v) or _BM_IMPORT.search(v):
+        return True
+    if py and all(w.search(v) for w in _BM_WORDS) and _BM_CODE.search(v):
+        return True  # code that names the pieces (`import_module("safo.broker." + "client")`)
+    if py and _BM_DOTTED.search(v) and _BM_RUNTIME.search(v):
+        return True  # the name beside xargs, eval, a variable, -c
+    if py and _BM_PATH.search(v) and _BM_FEED.search(v):
+        return True
+    return bool(_BM_EXPANDED.search(v) and _BM_OPTION.search(v))
+
+
+def broker_module_route(views: Sequence[str]) -> bool:
+    """True when these lines (cleaned lower-case views, one per line, of a brief or of one Bash command) run the broker
+    client module directly or build the command that would, so that it cannot be read."""
+    whole = "\n".join(views)
+    if "broker" in whole and any(len(v) > LINE_CAP for v in views):
+        return True  # a long line is not read; naming the broker beside one is refused rather than guessed at
+    short = [v for v in views if len(v) <= LINE_CAP]
+    if any(_broker_module_line(v) for v in short):
+        return True
+    if all(w.search(whole) for w in _BM_WORDS[:2]) and any(_BM_EXPANDED.search(v) for v in short):
+        return True  # `python3 -m $1$2` while `safo` and `broker` are named: the module is built at run time
+    return "broker" in whole and any(_BM_LOCAL.search(v) for v in short)  # `cd src/safo/broker && python3 client.py`
+
+
 _GEMINI_WORD = re.compile(r"\b(?:safo|gemini)\b|--paid|--approval|--cap(?![\w-])")
 _SHELL_C = re.compile(
     r"(?<![\w-])(?:bash|sh|zsh|dash|ksh|csh|tcsh|fish|pwsh|python[\d.]*|perl|ruby|node|php|lua)\b(?:\s+-{1,2}[\w-]+)*"
@@ -954,6 +1019,7 @@ def _findings(
                     flags.setdefault("vendor", number)
             continue
         _scan_line(number, line, steps, flags, materials, budget, runtime_scan)
+    _scan_broker_module(lines, steps)
     if "vendor" in flags:
         steps.append(
             Step(
@@ -1019,6 +1085,30 @@ def _findings(
     return [(rule, "; ".join(dict.fromkeys(why[:6]))) for rule, why in reasons.items()]
 
 
+def _scan_broker_module(lines: list[str], steps: list[Step]) -> None:
+    """A brief that runs the broker client module directly is a paid step, like one that writes `safo gemini paid`."""
+    views: list[str] = []
+    for number, line in enumerate(lines, 1):
+        if (
+            len(line) > LINE_CAP
+        ):  # not read (the scan above blocks it when it mentions Gemini); a module name is a mention
+            low = line.lower()
+            if "broker" in low and "client" in low:
+                steps.append(
+                    Step(
+                        unreadable=True,
+                        line=number,
+                        why=f"the line is longer than {LINE_CAP} characters and names the broker client, so it was "
+                        "not read; put it on a shorter line",
+                    )
+                )
+            continue
+        _, _, low, pre_low, _ = _views(line)
+        views.extend((low, pre_low))
+    if broker_module_route(views):
+        steps.append(Step(paid=True, matched=MATCH_MODULE))
+
+
 # -- shell commands (#209) ---------------------------------------------------------------------------------------------
 # A cheap, fail-closed check on one Bash command. It names no value and resolves nothing: it looks for the vendor API
 # host, its SDK, the key variable name and the secret-store project and config names (all shown in docs/gemini-keys.md
@@ -1030,6 +1120,7 @@ SHELL_KEY = "the key variable name"
 SHELL_STORE = "the secret-store project or config name"
 SHELL_BUILT = "a word built from escapes beside a network or secret tool"
 SHELL_TOOL = "a secret tool run with a shell expansion"
+SHELL_BROKER_MODULE = "the broker client module run directly"
 SHELL_UNVERIFIED = "a command that could not be checked in time"
 SHELL_CAP = 64 * 1024  # a command longer than this is denied unread: no normalization runs on it
 _SHELL_KEY = re.compile(r"gemini[\W_]*api[\W_]*key")
@@ -1057,9 +1148,11 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         lines = _join(command).splitlines() or [command]
         found: str | None = None
         secret_tool = network = False
+        views: list[str] = []
         for line in lines:
             tick()
             _, _, low, pre_low, _pre_raw = _views(line)
+            views.extend((low, pre_low))
             for view in (low, pre_low):
                 if VENDOR_RE.search(view) or SDK.search(view):
                     found = found or SHELL_VENDOR
@@ -1077,6 +1170,8 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
             found = SHELL_BUILT
         if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
             found = SHELL_TOOL
+        if found is None and broker_module_route(views):
+            found = SHELL_BROKER_MODULE
         if found is None:
             return None
         return found
