@@ -587,7 +587,10 @@ def check_broker_config(loc: Locations) -> Check:
         extra = sorted(loaded.server.allowed_uids - {loc.maintainer_uid})
         if extra:
             return Check(
-                name, "warn", f"loads, but allowed_uids also admits other account(s): {', '.join(map(str, extra))}"
+                name,
+                "fail",
+                f"allowed_uids also admits other account(s): {', '.join(map(str, extra))}; only the named "
+                "maintainer account may be listed before the switch is created",
             )
     return Check(
         name,

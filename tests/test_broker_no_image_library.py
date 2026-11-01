@@ -49,6 +49,20 @@ def module_file(src: Path, name: str) -> Path | None:
     return None
 
 
+# Calls that fetch an attribute by name: when the thing looked up, or the name, points at the import machinery anywhere
+# inside the arguments (however deeply nested), the result is import machinery under another name.
+LOOKUP_FUNCS = {"getattr", "attrgetter", "__getattribute__"}
+
+
+def _names_import_machinery(node: ast.AST) -> bool:
+    """True for a name, attribute or string that points at the import machinery (conservative: any such mention)."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str) and node.value in INDIRECTION | {"importlib", "builtins"}
+    if isinstance(node, ast.Name):
+        return node.id in {"importlib", "builtins"}
+    return False
+
+
 def imported_names(path: Path, name: str, is_package: bool) -> tuple[set[str], list[str]]:
     """Every dotted module name the file imports (relative ones resolved), and its dynamic-import problems."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -65,6 +79,9 @@ def imported_names(path: Path, name: str, is_package: bool) -> tuple[set[str], l
             and (getattr(v, "attr", None) or getattr(v, "id", "")) in IMPORT_FUNCS
             for v in [node.value]
         ):
+            aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.Assign) and any(_names_import_machinery(sub) for sub in ast.walk(node.value)):
+            # a loader fetched through a nested expression: whatever it is assigned to may be called as an import
             aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
     for node in ast.walk(tree):
         if isinstance(node, ast.Name | ast.Attribute) and id(node) not in call_funcs:
@@ -87,6 +104,8 @@ def imported_names(path: Path, name: str, is_package: bool) -> tuple[set[str], l
             called = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
             if any(isinstance(a, ast.Name) and a.id in ("importlib", "builtins") for a in node.args):
                 problems.append(f"{path.name}: the import machinery is passed to a call (getattr and the like)")
+            if called in LOOKUP_FUNCS and any(_names_import_machinery(sub) for a in node.args for sub in ast.walk(a)):
+                problems.append(f"{path.name}: import machinery is looked up through a nested expression")
             if called in INDIRECTION - IMPORT_FUNCS:
                 problems.append(f"{path.name}: a call to {called!r} can load code by a computed name")
             elif called in aliases:
@@ -255,3 +274,31 @@ def test_a_computed_name_outside_the_broker_prefix_is_still_a_problem(tmp_path: 
     assert not external_imports(build_tree(tmp_path / "a", inside), "safo.broker")[1]
     leaving = "import importlib\nimportlib.import_module(f'safo.other.{name}')\n"
     assert external_imports(build_tree(tmp_path / "b", leaving), "safo.broker")[1]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # a loader fetched through a nested expression, then called
+        'loader = getattr(__import__("importlib"), "import_module")\nloader("PIL")\n',
+        # the attribute name built from pieces
+        'loader = getattr(__import__("importlib"), "import_" + "module")\nloader("PIL")\n',
+        # the loader held in a tuple
+        'pair = (getattr(__import__("importlib"), "import_module"), 1)\npair[0]("PIL")\n',
+        # the machinery reached through the interpreter's module table
+        'import sys\nloader = getattr(sys.modules["importlib"], "import_module")\nloader("PIL")\n',
+        # a nested getattr into a submodule
+        'spec = getattr(getattr(__import__("importlib"), "util"), "find_spec")("PIL")\n',
+        # the builtins route
+        'loader = getattr(__import__("builtins"), "__import__")\nloader("PIL")\n',
+    ],
+)
+def test_the_check_fails_on_nested_indirect_import_forms(tmp_path: Path, body: str) -> None:
+    _, problems, _ = external_imports(build_tree(tmp_path, body), "safo.broker")
+    assert problems, body
+
+
+def test_an_ordinary_attribute_lookup_is_not_a_problem(tmp_path: Path) -> None:
+    body = "import os\nsep = getattr(os, 'sep')\n"
+    outside, problems, _ = external_imports(build_tree(tmp_path, body), "safo.broker")
+    assert not problems and not outside

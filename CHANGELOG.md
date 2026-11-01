@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Setup hardening follow-up (#303). Enabling-gate and import-check hardening; details are tracked privately until reviewed.
 - Setup-command hardening (#303). The runbook step that writes the broker configuration no longer lets file text reach a shell: the here-document delimiter is quoted and the one numeric account id is passed as an argument; a test renders every runbook command and fails if an expansion form can appear in embedded text. The enabling preflight now requires the named maintainer account in the broker config's allowed list (and warns on extra accounts), and its client-config check uses the client's own loader including the root-owned override. The no-image-library import check now rejects import indirection and walks nested packages.
 - Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
   which the installer never builds (it builds `current/venv/bin/python`): the runbook, the admin docs and a new test that

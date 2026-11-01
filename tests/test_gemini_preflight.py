@@ -1047,15 +1047,33 @@ def test_the_enabling_preflight_requires_the_named_maintainer_in_allowed_uids(tm
     assert got.status == "fail", got
 
 
-def test_an_extra_allowed_uid_is_flagged_when_a_maintainer_is_named(tmp_path: Path) -> None:
+def test_an_extra_allowed_uid_fails_when_a_maintainer_is_named(tmp_path: Path) -> None:
     loc = dataclasses.replace(make_tree(tmp_path), maintainer_uid=1000)
     loc.broker_config.write_text(
         loc.broker_config.read_text().replace("allowed_uids: [1000]", "allowed_uids: [1000, 1001]")
     )
     got = broker_check(loc)
-    assert got.status == "warn" and "1001" in got.detail, got
+    assert got.status == "fail" and "1001" in got.detail, got
     without = dataclasses.replace(loc, maintainer_uid=None)
     assert broker_check(without).status == "pass"  # no maintainer named: the old rule (nonempty) alone
+
+
+def test_the_enable_line_creates_no_switch_when_the_config_admits_another_account(tmp_path: Path) -> None:
+    import io
+
+    loc = dataclasses.replace(make_tree(tmp_path), maintainer_uid=1000)
+    loc.broker_config.write_text(
+        loc.broker_config.read_text().replace("allowed_uids: [1000]", "allowed_uids: [1000, 1001]")
+    )
+    # no strict flag, like the runbook line: the exit code alone must stop the switch
+    code = pf.main_with(loc, FakeRunner(), lookup_ok, out=io.StringIO(), enabling=True, ack_observe=True)
+    assert code == 1
+    switch = tmp_path / "out" / "gemini-paid-enabled"
+    switch.parent.mkdir()
+    # the shape of the runbook line: the switch is written only when the preflight exits 0
+    if code == 0:
+        switch.write_text("enabled\n")
+    assert not switch.exists()
 
 
 def test_the_client_config_check_applies_the_root_owned_override_like_the_client(tmp_path: Path) -> None:
