@@ -78,7 +78,8 @@ USAGE = (
     "       python -I -m safo.broker.admin check-install\n"
     "       python -I -m safo.broker.admin clear MODEL --confirm CALL_ID [--confirm CALL_ID ...]"
     " [--actual CALL_ID=USD ... --reason TEXT]\n"
-    "       python -I -m safo.broker.admin reconcile [--month YYYY-MM] [--billing-usd USD --reason TEXT]"
+    "       python -I -m safo.broker.admin reconcile [--month YYYY-MM] [--billing-usd USD --reason TEXT]\n"
+    "       python -I -m safo.broker.admin reconcile --adopt-marker NONCE --confirm NONCE --reason TEXT"
 )
 
 
@@ -535,13 +536,38 @@ def _clear(
     return 0
 
 
-def _reconcile(ledger: CallLedger, args: argparse.Namespace, who: AdminWho, now: dt.datetime, out: TextIO) -> int:
+def _adopt(
+    ledger: CallLedger, args: argparse.Namespace, who: AdminWho, now: dt.datetime, out: TextIO, err: TextIO
+) -> int:
+    nonce = args.adopt_marker
+    if not args.reason:
+        raise AdminError("adopting a marker needs --reason")
+    for line in ledger.marker_record(nonce):
+        output.write(out, line)
+    if args.confirm != nonce:
+        output.write(err, f"not adopted: repeat the nonce with --confirm {nonce} to record this charge")
+        return 2
+    done = ledger.admin_adopt_marker(nonce, args.reason, who, now)
+    output.write(out, f"adopted: {done.nonce} call {done.call_id} model {done.model}")
+    output.write(out, f"adopted_month: {done.month}")
+    output.write(out, f"adopted_usd: {format_usd(done.reserved_micro)}")
+    output.write(out, "the call is held ambiguous and the model stays stopped until: clear MODEL --confirm CALL_ID")
+    return 0
+
+
+def _reconcile(
+    ledger: CallLedger, args: argparse.Namespace, who: AdminWho, now: dt.datetime, out: TextIO, err: TextIO
+) -> int:
     billing = None
     if args.billing_usd is not None:
         try:
             billing = parse_usd(args.billing_usd)
         except MoneyError:
             raise AdminError("the billing figure is a plain amount in dollars with up to six decimals") from None
+    if args.adopt_marker is not None:
+        if billing is not None or args.month is not None:
+            raise AdminError("adopting a marker takes no month and no billing figure")
+        return _adopt(ledger, args, who, now, out, err)
     month = args.month or _month_key(now)
     if MONTH.fullmatch(month) is None:
         raise AdminError("a month is written YYYY-MM")
@@ -587,6 +613,8 @@ def _parser() -> argparse.ArgumentParser:
     rec.add_argument("--month")
     rec.add_argument("--billing-usd")
     rec.add_argument("--reason", default="")
+    rec.add_argument("--adopt-marker")
+    rec.add_argument("--confirm")
     return parser
 
 
@@ -646,7 +674,7 @@ def _run(
         return 0
     if args.cmd == "clear":
         return _clear(ledger, args, who, now, out, err)
-    return _reconcile(ledger, args, who, now, out)
+    return _reconcile(ledger, args, who, now, out, err)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

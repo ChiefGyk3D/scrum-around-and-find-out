@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Broker admin: `reconcile --adopt-marker NONCE --confirm NONCE --reason TEXT` repairs a used marker from an earlier month with no ledger row, which start-up recovery refused (#278). It only raises: the marker's reservation is added to the month it was written in, and the call is held ambiguous (model stopped) until `clear`; the marker is never rewritten or removed. Hostile, future-dated, unreadable and duplicate markers are refused; `reconcile` now names the repair beside the finding.
 - Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
   which the installer never builds (it builds `current/venv/bin/python`): the runbook, the admin docs and a new test that
   compares every interpreter path in the runbook with the installer's own constant now agree. Nothing created the broker

@@ -29,7 +29,7 @@ from typing import Any
 from safo import gemini
 from safo.bounded import MAX_FILE_BYTES, loads, read_bounded
 from safo.broker.errors import BrokerError, IllegalTransition, LedgerError, Refused
-from safo.broker.money import MAX_MICRO
+from safo.broker.money import MAX_MICRO, format_usd
 from safo.broker.policy import BrokerRequest, Policy, canonical_broker_request
 from safo.broker.records import (
     CALL_ID,
@@ -311,6 +311,15 @@ class AdminWho:
 class Cleared:
     model: str
     calls: tuple[tuple[str, int, int], ...]  # (call id, counted before, counted after)
+
+
+@dataclasses.dataclass(frozen=True)
+class Adopted:
+    nonce: str
+    call_id: str
+    model: str
+    month: str
+    reserved_micro: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -870,6 +879,70 @@ class CallLedger:
             self._fault("admin_after_append")
         return gap
 
+    def marker_record(self, nonce: str) -> list[str]:
+        """Read-only: what an unrecorded marker says, for root to read before confirming. Fixed text plus fields that
+        the strict marker reader has already shape-checked."""
+        with self._locked():
+            self._check_tree()
+            if not self.marker_exists(nonce):
+                raise IllegalTransition("there is no such marker")
+            data = self._read_marker(nonce)
+            if data is None:
+                raise IllegalTransition("the marker cannot be read; it is not adopted and root must look at it")
+            return [
+                f"marker: {nonce}",
+                f"call_id: {data['call_id']}",
+                f"model: {data['model']}",
+                f"job: {data['job']}",
+                f"written: {data['ts']}",
+                f"reserved_usd: {format_usd(data['reserved_micro'])}",
+            ]
+
+    def admin_adopt_marker(self, nonce: str, reason: str, who: AdminWho, now: dt.datetime) -> Adopted:
+        """Root adopts a used marker from an EARLIER month that has no ledger row (start-up recovery refuses it, because
+        rebuilding it now would move the charge into this month). Spend is recorded before the vendor call, so such a
+        marker is money that may have left; it is never dropped and never lowers any month. In ONE append this adds the
+        marker's whole reservation to the month the marker belongs to (an `adjust`, which only ever raises) and gives the
+        call its rows now, held ambiguous at that reservation, so the model stays stopped until root clears it with a
+        verified figure. The marker file is read, never rewritten or removed. A marker that is not whole and strict, a
+        month that is not before this one, a nonce the ledger knows and a call id it already holds are all refused."""
+        _check_who(who)
+        _check_reason(f"adopt marker {nonce}: {reason}", required=True)
+        _check_reason(reason, required=True)
+        now = self._now(now)
+        with self._locked():
+            self._check_tree()
+            view = self._view()
+            if not self.marker_exists(nonce):
+                raise IllegalTransition("there is no such marker")
+            if nonce in view.spent_nonces:
+                raise IllegalTransition("this marker already has a ledger row")
+            data = self._read_marker(nonce)
+            if data is None or type(data["reserved_micro"]) is not int or data["reserved_micro"] <= 0:
+                raise IllegalTransition("the marker cannot be read; it is not adopted and root must look at it")
+            stamp = self._stamp(now, view, strict=False)
+            month = data["ts"][:7]
+            if month > stamp[:7]:
+                raise IllegalTransition("this marker is not an earlier month; it is dated after this month")
+            if month == stamp[:7]:
+                raise IllegalTransition("this marker is from this month; start-up recovery adopts it by itself")
+            cid, model, reserved = data["call_id"], data["model"], data["reserved_micro"]
+            if cid in view.calls:
+                raise IllegalTransition("the call id of this marker is already recorded for another call")
+            start = _row("call_start", stamp, **{k: data[k] for k in data if k not in ("v", "ts")})
+            used = _row("approval_used", stamp, nonce=nonce, call_id=cid, model=model, job=data["job"], epoch="0" * 32)
+            shell = CallRecord(cid, nonce, model, data["job"], data["kind"], reserved, now, CallState.RESERVED)
+            rows = [
+                _admin_row(stamp, "adjust", who, f"adopt marker {nonce}: {reason}", month=month, add_micro=reserved),
+                used,
+                start,
+                *_ambiguous_rows(stamp, shell, "marker_only"),
+            ]
+            self._fault("admin_before_append")
+            self.ledger.append_many(rows, ts=stamp)
+            self._fault("admin_after_append")
+        return Adopted(nonce, cid, model, month, reserved)
+
     def audit(self, now: dt.datetime) -> list[str]:
         """Read-only: where the ledger, the used markers and the clock disagree. Raises LedgerError if the ledger or
         the used folder cannot be trusted at all. Each line is a fixed sentence plus an id."""
@@ -882,7 +955,7 @@ class CallLedger:
             for nonce in sorted(names):
                 rec = known.get(nonce)
                 if rec is None:
-                    found.append(f"marker {nonce} has no ledger row")
+                    found.append(_orphan_line(nonce, self._read_marker(nonce), now))
                     continue
                 data = self._read_marker(nonce)
                 if data is None:
@@ -905,6 +978,14 @@ class CallLedger:
             if view.last_ts is not None and view.last_ts > now:
                 found.append("the newest ledger row is newer than the clock")
         return found
+
+
+def _orphan_line(nonce: str, data: dict[str, Any] | None, now: dt.datetime) -> str:
+    """The report line for a marker with no ledger row; an earlier-month one names the repair."""
+    line = f"marker {nonce} has no ledger row"
+    if data is not None and data["ts"][:7] < gemini.stamp(now)[:7]:
+        line += f" (from {data['ts'][:7]}; to record it in that month: --adopt-marker {nonce})"
+    return line
 
 
 # -- row builders --------------------------------------------------------------------------------------------------
