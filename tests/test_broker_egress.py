@@ -636,3 +636,244 @@ def test_the_addresses_a_hosts_view_names_are_read_back_for_the_restore() -> Non
     assert (
         egress.addresses_in_hosts(b"garbage\n10.0.0.1 " + HOST.encode() + b"\n", HOST) == []
     )  # nothing invalid is trusted
+
+
+# ---- persistence: a removal or change from outside is noticed and undone ----------------------------------------------
+
+SUID = 1234
+
+
+def listing(*, chain: list[str] | None = None, addrs: Sequence[str] = GOOD, extra: str = "", mode: str = "drop") -> str:
+    """The text `nft list table` prints for the reviewed table (counter values and expiry times vary and are ignored)."""
+    rules = chain if chain is not None else egress.expected_chain(SUID, mode)
+    rules = [
+        r.replace("counter accept", "counter packets 3 bytes 180 accept").replace(
+            "counter drop", "counter packets 0 bytes 0 drop"
+        )
+        for r in rules
+    ]
+    elements = ""
+    if addrs:
+        elements = "\t\telements = { " + ",\n\t\t\t     ".join(f"{a} expires 59m59s987ms" for a in addrs) + " }\n"
+    body = "\n".join(f"\t\t{r}" for r in rules)
+    return (
+        f"table inet safo_broker_egress {{\n\tset vendor_v4 {{\n\t\ttype ipv4_addr\n\t\ttimeout 1h\n{elements}\t}}\n\n"
+        f"\tchain out {{\n{body}\n\t}}\n{extra}}}\n"
+    )
+
+
+def problem(text: str | None, *, mode: str = "drop", addrs: Sequence[str] = GOOD) -> str | None:
+    return egress.live_problem(text, service_uid=SUID, mode=mode, addresses=addrs)
+
+
+@pytest.mark.parametrize("mode", ["observe", "drop"])
+def test_the_reviewed_table_is_not_a_problem(mode: str) -> None:
+    assert problem(listing(mode=mode), mode=mode) is None
+    assert problem(listing(addrs=[], mode=mode), mode=mode, addrs=[]) is None
+
+
+def test_a_missing_table_is_a_problem() -> None:
+    assert problem(None) is not None
+
+
+def test_the_check_bites_on_every_kind_of_change() -> None:
+    good = egress.expected_chain(SUID, "drop")
+    changed = {
+        "an extra early accept": listing(chain=[good[0], "accept", *good[1:]]),
+        "a rule removed": listing(chain=good[:3] + good[4:]),
+        "the uid exception widened": listing(chain=[good[0], "meta skuid != 0 return", *good[2:]]),
+        "the final verdict flipped": listing(chain=[*good[:4], "counter accept"]),
+        "the chain emptied": listing(chain=[good[0]]),
+        "the hook policy changed": listing(chain=["type filter hook output priority filter; policy drop;", *good[1:]]),
+        "the set emptied": listing(addrs=[]),
+        "an address added": listing(addrs=[*GOOD, "8.8.8.8"]),
+        "another chain added": listing(extra="\n\tchain other {\n\t\taccept\n\t}\n"),
+        "another set added": listing(extra="\n\tset more {\n\t\ttype ipv4_addr\n\t}\n"),
+    }
+    for what, text in changed.items():
+        assert problem(text) is not None, what
+    assert problem(listing(mode="observe"), mode="drop") is not None  # the mode in the config is the one that counts
+    assert problem("garbage") is not None
+    assert problem("") is not None
+
+
+class Lab:
+    """A fake `nft list` and `nft -f` pair for the persistence tests."""
+
+    def __init__(self, live: str | None) -> None:
+        self.live = live
+        self.scripts: list[str] = []
+
+    def lister(self) -> str | None:
+        return self.live
+
+    def nft(self, script: str) -> None:
+        self.scripts.append(script)
+
+
+def test_ensure_leaves_a_good_table_alone(tmp_path: Path) -> None:
+    _fake, hosts, cfg = setup(tmp_path, GOOD)
+    egress.write_hosts(hosts, egress.hosts_content(HOST, GOOD), uid=UID, gid=os.getgid())
+    lab = Lab(listing(mode="observe"))
+    assert egress.ensure(cfg, lister=lab.lister, nft=lab.nft, hosts_path=hosts, service_uid=SUID) is None
+    assert lab.scripts == []
+
+
+def test_ensure_rebuilds_a_removed_table_from_the_hosts_view_without_resolving(tmp_path: Path) -> None:
+    _fake, hosts, cfg = setup(tmp_path, GOOD)
+    egress.write_hosts(hosts, egress.hosts_content(HOST, GOOD), uid=UID, gid=os.getgid())
+    lab = Lab(None)
+    assert egress.ensure(cfg, lister=lab.lister, nft=lab.nft, hosts_path=hosts, service_uid=SUID)
+    assert len(lab.scripts) == 1
+    assert lab.scripts[0].startswith("table inet safo_broker_egress\ndelete table inet safo_broker_egress\n")
+    assert lab.scripts[0].rstrip().endswith("{ 142.250.80.10, 142.250.80.11 }")
+
+
+def test_ensure_rebuilds_a_tampered_table_and_an_unreadable_view_gives_an_empty_set(tmp_path: Path) -> None:
+    _fake, hosts, cfg = setup(tmp_path, GOOD)
+    hosts.unlink()
+    lab = Lab(listing(chain=["accept"], mode="observe"))
+    assert egress.ensure(cfg, lister=lab.lister, nft=lab.nft, hosts_path=hosts, service_uid=SUID)
+    assert "add element" not in lab.scripts[0]
+    assert "meta skuid != 1234 return" in lab.scripts[0]
+
+
+def test_ensure_does_not_swallow_an_nft_failure(tmp_path: Path) -> None:
+    _fake, hosts, cfg = setup(tmp_path, GOOD)
+
+    def refuse(script: str) -> None:
+        msg = "nft refused"
+        raise EgressError(msg)
+
+    with pytest.raises(EgressError, match="nft refused"):
+        egress.ensure(cfg, lister=lambda: None, nft=refuse, hosts_path=hosts, service_uid=SUID)
+
+
+def test_the_lock_is_exclusive_and_refuses_a_symlink(tmp_path: Path) -> None:
+    lock = tmp_path / "lock"
+    with egress.locked(lock):
+        assert lock.exists()
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    link = tmp_path / "link"
+    link.symlink_to(lock)
+    with pytest.raises(EgressError, match="lock"), egress.locked(link):
+        pytest.fail("a symlink must not be opened")
+
+
+def test_main_check_and_refresh_put_the_table_back_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A removed table is restored even when the lookup then fails; `check` never resolves anything."""
+    _fake, hosts, _cfg = setup(tmp_path, GOOD)
+    conf = tmp_path / "broker-egress.conf"
+    conf.write_text(f"VENDOR_HOST={HOST}\nMODE=observe\n")
+    lab = Lab(None)
+    asked: list[str] = []
+
+    def resolver(host: str) -> list[object]:
+        asked.append(host)
+        msg = "the resolver failed"
+        raise EgressError(msg)
+
+    monkeypatch.setattr(egress, "service_ids", lambda: (SUID, os.getgid()))
+    monkeypatch.setattr(egress, "read_config", lambda path: egress.Config(host=HOST, mode="observe"))
+    monkeypatch.setattr(egress, "HOSTS", hosts)
+    monkeypatch.setattr(egress, "LOCK", tmp_path / "lock")
+    monkeypatch.setattr(egress, "list_table", lab.lister)
+    monkeypatch.setattr(egress, "run_nft", lab.nft)
+    monkeypatch.setattr(egress, "default_resolver", resolver)
+    assert egress.main(["check"]) == 0
+    assert asked == [] and len(lab.scripts) == 1
+    assert egress.main(["refresh"]) == 1  # the lookup fails ...
+    assert asked == [HOST] and len(lab.scripts) == 2  # ... but the table was put back before it
+    assert "put back" in capsys.readouterr().err
+
+
+def test_the_default_lister_reads_only_our_table_with_a_fixed_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        seen["argv"], seen["env"] = argv, kw["env"]
+        return subprocess.CompletedProcess(argv, 1, "", "no such table")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert egress.list_table() is None
+    assert seen["argv"] == ["/usr/sbin/nft", "list", "table", "inet", "safo_broker_egress"]
+    assert seen["env"] == {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+
+    def failing(*a: object, **k: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr(subprocess, "run", failing)
+    with pytest.raises(EgressError, match="nft"):
+        egress.list_table()
+
+
+@pytest.mark.skipif(not (NFT and UNSHARE), reason="nft or unshare is not installed here; real nft output not compared")
+def test_real_nft_output_matches_the_check_and_every_outside_change_is_seen(tmp_path: Path) -> None:
+    """Inside a throwaway user and network namespace (no root, nothing on this machine changes): load the real rules,
+    read them back with the real nft, and make outside changes."""
+    if not userns_ok():
+        pytest.skip("unprivileged user namespaces are unavailable here; real nft output not compared")
+    results: dict[str, str] = {}
+    for mode in ("observe", "drop"):
+        rules = egress.render_rules(egress.RULES_TEMPLATE, uid=SUID, mode=mode)
+        script = egress.refresh_script(rules, GOOD)
+        steps = {
+            "good": "true",
+            "emptied": "nft flush set inet safo_broker_egress vendor_v4",
+            "inserted": "nft insert rule inet safo_broker_egress out accept",
+            "flushed": "nft flush chain inet safo_broker_egress out",
+            "added": "nft add element inet safo_broker_egress vendor_v4 '{ 8.8.8.8 }'",
+            "deleted": "nft delete table inet safo_broker_egress",
+        }
+        for name, cmd in steps.items():
+            sh = f"nft -f {tmp_path}/rules && {cmd}; nft list table inet safo_broker_egress 2>/dev/null"
+            (tmp_path / "rules").write_text(script)
+            done = subprocess.run(  # noqa: S603 - fixed argv inside a private user and network namespace
+                [UNSHARE, "-Urn", "sh", "-c", sh], capture_output=True, text=True, timeout=60, check=False
+            )
+            results[f"{mode}-{name}"] = done.stdout
+        assert problem(results[f"{mode}-good"], mode=mode) is None, results[f"{mode}-good"]
+        for name in ("emptied", "inserted", "flushed", "added"):
+            assert problem(results[f"{mode}-{name}"], mode=mode) is not None, name
+        assert results[f"{mode}-deleted"] == ""
+
+
+def test_a_fresh_hosts_view_is_not_resolved_again_but_an_old_missing_or_future_one_is(tmp_path: Path) -> None:
+    hosts = tmp_path / "hosts"
+    assert egress.view_is_fresh(hosts, now=1000.0) is False  # missing
+    hosts.write_bytes(b"x")
+    os.utime(hosts, (900.0, 900.0))
+    assert egress.view_is_fresh(hosts, now=1000.0) is False  # 100 s old
+    os.utime(hosts, (1000.0 - egress.REFRESH_AFTER + 1, 1000.0 - egress.REFRESH_AFTER + 1))
+    assert egress.view_is_fresh(hosts, now=1000.0) is True
+    os.utime(hosts, (1000.0 - egress.REFRESH_AFTER - 1, 1000.0 - egress.REFRESH_AFTER - 1))
+    assert egress.view_is_fresh(hosts, now=1000.0) is False
+    os.utime(hosts, (2000.0, 2000.0))
+    assert egress.view_is_fresh(hosts, now=1000.0) is False  # dated in the future: do not trust it
+
+
+def test_main_tick_checks_every_time_but_resolves_only_when_the_view_is_old(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake, hosts, _cfg = setup(tmp_path, GOOD)
+    lab = Lab(None)
+    asked: list[str] = []
+
+    def resolver(host: str) -> list[object]:
+        asked.append(host)
+        return list(GOOD)
+
+    monkeypatch.setattr(egress, "service_ids", lambda: (SUID, os.getgid()))
+    monkeypatch.setattr(egress, "read_config", lambda path: egress.Config(host=HOST, mode="observe"))
+    monkeypatch.setattr(egress, "HOSTS", hosts)
+    monkeypatch.setattr(egress, "LOCK", tmp_path / "lock")
+    monkeypatch.setattr(egress, "list_table", lab.lister)
+    monkeypatch.setattr(egress, "run_nft", lab.nft)
+    monkeypatch.setattr(egress, "default_resolver", resolver)
+    assert egress.main(["tick"]) == 0  # the view was just written: put the table back, do not resolve
+    assert asked == [] and len(lab.scripts) == 1
+    os.utime(hosts, (1.0, 1.0))
+    assert egress.main(["tick"]) == 0  # an old view: put the table back and resolve
+    assert asked == [HOST] and len(lab.scripts) == 3

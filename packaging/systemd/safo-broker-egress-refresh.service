@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# The timer job: resolve the vendor host as root, validate every address, and swap the nft set and the hosts view. On
-# any problem it exits non-zero and leaves the previous set and hosts view in place.
+# The timer job, every ten seconds: put the nft table back if it was removed or changed from outside (no DNS), and when
+# the hosts view is a minute old resolve the vendor host as root, validate every address, and swap the nft set and the
+# hosts view. On a lookup problem it exits non-zero and leaves the previous set and hosts view in place.
 [Unit]
 Description=SAFO broker egress set refresh
 Requires=safo-broker-egress.service
@@ -8,7 +9,7 @@ After=safo-broker-egress.service network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/safo-broker-egress refresh
+ExecStart=/usr/local/sbin/safo-broker-egress tick
 TimeoutStartSec=60s
 UMask=0077
 NoNewPrivileges=yes

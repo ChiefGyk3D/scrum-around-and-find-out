@@ -9,7 +9,11 @@ constant in this file (packaging/nftables/safo-broker.nft is the reviewed refere
 The only inputs are the numeric uid of the service user, the mode (observe or drop) and the vendor host, read from the
 root-owned /etc/safo/broker-egress.conf, which no unit or command line names.
 
-Commands: `load` installs the ruleset and an empty hosts view. `refresh` (a timer, every minute) resolves the
+Commands: `tick` (a timer, every ten seconds) runs `check` and then `refresh` only when the hosts view is a minute old.
+`check` (no DNS) compares the live table with the reviewed ruleset and the set with
+the hosts view, and re-applies the whole table in one transaction when it is missing, changed or emptied from outside;
+`refresh`, `check` and `tick` run one at a time under a lock and `refresh` runs the same check first, so a failed lookup
+cannot leave a removed table removed. `load` installs the ruleset and an empty hosts view. `refresh` (a minute after the last one) resolves the
 vendor host, validates every address, and re-applies the whole table with the new set in ONE nft transaction (so a table
 that was removed or replaced from outside is rebuilt, and the set is never half-updated), then rewrites the hosts view
 the broker unit bind-mounts over /etc/hosts. `unload` removes the table. `render` prints the ruleset for review.
@@ -20,6 +24,7 @@ is changed. Standard library only; the only program it runs is nft, by absolute 
 
 from __future__ import annotations
 
+import fcntl
 import grp
 import ipaddress
 import os
@@ -29,7 +34,9 @@ import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -37,6 +44,8 @@ from typing import TextIO
 NFT = "/usr/sbin/nft"
 CONF = Path("/etc/safo/broker-egress.conf")
 HOSTS = Path("/etc/safo/egress/hosts")
+LOCK = Path("/etc/safo/egress/lock")
+REFRESH_AFTER = 55.0  # seconds: `tick` resolves again when the hosts view is at least this old
 SERVICE_USER = "safo-broker"
 TABLE = "safo_broker_egress"
 SET = "vendor_v4"
@@ -86,6 +95,7 @@ class Config:
 
 
 Nft = Callable[[str], None]
+Lister = Callable[[], str | None]
 Resolver = Callable[[str], Sequence[object]]
 
 
@@ -288,13 +298,106 @@ def write_hosts(path: Path, data: bytes, *, uid: int, gid: int) -> None:
         os.close(fd)
 
 
+# ---- persistence: notice and undo a removal or change from outside ---------------------------------------------------
+
+COUNTER_VALUES = re.compile(r"counter packets [0-9]+ bytes [0-9]+")
+OBJECT_LINE = re.compile(r"^\t(\w+) (\S+) \{$", re.MULTILINE)
+IPV4_TEXT = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}")
+
+
+def expected_chain(service_uid: int, mode: str) -> list[str]:
+    """The lines the live chain must show, in order, as `nft list` prints them once counter values are removed."""
+    final = {"observe": "counter accept", "drop": "counter drop"}[mode]
+    return [
+        "type filter hook output priority filter; policy accept;",
+        f"meta skuid != {service_uid} return",
+        f"ip daddr @{SET} tcp dport 443 counter accept",
+        f'limit rate 10/minute burst 10 packets log prefix "safo-broker-egress-{mode} "',
+        final,
+    ]
+
+
+def live_problem(listing: str | None, *, service_uid: int, mode: str, addresses: Sequence[str]) -> str | None:
+    """None when the live table is exactly the reviewed one with exactly `addresses` in the set, else the reason it is
+    not. Only the table, its one set and its one chain are allowed; the chain must be the reviewed rules and nothing
+    else, in order; counters and expiry times are ignored."""
+    if listing is None:
+        return "the table is missing"
+    text = COUNTER_VALUES.sub("counter", listing)
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    if not lines or lines[0] != f"table inet {TABLE} {{" or lines[-1] != "}":
+        return "the table header is not the reviewed one"
+    objects = sorted(f"{m[1]} {m[2]}" for m in OBJECT_LINE.finditer(text))
+    if objects != sorted([f"chain out", f"set {SET}"]):
+        return "the table holds an object that is not the reviewed set and chain"
+    chain = re.search(r"^\tchain out \{\n(.*?)^\t\}$", text, re.MULTILINE | re.DOTALL)
+    if chain is None or [x.strip() for x in chain[1].splitlines() if x.strip()] != expected_chain(service_uid, mode):
+        return "the chain is not the reviewed rules"
+    body = re.search(rf"^\tset {SET} \{{\n(.*?)^\t\}}$", text, re.MULTILINE | re.DOTALL)
+    if body is None:
+        return "the set is missing"
+    elements = re.search(r"elements = \{(.*?)\}", body[1], re.DOTALL)
+    rest = body[1] if elements is None else body[1].replace(elements[0], "")
+    if [x.strip() for x in rest.splitlines() if x.strip()] != ["type ipv4_addr", "timeout 1h"]:
+        return "the set is not the reviewed set"
+    found = sorted(IPV4_TEXT.findall(elements[1])) if elements else []
+    if found != sorted(addresses):
+        return "the set does not hold the addresses the hosts view names"
+    return None
+
+
+def read_view(hosts_path: Path, host: str) -> list[str]:
+    try:
+        return addresses_in_hosts(hosts_path.read_bytes(), host)
+    except OSError:
+        return []
+
+
+def ensure(config: Config, *, lister: Lister, nft: Nft, hosts_path: Path, service_uid: int) -> str | None:
+    """If the live table is not the reviewed one, put it back in one transaction, filled from the addresses the hosts
+    view names (the last good answer; nothing is resolved here). Returns the reason it was put back, else None."""
+    addresses = read_view(hosts_path, config.host)
+    problem = live_problem(lister(), service_uid=service_uid, mode=config.mode, addresses=addresses)
+    if problem is None:
+        return None
+    rules = render_rules(RULES_TEMPLATE, uid=service_uid, mode=config.mode)
+    nft(refresh_script(rules, addresses) if addresses else rules)
+    return problem
+
+
+def view_is_fresh(hosts_path: Path, *, now: float) -> bool:
+    """True when the hosts view was written less than REFRESH_AFTER seconds ago (a missing or future-dated one is not)."""
+    try:
+        age = now - hosts_path.stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < REFRESH_AFTER
+
+
+@contextmanager
+def locked(path: Path) -> Iterator[None]:
+    """One egress job at a time (refresh and check), so a check never judges a table in the middle of a refresh."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        msg = f"cannot open the lock: {type(exc).__name__}"
+        raise EgressError(msg) from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 # ---- the actions ----------------------------------------------------------------------------------------------------
 
 
-def run_nft(script: str) -> None:
+def nft_call(args: Sequence[str], script: str | None) -> subprocess.CompletedProcess[str]:
+    """The one place nft is run: absolute binary, fixed argument lists chosen by the callers below, scrubbed
+    environment, a time limit."""
     try:
-        done = subprocess.run(  # noqa: S603 - absolute nft, fixed argument list, the script on stdin, scrubbed environment
-            [NFT, "-f", "-"],
+        return subprocess.run(  # noqa: S603 - absolute nft, fixed argument list, the script on stdin, scrubbed environment
+            [NFT, *args],
             input=script,
             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
             capture_output=True,
@@ -305,10 +408,20 @@ def run_nft(script: str) -> None:
     except (OSError, subprocess.TimeoutExpired) as exc:
         msg = f"nft could not run: {type(exc).__name__}"
         raise EgressError(msg) from None
+
+
+def run_nft(script: str) -> None:
+    done = nft_call(["-f", "-"], script)
     if done.returncode != 0:
         lines = done.stderr.strip().splitlines()
         msg = f"nft refused the script: {lines[0][:120] if lines else 'no message'}"
         raise EgressError(msg)
+
+
+def list_table() -> str | None:
+    """The live table as text, or None when it does not exist (or nft cannot say)."""
+    done = nft_call(["list", "table", "inet", TABLE], None)
+    return done.stdout if done.returncode == 0 else None
 
 
 def default_resolver(host: str) -> list[object]:
@@ -400,21 +513,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             for line in text.splitlines():
                 say(sys.stdout, line)
             return 0
-        if command in ("load", "refresh") and not rest:
+        if command in ("load", "refresh", "check", "tick") and not rest:
             service_uid, gid = service_ids()
             config = read_config(CONF)
             if command == "load":
                 load(config, service_uid=service_uid, nft=run_nft, hosts_path=HOSTS, uid=0, gid=gid)
                 return 0
-            found = refresh(
-                config,
-                resolver=default_resolver,
-                nft=run_nft,
-                hosts_path=HOSTS,
-                uid=0,
-                service_uid=service_uid,
-                gid=gid,
-            )
+            with locked(LOCK):
+                back = ensure(config, lister=list_table, nft=run_nft, hosts_path=HOSTS, service_uid=service_uid)
+                if back:
+                    say(sys.stderr, f"egress table put back: {back}")
+                if command == "check" or (command == "tick" and view_is_fresh(HOSTS, now=time.time())):
+                    return 0
+                found = refresh(
+                    config,
+                    resolver=default_resolver,
+                    nft=run_nft,
+                    hosts_path=HOSTS,
+                    uid=0,
+                    service_uid=service_uid,
+                    gid=gid,
+                )
             say(sys.stderr, f"egress set refreshed: {len(found)} addresses")
             return 0
         if command == "unload" and not rest:
@@ -423,7 +542,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (EgressError, ValueError, OSError) as exc:
         say(sys.stderr, f"egress: {exc}")
         return 1
-    say(sys.stderr, "usage: safo-broker-egress load | refresh | unload | render --uid N --mode M")
+    say(sys.stderr, "usage: safo-broker-egress load | refresh | check | tick | unload | render --uid N --mode M")
     return 2
 
 

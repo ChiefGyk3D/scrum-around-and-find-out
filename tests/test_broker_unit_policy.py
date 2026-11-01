@@ -303,7 +303,7 @@ def test_the_socket_and_timer_units_are_held_to_the_same_rules() -> None:
     )
     refused(
         "safo-broker-egress-refresh.service",
-        read("safo-broker-egress-refresh.service").replace("egress refresh\n", "egress refresh --anything\n", 1),
+        read("safo-broker-egress-refresh.service").replace("egress tick\n", "egress tick --anything\n", 1),
     )
 
 

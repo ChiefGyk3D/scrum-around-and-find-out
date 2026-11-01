@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Broker egress control: the nftables table now persists against removal or change from outside (#283). The root timer
+  runs every ten seconds, compares the live table with the reviewed ruleset and rebuilds it in one transaction when it is
+  missing or different, and does this before any lookup, so a failed lookup no longer leaves a removed table removed.
+  Name lookups still happen about once a minute. Observe stays the default and still needs its explicit acknowledgement.
+  Tests use a fake nft and, where available, a throwaway user and network namespace; none touches a real firewall.
 - Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
   which the installer never builds (it builds `current/venv/bin/python`): the runbook, the admin docs and a new test that
   compares every interpreter path in the runbook with the installer's own constant now agree. Nothing created the broker

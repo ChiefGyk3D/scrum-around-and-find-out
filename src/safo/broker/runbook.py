@@ -360,7 +360,7 @@ def steps(login: str) -> tuple[Step, ...]:
             "nothing runs as it yet, so nothing is affected until the broker starts.",
             (ssh("systemctl disable --now safo-broker-egress-refresh.timer safo-broker-egress.service"),),
             "Stopping the egress service deletes the table. A reboot also clears it when the service is disabled. If "
-            "something else reloads the firewall and removes the table, the next timer run (within a minute) "
+            "something else reloads the firewall and removes the table, the next timer run (within ten seconds) "
             "puts it back; check the table again after any firewall change.",
         ),
         Step(

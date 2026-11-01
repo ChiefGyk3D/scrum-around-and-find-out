@@ -295,8 +295,11 @@ def test_the_broker_cannot_receive_descriptors_over_its_listener() -> None:
     assert filters == ["@system-service", "~@privileged @resources", "~recvmsg recvmmsg"]
 
 
-def test_the_egress_set_is_refreshed_every_minute() -> None:
-    assert values("safo-broker-egress-refresh.timer", "OnUnitActiveSec") == ["1min"]
+def test_the_egress_table_is_checked_every_ten_seconds_and_the_set_is_resolved_about_every_minute() -> None:
+    """The timer runs `tick`: a cheap check of the live table every ten seconds, and the lookup only once the hosts view
+    is a minute old (the helper tests pin that rule)."""
+    assert values("safo-broker-egress-refresh.timer", "OnUnitActiveSec") == ["10s"]
+    assert values("safo-broker-egress-refresh.service", "ExecStart") == ["/usr/local/sbin/safo-broker-egress tick"]
 
 
 def test_the_comments_say_exactly_what_the_address_family_line_does_and_does_not_do() -> None:
