@@ -1249,7 +1249,7 @@ def _follow_links(
     for _ in range(MAX_LINK_HOPS + 1):
         if current == os.devnull:  # a masked unit
             return None, current
-        if _in_home(current, who):
+        if _in_home(current, who) or _in_home(os.path.realpath(current), who):
             return f"is, or links through, {_show(current)}, under the account's home", current
         writable = _chain_writable(current, who, cache, floor)
         if writable is not None:
@@ -1272,7 +1272,9 @@ def _follow_links(
         except OSError:
             return f"has a link that cannot be read ({_show(current)}); {HUMAN}", current
         folder = os.path.realpath(os.path.dirname(current))
-        current = os.path.normpath(target if target.startswith("/") else os.path.join(folder, target))
+        # no lexical clean-up: a ".." after a link means something else to the kernel, so the path is kept as written
+        # and every check below resolves it the way the kernel does (the folder checks use real paths)
+        current = target if target.startswith("/") else os.path.join(folder, target)
     return f"has a chain of more than {MAX_LINK_HOPS} links; {HUMAN}", current
 
 

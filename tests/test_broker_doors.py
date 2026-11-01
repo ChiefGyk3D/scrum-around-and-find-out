@@ -2378,3 +2378,35 @@ def test_hardening_a_long_link_chain_in_a_tree_fails_closed(w: World) -> None:
     (w.usr / "l").symlink_to(previous)
     found = w.run()
     assert status(found, "trees") == "fail" and "needs to look" in found["trees"].text
+
+
+def dotdot_setup(w: World) -> Path:
+    wr = folder(w.t / "wr", 0o777)
+    sub = folder(wr / "sub")
+    (w.t / "via").symlink_to(sub)
+    return wr
+
+
+def test_hardening_a_dot_dot_after_a_link_is_resolved_the_way_the_kernel_does(w: World) -> None:
+    wr = dotdot_setup(w)
+    (w.usr / "l").symlink_to(f"{w.t}/via/../x")  # the kernel reads this as wr/x, a writable folder
+    found = w.run()
+    assert status(found, "trees") == "fail" and "l" in found["trees"].text
+    put(wr / "x", "x", 0o644)  # now it exists, in a folder the account can write
+    assert status(w.run(), "trees") == "fail"
+
+
+def test_hardening_a_dot_dot_through_a_link_in_a_cron_file_link_is_found(w: World) -> None:
+    wr = dotdot_setup(w)
+    put(wr / "tab", "# nothing\n", 0o644)
+    (w.cron_d / "x").symlink_to(f"{w.t}/via/../tab")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_relative_dot_dot_link_into_a_safe_folder_passes(w: World) -> None:
+    safe = folder(w.t / "safe")
+    folder(safe / "deep")
+    put(safe / "ok", "x")
+    (safe / "deep" / "l").symlink_to("../ok")
+    (w.usr / "l").symlink_to(safe / "deep" / "l")
+    assert status(w.run(), "trees") == "pass"
