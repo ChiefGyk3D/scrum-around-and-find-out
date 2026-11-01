@@ -37,7 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from safo import output
+from safo import geminisign, output
+from safo.gemini import RefusedError
 
 NAMESPACE = "safo-gemini-approval"
 SK_TYPES = ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
@@ -206,8 +207,8 @@ def _public_key(line: str) -> PublicKey | None:
 
 
 def _enrolled(loc: Locations) -> dict[str, tuple[str, str]]:
-    """fingerprint -> (principal, key type) for each key line of the allowed-signers file; empty if it cannot be read.
-    The structure check of the file itself is `check_allowed_signers`; this only links a key to a name."""
+    """fingerprint -> (principal, key type) for each key of the allowed-signers file; empty if it cannot be read or the
+    broker would refuse it. The check of the file itself is `check_allowed_signers`; this only links a key to a name."""
     try:
         st = loc.allowed_signers.lstat()
         if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_FILE_BYTES:
@@ -215,19 +216,13 @@ def _enrolled(loc: Locations) -> dict[str, tuple[str, str]]:
         text = loc.allowed_signers.read_text(errors="replace")
     except OSError:
         return {}
-    found: dict[str, tuple[str, str]] = {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        tokens = _TOKEN.findall(stripped)
-        for index, token in enumerate(tokens[1:], 1):
-            if token.startswith(("ssh-", "ecdsa-", "sk-")) and index + 1 < len(tokens):
-                digest = fingerprint(tokens[index + 1])
-                if digest is not None:
-                    found[digest] = (tokens[0], token)
-                break
-    return found
+    try:
+        records = geminisign.parse_signers(
+            text
+        )  # the broker's own parser: a file it refuses enrolls nobody here either
+    except RefusedError:
+        return {}
+    return {record.fingerprint: (record.label, record.key_type) for record in records}
 
 
 def _key_file_public(loc: Locations) -> tuple[PublicKey | None, str]:
@@ -339,22 +334,9 @@ def _file_problem(path: Path, trust_uid: int) -> tuple[os.stat_result | None, st
         return st, "is not a regular file"
     if st.st_uid != trust_uid:
         return st, f"has the wrong owner (uid {st.st_uid}, expected {trust_uid})"
-    if stat.S_IMODE(st.st_mode) != 0o644:
-        return st, f"has mode {stat.S_IMODE(st.st_mode):04o}, expected 0644"
+    if geminisign.writable_by_others(st.st_mode):  # the broker's rule: any root-owned file that others cannot write
+        return st, f"has mode {stat.S_IMODE(st.st_mode):04o} and is writable by its group or by others"
     return st, None
-
-
-def _line_namespace_problem(line: str, namespace: str) -> bool:
-    """True when the line is NOT bound to exactly the namespace. The line is never returned or printed."""
-    tokens = _TOKEN.findall(line)
-    if len(tokens) < 3:
-        return True
-    options = tokens[1] if tokens[1] not in SK_TYPES and not tokens[1].startswith(("ssh-", "ecdsa-", "sk-")) else ""
-    for option in re.split(r",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)", options):
-        key, _, value = option.partition("=")
-        if key.lower() == "namespaces" and value.strip('"') == namespace:
-            return False
-    return True
 
 
 def check_allowed_signers(loc: Locations) -> Check:
@@ -376,32 +358,25 @@ def check_allowed_signers(loc: Locations) -> Check:
         text = path.read_text(errors="replace")
     except OSError:
         return Check(name, "fail", "the file cannot be read")
-    keys = 0
-    bad: list[int] = []
-    secret_lines: list[int] = []
-    for number, line in enumerate(text.splitlines(), 1):
-        if "PRIVATE KEY" in line:
-            secret_lines.append(number)
-            continue
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        keys += 1
-        if _line_namespace_problem(stripped, loc.namespace):
-            bad.append(number)
+    secret_lines = [n for n, line in enumerate(text.splitlines(), 1) if "PRIVATE KEY" in line]
     if secret_lines:
         return Check(
             name,
             "fail",
             "private key text at line " + ", ".join(map(str, secret_lines)) + " (content not shown): remove it now",
         )
-    if keys == 0:
+    try:
+        keys = geminisign.parse_signers(text)  # the one parser the broker uses; no second reading of the file here
+    except RefusedError as problem:
+        return Check(name, "fail", f"the broker would refuse this file ({problem}; content not shown)")
+    if not keys:
         return Check(name, "fail", "the file has no key lines, so nothing can approve")
-    if bad:
-        return Check(
-            name, "fail", f'line {", ".join(map(str, bad))} lack(s) namespaces="{loc.namespace}" (content not shown)'
-        )
-    return Check(name, "pass", f'{keys} key line(s), each bound to namespaces="{loc.namespace}"; root-owned, mode 0644')
+    return Check(
+        name,
+        "pass",
+        f'{len(keys)} key line(s), each bound to namespaces="{loc.namespace}" and accepted by the broker parser; '
+        "root-owned, not writable by group or others",
+    )
 
 
 def check_switch(loc: Locations) -> Check:
@@ -414,11 +389,12 @@ def check_switch(loc: Locations) -> Check:
         return Check(name, "fail", "the switch path cannot be inspected")
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
         return Check(name, "fail", "present but not a regular file; the broker treats it as disabled")
-    if st.st_uid != loc.trust_uid or stat.S_IMODE(st.st_mode) != 0o644:
+    if st.st_uid != loc.trust_uid or geminisign.writable_by_others(st.st_mode):
         return Check(
             name,
             "fail",
-            f"present with owner uid {st.st_uid} and mode {stat.S_IMODE(st.st_mode):04o}; expected root and 0644",
+            f"present with owner uid {st.st_uid} and mode {stat.S_IMODE(st.st_mode):04o}; expected a root-owned file "
+            "that group and others cannot write",
         )
     return Check(
         name, "warn", "present (content not read): paid use is switched on if the file says so; remove it to switch off"
@@ -568,7 +544,7 @@ def _config_file_problem(path: Path, trust_uid: int) -> str | None:
         return f"is larger than {_MAX_FILE_BYTES} bytes"
     if st.st_uid != trust_uid:
         return f"has the wrong owner (uid {st.st_uid}, expected {trust_uid})"
-    if st.st_mode & 0o022:
+    if geminisign.writable_by_others(st.st_mode):
         return f"is writable by group or others (mode {stat.S_IMODE(st.st_mode):04o})"
     return None
 
@@ -624,7 +600,7 @@ def _directory_problem(fd: int, owners: frozenset[int]) -> str | None:
     if info.st_uid not in owners | {0}:
         return "a parent directory has the wrong owner"
     sticky_root = bool(info.st_mode & stat.S_ISVTX) and info.st_uid == 0
-    if info.st_mode & 0o022 and not sticky_root:
+    if geminisign.writable_by_others(info.st_mode) and not sticky_root:
         return "a parent directory is writable by group or others"
     return None
 
@@ -666,7 +642,7 @@ def _open_client_config(path: Path, owners: frozenset[int]) -> tuple[int | None,
         problem = "is not a regular file"
     elif info.st_uid not in owners:
         problem = f"has the wrong owner (uid {info.st_uid})"
-    elif info.st_mode & 0o022:
+    elif geminisign.writable_by_others(info.st_mode):
         problem = f"is writable by group or others (mode {stat.S_IMODE(info.st_mode):04o})"
     elif info.st_size > _MAX_FILE_BYTES:
         problem = f"is larger than {_MAX_FILE_BYTES} bytes"

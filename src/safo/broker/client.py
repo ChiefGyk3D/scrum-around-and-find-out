@@ -21,7 +21,8 @@ prompt bytes); otherwise it is discarded. Text from the broker is printed only t
 every control and format character. Nothing in this module logs, prints a prompt or an answer to a diagnostic stream,
 reads a key, opens an image, or imports the free-tier call. The wire format is `safo.broker.protocol`, used unchanged.
 
-Run it as `python3 -I -m safo.broker.client ...` (see `main`), or through the paid entries of the Gemini command group,
+Run it as `python3 -I -m safo.broker.client ...` (see `main`; that direct start is refused unless a person is at a
+terminal, see `direct_start_problem`), or through the paid entries of the Gemini command group,
 `safo gemini paid ...` and `safo gemini paid-dryrun` (#287): they call `run_paid` and `run_dryrun` below, and there is
 no other paid path in the program. `run_dryrun` asks the broker's `dryrun` operation to check one throw-away
 signature, so the signer, the enrollment and the broker's switch are tested without a call or a charge.
@@ -47,7 +48,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TextIO
 
-from safo import gemini, geminisign, output
+from safo import gemini, geminisign, output, wrapper
 from safo.bounded import loads, read_bounded
 from safo.broker import protocol
 from safo.broker.errors import Refused
@@ -1253,5 +1254,53 @@ def main(
     return run_paid(params, settings, wired, out, err)
 
 
+def _open_controlling_terminal() -> None:
+    """Opens and closes /dev/tty: it succeeds only in a process that has a controlling terminal."""
+    os.close(os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY | os.O_CLOEXEC))
+
+
+def direct_start_problem(
+    env: Mapping[str, str],
+    *,
+    isatty: Callable[[int], bool] = os.isatty,
+    open_tty: Callable[[], None] = _open_controlling_terminal,
+) -> str | None:
+    """Why this module may not start as its own program (`python3 -I -m safo.broker.client`), or None for a person at a
+    terminal. That entry skips the wrapper (its sanitized environment, private directory and closed descriptors), so it
+    starts only with a terminal on standard input and output and a controlling terminal, and with none of the startup
+    variables the wrapper refuses (their names are shown, never their values). The wrapper's paid commands call
+    `run_paid` and `run_dryrun` in-process and never come through here. The guard's text patterns are a denylist; this
+    is the check where the code runs."""
+    names = wrapper.startup_variables(env)
+    if names:
+        return "an interpreter or loader startup variable is set (" + ", ".join(names) + "); unset it and start again"
+    if not (isatty(0) and isatty(1)):
+        return "it needs a terminal on standard input and output"
+    try:
+        open_tty()
+    except OSError:
+        return "it needs a controlling terminal"
+    return None
+
+
+def entry(
+    argv: Sequence[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    isatty: Callable[[int], bool] = os.isatty,
+    open_tty: Callable[[], None] = _open_controlling_terminal,
+) -> int:
+    """The program entry (`__main__`): refuse unless a person started it at a terminal, then run `main`."""
+    found = direct_start_problem(os.environ if env is None else env, isatty=isatty, open_tty=open_tty)
+    if found is not None:
+        say(
+            sys.stderr,
+            f"error: the broker client does not start directly: {found}. An agent never runs it; a person at a "
+            "terminal can, or can use `safo gemini paid`",
+        )
+        return EXIT_REFUSED
+    return main(argv)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(entry())
