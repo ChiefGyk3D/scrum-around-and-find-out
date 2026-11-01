@@ -677,7 +677,7 @@ def test_a_missing_or_broken_client_config_fails(tmp_path: Path) -> None:
     good = loc.client_config.read_text()
     loc.client_config.write_text("version: 2\n")
     assert client_check(loc).status == "fail"
-    loc.client_config.write_text(good.replace("socket: /run/safo-broker.sock", "socket: relative/path"))
+    loc.client_config.write_text(good.replace("reply_seconds: 240", "reply_seconds: 5"))
     assert client_check(loc).status == "fail"
     loc.client_config.write_text(good)
     loc.client_config.chmod(0o666)
