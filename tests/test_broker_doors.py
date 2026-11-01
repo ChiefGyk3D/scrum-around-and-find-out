@@ -1010,7 +1010,7 @@ def test_a_polkit_file_outside_the_strict_shape_fails_as_needing_a_human(w: Worl
         "if (subject.user === 'o') return polkit.Result.YES;",
         'if (subject.isInGroup("g") && action.id == "a.b-c") { return "yes"; }',
         'if (action.id == "a.b" && subject.user == "o" && subject.isInGroup("g")) { return polkit.Result.YES; }',
-        'if (subject.user == "o") { return polkit.Result.YES; }\nif (subject.user == "p") { return polkit.Result.YES; }',
+        'if (subject.user == "o") { return polkit.Result.YES; }\nif (subject.user == "p") { return "yes"; }',
     ],
 )
 def test_a_polkit_file_in_the_strict_shape_for_other_principals_only_warns(w: World, body: str) -> None:
