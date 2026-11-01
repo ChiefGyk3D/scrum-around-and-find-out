@@ -786,7 +786,7 @@ def test_main_check_and_refresh_put_the_table_back_first(
     assert egress.main(["check"]) == 0
     assert asked == [] and len(lab.scripts) == 1
     assert egress.main(["refresh"]) == 1  # the lookup fails ...
-    assert asked == [HOST] and len(lab.scripts) == 2  # ... but the table was put back before it
+    assert asked == [HOST] and len(lab.scripts) == 3  # ... the table was put back before it and again after it
     assert "put back" in capsys.readouterr().err
 
 
@@ -840,6 +840,25 @@ def test_real_nft_output_matches_the_check_and_every_outside_change_is_seen(tmp_
         for name in ("emptied", "inserted", "flushed", "added"):
             assert problem(results[f"{mode}-{name}"], mode=mode) is not None, name
         assert results[f"{mode}-deleted"] == ""
+        # persistence: for every change, ensure() sees the real listing (a deleted table is None), sends a rebuild,
+        # and that rebuild, run by the real nft in a fresh namespace, gives back exactly the reviewed table
+        hosts = tmp_path / f"hosts-{mode}"
+        egress.write_hosts(hosts, egress.hosts_content(HOST, GOOD), uid=UID, gid=os.getgid())
+        cfg = egress.Config(host=HOST, mode=mode)
+        for name in ("emptied", "inserted", "flushed", "added", "deleted"):
+            live = results[f"{mode}-{name}"] or None
+            lab = Lab(live)
+            why = egress.ensure(cfg, lister=lab.lister, nft=lab.nft, hosts_path=hosts, service_uid=SUID)
+            assert why and len(lab.scripts) == 1, name
+            (tmp_path / "fix").write_text(lab.scripts[0])
+            sh = f"nft -f {tmp_path}/fix && nft list table inet safo_broker_egress"
+            done = subprocess.run(  # noqa: S603 - fixed argv inside a private user and network namespace
+                [UNSHARE, "-Urn", "sh", "-c", sh], capture_output=True, text=True, timeout=60, check=False
+            )
+            assert problem(done.stdout, mode=mode) is None, (name, done.stderr)
+        quiet = Lab(results[f"{mode}-good"])
+        assert egress.ensure(cfg, lister=quiet.lister, nft=quiet.nft, hosts_path=hosts, service_uid=SUID) is None
+        assert quiet.scripts == []
 
 
 def test_a_fresh_hosts_view_is_not_resolved_again_but_an_old_missing_or_future_one_is(tmp_path: Path) -> None:
@@ -883,7 +902,9 @@ def test_main_tick_checks_every_time_but_resolves_only_when_the_view_is_old(
     assert asked == [] and len(lab.scripts) == 1
     os.utime(hosts, (1.0, 1.0))
     assert egress.main(["tick"]) == 0  # an old view: put the table back and resolve
-    assert asked == [HOST] and len(lab.scripts) == 2  # the aged view is not put back with addresses
+    assert (
+        asked == [HOST] and len(lab.scripts) == 3
+    )  # before and after the lookup (the aged view gets no addresses back)
 
 
 def test_an_aged_view_is_not_put_back_and_a_young_one_keeps_only_its_remaining_time(tmp_path: Path) -> None:
@@ -905,3 +926,37 @@ def test_an_aged_view_is_not_put_back_and_a_young_one_keeps_only_its_remaining_t
     quiet = Lab(listing(addrs=[], mode="observe"))
     assert egress.ensure(cfg, lister=quiet.lister, nft=quiet.nft, hosts_path=hosts, service_uid=SUID, now=now) is None
     assert quiet.scripts == []
+
+
+def test_a_table_removed_while_the_lookup_runs_is_put_back_in_the_same_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check runs after the lookup attempt too, whether the lookup failed, was refused or succeeded."""
+    for outcome in ("fails", "returns-bad-address", "succeeds"):
+        (tmp_path / outcome).mkdir()
+        _fake, hosts, _cfg = setup(tmp_path / outcome, GOOD)
+        os.utime(hosts, (1.0, 1.0))  # an old view: the lookup will run
+        lab = Lab(listing(addrs=[], mode="observe"))
+
+        def resolver(host: str, lab: Lab = lab, outcome: str = outcome) -> list[object]:
+            lab.live = None  # something else removes the table while the lookup is running
+            if outcome == "fails":
+                msg = "the resolver failed"
+                raise EgressError(msg)
+            return ["10.0.0.1"] if outcome == "returns-bad-address" else list(GOOD)
+
+        def fake_refresh(cfg: egress.Config, *, resolver: egress.Resolver, **kw: object) -> list[str]:
+            return egress.validate_answers(resolver(cfg.host))
+
+        monkeypatch.setattr(egress, "service_ids", lambda: (SUID, os.getgid()))
+        monkeypatch.setattr(egress, "read_config", lambda path: egress.Config(host=HOST, mode="observe"))
+        monkeypatch.setattr(egress, "HOSTS", hosts)
+        monkeypatch.setattr(egress, "LOCK", tmp_path / "lock")
+        monkeypatch.setattr(egress, "list_table", lab.lister)
+        monkeypatch.setattr(egress, "run_nft", lab.nft)
+        monkeypatch.setattr(egress, "default_resolver", resolver)
+        monkeypatch.setattr(egress, "refresh", fake_refresh)
+        code = egress.main(["tick"])
+        assert code == (0 if outcome == "succeeds" else 1), outcome
+        assert len(lab.scripts) == 1, outcome  # the table is back before the run ends (the view is old: no addresses)
+        assert "meta skuid != 1234 return" in lab.scripts[0], outcome

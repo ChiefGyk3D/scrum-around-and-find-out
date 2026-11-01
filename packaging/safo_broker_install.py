@@ -650,7 +650,7 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Service", "SystemCallErrorNumber", "EPERM"),
     ),
     "safo-broker-egress-refresh.timer": (
-        ("Timer", "OnBootSec", "1min"),
+        ("Timer", "OnActiveSec", "1s"),
         ("Timer", "OnUnitActiveSec", "10s"),
         ("Timer", "AccuracySec", "1s"),
         ("Timer", "Unit", "safo-broker-egress-refresh.service"),

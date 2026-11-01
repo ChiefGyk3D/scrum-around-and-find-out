@@ -299,6 +299,9 @@ def test_the_egress_table_is_checked_every_ten_seconds_and_the_set_is_resolved_a
     """The timer runs `tick`: a cheap check of the live table every ten seconds, and the lookup only once the hosts view
     is a minute old (the helper tests pin that rule)."""
     assert values("safo-broker-egress-refresh.timer", "OnUnitActiveSec") == ["10s"]
+    # the first run is at activation (enable, restart, boot), not a delay later
+    assert values("safo-broker-egress-refresh.timer", "OnActiveSec") == ["1s"]
+    assert values("safo-broker-egress-refresh.timer", "OnBootSec") == []
     assert values("safo-broker-egress-refresh.service", "ExecStart") == ["/usr/local/sbin/safo-broker-egress tick"]
 
 

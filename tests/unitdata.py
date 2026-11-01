@@ -152,7 +152,7 @@ REQUIRED_REFRESH: tuple[tuple[str, str, str], ...] = (
 )
 
 REQUIRED_TIMER: tuple[tuple[str, str, str], ...] = (
-    ("Timer", "OnBootSec", "1min"),
+    ("Timer", "OnActiveSec", "1s"),
     ("Timer", "OnUnitActiveSec", "10s"),
     ("Timer", "AccuracySec", "1s"),
     ("Timer", "Unit", "safo-broker-egress-refresh.service"),

@@ -538,15 +538,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     say(sys.stderr, f"egress table put back: {back}")
                 if command == "check" or (command == "tick" and view_is_fresh(HOSTS, now=time.time())):
                     return 0
-                found = refresh(
-                    config,
-                    resolver=default_resolver,
-                    nft=run_nft,
-                    hosts_path=HOSTS,
-                    uid=0,
-                    service_uid=service_uid,
-                    gid=gid,
-                )
+                try:
+                    found = refresh(
+                        config,
+                        resolver=default_resolver,
+                        nft=run_nft,
+                        hosts_path=HOSTS,
+                        uid=0,
+                        service_uid=service_uid,
+                        gid=gid,
+                    )
+                finally:
+                    # whatever the lookup did (failed, refused, slow, or worked), a table removed while it ran is
+                    # put back before this run ends; an error here must not hide the lookup's own error
+                    try:
+                        back = ensure(config, lister=list_table, nft=run_nft, hosts_path=HOSTS, service_uid=service_uid)
+                    except EgressError as exc:
+                        say(sys.stderr, f"egress: the check after the lookup failed: {exc}")
+                    else:
+                        if back:
+                            say(sys.stderr, f"egress table put back after the lookup: {back}")
             say(sys.stderr, f"egress set refreshed: {len(found)} addresses")
             return 0
         if command == "unload" and not rest:
