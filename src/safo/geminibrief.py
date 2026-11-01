@@ -644,7 +644,8 @@ _BM_OPTION = re.compile(r"--(?:max-usd|max-output-tokens|quote|quoted-at|job)(?!
 
 
 def _flat_paths(v: str) -> str:
-    """A name or path written the long way, read the short way: joined string pieces, repeated slashes, `/./` and `x/../` segments collapsed, so
+    """A name or path written the long way, read the short way: joined string pieces, repeated slashes, `/./` and
+    `x/../` segments collapsed, so
     `src//safo/./broker/other/../client.py` is `src/safo/broker/client.py`. Bounded: the line is at most LINE_CAP."""
     v = re.sub(r"\s*\+\s*", "", v)  # `"saf" + "o.broker"` read as one string (the quotes are already gone)
     v = re.sub(r"/{2,}", "/", v)

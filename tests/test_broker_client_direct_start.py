@@ -4,7 +4,7 @@
 `python3 -I -m safo.broker.client` skips the wrapper (its sanitized environment, private directory and closed
 descriptors). The guard's text patterns are a denylist and can be got around, so the module also checks where it runs:
 the direct entry starts only with a controlling terminal and a terminal on standard input and output (a person), and
-with none of the startup variables the wrapper refuses. The wrapper's own paid commands never reach this entry: they call
+with no startup variable the wrapper refuses. The wrapper's own paid commands never reach this entry: they call
 `run_paid` and `run_dryrun` in-process, so they are unaffected."""
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def run_module(
             "os.execve(sys.argv[1], sys.argv[1:], dict(os.environ))"
         )
         base = [sys.executable, "-c", code, *base]
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603 - fixed argv built here, no shell
         base, stdin=stdin, stdout=stdout, stderr=subprocess.PIPE, env=dict(env), check=False, start_new_session=True
     )
 
