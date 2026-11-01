@@ -16,7 +16,7 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +134,17 @@ class Issuer:
 
     # -- operations
 
+    @contextlib.contextmanager
+    def _issued_lock(self) -> Iterator[None]:
+        """The lock every writer of the issued table holds. Only the timeout of TAKING it is `busy`, as the ledger
+        lock's timeout is; an exception raised by the work under the lock passes through unchanged."""
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(file_lock(self.dir.parent / "issued.lock", timeout=self.ledger.lock_seconds))
+            except TimeoutError:
+                raise Refused("busy", "another operation holds the approval table") from None
+            yield
+
     def begin(
         self,
         req: BrokerRequest,
@@ -172,7 +183,7 @@ class Issuer:
         )
         head = view.head or GENESIS
         ensure_dir(self.dir)
-        with file_lock(self.dir.parent / "issued.lock", timeout=self.ledger.lock_seconds):
+        with self._issued_lock():
             self._sweep_temporary()
             live = self._prune(now)
             if live >= MAX_OUTSTANDING:
@@ -270,7 +281,7 @@ class Issuer:
 
     def flush(self) -> int:
         """A restart empties the table: every nonce handed out must be asked for again. Returns how many went."""
-        with file_lock(self.dir.parent / "issued.lock", timeout=self.ledger.lock_seconds):
+        with self._issued_lock():
             self._sweep_temporary()
             names = self._nonces()
             for name in names:

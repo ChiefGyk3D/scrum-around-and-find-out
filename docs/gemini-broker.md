@@ -427,8 +427,8 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
   gemini-revoked-signers           root:root 0644   revoked keys (existing; may be empty; missing refuses all)
   gemini-paid-enabled              root:root 0644   the enable switch (existing; says "enabled")
   broker.yaml                      root:root 0644   caps, model allowlist, prices, allowed uids, limits, timeouts
-                                                    (sections server, prices, caps, deadline_seconds; not built yet:
-                                                    no example file ships and no runbook step writes it)
+                                                    (sections server, prices, caps, deadline_seconds; written by the
+                                                    runbook, and the same text is examples/broker.example.yaml)
   broker-egress config file        root:root 0644   the vendor host name and MODE=observe or MODE=drop (egress control)
   egress/                          root-owned       the hosts view the egress helper writes and the broker unit bind-mounts
   broker/                          root:root 0700
@@ -585,8 +585,9 @@ What phase 5 puts in the tree, all testable without root and none of it run on a
   `--only-binary=:all: --require-hashes --no-deps --isolated` and every file is re-checked against the lock, the release
   is built in a staging directory with a manifest, made read-only, and activated with a rename over a temporary link.
 - `src/safo/broker/runbook.py`: the one-time root setup as full `ssh -t host 'sudo ...'` lines, each step with its blast
-  radius and rollback. The paid key is typed at a hidden prompt on the remote terminal and never appears in the text. The
-  switch is left off.
+  radius and rollback. The paid key is typed at a hidden prompt on the remote terminal and never appears in the text. A
+  step writes `/etc/safo/broker.yaml` (root-owned, mode 0644, atomically, from a here-document that asks the machine for the
+  maintainer's numeric uid with `id -u`) before the socket is enabled. The switch is left off.
 
 **Egress control for the service user.** The units alone do not limit where the service can connect, so phase 5 also
 ships an nftables table keyed on the service user, three small units and a root helper that is **not part of any
@@ -611,7 +612,7 @@ new release cannot change what root does with network-administration rights. The
 - Observe mode (log, then let through) exists to find the addresses to allow. It does **not** stop the key leaving, so it is
   not a state to run paid use in. The mode is one value in the root-owned config (`MODE=observe` or `MODE=drop`; a missing
   line means drop, and the helper reads it, not the unit). The runbook's last step creates the enable switch only after
-  the read-only preflight (`python -I -m safo.gemini_preflight --enabling`, run by root from the installed release) exits 0,
+  the read-only preflight (`/opt/safo-broker/current/venv/bin/python -I -m safo.gemini_preflight --enabling`, run by root from the installed release; `venv/bin/python` is the one interpreter the installer builds) exits 0, which also requires that `/etc/safo/broker.yaml` is root-owned, not group or other writable, loads through the service's own loader and lists an allowed uid, and that the maintainer's `broker-client.yaml` loads,
   and that preflight fails while the mode is observe. The only way past it is `--ack-observe-mode`, added by hand to that
   line after an empty observe log through a full dry run (the minimum evidence); the preflight then warns, and the runbook
   says to switch to drop after the first clean real call at the latest. Blast radius of the acknowledged path: until the
@@ -904,6 +905,7 @@ same ownership walk as the trust files; it may set `socket` and nothing else), t
 variable names the socket, because the wrapper strips the environment and a variable is the caller's to set. The user
 file holds `version: 1`, `socket`, `signing.key` and `signing.principal` (the same two settings as `gemini.yaml`),
 `image_output_dir` (an absolute path to a mode 0700 folder), `private_terms` and `reply_seconds` (10 to 900, default 240).
+A commented example that loads through `load_client_config` is `examples/broker-client.example.yaml`.
 The client opens the socket path without following a link, checks on the descriptor that it is a socket owned by root and
 not writable by everyone, and connects through `/proc/self/fd`, so the object it checked is the object it connected to;
 an account that is not root cannot put a socket there for the client to talk to.
@@ -1093,7 +1095,11 @@ has `cap_verified` too.
 
 ### The price table
 
-`broker.yaml` carries one entry per model, with the date the figures were read. The shape for an image model adds the
+`broker.yaml` carries one entry per model, with the date the figures were read. A complete file that loads through the
+real loader ships as `examples/broker.example.yaml` (the runbook writes the same text): its figures were read from the
+vendor pricing page on 2026-10-31 (the page says "Last updated 2026-10-30 UTC"), the vendor states no end date for the image
+prices, so its `valid_through` is the date by which you must read the pages again. The client side has
+`examples/broker-client.example.yaml`. The shape for an image model adds the
 vendor-stated per-image figure by size, the token count for each size, the output limit and the cap flags:
 
 ```yaml
@@ -1132,9 +1138,13 @@ prices:
       max_images: 1
 ```
 
-These numbers show the shape and what the pages said on 2026-10-30. An example `broker.yaml` that ships with the
-program is **not built yet** (none exists; root writes the file by hand from this shape and re-reads the vendor pages
-first). The two maps `image_usd` and `image_tokens` must list the same sizes, and a size missing from them is refused for
+These numbers show the shape and what the pages said on 2026-10-30. An example `broker.yaml` ships as
+`examples/broker.example.yaml` (the runbook writes the same text), with prices read from the vendor pricing page on
+2026-10-31. It lists **only** Nano Banana 2.1 and Nano Banana 2 Lite. Nano Banana 2 and Nano Banana Pro are left out on
+purpose: decision 13 refuses them until their output cap is shown to hold (Nano Banana 2 at about 2.10 USD worst case,
+Pro as a Pro-class model, and Pro states per-image prices without token counts, so it cannot be listed). A test checks
+that every model in the example passes the unverified-cap limit at its largest size. Root re-reads the vendor pages
+before relying on any figure. The two maps `image_usd` and `image_tokens` must list the same sizes, and a size missing from them is refused for
 that model. The stated per-image figure must also agree
 with the token price the reservation uses: `image_usd[size]` may not be above `image_tokens[size] x
 image_output_per_mtok` (rounded up), and may not be more than **5 percent** below it. A table that breaks either rule is
@@ -1627,10 +1637,11 @@ the steps above.
 
 ## Test plan (hermetic)
 
-This is the plan the build followed; the tests are `tests/test_broker_*.py` and `tests/test_gemini_*.py`. Two items
-are **not built yet**: the randomized framing fuzz test with a fixed seed (the framing is covered by tables of malformed
-frames in `tests/test_broker_protocol.py`) and the run on a throwaway VM or container (the opt-in
+This is the plan the build followed; the tests are `tests/test_broker_*.py` and `tests/test_gemini_*.py`. One item
+is **not built yet**: the run on a throwaway VM or container (the opt-in
 `scripts/broker_sandbox_check.py` runs the start-up flow under the unit's properties as a transient user unit instead).
+The randomized framing fuzz (`tests/test_broker_framing_fuzz.py`, fixed seed, bounded), the static no-image-library check
+(`tests/test_broker_no_image_library.py`) and the free path with a dead broker socket (`tests/test_gemini_cli.py`) are built.
 No test uses the real key, the real vendor, the real `/etc/safo`, a real hardware key or the maintainer's state. Fakes:
 
 - **A fake vendor server** on loopback, scripted per test: a good text answer, a good image answer (with a PNG, JPEG and
@@ -1678,7 +1689,7 @@ service and spend nothing.
 | 0 | This design and the threat model (documents only) | The maintainer answers the decisions below; a cyber-tier review of the design |
 | 1 | The broker core as a library, no socket, no systemd: state directory checks, the ledger shared with today's code, issue and consume of nonces, recovery, spend-before-call, the signed approval schema version 3 (extending the version 2 of #217) and its verification, the reservation and typical-estimate arithmetic for `image` and `text`, with the hermetic fakes | Review of the state machine and the crash tests |
 | 2 | The call pipeline against the fake vendor: request builders per kind, the image response handling (magic bytes, limits, receipts), 429 and ambiguous outcomes. Reservation, reconciliation, breach and suspension. The response parser targets the vendor's documented shape and refuses any shape it has not been shown | Review |
-| 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, the operations, logging allowlist; fake socket peers. The idle exit and a fuzz test of the framing are not built yet | Review of the parser and the limits |
+| 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, the operations, logging allowlist; fake socket peers. The idle exit is not built yet; the framing fuzz is built (`tests/test_broker_framing_fuzz.py`) | Review of the parser and the limits |
 | 4 | The thin client: `safo gemini paid` and `paid-dryrun` go through the socket, safe image writing and sidecars, **removal of the in-process paid path** (done in #287: deleted, with a guard test that no module outside the broker can name the vendor, a paid model or the key header), the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |
 | 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that covers the release link, the record, the floor, the installed units against the signed release, the egress helper and the switch; the root-door checks remain a manual review), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
 | 6 | **Cyber-tier security review** of the broker and the signed-approval verification (issue step 3). Done; its findings were fixed in #288 and #289 | Clean review |
@@ -1717,7 +1728,7 @@ alignment, so they are shown as recommended and not yet confirmed.
 
 - That any of it has been run. The code is built and tested with fakes (no real key, vendor, hardware key or
   `/etc/safo`); nothing has been installed or run on a real machine, and no vendor call has been made. Phases 7 and 8 of
-  the "Build plan", the idle exit, the audit copy of the signed text, the example `broker.yaml`, the root-door checks
+  the "Build plan", the idle exit, the audit copy of the signed text, the root-door checks
   (#293), a `status` request in the installer health check, a command-line wrapper for `status`, and a count above 1 per
   approval are **not built yet**.
 - That the root account, the kernel, systemd or `ssh-keygen` are trustworthy. The design needs them to be.

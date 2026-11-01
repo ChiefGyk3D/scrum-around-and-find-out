@@ -131,7 +131,7 @@ are `tests/test_broker_*.py` and `tests/test_gemini_*.py`.
   `tests/test_broker_server.py` and `tests/test_broker_deadline.py`: the connection caps (the ninth and the
   third-per-uid are closed unread), stalled readers and writers dropped at the deadline with the slot already free;
   `tests/test_broker_units.py` and `tests/test_broker_unit_policy.py`: `systemd-analyze security --offline` on the shipped
-  units where the tool exists. A randomized framing fuzz with a fixed seed is **not built yet**.
+  units where the tool exists. A seeded, bounded framing fuzz (`tests/test_broker_framing_fuzz.py`) feeds the frame reader, both parsers and the server handler arbitrary bytes.
 - **Residual.** A memory-safety bug in the interpreter or a library could still reach the key. The unit limits what
   follows; it does not remove the key from the process. The cyber-tier review (phase 6) is the check on the parser.
 
@@ -214,8 +214,7 @@ are `tests/test_broker_*.py` and `tests/test_gemini_*.py`.
   and `tests/test_broker_vendor.py`, with the fake vendor: a wrong signature for the claimed type, an unlisted type, an empty
   image, an oversized image, more images than approved and a malformed body each give a coded refusal or a dropped item and
   send no bytes to the client. Client tests: an existing target, a symlink at the target, a symlinked
-  directory, a name from the reply, and a tampered attachment are all refused; modes are checked with `stat` (`tests/test_broker_imagewrite.py`, `tests/test_broker_client.py`). A static check that the
-  broker and client modules import no image library is **not built yet**.
+  directory, a name from the reply, and a tampered attachment are all refused; modes are checked with `stat` (`tests/test_broker_imagewrite.py`, `tests/test_broker_client.py`). A static check over the import graph that no module the broker loads imports an image library is `tests/test_broker_no_image_library.py`.
 - **Residual.** A valid PNG, JPEG or WebP can still carry content that harms whatever opens it, or an image that is
   wrong for its purpose. The maintainer's review is the control for what is in the picture; the brand rule is below (R15).
 
@@ -373,8 +372,7 @@ are `tests/test_broker_*.py` and `tests/test_gemini_*.py`.
 - **Mitigation.** Separate keys, projects and ledgers; the free key's project has billing disabled (the maintainer
   confirms once; unverified today); the free path never opens the socket; the broker never calls the free path.
 - **Verification.** `tests/test_broker_client.py` (the client names no free path) and the guard test of #287 (no module
-  outside the broker names the vendor host, a paid model or the key header). A free run with no socket, and against a fake
-  peer that fails on connect, is **not built yet**. Command: the vendor console shows billing off for the free project (a manual step).
+  outside the broker names the vendor host, a paid model or the key header). A free run with the broker socket absent, and with one that refuses, is `tests/test_gemini_cli.py` (the free path makes no broker connection). Command: the vendor console shows billing off for the free project (a manual step).
 - **Residual.** Depends on the vendor-side setting.
 
 ### R20. State restore

@@ -115,6 +115,7 @@ RESOLVED_MUST_BE_SET = (
 )
 
 UNIT_EXEC_PREFIX = "/opt/safo-broker/current"
+RELEASE_INTERPRETER = f"{UNIT_EXEC_PREFIX}/venv/bin/python"  # the only interpreter a release has: stage/venv/bin/python
 SK_KEY_TYPES = ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")  # hardware keys only, by default
 LOCK_REL = "packaging/broker-requirements.txt"
 TREE_PATHS = ("src/safo", "packaging", "pyproject.toml")
@@ -515,8 +516,8 @@ UNIT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("Service", "Type", "simple"),
         ("Service", "User", "safo-broker"),
         ("Service", "Group", "safo-broker"),
-        ("Service", "ExecStartPre", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker.floor"),
-        ("Service", "ExecStart", "/opt/safo-broker/current/venv/bin/python -I -m safo.broker"),
+        ("Service", "ExecStartPre", f"{RELEASE_INTERPRETER} -I -m safo.broker.floor"),
+        ("Service", "ExecStart", f"{RELEASE_INTERPRETER} -I -m safo.broker"),
         ("Service", "LoadCredentialEncrypted", "paid-key:/etc/safo/broker/paid-key"),
         ("Service", "StateDirectory", "safo-broker"),
         ("Service", "StateDirectoryMode", "0700"),

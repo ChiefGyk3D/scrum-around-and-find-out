@@ -103,7 +103,7 @@ def test_the_gemini_page_states_the_gates_and_is_linked() -> None:
         "only through the broker",
         "hardware",
         "single-use",
-        "2 usd per job",
+        "2.50 usd per job in the testing phase",
         "10 usd per month",
         "ledger",
         "midnight pacific",

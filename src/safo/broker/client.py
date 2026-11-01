@@ -159,6 +159,11 @@ def _parse_user(data: object) -> ClientConfig:
     )
 
 
+def parse_user_config(text: str) -> ClientConfig:
+    """The user's client settings from text, through the same strict parser `load_client_config` uses."""
+    return _parse_user(_safe_load(text, "broker client"))
+
+
 def load_client_config(
     *, home: Path, user_path: Path | None = None, root_path: Path = Path(ROOT_CONFIG), root_uid: int = BROKER_UID
 ) -> ClientConfig:
@@ -167,9 +172,7 @@ def load_client_config(
     cfg = ClientConfig()
     where = user_path if user_path is not None else user_config_path(home)
     if os.path.lexists(where):
-        cfg = _parse_user(
-            _safe_load(read_trusted_regular_file(where, 65_536).decode("utf-8", "replace"), "broker client")
-        )
+        cfg = parse_user_config(read_trusted_regular_file(where, 65_536).decode("utf-8", "replace"))
     if os.path.lexists(root_path):
         text = geminisign.read_trust_file(root_path, root_uid, "broker client settings").decode("utf-8", "replace")
         chosen = _parse_root(_safe_load(text, "broker client settings (root)"))

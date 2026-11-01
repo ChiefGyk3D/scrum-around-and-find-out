@@ -259,3 +259,51 @@ def test_a_naive_time_is_refused(rig: Rig) -> None:
         rig.issuer.begin(text_req(), prompt_bytes=5, max_micro=2_500_000, now=dt.datetime(2026, 10, 30, 12))
     assert err.value.code == "bad_request"
     assert IMAGE_MODEL in policy().prices.models
+
+
+def test_a_lock_timeout_while_taking_the_issued_lock_is_busy_not_internal(rig: Rig) -> None:
+    """#298 (4): the issuer's own lock timing out answered `internal`; it is the same `busy` as the ledger lock."""
+    import fcntl
+
+    rig.ledger.lock_seconds = 0.05
+    lock = rig.ledger.dir / "issued.lock"
+    lock.touch(mode=0o600)
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert code_of(rig, text_req()) == "busy"
+    finally:
+        os.close(fd)
+    assert rig.offer(text_req()).nonce  # and once the lock is free the same request is served
+
+
+def test_a_timeout_raised_inside_the_locked_body_is_not_turned_into_busy(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the timeout of TAKING the lock is `busy`; a TimeoutError from the work under the lock is a bug and must
+    surface as itself (the server answers it `internal`)."""
+
+    def boom() -> None:
+        raise TimeoutError("not the lock")
+
+    monkeypatch.setattr(rig.issuer, "_sweep_temporary", boom)
+    with pytest.raises(TimeoutError, match="not the lock"):
+        rig.issuer.begin(text_req(), now=rig.clock.wall(), max_micro=2_500_000, prompt_bytes=10)
+    with pytest.raises(TimeoutError, match="not the lock"):
+        rig.issuer.flush()
+
+
+def test_flush_maps_a_lock_timeout_to_busy_too(rig: Rig) -> None:
+    import fcntl
+
+    rig.ledger.lock_seconds = 0.05
+    lock = rig.ledger.dir / "issued.lock"
+    lock.touch(mode=0o600)
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with pytest.raises(Refused) as err:
+            rig.issuer.flush()
+        assert err.value.code == "busy"
+    finally:
+        os.close(fd)

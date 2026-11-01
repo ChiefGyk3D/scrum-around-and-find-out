@@ -18,8 +18,29 @@ def text() -> str:
     return runbook.render(maintainer="MAINTAINER_LOGIN")
 
 
+def grouped(lines: list[str]) -> list[str]:
+    """Commands from lines: one `ssh ...` line is one command; a command with a here-document runs over several
+    lines and ends where its single quotes balance (a line holding only the closing quote). Any other line stands
+    alone."""
+    out: list[str] = []
+    open_command: list[str] = []
+    for line in lines:
+        if open_command:
+            open_command.append(line)
+            if "\n".join(open_command).count("'") % 2 == 0:
+                out.append("\n".join(open_command))
+                open_command = []
+        elif line.startswith("ssh ") and line.count("'") % 2 == 1:
+            open_command = [line]
+        else:
+            out.append(line)
+    assert not open_command, "a command was never closed"
+    return out
+
+
 def command_lines(doc: str) -> list[str]:
-    return [line for line in doc.splitlines() if line.startswith("ssh ")]
+    """Every command in the document (a here-document command is one entry, its lines joined by newlines)."""
+    return [c for c in grouped(doc.splitlines()) if c.startswith("ssh ")]
 
 
 def test_the_runbook_has_the_steps_in_order() -> None:
@@ -59,20 +80,24 @@ def test_every_command_is_a_full_ssh_sudo_line_with_the_host_placeholder() -> No
     for line in lines:
         assert line.startswith("ssh -t host 'sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "), line
         assert line.endswith("'"), line
+        assert line.count("\n") == 0 or line.endswith("\nEOF\n'"), line  # only a here-document spans lines
         outer = shlex.split(line)
         assert outer[:3] == ["ssh", "-t", "host"], line
         assert len(outer) == 4, f"the remote command must be one quoted argument: {line}"
 
 
 def code_lines(doc: str) -> list[str]:
-    out: list[str] = []
+    """The commands inside the fenced blocks (a here-document command counts once)."""
+    blocks: list[list[str]] = []
     inside = False
     for line in doc.splitlines():
         if line.startswith("```"):
             inside = not inside
+            if inside:
+                blocks.append([])
         elif inside:
-            out.append(line)
-    return out
+            blocks[-1].append(line)
+    return [command for block in blocks for command in grouped(block)]
 
 
 def test_every_line_in_a_code_block_is_a_full_ssh_line() -> None:
@@ -130,7 +155,7 @@ def test_the_line_that_creates_the_switch_cannot_run_unless_the_preflight_passes
     line = next(x for x in switch_lines(doc) if "printf" in x)
     pre = "safo.gemini_preflight --enabling"
     assert pre in line
-    assert "/opt/safo-broker/current/bin/python -I -m" in line  # root runs the installed, reviewed copy, isolated
+    assert "/opt/safo-broker/current/venv/bin/python -I -m" in line  # root runs the installed, reviewed copy, isolated
     assert line.index(pre) < line.index("&&") < line.index("printf") < line.index("gemini-paid-enabled")
     assert line.count("&&") >= 2 and "||" not in line and ";" not in line
     assert "--ack-observe-mode" not in line  # the acknowledgement is never in a pasteable line
@@ -189,6 +214,10 @@ def test_no_secret_no_real_host_no_address() -> None:
     assert not re.search(r"\b[A-Za-z0-9_-]{32,}\b", doc.replace("/", " ")), "a long token-like string"
     assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", re.sub(r"203\.0\.113\.\d{1,3}", "", doc)), "an IPv4 address"
     assert not re.search(r"\b[0-9a-f]{2}(:[0-9a-f]{2}){5}\b", doc), "a MAC address"
+    models = re.findall(r"^    (gemini-[a-z0-9.-]+):", runbook.BROKER_CONFIG, re.MULTILINE)  # model names have dots
+    assert len(models) >= 2
+    for model in models:
+        doc = doc.replace(model, "MODEL")
     hosts = {h for h in re.findall(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", doc.replace(KEY_TYPE, ""))}
     allowed_suffixes: tuple[str, ...] = (".conf", ".timer", ".new", ".py", ".sock", ".socket", ".service")
     allowed_suffixes = (*allowed_suffixes, ".yaml", ".log", ".md", ".sha256", ".invalid")
@@ -259,3 +288,82 @@ def test_root_commands_run_with_a_fixed_environment_and_a_locked_down_pager() ->
         assert need in pager
     # nothing relies on an unqualified program name picked up from the remote session: the PATH is the fixed one
     assert not any("PATH=$" in line or 'PATH="$' in line for line in lines)
+
+
+INTERPRETER = re.compile(r"/opt/safo-broker/[A-Za-z0-9_./-]*/python[0-9.]*")
+
+
+def test_every_interpreter_path_in_the_runbook_is_the_one_the_installer_builds() -> None:
+    """#298 (1): the runbook named current/bin/python; the installer builds only current/venv/bin/python."""
+    named = set(INTERPRETER.findall(text()))
+    assert named, "the runbook names the installed interpreter at least once (the enable step)"
+    built = install.RELEASE_INTERPRETER
+    assert built == f"{install.UNIT_EXEC_PREFIX}/venv/bin/python"
+    assert named == {built}
+    # the installer really creates venv/bin/python inside a release, and `current` points at that release
+    source = Path(install.__file__).read_text()
+    assert 'stage / "venv" / "bin" / "python"' in source
+    # and the unit files the installer writes use the same interpreter
+    units = [path.read_text() for path in sorted((Path(install.__file__).parent / "systemd").glob("*.service"))]
+    assert any(f"ExecStart={built} -I -m safo.broker\n" in unit for unit in units)
+
+
+def config_step(doc: str) -> str:
+    return next(
+        x for x in re.split(r"^### Step ", doc, flags=re.MULTILINE)[1:] if "broker configuration" in x.splitlines()[0]
+    )
+
+
+def test_a_step_creates_the_broker_config_before_the_socket_and_the_enable_switch() -> None:
+    """#298 (2): nothing created /etc/safo/broker.yaml, so the service could not start."""
+    doc = text()
+    step = config_step(doc)
+    assert doc.index(step) < doc.index("systemctl enable --now safo-broker.socket") < doc.rindex("### Step ")
+    assert "Blast radius:" in step and "Rollback:" in step
+    assert "rm -f /etc/safo/broker.yaml" in step[step.index("Rollback:") :]
+    command = next(c for c in command_lines(step) if "broker.yaml.new" in c)
+    assert "install -m 0644 -o root -g root /dev/stdin /etc/safo/broker.yaml.new" in command  # root-owned, 0644
+    assert command.index("test ! -e /etc/safo/broker.yaml") < command.index("install -m 0644") < command.index("mv ")
+    assert "mv /etc/safo/broker.yaml.new /etc/safo/broker.yaml" in command  # atomic: a rename in one directory
+    assert "<<EOF\n" in command and command.endswith("\nEOF\n'")  # a here-document, closed
+    assert "allowed_uids: [$(id -u MAINTAINER_LOGIN)]" in command  # the number is asked of the machine at run time
+    assert "MAINTAINER_LOGIN]" not in command.replace("$(id -u MAINTAINER_LOGIN)]", "")  # never the name in the list
+    note = step[step.index("Note:") :]
+    assert "~/.config/safo/broker-client.yaml" in note and "0600" in note  # and the user's own client config
+
+
+def test_the_config_here_document_runs_and_writes_a_root_file_with_the_account_id(tmp_path: Path) -> None:
+    """Run the remote command in a local shell against a temporary path: the file holds the real id, mode 0644."""
+    import getpass
+    import os
+
+    login = getpass.getuser()
+    if not runbook.LOGIN.fullmatch(login):
+        import pytest
+
+        pytest.skip("the local login name is not a plain login name")
+    doc = runbook.render(maintainer=login)
+    command = next(c for c in command_lines(config_step(doc)) if "broker.yaml.new" in c)
+    remote = shlex.split(command)[3].removeprefix("sudo " + runbook.ENV + " ")
+    target = tmp_path / "broker.yaml"
+    head, body = remote.split("<<EOF\n", 1)  # only the command is pointed at the temporary path, not the text
+    local = head.replace("-o root -g root ", "").replace("/etc/safo/broker.yaml", str(target)) + "<<EOF\n" + body
+    subprocess.run(["sh", "-c", local], check=True, stdin=subprocess.DEVNULL, timeout=30)  # noqa: S603, S607 - fixed test string, temp path
+    assert target.read_text() == runbook.broker_config(str(os.getuid()))
+    assert oct(target.stat().st_mode & 0o777) == "0o644" and not (tmp_path / "broker.yaml.new").exists()
+    again = subprocess.run(["sh", "-c", local], check=False, stdin=subprocess.DEVNULL, timeout=30)  # noqa: S603, S607 - same
+    assert again.returncode != 0, "a second run refuses to replace the file"
+    assert target.read_text() == runbook.broker_config(str(os.getuid()))
+
+
+def test_the_enable_step_is_still_last_and_its_preflight_checks_the_users_client_config() -> None:
+    doc = text()
+    line = next(x for x in switch_lines(doc) if "printf" in x)
+    # the preflight is told WHO the maintainer is by number; it looks the home up itself, in Python. No value read from
+    # a data file (the passwd file) ever reaches the root shell's command line.
+    assert "--maintainer-uid $(id -u MAINTAINER_LOGIN)" in line
+    assert line.index("--maintainer-uid") < line.index("&&")
+    for banned in ("getent", "cut ", "--client-config", "/etc/passwd", "~"):
+        assert banned not in line, banned
+    assert line.count("$(") == 1  # the one expansion is the numeric id
+    assert doc.rindex("### Step ") < doc.index(line)

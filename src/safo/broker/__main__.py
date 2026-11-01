@@ -22,12 +22,11 @@ from pathlib import Path
 from safo import geminisign, output
 from safo.broker import runtime
 from safo.broker.approval import Verifier
+from safo.broker.config import load_broker_config
 from safo.broker.issue import Issuer
 from safo.broker.ledger import CallLedger
-from safo.broker.pipeline import DEFAULT_DEADLINE_SECONDS, Pipeline
-from safo.broker.policy import Caps, Policy
-from safo.broker.prices import parse_prices
-from safo.broker.server import Server, ServerConfig, adopt_listener, install_signal_handlers, read_config
+from safo.broker.pipeline import Pipeline
+from safo.broker.server import Server, adopt_listener, install_signal_handlers
 from safo.broker.transport import HttpsTransport
 from safo.broker.vendor import Transport
 from safo.errors import SafoError
@@ -37,7 +36,6 @@ SIGNERS = Path("/etc/safo/gemini-allowed-signers")
 REVOKED = Path("/etc/safo/gemini-revoked-signers")
 SWITCH = Path("/etc/safo/gemini-paid-enabled")
 EXIT_FAILED = 4
-_SECTIONS = {"server", "prices", "caps", "deadline_seconds"}
 
 
 def run(
@@ -62,17 +60,8 @@ def run(
     credentials = environ.get("CREDENTIALS_DIRECTORY")
     runtime.scrub_environment(environ)
     listener = adopt_listener(environ, pid, first_fd=first_fd)
-    data = read_config(config, trust_uid)
-    if set(data) - _SECTIONS or not {"server", "prices"} <= set(data):
-        raise SafoError("the broker config has an unknown or a missing section")
-    server_cfg = ServerConfig.from_mapping(data["server"])
-    caps_data = data.get("caps", {})
-    if type(caps_data) is not dict or set(caps_data) - {"job_usd", "month_usd"}:
-        raise SafoError("the broker config caps section is job_usd and month_usd")
-    policy = Policy(parse_prices(data["prices"]), Caps.from_usd(caps_data.get("job_usd"), caps_data.get("month_usd")))
-    deadline = data.get("deadline_seconds", DEFAULT_DEADLINE_SECONDS)
-    if type(deadline) not in (int, float) or not 1 <= deadline <= 600:
-        raise SafoError("the broker config deadline_seconds is from 1 to 600")
+    settings = load_broker_config(config, trust_uid)
+    server_cfg, policy, deadline = settings.server, settings.policy, settings.deadline_seconds
     if not state_env or not os.path.isabs(state_env):
         raise SafoError("the state directory was not passed")
     ledger = CallLedger(Path(state_env))
@@ -89,7 +78,7 @@ def run(
         epoch=epoch,
         wall=wall,
         mono=time.monotonic,
-        deadline_seconds=float(deadline),
+        deadline_seconds=deadline,
         verifier=verifier,
     )
     ledger.recover(wall())  # before anything is served: every open call becomes ambiguous
