@@ -630,7 +630,11 @@ INTERPRETERS = frozenset(
 )  # fmt: skip
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _CODE_OPTION = re.compile(r"-[A-Za-z]*[ceEmrx][A-Za-z]*|--(?:command|eval|exec|execute|expression)\b.*")
-_SHELL_SYNTAX = re.compile(r"[;|&`$()<>\\%\n]")
+_SHELL_SYNTAX = re.compile(r"[;|&`$()<>\\%\n*?\[\]{}~!#]")  # also glob, brace, tilde, history and comment characters
+# the only options on an interpreter or wrapper that are known to take no value and run no code
+SAFE_FLAGS = frozenset({"-I", "-u", "-B", "-s", "-S", "-O", "-OO", "-q", "--"})
+# these take their program text first, so a command line for them cannot be followed
+TEXT_FIRST = frozenset({"awk", "gawk", "mawk", "nawk", "sed"})
 HUMAN = "a human needs to look"
 
 
@@ -645,17 +649,23 @@ def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | N
         return f"runs {_show(first)}, which is not an absolute path; {HUMAN}"
     candidates = [first]
     base = re.sub(r"[0-9.]+$", "", os.path.basename(first))
+    if base in TEXT_FIRST:
+        return f"runs {_show(first)}, which takes its program text from the command line; {HUMAN}"
     if base in INTERPRETERS:
         found_script = False
         for arg in argv[1:]:
             if _CODE_OPTION.fullmatch(arg):
                 return f"runs {_show(first)} with code on its command line; {HUMAN}"
             if arg.startswith("-"):
-                _, _, value = arg.partition("=")
+                if arg in SAFE_FLAGS:
+                    continue
+                return f"runs {_show(first)} with the option {_show(arg)}, which is not known to be harmless; {HUMAN}"
+            if _SHELL_SYNTAX.search(arg):
+                return f"runs {_show(first)} with {_show(arg)}, which uses shell syntax; {HUMAN}"
+            if _ASSIGN.match(arg):
+                value = arg.partition("=")[2]
                 if value.startswith("/"):
                     candidates.append(value)
-                continue
-            if _ASSIGN.match(arg):
                 continue
             if not arg.startswith("/"):
                 return f"runs {_show(first)} with {_show(arg)}, which is not an absolute path; {HUMAN}"
@@ -669,6 +679,13 @@ def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | N
         writable = _chain_writable(candidate, who, cache, floor)
         if writable is not None:
             return f"runs {_show(candidate)}, which the account can replace through {_show(writable)}"
+    for candidate in candidates:  # a path that is not there is never treated as safe
+        try:
+            regular = stat.S_ISREG(os.stat(candidate).st_mode)
+        except OSError:
+            regular = False
+        if not regular:
+            return f"names {_show(candidate)}, which is not an existing regular file; {HUMAN}"
     return None
 
 

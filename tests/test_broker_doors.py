@@ -466,11 +466,13 @@ def test_a_symlinked_script_into_a_writable_folder_fails(w: World) -> None:
     assert status(w.run(), "jobs") == "fail"
 
 
-def test_a_safe_root_unit_passes_and_a_missing_script_is_ignored(w: World) -> None:
+def test_a_safe_root_unit_passes_and_a_missing_script_needs_a_human(w: World) -> None:
     safe = put(w.t / "bin" / "ok.sh", "#!/bin/sh\n", 0o755)
     put(w.units / "a.service", unit(str(safe)))
-    put(w.units / "b.service", unit(str(w.t / "bin" / "gone.sh")))
     assert status(w.run(), "jobs") == "pass"
+    put(w.units / "b.service", unit(str(w.t / "bin" / "gone.sh")))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
 
 
 def test_a_cron_job_running_a_writable_script_as_root_fails(w: World) -> None:
@@ -763,10 +765,11 @@ def test_a_root_job_running_an_existing_file_from_a_sticky_folder_fails(w: World
     assert status(w.run(), "jobs") == "fail"
 
 
-def test_a_missing_script_in_a_closed_folder_is_still_ignored(w: World) -> None:
+def test_a_missing_script_in_a_closed_folder_needs_a_human(w: World) -> None:
     folder(w.t / "closed", 0o755)
     put(w.units / "a.service", unit(str(w.t / "closed" / "later.sh")))
-    assert status(w.run(), "jobs") == "pass"
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
 
 
 def test_a_symlinked_unit_to_a_writable_folder_fails(w: World) -> None:
@@ -1365,3 +1368,65 @@ def test_the_checks_leave_every_byte_of_the_tree_as_it_was(w: World) -> None:
     before = digest()
     w.run()
     assert digest() == before
+
+
+@pytest.mark.parametrize(
+    "tail",
+    ["-Z {ok}", "-I/home/x {ok}", "--opt=/home/x {ok}", "--opt {ok}", "-W ignore {ok}", "-X{ok} {ok}", "-{ok}"],
+)
+def test_hardening_unrecognized_options_on_an_interpreter_need_a_human(w: World, tail: str) -> None:
+    ok = put(w.t / "bin" / "ok.py", "x = 1\n")
+    put(w.units / "a.service", unit("/usr/bin/python3 " + tail.format(ok=ok)))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_known_harmless_flags_are_followed_to_the_script(w: World) -> None:
+    ok = put(w.t / "bin" / "ok.py", "x = 1\n")
+    put(w.units / "a.service", unit(f"/usr/bin/python3 -I -B -u -- {ok}"))
+    assert status(w.run(), "jobs") == "pass"
+
+
+@pytest.mark.parametrize("program", ["awk", "gawk", "mawk", "sed"])
+def test_hardening_program_text_first_interpreters_need_a_human(w: World, program: str) -> None:
+    script = put(w.t / "bin" / "p.awk", "BEGIN{}\n")
+    put(w.units / "a.service", unit(f"/usr/bin/{program} -f {script}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+    put(w.units / "a.service", unit(f"/usr/bin/{program} 'BEGIN{{}}'"))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_script_path_must_exist_and_be_a_regular_file(w: World) -> None:
+    for target in (w.t / "bin" / "missing.py", w.t / "bin"):
+        folder(w.t / "bin")
+        put(w.units / "a.service", unit(f"/usr/bin/python3 {target}"))
+        found = w.run()
+        assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_assignment_value_that_is_a_path_is_checked(w: World) -> None:
+    payload = put(w.home / "lib.so", "x")
+    ok = put(w.t / "bin" / "ok.py", "x = 1\n")
+    put(w.units / "a.service", unit(f"/usr/bin/env LD_PRELOAD={payload} {ok}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "home" in found["jobs"].text
+    put(w.units / "a.service", unit(f"/usr/bin/env LD_PRELOAD={w.t}/bin/none.so {ok}"))
+    assert status(w.run(), "jobs") == "fail"
+
+
+@pytest.mark.parametrize("arg", ["*.py", "a?.py", "[ab].py", "{a,b}.py", "~/x.py", "!x.py", "x.py#c"])
+def test_hardening_glob_brace_tilde_history_and_comment_characters_need_a_human(w: World, arg: str) -> None:
+    ok = put(w.t / "bin" / "ok.sh", "true\n", 0o755)
+    put(w.cron_d / "x", f"17 * * * * root {ok} {arg}\n")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+    put(w.cron_d / "x", f"17 * * * * root {ok}\n")
+    assert status(w.run(), "jobs") == "pass"
+    put(w.cron_d / "x", f"17 * * * * root /bin/sh {arg}\n")
+    assert status(w.run(), "jobs") == "fail"
+    put(w.cron_d / "x", f"17 * * * * root /usr/bin/python3 {arg}\n")
+    assert status(w.run(), "jobs") == "fail"
+    (w.cron_d / "x").unlink()
+    put(w.units / "a.service", unit(f"/usr/bin/python3 {arg}"))
+    assert status(w.run(), "jobs") == "fail"
