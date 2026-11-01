@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Rehearsal containment, second round (#263). Review findings are fixed: the sandbox gets a synthetic `/etc` instead of
+  the host's, `bwrap` and `prlimit` are taken only from root-owned system folders (never `PATH`), and the sandbox runs
+  under memory, file size, open file, CPU and task limits with a size-capped memory-backed rehearsal folder; tests show
+  each limit bites. `--keep` now needs `--no-containment`. The header and `docs/gemini-enrollment.md` say what is and is
+  not contained.
+
 - Rehearsal review fixes (#263). The rehearsal now contains the runbook text it runs: it re-runs itself inside a rootless
   bubblewrap sandbox (user, network, IPC, PID and UTS namespaces, read-only `/usr`, `/etc` and checkout, a writable
   rehearsal folder, no home folder, scrubbed environment) and refuses to run when it cannot, unless `--no-containment` is

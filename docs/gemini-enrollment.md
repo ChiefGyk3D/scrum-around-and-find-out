@@ -26,12 +26,15 @@ tool can do. A software key cannot show the touch and PIN flags, and the preflig
 authenticators and the service user are stand-ins inside the folder, so those rows say they are.
 
 **What contains it.** The command lines come from the repository and run under bash, so by default the tool re-runs
-itself inside `bwrap` (bubblewrap, rootless): new user, network, IPC, PID and UTS namespaces; a new root holding only
-read-only copies of `/usr`, `/etc`, the checkout and the Python environment; a writable rehearsal folder and a private
-`/tmp`; no home folder (so no `~/.ssh` or `~/.config/safo`); and a scrubbed environment. That contains writes outside the
-folder, every network connection and reads of your home folder. It does not contain a kernel or bubblewrap flaw, it has
-no seccomp filter or resource limit, and `/usr` and `/etc` (including a real `/etc/safo`) stay readable. If `bwrap` or
-user namespaces are missing the tool refuses to run; `--no-containment` runs it anyway with your own rights and network,
+itself under `prlimit` and `bwrap` (bubblewrap, rootless), both taken only from `/usr/bin` or `/bin` and only if root
+owns them and every folder above them (never from `PATH`). Inside: new user, network, IPC, PID and UTS namespaces; a new
+root holding read-only `/usr`, the checkout and the Python environment; a synthetic `/etc` with only your account and
+root; a memory-backed, size-capped rehearsal folder and `/tmp`; no home folder (so no `~/.ssh` or `~/.config/safo`); a
+scrubbed environment; and per-process limits on memory, file size, open files and CPU, plus a cap on your account's
+task count. That contains writes outside the folder, every network connection, reads of your home folder and the host
+`/etc`, and runaway memory, files and processes. It does not contain a kernel or bubblewrap flaw; it has no seccomp
+filter and no cgroup, so the limits are per process; and `/usr` stays readable. If the tools or user namespaces are
+missing the tool refuses to run; `--no-containment` (needed too for `--keep`) runs it with your own rights and network,
 and every output line then ends with `[NO CONTAINMENT]`. It refuses to run as root.
 
 ## What was verified, and when

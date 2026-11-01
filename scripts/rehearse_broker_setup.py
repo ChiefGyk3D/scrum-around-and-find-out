@@ -15,18 +15,25 @@ mistakes in them before the real run:
     answered by stand-ins inside PREFIX, and the dry run runs through the real client and server.
 
 CONTAINMENT. The runbook text is repository-controlled and is run by bash, so by default the whole rehearsal re-runs
-itself inside `bwrap` (bubblewrap, rootless) with: a new user, network, IPC, PID and UTS namespace; a new empty root
-that holds only read-only copies of /usr, /etc, this checkout and the Python environment; a writable PREFIX and a
-private /tmp; the real home folder NOT present; and a scrubbed environment (HOME and TMPDIR inside PREFIX).
+itself under `prlimit` and `bwrap` (bubblewrap, rootless). Both programs are taken only from /usr/bin or /bin and only
+if they and every folder above them belong to root and are not writable by others; PATH is never used, and the only
+thing run outside the sandbox is that pair, which builds it. Inside: a new user, network, IPC, PID and UTS namespace; a
+new empty root holding read-only /usr, this checkout and the Python environment; a synthetic /etc with just this account
+and root (the host /etc is not there); a memory-backed rehearsal folder (512 MiB) and /tmp (64 MiB); the real home
+folder not present; a scrubbed environment (HOME and TMPDIR inside the folder); and limits on every process: address
+space 4 GiB, file size 256 MiB, 1024 open files, 1800 CPU seconds, no core files, and this account's task count at start
+plus 512.
 
-What that does contain: writes anywhere but PREFIX and its private /tmp; every network connection (the only interface
-is a down loopback); reads of your home folder (~/.ssh, ~/.config/safo and the rest), the other processes and the
-environment variables of the caller.
-What it does NOT contain: it is no defence against a kernel or bubblewrap flaw; the same account runs it (no seccomp
-filter, no resource limit); /usr and /etc, including a real /etc/safo, stay readable (read-only); and the safety
-transform of the command lines (path words moved, `sudo` removed) is not a sandbox, only the namespaces are.
-If `bwrap` or user namespaces are missing the tool REFUSES to run. `--no-containment` runs it anyway, in this process
-with your own rights and network; every output line then ends with [NO CONTAINMENT].
+What that does contain: writes anywhere but the rehearsal folder and /tmp, and those are size-capped and memory-backed
+(nothing is left on disk, so `--keep` needs `--no-containment`); every network connection (the only interface is a down
+loopback); reads of your home folder, the host /etc and the caller's other files and environment; runaway memory, file
+size, process count and CPU per process.
+What it does NOT contain: a kernel or bubblewrap flaw; there is no seccomp filter and no cgroup (the limits are per
+process, so many processes can still add up to more than one limit, and the task cap is account-wide); /usr, the
+checkout and the Python environment stay readable; the command-line safety transform (path words moved, `sudo`
+removed) is not a sandbox, only the namespaces are.
+If the two programs are missing or untrusted, or user namespaces are, the tool REFUSES to run. `--no-containment` runs
+it anyway, in this process with your own rights and network; every output line then ends with [NO CONTAINMENT].
 
 A step that needs root, systemd, nftables or a hardware key is reported SKIPPED with the reason, never as passed, and so
 is a step whose human review the tool cannot do (R3's `less` lines). Command lines are also checked with `bash -n`.
@@ -926,6 +933,7 @@ def r13_line(rh: Rehearsal, step: Any) -> tuple[int, str, int]:
 def rehearse(prefix: Path, *, doc: str | None = None) -> list[Row]:
     prefix.mkdir(parents=True, exist_ok=True)
     prefix.chmod(0o755)
+    (prefix / "tmp").mkdir(mode=0o700, exist_ok=True)
     old_umask = os.umask(0o077)
     rh = Rehearsal(prefix.resolve(), DOC.read_text() if doc is None else doc)
     try:
@@ -1076,14 +1084,110 @@ def check_prefix(prefix: Path) -> str | None:
 CONTAINED_MARK = "SAFO_REHEARSAL_CONTAINED"
 
 
-def contained_argv(prefix: Path, argv: Sequence[str], *, bwrap: str | None = None) -> list[str]:
-    """`argv` wrapped to run under bubblewrap: new user, network, IPC, PID and UTS namespaces; a new empty root with
-    read-only /usr, /etc, this checkout and the Python environment; a writable PREFIX; a private /tmp; the real home
-    folder absent; a scrubbed environment with HOME and TMPDIR inside PREFIX."""
-    tool = bwrap or shutil.which("bwrap")
-    if tool is None:
-        raise Bad("bubblewrap (bwrap) is not installed")
-    out = [tool, "--unshare-all", "--die-with-parent", "--new-session", "--clearenv"]
+TRUSTED_DIRS = ("/usr/bin", "/bin")  # fixed places for the two programs run outside the sandbox; never PATH
+
+
+@dataclasses.dataclass(frozen=True)
+class Limits:
+    """Resource limits for the sandbox, set with prlimit on the whole process tree (every one is per process except the
+    task count, which is per account: it is the account's tasks now plus the headroom) and a size for the folders."""
+
+    address_space: int = 4 * 1024**3
+    task_headroom: int = 512
+    file_size: int = 256 * 1024**2  # one file, not the total
+    cpu_seconds: int = 1800  # per process
+    open_files: int = 1024
+    prefix_size: int = 512 * 1024**2  # the rehearsal folder is a memory-backed folder of this size
+    tmp_size: int = 64 * 1024**2
+
+
+def trusted_tool(name: str, dirs: Sequence[str] = TRUSTED_DIRS) -> str | None:
+    """The real path of `name` in one of the fixed `dirs`, only if the file and every folder above it belong to root
+    and nobody else can write them; otherwise None. The program is run before any sandbox exists, so it is never found
+    through PATH and a user-owned file is never accepted."""
+    for folder in dirs:
+        path = Path(os.path.realpath(Path(folder) / name))
+        try:
+            info = path.stat()
+            chain = [path, *path.parents]
+            ok = stat.S_ISREG(info.st_mode) and os.access(path, os.X_OK)
+            for item in chain:
+                st = item.stat()
+                ok = ok and st.st_uid == 0 and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        except OSError:
+            continue
+        if ok:
+            return str(path)
+    return None
+
+
+def user_tasks() -> int:
+    """How many tasks (processes and threads) this account has now: the base for the task limit."""
+    total = 0
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != os.geteuid():
+                continue
+            for line in (entry / "status").read_text().splitlines():
+                if line.startswith("Threads:"):
+                    total += int(line.split()[1])
+        except (OSError, ValueError):
+            continue
+    return total
+
+
+def make_synthetic_etc(etc: Path, prefix: Path) -> None:
+    """A minimal /etc for the sandbox, built here: this account and root, nothing else. The host's /etc (machine id,
+    credentials, configuration) is not visible inside."""
+    user, uid, gid = getpass.getuser(), os.geteuid(), os.getegid()
+    files = {
+        "passwd": "root:x:0:0:root:/nonexistent:/usr/sbin/nologin\n"
+        f"{user}:x:{uid}:{gid}:rehearsal:{prefix / 'home'}:/bin/sh\n",
+        "group": f"root:x:0:\n{user}:x:{gid}:\n",
+        "nsswitch.conf": "passwd: files\ngroup: files\nhosts: files\n",
+    }
+    etc.mkdir(parents=True, exist_ok=True)
+    etc.chmod(0o755)
+    (etc / "alternatives").mkdir(exist_ok=True)  # the mount point for the host's link-only alternatives folder
+    for name, text in files.items():
+        (etc / name).write_text(text)
+        (etc / name).chmod(0o644)
+
+
+def contained_argv(
+    prefix: Path,
+    argv: Sequence[str],
+    *,
+    etc_dir: Path,
+    bwrap: str | None = None,
+    prlimit: str | None = None,
+    limits: Limits = Limits(),  # noqa: B008 - a frozen value object
+) -> list[str]:
+    """`argv` wrapped to run under prlimit and bubblewrap: resource limits; new user, network, IPC, PID and UTS
+    namespaces; a new empty root with read-only /usr, a synthetic /etc, this checkout and the Python environment; a
+    size-capped memory-backed PREFIX and /tmp; the real home folder absent; a scrubbed environment with HOME and TMPDIR
+    inside PREFIX. Both programs come from fixed trusted places."""
+    tool = bwrap or trusted_tool("bwrap")
+    limiter = prlimit or trusted_tool("prlimit")
+    if tool is None or limiter is None:
+        raise Bad("bubblewrap (bwrap) and prlimit are not both installed in a root-owned system folder")
+    out = [
+        limiter,
+        f"--as={limits.address_space}",
+        f"--nproc={user_tasks() + limits.task_headroom}",
+        f"--fsize={limits.file_size}",
+        f"--cpu={limits.cpu_seconds}",
+        f"--nofile={limits.open_files}",
+        "--core=0",
+        "--",
+        tool,
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+    ]
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(prefix / "home"),
@@ -1101,24 +1205,27 @@ def contained_argv(prefix: Path, argv: Sequence[str], *, bwrap: str | None = Non
             out += ["--symlink", os.readlink(link), folder]
         elif link.is_dir():
             out += ["--ro-bind", folder, folder]
-    shown = {"/usr", "/etc"}
-    for folder in (Path("/usr"), Path("/etc"), ROOT, Path(sys.prefix), Path(sys.base_prefix)):
-        if str(folder) not in shown and not any(str(folder).startswith(x + "/") for x in shown):
+    out += ["--ro-bind", "/usr", "/usr", "--ro-bind", str(etc_dir), "/etc"]
+    if Path("/etc/alternatives").is_dir():  # only symbolic links into /usr: the names programs like awk resolve through
+        out += ["--ro-bind", "/etc/alternatives", "/etc/alternatives"]
+    for folder in (ROOT, Path(sys.prefix), Path(sys.base_prefix)):
+        if not str(folder).startswith("/usr/"):
             out += ["--ro-bind", str(folder), str(folder)]
-            shown.add(str(folder))
-        elif str(folder) in shown and folder in (Path("/usr"), Path("/etc")):
-            out += ["--ro-bind", str(folder), str(folder)]
-    out += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", str(Path("/") / "tmp"), "--bind", str(prefix), str(prefix)]
+    tmp = str(Path("/") / "tmp")
+    out += ["--proc", "/proc", "--dev", "/dev", "--size", str(limits.tmp_size), "--tmpfs", tmp]
+    out += ["--size", str(limits.prefix_size), "--tmpfs", str(prefix)]
     return [*out, "--", *argv]
 
 
 def containment_problem() -> str | None:
-    """Why the rehearsal cannot be contained here, or None when a rootless bubblewrap sandbox starts."""
-    tool = shutil.which("bwrap")
-    if tool is None:
-        return "bubblewrap (bwrap) is not installed"
+    """Why the rehearsal cannot be contained here, or None when a rootless bubblewrap sandbox starts. Only the two
+    root-owned system programs are run, and the probe runs inside the sandbox."""
+    if trusted_tool("bwrap") is None or trusted_tool("prlimit") is None:
+        return "bwrap and prlimit are not both installed in a root-owned system folder (/usr/bin, /bin)"
     with tempfile.TemporaryDirectory(prefix="rhp") as folder:
-        probe = contained_argv(Path(folder), ["/usr/bin/true"], bwrap=tool)
+        etc = Path(folder) / "etc"
+        make_synthetic_etc(etc, Path(folder) / "p")
+        probe = contained_argv(Path(folder) / "p", ["/usr/bin/true"], etc_dir=etc)
         try:
             done = subprocess.run(  # noqa: S603 - a fixed probe argv built here, no shell, bounded time
                 probe, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False
@@ -1191,6 +1298,8 @@ def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None) -> int
         if problem:
             parser.exit(2, f"refused: {problem}\n")
     contained = not args.no_containment
+    if contained and not inside and args.keep:
+        parser.exit(2, "refused: --keep needs --no-containment (the contained folder is memory-backed and not kept)\n")
     try:
         if inside or args.no_containment:
             rows = rehearse(prefix)
@@ -1198,11 +1307,17 @@ def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None) -> int
             return 1 if any(r.status == "FAIL" for r in rows) else 0
         prefix.mkdir(parents=True, exist_ok=True)
         prefix.chmod(0o755)
-        (prefix / "tmp").mkdir(mode=0o700, exist_ok=True)
-        child = contained_argv(prefix, [sys.executable, str(Path(__file__).resolve()), "--prefix", str(prefix)])
-        done = subprocess.run(  # noqa: S603 - the bubblewrap argv built above, no shell, stdin closed
-            child, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True, timeout=1800, check=False
-        )
+        etc = Path(tempfile.mkdtemp(prefix="rhe"))
+        try:
+            make_synthetic_etc(etc, prefix)
+            child = contained_argv(
+                prefix, [sys.executable, str(Path(__file__).resolve()), "--prefix", str(prefix)], etc_dir=etc
+            )
+            done = subprocess.run(  # noqa: S603 - the argv built above, no shell, stdin closed
+                child, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True, timeout=1800, check=False
+            )
+        finally:
+            shutil.rmtree(etc, ignore_errors=True)
         stream.write(done.stdout)
         return done.returncode
     finally:

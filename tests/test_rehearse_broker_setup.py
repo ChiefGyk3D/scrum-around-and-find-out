@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import re
 import shutil
 import socket
@@ -142,13 +143,22 @@ def test_it_refuses_to_run_when_it_cannot_be_contained_unless_told_to(
     assert not prefix.exists()  # nothing was made
 
 
-def run_contained(prefix: Path, code: str) -> subprocess.CompletedProcess[str]:
+def run_contained(
+    prefix: Path, code: str, *, limits: Any = None, timeout: int = 120
+) -> subprocess.CompletedProcess[str]:
+    mod = load()
     prefix.mkdir(parents=True, exist_ok=True)
-    (prefix / "tmp").mkdir(exist_ok=True)
-    argv = load().contained_argv(prefix, [sys.executable, "-I", "-c", code])
-    return subprocess.run(  # noqa: S603 - argv built by the code under test, no shell, bounded time
-        argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False
-    )
+    etc = Path(tempfile.mkdtemp(prefix="rhe"))
+    try:
+        mod.make_synthetic_etc(etc, prefix)
+        argv = mod.contained_argv(
+            prefix, [sys.executable, "-I", "-c", code], etc_dir=etc, **({"limits": limits} if limits else {})
+        )
+        return subprocess.run(  # noqa: S603 - argv built by the code under test, no shell, bounded time
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    finally:
+        shutil.rmtree(etc, ignore_errors=True)
 
 
 @needs_bwrap
@@ -164,7 +174,7 @@ def test_the_sandbox_blocks_writes_outside_the_prefix_and_the_checkout(prefix: P
     )
     done = run_contained(prefix, code)
     assert done.returncode == 0, done.stderr
-    assert (prefix / "inside").exists()  # the prefix is writable
+    assert not (prefix / "inside").exists()  # the prefix is a size-capped memory folder: nothing is left on disk
     assert not outside.exists() and not (ROOT / ".probe").exists()
 
 
@@ -279,3 +289,95 @@ def test_it_refuses_to_run_as_root(prefix: Path, monkeypatch: pytest.MonkeyPatch
     with pytest.raises(SystemExit) as stop:
         mod.main(["--prefix", str(prefix)], out=io.StringIO())
     assert stop.value.code == 2
+
+
+# -- the second review: /etc, the tool path, resource limits --------------------------------------------------------
+
+
+@needs_bwrap
+def test_the_sandbox_has_a_synthetic_etc_not_the_hosts(prefix: Path) -> None:
+    code = (
+        "import pathlib,sys\n"
+        "bad = []\n"
+        "for name in ('machine-id', 'shadow', 'hostname', 'ssh', 'safo', 'hosts'):\n"
+        "    if pathlib.Path('/etc', name).exists(): bad.append(name)\n"
+        "users = [x.split(':')[0] for x in pathlib.Path('/etc/passwd').read_text().splitlines()]\n"
+        "print(bad, users)\n"
+        "sys.exit(len(bad) + (len(users) > 2))"
+    )
+    done = run_contained(prefix, code)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_bwrap_comes_from_fixed_trusted_places_never_from_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = load()
+    marker = tmp_path / "ran-outside-the-sandbox"
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "bwrap").write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+    (fake / "bwrap").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    mod.containment_problem()
+    assert not marker.exists(), "a bwrap found on PATH was run on the host"
+    # a user-owned file is not trusted even in a fixed list, and neither is a group-writable one
+    assert mod.trusted_tool("bwrap", (str(fake),)) is None
+    assert mod.trusted_tool("no-such-tool", ("/usr/bin",)) is None
+    found = mod.trusted_tool("true", ("/usr/bin", "/bin"))
+    assert found is not None and Path(found).stat().st_uid == 0
+
+
+@needs_bwrap
+def test_a_memory_hog_is_stopped_by_the_address_space_limit(prefix: Path) -> None:
+    mod = load()
+    code = "x = bytearray(2 * 1024**3)\nprint('allocated')"
+    assert run_contained(prefix, code).returncode == 0, "the default limit must allow ordinary work"
+    done = run_contained(prefix, code, limits=mod.Limits(address_space=512 * 1024**2))
+    assert done.returncode != 0 and "allocated" not in done.stdout
+
+
+@needs_bwrap
+def test_a_big_file_is_stopped_by_the_file_size_limit(prefix: Path) -> None:
+    mod = load()
+    code = f"import pathlib\npathlib.Path({str(prefix / 'big')!r}).write_bytes(b'x' * (8 * 1024**2))\nprint('written')"
+    assert "written" in run_contained(prefix, code).stdout
+    done = run_contained(prefix, code, limits=mod.Limits(file_size=1024**2))
+    assert "written" not in done.stdout and done.returncode != 0
+
+
+@needs_bwrap
+def test_the_prefix_is_a_size_capped_folder(prefix: Path) -> None:
+    mod = load()
+    code = (
+        "import pathlib\n"
+        f"for n in range(8):\n    pathlib.Path({str(prefix)!r}, f'f{{n}}').write_bytes(b'x' * (1024**2))\n"
+        "print('all written')"
+    )
+    done = run_contained(prefix, code, limits=mod.Limits(prefix_size=3 * 1024**2))
+    assert "all written" not in done.stdout and done.returncode != 0
+
+
+@needs_bwrap
+def test_a_process_flood_is_stopped_by_the_process_limit(prefix: Path) -> None:
+    mod = load()
+    code = (
+        "import subprocess,sys\n"
+        "kids = []\n"
+        "try:\n"
+        "    for _ in range(300): kids.append(subprocess.Popen(['/usr/bin/sleep', '20']))\n"
+        "except OSError:\n    print('stopped', len(kids)); sys.exit(0)\n"
+        "[k.kill() for k in kids]\n"
+        "print('flooded'); sys.exit(1)"
+    )
+    done = run_contained(prefix, code, limits=mod.Limits(task_headroom=40))
+    assert "stopped" in done.stdout, done.stdout + done.stderr
+    assert done.returncode == 0
+
+
+def test_keep_is_refused_while_contained_because_the_folder_is_not_on_disk(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mod = load()
+    monkeypatch.setattr(mod, "containment_problem", lambda: None)
+    with pytest.raises(SystemExit) as stop:
+        mod.main(["--prefix", str(prefix), "--keep"], out=io.StringIO())
+    assert stop.value.code == 2 and "--no-containment" in capsys.readouterr().err
