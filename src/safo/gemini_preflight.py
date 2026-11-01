@@ -581,7 +581,9 @@ def check_broker_config(loc: Locations) -> Check:
     path = loc.broker_config
     problem = _config_file_problem(path, loc.trust_uid)
     if problem == "absent":
-        return Check(name, "fail", "the file does not exist (the 'Create the broker configuration' step of the runbook)")
+        return Check(
+            name, "fail", "the file does not exist (the 'Create the broker configuration' step of the runbook)"
+        )
     if problem:
         return Check(name, "fail", f"the file {problem}")
     parent = _parent_problem(path, loc.trust_uid)
@@ -592,7 +594,9 @@ def check_broker_config(loc: Locations) -> Check:
 
         loaded = broker_config.load_broker_config(path, loc.trust_uid)
     except Exception as err:  # any refusal; the loaders word their errors without the file's text
-        return Check(name, "fail", f"the file does not load through the broker's own loader: {type(err).__name__}: {err}")
+        return Check(
+            name, "fail", f"the file does not load through the broker's own loader: {type(err).__name__}: {err}"
+        )
     uids = len(loaded.server.allowed_uids)
     if uids < 1:
         return Check(name, "fail", "the file lists no allowed uid, so nobody could use the broker")
@@ -600,7 +604,8 @@ def check_broker_config(loc: Locations) -> Check:
     return Check(
         name,
         "pass",
-        f"loads; {uids} allowed uid(s), {models} model(s) priced; owned by uid {loc.trust_uid}, not writable by group or "
+        f"loads; {uids} allowed uid(s), {models} model(s) priced; owned by uid {loc.trust_uid}, not writable by "
+        "group or "
         "others",
     )
 
@@ -608,7 +613,9 @@ def check_broker_config(loc: Locations) -> Check:
 def check_client_config(loc: Locations) -> Check:
     """The maintainer's own client config exists and loads through the client's own parser."""
     name = "client-config"
-    path = loc.client_config if loc.client_config is not None else Path.home() / ".config" / "safo" / "broker-client.yaml"
+    path = (
+        loc.client_config if loc.client_config is not None else Path.home() / ".config" / "safo" / "broker-client.yaml"
+    )
     problem = _config_file_problem(path, loc.trust_uid, root_reads=True)
     if problem == "absent":
         return Check(
@@ -628,9 +635,13 @@ def check_client_config(loc: Locations) -> Check:
             os.close(fd)
         loaded = client.parse_user_config(raw.decode("utf-8", "replace"))
     except Exception as err:  # unreadable, or refused by the parser (whose errors carry no file text)
-        return Check(name, "fail", f"the file does not load through the client's own parser: {type(err).__name__}: {err}")
+        return Check(
+            name, "fail", f"the file does not load through the client's own parser: {type(err).__name__}: {err}"
+        )
     if not loaded.signing_key or not loaded.principal:
-        return Check(name, "warn", "loads, but signing.key or signing.principal is not set, so no approval can be signed")
+        return Check(
+            name, "warn", "loads, but signing.key or signing.principal is not set, so no approval can be signed"
+        )
     return Check(name, "pass", "loads; the signing key and principal are set")
 
 

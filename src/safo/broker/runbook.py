@@ -23,15 +23,16 @@ PASTE_KEY = "PASTE_RELEASE_PUBLIC_KEY_HERE"
 RELEASE_PYTHON = "/opt/safo-broker/current/venv/bin/python"
 
 UID_MARK = "ACCOUNT_UID_HERE"
-# The broker config, written by the "Create the broker configuration" step. This text is also examples/broker.example.yaml
+# The broker config, written by the "Create the broker configuration" step. This text is also
+# examples/broker.example.yaml
 # (a test requires the two to be the same apart from the account id), and it loads through safo.broker.config. It has
 # no dollar sign, backtick or backslash, so the unquoted here-document expands only the id the step inserts.
 BROKER_CONFIG = """\
-# /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it once, at
-# start; restart the service after any change. It is root-owned because prices and caps decide what a call may cost.
-# docs/gemini-broker.md ("The price table", "What lives where") explains every part. Loaded by the broker config loader.
+# /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it
+# once, at start; restart the service after any change. It is root-owned because prices and caps decide what a call
+# may cost. docs/gemini-broker.md ("The price table", "What lives where") explains every part.
 server:
-  # Numeric ids of the accounts that may use the socket (required, at least one). The runbook writes the maintainer id.
+  # Numeric ids of the accounts that may use the socket (required, at least one). The runbook writes yours.
   allowed_uids: [ACCOUNT_UID_HERE]
   # Connections open at once.
   max_connections: 8
@@ -103,9 +104,9 @@ prices:
       thinking_level_sent: "minimal"
       # Text tokens reserved beside the image.
       min_text_tokens: 512
-      # Interim images the model may make before the final one (the vendor guide says up to two); reserved in the worst case.
+      # Interim images the model may make before the final one (the vendor guide says up to two); reserved.
       interim_images: 2
-      # false until root has seen billed output stay inside the signed limit; then the reservation uses the signed limit.
+      # false until root has seen billed output stay inside the signed limit; then the signed limit is used.
       cap_verified: false
       # Images per call (the policy fixes one per approval).
       max_images: 1
@@ -133,7 +134,7 @@ prices:
       thinking_level_sent: "minimal"
       # Text tokens reserved beside the image.
       min_text_tokens: 512
-      # Interim images the model may make before the final one (the vendor guide says up to two); reserved in the worst case.
+      # Interim images the model may make before the final one (the vendor guide says up to two); reserved.
       interim_images: 2
       # false until root has seen billed output stay inside the signed limit.
       cap_verified: false
@@ -381,7 +382,8 @@ def steps(login: str) -> tuple[Step, ...]:
                 ),
                 ssh("cat /etc/safo/broker.yaml"),
             ),
-            "One new root-owned file, /etc/safo/broker.yaml (mode 0644, owner root), and a short-lived .new file beside "
+            "One new root-owned file, /etc/safo/broker.yaml (mode 0644, owner root), and a short-lived .new file "
+            "beside "
             "it. Nothing reads it until the service starts. The caps in it can only lower the built-in ones.",
             (ssh("rm -f /etc/safo/broker.yaml /etc/safo/broker.yaml.new"),),
             "Your own client config is not a root step: copy examples/broker-client.example.yaml to "
@@ -440,7 +442,8 @@ def steps(login: str) -> tuple[Step, ...]:
             "the read-only "
             "preflight with --enabling as root from the installed release (isolated interpreter), and the file is "
             "written only if that exits 0. The preflight fails while the egress control is in observe mode, when the "
-            "egress config is missing or unusable, when /etc/safo/broker.yaml is missing, not root-owned, writable by group "
+            "egress config is missing or unusable, when /etc/safo/broker.yaml is missing, not root-owned, "
+            "writable by group "
             "or others, refused by the broker's own loader or lists no allowed uid, when your "
             "~/.config/safo/broker-client.yaml is missing or does not load (the line looks it up in your home "
             "directory), and on any other failed check. Run the dry run with a real key "

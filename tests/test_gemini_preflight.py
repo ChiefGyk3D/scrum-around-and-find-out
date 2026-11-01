@@ -696,7 +696,9 @@ def test_a_client_config_without_a_signing_key_warns(tmp_path: Path) -> None:
     assert got.status == "warn" and "signing" in got.detail
 
 
-def test_the_client_config_defaults_to_the_calling_accounts_own_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_client_config_defaults_to_the_calling_accounts_own_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     loc = dataclasses.replace(make_tree(tmp_path), client_config=None)
     home = tmp_path / "home"
     (home / ".config" / "safo").mkdir(parents=True)

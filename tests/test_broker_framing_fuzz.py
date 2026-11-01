@@ -17,10 +17,9 @@ The harness has a negative case: a reader that breaks a property makes it fail.
 from __future__ import annotations
 
 import json
-import random
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -40,15 +39,41 @@ SHAPE = {"model": "flat-test", "job": "job-one", "kind": "text", "max_output_tok
 MAX_READS = 4_000  # a read loop that needs more than this for a stream of at most a few KiB is a hang
 
 
+class Rng:
+    """A small deterministic generator (splitmix64) so a run is the same on every machine and Python version. It is a
+    test input source, not a secret source, and it avoids the standard `random` module on purpose."""
+
+    def __init__(self, seed: int) -> None:
+        self.state = seed & 0xFFFFFFFFFFFFFFFF
+
+    def next64(self) -> int:
+        self.state = (self.state + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+        z = self.state
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+        return z ^ (z >> 31)
+
+    def randrange(self, low: int, high: int | None = None) -> int:
+        if high is None:
+            low, high = 0, low
+        return low + self.next64() % (high - low)
+
+    def randbytes(self, count: int) -> bytes:
+        return bytes(self.next64() & 0xFF for _ in range(count))
+
+    def choice(self, items: list[Any]) -> Any:
+        return items[self.randrange(len(items))]
+
+
 def valid_status() -> bytes:
     return protocol.request_body("status")
 
 
-def junk(rng: random.Random, high: int = 600) -> bytes:
+def junk(rng: Rng, high: int = 600) -> bytes:
     return rng.randbytes(rng.randrange(0, high))
 
 
-def mutate(rng: random.Random, data: bytes) -> bytes:
+def mutate(rng: Rng, data: bytes) -> bytes:
     """Flip, drop, insert, repeat, cut or splice bytes: the shapes a broken or hostile peer sends."""
     out = bytearray(data)
     for _ in range(rng.randrange(1, 5)):
@@ -69,7 +94,7 @@ def mutate(rng: random.Random, data: bytes) -> bytes:
     return bytes(out)
 
 
-def framed(rng: random.Random, body: bytes) -> bytes:
+def framed(rng: Rng, body: bytes) -> bytes:
     """A frame whose header is sometimes honest and sometimes a lie (short, long, zero, huge)."""
     size = len(body)
     size = rng.choice([size, size, size + rng.randrange(1, 50), max(0, size - rng.randrange(1, 50)), 0, 2**32 - 1])
@@ -106,7 +131,7 @@ def check_stream(read: Callable[[Callable[[int], bytes], int], bytes], data: byt
     return "frame"
 
 
-def stream_cases(rng: random.Random) -> list[tuple[bytes, int]]:
+def stream_cases(rng: Rng) -> list[tuple[bytes, int]]:
     cases: list[tuple[bytes, int]] = []
     for _ in range(STREAM_ITERATIONS):
         kind = rng.randrange(4)
@@ -123,7 +148,7 @@ def stream_cases(rng: random.Random) -> list[tuple[bytes, int]]:
 
 
 def test_read_frame_returns_a_frame_or_a_protocol_error_and_always_finishes() -> None:
-    rng = random.Random(SEED)
+    rng = Rng(SEED)
     seen = {"frame": 0, "refused": 0, "truncated": 0}
     for data, step in stream_cases(rng):
         seen[check_stream(protocol.read_frame, data, step)] += 1
@@ -152,7 +177,7 @@ def test_a_reader_that_answers_wrongly_is_a_protocol_error() -> None:
             protocol.read_frame(recv, LIMIT)
 
 
-def parse_cases(rng: random.Random) -> list[bytes]:
+def parse_cases(rng: Rng) -> list[bytes]:
     seeds = [
         valid_status(),
         protocol.request_body("check", nonce="0123456789abcdef0123456789abcdef"),
@@ -170,7 +195,7 @@ def parse_cases(rng: random.Random) -> list[bytes]:
 
 
 def test_the_parsers_return_a_value_or_a_protocol_error_for_any_bytes() -> None:
-    rng = random.Random(SEED + 1)
+    rng = Rng(SEED + 1)
     parsed = refused = 0
     for body in parse_cases(rng):
         for parse in (protocol.parse_request, protocol.parse_reply):
@@ -193,7 +218,7 @@ def test_the_server_answers_any_bytes_with_a_refusal_or_closes_and_changes_nothi
     rig = Rig(tmp_path, key)
     env = Env(rig)
     before = state_snapshot(rig)
-    rng = random.Random(SEED + 2)
+    rng = Rng(SEED + 2)
     answered = silent = 0
     for _ in range(SERVER_ITERATIONS):
         kind = rng.randrange(4)

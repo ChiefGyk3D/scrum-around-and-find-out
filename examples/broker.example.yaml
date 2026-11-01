@@ -1,8 +1,8 @@
-# /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it once, at
-# start; restart the service after any change. It is root-owned because prices and caps decide what a call may cost.
-# docs/gemini-broker.md ("The price table", "What lives where") explains every part. Loaded by the broker config loader.
+# /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it
+# once, at start; restart the service after any change. It is root-owned because prices and caps decide what a call
+# may cost. docs/gemini-broker.md ("The price table", "What lives where") explains every part.
 server:
-  # Numeric ids of the accounts that may use the socket (required, at least one). The runbook writes the maintainer id.
+  # Numeric ids of the accounts that may use the socket (required, at least one). The runbook writes yours.
   allowed_uids: [1000]
   # Connections open at once.
   max_connections: 8
@@ -74,9 +74,9 @@ prices:
       thinking_level_sent: "minimal"
       # Text tokens reserved beside the image.
       min_text_tokens: 512
-      # Interim images the model may make before the final one (the vendor guide says up to two); reserved in the worst case.
+      # Interim images the model may make before the final one (the vendor guide says up to two); reserved.
       interim_images: 2
-      # false until root has seen billed output stay inside the signed limit; then the reservation uses the signed limit.
+      # false until root has seen billed output stay inside the signed limit; then the signed limit is used.
       cap_verified: false
       # Images per call (the policy fixes one per approval).
       max_images: 1
@@ -104,7 +104,7 @@ prices:
       thinking_level_sent: "minimal"
       # Text tokens reserved beside the image.
       min_text_tokens: 512
-      # Interim images the model may make before the final one (the vendor guide says up to two); reserved in the worst case.
+      # Interim images the model may make before the final one (the vendor guide says up to two); reserved.
       interim_images: 2
       # false until root has seen billed output stay inside the signed limit.
       cap_verified: false

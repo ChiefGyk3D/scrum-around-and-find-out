@@ -19,8 +19,9 @@ def text() -> str:
 
 
 def grouped(lines: list[str]) -> list[str]:
-    """Commands from lines: one `ssh ...` line is one command; a command with a here-document runs over several lines and
-    ends where its single quotes balance (a line holding only the closing quote). Any other line stands alone."""
+    """Commands from lines: one `ssh ...` line is one command; a command with a here-document runs over several
+    lines and ends where its single quotes balance (a line holding only the closing quote). Any other line stands
+    alone."""
     out: list[str] = []
     open_command: list[str] = []
     for line in lines:
@@ -293,7 +294,7 @@ INTERPRETER = re.compile(r"/opt/safo-broker/[A-Za-z0-9_./-]*/python[0-9.]*")
 
 
 def test_every_interpreter_path_in_the_runbook_is_the_one_the_installer_builds() -> None:
-    """#298 (1): the runbook named current/bin/python, which the installer never builds; it builds only current/venv/bin."""
+    """#298 (1): the runbook named current/bin/python; the installer builds only current/venv/bin/python."""
     named = set(INTERPRETER.findall(text()))
     assert named, "the runbook names the installed interpreter at least once (the enable step)"
     built = install.RELEASE_INTERPRETER
@@ -308,7 +309,9 @@ def test_every_interpreter_path_in_the_runbook_is_the_one_the_installer_builds()
 
 
 def config_step(doc: str) -> str:
-    return next(x for x in re.split(r"^### Step ", doc, flags=re.MULTILINE)[1:] if "broker configuration" in x.splitlines()[0])
+    return next(
+        x for x in re.split(r"^### Step ", doc, flags=re.MULTILINE)[1:] if "broker configuration" in x.splitlines()[0]
+    )
 
 
 def test_a_step_creates_the_broker_config_before_the_socket_and_the_enable_switch() -> None:

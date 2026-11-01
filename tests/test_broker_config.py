@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 
 from safo.broker import client, config, runbook
-from safo.broker.policy import JOB_CAP_MICRO, MONTH_CAP_MICRO
 from safo.broker.pipeline import DEFAULT_DEADLINE_SECONDS
+from safo.broker.policy import JOB_CAP_MICRO, MONTH_CAP_MICRO
 from safo.broker.server import ServerConfig
 from safo.errors import SafoError
 
@@ -46,7 +46,9 @@ def load(path: Path) -> config.BrokerConfig:
 
 def test_the_example_broker_config_loads_through_the_real_loader(tmp_path: Path) -> None:
     cfg = load(installed(tmp_path))
-    assert cfg.server.allowed_uids == frozenset({1000})  # the example names an account; the runbook inserts the real one
+    assert cfg.server.allowed_uids == frozenset(
+        {1000}
+    )  # the example names an account; the runbook inserts the real one
     assert cfg.policy.caps.job_micro == JOB_CAP_MICRO and cfg.policy.caps.month_micro == MONTH_CAP_MICRO
     assert cfg.deadline_seconds == DEFAULT_DEADLINE_SECONDS
     assert set(cfg.policy.prices.models) == {"gemini-nano-banana-2.1", "gemini-3.1-flash-lite-image"}
@@ -102,7 +104,7 @@ def test_a_missing_section_an_unknown_section_or_no_uid_is_refused(tmp_path: Pat
         "uid as text": good.replace("allowed_uids: [1000]", 'allowed_uids: ["1000"]'),
         "caps above the built-in": good.replace('job_usd: "2.50"', 'job_usd: "3.00"'),
         "deadline out of range": good.replace("deadline_seconds: 180", "deadline_seconds: 9000"),
-        "unknown caps key": good.replace("  month_usd:", "  year_usd: \"1.00\"\n  month_usd:"),
+        "unknown caps key": good.replace("  month_usd:", '  year_usd: "1.00"\n  month_usd:'),
     }
     for label, text in cases.items():
         path = tmp_path / f"{re.sub(r'[^a-z]', '-', label)}.yaml"

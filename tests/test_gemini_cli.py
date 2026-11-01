@@ -240,9 +240,7 @@ def test_the_free_path_works_when_the_broker_socket_is_absent_or_refuses(rig: Ri
     assert len(rig.server.requests) == 1  # and the free request really went to the (fake) free endpoint
 
 
-def test_the_dead_socket_is_really_dead_and_the_spy_sees_a_broker_connection(
-    rig: Rig, dead_socket: list[str]
-) -> None:
+def test_the_dead_socket_is_really_dead_and_the_spy_sees_a_broker_connection(rig: Rig, dead_socket: list[str]) -> None:
     """The negative case: the same fixture makes a broker connection fail and be recorded, so the empty list above
     means something."""
     cfg = client.load_client_config(home=rig.home)
