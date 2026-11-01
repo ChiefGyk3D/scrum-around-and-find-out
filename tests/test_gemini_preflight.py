@@ -742,7 +742,7 @@ def test_loading_the_configs_opens_no_connection(tmp_path: Path, monkeypatch: py
     assert {c.status for c in checks} == {"pass"}
 
 
-# -- hardening of the client-config read (#298 review) ------------------------------------------------------------------
+# -- hardening of the client-config read (#298 review) -----------------------------------------------------------
 
 WEIRD = ["a b", 'q"uote', "d$ollar", "back`tick", "new\nline", "semi;colon", "tab\there", "glob*", "(paren)"]
 
