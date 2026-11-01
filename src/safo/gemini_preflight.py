@@ -82,6 +82,7 @@ class Locations:
     egress_conf: Path = Path("/etc/safo/broker-egress.conf")
     broker_config: Path = Path("/etc/safo/broker.yaml")
     client_config: Path | None = None  # the maintainer's ~/.config/safo/broker-client.yaml; None: the caller's own home
+    client_root_config: Path = Path("/etc/safo/broker-client.yaml")  # the root-owned override the client also applies
     maintainer_uid: int | None = None  # the account whose client config root may read (the runbook passes it)
     state_dir: Path = Path("/var/lib/safo-broker")
     udev_dirs: tuple[Path, ...] = (Path("/etc/udev/rules.d"), Path("/usr/lib/udev/rules.d"), Path("/lib/udev/rules.d"))
@@ -576,6 +577,18 @@ def check_broker_config(loc: Locations) -> Check:
     if uids < 1:
         return Check(name, "fail", "the file lists no allowed uid, so nobody could use the broker")
     models = len(loaded.policy.prices.models)
+    if loc.maintainer_uid is not None:
+        # The enabling run names the account that will use the broker: that exact account must be admitted, or the
+        # switch could be created for a broker that admits someone else.
+        if loc.maintainer_uid not in loaded.server.allowed_uids:
+            return Check(
+                name, "fail", f"allowed_uids does not list the named maintainer account (uid {loc.maintainer_uid})"
+            )
+        extra = sorted(loaded.server.allowed_uids - {loc.maintainer_uid})
+        if extra:
+            return Check(
+                name, "warn", f"loads, but allowed_uids also admits other account(s): {', '.join(map(str, extra))}"
+            )
     return Check(
         name,
         "pass",
@@ -653,7 +666,7 @@ def _open_client_config(path: Path, owners: frozenset[int]) -> tuple[int | None,
 
 
 def check_client_config(loc: Locations) -> Check:
-    """The maintainer's own client config exists and loads through the client's own parser."""
+    """The maintainer's client config exists and, with the root-owned override, loads through the client's loader."""
     name = "client-config"
     path = (
         loc.client_config if loc.client_config is not None else Path.home() / ".config" / "safo" / "broker-client.yaml"
@@ -674,7 +687,13 @@ def check_client_config(loc: Locations) -> Check:
             raw = os.read(fd, _MAX_FILE_BYTES + 1)
         finally:
             os.close(fd)
-        loaded = client.parse_user_config(raw.decode("utf-8", "replace"))
+        # the client's own loader, fed the content already opened and checked, with the root override applied as it is
+        loaded = client.load_client_config(
+            home=path.parent,
+            user_text=raw.decode("utf-8", "replace"),
+            root_path=loc.client_root_config,
+            root_uid=loc.trust_uid,
+        )
     except Exception as err:  # unreadable, or refused by the parser (whose errors carry no file text)
         return Check(
             name, "fail", f"the file does not load through the client's own parser: {type(err).__name__}: {err}"
