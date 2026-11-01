@@ -430,7 +430,7 @@ def test_billing_first_then_adoption_counts_the_call_once(tmp_path: Path) -> Non
     ] in (0, 1)
     assert sept(ledger) == 7000
     code, out, _ = adopt(tmp_path)
-    assert code == 0 and "adopted_usd: 0" in out and "not added to it a second time" in out
+    assert code == 0 and "adopted_usd: 0" in out and "not added a second time" in out
     assert sept(ledger) == 7000  # not 14000
     assert ledger.view().suspended and CallLedger(state_dir(tmp_path)).recover(LATER) == []
 
@@ -448,12 +448,40 @@ def test_adoption_first_then_billing_counts_the_call_once(tmp_path: Path) -> Non
     assert sept(ledger) == 9000  # and only the true gap is added
 
 
-def test_a_partial_billing_figure_is_not_topped_up_by_the_adoption(tmp_path: Path) -> None:
+def test_a_partial_billing_figure_entered_after_the_marker_is_topped_up_by_the_shortfall_only(tmp_path: Path) -> None:
     ledger = seeded(tmp_path)
     make_stray(tmp_path, reserved_micro=7000)
     run(tmp_path, "reconcile", "--billing-usd", "0.003", "--reason", "billing page", "--month", "2026-09")
     assert adopt(tmp_path)[0] == 0
-    assert sept(ledger) == 3000  # the billing figure is the authority for the month; adoption never lowers it
+    assert sept(ledger) == 7000  # 3000 already entered, 4000 added: the reservation, counted once
+
+
+def test_an_adjustment_entered_before_the_marker_cannot_have_covered_it_and_is_not_credited(tmp_path: Path) -> None:
+    early = {
+        "type": "admin_action", "ts": "2026-09-30T12:00:00Z", "v": 3, "action": "adjust", "uid": 0,
+        "sudo_uid": -1, "model": "", "month": "2026-09", "add_micro": 7000, "reason": "an unrelated earlier figure",
+    }  # fmt: skip
+    ledger = new_ledger(tmp_path)
+    ledger.ledger.append_many([early], ts=str(early["ts"]))  # the ledger clock only moves forward: this goes first
+    cid = reserve(ledger, 5000, now=NOW)
+    ledger.mark_sent(cid, NOW)
+    ledger.settle(cid, "ok", 1000, NOW)
+    make_stray(tmp_path, "2026-09-30T23:59:59Z", reserved_micro=7000)
+    assert sept(ledger) == 7000
+    assert adopt(tmp_path)[0] == 0
+    assert sept(ledger) == 14_000  # the earlier figure predates the marker, so it is not credited against it
+
+
+def test_a_covering_billing_figure_entered_after_the_marker_adds_nothing_and_never_lowers_the_month(
+    tmp_path: Path,
+) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=7000)
+    run(tmp_path, "reconcile", "--billing-usd", "0.02", "--reason", "billing page", "--month", "2026-09")
+    assert sept(ledger) == 20_000
+    code, out, _ = adopt(tmp_path)
+    assert code == 0 and "adopted_usd: 0" in out
+    assert sept(ledger) == 20_000
 
 
 def test_two_markers_of_the_same_month_are_each_counted_when_no_billing_figure_exists(tmp_path: Path) -> None:

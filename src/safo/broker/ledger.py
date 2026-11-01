@@ -126,7 +126,8 @@ class LedgerView:
     rows: int
     hashes: frozenset[str] = frozenset()  # the hash of every chained row: a signed `ledger_head` must be one of them
     adjusted: Mapping[str, int] = dataclasses.field(default_factory=dict)  # month -> what root added (reconcile)
-    adopted_adjust: Mapping[str, int] = dataclasses.field(default_factory=dict)  # the part of that from adopted markers
+    # month -> (time, amount) of each adjustment root entered from a billing figure (not from an adopted marker)
+    billing_adjusts: Mapping[str, tuple[tuple[str, int], ...]] = dataclasses.field(default_factory=dict)
 
     def month_total(self, key: str) -> int:
         """What a month counts: every call at its counted figure, plus what root added for it. Only ever grows."""
@@ -156,7 +157,7 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
     used: dict[str, dict[str, Any]] = {}
     suspended: dict[str, list[str]] = {}
     adjusted: dict[str, int] = {}
-    adopted_adjust: dict[str, int] = {}
+    billing_adjusts: dict[str, tuple[tuple[str, int], ...]] = {}
     pending: str | None = None  # a breach or an ambiguity whose `suspended` row must come next
     last: dt.datetime | None = None
     version = 0
@@ -176,7 +177,7 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
         if used and kind != "call_start":
             raise _corrupt()
         if kind == "admin_action":
-            _fold_admin(row, when, adjusted, adopted_adjust)
+            _fold_admin(row, when, adjusted, billing_adjusts)
             continue
         cid = row.get("call_id", "")
         rec = calls.get(cid)
@@ -246,12 +247,12 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
         len(rows),
         hashes,
         adjusted,
-        adopted_adjust,
+        billing_adjusts,
     )
 
 
 def _fold_admin(
-    row: dict[str, Any], when: dt.datetime, adjusted: dict[str, int], adopted_adjust: dict[str, int]
+    row: dict[str, Any], when: dt.datetime, adjusted: dict[str, int], billing: dict[str, tuple[tuple[str, int], ...]]
 ) -> None:
     """An `admin_action` row is root's record. A `clear` names a model and adds nothing; an `adjust` names a month that
     is not in the future and adds a positive amount to it. Any other pairing of the fields is corruption."""
@@ -262,10 +263,8 @@ def _fold_admin(
     if row["model"] != "" or row["month"] == "" or row["add_micro"] <= 0 or row["month"] > when.strftime("%Y-%m"):
         raise _corrupt()
     adjusted[row["month"]] = adjusted.get(row["month"], 0) + row["add_micro"]
-    if row["reason"].startswith(
-        ADOPT_PREFIX
-    ):  # only ever used to tell billing from adoption: a wrong guess charges more
-        adopted_adjust[row["month"]] = adopted_adjust.get(row["month"], 0) + row["add_micro"]
+    if not row["reason"].startswith(ADOPT_PREFIX):
+        billing[row["month"]] = (*billing.get(row["month"], ()), (row["ts"], row["add_micro"]))
 
 
 def _end(rec: CallRecord, row: dict[str, Any]) -> None:
@@ -1015,24 +1014,13 @@ class CallLedger:
             start = _row("call_start", stamp, **{k: data[k] for k in data if k not in ("v", "ts")})
             used = _row("approval_used", stamp, nonce=nonce, call_id=cid, model=model, job=data["job"], epoch="0" * 32)
             shell = CallRecord(cid, nonce, model, data["job"], data["kind"], reserved, now, CallState.RESERVED)
-            # Spend for this call is counted once. If root already entered a billing total for the month, that total is
-            # the authority and covers the call, so no second amount is added; otherwise the reservation is added.
-            covered = view.adjusted.get(month, 0) - view.adopted_adjust.get(month, 0) > 0
-            added = 0 if covered else reserved
-            rows = [
-                *(
-                    []
-                    if covered
-                    else [
-                        _admin_row(
-                            stamp, "adjust", who, f"{ADOPT_PREFIX}{nonce}: {reason}", month=month, add_micro=reserved
-                        )
-                    ]
-                ),
-                used,
-                start,
-                *_ambiguous_rows(stamp, shell, "marker_only"),
-            ]
+            # Spend for this call is counted once and a month never goes down. A billing figure root entered AFTER the
+            # marker was written can already include this call, so what it added after that time is credited against
+            # the reservation and only the shortfall is added. One entered before the marker cannot have seen it.
+            credit = sum(amount for when, amount in view.billing_adjusts.get(month, ()) if when > data["ts"])
+            added = max(0, reserved - credit)
+            head = [_admin_row(stamp, "adjust", who, f"{ADOPT_PREFIX}{nonce}: {reason}", month=month, add_micro=added)]
+            rows = [*(head if added else []), used, start, *_ambiguous_rows(stamp, shell, "marker_only")]
             self._fault("admin_before_append")
             if self._marker_stat(nonce) != seen or self._digest_of(nonce) != confirmed.digest:
                 raise IllegalTransition("the marker changed while it was being adopted; nothing was recorded")

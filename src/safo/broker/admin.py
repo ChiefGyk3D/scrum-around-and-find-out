@@ -566,7 +566,7 @@ def _adopt(
     output.write(out, f"adopted_month: {done.month}")
     output.write(out, f"adopted_usd: {format_usd(done.added_micro)}")
     if not done.added_micro:
-        output.write(out, "the month already has a billing figure entered; the call was not added to it a second time")
+        output.write(out, "a billing figure entered after the marker covers the call; it was not added a second time")
     output.write(out, "the call is held ambiguous and the model stays stopped until: clear MODEL --confirm CALL_ID")
     return 0
 
