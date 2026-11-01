@@ -138,7 +138,7 @@ deleted later.
 ### Design points settled on 2026-10-31
 
 The builds of phases 1, 2 and 5 left about 30 smaller design points open (issues #256, #270 and #273). The maintainer
-ruled on 2026-10-31: all of them are **accepted as built**, with three exceptions. The unit start condition on the root-owned
+ruled on 2026-10-31: all of them are **accepted as built**, and three rulings add to that. The unit start condition on the root-owned
 enable switch is dropped (issue #270, question 1): status and dry run answer while the switch is off, and every paid
 call answers `disabled`. A model whose output cap is not verified stays refused, independent of the testing job cap
 (issue #256, question 1). A reply that names no model or another model, and an image that carries metadata, stay
@@ -223,7 +223,7 @@ sections that follow agree with it.
   frame, 10 seconds of progress per write and 60 seconds per attachment frame.
 - **The 256 KiB reply frame versus the 200,000 byte text answer.** The broker accepts a text answer of up to 200,000
   bytes (more is unreadable and ambiguous), but the JSON reply frame is limited to 262,144 bytes and the reply is written as
-  ASCII with every non-ASCII character as a six byte escape. An answer that does not fit the frame cannot be sent: the
+  ASCII with every non-ASCII character as an escape (six bytes, twelve outside the basic plane). An answer that does not fit the frame cannot be sent: the
   reply is **`internal` with the receipt**. The call was paid for and the answer is not delivered (the broker keeps no copy).
 - **Image metadata refusal.** Exif, XMP, ICC profiles, C2PA (content credentials) and compressed text chunks are refused, and
   so is a WebP with a separate alpha chunk (the extended WebP header may set only the alpha flag, with the one image).
