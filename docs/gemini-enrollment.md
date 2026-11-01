@@ -14,6 +14,16 @@ and a key handle file is a reference, not the private key.
 **Every step carries three things:** its blast radius (what it can change), its rollback, and the output to compare. If
 the output differs, stop and do not go on.
 
+## Rehearse first (no root, no vendor call)
+
+`python scripts/rehearse_broker_setup.py` walks this page and the root runbook against a throwaway folder with a test-only
+software key, a fake vendor and the real broker code, then prints one `PASS`, `FAIL` or `SKIPPED` row per step (`R1` to
+`R13` are the root runbook's step numbers; `E` rows are this page's). It finds runbook mistakes before the real run. It
+does not replace the real run: the steps that need root, systemd, nftables or a hardware key (`R1`, `R4`, `R6`, `R8`,
+`R10`, `R11`, the restart and probe lines of `R12`, the hardware key steps `Ea2` and `Eb`) are reported `SKIPPED` with the
+reason, and a software key cannot show the touch and PIN flags. It writes only under its own folder, makes no network
+call and refuses to run as root.
+
 ## What was verified, and when
 
 Read on **2026-10-31**. A line marked **unverified** was not found on a vendor page and not run here; do not trust it

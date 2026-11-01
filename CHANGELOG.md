@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Rootless rehearsal of the phase 7 root setup (#263): `scripts/rehearse_broker_setup.py` runs the root runbook's own
+  command lines and the enrollment page's command blocks against a throwaway folder (a test-only software key, the fake
+  vendor, the real preflight, client and broker start-up code) and prints a PASS, FAIL or SKIPPED row per runbook step. It
+  needs no root and makes no vendor or network call; steps that need root, systemd, nftables or a hardware key are
+  SKIPPED with the reason. It found four mistakes, each fixed in its own commit: `safo gemini keys propose` refused before
+  the files of step d2 existed, though the page runs it first; the page said two `FAIL` lines were expected under a sample
+  that shows four; runbook step 5 hard-coded the ed25519-sk key type, so a release key made with ecdsa-sk (which the page
+  allows) got a line that could never verify a tag (it now has a key type placeholder and a key placeholder); and five
+  places on the page still called the merged broker commands unmerged.
+
 - Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
   which the installer never builds (it builds `current/venv/bin/python`): the runbook, the admin docs and a new test that
   compares every interpreter path in the runbook with the installer's own constant now agree. Nothing created the broker
