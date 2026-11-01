@@ -1125,7 +1125,8 @@ _UNREADABLE = (
 
 SHELL_DENIAL = (
     "gemini-material: this shell command names {}, so it is denied; call Gemini only through the wrapper, "
-    "`safo gemini ask --model M --prompt-file F ...` (docs/gemini.md)"
+    "`safo gemini ask --model M --prompt-file F ...` (docs/gemini.md); to put text with escapes in a file, create "
+    "the file with the Write or Edit tool and then run it"
 )
 
 

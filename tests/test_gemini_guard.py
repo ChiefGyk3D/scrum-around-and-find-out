@@ -648,6 +648,8 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "RECORD_ID",
         # the Bash command check (#209) is its own scan of a shell command, not a brief detector
         "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL",
+        # the shell denial quoted back in a brief is removed before the scan, not a detector (#264)
+        "DENIAL_QUOTE",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
     compiled = {n: v for n, v in vars(gb).items() if isinstance(v, re.Pattern)}

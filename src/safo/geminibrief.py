@@ -221,6 +221,7 @@ def findings(
     deadline: float | None = None,
 ) -> list[tuple[str, str]]:
     """(rule, reason) for each Gemini rule the brief breaks, at most one entry per rule. Fails closed on a timeout."""
+    prompt = DENIAL_QUOTE.sub(" ", prompt)  # the shell denial quoted word for word is prose, never a step (#264)
     if not relevant(prompt):
         return []  # nothing in the brief can name Gemini, so there is nothing to time out on
     try:
@@ -1037,6 +1038,20 @@ _SECRET_TOOL = re.compile(r"(?<![\w.-])doppler(?![\w-])")
 _NETWORK_TOOL = re.compile(
     r"(?<![\w.-])(?:curl|wget|nc|ncat|socat|openssl|ssh|telnet|python[\d.]*|node|nodejs|perl|ruby|php|go|deno|bun"
     r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
+)
+
+# One narrow relaxation (#264); everything else about the rule above is unchanged. A brief that quotes the guard's own
+# denial word for word. The sentence is fixed alternatives only (one per class constant, the current text and the older
+# text without the closing advice), so the gap holds nothing a brief could hide a step in. A test keeps it equal to
+# `modes.hooks.SHELL_DENIAL`. A here-document written into a file is deliberately not relaxed: the command text cannot
+# show whether the file is a regular file.
+_DENIAL_CLASSES = (SHELL_VENDOR, SHELL_KEY, SHELL_STORE, SHELL_BUILT, SHELL_TOOL, SHELL_UNVERIFIED)
+DENIAL_QUOTE = re.compile(
+    r"this shell command names (?:"
+    + "|".join(re.escape(c) for c in _DENIAL_CLASSES)
+    + r"), so it is denied; call Gemini only through the wrapper, `safo gemini ask --model M --prompt-file F \.\.\.` "
+    r"\(docs/gemini\.md\)(?:; to put text with escapes in a file, create the file with the Write or Edit tool and "
+    r"then run it)?"
 )
 
 
