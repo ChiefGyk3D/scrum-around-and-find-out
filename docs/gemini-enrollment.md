@@ -2,7 +2,7 @@
 
 This is the copy-paste runbook for the maintainer-side setup of the paid Gemini broker: enroll hardware keys for
 approvals, test a second device, make a separate release-signing key, build the root-owned allowed-signers lines, and
-rotate or revoke. It is the preparation for phase 7 and does not depend on the unmerged broker code: every command here
+rotate or revoke. It is the preparation for phase 7 and does not depend on the broker code: every command here
 uses OpenSSH, git and libfido2 tools, not the broker. The design is in [Gemini broker](gemini-broker.md),
 [Gemini keys](gemini-keys.md) and [Gemini passkeys](gemini-passkeys.md); this page does not change it.
 
@@ -13,6 +13,29 @@ and a key handle file is a reference, not the private key.
 
 **Every step carries three things:** its blast radius (what it can change), its rollback, and the output to compare. If
 the output differs, stop and do not go on.
+
+## Rehearse first (no root, no vendor call)
+
+`python scripts/rehearse_broker_setup.py` walks this page and the root runbook against a throwaway folder with a test-only
+software key, a fake vendor and the real broker code, then prints one `PASS`, `FAIL` or `SKIPPED` row per step (`R1` to
+`R13` are the root runbook's step numbers; `E` rows are this page's). It finds runbook mistakes before the real run. It
+does not replace the real run: the steps that need root, systemd, nftables or a hardware key (`R1`, `R4`, `R6`, `R8`,
+`R10`, `R11`, the restart and probe lines of `R12`, the hardware key steps `Ea2` and `Eb`) are reported `SKIPPED` with the
+reason. `R3` is `SKIPPED` too: its lines run, but the review of the two root programs by a person is not something the
+tool can do. A software key cannot show the touch and PIN flags, and the preflight's checks of ssh, libfido2, udev,
+authenticators and the service user are stand-ins inside the folder, so those rows say they are.
+
+**What contains it.** The command lines come from the repository and run under bash, so by default the tool re-runs
+itself under `prlimit` and `bwrap` (bubblewrap, rootless), both taken only from `/usr/bin` or `/bin` and only if root
+owns them and every folder above them (never from `PATH`). Inside: new user, network, IPC, PID and UTS namespaces; a new
+root holding read-only `/usr`, the checkout and the Python environment; a synthetic `/etc` with only your account and
+root; a memory-backed, size-capped rehearsal folder and `/tmp`; no home folder (so no `~/.ssh` or `~/.config/safo`); a
+scrubbed environment; and per-process limits on memory, file size, open files and CPU, plus a cap on your account's
+task count. That contains writes outside the folder, every network connection, reads of your home folder and the host
+`/etc`, and runaway memory, files and processes. It does not contain a kernel or bubblewrap flaw; it has no seccomp
+filter and no cgroup, so the limits are per process; and `/usr` stays readable. If the tools or user namespaces are
+missing the tool refuses to run; `--no-containment` (needed too for `--keep`) runs it with your own rights and network,
+and every output line then ends with `[NO CONTAINMENT]`. It refuses to run as root.
 
 ## What was verified, and when
 
@@ -113,7 +136,8 @@ preflight below).
    summary: 3 pass, 4 warn, 4 fail; exit 1
    ```
 
-   The two `FAIL` lines are expected until the root setup and step d are done. Run it again at the end. Blast radius:
+   The four `FAIL` lines are expected until step d (`allowed-signers`), the root setup (`broker-config` and
+   `service-user`) and your own client config (`client-config`) are done. Run it again at the end. Blast radius:
    none (read only; the tests run it on a read-only tree). Rollback: none needed.
 
 ## Step a. Enroll one or two FIDO2 keys for approvals
@@ -229,7 +253,7 @@ Two more checks, by hand. Sign again and confirm it asks for a touch and the PIN
 `verify-required` requires verification for each signature). Then unplug the key and confirm the sign command fails.
 
 The manual does not say that `-Y verify` reports the PIN check, so a green verify does not prove the PIN was asked. The
-safo dry run reads the authenticator flags and prints touch and PIN, and that is the proof once phases 2 and 5 are merged.
+safo dry run reads the authenticator flags and prints touch and PIN, and that is the proof (`safo gemini paid-dryrun`, built and merged).
 
 For the structure-only check, `ssh-keygen -Y check-novalidate -n NAMESPACE -s SIGFILE < msg` does not validate that a
 signature comes from an authorized signer (manual). Run with a software key it printed a Good line and exited 0.
@@ -367,13 +391,13 @@ The approval file is `/etc/safo/gemini-allowed-signers`: root-owned, mode 0644, 
 key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. The label is the principal. Never write a line without the
 `namespaces=` option: a key without it is accepted by OpenSSH for any namespace, and the broker refuses the line.
 
-1. **Print the line.** Preferred, once the keys command is merged:
+1. **Print the line.** Preferred (`safo gemini keys propose` is built and merged; it works before the files of step 2 exist):
 
    ```bash
    safo gemini keys propose ~/.ssh/safo/safo_gemini_a.pub --label yubikey-a
    ```
 
-   Cross-check, or use if the command is not yet available:
+   Cross-check (the two lines must be the same):
 
    ```bash
    printf '%s namespaces="safo-gemini-approval" %s\n' yubikey-a "$(cut -d' ' -f1,2 ~/.ssh/safo/safo_gemini_a.pub)"
@@ -435,7 +459,7 @@ key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. The label is the 
    The preflight line `allowed-signers` must read `PASS`, with every key line bound to the approval namespace, root-owned,
    mode 0644. Do not sign any other text in the real approval namespace: a signature there is what the broker is built to
    accept once the payload is right. The `--dry-run` approve in the keys page (section "Test without spending") is the
-   proof that matters once the broker is merged.
+   proof that matters, now that the broker is merged.
 
 5. **The release signers file** is the same shape with the other namespace, and its own file, installed by root the same
    way: `/etc/safo/broker-release-signers`, lines `release-key namespaces="git" KEYTYPE BASE64`, root-owned, mode 0644.
@@ -545,7 +569,7 @@ procedure is not repeated here, and the preflight does not read the credential.
 1. Step 0 (packages, udev, preflight). 2. Step a (keys A and B), test a4. 3. Step b (optional, any time). 4. Step c.
 5. The root setup in [Gemini broker](gemini-broker.md) (user, folders, the paid key). 6. Step d (the files). 7. Install
 the broker and run the preflight again. 8. The root-door check below. 9. The dry run. 10. Only then the switch, and the
-first real call, which is phase 7 itself and needs the unmerged broker code.
+first real call, which is phase 7 itself and needs the maintainer's real key and a vendor call.
 
 **The root-door check (after the install, before the dry run).** The whole design assumes the maintainer's account has
 no way to become root. The administration command checks the installation and then looks, read-only, for the doors the

@@ -12,6 +12,7 @@ import safo_broker_install as install
 from safo.broker import runbook
 
 KEY_TYPE = "sk-ssh-ed25519@openssh.com"  # a key type name, not a host
+KEY_TYPE_ECDSA = "sk-ecdsa-sha2-nistp256@openssh.com"  # the other accepted release key type, named in step 5
 
 
 def text() -> str:
@@ -191,7 +192,7 @@ def test_the_observe_week_wording_no_longer_treats_observe_as_a_safe_state_for_p
 def test_the_allowed_signers_file_is_created_with_the_git_namespace_and_a_placeholder_key(tmp_path: Path) -> None:
     doc = text()
     line = next(line for line in command_lines(doc) if "printf" in line and "broker-release-signers" in line)
-    assert "PASTE_RELEASE_PUBLIC_KEY_HERE" in line
+    assert "PASTE_RELEASE_PUBLIC_KEY_HERE" in line and "PASTE_RELEASE_KEY_TYPE_HERE" in line
     assert "0644" in line
     # run the quoting chain locally against a temporary path (no sudo, no real file): the file must hold the quotes
     remote = shlex.split(line)[3].removeprefix("sudo ")
@@ -200,13 +201,26 @@ def test_the_allowed_signers_file_is_created_with_the_git_namespace_and_a_placeh
     subprocess.run(["sh", "-c", remote], check=True, stdin=subprocess.DEVNULL, timeout=30)  # noqa: S603, S607 - fixed test string, temp path
     assert (
         target.read_text()
-        == 'release-signer namespaces="git" sk-ssh-ed25519@openssh.com PASTE_RELEASE_PUBLIC_KEY_HERE\n'
+        == 'release-signer namespaces="git" PASTE_RELEASE_KEY_TYPE_HERE PASTE_RELEASE_PUBLIC_KEY_HERE\n'
     )
     assert oct(target.stat().st_mode & 0o777) == "0o644"
 
 
+def test_the_signers_line_takes_the_key_type_from_the_key_so_an_ecdsa_sk_release_key_fits(tmp_path: Path) -> None:
+    """Enrollment step c allows an ecdsa-sk release key on old firmware. The line used to hard-code the ed25519-sk type
+    word, so the line for an ecdsa-sk key named the wrong type and could never verify a tag (#263 rehearsal)."""
+    line = next(line for line in command_lines(text()) if "printf" in line and "broker-release-signers" in line)
+    ecdsa = "sk-ecdsa-sha2-nistp256@openssh.com"
+    target = tmp_path / "signers"
+    remote = shlex.split(line)[3].removeprefix("sudo ").replace("/etc/safo/broker-release-signers", str(target))
+    remote = remote.replace("PASTE_RELEASE_KEY_TYPE_HERE", ecdsa).replace("PASTE_RELEASE_PUBLIC_KEY_HERE", "AAAAkey")
+    subprocess.run(["sh", "-c", remote], check=True, stdin=subprocess.DEVNULL, timeout=30)  # noqa: S603, S607 - fixed test string, temp path
+    assert target.read_text() == f'release-signer namespaces="git" {ecdsa} AAAAkey\n'
+    assert "sk-ssh-ed25519@openssh.com" not in line  # no key type is baked in
+
+
 def test_no_secret_no_real_host_no_address() -> None:
-    doc = text()
+    doc = text().replace(KEY_TYPE_ECDSA, KEY_TYPE)
     assert "AIza" not in doc
     assert not re.search(r"-----BEGIN [A-Z ]*PRIVATE KEY", doc)
     assert not re.search(r"ssh-(ed25519|rsa) AAAA[0-9A-Za-z+/]{20,}", doc)

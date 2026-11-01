@@ -274,7 +274,9 @@ def test_the_runbook_template_installs_a_hardware_key_type() -> None:
 
     doc = runbook.render(maintainer="MAINTAINER_LOGIN")
     line = next(x for x in doc.splitlines() if "broker-release-signers" in x and "printf" in x)
-    assert "sk-ssh-ed25519@openssh.com" in line
+    # the line takes the key's own type word (ed25519-sk or ecdsa-sk) from a placeholder; the step names both types
+    assert "PASTE_RELEASE_KEY_TYPE_HERE" in line
+    assert "sk-ssh-ed25519@openssh.com" in doc and "sk-ecdsa-sha2-nistp256@openssh.com" in doc
     assert "release-signer ssh-ed25519" not in line
 
 

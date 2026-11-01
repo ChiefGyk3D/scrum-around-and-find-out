@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Rehearsal containment, second round (#263). Review findings are fixed: the sandbox gets a synthetic `/etc` instead of
+  the host's, `bwrap` and `prlimit` are taken only from root-owned system folders (never `PATH`), and the sandbox runs
+  under memory, file size, open file, CPU and task limits with a size-capped memory-backed rehearsal folder; tests show
+  each limit bites. `--keep` now needs `--no-containment`. The header and `docs/gemini-enrollment.md` say what is and is
+  not contained.
+
+- Rehearsal review fixes (#263). The rehearsal now contains the runbook text it runs: it re-runs itself inside a rootless
+  bubblewrap sandbox (user, network, IPC, PID and UTS namespaces, read-only `/usr`, `/etc` and checkout, a writable
+  rehearsal folder, no home folder, scrubbed environment) and refuses to run when it cannot, unless `--no-containment` is
+  given, in which case every output line says `[NO CONTAINMENT]`; the header and `docs/gemini-enrollment.md` state what is
+  and is not contained. R13 now takes its verdict from the real enabling preflight code path and its exit status (it used
+  to ignore the service-user check), R3 is SKIPPED because it cannot do the root review, and the preflight host checks are
+  stand-ins inside the rehearsal folder instead of reads of the real udev, linker, authenticator and agent state.
+  `keys propose` now learns that the allowed-signers file is missing from the one hardened open, not from a separate look.
+
+- Rootless rehearsal of the phase 7 root setup (#263): `scripts/rehearse_broker_setup.py` runs the root runbook's own
+  command lines and the enrollment page's command blocks against a throwaway folder (a test-only software key, the fake
+  vendor, the real preflight, client and broker start-up code) and prints a PASS, FAIL or SKIPPED row per runbook step. It
+  needs no root and makes no vendor or network call; steps that need root, systemd, nftables or a hardware key are
+  SKIPPED with the reason. It found four mistakes, each fixed in its own commit: `safo gemini keys propose` refused before
+  the files of step d2 existed, though the page runs it first; the page said two `FAIL` lines were expected under a sample
+  that shows four; runbook step 5 hard-coded the ed25519-sk key type, so a release key made with ecdsa-sk (which the page
+  allows) got a line that could never verify a tag (it now has a key type placeholder and a key placeholder); and five
+  places on the page still called the merged broker commands unmerged.
+
+
+
 - Broker egress control: the nftables table now persists against removal or change from outside (#283). The root timer
   runs every ten seconds, compares the live table with the reviewed ruleset and rebuilds it in one transaction when it is
   missing or different, and does this before any lookup, so a failed lookup no longer leaves a removed table removed.

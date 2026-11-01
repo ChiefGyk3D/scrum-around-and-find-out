@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 LOGIN = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 PASTE_KEY = "PASTE_RELEASE_PUBLIC_KEY_HERE"
+PASTE_KEY_TYPE = "PASTE_RELEASE_KEY_TYPE_HERE"  # the key's own type word: ed25519-sk and ecdsa-sk keys both enroll
 # The installer builds exactly one interpreter per release (venv/bin/python) and points `current` at the release; a test
 # pins this string to the installer's own constant.
 RELEASE_PYTHON = "/opt/safo-broker/current/venv/bin/python"
@@ -291,13 +292,14 @@ def steps(login: str) -> tuple[Step, ...]:
         Step(
             "Enroll the release signing key and set the version floor",
             "Only a tag signed by a key in this file installs. Use the public half of a release key kept apart from "
-            "the approval keys, and replace the placeholder with the key field. The installer accepts only hardware "
-            "key types here (sk-ssh-ed25519 and sk-ecdsa), so a software key is refused.",
+            "the approval keys. Replace the two placeholders with the first two fields of its .pub file: the key type "
+            "(sk-ssh-ed25519@openssh.com, or sk-ecdsa-sha2-nistp256@openssh.com for a key made with ecdsa-sk) and the "
+            "key. The installer accepts only those two hardware key types here, so a software key is refused.",
             (
                 ssh(
                     'sh -c "printf \\"%s namespaces=\\\\042git\\\\042 %s %s\\\\n\\" release-signer '
-                    "sk-ssh-ed25519@openssh.com "
-                    f'{PASTE_KEY} > /etc/safo/broker-release-signers && chmod 0644 /etc/safo/broker-release-signers"'
+                    f"{PASTE_KEY_TYPE} "
+                    f'{PASTE_KEY} >/etc/safo/broker-release-signers && chmod 0644 /etc/safo/broker-release-signers"'
                 ),
                 ssh(
                     'sh -c "printf \\"0.0.0\\\\n\\" > /etc/safo/broker-min-version '
