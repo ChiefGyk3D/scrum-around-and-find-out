@@ -924,8 +924,8 @@ class CallLedger:
         verified figure. The marker file is read, never rewritten or removed. A marker that is not whole and strict, a
         month that is not before this one, a nonce the ledger knows and a call id it already holds are all refused.
 
-        The marker is read ONCE, here, under the lock. What is charged is that read, and only if its digest, model, month
-        and amount are exactly what root confirmed; a marker replaced after root read it is refused and nothing is
+        The marker is read ONCE, here, under the lock. What is charged is that read, and only if its digest, model,
+        month and amount are exactly what root confirmed; a marker replaced after root read it is refused and nothing is
         written. A marker is a file in a folder only the broker's own user may write (owner and mode are checked on
         every read); it carries no signature, so it proves nothing the folder's permissions do not."""
         _check_who(who)
@@ -1146,7 +1146,7 @@ def _dangling(line: bytes) -> bool:
     if not isinstance(row, dict):
         return False
     kind = row.get("type")
-    if kind == "admin_action":  # the adjustment that heads an adoption group: it is never the last row of a finished one
+    if kind == "admin_action":  # heads an adoption group: never the last row of a finished one
         reason = row.get("reason")
         return row.get("action") == "adjust" and isinstance(reason, str) and reason.startswith(ADOPT_PREFIX)
     return kind in ("approval_used", "ambiguous_call")
