@@ -324,7 +324,7 @@ class StepClock:
 def slow_route(monkeypatch: pytest.MonkeyPatch) -> StepClock:
     """The injected clock, and a route detector whose line reading takes 1000 units (stands in for slow regex work)."""
     clock = StepClock()
-    monkeypatch.setattr(geminibrief.time, "monotonic", clock)
+    monkeypatch.setattr("safo.geminibrief.time.monotonic", clock)
     monkeypatch.setattr("safo.modes.hooks.time.monotonic", clock)
     flat = geminibrief._flat_paths
 
