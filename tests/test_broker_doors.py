@@ -59,7 +59,7 @@ class World:
         sudoers_text = f"Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n#includedir {self.t}/sudoers.d\n"
         self.sudoers = put(self.t / "sudoers", sudoers_text, 0o440)
         self.sudoers_d = folder(self.t / "sudoers.d", 0o750)
-        self.nss = put(self.t / "nsswitch.conf", "passwd: files systemd\ngroup: files [NOTFOUND=return] systemd\n")
+        self.nss = put(self.t / "nsswitch.conf", "passwd: files\ngroup: files [NOTFOUND=return]\n")
         self.polkit = folder(self.t / "polkit")
         self.etc = folder(self.t / "etc")
         self.opt = folder(self.t / "opt")
@@ -85,6 +85,7 @@ class World:
             cron_dirs=(self.cron_d,),
             ld_preload=self.preload,
             nsswitch=self.nss,
+            userdb_dirs=(self.t / "userdb",),
             chain_floor=self.t,
             setuid_roots=(self.usr,),
             dpkg_info=self.dpkg,
@@ -885,5 +886,78 @@ def test_a_missing_or_incomplete_name_service_file_fails_closed(w: World) -> Non
 
 
 def test_comments_and_actions_in_the_name_service_file_are_understood(w: World) -> None:
-    put(w.nss, "# x\npasswd: compat systemd # trailing\ngroup: files [SUCCESS=merge] systemd\nhosts: dns\n")
+    put(w.nss, "# x\npasswd: compat # trailing\ngroup: files [SUCCESS=merge]\nhosts: dns\ninitgroups: files\n")
     assert status(w.run(), "groups") == "pass"
+
+
+# -- review round 2 ------------------------------------------------------------
+
+
+def test_the_systemd_name_service_source_is_not_plain(w: World) -> None:
+    put(w.nss, "passwd: files systemd\ngroup: files systemd\n")
+    found = w.run()
+    assert status(found, "groups") == "fail" and "source other than local files" in found["groups"].text
+
+
+@pytest.mark.parametrize("name", ["alice.user", "1001.user", "staff.group", "alice.membership"])
+def test_a_record_in_a_user_record_folder_fails_closed(w: World, name: str) -> None:
+    put(w.t / "userdb" / name, "{}")
+    found = w.run()
+    assert status(found, "groups") == "fail" and "user record folder" in found["groups"].text
+
+
+def test_an_empty_or_absent_user_record_folder_passes_and_a_linked_one_fails(w: World) -> None:
+    assert status(w.run(), "groups") == "pass"
+    folder(w.t / "userdb")
+    assert status(w.run(), "groups") == "pass"
+    real = folder(w.t / "elsewhere")
+    (w.t / "userdb").rmdir()
+    (w.t / "userdb").symlink_to(real)
+    assert status(w.run(), "groups") == "fail"
+
+
+@pytest.mark.parametrize("database", ["initgroups", "shadow", "gshadow"])
+def test_other_identity_databases_follow_the_same_source_rule(w: World, database: str) -> None:
+    put(w.nss, f"passwd: files\ngroup: files\n{database}: sss\n")
+    found = w.run()
+    assert status(found, "groups") == "fail" and database in found["groups"].text
+
+
+def test_a_plain_initgroups_line_is_accepted(w: World) -> None:
+    put(w.nss, "passwd: files\ngroup: files\ninitgroups: files\nshadow: files\n")
+    assert status(w.run(), "groups") == "pass"
+
+
+def test_a_sudoers_rule_for_a_netgroup_fails_closed(w: World) -> None:
+    put(w.sudoers_d / "10", "+admins ALL=(ALL) ALL\n", 0o440)
+    found = w.run()
+    assert status(found, "sudo") == "fail" and "netgroup" in found["sudo"].text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'if (subject.user != "other") { return polkit.Result.YES; }',
+        'if (!subject.isInGroup("printers")) { return polkit.Result.YES; }',
+        'if (subject.user == "other" || subject.local) { return polkit.Result.YES; }',
+        "if (subject.local) { return polkit.Result.YES; }",
+        'if (subject.user == "other") { return polkit.Result.YES; }\nreturn polkit.Result.YES;',
+        'if (subject.user == "other") { return polkit.Result.NO; }\nif (x) { return "yes"; }',
+    ],
+)
+def test_a_polkit_grant_not_guarded_by_a_positive_literal_test_fails_closed(w: World, body: str) -> None:
+    put(w.polkit / "50-x.rules", f"polkit.addRule(function(a, subject) {{\n{body}\n}});\n")
+    assert status(w.run(), "polkit") == "fail"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'if (subject.user == "other") { return polkit.Result.YES; }',
+        'if (action.id == "x.y" && subject.isInGroup("printers")) { return polkit.Result.YES; }',
+        'if (subject.user === "other") return polkit.Result.YES;',
+    ],
+)
+def test_a_polkit_grant_guarded_by_a_positive_literal_for_someone_else_only_warns(w: World, body: str) -> None:
+    put(w.polkit / "50-x.rules", f"polkit.addRule(function(a, subject) {{\n{body}\n}});\n")
+    assert status(w.run(), "polkit") == "warn"

@@ -683,7 +683,7 @@ hit its entry limit is a `fail`, never a pass:
 |---|---|---|---|
 | `sudo` | `/etc/sudoers` and `/etc/sudoers.d` (names sudo reads), `User_Alias`, line continuations | a rule names the login, its uid, `ALL`, a group the account is in, or an alias of those; a file or folder is not root-owned and closed, is a link, or an include cannot be followed | the account is unknown |
 | `groups` | `/etc/passwd`, `/etc/group` | the account is in `root`, `sudo`, `wheel`, `admin`, `docker`, `lxd`, `lxc`, `libvirt`, `disk` or `shadow` (primary or supplementary), or is uid 0 | the account is unknown |
-| `polkit` | `*.rules` and `*.pkla` under the polkit folders | a rule granting without a password (`polkit.Result.YES` or a quoted `"yes"`) names a login of the uid or one of its groups (or every user), or a rules file grants with no literal user or group in it, so it cannot be attributed | a rule grants without a password and names only other users or groups |
+| `polkit` | `*.rules` and `*.pkla` under the polkit folders | a rule granting without a password (`polkit.Result.YES` or a quoted `"yes"`) names a login of the uid or one of its groups (or every user), or a rules file has a grant that is not under an `if` with a positive test (`==`, `isInGroup`) of a literal other than the account, with no negation and no or-clause, so it cannot be attributed | a rule grants without a password and names only other users or groups |
 | `writable` | a bounded walk of `/etc`, `/usr/local`, `/opt`, the systemd unit folder, polkit, the cron and `at` spools, and the broker's own folders | the account owns any entry (whatever its mode: the owner can change it) or can write it through its group or world bits; symbolic links are not followed | the account is unknown |
 | `jobs` | root-run `.service` files and `/etc/crontab`, `/etc/cron.d` | a root job runs a file, or a file not yet created, whose path (a folder above it, a unit link's target or the folders on its way) the account owns or can write, sticky world-writable folders included, or reads or runs something under the account's home. Unit links and `NAME.service.d/*.conf` drop-ins are read too; a link that does not resolve fails closed (a link to `/dev/null` is a masked unit). Only the first word of each command is followed | the account is unknown |
 | `preload` | `/etc/ld.so.preload` | it is a link, not root-owned or writable by others | it lists a library |
@@ -691,9 +691,10 @@ hit its entry limit is a `fail`, never a pass:
 | `credential` | the secret store tool's local settings folders in the account's home (`.doppler` and `.config/doppler`; these locations are inferred, not read from a vendor page) | the home cannot be examined | one of them exists: revoke the old key at the vendor, then delete it |
 
 Every login that maps to the account's uid is judged, in the group, sudoers and polkit checks and for the credential. If
-`/etc/nsswitch.conf` gives the passwd or group database a source other than `files`, `compat` or `systemd` (for example
-`ldap`, `sss`, `nis`), every account check fails closed, because accounts and groups could then exist that these checks do
-not read. The scan roots are fixed in code and no flag moves them. A clean machine of the Debian family is the model; a machine
+`/etc/nsswitch.conf` gives the passwd, group, shadow, gshadow or initgroups database a source other than `files` or
+`compat` (for example `ldap`, `sss`, `nis`, `systemd`), or any file sits in `/etc/userdb`, `/run/userdb` or
+`/run/systemd/userdb` (systemd user records, home-directory users), every account check fails closed, because accounts and
+groups could then exist that these checks do not read. A sudoers rule for a netgroup (`+name`) fails closed for the same reason. The scan roots are fixed in code and no flag moves them. A clean machine of the Debian family is the model; a machine
 that does not keep package file lists there fails the `setuid` check when it has any setuid file, by design.
 
 **Still a manual review (the checks above do not replace it; each hit is fixed or explained in writing):**

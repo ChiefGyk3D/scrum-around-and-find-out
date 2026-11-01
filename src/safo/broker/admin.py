@@ -70,7 +70,7 @@ UNIT_NAMES = (  # the units the installer manages; a test pins this tuple to the
 LIMITS = (
     "limits: pass means no door was found by these checks, never that none exists; access control lists, a flaw in a "
     "package-owned program, a privileged socket and anything that changes later are not seen, and accounts "
-    "that come from a source other than local files (or systemd) are refused "
+    "that come from a source other than local files, or from user record folders, are refused "
     "(docs/gemini-broker.md, The root-door precondition)"
 )
 VERSION = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")

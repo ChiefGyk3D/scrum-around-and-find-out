@@ -82,6 +82,9 @@ class DoorPaths:
     cron_dirs: tuple[Path, ...] = (Path("/etc/cron.d"),)
     ld_preload: Path = Path("/etc/ld.so.preload")
     nsswitch: Path = Path("/etc/nsswitch.conf")
+    # systemd's user and group record folders (JSON user records, homed users): any record there is an account or group
+    # this check does not read, so a record fails closed; a folder that is absent is fine
+    userdb_dirs: tuple[Path, ...] = (Path("/etc/userdb"), Path("/run/userdb"), Path("/run/systemd/userdb"))
     # path components at or below this folder are judged for "can the account replace this"; "/" judges them all
     # (a test points it at its temporary tree, whose parents are not the machine's)
     chain_floor: Path = Path("/")
@@ -249,7 +252,8 @@ class _Who:
         return bool(mode & 0o002)
 
 
-_PLAIN_SOURCES = ("files", "compat", "systemd")  # systemd supplies dynamic and transient users, not real accounts
+_PLAIN_SOURCES = ("files", "compat")  # "systemd" is not plain: its records are read through the userdb folders
+_IDENTITY_DATABASES = ("passwd", "group", "shadow", "gshadow", "initgroups")
 
 
 def _check_nsswitch(door: DoorPaths, trust: int) -> None:
@@ -258,7 +262,7 @@ def _check_nsswitch(door: DoorPaths, trust: int) -> None:
     for raw in _text(door.nsswitch, "the name service switch file", trust).splitlines():
         line = raw.split("#", 1)[0].strip()
         database, _, rest = line.partition(":")
-        if database.strip() not in ("passwd", "group"):
+        if database.strip() not in _IDENTITY_DATABASES:
             continue
         seen.add(database.strip())
         sources = [t for t in re.sub(r"\[[^\]]*\]", " ", rest).split() if t]
@@ -268,8 +272,19 @@ def _check_nsswitch(door: DoorPaths, trust: int) -> None:
                 f"the {database.strip()} database can come from a source other than local files "
                 f"({_show(' '.join(odd) or 'none named')}), which this check does not read"
             )
-    if seen != {"passwd", "group"}:
+    if not {"passwd", "group"} <= seen:
         raise _Problem("the name service switch file cannot be read (it does not name the passwd and group databases)")
+    for folder in door.userdb_dirs:
+        if _folder_state(folder, f"user record folder {_show(folder)}"):
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                raise _Problem(f"user record folder {_show(folder)} cannot be read (it cannot be listed)") from None
+            if names:
+                raise _Problem(
+                    f"user record folder {_show(folder)} holds records for users or groups, "
+                    "which this check does not read"
+                )
 
 
 def _load_who(door: DoorPaths, trust: int, uid: int) -> _Who:
@@ -381,7 +396,10 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
                 continue
             head = line.partition("=")[0].split()
             if len(head) >= 2:
-                rules.append((source, " ".join(head[:-1])))
+                users = " ".join(head[:-1])
+                if any(m.startswith("+") for m in re.split(r"[,\s]+", users)):
+                    problems.append(f"{source} uses a netgroup, which this check does not read")
+                rules.append((source, users))
     matched: set[str] = set()
 
     def applies(member: str) -> bool:
@@ -410,7 +428,30 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
 
 _YES = re.compile(r"polkit\.Result\.YES|[\"']yes[\"']|Result(?:Any|Inactive|Active)\s*=\s*yes", re.IGNORECASE)
 # a rule that names, by a quoted literal, who it is for: subject.user == "x", subject.isInGroup("x")
-_SUBJECT = re.compile(r"subject\.(?:user|isInGroup|groups)[^\n;{]*[\"'][\w.-]+[\"']")
+_IF = re.compile(r"\bif\s*\(")
+_POSITIVE = re.compile(r"subject\.user\s*===?\s*[\"'][\w.-]+[\"']|subject\.isInGroup\(\s*[\"'][\w.-]+[\"']\s*\)")
+
+
+def _grants_attributed(text: str) -> bool:
+    """True when every grant in a rules file sits under an `if` whose condition has a positive test of the user or a
+    group against a literal, and has no negation and no or-clause. Anything else cannot be attributed."""
+    for grant in _YES.finditer(text):
+        guards = list(_IF.finditer(text, 0, grant.start()))
+        if not guards:
+            return False
+        segment = text[guards[-1].end() : grant.start()]
+        opener = re.search(r"\{|\breturn\b", segment)
+        if opener is None:
+            return False
+        condition, tail = segment[: opener.start()], segment[opener.start() :]
+        # the guard must still enclose the grant: an earlier, closed `if` block guards nothing
+        if opener.group() == "{" and tail.count("{") - tail.count("}") < 1:
+            return False
+        if opener.group() != "{" and ";" in tail:
+            return False
+        if "!" in condition or "||" in condition or not _POSITIVE.search(condition):
+            return False
+    return True
 
 
 def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
@@ -437,7 +478,7 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
                     re.search(r"unix-(?:user|group):" + re.escape(n) + r"(?![\w.-])", text) for n in names
                 ) or re.search(r"unix-(?:user|group):\*", text)
                 # a grant in a rules file that names nobody by a literal cannot be attributed: fail closed
-                unattributed = path.endswith(".rules") and not _SUBJECT.search(text)
+                unattributed = path.endswith(".rules") and not _grants_attributed(text)
                 (hits if quoted or pkla or unattributed else others).append(_show(path))
     except _Problem as problem:
         return Finding("polkit", "fail", str(problem))
