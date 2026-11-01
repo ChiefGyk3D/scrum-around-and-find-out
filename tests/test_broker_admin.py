@@ -1391,3 +1391,40 @@ def test_check_install_does_not_claim_the_root_door_checks(tmp_path: Path) -> No
     install(tmp_path)
     _code, out, _ = run(tmp_path, "check-install")
     assert "not checked here: sudo rules, root-equivalent groups, polkit, writable root-run paths" in out
+
+
+# -- check-install reads the egress config by the helper's rules (#299) ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "VENDOR_HOST=api.vendor.example\nVENDOR_HOST=api.vendor.example\nMODE=drop\n",
+        "VENDOR_HOST=api.vendor.example\nMODE=observe\nMODE=drop\n",
+        "MODE=drop\n",
+        "VENDOR_HOST=\nMODE=drop\n",
+        "VENDOR_HOST=api.vendor.example\nMODE=allow\n",
+        "VENDOR_HOST=api.vendor.example\nEXTRA=1\n",
+    ],
+    ids=["duplicate host", "duplicate mode", "missing host", "empty host", "bad mode", "unknown key"],
+)
+@pytest.mark.parametrize("switch_on", [False, True])
+def test_check_install_fails_on_an_egress_config_the_helper_refuses(tmp_path: Path, text: str, switch_on: bool) -> None:
+    install(tmp_path)
+    p = paths(tmp_path)
+    if switch_on:
+        p.switch.write_text("enabled\n")
+        p.switch.chmod(0o644)
+    p.egress_conf.write_text(text)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1, out
+    assert "fail: the egress config is refused by the egress helper's rules" in out
+    assert "egress mode:" not in out
+
+
+def test_check_install_fails_on_an_egress_config_that_is_not_text(tmp_path: Path) -> None:
+    install(tmp_path)
+    junk = bytes([0xFF, 0xFE, 0x0A])  # not UTF-8; the helper's strict read refuses it
+    paths(tmp_path).egress_conf.write_bytes(b"VENDOR_HOST=api.vendor.example\nMODE=drop\n" + junk)
+    code, out, _ = run(tmp_path, "check-install")
+    assert code == 1 and "fail: the egress config is refused by the egress helper's rules" in out

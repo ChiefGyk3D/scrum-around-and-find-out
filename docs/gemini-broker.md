@@ -135,6 +135,27 @@ exists any more. The safe image writer of phase 4a is in the tree and `default_w
 the small marked adapter (`adapter_write_image`, `adapter_write_sidecar`) remains only as a fallback and for tests, and can be
 deleted later.
 
+The client module also has a command-line entry of its own (run as a module with the isolated interpreter), which
+skips the wrapper's sanitized environment, private directory and closed descriptors. That entry is meant for a person at
+a terminal. Three things discourage any other use, and all three are **defense in depth, not a barrier**: the entry
+refuses to start without a controlling terminal and a terminal on standard input and output, or with an interpreter or
+loader startup variable set (the wrapper's own paid commands call the client in-process and are not affected); the
+dispatch guard reads it as a paid command word (denied in a brief, unreadable in run-time forms); and the Bash check
+refuses the spellings it recognizes. A program running as the maintainer can still satisfy the terminal check with a
+pseudo terminal, can build a spelling the text patterns do not know, and can talk to the broker socket without the client
+at all. What holds is the broker: a paid call needs an approval signed with the hardware key, which needs a touch on the
+key (and a PIN when the key requires one), so no spend happens without the maintainer. What a process can do through the
+socket without a signed approval is exactly three operations (a test pins the list). `status` and `check` only read: the
+month's spend and caps, the suspended models, a nonce's state; they change nothing and are limited per peer. `begin`
+issues a nonce: it spends nothing, writes no ledger row and suspends no model, and a nonce alone does nothing; its only
+effect is that at most four nonces are outstanding at once (each lives ten minutes) and `begin` is limited to six a
+minute per peer, so a process that fills the slots can make the maintainer's own `begin` answer "busy" for up to ten
+minutes. That is a delay, not a cost, and it is the one effect no software check can prevent, because the maintainer
+and an agent running as the maintainer are the same peer to the broker. `call` and `dryrun` carry a signed approval and
+are refused before the ledger, the vendor or any suspension when it is missing or wrong. The social risk remains: a
+maintainer who touches the key for a prompt an agent started has approved it, which is why the full request is shown on
+the terminal before the touch.
+
 ### Design points settled on 2026-10-31
 
 The builds of phases 1, 2 and 5 left about 30 smaller design points open (issues #256, #270 and #273). The maintainer

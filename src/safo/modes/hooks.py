@@ -197,6 +197,10 @@ class EventScan:
         self.referenced: set[str] = set()
         self.deadline = deadline
 
+    def _tick(self) -> None:
+        if time.monotonic() > self.deadline:
+            raise TimeoutError("the event could not be checked in time")
+
     def feed(self, chunk: bytes) -> None:
         from safo import geminibrief  # deferred: it loads the Gemini mode, which the guard's entry must not at import
 
@@ -227,6 +231,8 @@ class EventScan:
                     self.conceal and "printf" in view and re.search(r"printf\s+-v\b", view) is not None
                 ):
                     self.hit = True
+            if geminibrief.has_route_hint(view) and geminibrief.broker_module_route(view.splitlines(), self._tick):
+                self.hit = True  # the broker client module run directly (#299), like a paid word
             if not self.capped:
                 if "=" in view:
                     self.assigned.update(m.group(1) for m in geminibrief._ASSIGNED.finditer(view))
