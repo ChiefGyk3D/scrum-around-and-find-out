@@ -697,7 +697,7 @@ and generator ones; the generator program folders are scanned for anything the a
 is not a known interpreter has every argument looked at, and an argument that cannot be placed goes to a human. Polkit
 action policy files are read too: a default of `yes` for any class of user is a finding, and a value or markup that
 cannot be read goes to a human. If the sudoers database is configured with a source other than local files, the `sudo`
-check fails closed. Files are opened without moving their access time where the kernel allows it. Every login that maps to the account's uid is judged, in the group, sudoers and polkit checks and for the credential. If
+check fails closed. Files and folders are opened without moving their access time where the kernel allows it (the owner and root); where it is refused, reading or listing may update an access time. The checks change no file contents and run no program, but they are not claimed to be free of every filesystem side effect. Every login that maps to the account's uid is judged, in the group, sudoers and polkit checks and for the credential. If
 the name service switch file in `/etc` gives the passwd, group, shadow, gshadow or initgroups database a source other than `files` or
 `compat` (for example `ldap`, `sss`, `nis`, `systemd`), or any file sits in `/etc/userdb`, `/run/userdb` or
 `/run/systemd/userdb` (systemd user records, home-directory users), every account check fails closed, because accounts and

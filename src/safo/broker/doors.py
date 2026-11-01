@@ -5,8 +5,9 @@ precondition").
 The whole broker design assumes the maintainer's account has no way to become root. Each check here looks for one kind
 of door and returns ONE finding: `pass`, `warn` or `fail`, with one plain sentence.
 
-* **Read-only.** Files are opened read-only without following a final symbolic link; directories are listed with
-  `scandir`; metadata comes from `lstat`. No program is run (neither the sudo listing command nor the package
+* **Read-only.** Files are opened read-only without following a final symbolic link; directories are listed through a
+  descriptor opened without moving the access time where the kernel allows it (otherwise listing may update it);
+  metadata comes from `lstat`. No program is run (neither the sudo listing command nor the package
   manager), no privilege is requested, and
   nothing is written. The command is root-only for reasons of its own (it reads root-owned files); these checks need
   nothing a root-owned read does not already give them, and a path that cannot be read is a **fail**, never a pass.
@@ -235,6 +236,20 @@ def _folder_state(path: Path, what: str) -> bool:
     return True
 
 
+def _listdir(path: Path | str) -> list[str]:
+    """Names in a folder, listed through a descriptor opened with O_NOATIME where the kernel allows it (the owner and
+    root), so listing does not move the folder's access time; otherwise a plain listing, which may."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    try:
+        fd = os.open(path, flags | getattr(os, "O_NOATIME", 0))
+    except PermissionError:
+        fd = os.open(path, flags)
+    try:
+        return os.listdir(fd)
+    finally:
+        os.close(fd)
+
+
 class _Scan:
     """A bounded, read-only walk that never follows a symbolic link and records what it could not read."""
 
@@ -249,24 +264,24 @@ class _Scan:
         while stack:
             folder = stack.pop()
             try:
-                with os.scandir(folder) as handle:
-                    entries = list(handle)
+                names = _listdir(folder)
             except OSError:
                 self.problems.append(f"{_show(folder)} cannot be read")
                 continue
-            for entry in entries:
+            for name in names:
                 self.count += 1
                 if self.count > self.limit:
                     self.limited = True
                     return
+                entry_path = os.path.join(folder, name)
                 try:
-                    info = entry.stat(follow_symlinks=False)
+                    info = os.lstat(entry_path)
                 except OSError:
-                    self.problems.append(f"{_show(entry.path)} cannot be examined")
+                    self.problems.append(f"{_show(entry_path)} cannot be examined")
                     continue
-                yield entry.path, info
+                yield entry_path, info
                 if stat.S_ISDIR(info.st_mode):
-                    stack.append(entry.path)
+                    stack.append(entry_path)
 
     def failure(self, what: str) -> str | None:
         if self.limited:
@@ -324,7 +339,7 @@ def _check_nsswitch(door: DoorPaths, trust: int) -> None:
     for folder in door.userdb_dirs:
         if _folder_state(folder, f"user record folder {_show(folder)}"):
             try:
-                names = os.listdir(folder)
+                names = _listdir(folder)
             except OSError:
                 raise _Problem(f"user record folder {_show(folder)} cannot be read (it cannot be listed)") from None
             if names:
@@ -427,7 +442,7 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
             info = os.lstat(door.sudoers_d)
             if info.st_uid != trust or info.st_mode & 0o022:
                 raise _Problem("the sudoers directory cannot be read (it is not owned by root or others can write it)")
-            for name in sorted(os.listdir(door.sudoers_d)):
+            for name in sorted(_listdir(door.sudoers_d)):
                 if "." in name or name.endswith("~"):  # sudo does not read these
                     continue
                 sources.append(
@@ -878,6 +893,14 @@ SINGLE_KEYS = frozenset({"StandardInput", "StandardInputText", "StandardInputDat
 EXEC_PREFIXES = "-:+!@"
 
 
+def _unquote(value: str) -> str:
+    """A value as systemd reads a plain scalar: surrounding white space and one pair of matching quotes removed."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+        value = value[1:-1].strip()
+    return value
+
+
 def _assignments(text: str, section: str) -> list[tuple[str, str]]:
     """The assignments of one section, in order. Anything outside that section is ignored, as systemd ignores it."""
     found: list[tuple[str, str]] = []
@@ -892,8 +915,10 @@ def _assignments(text: str, section: str) -> list[tuple[str, str]]:
             continue
         key, _, value = line.partition("=")
         key, value = key.strip(), value.strip()
-        if key in ("User", "PermissionsStartOnly") or key in UNIT_KEYS or key in HOME_KEYS or key in STDIN_KEYS:
-            found.append((key, value))
+        if key in UNIT_KEYS:
+            found.append((key, value))  # command lines keep their quoting: the command parser reads it
+        elif key in ("User", "PermissionsStartOnly") or key in HOME_KEYS or key in STDIN_KEYS:
+            found.append((key, _unquote(value)))
     return found
 
 
@@ -923,7 +948,7 @@ def _unit_hits(
             merged[key] = []
         else:
             merged.setdefault(key, []).append(value)
-    root_unit = socket or user in ("", "root", "0") or bool(re.search(r"[%$]", user))
+    root_unit = socket or user in ("", "root", "0") or bool(re.search(r"[%$\"'\\]", user))
     for key, values in merged.items():
         for value in values:
             if key in UNIT_KEYS:
@@ -1012,7 +1037,7 @@ def _unit_findings(
     for folder in door.unit_dirs:
         if not _folder_state(folder, f"unit folder {_show(folder)}"):
             continue
-        for name in sorted(os.listdir(folder)):
+        for name in sorted(_listdir(folder)):
             path = folder / name
             if name.endswith(".d"):
                 label = name[:-2]
@@ -1039,7 +1064,7 @@ def _unit_findings(
         seen: set[str] = set()
         for dname, dpath in dropdirs:  # in folder priority order: the first file of a name is the effective one
             if any(_applies(n, dname) for n in names):
-                for conf in sorted(os.listdir(dpath)):
+                for conf in sorted(_listdir(dpath)):
                     if not conf.endswith(".conf"):
                         continue
                     if conf in seen:
@@ -1090,6 +1115,31 @@ def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], flo
     return None
 
 
+def _cron_file_hit(
+    path: Path, info: os.stat_result, who: _Who, cache: dict[str, os.stat_result | None], floor: str
+) -> str | None:
+    """A cron file. cron follows a link, so a link is resolved: its target and every folder on the way must be out of
+    the account's reach, and a link that does not lead to a regular file goes to a human."""
+    real = path
+    if stat.S_ISLNK(info.st_mode):
+        resolved = os.path.realpath(path)
+        try:
+            regular = stat.S_ISREG(os.stat(resolved).st_mode)
+        except OSError:
+            regular = False
+        if not regular:
+            return f"is a link that does not lead to a regular file; {HUMAN}"
+        if _in_home(resolved, who):
+            return f"is a link to {_show(resolved)}, under the account's home"
+        writable = _chain_writable(str(path), who, cache, floor)
+        if writable is not None:
+            return f"is a link to {_show(resolved)}, which the account can replace through {_show(writable)}"
+        real = Path(resolved)
+    elif not stat.S_ISREG(info.st_mode):
+        return None
+    return _cron_hit(_text(real, f"cron file {_show(path.name)}", None), who, cache, floor)
+
+
 def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
     cache: dict[str, os.stat_result | None] = {}
     hits: list[str] = []
@@ -1101,15 +1151,13 @@ def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
         files = list(door.cron_files)
         for folder in door.cron_dirs:
             if _folder_state(folder, f"cron folder {_show(folder)}"):
-                files.extend(folder / n for n in sorted(os.listdir(folder)))
+                files.extend(folder / n for n in sorted(_listdir(folder)))
         for path in files:
             try:
                 info = os.lstat(path)
             except FileNotFoundError:
                 continue
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                continue
-            found = _cron_hit(_text(path, f"cron file {_show(path.name)}", None), who, cache, floor)
+            found = _cron_file_hit(path, info, who, cache, floor)
             if found:
                 hits.append(f"cron file {_show(path.name)} {found}")
     except _Problem as problem:
@@ -1168,7 +1216,7 @@ def _packages(door: DoorPaths, trust: int, who: _Who) -> set[str]:
     reach = _chain_writable(str(door.dpkg_info), who, {}, str(door.chain_floor))
     if reach is not None:
         raise _Problem(f"the package database cannot be trusted (the account can write {_show(reach)})")
-    for name in sorted(os.listdir(door.dpkg_info)):
+    for name in sorted(_listdir(door.dpkg_info)):
         if not name.endswith(".list"):
             continue
         for line in _text(door.dpkg_info / name, "a package file list", trust).splitlines():

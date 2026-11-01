@@ -1978,3 +1978,102 @@ def test_hardening_a_link_to_a_folder_cycle_does_not_hang(w: World) -> None:
     (data / "self").symlink_to(data)
     put(w.units / "a.service", unit(f"/bin/true {data}"))
     assert status(w.run(), "jobs") == "fail"
+
+
+# -- hardening, round 6 ------------------------------------------------------------
+
+
+def test_hardening_a_cron_link_to_a_file_in_the_home_fails(w: World) -> None:
+    target = put(w.home / "evil-crontab", "17 * * * * root /bin/true\n")
+    (w.cron_d / "evil").symlink_to(target)
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "home" in found["jobs"].text
+
+
+def test_hardening_a_cron_link_to_a_writable_folder_fails(w: World) -> None:
+    writable = folder(w.t / "wr", 0o777)
+    target = put(writable / "tab", "# nothing\n")
+    (w.cron_d / "evil").symlink_to(target)
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_cron_link_to_a_safe_file_is_read_like_the_file(w: World) -> None:
+    safe = put(w.t / "lib" / "tab", "17 * * * * root /bin/true\n")
+    (w.cron_d / "ok").symlink_to(safe)
+    assert status(w.run(), "jobs") == "pass"
+    script = put(w.t / "bin" / "s.sh", "#!/bin/sh\n", 0o666)
+    bad = put(w.t / "lib" / "bad", f"17 * * * * root {script}\n")
+    (w.cron_d / "bad").symlink_to(bad)
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_cron_link_that_does_not_resolve_or_is_not_a_file_needs_a_human(w: World) -> None:
+    (w.cron_d / "dangling").symlink_to(w.t / "nowhere")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+    (w.cron_d / "dangling").unlink()
+    (w.cron_d / "dir").symlink_to(folder(w.t / "somedir"))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_a_linked_cron_file_in_the_file_list_is_followed(w: World) -> None:
+    target = put(w.home / "evil-crontab", "# nothing\n")
+    w.crontab.unlink()
+    w.crontab.symlink_to(target)
+    assert status(w.run(), "jobs") == "fail"
+
+
+@pytest.mark.parametrize("value", ['"root"', "'root'", ' "root" ', "'0'", '"0"', '"ro\\ot"', '"root', "root'"])
+def test_hardening_quoted_user_values_are_read_as_systemd_reads_them(w: World, value: str) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", f"[Service]\nUser={value}\nExecStart={payload}\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+@pytest.mark.parametrize("value", ['"nobody"', "'nobody'", " nobody "])
+def test_hardening_a_quoted_other_user_is_still_not_root(w: World, value: str) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", f"[Service]\nUser={value}\nExecStart={payload}\n")
+    assert status(w.run(), "jobs") == "pass"
+
+
+def test_hardening_other_quoted_unit_values_are_unquoted(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    put(w.units / "a.service", f'[Service]\nUser="nobody"\nExecStart=/bin/true\nEnvironmentFile="{w.home}/env"\n')
+    assert status(w.run(), "jobs") == "fail"
+    put(w.units / "a.service", f'[Service]\nUser="nobody"\nPermissionsStartOnly="true"\nExecStartPre={payload}\n')
+    assert status(w.run(), "jobs") == "fail"
+    put(w.units / "a.service", f'[Service]\nStandardInput="file:{w.home}/in"\nExecStart=/bin/true\n')
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_listing_folders_leaves_their_access_times_alone(w: World) -> None:
+    folders = [w.etc, w.polkit, w.cron_d, w.units, w.sudoers_d, w.usr]
+    put(w.etc / "f", "x")
+    for d in folders:
+        os.utime(d, ns=(10**9, 2 * 10**9))
+    before = [os.stat(d).st_atime_ns for d in folders]
+    w.run()
+    assert [os.stat(d).st_atime_ns for d in folders] == before
+
+
+def test_hardening_folder_listings_ask_for_no_access_time_update_and_fall_back(
+    w: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    noatime = getattr(os, "O_NOATIME", 0)
+    if not noatime:
+        pytest.skip("this platform has no O_NOATIME")
+    real_open = os.open
+    seen: list[int] = []
+
+    def open_folder(path: Any, flags: int, *args: Any, **kw: Any) -> int:
+        if str(path).startswith(str(w.t)) and flags & os.O_DIRECTORY:
+            seen.append(flags)
+            if flags & noatime:
+                raise PermissionError(errno.EPERM, "refused")
+        return real_open(path, flags, *args, **kw)
+
+    monkeypatch.setattr(os, "open", open_folder)
+    found = w.run()
+    assert any(f & noatime for f in seen) and any(not f & noatime for f in seen)
+    assert status(found, "jobs") == "pass"
