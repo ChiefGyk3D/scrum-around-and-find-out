@@ -360,7 +360,88 @@ def test_the_oversized_event_scan_obeys_its_deadline_inside_the_route_detector(m
         scan.feed(b"broker python3 -m pytest\npython3 -m ruff check")
 
 
-def test_too_many_candidate_lines_are_refused_unread() -> None:
-    lines = ["broker python3 -m x"] * (geminibrief.MAX_ROUTE_LINES + 1)
-    assert geminibrief.broker_module_route(lines) is True
-    assert geminibrief.broker_module_route(["python3 -m x"] * (geminibrief.MAX_ROUTE_LINES + 1)) is False
+# -- every cap fails closed (#299) -------------------------------------------------------------------------------------
+# A bound on a line or on a count in a denylist detector must refuse what it cannot read, never skip it. Each case below
+# is a cap, one past it, and an ordinary input that must still pass.
+
+MODULE_ENTRY = "python3 -I -m " + MODULE
+
+
+def test_a_line_over_the_line_cap_that_could_hold_the_pattern_is_refused_and_ordinary_code_is_not() -> None:
+    cap = geminibrief.LINE_CAP
+    at_cap = "python3 " + "x" * (cap - len("python3 "))
+    assert len(at_cap) == cap and geminibrief.broker_module_route([at_cap]) is False
+    assert geminibrief.broker_module_route([at_cap + "x"]) is True  # one past the cap, an interpreter named: unread
+    assert geminibrief.broker_module_route(["print(1)  # " + "x" * cap]) is False  # ordinary long code: no pieces
+    assert geminibrief.broker_module_route(["x" * cap + " broker"]) is True
+    assert geminibrief.broker_module_route(["import os\n" * 10, "y = 1  # " + "z" * (cap * 3)]) is False
+
+
+@pytest.mark.parametrize("prefix_length", [301, 1001, 3000])
+def test_a_long_prefix_before_the_module_entry_or_a_built_module_is_still_denied(prefix_length: int) -> None:
+    prefix = ("echo " + "x " * prefix_length)[:prefix_length]
+    for tail in (
+        "&& " + MODULE_ENTRY + " --model m",  # the entry
+        "&& python3 -I -m $M --model m",  # a module built at run time (safo and broker are named below)
+        "&& cd src/safo/broker && python3 -I client.py",
+    ):
+        line = f"{prefix} {tail}"
+        assert len(line) < geminibrief.LINE_CAP
+        assert "gemini-paid" in rules("safo broker note\n" + line + "\n"), (prefix_length, tail)
+        assert geminibrief.shell_command_class("# safo broker\n" + line) is not None, (prefix_length, tail)
+
+
+@pytest.mark.parametrize("prefix_length", [301, 1001, 3000])
+def test_an_interpreter_far_before_the_expanded_module_word_is_still_found(prefix_length: int) -> None:
+    line = "safo broker python3 -I " + "-W ignore " * (prefix_length // 10) + "-m $M --model m"
+    assert geminibrief.broker_module_route([line]) is True
+    plain = "safo broker python3 -I " + "-W ignore " * (prefix_length // 10) + "-m pytest tests"
+    assert geminibrief.broker_module_route([plain]) is False  # the same line with a plain module is fine
+
+
+def test_an_import_list_longer_than_the_old_bound_still_ends_in_the_client_name() -> None:
+    names = ", ".join(f"n{i}" for i in range(300))
+    command = f"python3 -c 'from safo.broker import {names}, client'"
+    assert len(command) < geminibrief.LINE_CAP and len(names) > 301
+    assert geminibrief.shell_command_class(command) == geminibrief.SHELL_BROKER_MODULE
+    assert "gemini-paid" in rules(command + "\n")
+    other = f"python3 -c 'from safo.broker import {names}, admin'"
+    assert geminibrief.shell_command_class(other) is None  # the same list without the client name
+
+
+def test_the_candidate_cap_is_one_past_it_refused_and_exactly_it_is_read() -> None:
+    cap = geminibrief.MAX_ROUTE_LINES
+    filler = ["python3 -m pytest tests"] * cap
+    assert geminibrief.broker_module_route(filler) is False  # exactly the cap: read, and there is nothing in it
+    assert geminibrief.broker_module_route([*filler, "python3 -m pytest tests"]) is True  # one past: unread, refused
+    assert geminibrief.broker_module_route(["print(1)"] * (cap * 3)) is False  # lines with no hint are not counted
+
+
+def test_the_real_entry_among_more_candidate_lines_than_the_cap_is_denied() -> None:
+    filler = ["python3 -m pytest tests"] * (geminibrief.MAX_ROUTE_LINES + 5)
+    command = "\n".join([*filler, MODULE_ENTRY])
+    assert geminibrief.shell_command_class(command[: geminibrief.SHELL_CAP]) is not None
+    assert "gemini-paid" in rules(command + "\n")
+    pieces = "\n".join([*filler, "python3 -I -m $1$2", "set -- safo.broker. client"])
+    assert "gemini-paid" in rules(pieces + "\n")
+
+
+def test_split_pieces_are_candidates_on_the_joined_form_not_the_raw_one() -> None:
+    """Lines whose hint appears only after the plus signs and the dot segments are removed still count as candidates."""
+    split = ['n = "br" + "oker"'] * (geminibrief.MAX_ROUTE_LINES + 1)
+    assert geminibrief.broker_module_route(split) is True
+    dotted = ["x = 'src/./safo/../safo/' + 'br' + 'oker'"] * (geminibrief.MAX_ROUTE_LINES + 1)
+    assert geminibrief.broker_module_route(dotted) is True
+    assert geminibrief.broker_module_route(['n = "ab" + "cd"'] * (geminibrief.MAX_ROUTE_LINES + 1)) is False
+
+
+def test_no_route_pattern_has_a_length_bound_that_could_skip_a_match() -> None:
+    """A `{n,m}` bound on a route pattern is a place the pattern silently stops matching; the patterns are linear
+    without one (possessive flag clusters, one-space-squeezed input), so none is allowed."""
+    import re
+
+    bound = re.compile(r"\{\d*,\d+\}")
+    patterns = {n: p for n, p in vars(geminibrief).items() if n.startswith("_BM_") and isinstance(p, re.Pattern)}
+    assert len(patterns) >= 10, "something was collected"
+    assert [n for n, p in patterns.items() if bound.search(p.pattern)] == []
+    assert bound.search("[^;]{0,300}")  # the negative case: the guard does see a bound

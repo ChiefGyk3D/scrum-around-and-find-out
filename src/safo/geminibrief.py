@@ -621,17 +621,19 @@ _BM_PY_RE = re.compile(_BM_PY)
 _BM_OPTS = r"(?:\s+(?:-[wx](?:\s*[^\s-]\S*)?|-[a-ln-vyz]\w*|--[\w-]+))*"
 # Every line is squeezed (`_compact`) before any pattern reads it, so a run of whitespace is one space and a pattern
 # never repeats whitespace twice in a row; the spans that scan forward are bounded.
-_BM_ENTRY = re.compile(r"(?<![\w-])-[a-z]*m ?=? ?" + _BM_DOT + r"(?![\w-])")
+# A flag cluster is `-` + letters other than m + `m` (the option that takes the module): the possessive repeat cannot
+# give a letter back, so a long run of letters is read once, not once per way to split it.
+_BM_ENTRY = re.compile(r"(?<![\w-])-[a-ln-z]*+m ?=? ?" + _BM_DOT + r"(?![\w-])")
 _BM_SCRIPT = re.compile(_BM_PY + _BM_OPTS + r"\s+\S*safo/broker/client\.py")
 _BM_LOCAL = re.compile(_BM_PY + _BM_OPTS + r"\s+(?:\S*/)?client\.py")  # a script named client.py, run beside the broker
-_BM_ANY_M = re.compile(r"(?<![\w-])-[a-z]*m ?=? ?(?:\w+\.)*client(?![\w.-])")  # -m whose last part is client
+_BM_ANY_M = re.compile(r"(?<![\w-])-[a-ln-z]*+m ?=? ?(?:\w+\.)*client(?![\w.-])")  # -m whose last part is client
 _BM_DYNAMIC = re.compile(r"runpy|importlib|__import__|import_module|run_module|run_path|(?<![\w-])(?:exec|eval)\s*\(")
 _BM_IMPORT = re.compile(
     r"(?<![\w.-])(?:import|from)\s+" + _BM_DOT + r"(?![\w-])"
-    r"|(?<![\w.-])from\s+safo\.broker\s+import\s+[^;\n]{0,300}?(?<![\w-])client(?![\w-])"
+    r"|(?<![\w.-])from\s+safo\.broker\s+import\s+[^;\n]*?(?<![\w-])client(?![\w-])"
     r"|(?:run_module|import_module|__import__)\W*" + _BM_DOT
 )
-_BM_CODE = re.compile(r"(?<![\w-])-[a-z]*c\b|runpy|import_module|__import__|importlib|exec\s*\(|<<")
+_BM_CODE = re.compile(r"(?<![\w-])-[abd-z]*+c\b|runpy|import_module|__import__|importlib|exec\s*\(|<<")
 _BM_WORDS = (
     re.compile(r"(?<![\w-])safo(?![\w-])"),
     re.compile(r"(?<![\w-])broker(?![\w-])"),
@@ -641,7 +643,8 @@ _BM_DOTTED = re.compile(_BM_DOT + r"(?![\w-])")
 _BM_PATH = re.compile(r"safo/broker/client\.py")
 _BM_RUNTIME = re.compile(RUNTIME_FORMS.pattern + r"|`")
 _BM_FEED = re.compile(r"(?<![\w-])(?:xargs|eval|exec)(?![\w-])|(?<![\w-])-c\b")
-_BM_EXPANDED = re.compile(_BM_PY + r"[^;|&\n]{0,300}?(?<![\w-])-[a-z]*m ?[^\s;|&]{0,200}[$`{]")
+_BM_MFLAG = re.compile(r"-[a-ln-z]*+m")  # a flag cluster that ends in m, the whole word
+_BM_EXPANSION = "$`{"
 _BM_OPTION = re.compile(r"--(?:max-usd|max-output-tokens|quote|quoted-at|job)(?![\w-])")
 
 
@@ -665,6 +668,31 @@ def _flat_paths(v: str) -> str:
     return v
 
 
+def _expanded(v: str) -> bool:
+    """An interpreter word and, after it in the same command segment, `-m` whose module word holds an expansion
+    (`python3 -I -m $1$2`). Read word by word: no span between the interpreter and the flag is bounded, so a long
+    prefix cannot push the interpreter out of reach."""
+    for segment in re.split(r"[;|&]", v):
+        found = _BM_PY_RE.search(segment)
+        if found is None:
+            continue
+        words = segment[found.end() :].split(" ")
+        for i, word in enumerate(words):
+            if not word.startswith("-") or word.startswith("--"):
+                continue
+            cut = next((j for j, c in enumerate(word) if c in _BM_EXPANSION), -1)
+            if cut >= 0 and _BM_MFLAG.fullmatch(word[:cut]):
+                return True  # `-m$M`
+            if (
+                cut < 0
+                and _BM_MFLAG.fullmatch(word)
+                and i + 1 < len(words)
+                and any(c in words[i + 1] for c in _BM_EXPANSION)
+            ):
+                return True  # `-m $M`
+    return False
+
+
 def _broker_module_line(v: str) -> bool:
     py = bool(re.search(_BM_PY, v) or "runpy" in v)
     if _BM_ENTRY.search(v) or _BM_SCRIPT.search(v) or _BM_IMPORT.search(v):
@@ -675,43 +703,50 @@ def _broker_module_line(v: str) -> bool:
         return True  # the name beside xargs, eval, a variable, -c
     if py and _BM_PATH.search(v) and _BM_FEED.search(v):
         return True
-    return bool(_BM_EXPANDED.search(v) and _BM_OPTION.search(v))
+    return bool(_BM_OPTION.search(v) and _expanded(v))
 
 
 MAX_ROUTE_LINES = 2000  # candidate lines read per brief or command; more than this is refused unread
+# Every line rule needs one of these on the line once its pieces are joined (a plus sign between strings, dot and parent
+# segments of a path are removed first), so a line without any of them cannot hold the pattern.
 _ROUTE_HINTS = (
     "broker",
     "client",
     "python",
     "runpy",
     "safo",
-    "import",
+    "importlib",
+    "__import__",
+    "import_module",
+    "run_",
     "exec",
     "eval",
-)  # every line rule needs one of these on the line
+)
+_LONG_LINE_HINTS = ("broker", "python", "runpy")  # a line over LINE_CAP with one of these could hold the pattern
 
 
 def broker_module_route(views: Sequence[str], tick: Callable[[], None] | None = None) -> bool:
     """True when these lines (cleaned lower-case views, one per line, of a brief or of one Bash command) run the broker
-    client module directly or build the command that would, so that it cannot be read. Bounded work: a line over
-    LINE_CAP, or more than MAX_ROUTE_LINES candidate lines, is refused unread when the broker is named; each line is
-    squeezed before it is read; `tick` is called once per line and once per whole-text rule (it raises when the guard
-    deadline has passed)."""
+    client module directly or build the command that would, so that it cannot be read. Every bound fails closed: a
+    line over LINE_CAP that could hold the pattern, or more than MAX_ROUTE_LINES candidate lines, is refused unread.
+    Each line is squeezed and its path read the short way before it is judged; `tick` is called once per line and once
+    per whole-text rule (it raises when the guard deadline has passed)."""
     step = tick if tick is not None else (lambda: None)
-    whole = "\n".join(views)
-    if "broker" in whole and any(len(v) > LINE_CAP for v in views):
-        return True  # a long line is not read; naming the broker beside one is refused rather than guessed at
-    candidates = [v for v in views if any(h in v for h in _ROUTE_HINTS)]
-    if len(candidates) > MAX_ROUTE_LINES:
-        return "broker" in whole
     step()
     short: list[str] = []
-    for v in candidates:
+    for v in views:
         step()
-        flat = _flat_paths(_compact(v))
-        short.append(flat)
-        if _broker_module_line(flat):
-            return True
+        if len(v) > LINE_CAP:
+            if any(h in v for h in _LONG_LINE_HINTS):
+                return True  # not read, and it could hold the pattern: refused
+            continue
+        flat = _flat_paths(_compact(_strip(v)))
+        if any(h in flat for h in _ROUTE_HINTS):
+            short.append(flat)
+            if len(short) > MAX_ROUTE_LINES:
+                return True  # more candidates than are read: refused, never skipped
+            if _broker_module_line(flat):
+                return True
     step()
     whole = "\n".join(short)
     if "broker" in whole and any(_BM_ANY_M.search(v) for v in short):
@@ -720,7 +755,7 @@ def broker_module_route(views: Sequence[str], tick: Callable[[], None] | None = 
     if _BM_WORDS[0].search(whole) and _BM_DYNAMIC.search(whole) and (_BM_PY_RE.search(whole) or "runpy" in whole):
         return True  # an import decided at run time, in a command that names safo: the name may be built from parts
     step()
-    if all(w.search(whole) for w in _BM_WORDS[:2]) and any(_BM_EXPANDED.search(v) for v in short):
+    if all(w.search(whole) for w in _BM_WORDS[:2]) and any(_expanded(v) for v in short):
         return True  # `python3 -m $1$2` while `safo` and `broker` are named: the module is built at run time
     step()
     return "broker" in whole and any(_BM_LOCAL.search(v) for v in short)  # `cd src/safo/broker && python3 client.py`
