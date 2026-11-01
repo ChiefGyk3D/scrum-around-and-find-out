@@ -13,7 +13,7 @@ Commands: `tick` (a timer, every ten seconds) runs `check` and then `refresh` on
 `check` (no DNS) compares the live table with the reviewed ruleset and the set with
 the hosts view, and re-applies the whole table in one transaction when it is missing, changed or emptied from outside;
 `refresh`, `check` and `tick` run one at a time under a lock and `refresh` runs the same check first, so a failed lookup
-cannot leave a removed table removed. `load` installs the ruleset and an empty hosts view. `refresh` (a minute after the last one) resolves the
+cannot leave a removed table removed. `load` installs the ruleset and an empty hosts view. `refresh` resolves the
 vendor host, validates every address, and re-applies the whole table with the new set in ONE nft transaction (so a table
 that was removed or replaced from outside is rebuilt, and the set is never half-updated), then rewrites the hosts view
 the broker unit bind-mounts over /etc/hosts. `unload` removes the table. `render` prints the ruleset for review.
@@ -328,7 +328,7 @@ def live_problem(listing: str | None, *, service_uid: int, mode: str, addresses:
     if not lines or lines[0] != f"table inet {TABLE} {{" or lines[-1] != "}":
         return "the table header is not the reviewed one"
     objects = sorted(f"{m[1]} {m[2]}" for m in OBJECT_LINE.finditer(text))
-    if objects != sorted([f"chain out", f"set {SET}"]):
+    if objects != sorted(["chain out", f"set {SET}"]):
         return "the table holds an object that is not the reviewed set and chain"
     chain = re.search(r"^\tchain out \{\n(.*?)^\t\}$", text, re.MULTILINE | re.DOTALL)
     if chain is None or [x.strip() for x in chain[1].splitlines() if x.strip()] != expected_chain(service_uid, mode):
@@ -366,7 +366,7 @@ def ensure(config: Config, *, lister: Lister, nft: Nft, hosts_path: Path, servic
 
 
 def view_is_fresh(hosts_path: Path, *, now: float) -> bool:
-    """True when the hosts view was written less than REFRESH_AFTER seconds ago (a missing or future-dated one is not)."""
+    """True when the hosts view was written less than REFRESH_AFTER seconds ago (missing or future-dated: not)."""
     try:
         age = now - hosts_path.stat().st_mtime
     except OSError:

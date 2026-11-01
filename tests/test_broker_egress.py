@@ -638,13 +638,13 @@ def test_the_addresses_a_hosts_view_names_are_read_back_for_the_restore() -> Non
     )  # nothing invalid is trusted
 
 
-# ---- persistence: a removal or change from outside is noticed and undone ----------------------------------------------
+# ---- persistence: a removal or change from outside is noticed and undone -------------------------------------------
 
 SUID = 1234
 
 
 def listing(*, chain: list[str] | None = None, addrs: Sequence[str] = GOOD, extra: str = "", mode: str = "drop") -> str:
-    """The text `nft list table` prints for the reviewed table (counter values and expiry times vary and are ignored)."""
+    """The text `nft list table` prints for the reviewed table (counters and expiry times vary and are ignored)."""
     rules = chain if chain is not None else egress.expected_chain(SUID, mode)
     rules = [
         r.replace("counter accept", "counter packets 3 bytes 180 accept").replace(
