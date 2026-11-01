@@ -70,10 +70,10 @@ UNIT_NAMES = (
 )
 EGRESS_RULES_REL = "packaging/nftables/safo-broker.nft"
 EGRESS_HELPER = "/usr/local/sbin/safo-broker-egress"
-# The staged tree is tried in a transient systemd sandbox: the service user, no network, private IPC and /tmp, a read-only
-# file system, and empty in-memory directories where the live state and the root-owned config would be. It can see and
-# change nothing the running broker owns.
-# begin sandbox paths (the only place besides the unit policy that names the live state directory: it is hidden, not used)
+# The staged tree is tried in a transient systemd sandbox: the service user, no network, private IPC and /tmp, a
+# read-only file system, and empty in-memory directories where the live state and the root-owned config would be. It
+# can see and change nothing the running broker owns.
+# begin sandbox paths (the one place besides the unit policy that names the live state directory: hidden, not used)
 STATE_DIR = "/var/lib/safo-broker"
 CONFIG_DIR = "/etc/safo"
 SELF_TEST_PROPERTIES = (
