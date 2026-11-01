@@ -887,7 +887,11 @@ def test_the_self_test_runs_in_a_transient_sandbox_as_the_service_user_when_root
         assert flag in as_root
     props = sandbox_props(as_root)
     for wanted in (
-        f"User={install.SERVICE_USER}",
+        "DynamicUser=yes",
+        "PrivatePIDs=yes",
+        "RestrictNamespaces=yes",
+        "LockPersonality=yes",
+        "MemoryDenyWriteExecute=yes",
         "PrivateNetwork=yes",
         "PrivateTmp=yes",
         "PrivateDevices=yes",
@@ -900,6 +904,34 @@ def test_the_self_test_runs_in_a_transient_sandbox_as_the_service_user_when_root
     assert as_root[-4:-1] == [str(py), "-I", "-c"]
     plain = install.self_test_argv(py, ("safo.broker",), as_service_user=False)
     assert plain == [str(py), "-I", "-c", "import safo.broker"]
+
+
+def live_unit_values(key: str) -> list[str]:
+    text = (Path(install.__file__).parent / "systemd" / "safo-broker.service").read_text()
+    return [line.partition("=")[2] for line in text.splitlines() if line.startswith(key + "=")]
+
+
+def test_the_sandbox_uses_a_uid_that_is_not_the_service_user() -> None:
+    props = sandbox_props(install.sandboxed(["true"]))
+    assert not any(p.startswith(("User=", "Group=")) for p in props)
+
+
+def test_the_sandbox_syscall_filter_matches_the_live_unit() -> None:
+    props = sandbox_props(install.sandboxed(["true"]))
+    wanted = [f"SystemCallFilter={v}" for v in live_unit_values("SystemCallFilter")]
+    assert wanted and [p for p in props if p.startswith("SystemCallFilter=")] == wanted
+    for key in ("SystemCallArchitectures", "SystemCallErrorNumber"):
+        assert f"{key}={live_unit_values(key)[0]}" in props
+
+
+def test_the_sandbox_hides_everything_the_live_unit_hides_and_the_credential_directories() -> None:
+    props = sandbox_props(install.sandboxed(["true"]))
+    hidden = [p for p in props if p.startswith("InaccessiblePaths=")]
+    assert len(hidden) == 1
+    paths = hidden[0].removeprefix("InaccessiblePaths=").split()
+    assert set(live_unit_values("InaccessiblePaths")[0].split()) <= set(paths)
+    for cred in ("-/run/credentials", "-/etc/credstore", "-/etc/credstore.encrypted", "-/run/credstore"):
+        assert cred in paths
 
 
 def test_the_sandbox_replaces_the_live_state_and_config_with_empty_directories() -> None:

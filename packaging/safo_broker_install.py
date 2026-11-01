@@ -76,9 +76,23 @@ EGRESS_HELPER = "/usr/local/sbin/safo-broker-egress"
 # begin sandbox paths (the one place besides the unit policy that names the live state directory: hidden, not used)
 STATE_DIR = "/var/lib/safo-broker"
 CONFIG_DIR = "/etc/safo"
+# the live unit's inaccessible set, plus every place a service credential can sit
+SELF_TEST_HIDDEN = (
+    "-/run/systemd/resolve",
+    "-/run/dbus",
+    "-/run/nscd",
+    "-/run/avahi-daemon",
+    "-/run/systemd/private",
+    "-/run/credentials",
+    "-/run/credstore",
+    "-/run/credstore.encrypted",
+    "-/etc/credstore",
+    "-/etc/credstore.encrypted",
+)
 SELF_TEST_PROPERTIES = (
-    f"User={SERVICE_USER}",
+    "DynamicUser=yes",  # a uid of its own, never the live broker's
     "PrivateNetwork=yes",
+    "PrivatePIDs=yes",  # refused by a systemd without it, which fails the self-test closed
     "PrivateIPC=yes",
     "PrivateTmp=yes",
     "PrivateDevices=yes",
@@ -90,6 +104,15 @@ SELF_TEST_PROPERTIES = (
     "NoNewPrivileges=yes",
     "CapabilityBoundingSet=",
     "RestrictAddressFamilies=AF_UNIX",
+    "RestrictNamespaces=yes",
+    "LockPersonality=yes",
+    "MemoryDenyWriteExecute=yes",
+    "SystemCallArchitectures=native",
+    "SystemCallFilter=@system-service",
+    "SystemCallFilter=~@privileged @resources",
+    "SystemCallFilter=~recvmsg recvmmsg",
+    "SystemCallErrorNumber=EPERM",
+    "InaccessiblePaths=" + " ".join(SELF_TEST_HIDDEN),
     "MemoryMax=1G",
     "RuntimeMaxSec=120",
     f"TemporaryFileSystem={STATE_DIR}:mode=0700 {CONFIG_DIR}:mode=0755",
