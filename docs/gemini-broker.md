@@ -253,6 +253,7 @@ list of checks, what they cannot see, and what it means for the guarantees if a 
   gemini-revoked-signers           root:root 0644   revoked keys (existing; may be empty; missing refuses all)
   gemini-paid-enabled              root:root 0644   the enable switch (existing; says "enabled")
   broker.yaml                      root:root 0644   caps, model allowlist, prices, allowed uids, limits, timeouts
+                                                    (written by the runbook; the same text is examples/broker.example.yaml)
   broker/                          root:root 0700
     paid-key                       root:root 0600   the encrypted credential
 /opt/safo-broker/                  root:root 0755   releases/VERSION (a venv of locked wheels plus the broker source, read-only) and the symlink current
@@ -393,8 +394,9 @@ What phase 5 puts in the tree, all testable without root and none of it run on a
   `--only-binary=:all: --require-hashes --no-deps --isolated` and every file is re-checked against the lock, the release
   is built in a staging directory with a manifest, made read-only, and activated with a rename over a temporary link.
 - `src/safo/broker/runbook.py`: the one-time root setup as full `ssh -t host 'sudo ...'` lines, each step with its blast
-  radius and rollback. The paid key is typed at a hidden prompt on the remote terminal and never appears in the text. The
-  switch is left off.
+  radius and rollback. The paid key is typed at a hidden prompt on the remote terminal and never appears in the text. A
+  step writes `/etc/safo/broker.yaml` (root-owned, mode 0644, atomically, from a here-document that asks the machine for the
+  maintainer's numeric uid with `id -u`) before the socket is enabled. The switch is left off.
 
 **Egress control for the service user.** The units alone do not limit where the service can connect, so phase 5 also
 ships an nftables table keyed on the service user, three small units and a root helper that is **not part of any
@@ -419,7 +421,7 @@ new release cannot change what root does with network-administration rights. The
 - Observe mode (log, then let through) exists to find the addresses to allow. It does **not** stop the key leaving, so it is
   not a state to run paid use in. The mode is one value in the root-owned config (`MODE=observe` or `MODE=drop`; a missing
   line means drop, and the helper reads it, not the unit). The runbook's last step creates the enable switch only after
-  the read-only preflight (`python -I -m safo.gemini_preflight --enabling`, run by root from the installed release) exits 0,
+  the read-only preflight (`/opt/safo-broker/current/venv/bin/python -I -m safo.gemini_preflight --enabling`, run by root from the installed release; `venv/bin/python` is the one interpreter the installer builds) exits 0, which also requires that `/etc/safo/broker.yaml` is root-owned, not group or other writable, loads through the service's own loader and lists an allowed uid, and that the maintainer's `broker-client.yaml` loads,
   and that preflight fails while the mode is observe. The only way past it is `--ack-observe-mode`, added by hand to that
   line after an empty observe log through a full dry run (the minimum evidence); the preflight then warns, and the runbook
   says to switch to drop after the first clean real call at the latest. Blast radius of the acknowledged path: until the
@@ -683,6 +685,7 @@ same ownership walk as the trust files; it may set `socket` and nothing else), t
 variable names the socket, because the wrapper strips the environment and a variable is the caller's to set. The user
 file holds `version: 1`, `socket`, `signing.key` and `signing.principal` (the same two settings as `gemini.yaml`),
 `image_output_dir` (an absolute path to a mode 0700 folder), `private_terms` and `reply_seconds` (10 to 900, default 240).
+A commented example that loads through `load_client_config` is `examples/broker-client.example.yaml`.
 The client opens the socket path without following a link, checks on the descriptor that it is a socket owned by root and
 not writable by everyone, and connects through `/proc/self/fd`, so the object it checked is the object it connected to;
 an account that is not root cannot put a socket there for the client to talk to.
@@ -865,7 +868,11 @@ has `cap_verified` too.
 
 ### The price table
 
-`broker.yaml` carries one entry per model, with the date the figures were read. The shape for an image model adds the
+`broker.yaml` carries one entry per model, with the date the figures were read. A complete file that loads through the
+real loader ships as `examples/broker.example.yaml` (the runbook writes the same text): its figures were read from the
+vendor pricing page on 2026-10-31 (the page says "Last updated 2026-10-30 UTC"), the vendor states no end date for the image
+prices, so its `valid_through` is the date by which you must read the pages again. The client side has
+`examples/broker-client.example.yaml`. The shape for an image model adds the
 vendor-stated per-image figure by size, the token count for each size, the output limit and the cap flags:
 
 ```yaml

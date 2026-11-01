@@ -22,6 +22,130 @@ PASTE_KEY = "PASTE_RELEASE_PUBLIC_KEY_HERE"
 # pins this string to the installer's own constant.
 RELEASE_PYTHON = "/opt/safo-broker/current/venv/bin/python"
 
+UID_MARK = "ACCOUNT_UID_HERE"
+# The broker config, written by the "Create the broker configuration" step. This text is also examples/broker.example.yaml
+# (a test requires the two to be the same apart from the account id), and it loads through safo.broker.config. It has
+# no dollar sign, backtick or backslash, so the unquoted here-document expands only the id the step inserts.
+BROKER_CONFIG = """\
+# /etc/safo/broker.yaml: the configuration of the paid broker. Root owns it (mode 0644) and the service reads it once, at
+# start; restart the service after any change. It is root-owned because prices and caps decide what a call may cost.
+# docs/gemini-broker.md ("The price table", "What lives where") explains every part. Loaded by the broker config loader.
+server:
+  # Numeric ids of the accounts that may use the socket (required, at least one). The runbook writes the maintainer id.
+  allowed_uids: [ACCOUNT_UID_HERE]
+  # Connections open at once.
+  max_connections: 8
+  # Connections open at once from one account.
+  max_per_uid: 2
+  # Seconds to read one whole request frame.
+  read_deadline: 5.0
+  # Seconds to write the JSON reply frame.
+  write_json_deadline: 5.0
+  # Seconds one write of an image attachment may stall before the connection is dropped.
+  write_progress: 10.0
+  # Seconds for a whole image attachment frame.
+  write_frame_total: 60.0
+  # Paid vendor calls in flight at once; the design fixes this at 1 (a second call is told busy, not queued).
+  max_concurrent_calls: 1
+  # Per-account rate of begin requests per minute.
+  begin_per_minute: 6
+  # Per-account rate of call attempts per minute, failed ones included.
+  call_per_minute: 10
+  # Per-account rate of status, check and dryrun requests per minute.
+  other_per_minute: 30
+  # Vendor calls actually started per minute, from the ledger (below the limits the vendor sets).
+  max_calls_per_minute: 5
+  # Vendor calls actually started per day, from the ledger.
+  max_calls_per_day: 20
+  # Seconds a second call waits for the slot before it is told busy (0: at once).
+  slot_wait: 0.0
+  # Seconds a stop waits for calls in flight before they are recorded as interrupted.
+  grace_seconds: 150.0
+# Caps. They may lower the built-in caps and never raise them: 2.50 USD per job (testing phase) and 10 USD per month.
+caps:
+  # The most one job may reserve, in USD, as a quoted string.
+  job_usd: "2.50"
+  # The most a month may spend before every call needs an approval that says so.
+  month_usd: "10.00"
+# Seconds the broker gives one vendor call before it records the outcome as unknown (1 to 600).
+deadline_seconds: 180
+# The price table. Figures are USD per million tokens, written as quoted strings. Source: the vendor pricing page,
+# read 2026-10-31 (the page says "Last updated 2026-10-30 UTC"), and each model page for its output limit and thinking
+# levels (both say "Last updated 2026-10-29 UTC"); interim images from the image-generation page (updated 2026-10-26).
+# Nano Banana 2 and Nano Banana Pro are not listed: the design refuses them until their output cap is shown to hold.
+# Read the pages again before you change a number. A table past its valid_through date refuses every paid call.
+prices:
+  # The date the figures were read.
+  price_checked: "2026-10-31"
+  # One entry per model, named as the vendor names it in the API.
+  models:
+    # Nano Banana 2.1.
+    gemini-nano-banana-2.1:
+      # image or text.
+      kind: image
+      # The vendor states no end date for these prices; this is the date by which you must read the pages again.
+      valid_through: "2026-12-31"
+      # Input price (text, image, video) per million tokens.
+      input_per_mtok: "1.50"
+      # Text and thinking output price per million tokens.
+      text_output_per_mtok: "7.50"
+      # Image output price per million tokens.
+      image_output_per_mtok: "30.00"
+      # The per-image figure by size, as the vendor states it. It may not exceed the token count times the image rate.
+      image_usd: { "1K": "0.0336", "2K": "0.0504", "4K": "0.113" }
+      # Tokens one image of each size takes, as the vendor states them (the same sizes as image_usd).
+      image_tokens: { "1K": 1120, "2K": 1680, "4K": 3780 }
+      # The output token limit the model page documents.
+      output_token_limit: 32768
+      # The thinking levels the vendor lists for the model.
+      thinking_levels: ["minimal", "medium", "high"]
+      # The thinking level the broker sends (one of the levels above).
+      thinking_level_sent: "minimal"
+      # Text tokens reserved beside the image.
+      min_text_tokens: 512
+      # Interim images the model may make before the final one (the vendor guide says up to two); reserved in the worst case.
+      interim_images: 2
+      # false until root has seen billed output stay inside the signed limit; then the reservation uses the signed limit.
+      cap_verified: false
+      # Images per call (the policy fixes one per approval).
+      max_images: 1
+    # Nano Banana 2 Lite.
+    gemini-3.1-flash-lite-image:
+      # image or text.
+      kind: image
+      # The vendor states no end date for these prices; this is the date by which you must read the pages again.
+      valid_through: "2026-12-31"
+      # Input price (text, image, video) per million tokens.
+      input_per_mtok: "0.25"
+      # Text and thinking output price per million tokens.
+      text_output_per_mtok: "1.50"
+      # Image output price per million tokens.
+      image_output_per_mtok: "30.00"
+      # The per-image figure by size, as the vendor states it (the page lists 1K only).
+      image_usd: { "1K": "0.0336" }
+      # Tokens one image of each size takes, as the vendor states them.
+      image_tokens: { "1K": 1120 }
+      # The output token limit the model page documents.
+      output_token_limit: 4096
+      # The thinking levels the vendor lists for the model (minimal and high).
+      thinking_levels: ["minimal", "high"]
+      # The thinking level the broker sends (one of the levels above).
+      thinking_level_sent: "minimal"
+      # Text tokens reserved beside the image.
+      min_text_tokens: 512
+      # Interim images the model may make before the final one (the vendor guide says up to two); reserved in the worst case.
+      interim_images: 2
+      # false until root has seen billed output stay inside the signed limit.
+      cap_verified: false
+      # Images per call (the policy fixes one per approval).
+      max_images: 1
+"""
+
+
+def broker_config(uid: str) -> str:
+    """The config text with the account id (a number, or the shell expression the step uses) in place."""
+    return BROKER_CONFIG.replace(UID_MARK, uid)
+
 
 @dataclass(frozen=True)
 class Step:
@@ -37,12 +161,16 @@ ENV = "env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin"  # root never inherits the rem
 PAGER_ENV = "LESSSECURE=1 LESSOPEN= LESSCLOSE= TERM=$TERM"  # no shell escape, no preprocessor, a terminal that works
 
 
-def ssh(cmd: str, *, env: str = "") -> str:
-    """Wrap one remote command as a full copy-paste line. `cmd` must not contain a single quote."""
+def ssh(cmd: str, *, env: str = "", heredoc: bool = False) -> str:
+    """Wrap one remote command as a full copy-paste line. `cmd` must not contain a single quote.
+
+    A command with a here-document (`heredoc=True`) is several lines: the first begins with `ssh -t host 'sudo ...`, the
+    body and its `EOF` follow, and a line holding only the closing quote ends the command. It still pastes as one."""
     if "'" in cmd:
         msg = "a remote command may not contain a single quote"
         raise ValueError(msg)
-    return f"ssh -t host 'sudo {ENV} {env + ' ' if env else ''}{cmd}'"
+    line = f"ssh -t host 'sudo {ENV} {env + ' ' if env else ''}{cmd}"
+    return line + "\n'" if heredoc else line + "'"
 
 
 def steps(login: str) -> tuple[Step, ...]:
@@ -234,6 +362,35 @@ def steps(login: str) -> tuple[Step, ...]:
             "puts it back; check the table again after any firewall change.",
         ),
         Step(
+            "Create the broker configuration",
+            "The service refuses to start without /etc/safo/broker.yaml: it holds the account ids that may use the "
+            "socket, the caps, the price table and the call deadline. The here-document writes the file next to its "
+            "final name and renames it, so the service never sees half a file, and it refuses to replace a file that "
+            "exists. The line asks the machine for your numeric account id with id -u (a number, never a name) and "
+            "writes it into allowed_uids. The prices were read from the vendor pricing page on 2026-10-31 and "
+            "run to the valid_through dates in the file; read the page again and correct the file (as root, then "
+            "restart the service) before you rely on a figure.",
+            (
+                ssh(
+                    'sh -c "test ! -e /etc/safo/broker.yaml '
+                    "&& install -m 0644 -o root -g root /dev/stdin /etc/safo/broker.yaml.new "
+                    '&& mv /etc/safo/broker.yaml.new /etc/safo/broker.yaml" <<EOF\n'
+                    + broker_config(f"$(id -u {login})")
+                    + "EOF",
+                    heredoc=True,
+                ),
+                ssh("cat /etc/safo/broker.yaml"),
+            ),
+            "One new root-owned file, /etc/safo/broker.yaml (mode 0644, owner root), and a short-lived .new file beside "
+            "it. Nothing reads it until the service starts. The caps in it can only lower the built-in ones.",
+            (ssh("rm -f /etc/safo/broker.yaml /etc/safo/broker.yaml.new"),),
+            "Your own client config is not a root step: copy examples/broker-client.example.yaml to "
+            "~/.config/safo/broker-client.yaml (a 0700 directory, a 0600 file), replace USER with your login, and set "
+            "the key and principal under signing. The preflight in the last step checks that it loads. To change the "
+            "broker config later, edit it as root, keep it root-owned and not group or other writable, and restart "
+            "the service.",
+        ),
+        Step(
             "Enable the socket",
             "The socket starts the service on demand. The broker reads the switch file on every request, so with the "
             "switch absent it still answers status and dry run and refuses every paid call as disabled; this runbook "
@@ -283,11 +440,15 @@ def steps(login: str) -> tuple[Step, ...]:
             "the read-only "
             "preflight with --enabling as root from the installed release (isolated interpreter), and the file is "
             "written only if that exits 0. The preflight fails while the egress control is in observe mode, when the "
-            "egress config is missing or unusable, and on any other failed check. Run the dry run with a real key "
+            "egress config is missing or unusable, when /etc/safo/broker.yaml is missing, not root-owned, writable by group "
+            "or others, refused by the broker's own loader or lists no allowed uid, when your "
+            "~/.config/safo/broker-client.yaml is missing or does not load (the line looks it up in your home "
+            "directory), and on any other failed check. Run the dry run with a real key "
             "before this step.",
             (
                 ssh(
                     f'sh -c "{RELEASE_PYTHON} -I -m safo.gemini_preflight --enabling '
+                    f"--client-config $(getent passwd {login} | cut -d: -f6)/.config/safo/broker-client.yaml "
                     '&& printf \\"enabled\\\\n\\" > /etc/safo/gemini-paid-enabled '
                     '&& chmod 0644 /etc/safo/gemini-paid-enabled"'
                 ),

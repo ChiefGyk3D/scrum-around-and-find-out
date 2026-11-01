@@ -106,9 +106,11 @@ preflight below).
    FAIL allowed-signers: the file does not exist (step d of docs/gemini-enrollment.md)
    PASS switch: absent: paid use is off (the safe state until the dry run has passed)
    WARN egress-mode: the egress config does not exist (the egress steps of the runbook are not done)
+   FAIL broker-config: the file does not exist (the 'Create the broker configuration' step of the runbook)
+   FAIL client-config: the file does not exist (copy examples/broker-client.example.yaml to ~/.config/safo/broker-client.yaml)
    FAIL service-user: user safo-broker does not exist (step 2 of the root setup in docs/gemini-broker.md)
    WARN state-dir: absent: systemd creates it at the first start of the service (StateDirectory=)
-   summary: 3 pass, 4 warn, 2 fail; exit 1
+   summary: 3 pass, 4 warn, 4 fail; exit 1
    ```
 
    The two `FAIL` lines are expected until the root setup and step d are done. Run it again at the end. Blast radius:
@@ -450,6 +452,14 @@ installed release) and writes the file only if it exits 0. The preflight reports
 present (warn: the content is not read, because the broker, not the preflight, decides). Its egress-mode line reads the
 root-owned egress config and prints the mode word only: drop passes; observe warns while paid use is off and **fails**
 when the switch is being created (--enabling) or already exists; a missing or unusable config fails in that case too.
+
+Two more lines read the configuration the broker needs, and both must pass before the switch is created. `broker-config`
+checks `/etc/safo/broker.yaml` (written by the "Create the broker configuration" step of the root runbook): it exists, root
+owns it, group and others cannot write it, it loads through the same loader the service uses, and it lists at least one
+allowed uid. `client-config` checks your own `~/.config/safo/broker-client.yaml` (copy `examples/broker-client.example.yaml`,
+mode 0600, in a 0700 directory, and set the key file and the principal): it exists and loads. Root runs the last step, so that
+line passes `--client-config` with the path to your home; run the preflight yourself without the flag and it looks in your own.
+The interpreter in that line is the one the installer builds, `/opt/safo-broker/current/venv/bin/python`.
 
 The one way past the observe-mode failure is the flag `--ack-observe-mode`, which you add to that line yourself. Observe
 mode logs and accepts, so a code execution bug in the broker could send the paid key to any IPv4 address until you switch

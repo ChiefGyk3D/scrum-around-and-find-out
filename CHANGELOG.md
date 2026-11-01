@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
+  which the installer never builds (it builds `current/venv/bin/python`): the runbook, the admin docs and a new test that
+  compares every interpreter path in the runbook with the installer's own constant now agree. Nothing created the broker
+  config, so the service could not start: the runbook has a new step, before the socket is enabled, that writes
+  `/etc/safo/broker.yaml` (root-owned, mode 0644, atomically, refusing to replace a file) from a here-document with the
+  maintainer's numeric uid inserted by `id -u` at run time; `examples/broker.example.yaml` (prices from the vendor pricing
+  page read 2026-10-31, "Last updated 2026-10-30 UTC") and `examples/broker-client.example.yaml` load through the real
+  loaders in tests, and a test requires the runbook text and the example to be the same. The service and the preflight now
+  share one loader, `safo.broker.config`. The preflight has two new checks, `broker-config` (exists, root-owned, not group
+  or other writable, loads, lists an allowed uid) and `client-config` (exists, loads; new `--client-config PATH`, which
+  the enable step passes); the enable step is still last and still refuses unless the preflight passes. `docs/gemini.md`
+  and its pinned phrase now say 2.50 USD per job in the testing phase. A lock timeout while the issuer takes
+  `issued.lock` is now answered `busy` (it was `internal`). New tests the design promised: a seeded, bounded framing fuzz
+  for the protocol and the server frame reader, a static check that nothing the broker loads imports an image library
+  (allow-list over the import graph), and a free-path test with a broker socket that is absent or refuses.
 - Paid Gemini: the in-process paid path is deleted and the broker is the only way to a paid call (#287). Removed from
   `safo.gemini` and `safo gemini`: the paid branch of `ask`, the approval store and its records, the local `approve` and
   its dry run, the paid spend counter and quota line, the paid key read, the root-owned in-process paid switch, the

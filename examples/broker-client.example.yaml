@@ -1,0 +1,20 @@
+# ~/.config/safo/broker-client.yaml: how `safo gemini paid` finds the broker and signs an approval. Your account owns
+# it (mode 0600, in a 0700 directory). It holds no secret: the key file named below is a security-key handle.
+# Loaded by safo.broker.client.load_client_config. docs/gemini-broker.md ("The client") explains each key.
+# The file format version; only 1 exists.
+version: 1
+# The broker socket. Leave it out for the default. A root-owned /etc/safo/broker-client.yaml with a `socket` key wins.
+socket: /run/safo-broker.sock
+# Where the approval is signed.
+signing:
+  # The approval key file: the handle of the hardware security key (absolute path). Replace USER with your login.
+  key: /home/USER/.ssh/id_ed25519_sk
+  # The label of the enrolled key in /etc/safo/gemini-allowed-signers (docs/gemini-enrollment.md).
+  principal: yubikey-a
+# The folder images are written to. It must exist, belong to you and be mode 0700. Replace USER with your login.
+image_output_dir: /home/USER/safo-images
+# What counts as private text that must never reach the paid vendor: default (the built-in list), none, or the absolute
+# path of your own terms file.
+private_terms: default
+# Seconds to wait for the broker's reply to a call (10 to 900); the broker's own deadline is shorter.
+reply_seconds: 240
