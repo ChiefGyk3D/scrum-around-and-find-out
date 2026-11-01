@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 import safo_broker_install as install
-from installdata import SimulatedCrash, World, git, lock_text, make_key, make_wheel, make_world
+from installdata import SimulatedCrash, World, git, lock_text, make_key, make_wheel, make_world, unconfined
 from safo_broker_install import FAULT_POINTS, InstallError, Layout
 
 
@@ -504,14 +504,18 @@ def test_real_pip_refuses_an_unhashed_requirement_and_accepts_a_hashed_wheel(tmp
 
 def test_the_staged_venv_imports_the_broker_and_its_dependency(world: World) -> None:
     world.release("1.0.0")
-    hooks = world.hooks(self_test=install.default_self_test(("safo.broker", "fakedep"), use_runuser=False))
+    hooks = world.hooks(
+        self_test=install.default_self_test(("safo.broker", "fakedep"), use_runuser=False, wrap=unconfined)
+    )
     install.install("1.0.0", world.layout, hooks, apply=True, out=lambda s: None)
     assert current_name(world.layout) == "1.0.0"
 
 
 def test_a_failing_self_test_leaves_nothing_active(world: World) -> None:
     world.release("1.0.0")
-    hooks = world.hooks(self_test=install.default_self_test(("safo.broker", "not_a_module"), use_runuser=False))
+    hooks = world.hooks(
+        self_test=install.default_self_test(("safo.broker", "not_a_module"), use_runuser=False, wrap=unconfined)
+    )
     with pytest.raises(InstallError, match="self-test"):
         install.install("1.0.0", world.layout, hooks, apply=True, out=lambda s: None)
     assert current_name(world.layout) is None
@@ -761,19 +765,59 @@ def socket_v2() -> str:
     return read("safo-broker.socket").replace("SAFO Gemini broker socket", "SAFO Gemini broker socket v2")
 
 
+LIVE_STATE = "/var/lib/safo-broker"
+
+
+def state_directory_uses(source: str) -> list[str]:
+    """Every place the source names the live state directory, by literal or through the STATE_DIR constant, that is not
+    one of the three allowed: the unit policy table, the constant's own definition, and the sandbox property list and
+    wrapper (where it only becomes an empty in-memory mount and an environment value)."""
+    import ast
+
+    tree = ast.parse(source)
+    allowed_literal_roots = {"UNIT_POLICY", "STATE_DIR"}
+    allowed_name_roots = {"SELF_TEST_PROPERTIES", "sandboxed"}
+    found: list[str] = []
+
+    def target_names(node: ast.AST) -> set[str]:
+        if isinstance(node, ast.Assign):
+            return {t.id for t in node.targets if isinstance(t, ast.Name)}
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            return {node.target.id}
+        if isinstance(node, ast.FunctionDef):
+            return {node.name}
+        return set()
+
+    def visit(node: ast.AST, roots: set[str]) -> None:
+        roots = roots | target_names(node)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            v = node.value
+            if (v == LIVE_STATE or v.startswith(LIVE_STATE + "/")) and not roots & allowed_literal_roots:
+                found.append(f"line {node.lineno}: literal")
+        is_use = isinstance(node, ast.Name) and node.id == "STATE_DIR"
+        if is_use and not roots & allowed_name_roots and "STATE_DIR" not in roots:
+            found.append(f"line {getattr(node, 'lineno', 0)}: STATE_DIR")
+        for child in ast.iter_child_nodes(node):
+            visit(child, roots)
+
+    visit(tree, set())
+    return found
+
+
 def test_the_installer_source_never_names_the_state_directory() -> None:
     source = Path(install.__file__).read_text()
-    # the unit policy table must name the one writable path the units may grant; no code path uses it
-    head, _, rest = source.partition("UNIT_POLICY: dict")
-    source = head + rest.partition("FORBIDDEN_UNIT_KEYS")[2]
-    # the sandbox block hides the directory under an empty in-memory mount; it is the one other place the path appears
-    before, _, after = source.partition("# begin sandbox paths")
-    block, _, after = after.partition("# end sandbox paths")
-    assert "TemporaryFileSystem={STATE_DIR}" in block and "ReadWritePaths" not in block and "BindPaths" not in block
-    source = before + after
-    assert '"/var/lib/safo-broker"' not in source
-    assert "'/var/lib/safo-broker'" not in source
-    assert "/var/lib/safo-broker/" not in source
+    assert LIVE_STATE in source and "STATE_DIR" in source  # the scan sees the real definition, which is not erased
+    assert state_directory_uses(source) == []
+
+
+def test_the_state_directory_guard_bites_on_a_later_use_of_the_constant_or_the_literal() -> None:
+    source = Path(install.__file__).read_text()
+    via_constant = source + "\n\ndef read_live() -> bytes:\n    return (Path(STATE_DIR) / 'x').read_bytes()\n"
+    via_literal = source + "\n\ndef read_live2() -> bytes:\n    return Path('/var/lib/safo-broker/x').read_bytes()\n"
+    via_sandbox_scope_leak = source + "\n\ndef sandboxed2() -> str:\n    return STATE_DIR\n"
+    assert any("STATE_DIR" in f for f in state_directory_uses(via_constant))
+    assert any("literal" in f for f in state_directory_uses(via_literal))
+    assert state_directory_uses(via_sandbox_scope_leak) != []
 
 
 def test_apply_as_a_non_root_user_is_refused_by_the_cli(world: World) -> None:
@@ -899,6 +943,7 @@ def test_the_self_test_runs_in_a_transient_sandbox_as_the_service_user_when_root
         "ProtectSystem=strict",
         "ProtectHome=yes",
         "CapabilityBoundingSet=",
+        "RestrictAddressFamilies=none",
     ):
         assert wanted in props
     assert as_root[-4:-1] == [str(py), "-I", "-c"]
@@ -930,8 +975,8 @@ def test_the_sandbox_hides_everything_the_live_unit_hides_and_the_credential_dir
     assert len(hidden) == 1
     paths = hidden[0].removeprefix("InaccessiblePaths=").split()
     assert set(live_unit_values("InaccessiblePaths")[0].split()) <= set(paths)
-    for cred in ("-/run/credentials", "-/etc/credstore", "-/etc/credstore.encrypted", "-/run/credstore"):
-        assert cred in paths
+    assert install.SELF_TEST_HIDDEN and set(install.SELF_TEST_HIDDEN) <= set(paths)
+    assert len(paths) == len(set(paths))
 
 
 def test_the_sandbox_replaces_the_live_state_and_config_with_empty_directories() -> None:
@@ -946,6 +991,7 @@ def test_the_sandbox_replaces_the_live_state_and_config_with_empty_directories()
         mounted = tmpfs[0].removeprefix("TemporaryFileSystem=").split()
         assert any(m.split(":")[0] == install.STATE_DIR for m in mounted)
         assert any(m.split(":")[0] == install.CONFIG_DIR for m in mounted)
+        assert any(m.split(":")[0] == "/run" for m in mounted)
         assert f"STATE_DIRECTORY={install.STATE_DIR}" in argv
         assert not any(p.startswith(("ReadWritePaths=", "BindPaths=", "StateDirectory=")) for p in props)
 
@@ -964,10 +1010,30 @@ def test_the_unprivileged_self_test_gets_an_empty_state_directory_of_its_own(tmp
     release = tmp_path / "rel"
     (release / "venv" / "bin").mkdir(parents=True)
     (release / "venv" / "lib" / "python3" / "site-packages" / "safo" / "broker").mkdir(parents=True)
-    test = install.default_self_test(("yaml",), use_runuser=False, run=fake_run)
+    test = install.default_self_test(("yaml",), use_runuser=False, run=fake_run, wrap=unconfined)
     test(release)
     assert len(seen) == 2 and listing == [[], []]
     assert not Path(seen[0]["STATE_DIRECTORY"]).exists()
+
+
+def test_the_sandbox_allows_no_socket_family_at_all() -> None:
+    props = sandbox_props(install.sandboxed(["true"]))
+    assert [p for p in props if p.startswith("RestrictAddressFamilies=")] == ["RestrictAddressFamilies=none"]
+
+
+def test_without_root_and_without_a_named_wrap_the_staged_tree_is_not_run(tmp_path: Path) -> None:
+    calls: list[Any] = []
+
+    def run(argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    release = tmp_path / "rel"
+    (release / "venv" / "bin").mkdir(parents=True)
+    (release / "venv" / "lib" / "python3" / "site-packages" / "safo" / "broker").mkdir(parents=True)
+    with pytest.raises(InstallError, match="without the sandbox"):
+        install.default_self_test(use_runuser=False, run=run)(release)
+    assert calls == []
 
 
 def test_a_failed_sandboxed_self_test_fails_the_install_and_names_no_state(tmp_path: Path) -> None:

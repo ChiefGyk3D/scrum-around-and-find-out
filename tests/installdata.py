@@ -279,3 +279,8 @@ __all__ = [
     "make_world",
     "run",
 ]
+
+
+def unconfined(argv: list[str]) -> list[str]:
+    """The test seam: the staged fake release runs as itself. The installer never passes this."""
+    return argv
