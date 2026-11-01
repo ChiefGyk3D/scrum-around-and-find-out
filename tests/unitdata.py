@@ -124,7 +124,7 @@ REQUIRED_REFRESH: tuple[tuple[str, str, str], ...] = (
     ("Unit", "Requires", "safo-broker-egress.service"),
     ("Unit", "After", "safo-broker-egress.service network-online.target"),
     ("Service", "Type", "oneshot"),
-    ("Service", "ExecStart", "/usr/local/sbin/safo-broker-egress refresh"),
+    ("Service", "ExecStart", "/usr/local/sbin/safo-broker-egress tick"),
     ("Service", "TimeoutStartSec", "60s"),
     ("Service", "UMask", "0077"),
     ("Service", "NoNewPrivileges", "yes"),
@@ -152,9 +152,9 @@ REQUIRED_REFRESH: tuple[tuple[str, str, str], ...] = (
 )
 
 REQUIRED_TIMER: tuple[tuple[str, str, str], ...] = (
-    ("Timer", "OnBootSec", "1min"),
-    ("Timer", "OnUnitActiveSec", "1min"),
-    ("Timer", "AccuracySec", "10s"),
+    ("Timer", "OnActiveSec", "1s"),
+    ("Timer", "OnUnitActiveSec", "10s"),
+    ("Timer", "AccuracySec", "1s"),
     ("Timer", "Unit", "safo-broker-egress-refresh.service"),
     ("Install", "WantedBy", "timers.target"),
 )
