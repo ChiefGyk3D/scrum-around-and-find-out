@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The dispatch guard's Gemini rules (#200): a paid step needs a live approval record and a cap of at most 2 USD, and
+"""The dispatch guard's Gemini rules (#200): a paid step needs a live approval record and a cap of at most 2.50 USD, and
 nothing private goes to the free tier. These rules deny in every guard mode, warn included: the maintainer's rule is
 that no record means the guard blocks, not warns.
 """
@@ -11,7 +11,6 @@ import datetime as dt
 import json
 import re
 from collections.abc import Callable
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +20,7 @@ import yaml
 from agentsdata import agents_with
 from geminidata import MODEL, NOW, hard_timeout, pathological
 from hooksdata import agents_file, dispatch, hooks, read_log, set_mode
-from safo.gemini import Locations, approval_problem, open_store
+from safo.gemini import Locations
 from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, findings
 from safo.hooks import RULES, Verdict, check_dispatch, decide
 
@@ -76,13 +75,13 @@ def test_a_paid_step_with_a_live_record_and_a_cap_passes() -> None:
     assert rules(f"gemini: paid model={MODEL} cap=1.50 approval={OK}\n{PUBLIC}", accepts()) == []
 
 
-@pytest.mark.parametrize("cap", ["2.01", "10", "0", "-1", "abc", "nan", "inf", "1e9"])
-def test_a_cap_over_two_dollars_or_unreadable_is_blocked(cap: str) -> None:
+@pytest.mark.parametrize("cap", ["2.51", "10", "0", "-1", "abc", "nan", "inf", "1e9"])
+def test_a_cap_over_the_job_cap_or_unreadable_is_blocked(cap: str) -> None:
     assert GEMINI_PAID in rules(f"gemini: paid cap={cap} approval={OK}\n{PUBLIC}", accepts())
 
 
-def test_a_cap_of_exactly_two_dollars_passes() -> None:
-    assert rules(f"gemini: paid cap=2.00 approval={OK}\n{PUBLIC}", accepts()) == []
+def test_a_cap_of_exactly_the_job_cap_passes() -> None:
+    assert rules(f"gemini: paid cap=2.50 approval={OK}\n{PUBLIC}", accepts()) == []
 
 
 def test_a_paid_step_with_no_cap_is_blocked() -> None:
@@ -144,41 +143,24 @@ def test_the_hook_denies_a_paid_brief_with_no_record_in_warn_mode(_private_home:
     assert code == 0
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "approval record" in data["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "only through the broker" in data["hookSpecificOutput"]["permissionDecisionReason"]
     row = read_log(_private_home)[-1]
     assert row["decision"] == "deny" and GEMINI_PAID in row["rules"]
     assert brief not in json.dumps(row), "the log never holds the brief"
 
 
-def test_the_hook_allows_a_paid_brief_whose_record_is_live(
+def test_the_hook_denies_a_paid_brief_whatever_record_it_names(
     _private_home: Path, tmp_path: Path, gemini_locations: Locations
 ) -> None:
+    """The in-process approval records are gone (#287): no id, however well formed, makes a paid step pass the hook."""
     agents = agents_file(tmp_path / "agents.yaml")
-    ledger = tmp_path / "data" / "ledger.jsonl"  # in its own folder: a bare ledger.jsonl would look like a stray ledger
-    store = open_store(gemini_locations, ledger, str(gemini_locations.home / "key"), "test-key-a")
-    now = dt.datetime.now(dt.UTC)
-    record = store.issue(
-        prompt="Summarize the public advisories.",
-        model=MODEL,
-        max_usd=Decimal("1.50"),
-        job="j1",
-        quote="yes, up to 1.50",
-        quoted_at=now - dt.timedelta(minutes=1),
-        now=now,
-        ttl_minutes=60,
-        beyond_ceiling=False,
-    )
     _config_with_terms(gemini_locations, tmp_path, "none")
-    config = gemini_locations.config.read_text().replace(str(tmp_path / "ledger.jsonl"), str(ledger))
-    gemini_locations.config.write_text(config)
-    brief = f"gemini: paid model={MODEL} cap=1.50 approval={record.id}\n{PUBLIC}"
+    now = dt.datetime.now(dt.UTC)
+    brief = f"gemini: paid model={MODEL} cap=1.50 approval=abcdefgh12\n{PUBLIC}"
     code, out, _ = hooks("guard", "--agents", str(agents), home=_private_home, stdin=dispatch(prompt=brief), now=now)
     assert code == 0
-    assert GEMINI_PAID not in read_log(_private_home)[-1]["rules"]
-    assert "deny" not in out
-    assert approval_problem(store, record.id, now) is None
-    (store.folder / f"{record.id}.used").write_text("")
-    assert approval_problem(store, record.id, now) is not None
+    assert GEMINI_PAID in read_log(_private_home)[-1]["rules"]
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_the_hook_denies_private_material_to_the_free_tier(_private_home: Path, tmp_path: Path) -> None:
@@ -329,7 +311,7 @@ def test_a_brief_with_no_gemini_marker_is_untouched_by_a_past_deadline() -> None
 # -- second review round -------------------------------------------------------------------------------------------
 
 EXAMPLE_MODELS = sorted(
-    yaml.safe_load((Path(__file__).parent.parent / "examples" / "gemini.example.yaml").read_text())["paid"]
+    yaml.safe_load((Path(__file__).parent.parent / "examples" / "gemini.example.yaml").read_text())["free"]
 )
 
 
@@ -469,7 +451,7 @@ def test_the_guard_over_the_repos_own_docs_has_a_small_false_positive_ceiling() 
         if "gemini" in p.lower()
     ]
     legit = re.compile(
-        r"safo gemini (?:ask|approve)|gemini: ?(?:free|paid)|prd_paid|generativelanguage|genai|base64|xxd|openssl",
+        r"safo gemini (?:ask|approve|paid)|gemini: ?(?:free|paid)|prd_paid|generativelanguage|genai|base64|xxd|openssl",
         re.IGNORECASE,
     )
     assert len(paragraphs) >= 20, "something was collected"
@@ -619,6 +601,7 @@ PREFILTER_TRIGGERS = {
     "sdk": "import generativeai",
     "decode": "printf '\\x41' | sh",
     "conceal": "$'\\x73afo' ask --paid",
+    "broker module": "python3 -m safo.broker.client",
 }
 
 
@@ -650,6 +633,9 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL",
         # the shell denial quoted back in a brief is removed before the scan, not a detector (#264)
         "DENIAL_QUOTE",
+        # the broker client module reader (#299): gated by the "broker module" prefilter word or a risk line
+        "_BM_ENTRY", "_BM_SCRIPT", "_BM_LOCAL", "_BM_IMPORT", "_BM_CODE", "_BM_DOTTED", "_BM_PATH", "_BM_RUNTIME",
+        "_BM_FEED", "_BM_MFLAG", "_BM_OPTION", "_BM_PY_RE", "_BM_ANY_M", "_BM_DYNAMIC",
     }  # fmt: skip
     in_prefilter = {id(p) for _, p in gb.PREFILTER}
     compiled = {n: v for n, v in vars(gb).items() if isinstance(v, re.Pattern)}
@@ -1385,38 +1371,23 @@ def test_the_worker_dies_with_its_parent() -> None:
         parent.kill()
 
 
-def test_the_hook_blocks_every_paid_step_while_paid_use_is_disabled(
+def test_the_hook_blocks_every_paid_step_and_the_broker_commands_but_not_the_free_tier(
     _private_home: Path, tmp_path: Path, gemini_locations: Locations
 ) -> None:
     agents = agents_file(tmp_path / "agents.yaml")
-    ledger = tmp_path / "data" / "ledger.jsonl"
-    store = open_store(gemini_locations, ledger, str(gemini_locations.home / "key"), "test-key-a")
-    now = dt.datetime.now(dt.UTC)
-    record = store.issue(
-        prompt="Summarize the public advisories.",
-        model=MODEL,
-        max_usd=Decimal("1.50"),
-        job="j1",
-        quote="yes, up to 1.50",
-        quoted_at=now - dt.timedelta(minutes=1),
-        now=now,
-        ttl_minutes=10,
-        beyond_ceiling=False,
-    )
     _config_with_terms(gemini_locations, tmp_path, "none")
-    gemini_locations.config.write_text(
-        gemini_locations.config.read_text().replace(str(tmp_path / "ledger.jsonl"), str(ledger))
-    )
-    gemini_locations.paid_switch.unlink()
+    now = dt.datetime.now(dt.UTC)
     for brief in (
-        f"gemini: paid model={MODEL} cap=1.50 approval={record.id}\n{PUBLIC}",
+        f"gemini: paid model={MODEL} cap=1.50 approval=abcdefgh12\n{PUBLIC}",
         f"gemini: paid model={MODEL}\n{PUBLIC}",
-        f"safo gemini ask --model {MODEL} --paid --job j --cap 1.5 --approval {record.id} --material public\n{PUBLIC}",
+        f"safo gemini ask --model {MODEL} --paid --job j --cap 1.5 --approval abcdefgh12 --material public\n{PUBLIC}",
+        f"safo gemini paid --model {MODEL} --job j --prompt-file p.txt --max-usd 1\n{PUBLIC}",
+        f"safo gemini paid-dryrun --prompt-file p.txt\n{PUBLIC}",
     ):
         _, out, _ = hooks("guard", "--agents", str(agents), home=_private_home, stdin=dispatch(prompt=brief), now=now)
         data = json.loads(out)
-        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "paid use is disabled" in data["hookSpecificOutput"]["permissionDecisionReason"]
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny", brief
+        assert "only through the broker" in data["hookSpecificOutput"]["permissionDecisionReason"]
     free = f"gemini: free\n{PUBLIC}"
     _, out, _ = hooks("guard", "--agents", str(agents), home=_private_home, stdin=dispatch(prompt=free), now=now)
     assert "deny" not in out
@@ -1432,6 +1403,7 @@ BLOCKED_SAMPLES = {
     "sdk": "import generativeai\n",
     "decode": "printf '\\x41' | sh\n",
     "conceal": "$'\\x73afo' $'\\x67emini' $'\\x61sk' $'\\x2d\\x2dpaid'\n",
+    "broker module": "python3 -I -m safo.broker.client --model m --job j\n",
     "variable flow": "A=safo\nB=gemini\n$A $B ask --paid\n",
     "risk option beside an expansion command": "$X $Y ask --paid\n",
     "a wrapper with options": "env -u FOO $BIN $SUB ask --paid --model m\n",

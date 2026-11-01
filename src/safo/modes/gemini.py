@@ -1,85 +1,83 @@
 # SPDX-License-Identifier: Apache-2.0
-"""gemini: ask the free tier a public-material question, and gate every paid one (#200).
+"""gemini: ask the free tier a public-material question; reach the paid tier only through the broker (#200, #287).
 
-    safo gemini quota   --model M [--paid ...]            print the quota line and send nothing
-    safo gemini approve --model M --max-usd X --job J --quote Q --quoted-at T --prompt-file F
-                                                           print the quota line, then write one single-use approval
-    safo gemini ask     --model M --material public --prompt-file F [--paid --job J --approval ID]
-                                                           print the quota line, send ONE request, log it
+    safo gemini quota   --model M                          print the free quota line and send nothing
+    safo gemini ask     --model M --material public --prompt-file F
+                                                           print the quota line, send ONE free-tier request, log it
+    safo gemini paid    --model M --job J --prompt-file F --max-output-tokens N --max-usd X --quote Q --quoted-at T
+                                                           ONE paid call through the broker: shows the whole approval,
+                                                           asks for the touch on the security key, sends once
+    safo gemini paid-dryrun                                test the signer and the broker with a throw-away signature:
+                                                           no call, no reservation, no charge
     safo gemini keys    list | check | propose PUBKEY_FILE --label NAME
                                                            read-only: the enrolled approval keys (never edits them)
-    safo gemini usage   --amount-usd X --on-date YYYY-MM-DD --note TEXT
-                                                           add a vendor-observed spend row to the chained ledger
 
-Read docs/gemini.md. `approve` asks the maintainer's security key to SIGN his approval (a touch); run it only after he
-has said yes in his own message, and he touches the key only after reading the quota line.
+The paid path exists only through the broker (docs/gemini-broker.md): this program holds no paid key, signs nothing
+for a call itself and sends no paid request. `paid` and `paid-dryrun` are the broker client run from this command
+group; `--paid`, `--approval`, `--cap` and `approve` are recognized only so that the dispatch guard keeps reading a
+brief that names them as a paid step, and the command refuses them. Read docs/gemini.md.
 """
 
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import datetime as dt
 import os
-import re
 import sys
-from collections.abc import Callable
 from pathlib import Path
-from typing import NoReturn, TextIO
+from typing import TYPE_CHECKING, NoReturn
 
 from safo import gemini, geminisign, output
 from safo.bounded import read_bounded
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 from safo.gemini import (
-    DEFAULT_TTL_MINUTES,
-    MAX_APPROVED_PROMPT_CHARS,
     MAX_PROMPT_BYTES,
-    ApprovalStore,
+    PAID_ELSEWHERE,
     GeminiConfig,
-    Ledger,
     RefusedError,
     Request,
     ask,
     doppler_key_provider,
-    estimate_usd,
     fixed,
     load_config,
-    money,
-    open_store,
-    paid_quota,
-    prompt_binding,
     quota_line,
-    snapshot,
-    too_long,
-    usd_amount,
 )
 from safo.modes import LocalMode, register_local
 
+if TYPE_CHECKING:
+    from safo.broker import client
+
+
+PAID_ACTIONS = ("paid", "paid-dryrun")
+
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("action", choices=["quota", "approve", "ask", "keys", "usage"])
+    parser.add_argument("action", choices=["quota", "approve", "ask", "keys", "paid", "paid-dryrun"])
     parser.add_argument("keys_action", nargs="?", choices=["list", "check", "propose"], help="keys: what to do")
     parser.add_argument("keys_file", nargs="?", default="", help="keys propose: the public key file (.pub)")
     parser.add_argument("--label", default="", help="keys propose: the principal label, such as yubikey-a")
-    parser.add_argument("--amount-usd", default="", help="usage: the spend to add, in USD")
-    parser.add_argument("--on-date", default="", help="usage: the date of that spend, YYYY-MM-DD")
-    parser.add_argument("--note", default="", help="usage: where the number came from")
-    parser.add_argument("--model", default="", help="a model named in the config (not needed for keys and usage)")
-    parser.add_argument("--paid", action="store_true", help="the paid tier: needs --job and --approval")
-    parser.add_argument("--job", default="", help="the job an approval is for")
-    parser.add_argument("--approval", default="", help="the id `approve` printed")
+    parser.add_argument("--model", default="", help="a model named in the config (not needed for keys)")
     parser.add_argument("--prompt-file", default="", help="the prompt, from a file (never argv)")
-    parser.add_argument("--cap", default="", help="ask: refuse when the estimate is over this many USD (at most 2)")
     parser.add_argument("--max-output-tokens", type=int, default=0, help="a hard output limit (default: the config's)")
     parser.add_argument("--material", default="", help="ask: must be `public`; nothing private goes to Gemini")
-    parser.add_argument("--max-usd", default="", help="approve: the most this job may cost, at most 2")
-    parser.add_argument("--quote", default="", help="approve: the maintainer's message, as he wrote it")
-    parser.add_argument("--quoted-at", default="", help="approve: when he wrote it, UTC, YYYY-MM-DDTHH:MM:SSZ")
-    parser.add_argument(
-        "--ttl-minutes", type=int, default=DEFAULT_TTL_MINUTES, help="approve: how long the record lives (at most 60)"
-    )
-    parser.add_argument("--issue", default="", help="approve: the tracking issue, owner/repo#N")
+    # Recognized so the dispatch guard reads a brief that names them as a paid step; the command refuses them (#287).
+    parser.add_argument("--paid", action="store_true", help="REMOVED: the paid path is `safo gemini paid`")
+    parser.add_argument("--approval", default="", help="REMOVED: an approval is signed for one call by `paid`")
+    parser.add_argument("--cap", default="", help="REMOVED")
+    parser.add_argument("--ttl-minutes", type=int, default=0, help="REMOVED")
+    parser.add_argument("--amount-usd", default="", help="REMOVED")
+    parser.add_argument("--on-date", default="", help="REMOVED")
+    parser.add_argument("--note", default="", help="REMOVED")
+    # paid, paid-dryrun
+    parser.add_argument("--job", default="", help="paid: the job an approval is for; paid-dryrun: a label")
+    parser.add_argument("--max-usd", default="", help="paid: the most this call may cost, at most 2")
+    parser.add_argument("--quote", default="", help="paid: the maintainer's message, as he wrote it")
+    parser.add_argument("--quoted-at", default="", help="paid: when he wrote it, UTC, YYYY-MM-DDTHH:MM:SSZ")
+    parser.add_argument("--issue", default="", help="paid: the tracking issue, owner/repo#N")
+    parser.add_argument("--kind", choices=["text", "image"], default="text", help="paid: text or image")
+    parser.add_argument("--count", type=int, default=None, help="paid image: how many images (default 1)")
+    parser.add_argument("--image-size", default="", help="paid image: the size, such as 1K")
+    parser.add_argument("--aspect-ratio", default="", help="paid image: the ratio, such as 1:1 (default 1:1)")
 
 
 class BriefParseError(ValueError):
@@ -98,7 +96,7 @@ def brief_namespace(tokens: list[str]) -> argparse.Namespace:
     parser = _BriefParser(prog="safo gemini", add_help=False, allow_abbrev=False)
     add_arguments(parser)
     ns = parser.parse_args(tokens)
-    if ns.action in ("quota", "approve", "ask") and not ns.model:
+    if ns.action in ("quota", "approve", "ask", "paid") and not ns.model:
         raise BriefParseError("the following arguments are required: --model")
     if ns.action not in ("keys",) and (ns.keys_action or ns.keys_file):
         raise BriefParseError("unrecognized arguments: a word after the action")
@@ -131,129 +129,11 @@ def _request(args: argparse.Namespace) -> Request:
     return Request(
         model=args.model,
         prompt=_prompt(args),
-        tier="paid" if args.paid or args.action == "approve" else "free",
+        tier="free",
         job=args.job,
-        approval=args.approval,
+        approval="",
         max_output_tokens=args.max_output_tokens,
     )
-
-
-def _is_tty(stream: object) -> bool:
-    check = getattr(stream, "isatty", None)
-    try:
-        return bool(check()) if callable(check) else False
-    except (OSError, ValueError):
-        return False
-
-
-def _ask_line(ctx: LocalContext, stdin: TextIO, prompt: str) -> str:
-    ctx.say(prompt)
-    return stdin.readline()
-
-
-def approve_flow(
-    ctx: LocalContext,
-    args: argparse.Namespace,
-    cfg: GeminiConfig,
-    store: ApprovalStore,
-    req: Request,
-    *,
-    interactive: bool,
-    confirm: Callable[[str], str],
-) -> int:
-    """Write one approval record, but only for a person at a terminal who types the confirmation phrase.
-
-    `interactive` and `confirm` are arguments, not flags: the command line passes the real streams, and only a test can
-    pass anything else. The ceiling flag comes from the ledger here, never from the caller."""
-    if not ctx.dry_run:
-        gemini.require_paid()  # a dry run spends nothing and writes nothing, so it can still test a key
-    # One plain copy of the request and the clock, taken once: the display, the digest and the signature all come from
-    # these, never from the caller's objects again.
-    req = gemini.canonical_request(req)
-    now = gemini.plain_time(ctx.now, "now")
-    snapshot_raw = gemini.prompt_bytes(req.prompt)  # exact str only; the bytes are the single source
-    if not snapshot_raw:
-        raise ConfigError("approve needs --prompt-file: an approval covers the exact prompt that `ask` will read")
-    text = bytes.decode(snapshot_raw, "utf-8")
-    req = dataclasses.replace(req, prompt=text)
-    if len(text) > MAX_APPROVED_PROMPT_CHARS:
-        raise RefusedError(too_long(len(text)))
-    digest, size = prompt_binding(text)  # the same bytes `ask` sends, from the same file
-    line = quota_line(cfg, req, now)  # first: an approval is refused when the line cannot be produced
-    ctx.say(line)
-    amount = usd_amount(args.max_usd, "--max-usd")
-    estimate = estimate_usd(cfg, req, now)
-    if estimate > cfg.job_cap:
-        raise RefusedError(
-            f"the estimate {money(estimate)} USD is over the {money(cfg.job_cap)} USD job cap; lower the output limit"
-        )
-    if estimate > amount:
-        raise RefusedError(
-            f"the estimate {money(estimate)} USD is over the amount to be approved ({money(amount)} USD)"
-        )
-    beyond = paid_quota(cfg, snapshot(Ledger(cfg.ledger).read()), req, now).beyond
-    try:
-        quoted = dt.datetime.strptime(args.quoted_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.UTC)
-    except ValueError:
-        raise ConfigError("--quoted-at: expected the time of his message, UTC, as YYYY-MM-DDTHH:MM:SSZ") from None
-    if not interactive:
-        raise RefusedError(
-            "approve needs a person at a terminal: standard input and output must both be one. "
-            "The quota line above is what the person would be shown"
-        )
-    phrase = f"approve {req.job}"
-    ctx.say(f"quote of his message ({args.quoted_at}): {args.quote}")
-    ctx.say(f"prompt: {len(text)} characters, {size} bytes, SHA-256 {digest}")
-    ctx.say("--- the WHOLE prompt starts (line by line; non-ASCII and control characters are escaped) ---")
-    for number, row in enumerate(text.split("\n"), 1):
-        ctx.say(f"{number:4d}| {row!a}")
-    ctx.say("--- the prompt ends ---")
-    ctx.say(
-        f"you are approving up to {money(amount)} USD on {req.model} for job {req.job}"
-        + (" and it PASSES the monthly ceiling" if beyond else "")
-    )
-    ctx.say(
-        "your security key will blink next. Touch it only because you have just read the quota line, the quote and "
-        "the whole prompt and its digest above and they are right; the signature covers that exact prompt and no "
-        "other. "
-        "If you did not start this, do not touch it."
-    )
-    if confirm(f"type exactly `{phrase}` to approve, anything else cancels: ").strip() != phrase:
-        raise RefusedError("not confirmed; no approval record was written")
-    if ctx.dry_run:
-        # signs a throw-away text in another namespace and checks it: tests the key and the enrollment, spends nothing,
-        # writes no record and no ledger row
-        trust = store.trust
-        if trust is None or not store.signing_key or not store.signing_principal:
-            raise RefusedError("signing is not set up (signing.key and signing.principal in gemini.yaml)")
-        text = geminisign.canonical({"dry_run": True, "job": req.job})
-        armor = geminisign.sign(store.signing_key, text.encode(), geminisign.DRYRUN_NAMESPACE, ctx.env)
-        who = geminisign.verify(trust, text.encode(), armor, namespace=geminisign.DRYRUN_NAMESPACE, now=now)
-        if who.label != store.signing_principal:
-            raise RefusedError("the key that signed is not the principal named in gemini.yaml")
-        ctx.say(
-            f"dry run: the signature verifies. principal {who.label}, {who.key_type}, {who.fingerprint}, "
-            f"touch {'seen' if who.user_present else 'not shown (a software key reports none)'}, "
-            f"PIN {'seen' if who.user_verified else 'not shown'}. No approval record and no ledger row were written."
-        )
-        return EXIT_OK
-    record = store.issue(
-        model=req.model,
-        max_usd=amount,
-        job=req.job,
-        quote=args.quote,
-        quoted_at=quoted,
-        now=now,
-        ttl_minutes=args.ttl_minutes,
-        beyond_ceiling=beyond,
-        prompt=text,
-        issue_ref=args.issue,
-    )
-    ctx.say(
-        f"approval record {record.id}: {req.model}, job {record.job}, up to {money(amount)} USD, "
-        f"single use, signed by {record.principal}, expires {record.expires_at.strftime('%Y-%m-%dT%H:%M:%SZ')}."
-    )
-    return EXIT_OK
 
 
 def _trust() -> geminisign.Trust:
@@ -264,8 +144,8 @@ def _trust() -> geminisign.Trust:
 def run_keys(ctx: LocalContext, args: argparse.Namespace) -> int:
     """Read-only. The maintainer enrolls, rotates or revokes a key by editing the two trust files by hand."""
     trust = _trust()
-    if args.keys_action in ("list", "check") and not os.path.lexists(trust.signers) and not gemini.paid_enabled():
-        ctx.say("no allowed-signers file, and paid use is disabled: there are no approval keys to list or check")
+    if args.keys_action in ("list", "check") and not os.path.lexists(trust.signers):
+        ctx.say("no allowed-signers file: there are no approval keys to list or check")
         return EXIT_OK
     if args.keys_action == "list":
         for row in geminisign.key_rows(trust, ctx.now) or ["(no key is enrolled)"]:
@@ -290,62 +170,91 @@ def run_keys(ctx: LocalContext, args: argparse.Namespace) -> int:
     raise ConfigError("keys: say list, check or propose")
 
 
-def run_usage(ctx: LocalContext, args: argparse.Namespace, cfg: GeminiConfig) -> int:
-    amount = usd_amount(args.amount_usd, "--amount-usd")
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.on_date):
-        raise ConfigError("--on-date: expected YYYY-MM-DD")
-    if not args.note.strip() or len(args.note) > 300:
-        raise ConfigError("--note: say where the number came from (1 to 300 characters)")
+def broker_setup(ctx: LocalContext) -> tuple[client.ClientConfig, client.Deps]:
+    """The broker client's configuration and dependencies for this command: ~/.config/safo/broker-client.yaml (and the
+    root-owned file beside it), the broker's socket, the signer, the terminal. The one seam a test replaces."""
+    from safo.broker import client  # deferred: the guard's entry point must not load the client at import
+
+    cfg = client.load_client_config(home=ctx.home)
+    stdin = ctx.stdin if ctx.stdin is not None else sys.stdin
+    return cfg, client.default_deps(cfg, ctx.env, stdin, ctx.out, ctx.home)
+
+
+def run_paid(ctx: LocalContext, args: argparse.Namespace) -> int:
+    """ONE paid call, through the broker client and nowhere else. The model, job, amount, quote and prompt are checked
+    by the client before a socket is opened; the person sees the whole approval and touches the key."""
+    from safo.broker import client
+
+    if args.kind == "text" and (args.count is not None or args.image_size or args.aspect_ratio):
+        raise ConfigError("a text request has no image count, size or aspect ratio")
+    image = args.kind == "image"
+    params = client.PaidParams(
+        model=args.model,
+        job=args.job,
+        kind=args.kind,
+        prompt=_prompt(args),
+        max_output_tokens=args.max_output_tokens,
+        max_usd=args.max_usd,
+        quote=args.quote,
+        quoted_at=args.quoted_at,
+        issue=args.issue,
+        count=(1 if args.count is None else args.count) if image else 0,
+        image_size=args.image_size,
+        aspect_ratio=(args.aspect_ratio or "1:1") if image else "",
+    )
     if ctx.dry_run:
-        ctx.say("dry run: nothing written")
+        client.check_params(params)  # the same checks the client makes first; no socket, no key, no broker
+        ctx.say("dry run: the request is well formed; nothing was signed, sent or reserved")
         return EXIT_OK
-    ledger = Ledger(cfg.ledger)
-    with ledger.lock():
-        ledger.append(
-            {"type": "usage", "date": args.on_date, "amount_usd": float(amount), "note": args.note.strip()},
-            ts=gemini.stamp(ctx.now),
-        )
-    ctx.say(f"added {money(amount)} USD for {args.on_date} to the chained ledger")
-    return EXIT_OK
+    cfg, deps = broker_setup(ctx)
+    return client.run_paid(params, cfg, deps, ctx.out, ctx.out)
+
+
+def run_paid_dryrun(ctx: LocalContext, args: argparse.Namespace) -> int:
+    from safo.broker import client
+
+    if ctx.dry_run:
+        ctx.say("dry run: nothing was signed or sent")
+        return EXIT_OK
+    cfg, deps = broker_setup(ctx)
+    return client.run_dryrun(cfg, deps, ctx.out, ctx.out, args.job or "signer-check")
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     if args.action != "keys" and (args.keys_action or args.keys_file):
         raise ConfigError("unrecognized arguments: a word after the action")
+    removed = (
+        args.action == "approve"
+        or args.paid
+        or args.approval
+        or args.cap
+        or args.ttl_minutes
+        or args.amount_usd
+        or args.on_date
+        or args.note
+    )
+    if removed:
+        raise RefusedError(PAID_ELSEWHERE)  # before a config, a prompt or a key is read
     if args.action == "keys":
         return run_keys(ctx, args)
+    if args.action == "paid":
+        return run_paid(ctx, args)
+    if args.action == "paid-dryrun":
+        return run_paid_dryrun(ctx, args)
     cfg = _config()
-    if args.action == "usage":
-        return run_usage(ctx, args, cfg)
     if not args.model:
         raise ConfigError("--model is required")
-    store = open_store(gemini.fixed_locations(), cfg.ledger, cfg.signing_key, cfg.signing_principal, ctx.env)
     req = _request(args)
     if args.action == "quota":
         ctx.say(quota_line(cfg, req, ctx.now))
         return EXIT_OK
-    if args.action == "approve":
-        stdin = ctx.stdin if ctx.stdin is not None else sys.stdin
-        return approve_flow(
-            ctx,
-            args,
-            cfg,
-            store,
-            req,
-            interactive=_is_tty(stdin) and _is_tty(ctx.out),
-            confirm=lambda prompt: _ask_line(ctx, stdin, prompt),
-        )
     if args.material != "public":
         raise ConfigError("--material public is required: private or sensitive material never goes to Gemini")
     ctx.say(quota_line(cfg, req, ctx.now))
-    if args.cap:
-        cap = usd_amount(args.cap, "--cap")
-        if req.tier == "paid" and estimate_usd(cfg, req, ctx.now) > cap:
-            raise RefusedError(f"the estimate is over the --cap of {money(cap)} USD; nothing was sent")
     if ctx.dry_run:
         ctx.say("dry run: no request sent, no key read, nothing logged")
         return EXIT_OK
-    reply = ask(cfg, req, store=store, key_for=doppler_key_provider(cfg, ctx.env), now=ctx.now)
+    reply = ask(cfg, req, key_for=doppler_key_provider(cfg, ctx.env), now=ctx.now)
     output.block(ctx.out, reply.text.splitlines() or [""])
     suffix = " (estimate)" if reply.estimated else ""
     ctx.say(
@@ -358,5 +267,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
 
 
 register_local(
-    LocalMode("gemini", "ask the free Gemini tier a public question; gate every paid call", add_arguments, run)
+    LocalMode(
+        "gemini", "ask the free Gemini tier a public question; paid calls only through the broker", add_arguments, run
+    )
 )

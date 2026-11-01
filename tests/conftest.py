@@ -209,10 +209,6 @@ def gemini_locations(
     signers = root / "signers"
     signers.write_text(signers_line("test-key-a", root / "key.pub") + "\n")
     signers.chmod(0o644)
-    (root / "paid-enabled").write_text(
-        "enabled\n"
-    )  # the paid path is on in tests; test_gemini_paid_switch.py turns it off
-    (root / "paid-enabled").chmod(0o644)
     locations = gemini.Locations(
         root,
         root / "gemini.yaml",
@@ -223,7 +219,6 @@ def gemini_locations(
         os.geteuid(),
         False,
         False,
-        root / "paid-enabled",
     )
     monkeypatch.setattr(gemini, "fixed_locations", lambda: locations)
     return locations

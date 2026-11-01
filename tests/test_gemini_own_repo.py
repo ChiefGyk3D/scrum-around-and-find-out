@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from safo import geminibrief
-from safo.gemini import DisabledCheck
+from safo.gemini import PaidOnlyThroughBroker
 
 OWN = "issue: ChiefGyk3D/scrum-around-and-find-out#209\n"
 PUBLIC = "gemini-material: public\n"
@@ -15,13 +15,15 @@ SECRET = "tok_SECRETVALUE123"
 
 
 def paid(brief: str) -> list[str]:
-    return [why for rule, why in geminibrief.findings(brief, DisabledCheck()) if rule == geminibrief.GEMINI_PAID]
+    return [
+        why for rule, why in geminibrief.findings(brief, PaidOnlyThroughBroker()) if rule == geminibrief.GEMINI_PAID
+    ]
 
 
 def test_denial_names_rule_line_and_command_class() -> None:
     reasons = paid(PUBLIC + "safo gemini ask --paid --model m --prompt-file p\n")
     assert len(reasons) == 1
-    assert "line 2: paid use is disabled" in reasons[0]
+    assert "line 2: paid use exists only through the broker" in reasons[0]
     assert "rule gemini-paid" in reasons[0] and "matched: a `safo gemini` command" in reasons[0]
 
 

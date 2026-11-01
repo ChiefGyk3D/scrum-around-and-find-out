@@ -72,12 +72,12 @@ def prices_data() -> dict[str, Any]:
                 "interim_images": 2,
                 "cap_verified": False,
             },
-            "gemini-3-pro-image": {  # Nano Banana Pro: worst case about 3.93 USD
+            "gemini-3-pro-image": {  # Nano Banana Pro: 120.00 per million image tokens, 1120 tokens, 0.134 per image
                 "kind": "image",
                 "valid_through": "2026-12-31",
                 "input_per_mtok": "2.00",
                 "text_output_per_mtok": "12.00",
-                "image_output_per_mtok": "30.00",
+                "image_output_per_mtok": "120.00",
                 "image_usd": {"1K": "0.134"},
                 "image_tokens": {"1K": 1120},
                 "output_token_limit": 131072,

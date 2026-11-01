@@ -22,7 +22,7 @@ import json
 import os
 import secrets
 import stat
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +33,11 @@ from safo.broker.money import MAX_MICRO
 from safo.broker.policy import BrokerRequest, Policy, canonical_broker_request
 from safo.broker.records import (
     CALL_ID,
+    MONTH,
     NONCE,
+    REASON,
     SCHEMA_VERSION,
+    UID_MAX,
     ApprovalV3,
     check_binding,
     parse_stamp,
@@ -83,10 +86,20 @@ class CallRecord:
     resolved_micro: int | None = None
     ambiguous: bool = False
     breach: bool = False
+    last_row: dt.datetime | None = None  # the time of the row that ended or made the call ambiguous
 
     @property
     def month(self) -> str:
+        """The month the call was reserved in: the month it belongs to."""
         return self.started.strftime("%Y-%m")
+
+    @property
+    def months(self) -> frozenset[str]:
+        """Every month that counts this call. A call that ends in a later month than the one it was reserved in
+        straddles the boundary and counts in both: the later month's cap must see money that left before midnight."""
+        if self.last_row is None:
+            return frozenset({self.month})
+        return frozenset({self.month, self.last_row.strftime("%Y-%m")})
 
     @property
     def counted_micro(self) -> int:
@@ -111,10 +124,18 @@ class LedgerView:
     head: str
     rows: int
     hashes: frozenset[str] = frozenset()  # the hash of every chained row: a signed `ledger_head` must be one of them
+    adjusted: Mapping[str, int] = dataclasses.field(default_factory=dict)  # month -> what root added (reconcile)
+
+    def month_total(self, key: str) -> int:
+        """What a month counts: every call at its counted figure, plus what root added for it. Only ever grows."""
+        return sum(c.counted_micro for c in self.calls.values() if key in c.months) + self.adjusted.get(key, 0)
 
     def month_spent(self, now: dt.datetime) -> int:
+        """What the month of `now` counts. A call still open that was reserved in an earlier month is in flight across
+        the boundary: it counts here too, at its reservation, until it ends."""
         key = now.astimezone(dt.UTC).strftime("%Y-%m")
-        return sum(c.counted_micro for c in self.calls.values() if c.month == key)
+        in_flight = sum(c.counted_micro for c in self.open_calls() if key not in c.months and c.month < key)
+        return self.month_total(key) + in_flight
 
     def open_calls(self) -> list[CallRecord]:
         return [c for c in self.calls.values() if c.state in (CallState.RESERVED, CallState.SENT)]
@@ -132,6 +153,7 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
     nonces: set[str] = set()
     used: dict[str, dict[str, Any]] = {}
     suspended: dict[str, list[str]] = {}
+    adjusted: dict[str, int] = {}
     pending: str | None = None  # a breach or an ambiguity whose `suspended` row must come next
     last: dt.datetime | None = None
     version = 0
@@ -150,6 +172,9 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
             raise _corrupt()
         if used and kind != "call_start":
             raise _corrupt()
+        if kind == "admin_action":
+            _fold_admin(row, when, adjusted)
+            continue
         cid = row.get("call_id", "")
         rec = calls.get(cid)
         try:
@@ -179,12 +204,14 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
                 rec.state = advance(rec.state, CallState.SENT)
             elif kind == "call_end":
                 _end(rec, row)
+                rec.last_row = when
                 pending = cid if rec.breach else None
             elif kind == "ambiguous_call":
                 if row["model"] != rec.model or row["reserved_micro"] != rec.reserved_micro:
                     raise _corrupt()
                 rec.state = advance(rec.state, CallState.AMBIGUOUS)
                 rec.ambiguous = True
+                rec.last_row = when
                 pending = cid
             elif kind == "suspended":
                 if row["model"] != rec.model or row["reason"] != ("breach" if rec.breach else "ambiguous"):
@@ -208,8 +235,20 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
         raise _corrupt()
     hashes = frozenset(row["hash"] for row in rows)
     return LedgerView(
-        calls, frozenset(nonces), {m: tuple(v) for m, v in suspended.items()}, last, head, len(rows), hashes
+        calls, frozenset(nonces), {m: tuple(v) for m, v in suspended.items()}, last, head, len(rows), hashes, adjusted
     )
+
+
+def _fold_admin(row: dict[str, Any], when: dt.datetime, adjusted: dict[str, int]) -> None:
+    """An `admin_action` row is root's record. A `clear` names a model and adds nothing; an `adjust` names a month that
+    is not in the future and adds a positive amount to it. Any other pairing of the fields is corruption."""
+    if row["action"] == "clear":
+        if row["model"] == "" or row["month"] != "" or row["add_micro"] != 0:
+            raise _corrupt()
+        return
+    if row["model"] != "" or row["month"] == "" or row["add_micro"] <= 0 or row["month"] > when.strftime("%Y-%m"):
+        raise _corrupt()
+    adjusted[row["month"]] = adjusted.get(row["month"], 0) + row["add_micro"]
 
 
 def _end(rec: CallRecord, row: dict[str, Any]) -> None:
@@ -221,7 +260,10 @@ def _end(rec: CallRecord, row: dict[str, Any]) -> None:
         raise _corrupt()
     if status != "ok" and (actual != 0 or row["breach"]):
         raise _corrupt()
-    if row["breach"] != (actual > rec.reserved_micro) or row["released_micro"] != max(rec.reserved_micro - actual, 0):
+    # an actual above the reservation is always a breach; a breach inside the reservation is an output-cap breach
+    if (actual > rec.reserved_micro and not row["breach"]) or row["released_micro"] != max(
+        rec.reserved_micro - actual, 0
+    ):
         raise _corrupt()
     rec.state = advance(rec.state, CallState.SETTLED)
     rec.actual_micro = actual
@@ -255,6 +297,20 @@ class Ticket:
     nonce: str
     model: str
     reserved_micro: int
+
+
+@dataclasses.dataclass(frozen=True)
+class AdminWho:
+    """Who ran an administration step: the real uid of the process and the uid sudo says it came from (-1: none)."""
+
+    uid: int
+    sudo_uid: int
+
+
+@dataclasses.dataclass(frozen=True)
+class Cleared:
+    model: str
+    calls: tuple[tuple[str, int, int], ...]  # (call id, counted before, counted after)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -444,9 +500,18 @@ class CallLedger:
             return self._view()
 
     def reserve(
-        self, req: BrokerRequest, approval: ApprovalV3, policy: Policy, *, epoch: str, now: dt.datetime
+        self,
+        req: BrokerRequest,
+        approval: ApprovalV3,
+        policy: Policy,
+        *,
+        epoch: str,
+        now: dt.datetime,
+        pre_spend: Callable[[], None] | None = None,
     ) -> Ticket:
-        """Check, then spend first. Everything from the nonce check to the markers is one critical section."""
+        """Check, then spend first. Everything from the nonce check to the markers is one critical section.
+        `pre_spend` runs inside it, after the replay and suspension checks and just before the spend is written: the
+        pipeline uses it to check revocation and the issued nonce at the last moment. It raises to refuse."""
         now = self._now(now)
         req = canonical_broker_request(req)
         check_binding(approval, req, epoch=epoch, now=now)
@@ -468,6 +533,8 @@ class CallLedger:
                 beyond_ceiling=approval.beyond_ceiling,
                 month_spent_micro=view.month_spent(now),
             )
+            if pre_spend is not None:
+                pre_spend()
             call_id = secrets.token_hex(16)
             rows = _spend_rows(
                 stamp, call_id, approval.nonce, epoch, req, priced.prompt_sha256, priced.prompt_bytes, reserved
@@ -490,9 +557,13 @@ class CallLedger:
             self.ledger.append_many([_row("call_sent", self._stamp(now, view, strict=False), call_id=call_id)])
             self._fault("after_sent")
 
-    def settle(self, call_id: str, status: str, actual_micro: int, now: dt.datetime) -> Settlement:
+    def settle(
+        self, call_id: str, status: str, actual_micro: int, now: dt.datetime, *, cap_breach: bool = False
+    ) -> Settlement:
         """Record the outcome against the reservation the LEDGER holds (never a figure the caller supplies for it).
-        An actual above the reservation is a breach: it is counted in full and the model is suspended in one append."""
+        An actual above the reservation is a breach: it is counted in full and the model is suspended in one append.
+        `cap_breach` is the same outcome for a reply that went over the signed output cap while the money stayed inside
+        the reservation (decision 13): the call is recorded as a breach and the model is suspended all the same."""
         if status not in ("ok", "not_sent", "rate_limited", "vendor_refused") or type(actual_micro) is not int:
             raise IllegalTransition("a call ends with ok, not_sent, rate_limited or vendor_refused and a whole amount")
         if not 0 <= actual_micro <= MAX_MICRO or (status != "ok" and actual_micro != 0):
@@ -508,7 +579,9 @@ class CallLedger:
                     "only a call that never left ends as not_sent, and a sent call is never not_sent"
                 )
             stamp = self._stamp(now, view, strict=False)
-            breach = actual_micro > rec.reserved_micro
+            if cap_breach and status != "ok":
+                raise IllegalTransition("only a call that returned an answer can breach the output cap")
+            breach = actual_micro > rec.reserved_micro or cap_breach
             released = max(rec.reserved_micro - actual_micro, 0)
             rows = [
                 _row(
@@ -707,12 +780,170 @@ class CallLedger:
                 raise IllegalTransition("enter the real amount for the ambiguous call before clearing the suspension")
             self.ledger.append_many([_row("suspension_cleared", self._stamp(now, view, strict=False), model=model)])
 
+    # -- root's administration steps (src/safo/broker/admin.py runs these as the service user, after the privilege drop)
+
+    def floor(self) -> int | None:
+        """The schema version recorded in the state directory, or None when none has been written yet."""
+        with self._locked():
+            self._check_tree()
+            self._check_floor()
+            try:
+                return int(read_bounded(self.dir / FLOOR_NAME, 16).decode("ascii").strip())
+            except FileNotFoundError:
+                return None
+            except (OSError, UnicodeError, ValueError):
+                raise LedgerError("the schema version record cannot be read") from None
+
+    def admin_clear(
+        self,
+        model: str,
+        confirm: Sequence[str],
+        actuals: Mapping[str, int],
+        reason: str,
+        who: AdminWho,
+        now: dt.datetime,
+    ) -> Cleared:
+        """Root clears a model's suspension in ONE append: its own record, the figure for each ambiguous call, and the
+        clearing. The confirmation must repeat every call id that suspended the model, judged against the ledger as it
+        is under the lock. An ambiguous call is settled at its whole reservation unless root names a verified actual
+        for it (with a reason), and an actual is never below the usage already recorded for that call. A breach is
+        already counted at its recorded actual and takes no figure. Nothing here lowers a call below what it counts
+        unless root names such a figure; a cut write leaves the model suspended or cleared, never half of each."""
+        _check_who(who)
+        _check_reason(reason, required=bool(actuals))
+        for call_id, amount in actuals.items():
+            if type(call_id) is not str or type(amount) is not int or not 0 <= amount <= MAX_MICRO:
+                raise IllegalTransition("a verified amount is a whole number in range for a named call")
+        now = self._now(now)
+        with self._locked():
+            view = self._view()
+            ids = view.suspended.get(model)
+            if not ids:
+                raise IllegalTransition("this model is not suspended")
+            if sorted(confirm) != sorted(ids):
+                raise IllegalTransition("the confirmation must repeat every call id that suspended this model")
+            for call_id, amount in actuals.items():
+                rec = view.calls.get(call_id)
+                if call_id not in ids or rec is None or not rec.unresolved:
+                    raise IllegalTransition(
+                        "a verified amount can only be given for an ambiguous call of this suspension"
+                    )
+                if amount < (rec.actual_micro or 0):
+                    raise IllegalTransition("a verified amount cannot be below the usage already recorded for the call")
+            stamp = self._stamp(now, view, strict=False)
+            rows = [_admin_row(stamp, "clear", who, reason, model=model)]
+            settled: list[tuple[str, int, int]] = []
+            for call_id in ids:
+                rec = view.calls[call_id]
+                if rec.unresolved:
+                    amount = actuals.get(call_id, rec.reserved_micro)
+                    rows.append(_row("ambiguous_resolved", stamp, call_id=call_id, actual_micro=amount))
+                    settled.append((call_id, rec.counted_micro, amount))
+                else:
+                    settled.append((call_id, rec.counted_micro, rec.counted_micro))
+            rows.append(_row("suspension_cleared", stamp, model=model))
+            self._fault("admin_before_append")
+            self.ledger.append_many(rows, ts=stamp)
+            self._fault("admin_after_append")
+        return Cleared(model, tuple(settled))
+
+    def admin_adjust(self, month: str, billing_micro: int, reason: str, who: AdminWho, now: dt.datetime) -> int:
+        """Root enters the vendor's billed figure for a month. The ledger adds the difference when the figure is higher
+        than the month counts and does nothing when it is not: this can only raise a month. Returns what was added."""
+        _check_who(who)
+        _check_reason(reason, required=True)
+        if type(billing_micro) is not int or not 0 <= billing_micro <= MAX_MICRO:
+            raise IllegalTransition("the billing figure is a whole number of micro-dollars in range")
+        if type(month) is not str or MONTH.fullmatch(month) is None:
+            raise IllegalTransition("a month is written YYYY-MM")
+        now = self._now(now)
+        with self._locked():
+            view = self._view()
+            stamp = self._stamp(now, view, strict=False)
+            if month > stamp[:7]:
+                raise IllegalTransition("a month that has not started cannot be adjusted")
+            gap = billing_micro - view.month_total(month)
+            if gap <= 0:
+                return 0
+            self._fault("admin_before_append")
+            self.ledger.append_many([_admin_row(stamp, "adjust", who, reason, month=month, add_micro=gap)], ts=stamp)
+            self._fault("admin_after_append")
+        return gap
+
+    def audit(self, now: dt.datetime) -> list[str]:
+        """Read-only: where the ledger, the used markers and the clock disagree. Raises LedgerError if the ledger or
+        the used folder cannot be trusted at all. Each line is a fixed sentence plus an id."""
+        now = self._now(now)
+        found: list[str] = []
+        with self._locked():
+            view = self._view()
+            known = {c.nonce: c for c in view.calls.values()}
+            names = set(self._marker_names())
+            for nonce in sorted(names):
+                rec = known.get(nonce)
+                if rec is None:
+                    found.append(f"marker {nonce} has no ledger row")
+                    continue
+                data = self._read_marker(nonce)
+                if data is None:
+                    found.append(f"marker {nonce} is partial or unreadable")
+                elif (rec.call_id, rec.model, rec.job, rec.reserved_micro) != (
+                    data["call_id"],
+                    data["model"],
+                    data["job"],
+                    data["reserved_micro"],
+                ):
+                    found.append(f"marker {nonce} disagrees with the ledger")
+            for rec in view.calls.values():
+                if rec.nonce not in names:
+                    found.append(f"call {rec.call_id} has no marker")
+            for rec in view.open_calls():
+                found.append(f"open call {rec.call_id} ({rec.state.value}): start-up recovery makes it ambiguous")
+            for rec in view.calls.values():
+                if rec.unresolved:
+                    found.append(f"ambiguous call {rec.call_id} has no real amount yet (unresolved)")
+            if view.last_ts is not None and view.last_ts > now:
+                found.append("the newest ledger row is newer than the clock")
+        return found
+
 
 # -- row builders --------------------------------------------------------------------------------------------------
 
 
 def _row(row_type: str, stamp: str, /, **fields: Any) -> dict[str, Any]:
     return {"type": row_type, "ts": stamp, "v": SCHEMA_VERSION, **fields}
+
+
+def _check_who(who: AdminWho) -> None:
+    if (
+        type(who) is not AdminWho
+        or type(who.uid) is not int
+        or type(who.sudo_uid) is not int
+        or not 0 <= who.uid <= UID_MAX
+        or not -1 <= who.sudo_uid <= UID_MAX
+    ):
+        raise IllegalTransition("an administration step names the uid that ran it")
+
+
+def _check_reason(reason: str, *, required: bool) -> None:
+    if type(reason) is not str or REASON.fullmatch(reason) is None or (required and not reason.strip()):
+        raise IllegalTransition("a reason is up to 120 printable characters, and is required here")
+
+
+def _admin_row(
+    stamp: str, action: str, who: AdminWho, reason: str, *, model: str = "", month: str = "", add_micro: int = 0
+) -> dict[str, Any]:
+    return _row(
+        "admin_action",
+        stamp,
+        action=action,
+        uid=who.uid,
+        sudo_uid=who.sudo_uid,
+        model=model,
+        month=month,
+        add_micro=add_micro,
+        reason=reason,
+    )
 
 
 def _call(view: LedgerView, call_id: str) -> CallRecord:

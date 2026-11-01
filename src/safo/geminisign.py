@@ -123,6 +123,12 @@ def fingerprint_of(blob: bytes) -> str:
 # -- reading the trust files ------------------------------------------------------------------------------------------
 
 
+def writable_by_others(mode: int) -> bool:
+    """The mode rule of a maintainer-edited trust file: group or others can write it. The one rule the broker's reader
+    and the readiness checks share."""
+    return bool(mode & (stat.S_IWGRP | stat.S_IWOTH))
+
+
 def read_trust_file(path: Path, uid: int, what: str) -> bytes:
     """A maintainer-edited file: a regular file owned by `uid`, no group or other write, every directory above it owned
     by `uid` or root and not group- or other-writable (a sticky root directory is allowed), no symlink at the end."""
@@ -144,7 +150,7 @@ def read_trust_file(path: Path, uid: int, what: str) -> bytes:
             raise RefusedError(f"the {what} is not a regular file")
         if info.st_uid != uid:
             raise RefusedError(f"the {what} is not owned by the account that must own it (root, in production)")
-        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        if writable_by_others(info.st_mode):
             raise RefusedError(f"the {what} is writable by its group or by others")
         chunks: list[bytes] = []
         total = 0

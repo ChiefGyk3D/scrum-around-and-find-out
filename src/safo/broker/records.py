@@ -33,6 +33,8 @@ CALL_ID = re.compile(r"[0-9a-f]{16,64}")
 HEAD = re.compile(r"[0-9a-f]{64}")
 STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 MONTH = re.compile(r"[0-9]{4}-(?:0[1-9]|1[0-2])")
+UID_MAX = 2**32 - 1
+REASON = re.compile(r"[ -~]{0,120}")  # printable ASCII only: a reason is shown back to root and must not hide anything
 MAX_ISSUE = 80
 MAX_PRINCIPAL = 64
 
@@ -297,6 +299,18 @@ ROWS: dict[str, dict[str, Check]] = {
     "suspended": {"call_id": _pat(CALL_ID), "model": _MODEL, "reason": _enum("breach", "ambiguous")},
     "ambiguous_resolved": {"call_id": _pat(CALL_ID), "actual_micro": _MICRO},
     "suspension_cleared": {"model": _MODEL},
+    # root's own record of what it did and who it was: `uid` is the real uid of the process that ran the command and
+    # `sudo_uid` the uid sudo says it came from (-1 when there is none). `clear` names a model; `adjust` names a month
+    # and adds to it (never subtracts). The fold checks the pairing of the fields.
+    "admin_action": {
+        "action": _enum("clear", "adjust"),
+        "uid": _int(0, UID_MAX),
+        "sudo_uid": _int(-1, UID_MAX),
+        "model": lambda v: v == "" or _MODEL(v),
+        "month": lambda v: v == "" or _pat(MONTH)(v),
+        "add_micro": _MICRO,
+        "reason": _pat(REASON),
+    },
 }
 CHAIN_ROWS = frozenset({"chain_start"})
 
