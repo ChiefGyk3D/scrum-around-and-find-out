@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -381,3 +382,106 @@ def test_a_write_cut_at_any_byte_of_the_adoption_batch_is_all_in_or_all_out_and_
         assert after["2026-09"] - before["2026-09"] == 7000, cut  # exactly once, whichever way it was cut
         assert CallLedger(state_dir(tmp_path)).recover(LATER) in ([], ["d" * 32])
     assert seen == {False, True}  # both outcomes were exercised
+
+
+def test_a_marker_replaced_after_the_last_read_and_before_the_append_aborts_the_adoption(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    stray = make_stray(tmp_path, reserved_micro=1000)
+    confirmed = confirmed_for(tmp_path)
+    swapped = other_marker(tmp_path, reserved_micro=900_000, call_id="c" * 32)
+
+    def swap(point: str) -> None:
+        if point == "admin_before_append":
+            replacement = stray.with_name("replacement")
+            replacement.write_bytes(swapped)
+            replacement.chmod(0o600)
+            replacement.replace(stray)  # atomic: a new file under the same name
+
+    before = ledger_bytes(tmp_path)
+    with pytest.raises(IllegalTransition, match="changed while"):
+        CallLedger(state_dir(tmp_path), faults=swap).admin_adopt_marker(STRAY, "r", WHO, LATER, confirmed)
+    assert ledger_bytes(tmp_path) == before and totals(ledger)["2026-09"] == 0
+
+
+def test_a_marker_rewritten_in_place_with_the_same_size_is_also_caught(tmp_path: Path) -> None:
+    seeded(tmp_path)
+    stray = make_stray(tmp_path, reserved_micro=1000)
+    confirmed = confirmed_for(tmp_path)
+
+    def rewrite(point: str) -> None:
+        if point == "admin_before_append":
+            stray.write_bytes(other_marker(tmp_path, reserved_micro=2000))
+
+    before = ledger_bytes(tmp_path)
+    with pytest.raises(IllegalTransition, match="changed while"):
+        CallLedger(state_dir(tmp_path), faults=rewrite).admin_adopt_marker(STRAY, "r", WHO, LATER, confirmed)
+    assert ledger_bytes(tmp_path) == before
+
+
+def sept(ledger: CallLedger) -> int:
+    return ledger.view().month_total("2026-09")
+
+
+def test_billing_first_then_adoption_counts_the_call_once(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=7000)
+    assert run(tmp_path, "reconcile", "--billing-usd", "0.007", "--reason", "billing page", "--month", "2026-09")[
+        0
+    ] in (0, 1)
+    assert sept(ledger) == 7000
+    code, out, _ = adopt(tmp_path)
+    assert code == 0 and "adopted_usd: 0" in out and "not added to it a second time" in out
+    assert sept(ledger) == 7000  # not 14000
+    assert ledger.view().suspended and CallLedger(state_dir(tmp_path)).recover(LATER) == []
+
+
+def test_adoption_first_then_billing_counts_the_call_once(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=7000)
+    assert adopt(tmp_path)[0] == 0
+    assert sept(ledger) == 7000
+    assert run(tmp_path, "reconcile", "--billing-usd", "0.007", "--reason", "billing page", "--month", "2026-09")[
+        0
+    ] in (0, 1)
+    assert sept(ledger) == 7000  # the billing figure finds the call already counted
+    run(tmp_path, "reconcile", "--billing-usd", "0.009", "--reason", "billing page", "--month", "2026-09")
+    assert sept(ledger) == 9000  # and only the true gap is added
+
+
+def test_a_partial_billing_figure_is_not_topped_up_by_the_adoption(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=7000)
+    run(tmp_path, "reconcile", "--billing-usd", "0.003", "--reason", "billing page", "--month", "2026-09")
+    assert adopt(tmp_path)[0] == 0
+    assert sept(ledger) == 3000  # the billing figure is the authority for the month; adoption never lowers it
+
+
+def test_two_markers_of_the_same_month_are_each_counted_when_no_billing_figure_exists(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=7000)
+    second = state_dir(tmp_path) / "used" / ("f" * 16)
+    second.write_bytes(other_marker(tmp_path, nonce="f" * 16, call_id="b" * 32, reserved_micro=3000))
+    second.chmod(0o600)
+    assert adopt(tmp_path)[0] == 0 and adopt(tmp_path, "f" * 16)[0] == 0
+    assert sept(ledger) == 10_000
+
+
+def test_an_older_adjustment_whose_reason_starts_like_an_adoption_is_never_removed_by_repair(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=7000)
+    for reason in (
+        "adopt marker quarterly correction",
+        f"adopt marker {STRAY}: but not this marker's amount",
+        f"adopt marker {'0' * 16}: names no marker",
+    ):
+        row = {
+            "type": "admin_action", "ts": "2026-10-30T12:00:20Z", "v": 3, "action": "adjust", "uid": 0,
+            "sudo_uid": -1, "model": "", "month": "2026-09", "add_micro": 1234, "reason": reason,
+        }  # fmt: skip
+        pre = snapshot(tmp_path, "legacy")
+        ledger.ledger.append_many([row], ts="2026-10-30T12:00:20Z")
+        with pytest.raises(LedgerError, match="root must reconcile it"):
+            CallLedger(state_dir(tmp_path)).recover(LATER)  # the orphan still blocks, as before
+        assert sept(CallLedger(state_dir(tmp_path))) == 1234, reason  # and the adjustment is still counted
+        restore(tmp_path, pre)
+        shutil.rmtree(pre)

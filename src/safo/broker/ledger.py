@@ -126,6 +126,7 @@ class LedgerView:
     rows: int
     hashes: frozenset[str] = frozenset()  # the hash of every chained row: a signed `ledger_head` must be one of them
     adjusted: Mapping[str, int] = dataclasses.field(default_factory=dict)  # month -> what root added (reconcile)
+    adopted_adjust: Mapping[str, int] = dataclasses.field(default_factory=dict)  # the part of that from adopted markers
 
     def month_total(self, key: str) -> int:
         """What a month counts: every call at its counted figure, plus what root added for it. Only ever grows."""
@@ -155,6 +156,7 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
     used: dict[str, dict[str, Any]] = {}
     suspended: dict[str, list[str]] = {}
     adjusted: dict[str, int] = {}
+    adopted_adjust: dict[str, int] = {}
     pending: str | None = None  # a breach or an ambiguity whose `suspended` row must come next
     last: dt.datetime | None = None
     version = 0
@@ -174,7 +176,7 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
         if used and kind != "call_start":
             raise _corrupt()
         if kind == "admin_action":
-            _fold_admin(row, when, adjusted)
+            _fold_admin(row, when, adjusted, adopted_adjust)
             continue
         cid = row.get("call_id", "")
         rec = calls.get(cid)
@@ -236,11 +238,21 @@ def fold(rows: list[dict[str, Any]], head: str = "") -> LedgerView:
         raise _corrupt()
     hashes = frozenset(row["hash"] for row in rows)
     return LedgerView(
-        calls, frozenset(nonces), {m: tuple(v) for m, v in suspended.items()}, last, head, len(rows), hashes, adjusted
+        calls,
+        frozenset(nonces),
+        {m: tuple(v) for m, v in suspended.items()},
+        last,
+        head,
+        len(rows),
+        hashes,
+        adjusted,
+        adopted_adjust,
     )
 
 
-def _fold_admin(row: dict[str, Any], when: dt.datetime, adjusted: dict[str, int]) -> None:
+def _fold_admin(
+    row: dict[str, Any], when: dt.datetime, adjusted: dict[str, int], adopted_adjust: dict[str, int]
+) -> None:
     """An `admin_action` row is root's record. A `clear` names a model and adds nothing; an `adjust` names a month that
     is not in the future and adds a positive amount to it. Any other pairing of the fields is corruption."""
     if row["action"] == "clear":
@@ -250,6 +262,10 @@ def _fold_admin(row: dict[str, Any], when: dt.datetime, adjusted: dict[str, int]
     if row["model"] != "" or row["month"] == "" or row["add_micro"] <= 0 or row["month"] > when.strftime("%Y-%m"):
         raise _corrupt()
     adjusted[row["month"]] = adjusted.get(row["month"], 0) + row["add_micro"]
+    if row["reason"].startswith(
+        ADOPT_PREFIX
+    ):  # only ever used to tell billing from adoption: a wrong guess charges more
+        adopted_adjust[row["month"]] = adopted_adjust.get(row["month"], 0) + row["add_micro"]
 
 
 def _end(rec: CallRecord, row: dict[str, Any]) -> None:
@@ -332,6 +348,7 @@ class Adopted:
     model: str
     month: str
     reserved_micro: int
+    added_micro: int  # what was added to the month; 0 when a billing reconciliation already covers it
 
 
 @dataclasses.dataclass(frozen=True)
@@ -729,6 +746,28 @@ class CallLedger:
             finally:
                 os.close(fd)
 
+    def _adoption_head(self, line: bytes) -> bool:
+        """The last whole row is the adjustment that opens an adoption whose call rows never landed. It must name a
+        nonce in its reason, and match, in month and amount, the unrecorded marker with that nonce; an adjustment that
+        root entered for any other reason is never matched, so repair cannot remove spend that was recorded."""
+        try:
+            row = loads(line)
+        except (ValueError, UnicodeError, RecursionError):
+            return False
+        if not isinstance(row, dict) or row.get("type") != "admin_action" or row.get("action") != "adjust":
+            return False
+        reason = row.get("reason")
+        if not isinstance(reason, str) or not reason.startswith(ADOPT_PREFIX):
+            return False
+        nonce = reason[len(ADOPT_PREFIX) :].partition(":")[0]
+        if NONCE.fullmatch(nonce) is None or not self.marker_exists(nonce):
+            return False
+        try:
+            data = self._read_marker(nonce)
+        except LedgerError:
+            return False
+        return data is not None and (data["ts"][:7], data["reserved_micro"]) == (row.get("month"), row.get("add_micro"))
+
     def _repair_tail(self) -> None:
         """An append is one write and then one fsync, and a vendor call follows only after both. A crash during the
         write can leave a last line that is cut short, or a group of rows whose first row is whole and whose second is
@@ -751,7 +790,7 @@ class CallLedger:
         ):  # a complete row that only lost its newline: keep it (counting it is the safe side)
             body, tail = raw + b"\n", b""
         lines = body.splitlines(keepends=True)
-        while lines and _dangling(lines[-1]):
+        while lines and (_dangling(lines[-1]) or self._adoption_head(lines[-1])):
             lines.pop()
         fixed = b"".join(lines)
         if fixed == raw:
@@ -913,6 +952,18 @@ class CallLedger:
                 f"reserved_usd: {format_usd(data['reserved_micro'])}",
             ]
 
+    def _marker_stat(self, nonce: str) -> tuple[int, int, int, int]:
+        """Which file this is and whether it was touched: inode, size, change time and modification time."""
+        try:
+            info = os.lstat(self._marker_path(nonce))
+        except OSError:
+            raise IllegalTransition("the marker cannot be read; it is not adopted and root must look at it") from None
+        return info.st_ino, info.st_size, info.st_ctime_ns, info.st_mtime_ns
+
+    def _digest_of(self, nonce: str) -> str:
+        data = self._read_marker(nonce)
+        return marker_digest(data) if data is not None else ""
+
     def admin_adopt_marker(
         self, nonce: str, reason: str, who: AdminWho, now: dt.datetime, confirmed: Confirmed
     ) -> Adopted:
@@ -941,6 +992,7 @@ class CallLedger:
                 raise IllegalTransition("there is no such marker")
             if nonce in view.spent_nonces:
                 raise IllegalTransition("this marker already has a ledger row")
+            seen = self._marker_stat(nonce)
             data = self._read_marker(nonce)
             if data is None or type(data["reserved_micro"]) is not int or data["reserved_micro"] <= 0:
                 raise IllegalTransition("the marker cannot be read; it is not adopted and root must look at it")
@@ -963,16 +1015,30 @@ class CallLedger:
             start = _row("call_start", stamp, **{k: data[k] for k in data if k not in ("v", "ts")})
             used = _row("approval_used", stamp, nonce=nonce, call_id=cid, model=model, job=data["job"], epoch="0" * 32)
             shell = CallRecord(cid, nonce, model, data["job"], data["kind"], reserved, now, CallState.RESERVED)
+            # Spend for this call is counted once. If root already entered a billing total for the month, that total is
+            # the authority and covers the call, so no second amount is added; otherwise the reservation is added.
+            covered = view.adjusted.get(month, 0) - view.adopted_adjust.get(month, 0) > 0
+            added = 0 if covered else reserved
             rows = [
-                _admin_row(stamp, "adjust", who, f"{ADOPT_PREFIX}{nonce}: {reason}", month=month, add_micro=reserved),
+                *(
+                    []
+                    if covered
+                    else [
+                        _admin_row(
+                            stamp, "adjust", who, f"{ADOPT_PREFIX}{nonce}: {reason}", month=month, add_micro=reserved
+                        )
+                    ]
+                ),
                 used,
                 start,
                 *_ambiguous_rows(stamp, shell, "marker_only"),
             ]
             self._fault("admin_before_append")
+            if self._marker_stat(nonce) != seen or self._digest_of(nonce) != confirmed.digest:
+                raise IllegalTransition("the marker changed while it was being adopted; nothing was recorded")
             self.ledger.append_many(rows, ts=stamp)
             self._fault("admin_after_append")
-        return Adopted(nonce, cid, model, month, reserved)
+        return Adopted(nonce, cid, model, month, reserved, added)
 
     def audit(self, now: dt.datetime) -> list[str]:
         """Read-only: where the ledger, the used markers and the clock disagree. Raises LedgerError if the ledger or
@@ -1146,7 +1212,4 @@ def _dangling(line: bytes) -> bool:
     if not isinstance(row, dict):
         return False
     kind = row.get("type")
-    if kind == "admin_action":  # heads an adoption group: never the last row of a finished one
-        reason = row.get("reason")
-        return row.get("action") == "adjust" and isinstance(reason, str) and reason.startswith(ADOPT_PREFIX)
     return kind in ("approval_used", "ambiguous_call")
