@@ -672,10 +672,12 @@ def propose_line(trust: Trust, pubkey_file: Path, label: str) -> list[str]:
         raise ConfigError("the public key is not base64") from None
     if key_type not in KEY_TYPES or not _valid_blob(blob, key_type):
         raise ConfigError(f"key type {key_type[:40]!r} is not accepted; use sk-ssh-ed25519@openssh.com")
-    roster = load_roster(trust)
-    if any(k.label == label for k in roster.keys):
+    # the maintainer page prints this line before it creates the files (step d1 before d2): no file means nothing is
+    # enrolled yet. A file that is there but unsafe is still refused by the reader.
+    enrolled = load_roster(trust).keys if os.path.lexists(trust.signers) else ()
+    if any(k.label == label for k in enrolled):
         raise ConfigError(f"the label {label} is already enrolled")
-    if any(k.blob == blob for k in roster.keys):
+    if any(k.blob == blob for k in enrolled):
         raise ConfigError("this key is already enrolled")
     lines = [
         f"fingerprint: {fingerprint_of(blob)}",

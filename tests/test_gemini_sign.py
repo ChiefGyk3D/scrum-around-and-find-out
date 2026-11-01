@@ -327,6 +327,21 @@ def test_propose_prints_the_line_and_the_fingerprint_and_writes_nothing(rig: Rig
     assert rig.signers.read_bytes() == before and not rig.revoked.exists()
 
 
+def test_propose_works_before_any_trust_file_exists(rig: Rig) -> None:
+    """docs/gemini-enrollment.md step d prints the line (d1) before it creates the files (d2): nothing is enrolled yet,
+    so there is nothing to clash with (#263 rehearsal)."""
+    rig.signers.unlink()
+    lines = geminisign.propose_line(rig.trust(), rig.b.with_suffix(".pub"), "yubikey-a")
+    assert f'yubikey-a namespaces="{NAMESPACE}" ssh-ed25519 ' in "\n".join(lines)
+    assert not rig.signers.exists()  # still writes nothing
+
+
+def test_propose_still_refuses_a_trust_file_that_is_there_but_unsafe(rig: Rig) -> None:
+    rig.signers.chmod(0o666)
+    with refused("writable"):
+        geminisign.propose_line(rig.trust(), rig.b.with_suffix(".pub"), "backup-1")
+
+
 @pytest.mark.parametrize("label", ["", "Bad Label", "a@b", "x" * 80])
 def test_propose_refuses_a_bad_label(rig: Rig, label: str) -> None:
     with pytest.raises(Exception, match="label"):
