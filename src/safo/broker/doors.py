@@ -27,6 +27,7 @@ import dataclasses
 import errno
 import os
 import re
+import shlex
 import stat
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -76,8 +77,23 @@ class DoorPaths:
         Path("/usr/share/polkit-1"),
         Path("/var/spool/cron"),
         Path("/var/spool/at"),
+        Path("/var/lib/polkit-1"),
+        Path("/run/systemd/system"),
+        Path("/run/systemd/transient"),
+        Path("/run/systemd/generator"),
+        Path("/run/systemd/generator.early"),
+        Path("/run/systemd/generator.late"),
     )
-    unit_dirs: tuple[Path, ...] = (Path("/etc/systemd/system"), Path("/usr/lib/systemd/system"))
+    unit_dirs: tuple[Path, ...] = (
+        Path("/etc/systemd/system"),
+        Path("/usr/lib/systemd/system"),
+        Path("/usr/local/lib/systemd/system"),
+        Path("/run/systemd/system"),
+        Path("/run/systemd/transient"),
+        Path("/run/systemd/generator"),
+        Path("/run/systemd/generator.early"),
+        Path("/run/systemd/generator.late"),
+    )
     cron_files: tuple[Path, ...] = (Path("/etc/crontab"),)
     cron_dirs: tuple[Path, ...] = (Path("/etc/cron.d"),)
     ld_preload: Path = Path("/etc/ld.so.preload")
@@ -334,6 +350,7 @@ def _check_groups(who: _Who) -> Finding:
 
 
 _INCLUDE = re.compile(r"[#@]include(dir)?\s+(\S+)")
+_NUMERIC_RULE = re.compile(r"#[0-9]+[\s,]")  # "#1000 ALL=..." is a rule for a user id, not a comment
 _SKIP_SUDO = ("Defaults", "Host_Alias", "Cmnd_Alias", "Cmd_Alias", "Runas_Alias")
 
 
@@ -384,7 +401,7 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
                     continue
                 problems.append(f"{source} includes {_show(include.group(2))}, which this check does not read")
                 continue
-            if not line or line.startswith("#"):
+            if not line or (line.startswith("#") and not _NUMERIC_RULE.match(line)):
                 continue
             first = line.split(None, 1)[0]
             if first.startswith(_SKIP_SUDO):
@@ -426,47 +443,70 @@ def _check_sudo(door: DoorPaths, trust: int, who: _Who) -> Finding:
     return Finding("sudo", "pass", "no sudoers rule names the account, one of its groups or ALL")
 
 
-_YES = re.compile(r"polkit\.Result\.YES|[\"']yes[\"']|Result(?:Any|Inactive|Active)\s*=\s*yes", re.IGNORECASE)
-# The ONLY shape of rules file that counts as attributed to another principal. The whole file must be one or more
-#     polkit.addRule(function(action, subject) { if (TERM && TERM ...) { return polkit.Result.YES; } ... });
+_PKLA_YES = re.compile(r"Result(?:Any|Inactive|Active)\s*=\s*yes", re.IGNORECASE)
+# The ONLY shape of rules file this check can judge. The whole file must be one or more
+#     polkit.addRule(function(action, subject) { if (TERM && TERM ...) { return RESULT; } ... });
 # where a TERM is `subject.user == "x"`, `subject.isInGroup("x")` or `action.id == "x"` (literals are word characters,
-# dots and dashes), and the body of each `if` is the yes return and nothing else. Comments, else, ternaries, `||`, `!`,
-# other comparisons, arithmetic, extra statements and any other shape do not match, and a file that does not match is a
-# door a human has to look at.
+# dots and dashes), the body of each `if` is one return of a known result and nothing else. Every other nonempty rules
+# file (comments, else, ternaries, `||`, `!`, other comparisons, other ways to write a result, extra statements,
+# any other shape) cannot be judged, and is a door a human has to look at.
 _Q = r"""(?:"[\w.-]+"|'[\w.-]+')"""
 _TERM = rf"(?:subject\.user[ \t]*===?[ \t]*{_Q}|subject\.isInGroup\([ \t]*{_Q}[ \t]*\)|action\.id[ \t]*===?[ \t]*{_Q})"
-_RET = r"""return[ \t]+(?:polkit\.Result\.YES|"yes"|'yes')[ \t]*;"""
+_RET = r"""return[ \t]+(?:polkit\.Result\.([A-Z_]+)|"([a-z_]+)"|'([a-z_]+)')[ \t]*;"""
 _STMT = rf"if[ \t]*\([ \t]*{_TERM}(?:[ \t]*&&[ \t]*{_TERM})*[ \t]*\)\s*(?:\{{\s*{_RET}\s*\}}|{_RET})"
 _RULE = rf"polkit\.addRule\(\s*function\s*\(\s*action\s*,\s*subject\s*\)\s*\{{\s*(?:{_STMT}\s*)+\}}\s*\)\s*;"
 _RULES_FILE = re.compile(rf"\s*(?:{_RULE}\s*)+")
 _STATEMENT = re.compile(_STMT)
 _SUBJECT_TERM = re.compile(rf"subject\.user[ \t]*===?[ \t]*({_Q})|subject\.isInGroup\([ \t]*({_Q})[ \t]*\)")
+_RESULTS = frozenset(
+    {"YES", "NO", "AUTH_SELF", "AUTH_ADMIN", "AUTH_SELF_KEEP", "AUTH_ADMIN_KEEP", "NOT_HANDLED"}
+    | {"yes", "no", "auth_self", "auth_admin", "auth_self_keep", "auth_admin_keep", "not_handled"}
+)
 MAX_RULES_FILE = 100_000
 
 
-def _grants_attributed(text: str, who: _Who) -> bool:
-    """True only for the strict shape above, with a user or group test in every `if` that is not the account's."""
+def _classify_rules(text: str, who: _Who) -> str:
+    """none (no grant), warn (a grant for other principals only), hit (a grant for the account or its groups) or human
+    (a shape this check cannot judge). An empty file is none; every other file must parse completely."""
+    if not text.strip():
+        return "none"
+    names = [*sorted(who.logins), *sorted(who.group_names)]
+    quoted = any(re.search(r"[\"']" + re.escape(n) + r"[\"']", text) for n in names)
     if len(text) > MAX_RULES_FILE or _RULES_FILE.fullmatch(text) is None:
-        return False
+        return "hit" if quoted else "human"
+    grants = False
     for statement in _STATEMENT.finditer(text):
+        value = next((g for g in statement.groups() if g), "")
+        if value not in _RESULTS:
+            return "human"
+        if value.lower() != "yes":
+            continue
+        grants = True
         tests = [(m.group(1) or m.group(2))[1:-1] for m in _SUBJECT_TERM.finditer(statement.group())]
-        if not tests:  # only `action.id` tests: the grant is for everyone
-            return False
         if any(t in who.logins or t in who.group_names for t in tests):
-            return False
-    return True
+            return "hit"
+        if not tests:  # only `action.id` tests: the grant is for everyone
+            return "human"
+    return "warn" if grants else "none"
 
 
 def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
     scan = _Scan(door.max_entries)
+    cache: dict[str, os.stat_result | None] = {}
     hits: list[str] = []
     others: list[str] = []
     human: list[str] = []
+    open_to_account: list[str] = []
     try:
         for folder in door.polkit_dirs:
             if not _folder_state(folder, f"polkit folder {_show(folder)}"):
                 continue
+            reach = _chain_writable(str(folder), who, cache, str(door.chain_floor))
+            if reach is not None:
+                open_to_account.append(_show(reach))
             for path, info in scan.walk(folder):
+                if not stat.S_ISLNK(info.st_mode) and who.can_write(info):
+                    open_to_account.append(_show(path))
                 if not path.endswith((".rules", ".pkla")):
                     continue
                 if stat.S_ISLNK(info.st_mode):
@@ -474,25 +514,24 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
                 if not stat.S_ISREG(info.st_mode):
                     continue
                 text = _text(Path(path), f"polkit file {_show(path)}", None)
-                if not _YES.search(text):
+                if path.endswith(".rules"):
+                    verdict = _classify_rules(text, who)
+                    {"hit": hits, "human": human, "warn": others}.get(verdict, []).append(_show(path))
+                    continue
+                if not _PKLA_YES.search(text):
                     continue
                 names = [*sorted(who.logins), *sorted(who.group_names)]
-                quoted = any(re.search(r"[\"']" + re.escape(n) + r"[\"']", text) for n in names)
-                pkla = any(
+                named = any(
                     re.search(r"unix-(?:user|group):" + re.escape(n) + r"(?![\w.-])", text) for n in names
                 ) or re.search(r"unix-(?:user|group):\*", text)
-                # a grant in a rules file of any other shape cannot be attributed: fail closed
-                if quoted or pkla:
-                    hits.append(_show(path))
-                elif path.endswith(".rules") and not _grants_attributed(text, who):
-                    human.append(_show(path))
-                else:
-                    others.append(_show(path))
+                (hits if named else others).append(_show(path))
     except _Problem as problem:
         return Finding("polkit", "fail", str(problem))
     failure = scan.failure("the polkit scan")
     if failure:
         return Finding("polkit", "fail", failure)
+    if open_to_account:
+        return Finding("polkit", "fail", _sentence("the account can write polkit storage:", open_to_account))
     if hits:
         return Finding(
             "polkit",
@@ -506,7 +545,7 @@ def _check_polkit(door: DoorPaths, who: _Who) -> Finding:
             _sentence(
                 "polkit rules file",
                 human,
-                " grants without a password in a shape this check cannot attribute; a human needs to look",
+                " is in a shape this check cannot judge; a human needs to look",
             ),
         )
     if others:
@@ -581,6 +620,65 @@ def _in_home(path: str, who: _Who) -> bool:
     return any(_under(path, h) for h in who.homes)
 
 
+INTERPRETERS = frozenset(
+    {
+        "sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish", "ash", "busybox",
+        "python", "python2", "python3", "perl", "ruby", "node", "nodejs", "php", "lua", "tclsh", "awk", "gawk",
+        "env", "nice", "ionice", "timeout", "nohup", "setsid", "flock", "stdbuf", "xargs", "sudo", "su", "chroot",
+        "run-parts", "systemd-run", "unshare", "nsenter", "script", "watch", "time", "strace", "taskset",
+    }
+)  # fmt: skip
+_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_CODE_OPTION = re.compile(r"-[A-Za-z]*[ceEmrx][A-Za-z]*|--(?:command|eval|exec|execute|expression)\b.*")
+_SHELL_SYNTAX = re.compile(r"[;|&`$()<>\\%\n]")
+HUMAN = "a human needs to look"
+
+
+def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
+    """A root job's command line. The program must be an absolute path out of the account's reach. An interpreter, shell
+    or wrapper is followed: every absolute path among its arguments must be out of reach too, and a command line that
+    runs code from a string, from a relative name or from nothing cannot be judged, so it is reported for a human."""
+    if not argv:
+        return None
+    first = argv[0]
+    if not first.startswith("/"):
+        return f"runs {_show(first)}, which is not an absolute path; {HUMAN}"
+    candidates = [first]
+    base = re.sub(r"[0-9.]+$", "", os.path.basename(first))
+    if base in INTERPRETERS:
+        found_script = False
+        for arg in argv[1:]:
+            if _CODE_OPTION.fullmatch(arg):
+                return f"runs {_show(first)} with code on its command line; {HUMAN}"
+            if arg.startswith("-"):
+                _, _, value = arg.partition("=")
+                if value.startswith("/"):
+                    candidates.append(value)
+                continue
+            if _ASSIGN.match(arg):
+                continue
+            if not arg.startswith("/"):
+                return f"runs {_show(first)} with {_show(arg)}, which is not an absolute path; {HUMAN}"
+            found_script = True
+            candidates.append(arg)
+        if not found_script:
+            return f"runs {_show(first)} without a script path; {HUMAN}"
+    for candidate in candidates:
+        if _in_home(candidate, who):
+            return f"reads or runs {_show(candidate)} from the account's home"
+        writable = _chain_writable(candidate, who, cache, floor)
+        if writable is not None:
+            return f"runs {_show(candidate)}, which the account can replace through {_show(writable)}"
+    return None
+
+
+def _split_command(text: str) -> list[str] | None:
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return None
+
+
 def _unit_hits(text: str, who: _Who, cache: dict[str, os.stat_result | None], floor: str) -> str | None:
     user = ""
     entries: list[tuple[str, str]] = []
@@ -594,16 +692,25 @@ def _unit_hits(text: str, who: _Who, cache: dict[str, os.stat_result | None], fl
     if user not in ("", "root", "0"):
         return None
     for key, value in entries:
-        first = value.lstrip("@-:+!").split(None, 1)[0] if value.lstrip("@-:+!") else ""
         if key in HOME_KEYS:
             first = value.lstrip("-").split(None, 1)[0] if value.lstrip("-") else ""
-        if not first.startswith("/"):
+            if not first.startswith("/"):
+                continue
+            if _in_home(first, who):
+                return f"reads or runs {_show(first)} from the account's home"
+            writable = _chain_writable(first, who, cache, floor)
+            if writable is not None:
+                return f"runs {_show(first)}, which the account can replace through {_show(writable)}"
             continue
-        if _in_home(first, who):
-            return f"reads or runs {_show(first)} from the account's home"
-        writable = _chain_writable(first, who, cache, floor)
-        if writable is not None:
-            return f"runs {_show(first)}, which the account can replace through {_show(writable)}"
+        body = value.lstrip("-:+!")
+        if not body:  # an empty value resets the list
+            continue
+        argv = None if body.startswith("@") else _split_command(body)
+        if argv is None or ";" in argv:
+            return f"has a command line this check cannot read ({_show(body.split(None, 1)[0])}); {HUMAN}"
+        hit = _command_hit(argv, who, cache, floor)
+        if hit:
+            return hit
     return None
 
 
@@ -641,13 +748,13 @@ def _cron_hit(text: str, who: _Who, cache: dict[str, os.stat_result | None], flo
         index = 1 if line.startswith("@") else 5
         if len(fields) <= index + 1 or fields[index] != "root":
             continue
-        command = fields[index + 1].split(None, 1)[0]
-        if _in_home(command, who):
-            return f"runs {_show(command)} from the account's home as root"
-        if command.startswith("/"):
-            writable = _chain_writable(command, who, cache, floor)
-            if writable is not None:
-                return f"runs {_show(command)} as root, which the account can replace through {_show(writable)}"
+        command = fields[index + 1]
+        argv = None if _SHELL_SYNTAX.search(command) else _split_command(command)
+        if argv is None:
+            return f"runs a command line this check cannot read ({_show(command.split(None, 1)[0])}); {HUMAN}"
+        hit = _command_hit(argv, who, cache, floor)
+        if hit:
+            return hit
     return None
 
 
@@ -694,8 +801,7 @@ def _check_jobs(door: DoorPaths, who: _Who) -> Finding:
     return Finding(
         "jobs",
         "pass",
-        "no root-run unit or cron job runs a file the account can replace or reads from its home "
-        "(first word of each command only)",
+        "no root-run unit or cron job runs a file the account can replace or reads from its home",
     )
 
 
@@ -724,14 +830,22 @@ def _has_capability(path: str) -> bool:
     return True
 
 
-def _packages(door: DoorPaths) -> set[str]:
+def _packages(door: DoorPaths, trust: int, who: _Who) -> set[str]:
+    """The files the packages own. The database is evidence only if the account cannot have written it: the folder and
+    every list must be owned by root and closed, and the account must not be able to write any folder above it."""
     owned: set[str] = set()
     if not _folder_state(door.dpkg_info, "the package database"):
         raise _Problem("the package database cannot be read (it is missing)")
+    info = _lstat(door.dpkg_info, "the package database")
+    if info.st_uid != trust or info.st_mode & 0o022:
+        raise _Problem("the package database cannot be trusted (its folder is not owned by root or is open to others)")
+    reach = _chain_writable(str(door.dpkg_info), who, {}, str(door.chain_floor))
+    if reach is not None:
+        raise _Problem(f"the package database cannot be trusted (the account can write {_show(reach)})")
     for name in sorted(os.listdir(door.dpkg_info)):
         if not name.endswith(".list"):
             continue
-        for line in _text(door.dpkg_info / name, "a package file list", None).splitlines():
+        for line in _text(door.dpkg_info / name, "a package file list", trust).splitlines():
             owned.add(_merge(door, line.strip()))
     if not owned:
         raise _Problem("the package database cannot be read (it lists no files)")
@@ -745,7 +859,7 @@ def _merge(door: DoorPaths, path: str) -> str:
     return path
 
 
-def _check_suid(door: DoorPaths, who: _Who) -> Finding:
+def _check_suid(door: DoorPaths, who: _Who, trust: int) -> Finding:
     scan = _Scan(door.max_entries)
     marked: list[tuple[str, os.stat_result]] = []
     capped: list[tuple[str, os.stat_result]] = []
@@ -790,7 +904,7 @@ def _check_suid(door: DoorPaths, who: _Who) -> Finding:
     owned: set[str] = set()
     if marked or capped:
         try:
-            owned = _packages(door)
+            owned = _packages(door, trust, who)
         except _Problem as problem:
             return Finding("setuid", "fail", f"setuid, setgid or capability files exist and {problem}")
     bad = [_show(p) for p, i in marked + capped if who.can_write(i)]
@@ -849,19 +963,24 @@ def check_doors(
     trust_uid: int,
     maintainer_uid: int | None,
     extra_roots: Sequence[Path] = (),
+    claimed_login: str | None = None,
 ) -> list[Finding]:
-    """One finding per check, in a fixed order. Never raises for a path problem: that is a fail."""
+    """One finding per check, in a fixed order. Never raises for a path problem: that is a fail. An account that is not
+    known is a fail, never a warning: with `claimed_login` set (sudo's own user name) it must be one of the logins of
+    the uid, so a user id alone, set by hand, does not select the account that gets judged."""
     who: _Who | None = None
     unknown = ""
+    state = "fail"
     if maintainer_uid is None:
-        unknown = "the maintainer account is unknown (run through sudo so SUDO_UID is set), so this was not judged"
-        state = "warn"
+        unknown = "the maintainer account is unknown (run through sudo so SUDO_UID is set), so nothing was judged"
     else:
-        state = "fail"
         try:
             who = _load_who(door, trust_uid, maintainer_uid)
         except _Problem as problem:
             unknown = str(problem)
+        if who is not None and claimed_login is not None and claimed_login not in who.logins:
+            who = None
+            unknown = "the user name sudo reports does not belong to the user id it reports, so nothing was judged"
     results: list[Finding] = []
     for name in _NEEDS_WHO:
         if who is None:
@@ -877,7 +996,7 @@ def check_doors(
         elif name == "jobs":
             results.append(_check_jobs(door, who))
         elif name == "setuid":
-            results.append(_check_suid(door, who))
+            results.append(_check_suid(door, who, trust_uid))
         else:
             results.append(_check_credential(door, who))
     results.append(_check_preload(door, trust_uid))

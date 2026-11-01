@@ -380,7 +380,9 @@ def _check_switch_and_egress(paths: Paths, facts: list[str], fails: list[str], n
         fails.append("paid use is enabled but the egress config cannot be read or has no valid mode")
 
 
-def check_install(paths: Paths, maintainer_uid: int | None = None) -> tuple[list[str], list[str]]:
+def check_install(
+    paths: Paths, maintainer_uid: int | None = None, claimed_login: str | None = None
+) -> tuple[list[str], list[str]]:
     """(lines, failures): whether the release link, the version record, the floor, the installed unit files (against the
     release's own copies and its manifest), the egress helper and the switch agree, and the read-only root-door checks
     (`safo.broker.doors`) for the maintainer account `maintainer_uid` (None when sudo did not say). Read-only."""
@@ -442,7 +444,9 @@ def check_install(paths: Paths, maintainer_uid: int | None = None) -> tuple[list
     if not fails:
         lines.append("ok: the release link, the record, the floor, the units, the egress helper and the switch agree")
     broker_folders = (paths.release_link.parent, paths.state_dir)
-    findings = doors.check_doors(paths.door, paths.trust_uid, maintainer_uid, extra_roots=broker_folders)
+    findings = doors.check_doors(
+        paths.door, paths.trust_uid, maintainer_uid, extra_roots=broker_folders, claimed_login=claimed_login
+    )
     lines.extend(finding.line() for finding in findings)
     fails = fails + [f.text for f in findings if f.status == "fail"]
     lines.append(LIMITS)
@@ -635,7 +639,7 @@ def _run(
     who = AdminWho(ops.getuid(), sudo_uid(env))
     if args.cmd == "check-install":
         sudo_user = sudo_uid(env)
-        lines, fails = check_install(paths, None if sudo_user < 0 else sudo_user)
+        lines, fails = check_install(paths, None if sudo_user < 0 else sudo_user, env.get("SUDO_USER", ""))
         for line in lines:
             output.write(out, line)
         return 1 if fails else 0

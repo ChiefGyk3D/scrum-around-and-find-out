@@ -199,7 +199,7 @@ def run(
         list(argv),
         ops=(ops or FakeOps()).as_ops(),
         paths=paths(tmp),
-        env={"SUDO_UID": str(SUDO_USER)} if env is None else env,
+        env={"SUDO_UID": str(SUDO_USER), "SUDO_USER": "maint"} if env is None else env,
         now=now,
         out=out,
         err=err,
@@ -1421,7 +1421,7 @@ def run_with_door(tmp: Path, door: DoorPaths, *, env: dict[str, str] | None = No
         ["check-install"],
         ops=FakeOps().as_ops(),
         paths=dataclasses.replace(paths(tmp), door=door),
-        env={"SUDO_UID": str(SUDO_USER)} if env is None else env,
+        env={"SUDO_UID": str(SUDO_USER), "SUDO_USER": "maint"} if env is None else env,
         now=LATER,
         out=out,
         err=err,
@@ -1454,12 +1454,21 @@ def test_a_root_door_warning_alone_keeps_exit_0_but_is_not_called_ok(tmp_path: P
     assert code == 0 and "warn: credential: " in out
 
 
-def test_check_install_without_sudo_uid_warns_for_the_account_checks_and_fails_nothing(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"SUDO_UID": str(SUDO_USER)},
+        {"SUDO_UID": str(SUDO_USER), "SUDO_USER": "someone-else"},
+        {"SUDO_USER": "maint"},
+    ],
+)
+def test_check_install_fails_when_the_maintainer_cannot_be_identified(tmp_path: Path, env: dict[str, str]) -> None:
     install(tmp_path)
-    out_code, out, _ = run(tmp_path, "check-install", env={})
-    assert out_code == 0
+    out_code, out, _ = run(tmp_path, "check-install", env=env)
+    assert out_code == 1
     for name in ("sudo", "groups", "polkit", "writable", "jobs", "setuid", "credential"):
-        assert f"warn: {name}: " in out
+        assert f"fail: {name}: " in out
     assert "pass: preload: " in out
 
 

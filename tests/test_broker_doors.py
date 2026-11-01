@@ -10,11 +10,13 @@ world-writable or maintainer-writable path, a missing path and an unreadable one
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import errno
 import os
 import shutil
 import stat
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -133,10 +135,10 @@ def test_every_finding_is_one_plain_sentence(w: World) -> None:
 # -- the maintainer account ----------------------------------------------------------------------------------------
 
 
-def test_an_unknown_maintainer_warns_instead_of_passing(w: World) -> None:
+def test_an_unknown_maintainer_fails_every_account_check(w: World) -> None:
     found = w.run(who=None)
     assert {status(found, n) for n in ("sudo", "groups", "writable", "jobs", "setuid", "credential", "polkit")} == {
-        "warn"
+        "fail"
     }
 
 
@@ -1036,3 +1038,330 @@ def test_an_oversized_polkit_file_is_not_attributed(w: World) -> None:
     body = "\n".join(['if (subject.user == "o") { return polkit.Result.YES; }'] * 5000)
     put(w.polkit / "50-x.rules", WRAP.format(body))
     assert status(w.run(), "polkit") == "fail"
+
+
+# -- hardening ----------------------------------------------------------------------
+
+
+def test_hardening_claimed_login_must_belong_to_the_user_id(w: World) -> None:
+    ok = doors.check_doors(w.door(), UID, MAINT, claimed_login="maint")
+    assert {f.status for f in ok if f.name != "preload"} == {"pass"}
+    for bad in ("root", "", "someone-else"):
+        found = {f.name: f for f in doors.check_doors(w.door(), UID, MAINT, claimed_login=bad)}
+        assert {found[n].status for n in ("sudo", "groups", "polkit", "writable", "jobs", "setuid", "credential")} == {
+            "fail"
+        }
+
+
+@pytest.mark.parametrize("line", ["#31337 ALL=(ALL) ALL", "#31337\tALL=(ALL) ALL", "#31337,other ALL=(ALL) ALL"])
+def test_hardening_numeric_sudoers_rule_is_a_rule(w: World, line: str) -> None:
+    put(w.sudoers_d / "10", line + "\n", 0o440)
+    assert status(w.run(), "sudo") == "fail"
+
+
+def test_hardening_numeric_comment_without_a_rule_shape_is_still_a_comment(w: World) -> None:
+    put(w.sudoers_d / "10", "#31337\n# 31337 ALL=(ALL) ALL\n#31338 ALL=(ALL) ALL\n", 0o440)
+    assert status(w.run(), "sudo") == "pass"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'if (subject.user == "o") return polkit.Result["YES"];',
+        "const allow = polkit.Result.YES; return allow;",
+        'if (subject.user == "o") { return polkit["Result"].YES; }',
+        'if (subject.user == "o") { return polkit.Result.\\u0059ES; }',
+        'if (subject.user == "o") { return String.fromCharCode(121, 101, 115); }',
+        'if (subject.user == "o") { return polkit.Result.WHATEVER; }',
+        "log(1);",
+    ],
+)
+def test_hardening_any_rules_file_not_in_the_strict_shape_fails(w: World, body: str) -> None:
+    put(w.polkit / "50-x.rules", WRAP.format(body))
+    assert status(w.run(), "polkit") == "fail"
+
+
+def test_hardening_rules_files_that_are_empty_or_only_deny_pass(w: World) -> None:
+    put(w.polkit / "10-empty.rules", "  \n")
+    put(w.polkit / "20-deny.rules", WRAP.format('if (subject.user == "o") { return polkit.Result.NO; }'))
+    assert status(w.run(), "polkit") == "pass"
+
+
+def test_hardening_commented_or_garbled_nonempty_rules_file_fails(w: World) -> None:
+    put(w.polkit / "10.rules", "// only a comment\n")
+    assert status(w.run(), "polkit") == "fail"
+
+
+def test_hardening_interpreter_running_a_script_in_the_home_fails(w: World) -> None:
+    payload = put(w.home / "payload.py", "x = 1\n")
+    put(w.units / "a.service", unit(f"/usr/bin/python3 {payload}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "home" in found["jobs"].text
+
+
+def test_hardening_shell_in_cron_running_a_script_in_the_home_fails(w: World) -> None:
+    payload = put(w.home / "payload.sh", "true\n")
+    put(w.cron_d / "x", f"@reboot root /bin/sh {payload}\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_interpreter_script_in_a_writable_folder_fails(w: World) -> None:
+    folder(w.t / "wr", 0o777)
+    put(w.units / "a.service", unit(f"/usr/bin/env python3 {w.t}/wr/s.py"))
+    assert status(w.run(), "jobs") == "fail"
+    put(w.units / "a.service", unit(f"/usr/bin/env {w.t}/wr/s.py"))
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_interpreter_with_a_safe_script_passes(w: World) -> None:
+    script = put(w.t / "bin" / "ok.py", "x = 1\n")
+    put(w.units / "a.service", unit(f"/usr/bin/python3 -I {script}"))
+    put(w.units / "b.service", unit(f"/usr/bin/env FOO=1 {script}"))
+    assert status(w.run(), "jobs") == "pass"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/bin/sh -c 'run something'",
+        "/usr/bin/python3 -c 'print(1)'",
+        "/usr/bin/python3 -m http.server",
+        "/usr/bin/python3 relative.py",
+        "/usr/bin/python3",
+        "/usr/bin/perl -e 1",
+        "/bin/bash",
+        "/usr/bin/env python3 /x/y.py",
+        "/bin/sh --command=x",
+        "/usr/bin/node --eval 1",
+    ],
+)
+def test_hardening_interpreter_command_lines_it_cannot_judge_fail(w: World, command: str) -> None:
+    put(w.units / "a.service", unit(command))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+@pytest.mark.parametrize(
+    "value", ["python3 /x/y.py", "$HOME/x", "@/bin/true name", "/bin/true ; /bin/false", "/bin/true 'unclosed"]
+)
+def test_hardening_unreadable_unit_command_lines_fail(w: World, value: str) -> None:
+    put(w.units / "a.service", unit(value))
+    assert status(w.run(), "jobs") == "fail"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/bin/true; /bin/false",
+        "/bin/true | cat",
+        "/bin/true $(x)",
+        "/bin/true `x`",
+        "/bin/true && /bin/false",
+        "/bin/true 'unclosed",
+    ],
+)
+def test_hardening_cron_shell_syntax_it_cannot_judge_fails(w: World, command: str) -> None:
+    put(w.cron_d / "x", f"17 * * * * root {command}\n")
+    assert status(w.run(), "jobs") == "fail"
+
+
+def test_hardening_default_paths_cover_runtime_unit_and_polkit_storage() -> None:
+    d = DoorPaths()
+    for name in ("system", "transient", "generator", "generator.early", "generator.late"):
+        assert Path("/run/systemd") / name in d.unit_dirs
+        assert Path("/run/systemd") / name in d.writable_roots
+    assert Path("/var/lib/polkit-1") in d.writable_roots
+
+
+def test_hardening_runtime_unit_folder_is_read_like_the_others(w: World) -> None:
+    runtime = folder(w.t / "run-system")
+    payload = put(w.home / "payload.py", "x = 1\n")
+    put(runtime / "t.service", unit(f"/usr/bin/python3 {payload}"))
+    assert status(w.run(unit_dirs=(w.units, runtime)), "jobs") == "fail"
+
+
+def test_hardening_forged_package_list_is_not_trusted(w: World) -> None:
+    evil = put(w.usr / "evil", "x", 0o4755)
+    put(w.dpkg / "forged.list", f"{evil}\n", 0o666)
+    assert status(w.run(), "setuid") == "fail"
+
+
+def test_hardening_package_database_must_be_root_owned_and_closed(w: World) -> None:
+    (w.usr / "ls").chmod(0o4755)
+    assert status(w.run(), "setuid") == "pass"
+    w.dpkg.chmod(0o777)
+    assert status(w.run(), "setuid") == "fail"
+    w.dpkg.chmod(0o755)
+    assert status(w.run(trust=UID + 1), "setuid") == "fail"
+
+
+def test_hardening_package_database_in_a_folder_the_account_can_write_is_not_trusted(w: World) -> None:
+    (w.usr / "ls").chmod(0o4755)
+    w.t.chmod(0o777)
+    try:
+        assert status(w.run(), "setuid") == "fail"
+    finally:
+        w.t.chmod(0o755)
+
+
+def test_hardening_writable_legacy_polkit_storage_fails(w: World) -> None:
+    legacy = folder(w.t / "var-lib-polkit", 0o777)
+    found = w.run(polkit_dirs=(legacy,))
+    assert status(found, "polkit") == "fail" and "polkit storage" in found["polkit"].text
+
+
+def test_hardening_writable_entry_inside_polkit_storage_fails(w: World) -> None:
+    put(w.polkit / "sub" / "x.pkla", "[x]\n", 0o666)
+    assert status(w.run(), "polkit") == "fail"
+
+
+def test_hardening_writable_parent_of_polkit_storage_fails(w: World) -> None:
+    parent = folder(w.t / "pk", 0o777)
+    inner = folder(parent / "rules.d")
+    assert status(w.run(polkit_dirs=(inner,)), "polkit") == "fail"
+
+
+# -- the read-only property, proved at run time ------------------------------------------------------------------------
+
+WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+CHANGING_EVENTS = frozenset(
+    {
+        "os.chmod",
+        "os.chown",
+        "os.mkdir",
+        "os.remove",
+        "os.rename",
+        "os.rmdir",
+        "os.truncate",
+        "os.symlink",
+        "os.link",
+        "os.utime",
+        "os.setxattr",
+        "os.removexattr",
+        "os.mkfifo",
+        "os.mknod",
+        "os.system",
+        "os.exec",
+        "os.posix_spawn",
+        "os.spawn",
+        "os.fork",
+        "os.forkpty",
+        "subprocess.Popen",
+        "ctypes.dlopen",
+        "ctypes.call_function",
+        "pty.spawn",
+        "shutil.copyfile",
+        "shutil.copymode",
+        "shutil.copystat",
+        "shutil.copytree",
+        "shutil.rmtree",
+        "shutil.move",
+        "tempfile.mkstemp",
+        "tempfile.mkdtemp",
+    }
+)
+
+
+class Recorder:
+    def __init__(self) -> None:
+        self.active = False
+        self.bad: list[str] = []
+        self.reads = 0
+
+
+RECORDER = Recorder()
+
+
+def _audit(event: str, args: tuple[object, ...]) -> None:
+    if not RECORDER.active:
+        return
+    if event == "open":
+        flags = args[2] if len(args) > 2 and isinstance(args[2], int) else 0
+        mode = args[1] if len(args) > 1 and isinstance(args[1], str) else ""
+        if flags & WRITE_FLAGS or set(mode) & set("wax+"):
+            RECORDER.bad.append(f"open {args[0]!r} {mode!r} {flags}")
+        else:
+            RECORDER.reads += 1
+    elif event in CHANGING_EVENTS:
+        RECORDER.bad.append(event)
+
+
+sys.addaudithook(_audit)
+
+
+@contextlib.contextmanager
+def recording() -> Iterator[Recorder]:
+    RECORDER.bad.clear()
+    RECORDER.reads = 0
+    RECORDER.active = True
+    try:
+        yield RECORDER
+    finally:
+        RECORDER.active = False
+
+
+def hostile_world(w: World) -> None:
+    put(w.sudoers_d / "10", "maint ALL=(ALL) ALL\n", 0o440)
+    put(w.polkit / "50-x.rules", rule())
+    put(w.polkit / "60-y.rules", "garbage\n")
+    put(w.usr / "evil", "x", 0o4755)
+    put(w.etc / "open.conf", "x", 0o666)
+    put(w.units / "a.service", unit(f"/usr/bin/python3 {w.home}/p.py"))
+    (w.units / "b.service").symlink_to(w.t / "nowhere")
+    put(w.units / "c.service.d" / "o.conf", unit("/bin/true"))
+    put(w.cron_d / "x", "@reboot root /bin/true\n")
+    put(w.preload, "/x.so\n")
+    folder(w.home / ".doppler")
+
+
+def test_the_checks_make_no_write_or_process_call_on_a_hostile_machine(w: World) -> None:
+    hostile_world(w)
+    with recording() as rec:
+        found = w.run()
+    assert rec.bad == []
+    assert rec.reads >= 5  # the guard saw the checks read
+    assert {f.status for f in found.values()} >= {"fail", "warn"}
+
+
+def test_the_runtime_guard_bites_on_writes_and_process_calls(w: World, tmp_path: Path) -> None:
+    target = tmp_path / "scratch"
+    with recording() as rec:
+        with open(target, "w") as handle:
+            handle.write("x")
+        os.mkdir(tmp_path / "d")
+        os.chmod(target, 0o600)
+        os.rename(target, tmp_path / "r")
+    assert len(rec.bad) >= 4
+
+
+def test_the_runtime_guard_catches_a_check_that_writes(
+    w: World, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def writer(*_: object) -> Finding:
+        (tmp_path / "leak").write_text("x")
+        return Finding("preload", "pass", "x")
+
+    monkeypatch.setattr(doors, "_check_preload", writer)
+    with recording() as rec:
+        w.run()
+    assert rec.bad
+
+
+def test_the_checks_leave_every_byte_of_the_tree_as_it_was(w: World) -> None:
+    hostile_world(w)
+
+    def digest() -> dict[str, tuple[int, bytes | str]]:
+        out: dict[str, tuple[int, bytes | str]] = {}
+        for dirpath, dirnames, filenames in os.walk(w.t):
+            for name in dirnames + filenames:
+                p = os.path.join(dirpath, name)
+                st = os.lstat(p)
+                body: bytes | str = os.readlink(p) if stat.S_ISLNK(st.st_mode) else b""
+                if stat.S_ISREG(st.st_mode):
+                    body = Path(p).read_bytes()
+                out[p] = (stat.S_IMODE(st.st_mode) | st.st_mtime_ns, body)
+        return out
+
+    before = digest()
+    w.run()
+    assert digest() == before
