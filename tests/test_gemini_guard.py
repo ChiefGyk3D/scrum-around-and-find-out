@@ -631,6 +631,8 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "RECORD_ID",
         # the Bash command check (#209) is its own scan of a shell command, not a brief detector
         "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL",
+        # the shell denial quoted back in a brief is removed before the scan, not a detector (#264)
+        "DENIAL_QUOTE",
         # the broker client module reader (#299): gated by the "broker module" prefilter word or a risk line
         "_BM_ENTRY", "_BM_SCRIPT", "_BM_LOCAL", "_BM_IMPORT", "_BM_CODE", "_BM_DOTTED", "_BM_PATH", "_BM_RUNTIME",
         "_BM_FEED", "_BM_MFLAG", "_BM_OPTION", "_BM_PY_RE", "_BM_ANY_M", "_BM_DYNAMIC",
