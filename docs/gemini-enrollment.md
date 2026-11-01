@@ -21,8 +21,18 @@ software key, a fake vendor and the real broker code, then prints one `PASS`, `F
 `R13` are the root runbook's step numbers; `E` rows are this page's). It finds runbook mistakes before the real run. It
 does not replace the real run: the steps that need root, systemd, nftables or a hardware key (`R1`, `R4`, `R6`, `R8`,
 `R10`, `R11`, the restart and probe lines of `R12`, the hardware key steps `Ea2` and `Eb`) are reported `SKIPPED` with the
-reason, and a software key cannot show the touch and PIN flags. It writes only under its own folder, makes no network
-call and refuses to run as root.
+reason. `R3` is `SKIPPED` too: its lines run, but the review of the two root programs by a person is not something the
+tool can do. A software key cannot show the touch and PIN flags, and the preflight's checks of ssh, libfido2, udev,
+authenticators and the service user are stand-ins inside the folder, so those rows say they are.
+
+**What contains it.** The command lines come from the repository and run under bash, so by default the tool re-runs
+itself inside `bwrap` (bubblewrap, rootless): new user, network, IPC, PID and UTS namespaces; a new root holding only
+read-only copies of `/usr`, `/etc`, the checkout and the Python environment; a writable rehearsal folder and a private
+`/tmp`; no home folder (so no `~/.ssh` or `~/.config/safo`); and a scrubbed environment. That contains writes outside the
+folder, every network connection and reads of your home folder. It does not contain a kernel or bubblewrap flaw, it has
+no seccomp filter or resource limit, and `/usr` and `/etc` (including a real `/etc/safo`) stay readable. If `bwrap` or
+user namespaces are missing the tool refuses to run; `--no-containment` runs it anyway with your own rights and network,
+and every output line then ends with `[NO CONTAINMENT]`. It refuses to run as root.
 
 ## What was verified, and when
 

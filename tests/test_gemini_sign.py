@@ -343,7 +343,7 @@ def test_propose_decides_from_one_open_of_the_trust_file_not_a_check_then_use(
     learned from the one hardened open, which raises a distinct error."""
     real = os.path.lexists
 
-    def spy(path: object) -> bool:
+    def spy(path: str | os.PathLike[str]) -> bool:
         assert Path(str(path)) != rig.signers, "propose looked at the signers path before opening it"
         return real(path)
 

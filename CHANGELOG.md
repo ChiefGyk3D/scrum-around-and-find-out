@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Rehearsal review fixes (#263). The rehearsal now contains the runbook text it runs: it re-runs itself inside a rootless
+  bubblewrap sandbox (user, network, IPC, PID and UTS namespaces, read-only `/usr`, `/etc` and checkout, a writable
+  rehearsal folder, no home folder, scrubbed environment) and refuses to run when it cannot, unless `--no-containment` is
+  given, in which case every output line says `[NO CONTAINMENT]`; the header and `docs/gemini-enrollment.md` state what is
+  and is not contained. R13 now takes its verdict from the real enabling preflight code path and its exit status (it used
+  to ignore the service-user check), R3 is SKIPPED because it cannot do the root review, and the preflight host checks are
+  stand-ins inside the rehearsal folder instead of reads of the real udev, linker, authenticator and agent state.
+  `keys propose` now learns that the allowed-signers file is missing from the one hardened open, not from a separate look.
+
 - Rootless rehearsal of the phase 7 root setup (#263): `scripts/rehearse_broker_setup.py` runs the root runbook's own
   command lines and the enrollment page's command blocks against a throwaway folder (a test-only software key, the fake
   vendor, the real preflight, client and broker start-up code) and prints a PASS, FAIL or SKIPPED row per runbook step. It

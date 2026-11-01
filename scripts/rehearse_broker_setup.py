@@ -9,22 +9,34 @@ mistakes in them before the real run:
   * /etc/safo, /opt/safo-broker, /var/lib/... and /usr/local/sbin become folders under PREFIX; the runbook's own command
     lines run through bash with those path words moved and `sudo` and `-o root -g root` removed (nothing else changes);
   * the keys are test-only software keys made here; the approvals are dry-run approvals signed with them;
-  * the broker is the real start-up code (`safo.broker.__main__.run`) given a listening socket the way systemd
-    gives one,
-    the config the runbook wrote, a fake vendor that records requests, and a placeholder credential;
-  * the preflight runs against PREFIX, and the dry run runs through the real client and server.
+  * the broker is the real start-up code (`safo.broker.__main__.run`) given a listening socket the way systemd gives
+    one, the config the runbook wrote, a fake vendor that records requests, and a placeholder credential;
+  * the preflight runs against PREFIX with its host checks (ssh, libfido2, udev, authenticators, the service user)
+    answered by stand-ins inside PREFIX, and the dry run runs through the real client and server.
 
-It makes no vendor call and no network call (the fake vendor must end with zero requests), touches nothing outside
-PREFIX,
-reads no real key, nothing of ~/.ssh and nothing of ~/.config/safo, and refuses to run as root. A step that needs root,
-systemd, nftables or a hardware key is reported SKIPPED with the reason, never as passed. Its command lines are still
-checked with `bash -n`.
+CONTAINMENT. The runbook text is repository-controlled and is run by bash, so by default the whole rehearsal re-runs
+itself inside `bwrap` (bubblewrap, rootless) with: a new user, network, IPC, PID and UTS namespace; a new empty root
+that holds only read-only copies of /usr, /etc, this checkout and the Python environment; a writable PREFIX and a
+private /tmp; the real home folder NOT present; and a scrubbed environment (HOME and TMPDIR inside PREFIX).
 
-    python scripts/rehearse_broker_setup.py [--prefix DIR] [--keep]
+What that does contain: writes anywhere but PREFIX and its private /tmp; every network connection (the only interface
+is a down loopback); reads of your home folder (~/.ssh, ~/.config/safo and the rest), the other processes and the
+environment variables of the caller.
+What it does NOT contain: it is no defence against a kernel or bubblewrap flaw; the same account runs it (no seccomp
+filter, no resource limit); /usr and /etc, including a real /etc/safo, stay readable (read-only); and the safety
+transform of the command lines (path words moved, `sudo` removed) is not a sandbox, only the namespaces are.
+If `bwrap` or user namespaces are missing the tool REFUSES to run. `--no-containment` runs it anyway, in this process
+with your own rights and network; every output line then ends with [NO CONTAINMENT].
+
+A step that needs root, systemd, nftables or a hardware key is reported SKIPPED with the reason, never as passed, and so
+is a step whose human review the tool cannot do (R3's `less` lines). Command lines are also checked with `bash -n`.
+The preflight's host checks never read the real udev rules, linker cache, authenticators or agent keys: they are
+stand-ins, and a row that depends on them says so.
+
+    python scripts/rehearse_broker_setup.py [--prefix DIR] [--keep] [--no-containment]
 
 Prints one row per step (PASS, FAIL or SKIPPED) and a total; exits 1 when a row failed, 2 for a refused setup. The
-default
-PREFIX is a new folder under ~/.local/share/safo-rehearsal/.
+default PREFIX is a new folder under ~/.local/share/safo-rehearsal/.
 """
 
 from __future__ import annotations
@@ -47,6 +59,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -66,7 +79,6 @@ PATH_WORDS = (
     "/etc/safo",
     "/usr/local/sbin",
 )
-HOST_CHECKS = ("ssh-sk-support", "libfido2", "udev-rule", "hardware-key")  # depend on this machine, not on the prefix
 STATUSES = ("PASS", "FAIL", "SKIPPED")
 RELEASE_KEY_TYPES = ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
 TITLE_WORDS = (
@@ -117,17 +129,27 @@ def sort_key(step: str) -> tuple[int, int, str]:
     return (2, 0, step)
 
 
-def render(rows: Sequence[Row]) -> str:
+NO_CONTAINMENT = "[NO CONTAINMENT]"
+
+
+def render(rows: Sequence[Row], *, contained: bool = True) -> str:
     lines = [f"{'STEP':<8}{'STATUS':<9}{'WHAT':<46}DETAIL"]
     for r in sorted(rows, key=lambda x: sort_key(x.step)):
         lines.append(f"{r.step:<8}{r.status:<9}{r.title[:44]:<46}{r.detail}")
     counts = {s: sum(1 for r in rows if r.status == s) for s in STATUSES}
     lines.append(f"total: {counts['PASS']} pass, {counts['FAIL']} fail, {counts['SKIPPED']} skipped")
+    if not contained:
+        lines = [f"{x}  {NO_CONTAINMENT}" for x in lines]
     return "\n".join(lines)
 
 
 class Bad(Exception):
     """A step's check failed; the message becomes the row's detail."""
+
+
+class Partial(Exception):
+    """Everything the tool can check in the step passed, but part of the step is a human or root act it cannot do:
+    the row is SKIPPED, never PASS."""
 
 
 def run(argv: Sequence[str], *, env: dict[str, str], cwd: Path | None = None, timeout: int = 120) -> tuple[int, str]:
@@ -202,6 +224,7 @@ class Rehearsal:
         self.broker: BrokerThread | None = None
         self.vendor = self.h.fakevendor.FakeVendor(self.h.fakevendor.FakeClock())
         self.dryruns: dict[str, tuple[int, str, str]] = {}
+        self.service_user_standin = False
 
     # -- reporting
     def add(self, step: str, title: str, status: str, detail: str) -> None:
@@ -210,6 +233,8 @@ class Rehearsal:
     def attempt(self, step: str, title: str, body: Callable[[], str]) -> None:
         try:
             self.add(step, title, "PASS", body())
+        except Partial as part:
+            self.add(step, title, "SKIPPED", str(part))
         except Bad as why:
             self.add(step, title, "FAIL", str(why))
         except Exception as err:  # a crash in a step is a finding about that step, not a reason to stop the rehearsal
@@ -304,9 +329,30 @@ class Rehearsal:
                 raise Bad(f"runbook step {n} is {steps[n - 1].title!r}, not the {word} step: update the rehearsal")
         return steps
 
-    # -- the preflight
+    # -- the preflight, with every host check answered from inside the prefix
+    def fake_runner(self, argv: Sequence[str]) -> Any:
+        from safo import gemini_preflight
+
+        answers = {
+            ("ssh", "-Q", "key"): (0, "\n".join(RELEASE_KEY_TYPES) + "\n"),
+            ("ldconfig", "-p"): (0, "\tlibfido2.so.1 (libc6,x86-64) => /rehearsal/libfido2.so.1\n"),
+            ("fido2-token", "-L"): (0, ""),
+            ("ssh-add", "-L"): (1, "The agent has no identities.\n"),
+        }
+        code, text = answers.get(tuple(argv), (127, ""))
+        return gemini_preflight.RunResult(code, text)
+
+    def fake_lookup(self, name: str) -> int | None:
+        """No service user exists (step R1 is skipped) until the enabling step, which stands this account in."""
+        return self.uid if self.service_user_standin and name == "safo-broker" else None
+
     def locations(self) -> Any:
         from safo import gemini_preflight
+
+        fake = self.prefix / "hostfake"
+        (fake / "udev").mkdir(parents=True, exist_ok=True)
+        (fake / "ssh").mkdir(parents=True, exist_ok=True)
+        (fake / "ssh/ssh-sk-helper").write_text("")
 
         return gemini_preflight.Locations(
             allowed_signers=self.signers,
@@ -318,25 +364,28 @@ class Rehearsal:
             state_dir=self.state,
             service_user="safo-broker",
             trust_uid=self.uid,
+            udev_dirs=(fake / "udev",),
+            sk_helper_dirs=(fake / "ssh",),
         )
 
     def preflight(self, *, enabling: bool = False) -> list[Any]:
         from safo import gemini_preflight
 
-        return gemini_preflight.run_preflight(
-            self.locations(), gemini_preflight.default_runner, gemini_preflight.default_lookup, enabling=enabling
-        )
+        return gemini_preflight.run_preflight(self.locations(), self.fake_runner, self.fake_lookup, enabling=enabling)
+
+    def enabling_exit(self) -> tuple[int, str]:
+        """The exit status of the real enabling preflight: the same `main_with` the command line uses, so the exit
+        policy is production's, with the host answers above."""
+        from safo import gemini_preflight
+
+        out = io.StringIO()
+        code = gemini_preflight.main_with(self.locations(), self.fake_runner, self.fake_lookup, out=out, enabling=True)
+        failed = ", ".join(x.split(":")[0][5:] for x in out.getvalue().splitlines() if x.startswith("FAIL "))
+        return code, failed
 
 
 def statuses(checks: Sequence[Any]) -> dict[str, str]:
     return {c.name: c.status for c in checks}
-
-
-def gate_passes(checks: Sequence[Any]) -> bool:
-    """Would the real preflight exit 0? The checks about this machine's own key and the service user (step R1, skipped)
-    are left out; they are reported, not judged."""
-    skipped = (*HOST_CHECKS, "service-user")
-    return not any(c.status == "fail" for c in checks if c.name not in skipped)
 
 
 # -- the broker, started the way systemd would start it ----------------------------------------------------------------
@@ -521,7 +570,7 @@ def step_e0(rh: Rehearsal) -> str:
     if names != [c.name for c in checks]:
         raise Bad(f"the sample lists the checks {names}; the preflight runs {[c.name for c in checks]}")
     got = statuses(checks)
-    wrong = {n: (k, got[n]) for k, n in sample if n not in (*HOST_CHECKS, "service-user") and k.lower() != got[n]}
+    wrong = {n: (k, got[n]) for k, n in sample if k.lower() != got[n]}
     if wrong:
         raise Bad(f"on an empty prefix the sample and the real preflight disagree (sample, real): {wrong}")
     return f"the sample matches the {len(names)} real checks and the page's own counts agree"
@@ -655,9 +704,9 @@ def step_epf(rh: Rehearsal) -> str:
     wrong = {n: (want[n], got.get(n)) for n in want if got.get(n) != want[n]}
     if wrong:
         raise Bad(f"after the setup the preflight disagrees (expected, real): {wrong}")
-    host = ", ".join(f"{n} {got[n]}" for n in HOST_CHECKS)
     return (
-        f"allowed-signers, broker-config, client-config pass; switch absent; egress observe warns. This machine: {host}"
+        "allowed-signers, broker-config, client-config pass; switch absent; egress observe warns "
+        "(the ssh, libfido2, udev and authenticator checks are stand-ins, not this machine)"
     )
 
 
@@ -705,9 +754,7 @@ def r3(rh: Rehearsal, step: Any) -> str:
     ran = 0
     stage = rh.pathmap["/var/lib/safo-broker-install"] / "stage"
     for line in step.commands:
-        if " less " in line:
-            continue  # an interactive pager: the maintainer reads the file here
-        out = rh.must(line)
+        out = rh.must(line)  # the `less` lines print the file (no terminal); they do not review it
         ran += 1
         if "sha256sum" in line:
             staged = stage / "safo-broker-install"
@@ -730,7 +777,10 @@ def r3(rh: Rehearsal, step: Any) -> str:
             raise Bad(f"{name} is not the file that was staged")
     if stage.exists():
         raise Bad("the stage folder was not removed")
-    return f"{ran} lines ran (the two `less` pager lines are the maintainer's reading); both files 0755 and match"
+    raise Partial(
+        f"{ran} lines ran and both files are 0755 and match; SKIPPED as a pass because the mandatory root review "
+        "(the two `less` lines, a person reading the programs root will run) cannot be done by this tool"
+    )
 
 
 def r5(rh: Rehearsal, step: Any) -> str:
@@ -853,16 +903,21 @@ def r12(rh: Rehearsal, step: Any) -> str:
     )
 
 
-def r13_line(rh: Rehearsal, step: Any, verdict: str) -> tuple[int, str]:
-    """Run the switch line with its preflight head replaced by `true` or `false` (the preflight's own exit code, which
-    is computed in process): the quoting, the `&&` chain, the file content and the mode are the line's own."""
+def r13_line(rh: Rehearsal, step: Any) -> tuple[int, str, int]:
+    """Run the switch line with its preflight head replaced by `true` or `false`, taken from the exit status of the
+    real preflight code path (`main_with --enabling`, production's exit policy): the quoting, the `&&` chain, the file
+    content and the mode are the line's own. Returns the line's status, its output and the preflight's status."""
     from safo.broker import runbook
 
     line = step.commands[0]
     head = f"{runbook.RELEASE_PYTHON} -I -m safo.gemini_preflight --enabling --maintainer-uid $(id -u {rh.login})"
     if head not in shlex.split(line)[3]:
         raise Bad("the switch line no longer has the preflight head the rehearsal replaces")
-    return rh.sh(line, fill={head: verdict})
+    preflight_code, _failed = rh.enabling_exit()
+    code, out = rh.sh(line, fill={head: "true" if preflight_code == 0 else "false"})
+    if (code == 0) != (preflight_code == 0):
+        raise Bad(f"the line exited {code} but the real enabling preflight exited {preflight_code}")
+    return code, out, preflight_code
 
 
 # -- the whole walk ----------------------------------------------------------------------------------------------------
@@ -941,21 +996,22 @@ def walk(rh: Rehearsal, steps: Sequence[Any]) -> None:
         rh.add("DRYRUN", "The dry run through the real client and broker", "FAIL", detail)
         return
     # R13 in observe mode: the preflight must refuse and the line must not write the switch
-    observe = rh.preflight(enabling=True)
-    code, _ = r13_line(rh, steps[12], "true" if gate_passes(observe) else "false")
-    refused = statuses(observe).get("egress-mode") == "fail" and code != 0 and not rh.switch.exists()
+    rh.service_user_standin = True  # stands in for step R1 (skipped); the enabling preflight fails without a user
+    observe_failed = rh.enabling_exit()[1]
+    try:
+        code, _, observe_rc = r13_line(rh, steps[12])
+    except Bad as why:
+        code, observe_rc, observe_failed = 0, 0, str(why)
+    refused = "egress-mode" in observe_failed and code != 0 and observe_rc != 0 and not rh.switch.exists()
     rh.skip("R12a", "R12: restart, blocked probe and drop log", f"{root}, systemd, nftables and runuser", lines(12)[1:])
     rh.attempt("R12", steps[11].title, lambda: r12(rh, steps[11]))
-    drop = rh.preflight(enabling=True)
 
     def r13() -> str:
         if not refused:
-            raise Bad("in observe mode the switch line was not refused, or the preflight did not fail egress-mode")
-        if not gate_passes(drop):
-            raise Bad(
-                "in drop mode the preflight still fails: " + ", ".join(c.name for c in drop if c.status == "fail")
-            )
-        rc, out = r13_line(rh, steps[12], "true")
+            raise Bad(f"in observe mode the switch line was not refused by egress-mode: {observe_failed}")
+        rc, out, drop_rc = r13_line(rh, steps[12])
+        if drop_rc != 0:
+            raise Bad(f"in drop mode the real enabling preflight still exits {drop_rc}: {rh.enabling_exit()[1]}")
         if rc != 0 or rh.switch.read_text() != "enabled\n" or (rh.switch.stat().st_mode & 0o777) != 0o644:
             raise Bad(f"the switch line did not write 'enabled' with mode 0644: rc {rc} {out.strip()[-100:]}")
         from safo.broker import runtime
@@ -963,7 +1019,8 @@ def walk(rh: Rehearsal, steps: Sequence[Any]) -> None:
         if not runtime.switch_reader(rh.switch, rh.uid)():
             raise Bad("the broker's own switch reader does not read the file as enabled")
         return (
-            "refused in observe mode (egress-mode FAIL, no file); after drop wrote 'enabled' 0644, read by the broker"
+            "refused in observe mode (egress-mode FAIL, no file); after drop wrote 'enabled' 0644, read by the broker; "
+            "the service user and host checks are stand-ins (R1 skipped), the exit policy is the real one"
         )
 
     rh.attempt("R13", steps[12].title, r13)
@@ -1016,32 +1073,141 @@ def check_prefix(prefix: Path) -> str | None:
     return None
 
 
+CONTAINED_MARK = "SAFO_REHEARSAL_CONTAINED"
+
+
+def contained_argv(prefix: Path, argv: Sequence[str], *, bwrap: str | None = None) -> list[str]:
+    """`argv` wrapped to run under bubblewrap: new user, network, IPC, PID and UTS namespaces; a new empty root with
+    read-only /usr, /etc, this checkout and the Python environment; a writable PREFIX; a private /tmp; the real home
+    folder absent; a scrubbed environment with HOME and TMPDIR inside PREFIX."""
+    tool = bwrap or shutil.which("bwrap")
+    if tool is None:
+        raise Bad("bubblewrap (bwrap) is not installed")
+    out = [tool, "--unshare-all", "--die-with-parent", "--new-session", "--clearenv"]
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(prefix / "home"),
+        "TMPDIR": str(prefix / "tmp"),
+        "LC_ALL": "C",
+        "TERM": "dumb",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        CONTAINED_MARK: "1",
+    }
+    for key, value in env.items():
+        out += ["--setenv", key, value]
+    for folder in ("/bin", "/sbin", "/lib", "/lib64"):  # merged-usr systems link these into /usr
+        link = Path(folder)
+        if link.is_symlink():
+            out += ["--symlink", os.readlink(link), folder]
+        elif link.is_dir():
+            out += ["--ro-bind", folder, folder]
+    shown = {"/usr", "/etc"}
+    for folder in (Path("/usr"), Path("/etc"), ROOT, Path(sys.prefix), Path(sys.base_prefix)):
+        if str(folder) not in shown and not any(str(folder).startswith(x + "/") for x in shown):
+            out += ["--ro-bind", str(folder), str(folder)]
+            shown.add(str(folder))
+        elif str(folder) in shown and folder in (Path("/usr"), Path("/etc")):
+            out += ["--ro-bind", str(folder), str(folder)]
+    out += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", str(Path("/") / "tmp"), "--bind", str(prefix), str(prefix)]
+    return [*out, "--", *argv]
+
+
+def containment_problem() -> str | None:
+    """Why the rehearsal cannot be contained here, or None when a rootless bubblewrap sandbox starts."""
+    tool = shutil.which("bwrap")
+    if tool is None:
+        return "bubblewrap (bwrap) is not installed"
+    with tempfile.TemporaryDirectory(prefix="rhp") as folder:
+        probe = contained_argv(Path(folder), ["/usr/bin/true"], bwrap=tool)
+        try:
+            done = subprocess.run(  # noqa: S603 - a fixed probe argv built here, no shell, bounded time
+                probe, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False
+            )
+        except (OSError, subprocess.TimeoutExpired) as err:
+            return f"bubblewrap could not start: {type(err).__name__}"
+        if done.returncode != 0:
+            return "user namespaces are not available to bubblewrap here: " + done.stderr.strip()[-100:]
+        return None
+
+
+def inside_problem() -> str | None:
+    """Checks, from inside, that the sandbox really holds: the checkout is read-only and the only network interface is
+    the (down) loopback."""
+    try:
+        (ROOT / ".rehearsal-probe").write_text("x")
+    except OSError:
+        pass
+    else:
+        (ROOT / ".rehearsal-probe").unlink()
+        return "the checkout is writable inside the sandbox"
+    try:
+        names = {x.split(":")[0].strip() for x in Path("/proc/net/dev").read_text().splitlines()[2:]}
+    except OSError:
+        return "the network interfaces cannot be listed"
+    if names - {"lo"}:
+        return f"the sandbox has a network interface besides loopback: {sorted(names - {'lo'})}"
+    return None
+
+
 def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None) -> int:
     parser = argparse.ArgumentParser(description="Rootless rehearsal of the phase 7 root setup (#263)")
     parser.add_argument(
         "--prefix", help="a new folder to rehearse in (default: a new one under ~/.local/share/safo-rehearsal)"
     )
     parser.add_argument("--keep", action="store_true", help="keep the prefix folder afterwards")
+    parser.add_argument(
+        "--no-containment",
+        action="store_true",
+        help="run without the bubblewrap sandbox, with your own rights and network (every output line says so)",
+    )
     args = parser.parse_args(argv)
     stream = out if out is not None else sys.stdout
     if os.geteuid() == 0:
         parser.exit(2, "refused: this rehearsal is rootless on purpose; run it as your own account\n")
+    inside = os.environ.get(CONTAINED_MARK) == "1"
+    if args.no_containment and inside:
+        parser.exit(2, "refused: --no-containment inside the sandbox\n")
+    if inside:
+        problem = inside_problem()
+        if problem:
+            parser.exit(2, f"refused: the sandbox does not hold: {problem}\n")
+    elif not args.no_containment:
+        problem = containment_problem()
+        if problem:
+            parser.exit(
+                2,
+                f"refused: cannot contain the rehearsal ({problem}). Install bubblewrap, or pass --no-containment "
+                "to run "
+                "it with your own rights and network (every output line then says so)\n",
+            )
     if args.prefix:
         prefix = Path(args.prefix).absolute()
     else:
         base = Path.home() / ".local/share/safo-rehearsal"
         base.mkdir(parents=True, exist_ok=True)
         prefix = base / time.strftime("%Y%m%d-%H%M%S")
-    problem = check_prefix(prefix)
-    if problem:
-        parser.exit(2, f"refused: {problem}\n")
+    if not inside:
+        problem = check_prefix(prefix)
+        if problem:
+            parser.exit(2, f"refused: {problem}\n")
+    contained = not args.no_containment
     try:
-        rows = rehearse(prefix)
+        if inside or args.no_containment:
+            rows = rehearse(prefix)
+            stream.write(render(rows, contained=contained) + "\n")
+            return 1 if any(r.status == "FAIL" for r in rows) else 0
+        prefix.mkdir(parents=True, exist_ok=True)
+        prefix.chmod(0o755)
+        (prefix / "tmp").mkdir(mode=0o700, exist_ok=True)
+        child = contained_argv(prefix, [sys.executable, str(Path(__file__).resolve()), "--prefix", str(prefix)])
+        done = subprocess.run(  # noqa: S603 - the bubblewrap argv built above, no shell, stdin closed
+            child, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True, timeout=1800, check=False
+        )
+        stream.write(done.stdout)
+        return done.returncode
     finally:
-        if not args.keep:
+        if not args.keep and not inside:
             shutil.rmtree(prefix, ignore_errors=True)
-    stream.write(render(rows) + "\n")
-    return 1 if any(r.status == "FAIL" for r in rows) else 0
 
 
 if __name__ == "__main__":
