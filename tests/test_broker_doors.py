@@ -1512,3 +1512,39 @@ def test_hardening_standard_input_file_goes_through_the_path_checks(w: World) ->
     safe = put(w.t / "bin" / "in.txt", "x")
     put(w.units / "a.service", unit("/bin/true") + f"StandardInput=file:{safe}\n")
     assert status(w.run(), "jobs") == "pass"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "/usr/bin/env -i /bin/sh -s {ok}",
+        "/usr/bin/env -i /bin/bash -i {ok}",
+        "/usr/bin/env /bin/sh -u {ok}",
+        "/usr/bin/env -i /usr/bin/perl -I {ok}",
+        "/usr/bin/env /usr/bin/nice /bin/sh -s {ok}",
+        "/usr/bin/env -i /usr/bin/python3 -W error {ok}",
+        "/usr/bin/env -i /usr/bin/python3 - {ok}",
+        "/usr/bin/env -i /bin/sh -c x",
+        "/usr/bin/env -i /usr/bin/awk x",
+        "/usr/bin/env -i",
+    ],
+)
+def test_hardening_a_nested_program_gets_its_own_flag_rules(w: World, line: str) -> None:
+    ok = put(w.t / "bin" / "ok.sh", "true\n", 0o755)
+    put(w.units / "a.service", unit(line.format(ok=ok)))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_a_nested_program_with_flags_from_its_own_table_passes(w: World) -> None:
+    ok = put(w.t / "bin" / "ok.py", "x = 1\n")
+    put(w.units / "a.service", unit(f"/usr/bin/env -i /usr/bin/python3 -I -B {ok}"))
+    put(w.units / "b.service", unit(f"/usr/bin/env FOO=1 /usr/bin/nice /usr/bin/python3 -s {ok}"))
+    assert status(w.run(), "jobs") == "pass"
+
+
+def test_hardening_a_nested_script_in_the_home_is_still_found(w: World) -> None:
+    payload = put(w.home / "p.sh", "true\n", 0o755)
+    put(w.units / "a.service", unit(f"/usr/bin/env -i /bin/sh -- {payload}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "home" in found["jobs"].text

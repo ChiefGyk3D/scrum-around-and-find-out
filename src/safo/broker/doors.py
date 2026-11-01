@@ -642,7 +642,7 @@ WRAPPERS = frozenset({"env", "nice", "ionice", "timeout", "nohup", "setsid", "fl
 def _safe_flags(base: str) -> frozenset[str]:
     if base == "python" or base in ("python2", "python3"):
         return PYTHON_FLAGS
-    return WRAPPER_FLAGS if base in WRAPPERS else NO_FLAGS
+    return NO_FLAGS
 
 
 # these take their program text first, so a command line for them cannot be followed
@@ -663,6 +663,26 @@ def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | N
     base = re.sub(r"[0-9.]+$", "", os.path.basename(first))
     if base in TEXT_FIRST:
         return f"runs {_show(first)}, which takes its program text from the command line; {HUMAN}"
+    if base in WRAPPERS:
+        # a wrapper's own flags are valid only before the program it runs; from there the nested program's own rules
+        # apply to the rest of the line
+        for index, arg in enumerate(argv[1:], 1):
+            if _CODE_OPTION.fullmatch(arg) and arg not in WRAPPER_FLAGS:
+                return f"runs {_show(first)} with code on its command line; {HUMAN}"
+            if arg.startswith("-"):
+                if arg in WRAPPER_FLAGS:
+                    continue
+                return f"runs {_show(first)} with the option {_show(arg)}, which is not known to be harmless; {HUMAN}"
+            if _SHELL_SYNTAX.search(arg):
+                return f"runs {_show(first)} with {_show(arg)}, which uses shell syntax; {HUMAN}"
+            if _ASSIGN.match(arg):
+                value = arg.partition("=")[2]
+                if value.startswith("/"):
+                    candidates.append(value)
+                continue
+            own = _candidates_hit(candidates, who, cache, floor)
+            return own or _command_hit(argv[index:], who, cache, floor)
+        return f"runs {_show(first)} without a command; {HUMAN}"
     if base in INTERPRETERS:
         found_script = False
         for arg in argv[1:]:
