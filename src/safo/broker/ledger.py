@@ -50,6 +50,7 @@ GENESIS = "0" * 64  # the ledger head before any row exists
 LEDGER_NAME = "ledger.jsonl"
 FLOOR_NAME = "schema_version"
 USED_DIR = "used"
+ADOPT_PREFIX = "adopt marker "  # the reason that heads an adoption group; no other `adjust` may start with it
 MARKER_BYTES = 4096
 FAULT_POINTS = ("before_append", "after_append", "after_marker", "after_sent", "before_settle")
 Faults = Callable[[str], None]
@@ -311,6 +312,17 @@ class AdminWho:
 class Cleared:
     model: str
     calls: tuple[tuple[str, int, int], ...]  # (call id, counted before, counted after)
+
+
+@dataclasses.dataclass(frozen=True)
+class Confirmed:
+    """What root read and confirmed about a marker: the digest of its whole contents, and the model, the month and the
+    amount named on their own. Adoption charges exactly this and nothing else."""
+
+    digest: str
+    model: str
+    month: str
+    reserved_micro: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -861,6 +873,8 @@ class CallLedger:
         than the month counts and does nothing when it is not: this can only raise a month. Returns what was added."""
         _check_who(who)
         _check_reason(reason, required=True)
+        if reason.startswith(ADOPT_PREFIX):
+            raise IllegalTransition("a reason cannot begin the way an adopted marker's record does")
         if type(billing_micro) is not int or not 0 <= billing_micro <= MAX_MICRO:
             raise IllegalTransition("the billing figure is a whole number of micro-dollars in range")
         if type(month) is not str or MONTH.fullmatch(month) is None:
@@ -891,6 +905,7 @@ class CallLedger:
                 raise IllegalTransition("the marker cannot be read; it is not adopted and root must look at it")
             return [
                 f"marker: {nonce}",
+                f"digest: {marker_digest(data)}",
                 f"call_id: {data['call_id']}",
                 f"model: {data['model']}",
                 f"job: {data['job']}",
@@ -898,16 +913,25 @@ class CallLedger:
                 f"reserved_usd: {format_usd(data['reserved_micro'])}",
             ]
 
-    def admin_adopt_marker(self, nonce: str, reason: str, who: AdminWho, now: dt.datetime) -> Adopted:
+    def admin_adopt_marker(
+        self, nonce: str, reason: str, who: AdminWho, now: dt.datetime, confirmed: Confirmed
+    ) -> Adopted:
         """Root adopts a used marker from an EARLIER month that has no ledger row (start-up recovery refuses it, because
         rebuilding it now would move the charge into this month). Spend is recorded before the vendor call, so such a
         marker is money that may have left; it is never dropped and never lowers any month. In ONE append this adds the
         marker's whole reservation to the month the marker belongs to (an `adjust`, which only raises) and gives the
         call its rows now, held ambiguous at that reservation, so the model stays stopped until root clears it with a
         verified figure. The marker file is read, never rewritten or removed. A marker that is not whole and strict, a
-        month that is not before this one, a nonce the ledger knows and a call id it already holds are all refused."""
+        month that is not before this one, a nonce the ledger knows and a call id it already holds are all refused.
+
+        The marker is read ONCE, here, under the lock. What is charged is that read, and only if its digest, model, month
+        and amount are exactly what root confirmed; a marker replaced after root read it is refused and nothing is
+        written. A marker is a file in a folder only the broker's own user may write (owner and mode are checked on
+        every read); it carries no signature, so it proves nothing the folder's permissions do not."""
         _check_who(who)
-        _check_reason(f"adopt marker {nonce}: {reason}", required=True)
+        if type(confirmed) is not Confirmed:
+            raise IllegalTransition("adopting a marker needs the confirmed digest, model, month and amount")
+        _check_reason(f"{ADOPT_PREFIX}{nonce}: {reason}", required=True)
         _check_reason(reason, required=True)
         now = self._now(now)
         with self._locked():
@@ -922,6 +946,13 @@ class CallLedger:
                 raise IllegalTransition("the marker cannot be read; it is not adopted and root must look at it")
             stamp = self._stamp(now, view, strict=False)
             month = data["ts"][:7]
+            if (confirmed.digest, confirmed.model, confirmed.month, confirmed.reserved_micro) != (
+                marker_digest(data),
+                data["model"],
+                month,
+                data["reserved_micro"],
+            ):
+                raise IllegalTransition("the marker is not what was confirmed; nothing was recorded")
             if month > stamp[:7]:
                 raise IllegalTransition("this marker is not an earlier month; it is dated after this month")
             if month == stamp[:7]:
@@ -933,7 +964,7 @@ class CallLedger:
             used = _row("approval_used", stamp, nonce=nonce, call_id=cid, model=model, job=data["job"], epoch="0" * 32)
             shell = CallRecord(cid, nonce, model, data["job"], data["kind"], reserved, now, CallState.RESERVED)
             rows = [
-                _admin_row(stamp, "adjust", who, f"adopt marker {nonce}: {reason}", month=month, add_micro=reserved),
+                _admin_row(stamp, "adjust", who, f"{ADOPT_PREFIX}{nonce}: {reason}", month=month, add_micro=reserved),
                 used,
                 start,
                 *_ambiguous_rows(stamp, shell, "marker_only"),
@@ -978,6 +1009,11 @@ class CallLedger:
             if view.last_ts is not None and view.last_ts > now:
                 found.append("the newest ledger row is newer than the clock")
         return found
+
+
+def marker_digest(data: dict[str, Any]) -> str:
+    """A digest of the marker's whole contents as a canonical string: what root confirms, and what is checked again."""
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _orphan_line(nonce: str, data: dict[str, Any] | None, now: dt.datetime) -> str:
@@ -1110,4 +1146,7 @@ def _dangling(line: bytes) -> bool:
     if not isinstance(row, dict):
         return False
     kind = row.get("type")
+    if kind == "admin_action":  # the adjustment that heads an adoption group: it is never the last row of a finished one
+        reason = row.get("reason")
+        return row.get("action") == "adjust" and isinstance(reason, str) and reason.startswith(ADOPT_PREFIX)
     return kind in ("approval_used", "ambiguous_call")

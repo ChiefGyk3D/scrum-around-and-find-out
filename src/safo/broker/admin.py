@@ -52,7 +52,7 @@ from typing import Any, NoReturn, TextIO
 
 from safo import gemini, geminisign, output
 from safo.broker.errors import BrokerError, LedgerError
-from safo.broker.ledger import AdminWho, CallLedger, CallRecord, LedgerView
+from safo.broker.ledger import AdminWho, CallLedger, CallRecord, Confirmed, LedgerView
 from safo.broker.money import MoneyError, format_usd, parse_usd
 from safo.broker.policy import MONTH_CAP_MICRO
 from safo.broker.records import MONTH, SCHEMA_VERSION, UID_MAX
@@ -79,7 +79,8 @@ USAGE = (
     "       python -I -m safo.broker.admin clear MODEL --confirm CALL_ID [--confirm CALL_ID ...]"
     " [--actual CALL_ID=USD ... --reason TEXT]\n"
     "       python -I -m safo.broker.admin reconcile [--month YYYY-MM] [--billing-usd USD --reason TEXT]\n"
-    "       python -I -m safo.broker.admin reconcile --adopt-marker NONCE --confirm NONCE --reason TEXT"
+    "       python -I -m safo.broker.admin reconcile --adopt-marker NONCE --reason TEXT\n"
+    "         [--confirm DIGEST --confirm-model MODEL --confirm-month YYYY-MM --confirm-usd USD]"
 )
 
 
@@ -544,10 +545,22 @@ def _adopt(
         raise AdminError("adopting a marker needs --reason")
     for line in ledger.marker_record(nonce):
         output.write(out, line)
-    if args.confirm != nonce:
-        output.write(err, f"not adopted: repeat the nonce with --confirm {nonce} to record this charge")
+    named = (args.confirm, args.confirm_model, args.confirm_month, args.confirm_usd)
+    if any(item is None for item in named):
+        output.write(
+            err,
+            "not adopted: read the record above, then repeat it with --confirm DIGEST --confirm-model MODEL"
+            " --confirm-month YYYY-MM --confirm-usd USD",
+        )
         return 2
-    done = ledger.admin_adopt_marker(nonce, args.reason, who, now)
+    if MONTH.fullmatch(args.confirm_month) is None:
+        raise AdminError("a month is written YYYY-MM")
+    try:
+        amount = parse_usd(args.confirm_usd)
+    except MoneyError:
+        raise AdminError("the amount is a plain amount in dollars with up to six decimals") from None
+    confirmed = Confirmed(args.confirm, args.confirm_model, args.confirm_month, amount)
+    done = ledger.admin_adopt_marker(nonce, args.reason, who, now, confirmed)
     output.write(out, f"adopted: {done.nonce} call {done.call_id} model {done.model}")
     output.write(out, f"adopted_month: {done.month}")
     output.write(out, f"adopted_usd: {format_usd(done.reserved_micro)}")
@@ -615,6 +628,9 @@ def _parser() -> argparse.ArgumentParser:
     rec.add_argument("--reason", default="")
     rec.add_argument("--adopt-marker")
     rec.add_argument("--confirm")
+    rec.add_argument("--confirm-model")
+    rec.add_argument("--confirm-month")
+    rec.add_argument("--confirm-usd")
     return parser
 
 

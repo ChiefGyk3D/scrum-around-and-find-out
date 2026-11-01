@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ import pytest
 
 from brokerdata import Crash, CrashAt, new_ledger, state_dir
 from safo.broker.errors import IllegalTransition, LedgerError
-from safo.broker.ledger import AdminWho, CallLedger
+from safo.broker.ledger import ADOPT_PREFIX, AdminWho, CallLedger, Confirmed, marker_digest
 from safo.broker.money import format_usd
 from test_broker_admin import WHO, last_rows, ledger_bytes, reserve, restore, run, snapshot
 
@@ -50,9 +51,24 @@ def seeded(tmp: Path, reserved: int = 5000) -> CallLedger:
     return ledger
 
 
-def adopt(tmp: Path, nonce: str = STRAY, *, confirm: str | None = STRAY) -> tuple[int, str, str]:
+def confirmed_for(tmp: Path, nonce: str = STRAY) -> Confirmed:
+    """What an operator who read the marker file would confirm."""
+    data = json.loads((state_dir(tmp) / "used" / nonce).read_text())
+    return Confirmed(marker_digest(data), data["model"], data["ts"][:7], data["reserved_micro"])
+
+
+def adopt(tmp: Path, nonce: str = STRAY, *, confirm: bool = True) -> tuple[int, str, str]:
     argv = ["reconcile", "--adopt-marker", nonce, "--reason", "lost row"]
-    return run(tmp, *argv, *(["--confirm", confirm] if confirm is not None else []))
+    if confirm:
+        try:
+            c = confirmed_for(tmp, nonce)
+            argv += [
+                "--confirm", c.digest, "--confirm-model", c.model, "--confirm-month", c.month,
+                "--confirm-usd", format_usd(c.reserved_micro),
+            ]  # fmt: skip
+        except (OSError, ValueError, KeyError, TypeError):
+            argv += ["--confirm", "0" * 64, "--confirm-model", "m", "--confirm-month", "2026-09", "--confirm-usd", "1"]
+    return run(tmp, *argv)
 
 
 def test_an_earlier_month_marker_blocks_recovery_and_reconcile_points_at_the_repair(tmp_path: Path) -> None:
@@ -92,8 +108,14 @@ def test_adopting_changes_nothing_without_the_confirmation_or_with_a_wrong_one(t
     before = ledger_bytes(tmp_path)
     code, out, err = adopt(tmp_path, confirm=None)
     assert code == 2 and "--confirm" in err and STRAY in out  # the record is shown
-    assert adopt(tmp_path, confirm="f" * 16)[0] == 2
-    assert run(tmp_path, "reconcile", "--adopt-marker", STRAY, "--confirm", STRAY)[0] == 2  # no reason given
+    c = confirmed_for(tmp_path)
+    base = ["reconcile", "--adopt-marker", STRAY, "--reason", "r"]
+    full = ["--confirm", c.digest, "--confirm-model", c.model, "--confirm-month", c.month, "--confirm-usd", "0.007"]
+    assert run(tmp_path, *base, "--confirm", c.digest)[0] == 2  # the digest alone is not enough
+    assert run(tmp_path, *base, "--confirm", STRAY)[0] == 2  # the nonce is not the confirmation any more
+    assert run(tmp_path, "reconcile", "--adopt-marker", STRAY, *full)[0] == 2  # no reason given
+    assert run(tmp_path, *base, *full[:-1], "1e1")[0] == 2
+    assert run(tmp_path, *base, *full[:5], "2026-9", *full[6:])[0] == 2
     assert ledger_bytes(tmp_path) == before
 
 
@@ -177,7 +199,7 @@ def test_a_nonce_that_is_not_a_plain_marker_name_or_names_no_marker_is_refused(t
     seeded(tmp_path)
     make_stray(tmp_path)
     before = ledger_bytes(tmp_path)
-    assert adopt(tmp_path, nonce, confirm=nonce)[0] == 2
+    assert adopt(tmp_path, nonce)[0] == 2
     assert ledger_bytes(tmp_path) == before
 
 
@@ -209,7 +231,9 @@ def test_a_kill_around_the_adoption_leaves_it_fully_in_or_fully_out_and_never_lo
     for point, adopted in (("admin_before_append", False), ("admin_after_append", True)):
         restore(tmp_path, saved)
         with pytest.raises(Crash):
-            CallLedger(state_dir(tmp_path), faults=CrashAt(point)).admin_adopt_marker(STRAY, "r", WHO, LATER)
+            CallLedger(state_dir(tmp_path), faults=CrashAt(point)).admin_adopt_marker(
+                STRAY, "r", WHO, LATER, confirmed_for(tmp_path)
+            )
         fresh = CallLedger(state_dir(tmp_path))
         now_totals = totals(fresh)
         assert all(now_totals[k] >= before[k] for k in before)
@@ -219,7 +243,9 @@ def test_a_kill_around_the_adoption_leaves_it_fully_in_or_fully_out_and_never_lo
         else:
             with pytest.raises(LedgerError, match="root must reconcile it"):
                 fresh.recover(LATER)
-            fresh.admin_adopt_marker(STRAY, "r", WHO, LATER)  # the retry after a lost attempt works
+            fresh.admin_adopt_marker(
+                STRAY, "r", WHO, LATER, confirmed_for(tmp_path)
+            )  # the retry after a lost attempt works
             assert totals(fresh)["2026-09"] == before["2026-09"] + 7000
 
 
@@ -227,9 +253,9 @@ def test_adopting_validates_who_and_reason_in_the_ledger_itself(tmp_path: Path) 
     ledger = seeded(tmp_path)
     make_stray(tmp_path)
     before = ledger_bytes(tmp_path)
-    for who, reason in ((AdminWho(-1, 0), "r"), (WHO, ""), (WHO, "x" * 121), (WHO, "tab\t")):
+    for who, reason in ((AdminWho(-1, 0), "r"), (WHO, ""), (WHO, "x" * 106), (WHO, "tab\t")):
         with pytest.raises(IllegalTransition):
-            ledger.admin_adopt_marker(STRAY, reason, who, LATER)
+            ledger.admin_adopt_marker(STRAY, reason, who, LATER, confirmed_for(tmp_path))
     assert ledger_bytes(tmp_path) == before
 
 
@@ -244,3 +270,115 @@ def test_clearing_an_adopted_call_never_gives_back_the_earlier_month(tmp_path: P
     assert code == 0 and "settled" in out
     assert not ledger.view().suspended
     assert totals(ledger)["2026-09"] >= 7000  # the earlier month keeps its charge whatever is done to the call
+
+
+def other_marker(tmp: Path, **over: Any) -> bytes:
+    """A different, strict, valid marker for the same nonce (what a swap would put in place)."""
+    data = json.loads((state_dir(tmp) / "used" / STRAY).read_text()) | over
+    return json.dumps(data).encode()
+
+
+def test_a_marker_swapped_after_it_was_read_is_refused_and_nothing_is_charged(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    stray = make_stray(tmp_path, reserved_micro=1000)
+    confirmed = confirmed_for(tmp_path)  # what root read
+    stray.write_bytes(other_marker(tmp_path, reserved_micro=900_000, call_id="c" * 32, job="other-job"))
+    before, totals_before = ledger_bytes(tmp_path), totals(ledger)
+    with pytest.raises(IllegalTransition, match="not what was confirmed"):
+        ledger.admin_adopt_marker(STRAY, "r", WHO, LATER, confirmed)
+    assert ledger_bytes(tmp_path) == before and totals(ledger) == totals_before
+
+
+@pytest.mark.parametrize("what", ["digest", "model", "month", "amount"])
+def test_every_part_of_the_confirmation_must_match_the_marker(tmp_path: Path, what: str) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=1000)
+    good = confirmed_for(tmp_path)
+    bad = {
+        "digest": Confirmed("0" * 64, good.model, good.month, good.reserved_micro),
+        "model": Confirmed(good.digest, "another-model", good.month, good.reserved_micro),
+        "month": Confirmed(good.digest, good.model, "2026-08", good.reserved_micro),
+        "amount": Confirmed(good.digest, good.model, good.month, good.reserved_micro + 1),
+    }[what]
+    before = ledger_bytes(tmp_path)
+    with pytest.raises(IllegalTransition, match="not what was confirmed"):
+        ledger.admin_adopt_marker(STRAY, "r", WHO, LATER, bad)
+    assert ledger_bytes(tmp_path) == before
+    assert adopt(tmp_path)[0] == 0  # and the right confirmation still works
+
+
+def test_the_confirmed_contents_are_the_contents_charged(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=1234, job="the-confirmed-job")
+    c = confirmed_for(tmp_path)
+    before = totals(ledger)
+    done = ledger.admin_adopt_marker(STRAY, "r", WHO, LATER, c)
+    assert (done.model, done.month, done.reserved_micro) == (c.model, c.month, 1234)
+    rec = next(r for r in ledger.view().calls.values() if r.nonce == STRAY)
+    assert (rec.model, rec.job, rec.reserved_micro) == (c.model, "the-confirmed-job", 1234)
+    assert totals(ledger)["2026-09"] - before["2026-09"] == 1234
+
+
+def test_a_confirmation_that_is_not_the_confirmed_type_is_refused(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path)
+    before = ledger_bytes(tmp_path)
+    with pytest.raises(IllegalTransition):
+        ledger.admin_adopt_marker(STRAY, "r", WHO, LATER, STRAY)  # type: ignore[arg-type]  # the point of the test
+    assert ledger_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o660, 0o606, 0o777])
+def test_a_marker_open_to_other_users_is_refused(tmp_path: Path, mode: int) -> None:
+    seeded(tmp_path)
+    stray = make_stray(tmp_path)
+    stray.chmod(mode)
+    before = ledger_bytes(tmp_path)
+    assert adopt(tmp_path)[0] == 2
+    assert ledger_bytes(tmp_path) == before
+
+
+def test_a_billing_reason_cannot_look_like_the_head_of_an_adoption(tmp_path: Path) -> None:
+    ledger = seeded(tmp_path)
+    before = ledger_bytes(tmp_path)
+    with pytest.raises(IllegalTransition):
+        ledger.admin_adjust("2026-10", 9_000_000, ADOPT_PREFIX + "x", WHO, LATER)
+    assert ledger_bytes(tmp_path) == before
+
+
+def test_a_write_cut_at_any_byte_of_the_adoption_batch_is_all_in_or_all_out_and_a_retry_charges_once(
+    tmp_path: Path,
+) -> None:
+    ledger = seeded(tmp_path)
+    make_stray(tmp_path, reserved_micro=7000)
+    pre = snapshot(tmp_path, "pre")
+    before = totals(ledger)
+    ledger.admin_adopt_marker(STRAY, "r", WHO, LATER, confirmed_for(tmp_path))
+    full = ledger_bytes(tmp_path)
+    start = len((pre / "ledger.jsonl").read_bytes())
+    batch = full[start:]
+    assert batch.count(b"\n") == 5  # the adjustment and the four call rows are one write
+    cuts = sorted({0, len(batch), *range(0, len(batch), 7), *(i + 1 for i, b in enumerate(batch) if b == 10)})
+    seen: set[bool] = set()
+    for cut in cuts:
+        restore(tmp_path, pre)
+        with (state_dir(tmp_path) / "ledger.jsonl").open("ab") as handle:
+            handle.write(batch[:cut])  # the torn write; the height record is still the old one, as after a real kill
+        fresh = CallLedger(state_dir(tmp_path))
+        try:
+            fresh.recover(LATER)
+        except LedgerError as err:
+            assert "root must reconcile it" in str(err)  # the repair of the tail ran, the marker is still unrecorded
+        now_totals = totals(fresh)
+        assert all(now_totals[k] >= before[k] for k in before), cut
+        gained = now_totals["2026-09"] - before["2026-09"]
+        assert gained in (0, 7000), cut
+        seen.add(gained == 7000)
+        retry = adopt(tmp_path)  # the operator reruns the same command
+        assert (retry[0] == 0) is (gained == 0), (cut, retry)
+        if gained == 7000:
+            assert "already has a ledger row" in retry[2]
+        after = totals(CallLedger(state_dir(tmp_path)))
+        assert after["2026-09"] - before["2026-09"] == 7000, cut  # exactly once, whichever way it was cut
+        assert CallLedger(state_dir(tmp_path)).recover(LATER) in ([], ["d" * 32])
+    assert seen == {False, True}  # both outcomes were exercised
