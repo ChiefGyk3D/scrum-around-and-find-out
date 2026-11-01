@@ -32,7 +32,8 @@ BROKER_CONFIG = """\
 # once, at start; restart the service after any change. It is root-owned because prices and caps decide what a call
 # may cost. docs/gemini-broker.md ("The price table", "What lives where") explains every part.
 server:
-  # Numeric ids of the accounts that may use the socket (required, at least one). The runbook writes yours.
+  # Numeric ids of the accounts that may use the socket (required, at least one). The empty list below is refused on
+  # purpose, so this file cannot be installed unchanged; the runbook writes your own id (from id -u) here.
   allowed_uids: [ACCOUNT_UID_HERE]
   # Connections open at once.
   max_connections: 8

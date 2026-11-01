@@ -96,7 +96,7 @@ def make_tree(tmp_path: Path, *, signers_lines: list[str] | None = None) -> pf.L
     (state / "epoch").write_text("x")
     (state / "epoch").chmod(0o600)
     broker = etc / "broker.yaml"
-    shutil.copyfile(EXAMPLES / "broker.example.yaml", broker)
+    broker.write_text((EXAMPLES / "broker.example.yaml").read_text().replace("allowed_uids: []", "allowed_uids: [1000]"))
     broker.chmod(0o644)
     client = root / "home" / ".config" / "safo" / "broker-client.yaml"
     client.parent.mkdir(parents=True)

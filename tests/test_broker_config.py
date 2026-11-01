@@ -30,13 +30,13 @@ CLIENT_EXAMPLE = ROOT / "examples" / "broker-client.example.yaml"
 UID = os.getuid()
 
 
-def installed(tmp_path: Path, source: Path = BROKER_EXAMPLE, name: str = "broker.yaml") -> Path:
+def installed(tmp_path: Path, source: Path = BROKER_EXAMPLE, name: str = "broker.yaml", uid: int = 1000) -> Path:
     """Copy a file where the loader's ownership walk accepts it (owned by this test user, not group/other writable)."""
     folder = tmp_path / "etc"
     folder.mkdir(exist_ok=True)
     folder.chmod(0o755)
     target = folder / name
-    shutil.copyfile(source, target)
+    target.write_text(source.read_text().replace("allowed_uids: []", f"allowed_uids: [{uid}]"))
     target.chmod(0o644)
     return target
 
@@ -53,6 +53,19 @@ def test_the_example_broker_config_loads_through_the_real_loader(tmp_path: Path)
     assert cfg.policy.caps.job_micro == JOB_CAP_MICRO and cfg.policy.caps.month_micro == MONTH_CAP_MICRO
     assert cfg.deadline_seconds == DEFAULT_DEADLINE_SECONDS
     assert set(cfg.policy.prices.models) == {"gemini-nano-banana-2.1", "gemini-3.1-flash-lite-image"}
+
+
+def test_the_example_as_shipped_is_refused_so_nobody_installs_it_unchanged(tmp_path: Path) -> None:
+    """It names no account on purpose: an empty list is refused by the loader with a clear sentence."""
+    folder = tmp_path / "etc"
+    folder.mkdir()
+    folder.chmod(0o755)
+    path = folder / "broker.yaml"
+    shutil.copyfile(BROKER_EXAMPLE, path)
+    path.chmod(0o644)
+    assert "allowed_uids: []" in path.read_text()
+    with pytest.raises(SafoError, match="allowed_uids is a non-empty list"):
+        load(path)
 
 
 def test_the_example_states_every_server_key_with_the_value_the_code_defaults_to(tmp_path: Path) -> None:
@@ -168,9 +181,9 @@ def test_the_runbook_step_writes_exactly_the_example_with_the_uid_filled_in(tmp_
     """One source of truth: the here-document in the runbook and examples/broker.example.yaml are the same text, apart
     from the line that holds the account id (`$(id -u LOGIN)` in the runbook, a sample number in the example)."""
     template = runbook.broker_config("1000")
-    assert (
-        BROKER_EXAMPLE.read_text() == "# SPDX-License-Identifier: Apache-2.0\n" + template
-    )  # the licence line is the only extra
+    shipped = BROKER_EXAMPLE.read_text()
+    assert shipped == "# SPDX-License-Identifier: Apache-2.0\n" + runbook.broker_config("")  # only the licence line
+    assert "allowed_uids: []" in shipped  # the shipped example names no account
     rendered = runbook.render(maintainer="alice")
     assert runbook.broker_config("$(id -u alice)") in rendered  # the id is asked of the machine, never typed or named
     path = tmp_path / "etc"
