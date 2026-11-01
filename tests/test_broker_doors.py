@@ -1832,14 +1832,29 @@ def test_hardening_only_the_service_section_is_read(w: World) -> None:
     assert status(w.run(), "jobs") == "fail"
 
 
-def test_hardening_every_drop_in_of_a_name_is_checked_even_if_a_higher_folder_would_mask_it(w: World) -> None:
+def test_hardening_a_shadowed_drop_in_is_reported_apart_and_never_merged(w: World) -> None:
     payload = put(w.home / "payload", "x", 0o755)
     high = folder(w.t / "high")
     put(w.units / "a.service", unit(str(payload), user="nobody"))
-    dropin(w, "a.service", "10-x.conf", "[Service]\nUser=root\n")
     dropin(w, "a.service", "10-x.conf", "[Service]\nUser=nobody\n", high)
-    assert status(w.run(unit_dirs=(high, w.units)), "jobs") == "fail"
-    assert status(w.run(unit_dirs=(w.units, high)), "jobs") == "fail"
+    assert status(w.run(unit_dirs=(high, w.units)), "jobs") == "pass"
+    dropin(w, "a.service", "10-x.conf", "[Service]\nUser=root\n")  # lower priority: shadowed, would change User
+    found = w.run(unit_dirs=(high, w.units))
+    assert status(found, "jobs") == "fail" and "shadows" in found["jobs"].text and "needs to look" in found["jobs"].text
+    assert "runs" not in found["jobs"].text and "home" not in found["jobs"].text  # the effective unit is clean
+
+
+def test_hardening_the_higher_folder_file_is_the_effective_one(w: World) -> None:
+    payload = put(w.home / "payload", "x", 0o755)
+    high = folder(w.t / "high")
+    put(w.units / "a.service", unit(str(payload), user="nobody"))
+    dropin(w, "a.service", "10-x.conf", "[Service]\nUser=root\n", high)
+    dropin(w, "a.service", "10-x.conf", "[Service]\nUser=nobody\n")
+    found = w.run(unit_dirs=(high, w.units))
+    assert (
+        status(found, "jobs") == "fail" and "home" in found["jobs"].text
+    )  # root is effective, and also shadow-reported
+    assert "shadows" in found["jobs"].text
 
 
 def test_hardening_socket_unit_commands_run_as_root_and_their_drop_ins_are_read(w: World) -> None:

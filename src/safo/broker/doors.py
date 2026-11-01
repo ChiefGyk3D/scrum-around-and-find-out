@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import dataclasses
 import errno
-import itertools
 import os
 import re
 import shlex
@@ -1036,31 +1035,39 @@ def _unit_findings(
         template = f"{instance.group(1)}@.{instance.group(3)}" if instance else None
         names = [unit] + ([template] if template else [])
         confs: list[tuple[str, Path]] = []
-        for dname, dpath in dropdirs:  # every file from every folder, even one a higher folder would mask
+        shadowed: list[str] = []
+        seen: set[str] = set()
+        for dname, dpath in dropdirs:  # in folder priority order: the first file of a name is the effective one
             if any(_applies(n, dname) for n in names):
-                confs.extend((c, dpath / c) for c in sorted(os.listdir(dpath)) if c.endswith(".conf"))
+                for conf in sorted(os.listdir(dpath)):
+                    if not conf.endswith(".conf"):
+                        continue
+                    if conf in seen:
+                        shadowed.append(f"{conf} in {dname}.d")  # reported, never merged into the effective unit
+                    else:
+                        seen.add(conf)
+                        confs.append((conf, dpath / conf))
         confs.sort(key=lambda item: item[0])  # systemd reads them in file name order, whatever the folder
         base_files: list[Path | None] = [*bases.get(unit, [])] or ([*bases.get(template or "", [])] or [None])
         if instance and base_files == [None]:
             raise _Problem(f"unit {_show(unit)} is a template instance and its template base file is missing")
         label = f"unit {_show(unit)}" + (f" with drop-ins {_show(', '.join(c for c, _ in confs))}" if confs else "")
-        # same-named files from several folders: judge in folder order, then with each such group reversed
-        reversed_groups = [
-            c for _, grp in itertools.groupby(confs, key=lambda item: item[0]) for c in reversed(list(grp))
-        ]
         for base in base_files:
-            for ordering in (confs, reversed_groups):
-                assignments: list[tuple[str, str]] = []
-                found: str | None = None
-                for fname, fpath in ([(unit, base)] if base else []) + ordering:
-                    part, found = _fragment(fpath, fname, HANDLED_UNITS[kind], who, cache, floor)
-                    if found:
-                        break
-                    assignments.extend(part)
-                found = found or _unit_hits(assignments, who, cache, floor, socket=kind == "socket")
+            assignments: list[tuple[str, str]] = []
+            found: str | None = None
+            for fname, fpath in ([(unit, base)] if base else []) + confs:
+                part, found = _fragment(fpath, fname, HANDLED_UNITS[kind], who, cache, floor)
                 if found:
-                    hits.append(f"{label} {found}")
                     break
+                assignments.extend(part)
+            found = found or _unit_hits(assignments, who, cache, floor, socket=kind == "socket")
+            if found:
+                hits.append(f"{label} {found}")
+        if shadowed:
+            hits.append(
+                f"{label} has drop-ins that a higher-priority file of the same name shadows "
+                f"({_show(', '.join(shadowed))}); {HUMAN}"
+            )
     return hits, unhandled
 
 
