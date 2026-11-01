@@ -619,14 +619,16 @@ _BM_PY_RE = re.compile(_BM_PY)
 # interpreter options before a script (not -m: that names a module). The alternatives start differently, and an
 # option's value cannot start with a dash, so the repetition cannot backtrack badly on a long run of options.
 _BM_OPTS = r"(?:\s+(?:-[wx](?:\s*[^\s-]\S*)?|-[a-ln-vyz]\w*|--[\w-]+))*"
-_BM_ENTRY = re.compile(r"(?<![\w-])-[a-z]*m\s*=?\s*" + _BM_DOT + r"(?![\w-])")
+# Every line is squeezed (`_compact`) before any pattern reads it, so a run of whitespace is one space and a pattern
+# never repeats whitespace twice in a row; the spans that scan forward are bounded.
+_BM_ENTRY = re.compile(r"(?<![\w-])-[a-z]*m ?=? ?" + _BM_DOT + r"(?![\w-])")
 _BM_SCRIPT = re.compile(_BM_PY + _BM_OPTS + r"\s+\S*safo/broker/client\.py")
 _BM_LOCAL = re.compile(_BM_PY + _BM_OPTS + r"\s+(?:\S*/)?client\.py")  # a script named client.py, run beside the broker
-_BM_ANY_M = re.compile(r"(?<![\w-])-[a-z]*m\s*=?\s*(?:\w+\.)*client(?![\w.-])")  # -m whose last part is client
+_BM_ANY_M = re.compile(r"(?<![\w-])-[a-z]*m ?=? ?(?:\w+\.)*client(?![\w.-])")  # -m whose last part is client
 _BM_DYNAMIC = re.compile(r"runpy|importlib|__import__|import_module|run_module|run_path|(?<![\w-])(?:exec|eval)\s*\(")
 _BM_IMPORT = re.compile(
     r"(?<![\w.-])(?:import|from)\s+" + _BM_DOT + r"(?![\w-])"
-    r"|(?<![\w.-])from\s+safo\.broker\s+import\s+[^;\n]*(?<![\w-])client(?![\w-])"
+    r"|(?<![\w.-])from\s+safo\.broker\s+import\s+[^;\n]{0,300}?(?<![\w-])client(?![\w-])"
     r"|(?:run_module|import_module|__import__)\W*" + _BM_DOT
 )
 _BM_CODE = re.compile(r"(?<![\w-])-[a-z]*c\b|runpy|import_module|__import__|importlib|exec\s*\(|<<")
@@ -639,15 +641,20 @@ _BM_DOTTED = re.compile(_BM_DOT + r"(?![\w-])")
 _BM_PATH = re.compile(r"safo/broker/client\.py")
 _BM_RUNTIME = re.compile(RUNTIME_FORMS.pattern + r"|`")
 _BM_FEED = re.compile(r"(?<![\w-])(?:xargs|eval|exec)(?![\w-])|(?<![\w-])-c\b")
-_BM_EXPANDED = re.compile(_BM_PY + r"[^;|&\n]*?(?<![\w-])-[a-z]*m\s*[^\s;|&]*[$`{]")
+_BM_EXPANDED = re.compile(_BM_PY + r"[^;|&\n]{0,300}?(?<![\w-])-[a-z]*m ?[^\s;|&]{0,200}[$`{]")
 _BM_OPTION = re.compile(r"--(?:max-usd|max-output-tokens|quote|quoted-at|job)(?![\w-])")
+
+
+def _compact(v: str) -> str:
+    """Every run of whitespace (a tab, a newline, a thousand spaces) as one space."""
+    return re.sub(r"\s+", " ", v)
 
 
 def _flat_paths(v: str) -> str:
     """A name or path written the long way, read the short way: joined string pieces, repeated slashes, `/./` and
     `x/../` segments collapsed, so
     `src//safo/./broker/other/../client.py` is `src/safo/broker/client.py`. Bounded: the line is at most LINE_CAP."""
-    v = re.sub(r"\s*\+\s*", "", v)  # `"saf" + "o.broker"` read as one string (the quotes are already gone)
+    v = re.sub(r" ?\+ ?", "", v)  # `"saf" + "o.broker"` read as one string (the quotes are already gone)
     v = re.sub(r"/{2,}", "/", v)
     for _ in range(8):
         flat = re.sub(r"/\.(?=/)", "", v)
@@ -671,22 +678,51 @@ def _broker_module_line(v: str) -> bool:
     return bool(_BM_EXPANDED.search(v) and _BM_OPTION.search(v))
 
 
-def broker_module_route(views: Sequence[str]) -> bool:
+MAX_ROUTE_LINES = 2000  # candidate lines read per brief or command; more than this is refused unread
+_ROUTE_HINTS = (
+    "broker",
+    "client",
+    "python",
+    "runpy",
+    "safo",
+    "import",
+    "exec",
+    "eval",
+)  # every line rule needs one of these on the line
+
+
+def broker_module_route(views: Sequence[str], tick: Callable[[], None] | None = None) -> bool:
     """True when these lines (cleaned lower-case views, one per line, of a brief or of one Bash command) run the broker
-    client module directly or build the command that would, so that it cannot be read."""
+    client module directly or build the command that would, so that it cannot be read. Bounded work: a line over
+    LINE_CAP, or more than MAX_ROUTE_LINES candidate lines, is refused unread when the broker is named; each line is
+    squeezed before it is read; `tick` is called once per line and once per whole-text rule (it raises when the guard
+    deadline has passed)."""
+    step = tick if tick is not None else (lambda: None)
     whole = "\n".join(views)
     if "broker" in whole and any(len(v) > LINE_CAP for v in views):
         return True  # a long line is not read; naming the broker beside one is refused rather than guessed at
-    short = [_flat_paths(v) for v in views if len(v) <= LINE_CAP]
+    candidates = [v for v in views if any(h in v for h in _ROUTE_HINTS)]
+    if len(candidates) > MAX_ROUTE_LINES:
+        return "broker" in whole
+    step()
+    short: list[str] = []
+    for v in candidates:
+        step()
+        flat = _flat_paths(_compact(v))
+        short.append(flat)
+        if _broker_module_line(flat):
+            return True
+    step()
     whole = "\n".join(short)
-    if any(_broker_module_line(v) for v in short):
-        return True
     if "broker" in whole and any(_BM_ANY_M.search(v) for v in short):
         return True  # `-m x.y.client`, `-m client` beside the broker: the module by any leading parts
+    step()
     if _BM_WORDS[0].search(whole) and _BM_DYNAMIC.search(whole) and (_BM_PY_RE.search(whole) or "runpy" in whole):
         return True  # an import decided at run time, in a command that names safo: the name may be built from parts
+    step()
     if all(w.search(whole) for w in _BM_WORDS[:2]) and any(_BM_EXPANDED.search(v) for v in short):
         return True  # `python3 -m $1$2` while `safo` and `broker` are named: the module is built at run time
+    step()
     return "broker" in whole and any(_BM_LOCAL.search(v) for v in short)  # `cd src/safo/broker && python3 client.py`
 
 
@@ -1042,7 +1078,7 @@ def _findings(
                     flags.setdefault("vendor", number)
             continue
         _scan_line(number, line, steps, flags, materials, budget, runtime_scan)
-    _scan_broker_module(lines, steps)
+    _scan_broker_module(lines, steps, tick)
     if "vendor" in flags:
         steps.append(
             Step(
@@ -1108,10 +1144,11 @@ def _findings(
     return [(rule, "; ".join(dict.fromkeys(why[:6]))) for rule, why in reasons.items()]
 
 
-def _scan_broker_module(lines: list[str], steps: list[Step]) -> None:
+def _scan_broker_module(lines: list[str], steps: list[Step], tick: Callable[[], None]) -> None:
     """A brief that runs the broker client module directly is a paid step, like one that writes `safo gemini paid`."""
     views: list[str] = []
     for number, line in enumerate(lines, 1):
+        tick()
         if (
             len(line) > LINE_CAP
         ):  # not read (the scan above blocks it when it mentions Gemini); a module name is a mention
@@ -1128,7 +1165,7 @@ def _scan_broker_module(lines: list[str], steps: list[Step]) -> None:
             continue
         _, _, low, pre_low, _ = _views(line)
         views.extend((low, pre_low))
-    if broker_module_route(views):
+    if broker_module_route(views, tick):
         steps.append(Step(paid=True, matched=MATCH_MODULE))
 
 
@@ -1193,7 +1230,7 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
             found = SHELL_BUILT
         if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
             found = SHELL_TOOL
-        if found is None and broker_module_route(views):
+        if found is None and broker_module_route(views, tick):
             found = SHELL_BROKER_MODULE
         if found is None:
             return None

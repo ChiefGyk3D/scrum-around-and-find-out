@@ -15,7 +15,7 @@
   signers file, what `check-install` covers (the rest is issue #293), and what stays unverified. The shipped units are
   quoted in full, the unit start condition on the switch is gone from the text (decided 2026-10-31), and text for things not
   built is marked "not built yet". Threat model: each planned verification now names the test files, or says not built yet.
-- Review items of the phase 6 fixes (#299), all tested red first. The broker client's own module entry is now a paid
+- Review items of the phase 6 fixes (#299), all tested red first. Second round: the broker-module route detector is bounded work (whitespace squeezed before any pattern runs, no adjacent whitespace repeats, spans capped, an over-long or over-numerous line set refused unread) and checks the guard deadline per line in the Bash check, the brief scan and the oversized-event scan; the preflight judges the mode of the signers file, the switch and the egress config by the broker's rule (any root-owned file that group and others cannot write) instead of exactly 0644; and the docs now say plainly that the terminal-only start and the text patterns are defense in depth, and list what the socket allows without a signed approval. The broker client's own module entry is now a paid
   command word like `paid`: the dispatch guard denies it in a brief (also built at run time, wrapped in `eval`,
   `bash -c` or `xargs`, imported, or started by file) and the Bash check refuses it for an agent; naming the module or its
   file in prose, or checking or reading the file, stays allowed, and `safo gemini paid` is unchanged. The module also refuses to start

@@ -329,8 +329,8 @@ def _file_problem(path: Path, trust_uid: int) -> tuple[os.stat_result | None, st
         return st, "is not a regular file"
     if st.st_uid != trust_uid:
         return st, f"has the wrong owner (uid {st.st_uid}, expected {trust_uid})"
-    if stat.S_IMODE(st.st_mode) != 0o644:
-        return st, f"has mode {stat.S_IMODE(st.st_mode):04o}, expected 0644"
+    if geminisign.writable_by_others(st.st_mode):  # the broker's rule: any root-owned file that others cannot write
+        return st, f"has mode {stat.S_IMODE(st.st_mode):04o} and is writable by its group or by others"
     return st, None
 
 
@@ -370,7 +370,7 @@ def check_allowed_signers(loc: Locations) -> Check:
         name,
         "pass",
         f'{len(keys)} key line(s), each bound to namespaces="{loc.namespace}" and accepted by the broker parser; '
-        "root-owned, mode 0644",
+        "root-owned, not writable by group or others",
     )
 
 
@@ -384,11 +384,12 @@ def check_switch(loc: Locations) -> Check:
         return Check(name, "fail", "the switch path cannot be inspected")
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
         return Check(name, "fail", "present but not a regular file; the broker treats it as disabled")
-    if st.st_uid != loc.trust_uid or stat.S_IMODE(st.st_mode) != 0o644:
+    if st.st_uid != loc.trust_uid or geminisign.writable_by_others(st.st_mode):
         return Check(
             name,
             "fail",
-            f"present with owner uid {st.st_uid} and mode {stat.S_IMODE(st.st_mode):04o}; expected root and 0644",
+            f"present with owner uid {st.st_uid} and mode {stat.S_IMODE(st.st_mode):04o}; expected a root-owned file "
+            "that group and others cannot write",
         )
     return Check(
         name, "warn", "present (content not read): paid use is switched on if the file says so; remove it to switch off"

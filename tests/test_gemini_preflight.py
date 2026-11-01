@@ -272,13 +272,59 @@ def test_missing_allowed_signers_fails(tmp_path: Path) -> None:
     assert got["allowed-signers"].status == "fail"
 
 
-@pytest.mark.parametrize("mode", [0o600, 0o664, 0o666, 0o755])
-def test_allowed_signers_must_be_exactly_0644(tmp_path: Path, mode: int) -> None:
+def broker_reads(path: Path) -> bool:
+    """Whether the broker's own trusted-file reader takes the file (owner and mode rules of `read_trust_file`)."""
+    from safo import geminisign
+    from safo.gemini import RefusedError
+
+    try:
+        geminisign.read_trust_file(path, os.getuid(), "file")
+    except RefusedError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o644, 0o444, 0o755, 0o700])
+def test_a_mode_the_broker_accepts_passes_for_the_signers_the_switch_and_the_egress_config(
+    tmp_path: Path, mode: int
+) -> None:
+    """The broker takes any root-owned file that group and others cannot write; the preflight uses its rule (#299)."""
     loc = make_tree(tmp_path)
     loc.allowed_signers.chmod(mode)
+    loc.switch.write_text("enabled\n")
+    loc.switch.chmod(mode)
+    loc.egress_conf.chmod(mode)
+    for path in (loc.allowed_signers, loc.switch, loc.egress_conf):
+        assert broker_reads(path), (path.name, mode)
     got = by_name(pf.run_preflight(loc, FakeRunner(), lookup_ok))
-    assert got["allowed-signers"].status == "fail"
-    assert "0644" in got["allowed-signers"].detail
+    assert got["allowed-signers"].status == "pass", got["allowed-signers"].detail
+    assert got["switch"].status == "warn"  # present: not a failure
+    assert got["egress-mode"].status != "fail", got["egress-mode"].detail
+
+
+@pytest.mark.parametrize("mode", [0o664, 0o666, 0o620, 0o602, 0o646])
+def test_a_mode_the_broker_refuses_fails_for_the_signers_the_switch_and_the_egress_config(
+    tmp_path: Path, mode: int
+) -> None:
+    loc = make_tree(tmp_path)
+    loc.allowed_signers.chmod(mode)
+    loc.switch.write_text("enabled\n")
+    loc.switch.chmod(mode)
+    loc.egress_conf.chmod(mode)
+    for path in (loc.allowed_signers, loc.switch, loc.egress_conf):
+        assert not broker_reads(path), (path.name, mode)
+    got = by_name(pf.run_preflight(loc, FakeRunner(), lookup_ok))
+    assert got["allowed-signers"].status == "fail" and "writable" in got["allowed-signers"].detail
+    assert got["switch"].status == "fail"
+    assert got["egress-mode"].status == "fail"
+
+
+def test_the_preflight_uses_the_brokers_mode_rule_not_its_own_number() -> None:
+    from safo import geminisign
+
+    source = Path(pf.__file__).read_text()
+    assert "0o644" not in source and "geminisign.writable_by_others(" in source
+    assert geminisign.writable_by_others(0o664) and not geminisign.writable_by_others(0o600)
 
 
 def test_allowed_signers_owned_by_someone_else_fails(tmp_path: Path) -> None:

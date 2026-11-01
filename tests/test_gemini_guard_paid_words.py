@@ -249,3 +249,118 @@ def test_a_long_line_that_names_the_broker_client_is_refused_unread() -> None:
     assert "gemini-paid" in rules(line)
     assert geminibrief.shell_command_class(line) is not None
     assert "gemini-paid" not in rules("echo " + "x " * geminibrief.LINE_CAP + "\n")
+
+
+# -- the route detector is bounded work that obeys the guard deadline (#299) ------------------------------------------
+# No wall time here: work is counted as scanner steps (ticks the detector reports to the guard) and the deadline is an
+# injected clock that advances one unit per reading.
+
+HOSTILE_LINES = {
+    "a long run of spaces after -m": "broker python3 -m" + " " * 3900 + "x",
+    "a long run of tabs and spaces": "broker python3 -m" + " \t" * 1900 + "x",
+    "a long run of options": "broker python3 " + "-x " * 1200,
+    "repeated dot segments": "broker python3 src/" + "./" * 1900 + "client.py",
+    "repeated parent segments": "broker python3 src/a/" + "../a/" * 600 + "client.py",
+    "repeated slashes": "broker python3 " + "/" * 3800 + "client.py",
+    "repeated dots": "broker python3 " + "." * 3900,
+    "a long quoted string": "broker python3 -m '" + "a" * 3900 + "'",
+    "many quotes": "broker python3 -m " + "''" * 1900,
+    "many python words": "broker " + "python3 " * 490 + "-m",
+    "many dashes": "broker python3 " + "-m " * 1200,
+}
+
+
+def route_steps(lines: list[str]) -> tuple[bool, int]:
+    steps = [0]
+
+    def tick() -> None:
+        steps[0] += 1
+
+    found = geminibrief.broker_module_route(lines, tick=tick)
+    return found, steps[0]
+
+
+@pytest.mark.parametrize("name", list(HOSTILE_LINES))
+def test_a_hostile_line_costs_a_bounded_number_of_scanner_steps(name: str) -> None:
+    line = HOSTILE_LINES[name]
+    assert len(line) < geminibrief.LINE_CAP
+    _, steps = route_steps([line])
+    assert 1 <= steps <= 30  # a line costs a few rule steps, however it is shaped
+    _, many = route_steps([line] * 200)
+    assert many <= 200 * 30 + 30  # and the cost grows with the line count, not with anything inside a line
+
+
+def test_the_hostile_line_table_is_not_trimmed() -> None:
+    assert len(HOSTILE_LINES) == 11
+
+
+def test_whitespace_runs_are_squeezed_before_any_rule_reads_the_line() -> None:
+    assert len(geminibrief._compact("a" + " " * 3900 + "\t" * 50 + "b")) == 3
+    assert geminibrief._compact("x \t\n y") == "x y"
+
+
+def test_no_route_pattern_has_two_adjacent_unbounded_whitespace_repeats() -> None:
+    """The shape that cost 0.2 s a line (`\\s*=?\\s*` over a long run of spaces): a source guard on every pattern."""
+    import re
+
+    bad = re.compile(r"\\s\*(?:=\?)?\\s\*|\\s\+(?:=\?)?\\s[*+]")
+    patterns = {n: p for n, p in vars(geminibrief).items() if n.startswith("_BM_") and isinstance(p, re.Pattern)}
+    assert len(patterns) >= 10, "something was collected"
+    assert [n for n, p in patterns.items() if bad.search(p.pattern)] == []
+    assert bad.search(r"-[a-z]*m\s*=?\s*x")  # the negative case: the guard does catch the old shape
+
+
+class StepClock:
+    """A monotonic clock that advances one unit per reading, in place of wall time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        self.now += 1.0
+        return self.now
+
+
+def slow_route(monkeypatch: pytest.MonkeyPatch) -> StepClock:
+    """The injected clock, and a route detector whose line reading takes 1000 units (stands in for slow regex work)."""
+    clock = StepClock()
+    monkeypatch.setattr(geminibrief.time, "monotonic", clock)
+    monkeypatch.setattr("safo.modes.hooks.time.monotonic", clock)
+    flat = geminibrief._flat_paths
+
+    def slow(v: str) -> str:
+        clock.now += 1000.0
+        return flat(v)
+
+    monkeypatch.setattr(geminibrief, "_flat_paths", slow)
+    return clock
+
+
+def test_the_shell_check_obeys_its_deadline_inside_the_route_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = slow_route(monkeypatch)
+    command = "python3 -m pytest\npython3 -m ruff check"  # nothing wrong with it, but reading it is slow
+    found = geminibrief.shell_command_class(command, deadline=clock.now + 500)
+    assert found == geminibrief.SHELL_UNVERIFIED  # a late answer is "could not be checked", never "fine"
+
+
+def test_the_brief_scan_fails_closed_on_its_deadline_inside_the_route_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = slow_route(monkeypatch)
+    got = geminibrief.findings(
+        "python3 -m pytest\npython3 -m ruff check\n" + PUBLIC, PaidOnlyThroughBroker(), deadline=clock.now + 500
+    )
+    assert "gemini-paid" in {rule for rule, _ in got}
+
+
+def test_the_oversized_event_scan_obeys_its_deadline_inside_the_route_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    from safo.modes.hooks import EventScan
+
+    clock = slow_route(monkeypatch)
+    scan = EventScan(clock.now + 500)
+    with pytest.raises(TimeoutError):
+        scan.feed(b"broker python3 -m pytest\npython3 -m ruff check")
+
+
+def test_too_many_candidate_lines_are_refused_unread() -> None:
+    lines = ["broker python3 -m x"] * (geminibrief.MAX_ROUTE_LINES + 1)
+    assert geminibrief.broker_module_route(lines) is True
+    assert geminibrief.broker_module_route(["python3 -m x"] * (geminibrief.MAX_ROUTE_LINES + 1)) is False
