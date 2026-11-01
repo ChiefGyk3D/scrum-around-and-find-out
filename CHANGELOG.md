@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Broker admin docs: what to do when start-up recovery refuses a used marker from an earlier month that has no ledger row (#278). The refusal is unchanged and is now pinned by a test; an automated repair step was deferred for a simpler design.
 - Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
   which the installer never builds (it builds `current/venv/bin/python`): the runbook, the admin docs and a new test that
   compares every interpreter path in the runbook with the installer's own constant now agree. Nothing created the broker
