@@ -256,7 +256,7 @@ def test_the_harness_catches_a_reader_that_breaks_the_properties() -> None:
     """The negative case: a reader that crashes, hangs or returns an empty frame is reported, not swallowed."""
 
     def crashes(recv: Callable[[int], bytes], limit: int) -> bytes:
-        return protocol.read_frame(recv, limit)[999]  # IndexError on a short body
+        return bytes([protocol.read_frame(recv, limit)[999]])  # IndexError on a short body
 
     def returns_empty(recv: Callable[[int], bytes], limit: int) -> bytes:
         return b""
