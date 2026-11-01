@@ -544,8 +544,23 @@ procedure is not repeated here, and the preflight does not read the credential.
 
 1. Step 0 (packages, udev, preflight). 2. Step a (keys A and B), test a4. 3. Step b (optional, any time). 4. Step c.
 5. The root setup in [Gemini broker](gemini-broker.md) (user, folders, the paid key). 6. Step d (the files). 7. Install
-the broker and run the preflight again. 8. The dry run. 9. Only then the switch, and the first real call, which
-is phase 7 itself and needs the unmerged broker code.
+the broker and run the preflight again. 8. The root-door check below. 9. The dry run. 10. Only then the switch, and the
+first real call, which is phase 7 itself and needs the unmerged broker code.
+
+**The root-door check (after the install, before the dry run).** The whole design assumes the maintainer's account has
+no way to become root. The administration command checks the installation and then looks, read-only, for the doors the
+broker page lists: sudo rules, root-equivalent groups, polkit rules, root-run paths the account can write, setuid files no
+package owns, and a leftover old secret-store credential. Run it through `sudo` so that it knows which account to judge:
+
+```text
+ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.admin check-install'
+```
+
+Expected: every line starts with `pass`, `warn` or `fail`, and the last line starts with `limits:`. Any `fail` makes the
+command exit 1: fix it, or write down why it is accepted, before the dry run. A `warn` on `credential` means the old key
+is still on disk: revoke it at the vendor, then delete it. A pass means "no door found by these checks", not "no door"
+([Gemini broker](gemini-broker.md), "The root-door precondition"). Blast radius: none (read only; it runs no program and
+writes nothing). Rollback: none needed. Not run by the agent that wrote this page.
 
 ## Not verified
 

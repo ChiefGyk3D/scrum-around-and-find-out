@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Admin `check-install` root-door checks (#293). The broker administration command now runs eight read-only checks for the
+  root-door items the docs list, each answering `pass`, `warn` or `fail` in one sentence: sudo rules (sudoers and
+  `sudoers.d`, aliases, groups), root-equivalent group membership, polkit rules that grant without a password, paths
+  under root-run folders (and the broker's own) that the account can write, root-run units and cron jobs that run a
+  replaceable file or read from the account's home, the preload file, setuid, setgid and capability files no package
+  owns, and a leftover old secret-store credential. Strictly read-only (no program is run, nothing is written, a final
+  symbolic link is never followed), and a path that cannot be read, has the wrong owner, is open to others or hits the
+  scan limit is a `fail`. A `fail` makes the command exit 1; the output ends with a `limits:` line. The enrollment
+  runbook names the command in the ordering list; the broker page and the threat model (R16) describe the checks.
 - Paid Gemini broker setup gaps (#298). The runbook last step ran the preflight as `/opt/safo-broker/current/bin/python`,
   which the installer never builds (it builds `current/venv/bin/python`): the runbook, the admin docs and a new test that
   compares every interpreter path in the runbook with the installer's own constant now agree. Nothing created the broker

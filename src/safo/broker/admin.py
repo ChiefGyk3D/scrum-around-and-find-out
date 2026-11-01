@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, NoReturn, TextIO
 
 from safo import gemini, geminisign, output
+from safo.broker import doors
 from safo.broker.errors import BrokerError, LedgerError
 from safo.broker.ledger import AdminWho, CallLedger, CallRecord, LedgerView
 from safo.broker.money import MoneyError, format_usd, parse_usd
@@ -66,9 +67,10 @@ UNIT_NAMES = (  # the units the installer manages; a test pins this tuple to the
     "safo-broker-egress-refresh.service",
     "safo-broker-egress-refresh.timer",
 )
-NOT_CHECKED = (
-    "not checked here: sudo rules, root-equivalent groups, polkit, writable root-run paths, setuid files and the "
-    "old secret-store credential (docs/gemini-broker.md, The root-door precondition, lists them for a manual review)"
+LIMITS = (
+    "limits: pass means no door was found by these checks, never that none exists; access control lists, a flaw in a "
+    "package-owned program, a privileged socket and anything that changes later are not seen "
+    "(docs/gemini-broker.md, The root-door precondition)"
 )
 VERSION = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 SUDO_UID = re.compile(r"[0-9]{1,10}")
@@ -108,6 +110,7 @@ class Paths:
     egress_helper: Path = Path("/usr/local/sbin/safo-broker-egress")
     egress_conf: Path = Path("/etc/safo/broker-egress.conf")
     trust_uid: int = 0  # who must own the root files above
+    door: doors.DoorPaths = doors.DoorPaths()  # where the root-door checks look (#293)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -376,9 +379,10 @@ def _check_switch_and_egress(paths: Paths, facts: list[str], fails: list[str], n
         fails.append("paid use is enabled but the egress config cannot be read or has no valid mode")
 
 
-def check_install(paths: Paths) -> tuple[list[str], list[str]]:
-    """(facts, failures): whether the release link, the version record, the floor, the installed unit files (against the
-    release's own copies and its manifest), the egress helper and the switch agree. Read-only."""
+def check_install(paths: Paths, maintainer_uid: int | None = None) -> tuple[list[str], list[str]]:
+    """(lines, failures): whether the release link, the version record, the floor, the installed unit files (against the
+    release's own copies and its manifest), the egress helper and the switch agree, and the read-only root-door checks
+    (`safo.broker.doors`) for the maintainer account `maintainer_uid` (None when sudo did not say). Read-only."""
     facts: list[str] = []
     fails: list[str] = []
     notes: list[str] = []
@@ -436,7 +440,11 @@ def check_install(paths: Paths) -> tuple[list[str], list[str]]:
     lines = facts + [f"fail: {text}" for text in fails] + [f"note: {text}" for text in notes]
     if not fails:
         lines.append("ok: the release link, the record, the floor, the units, the egress helper and the switch agree")
-    lines.append(NOT_CHECKED)
+    broker_folders = (paths.release_link.parent, paths.state_dir)
+    findings = doors.check_doors(paths.door, paths.trust_uid, maintainer_uid, extra_roots=broker_folders)
+    lines.extend(finding.line() for finding in findings)
+    fails = fails + [f.text for f in findings if f.status == "fail"]
+    lines.append(LIMITS)
     return lines, fails
 
 
@@ -625,7 +633,8 @@ def _run(
         raise AdminError("the broker administration command runs as root only")
     who = AdminWho(ops.getuid(), sudo_uid(env))
     if args.cmd == "check-install":
-        lines, fails = check_install(paths)
+        sudo_user = sudo_uid(env)
+        lines, fails = check_install(paths, None if sudo_user < 0 else sudo_user)
         for line in lines:
             output.write(out, line)
         return 1 if fails else 0

@@ -276,10 +276,10 @@ sections that follow agree with it.
   `no-touch-required`, certificates and duplicates, and the broker accepts only hardware keys from it even when a
   software key has the written opt-in.
 - **`check-install` coverage.** It checks the release link and folder, the version record, the floor, the five installed
-  unit files against the signed release and its manifest, the egress helper and the switch and egress mode. It does **not**
-  check the root-door items (sudo rules, group membership, polkit rules, writable root-run paths, setuid files, a leftover
-  old secret-store credential); its output ends with a line saying so. A read-only check for those is **not built yet**
-  (issue #293).
+  unit files against the signed release and its manifest, the egress helper and the switch and egress mode. Since #293 it
+  also runs eight read-only root-door checks (see "The root-door precondition"), each answering `pass`, `warn` or `fail`
+  in one sentence; a `fail` makes the command exit 1, a `warn` does not. The output ends with a `limits:` line: a pass is
+  "no door found by these checks", never "no door".
 - **The paid commands and the removed path.** `safo gemini paid` and `safo gemini paid-dryrun` run the broker client.
   The in-process paid path is deleted (#287), the dispatch guard denies every paid step in a brief, and the only paid route
   is the broker.
@@ -670,16 +670,30 @@ absent (there is no start condition on the switch; decided 2026-10-31).
 The whole design assumes the maintainer's account, and every agent running as it, has **no way to become root**. The
 installer's checks reduce the chance that this is false; they cannot prove it, and this page does not claim they do.
 
-**What `check-install` does not check yet.** The list below is the manual review the maintainer does. A read-only code
-check for these items is **not built yet** and is tracked as issue #293 (sudo rules, group membership, polkit rules,
-writable root-run paths, setuid files, and a leftover old secret-store credential). Today the administration command
-`check-install` (run as `python -I -m safo.broker.admin check-install`) checks the release link, the version record, the
-floor, the installed unit files against the signed release, the egress helper and the switch (see the administration
-section), and its output ends with a line saying that these root-door items are not checked. It does not run `sudo -l`,
-read group or polkit data, or walk the file system. Until it does, treat a passing `check-install` as "the installation
-matches the signed release", never as "no door to root exists".
+**What `check-install` checks (issue #293).** The administration command `check-install` (run as
+`python -I -m safo.broker.admin check-install`) checks the installation (see the administration section) and then runs
+the root-door checks in `src/safo/broker/doors.py`, for the account named by `SUDO_UID` (run it through `sudo`; without
+it the account checks answer `warn` and say why). The checks are strictly read-only: files are read without following a
+final symbolic link, folders are listed, nothing is written and **no program is run**, so there is no `sudo -l`; the
+sudoers files themselves are read and parsed. Each check gives one finding, and a path that cannot be read, has the wrong
+owner, is writable by others, is a symbolic link where a file belongs, is missing where it must exist, or is a scan that
+hit its entry limit is a `fail`, never a pass:
 
-**The root-door review (manual today; each hit is fixed or explained in writing):**
+| Finding | What it reads | Fails when | Warns when |
+|---|---|---|---|
+| `sudo` | `/etc/sudoers` and `/etc/sudoers.d` (names sudo reads), `User_Alias`, line continuations | a rule names the login, its uid, `ALL`, a group the account is in, or an alias of those; a file or folder is not root-owned and closed, is a link, or an include cannot be followed | the account is unknown |
+| `groups` | `/etc/passwd`, `/etc/group` | the account is in `root`, `sudo`, `wheel`, `admin`, `docker`, `lxd`, `lxc`, `libvirt`, `disk` or `shadow` (primary or supplementary), or is uid 0 | the account is unknown |
+| `polkit` | `*.rules` and `*.pkla` under the polkit folders | a rule granting without a password names the login or one of its groups (or every user) | a rule grants without a password and does not name the account |
+| `writable` | a bounded walk of `/etc`, `/usr/local`, `/opt`, the systemd unit folder, polkit, the cron and `at` spools, and the broker's own folders | the account can write any entry (owner, group or world bits); symbolic links are not followed | the account is unknown |
+| `jobs` | root-run `.service` files and `/etc/crontab`, `/etc/cron.d` | a root job runs a file whose path (or a folder above it, or the link target) the account can replace, or reads or runs something under the account's home. Only the first word of each command is followed | the account is unknown |
+| `preload` | `/etc/ld.so.preload` | it is a link, not root-owned or writable by others | it lists a library |
+| `setuid` | a bounded walk of `/usr`, `/opt` and the merged `/bin`, `/sbin`, `/lib*`, against the package file lists in `/var/lib/dpkg/info` (read as files, `dpkg` is not run) | a setuid or setgid file no package owns, any such file or a file with capabilities that the account can write, or the package lists cannot be read | a file with capabilities that no package owns |
+| `credential` | the secret store tool's local settings folders in the account's home (`.doppler` and `.config/doppler`; these locations are inferred, not read from a vendor page) | the home cannot be examined | one of them exists: revoke the old key at the vendor, then delete it |
+
+The scan roots are fixed in code and no flag moves them. A clean machine of the Debian family is the model; a machine
+that does not keep package file lists there fails the `setuid` check when it has any setuid file, by design.
+
+**Still a manual review (the checks above do not replace it; each hit is fixed or explained in writing):**
 
 - `sudo -l -U LOGIN`: any rule at all for the account, `NOPASSWD` or not, including command-specific rules (a rule for
   one command can be an editor, a service manager or an installer with a shell escape); and `sudo -n true`.
@@ -1371,7 +1385,8 @@ ssh -t host 'sudo /opt/safo-broker/current/venv/bin/python -I -m safo.broker.adm
   others, and it reports the switch state (a switch file that is present but is not exactly `enabled`, or not root-owned,
   fails because the broker would treat it as off) and the egress mode. It notes, without failing, an enabled switch with the
   egress control in observe mode (the preflight owns that decision), and it fails if the switch is enabled but the egress
-  config cannot be read. It exits 1 on any failure. It does not check the root-door items listed above.
+  config cannot be read. It then prints the eight root-door findings (`pass`, `warn` or `fail`, one sentence each; see
+  "The root-door precondition") and a `limits:` line. It exits 1 on any failure, including a root-door `fail`.
 - **clear MODEL** first prints the record of every call that suspended the model (call id, model, job, kind
   `ambiguous` or `breach`, start time, reserved amount, state, counted amount, recorded actual) and changes nothing.
   Read the vendor billing page, then repeat the command with `--confirm CALL_ID` for **every** call id printed. The
@@ -1691,7 +1706,7 @@ service and spend nothing.
 | 2 | The call pipeline against the fake vendor: request builders per kind, the image response handling (magic bytes, limits, receipts), 429 and ambiguous outcomes. Reservation, reconciliation, breach and suspension. The response parser targets the vendor's documented shape and refuses any shape it has not been shown | Review |
 | 3 | The socket server: framing, protocol version 1 with attachments, peer credentials, limits, deadlines, the operations, logging allowlist; fake socket peers. The idle exit is not built yet; the framing fuzz is built (`tests/test_broker_framing_fuzz.py`) | Review of the parser and the limits |
 | 4 | The thin client: `safo gemini paid` and `paid-dryrun` go through the socket, safe image writing and sidecars, **removal of the in-process paid path** (done in #287: deleted, with a guard test that no module outside the broker can name the vendor, a paid model or the key header), the free-path independence tests, docs | Review; the old local paid code must be gone, not just unused |
-| 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that covers the release link, the record, the floor, the installed units against the signed release, the egress helper and the switch; the root-door checks remain a manual review), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
+| 5 | The units, `safo-broker-install` with its signed-tag, rollback and review-gate checks, the administration command (built in #262: `status`, `usage`, `reconcile`, `clear`, and a `check-install` that covers the release link, the record, the floor, the installed units against the signed release, the egress helper and the switch, and, since #293, the read-only root-door checks), `systemd-analyze` in CI, the throwaway-VM run including the first-run connection test, and the setup runbook | Review of the units, the installer and the checks |
 | 6 | **Cyber-tier security review** of the broker and the signed-approval verification (issue step 3). Done; its findings were fixed in #288 and #289 | Clean review |
 | 7 | The maintainer does the root setup and the dry run, then creates the switch (issue step 5). The first calls use Nano Banana 2 Lite to record the real response shape and to observe the output cap; root then sets `cap_verified` for each model observed; a fixture PR follows | The maintainer's own run; the observation reviewed |
 | 8 | Text paid calls through the same path, the `usage` workflow, then the optional count-per-approval and passkey wiring if the maintainer wants them | Review per item |
