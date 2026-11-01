@@ -607,7 +607,7 @@ def test_a_hosts_write_failure_puts_the_previous_set_back(tmp_path: Path, monkey
         run_refresh(fake, hosts, cfg)
     assert len(fake.scripts) == 2  # the new set, then the previous one
     assert "142.250.80.10" in fake.scripts[0]
-    assert fake.scripts[1].rstrip().endswith("{ 142.250.80.1 }")  # the address the previous view named
+    assert "{ 142.250.80.1 timeout " in fake.scripts[1]  # the address the previous view named, with its time left
     assert "142.250.80.10" not in fake.scripts[1]
     assert hosts.read_bytes() == before
 
@@ -960,3 +960,117 @@ def test_a_table_removed_while_the_lookup_runs_is_put_back_in_the_same_run(
         assert code == (0 if outcome == "succeeds" else 1), outcome
         assert len(lab.scripts) == 1, outcome  # the table is back before the run ends (the view is old: no addresses)
         assert "meta skuid != 1234 return" in lab.scripts[0], outcome
+
+
+def wire_main(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hosts: Path, lab: Lab, resolver: egress.Resolver
+) -> None:
+    def fake_refresh(cfg: egress.Config, *, resolver: egress.Resolver, **kw: object) -> list[str]:
+        return egress.validate_answers(resolver(cfg.host))
+
+    monkeypatch.setattr(egress, "service_ids", lambda: (SUID, os.getgid()))
+    monkeypatch.setattr(egress, "read_config", lambda path: egress.Config(host=HOST, mode="observe"))
+    monkeypatch.setattr(egress, "HOSTS", hosts)
+    monkeypatch.setattr(egress, "LOCK", tmp_path / "lock")
+    monkeypatch.setattr(egress, "FAILURES", tmp_path / "failures")
+    monkeypatch.setattr(egress, "list_table", lab.lister)
+    monkeypatch.setattr(egress, "run_nft", lab.nft)
+    monkeypatch.setattr(egress, "default_resolver", resolver)
+    monkeypatch.setattr(egress, "refresh", fake_refresh)
+
+
+def test_a_failed_restore_after_a_good_lookup_exits_nonzero_and_is_counted_until_it_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Never exit 0 while the table is absent: the failure is loud, counted, and the next run tries again."""
+    _fake, hosts, _cfg = setup(tmp_path, GOOD)
+    os.utime(hosts, (1.0, 1.0))
+    lab = Lab(listing(addrs=[], mode="observe"))
+    state = {"broken": True}
+
+    def resolver(host: str) -> list[object]:
+        if lab.live is not None:
+            lab.live = None  # removed while the lookup runs
+        return list(GOOD)
+
+    def nft(script: str) -> None:
+        if state["broken"]:
+            msg = "nft refused"
+            raise EgressError(msg)
+        lab.scripts.append(script)
+        lab.live = listing(addrs=[], mode="observe")
+
+    wire_main(monkeypatch, tmp_path, hosts, lab, resolver)
+    monkeypatch.setattr(egress, "run_nft", nft)
+    assert egress.main(["tick"]) == 1  # the lookup worked, the restore did not
+    assert "nft refused" in capsys.readouterr().err
+    assert (tmp_path / "failures").read_text().strip() == "1"
+    assert egress.main(["tick"]) == 1  # still absent: the next run tries again and counts again
+    err = capsys.readouterr().err
+    assert (tmp_path / "failures").read_text().strip() == "2"
+    assert "2 runs in a row" in err
+    state["broken"] = False
+    os.utime(hosts, (1.0, 1.0))
+    assert egress.main(["tick"]) == 0
+    assert lab.live is not None  # back
+    assert not (tmp_path / "failures").exists()  # a good run clears the count
+
+
+def test_a_lookup_error_is_not_hidden_by_a_failed_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _fake, hosts, _cfg = setup(tmp_path, GOOD)
+    os.utime(hosts, (1.0, 1.0))
+    lab = Lab(listing(addrs=[], mode="observe"))
+
+    def resolver(host: str) -> list[object]:
+        lab.live = None
+        msg = "the resolver failed"
+        raise EgressError(msg)
+
+    def nft(script: str) -> None:
+        msg = "nft refused"
+        raise EgressError(msg)
+
+    wire_main(monkeypatch, tmp_path, hosts, lab, resolver)
+    monkeypatch.setattr(egress, "run_nft", nft)
+    assert egress.main(["tick"]) == 1
+    err = capsys.readouterr().err
+    assert "the resolver failed" in err and "nft refused" in err
+
+
+def test_the_failure_count_file_is_opened_safely(tmp_path: Path) -> None:
+    path = tmp_path / "failures"
+    assert egress.note_failure(path) == 1
+    assert egress.note_failure(path) == 2
+    path.write_text("garbage")
+    assert egress.note_failure(path) == 1  # an unreadable count starts again, it never stops the run
+    egress.clear_failures(path)
+    assert not path.exists()
+    egress.clear_failures(path)  # idempotent
+    target = tmp_path / "target"
+    target.write_text("5")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert egress.note_failure(link) == 1  # a symlink is never followed
+    assert target.read_text() == "5"
+
+
+def test_a_rollback_restores_the_old_addresses_with_their_remaining_lifetime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, hosts, cfg = setup(tmp_path, GOOD)
+    old = os.stat(hosts).st_mtime
+    os.utime(hosts, (old - 3000, old - 3000))  # the old view is 50 minutes old
+
+    def boom(*a: object, **k: object) -> None:
+        msg = "disk full"
+        raise EgressError(msg)
+
+    monkeypatch.setattr(egress, "write_hosts", boom)
+    with pytest.raises(EgressError, match="disk full"):
+        run_refresh(fake, hosts, cfg)
+    last = fake.scripts[1].rstrip().splitlines()[-1]
+    assert last.startswith("add element inet safo_broker_egress vendor_v4 { 142.250.80.1 timeout ")
+    seconds = int(last.rsplit("timeout ", 1)[1].rstrip("s }"))
+    assert 1 <= seconds <= 600  # about ten minutes left, never a fresh hour

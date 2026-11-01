@@ -24,6 +24,7 @@ is changed. Standard library only; the only program it runs is nft, by absolute 
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import grp
 import ipaddress
@@ -45,6 +46,7 @@ NFT = "/usr/sbin/nft"
 CONF = Path("/etc/safo/broker-egress.conf")
 HOSTS = Path("/etc/safo/egress/hosts")
 LOCK = Path("/etc/safo/egress/lock")
+FAILURES = Path("/etc/safo/egress/failures")
 SET_LIFETIME = 3600  # seconds: the set timeout in the ruleset; an address older than this is never put back
 REFRESH_AFTER = 55.0  # seconds: `tick` resolves again when the hosts view is at least this old
 SERVICE_USER = "safo-broker"
@@ -387,6 +389,32 @@ def view_is_fresh(hosts_path: Path, *, now: float) -> bool:
     return 0 <= age < REFRESH_AFTER
 
 
+def note_failure(path: Path) -> int:
+    """Count one more failed run in a row and return the count. A count that cannot be read starts again at 1 and one
+    that cannot be written is not an error: this bookkeeping must never stop the next run from trying."""
+    count = 1
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return count
+    try:
+        text = os.pread(fd, 16, 0).decode("ascii", "replace").strip()
+        if text.isdigit() and len(text) < 9:
+            count = int(text) + 1
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, f"{count}\n".encode("ascii"), 0)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+    return count
+
+
+def clear_failures(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
 @contextmanager
 def locked(path: Path) -> Iterator[None]:
     """One egress job at a time (refresh and check), so a check never judges a table in the middle of a refresh."""
@@ -461,18 +489,14 @@ def refresh(
     addresses = validate_answers(raw)
     data = hosts_content(config.host, addresses)
     rules = render_rules(RULES_TEMPLATE, uid=service_uid, mode=config.mode)
-    try:
-        previous = hosts_path.read_bytes()
-    except OSError:
-        previous = b""
+    old, left = read_view(hosts_path, config.host, now=time.time())  # what a rollback would put back, and for how long
     nft(refresh_script(rules, addresses))
     try:
         write_hosts(hosts_path, data, uid=uid, gid=gid)
     except EgressError as exc:
         # the set and the view change together or not at all: put the set back to what the old view names
-        old = addresses_in_hosts(previous, config.host)
         try:
-            nft(refresh_script(rules, old) if old else rules)
+            nft(refresh_script(rules, old, timeout=left) if old else rules)
         except EgressError:
             msg = f"{exc}; the previous set could not be restored either"
             raise EgressError(msg) from None
@@ -537,7 +561,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if back:
                     say(sys.stderr, f"egress table put back: {back}")
                 if command == "check" or (command == "tick" and view_is_fresh(HOSTS, now=time.time())):
+                    clear_failures(FAILURES)
                     return 0
+                lookup_error: Exception | None = None
+                found: list[str] = []
                 try:
                     found = refresh(
                         config,
@@ -548,16 +575,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                         service_uid=service_uid,
                         gid=gid,
                     )
-                finally:
-                    # whatever the lookup did (failed, refused, slow, or worked), a table removed while it ran is
-                    # put back before this run ends; an error here must not hide the lookup's own error
-                    try:
-                        back = ensure(config, lister=list_table, nft=run_nft, hosts_path=HOSTS, service_uid=service_uid)
-                    except EgressError as exc:
-                        say(sys.stderr, f"egress: the check after the lookup failed: {exc}")
-                    else:
-                        if back:
-                            say(sys.stderr, f"egress table put back after the lookup: {back}")
+                except (EgressError, ValueError, OSError) as exc:
+                    lookup_error = exc
+                # whatever the lookup did (failed, refused, slow, or worked), a table removed while it ran is put back
+                # before this run ends. If that fails the run fails too, and the lookup's own error is still shown.
+                try:
+                    back = ensure(config, lister=list_table, nft=run_nft, hosts_path=HOSTS, service_uid=service_uid)
+                except EgressError as exc:
+                    if lookup_error is None:
+                        raise
+                    say(sys.stderr, f"egress: the check after the lookup failed too: {exc}")
+                else:
+                    if back:
+                        say(sys.stderr, f"egress table put back after the lookup: {back}")
+                if lookup_error is not None:
+                    raise lookup_error
+            clear_failures(FAILURES)
             say(sys.stderr, f"egress set refreshed: {len(found)} addresses")
             return 0
         if command == "unload" and not rest:
@@ -565,6 +598,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
     except (EgressError, ValueError, OSError) as exc:
         say(sys.stderr, f"egress: {exc}")
+        if command in ("refresh", "check", "tick") and not rest:
+            count = note_failure(FAILURES)
+            streak = f"{count} runs in a row have" if count > 1 else "this run has"
+            say(sys.stderr, f"egress: {streak} failed; the broker's drop table may be absent until a run succeeds")
         return 1
     say(sys.stderr, "usage: safo-broker-egress load | refresh | check | tick | unload | render --uid N --mode M")
     return 2
