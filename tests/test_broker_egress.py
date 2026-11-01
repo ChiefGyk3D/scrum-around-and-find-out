@@ -815,6 +815,7 @@ def test_real_nft_output_matches_the_check_and_every_outside_change_is_seen(tmp_
     read them back with the real nft, and make outside changes."""
     if not userns_ok():
         pytest.skip("unprivileged user namespaces are unavailable here; real nft output not compared")
+    assert UNSHARE
     results: dict[str, str] = {}
     for mode in ("observe", "drop"):
         rules = egress.render_rules(egress.RULES_TEMPLATE, uid=SUID, mode=mode)
