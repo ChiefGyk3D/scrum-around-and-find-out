@@ -1430,3 +1430,85 @@ def test_hardening_glob_brace_tilde_history_and_comment_characters_need_a_human(
     (w.cron_d / "x").unlink()
     put(w.units / "a.service", unit(f"/usr/bin/python3 {arg}"))
     assert status(w.run(), "jobs") == "fail"
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash", "dash"])
+@pytest.mark.parametrize("flag", ["-s", "-u", "-i", "-l", "-su"])
+def test_hardening_shell_flags_are_never_known_harmless(w: World, shell: str, flag: str) -> None:
+    ok = put(w.t / "bin" / "ok.sh", "true\n", 0o755)
+    put(w.units / "a.service", unit(f"/bin/{shell} {flag} {ok}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+@pytest.mark.parametrize("program", ["sh", "bash", "dash"])
+def test_hardening_shell_running_a_plain_script_path_is_followed(w: World, program: str) -> None:
+    ok = put(w.t / "bin" / "ok.sh", "true\n", 0o755)
+    put(w.units / "a.service", unit(f"/bin/{program} -- {ok}"))
+    assert status(w.run(), "jobs") == "pass"
+
+
+@pytest.mark.parametrize("argv", ["-", "-c x", "-e 1", "-S x", "-W error", "-X dev"])
+def test_hardening_python_flags_that_read_stdin_or_run_text_need_a_human(w: World, argv: str) -> None:
+    ok = put(w.t / "bin" / "ok.py", "x = 1\n")
+    put(w.units / "a.service", unit(f"/usr/bin/python3 {argv} {ok}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+@pytest.mark.parametrize("program", ["perl", "ruby", "node", "php", "lua"])
+@pytest.mark.parametrize("flag", ["-", "-s", "-I", "-w", "-T"])
+def test_hardening_other_interpreters_have_no_harmless_flags(w: World, program: str, flag: str) -> None:
+    ok = put(w.t / "bin" / "ok.x", "x\n")
+    put(w.units / "a.service", unit(f"/usr/bin/{program} {flag} {ok}"))
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_wrapper_flags_are_a_short_list(w: World) -> None:
+    ok = put(w.t / "bin" / "ok.sh", "true\n", 0o755)
+    put(w.units / "a.service", unit(f"/usr/bin/env -i {ok}"))
+    assert status(w.run(), "jobs") == "pass"
+    for flag in ("-S", "-0", "-C"):
+        put(w.units / "a.service", unit(f"/usr/bin/env {flag} {ok}"))
+        assert status(w.run(), "jobs") == "fail"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "StandardInput=tty",
+        "StandardInput=tty-force",
+        "StandardInput=socket",
+        "StandardInput=data",
+        "StandardInput=fd:x",
+        "StandardInput=file:relative",
+        "StandardInputText=echo hi",
+        "StandardInputData=aGk=",
+    ],
+)
+def test_hardening_standard_input_settings_need_a_human(w: World, line: str) -> None:
+    put(w.units / "a.service", unit("/bin/true") + line + "\n")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "needs to look" in found["jobs"].text
+
+
+def test_hardening_standard_input_null_or_unset_is_fine(w: World) -> None:
+    put(w.units / "a.service", unit("/bin/true") + "StandardInput=null\n")
+    put(w.units / "b.service", unit("/bin/true"))
+    assert status(w.run(), "jobs") == "pass"
+
+
+def test_hardening_standard_input_file_goes_through_the_path_checks(w: World) -> None:
+    home_file = put(w.home / "in.txt", "x")
+    put(w.units / "a.service", unit("/bin/true") + f"StandardInput=file:{home_file}\n")
+    found = w.run()
+    assert status(found, "jobs") == "fail" and "home" in found["jobs"].text
+    writable = put(w.t / "wr" / "in.txt", "x", 0o666)
+    put(w.units / "a.service", unit("/bin/true") + f"StandardInput=file:{writable}\n")
+    assert status(w.run(), "jobs") == "fail"
+    put(w.units / "a.service", unit("/bin/true") + f"StandardInput=file:{w.t}/none.txt\n")
+    assert status(w.run(), "jobs") == "fail"
+    safe = put(w.t / "bin" / "in.txt", "x")
+    put(w.units / "a.service", unit("/bin/true") + f"StandardInput=file:{safe}\n")
+    assert status(w.run(), "jobs") == "pass"

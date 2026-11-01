@@ -36,6 +36,7 @@ from safo import output
 
 MAX_FILE = 4_000_000  # bytes read from any one file; a bigger file is a fail
 BAD_GROUPS = ("root", "sudo", "wheel", "admin", "docker", "lxd", "lxc", "libvirt", "disk", "shadow")
+STDIN_KEYS = ("StandardInput", "StandardInputText", "StandardInputData")
 UNIT_KEYS = ("ExecStart", "ExecCondition", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost", "ExecReload")
 HOME_KEYS = ("EnvironmentFile", "WorkingDirectory")
 CRON_VAR = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*=")
@@ -632,7 +633,18 @@ _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _CODE_OPTION = re.compile(r"-[A-Za-z]*[ceEmrx][A-Za-z]*|--(?:command|eval|exec|execute|expression)\b.*")
 _SHELL_SYNTAX = re.compile(r"[;|&`$()<>\\%\n*?\[\]{}~!#]")  # also glob, brace, tilde, history and comment characters
 # the only options on an interpreter or wrapper that are known to take no value and run no code
-SAFE_FLAGS = frozenset({"-I", "-u", "-B", "-s", "-S", "-O", "-OO", "-q", "--"})
+PYTHON_FLAGS = frozenset({"-I", "-u", "-B", "-s", "-S", "-O", "-OO", "-q", "--"})  # python -s is "no user site"
+WRAPPER_FLAGS = frozenset({"-i", "--"})
+NO_FLAGS = frozenset({"--"})  # shells and every other interpreter: no option is known to be harmless (-s reads stdin)
+WRAPPERS = frozenset({"env", "nice", "ionice", "timeout", "nohup", "setsid", "flock", "stdbuf", "xargs", "time"})
+
+
+def _safe_flags(base: str) -> frozenset[str]:
+    if base == "python" or base in ("python2", "python3"):
+        return PYTHON_FLAGS
+    return WRAPPER_FLAGS if base in WRAPPERS else NO_FLAGS
+
+
 # these take their program text first, so a command line for them cannot be followed
 TEXT_FIRST = frozenset({"awk", "gawk", "mawk", "nawk", "sed"})
 HUMAN = "a human needs to look"
@@ -657,7 +669,7 @@ def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | N
             if _CODE_OPTION.fullmatch(arg):
                 return f"runs {_show(first)} with code on its command line; {HUMAN}"
             if arg.startswith("-"):
-                if arg in SAFE_FLAGS:
+                if arg in _safe_flags(base):
                     continue
                 return f"runs {_show(first)} with the option {_show(arg)}, which is not known to be harmless; {HUMAN}"
             if _SHELL_SYNTAX.search(arg):
@@ -673,6 +685,12 @@ def _command_hit(argv: list[str], who: _Who, cache: dict[str, os.stat_result | N
             candidates.append(arg)
         if not found_script:
             return f"runs {_show(first)} without a script path; {HUMAN}"
+    return _candidates_hit(candidates, who, cache, floor)
+
+
+def _candidates_hit(
+    candidates: list[str], who: _Who, cache: dict[str, os.stat_result | None], floor: str
+) -> str | None:
     for candidate in candidates:
         if _in_home(candidate, who):
             return f"reads or runs {_show(candidate)} from the account's home"
@@ -704,11 +722,20 @@ def _unit_hits(text: str, who: _Who, cache: dict[str, os.stat_result | None], fl
         key, value = key.strip(), value.strip()
         if key == "User":
             user = value
-        elif key in UNIT_KEYS or key in HOME_KEYS:
+        elif key in UNIT_KEYS or key in HOME_KEYS or key in STDIN_KEYS:
             entries.append((key, value))
     if user not in ("", "root", "0"):
         return None
     for key, value in entries:
+        if key in STDIN_KEYS:
+            if key == "StandardInput" and value in ("", "null"):
+                continue
+            if key == "StandardInput" and value.startswith("file:") and value[5:].startswith("/"):
+                hit = _candidates_hit([value[5:]], who, cache, floor)
+                if hit:
+                    return hit
+                continue
+            return f"feeds {_show(key)} to a root job ({_show(value[:40])}); {HUMAN}"
         if key in HOME_KEYS:
             first = value.lstrip("-").split(None, 1)[0] if value.lstrip("-") else ""
             if not first.startswith("/"):
