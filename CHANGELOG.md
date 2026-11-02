@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.0 (2026-11-02)
+
+- First release that carries the Gemini paid-path broker, its installer and units, the approval-binds-prompt change, the
+  passkey extra, the `safo-guard` entry point and the Action trust hardening. Paid use stays disabled. The release is
+  installed only from a signed annotated tag `v0.2.0` by `packaging/safo_broker_install.py`; the release notes the
+  installer review reads are in the pull request that prepared the release (#341). Everything below was merged after
+  v0.1.2.
+
 - SAFO threat model diagram (#246): the Threat Dragon file opened as an unreadable tangle. Rebuilt the geometry only: six
   aligned boundary boxes with room around their contents, every shape inside its own boundary on a 20 px grid, flows as
   straight or right-angle lines with explicit vertices (none through a shape), short flow labels on clear stretches, and
