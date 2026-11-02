@@ -140,7 +140,7 @@ def test_every_action_is_pinned_to_a_commit_with_a_version_comment() -> None:
 def test_the_pins_match_the_ones_gyst_runs() -> None:
     pins = dict(re.findall(r"uses:\s+(\S+)@([0-9a-f]{40})", TEXT))
     assert pins == {
-        "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
+        "actions/setup-python": "6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
         "actions/create-github-app-token": "64ab729a6294000f5aa4" + "a4bc0b73d1f32bc45510",
         "dopplerhq/secrets-fetch-action": "451892f16195" + "f9ac360e1a5bcbf0b5fd0e957534",
     }
