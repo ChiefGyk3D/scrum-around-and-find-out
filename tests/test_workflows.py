@@ -82,3 +82,42 @@ def test_the_wiki_caller_is_pinned_and_only_the_publish_call_can_write() -> None
     command = jobs["wiki"]["with"]["generate-command"]
     assert command == 'python scripts/gen_wiki.py --out "$OUT_DIR" --commit "$SOURCE_SHA"'
     assert "${{" not in command, "no expression expands into a shell"
+
+
+def audited_lock_files(path: Path) -> set[str]:
+    """The requirement files the GYST security caller gives pip-audit: the input plus any extra `--requirement`."""
+    inputs = load(path)["jobs"]["security"]["with"]
+    named = {str(inputs["pip-audit-requirements"])}
+    extra = str(inputs.get("pip-audit-extra-args", "")).split()
+    named |= {extra[i + 1] for i, word in enumerate(extra[:-1]) if word in ("--requirement", "-r")}
+    return named
+
+
+def shipped_runtime_locks() -> set[str]:
+    """Every hash-locked runtime requirements file at the root (the dev lock is tooling and is not shipped)."""
+    return {
+        p.name
+        for p in ROOT.glob("requirements*.txt")
+        if p.name != "requirements-dev.txt" and "--hash=" in p.read_text()
+    }
+
+
+def test_pip_audit_covers_every_shipped_lock_file() -> None:
+    locks = shipped_runtime_locks()
+    assert {"requirements.txt", "requirements-passkey.txt"} <= locks, "the locks the guard exists for were collected"
+    audited = audited_lock_files(ROOT / ".github" / "workflows" / "security.yml")
+    assert locks <= audited, f"not audited by pip-audit: {sorted(locks - audited)}"
+
+
+def test_the_lock_audit_guard_bites(tmp_path: Path) -> None:
+    caller = tmp_path / "security.yml"
+    caller.write_text(
+        "jobs:\n  security:\n    with:\n      pip-audit-requirements: requirements.txt\n"
+        "      pip-audit-extra-args: --ignore-vuln X\n"
+    )
+    assert audited_lock_files(caller) == {"requirements.txt"}
+    caller.write_text(
+        "jobs:\n  security:\n    with:\n      pip-audit-requirements: requirements.txt\n"
+        "      pip-audit-extra-args: --requirement requirements-passkey.txt\n"
+    )
+    assert audited_lock_files(caller) == {"requirements.txt", "requirements-passkey.txt"}

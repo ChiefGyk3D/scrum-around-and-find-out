@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The egress part of the runbook: the vendor host is pasted into a root-owned file, observe mode first, then drop."""
+
+from __future__ import annotations
+
+import re
+
+from safo.broker import runbook
+
+
+def doc() -> str:
+    return runbook.render(maintainer="MAINTAINER_LOGIN")
+
+
+def lines() -> list[str]:
+    return [x for x in doc().splitlines() if x.startswith("ssh ")]
+
+
+def test_no_command_names_the_vendor_host() -> None:
+    text = doc()
+    assert "googleapis" not in text
+    assert "PASTE_VENDOR_API_HOST_HERE" in text
+    assert "VENDOR_HOST=PASTE_VENDOR_API_HOST_HERE" in text
+
+
+def test_the_config_starts_in_observe_mode() -> None:
+    line = next(x for x in lines() if "broker-egress.conf" in x and "printf" in x)
+    assert "MODE=observe" in line
+    assert "MODE=drop" not in line
+
+
+def test_the_steps_run_in_order_conf_then_egress_then_socket_then_drop() -> None:
+    text = doc()
+    order = [
+        "broker-egress.conf",
+        "systemctl enable --now safo-broker-egress.service",
+        "systemctl enable --now safo-broker.socket",
+        "MODE=drop",
+    ]
+    positions = [text.index(x) for x in order]
+    assert positions == sorted(positions)
+
+
+def test_the_directory_for_the_hosts_view_is_made_and_removed() -> None:
+    assert any("install -d -m 0755" in x and " /etc/safo/egress " in x for x in lines())
+    assert any(
+        x.startswith("ssh -t host 'sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin rmdir") and "/etc/safo/egress" in x
+        for x in lines()
+    )
+
+
+def test_the_drop_step_has_a_rollback_to_observe_and_names_its_blast_radius() -> None:
+    step = next(
+        s
+        for s in re.split(r"^### Step ", doc(), flags=re.MULTILINE)
+        if s.startswith(tuple("0123456789")) and "drop mode" in s.splitlines()[0]
+    )
+    assert "Blast radius:" in step
+    assert "MODE=drop/ MODE=observe/" not in step
+    assert "s/^MODE=drop/MODE=observe/" in step
+    assert step.index("Rollback:") < step.index("s/^MODE=drop/MODE=observe/")
+
+
+def test_the_observe_step_reads_the_log_and_the_set_without_changing_anything() -> None:
+    assert any("journalctl -k" in x and "safo-broker-egress-observe" in x for x in lines())
+    assert any("nft list table inet safo_broker_egress" in x for x in lines())
+
+
+def test_the_vendor_restriction_section_is_dated_and_marks_what_is_unverified() -> None:
+    text = doc()
+    assert "read 2026-10-31" in text
+    assert "Restrict to Gemini API only" in text
+    assert "Not verified" in text
+    assert "spend cap" in text
+
+
+def test_the_runbook_does_not_say_the_service_waits_for_the_switch() -> None:
+    text = doc()
+    assert "will not start" not in text.replace("will not start without it", "")
+    assert "answers disabled" in text or "answered as disabled" in text
+    assert "dry run" in text
+    # the switch is still created last, by the keys guide, after the dry run with a real key
+    assert text.index("Create it last") < text.index("answered as disabled") or "answered as disabled" not in text
+
+
+def test_the_installer_helper_is_staged_hashed_and_installed_from_one_root_owned_copy() -> None:
+    cmds = lines()
+    stage = "/var/lib/safo-broker-install/stage/"
+    take = [x for x in cmds if "reviewed/checkout" in x]
+    assert len(take) == 2  # the installer and the egress helper, each read from the checkout exactly once
+    assert any("packaging/safo_broker_egress.py" in x for x in take)
+    final = next(x for x in cmds if "/usr/local/sbin/safo-broker-egress'" in x and "install -m 0755" in x)
+    assert stage + "safo-broker-egress" in final
+    assert "reviewed/checkout" not in final
+    assert any("sha256sum" in x and stage + "safo-broker-egress" in x for x in cmds)
+
+
+def test_the_observe_criterion_is_an_empty_log_because_vendor_traffic_is_accepted_before_logging() -> None:
+    text = doc()
+    assert "never appears in this log" in text
+    assert "every destination it shows is a vendor address" not in text
+    assert "nothing unexplained" in text
+    # explicit checks before and after the switch to drop mode
+    assert any("nft list table inet safo_broker_egress" in x for x in lines())
+    assert any("systemctl status safo-broker-egress-refresh.timer" in x or "list-timers" in x for x in lines())
+    assert "deliberately blocked probe" in text
+
+
+def test_the_drop_step_runs_a_blocked_probe_as_the_service_user_and_reads_the_drop_log() -> None:
+    drop_lines = [x for x in lines() if "MODE=drop" in x or "safo-broker-egress-drop" in x or "/dev/tcp/" in x]
+    probe = next(x for x in drop_lines if "/dev/tcp/" in x)
+    assert "runuser -u safo-broker" in probe
+    assert "timeout" in probe
+    assert "203.0.113." in probe  # the documentation range: never a real destination
+    assert any("safo-broker-egress-drop" in x for x in drop_lines)
+    text = doc()
+    assert "nothing but vendor addresses" not in text

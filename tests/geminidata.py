@@ -101,29 +101,13 @@ def config_dict(url: str, ledger: Path, **over: Any) -> dict[str, Any]:
     data: dict[str, Any] = {
         "version": 1,
         "endpoint": url,
-        "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
-        "price_checked": "2026-10-29",
-        "secrets": {
-            "project": "image-gen",
-            "free_config": "prd",
-            "paid_config": "prd_paid",
-            "key_name": "GEMINI_API_KEY",
-        },
-        "caps": {"job_usd": 2, "month_usd": 10, "block_usd": 2},
+        "secrets": {"project": "image-gen", "free_config": "prd", "key_name": "GEMINI_API_KEY"},
         "ledger": str(ledger),
         "private_terms": "none",
         "timeout_seconds": 5,
         "max_output_tokens": 1000,
         "free": {MODEL: {"rpm": 3, "tpm": 1000, "rpd": 5}},
-        "paid": {
-            MODEL: {"input_per_mtok": 0.75, "output_per_mtok": 3.75, "valid_through": "2026-12-31"},
-            IMAGE_MODEL: {
-                "input_per_mtok": 0.5,
-                "output_per_mtok": 30,
-                "valid_through": "2026-12-31",
-                "modality": "image",
-            },
-        },
+        "image_models": [IMAGE_MODEL],
     }
     data.update(over)
     return data

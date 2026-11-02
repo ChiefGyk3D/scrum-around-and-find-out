@@ -446,7 +446,7 @@ remains, **Mitigated** means the controls below hold and the residual is accepte
 - **Mitigation (V verified, I inferred):**
   - **V.** Paid use is disabled today, and the guard denies any paid step while it is off (docs/gemini.md).
   - **V.** The design-grade model for the broker is [Gemini broker: threat model](gemini-broker-threat-model.md).
-- **Verification:** See the broker model. Today: tests/test_gemini_paid_switch.py, tests/test_gemini_guard.py.
+- **Verification:** See the broker model. Today: tests/test_no_inprocess_paid.py, tests/test_gemini_paid_command.py, tests/test_gemini_guard.py.
 - **Residual risk:** Open. Owner: the maintainer. Tracked in #205 and #217. Modeled separately; The statements under Mitigation describe what the repository tests exercise today; they are not a wider guarantee.
 - **Tracking:** #205, #217, docs/gemini-broker-threat-model.md.
 

@@ -229,7 +229,7 @@ Research over public sources only: vendor pages, CVEs and advisories, changelogs
 Limits:
 
 - free tier: The maintainer's own per-model limits (requests and input tokens per minute, requests per day, reset at midnight Pacific) kept in gemini.yaml and counted from a local ledger; any 429 stops the job.
-- paid: Disabled: paid use is off behind a root-owned switch. If it is ever enabled, each paid call needs its own single-use approval record, at most 2 USD per job and 10 USD per month; image generation is paid-only.
+- paid: Disabled: paid use is off behind a root-owned switch. If it is ever enabled, each paid call needs its own single-use approval record, at most 2.50 USD per job and 10 USD per month; image generation is paid-only.
 
 Strengths:
 
@@ -242,7 +242,7 @@ Constraints:
 - Public material only: organizations, public infrastructure, CVEs, vendors, public documents and the maintainer's own public assets. Never a private individual, and no targeting.
 - Adversarial and exploit work stays on the cyber-program tiers, never Gemini, and text work the local LLM can do stays local-first.
 - A rate limit or a 429 stops the job and is reported with the quota line; it never falls through to the paid tier, and the work goes to the fallback.
-- Paid use is disabled. If it is ever enabled it needs a fresh approval record per job (a quote of the maintainer's message and its time; not reusable, not inherited by a sub-agent, expires with the job), a cap of at most 2 USD, and the quota line printed first. Past 10 USD in a month each further 2 USD block needs its own approval.
+- Paid use is disabled. If it is ever enabled it needs a fresh approval record per job (a quote of the maintainer's message and its time; not reusable, not inherited by a sub-agent, expires with the job), a cap of at most 2.50 USD, and the quota line printed first. Past 10 USD in a month each further 2 USD block needs its own approval.
 - Image generation is paid-only: the free quota for image models is zero.
 - The wrapper (`safo gemini`) holds the gates in code; the dispatch guard denies every paid step while paid use is disabled, and with no live record once it is enabled, in every guard mode.
 

@@ -69,8 +69,14 @@ DOCUMENT_KEYS = {
     "items.totalcount",
     "statusupdate.project.id",
     "safo.guard",  # the guard's entry module, `python -m safo.guard`
+    "safo.broker.client",  # the broker client's entry module, `python3 -I -m safo.broker.client`
     "github.sha",  # the Actions context value for the commit a run is on, in the caller examples
     "safo.modes.hooks",  # the module that holds the legacy guard routing
+    "gpg.format",  # git config keys named in docs/gemini-enrollment.md (SSH-signed release tags)
+    "gpg.ssh.allowedsignersfile",
+    "user.signingkey",
+    "user.name",
+    "user.email",
 }
 FILE_SUFFIXES = {
     "md",
@@ -84,6 +90,7 @@ FILE_SUFFIXES = {
     "toml",
     "lock",
     "pub",
+    "rules",  # a udev rules file, named in docs/gemini-enrollment.md
 }  # pub: a public key file
 
 # Names that only the two broker documents may use. Scoped by file, not global: the same text in any other file is
@@ -97,6 +104,7 @@ BROKER_DOC_NAMES = {
     "sockets.target",
     "network-online.target",
     "safo.broker",
+    "safo.broker.admin",  # the administration command, run as python -I -m safo.broker.admin
 }
 
 ALLOWED_HOSTS = {

@@ -81,16 +81,20 @@ nonce is spent and the expiry enforced by the same store as Tier 1, and the call
   counter, wrong challenge, wrong nonce, model or prompt digest, expired approval, wrong key, wrong key type or curve,
   truncated and oversized input, and a corrupt signature. Also the trust-file lines, the policy switch, and that the SSH
   side ignores the passkey lines.
-- Not built: the enrollment page, the approval page and server, and the wiring into the record and the ledger.
+- Not built: the enrollment page, the approval page and server, and the wiring of a passkey assertion into the record
+  and the ledger.
 - Not tested with a real browser or authenticator. A real authenticator can behave differently from the test one (for
   example, a platform authenticator that reports no backup flags).
 
-## Prerequisite for wiring: the prompt digest
+## The prompt digest
 
 `verify_assertion` requires the caller to pass `expect`, holding a non-empty nonce, model and prompt digest
-(`prompt_sha256`), and refuses unless the signed approval text carries exactly those values. So Tier 2 requires the
-approval text to include a prompt digest. Adding one to the production approval payload is a prerequisite for wiring Tier 2
-and is tracked in #217 ("Hardening: what a paid approval binds"). This tier does not define that schema.
+(`prompt_sha256`), and refuses unless the signed approval text carries exactly those values. The production approval
+payload now carries that digest on both tiers (#217, payload version 2): `prompt_sha256` is the lowercase hex SHA-256 of
+the exact UTF-8 bytes of the prompt, and `prompt_bytes` is their count. The passkey challenge is the SHA-256 of the same
+canonical payload Tier 1 signs, so a passkey approval binds the same digest. The caller passes the digest it computed
+from the prompt it is about to send as `expect["prompt_sha256"]`. See "What a signature covers" in
+[Gemini](gemini.md) for the canonical form.
 
 ## Dependency choice (decided 2026-10-30)
 

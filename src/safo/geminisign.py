@@ -123,6 +123,21 @@ def fingerprint_of(blob: bytes) -> str:
 # -- reading the trust files ------------------------------------------------------------------------------------------
 
 
+def writable_by_others(mode: int) -> bool:
+    """The mode rule of a maintainer-edited trust file: group or others can write it. The one rule the broker's reader
+    and the readiness checks share."""
+    return bool(mode & (stat.S_IWGRP | stat.S_IWOTH))
+
+
+class MissingTrustFile(RefusedError):
+    """The trust file does not exist. A subclass, so every existing handler still sees a refusal. `path` is the path
+    that was asked for, so a caller can tell which of two files is missing."""
+
+    def __init__(self, message: str, path: Path | None = None) -> None:
+        super().__init__(message)
+        self.path = path
+
+
 def read_trust_file(path: Path, uid: int, what: str) -> bytes:
     """A maintainer-edited file: a regular file owned by `uid`, no group or other write, every directory above it owned
     by `uid` or root and not group- or other-writable (a sticky root directory is allowed), no symlink at the end."""
@@ -135,7 +150,7 @@ def read_trust_file(path: Path, uid: int, what: str) -> bytes:
                 raise RefusedError(f"the {what} sits under a directory that is not owned by root or is writable")
         fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
-        raise RefusedError(f"the {what} does not exist, so nothing can be approved") from None
+        raise MissingTrustFile(f"the {what} does not exist, so nothing can be approved", path) from None
     except OSError:
         raise RefusedError(f"the {what} cannot be opened") from None
     try:
@@ -144,7 +159,7 @@ def read_trust_file(path: Path, uid: int, what: str) -> bytes:
             raise RefusedError(f"the {what} is not a regular file")
         if info.st_uid != uid:
             raise RefusedError(f"the {what} is not owned by the account that must own it (root, in production)")
-        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        if writable_by_others(info.st_mode):
             raise RefusedError(f"the {what} is writable by its group or by others")
         chunks: list[bytes] = []
         total = 0
@@ -666,10 +681,17 @@ def propose_line(trust: Trust, pubkey_file: Path, label: str) -> list[str]:
         raise ConfigError("the public key is not base64") from None
     if key_type not in KEY_TYPES or not _valid_blob(blob, key_type):
         raise ConfigError(f"key type {key_type[:40]!r} is not accepted; use sk-ssh-ed25519@openssh.com")
-    roster = load_roster(trust)
-    if any(k.label == label for k in roster.keys):
+    # the maintainer page prints this line before it creates the files (step d1 before d2): no file means nothing is
+    # enrolled yet. A file that is there but unsafe is still refused by the reader.
+    try:
+        enrolled = load_roster(trust).keys
+    except MissingTrustFile as gone:
+        if gone.path != trust.signers:
+            raise  # the revocation list is the missing one: that is still a refusal
+        enrolled = ()  # learned from the one hardened open, not from a separate look at the path
+    if any(k.label == label for k in enrolled):
         raise ConfigError(f"the label {label} is already enrolled")
-    if any(k.blob == blob for k in roster.keys):
+    if any(k.blob == blob for k in enrolled):
         raise ConfigError("this key is already enrolled")
     lines = [
         f"fingerprint: {fingerprint_of(blob)}",

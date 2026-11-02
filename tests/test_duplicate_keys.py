@@ -150,11 +150,12 @@ def test_the_guard_log_skips_a_line_with_a_repeated_key(tmp_path: Path) -> None:
 
 
 def test_no_source_file_calls_json_loads_on_a_file_or_response_it_does_not_own() -> None:
-    """The only `json.loads` left in src/ parse text this program just produced or a GitHub API response."""
+    """The only `json.loads` left in src/ parse text this program just produced, a GitHub API response, or (in
+    broker/vendor.py) a vendor reply read under its own strict loader: size cap, duplicate keys, NaN, depth."""
     root = Path(__file__).parent.parent / "src" / "safo"
     found = sorted(
         f"{p.relative_to(root)}"
         for p in root.rglob("*.py")
         if p.name != "bounded.py" and "json.loads(" in p.read_text()
     )
-    assert found == ["graphql.py", "modes/hooks.py", "modes/outcome.py", "outcomes.py"]
+    assert found == ["broker/vendor.py", "graphql.py", "modes/hooks.py", "modes/outcome.py", "outcomes.py"]

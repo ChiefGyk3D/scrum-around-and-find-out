@@ -30,7 +30,7 @@ where = ["src"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-src = ["src", "tests"]
+src = ["src", "tests", "packaging"]
 extend-exclude = ["docs/superpowers"]
 
 [tool.ruff.lint]
@@ -41,11 +41,11 @@ select = ["E", "F", "B", "I", "UP", "S", "SIM", "RUF"]
 
 [tool.mypy]
 strict = true
-mypy_path = "src:tests"
-files = ["src", "tests"]
+mypy_path = "src:tests:packaging"
+files = ["src", "tests", "packaging"]
 python_version = "3.11"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "tests"]
+pythonpath = ["src", "tests", "packaging"]
 addopts = "-q --strict-markers"

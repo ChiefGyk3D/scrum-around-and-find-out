@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=SAFO broker egress set refresh timer
+
+[Timer]
+OnActiveSec=1s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=safo-broker-egress-refresh.service
+
+[Install]
+WantedBy=timers.target

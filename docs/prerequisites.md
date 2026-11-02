@@ -27,7 +27,7 @@ no version flag we may call, so it is checked for presence only and never run. P
 
 | Item | Minimum | Source |
 |---|---|---|
-| Python | 3.11 | verified: `requires-python = ">=3.11"` in `pyproject.toml`; CI runs 3.11, 3.12 and 3.13 |
+| Python | 3.11 | verified: `requires-python = ">=3.11"` in `pyproject.toml`; CI runs 3.11, 3.12, 3.13 and 3.14 |
 | PyYAML | exactly 6.0.3 | verified: the only runtime dependency, pinned in `pyproject.toml` and hash-locked in `requirements.txt` |
 
 Development tools (ruff, mypy, pytest and friends) are hash-locked in `requirements-dev.txt`; `make venv` installs them.
