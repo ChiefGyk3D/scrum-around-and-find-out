@@ -381,3 +381,56 @@ def test_keep_is_refused_while_contained_because_the_folder_is_not_on_disk(
     with pytest.raises(SystemExit) as stop:
         mod.main(["--prefix", str(prefix), "--keep"], out=io.StringIO())
     assert stop.value.code == 2 and "--no-containment" in capsys.readouterr().err
+
+
+def test_the_sandbox_environment_points_python_at_this_checkout_and_nothing_else_new(prefix: Path) -> None:
+    mod = load()
+    etc = prefix / "etc"
+    argv = mod.contained_argv(
+        prefix, ["/usr/bin/true"], etc_dir=etc, bwrap="/usr/bin/bwrap", prlimit="/usr/bin/prlimit"
+    )
+    setenv = {argv[i + 1]: argv[i + 2] for i, word in enumerate(argv) if word == "--setenv"}
+    assert setenv["PYTHONPATH"] == str(ROOT / "src")
+    assert set(setenv) == {
+        "PATH", "HOME", "TMPDIR", "LC_ALL", "TERM", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH", mod.CONTAINED_MARK
+    }  # fmt: skip
+    assert "--clearenv" in argv
+
+
+@needs_bwrap
+def test_the_contained_python_imports_safo_from_this_checkout_without_the_callers_pythonpath(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    mod = load()
+    prefix.mkdir(parents=True, exist_ok=True)
+    etc = Path(tempfile.mkdtemp(prefix="rhe"))
+    try:
+        mod.make_synthetic_etc(etc, prefix)
+        code = "import safo, sys; sys.stdout.write(safo.__file__)"
+        argv = mod.contained_argv(prefix, [sys.executable, "-c", code], etc_dir=etc)
+        done = subprocess.run(  # noqa: S603 - argv built by the code under test, no shell, bounded time
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False
+        )
+    finally:
+        shutil.rmtree(etc, ignore_errors=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith(str(ROOT / "src"))
+
+
+def test_it_refuses_with_exit_2_when_the_checkout_has_no_safo_package(
+    prefix: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mod = load()
+    monkeypatch.setattr(mod, "ROOT", tmp_path)  # a folder with no src/safo
+    monkeypatch.setattr(mod, "containment_problem", lambda: None)
+    with pytest.raises(SystemExit) as stop:
+        mod.main(["--prefix", str(prefix)], out=io.StringIO())
+    assert stop.value.code == 2
+    err = capsys.readouterr().err
+    assert "refused" in err and str(tmp_path / "src") in err
+    assert not prefix.exists()  # nothing was made, nothing was run
+
+
+def test_the_checkout_check_passes_for_this_checkout() -> None:
+    assert load().checkout_problem() is None

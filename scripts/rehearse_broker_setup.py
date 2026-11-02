@@ -32,6 +32,14 @@ What it does NOT contain: a kernel or bubblewrap flaw; there is no seccomp filte
 process, so many processes can still add up to more than one limit, and the task cap is account-wide); /usr, the
 checkout and the Python environment stay readable; the command-line safety transform (path words moved, `sudo`
 removed) is not a sandbox, only the namespaces are.
+The sandbox sets PYTHONPATH to this checkout's src folder (the one variable added to the scrubbed environment), so the
+rehearsal always imports `safo` from the checkout it is run from, even when the Python environment has an editable
+install that points at another checkout. If src/safo is missing from the checkout, the tool prints "refused: ..." and
+exits 2 (never a traceback).
+
+Exit codes: 0 every row passed or was skipped; 1 a row FAILED; 2 refused to set up (not contained, not rootless, bad
+prefix, `--keep` contained, or no safo package in the checkout).
+
 If the two programs are missing or untrusted, or user namespaces are, the tool REFUSES to run. `--no-containment` runs
 it anyway, in this process with your own rights and network; every output line then ends with [NO CONTAINMENT].
 
@@ -1195,6 +1203,9 @@ def contained_argv(
         "LC_ALL": "C",
         "TERM": "dumb",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": str(
+            ROOT / "src"
+        ),  # this checkout is always the safo package; an editable install elsewhere is not seen
         CONTAINED_MARK: "1",
     }
     for key, value in env.items():
@@ -1215,6 +1226,15 @@ def contained_argv(
     out += ["--proc", "/proc", "--dev", "/dev", "--size", str(limits.tmp_size), "--tmpfs", tmp]
     out += ["--size", str(limits.prefix_size), "--tmpfs", str(prefix)]
     return [*out, "--", *argv]
+
+
+def checkout_problem() -> str | None:
+    """Why the contained re-run could not import safo from this checkout, or None. The sandbox sets PYTHONPATH to
+    ROOT/src, so the package must be there; it is checked as a file, never imported, so no other checkout is run."""
+    package = ROOT / "src" / "safo"
+    if not (package / "__init__.py").is_file():
+        return f"the safo package is not at {package}; run this script from a full checkout of the repository"
+    return None
 
 
 def containment_problem() -> str | None:
@@ -1279,6 +1299,9 @@ def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None) -> int
         if problem:
             parser.exit(2, f"refused: the sandbox does not hold: {problem}\n")
     elif not args.no_containment:
+        problem = checkout_problem()
+        if problem:
+            parser.exit(2, f"refused: {problem}\n")
         problem = containment_problem()
         if problem:
             parser.exit(
