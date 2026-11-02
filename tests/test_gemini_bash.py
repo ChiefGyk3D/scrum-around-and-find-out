@@ -238,7 +238,7 @@ def test_the_hook_denies_a_shell_call_to_the_vendor_even_in_warn_mode(_private_h
     out, _ = run(agents, _private_home, event(f"curl https://{HOST}/v1/models"))
     assert denied(out)
     text = reason(out)
-    assert "gemini-material" in text and "safo gemini" in text and "docs/gemini.md" in text
+    assert "gemini-material" in text and "wrapper" in text and "docs/gemini.md" in text
     assert HOST not in text and "curl" not in text
     assert read_log(_private_home)[-1]["decision"] == "error"
 
@@ -318,7 +318,7 @@ def test_an_error_in_the_check_denies_with_fixed_text(
     out, _ = run(agents, _private_home, event(command))
     assert denied(out)
     text = reason(out)
-    assert "could not be checked in time" in text and "safo gemini" in text
+    assert "could not be checked in time" in text and "wrapper" in text
     logged = json.dumps(read_log(_private_home)) + out
     assert "EXCEPTIONTEXT" not in logged and "COMMANDTEXT" not in logged and KEY not in logged
     assert read_log(_private_home)[-1]["decision"] == "error"
