@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- SAFO threat model diagram (#246): the Threat Dragon file opened as an unreadable tangle. Rebuilt the geometry only: six
+  aligned boundary boxes with room around their contents, every shape inside its own boundary on a 20 px grid, flows as
+  straight or right-angle lines with explicit vertices (none through a shape), short flow labels on clear stretches, and
+  the shape and boundary names drawn on the canvas. Ids, names, descriptions, threats and mitigations are unchanged.
+  `tests/test_safo_threat_model.py` gains a layout guard (containment, overlap, flow clearance) with a negative case.
+  Checked by opening the file in Threat Dragon 2.6.2 in a headless browser (`scripts/threat_dragon_shots.py`).
 - Rehearsal containment, second round (#263). Review findings are fixed: the sandbox gets a synthetic `/etc` instead of
   the host's, `bwrap` and `prlimit` are taken only from root-owned system folders (never `PATH`), and the sandbox runs
   under memory, file size, open file, CPU and task limits with a size-capped memory-backed rehearsal folder; tests show
