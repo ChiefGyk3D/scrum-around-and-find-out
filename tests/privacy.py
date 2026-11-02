@@ -90,6 +90,7 @@ FILE_SUFFIXES = {
     "toml",
     "lock",
     "pub",
+    "sig",  # an SSH signature file (ssh-keygen -Y sign writes FILE.sig), named in docs/gemini-enrollment.md
     "rules",  # a udev rules file, named in docs/gemini-enrollment.md
 }  # pub: a public key file
 
