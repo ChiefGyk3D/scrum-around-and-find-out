@@ -59,8 +59,23 @@ until you have seen it work.
 Also run on this machine on 2026-10-31 with a throw-away **software** key in a scratch directory (no hardware key, no
 root): `-Y sign`, `-Y verify`, `-Y find-principals`, `-Y check-novalidate`, `-r`, the namespace refusals, and a git SSH
 signed tag, with OpenSSH 10.3 and git 2.47. The output lines quoted below marked "(run)" are real output of those runs.
-Lines marked "(shape)" show what to expect from a hardware key, which was not available to the author: the words
-`ED25519-SK` and the touch prompts are **unverified** until you see them.
+Lines marked "(shape)" show what to expect and are **unverified** until you see them.
+
+Run on **2026-11-02** by the maintainer with real hardware security keys (key B with OpenSSH 10.3p1 Debian-1~bpo13+1,
+and key A), step a4. Key B: `Enter PIN for ED25519-SK key:` in the terminal, `Confirm user presence for key ED25519-SK SHA256:...`,
+`Write signature to msg.sig`, then `Good "safo-gemini-approval-dryrun" signature for key-b with ED25519-SK key`, rc=0.
+`scripts/sshsig_flags.py` on that signature printed `flags=0x05 counter=2 user-present=True user-verified=True`, which
+proves the PIN was required. Key A, same form: PIN prompt in the terminal, touch prompt, `Write signature to msg.sig`,
+`Good ... signature for key-a with ED25519-SK key`, rc=0; the helper printed `flags=0x05 counter=11 user-present=True
+user-verified=True` and exited 0. With key A unplugged the PIN and touch prompts still appeared, then `Couldn't sign
+message: device not found` and `Signing msg failed: device not found`, rc=255, and no `msg.sig` was created. Touch and
+PIN were asked on every signing run (a second signing attempt prompted again). The cause of the earlier pop-up: the old command signed standard input (`< msg`), so
+standard input was not a terminal and ssh-keygen asked for the PIN through an askpass program (OpenSSH 10.3p1 source,
+`read_passphrase` with `RP_ALLOW_STDIN`; read, plus live checks); on that machine the compiled-in default
+`/usr/bin/ssh-askpass` pointed to ksshaskpass, which showed a pop-up. For that prompt ksshaskpass could not store or
+replay the PIN (its parser matched nothing, source v6.3.4). The fix: pass the message file as an argument and set
+`SSH_ASKPASS_REQUIRE=never`. Key creation with `verify-required` printed no PIN prompt line in the pasted output for
+key B; the flags prove the requirement, so the page does not claim a creation-time PIN prompt.
 
 ## Step 0. Prerequisites and the read-only preflight
 
@@ -175,16 +190,21 @@ credential on the key** (Yubico page) and means re-enrolling. Expected: a prompt
 
 ```bash
 mkdir -p ~/.ssh/safo && chmod 700 ~/.ssh/safo
-ssh-keygen -t ed25519-sk -O verify-required -O application=ssh:safo-gemini-a -C "safo gemini approval key A" -f ~/.ssh/safo/safo_gemini_a
+SSH_ASKPASS_REQUIRE=never ssh-keygen -t ed25519-sk -O verify-required -O application=ssh:safo-gemini-a -C "safo gemini approval key A" -f ~/.ssh/safo/safo_gemini_a
 ```
 
-Touch the key when it blinks and type the PIN when asked. ssh-keygen then asks for a passphrase for the handle file;
+Set `SSH_ASKPASS_REQUIRE=never` on the command, as on every `ssh-keygen` command in this runbook that can ask for a PIN.
+It keeps the prompt in the terminal and stops a graphical askpass program from taking it (the reason is in a4). Touch
+the key when it blinks and type the PIN when asked. ssh-keygen then asks for a passphrase for the handle file;
 setting one is allowed and is an extra layer. Blast radius: creates one credential on the key and two files,
 `~/.ssh/safo/safo_gemini_a` (the handle: a reference, not the private key) and `~/.ssh/safo/safo_gemini_a.pub`. Nothing
 is enrolled anywhere yet, so this authorizes nothing. Rollback: `rm ~/.ssh/safo/safo_gemini_a ~/.ssh/safo/safo_gemini_a.pub`;
 the credential stays on the key unused (for a non-resident key it cannot be listed or removed individually; a FIDO2
-reset clears it). Expected (shape, **unverified** wording): a line `Generating public/private ed25519-sk key pair.`, a
-touch prompt, then the saved paths and a `SHA256:` fingerprint.
+reset clears it). Expected (shape, **unverified** wording for key A: the maintainer's own run is still pending): a line
+`Generating public/private ed25519-sk key pair.`, a touch prompt, then the saved paths and a `SHA256:` fingerprint. Run
+on 2026-11-02 with hardware key B (step a3): the pasted output showed no PIN prompt line at creation time, yet the
+signature flags in a4 prove `verify-required` took effect. Do not expect a creation-time PIN prompt; the proof is the
+flags check in a4.
 
 On firmware older than 5.2.3 replace `ed25519-sk` with `ecdsa-sk`.
 
@@ -207,53 +227,84 @@ Expected (shape; the run with a software key printed `256 SHA256:... comment (ED
 Unplug A, plug in B, and set its PIN as in a1. Then:
 
 ```bash
-ssh-keygen -t ed25519-sk -O verify-required -O application=ssh:safo-gemini-b -C "safo gemini approval key B" -f ~/.ssh/safo/safo_gemini_b
+SSH_ASKPASS_REQUIRE=never ssh-keygen -t ed25519-sk -O verify-required -O application=ssh:safo-gemini-b -C "safo gemini approval key B" -f ~/.ssh/safo/safo_gemini_b
 ssh-keygen -lf ~/.ssh/safo/safo_gemini_b.pub
 ```
 
-Same blast radius, rollback and expected output as a2. Copy `safo_gemini_b` and `safo_gemini_b.pub` to the offline store
+Same blast radius, rollback and expected output as a2 (created on 2026-11-02 with a hardware key). Copy `safo_gemini_b` and `safo_gemini_b.pub` to the offline store
 with key B. If only one key is available now, enroll it and put B on your list: `safo gemini keys check` warns about a
 single key.
 
 ### a4. Test a signature, in the dry-run namespace, with a throw-away allowed-signers file
 
-This proves the key signs and that the namespace and the tamper checks bite. It uses the **dry-run** namespace and a
+This proves the key signs, that the PIN was required, and that the namespace and the tamper checks bite. It uses the **dry-run** namespace and a
 file in a scratch directory that you own; it touches no `/etc` file and no real approval. Replace `a` with `b` to test B.
 
 ```bash
 T="$(mktemp -d)" && cd "$T" && printf 'safo enrollment test\n' > msg
-ssh-keygen -Y sign -f ~/.ssh/safo/safo_gemini_a -n safo-gemini-approval-dryrun < msg > sig.txt
+SSH_ASKPASS_REQUIRE=never ssh-keygen -Y sign -f ~/.ssh/safo/safo_gemini_a -n safo-gemini-approval-dryrun msg
 printf 'key-a namespaces="safo-gemini-approval-dryrun" %s\n' "$(cut -d' ' -f1,2 ~/.ssh/safo/safo_gemini_a.pub)" > allowed
-ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s sig.txt < msg; echo "rc=$?"
+ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s msg.sig < msg; echo "rc=$?"
 ```
 
-Touch the key and give the PIN at the sign step. With no file argument `-Y sign` signs standard input and writes
-the signature to standard output (manual), which the redirect saves as `sig.txt`. Blast radius: files under the new temporary directory
-only. Rollback: `rm -r "$T"`. Expected:
+Touch the key and give the PIN at the sign step. The sign command passes the message **file** as an argument (no
+redirect of standard input) and sets `SSH_ASKPASS_REQUIRE=never`; the signature is written to `msg.sig`. Why: the
+earlier form (`< msg > sig.txt`) made standard input not a terminal, so ssh-keygen sent the PIN prompt to an askpass
+program, and on a KDE machine that was a graphical pop-up, which can hand the PIN to a desktop wallet. With the file
+argument and `never` the prompt stays in the terminal. Blast radius: files under the new temporary directory only.
+Rollback: `rm -r "$T"`. Expected, **run on 2026-11-02 with hardware key B** (OpenSSH 10.3p1): `Enter PIN for ED25519-SK
+key:` in the terminal, then `Confirm user presence for key ED25519-SK SHA256:...`, then `Write signature to msg.sig`,
+then:
 
 ```text
-Good "safo-gemini-approval-dryrun" signature for key-a with ED25519-SK key SHA256:...
+Good "safo-gemini-approval-dryrun" signature for key-b with ED25519-SK key SHA256:...
 rc=0
 ```
 
-(run with a software key, which printed `with ED25519 key`; the `-SK` form is **unverified**). Now the three refusals,
+Key A gave the same result on 2026-11-02 (`... signature for key-a with ED25519-SK key`, rc=0).
+
+Now the three refusals,
 each of which must print a failure and a nonzero rc:
 
 ```bash
-ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval -s sig.txt < msg; echo "rc=$?"
-printf 'other\n' | ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s sig.txt; echo "rc=$?"
-ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s sig.txt -r ~/.ssh/safo/safo_gemini_a.pub < msg; echo "rc=$?"
+ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval -s msg.sig < msg; echo "rc=$?"
+printf 'other\n' | ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s msg.sig; echo "rc=$?"
+ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s msg.sig -r ~/.ssh/safo/safo_gemini_a.pub < msg; echo "rc=$?"
 ```
 
 Expected (run): `Couldn't verify signature: namespace does not match` with `rc=255`; `Signature verification failed:
 incorrect signature` with `rc=255`; and for the revocation test `Could not verify signature.` with `rc=255` (the `-r` file
 may be a list of public keys; manual). If any of these three ends in `rc=0`, stop: the check is not biting.
 
-Two more checks, by hand. Sign again and confirm it asks for a touch and the PIN every time (the manual says
-`verify-required` requires verification for each signature). Then unplug the key and confirm the sign command fails.
+Prove the PIN was required. A
+green verify does not show it, so read the authenticator flags from the signature with the helper in this repository (`REPO` is your checkout of it):
 
-The manual does not say that `-Y verify` reports the PIN check, so a green verify does not prove the PIN was asked. The
-safo dry run reads the authenticator flags and prints touch and PIN, and that is the proof (`safo gemini paid-dryrun`, built and merged).
+```bash
+python3 "$REPO/scripts/sshsig_flags.py" msg.sig; echo "rc=$?"
+```
+
+Expected: `flags=0x05` (bit 0x01 user present, bit 0x04 user verified, that is the PIN), `user-present=True
+user-verified=True`, `rc=0`. Real output for key B on 2026-11-02: `flags=0x05 counter=2 user-present=True
+user-verified=True`. The helper exits 1 when the PIN bit is missing (then the key was made without `verify-required`:
+stop and make it again) and 2 when the file is not a security-key signature. It does not verify the signature; the
+verify command above does, and the flags byte is covered by the signature. Blast radius and rollback: none (read only).
+Key A, real output on 2026-11-02: `flags=0x05 counter=11 user-present=True user-verified=True`, exit 0.
+
+Two more checks, by hand (both run on 2026-11-02 with key A). Sign again and confirm it asks for a touch and the PIN
+every time (the manual says `verify-required` requires verification for each signature); the second signing attempt
+prompted again. Then unplug the key and confirm the sign command fails. Real output: the PIN and touch prompts still
+appear, then
+
+```text
+Couldn't sign message: device not found
+Signing msg failed: device not found
+```
+
+with rc=255 and no `msg.sig` file created.
+
+The manual does not say that `-Y verify` reports the PIN check, so a green verify does not prove the PIN was asked; the
+flags check above is the proof before the broker exists. The safo dry run also reads the authenticator flags and prints
+touch and PIN (`safo gemini paid-dryrun`, built and merged).
 
 For the structure-only check, `ssh-keygen -Y check-novalidate -n NAMESPACE -s SIGFILE < msg` does not validate that a
 signature comes from an authorized signer (manual). Run with a software key it printed a Good line and exited 0.
@@ -440,17 +491,17 @@ key: `LABEL namespaces="safo-gemini-approval" KEYTYPE BASE64`. The label is the 
 4. **Check it with OpenSSH, and with the preflight.**
 
    ```bash
-   ssh-keygen -Y find-principals -f /etc/safo/gemini-allowed-signers -s "$T/sig.txt"
+   ssh-keygen -Y find-principals -f /etc/safo/gemini-allowed-signers -s "$T/msg.sig"
    python -m safo.gemini_preflight
    ```
 
-   For `$T/sig.txt` use the signature from step a4 (re-run a4 first if the folder is gone). Expected: the first command
+   For `$T/msg.sig` use the signature from step a4 (re-run a4 first if the folder is gone). Expected: the first command
    prints `key-a`'s label as it appears in the file (run with a software key: it printed the principal), and `find-principals`
    does not check the namespace, so it only proves the key is listed. To prove the **namespace restriction** bites, the
    dry-run signature must now be refused by the real file (run, with the restriction `safo-gemini-approval`):
 
    ```bash
-   ssh-keygen -Y verify -f /etc/safo/gemini-allowed-signers -I yubikey-a -n safo-gemini-approval-dryrun -s "$T/sig.txt" < "$T/msg"; echo "rc=$?"
+   ssh-keygen -Y verify -f /etc/safo/gemini-allowed-signers -I yubikey-a -n safo-gemini-approval-dryrun -s "$T/msg.sig" < "$T/msg"; echo "rc=$?"
    ```
 
    Expected: a line ending in `is not permitted for use in signature namespace` followed by the dry-run name, then
@@ -534,7 +585,7 @@ the backup. Expected: `safo gemini keys list` shows both until the old one is re
 3. Cross-check with OpenSSH (public-key form of the revocation file, in a scratch directory):
 
    ```bash
-   ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s sig.txt -r ~/.ssh/safo/safo_gemini_a.pub < msg; echo "rc=$?"
+   ssh-keygen -Y verify -f allowed -I key-a -n safo-gemini-approval-dryrun -s msg.sig -r ~/.ssh/safo/safo_gemini_a.pub < msg; echo "rc=$?"
    ```
 
    Expected (run): `Could not verify signature.`, `rc=255`.
@@ -586,9 +637,12 @@ modifies nothing except possibly access times). Rollback: none needed. Not run b
 
 ## Not verified
 
-- Output words for hardware keys: `ED25519-SK`, the touch prompts and the exact `fido2-token -L` line format.
+- Creation of key A (a2) with this exact command form: the maintainer has not reported it (key A's signing, flags and
+  unplugged checks in a4 were run on 2026-11-02).
+- The `fido2-token -L` line format (the `ED25519-SK` and touch-prompt words are now seen).
 - What the Debian package `libu2f-udev` installs.
 - Whether the Immurok works with `ssh-keygen -Y sign` at all.
 - That the installer uses exactly the `git` namespace and these flags.
 - `ssh-add -d`, `tee`, `usermod`, `gpasswd`, `apt`, `sudoedit`, `diff`: standard tools, not read from a vendor page here.
-- Nothing in this runbook was run against a hardware key or as root by the author.
+- Only step a3 and the a4 checks (sign, verify, flags, touch and PIN every time, unplugged key) were run against
+  hardware keys (keys A and B, 2026-11-02). Nothing else in this runbook was run against a hardware key or as root by the author.
