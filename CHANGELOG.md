@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Enrollment runbook (#339): the PIN prompt stays in the terminal. Steps a2, a3 and a4 set `SSH_ASKPASS_REQUIRE=never`,
+  and the a4 signing command passes the message file as an argument instead of redirecting standard input (the redirect
+  made ssh-keygen ask for the PIN through a graphical askpass program). New step in a4: `scripts/sshsig_flags.py` reads
+  the authenticator flags from a signature and proves the PIN was required (expect `flags=0x05`); tests in
+  `tests/test_sshsig_flags.py`. Verified on 2026-11-02 with hardware keys A and B, including the flags (0x05) and the
+  unplugged-key refusal.
 - SAFO threat model diagram (#246): the Threat Dragon file opened as an unreadable tangle. Rebuilt the geometry only: six
   aligned boundary boxes with room around their contents, every shape inside its own boundary on a 20 px grid, flows as
   straight or right-angle lines with explicit vertices (none through a shape), short flow labels on clear stretches, and
