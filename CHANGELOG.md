@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.0 (2026-11-02)
+
+- First release that carries the Gemini paid-path broker, its installer and units, the approval-binds-prompt change, the
+  passkey extra, the `safo-guard` entry point and the Action trust hardening. Paid use stays disabled. The release is
+  installed only from a signed annotated tag `v0.2.0` by `packaging/safo_broker_install.py`; the release notes the
+  installer review reads are in the pull request that prepared the release (#341). Everything below was merged after
+  v0.1.2.
 - Enrollment runbook (#339): the PIN prompt stays in the terminal. Steps a2, a3 and a4 set `SSH_ASKPASS_REQUIRE=never`,
   and the a4 signing command passes the message file as an argument instead of redirecting standard input (the redirect
   made ssh-keygen ask for the PIN through a graphical askpass program). New step in a4: `scripts/sshsig_flags.py` reads
