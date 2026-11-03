@@ -161,7 +161,7 @@ def test_apply_with_allow_list_fetch_failure_exits_nonzero_and_skips_allowed_act
     """A failing allow-list fetch under --apply exits non-zero and no 'allowed_actions=selected' call is logged."""
     fail_cmd = (
         "api repos/ChiefGyk3D/git-your-ship-together/contents/baseline/"
-        "selected-actions.json?ref=0fc2df49cf51608a2f8b4b8eeb51d86d4d4cfaba --jq .content"
+        "selected-actions.json?ref=7501cb3fa19d83d0e0a131cb040e7c4da32a9504 --jq .content"
     )
     done, calls, _ = run(tmp_path, "--apply", fail_on_cmd=fail_cmd)
     assert done.returncode != 0, "should exit non-zero when allow-list fetch fails"
