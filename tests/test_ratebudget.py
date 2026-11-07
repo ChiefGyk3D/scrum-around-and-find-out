@@ -325,6 +325,8 @@ class Harness:
         self.fail: Exception | None = None
         self.login: str | None = "octocat"  # who `gh api user` says the credential is; None: the lookup fails
         self.identity_calls = 0
+        self.advance = False  # a sleep moves the clock, as a real one would
+        self.launches: list[float] = []  # the clock at each gh launch under test
         self.on_sleep: Callable[[float], None] | None = None
 
     def run(self, argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
@@ -332,6 +334,7 @@ class Harness:
             self.identity_calls += 1
             return done((self.login or "") + "\n", 0 if self.login else 1)
         self.calls.append(argv)
+        self.launches.append(self.clock.now)
         if self.fail is not None:
             raise self.fail
         return done(self.reply, self.code)
@@ -342,6 +345,8 @@ class Harness:
 
     def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
+        if self.advance:
+            self.clock.now += seconds
         if self.on_sleep:
             self.on_sleep(seconds)
 
@@ -404,6 +409,7 @@ def test_wrapper_warns_at_seventy_percent_but_goes(tmp_path: Path) -> None:
 
 def test_wrapper_spaces_writes(tmp_path: Path) -> None:
     h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    h.advance = True  # a sleep moves the clock, as a real one does
     h.go(["api", "-X", "PATCH", "repos/o/r/issues/5", "-f", "state=open"])
     h.go(["api", "-X", "PATCH", "repos/o/r/issues/6", "-f", "state=open"])
     assert h.slept == [pytest.approx(1)]

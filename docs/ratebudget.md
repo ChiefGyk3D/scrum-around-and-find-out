@@ -17,12 +17,12 @@ bucket) kept working. `ghw` and the ledger make that spending visible and stop i
 | 70% used | A WARNING line on stderr; the call goes. |
 | 90% used | The call is refused with exit 75 and `retry after Ns`, until that counter's reset time. |
 | Retry-After | A 403 or 429 with `Retry-After` blocks the bucket for that long (capped at one hour; `nan`, `inf`, negative and junk are ignored). A 429 with no usable header, or a 403 that says "secondary rate limit", blocks it 60 seconds. A GraphQL answer can carry a secondary limit with HTTP 200: for the GraphQL bucket only, a message in the top-level `errors` list that says "secondary rate limit" blocks it too (the answer's `Retry-After`, else 60 seconds); the same words in `data` or in a REST body do not. |
-| Writes | At least one second apart across all processes and all buckets of one account: each writer reserves a slot in one queue under a file lock. A writer queued past 60 seconds is refused, not parked. A writer that slept for its slot re-checks the budget and any block just before it launches `gh`. |
+| Writes | Two steps. A reservation under the file lock gives a place in the queue (a writer queued past 60 seconds is refused, not parked) and sets how long to sleep. The launch gate then decides when the child starts: under the same per-account lock it waits until at least one second after the last ACTUAL launch (recorded, not reserved, so a process descheduled between reserving and launching cannot go out right behind a later ticket), starts the child (the spawn only) while holding the lock, records the real launch time and releases. The lock is not held while the child runs, so a stuck `gh` never freezes the others; the gate takes at most 20 short sleeps and then refuses (exit 75) with nothing sent. A spawn that fails still counts as a launch. After sleeping for its slot a writer also re-checks the budget and any block just before the gate. |
 | Option grammar | An option spelled outside gh's documented forms (`-XPATCH`, `-X=PATCH`, an unknown flag) is treated as a write. |
-| Rollover | A counter past its reset time no longer counts. A counter reset more than two hours from now, a block more than one hour, or a write slot more than one minute (the queue limit) is treated as corrupt and ignored, in state or in an answer. |
+| Rollover | A counter past its reset time no longer counts. A counter reset more than two hours from now, a block more than one hour, a write slot more than one minute (the queue limit) or a recorded launch more than five seconds ahead is treated as corrupt and ignored, in state or in an answer. |
 | Headers | Only the final header block is read. A repeated rate-limit header, an obs-fold line or a malformed header name rejects every rate-limit and Retry-After value of that answer. |
 | No replay | A call that went out is never repeated here. A timeout or output that is not valid UTF-8 is an unknown outcome (exit 124, recorded as status 0). |
-| Advice only | If the ledger directory cannot be used, `ghw` says so once and runs the call. If only the audit row cannot be written, the counters and blocks were already saved; `ghw` says so once. |
+| Advice only | If the ledger directory cannot be used, or the budget setup meets unusable cache data (a malformed identity record is dropped, and any `TypeError`, `ValueError` or `OverflowError` from cache upkeep counts as the ledger being unavailable), `ghw` says so once and runs the call. If only the audit row cannot be written, the counters and blocks were already saved; `ghw` says so once. |
 
 `gh api` calls get `--include` added so the headers can be read; they are removed again before the body is printed.
 Calls that use `--jq`, `--template`, `--paginate`, `--silent` or `--include` themselves, and every other `gh` command
@@ -33,7 +33,7 @@ it, so a block from another call does not stop it. Do not poll it.
 ## Where it lives
 
 `~/.local/state/safo/ratebudget` (or under `$XDG_STATE_HOME`): `ledger.jsonl` (one line per call, rotated at
-4 MiB to `ledger.jsonl.1`), `state.json` (counters, blocks and the write slot, each under its account scope), `identity.json` (credential fingerprint to account scope, one hour),
+4 MiB to `ledger.jsonl.1`), `state.json` (counters, blocks, the write slot and the last launch, each under its account scope), `identity.json` (credential fingerprint to account scope, one hour),
 `statusline.txt` (one line for the account used last, rewritten on every call, for a session statusline), and `lock`.
 The directory is opened without following a symlink, must belong to you, and is set to mode 0700 if it was looser; the
 files in it are opened relative to it, must be regular files of yours with one link, and are set to 0600. A file that

@@ -29,6 +29,7 @@ import json
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -36,7 +37,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Protocol, TextIO
 
 from safo import bounded
 from safo.credentials import find_gh
@@ -51,6 +52,8 @@ SECONDARY_WAIT = 60.0  # GitHub: wait at least a minute after a secondary limit 
 MAX_STATE_BYTES = 262_144
 MAX_HORIZON = 7200.0  # a counter whose reset is further off than this is corrupt, not a throttle
 MAX_COUNTERS = 256
+MAX_LAUNCH_SKEW = 5.0  # a recorded launch further in the future than this is corrupt
+GATE_TRIES = 20  # the launch gate sleeps at most WRITE_SPACING per try, so this bounds its wait
 WRITES = "*"  # the one write queue of a scope, across buckets
 AUTH_TIMEOUT_SECONDS = 20.0
 IDENTITY_TTL = 3600.0  # how long a credential's account is remembered
@@ -287,6 +290,67 @@ def classify(argv: Sequence[str]) -> Classified:
     return Classified(bucket, _endpoint_class(endpoint), verb not in ("GET", "HEAD") or unknown, False)
 
 
+class GateUnavailable(Exception):
+    """The launch gate could not be taken (the ledger directory is unusable); nothing was started."""
+
+
+class GateBusy(Exception):
+    """The launch gate did not open within its bounded tries; nothing was started."""
+
+
+class Launched(Protocol):
+    def wait(self) -> subprocess.CompletedProcess[str]: ...
+
+
+Launcher = Callable[[list[str], str | None], Launched]
+
+
+class _Finished:
+    def __init__(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.result = result
+
+    def wait(self) -> subprocess.CompletedProcess[str]:
+        return self.result
+
+
+class _Child:
+    """A started `gh`. The start is what the launch gate covers; waiting for it to exit is not."""
+
+    def __init__(self, command: list[str], stdin: str | None) -> None:
+        self.stdin = stdin
+        self.process = subprocess.Popen(  # noqa: S603 - argv list, absolute gh found on a trusted PATH, no shell
+            command,
+            stdin=None if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,  # its own process group, so a timeout can end the child and its children
+        )
+
+    def wait(self) -> subprocess.CompletedProcess[str]:
+        try:
+            out, err = self.process.communicate(input=self.stdin, timeout=GH_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.process.communicate(timeout=5)
+            raise
+        return subprocess.CompletedProcess(self.process.args, self.process.returncode, out, err)
+
+
+def _launcher(run: Run) -> Launcher:
+    """The real launcher is Popen. A stand-in `run` (tests) is called at once, inside the gate."""
+    if run is subprocess.run:
+        return _Child
+
+    def launch(command: list[str], stdin: str | None) -> Launched:
+        extra = {} if stdin is None else {"input": stdin}  # the request body of `--input -`
+        return _Finished(run(command, capture_output=True, text=True, check=False, timeout=GH_TIMEOUT_SECONDS, **extra))
+
+    return launch
+
+
 # private directories: every file operation is relative to one directory descriptor
 
 
@@ -422,15 +486,23 @@ def _identity_get(directory: Path, key: str, now: float) -> tuple[bool, str | No
         return None
     if not isinstance(entry, dict):
         return None
-    at, scope = entry.get("at"), entry.get("scope")
-    if isinstance(at, bool) or not isinstance(at, int | float) or not math.isfinite(at):
+    if not _valid_identity(key, entry):
         return None
-    if scope is not None and not (isinstance(scope, str) and re.fullmatch(r"[0-9a-f]{20}", scope)):
-        return None
+    at, scope = entry["at"], entry.get("scope")
     ttl = IDENTITY_TTL if scope else NEGATIVE_TTL
     if not at - 60 <= now <= at + ttl:
         return None
     return True, scope
+
+
+def _valid_identity(key: object, entry: object) -> bool:
+    """A cache record is kept only if it is exactly the shape this code writes."""
+    if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{20}", key) or not isinstance(entry, dict):
+        return False
+    at, scope = entry.get("at"), entry.get("scope")
+    if isinstance(at, bool) or not isinstance(at, int | float) or not -1e15 < at < 1e15:
+        return False
+    return scope is None or (isinstance(scope, str) and re.fullmatch(r"[0-9a-f]{20}", scope) is not None)
 
 
 def _identity_put(directory: Path, clock: Clock, key: str, scope: str | None) -> None:
@@ -441,10 +513,10 @@ def _identity_put(directory: Path, clock: Clock, key: str, scope: str | None) ->
             data = bounded.loads(raw) if raw else {}
         except (ValueError, RecursionError):
             data = {}
-        ids = data.get("ids") if isinstance(data, dict) else None
-        ids = ids if isinstance(ids, dict) else {}
+        loaded = data.get("ids") if isinstance(data, dict) else None
+        ids = {k: v for k, v in loaded.items() if _valid_identity(k, v)} if isinstance(loaded, dict) else {}
         ids[key] = {"at": now, "scope": scope}
-        newest = sorted(ids.items(), key=lambda kv: -(kv[1].get("at", 0) if isinstance(kv[1], dict) else 0))
+        newest = sorted(ids.items(), key=lambda kv: -float(kv[1]["at"]))
         _replace_private(dfd, IDENTITY, bounded_dumps({"ids": dict(newest[:MAX_IDENTITIES])}).encode())
 
 
@@ -505,7 +577,7 @@ def scope_for(
             login = ""
     account = _hash("account", host, login.lower()) if login else None
     if directory is not None:
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError, TypeError, ValueError, OverflowError):
             _identity_put(directory, clock, key, account)
     if account:
         return Scope(account, False, "")
@@ -607,6 +679,9 @@ class Budget:
     def _written(self, state: Mapping[str, Any]) -> dict[str, float]:
         return self._map(state, "last_write", MAX_SPACING_WAIT)
 
+    def _launched(self, state: Mapping[str, Any]) -> dict[str, float]:
+        return self._map(state, "last_launch", MAX_LAUNCH_SKEW)
+
     def _save(self, dfd: int, state: dict[str, Any]) -> None:
         state["updated"] = self.clock()
         _replace_private(dfd, STATE, bounded_dumps(state).encode())
@@ -655,6 +730,7 @@ class Budget:
         counters: Sequence[Counter],
         block: tuple[str, float] | None,
         slot: float | None,
+        launched: float | None = None,
     ) -> None:
         now = self.clock()
         kept = {c.key: c for c in self._counters(state)}
@@ -676,6 +752,10 @@ class Budget:
         if slot is not None:
             written[self._k(WRITES)] = slot
         state["last_write"] = {k: v for k, v in written.items() if v > now - 3600}
+        launches = self._launched(state)
+        if launched is not None:
+            launches[self._k(WRITES)] = launched
+        state["last_launch"] = {k: v for k, v in launches.items() if v > now - 3600}
 
     def _judge(self, state: Mapping[str, Any], bucket: str) -> Decision | None:
         """A refusal when the bucket is throttled or blocked now; None otherwise."""
@@ -715,6 +795,45 @@ class Budget:
                 left = head.min_remaining if head.min_remaining is not None else 0
                 message = f"WARNING {bucket} budget {head.used_fraction:.0%} used ({left} left): slow down"
             return Decision("go", wait, head.level, message)
+
+    def launch_gate(self, start: Callable[[], Any], sleep: Callable[[float], None]) -> Any:
+        """Start a write's child no sooner than WRITE_SPACING after the last ACTUAL launch of this account.
+
+        A reservation is only a place in the queue: a process can be descheduled between reserving and launching and
+        then run after a later ticket. So the wait is measured here, under the per-account lock, from the recorded
+        launch time; `start()` (the spawn, not the child's whole life) runs while the lock is held, and the real launch
+        time is recorded before the lock is released. A spawn that fails still counts as a launch. At most GATE_TRIES
+        short sleeps are taken, outside the lock.
+        """
+        for _ in range(GATE_TRIES):
+            wait = 0.0
+            started = False
+            try:
+                with self._locked() as dfd:
+                    state = self._load(dfd)
+                    ready_at = self._launched(state).get(self._k(WRITES), 0.0) + WRITE_SPACING
+                    now = self.clock()
+                    if now >= ready_at:
+                        started = True
+                        value: Any = None
+                        error: Exception | None = None
+                        try:
+                            value = start()
+                        except Exception as problem:  # kept until the launch is recorded, then re-raised
+                            error = problem
+                        with contextlib.suppress(OSError):  # the child is already out; a save failure is reported later
+                            self._apply(state, (), None, None, self.clock())
+                            self._save(dfd, state)
+                        if error is not None:
+                            raise error
+                        return value
+                    wait = ready_at - now
+            except OSError as problem:
+                if started:
+                    raise
+                raise GateUnavailable(type(problem).__name__) from problem
+            sleep(wait)
+        raise GateBusy("the launch gate did not open")
 
     def confirm(self, bucket: str) -> Decision:
         """Re-check a bucket just before launching a call that waited for its slot. Takes no new slot."""
@@ -899,6 +1018,7 @@ def main(
     clock: Clock = time.time,
     gh: str | None = None,
     stdin: str | None = None,
+    launch: Launcher | None = None,
 ) -> int:
     if not argv:
         err.write("usage: ghw <gh arguments>   (gh, with the shared API budget applied; caller: $SAFO_CALLER)\n")
@@ -918,7 +1038,7 @@ def main(
                 err.write(scope.note + "\n")
             ledger = Budget(directory, clock, scope.name, unknown=scope.unknown)
             decision = ledger.reserve(what.bucket, write=what.write)
-        except (OSError, ConfigError) as problem:
+        except (OSError, ConfigError, TypeError, ValueError, OverflowError) as problem:
             err.write(f"ghw: the budget ledger is unavailable ({type(problem).__name__}); going ahead without it\n")
             ledger = None
         else:
@@ -939,9 +1059,21 @@ def main(
     inject = ledger is not None and _injectable(argv)
     if inject:
         command = [exe, "api", "--include", *argv[1:]]
+    starter = launch or _launcher(run)
+    child: Launched
     try:
-        extra = {} if stdin is None else {"input": stdin}  # the request body of `--input -`; else gh inherits stdin
-        done = run(command, capture_output=True, text=True, check=False, timeout=GH_TIMEOUT_SECONDS, **extra)
+        if ledger is not None and what.write:
+            try:
+                child = ledger.launch_gate(lambda: starter(command, stdin), sleep)
+            except GateUnavailable as problem:
+                err.write(f"ghw: the launch gate is unavailable ({problem}); going ahead without it\n")
+                child = starter(command, stdin)
+            except GateBusy:
+                err.write("ghw: the launch gate stayed busy; nothing was sent, retry shortly\n")
+                return EXIT_THROTTLED
+        else:
+            child = starter(command, stdin)
+        done = child.wait()
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as problem:  # bad UTF-8 is unknown too
         # sent or not, we cannot tell: record it, never replay it
         err.write(f"ghw: outcome unknown ({type(problem).__name__}); not retried\n")
