@@ -166,7 +166,10 @@ def parse_checks(rollup: Any) -> list[Check]:
 
 
 def matches(check: Check, context: str) -> bool:
-    return context in check.names or any(n.endswith(f" / {context}") for n in check.names)
+    if context in check.names:
+        return True
+    # only a bare name ("CI green") may be the tail of a "workflow / job" spelling; a qualified context is exact
+    return " / " not in context and any(n.endswith(f" / {context}") for n in check.names)
 
 
 @dataclass
@@ -195,6 +198,20 @@ def judge(checks: list[Check], required: Sequence[str]) -> Verdict:
     if bad:
         return Verdict("failed", ", ".join(f"{c.name}={c.outcome or '?'}" for c in bad), bad)
     return Verdict("green")
+
+
+def protection_contexts(data: Any) -> list[str]:
+    """Every required context in a required_status_checks answer; any other shape is unreadable (fail closed)."""
+    contexts = data.get("contexts") if isinstance(data, dict) else None
+    checks = data.get("checks") if isinstance(data, dict) else None
+    if (
+        not isinstance(contexts, list)
+        or not isinstance(checks, list)
+        or not all(isinstance(c, str) and c for c in contexts)
+        or not all(isinstance(c, dict) and isinstance(c.get("context"), str) and c["context"] for c in checks)
+    ):
+        raise ShipError(EXIT_ERROR, "unreadable required-checks answer")
+    return [*contexts, *(c["context"] for c in checks)]
 
 
 class Watcher:
@@ -246,12 +263,7 @@ class Watcher:
             data = bounded.loads(out)
         except ValueError as error:
             raise ShipError(EXIT_ERROR, "unreadable required-checks answer") from error
-        found: list[str] = []
-        if isinstance(data, dict):
-            found += [str(c) for c in data.get("contexts") or []]
-            found += [
-                str(c.get("context")) for c in data.get("checks") or [] if isinstance(c, dict) and c.get("context")
-            ]
+        found = protection_contexts(data)
         for context in found:
             if context not in names:
                 names.append(context)
@@ -316,7 +328,7 @@ class Watcher:
         canaries: dict[str, int] = {}
         grace: dict[tuple[str, str], int] = {}
         last = ""
-        for _ in range(self.max_polls):
+        for poll in range(1, self.max_polls + 1):
             data = self.view(repo, number)
             head = str(data["headRefOid"])
             if head != pin:
@@ -345,7 +357,7 @@ class Watcher:
                     last = "re-ran a job; waiting"
             else:
                 last = verdict.why
-            if self.clock() - start >= self.timeout:
+            if poll == self.max_polls or self.clock() - start >= self.timeout:
                 break
             self.sleep(self.interval)
         return Result(EXIT_TIMEOUT, "TIMEOUT", f"still pending after the wait: {last}")
@@ -403,13 +415,23 @@ class Watcher:
                         EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {moved['headRefOid']}"
                     )
                 continue
-            return Result(
-                EXIT_MERGE_REFUSED, "MERGE-REFUSED", err.strip().splitlines()[0][:200] if err.strip() else "gh refused"
-            )
+            return self.refused(repo, number, pin, err)
         state = self.view(repo, number).get("state")
         if state != "MERGED":
             return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", f"merge accepted but the read-back says {state}")
         return Result(EXIT_MERGED, "MERGED", f"head={pin[:12]}")
+
+    def refused(self, repo: str, number: int, pin: str, err: str) -> Result:
+        """A merge gh refused: a head that moved since the pin is HEAD-MOVED with the new sha, else a plain refusal."""
+        try:
+            head = str(self.view(repo, number)["headRefOid"])
+        except ShipError:
+            head = pin
+        if head != pin:
+            return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
+        return Result(
+            EXIT_MERGE_REFUSED, "MERGE-REFUSED", err.strip().splitlines()[0][:200] if err.strip() else "gh refused"
+        )
 
     def one(self, repo: str, number: int, expect: str = "") -> Result:
         try:
@@ -558,6 +580,93 @@ def main(
         for line in result.extra:
             output.write(out, line)
     return max((r.code for _n, r in results), default=EXIT_ERROR)
+
+
+def wait_ci_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="safo-wait-ci",
+        description="Wait for CI on one pull request or commit and print one result line. Read-only: it never merges. "
+        "Exit codes as safo-ship (0 green, 1 CI failed, 4 head moved, 5 timed out, 7 error).",
+    )
+    p.add_argument("repo", help="owner/name")
+    p.add_argument("target", help="a pull request number, or a 40-hex commit sha (pinned)")
+    p.add_argument("--timeout", type=float, default=1800.0)
+    p.add_argument("--interval", type=float, default=20.0)
+    p.add_argument("--max-polls", type=int, default=120)
+    p.add_argument("--workdir", default=None)
+    return p
+
+
+def wait_ci_main(
+    argv: Sequence[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    out: TextIO | None = None,
+    err: TextIO | None = None,
+    run: Run = subprocess.run,
+    sleep: Sleep = time.sleep,
+    clock: Clock = time.monotonic,
+) -> int:
+    """`safo-wait-ci <owner/repo> <pr|sha>`: the safo-ship engine, stopping before the merge."""
+    env = os.environ if env is None else env
+    out = out or sys.stdout
+    err = err or sys.stderr
+    parser = wait_ci_parser()
+    args = parser.parse_args(argv)
+    if not SLUG.fullmatch(args.repo):
+        parser.error("repo must be owner/name")
+    if not (args.target.isdigit() or SHA.fullmatch(args.target)):
+        parser.error("target must be a pull request number or a 40-hex commit sha")
+    if not 1 <= args.interval <= 300 or not 1 <= args.timeout <= 7200 or not 1 <= args.max_polls <= 1000:
+        parser.error("--interval is 1 to 300, --timeout 1 to 7200, --max-polls 1 to 1000")
+    workdir = resolve_workdir(args.workdir)
+    gh_path, git_path = find_gh(env, workdir), find_executable("git", env, workdir)
+    if gh_path is None or git_path is None:
+        output.write(err, "error: gh and git must be on PATH")
+        return EXIT_ERROR
+    gh = Gh(gh_path, git_path, env, run, workdir)
+    watcher = Watcher(
+        gh,
+        out,
+        timeout=args.timeout,
+        interval=args.interval,
+        max_polls=args.max_polls,
+        method="squash",
+        delete_branch=False,
+        sleep=sleep,
+        clock=clock,
+    )
+    try:
+        if args.target.isdigit():
+            number, pin = int(args.target), ""
+        else:
+            pin = args.target
+            pulls = gh.json("api", f"repos/{args.repo}/commits/{pin}/pulls")
+            open_ones = (
+                [
+                    p
+                    for p in pulls
+                    if isinstance(p, dict) and p.get("state") == "open" and (p.get("head") or {}).get("sha") == pin
+                ]
+                if isinstance(pulls, list)
+                else []
+            )
+            if len(open_ones) != 1 or not isinstance(open_ones[0].get("number"), int):
+                raise ShipError(EXIT_ERROR, f"{pin[:12]} is not the head of exactly one open pull request")
+            number = open_ones[0]["number"]
+        pin = pin or str(watcher.view(args.repo, number)["headRefOid"])
+        ended = watcher.wait_ci(args.repo, number, pin)
+    except ShipError as error:
+        ended = Result(error.code, "ERROR", str(error))
+        number = int(args.target) if args.target.isdigit() else 0
+    if ended is None:
+        ended = Result(EXIT_MERGED, "GREEN", f"head={pin[:12]}")
+    output.write(out, f"{ended.word} {args.repo}#{number} {ended.detail}".rstrip())
+    return ended.code
+
+
+def run_wait_ci() -> None:
+    raise SystemExit(wait_ci_main())
 
 
 def run() -> None:

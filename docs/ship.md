@@ -48,7 +48,19 @@ lines.
 | 7 | error: gh or git missing or failing, push or open failed, protection unreadable |
 
 Protection is read from the base branch; a 404 means "none listed" and `CI green` is still required, any other failure to
-read it is exit 7. Branch rulesets are not read.
+read it, or an answer of an unexpected shape, is exit 7. A required context with a ` / ` in it must match exactly; only a
+bare name such as `CI green` also matches the tail of a `workflow / job` spelling. The wait never sleeps after its last
+poll. A merge gh refuses is re-checked: if the head moved meanwhile the result is `HEAD-MOVED` (exit 4) with the new sha. Branch rulesets are not read.
+
+## safo-wait-ci
+
+`safo-wait-ci <owner/repo> <pr|sha>` is the same engine without the merge: read-only, it waits for CI on a pull request
+number, or on a 40-hex commit that is the head of exactly one open pull request (the sha is pinned), and prints one line
+(`GREEN owner/name#N head=...`, or the result word of the table above). Same exit codes (0, 1, 4, 5, 7).
+
+The issue asked for a `safo wait-ci` subcommand. Adding a `safo` subcommand needs a one-line edit of the guard's
+`TOP_LEVEL_COMMANDS` tuple, which is guard code, so it is left to a follow-up that needs the owner's explicit OK. The
+separate `safo-wait-ci` entry point delivers the behavior meanwhile.
 
 The monitor-agent template in [Orchestrator](orchestrator.md) stays read-only; a lead that needs a merge watcher runs this
 tool in the background instead of writing one.

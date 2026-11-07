@@ -50,6 +50,8 @@ STUB = textwrap.dedent(
         reply(pop("merges"))
     if key == "api graphql":
         reply({{"out": json.dumps(pop("threads"))}})
+    if rest[0] == "api" and "/pulls" in rest[1]:
+        reply({{"out": json.dumps(state.get("commit_pulls", []))}})
     if rest[0] == "api":
         reply(state["protection"])
     if key == "run view":
@@ -179,7 +181,7 @@ def test_an_empty_rollup_keeps_waiting_and_never_merges(rig: Rig) -> None:
     code, out, calls = rig.go("5", "--repo", REPO, "--max-polls", "4")
     assert code == ship.EXIT_TIMEOUT
     assert out.startswith("TIMEOUT") and "no checks registered" in out
-    assert merges(calls) == [] and len(rig.slept) == 4
+    assert merges(calls) == [] and len(rig.slept) == 3
 
 
 def test_a_half_filled_rollup_is_pending_even_with_nothing_running(rig: Rig) -> None:
@@ -567,3 +569,87 @@ def test_the_workdir_is_resolved_to_its_real_absolute_path(tmp_path: Path, monke
     monkeypatch.chdir(real)
     assert ship.resolve_workdir("../link") == str(real.resolve())
     assert ship.resolve_workdir(None) == str(real.resolve())
+
+
+def test_a_qualified_required_context_matches_exactly_not_by_suffix() -> None:
+    gate = ship.Check("CI green", frozenset({"CI green"}), True, "SUCCESS")
+    wrong = [gate, ship.Check("deploy", frozenset({"deploy", "other / ci / deploy"}), True, "SUCCESS")]
+    verdict = ship.judge(wrong, ["CI green", "ci / deploy"])
+    assert verdict.state == "pending" and "ci / deploy" in verdict.why
+    right = [
+        ship.Check("deploy", frozenset({"deploy", "ci / deploy"}), True, "SUCCESS"),
+        ship.Check("CI green", frozenset({"CI green", "w / CI green"}), True, "SUCCESS"),
+    ]
+    assert ship.judge(right, ["CI green", "ci / deploy"]).state == "green"
+    bare = [ship.Check("CI green", frozenset({"x / CI green"}), True, "SUCCESS")]
+    assert ship.judge(bare, ["CI green"]).state == "green"  # a bare name may still use the suffix
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "null",
+        "[]",
+        '{"contexts": null, "checks": null}',
+        '{"contexts": "CI green", "checks": []}',
+        '{"contexts": [1], "checks": []}',
+        '{"contexts": [], "checks": ["x"]}',
+        '{"contexts": [], "checks": [{"context": 5}]}',
+        '{"contexts": []}',
+    ],
+)
+def test_a_malformed_protection_answer_fails_closed(rig: Rig, body: str) -> None:
+    rig.state["protection"] = {"rc": 0, "out": body}
+    code, out, calls = rig.go("5", "--repo", REPO)
+    assert code == ship.EXIT_ERROR and "unreadable required-checks" in out and merges(calls) == []
+
+
+def test_no_sleep_after_the_final_poll(rig: Rig) -> None:
+    rig.state["views"] = [view([])]
+    code, _out, _calls = rig.go("5", "--repo", REPO, "--max-polls", "1", "--interval", "300")
+    assert code == ship.EXIT_TIMEOUT and rig.slept == []
+
+
+def test_a_refused_merge_after_the_head_moved_reports_the_new_head(rig: Rig) -> None:
+    rig.state["merges"] = [{"rc": 1, "err": "head commit mismatch"}]
+    rig.state["views"] = [view(GREEN), view(GREEN), view(GREEN, head=MOVED)]
+    code, out, _calls = rig.go("5", "--repo", REPO)
+    assert code == ship.EXIT_HEAD_MOVED and MOVED in out
+
+
+def test_wait_ci_waits_without_merging_for_a_pr_number(rig: Rig) -> None:
+    out, err = io.StringIO(), io.StringIO()
+    rig.state_path.write_text(json.dumps(rig.state), encoding="utf-8")
+    env = {"PATH": str(rig.bin), "FAKE_STATE": str(rig.state_path)}
+    assert ship.wait_ci_main([REPO, "5"], env=env, out=out, err=err, sleep=lambda _s: None) == 0
+    assert out.getvalue().strip() == f"GREEN {REPO}#5 head={HEAD[:12]}"
+    assert merges(json.loads(rig.state_path.read_text(encoding="utf-8"))["calls"]) == []
+
+
+def test_wait_ci_resolves_a_sha_to_its_open_pr_and_pins_it(rig: Rig) -> None:
+    rig.state["commit_pulls"] = [
+        {"number": 9, "state": "closed", "head": {"sha": HEAD}},
+        {"number": 5, "state": "open", "head": {"sha": HEAD}},
+    ]
+    rig.state["views"] = [view([]), view(GREEN, head=MOVED)]
+    out, err = io.StringIO(), io.StringIO()
+    rig.state_path.write_text(json.dumps(rig.state), encoding="utf-8")
+    env = {"PATH": str(rig.bin), "FAKE_STATE": str(rig.state_path)}
+    code = ship.wait_ci_main([REPO, HEAD], env=env, out=out, err=err, sleep=lambda _s: None)
+    assert code == ship.EXIT_HEAD_MOVED and MOVED in out.getvalue()
+
+
+def test_wait_ci_reports_pending_and_failure_codes(rig: Rig) -> None:
+    rig.state["views"] = [view([])]
+    rig.state_path.write_text(json.dumps(rig.state), encoding="utf-8")
+    env = {"PATH": str(rig.bin), "FAKE_STATE": str(rig.state_path)}
+    out, err = io.StringIO(), io.StringIO()
+    code = ship.wait_ci_main([REPO, "5", "--max-polls", "2"], env=env, out=out, err=err, sleep=lambda _s: None)
+    assert code == ship.EXIT_TIMEOUT and out.getvalue().startswith("TIMEOUT")
+
+
+def test_wait_ci_entry_point_is_declared() -> None:
+    import tomllib
+
+    meta = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8"))
+    assert meta["project"]["scripts"]["safo-wait-ci"] == "safo.ship:run_wait_ci"
