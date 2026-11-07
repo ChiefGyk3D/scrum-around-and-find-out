@@ -13,15 +13,15 @@ from typing import Any
 import pytest
 
 from safo import ratebudget as rb
-from test_ratebudget import OK, T0, Clock, Harness, budget, done, http
+from test_ratebudget import OK, T0, Clock, Harness, budget, counter, done, http
 
 DIR = ".local/state/safo/ratebudget"
 WRITE = ["api", "-X", "PATCH", "repos/o/r/issues/1", "-f", "a=b"]
 
 
-def lock_is_held(directory: Path) -> bool:
-    """True when another descriptor cannot take the per-account lock right now."""
-    fd = (directory / "lock").open("a")
+def lock_is_held(directory: Path, name: str = "lock") -> bool:
+    """True when another descriptor cannot take the named lock file of the directory right now."""
+    fd = (directory / name).open("a")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -89,10 +89,12 @@ def test_the_gate_records_the_real_launch_time(tmp_path: Path) -> None:
 
 def test_the_child_is_started_while_the_gate_is_held(tmp_path: Path) -> None:
     b = budget(tmp_path)
-    seen: list[bool] = []
-    b.launch_gate(lambda: seen.append(lock_is_held(b.directory)), lambda s: None)
-    assert seen == [True]
-    assert not lock_is_held(b.directory)  # and it is released as soon as the start returns
+    seen: list[tuple[bool, bool]] = []
+    b.launch_gate(
+        lambda: seen.append((lock_is_held(b.directory, b.gate_lock_name), lock_is_held(b.directory))), lambda s: None
+    )
+    assert seen == [(True, False)]  # the account's gate is held at the spawn; the shared state lock is not
+    assert not lock_is_held(b.directory, b.gate_lock_name)  # and it is released as soon as the start returns
 
 
 def test_a_failed_spawn_still_counts_as_a_launch(tmp_path: Path) -> None:
@@ -114,15 +116,172 @@ def test_a_failed_spawn_still_counts_as_a_launch(tmp_path: Path) -> None:
     assert slept  # the next one waited: an ambiguous spawn is not free
 
 
-def test_a_launch_time_in_the_future_is_corrupt_and_does_not_stall(tmp_path: Path) -> None:
-    b = budget(tmp_path)
+@pytest.mark.parametrize("ahead", [6.0, 3600.0, 4_000_000_000.0])
+def test_a_launch_recorded_in_the_future_fails_closed_for_one_spacing(tmp_path: Path, ahead: float) -> None:
+    """The wall clock stepped back (or the record is corrupt): wait one spacing, once, never launch at once."""
+    clock = Clock()
+    b = budget(tmp_path, clock)
     b.launch_gate(lambda: None, lambda s: None)
     state = json.loads((b.directory / "state.json").read_text())
-    state["last_launch"] = {"local|*": T0 + 4_000_000_000}
+    state["last_launch"] = {"local|*": T0 + ahead}
     (b.directory / "state.json").write_text(json.dumps(state))
     slept: list[float] = []
-    b.launch_gate(lambda: None, slept.append)
-    assert slept == []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    b.launch_gate(lambda: None, sleep)
+    assert slept == [pytest.approx(rb.WRITE_SPACING)]  # bounded: one spacing, however far ahead the record is
+    assert json.loads((b.directory / "state.json").read_text())["last_launch"]  # clamped, not deleted
+
+
+def test_a_backward_step_after_a_launch_does_not_allow_an_immediate_second_launch(tmp_path: Path) -> None:
+    clock = Clock()
+    b = budget(tmp_path, clock)
+    b.launch_gate(lambda: None, lambda s: None)  # a launch at T0
+    clock.now = T0 - 6  # the wall clock is corrected backwards
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    b.launch_gate(lambda: None, sleep)
+    assert slept
+
+
+class Mono:
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def mono_budget(tmp_path: Path, clock: Clock, mono: Mono, boot: str = "boot-a") -> rb.Budget:
+    return rb.Budget(tmp_path / "rb", clock, "local", mono=mono, boot_id=boot)
+
+
+def test_same_boot_spacing_uses_the_monotonic_clock_not_the_wall_clock(tmp_path: Path) -> None:
+    clock, mono = Clock(), Mono()
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, lambda s: None)
+    clock.now = T0 - 3600  # the wall clock jumps an hour back
+    mono.now += 5.0  # but five real seconds passed
+    slept: list[float] = []
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, slept.append)
+    assert slept == []  # exact: no needless wait after a wall-clock step
+
+
+def test_same_boot_spacing_still_waits_when_the_wall_clock_says_otherwise(tmp_path: Path) -> None:
+    clock, mono = Clock(), Mono()
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, lambda s: None)
+    clock.now = T0 + 3600  # the wall clock jumps an hour forward
+    mono.now += 0.25
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        mono.now += seconds
+
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, sleep)
+    assert slept == [pytest.approx(0.75)]
+
+
+def test_another_boot_falls_back_to_the_wall_clock(tmp_path: Path) -> None:
+    clock, mono = Clock(), Mono()
+    mono_budget(tmp_path, clock, mono, "boot-a").launch_gate(lambda: None, lambda s: None)
+    mono.now = 5.0  # a fresh boot: the monotonic clock restarted
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    mono_budget(tmp_path, clock, mono, "boot-b").launch_gate(lambda: None, sleep)
+    assert slept == [pytest.approx(1.0)]  # the wall clock shows the last launch a moment ago
+
+
+def test_the_boot_id_reader_accepts_only_a_uuid(tmp_path: Path) -> None:
+    good = tmp_path / "id"
+    good.write_text("0123abcd-0123-4567-89ab-0123456789ab\n")
+    assert rb.read_boot_id(good) == "0123abcd-0123-4567-89ab-0123456789ab"
+    good.write_text("../../etc\n")
+    assert rb.read_boot_id(good) is None
+    assert rb.read_boot_id(tmp_path / "missing") is None
+
+
+# the gate lock is per account
+
+
+def test_one_accounts_stalled_spawn_does_not_block_another_account(tmp_path: Path) -> None:
+    import threading
+
+    a = rb.Budget(tmp_path / "rb", Clock(), "acct-a")
+    b = rb.Budget(tmp_path / "rb", Clock(), "acct-b")
+    a_in_spawn, release_a = threading.Event(), threading.Event()
+    a_result: list[str] = []
+
+    def stalled_spawn() -> str:
+        a_in_spawn.set()
+        release_a.wait(10)
+        return "a"
+
+    worker = threading.Thread(target=lambda: a_result.append(a.launch_gate(stalled_spawn, lambda s: None)))
+    worker.start()
+    try:
+        assert a_in_spawn.wait(5)
+        b_done = threading.Event()
+        b_results: list[str] = []
+
+        def other_account() -> None:
+            b_results.append(b.launch_gate(lambda: "b", lambda s: None))  # its own gate lock
+            b.observe([counter()])  # and the shared state is free for everyone meanwhile
+            b_results.append(b.reserve("core", write=True).action)
+            b_results.append(a.reserve("core", write=False).action)
+            b_done.set()
+
+        threading.Thread(target=other_account, daemon=True).start()
+        assert b_done.wait(3), "account B was blocked by account A's stalled spawn"
+        assert b_results == ["b", "go", "go"]
+    finally:
+        release_a.set()
+        worker.join(10)
+    assert a_result == ["a"]
+
+
+def test_the_same_accounts_second_launcher_waits_for_the_gate_and_gives_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    monkeypatch.setattr(rb, "GATE_LOCK_WAIT_SECONDS", 0.3)
+    a = rb.Budget(tmp_path / "rb", Clock(), "acct-a")
+    again = rb.Budget(tmp_path / "rb", Clock(), "acct-a")
+    in_spawn, release = threading.Event(), threading.Event()
+
+    def stalled() -> None:
+        in_spawn.set()
+        release.wait(10)
+
+    worker = threading.Thread(target=lambda: a.launch_gate(stalled, lambda s: None))
+    worker.start()
+    try:
+        assert in_spawn.wait(5)
+        with pytest.raises(rb.GateBusy):
+            again.launch_gate(lambda: None, lambda s: None)
+    finally:
+        release.set()
+        worker.join(10)
+
+
+def test_the_gate_lock_name_is_a_hash_of_the_scope() -> None:
+    a = rb.Budget(Path("/x"), Clock(), "acct-a").gate_lock_name
+    b = rb.Budget(Path("/x"), Clock(), "../../etc/passwd").gate_lock_name
+    assert a != b
+    assert "/" not in b
+    assert a.startswith("gate-")
+    assert a.endswith(".lock")
 
 
 def test_the_gate_gives_up_after_bounded_tries(tmp_path: Path) -> None:
@@ -165,11 +324,12 @@ def test_wrapper_reads_do_not_use_the_gate(tmp_path: Path) -> None:
 
 
 class Handle:
-    def __init__(self, directory: Path, log: list[str]) -> None:
-        self.directory, self.log = directory, log
+    def __init__(self, directory: Path, log: list[str], gate: str) -> None:
+        self.directory, self.log, self.gate = directory, log, gate
 
     def wait(self) -> subprocess.CompletedProcess[str]:
-        self.log.append("held-while-running" if lock_is_held(self.directory) else "free-while-running")
+        held = lock_is_held(self.directory) or lock_is_held(self.directory, self.gate)
+        self.log.append("held-while-running" if held else "free-while-running")
         return done(http("200 OK", OK, "{}"))
 
 
@@ -180,8 +340,8 @@ def test_the_gate_is_released_after_the_spawn_not_after_the_child_exits(tmp_path
     directory = tmp_path / DIR
 
     def launch(command: list[str], stdin: str | None) -> Handle:
-        log.append("held-at-spawn" if directory.exists() and lock_is_held(directory) else "free-at-spawn")
-        return Handle(directory, log)
+        log.append("held-at-spawn" if lock_is_held(directory, h.ledger.gate_lock_name) else "free-at-spawn")
+        return Handle(directory, log, h.ledger.gate_lock_name)
 
     h = Harness(tmp_path)
     h.advance = True

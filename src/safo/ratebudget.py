@@ -52,8 +52,10 @@ SECONDARY_WAIT = 60.0  # GitHub: wait at least a minute after a secondary limit 
 MAX_STATE_BYTES = 262_144
 MAX_HORIZON = 7200.0  # a counter whose reset is further off than this is corrupt, not a throttle
 MAX_COUNTERS = 256
-MAX_LAUNCH_SKEW = 5.0  # a recorded launch further in the future than this is corrupt
-GATE_TRIES = 20  # the launch gate sleeps at most WRITE_SPACING per try, so this bounds its wait
+GATE_TRIES = 20  # an iteration bound for the launch gate (each try sleeps at most one spacing); not a time bound
+GATE_LOCK_WAIT_SECONDS = 30.0  # how long a writer waits for its account's gate while another is spawning
+SIGNAL_GRACE_SECONDS = 5.0  # a forwarded signal gets this long to end the child before SIGKILL
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 WRITES = "*"  # the one write queue of a scope, across buckets
 AUTH_TIMEOUT_SECONDS = 20.0
 IDENTITY_TTL = 3600.0  # how long a credential's account is remembered
@@ -131,6 +133,15 @@ def state_dir(env: Mapping[str, str]) -> Path:
     else:
         raise ConfigError("no state directory: set HOME or XDG_STATE_HOME")
     return base / "safo" / "ratebudget"
+
+
+def read_boot_id(path: Path = BOOT_ID_PATH) -> str | None:
+    """The kernel's boot id (a UUID), which says the monotonic clock is still the same one; None if unavailable."""
+    try:
+        text = path.read_text().strip()
+    except (OSError, UnicodeError):
+        return None
+    return text if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", text) else None
 
 
 def clean_caller(value: str) -> str:
@@ -294,6 +305,14 @@ class GateUnavailable(Exception):
     """The launch gate could not be taken (the ledger directory is unusable); nothing was started."""
 
 
+class Interrupted(Exception):
+    """SIGINT, SIGTERM or SIGHUP arrived while the child ran: the outcome of the call is unknown."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"signal {signum}")
+        self.signum = signum
+
+
 class GateBusy(Exception):
     """The launch gate did not open within its bounded tries; nothing was started."""
 
@@ -313,6 +332,9 @@ class _Finished:
         return self.result
 
 
+_FORWARDED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
 class _Child:
     """A started `gh`. The start is what the launch gate covers; waiting for it to exit is not."""
 
@@ -327,7 +349,36 @@ class _Child:
             start_new_session=True,  # its own process group, so a timeout can end the child and its children
         )
 
+    def _stop(self, signum: int) -> None:
+        """Forward the signal to the child's group, give it a grace period, then SIGKILL the group and reap."""
+        group = self.process.pid
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signum)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self.process.wait(timeout=SIGNAL_GRACE_SECONDS)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)  # also ends anything left in the group, as the leader may have exited
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self.process.wait(timeout=5)
+        for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if pipe is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    pipe.close()
+
     def wait(self) -> subprocess.CompletedProcess[str]:
+        """Wait for the child. SIGINT, SIGTERM and SIGHUP are forwarded to its group while we wait (it is detached
+        from our terminal, so Ctrl-C would otherwise miss it); the handlers are restored afterwards. A signal ends the
+        child within a bounded time and raises Interrupted: the call may have been applied, so it is not replayed."""
+
+        def forward(signum: int, _frame: object) -> None:
+            raise Interrupted(signum)
+
+        previous: dict[signal.Signals, Any] = {}
+        try:
+            for number in _FORWARDED:
+                previous[number] = signal.signal(number, forward)
+        except ValueError:  # not the main thread: handlers cannot be set, the timeout still applies
+            pass
         try:
             out, err = self.process.communicate(input=self.stdin, timeout=GH_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
@@ -336,6 +387,15 @@ class _Child:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self.process.communicate(timeout=5)
             raise
+        except Interrupted as stop:
+            with contextlib.suppress(ValueError):
+                for number in previous:
+                    signal.signal(number, signal.SIG_IGN)  # a second signal must not interrupt the clean-up
+            self._stop(stop.signum)
+            raise
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
         return subprocess.CompletedProcess(self.process.args, self.process.returncode, out, err)
 
 
@@ -591,16 +651,32 @@ class Budget:
     """The shared state under one directory, for one scope (host and account). Every change holds the file lock."""
 
     def __init__(
-        self, directory: Path, clock: Clock = time.time, scope: str = "local", *, unknown: bool = False
+        self,
+        directory: Path,
+        clock: Clock = time.time,
+        scope: str = "local",
+        *,
+        unknown: bool = False,
+        mono: Clock | None = None,
+        boot_id: str | None = None,
     ) -> None:
         self.directory = directory
         self.clock = clock
         self.scope = scope
         self.warn = UNKNOWN_WARN if unknown else WARN
         self.throttle = UNKNOWN_THROTTLE if unknown else THROTTLE
+        if mono is None and clock is time.time:  # production: spacing is read from this boot's monotonic clock
+            mono, boot_id = time.monotonic, boot_id or read_boot_id()
+        self.mono = mono if boot_id else None
+        self.boot_id = boot_id
 
     def _k(self, name: str) -> str:
         return f"{self.scope}|{name}"
+
+    @property
+    def gate_lock_name(self) -> str:
+        """The lock file of this scope's launch gate: a hash, so no scope text reaches the file system."""
+        return f"gate-{hashlib.sha256(self.scope.encode()).hexdigest()[:20]}.lock"
 
     # locking and files
 
@@ -680,7 +756,7 @@ class Budget:
         return self._map(state, "last_write", MAX_SPACING_WAIT)
 
     def _launched(self, state: Mapping[str, Any]) -> dict[str, float]:
-        return self._map(state, "last_launch", MAX_LAUNCH_SKEW)
+        return self._map(state, "last_launch", math.inf)
 
     def _save(self, dfd: int, state: dict[str, Any]) -> None:
         state["updated"] = self.clock()
@@ -753,9 +829,16 @@ class Budget:
             written[self._k(WRITES)] = slot
         state["last_write"] = {k: v for k, v in written.items() if v > now - 3600}
         launches = self._launched(state)
+        monos = state.get("launch_mono")
+        monos = dict(monos) if isinstance(monos, dict) else {}
         if launched is not None:
             launches[self._k(WRITES)] = launched
+            if self.mono is not None and self.boot_id is not None:
+                monos[self._k(WRITES)] = {"boot": self.boot_id, "t": self.mono()}
+            else:
+                monos.pop(self._k(WRITES), None)
         state["last_launch"] = {k: v for k, v in launches.items() if v > now - 3600}
+        state["launch_mono"] = {k: v for k, v in monos.items() if k in state["last_launch"]}
 
     def _judge(self, state: Mapping[str, Any], bucket: str) -> Decision | None:
         """A refusal when the bucket is throttled or blocked now; None otherwise."""
@@ -796,43 +879,100 @@ class Budget:
                 message = f"WARNING {bucket} budget {head.used_fraction:.0%} used ({left} left): slow down"
             return Decision("go", wait, head.level, message)
 
+    def _launch_wait(self, state: dict[str, Any], dfd: int) -> float:
+        """Seconds to wait before the next launch of this account (0: go). Under the state lock.
+
+        Same boot: elapsed time since the last launch is read from the monotonic clock, which a wall-clock step cannot
+        move. Otherwise the wall clock is used, and a recorded launch that lies in the future (the clock stepped back,
+        or the record is corrupt) fails closed: it is clamped to now and costs one spacing, once; it is never dropped.
+        """
+        key = self._k(WRITES)
+        record = state.get("launch_mono")
+        entry = record.get(key) if isinstance(record, dict) else None
+        if self.mono is not None and isinstance(entry, dict) and entry.get("boot") == self.boot_id:
+            seen = entry.get("t")
+            if isinstance(seen, int | float) and not isinstance(seen, bool) and math.isfinite(seen):
+                elapsed = self.mono() - float(seen)
+                return max(0.0, WRITE_SPACING - elapsed) if elapsed >= 0 else WRITE_SPACING
+        last = self._launched(state).get(key)
+        if last is None:
+            return 0.0
+        now = self.clock()
+        if last > now:
+            self._apply(state, (), None, None, now)
+            self._save(dfd, state)
+            return WRITE_SPACING
+        return max(0.0, last + WRITE_SPACING - now)
+
+    def _take_gate(self, dfd: int) -> int:
+        """The descriptor of this account's gate lock, once it is ours; waits up to GATE_LOCK_WAIT_SECONDS."""
+        fd = os.open(self.gate_lock_name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        try:
+            _check_regular(fd)
+            give_up = time.monotonic() + GATE_LOCK_WAIT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return fd
+                except BlockingIOError:
+                    if time.monotonic() >= give_up:
+                        raise GateBusy("another launch of this account is still starting") from None
+                    time.sleep(0.01)
+        except BaseException:
+            os.close(fd)
+            raise
+
     def launch_gate(self, start: Callable[[], Any], sleep: Callable[[float], None]) -> Any:
         """Start a write's child no sooner than WRITE_SPACING after the last ACTUAL launch of this account.
 
         A reservation is only a place in the queue: a process can be descheduled between reserving and launching and
-        then run after a later ticket. So the wait is measured here, under the per-account lock, from the recorded
-        launch time; `start()` (the spawn, not the child's whole life) runs while the lock is held, and the real launch
-        time is recorded before the lock is released. A spawn that fails still counts as a launch. At most GATE_TRIES
-        short sleeps are taken, outside the lock.
+        then run after a later ticket. So the wait is measured here, from the recorded launch time, under this
+        account's gate lock (a file of its own: another account is never held up by it). `start()` (the spawn, not the
+        child's whole life) runs while the gate lock is held; the shared state lock is taken only briefly, to read the
+        record and to write the real launch time afterwards, never across the spawn. A spawn that fails still counts as
+        a launch. At most GATE_TRIES checks are made, each followed by a sleep of at most one spacing, outside the
+        state lock.
         """
-        for _ in range(GATE_TRIES):
-            wait = 0.0
-            started = False
+        try:
+            dfd = open_private_dir(self.directory, create=True)
+        except OSError as problem:
+            raise GateUnavailable(type(problem).__name__) from problem
+        try:
             try:
-                with self._locked() as dfd:
-                    state = self._load(dfd)
-                    ready_at = self._launched(state).get(self._k(WRITES), 0.0) + WRITE_SPACING
-                    now = self.clock()
-                    if now >= ready_at:
-                        started = True
-                        value: Any = None
-                        error: Exception | None = None
-                        try:
-                            value = start()
-                        except Exception as problem:  # kept until the launch is recorded, then re-raised
-                            error = problem
-                        with contextlib.suppress(OSError):  # the child is already out; a save failure is reported later
-                            self._apply(state, (), None, None, self.clock())
-                            self._save(dfd, state)
-                        if error is not None:
-                            raise error
-                        return value
-                    wait = ready_at - now
+                gate = self._take_gate(dfd)
             except OSError as problem:
-                if started:
-                    raise
                 raise GateUnavailable(type(problem).__name__) from problem
-            sleep(wait)
+            try:
+                return self._gated(start, sleep)
+            finally:
+                os.close(gate)
+        finally:
+            os.close(dfd)
+
+    def _gated(self, start: Callable[[], Any], sleep: Callable[[float], None]) -> Any:
+        for _ in range(GATE_TRIES):
+            try:
+                with self._locked() as sdfd:
+                    wait = self._launch_wait(self._load(sdfd), sdfd)
+            except OSError as problem:
+                raise GateUnavailable(type(problem).__name__) from problem
+            if wait > 0:
+                sleep(wait)
+                continue
+            value: Any = None
+            error: Exception | None = None
+            try:
+                value = start()
+            except Exception as problem:  # kept until the launch is recorded, then re-raised
+                error = problem
+            # the child is already out; a save failure is reported later
+            with contextlib.suppress(OSError), self._locked() as sdfd:
+                state = self._load(sdfd)
+                self._apply(state, (), None, None, self.clock())
+                self._save(sdfd, state)
+            if error is not None:
+                raise error
+            return value
         raise GateBusy("the launch gate did not open")
 
     def confirm(self, bucket: str) -> Decision:
@@ -1074,6 +1214,13 @@ def main(
         else:
             child = starter(command, stdin)
         done = child.wait()
+    except Interrupted as stop:
+        err.write(
+            f"ghw: interrupted by signal {stop.signum}; outcome unknown (the call may or may not have been applied); "
+            "not retried\n"
+        )
+        _record(ledger, env, what, 0, [], None, err)
+        return 128 + stop.signum
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as problem:  # bad UTF-8 is unknown too
         # sent or not, we cannot tell: record it, never replay it
         err.write(f"ghw: outcome unknown ({type(problem).__name__}); not retried\n")

@@ -18,8 +18,12 @@
   account that cannot be told gets a conservative unknown scope, a GraphQL secondary limit sent with HTTP 200 blocks,
   `boardmap.json` is read with the same private-directory checks as it is written, and the write-slot bound is the
   queue limit. Round 4 (#367, #368): a launch gate spaces writes from the last actual launch (the child is spawned
-  while the per-account lock is held, then the lock is released), and a hostile identity cache is validated record by
-  record and fails open. The real `gh` child now runs in its own process group so a timeout ends it and its children.
+  while the account's gate lock is held, then the lock is released), and a hostile identity cache is validated record by
+  record and fails open. The real `gh` child now runs in its own process group so a timeout ends it and its children. Round 5: SIGINT, SIGTERM and
+  SIGHUP are forwarded to that group while `ghw` waits (grace, SIGKILL, reap; unknown outcome, exit 128+signal); launch
+  spacing is read from the monotonic clock of the same boot, and a launch recorded in the future fails closed for one
+  spacing instead of being dropped; the launch gate lock is a file per account, so one account's stalled spawn does not
+  block another.
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on
