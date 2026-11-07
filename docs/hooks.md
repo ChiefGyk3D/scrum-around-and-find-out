@@ -64,6 +64,25 @@ step you run yourself after the release (`safo hooks install`, then `safo hooks 
    view`; in `block` mode a lookup that fails denies. Nothing is exempt unless `hooks.tracking_exempt_repos` lists the
    repository. See [No hidden work](no-hidden-work.md).
 
+## Research rules (warn only)
+
+`research-route` and `research-ladder` flag a brief that asks for a fact about a vendor, product, standard or document
+when it goes to an agent type that cannot search, or carries no `research:` line. They never deny, in `block` mode too.
+Everything is optional configuration; the defaults are:
+
+```yaml
+hooks:
+  research:
+    route: true               # research-route
+    ladder: true              # research-ladder
+    report_not_found: true    # `safo handoff shape`
+    na_marker: "research: n/a -"   # followed by a reason on the same line
+    intent_keywords: [find what, says about, vendor page, check against, verify the claim, advisory, press release]   # abridged
+    search_types: [general-purpose, claude, Explore, Plan, claude-code-guide, web-fetch, codex:codex-rescue, ollama:ollama-rescue]
+```
+
+See [Look before instructing](look-before-instructing.md) for the rules and the measured case.
+
 ## The fifth rule: the lead never waits
 
 The lead session is a project manager; every wait is delegated ([The orchestrator](orchestrator.md)). A Bash call in the

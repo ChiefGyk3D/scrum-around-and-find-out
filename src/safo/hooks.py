@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from safo import tracking
-from safo.agentsfile import Agent, AgentsFile, Endpoint
+from safo.agentsfile import Agent, AgentsFile, Endpoint, Hooks
 from safo.bounded import loads
 from safo.errors import ConfigError
 from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, ApprovalCheck, TermsSource, findings
@@ -72,6 +72,8 @@ NO_ISSUE = "no-issue"  # the brief names no tracking item (or an unusable one)
 ISSUE_UNUSABLE = "issue-unusable"  # the item does not exist or is closed
 ISSUE_UNVERIFIED = "issue-unverified"  # the item could not be looked up
 LEAD_WAITS = "lead-waits"  # a lead session's foreground Bash call waits (gh run watch, a polling loop, a long sleep)
+RESEARCH_ROUTE = "research-route"  # a research brief goes to an agent type that cannot search (warn only)
+RESEARCH_LADDER = "research-ladder"  # a research brief names no `research:` ladder (warn only)
 RULES = (
     NO_MODEL,
     UNKNOWN_MODEL,
@@ -81,12 +83,27 @@ RULES = (
     ISSUE_UNUSABLE,
     ISSUE_UNVERIFIED,
     LEAD_WAITS,
+    RESEARCH_ROUTE,
+    RESEARCH_LADDER,
     GEMINI_PAID,
     GEMINI_MATERIAL,
 )
 # These deny in every guard mode, warn included: no approval record for money, or private material for the free tier,
 # is blocked and not noted (#200, #195).
 ALWAYS_BLOCK = (GEMINI_PAID, GEMINI_MATERIAL)
+# These never deny, block mode included: they warn until a week of measurements says otherwise (#353).
+WARN_ONLY = (RESEARCH_ROUTE, RESEARCH_LADDER)
+NO_SEARCH_TYPES = ("implementer", "reviewer", "adversarial-reviewer", "transcriber")  # named in the message only
+RESEARCH_LINE = re.compile(
+    r"(?im)^[ \t>*-]*research:[ \t]*(?!n/a\b)(\S.{3,})$"
+)  # a value of at least 4 characters; n/a needs its reason
+LADDER_TEXT = (
+    "research-ladder: this brief asks for a fact about a vendor, product, standard or document but has no `research:` "
+    "line. Name the ladder it follows: prior art (memory, docs), the vendor page itself, a web search with the exact "
+    'query, an archive or second source, then the live system. A claim may be reported "not found" only after at '
+    "least two distinct web search queries, each listed in the report (`query:` lines). Or write "
+    "`research: n/a - <why>`"
+)
 
 
 # -- the probe -------------------------------------------------------------------------------------
@@ -453,6 +470,9 @@ def check_dispatch(
         if broken:
             rules.append(broken[0])
             reasons.append("no hidden work: " + broken[1])
+    for rule, why in research_findings(hooks, prompt, tool_input.get("subagent_type")):
+        rules.append(rule)
+        reasons.append(why)
     try:
         gemini_findings = findings(prompt, approval_check, terms, deadline)
     except Exception:  # a check that cannot finish blocks: it never allows
@@ -466,12 +486,42 @@ def check_dispatch(
     return Verdict(tuple(rules), tuple(reasons), model, local_step, na)
 
 
+def research_findings(hooks: Hooks, prompt: str, subagent_type: object) -> list[tuple[str, str]]:
+    """(rule, why) for the research rules. Warn only; unknown types fail open with a visible warning."""
+    cfg = hooks.research
+    lowered = prompt.lower()
+    if not (cfg.route or cfg.ladder) or not any(k in lowered for k in cfg.intent_keywords):
+        return []
+    if re.search(r"\s+".join(re.escape(w) for w in cfg.na_marker.split()) + r"[ \t]*\S", lowered):
+        return []  # a reason must follow on the same line
+    out: list[tuple[str, str]] = []
+    kind = subagent_type.strip() if isinstance(subagent_type, str) and subagent_type.strip() else "general-purpose"
+    if cfg.route and kind.lower() not in cfg.search_types:
+        if kind.lower() in NO_SEARCH_TYPES:
+            why = f"subagent type {kind} has no search tool"
+        else:
+            why = f"unknown subagent type {kind} (not in hooks.research.search_types, so it may not be able to search)"
+        out.append(
+            (
+                RESEARCH_ROUTE,
+                f"research-route: this brief asks for a fact about a vendor, product, standard or document, and {why}. "
+                f"Route the research to a type that can search ({', '.join(cfg.search_types)}), "
+                "or write `research: n/a - <why>`",
+            )
+        )
+    if cfg.ladder and RESEARCH_LINE.search(prompt) is None:
+        out.append((RESEARCH_LADDER, LADDER_TEXT))
+    return out
+
+
 def decide(verdict: Verdict, mode: str) -> str:
     """allow when nothing is wrong; otherwise deny in block mode and warn (allow, but say so) in warn mode."""
     if not verdict.rules:
         return "allow"
     if any(rule in ALWAYS_BLOCK for rule in verdict.rules):
         return "deny"
+    if all(rule in WARN_ONLY for rule in verdict.rules):
+        return "warn"
     return "deny" if mode == "block" else "warn"
 
 

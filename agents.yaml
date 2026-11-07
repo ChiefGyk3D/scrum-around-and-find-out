@@ -409,6 +409,12 @@ hooks:
   lead_wait:
     mode: follow
     sleep_threshold_seconds: 10
+  # Research discipline (#353, docs/look-before-instructing.md). Warn only; the defaults are built in, so this block is
+  # only needed to switch a rule off or to change the keyword and agent-type sets.
+  research:
+    route: true
+    ladder: true
+    report_not_found: true
 
 rules_of_thumb:
   - "Routing order 1: text-in/text-out work (summaries, triage, classification, first drafts, log and CI digests) goes to the local LLM first, and a Claude model checks anything that will be applied."

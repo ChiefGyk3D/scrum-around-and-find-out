@@ -6,6 +6,13 @@
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on
   "Base branch was modified", and can push and open the pull request first. Tests: `tests/test_ship.py`, against a fake gh.
+- Research discipline (#353), warn only, by the maintainer's explicit word of 2026-11-07 despite the guard freeze. New
+  dispatch rules `research-route` (a research brief goes to an agent type that cannot search) and `research-ladder` (a
+  research brief has no `research:` line; `research: n/a - <why>` turns both off for that brief), and `safo handoff
+  shape` (report-not-found: a report that says not found, blocked or 403 without two listed queries or a named fallback;
+  shape only, not truth). No deny path, `block` mode included. New `hooks.research` block in `agents.yaml` (`route`,
+  `ladder`, `report_not_found`, `intent_keywords`, `search_types`, `na_marker`); `safo hooks status` counts both rules.
+  Tests: `tests/test_research_rules.py`, `tests/test_reportshape.py`. Docs: `docs/look-before-instructing.md`.
 
 ## 0.2.0 (2026-11-02)
 

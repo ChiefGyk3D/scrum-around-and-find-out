@@ -94,6 +94,8 @@ RULE_IDS = (
     "issue-unusable",
     "issue-unverified",
     "lead-waits",
+    "research-route",
+    "research-ladder",
     "gemini-paid",
     "gemini-material",
 )

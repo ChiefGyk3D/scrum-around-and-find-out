@@ -127,6 +127,49 @@ class LeadWait:
     exempt_repos: tuple[LeadWaitExemption, ...] = ()
 
 
+DEFAULT_RESEARCH_KEYWORDS = (
+    "find what",
+    "says about",
+    "say about",
+    "vendor page",
+    "vendor's",
+    "check against",
+    "verify the claim",
+    "verify what",
+    "verify against",
+    "verify that the vendor",
+    "advisory",
+    "press release",
+    "official doc",
+    "look up",
+    "web search",
+)
+# Agent types that carry WebSearch and WebFetch (or reach a host that does). implementer, reviewer, adversarial-reviewer
+# and transcriber do not. Compared without case.
+DEFAULT_SEARCH_TYPES = (
+    "general-purpose",
+    "claude",
+    "Explore",
+    "Plan",
+    "claude-code-guide",
+    "web-fetch",
+    "codex:codex-rescue",
+    "ollama:ollama-rescue",
+)
+
+
+@dataclass(frozen=True)
+class Research:
+    """The research-discipline rules of the dispatch guard (#353, docs/look-before-instructing.md). Warn only."""
+
+    route: bool = True  # research-route: a research brief goes to a type that can search
+    ladder: bool = True  # research-ladder: a research brief carries a `research:` line
+    report_not_found: bool = True  # report-not-found: `safo handoff shape` checks a report's shape
+    intent_keywords: tuple[str, ...] = DEFAULT_RESEARCH_KEYWORDS  # any one in the brief (no case) marks it research
+    search_types: tuple[str, ...] = DEFAULT_SEARCH_TYPES
+    na_marker: str = "research: n/a -"  # followed by a reason, it says why the brief needs no research route or ladder
+
+
 @dataclass(frozen=True)
 class Hooks:
     """What the Claude Code hooks (`safo hooks`) enforce. All of it is configuration; nothing here is a secret."""
@@ -141,6 +184,7 @@ class Hooks:
     # owner/name of repositories whose issues a brief may cite, besides the session's own repository (its origin remote)
     tracking_repos: tuple[str, ...] = ()
     lead_wait: LeadWait = field(default_factory=LeadWait)
+    research: Research = field(default_factory=Research)
 
 
 @dataclass(frozen=True)
@@ -323,6 +367,7 @@ def _hooks(r: Reader, value: object) -> Hooks:
             "tracking_exempt_repos",
             "tracking_repos",
             "lead_wait",
+            "research",
         },
     )
     token = r.string(m.get("approval_token", default.approval_token), "hooks.approval_token")
@@ -352,6 +397,35 @@ def _hooks(r: Reader, value: object) -> Hooks:
         named["tracking_exempt_repos"],
         named["tracking_repos"],
         _lead_wait(r, m.get("lead_wait")),
+        _research(r, m.get("research")),
+    )
+
+
+def _research(r: Reader, value: object) -> Research:
+    default = Research()
+    m = r.mapping(
+        value if value is not None else {},
+        "hooks.research",
+        {"route", "ladder", "report_not_found", "intent_keywords", "search_types", "na_marker"},
+    )
+    flags: dict[str, bool] = {}
+    for key in ("route", "ladder", "report_not_found"):
+        flag = m.get(key, getattr(default, key))
+        if not isinstance(flag, bool):
+            raise r.fail(f"hooks.research.{key}", "expected true or false")
+        flags[key] = flag
+    keywords = _strings(r, m.get("intent_keywords", list(default.intent_keywords)), "hooks.research.intent_keywords")
+    if not keywords:
+        raise r.fail("hooks.research.intent_keywords", "needs at least one keyword")
+    types = _strings(r, m.get("search_types", list(default.search_types)), "hooks.research.search_types")
+    na = r.string(m.get("na_marker", default.na_marker), "hooks.research.na_marker")
+    return Research(
+        flags["route"],
+        flags["ladder"],
+        flags["report_not_found"],
+        tuple(x.strip().lower() for x in keywords),
+        tuple(x.strip().lower() for x in types),
+        na.strip().lower(),
     )
 
 
