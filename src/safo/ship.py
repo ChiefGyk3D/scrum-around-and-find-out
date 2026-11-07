@@ -29,7 +29,6 @@ Exit codes (several pull requests: the highest code wins):
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import subprocess
@@ -39,7 +38,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
-from safo import output
+from safo import bounded, output
 from safo.credentials import find_executable, find_gh
 
 EXIT_MERGED = 0
@@ -130,7 +129,7 @@ class Gh:
         if code != 0:
             raise ShipError(EXIT_ERROR, f"gh {args[0]} {args[1] if len(args) > 1 else ''} failed: {err.strip()[:200]}")
         try:
-            return json.loads(out)
+            return bounded.loads(out)
         except ValueError as error:
             raise ShipError(EXIT_ERROR, f"gh {args[0]} gave unreadable JSON") from error
 
@@ -244,7 +243,7 @@ class Watcher:
                 return names
             raise ShipError(EXIT_ERROR, f"cannot read the required checks of {base}: {err.strip()[:200]}")
         try:
-            data = json.loads(out)
+            data = bounded.loads(out)
         except ValueError as error:
             raise ShipError(EXIT_ERROR, "unreadable required-checks answer") from error
         found: list[str] = []
