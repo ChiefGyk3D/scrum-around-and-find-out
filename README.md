@@ -175,6 +175,7 @@ replaced are gone.
 - [Act-then-report](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Act-then-report)
 - [Security-findings](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Security-findings)
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
+- [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)
 - [Gemini enrollment](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-enrollment)

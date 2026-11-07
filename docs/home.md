@@ -10,6 +10,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Personas](personas.md): the four roles (implementer, reviewer, adversarial reviewer, transcriber) and six packs defined in the Department of Internal Arguments, how SAFO relates to them, and how to install and update them.
 - [Agent profiles](profiles.md): how to brief each agent, with every claim tied to a pointer at a measurement (the loader, the evidence check and the rendering into `examples/harness/` are built).
 - [Usage, routing and outcomes](usage.md): measure what each agent has left, get a recommendation, and keep a log of how it went.
+- [safo-ship](ship.md): the tested merge watcher: pins the head, waits for `CI green` and every required check, checks review threads, merges that commit.
 - [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
 - [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
 - [SAFO threat model](safo-threat-model.md): the threat model of SAFO as a whole: assets, actors, trust boundaries, 25 ranked risks, a mitigation and a verification for each, and what SAFO does not guarantee.

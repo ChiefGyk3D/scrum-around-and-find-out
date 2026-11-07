@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
+  head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
+  the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on
+  "Base branch was modified", and can push and open the pull request first. Tests: `tests/test_ship.py`, against a fake gh.
+
 ## 0.2.0 (2026-11-02)
 
 - First release that carries the Gemini paid-path broker, its installer and units, the approval-binds-prompt change, the
