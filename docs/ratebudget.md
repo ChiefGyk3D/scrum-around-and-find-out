@@ -11,32 +11,39 @@ bucket) kept working. `ghw` and the ledger make that spending visible and stop i
 
 | Rule | What happens |
 | --- | --- |
-| Worst counter wins | A bucket's state is the WORST of every counter seen for it: the `x-ratelimit-*` headers of answers and the free `rate_limit` endpoint. The endpoint alone is not the truth. |
+| Account scope | Counters, blocks and the write queue belong to a host and a credential: a 20-hex-digit SHA-256 fingerprint of the host and the token (from `GH_TOKEN` or `GITHUB_TOKEN`, the enterprise pair for another host, else `gh auth token`). The token is hashed in memory and never written. Two accounts or two hosts never overwrite or throttle each other; the host comes from `--hostname` or `GH_HOST`. |
+| Worst counter wins | Within one account and bucket the state is the WORST live counter: the `x-ratelimit-*` headers of answers and the `rate_limit` endpoint. This is deliberately more cautious than GitHub's guidance, which treats the response headers as authoritative when they disagree with `GET /rate_limit`; it follows the #356 rule that the minimum across counters is the truth. |
 | 70% used | A WARNING line on stderr; the call goes. |
 | 90% used | The call is refused with exit 75 and `retry after Ns`, until that counter's reset time. |
-| Retry-After | A 403 or 429 with `Retry-After` blocks the bucket for that long (capped at one hour; `nan`, `inf`, negative and junk are ignored). A secondary-limit answer with no header blocks it 60 seconds. |
-| Writes | At least one second apart across all processes: each writer reserves a slot under a file lock. A writer queued past 60 seconds is refused, not parked. |
-| Rollover | A counter past its reset time no longer counts. |
-| No replay | A call that went out is never repeated here. A timeout is reported (exit 124) and recorded as status 0. |
-| Advice only | If the ledger cannot be used, `ghw` says so once and runs the call. |
+| Retry-After | A 403 or 429 with `Retry-After` blocks the bucket for that long (capped at one hour; `nan`, `inf`, negative and junk are ignored). A 429 with no usable header, or a 403 that says "secondary rate limit", blocks it 60 seconds. |
+| Writes | At least one second apart across all processes and all buckets of one account: each writer reserves a slot in one queue under a file lock. A writer queued past 60 seconds is refused, not parked. A writer that slept for its slot re-checks the budget and any block just before it launches `gh`. |
+| Option grammar | An option spelled outside gh's documented forms (`-XPATCH`, `-X=PATCH`, an unknown flag) is treated as a write. |
+| Rollover | A counter past its reset time no longer counts. A reset, block or write slot further than two hours (a minute for a slot) from now, in state or in an answer, is treated as corrupt and ignored. |
+| Headers | Only the final header block is read. A repeated rate-limit header, an obs-fold line or a malformed header name rejects every rate-limit and Retry-After value of that answer. |
+| No replay | A call that went out is never repeated here. A timeout or output that is not valid UTF-8 is an unknown outcome (exit 124, recorded as status 0). |
+| Advice only | If the ledger directory cannot be used, `ghw` says so once and runs the call. If only the audit row cannot be written, the counters and blocks were already saved; `ghw` says so once. |
 
 `gh api` calls get `--include` added so the headers can be read; they are removed again before the body is printed.
 Calls that use `--jq`, `--template`, `--paginate`, `--silent` or `--include` themselves, and every other `gh` command
-(`gh issue`, `gh pr`, `gh project` count as GraphQL), are recorded without headers. `gh api rate_limit` is free and
-neither counted nor blocked.
+(`gh issue`, `gh pr`, `gh project` count as GraphQL), are recorded without headers. `gh api rate_limit` does not count
+against the primary limit, but GitHub does not promise the same for the secondary limit; `ghw` neither counts nor blocks
+it, so a block from another call does not stop it. Do not poll it.
 
 ## Where it lives
 
-`~/.local/state/safo/ratebudget` (or under `$XDG_STATE_HOME`), mode 0700: `ledger.jsonl` (one line per call, rotated at
-4 MiB to `ledger.jsonl.1`), `state.json` (counters, blocks, last write slot per bucket), `statusline.txt` (one line,
-rewritten on every call, for a session statusline), and `lock`.
+`~/.local/state/safo/ratebudget` (or under `$XDG_STATE_HOME`): `ledger.jsonl` (one line per call, rotated at
+4 MiB to `ledger.jsonl.1`), `state.json` (counters, blocks and the write slot, each under its account scope),
+`statusline.txt` (one line for the account used last, rewritten on every call, for a session statusline), and `lock`.
+The directory is opened without following a symlink, must belong to you, and is set to mode 0700 if it was looser; the
+files in it are opened relative to it, must be regular files of yours with one link, and are set to 0600. A file that
+is a symlink is never followed. The same holds for `boardmap.json` (`safo-card`).
 
 ## `safo-ratebudget`
 
     safo-ratebudget [--by-caller] [--refresh] [--json]
 
 Prints the status line, for example `ratebudget: core 20% (4000 left), graphql 83% (850 left) WARN`, and with
-`--by-caller` the calls and writes per caller. `--refresh` reads the `rate_limit` endpoint into the ledger first.
+`--by-caller` the calls and writes per caller. `--refresh` reads the `rate_limit` endpoint into the ledger first (for the account `gh` is logged in as).
 Exit 0 when every bucket is under 70%, 1 at WARN or THROTTLE.
 
 ## Card edits (`safo-card`, #358)

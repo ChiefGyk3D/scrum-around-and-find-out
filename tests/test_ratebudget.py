@@ -11,6 +11,7 @@ import json
 import multiprocessing
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -320,27 +321,42 @@ class Harness:
         self.out = io.StringIO()
         self.err = io.StringIO()
         self.tmp = tmp_path
+        self.cred = "t0-credential"
+        self.fail: Exception | None = None
+        self.on_sleep: Callable[[float], None] | None = None
 
     def run(self, argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(argv)
+        if self.fail is not None:
+            raise self.fail
         return done(self.reply, self.code)
 
+    @property
+    def env(self) -> dict[str, str]:
+        return {"HOME": str(self.tmp), "SAFO_CALLER": "agent-a", "PATH": "/usr/bin", "GH_TOKEN": self.cred}
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        if self.on_sleep:
+            self.on_sleep(seconds)
+
     def go(self, argv: list[str], caller: str = "agent-a") -> int:
-        env = {"HOME": str(self.tmp), "SAFO_CALLER": caller, "PATH": "/usr/bin"}
+        env = {**self.env, "SAFO_CALLER": caller}
         return rb.main(
             argv,
             env=env,
             out=self.out,
             err=self.err,
             run=self.run,
-            sleep=self.slept.append,
+            sleep=self.sleep,
             clock=self.clock,
             gh="/usr/bin/gh",
         )
 
     @property
     def ledger(self) -> rb.Budget:
-        return rb.Budget(self.tmp / ".local" / "state" / "safo" / "ratebudget", self.clock)
+        scope = rb.scope_for(self.env, ["api", "x"], self.run, "/usr/bin/gh")
+        return rb.Budget(self.tmp / ".local" / "state" / "safo" / "ratebudget", self.clock, scope)
 
 
 OK = {

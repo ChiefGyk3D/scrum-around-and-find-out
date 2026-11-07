@@ -24,6 +24,7 @@ import contextlib
 import datetime as dt
 import email.utils
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -48,6 +49,10 @@ MAX_WAIT = 3600.0  # no Retry-After or reset is believed past an hour
 MAX_SPACING_WAIT = 60.0  # a writer queued longer than this is refused, not parked
 SECONDARY_WAIT = 60.0  # GitHub: wait at least a minute after a secondary limit with no Retry-After
 MAX_STATE_BYTES = 262_144
+MAX_HORIZON = 7200.0  # a counter whose reset is further off than this is corrupt, not a throttle
+MAX_COUNTERS = 256
+WRITES = "*"  # the one write queue of a scope, across buckets
+AUTH_TIMEOUT_SECONDS = 20.0
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
 MAX_HEADER_BYTES = 65_536
 MAX_PRELUDE = 2  # leading 100-continue or CONNECT blocks allowed before the final header block
@@ -63,6 +68,7 @@ STATUSLINE = "statusline.txt"
 
 _NAME = re.compile(r"[a-z_]{1,32}")
 _NUMBER = re.compile(r"[0-9]{1,12}")
+_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _BAD_CALLER = re.compile(r"[^A-Za-z0-9._-]+")
 
 Clock = Callable[[], float]
@@ -196,6 +202,7 @@ _VALUE_FLAGS = frozenset(
     | {"--input", "--hostname", "--cache", "-p", "--preview"}
 )
 _FIELD_FLAGS = frozenset({"-f", "--raw-field", "-F", "--field", "--input"})
+_BOOL_FLAGS = frozenset({"--include", "-i", "--paginate", "--slurp", "--silent", "--verbose", "--help", "-h"})
 _NO_INCLUDE = frozenset({"--include", "-i", "--jq", "-q", "--template", "-t", "--paginate", "--slurp", "--silent"})
 _GRAPHQL_GROUPS = frozenset({"project", "issue", "pr", "repo", "release", "label", "milestone", "discussion"})
 _FREE_GROUPS = frozenset({"auth", "config", "alias", "completion", "version", "help", "extension", "--version", "-h"})
@@ -233,6 +240,9 @@ def classify(argv: Sequence[str]) -> Classified:
     method = ""
     has_fields = False
     mutation = False
+    unknown = (
+        False  # an option spelling not in gh's documented grammar: its meaning is unknown, so it counts as a write
+    )
     skip = False
     for word in argv[1:]:
         if skip:
@@ -243,6 +253,9 @@ def classify(argv: Sequence[str]) -> Classified:
             continue
         name = _flag_name(word)
         if word.startswith("-"):
+            inline_ok = word.startswith("--") and "=" in word and name in _VALUE_FLAGS
+            if word not in _VALUE_FLAGS and word not in _BOOL_FLAGS and not inline_ok:
+                unknown = True  # compact (-XPATCH, -X=PATCH), unknown, or a boolean given a value
             has_fields = has_fields or name in _FIELD_FLAGS
             inline = "=" in word and word.startswith("--")
             if name in ("-X", "--method"):
@@ -262,60 +275,185 @@ def classify(argv: Sequence[str]) -> Classified:
     if bare == "rate_limit":
         return Classified("core", "rate_limit", False, True)
     if bare == "graphql":
-        return Classified("graphql", "graphql", mutation, False)
+        return Classified("graphql", "graphql", mutation or unknown, False)
     bucket = "search" if bare.startswith("search/") else "core"
     verb = method if method and method != "?" else ("POST" if has_fields else "GET")
-    return Classified(bucket, _endpoint_class(endpoint), verb not in ("GET", "HEAD"), False)
+    return Classified(bucket, _endpoint_class(endpoint), verb not in ("GET", "HEAD") or unknown, False)
+
+
+# private directories: every file operation is relative to one directory descriptor
+
+
+def open_private_dir(directory: Path, *, create: bool) -> int:
+    """A descriptor for `directory`, which must be ours and is repaired to 0700 when it is looser.
+
+    The directory is opened without following a symlink, and every later operation is relative to the descriptor, so
+    a name inside cannot be swapped for another directory's entry after this check.
+    """
+    if create:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.geteuid():
+            raise OSError("the ratebudget directory is not owned by this user")
+        if info.st_mode & 0o077:
+            os.fchmod(fd, 0o700)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _check_regular(fd: int) -> None:
+    """The descriptor is a regular file of this user with one link; a mode looser than 0600 is repaired."""
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+        raise OSError("not a private regular file of this user")
+    if info.st_mode & 0o077:
+        os.fchmod(fd, 0o600)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
+
+
+def _replace_private(dfd: int, name: str, data: bytes) -> None:
+    tmp = f"{name}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+    try:
+        _check_regular(fd)
+        _write_all(fd, data)
+    finally:
+        os.close(fd)
+    os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+
+
+def write_private(path: Path, data: bytes) -> None:
+    """Atomically write `data` to `path` inside a private directory (created or repaired)."""
+    dfd = open_private_dir(path.parent, create=True)
+    try:
+        _replace_private(dfd, path.name, data)
+    finally:
+        os.close(dfd)
+
+
+def _read_private(dfd: int, name: str, limit: int) -> bytes | None:
+    """At most limit+1 bytes of a private regular file, or None when it is absent or not one. Never follows a link."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+    except OSError:
+        return None
+    try:
+        _check_regular(fd)
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(fd, min(65_536, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+# who is calling: a host and credential scope for every counter
+
+
+def _option_value(argv: Sequence[str], name: str) -> str:
+    for i, word in enumerate(argv):
+        if word == name and i + 1 < len(argv):
+            return argv[i + 1]
+        if word.startswith(name + "="):
+            return word.split("=", 1)[1]
+    return ""
+
+
+def scope_for(env: Mapping[str, str], argv: Sequence[str], run: Run, gh: str | None) -> str:
+    """A short, non-reversible name for this host and this credential; the credential itself is never stored.
+
+    The credential is read only to be hashed: from the environment (GH_TOKEN, GITHUB_TOKEN, or the enterprise pair for
+    another host), else from `gh auth token`. Two accounts, or two hosts, never share a counter, a block or a queue.
+    """
+    host = (_option_value(argv, "--hostname") or env.get("GH_HOST", "") or "github.com").strip().lower()[:253]
+    names = ("GH_TOKEN", "GITHUB_TOKEN") if host == "github.com" else ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    secret = next((env[n] for n in names if env.get(n)), "")
+    if not secret and gh is not None:
+        try:
+            done = run(
+                [gh, "auth", "token", "--hostname", host],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=AUTH_TIMEOUT_SECONDS,
+                stdin=subprocess.DEVNULL,
+            )
+            secret = (done.stdout or "").strip() if done.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired, UnicodeError):
+            secret = ""
+    digest = hashlib.sha256(b"safo-ratebudget-scope\0" + host.encode() + b"\0" + secret.encode()).hexdigest()
+    return digest[:20]
 
 
 # the ledger
 
 
 class Budget:
-    """The shared state under one directory. Every method that changes it holds the file lock for the whole step."""
+    """The shared state under one directory, for one scope (host and account). Every change holds the file lock."""
 
-    def __init__(self, directory: Path, clock: Clock = time.time) -> None:
+    def __init__(self, directory: Path, clock: Clock = time.time, scope: str = "local") -> None:
         self.directory = directory
         self.clock = clock
+        self.scope = scope
+
+    def _k(self, name: str) -> str:
+        return f"{self.scope}|{name}"
 
     # locking and files
 
-    def _ensure(self) -> None:
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = self.directory.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-            raise OSError("the ratebudget directory is not a directory of this user")
-
     @contextlib.contextmanager
-    def _locked(self) -> Iterator[None]:
-        self._ensure()
-        fd = os.open(self.directory / LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    def _locked(self) -> Iterator[int]:
+        dfd = open_private_dir(self.directory, create=True)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            lock = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+            try:
+                _check_regular(lock)
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                yield dfd
+            finally:
+                os.close(lock)  # closing releases the lock
         finally:
-            os.close(fd)  # closing releases the lock
+            os.close(dfd)
 
-    def _write_atomic(self, name: str, text: str) -> None:
-        tmp = self.directory / f"{name}.{os.getpid()}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    def _read(self, name: str, limit: int) -> bytes | None:
         try:
-            os.write(fd, text.encode())
+            dfd = open_private_dir(self.directory, create=False)
+        except OSError:
+            return None
+        try:
+            return _read_private(dfd, name, limit)
         finally:
-            os.close(fd)
-        os.replace(tmp, self.directory / name)
+            os.close(dfd)
 
-    def _load(self) -> dict[str, Any]:
+    def _load(self, dfd: int | None = None) -> dict[str, Any]:
+        raw = _read_private(dfd, STATE, MAX_STATE_BYTES) if dfd is not None else self._read(STATE, MAX_STATE_BYTES)
+        if raw is None or len(raw) > MAX_STATE_BYTES:
+            return {}
         try:
-            raw = bounded.read_bounded(self.directory / STATE, MAX_STATE_BYTES + 1)
-            if len(raw) > MAX_STATE_BYTES:
-                return {}
             data = bounded.loads(raw)
-        except (OSError, ValueError, RecursionError):
+        except (ValueError, RecursionError):
             return {}
         return data if isinstance(data, dict) else {}
 
     def _counters(self, state: Mapping[str, Any]) -> list[Counter]:
+        """Every scope's counters; one whose reset is past the horizon is corrupt and is not returned."""
+        now = self.clock()
         found: list[Counter] = []
         raw = state.get("counters")
         for key, entry in raw.items() if isinstance(raw, dict) else []:
@@ -331,28 +469,41 @@ class Budget:
                 )
             except (KeyError, TypeError, ValueError, OverflowError):
                 continue
-        return [c for c in found if c.limit >= 1 and 0 <= c.remaining <= c.limit and math.isfinite(c.reset)]
+        return [
+            c
+            for c in found
+            if c.limit >= 1 and 0 <= c.remaining <= c.limit and math.isfinite(c.reset) and c.reset <= now + MAX_HORIZON
+        ]
 
-    @staticmethod
-    def _map(state: Mapping[str, Any], name: str) -> dict[str, float]:
+    def _map(self, state: Mapping[str, Any], name: str, ahead: float) -> dict[str, float]:
+        """A name -> epoch map from state; a time more than `ahead` seconds from now is corrupt and is dropped."""
         raw = state.get(name)
+        now = self.clock()
         out: dict[str, float] = {}
         for key, value in raw.items() if isinstance(raw, dict) else []:
-            if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
+            numeric = isinstance(value, int | float) and not isinstance(value, bool)
+            if numeric and math.isfinite(value) and value <= now + ahead:
                 out[str(key)] = float(value)
         return out
 
-    def _save(self, state: dict[str, Any]) -> None:
+    def _blocked(self, state: Mapping[str, Any]) -> dict[str, float]:
+        return self._map(state, "blocked", MAX_WAIT)
+
+    def _written(self, state: Mapping[str, Any]) -> dict[str, float]:
+        return self._map(state, "last_write", 2 * MAX_SPACING_WAIT)
+
+    def _save(self, dfd: int, state: dict[str, Any]) -> None:
         state["updated"] = self.clock()
-        self._write_atomic(STATE, bounded_dumps(state))
-        self._write_atomic(STATUSLINE, self._line(state) + "\n")
+        _replace_private(dfd, STATE, bounded_dumps(state).encode())
+        _replace_private(dfd, STATUSLINE, (self._line(state) + "\n").encode())
 
     # reading the truth
 
     def _headroom(self, state: Mapping[str, Any], bucket: str) -> Headroom:
         now = self.clock()
-        live = [c for c in self._counters(state) if c.bucket == bucket and c.reset > now]
-        blocked = self._map(state, "blocked").get(bucket, 0.0) - now
+        key = self._k(bucket)
+        live = [c for c in self._counters(state) if c.bucket == key and c.reset > now]
+        blocked = self._blocked(state).get(key, 0.0) - now
         if not live and blocked <= 0:
             return Headroom("ok", 0.0, None, 0.0, "")
         worst = max(live, key=lambda c: (c.used_fraction, -c.remaining), default=None)
@@ -365,74 +516,95 @@ class Budget:
             level = "warn"
         if blocked > 0:
             level, retry = "throttle", max(retry, min(blocked, MAX_WAIT))
-        return Headroom(
-            level, used, min((c.remaining for c in live), default=None), retry, worst.key if worst else "blocked"
-        )
+        counter = worst.key.removeprefix(self.scope + "|") if worst else "blocked"
+        return Headroom(level, used, min((c.remaining for c in live), default=None), retry, counter)
 
     def headroom(self, bucket: str) -> Headroom:
         return self._headroom(self._load(), bucket)
 
     def observe(self, counters: Sequence[Counter]) -> None:
-        with self._locked():
-            state = self._load()
+        with self._locked() as dfd:
+            state = self._load(dfd)
             self._apply(state, counters, None, None)
-            self._save(state)
+            self._save(dfd, state)
 
     def block(self, bucket: str, seconds: float) -> None:
-        with self._locked():
-            state = self._load()
+        with self._locked() as dfd:
+            state = self._load(dfd)
             self._apply(state, (), (bucket, seconds), None)
-            self._save(state)
+            self._save(dfd, state)
 
     def _apply(
         self,
         state: dict[str, Any],
         counters: Sequence[Counter],
         block: tuple[str, float] | None,
-        last_write: tuple[str, float] | None,
+        slot: float | None,
     ) -> None:
+        now = self.clock()
         kept = {c.key: c for c in self._counters(state)}
         for c in counters:
-            kept[c.key] = c
+            if c.reset > now + MAX_HORIZON:
+                continue  # an implausible reset is no observation
+            key = self._k(c.key)
+            kept[key] = Counter(key, self._k(c.bucket), c.limit, c.remaining, c.reset)
+        live = sorted((c for c in kept.values() if c.reset > now), key=lambda c: c.reset)[-MAX_COUNTERS:]
         state["counters"] = {
-            k: {"bucket": c.bucket, "limit": c.limit, "remaining": c.remaining, "reset": c.reset}
-            for k, c in kept.items()
-            if c.reset > self.clock()
+            c.key: {"bucket": c.bucket, "limit": c.limit, "remaining": c.remaining, "reset": c.reset} for c in live
         }
-        blocked = {k: v for k, v in self._map(state, "blocked").items() if v > self.clock()}
+        blocked = {k: v for k, v in self._blocked(state).items() if v > now}
         if block:
-            blocked[block[0]] = max(blocked.get(block[0], 0.0), self.clock() + min(max(block[1], 0.0), MAX_WAIT))
+            key = self._k(block[0])
+            blocked[key] = max(blocked.get(key, 0.0), now + min(max(block[1], 0.0), MAX_WAIT))
         state["blocked"] = blocked
-        written = self._map(state, "last_write")
-        if last_write:
-            written[last_write[0]] = last_write[1]
-        state["last_write"] = {k: v for k, v in written.items() if v > self.clock() - 3600}
+        written = self._written(state)
+        if slot is not None:
+            written[self._k(WRITES)] = slot
+        state["last_write"] = {k: v for k, v in written.items() if v > now - 3600}
+
+    def _judge(self, state: Mapping[str, Any], bucket: str) -> Decision | None:
+        """A refusal when the bucket is throttled or blocked now; None otherwise."""
+        head = self._headroom(state, bucket)
+        if head.level != "throttle":
+            return None
+        message = (
+            f"{bucket} budget {head.used_fraction:.0%} used or blocked; retry after {math.ceil(head.retry_after)}s"
+        )
+        return Decision("refuse", head.retry_after, "throttle", message)
 
     def reserve(self, bucket: str, *, write: bool) -> Decision:
-        """Decide, and for a write claim the next free one-second slot so concurrent writers queue instead of racing."""
-        with self._locked():
-            state = self._load()
+        """Decide, and for a write claim the next free one-second slot so concurrent writers queue instead of racing.
+
+        The queue is one per scope across every bucket: GitHub asks for a second between mutating requests, not a
+        second per rate-limit resource.
+        """
+        with self._locked() as dfd:
+            state = self._load(dfd)
             now = self.clock()
+            refusal = self._judge(state, bucket)
+            if refusal:
+                return refusal
             head = self._headroom(state, bucket)
-            if head.level == "throttle":
-                seconds = math.ceil(head.retry_after)
-                message = f"{bucket} budget {head.used_fraction:.0%} used or blocked; retry after {seconds}s"
-                return Decision("refuse", head.retry_after, "throttle", message)
             wait = 0.0
             if write:
-                slot = max(now, self._map(state, "last_write").get(bucket, 0.0) + WRITE_SPACING)
+                slot = max(now, self._written(state).get(self._k(WRITES), 0.0) + WRITE_SPACING)
                 wait = slot - now
                 if wait > MAX_SPACING_WAIT:
                     return Decision(
                         "refuse", wait, "throttle", f"{bucket} writes are queued; retry after {math.ceil(wait)}s"
                     )
-                self._apply(state, (), None, (bucket, slot))
-                self._save(state)
+                self._apply(state, (), None, slot)
+                self._save(dfd, state)
             message = ""
             if head.level == "warn":
                 left = head.min_remaining if head.min_remaining is not None else 0
                 message = f"WARNING {bucket} budget {head.used_fraction:.0%} used ({left} left): slow down"
             return Decision("go", wait, head.level, message)
+
+    def confirm(self, bucket: str) -> Decision:
+        """Re-check a bucket just before launching a call that waited for its slot. Takes no new slot."""
+        with self._locked() as dfd:
+            return self._judge(self._load(dfd), bucket) or Decision("go", 0.0, "ok", "")
 
     def record(
         self,
@@ -445,30 +617,42 @@ class Budget:
         counters: Sequence[Counter] = (),
         block_for: float | None = None,
     ) -> None:
+        """Save the counters and the block first, then append the audit row; the row may fail alone (OSError)."""
         row = {"t": round(self.clock(), 3), "caller": clean_caller(caller), "bucket": bucket, "class": klass}
         row |= {"write": write, "status": status}
-        with self._locked():
-            path = self.directory / LEDGER
-            with contextlib.suppress(FileNotFoundError):
-                if path.stat().st_size > MAX_LEDGER_BYTES:
-                    os.replace(path, self.directory / f"{LEDGER}.1")
-            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            try:
-                os.write(fd, (bounded_dumps(row) + "\n").encode())
-            finally:
-                os.close(fd)
-            state = self._load()
+        with self._locked() as dfd:
+            state = self._load(dfd)
             self._apply(state, counters, (bucket, block_for) if block_for else None, None)
-            self._save(state)
+            self._save(dfd, state)
+            self._append(dfd, bounded_dumps(row) + "\n")
+
+    @staticmethod
+    def _append(dfd: int, line: str) -> None:
+        try:
+            if os.stat(LEDGER, dir_fd=dfd, follow_symlinks=False).st_size > MAX_LEDGER_BYTES:
+                os.replace(LEDGER, f"{LEDGER}.1", src_dir_fd=dfd, dst_dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+        fd = os.open(LEDGER, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        try:
+            _check_regular(fd)
+            _write_all(fd, line.encode())
+        finally:
+            os.close(fd)
 
     # reports
 
     def rows(self) -> list[dict[str, Any]]:
-        try:
-            lines = bounded.json_lines(self.directory / LEDGER)
-        except (OSError, ValueError):
-            return []
-        return [row for _, row in lines if isinstance(row, dict)]
+        raw = self._read(LEDGER, 2 * MAX_LEDGER_BYTES)
+        rows: list[dict[str, Any]] = []
+        for line in (raw or b"").splitlines():
+            try:
+                row = bounded.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
 
     def by_caller(self) -> dict[str, dict[str, dict[str, int]]]:
         report: dict[str, dict[str, dict[str, int]]] = {}
@@ -481,7 +665,9 @@ class Budget:
 
     def _line(self, state: Mapping[str, Any]) -> str:
         now = self.clock()
-        buckets = sorted({c.bucket for c in self._counters(state) if c.reset > now} | set(self._map(state, "blocked")))
+        prefix = self.scope + "|"
+        names = {c.bucket for c in self._counters(state) if c.reset > now} | set(self._blocked(state))
+        buckets = sorted(n.removeprefix(prefix) for n in names if n.startswith(prefix))
         parts = []
         for bucket in buckets:
             head = self._headroom(state, bucket)
@@ -505,6 +691,10 @@ def bounded_dumps(value: Any) -> str:
 # the gh wrapper
 
 
+def _sensitive(name: str) -> bool:
+    return name.startswith("x-ratelimit-") or name == "retry-after"
+
+
 def _parse_block(text: str) -> tuple[int, str, dict[str, str], str] | None:
     """(status, reason, lower-cased headers, rest) of the header block at the start of `text`, or None."""
     if not text.startswith("HTTP/"):
@@ -517,10 +707,20 @@ def _parse_block(text: str) -> tuple[int, str, dict[str, str], str] | None:
     if len(parts) < 2 or not parts[1].isdigit() or len(parts[1]) != 3:
         return None
     headers: dict[str, str] = {}
+    seen: set[str] = set()
+    tainted = len(lines) > 200
     for line in lines[1:200]:
         name, sep, value = line.partition(":")
-        if sep:
-            headers[name.strip().lower()] = value.strip()
+        if line[:1] in (" ", "\t") or not sep or not _TOKEN.fullmatch(name):
+            tainted = True  # obs-fold, no colon, or a name that is not an HTTP token: this block cannot be trusted
+            continue
+        key = name.lower()
+        if key in seen and _sensitive(key):
+            tainted = True  # a repeated rate-limit header: first-value and last-value readers would disagree
+        seen.add(key)
+        headers[key] = value.strip()
+    if tainted:
+        headers = {k: v for k, v in headers.items() if not _sensitive(k)}
     return int(parts[1]), parts[2].strip().lower() if len(parts) > 2 else "", headers, text[match.end() :]
 
 
@@ -578,7 +778,7 @@ def main(
     ledger: Budget | None = None
     if not what.free:
         try:
-            ledger = Budget(state_dir(env), clock)
+            ledger = Budget(state_dir(env), clock, scope_for(env, argv, run, exe))
             decision = ledger.reserve(what.bucket, write=what.write)
         except (OSError, ConfigError) as problem:
             err.write(f"ghw: the budget ledger is unavailable ({type(problem).__name__}); going ahead without it\n")
@@ -591,16 +791,23 @@ def main(
                 err.write(decision.message + "\n")
             if decision.wait > 0:
                 sleep(decision.wait)
+                try:
+                    again = ledger.confirm(what.bucket)  # another writer may have hit a limit while this one queued
+                except OSError:
+                    again = None
+                if again is not None and again.action == "refuse":
+                    err.write(f"ghw: {again.message}\n")
+                    return EXIT_THROTTLED
     inject = ledger is not None and _injectable(argv)
     if inject:
         command = [exe, "api", "--include", *argv[1:]]
     try:
         extra = {} if stdin is None else {"input": stdin}  # the request body of `--input -`; else gh inherits stdin
         done = run(command, capture_output=True, text=True, check=False, timeout=GH_TIMEOUT_SECONDS, **extra)
-    except (OSError, subprocess.TimeoutExpired) as problem:
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as problem:  # bad UTF-8 is unknown too
         # sent or not, we cannot tell: record it, never replay it
         err.write(f"ghw: outcome unknown ({type(problem).__name__}); not retried\n")
-        _record(ledger, env, what, 0, [], None)
+        _record(ledger, env, what, 0, [], None, err)
         return EXIT_UNKNOWN_OUTCOME
     stdout = done.stdout or ""
     status, headers, body = _split_response(stdout) if inject else (0, {}, stdout)
@@ -610,10 +817,10 @@ def main(
     block: float | None = None
     if status in (403, 429):
         block = parse_retry_after(headers.get("retry-after", ""), clock())
-        if block is None and "secondary rate limit" in body.lower():
+        if block is None and (status == 429 or "secondary rate limit" in body.lower()):
             block = SECONDARY_WAIT
     counters = counters_from_headers(headers, what.bucket) if headers else []
-    _record(ledger, env, what, status, counters, block)
+    _record(ledger, env, what, status, counters, block, err)
     return done.returncode
 
 
@@ -624,10 +831,11 @@ def _record(
     status: int,
     counters: Sequence[Counter],
     block: float | None,
+    err: TextIO,
 ) -> None:
     if ledger is None:
         return
-    with contextlib.suppress(OSError):
+    try:
         ledger.record(
             caller=env.get("SAFO_CALLER", "unknown"),
             bucket=what.bucket,
@@ -637,6 +845,8 @@ def _record(
             counters=counters,
             block_for=block,
         )
+    except OSError as problem:  # counters and blocks are saved before the audit row; say so once
+        err.write(f"ghw: the budget ledger could not be written ({type(problem).__name__}); the call is not repeated\n")
 
 
 def refresh(ledger: Budget, env: Mapping[str, str], run: Run = subprocess.run, gh: str | None = None) -> int:
@@ -646,7 +856,7 @@ def refresh(ledger: Budget, env: Mapping[str, str], run: Run = subprocess.run, g
         raise ConfigError("gh was not found on PATH")
     try:
         done = run([exe, "api", "rate_limit"], capture_output=True, text=True, check=False, timeout=GH_TIMEOUT_SECONDS)
-    except (OSError, subprocess.TimeoutExpired) as problem:
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as problem:
         raise ConfigError(f"could not read rate_limit ({type(problem).__name__})") from problem
     counters = counters_from_rate_limit((done.stdout or "").encode()) if done.returncode == 0 else []
     if counters:

@@ -10,7 +10,11 @@
   (`statusline.txt`) is kept for a statusline. `safo-card` edits one project card with one REST PATCH from a persisted
   map of item, field and option ids (`safo.boardmap`) and never lists the board. Tests: `tests/test_ratebudget.py`,
   `tests/test_ratebudget_mode.py`, `tests/test_boardmap.py`. Docs: `docs/ratebudget.md`. Not wired into the dispatch
-  guard (a guard file; #357).
+  guard (a guard file; #357). Round 2 (review): counters, blocks and the write queue are scoped by a host and
+  credential fingerprint; one global write queue; a queued writer re-checks before it launches; counters are saved
+  before the audit row; the state directory is made private and used by descriptor; persisted times are bounded; a
+  repeated or malformed rate-limit header rejects the answer; compact option spellings count as writes; `--resolve`
+  needs a positive repository match.
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on

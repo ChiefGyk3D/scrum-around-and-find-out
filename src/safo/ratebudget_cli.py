@@ -23,7 +23,11 @@ from safo.modes.reconcile import safe
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
-    ledger = ratebudget.Budget(ratebudget.state_dir(ctx.env), lambda: ctx.now.timestamp())
+    ledger = ratebudget.Budget(
+        ratebudget.state_dir(ctx.env),
+        lambda: ctx.now.timestamp(),
+        ratebudget.scope_for(ctx.env, [], ctx.run, ctx.which("gh")),
+    )
     if args.refresh:
         count = ratebudget.refresh(ledger, ctx.env, ctx.run, ctx.which("gh"))
         if not count:

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import re
 import subprocess
 import time
@@ -160,15 +159,8 @@ def load(path: Path) -> BoardMap:
 
 
 def save(board: BoardMap, path: Path) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    try:
-        os.write(fd, json.dumps(to_json(board), indent=1, sort_keys=True).encode() + b"\n")
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+    """Atomically write the map into a private directory (created, or repaired to 0700)."""
+    ratebudget.write_private(path, json.dumps(to_json(board), indent=1, sort_keys=True).encode() + b"\n")
 
 
 def map_path(env: Mapping[str, str]) -> Path:
@@ -274,7 +266,7 @@ def resolve_item(board: BoardMap, transport: Transport, key: str) -> int:
         item_id = entry.get("id")
         if isinstance(item_id, bool) or not isinstance(item_id, int) or item_id < 1:
             raise MalformedDataError(f"{key}: an item has no usable id")
-        if _repo_matches(content, owner, repo) is False:
+        if _repo_matches(content, owner, repo) is not True:  # no repository identity is no match
             continue
         found.add(item_id)
     if len(found) != 1:

@@ -260,6 +260,27 @@ def test_resolve_does_not_take_true_for_issue_number_one() -> None:
         bm.resolve_item(bm.default_map(), stub, "ChiefGyk3D/scrum-around-and-find-out#1")
 
 
+def test_resolve_requires_a_positive_repository_match() -> None:
+    stub = Stub(
+        {
+            ("GET", "repos/"): issue_reply(),
+            ("GET", f"{PROJECT}/items"): items_reply({"id": 99, "content": {"number": 356, "title": "same"}}),
+        }
+    )
+    board = bm.default_map()
+    with pytest.raises(MalformedDataError):
+        bm.resolve_item(board, stub, KEY)
+    assert board.items == {}
+
+
+def test_save_repairs_a_group_writable_directory(tmp_path: Path) -> None:
+    d = tmp_path / "state"
+    d.mkdir()
+    d.chmod(0o777)
+    bm.save(seeded(), d / "boardmap.json")
+    assert (d.stat().st_mode & 0o077) == 0
+
+
 def test_resolve_ignores_a_same_number_in_another_repo() -> None:
     stub = Stub(
         {
@@ -290,7 +311,7 @@ def test_gh_transport_patches_through_the_budget(tmp_path: Path) -> None:
         reply += "x-ratelimit-reset: 4000000000\r\nx-ratelimit-resource: core\r\n\r\n{}"
         return subprocess.CompletedProcess(argv, 0, reply, "")
 
-    env = {"HOME": str(tmp_path), "SAFO_CALLER": "card", "PATH": "/usr/bin"}
+    env = {"HOME": str(tmp_path), "SAFO_CALLER": "card", "PATH": "/usr/bin", "GH_TOKEN": "tok"}
     transport = bm.gh_transport(env, run=run, sleep=lambda _s: None, gh="/usr/bin/gh")
     bm.edit_card(seeded(), transport, KEY, {"Effort": "S"})
     argv, stdin = seen[0]

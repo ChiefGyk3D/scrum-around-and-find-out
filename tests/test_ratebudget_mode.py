@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from localcli import tool
@@ -13,7 +14,9 @@ from safo import ratebudget_cli
 
 
 def ledger(home: Path) -> rb.Budget:
-    return rb.Budget(home / ".local" / "state" / "safo" / "ratebudget", lambda: NOW.timestamp())
+    # the scope `safo-ratebudget` computes in these tests: no gh on PATH, no credential in the environment
+    scope = rb.scope_for({"HOME": str(home), "PATH": ""}, [], subprocess.run, None)
+    return rb.Budget(home / ".local" / "state" / "safo" / "ratebudget", lambda: NOW.timestamp(), scope)
 
 
 def seed(home: Path, remaining: int) -> None:
