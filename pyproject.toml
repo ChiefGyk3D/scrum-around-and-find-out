@@ -20,6 +20,7 @@ passkeys = ["cryptography==50.0.2"]  # Tier 2 passkey approvals only; hash-locke
 [project.scripts]
 safo = "safo.cli:run"
 safo-guard = "safo.guard:run"
+safo-ship = "safo.ship:run"
 
 [tool.setuptools.dynamic]
 version = { attr = "safo.__version__" }

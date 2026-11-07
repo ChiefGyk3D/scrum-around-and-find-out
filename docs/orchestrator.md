@@ -103,6 +103,11 @@ Why each part is there:
   down matters ([Where unfixed security findings live](security-findings.md)).
 - **Read only** because a watcher that can re-run or cancel will eventually do it unasked.
 
+## Waiting to merge
+
+A merge watcher is not written ad hoc: run [`safo-ship`](ship.md) (in the background, never on the lead's thread). It pins
+the head, requires `CI green` and every required check on that commit, and refuses to merge on unresolved review threads.
+
 ## Related doctrine
 
 Three more rules govern what the lead says to the maintainer, and none of them is enforced by a hook:
