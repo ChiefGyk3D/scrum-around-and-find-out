@@ -30,7 +30,8 @@ from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import Any
 
-from safo import credentials
+from safo import credentials, reportshape
+from safo.agentsfile import load_agents_merged
 from safo.context import LocalContext
 from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, MalformedDataError, SafoError
 from safo.graphql import GRAPHQL_URL, Client
@@ -279,6 +280,52 @@ def newest_report(nodes: list[dict[str, Any]], roles: tuple[str, ...]) -> tuple[
     return latest, [entry for when, entries in found if when == latest for entry in entries]
 
 
+def newest_report_lines(nodes: list[dict[str, Any]]) -> list[str] | None:
+    """The lines of the newest trusted, visible comment that holds a report header (a `ROLE:` line then a `HEAD:` line)
+    of any role, or None. Same reader and same trust rule as `newest_report`; the role is not compared."""
+    best: tuple[str, list[str]] | None = None
+    for node in nodes:
+        association, created, edited = node.get("authorAssociation"), node.get("createdAt"), node.get("lastEditedAt")
+        html, minimized = node.get("bodyHTML"), node.get("isMinimized")
+        if not isinstance(association, str) or not isinstance(created, str) or not isinstance(html, str):
+            raise MalformedDataError("a comment lacks authorAssociation, createdAt or bodyHTML as text")
+        if not isinstance(minimized, bool) or "lastEditedAt" not in node:
+            raise MalformedDataError("a comment lacks isMinimized as a boolean or lastEditedAt")
+        if not TIME.fullmatch(created) or not (edited is None or (isinstance(edited, str) and TIME.fullmatch(edited))):
+            raise MalformedDataError("a comment's createdAt or lastEditedAt is not a timestamp")
+        if minimized or association not in TRUSTED or "ROLE" not in html:
+            continue
+        try:
+            lines = report_lines(html)
+        except UnreadableHtml as error:
+            raise UnreadableHtml(f"a comment that mentions a ROLE cannot be read ({error})") from None
+        if report_entries(lines):
+            when = max(created, edited or created)
+            if best is None or when >= best[0]:
+                best = (when, lines)
+    return best[1] if best else None
+
+
+def shape(client: Client, variables: Mapping[str, Any]) -> tuple[str, str]:
+    """(OK | WARN, message) for the newest report's shape (report-not-found). Raises Unknown when there is no report."""
+    nodes = pages_bounded(
+        client,
+        COMMENTS_QUERY,
+        variables,
+        ["repository", "pullRequest", "comments"],
+        MAX_COMMENT_PAGES,
+        "comments",
+        ("authorAssociation", "createdAt", "isMinimized", "bodyHTML"),
+    )
+    lines = newest_report_lines(nodes)
+    if lines is None:
+        raise _bad("no report from an owner, member or collaborator has a ROLE and HEAD line")
+    found = reportshape.check("\n".join(lines))
+    return (
+        ("WARN", found[0]) if found else ("OK", "report-not-found: the report's shape is fine (shape only, not truth)")
+    )
+
+
 def resolve(client: Client, variables: Mapping[str, Any], reported: str) -> str:
     """The full SHA a report names: itself when it is full, else the one commit of the pull request it prefixes."""
     if len(reported) == 40:
@@ -441,8 +488,27 @@ def class_name(error: BaseException) -> str:
     return name if CLASS_NAME.fullmatch(name) else "Exception"
 
 
+def decide_shape(ctx: LocalContext, args: argparse.Namespace) -> tuple[int, str]:
+    """`handoff shape`: exit 0 for OK and for WARN (warn only: no deny path), 2 when the report cannot be read."""
+    try:
+        if args.agents and not load_agents_merged(args.agents, None).hooks.research.report_not_found:
+            return EXIT_OK, "OFF report-not-found is switched off in agents.yaml (hooks.research.report_not_found)"
+        match = REPO.fullmatch(args.repo)
+        if not match or match.group(2) in (".", "..") or not NUMBER.fullmatch(args.pr):
+            raise _bad("expected <owner/repo> and a pull request number")
+        variables = {"owner": match.group(1), "name": match.group(2), "number": int(args.pr)}
+        state, message = shape(make_client(ctx.env), variables)
+    except Unknown as why:
+        return EXIT_UNKNOWN, f"{UNKNOWN} {why}"
+    except SafoError as error:
+        return EXIT_UNKNOWN, f"{UNKNOWN} {safe(str(error))[:300]}"
+    return EXIT_OK, f"{state} {message}"
+
+
 def decide(ctx: LocalContext, args: argparse.Namespace) -> tuple[int, str]:
     """(exit code, the line to print). Everything that can fail except the printing happens here."""
+    if args.action == "shape":
+        return decide_shape(ctx, args)
     try:
         roles = parse_roles(args.roles)
         match = REPO.fullmatch(args.repo)
@@ -458,8 +524,8 @@ def decide(ctx: LocalContext, args: argparse.Namespace) -> tuple[int, str]:
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
-    if args.action != "check":
-        raise ConfigError("the only handoff action is `check`")
+    if args.action not in ("check", "shape"):
+        raise ConfigError("the handoff actions are `check` and `shape`")
     try:
         code, line = decide(ctx, args)
     except KeyboardInterrupt:
@@ -476,9 +542,12 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("action", choices=["check"])
+    parser.add_argument("action", choices=["check", "shape"])
     parser.add_argument("repo", help="owner/repo")
     parser.add_argument("pr", help="the pull request number")
+    parser.add_argument(
+        "--agents", default=None, help="shape: an agents.yaml whose hooks.research.report_not_found can switch it off"
+    )
     parser.add_argument(
         "--roles",
         default=None,
@@ -488,6 +557,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 register_local(
     LocalMode(
-        "handoff", "check whether the latest review report names the pull request's current head", add_arguments, run
+        "handoff",
+        "check whether the latest review report names the current head (check), or its search shape (shape)",
+        add_arguments,
+        run,
     )
 )

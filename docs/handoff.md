@@ -143,3 +143,11 @@ depend on is on the default branch. A merge into a deleted base strands the comm
 
 Set Status to Blocked. The `agents-status` command lists everything Blocked at the top, because that is the list the
 maintainer opens first.
+
+## `safo handoff shape` (report-not-found, #353)
+
+`safo handoff shape <owner/repo> <pr> [--agents agents.yaml]` reads the newest report from an OWNER, MEMBER or
+COLLABORATOR (a `ROLE:` line then a `HEAD:` line, any role) and checks its shape: a report that says not found, could not
+find, unverified, blocked, 403, could not read, not read or no statement found must list at least two distinct `query:` or
+`search:` lines, or name a `fallback:`, `archive:` or `second source:`. It prints `OK`, `WARN` or `OFF` and exits 0 for all
+three, and 2 when no report can be read. It checks the report's shape, never whether the claim or the queries are true.
