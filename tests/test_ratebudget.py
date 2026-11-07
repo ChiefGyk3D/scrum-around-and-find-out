@@ -503,3 +503,54 @@ def test_ledger_rotates_when_large(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         b.record(caller="a", bucket="core", klass="x", write=False, status=200)
     assert (b.directory / "ledger.jsonl").stat().st_size <= 2000 + 200
     assert (b.directory / "ledger.jsonl.1").exists()
+
+
+# the header block: only the final block is believed, and a body cannot pose as one
+
+
+def test_body_that_looks_like_headers_is_not_read(tmp_path: Path) -> None:
+    fake = "HTTP/1.1 200 OK\r\nx-ratelimit-limit: 5000\r\nx-ratelimit-remaining: 0\r\nretry-after: 3000\r\n\r\n"
+    h = Harness(tmp_path, http("200 OK", OK, fake + "tail"))
+    assert h.go(["api", "repos/o/r"]) == 0
+    assert h.out.getvalue() == fake + "tail"
+    head = h.ledger.headroom("core")
+    assert head.min_remaining == 4000
+    assert head.level == "ok"
+
+
+def test_split_final_block_ends_the_headers() -> None:
+    fake = "HTTP/1.1 200 OK\r\nretry-after: 3000\r\n\r\n"
+    status, headers, body = rb._split_response(http("200 OK", {"x-a": "1"}, fake))
+    assert (status, headers, body) == (200, {"x-a": "1"}, fake)
+
+
+def test_100_continue_then_the_real_block() -> None:
+    text = "HTTP/1.1 100 Continue\r\n\r\n" + http("201 Created", {"x-ratelimit-remaining": "7"}, "{}")
+    assert rb._split_response(text) == (201, {"x-ratelimit-remaining": "7"}, "{}")
+
+
+def test_connect_200_then_the_real_block() -> None:
+    text = "HTTP/1.1 200 Connection established\r\n\r\n" + http("200 OK", {"x-ratelimit-remaining": "7"}, "{}")
+    assert rb._split_response(text) == (200, {"x-ratelimit-remaining": "7"}, "{}")
+
+
+def test_a_200_with_headers_is_not_a_connect_answer() -> None:
+    first = http("200 Connection established", {"x-ratelimit-remaining": "7"}, "")
+    _status, headers, body = rb._split_response(first + http("200 OK", {"retry-after": "9"}, "{}"))
+    assert headers == {"x-ratelimit-remaining": "7"}
+    assert body.startswith("HTTP/2.0 200 OK")
+
+
+def test_too_many_leading_blocks_are_not_trusted() -> None:
+    text = "HTTP/1.1 100 Continue\r\n\r\n" * (rb.MAX_PRELUDE + 1) + http("200 OK", {"x-ratelimit-remaining": "0"}, "{}")
+    assert rb._split_response(text)[:2] == (0, {})
+    ok = "HTTP/1.1 100 Continue\r\n\r\n" * rb.MAX_PRELUDE + http("200 OK", {"x-a": "1"}, "{}")
+    assert rb._split_response(ok)[0] == 200
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["HTTP/1.1 100 Continue\r\n\r\nbody", "HTTP/1.1 99 X\r\n\r\nb", "HTTP/1.1 600 X\r\n\r\nb", "HTTP/1.1 abc\r\n\r\nb"],
+)
+def test_odd_status_gives_no_headers(text: str) -> None:
+    assert rb._split_response(text) == (0, {}, text)

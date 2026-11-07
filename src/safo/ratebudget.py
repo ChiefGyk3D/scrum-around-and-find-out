@@ -50,6 +50,7 @@ SECONDARY_WAIT = 60.0  # GitHub: wait at least a minute after a secondary limit 
 MAX_STATE_BYTES = 262_144
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
 MAX_HEADER_BYTES = 65_536
+MAX_PRELUDE = 2  # leading 100-continue or CONNECT blocks allowed before the final header block
 GH_TIMEOUT_SECONDS = 120.0
 EXIT_THROTTLED = 75  # EX_TEMPFAIL
 EXIT_NO_GH = 127
@@ -504,27 +505,49 @@ def bounded_dumps(value: Any) -> str:
 # the gh wrapper
 
 
-def _split_response(text: str) -> tuple[int, dict[str, str], str]:
-    """(status, lower-cased headers, body) of `gh api --include` output; (0, {}, text) when it is not that shape."""
-    status = 0
+def _parse_block(text: str) -> tuple[int, str, dict[str, str], str] | None:
+    """(status, reason, lower-cased headers, rest) of the header block at the start of `text`, or None."""
+    if not text.startswith("HTTP/"):
+        return None
+    match = re.search(r"\r?\n\r?\n", text[:MAX_HEADER_BYTES])
+    if match is None:
+        return None
+    lines = text[: match.start()].splitlines()
+    parts = lines[0].split(" ", 2)
+    if len(parts) < 2 or not parts[1].isdigit() or len(parts[1]) != 3:
+        return None
     headers: dict[str, str] = {}
-    body = text
-    for _ in range(3):  # a 100-continue or a proxy can put more than one header block first
-        if not body.startswith("HTTP/"):
-            break
-        match = re.search(r"\r?\n\r?\n", body[:MAX_HEADER_BYTES])
-        if match is None:
+    for line in lines[1:200]:
+        name, sep, value = line.partition(":")
+        if sep:
+            headers[name.strip().lower()] = value.strip()
+    return int(parts[1]), parts[2].strip().lower() if len(parts) > 2 else "", headers, text[match.end() :]
+
+
+def _is_prelude(status: int, reason: str, headers: Mapping[str, str]) -> bool:
+    """A block that is followed by the real one: any 1xx, or a proxy's bare `200 Connection established`."""
+    return 100 <= status < 200 or (status == 200 and reason.startswith("connection established") and not headers)
+
+
+def _split_response(text: str) -> tuple[int, dict[str, str], str]:
+    """(status, lower-cased headers, body) of `gh api --include` output; (0, {}, text) when it is not that shape.
+
+    Only a 1xx block or a proxy's CONNECT answer may come before the final block, at most MAX_PRELUDE of them. The first
+    final status (200-599) ends the headers: everything after it is body, even if it starts with `HTTP/`, so a body
+    cannot pose as headers and feed fake rate-limit values to the ledger.
+    """
+    rest = text
+    for _ in range(MAX_PRELUDE + 1):
+        block = _parse_block(rest)
+        if block is None:
             return 0, {}, text
-        head, body = body[: match.start()], body[match.end() :]
-        lines = head.splitlines()
-        parts = lines[0].split(" ", 2)
-        status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-        headers = {}
-        for line in lines[1:200]:
-            name, sep, value = line.partition(":")
-            if sep:
-                headers[name.strip().lower()] = value.strip()
-    return status, headers, body
+        status, reason, headers, rest = block
+        if _is_prelude(status, reason, headers):
+            continue
+        if not 200 <= status <= 599:
+            return 0, {}, text
+        return status, headers, rest
+    return 0, {}, text  # more leading blocks than allowed: nothing here is trusted
 
 
 def _injectable(argv: Sequence[str]) -> bool:
