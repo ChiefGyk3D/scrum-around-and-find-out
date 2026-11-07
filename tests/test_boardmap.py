@@ -109,6 +109,43 @@ def test_load_rejects_a_symlink(tmp_path: Path) -> None:
         bm.load(link)
 
 
+def test_load_refuses_a_symlinked_state_directory(tmp_path: Path) -> None:
+    attacker = tmp_path / "attacker"
+    bm.save(seeded(), attacker / "boardmap.json")
+    state = tmp_path / "state"
+    state.symlink_to(attacker)
+    with pytest.raises(ConfigError):
+        bm.load(state / "boardmap.json")
+
+
+def test_load_refuses_a_hard_linked_map(tmp_path: Path) -> None:
+    d = tmp_path / "state"
+    bm.save(seeded(), d / "boardmap.json")
+    (tmp_path / "second-name.json").hardlink_to(d / "boardmap.json")
+    with pytest.raises(ConfigError):
+        bm.load(d / "boardmap.json")
+
+
+def test_load_repairs_a_loose_map_mode_and_a_loose_directory(tmp_path: Path) -> None:
+    d = tmp_path / "state"
+    bm.save(seeded(), d / "boardmap.json")
+    d.chmod(0o777)
+    (d / "boardmap.json").chmod(0o666)
+    assert bm.load(d / "boardmap.json") == seeded()
+    assert (d.stat().st_mode & 0o077) == 0
+    assert ((d / "boardmap.json").stat().st_mode & 0o077) == 0
+
+
+def test_load_with_no_directory_gives_the_default(tmp_path: Path) -> None:
+    assert bm.load(tmp_path / "never" / "boardmap.json") == bm.default_map()
+
+
+def test_load_refuses_a_directory_named_as_the_map(tmp_path: Path) -> None:
+    (tmp_path / "boardmap.json").mkdir()
+    with pytest.raises(ConfigError):
+        bm.load(tmp_path / "boardmap.json")
+
+
 # building the request
 
 
@@ -306,6 +343,8 @@ def test_gh_transport_patches_through_the_budget(tmp_path: Path) -> None:
     seen: list[tuple[list[str], str | None]] = []
 
     def run(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["api", "user"]:
+            return subprocess.CompletedProcess(argv, 0, "octocat\n", "")
         seen.append((argv, kw.get("input")))
         reply = "HTTP/2.0 200 OK\r\nx-ratelimit-limit: 5000\r\nx-ratelimit-remaining: 4999\r\n"
         reply += "x-ratelimit-reset: 4000000000\r\nx-ratelimit-resource: core\r\n\r\n{}"

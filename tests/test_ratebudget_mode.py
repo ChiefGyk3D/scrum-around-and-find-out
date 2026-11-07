@@ -16,7 +16,9 @@ from safo import ratebudget_cli
 def ledger(home: Path) -> rb.Budget:
     # the scope `safo-ratebudget` computes in these tests: no gh on PATH, no credential in the environment
     scope = rb.scope_for({"HOME": str(home), "PATH": ""}, [], subprocess.run, None)
-    return rb.Budget(home / ".local" / "state" / "safo" / "ratebudget", lambda: NOW.timestamp(), scope)
+    return rb.Budget(
+        home / ".local" / "state" / "safo" / "ratebudget", lambda: NOW.timestamp(), scope.name, unknown=scope.unknown
+    )
 
 
 def seed(home: Path, remaining: int) -> None:
@@ -27,7 +29,9 @@ def seed(home: Path, remaining: int) -> None:
 
 def test_empty_ledger(tmp_path: Path) -> None:
     code, out, _ = tool(ratebudget_cli.main, home=tmp_path)
-    assert (code, out.strip()) == (0, "ratebudget: no calls recorded")
+    assert code == 0
+    assert out.splitlines()[0] == "ratebudget: no calls recorded"
+    assert "which account" in out  # no gh here, so the account is unknown, and the status says so
 
 
 def test_status_line_ok_exits_zero(tmp_path: Path) -> None:
@@ -38,7 +42,7 @@ def test_status_line_ok_exits_zero(tmp_path: Path) -> None:
 
 
 def test_warn_exits_one(tmp_path: Path) -> None:
-    seed(tmp_path, 1000)
+    seed(tmp_path, 2000)  # 60% used: WARN for an unknown account (50%), ok for a known one
     code, out, _ = tool(ratebudget_cli.main, home=tmp_path)
     assert code == 1
     assert "WARN" in out

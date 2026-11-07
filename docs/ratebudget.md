@@ -11,14 +11,15 @@ bucket) kept working. `ghw` and the ledger make that spending visible and stop i
 
 | Rule | What happens |
 | --- | --- |
-| Account scope | Counters, blocks and the write queue belong to a host and a credential: a 20-hex-digit SHA-256 fingerprint of the host and the token (from `GH_TOKEN` or `GITHUB_TOKEN`, the enterprise pair for another host, else `gh auth token`). The token is hashed in memory and never written. Two accounts or two hosts never overwrite or throttle each other; the host comes from `--hostname` or `GH_HOST`. |
+| Account scope | Counters, blocks and the write queue belong to a GitHub host and an ACCOUNT, because GitHub limits the account: several tokens of one account share one limit and one queue here too. The account is found once per credential with `gh api user` (one REST read) and remembered for an hour in `identity.json`, keyed by a SHA-256 fingerprint of host and token; the scope itself is a hash of host and login. Neither the token nor the login is written. The host comes from `--hostname` or `GH_HOST`; the token from `GH_TOKEN`/`GITHUB_TOKEN` (the enterprise pair for another host) or `gh auth token`. |
+| Unknown account | If no credential is found or `gh api user` fails, the scope is `unknown-<credential hash>`: never merged with another credential's, throttled earlier (warn at 50%, refuse at 70%), and said once per five minutes on stderr and in `safo-ratebudget`. Isolation between accounts, and sharing between two credentials of one account, are not available there. |
 | Worst counter wins | Within one account and bucket the state is the WORST live counter: the `x-ratelimit-*` headers of answers and the `rate_limit` endpoint. This is deliberately more cautious than GitHub's guidance, which treats the response headers as authoritative when they disagree with `GET /rate_limit`; it follows the #356 rule that the minimum across counters is the truth. |
 | 70% used | A WARNING line on stderr; the call goes. |
 | 90% used | The call is refused with exit 75 and `retry after Ns`, until that counter's reset time. |
-| Retry-After | A 403 or 429 with `Retry-After` blocks the bucket for that long (capped at one hour; `nan`, `inf`, negative and junk are ignored). A 429 with no usable header, or a 403 that says "secondary rate limit", blocks it 60 seconds. |
+| Retry-After | A 403 or 429 with `Retry-After` blocks the bucket for that long (capped at one hour; `nan`, `inf`, negative and junk are ignored). A 429 with no usable header, or a 403 that says "secondary rate limit", blocks it 60 seconds. A GraphQL answer can carry a secondary limit with HTTP 200: for the GraphQL bucket only, a message in the top-level `errors` list that says "secondary rate limit" blocks it too (the answer's `Retry-After`, else 60 seconds); the same words in `data` or in a REST body do not. |
 | Writes | At least one second apart across all processes and all buckets of one account: each writer reserves a slot in one queue under a file lock. A writer queued past 60 seconds is refused, not parked. A writer that slept for its slot re-checks the budget and any block just before it launches `gh`. |
 | Option grammar | An option spelled outside gh's documented forms (`-XPATCH`, `-X=PATCH`, an unknown flag) is treated as a write. |
-| Rollover | A counter past its reset time no longer counts. A reset, block or write slot further than two hours (a minute for a slot) from now, in state or in an answer, is treated as corrupt and ignored. |
+| Rollover | A counter past its reset time no longer counts. A counter reset more than two hours from now, a block more than one hour, or a write slot more than one minute (the queue limit) is treated as corrupt and ignored, in state or in an answer. |
 | Headers | Only the final header block is read. A repeated rate-limit header, an obs-fold line or a malformed header name rejects every rate-limit and Retry-After value of that answer. |
 | No replay | A call that went out is never repeated here. A timeout or output that is not valid UTF-8 is an unknown outcome (exit 124, recorded as status 0). |
 | Advice only | If the ledger directory cannot be used, `ghw` says so once and runs the call. If only the audit row cannot be written, the counters and blocks were already saved; `ghw` says so once. |
@@ -32,11 +33,12 @@ it, so a block from another call does not stop it. Do not poll it.
 ## Where it lives
 
 `~/.local/state/safo/ratebudget` (or under `$XDG_STATE_HOME`): `ledger.jsonl` (one line per call, rotated at
-4 MiB to `ledger.jsonl.1`), `state.json` (counters, blocks and the write slot, each under its account scope),
+4 MiB to `ledger.jsonl.1`), `state.json` (counters, blocks and the write slot, each under its account scope), `identity.json` (credential fingerprint to account scope, one hour),
 `statusline.txt` (one line for the account used last, rewritten on every call, for a session statusline), and `lock`.
 The directory is opened without following a symlink, must belong to you, and is set to mode 0700 if it was looser; the
 files in it are opened relative to it, must be regular files of yours with one link, and are set to 0600. A file that
-is a symlink is never followed. The same holds for `boardmap.json` (`safo-card`).
+is a symlink is never followed. The same holds for reading and writing `boardmap.json` (`safo-card`): a symlinked
+directory, a hard-linked or foreign file is a configuration error, not a map.
 
 ## `safo-ratebudget`
 

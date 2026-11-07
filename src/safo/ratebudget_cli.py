@@ -23,10 +23,13 @@ from safo.modes.reconcile import safe
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
+    directory = ratebudget.state_dir(ctx.env)
+    scope = ratebudget.scope_for(ctx.env, [], ctx.run, ctx.which("gh"), directory, lambda: ctx.now.timestamp())
     ledger = ratebudget.Budget(
-        ratebudget.state_dir(ctx.env),
+        directory,
         lambda: ctx.now.timestamp(),
-        ratebudget.scope_for(ctx.env, [], ctx.run, ctx.which("gh")),
+        scope.name,
+        unknown=scope.unknown,
     )
     if args.refresh:
         count = ratebudget.refresh(ledger, ctx.env, ctx.run, ctx.which("gh"))
@@ -38,9 +41,15 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
         worst = EXIT_DRIFT
     if args.json:
         report = ledger.by_caller() if args.by_caller else {}
-        ctx.say(json.dumps({"line": line, "by_caller": report}, separators=(",", ":")).replace("::", ":\\u003a"))
+        ctx.say(
+            json.dumps({"line": line, "by_caller": report, "note": scope.note}, separators=(",", ":")).replace(
+                "::", ":\\u003a"
+            )
+        )
         return worst
     ctx.say(line)
+    if scope.note:
+        ctx.say(scope.note)
     if args.by_caller:
         report = ledger.by_caller()
         if not report:

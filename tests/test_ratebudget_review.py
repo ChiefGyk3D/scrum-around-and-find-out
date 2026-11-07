@@ -18,41 +18,129 @@ DIR = ".local/state/safo/ratebudget"
 GH = "/usr/bin/gh"
 
 
-# 1. counters are scoped to host and credential
+# 1. counters follow the account GitHub limits, not the credential
 
 
-def scope(env: dict[str, str], argv: list[str] | None = None) -> str:
-    return rb.scope_for(env, argv or ["api", "x"], subprocess.run, GH)
+def resolve(
+    env: dict[str, str],
+    logins: dict[str, str | None] | None = None,
+    *,
+    argv: list[str] | None = None,
+    directory: Path | None = None,
+    clock: Clock | None = None,
+) -> rb.Scope:
+    """scope_for with a stub gh: `logins` maps a credential to the login `gh api user` says (None: it fails)."""
+    table = logins or {}
+
+    def run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[1:3] == ["api", "user"]:
+            who = table.get(env.get("GH_TOKEN", ""))
+            return done((who or "") + "\n", 0 if who else 1)
+        if cmd[1:3] == ["auth", "token"]:
+            return done("cred-from-gh\n")
+        raise AssertionError(cmd)
+
+    return rb.scope_for(env, argv or ["api", "x"], run, GH, directory, clock or Clock())
 
 
-def test_scope_differs_by_credential_and_host_and_hides_the_credential() -> None:
-    a = scope({"GH_TOKEN": "cred-A"})
-    b = scope({"GH_TOKEN": "cred-B"})
-    c = scope({"GH_TOKEN": "cred-A"}, ["api", "--hostname", "ghe.example", "x"])
-    d = scope({"GH_TOKEN": "cred-A", "GH_HOST": "ghe.example"})
-    assert len({a, b, c}) == 3
-    assert c == d
-    assert "cred-A" not in a
-    assert len(a) <= 24
+def test_two_credentials_of_one_account_share_a_scope() -> None:
+    logins: dict[str, str | None] = {"cred-A": "octocat", "cred-B": "octocat", "cred-C": "hubot"}
+    a = resolve({"GH_TOKEN": "cred-A"}, logins)
+    b = resolve({"GH_TOKEN": "cred-B"}, logins)
+    c = resolve({"GH_TOKEN": "cred-C"}, logins)
+    assert a.name == b.name
+    assert a.name != c.name
+    assert not a.unknown
 
 
-def test_scope_falls_back_to_gh_auth_token() -> None:
-    seen: list[list[str]] = []
+def test_the_host_is_part_of_the_scope() -> None:
+    logins: dict[str, str | None] = {"cred-A": "octocat"}
+    a = resolve({"GH_TOKEN": "cred-A"}, logins)
+    other = resolve({"GH_ENTERPRISE_TOKEN": "cred-A", "GH_TOKEN": "cred-A", "GH_HOST": "ghe.example"}, logins)
+    flag = resolve({"GH_TOKEN": "cred-A"}, logins, argv=["api", "--hostname", "ghe.example", "x"])
+    assert a.name != other.name
+    assert flag.name != a.name
 
-    def run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(argv)
-        return done("cred-from-gh\n")
 
-    got = rb.scope_for({}, ["api", "x"], run, GH)
-    assert seen == [[GH, "auth", "token", "--hostname", "github.com"]]
-    assert got == rb.scope_for({"GH_TOKEN": "cred-from-gh"}, ["api", "x"], run, GH)
+def test_scope_hides_the_login_and_the_credential() -> None:
+    got = resolve({"GH_TOKEN": "cred-A"}, {"cred-A": "octocat"})
+    assert "octocat" not in got.name
+    assert "cred-A" not in got.name
+    assert len(got.name) <= 24
+
+
+def test_the_identity_is_cached_on_disk_with_a_ttl_and_without_the_credential(tmp_path: Path) -> None:
+    clock = Clock()
+    lookups: list[list[str]] = []
+
+    def run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        lookups.append(cmd)
+        return done("octocat\n")
+
+    env = {"GH_TOKEN": "cred-A"}
+    first = rb.scope_for(env, ["api", "x"], run, GH, tmp_path / "rb", clock)
+    second = rb.scope_for(env, ["api", "x"], run, GH, tmp_path / "rb", clock)
+    assert first.name == second.name
+    assert len(lookups) == 1  # the second resolve came from the cache
+    for f in (tmp_path / "rb").iterdir():
+        assert b"cred-A" not in f.read_bytes()
+        assert b"octocat" not in f.read_bytes()
+    clock.now += rb.IDENTITY_TTL + 1
+    rb.scope_for(env, ["api", "x"], run, GH, tmp_path / "rb", clock)
+    assert len(lookups) == 2  # expired: asked again
+
+
+def test_a_failed_lookup_is_unknown_not_merged_and_reported_once(tmp_path: Path) -> None:
+    clock = Clock()
+    a = resolve({"GH_TOKEN": "cred-A"}, {}, directory=tmp_path / "rb", clock=clock)
+    again = resolve({"GH_TOKEN": "cred-A"}, {}, directory=tmp_path / "rb", clock=clock)
+    b = resolve({"GH_TOKEN": "cred-B"}, {}, directory=tmp_path / "rb", clock=clock)
+    assert a.unknown
+    assert a.note
+    assert again.unknown
+    assert not again.note  # said once
+    assert a.name == again.name
+    assert a.name != b.name  # unrelated credentials are not merged
+    assert a.name.startswith("unknown-")
+
+
+def test_no_credential_at_all_is_unknown() -> None:
+    def run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        raise OSError("no gh")
+
+    got = rb.scope_for({}, ["api", "x"], run, GH, None, Clock())
+    assert got.unknown
+    assert got.note
+
+
+def test_an_unknown_scope_is_throttled_more_conservatively(tmp_path: Path) -> None:
+    known = rb.Budget(tmp_path / "rb", Clock(), "known")
+    unknown = rb.Budget(tmp_path / "rb", Clock(), "unknown-x", unknown=True)
+    known.observe([counter(remaining=2000)])  # 60% used
+    unknown.observe([counter(remaining=2000)])
+    assert known.headroom("core").level == "ok"
+    assert unknown.headroom("core").level == "warn"
+    known.observe([counter(remaining=1000)])  # 80% used
+    unknown.observe([counter(remaining=1000)])
+    assert known.headroom("core").level == "warn"
+    assert unknown.headroom("core").level == "throttle"
+    assert unknown.reserve("core", write=False).action == "refuse"
 
 
 def test_scope_survives_a_failing_gh() -> None:
     def run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         raise OSError("no gh")
 
-    assert rb.scope_for({}, ["api", "x"], run, GH)
+    assert rb.scope_for({}, ["api", "x"], run, GH, None, Clock()).name
+
+
+def test_wrapper_says_once_when_the_account_cannot_be_told(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    h.login = None
+    h.go(["api", "repos/o/r"])
+    assert h.err.getvalue().count("which account") == 1
+    h.go(["api", "repos/o/r"])
+    assert h.err.getvalue().count("which account") == 1
 
 
 def test_one_account_cannot_overwrite_or_poison_another(tmp_path: Path) -> None:
@@ -81,12 +169,21 @@ def test_wrapper_keeps_accounts_apart_and_writes_no_credential(tmp_path: Path) -
     h.go(["api", "repos/o/r"])
     assert h.go(["api", "repos/o/r"]) == rb.EXIT_THROTTLED
     h.cred = "another-account-credential"
+    h.login = "hubot"
     h.reply = http("200 OK", OK, "{}")
     assert h.go(["api", "repos/o/r"]) == 0  # the other account has its own budget
     for f in (tmp_path / DIR).iterdir():
         data = f.read_bytes()
         assert b"t0-credential" not in data
         assert b"another-account-credential" not in data
+
+
+def test_wrapper_shares_the_budget_between_two_credentials_of_one_account(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", {**OK, "x-ratelimit-remaining": "0"}, "{}"))
+    h.go(["api", "repos/o/r"])
+    h.cred = "second-token-same-account"  # same login "octocat"
+    assert h.go(["api", "repos/o/r"]) == rb.EXIT_THROTTLED
+    assert h.identity_calls == 2  # one lookup per credential, then cached
 
 
 # 2. a queued writer re-checks before it launches
@@ -287,3 +384,81 @@ def test_invalid_utf8_from_gh_is_an_unknown_outcome(tmp_path: Path) -> None:
     assert "outcome unknown" in h.err.getvalue()
     assert len(h.calls) == 1
     assert h.ledger.rows()[0]["status"] == 0
+
+
+# round 3, finding 2: a GraphQL secondary limit can arrive as HTTP 200
+
+
+GQL = {**OK, "x-ratelimit-resource": "graphql"}
+GQL_QUERY = ["api", "graphql", "-f", "query=query { viewer { login } }"]
+SECONDARY = '{"errors":[{"message":"You have exceeded a secondary rate limit. Please wait a few minutes"}]}'
+
+
+def test_graphql_200_with_a_secondary_limit_error_and_retry_after_blocks(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", {**GQL, "retry-after": "120"}, SECONDARY))
+    assert h.go(GQL_QUERY) == 0
+    assert h.ledger.headroom("graphql").retry_after == pytest.approx(120)
+    h.calls.clear()
+    assert h.go(GQL_QUERY) == rb.EXIT_THROTTLED
+    assert h.calls == []
+
+
+def test_graphql_200_with_a_secondary_limit_error_and_no_header_waits_a_minute(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", GQL, SECONDARY))
+    h.go(GQL_QUERY)
+    assert h.ledger.headroom("graphql").retry_after == pytest.approx(rb.SECONDARY_WAIT)
+    assert h.ledger.headroom("core").level == "ok"  # only the GraphQL bucket
+
+
+def test_graphql_200_with_an_unrelated_error_does_not_block(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", GQL, '{"errors":[{"message":"Field \'x\' doesn\'t exist on type Query"}]}'))
+    h.go(GQL_QUERY)
+    assert h.ledger.headroom("graphql").level == "ok"
+
+
+def test_graphql_200_with_the_words_in_user_data_does_not_block(tmp_path: Path) -> None:
+    body = json.dumps({"data": {"viewer": {"bio": "You have exceeded a secondary rate limit"}}})
+    h = Harness(tmp_path, http("200 OK", GQL, body))
+    h.go(GQL_QUERY)
+    assert h.ledger.headroom("graphql").level == "ok"
+
+
+def test_graphql_200_with_the_words_in_an_error_path_is_read_from_the_message_only(tmp_path: Path) -> None:
+    body = json.dumps({"errors": [{"message": "boom", "path": ["secondary rate limit"]}]})
+    h = Harness(tmp_path, http("200 OK", GQL, body))
+    h.go(GQL_QUERY)
+    assert h.ledger.headroom("graphql").level == "ok"
+
+
+def test_rest_200_body_with_the_words_does_not_block(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", OK, SECONDARY))
+    h.go(["api", "repos/o/r"])
+    assert h.ledger.headroom("core").level == "ok"
+
+
+def test_graphql_200_with_a_huge_or_broken_body_is_ignored(tmp_path: Path) -> None:
+    for body in ("[[[[", "x" * 10, '{"errors": "secondary rate limit"}', '{"errors": [1, "secondary rate limit"]}'):
+        h = Harness(tmp_path / "x", http("200 OK", GQL, body))
+        assert h.go(GQL_QUERY) == 0
+        assert h.ledger.headroom("graphql").level == "ok"
+
+
+# round 3, finding 5: the persisted write-slot bound is the queue limit, as documented
+
+
+def test_a_write_slot_further_ahead_than_the_queue_limit_is_corrupt(tmp_path: Path) -> None:
+    b = budget(tmp_path)
+    b.reserve("core", write=True)
+    state = json.loads((b.directory / "state.json").read_text())
+    state["last_write"] = {"local|*": T0 + 90}
+    (b.directory / "state.json").write_text(json.dumps(state))
+    assert b.reserve("core", write=True).wait == 0
+
+
+def test_a_write_slot_within_the_queue_limit_is_believed(tmp_path: Path) -> None:
+    b = budget(tmp_path)
+    b.reserve("core", write=True)
+    state = json.loads((b.directory / "state.json").read_text())
+    state["last_write"] = {"local|*": T0 + 50}
+    (b.directory / "state.json").write_text(json.dumps(state))
+    assert b.reserve("core", write=True).wait == pytest.approx(51)

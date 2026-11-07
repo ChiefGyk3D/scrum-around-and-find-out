@@ -14,7 +14,10 @@
   credential fingerprint; one global write queue; a queued writer re-checks before it launches; counters are saved
   before the audit row; the state directory is made private and used by descriptor; persisted times are bounded; a
   repeated or malformed rate-limit header rejects the answer; compact option spellings count as writes; `--resolve`
-  needs a positive repository match.
+  needs a positive repository match. Round 3: the scope follows the authenticated account (not the token), an
+  account that cannot be told gets a conservative unknown scope, a GraphQL secondary limit sent with HTTP 200 blocks,
+  `boardmap.json` is read with the same private-directory checks as it is written, and the write-slot bound is the
+  queue limit.
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on

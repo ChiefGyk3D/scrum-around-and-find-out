@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import subprocess
 import time
@@ -143,19 +144,33 @@ def to_json(board: BoardMap) -> dict[str, Any]:
 
 
 def load(path: Path) -> BoardMap:
-    """The map at `path`, or the default when there is no file. A symlink, FIFO, big or malformed file is refused."""
+    """The map at `path`, or the default when there is no directory or no file. Anything unsafe is a ConfigError.
+
+    Read the way `save` writes: the directory is opened without following a symlink and must be ours (repaired to
+    0700), and the file is opened relative to it, without following a link, must be a regular file of ours with one
+    link. A big or malformed file is refused too.
+    """
+    name = path.name
     try:
-        raw = bounded.read_bounded(path, MAX_MAP_BYTES + 1)
+        dfd = ratebudget.open_private_dir(path.parent, create=False)
     except FileNotFoundError:
         return default_map()
-    except OSError as problem:  # includes a symlink (ELOOP) and a FIFO or directory (NotRegularFileError)
-        raise ConfigError(f"the board map {path.name} cannot be read ({type(problem).__name__})") from problem
+    except OSError as problem:  # a symlinked or foreign directory
+        raise ConfigError(f"the board map directory is not safe to read ({type(problem).__name__})") from problem
+    try:
+        raw = ratebudget.read_private(dfd, name, MAX_MAP_BYTES)
+    except FileNotFoundError:
+        return default_map()
+    except OSError as problem:  # a symlink, a special file, another user's file, a hard link
+        raise ConfigError(f"the board map {name} is not safe to read ({type(problem).__name__})") from problem
+    finally:
+        os.close(dfd)
     if len(raw) > MAX_MAP_BYTES:
-        raise ConfigError(f"the board map {path.name} is larger than {MAX_MAP_BYTES} bytes")
+        raise ConfigError(f"the board map {name} is larger than {MAX_MAP_BYTES} bytes")
     try:
         return from_json(bounded.loads(raw))
     except (ValueError, RecursionError) as problem:  # JSON errors, duplicate keys, nesting, encoding
-        raise ConfigError(f"the board map {path.name} is not valid JSON ({type(problem).__name__})") from problem
+        raise ConfigError(f"the board map {name} is not valid JSON ({type(problem).__name__})") from problem
 
 
 def save(board: BoardMap, path: Path) -> None:

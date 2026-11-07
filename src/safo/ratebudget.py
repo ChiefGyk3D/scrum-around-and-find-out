@@ -53,6 +53,11 @@ MAX_HORIZON = 7200.0  # a counter whose reset is further off than this is corrup
 MAX_COUNTERS = 256
 WRITES = "*"  # the one write queue of a scope, across buckets
 AUTH_TIMEOUT_SECONDS = 20.0
+IDENTITY_TTL = 3600.0  # how long a credential's account is remembered
+NEGATIVE_TTL = 300.0  # how long a failed lookup is remembered (and reported once)
+MAX_IDENTITIES = 64
+UNKNOWN_WARN = 0.50  # an account that could not be told is throttled earlier
+UNKNOWN_THROTTLE = 0.70
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
 MAX_HEADER_BYTES = 65_536
 MAX_PRELUDE = 2  # leading 100-continue or CONNECT blocks allowed before the final header block
@@ -65,6 +70,7 @@ LEDGER = "ledger.jsonl"
 STATE = "state.json"
 LOCK = "lock"
 STATUSLINE = "statusline.txt"
+IDENTITY = "identity.json"
 
 _NAME = re.compile(r"[a-z_]{1,32}")
 _NUMBER = re.compile(r"[0-9]{1,12}")
@@ -340,12 +346,13 @@ def write_private(path: Path, data: bytes) -> None:
         os.close(dfd)
 
 
-def _read_private(dfd: int, name: str, limit: int) -> bytes | None:
-    """At most limit+1 bytes of a private regular file, or None when it is absent or not one. Never follows a link."""
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
-    except OSError:
-        return None
+def read_private(dfd: int, name: str, limit: int) -> bytes:
+    """At most limit+1 bytes of a private regular file of this user.
+
+    Raises FileNotFoundError when it is absent, and OSError when it is not safe to read: a symlink, a FIFO or other
+    special file, a file of another user, or one with more than one link. A mode looser than 0600 is repaired.
+    """
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
     try:
         _check_regular(fd)
         chunks: list[bytes] = []
@@ -357,10 +364,16 @@ def _read_private(dfd: int, name: str, limit: int) -> bytes | None:
             chunks.append(chunk)
             total += len(chunk)
         return b"".join(chunks)
-    except OSError:
-        return None
     finally:
         os.close(fd)
+
+
+def _read_private(dfd: int, name: str, limit: int) -> bytes | None:
+    """`read_private`, with None for every failure (absent or unsafe)."""
+    try:
+        return read_private(dfd, name, limit)
+    except OSError:
+        return None
 
 
 # who is calling: a host and credential scope for every counter
@@ -375,11 +388,81 @@ def _option_value(argv: Sequence[str], name: str) -> str:
     return ""
 
 
-def scope_for(env: Mapping[str, str], argv: Sequence[str], run: Run, gh: str | None) -> str:
-    """A short, non-reversible name for this host and this credential; the credential itself is never stored.
+@dataclass(frozen=True)
+class Scope:
+    name: str
+    unknown: bool  # the account could not be told: a conservative, uncoordinated scope
+    note: str  # a line to say once (empty when there is nothing new to say)
 
-    The credential is read only to be hashed: from the environment (GH_TOKEN, GITHUB_TOKEN, or the enterprise pair for
-    another host), else from `gh auth token`. Two accounts, or two hosts, never share a counter, a block or a queue.
+
+UNKNOWN_NOTE = (
+    "ghw: could not tell which account this credential belongs to; using an unknown-account budget, "
+    "throttled early, that is not shared with other credentials"
+)
+_LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}")
+
+
+def _hash(*parts: str) -> str:
+    return hashlib.sha256(b"safo-ratebudget-scope\0" + b"\0".join(p.encode() for p in parts)).hexdigest()[:20]
+
+
+def _identity_get(directory: Path, key: str, now: float) -> tuple[bool, str | None] | None:
+    """(found, scope-or-None) from the identity cache, or None when there is no live entry."""
+    try:
+        dfd = open_private_dir(directory, create=False)
+    except OSError:
+        return None
+    try:
+        raw = _read_private(dfd, IDENTITY, MAX_STATE_BYTES)
+    finally:
+        os.close(dfd)
+    try:
+        entry = bounded.loads(raw).get("ids", {}).get(key) if raw else None
+    except (ValueError, RecursionError, AttributeError):
+        return None
+    if not isinstance(entry, dict):
+        return None
+    at, scope = entry.get("at"), entry.get("scope")
+    if isinstance(at, bool) or not isinstance(at, int | float) or not math.isfinite(at):
+        return None
+    if scope is not None and not (isinstance(scope, str) and re.fullmatch(r"[0-9a-f]{20}", scope)):
+        return None
+    ttl = IDENTITY_TTL if scope else NEGATIVE_TTL
+    if not at - 60 <= now <= at + ttl:
+        return None
+    return True, scope
+
+
+def _identity_put(directory: Path, clock: Clock, key: str, scope: str | None) -> None:
+    now = clock()
+    with Budget(directory, clock)._locked() as dfd:
+        raw = _read_private(dfd, IDENTITY, MAX_STATE_BYTES)
+        try:
+            data = bounded.loads(raw) if raw else {}
+        except (ValueError, RecursionError):
+            data = {}
+        ids = data.get("ids") if isinstance(data, dict) else None
+        ids = ids if isinstance(ids, dict) else {}
+        ids[key] = {"at": now, "scope": scope}
+        newest = sorted(ids.items(), key=lambda kv: -(kv[1].get("at", 0) if isinstance(kv[1], dict) else 0))
+        _replace_private(dfd, IDENTITY, bounded_dumps({"ids": dict(newest[:MAX_IDENTITIES])}).encode())
+
+
+def scope_for(
+    env: Mapping[str, str],
+    argv: Sequence[str],
+    run: Run,
+    gh: str | None,
+    directory: Path | None = None,
+    clock: Clock = time.time,
+) -> Scope:
+    """The budget scope of a call: GitHub host plus the authenticated ACCOUNT, because GitHub limits the account.
+
+    Several tokens of one account share one limit, so the credential is not the scope. It is only the key of a small
+    cache (under `directory`, hour-long) that remembers which account `gh api user` said it belongs to; the token
+    itself is hashed in memory and never stored, and nor is the login (only a hash of host and login).
+    When the account cannot be told (no credential, `gh` failing) the scope is `unknown-<credential hash>`: it is not
+    merged with any other credential's, it is throttled earlier, and the condition is reported once per cache period.
     """
     host = (_option_value(argv, "--hostname") or env.get("GH_HOST", "") or "github.com").strip().lower()[:253]
     names = ("GH_TOKEN", "GITHUB_TOKEN") if host == "github.com" else ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
@@ -397,8 +480,36 @@ def scope_for(env: Mapping[str, str], argv: Sequence[str], run: Run, gh: str | N
             secret = (done.stdout or "").strip() if done.returncode == 0 else ""
         except (OSError, subprocess.TimeoutExpired, UnicodeError):
             secret = ""
-    digest = hashlib.sha256(b"safo-ratebudget-scope\0" + host.encode() + b"\0" + secret.encode()).hexdigest()
-    return digest[:20]
+    key = _hash("credential", host, secret)  # the cache key; reveals nothing about the credential
+    unknown = Scope("unknown-" + key[:12], True, "")
+    now = clock()
+    if directory is not None:
+        cached = _identity_get(directory, key, now)
+        if cached is not None:
+            return Scope(cached[1], False, "") if cached[1] else unknown
+    login = ""
+    if secret and gh is not None:
+        command = [gh, "api", "user"] + ([] if host == "github.com" else ["--hostname", host]) + ["--jq", ".login"]
+        try:
+            done = run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=AUTH_TIMEOUT_SECONDS,
+                stdin=subprocess.DEVNULL,
+            )
+            text = (done.stdout or "").strip() if done.returncode == 0 else ""
+            login = text if _LOGIN.fullmatch(text) else ""
+        except (OSError, subprocess.TimeoutExpired, UnicodeError):
+            login = ""
+    account = _hash("account", host, login.lower()) if login else None
+    if directory is not None:
+        with contextlib.suppress(OSError):
+            _identity_put(directory, clock, key, account)
+    if account:
+        return Scope(account, False, "")
+    return Scope(unknown.name, True, UNKNOWN_NOTE)
 
 
 # the ledger
@@ -407,10 +518,14 @@ def scope_for(env: Mapping[str, str], argv: Sequence[str], run: Run, gh: str | N
 class Budget:
     """The shared state under one directory, for one scope (host and account). Every change holds the file lock."""
 
-    def __init__(self, directory: Path, clock: Clock = time.time, scope: str = "local") -> None:
+    def __init__(
+        self, directory: Path, clock: Clock = time.time, scope: str = "local", *, unknown: bool = False
+    ) -> None:
         self.directory = directory
         self.clock = clock
         self.scope = scope
+        self.warn = UNKNOWN_WARN if unknown else WARN
+        self.throttle = UNKNOWN_THROTTLE if unknown else THROTTLE
 
     def _k(self, name: str) -> str:
         return f"{self.scope}|{name}"
@@ -490,7 +605,7 @@ class Budget:
         return self._map(state, "blocked", MAX_WAIT)
 
     def _written(self, state: Mapping[str, Any]) -> dict[str, float]:
-        return self._map(state, "last_write", 2 * MAX_SPACING_WAIT)
+        return self._map(state, "last_write", MAX_SPACING_WAIT)
 
     def _save(self, dfd: int, state: dict[str, Any]) -> None:
         state["updated"] = self.clock()
@@ -510,9 +625,9 @@ class Budget:
         used = worst.used_fraction if worst else 0.0
         retry = 0.0
         level = "ok"
-        if worst and used >= THROTTLE:
+        if worst and used >= self.throttle:
             level, retry = "throttle", min(worst.reset - now, MAX_WAIT)
-        elif worst and used >= WARN:
+        elif worst and used >= self.warn:
             level = "warn"
         if blocked > 0:
             level, retry = "throttle", max(retry, min(blocked, MAX_WAIT))
@@ -750,6 +865,25 @@ def _split_response(text: str) -> tuple[int, dict[str, str], str]:
     return 0, {}, text  # more leading blocks than allowed: nothing here is trusted
 
 
+def _graphql_secondary(body: str) -> bool:
+    """A GraphQL answer (HTTP 200 is possible) whose `errors` list has a secondary-rate-limit message.
+
+    Only the message of an entry in the top-level `errors` list is read: the same words in `data` (user-controlled
+    text) or in another member do not count, and a body that is not bounded JSON counts for nothing.
+    """
+    try:
+        data = bounded.loads(body)
+    except (ValueError, RecursionError):
+        return False
+    errors = data.get("errors") if isinstance(data, dict) else None
+    if not isinstance(errors, list):
+        return False
+    return any(
+        isinstance(e, dict) and isinstance(e.get("message"), str) and "secondary rate limit" in e["message"].lower()
+        for e in errors
+    )
+
+
 def _injectable(argv: Sequence[str]) -> bool:
     return bool(argv) and argv[0] == "api" and not any(_flag_name(w) in _NO_INCLUDE for w in argv[1:])
 
@@ -778,7 +912,11 @@ def main(
     ledger: Budget | None = None
     if not what.free:
         try:
-            ledger = Budget(state_dir(env), clock, scope_for(env, argv, run, exe))
+            directory = state_dir(env)
+            scope = scope_for(env, argv, run, exe, directory, clock)
+            if scope.note:
+                err.write(scope.note + "\n")
+            ledger = Budget(directory, clock, scope.name, unknown=scope.unknown)
             decision = ledger.reserve(what.bucket, write=what.write)
         except (OSError, ConfigError) as problem:
             err.write(f"ghw: the budget ledger is unavailable ({type(problem).__name__}); going ahead without it\n")
@@ -818,6 +956,10 @@ def main(
     if status in (403, 429):
         block = parse_retry_after(headers.get("retry-after", ""), clock())
         if block is None and (status == 429 or "secondary rate limit" in body.lower()):
+            block = SECONDARY_WAIT
+    elif what.bucket == "graphql" and 200 <= status < 300 and _graphql_secondary(body):
+        block = parse_retry_after(headers.get("retry-after", ""), clock())
+        if block is None:
             block = SECONDARY_WAIT
     counters = counters_from_headers(headers, what.bucket) if headers else []
     _record(ledger, env, what, status, counters, block, err)

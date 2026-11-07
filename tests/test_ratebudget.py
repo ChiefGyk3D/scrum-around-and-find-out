@@ -323,9 +323,14 @@ class Harness:
         self.tmp = tmp_path
         self.cred = "t0-credential"
         self.fail: Exception | None = None
+        self.login: str | None = "octocat"  # who `gh api user` says the credential is; None: the lookup fails
+        self.identity_calls = 0
         self.on_sleep: Callable[[float], None] | None = None
 
     def run(self, argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["api", "user"]:  # the account lookup is not one of the calls under test
+            self.identity_calls += 1
+            return done((self.login or "") + "\n", 0 if self.login else 1)
         self.calls.append(argv)
         if self.fail is not None:
             raise self.fail
@@ -355,8 +360,9 @@ class Harness:
 
     @property
     def ledger(self) -> rb.Budget:
-        scope = rb.scope_for(self.env, ["api", "x"], self.run, "/usr/bin/gh")
-        return rb.Budget(self.tmp / ".local" / "state" / "safo" / "ratebudget", self.clock, scope)
+        directory = self.tmp / ".local" / "state" / "safo" / "ratebudget"
+        scope = rb.scope_for(self.env, ["api", "x"], self.run, "/usr/bin/gh", directory, self.clock)
+        return rb.Budget(directory, self.clock, scope.name, unknown=scope.unknown)
 
 
 OK = {
