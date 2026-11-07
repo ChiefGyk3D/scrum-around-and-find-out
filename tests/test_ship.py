@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""safo-ship against a fake `gh` and `git` on PATH (issue #85). Nothing here reaches the network or a real repository."""
+"""safo-ship against a fake `gh` and `git` on PATH (issue #85). Nothing reaches the network or a real repository."""
 
 from __future__ import annotations
 
@@ -212,7 +212,7 @@ def test_it_waits_through_a_filling_rollup_then_merges(rig: Rig) -> None:
 
 def test_the_wait_is_bounded_by_time_too(rig: Rig) -> None:
     rig.state["views"] = [view([])]
-    code, out, _calls = rig.go("5", "--repo", REPO, "--timeout", "50", "--interval", "20", "--max-polls", "1000")
+    code, _out, _calls = rig.go("5", "--repo", REPO, "--timeout", "50", "--interval", "20", "--max-polls", "1000")
     assert code == ship.EXIT_TIMEOUT and len(rig.slept) == 3
 
 
@@ -234,7 +234,7 @@ def test_every_required_context_from_branch_protection_must_be_present(rig: Rig)
 def test_an_unprotected_branch_still_requires_the_named_gate(rig: Rig) -> None:
     rig.state["protection"] = {"rc": 1, "err": "gh: Branch not protected (HTTP 404)"}
     rig.state["views"] = [view([check("test")])]
-    code, out, calls = rig.go("5", "--repo", REPO, "--max-polls", "2")
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "2")
     assert code == ship.EXIT_TIMEOUT and merges(calls) == []
 
 
@@ -291,7 +291,7 @@ def test_base_branch_modified_is_retried_once(rig: Rig) -> None:
 
 def test_base_branch_modified_twice_is_a_refusal(rig: Rig) -> None:
     rig.state["merges"] = [{"rc": 1, "err": "Base branch was modified"}]
-    code, out, calls = rig.go("5", "--repo", REPO)
+    code, _out, calls = rig.go("5", "--repo", REPO)
     assert code == ship.EXIT_MERGE_REFUSED and len(merges(calls)) == 2
 
 
@@ -339,7 +339,7 @@ def test_a_job_cancelled_again_after_its_rerun_fails(rig: Rig) -> None:
         first,
         again,
     ]
-    code, out, calls = rig.go("5", "--repo", REPO)
+    code, _out, calls = rig.go("5", "--repo", REPO)
     assert code == ship.EXIT_CI_FAILED and len(reruns(calls)) == 1 and merges(calls) == []
 
 
@@ -355,7 +355,7 @@ def test_a_stale_failure_right_after_a_rerun_is_not_counted_twice(rig: Rig) -> N
 
 def test_a_failed_gate_alone_is_a_real_failure(rig: Rig) -> None:
     rig.state["views"] = [view([check("test"), check("CI green", conclusion="FAILURE", run=9, job=99)])]
-    code, out, calls = rig.go("5", "--repo", REPO)
+    code, _out, calls = rig.go("5", "--repo", REPO)
     assert code == ship.EXIT_CI_FAILED and reruns(calls) == [] and merges(calls) == []
 
 
@@ -427,7 +427,7 @@ def test_a_canary_only_failure_is_rerun_and_then_merges(rig: Rig) -> None:
 def test_a_canary_is_rerun_at_most_twice_per_run(rig: Rig) -> None:
     first = canary_world(rig, 91)
     rig.state["views"] = [first, first, first, first, first, first, first, first]
-    code, out, calls = rig.go("5", "--repo", REPO, "--max-polls", "30")
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "30")
     assert code == ship.EXIT_CI_FAILED and len(reruns(calls)) == 2 and merges(calls) == []
 
 
@@ -445,7 +445,7 @@ def test_several_pull_requests_print_one_result_line_each_and_the_worst_code_win
         view([]),
     ]
     rig.state["threads"] = [CLEAN]
-    code, out, calls = rig.go("5", "6", "--repo", REPO, "--max-polls", "2")
+    code, out, _calls = rig.go("5", "6", "--repo", REPO, "--max-polls", "2")
     lines = out.strip().splitlines()
     assert [ln.split()[0] for ln in lines] == ["MERGED", "TIMEOUT"] and "#5" in lines[0] and "#6" in lines[1]
     assert code == ship.EXIT_TIMEOUT
@@ -474,7 +474,7 @@ def test_open_pr_reuses_an_open_pull_request_for_the_branch(rig: Rig) -> None:
 def test_open_pr_pins_the_pushed_commit_so_a_later_push_aborts(rig: Rig) -> None:
     rig.state["existing"] = [{"number": 7}]
     rig.state["views"] = [view(GREEN, head=MOVED)]
-    code, out, calls = rig.go("--open-pr", "--repo", REPO, "--branch", "feat/x", "--title", "t", "--issue", "85")
+    code, _out, calls = rig.go("--open-pr", "--repo", REPO, "--branch", "feat/x", "--title", "t", "--issue", "85")
     assert code == ship.EXIT_HEAD_MOVED and merges(calls) == []
 
 

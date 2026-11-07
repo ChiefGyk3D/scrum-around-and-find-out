@@ -6,8 +6,8 @@ guard, or any settings file.
 
 For each pull request, in order:
 
-1. Pin the head commit (the first one read, or `--expect-head`). If the head ever moves, stop and report the new one.
-2. Wait, bounded (`--timeout`, `--max-polls`), until the check rollup is COMPLETE and every required check is present and
+2. Wait, bounded (`--timeout`, `--max-polls`), until the check rollup is COMPLETE and every required check is
+   present and succeeded on that commit. The required checks are `CI green` plus every context the base branch lists.
    succeeded on that commit. The required checks are `CI green` plus every context the base branch's protection lists.
    An empty rollup, a missing required check, or any run still queued or in progress is PENDING, never done.
 3. A cancelled job is re-run once. A job whose only failed step is the approved egress canary (EX-0001) is re-run, at
@@ -317,7 +317,7 @@ class Watcher:
         canaries: dict[str, int] = {}
         grace: dict[tuple[str, str], int] = {}
         last = ""
-        for poll in range(1, self.max_polls + 1):
+        for _ in range(self.max_polls):
             data = self.view(repo, number)
             head = str(data["headRefOid"])
             if head != pin:
