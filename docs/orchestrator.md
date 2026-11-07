@@ -72,7 +72,8 @@ Task: watch <exact run URL or id, or exact PR number in owner/repo> and report w
 Do not push, merge, re-run, cancel, comment, approve or edit anything. Do not change any file. If the run needs one of
 those, say so in the report and stop.
 
-How: poll with `gh run view <id> --repo <owner/repo> --json status,conclusion,jobs` (or `gh pr checks <number> --repo
+How: run `safo-wait-ci <owner/repo> <pr|sha>` (it waits for the named `CI green` check and every required check on the
+pinned commit, and never merges), or poll with `gh run view <id> --repo <owner/repo> --json status,conclusion,jobs` (or `gh pr checks <number> --repo
 <owner/repo>`). Poll every 30 to 60 seconds. You may use `gh run watch`; you are not the lead.
 
 Report when the run concludes, or when a step has shown no progress for 5 minutes. Do not wait past 5 minutes on a hung
@@ -102,6 +103,11 @@ Why each part is there:
 - **The `findings:` line** because an agent that reads a log may meet an unfixed security finding, and where it writes it
   down matters ([Where unfixed security findings live](security-findings.md)).
 - **Read only** because a watcher that can re-run or cancel will eventually do it unasked.
+
+## Waiting to merge
+
+A merge watcher is not written ad hoc: run [`safo-ship`](ship.md) (or [`safo-wait-ci`](ship.md) to only wait) (in the background, never on the lead's thread). It pins
+the head, requires `CI green` and every required check on that commit, and refuses to merge on unresolved review threads.
 
 ## Related doctrine
 
