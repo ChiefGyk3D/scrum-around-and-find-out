@@ -1,4 +1,4 @@
-# The shared GitHub API budget (`ghw`, `safo ratebudget`)
+# The shared GitHub API budget (`ghw`, `safo-ratebudget`)
 
 Every session and agent on one account spends one GitHub budget. On 2026-11-07 a full board listing cost about 600
 GraphQL points, about 200 listings were made in one day, GraphQL showed two independent counters, and REST (the `core`
@@ -31,17 +31,17 @@ neither counted nor blocked.
 4 MiB to `ledger.jsonl.1`), `state.json` (counters, blocks, last write slot per bucket), `statusline.txt` (one line,
 rewritten on every call, for a session statusline), and `lock`.
 
-## `safo ratebudget`
+## `safo-ratebudget`
 
-    safo ratebudget [--by-caller] [--refresh] [--json]
+    safo-ratebudget [--by-caller] [--refresh] [--json]
 
 Prints the status line, for example `ratebudget: core 20% (4000 left), graphql 83% (850 left) WARN`, and with
 `--by-caller` the calls and writes per caller. `--refresh` reads the `rate_limit` endpoint into the ledger first.
 Exit 0 when every bucket is under 70%, 1 at WARN or THROTTLE.
 
-## Card edits (`safo card`, #358)
+## Card edits (`safo-card`, #358)
 
-    safo card owner/repo#N Field=Value [Field=Value ...] [--item-id N | --resolve] [--option Field:Name=ID] [--dry-run]
+    safo-card owner/repo#N Field=Value [Field=Value ...] [--item-id N | --resolve] [--option Field:Name=ID] [--dry-run]
 
 One REST `PATCH users/<owner>/projectsV2/<n>/items/<item id>` with `{"fields":[{"id":<numeric field id>,"value":...}]}`
 (verified on the user-owned board 2026-11-07), sent through the same budget rules as `ghw`. The ids come from a
@@ -61,5 +61,6 @@ never repeated. Unverified: the live shape of the REST items listing and the Epi
 
 ## Not done here
 
-This does not change the dispatch guard's issue lookup (a guard file; #357) or the session hooks. Wire `ghw` in
+`safo-ratebudget` and `safo-card` are their own console scripts, not `safo` subcommands: a subcommand must also be added
+to `TOP_LEVEL_COMMANDS` in `modes/hooks.py`, which is a guard file (#357) and needs the maintainer's word. This does not change the dispatch guard's issue lookup (a guard file; #357) or the session hooks. Wire `ghw` in
 place of `gh` in briefs and scripts by hand; briefs should say: read issues over REST, no board-wide lists, never poll.

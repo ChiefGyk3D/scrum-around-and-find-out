@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The persisted board map and `safo card`: a card edit is one REST PATCH, never a listing (#358).
+"""The persisted board map and `safo-card`: a card edit is one REST PATCH, never a listing (#358).
 
 The transport is a stub; nothing here writes to GitHub or reaches the network.
 """
@@ -13,8 +13,9 @@ from typing import Any
 
 import pytest
 
-from localcli import cli
+from localcli import tool
 from safo import boardmap as bm
+from safo import card_cli
 from safo.errors import ApiError, ConfigError, MalformedDataError, UnknownOutcomeError
 
 PROJECT = "users/ChiefGyk3D/projectsV2/3"
@@ -307,29 +308,37 @@ def test_gh_transport_patches_through_the_budget(tmp_path: Path) -> None:
 def test_mode_dry_run_prints_the_request_and_sends_nothing(tmp_path: Path) -> None:
     path = tmp_path / ".local" / "state" / "safo" / "ratebudget" / "boardmap.json"
     bm.save(seeded(), path)
-    code, out, _ = cli("card", KEY, "Effort=M", "--dry-run", home=tmp_path)
+    code, out, _ = tool(card_cli.main, KEY, "Effort=M", "--dry-run", home=tmp_path)
     assert code == 0
     assert f"PATCH {PROJECT}/items/99" in out
     assert "a22f24ba" in out
 
 
 def test_mode_unmapped_card_says_how_to_map_it(tmp_path: Path) -> None:
-    code, out, err = cli("card", KEY, "Effort=M", "--dry-run", home=tmp_path)
+    code, out, err = tool(card_cli.main, KEY, "Effort=M", "--dry-run", home=tmp_path)
     assert code == 2
     assert "--resolve" in out + err
     assert "--item-id" in out + err
 
 
 def test_mode_item_id_is_remembered(tmp_path: Path) -> None:
-    code, _, _ = cli("card", KEY, "Effort=S", "--item-id", "55", "--dry-run", home=tmp_path)
+    code, _, _ = tool(card_cli.main, KEY, "Effort=S", "--item-id", "55", "--dry-run", home=tmp_path)
     assert code == 0
     saved = bm.load(tmp_path / ".local" / "state" / "safo" / "ratebudget" / "boardmap.json")
     assert saved.items[KEY] == 55
 
 
 def test_mode_learns_an_option(tmp_path: Path) -> None:
-    code, out, _ = cli(
-        "card", KEY, "Status=Done", "--item-id", "55", "--option", "Status:Done=deadbeef", "--dry-run", home=tmp_path
+    code, out, _ = tool(
+        card_cli.main,
+        KEY,
+        "Status=Done",
+        "--item-id",
+        "55",
+        "--option",
+        "Status:Done=deadbeef",
+        "--dry-run",
+        home=tmp_path,
     )
     assert code == 0
     assert "deadbeef" in out

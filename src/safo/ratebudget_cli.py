@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""ratebudget: the shared GitHub API budget, from the ledger `ghw` keeps (local, read-only unless --refresh).
+"""safo-ratebudget: the shared GitHub API budget, from the ledger `ghw` keeps (local, read-only unless --refresh).
 
 Prints one status line (the worst counter per bucket), and with --by-caller the calls and writes each caller made.
 --refresh first reads the free `rate_limit` endpoint into the ledger. Exit 0 when every bucket is under the warning
@@ -9,12 +9,17 @@ line, 1 when one is at WARN or THROTTLE, so a script can act on it.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
+import os
+import sys
+from collections.abc import Mapping, Sequence
+from typing import TextIO
 
 from safo import ratebudget
 from safo.context import LocalContext
-from safo.errors import EXIT_DRIFT, EXIT_OK
-from safo.modes import LocalMode, register_local
+from safo.errors import EXIT_DRIFT, EXIT_OK, SafoError
+from safo.modes.reconcile import safe
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
@@ -42,14 +47,25 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     return worst
 
 
-def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--by-caller", action="store_true", help="also report calls and writes per caller")
-    parser.add_argument(
-        "--refresh", action="store_true", help="read the free rate_limit endpoint into the ledger first"
-    )
-    parser.add_argument("--json", action="store_true", help="machine-readable output")
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="safo-ratebudget", description="the shared GitHub API budget and who spent it")
+    p.add_argument("--by-caller", action="store_true", help="also report calls and writes per caller")
+    p.add_argument("--refresh", action="store_true", help="read the free rate_limit endpoint into the ledger first")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    return p
 
 
-register_local(
-    LocalMode("ratebudget", "the shared GitHub API budget and who spent it (ghw ledger)", add_arguments, run)
-)
+def main(
+    argv: Sequence[str], *, env: Mapping[str, str], out: TextIO, err: TextIO, now: dt.datetime | None = None
+) -> int:
+    args = parser().parse_args(argv)
+    ctx = LocalContext(out, env, now or dt.datetime.now(dt.UTC))
+    try:
+        return run(ctx, args)
+    except SafoError as problem:
+        err.write(f"safo-ratebudget: {safe(str(problem))}\n")
+        return problem.exit_code
+
+
+def entry() -> None:
+    raise SystemExit(main(sys.argv[1:], env=os.environ, out=sys.stdout, err=sys.stderr))

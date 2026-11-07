@@ -9,8 +9,8 @@ Nothing here lists the board: an unmapped card is a `MapMiss`, and the one way t
 `resolve_item`, which asks the REST item finder (`items?q=<title>`) once and caches the answer only when exactly one
 item matches the issue's number and repository.
 
-UNVERIFIED: the shape of the REST items listing (`id`, `content.number`, `content.repository_url`) is read defensively
-from the documented response and has not been exercised against the live board by this code; a listing that does not
+UNVERIFIED: the shape of the REST items listing (`id`, `content.number`, `content.repository_url`) is read
+defensively as documented and has not been exercised against the live board by this code; a listing that does not
 match gives `MalformedDataError`, never a guess. The kind of the Epic field (`text`) is likewise unverified: a wrong
 kind shows up as a 422 on the first edit and is fixed in the map file.
 """

@@ -23,6 +23,8 @@ safo-guard = "safo.guard:run"
 safo-ship = "safo.ship:run"
 safo-wait-ci = "safo.ship:run_wait_ci"
 ghw = "safo.ratebudget:run"
+safo-ratebudget = "safo.ratebudget_cli:entry"
+safo-card = "safo.card_cli:entry"
 
 [tool.setuptools.dynamic]
 version = { attr = "safo.__version__" }

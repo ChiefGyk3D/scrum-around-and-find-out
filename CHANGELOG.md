@@ -6,8 +6,8 @@
   with a per-bucket call ledger under `~/.local/state/safo/ratebudget` (file lock): the worst counter across response
   headers and the `rate_limit` endpoint is the truth, 70% warns, 90% refuses (exit 75) until reset, `Retry-After` and
   secondary-limit answers block the bucket, writes are spaced at least one second across processes, nothing is replayed.
-  `safo ratebudget [--by-caller] [--refresh]` prints the status line and a per-caller report; a one-line cache
-  (`statusline.txt`) is kept for a statusline. `safo card` edits one project card with one REST PATCH from a persisted
+  `safo-ratebudget [--by-caller] [--refresh]` prints the status line and a per-caller report; a one-line cache
+  (`statusline.txt`) is kept for a statusline. `safo-card` edits one project card with one REST PATCH from a persisted
   map of item, field and option ids (`safo.boardmap`) and never lists the board. Tests: `tests/test_ratebudget.py`,
   `tests/test_ratebudget_mode.py`, `tests/test_boardmap.py`. Docs: `docs/ratebudget.md`. Not wired into the dispatch
   guard (a guard file; #357).

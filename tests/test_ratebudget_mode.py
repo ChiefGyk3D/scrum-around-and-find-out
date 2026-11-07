@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`safo ratebudget`: the status line and the by-caller report, from a ledger in a private HOME."""
+"""`safo-ratebudget`: the status line and the by-caller report, from a ledger in a private HOME."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from localcli import cli
+from localcli import tool
 from meterdata import NOW
 from safo import ratebudget as rb
+from safo import ratebudget_cli
 
 
 def ledger(home: Path) -> rb.Budget:
@@ -22,34 +23,34 @@ def seed(home: Path, remaining: int) -> None:
 
 
 def test_empty_ledger(tmp_path: Path) -> None:
-    code, out, _ = cli("ratebudget", home=tmp_path)
+    code, out, _ = tool(ratebudget_cli.main, home=tmp_path)
     assert (code, out.strip()) == (0, "ratebudget: no calls recorded")
 
 
 def test_status_line_ok_exits_zero(tmp_path: Path) -> None:
     seed(tmp_path, 4000)
-    code, out, _ = cli("ratebudget", home=tmp_path)
+    code, out, _ = tool(ratebudget_cli.main, home=tmp_path)
     assert code == 0
     assert "core 20%" in out
 
 
 def test_warn_exits_one(tmp_path: Path) -> None:
     seed(tmp_path, 1000)
-    code, out, _ = cli("ratebudget", home=tmp_path)
+    code, out, _ = tool(ratebudget_cli.main, home=tmp_path)
     assert code == 1
     assert "WARN" in out
 
 
 def test_by_caller(tmp_path: Path) -> None:
     seed(tmp_path, 4000)
-    _, out, _ = cli("ratebudget", "--by-caller", home=tmp_path)
+    _, out, _ = tool(ratebudget_cli.main, "--by-caller", home=tmp_path)
     assert "agent-a" in out
     assert "core 1 calls (1 writes)" in out
 
 
 def test_json(tmp_path: Path) -> None:
     seed(tmp_path, 4000)
-    _, out, _ = cli("ratebudget", "--by-caller", "--json", home=tmp_path)
+    _, out, _ = tool(ratebudget_cli.main, "--by-caller", "--json", home=tmp_path)
     data = json.loads(out)
     assert data["by_caller"] == {"agent-a": {"core": {"calls": 1, "writes": 1}}}
     assert data["line"].startswith("ratebudget:")

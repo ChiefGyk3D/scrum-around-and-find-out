@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""card: edit one project card with a single REST PATCH, from a persisted map of ids (#358). Never lists the board.
+"""safo-card: edit one project card with a single REST PATCH, from a persisted map of ids (#358). Never lists the board.
 
-    safo card owner/repo#N Field=Value [Field=Value ...] [--item-id N | --resolve] [--option Field:Name=ID]
+    safo-card owner/repo#N Field=Value [Field=Value ...] [--item-id N | --resolve] [--option Field:Name=ID]
 
 The map lives beside the rate-budget ledger (`boardmap.json`). A card not in it needs `--item-id` (from a read you made)
 or `--resolve` (two REST reads, once). `Field=` with no value clears the field. `--dry-run` prints the request and sends
@@ -11,11 +11,16 @@ nothing; the map is still updated, since it is a local file. The call goes throu
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import os
+import sys
+from collections.abc import Mapping, Sequence
+from typing import TextIO
 
 from safo import boardmap
 from safo.context import LocalContext
-from safo.errors import EXIT_OK, ConfigError
-from safo.modes import LocalMode, register_local
+from safo.errors import EXIT_OK, ConfigError, SafoError
+from safo.modes.reconcile import safe
 
 
 def _edits(words: list[str]) -> dict[str, str | None]:
@@ -69,15 +74,28 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("issue", help="owner/repo#N")
-    parser.add_argument("edits", nargs="*", help="Field=Value (Field= clears)")
-    parser.add_argument("--item-id", type=int, default=0, help="the card's project item id; remembered in the map")
-    parser.add_argument("--resolve", action="store_true", help="find the item id with two REST reads, once")
-    parser.add_argument("--option", action="append", default=[], help="learn an option: Field:Name=ID (8 hex digits)")
-    parser.add_argument("--dry-run", dest="card_dry_run", action="store_true", help="print the request, send nothing")
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="safo-card", description="edit one project card with one REST PATCH")
+    p.add_argument("issue", help="owner/repo#N")
+    p.add_argument("edits", nargs="*", help="Field=Value (Field= clears)")
+    p.add_argument("--item-id", type=int, default=0, help="the card's project item id; remembered in the map")
+    p.add_argument("--resolve", action="store_true", help="find the item id with two REST reads, once")
+    p.add_argument("--option", action="append", default=[], help="learn an option: Field:Name=ID (8 hex digits)")
+    p.add_argument("--dry-run", dest="card_dry_run", action="store_true", help="print the request, send nothing")
+    return p
 
 
-register_local(
-    LocalMode("card", "edit one project card with one REST PATCH from a persisted id map", add_arguments, run)
-)
+def main(
+    argv: Sequence[str], *, env: Mapping[str, str], out: TextIO, err: TextIO, now: dt.datetime | None = None
+) -> int:
+    args = parser().parse_args(argv)
+    ctx = LocalContext(out, env, now or dt.datetime.now(dt.UTC))
+    try:
+        return run(ctx, args)
+    except SafoError as problem:
+        err.write(f"safo-card: {safe(str(problem))}\n")
+        return problem.exit_code
+
+
+def entry() -> None:
+    raise SystemExit(main(sys.argv[1:], env=os.environ, out=sys.stdout, err=sys.stderr))
