@@ -515,3 +515,55 @@ def test_the_entry_point_is_declared() -> None:
 
     meta = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8"))
     assert meta["project"]["scripts"]["safo-ship"] == "safo.ship:run"
+
+
+def plant(folder: Path) -> Path:
+    """A `gh` and `git` that record that they ran, in a folder that is on PATH."""
+    folder.mkdir(parents=True)
+    marker = folder / "ran"
+    for name in ("gh", "git"):
+        f = folder / name
+        f.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+        f.chmod(f.stat().st_mode | stat.S_IXUSR)
+    return marker
+
+
+@pytest.mark.parametrize("via_link", [False, True])
+def test_a_gh_or_git_inside_the_workdir_is_never_chosen(rig: Rig, tmp_path: Path, via_link: bool) -> None:
+    work = tmp_path / "work"
+    marker = plant(work / "bin")
+    given = work
+    if via_link:
+        given = tmp_path / "link"
+        given.symlink_to(work)
+    rig.state_path.write_text(json.dumps(rig.state), encoding="utf-8")
+    out, err = io.StringIO(), io.StringIO()
+    path = f"{given / 'bin'}:{rig.bin}"  # the planted folder comes FIRST on PATH
+    code = ship.main(
+        ["5", "--repo", REPO, "--workdir", str(given)],
+        env={"PATH": path, "FAKE_STATE": str(rig.state_path)},
+        out=out,
+        err=err,
+        sleep=lambda _s: None,
+    )
+    calls = json.loads(rig.state_path.read_text(encoding="utf-8"))["calls"]
+    assert not marker.exists() and calls, "the planted binary ran, or the trusted one never did"
+    assert code == 0 or code == ship.EXIT_MERGE_REFUSED, out.getvalue()
+
+
+def test_the_planted_binary_is_the_only_one_on_path_means_not_found(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    marker = plant(work / "bin")
+    out, err = io.StringIO(), io.StringIO()
+    code = ship.main(["5", "--repo", REPO, "--workdir", str(work)], env={"PATH": str(work / "bin")}, out=out, err=err)
+    assert code == ship.EXIT_ERROR and not marker.exists() and "must be on PATH" in err.getvalue()
+
+
+def test_the_workdir_is_resolved_to_its_real_absolute_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    assert ship.resolve_workdir(str(tmp_path / "link")) == str(real.resolve())
+    monkeypatch.chdir(real)
+    assert ship.resolve_workdir("../link") == str(real.resolve())
+    assert ship.resolve_workdir(None) == str(real.resolve())

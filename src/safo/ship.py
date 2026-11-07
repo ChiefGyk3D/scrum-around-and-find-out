@@ -498,6 +498,11 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error("give a pull request number, or --open-pr")
 
 
+def resolve_workdir(path: str | None) -> str:
+    """The absolute real path (symlinks resolved) of --workdir, or of the current directory."""
+    return os.path.realpath(path or os.getcwd())
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -514,11 +519,12 @@ def main(
     parser = build_parser()
     args = parser.parse_args(argv)
     validate(args, parser)
-    gh_path, git_path = find_gh(env), find_executable("git", env)
+    workdir = resolve_workdir(args.workdir)  # the trust root: no gh or git from inside it is ever chosen
+    gh_path, git_path = find_gh(env, workdir), find_executable("git", env, workdir)
     if gh_path is None or git_path is None:
         output.write(err, "error: gh and git must be on PATH")
         return EXIT_ERROR
-    gh = Gh(gh_path, git_path, env, run, args.workdir)
+    gh = Gh(gh_path, git_path, env, run, workdir)
     watcher = Watcher(
         gh,
         out,
