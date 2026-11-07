@@ -33,6 +33,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Claude Code plugins](plugins.md): set up the Codex and Ollama plugins, and where each one fits.
 - [Prerequisites](prerequisites.md): the tools, plugins, packs and accounts SAFO leans on, with verified minimum versions, and `safo doctor` to check them.
 - [Local LLM](local-llm.md): what a local model is good and bad at, and the guard that keeps it from evicting a resident model.
+- [Shared GitHub API budget and card edits](ratebudget.md): `ghw`, `safo ratebudget` and `safo card`: one budget view for every session, one REST call per card edit.
 - [Limits](limits.md): reading each tool's real usage and deciding when to switch.
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.
 - [Approval issues](approvals.md): how a gate or change approval is read and what it must say.
