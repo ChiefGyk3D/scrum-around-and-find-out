@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Shared GitHub API budget (#356, #358; umbrella #355, rules #204). `ghw` (new entry point, `safo.ratebudget`) is `gh`
+  with a per-bucket call ledger under `~/.local/state/safo/ratebudget` (file lock): the worst counter across response
+  headers and the `rate_limit` endpoint is the truth, 70% warns, 90% refuses (exit 75) until reset, `Retry-After` and
+  secondary-limit answers block the bucket, writes are spaced at least one second across processes, nothing is replayed.
+  `safo-ratebudget [--by-caller] [--refresh]` prints the status line and a per-caller report; a one-line cache
+  (`statusline.txt`) is kept for a statusline. `safo-card` edits one project card with one REST PATCH from a persisted
+  map of item, field and option ids (`safo.boardmap`) and never lists the board. Tests: `tests/test_ratebudget.py`,
+  `tests/test_ratebudget_mode.py`, `tests/test_boardmap.py`. Docs: `docs/ratebudget.md`. Not wired into the dispatch
+  guard (a guard file; #357). Round 2 (review): counters, blocks and the write queue are scoped by a host and
+  credential fingerprint; one global write queue; a queued writer re-checks before it launches; counters are saved
+  before the audit row; the state directory is made private and used by descriptor; persisted times are bounded; a
+  repeated or malformed rate-limit header rejects the answer; compact option spellings count as writes; `--resolve`
+  needs a positive repository match. Round 3: the scope follows the authenticated account (not the token), an
+  account that cannot be told gets a conservative unknown scope, a GraphQL secondary limit sent with HTTP 200 blocks,
+  `boardmap.json` is read with the same private-directory checks as it is written, and the write-slot bound is the
+  queue limit. Round 4 (#367, #368): a launch gate spaces writes from the last actual launch (the child is spawned
+  while the account's gate lock is held, then the lock is released), and a hostile identity cache is validated record by
+  record and fails open. The real `gh` child now runs in its own process group so a timeout ends it and its children. Round 5: SIGINT, SIGTERM and
+  SIGHUP are forwarded to that group while `ghw` waits (grace, SIGKILL, reap; unknown outcome, exit 128+signal); launch
+  spacing is read from the monotonic clock of the same boot, and a launch recorded in the future fails closed for one
+  spacing instead of being dropped; the launch gate lock is a file per account, so one account's stalled spawn does not
+  block another. Round 6: the signal guard covers the whole run (handlers installed together before the gate, a
+  signal at any point after a child may exist is forwarded, stopped, reaped, reported as an unknown outcome),
+  `safo-card` reports a signal-interrupted PATCH as an unknown outcome (`is_unknown_outcome_exit`), a future same-boot
+  monotonic launch record is repaired once, and concurrent card-map updates are merged under a lock. Round 7: modes are written as `stat.S_IRWXU` (Semgrep read the 0o700 literal as too
+  permissive; same mode, no suppression), the board snapshot copies the option dicts (#373), and an oversized or
+  unterminated header block is withheld instead of printed as body (#374).
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on
