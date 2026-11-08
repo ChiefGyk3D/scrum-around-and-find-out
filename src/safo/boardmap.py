@@ -17,13 +17,15 @@ kind shows up as a 422 on the first edit and is fixed in the map file.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import io
 import json
 import os
 import re
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,7 @@ DEFAULT_PROJECT = "users/ChiefGyk3D/projectsV2/3"
 MAX_MAP_BYTES = 524_288
 MAX_ITEMS = 5000
 MAP_NAME = "boardmap.json"
+MAP_LOCK = "boardmap.lock"
 
 _PROJECT = re.compile(r"(users|orgs)/[A-Za-z0-9][A-Za-z0-9-]{0,38}/projectsV2/[0-9]{1,9}")
 _KEY = re.compile(r"([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,8})")
@@ -178,6 +181,49 @@ def save(board: BoardMap, path: Path) -> None:
     ratebudget.write_private(path, json.dumps(to_json(board), indent=1, sort_keys=True).encode() + b"\n")
 
 
+@contextlib.contextmanager
+def _map_lock(directory: Path) -> Iterator[None]:
+    """An exclusive lock for the whole read-merge-write of the map (a short, local step: no network inside)."""
+    dfd = ratebudget.open_private_dir(directory, create=True)
+    try:
+        fd = os.open(MAP_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        try:
+            ratebudget.check_regular(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dfd)
+
+
+def merge_save(path: Path, before: Mapping[str, Any], board: BoardMap) -> None:
+    """Save what this run learned (the difference between `before` and `board`) onto the map as it is now.
+
+    Two runs that each loaded the same file and each learned something both keep their finds: the file is re-read
+    under a lock and only this run's new or changed items and options are laid over it. No difference, no write.
+    """
+    mine = to_json(board)
+    new_items = {k: v for k, v in mine["items"].items() if before["items"].get(k) != v}
+    new_options = {
+        name: {
+            label: oid
+            for label, oid in field["options"].items()
+            if before["fields"].get(name, {}).get("options", {}).get(label) != oid
+        }
+        for name, field in mine["fields"].items()
+    }
+    if not new_items and not any(new_options.values()):
+        return
+    with _map_lock(path.parent):
+        current = load(path)
+        current.items.update(new_items)
+        for name, options in new_options.items():
+            if name in current.fields:
+                current.fields[name].options.update(options)
+        save(current, path)
+
+
 def map_path(env: Mapping[str, str]) -> Path:
     return ratebudget.state_dir(env) / MAP_NAME
 
@@ -312,7 +358,7 @@ def gh_transport(
         code = ratebudget.main(argv, env=env, out=out, err=err, run=run, sleep=sleep, clock=clock, gh=gh, stdin=body)
         if code == ratebudget.EXIT_THROTTLED:
             raise RateLimitedError(err.getvalue().strip() or "rate limited")
-        if code == ratebudget.EXIT_UNKNOWN_OUTCOME:
+        if ratebudget.is_unknown_outcome_exit(code, err.getvalue()):  # a timeout, or the wrapper's own signal report
             raise TimeoutError(err.getvalue().strip() or "outcome unknown")
         text = (out.getvalue() + err.getvalue())[:300]
         return Reply(code == 0, out.getvalue().encode(), "" if code == 0 else f"exit {code}: {text}")

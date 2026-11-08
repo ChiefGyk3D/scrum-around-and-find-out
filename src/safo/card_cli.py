@@ -63,8 +63,7 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
             boardmap.resolve_item(board, transport, key)
         request = boardmap.build_request(board, key, edits)
     finally:
-        if boardmap.to_json(board) != before:
-            boardmap.save(board, path)
+        boardmap.merge_save(path, before, board)
     if dry:
         ctx.say(f"{request.method} {request.path}")
         ctx.say(request.body)

@@ -332,6 +332,9 @@ class Handle:
         self.log.append("held-while-running" if held else "free-while-running")
         return done(http("200 OK", OK, "{}"))
 
+    def stop(self, signum: int) -> None:
+        return None
+
 
 def test_the_gate_is_released_after_the_spawn_not_after_the_child_exits(tmp_path: Path) -> None:
     from io import StringIO
@@ -563,3 +566,34 @@ def test_a_hostile_record_at_the_credentials_own_key_is_a_miss(tmp_path: Path, e
     assert not got.unknown  # asked again, and the bad record was replaced
     data = json.loads((tmp_path / DIR / "identity.json").read_text())
     assert data["ids"][key]["scope"] == got.name
+
+
+# round 6: a hostile same-boot monotonic record in the future is repaired like a future wall record
+
+
+def test_a_future_monotonic_record_with_the_matching_boot_is_repaired_once(tmp_path: Path) -> None:
+    clock, mono = Clock(), Mono()
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, lambda s: None)
+    state = json.loads((tmp_path / "rb" / "state.json").read_text())
+    state["launch_mono"]["local|*"] = {"boot": "boot-a", "t": 999_999_999_999.0}
+    (tmp_path / "rb" / "state.json").write_text(json.dumps(state))
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        mono.now += seconds
+        clock.now += seconds
+
+    b = mono_budget(tmp_path, clock, mono)
+    assert b.launch_gate(lambda: "went", sleep) == "went"
+    assert slept == [pytest.approx(rb.WRITE_SPACING)]  # exactly one spacing, then it proceeded
+    repaired = json.loads((tmp_path / "rb" / "state.json").read_text())["launch_mono"]["local|*"]
+    assert repaired["t"] < 1e6  # rewritten from the current monotonic clock, not left as it was
+    again: list[float] = []
+
+    def sleep_again(seconds: float) -> None:
+        again.append(seconds)
+        mono.now += seconds
+
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, sleep_again)
+    assert again == [pytest.approx(rb.WRITE_SPACING)]  # a normal spacing after the real launch, not a stuck gate

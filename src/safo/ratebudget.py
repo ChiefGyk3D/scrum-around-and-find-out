@@ -33,6 +33,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -142,6 +143,24 @@ def read_boot_id(path: Path = BOOT_ID_PATH) -> str | None:
     except (OSError, UnicodeError):
         return None
     return text if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", text) else None
+
+
+UNKNOWN_OUTCOME_EXITS = frozenset(
+    {EXIT_UNKNOWN_OUTCOME, 128 + signal.SIGHUP, 128 + signal.SIGINT, 128 + signal.SIGTERM}
+)
+UNKNOWN_OUTCOME_MARKER = "outcome unknown"
+
+
+def is_unknown_outcome_exit(code: int, stderr: str | None = None) -> bool:
+    """True for the exit codes `main` uses when a call may have been sent and its result is not known: 124 (timeout,
+    bad output) and 128 plus SIGHUP, SIGINT or SIGTERM (a signal). No other code above 128 is assumed: `gh` itself
+    can exit with any code. If `stderr` is given it must also carry the wrapper's own report, so a `gh` that merely
+    exited 130 is not mistaken for one."""
+    if code not in UNKNOWN_OUTCOME_EXITS:
+        return False
+    return stderr is None or any(
+        line.startswith("ghw: ") and UNKNOWN_OUTCOME_MARKER in line for line in stderr.splitlines()
+    )
 
 
 def clean_caller(value: str) -> str:
@@ -320,6 +339,8 @@ class GateBusy(Exception):
 class Launched(Protocol):
     def wait(self) -> subprocess.CompletedProcess[str]: ...
 
+    def stop(self, signum: int) -> None: ...
+
 
 Launcher = Callable[[list[str], str | None], Launched]
 
@@ -331,8 +352,63 @@ class _Finished:
     def wait(self) -> subprocess.CompletedProcess[str]:
         return self.result
 
+    def stop(self, signum: int) -> None:
+        return None
+
 
 _FORWARDED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+_ACTIVE: _SignalGuard | None = None
+
+
+class _SignalGuard:
+    """SIGINT, SIGTERM and SIGHUP, caught from before the launch gate until the call is over.
+
+    The child is detached (its own session), so a signal sent to us never reaches it by itself, and a signal that
+    killed us between the spawn and the wait would leave a possibly-applied call with no report. So the three handlers
+    are installed first, with the signals blocked while it is done (all three or none), and restored last. While no
+    child can exist (`raising`), a signal raises `Interrupted` at once; across the spawn and the launch record it is
+    only noted (`pending`), and the caller acts on it as soon as it holds the child. Off the main thread nothing can be
+    installed and the guard does nothing.
+    """
+
+    def __init__(self) -> None:
+        self.pending: int | None = None
+        self.raising = False  # set by the caller once it can handle an Interrupted
+        self._previous: dict[signal.Signals, Any] = {}
+
+    def _handle(self, signum: int, _frame: object) -> None:
+        if self.pending is None:
+            self.pending = signum
+        if self.raising:
+            raise Interrupted(signum)
+
+    def _restore(self) -> None:
+        for number, handler in self._previous.items():
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+        self._previous.clear()
+
+    def __enter__(self) -> _SignalGuard:
+        if threading.current_thread() is not threading.main_thread():
+            return self
+        before = signal.pthread_sigmask(signal.SIG_BLOCK, _FORWARDED)
+        try:
+            for number in _FORWARDED:
+                self._previous[number] = signal.signal(number, self._handle)
+        except BaseException:
+            self._restore()
+            raise
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, before)  # a signal that came meanwhile is delivered now
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if not self._previous:
+            return
+        before = signal.pthread_sigmask(signal.SIG_BLOCK, _FORWARDED)
+        try:
+            self._restore()
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, before)
 
 
 class _Child:
@@ -340,6 +416,11 @@ class _Child:
 
     def __init__(self, command: list[str], stdin: str | None) -> None:
         self.stdin = stdin
+        guard = _ACTIVE
+        if guard is not None:
+            if guard.pending is not None:
+                raise Interrupted(guard.pending)  # a signal came before anything was started: nothing is sent
+            guard.raising = False  # from here a child may exist: signals are noted, not raised
         self.process = subprocess.Popen(  # noqa: S603 - argv list, absolute gh found on a trusted PATH, no shell
             command,
             stdin=None if stdin is None else subprocess.PIPE,
@@ -349,7 +430,7 @@ class _Child:
             start_new_session=True,  # its own process group, so a timeout can end the child and its children
         )
 
-    def _stop(self, signum: int) -> None:
+    def stop(self, signum: int) -> None:
         """Forward the signal to the child's group, give it a grace period, then SIGKILL the group and reap."""
         group = self.process.pid
         with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -366,19 +447,7 @@ class _Child:
                     pipe.close()
 
     def wait(self) -> subprocess.CompletedProcess[str]:
-        """Wait for the child. SIGINT, SIGTERM and SIGHUP are forwarded to its group while we wait (it is detached,
-        so a Ctrl-C at our terminal would otherwise miss it); the handlers are restored afterwards. A signal ends the
-        child within a bounded time and raises Interrupted: the call may have been applied, so it is not replayed."""
-
-        def forward(signum: int, _frame: object) -> None:
-            raise Interrupted(signum)
-
-        previous: dict[signal.Signals, Any] = {}
-        try:
-            for number in _FORWARDED:
-                previous[number] = signal.signal(number, forward)
-        except ValueError:  # not the main thread: handlers cannot be set, the timeout still applies
-            pass
+        """Wait for the child. A signal raises Interrupted here (the guard's handler); the caller stops the child."""
         try:
             out, err = self.process.communicate(input=self.stdin, timeout=GH_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
@@ -387,15 +456,6 @@ class _Child:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self.process.communicate(timeout=5)
             raise
-        except Interrupted as stop:
-            with contextlib.suppress(ValueError):
-                for number in previous:
-                    signal.signal(number, signal.SIG_IGN)  # a second signal must not interrupt the clean-up
-            self._stop(stop.signum)
-            raise
-        finally:
-            for number, handler in previous.items():
-                signal.signal(number, handler)
         return subprocess.CompletedProcess(self.process.args, self.process.returncode, out, err)
 
 
@@ -435,7 +495,7 @@ def open_private_dir(directory: Path, *, create: bool) -> int:
     return fd
 
 
-def _check_regular(fd: int) -> None:
+def check_regular(fd: int) -> None:
     """The descriptor is a regular file of this user with one link; a mode looser than 0600 is repaired."""
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
@@ -454,7 +514,7 @@ def _replace_private(dfd: int, name: str, data: bytes) -> None:
     tmp = f"{name}.{os.getpid()}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
     try:
-        _check_regular(fd)
+        check_regular(fd)
         _write_all(fd, data)
     finally:
         os.close(fd)
@@ -478,7 +538,7 @@ def read_private(dfd: int, name: str, limit: int) -> bytes:
     """
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
     try:
-        _check_regular(fd)
+        check_regular(fd)
         chunks: list[bytes] = []
         total = 0
         while total <= limit:
@@ -686,7 +746,7 @@ class Budget:
         try:
             lock = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
             try:
-                _check_regular(lock)
+                check_regular(lock)
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 yield dfd
             finally:
@@ -893,7 +953,11 @@ class Budget:
             seen = entry.get("t")
             if isinstance(seen, int | float) and not isinstance(seen, bool) and math.isfinite(seen):
                 elapsed = self.mono() - float(seen)
-                return max(0.0, WRITE_SPACING - elapsed) if elapsed >= 0 else WRITE_SPACING
+                if elapsed >= 0:
+                    return max(0.0, WRITE_SPACING - elapsed)
+                self._apply(state, (), None, None, self.clock())  # a record from the future: repaired, as below
+                self._save(dfd, state)
+                return WRITE_SPACING
         last = self._launched(state).get(key)
         if last is None:
             return 0.0
@@ -908,7 +972,7 @@ class Budget:
         """The descriptor of this account's gate lock, once it is ours; waits up to GATE_LOCK_WAIT_SECONDS."""
         fd = os.open(self.gate_lock_name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
         try:
-            _check_regular(fd)
+            check_regular(fd)
             give_up = time.monotonic() + GATE_LOCK_WAIT_SECONDS
             while True:
                 try:
@@ -1009,7 +1073,7 @@ class Budget:
             pass
         fd = os.open(LEDGER, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
         try:
-            _check_regular(fd)
+            check_regular(fd)
             _write_all(fd, line.encode())
         finally:
             os.close(fd)
@@ -1200,32 +1264,66 @@ def main(
     if inject:
         command = [exe, "api", "--include", *argv[1:]]
     starter = launch or _launcher(run)
-    child: Launched
-    try:
-        if ledger is not None and what.write:
+    child: Launched | None = None
+    guard = _SignalGuard()
+    global _ACTIVE
+    with guard:
+        _ACTIVE = guard
+        try:
+            guard.raising = True  # nothing is started yet: a signal now simply stops us
+            if guard.pending is not None:  # one that came while the handlers were being installed
+                err.write(f"ghw: interrupted by signal {guard.pending} before the call was sent; nothing was sent\n")
+                return 128 + guard.pending
             try:
-                child = ledger.launch_gate(lambda: starter(command, stdin), sleep)
-            except GateUnavailable as problem:
-                err.write(f"ghw: the launch gate is unavailable ({problem}); going ahead without it\n")
-                child = starter(command, stdin)
-            except GateBusy:
-                err.write("ghw: the launch gate stayed busy; nothing was sent, retry shortly\n")
-                return EXIT_THROTTLED
-        else:
-            child = starter(command, stdin)
-        done = child.wait()
-    except Interrupted as stop:
-        err.write(
-            f"ghw: interrupted by signal {stop.signum}; outcome unknown (the call may or may not have been applied); "
-            "not retried\n"
-        )
-        _record(ledger, env, what, 0, [], None, err)
-        return 128 + stop.signum
-    except (OSError, subprocess.TimeoutExpired, UnicodeError) as problem:  # bad UTF-8 is unknown too
-        # sent or not, we cannot tell: record it, never replay it
-        err.write(f"ghw: outcome unknown ({type(problem).__name__}); not retried\n")
-        _record(ledger, env, what, 0, [], None, err)
-        return EXIT_UNKNOWN_OUTCOME
+                if ledger is not None and what.write:
+                    try:
+                        child = ledger.launch_gate(lambda: starter(command, stdin), sleep)
+                    except GateUnavailable as problem:
+                        err.write(f"ghw: the launch gate is unavailable ({problem}); going ahead without it\n")
+                        child = starter(command, stdin)
+                    except GateBusy:
+                        err.write("ghw: the launch gate stayed busy; nothing was sent, retry shortly\n")
+                        return EXIT_THROTTLED
+                else:
+                    child = starter(command, stdin)
+                guard.raising = True  # the child exists: from here a signal interrupts the wait
+                if guard.pending is not None:
+                    raise Interrupted(guard.pending)
+                done = child.wait()
+            except Interrupted as stop:
+                guard.raising = False  # clean-up must not be interrupted
+                if child is None:
+                    err.write(f"ghw: interrupted by signal {stop.signum} before the call was sent; nothing was sent\n")
+                    return 128 + stop.signum
+                child.stop(stop.signum)
+                err.write(
+                    f"ghw: interrupted by signal {stop.signum}; {UNKNOWN_OUTCOME_MARKER} "
+                    "(the call may or may not have been applied); not retried\n"
+                )
+                _record(ledger, env, what, 0, [], None, err)
+                return 128 + stop.signum
+            except (OSError, subprocess.TimeoutExpired, UnicodeError) as problem:  # bad UTF-8 is unknown too
+                # sent or not, we cannot tell: record it, never replay it
+                err.write(f"ghw: {UNKNOWN_OUTCOME_MARKER} ({type(problem).__name__}); not retried\n")
+                _record(ledger, env, what, 0, [], None, err)
+                return EXIT_UNKNOWN_OUTCOME
+            guard.raising = False  # the call is over; a later signal is noted and honoured below
+            return _finish(done, inject, what, ledger, env, clock, out, err, guard)
+        finally:
+            _ACTIVE = None
+
+
+def _finish(
+    done: subprocess.CompletedProcess[str],
+    inject: bool,
+    what: Classified,
+    ledger: Budget | None,
+    env: Mapping[str, str],
+    clock: Clock,
+    out: TextIO,
+    err: TextIO,
+    guard: _SignalGuard,
+) -> int:
     stdout = done.stdout or ""
     status, headers, body = _split_response(stdout) if inject else (0, {}, stdout)
     out.write(body)
@@ -1242,6 +1340,8 @@ def main(
             block = SECONDARY_WAIT
     counters = counters_from_headers(headers, what.bucket) if headers else []
     _record(ledger, env, what, status, counters, block, err)
+    if guard.pending is not None:  # told to stop while finishing: the call is reported above, then honour it
+        return 128 + guard.pending
     return done.returncode
 
 

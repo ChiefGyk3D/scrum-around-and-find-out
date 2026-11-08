@@ -23,7 +23,10 @@
   SIGHUP are forwarded to that group while `ghw` waits (grace, SIGKILL, reap; unknown outcome, exit 128+signal); launch
   spacing is read from the monotonic clock of the same boot, and a launch recorded in the future fails closed for one
   spacing instead of being dropped; the launch gate lock is a file per account, so one account's stalled spawn does not
-  block another.
+  block another. Round 6: the signal guard covers the whole run (handlers installed together before the gate, a
+  signal at any point after a child may exist is forwarded, stopped, reaped, reported as an unknown outcome),
+  `safo-card` reports a signal-interrupted PATCH as an unknown outcome (`is_unknown_outcome_exit`), a future same-boot
+  monotonic launch record is repaired once, and concurrent card-map updates are merged under a lock.
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on

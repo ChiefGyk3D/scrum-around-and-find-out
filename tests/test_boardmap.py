@@ -16,6 +16,7 @@ import pytest
 from localcli import tool
 from safo import boardmap as bm
 from safo import card_cli
+from safo import ratebudget as rbmod
 from safo.errors import ApiError, ConfigError, MalformedDataError, UnknownOutcomeError
 
 PROJECT = "users/ChiefGyk3D/projectsV2/3"
@@ -402,3 +403,111 @@ def test_mode_learns_an_option(tmp_path: Path) -> None:
     )
     assert code == 0
     assert "deadbeef" in out
+
+
+# round 6: a signal-interrupted PATCH is an unknown outcome, never "GitHub refused"
+
+
+def stub_main(monkeypatch: pytest.MonkeyPatch, code: int, err_text: str) -> None:
+    def fake(argv: Any, *, out: Any, err: Any, **_kw: Any) -> int:
+        err.write(err_text)
+        return code
+
+    monkeypatch.setattr(rbmod, "main", fake)
+
+
+UNKNOWN_TEXT = (
+    "ghw: interrupted by signal {n}; outcome unknown (the call may or may not have been applied); not retried\n"
+)
+
+
+@pytest.mark.parametrize("code", [124, 129, 130, 143])
+def test_a_signal_or_timeout_exit_with_the_wrapper_report_is_an_unknown_outcome(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    stub_main(monkeypatch, code, UNKNOWN_TEXT.format(n=code - 128))
+    transport = bm.gh_transport({"HOME": "/nonexistent", "GH_TOKEN": "t"})
+    with pytest.raises(UnknownOutcomeError):
+        bm.edit_card(seeded(), transport, KEY, {"Effort": "M"})
+
+
+@pytest.mark.parametrize("code", [1, 2, 4, 128, 131, 137, 255])
+def test_other_exit_codes_stay_a_refusal(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    stub_main(monkeypatch, code, UNKNOWN_TEXT.format(n=1))
+    transport = bm.gh_transport({"HOME": "/nonexistent", "GH_TOKEN": "t"})
+    with pytest.raises(ApiError) as caught:
+        bm.edit_card(seeded(), transport, KEY, {"Effort": "M"})
+    assert not isinstance(caught.value, UnknownOutcomeError)
+
+
+@pytest.mark.parametrize("code", [129, 130, 143])
+def test_a_plain_gh_exit_that_looks_like_a_signal_is_not_assumed_unknown(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    stub_main(monkeypatch, code, "gh: HTTP 422: Validation Failed\n")  # gh's own exit, no wrapper report
+    transport = bm.gh_transport({"HOME": "/nonexistent", "GH_TOKEN": "t"})
+    with pytest.raises(ApiError) as caught:
+        bm.edit_card(seeded(), transport, KEY, {"Effort": "M"})
+    assert not isinstance(caught.value, UnknownOutcomeError)
+
+
+def test_is_unknown_outcome_exit() -> None:
+    from safo import ratebudget as rb
+
+    for code in (124, 129, 130, 143):
+        assert rb.is_unknown_outcome_exit(code)
+    for code in (0, 1, 75, 127, 128, 131, 137, 255):
+        assert not rb.is_unknown_outcome_exit(code)
+    assert rb.is_unknown_outcome_exit(130, "ghw: interrupted by signal 2; outcome unknown (x); not retried\n")
+    assert not rb.is_unknown_outcome_exit(130, "something else\n")
+
+
+# round 6: two edits that each learn something both persist
+
+
+def test_two_stale_copies_saved_in_turn_both_persist(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "boardmap.json"
+    bm.save(bm.default_map(), path)
+    a, b = bm.load(path), bm.load(path)  # both started from the same file
+    before = bm.to_json(a)
+    a.items["o/r#1"] = 11
+    b.items["o/r#2"] = 22
+    b.fields["Effort"].options["XL"] = "deadbeef"
+    bm.merge_save(path, before, a)
+    bm.merge_save(path, before, b)
+    final = bm.load(path)
+    assert final.items == {"o/r#1": 11, "o/r#2": 22}
+    assert final.fields["Effort"].options["XL"] == "deadbeef"
+
+
+def test_concurrent_threads_all_persist(tmp_path: Path) -> None:
+    import threading
+
+    path = tmp_path / "state" / "boardmap.json"
+    bm.save(bm.default_map(), path)
+    start = threading.Barrier(6)
+
+    def worker(n: int) -> None:
+        mine = bm.load(path)
+        before = bm.to_json(mine)
+        start.wait(5)  # every worker holds a copy loaded before any of them saves
+        mine.items[f"o/r#{n}"] = 100 + n
+        bm.merge_save(path, before, mine)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(1, 7)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+    assert bm.load(path).items == {f"o/r#{n}": 100 + n for n in range(1, 7)}
+
+
+def test_merge_save_changes_nothing_when_nothing_changed(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "boardmap.json"
+    bm.save(seeded(), path)
+    mine = bm.load(path)
+    other = bm.load(path)
+    other.items["o/r#9"] = 9
+    bm.save(other, path)
+    bm.merge_save(path, bm.to_json(mine), mine)  # no diff: must not roll back the other writer
+    assert bm.load(path).items["o/r#9"] == 9
