@@ -366,8 +366,8 @@ class _Child:
                     pipe.close()
 
     def wait(self) -> subprocess.CompletedProcess[str]:
-        """Wait for the child. SIGINT, SIGTERM and SIGHUP are forwarded to its group while we wait (it is detached
-        from our terminal, so Ctrl-C would otherwise miss it); the handlers are restored afterwards. A signal ends the
+        """Wait for the child. SIGINT, SIGTERM and SIGHUP are forwarded to its group while we wait (it is detached,
+        so a Ctrl-C at our terminal would otherwise miss it); the handlers are restored afterwards. A signal ends the
         child within a bounded time and raises Interrupted: the call may have been applied, so it is not replayed."""
 
         def forward(signum: int, _frame: object) -> None:
