@@ -55,8 +55,9 @@ class LocalContext:
 
     @property
     def which(self) -> Callable[[str], str | None]:
-        """Find `gh` on the absolute PATH entries of `env`, not the process's: an empty PATH finds nothing."""
-        return self.which_override or (lambda name: find_gh(self.env) if name == "gh" else None)
+        """Find `gh` on the absolute PATH entries of `env`, not the process's: an empty PATH finds nothing.
+        A session whose working directory is the home directory still finds a `gh` under it (#357)."""
+        return self.which_override or (lambda name: find_gh(self.env, home_ok=True) if name == "gh" else None)
 
     @property
     def home(self) -> Path:
