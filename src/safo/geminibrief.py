@@ -1219,57 +1219,63 @@ _NETWORK_TOOL = re.compile(
 )
 
 
-_HEREDOC = re.compile(r"<<(?!<)-?\s*(['\"]?)([A-Za-z_][\w.-]*)\1")
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)")
 _SHELL_READERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "eval", "source", ".", "xargs", "su", "sudo"})
-# Commands that only print, search, edit or record the words they are given. A tool name that is an argument of one of
-# these is text, not a command that runs: `grep -rn doppler docs`, `git commit -m 'doppler gate'`.
+# Words that hand text to something that runs it: shells, interpreters, and the tools that evaluate what they read.
+_RELAY_HEADS = frozenset({"python", "perl", "ruby", "node", "nodejs", "awk", "gawk", "mawk", "sed", "php", "lua"})
+_RELAY_HEADS = _RELAY_HEADS | frozenset({"tclsh", "deno", "bun", "pwsh", "powershell", "busybox", "env"})
+_RELAY_PREFIX = frozenset({"eval", "xargs"})
+# Commands that cannot run anything, whatever their arguments: they print, search or move files and nothing else.
+# A tool name that is an argument of one of these is text: `grep -rn <tool> docs`. A tool that can run another
+# program (find, awk, sed, vim, less, man, tar, make, pytest, rg --pre, sort --compress-program, ...) is not listed.
 _INERT_COMMANDS = frozenset(
-    {"grep", "egrep", "fgrep", "rg", "ag", "git", "gh", "echo", "printf", "cat", "tee", "ls", "head", "tail", "sed"}
-    | {"awk", "wc", "sort", "uniq", "diff", "cmp", "find", "test", "[", "less", "more", "vim", "nano", "mkdir"}
-    | {"touch", "cp", "mv", "rm", "man", "which", "type", "tr", "cut", "yamllint", "actionlint", "shellcheck", "ruff"}
-    | {"mypy", "pytest", "make", "true", "false", ":", "cd", "pwd", "export", "set", "unset", "read", "tar", "zip"}
+    {"grep", "egrep", "fgrep", "echo", "printf", "cat", "tee", "ls", "head", "tail", "wc", "uniq", "cut", "tr", "cmp"}
+    | {"true", "false", ":", "pwd", "cd", "mkdir", "touch", "cp", "mv", "rm", "test", "["}
 )
+_GIT_INERT_SUBCOMMANDS = frozenset({"commit"})
+_GH_INERT_SUBCOMMANDS = frozenset({"pr", "issue"})
+_GH_INERT_ACTIONS = frozenset({"create", "comment", "edit", "close", "reopen", "view", "list", "merge"})
+_SUBSTITUTION = ("`", "$(")
+_SYSTEM_BINS = frozenset({"/bin", "/usr/bin"})
 
 
-def _heredoc_data_dropped(command: str) -> str:
-    """The command without the bodies of here-documents fed to a command that does not run them. `cat <<EOF` and
-    `python3 - <<PY` bodies are data here: only a shell reader (bash, sh, eval, ...) executes lines it is given, so a
-    body fed to one of those stays. Other checks (vendor host, key name, project) still read the whole text."""
-    out: list[str] = []
-    lines = command.split("\n")
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        out.append(line)
-        i += 1
-        tags = [m.group(2) for m in _HEREDOC.finditer(line)]
-        if not tags:
-            continue
-        runs = any(_core(w) in _SHELL_READERS for w in re.split(r"\s+", line))
-        for tag in tags:
-            body: list[str] = []
-            while i < len(lines) and lines[i].strip() != tag:
-                body.append(lines[i])
-                i += 1
-            if runs:
-                out.extend(body)
-            if i < len(lines):
-                out.append(lines[i])
-                i += 1
-    return "\n".join(out)
+def _plain_name(word: str) -> str | None:
+    """The command name of a head word, or None when it is a path to something that is not a system binary."""
+    if "/" not in word:
+        return word
+    folder, _, name = word.rpartition("/")
+    return name if folder in _SYSTEM_BINS else None
 
 
-def _active_words(command: str, pattern: re.Pattern[str]) -> bool:
-    """True when `pattern` names a word that may RUN: a command word, a word of a command not known to only print
-    or search, or anything at all when the text cannot be read as plain words (an unterminated quote, an expansion or a
-    shell reader in command position). Words in a comment, in the data of a here-document, or the arguments of grep,
-    git commit, echo, printf and the like are text. Fails closed: whenever unsure, the old any-word answer stands."""
-    text = _heredoc_data_dropped(_join(command))
-    tokens = _lex(text)
-    if tokens is None:
-        return bool(pattern.search(text.lower()))
+def _inert(words: list[Tok]) -> bool:
+    """True when this command (its words, assignments and prefix words already removed) can run nothing: a command
+    from the inert list, `git commit`, or `gh pr|issue <action>`. Anything else, an unknown form, a path or an
+    expansion in command position answers False."""
+    if not words or words[0].mixed:
+        return False
+    head = words[0].value
+    if _DOLLAR.search(head) or any(m in head for m in _SUBSTITUTION):
+        return False
+    name = _plain_name(head)
+    if name is None:
+        return False
+    if name in _INERT_COMMANDS:
+        return True
+    if name == "git":
+        return len(words) > 1 and words[1].value in _GIT_INERT_SUBCOMMANDS
+    if name == "gh":
+        return len(words) > 2 and words[1].value in _GH_INERT_SUBCOMMANDS and words[2].value in _GH_INERT_ACTIONS
+    return False
+
+
+def _is_comment(text: str, t: Tok) -> bool:
+    return t.value.startswith("#") and not t.quoted and (t.start == 0 or text[t.start - 1] in " \t\n;&|()<>")
+
+
+def _segments(text: str, tokens: list[Tok]) -> list[list[Tok]]:
+    """Tokens cut into simple commands: at a newline, at `; | & ( )`. Comments and redirection operators drop out."""
     segments: list[list[Tok]] = [[]]
-    prev_end = 0
+    prev_end = tokens[0].start if tokens else 0
     comment = False
     for t in tokens:
         if "\n" in text[prev_end : t.start]:
@@ -1282,16 +1288,144 @@ def _active_words(command: str, pattern: re.Pattern[str]) -> bool:
             if any(c in t.value for c in ";|&()"):
                 segments.append([])
             continue
-        if t.value.startswith("#") and not t.quoted and (t.start == 0 or text[t.start - 1] in " \t\n;&|()<>"):
+        if _is_comment(text, t):
             comment = True
             continue
         segments[-1].append(t)
+    return segments
+
+
+def _all_inert(text: str, tokens: list[Tok]) -> bool:
+    """Every command in `tokens` is a bare inert command: no assignment, no prefix word, nothing that can run."""
+    return all(_inert(seg) for seg in _segments(text, tokens) if seg)
+
+
+def _heredoc_data_dropped(command: str) -> str:
+    """The command without the bodies of here-documents that only an inert command receives. The here-document
+    operators are read from the lexer's tokens, so a `<<` inside quotes or a comment is not one. A body is data only
+    when the receiving command and every other command are provably inert (`cat <<'EOF' > file`): a shell, an
+    interpreter, a network tool or anything unknown that reads it keeps the body, and so does an unquoted delimiter
+    whose body could expand a command. No unquoted operator, an unterminated body or text that cannot be lexed: every
+    line stays. Other checks (vendor host, key name, project) still read the whole text."""
+    tokens = _lex(command)
+    if tokens is None or not any(t.op and _HEREDOC.search(t.value) for t in tokens):
+        return command
+    ranges: list[tuple[int, int]] = []
+    kept: list[Tok] = []
+    line: list[Tok] = []
+    pending: list[tuple[str, bool]] = []  # delimiter, quoted
+    prev_end = skip_until = 0
+    comment = False
+
+    def consume(newline: int) -> int | None:
+        """Cut the bodies of the pending here-documents that start after `newline`. The position where the last
+        terminator line ends, `newline` when nothing is cut, None when a body has no terminator (keep it all)."""
+        if not _all_inert(command, line):
+            return newline
+        pos = newline + 1
+        found: list[tuple[int, int]] = []
+        for tag, quoted in pending:
+            start = pos
+            while True:
+                if pos > len(command):
+                    return None
+                eol = command.find("\n", pos)
+                eol = len(command) if eol == -1 else eol
+                if command[pos:eol].strip() == tag:
+                    break
+                pos = eol + 1
+            body = command[start:pos]
+            if quoted or not any(m in body for m in ("`", "$(", "${")):
+                found.append((start, pos))
+            pos = eol + 1
+        ranges.extend(found)
+        return max(newline, pos - 1)
+
+    k = 0
+    while k < len(tokens):
+        t = tokens[k]
+        k += 1
+        if t.start < skip_until:
+            continue
+        prev_end = max(prev_end, skip_until)
+        gap = command[prev_end : t.start]
+        if "\n" in gap:
+            if pending:
+                end = consume(prev_end + gap.index("\n"))
+                if end is None:
+                    return command
+                skip_until = end
+            line, pending, comment = [], [], False
+            if t.start < skip_until:
+                continue
+        prev_end = t.end
+        kept.append(t)
+        if comment:
+            continue
+        line.append(t)
+        if not t.op:
+            comment = _is_comment(command, t)
+            continue
+        if not _HEREDOC.search(t.value):
+            continue
+        # the delimiter is the word right after the operator: `<<EOF`, `<<-EOF`, `<< 'EOF'`
+        if not t.value.endswith("<<") or k >= len(tokens) or tokens[k].op:
+            return command
+        word = tokens[k]
+        k += 1
+        kept.append(word)
+        line.append(word)
+        prev_end = word.end
+        dash = word.start == t.end and word.value.startswith("-")
+        tag = word.value[1:] if dash else word.value
+        quoted = word.quoted
+        if dash and not tag:
+            if k >= len(tokens) or tokens[k].op:
+                return command
+            word = tokens[k]
+            k += 1
+            kept.append(word)
+            line.append(word)
+            prev_end = word.end
+            tag, quoted = word.value, word.quoted
+        pending.append((tag, quoted))
+    if pending:
+        tail = command[prev_end:]
+        if "\n" in tail:
+            end = consume(prev_end + tail.index("\n"))
+            if end is None:
+                return command
+            skip_until = end
+    if not ranges or not _all_inert(command, kept):
+        return command
+    out: list[str] = []
+    last = 0
+    for a, b in ranges:
+        out.append(command[last:a])
+        last = b
+    out.append(command[last:])
+    return "".join(out)
+
+
+def _active_words(command: str, pattern: re.Pattern[str]) -> bool:
+    """True when `pattern` names a word that may RUN: a command word, a word of a command not known to be inert, or
+    anything at all when the text cannot be read as plain words (an unterminated quote, an expansion in command
+    position, or a shell, interpreter or network tool that reads text from another command). Words in a comment, in
+    the data of a here-document, or the arguments of grep, git commit, echo, printf and the like are text. Fails
+    closed: whenever unsure, the old any-word answer stands."""
+    text = _heredoc_data_dropped(_join(command))
+    tokens = _lex(text)
+    if tokens is None:
+        return bool(pattern.search(text.lower()))
     relay = unknown = False
+    segments = _segments(text, tokens)
     for seg in segments:
         words = [t for t in seg if not _ASSIGNMENT_WORD.match(t.value) or t.quoted]
         if len(words) < len(seg) and any(pattern.search(t.value.lower()) for t in seg if t not in words):
             return True  # NAME=tool: the tool name is stored to be run later
         while words and words[0].value in _PREFIX_WORDS:
+            if words[0].value in _RELAY_PREFIX:
+                relay = True
             words = words[1:]
         if not words:
             continue
@@ -1299,9 +1433,19 @@ def _active_words(command: str, pattern: re.Pattern[str]) -> bool:
         base = head.rsplit("/", 1)[-1].lower()
         if _DOLLAR.search(head) or "`" in head:
             unknown = True
-        if base in _SHELL_READERS:
+        if (
+            _plain_name(head) is None  # a script or program by path: it may read and run what it is given
+            or base in _SHELL_READERS
+            or base in _RELAY_HEADS
+            or base.startswith("python")
+            or _NETWORK_TOOL.fullmatch(base)
+        ):
             relay = True
-        if base not in _INERT_COMMANDS and any(pattern.search(t.value.lower()) for t in words):
+        if _inert(words):
+            # text, unless a word holds a command substitution that the shell runs before the command does
+            if any(pattern.search(t.value.lower()) and any(m in t.value for m in _SUBSTITUTION) for t in words):
+                return True
+        elif any(pattern.search(t.value.lower()) for t in words):
             return True
     if relay or unknown:
         return any(pattern.search(t.value.lower()) for seg in segments for t in seg)

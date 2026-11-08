@@ -128,7 +128,7 @@ SECRET_TOOL = "dop" + "pler"  # built at run time like the other names here
         # a heredoc editing a workflow file: the body is data written to a file
         f"cat >> .github/workflows/ci.yml <<'EOF'\n  - run: {SECRET_TOOL} run -- make test\n    env: ${{{{ x }}}}\nEOF",
         f"cat <<EOF > notes.md\nuse {SECRET_TOOL} for $HOME\nEOF\nls",
-        f"python3 - <<'PY'\nprint('use {SECRET_TOOL} for $HOME')\nPY",
+        f"tee notes.md <<'EOF'\nuse {SECRET_TOOL} for $HOME\nEOF",
         # a printf escape sequence in a line that mentions the tool
         f"printf '\\033[1m{SECRET_TOOL} ready\\033[0m\\n'",
         f"printf '\\033[1m{SECRET_TOOL} ready\\033[0m\\n'; echo $HOME",
@@ -168,6 +168,134 @@ def test_a_secret_tool_word_that_is_only_text_is_not_denied_390(command: str) ->
 )
 def test_the_secret_tool_run_with_an_expansion_is_still_denied_390(command: str) -> None:
     assert geminibrief.shell_command_class(command) is not None, command
+
+
+# -- #390 round 2: harden the shell matcher against bypass ----------------------------------------------------------
+T = SECRET_TOOL
+
+# an argument of a command that can run other programs is not text
+RUNNERS = [
+    f"find . -exec {T} secrets get $K +",
+    f"find . -name x -exec {T} secrets get $K {{}} +",
+    f"awk 'BEGIN{{system(\"{T} secrets get $K\")}}'",
+    f"sed -n '1e {T} secrets get $K' f",
+    f"git -c alias.x='!{T} secrets get $K' x",
+    f"git -c core.pager='{T} secrets get $K' log",
+    f"git log --exec {T} secrets get $K",
+    f"gh alias set x '!{T} secrets get $K'",
+    f"gh api --hostname {T} /x $K",
+    f"vim -c '!{T} secrets get $K'",
+    f"nano --speller='{T} secrets get $K' f",
+    f"less -+'!{T} secrets get $K' f",
+    f"more '+!{T} secrets get $K' f",
+    f"man --pager='{T} secrets get $K' ls",
+    f"tar --to-command='{T} secrets get $K' -xf a.tar",
+    f"zip a.zip f -T --unzip-command '{T} secrets get $K'",
+    f"make -s run CMD='{T} secrets get $K'",
+    f"pytest -p {T} --co $K",
+    f"rg --pre {T} x $K",
+    f"sort --compress-program={T} f $K",
+    f"diff --paginate {T} $K",
+    f"export X={T}; echo $X",
+    f"set -- {T} secrets get $K",
+]
+
+
+@pytest.mark.parametrize("command", RUNNERS)
+def test_a_tool_word_after_a_command_that_can_run_it_is_denied_390(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'echo "$({T} secrets get K)"',
+        f'echo "`{T} secrets get K`"',
+        f'git commit -m "$({T} secrets get K)"',
+        f"cat <<EOF\n$({T} secrets get K)\nEOF",
+        f"cat <<EOF\n`{T} secrets get K`\nEOF",
+        f"echo '{T} secrets get $K' | python3",
+        f"echo '{T} secrets get $K' | python3.12 -",
+        f"echo {T} secrets get $K | awk '{{system($0)}}'",
+        f"echo {T} secrets get $K | perl",
+        f"echo {T} secrets get $K | xargs",
+        f"echo {T} secrets get $K | ./runner",
+        f"echo {T} | xargs sh -c '$0 secrets get $K' ",
+        f"./echo {T} secrets get $K",
+    ],
+)
+def test_text_that_the_shell_or_a_reader_runs_is_denied_390(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+# a here-document body goes to whatever reads it: only a provably inert receiver keeps it as data
+BODY = f"import os\nos.system('{T} secrets get $K')"
+HEREDOC_RUNS = [
+    f"python3 - <<'PY'\n{BODY}\nPY",
+    f"python3 <<PY\n{BODY}\nPY",
+    f"python3 - <<'PY'\nprint('use {T} for $HOME')\nPY",
+    f"python - <<'PY'\n{BODY}\nPY",
+    f"perl <<'EOF'\nsystem('{T} secrets get $K');\nEOF",
+    f"ruby <<'EOF'\nsystem('{T} secrets get $K')\nEOF",
+    f"node <<'EOF'\nrequire('child_process').execSync('{T} secrets get $K')\nEOF",
+    f"awk -f /dev/stdin <<'EOF'\nBEGIN{{system(\"{T} secrets get $K\")}}\nEOF",
+    f"bash <<'EOF'\n{T} secrets get $K\nEOF",
+    f"sh -s <<'EOF'\n{T} secrets get $K\nEOF",
+    f"cat <<'EOF' | bash\n{T} secrets get $K\nEOF",
+    f"cat <<'EOF' | python3\nimport os; os.system('{T} secrets get $K')\nEOF",
+    f"cat <<'EOF' > x.sh\n{T} secrets get $K\nEOF\nbash x.sh",
+    f"cat <<'EOF' > x.sh\n{T} secrets get $K\nEOF\n./x.sh",
+    f"cat <<'EOF' > x.py\n{T} secrets get $K\nEOF\npython3 x.py",
+    f"cat <<'EOF' > x.sh; sh x.sh\n{T} secrets get $K\nEOF",
+    f"cat <<'EOF' >(sh)\n{T} secrets get $K\nEOF",
+    f"unknowncmd <<'EOF'\n{T} secrets get $K\nEOF",
+    f"FOO=1 cat <<'EOF'\n{T} secrets get $K\nEOF",
+    f"cat <<EOF\n$({T} secrets get K)\nEOF",
+    f"cat <<EOF\n${{X:-$({T} secrets get K)}}\nEOF",
+    f"cat <<'EOF'\nx\nEOF\n{T} secrets get $K",
+    f"cat <<'EOF'\nx\n{T} secrets get $K",
+]
+
+
+@pytest.mark.parametrize("command", HEREDOC_RUNS)
+def test_a_heredoc_body_that_something_may_run_is_denied_390(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+# the operator must be a real one: quoted or commented `<<` hides nothing
+FAKE_HEREDOC = [
+    f"echo '<<EOF'\n{T} secrets get $K\nEOF",
+    f'echo "<<EOF"\n{T} secrets get $K\nEOF',
+    f"echo \\<<EOF\n{T} secrets get $K\nEOF",
+    f"# cat <<EOF\n{T} secrets get $K\nEOF",
+    f"echo hi # cat <<EOF\n{T} secrets get $K\nEOF",
+    f"echo x <<< EOF\n{T} secrets get $K\nEOF",
+    f"echo '<<EOF' && echo\n{T} secrets get $K\nEOF\n",
+    f"grep -c '<<-X' f\n{T} secrets get $K\nX",
+]
+
+
+@pytest.mark.parametrize("command", FAKE_HEREDOC)
+def test_a_quoted_or_commented_heredoc_operator_hides_nothing_390(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cat >> .github/workflows/ci.yml <<'EOF'\n  - run: {T} run -- make test\n    env: ${{{{ x }}}}\nEOF",
+        f"cat <<EOF > notes.md\nuse {T} for $HOME\nEOF\nls",
+        f"tee notes.md <<'EOF'\nuse {T} for $HOME\nEOF",
+        f"cat <<-'EOF' > notes.md\n\tuse {T} for $HOME\n\tEOF",
+        f"git commit -m '{T} gate' && echo $HOME",
+        f"gh pr create --title t --body '{T} gate $HOME'",
+        f"grep -rn {T} docs | head; echo $?",
+        f"echo {T} | wc -c; echo $HOME",
+        f"ls /usr/bin/{T}; echo $HOME",
+    ],
+)
+def test_the_390_text_cases_stay_allowed_after_hardening(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
 
 
 def test_the_wrapper_is_not_exempt_when_it_carries_a_name() -> None:
