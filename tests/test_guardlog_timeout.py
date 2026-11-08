@@ -94,7 +94,7 @@ def test_the_warning_is_printed_by_main_for_other_commands_and_never_for_the_hoo
     assert "safo: SAFO_APPEND_LOCK_TIMEOUT is not a number" in other.getvalue(), (
         "printed AFTER the command, for a person"
     )
-    for hook in (["hooks", "guard"], ["hooks", "probe"]):
+    for hook in (["hooks", "guard"], ["hooks", "probe"], ["hooks", "stop"]):
         quiet = io.StringIO()
         main(hook, env=env, out=io.StringIO(), err=quiet, stdin=io.StringIO("{}"))
         assert quiet.getvalue() == "", f"{hook}: a hook never prints it"

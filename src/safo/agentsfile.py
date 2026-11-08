@@ -158,6 +158,33 @@ DEFAULT_SEARCH_TYPES = (
 )
 
 
+# Lead-side check (#84, `safo hooks stop`): phrases that relay a negative or deferred result about an external fact.
+# Plain text compared without case; a `*` stands for a few words (`ask * in writing`).
+DEFAULT_LEAD_PHRASES = (
+    "not found",
+    "no statement found",
+    "could not find",
+    "couldn't find",
+    "could not verify",
+    "couldn't verify",
+    "unverified",
+    "unable to confirm",
+    "needs your decision",
+    "ask * in writing",
+    "found no source",
+    "no source found",
+)
+# Tool names that count as a search in the turn. Compared without case; a trailing `*` is a prefix match.
+DEFAULT_SEARCH_TOOLS = (
+    "WebSearch",
+    "WebFetch",
+    "mcp__cloudflare-docs__*",
+    "mcp__plugin_cloudflare_cloudflare__docs",
+    "mcp__plugin_cloudflare_cloudflare__search",
+    "mcp__claude_ai_Vercel__search_vercel_documentation",
+)
+
+
 @dataclass(frozen=True)
 class Research:
     """The research-discipline rules of the dispatch guard (#353, docs/look-before-instructing.md). Warn only."""
@@ -168,6 +195,9 @@ class Research:
     intent_keywords: tuple[str, ...] = DEFAULT_RESEARCH_KEYWORDS  # any one in the brief (no case) marks it research
     search_types: tuple[str, ...] = DEFAULT_SEARCH_TYPES
     na_marker: str = "research: n/a -"  # followed by a reason, it says why the brief needs no research route or ladder
+    lead_check: bool = True  # research-lead: the Stop hook checks the final message of a turn (warn only)
+    lead_phrases: tuple[str, ...] = DEFAULT_LEAD_PHRASES
+    search_tools: tuple[str, ...] = tuple(x.lower() for x in DEFAULT_SEARCH_TOOLS)
 
 
 @dataclass(frozen=True)
@@ -406,10 +436,20 @@ def _research(r: Reader, value: object) -> Research:
     m = r.mapping(
         value if value is not None else {},
         "hooks.research",
-        {"route", "ladder", "report_not_found", "intent_keywords", "search_types", "na_marker"},
+        {
+            "route",
+            "ladder",
+            "report_not_found",
+            "intent_keywords",
+            "search_types",
+            "na_marker",
+            "lead_check",
+            "lead_phrases",
+            "search_tools",
+        },
     )
     flags: dict[str, bool] = {}
-    for key in ("route", "ladder", "report_not_found"):
+    for key in ("route", "ladder", "report_not_found", "lead_check"):
         flag = m.get(key, getattr(default, key))
         if not isinstance(flag, bool):
             raise r.fail(f"hooks.research.{key}", "expected true or false")
@@ -419,6 +459,10 @@ def _research(r: Reader, value: object) -> Research:
         raise r.fail("hooks.research.intent_keywords", "needs at least one keyword")
     types = _strings(r, m.get("search_types", list(default.search_types)), "hooks.research.search_types")
     na = r.string(m.get("na_marker", default.na_marker), "hooks.research.na_marker")
+    phrases = _strings(r, m.get("lead_phrases", list(default.lead_phrases)), "hooks.research.lead_phrases")
+    if not phrases or any(not x.strip() for x in phrases):
+        raise r.fail("hooks.research.lead_phrases", "needs at least one non-empty phrase")
+    tools = _strings(r, m.get("search_tools", list(default.search_tools)), "hooks.research.search_tools")
     return Research(
         flags["route"],
         flags["ladder"],
@@ -426,6 +470,9 @@ def _research(r: Reader, value: object) -> Research:
         tuple(x.strip().lower() for x in keywords),
         tuple(x.strip().lower() for x in types),
         na.strip().lower(),
+        flags["lead_check"],
+        tuple(x.strip().lower() for x in phrases),
+        tuple(x.strip().lower() for x in tools),
     )
 
 
