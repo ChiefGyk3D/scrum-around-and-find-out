@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `safo audit` (#389): open pull requests in the listed repositories that cannot merge as they stand. `DRIFT   CONFLICT
+  owner/name#n` for `mergeable: CONFLICTING`, a `NOTE    BEHIND ...` for one behind its base, and a count note
+  (`mergeability: N open pull requests, C conflicting, B behind, U not yet computed`). A `mergeable` still being
+  computed (`UNKNOWN`/null) is counted, never drift; an unrecognized value exits 2. One GraphQL read per repository
+  (`safo.mergeability`), never a project listing. Tests: `tests/test_audit_mergeability.py`.
 - Shared GitHub API budget (#356, #358; umbrella #355, rules #204). `ghw` (new entry point, `safo.ratebudget`) is `gh`
   with a per-bucket call ledger under `~/.local/state/safo/ratebudget` (file lock): the worst counter across response
   headers and the `rate_limit` endpoint is the truth, 70% warns, 90% refuses (exit 75) until reset, `Retry-After` and

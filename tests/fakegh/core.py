@@ -100,6 +100,8 @@ class FContent:
     labels: list[str] = field(default_factory=list)
     body: str = "Closes #900001"  # a pull request links an issue unless a test says otherwise
     closing: int = 0  # how many issues GitHub itself counts as closed by a pull request
+    mergeable: Any = "MERGEABLE"  # MERGEABLE | CONFLICTING | UNKNOWN (GitHub is still computing), or raw garbage
+    merge_state: Any = "CLEAN"  # mergeStateStatus: CLEAN | BEHIND | DIRTY | BLOCKED ...
 
 
 @dataclass

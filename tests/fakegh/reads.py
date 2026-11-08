@@ -219,6 +219,30 @@ def pull_links(fake: FakeGitHub, v: JSON) -> JSON:
     return {"repository": {"pullRequests": fake.connection(rows, v)}}
 
 
+@handler("RepoPullMergeable")
+def pull_mergeable(fake: FakeGitHub, v: JSON) -> JSON:
+    """Open pull requests of one repository with their mergeable and mergeStateStatus."""
+    repo = fake.repos.get(f"{v['owner']}/{v['name']}".lower())
+    if repo is None or not repo.installed:
+        raise GqlError(
+            "NOT_FOUND",
+            f"Could not resolve to a Repository with the name '{v['owner']}/{v['name']}'.",
+            {"repository": None},
+        )
+    rows = [
+        {
+            "number": c.number,
+            "state": c.state,
+            "repository": {"nameWithOwner": c.repo},
+            "mergeable": c.mergeable,
+            "mergeStateStatus": c.merge_state,
+        }
+        for c in repo.contents
+        if c.kind == "PullRequest" and c.state == "OPEN"
+    ]
+    return {"repository": {"pullRequests": fake.connection(rows, v)}}
+
+
 @handler("RepoThreatIssues")
 def threat_issues(fake: FakeGitHub, v: JSON) -> JSON:
     """Issues of one repository that carry the label asked for, open and closed, with their bodies."""
