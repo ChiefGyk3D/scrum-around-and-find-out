@@ -3,6 +3,7 @@
 
     safo hooks install [--settings PATH] [--mode warn|block]   add the probe and the guard to a settings.json
     safo hooks probe                                           SessionStart: is the local LLM reachable?
+    safo hooks stop                                            Stop: warn on an unsearched "not found" (warn only)
     safo-guard                                                 PreToolUse (Agent, Bash): check the brief, or the wait
     safo hooks guard                                           the same, as already installed lines call it (legacy)
     safo hooks mode warn|block                                 warn reports; block denies a dispatch that breaks a rule
@@ -90,6 +91,7 @@ from safo.hooks import (
 )
 from safo.localfiles import add_agents_arguments, load_agents_for
 from safo.modes import LocalMode, register_local
+from safo.stophook import run_stop
 
 if TYPE_CHECKING:  # imported only where needed: the guard's entry never loads argparse or the Gemini mode
     import argparse
@@ -913,7 +915,13 @@ TOP_LEVEL_COMMANDS = (
     "usage",
     "validate",
 )
-HOOKS_SUBCOMMANDS = ("install", "probe", "mode", "status")  # what argparse serves under `hooks` besides the guard
+HOOKS_SUBCOMMANDS = (
+    "install",
+    "probe",
+    "stop",
+    "mode",
+    "status",
+)  # what argparse serves under `hooks` besides the guard
 
 
 def hooks_tail(argv: Sequence[str]) -> list[str] | None:
@@ -1762,6 +1770,7 @@ ACTIONS = {
     "install": run_install,
     "probe": run_probe,
     "guard": guard_process,
+    "stop": run_stop,
     "mode": run_mode,
     "status": run_status,
 }
@@ -1786,6 +1795,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     probe = sub.add_parser("probe", help="SessionStart hook: is the local LLM reachable?")
     add_agents_arguments(probe)
+    stop = sub.add_parser("stop", help="Stop hook: warn when a final message relays 'not found' with no web search")
+    add_agents_arguments(stop)
     guard_help = "PreToolUse hook on the Agent and Bash tools: check the brief, or a foreground wait (JSON on stdin)"
     guard_parser = sub.add_parser("guard", help=guard_help, description=guard_help)
     add_agents_arguments(guard_parser)

@@ -83,6 +83,83 @@ hooks:
 
 See [Look before instructing](look-before-instructing.md) for the rules and the measured case.
 
+## The Stop hook: `research-lead` (warn only)
+
+`safo hooks stop` runs when the lead finishes a turn. It flags a final message that relays a negative or deferred result
+about an external fact ("not found", "no statement found", "could not verify", "unverified", "needs your decision",
+"ask <vendor> in writing", "I found no source") when the turn contains no web search. It exists because of one
+measured failure (2026-11-07): the lead told the maintainer a vendor statement did not exist and asked what to do,
+after a delegated agent with no search tool had said "no statement found"; one web search found the vendor's press
+release. The warning says: run a web search (list the query) before relaying "not found" or asking for a decision about
+an external fact.
+
+It never blocks and never makes Claude continue. It prints only `{"systemMessage": ...}` and writes a guard-log row
+(rule `research-lead`, decision `warn`; the row holds no message text). Clean turns write nothing. Any error (an
+unreadable transcript, a bad event, a broken `agents.yaml`) is an allow with the same fixed degraded notice the other
+hooks print, and an `error` row in the log. `stop_hook_active: true` makes it do nothing.
+
+Settings snippet (not installed by `safo hooks install`; add it to `~/.claude/settings.json` yourself, after review):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "safo hooks stop", "timeout": 10 } ] }
+    ]
+  }
+}
+```
+
+Use the absolute path of the `safo` executable if the host's PATH lacks it, as `safo hooks install --command` does.
+
+Configuration, all in the `research` block under `hooks` and all optional (defaults shown, on):
+
+```yaml
+hooks:
+  research:
+    lead_check: true        # research-lead
+    lead_phrases: [not found, no statement found, could not find, couldn't find, could not verify, couldn't verify,
+                   unverified, unable to confirm, needs your decision, "ask * in writing", found no source,
+                   no source found]   # plain text, no case; * stands for a few words
+    search_tools: [WebSearch, WebFetch, "mcp__cloudflare-docs__*", mcp__plugin_cloudflare_cloudflare__docs,
+                   mcp__plugin_cloudflare_cloudflare__search, mcp__claude_ai_Vercel__search_vercel_documentation]
+                            # tool names that count as a search; no case; a trailing * is a prefix
+```
+
+### What the Stop payload contains (verified)
+
+- Documentation, read 2026-11-07 (the hooks reference, Stop section): the common fields
+  `session_id`, `transcript_path`, `cwd`, `permission_mode`, `hook_event_name`, plus `stop_hook_active` (true when Claude
+  Code is already continuing because of a stop hook), `last_assistant_message` (the text of the final response; the docs
+  tell hooks to prefer it to the transcript, because the transcript "isn't guaranteed to include the final message at Stop
+  time on all versions"), `background_tasks` and `session_crons`. The Stop hook does not run after a user interrupt; API
+  errors fire StopFailure instead.
+- Output: `decision: "block"` and the `additionalContext` field of `hookSpecificOutput` both make Claude continue (an 8-continuation cap
+  applies), so this hook uses neither. The universal `systemMessage` is documented as a "warning message shown to the
+  user". That it renders on Stop in a live session is documented only in general terms and was not observed here
+  (unverified); the guard-log row is the record that does not depend on it.
+- Transcript shape, observed 2026-11-07 in a real session file under `~/.claude/projects/` (shape only; no content was
+  copied): JSON Lines, one object per line, `type` one of `user`, `assistant`, `system`, `attachment` and some host
+  bookkeeping types. `assistant` and `user` lines carry a `message` whose `content` is a list of blocks (`text`, `thinking`,
+  `tool_use` with `name` and `input`, `tool_result`); a person's prompt is a `user` line whose content is a string or has
+  a non-`tool_result` block; every line has `isSidechain` (false for the main session; a delegated agent's own calls are
+  not in the lead's file, which is what the check needs). One session file was 31 MB with single lines far larger than
+  the average, so the hook reads only the last 1 MiB, keeps the last 2000 lines, and skips any line over 256 KiB.
+- The turn is the span after the last person prompt in that window. A window that never reaches a prompt is treated as
+  the whole turn.
+
+### Limits and false positives
+
+Handled (the phrase is ignored): inside fenced or inline code, in a block quote, inside double quotes, and on a line
+that names a file path, a file with a common extension, `404`, "no such file" or "command not found".
+
+Not handled, so expect some noise: a "not found" about an external fact that sits on a line with a path or `404`
+(a missed warning); an unquoted discussion of the phrase itself; a search done by a delegated agent (it does not count,
+by design); a search made by a tool not in `search_tools` (add it); an earlier-turn search that the 1 MiB window cuts
+off (a false warning); a prompt line over 256 KiB (the turn then reaches back too far, a missed warning); a transcript
+that lags the final message (the hook uses `last_assistant_message` for the text, but tool calls still come from the
+file); the phrase list is English only. The check judges wording and tool names, not whether the claim is true.
+
 ## The fifth rule: the lead never waits
 
 The lead session is a project manager; every wait is delegated ([The orchestrator](orchestrator.md)). A Bash call in the

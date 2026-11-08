@@ -415,6 +415,10 @@ hooks:
     route: true
     ladder: true
     report_not_found: true
+    # `safo hooks stop` (research-lead, #84): the final message relays "not found" and the turn ran no web search.
+    lead_check: true
+    # lead_phrases: [not found, no statement found, ask * in writing, ...]   # plain text, no case; * is a few words
+    # search_tools: [WebSearch, WebFetch, "mcp__cloudflare-docs__*"]         # a trailing * is a prefix match
 
 rules_of_thumb:
   - "Routing order 1: text-in/text-out work (summaries, triage, classification, first drafts, log and CI digests) goes to the local LLM first, and a Claude model checks anything that will be applied."

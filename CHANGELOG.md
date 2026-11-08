@@ -13,6 +13,14 @@
   shape only, not truth). No deny path, `block` mode included. New `hooks.research` block in `agents.yaml` (`route`,
   `ladder`, `report_not_found`, `intent_keywords`, `search_types`, `na_marker`); `safo hooks status` counts both rules.
   Tests: `tests/test_research_rules.py`, `tests/test_reportshape.py`. Docs: `docs/look-before-instructing.md`.
+- Lead-side research check (#84, rule `research-lead`), warn only, by the maintainer's word of 2026-11-07. New Stop hook
+  `safo hooks stop`: when the final message of a turn relays "not found", "no statement found", "needs your decision"
+  and the like about an external fact and the turn made no WebSearch, WebFetch or listed documentation call, it shows a
+  `systemMessage` ("run a web search before relaying not found") and writes a guard-log row. It never blocks and never
+  makes Claude continue (no `decision`, no `additionalContext`), honors `stop_hook_active`, reads only the last 1 MiB
+  of the transcript, and fails open with the degraded notice. New `hooks.research` keys `lead_check`, `lead_phrases`,
+  `search_tools`; `safo hooks status` counts the rule. The other #84 heuristics (done claims, click paths) stay unbuilt;
+  `CHECKS` in `src/safo/stophook.py` is where they would go. Tests: `tests/test_stop_hook.py`. Docs: `docs/hooks.md`.
 
 ## 0.2.0 (2026-11-02)
 
