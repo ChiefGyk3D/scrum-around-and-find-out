@@ -24,8 +24,13 @@ Put this line, by itself, in every brief:
 issue: ChiefGyk3D/example#123
 ```
 
-- A GitHub reference is `owner/repo#N`. The guard runs `gh issue view N --repo owner/repo --json state`, a read, from an
-  argument list with no shell. The reference must match a strict pattern first, so shell metacharacters never reach a
+- A GitHub reference is `owner/repo#N`. The guard first reads `gh api repos/owner/repo/issues/N` (REST, which has its own rate-limit counter
+  and tells an issue from a pull request by the `pull_request` key). Only if REST gives no usable answer does it run
+  `gh issue view N --repo owner/repo --json state,url` (GraphQL). Both are reads from an argument list with no shell.
+  A positive answer (open issue) is cached for five minutes in `issue-cache.json` in the guard's state directory
+  (owner-only, atomic write, at most 64 entries, repository names, numbers and times only); closed, missing and failed
+  answers are never cached, a corrupt or foreign entry is ignored. A denial names the source that answered (`REST`,
+  `GraphQL`) or that both failed. The reference must match a strict pattern first, so shell metacharacters never reach a
   process; a rejected reference is not echoed back.
 - A Jira-style key, `KEY-123`, is accepted by its shape alone, because no Jira instance exists today. See the mapping below.
 - No line, an invalid line, a missing or closed issue: in `block` mode the dispatch is denied with a message that says how

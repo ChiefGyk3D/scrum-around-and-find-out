@@ -60,9 +60,22 @@ step you run yourself after the release (`safo hooks install`, then `safo hooks 
 3. **A local step or a reason for none**, while the last probe is fresh and found the local LLM reachable: a marker from
    `hooks.local_step_markers`, or `hooks.na_marker` followed by a reason.
 4. **No hidden work.** A brief carries a line of its own, `issue: owner/repo#N` or `issue: KEY-N`, naming an issue that
-   exists and is open (`no-issue`, `issue-unusable`, `issue-unverified`). A GitHub issue is checked with a read-only `gh issue
-   view`; in `block` mode a lookup that fails denies. Nothing is exempt unless `hooks.tracking_exempt_repos` lists the
+   exists and is open (`no-issue`, `issue-unusable`, `issue-unverified`). A GitHub issue is checked over REST with a read-only
+   `gh api repos/OWNER/REPO/issues/N` (its own rate-limit counter), then `gh issue view` (GraphQL) only if REST gave no
+   answer; an open issue is remembered for five minutes. In `block` mode a lookup that fails on both denies and the
+   denial names which source failed. Nothing is exempt unless `hooks.tracking_exempt_repos` lists the
    repository. See [No hidden work](no-hidden-work.md).
+
+   The five-minute cache (`issue-cache.json` in the state directory) is trusted only when it provably is ours, and a
+   cache that fails any test is a miss that falls through to the REST check, never a pass: the state directory must be
+   owned by you and not writable by others; the file must be a regular file (no symlink, no FIFO) opened without
+   following links and judged on the open descriptor: owned by you, no group or other write bit, at most 64 KiB; an
+   entry must name exactly that repository and issue number and be no older than five minutes and not from the future
+   (no clock-skew allowance). It is not bound to a session or to the configuration, because the entry says only that an
+   issue was open a moment ago and a same-user writer could forge any such binding. It is read under the hook's
+   state-I/O bound and skipped when under one second of the hook's budget is left. The write happens after the verdict is
+   out, inside the post-delivery worker (temporary file in the same directory, an atomic rename, no fsync); a skipped, failed
+   or cut-off write never changes the verdict.
 
 ## Research rules (warn only)
 

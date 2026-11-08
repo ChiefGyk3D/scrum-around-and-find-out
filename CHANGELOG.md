@@ -29,6 +29,16 @@
   monotonic launch record is repaired once, and concurrent card-map updates are merged under a lock. Round 7: modes are written as `stat.S_IRWXU` (Semgrep read the 0o700 literal as too
   permissive; same mode, no suppression), the board snapshot copies the option dicts (#373), and an oversized or
   unterminated header block is withheld instead of printed as body (#374).
+- `safo-ship` (#371): on exit 3 each unresolved review thread is printed with its author, file:line, link and the first
+  600 characters of the comment (control characters stripped, `[truncated]` after a cut). New `--wait-for-review SECONDS`
+  (0 to 900, default 0) waits, within `--timeout` and `--max-polls`, for the automated reviewer's review of the pinned
+  head before the thread check, then goes on either way with a notice if none came. It never resolves a thread and never
+  merges past one. Tests: `tests/test_ship_review.py`. Docs: `docs/ship.md`.
+- Dispatch guard issue check (#370): the open-issue check reads REST (`gh api repos/OWNER/REPO/issues/N`) first, so a
+  rate-limited GraphQL no longer denies valid briefs; GraphQL (`gh issue view`) is the fallback, and the check fails
+  closed only when both fail. A pull request number is refused as before. A positive answer is cached for five minutes
+  per issue in `issue-cache.json` in the state directory; negative and error answers are never cached. The denial text
+  names the source. Nothing new is denied. Tests: `tests/test_tracking_rest.py`.
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on
