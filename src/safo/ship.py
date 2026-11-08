@@ -363,9 +363,13 @@ class Watcher:
             return None
         end = min(deadline, self.clock() + self.wait_for_review)
         for poll in range(1, self.max_polls + 1):
+            if end - self.clock() <= 0:  # no gh call is started after the deadline
+                break
             head = str(self.view(repo, number)["headRefOid"])
             if head != pin:
                 return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
+            if end - self.clock() <= 0:  # the head read used the rest of the time
+                break
             if self.reviewed(repo, number, pin):
                 return None
             left = end - self.clock()

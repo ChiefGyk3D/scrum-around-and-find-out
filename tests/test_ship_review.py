@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import io
+import json
 from typing import Any
 
 import pytest
@@ -67,7 +69,7 @@ def test_a_wait_that_times_out_says_so_and_still_checks_threads(rig: Rig) -> Non
     code, out, calls = rig.go("5", "--repo", REPO, "--wait-for-review", "60", "--interval", "20")
     assert code == ship.EXIT_THREADS and "NOTICE no review by the automated reviewer" in out
     assert "late.py:3" in out and merges(calls) == []
-    assert rig.slept == [20, 20, 20] and len(review_calls(calls)) == 4
+    assert rig.slept == [20, 20, 20] and len(review_calls(calls)) == 3
 
 
 def test_a_timed_out_wait_goes_on_to_merge_when_there_are_no_threads(rig: Rig) -> None:  # noqa: F811
@@ -126,3 +128,80 @@ def test_ship_never_resolves_a_thread(rig: Rig) -> None:  # noqa: F811
     rig.state["threads"] = [threads("a.py")]
     _code, _out, calls = rig.go("5", "--repo", REPO, "--wait-for-review", "20")
     assert not any("resolveReviewThread" in " ".join(c) for c in calls)
+
+
+# -- the review wait never starts work after its deadline (#371, review finding) -----------------------------
+
+
+class TimedGh:
+    """A stand-in for ship.Gh: every call costs `cost` seconds on a fake clock, and the calls are counted."""
+
+    def __init__(self, clock: list[float], cost: float = 0.0, reviews: str = "") -> None:
+        self.clock, self.cost, self.reviews = clock, cost, reviews
+        self.views = 0
+        self.review_reads = 0
+
+    def json(self, *args: str) -> Any:
+        self.views += 1
+        self.clock[0] += self.cost
+        return {"headRefOid": HEAD}
+
+    def gh_call(self, *args: str) -> tuple[int, str, str]:
+        self.review_reads += 1
+        self.clock[0] += self.cost
+        return 0, self.reviews, ""
+
+
+def watcher(
+    gh: TimedGh, clock: list[float], out: io.StringIO, wait: float = 300.0, timeout: float = 100.0
+) -> ship.Watcher:
+    return ship.Watcher(
+        gh,  # type: ignore[arg-type]
+        out,
+        timeout=timeout,
+        interval=20.0,
+        max_polls=50,
+        method="squash",
+        delete_branch=False,
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+        clock=lambda: clock[0],
+        wait_for_review=wait,
+    )
+
+
+def test_a_deadline_that_is_already_past_makes_no_gh_call_for_the_wait() -> None:
+    clock = [500.0]
+    gh = TimedGh(clock)
+    out = io.StringIO()
+    w = watcher(gh, clock, out)
+    assert w.await_review(REPO, 5, HEAD, deadline=400.0) is None
+    assert gh.views == 0 and gh.review_reads == 0
+    assert "NOTICE no review" in out.getvalue()
+
+
+def test_a_deadline_that_passes_during_the_head_read_skips_the_review_read() -> None:
+    clock = [0.0]
+    gh = TimedGh(clock, cost=30.0)  # the head read alone uses up the 20 s that were left
+    out = io.StringIO()
+    w = watcher(gh, clock, out)
+    assert w.await_review(REPO, 5, HEAD, deadline=20.0) is None
+    assert gh.views == 1 and gh.review_reads == 0
+    assert "NOTICE no review" in out.getvalue()
+
+
+def test_a_wait_with_time_left_still_polls_and_finds_the_review() -> None:
+    clock = [0.0]
+    gh = TimedGh(clock, cost=1.0, reviews=json.dumps(review()))
+    out = io.StringIO()
+    w = watcher(gh, clock, out)
+    assert w.await_review(REPO, 5, HEAD, deadline=100.0) is None
+    assert gh.views == 1 and gh.review_reads == 1 and "NOTICE" not in out.getvalue()
+
+
+def test_the_total_wait_never_exceeds_timeout_plus_one_call() -> None:
+    clock = [0.0]
+    cost = float(ship.CALL_TIMEOUT)
+    gh = TimedGh(clock, cost=cost)
+    w = watcher(gh, clock, io.StringIO(), wait=900.0, timeout=100.0)
+    w.await_review(REPO, 5, HEAD, deadline=100.0)
+    assert clock[0] <= 100.0 + cost
