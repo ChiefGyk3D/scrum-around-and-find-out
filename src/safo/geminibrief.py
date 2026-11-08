@@ -1219,6 +1219,95 @@ _NETWORK_TOOL = re.compile(
 )
 
 
+_HEREDOC = re.compile(r"<<(?!<)-?\s*(['\"]?)([A-Za-z_][\w.-]*)\1")
+_SHELL_READERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "eval", "source", ".", "xargs", "su", "sudo"})
+# Commands that only print, search, edit or record the words they are given. A tool name that is an argument of one of
+# these is text, not a command that runs: `grep -rn doppler docs`, `git commit -m 'doppler gate'`.
+_INERT_COMMANDS = frozenset(
+    {"grep", "egrep", "fgrep", "rg", "ag", "git", "gh", "echo", "printf", "cat", "tee", "ls", "head", "tail", "sed"}
+    | {"awk", "wc", "sort", "uniq", "diff", "cmp", "find", "test", "[", "less", "more", "vim", "nano", "mkdir"}
+    | {"touch", "cp", "mv", "rm", "man", "which", "type", "tr", "cut", "yamllint", "actionlint", "shellcheck", "ruff"}
+    | {"mypy", "pytest", "make", "true", "false", ":", "cd", "pwd", "export", "set", "unset", "read", "tar", "zip"}
+)
+
+
+def _heredoc_data_dropped(command: str) -> str:
+    """The command without the bodies of here-documents fed to a command that does not run them. `cat <<EOF` and
+    `python3 - <<PY` bodies are data here: only a shell reader (bash, sh, eval, ...) executes lines it is given, so a
+    body fed to one of those stays. Other checks (vendor host, key name, project) still read the whole text."""
+    out: list[str] = []
+    lines = command.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        tags = [m.group(2) for m in _HEREDOC.finditer(line)]
+        if not tags:
+            continue
+        runs = any(_core(w) in _SHELL_READERS for w in re.split(r"\s+", line))
+        for tag in tags:
+            body: list[str] = []
+            while i < len(lines) and lines[i].strip() != tag:
+                body.append(lines[i])
+                i += 1
+            if runs:
+                out.extend(body)
+            if i < len(lines):
+                out.append(lines[i])
+                i += 1
+    return "\n".join(out)
+
+
+def _active_words(command: str, pattern: re.Pattern[str]) -> bool:
+    """True when `pattern` names a word that may RUN: a command word, a word of a command not known to only print
+    or search, or anything at all when the text cannot be read as plain words (an unterminated quote, an expansion or a
+    shell reader in command position). Words in a comment, in the data of a here-document, or the arguments of grep,
+    git commit, echo, printf and the like are text. Fails closed: whenever unsure, the old any-word answer stands."""
+    text = _heredoc_data_dropped(_join(command))
+    tokens = _lex(text)
+    if tokens is None:
+        return bool(pattern.search(text.lower()))
+    segments: list[list[Tok]] = [[]]
+    prev_end = 0
+    comment = False
+    for t in tokens:
+        if "\n" in text[prev_end : t.start]:
+            comment = False
+            segments.append([])
+        prev_end = t.end
+        if comment:
+            continue
+        if t.op:
+            if any(c in t.value for c in ";|&()"):
+                segments.append([])
+            continue
+        if t.value.startswith("#") and not t.quoted and (t.start == 0 or text[t.start - 1] in " \t\n;&|()<>"):
+            comment = True
+            continue
+        segments[-1].append(t)
+    relay = unknown = False
+    for seg in segments:
+        words = [t for t in seg if not _ASSIGNMENT_WORD.match(t.value) or t.quoted]
+        if len(words) < len(seg) and any(pattern.search(t.value.lower()) for t in seg if t not in words):
+            return True  # NAME=tool: the tool name is stored to be run later
+        while words and words[0].value in _PREFIX_WORDS:
+            words = words[1:]
+        if not words:
+            continue
+        head = words[0].value
+        base = head.rsplit("/", 1)[-1].lower()
+        if _DOLLAR.search(head) or "`" in head:
+            unknown = True
+        if base in _SHELL_READERS:
+            relay = True
+        if base not in _INERT_COMMANDS and any(pattern.search(t.value.lower()) for t in words):
+            return True
+    if relay or unknown:
+        return any(pattern.search(t.value.lower()) for seg in segments for t in seg)
+    return False
+
+
 def shell_command_class(command: str, deadline: float | None = None) -> str | None:
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
     it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED."""
@@ -1233,7 +1322,7 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         tick()
         lines = _join(command).splitlines() or [command]
         found: str | None = None
-        secret_tool = network = False
+        secret_tool = network = config_word = False
         views: list[str] = []
         for line in lines:
             tick()
@@ -1249,8 +1338,13 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
                 secret_tool = secret_tool or bool(_SECRET_TOOL.search(view))
                 network = network or bool(_NETWORK_TOOL.search(view))
             if secret_tool and any(_SHELL_CONFIG.search(v) for v in (low, pre_low)):
-                found = found or SHELL_STORE
+                config_word = True
         tick()
+        # a tool name counts only when it can run (see _active_words): in a heredoc body or a printed line it is text
+        secret_tool = secret_tool and _active_words(command, _SECRET_TOOL)
+        if config_word and secret_tool:
+            found = found or SHELL_STORE
+        network = network and _active_words(command, _NETWORK_TOOL)
         built = bool(CONCEAL.search(command.lower()) or CONCEAL.search(_join(command).lower()))
         if found is None and built and (network or secret_tool):
             found = SHELL_BUILT

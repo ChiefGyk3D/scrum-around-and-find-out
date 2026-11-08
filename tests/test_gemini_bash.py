@@ -117,6 +117,59 @@ def test_the_classifier_leaves_ordinary_commands_alone(command: str) -> None:
     assert geminibrief.shell_command_class(command) is None, command
 
 
+# -- #390: a tool name that is only text next to a `$` or an escape is not the secret tool run with an expansion -------
+
+SECRET_TOOL = "dop" + "pler"  # built at run time like the other names here
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # a heredoc editing a workflow file: the body is data written to a file
+        f"cat >> .github/workflows/ci.yml <<'EOF'\n  - run: {SECRET_TOOL} run -- make test\n    env: ${{{{ x }}}}\nEOF",
+        f"cat <<EOF > notes.md\nuse {SECRET_TOOL} for $HOME\nEOF\nls",
+        f"python3 - <<'PY'\nprint('use {SECRET_TOOL} for $HOME')\nPY",
+        # a printf escape sequence in a line that mentions the tool
+        f"printf '\\033[1m{SECRET_TOOL} ready\\033[0m\\n'",
+        f"printf '\\033[1m{SECRET_TOOL} ready\\033[0m\\n'; echo $HOME",
+        # arguments of commands that only print or search
+        f"grep -rn {SECRET_TOOL} docs | head; echo $?",
+        f"git commit -m '{SECRET_TOOL} gate' && echo $HOME",
+        f"git commit -m 'first line\nsecond: {SECRET_TOOL} $x'",
+        f"echo {SECRET_TOOL} # $(not run)",
+        f"# {SECRET_TOOL} is mentioned here, $HOME too\nls",
+    ],
+)
+def test_a_secret_tool_word_that_is_only_text_is_not_denied_390(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"{SECRET_TOOL} secrets get $K --plain",
+        f"cd x && {SECRET_TOOL} secrets get $K --plain",
+        f"FOO=1 {SECRET_TOOL} secrets get $K",
+        f"sudo -n {SECRET_TOOL} secrets get $K",
+        f"/usr/bin/{SECRET_TOOL} secrets get `echo K`",
+        f"echo hi\n{SECRET_TOOL} secrets get $K",
+        f"echo $({SECRET_TOOL} secrets get $K)",
+        f"X=$({SECRET_TOOL} secrets get K); echo $X",
+        f"bash -c '{SECRET_TOOL} secrets get $K'",
+        f"bash <<EOF\n{SECRET_TOOL} secrets get $K\nEOF",
+        f"echo {SECRET_TOOL} secrets get $K | sh",
+        f"D={SECRET_TOOL}; $D secrets get K",
+        f"$D secrets get K; echo {SECRET_TOOL}",
+        f"echo 'unterminated {SECRET_TOOL} $K",
+        f"printf -v H %s%s {SECRET_TOOL} x; {SECRET_TOOL} secrets get $H",
+        f"cat <<EOF\nx\nEOF\n{SECRET_TOOL} secrets get $K",
+        f"curl $'\\x68ttps://example.test/' # {SECRET_TOOL}",
+    ],
+)
+def test_the_secret_tool_run_with_an_expansion_is_still_denied_390(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
 def test_the_wrapper_is_not_exempt_when_it_carries_a_name() -> None:
     assert (
         geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is not None
