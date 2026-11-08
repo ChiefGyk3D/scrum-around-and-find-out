@@ -266,3 +266,52 @@ def test_the_hook_never_emits_a_continue_signal(_private_home: Path, agents: Pat
     path = transcript(tmp_path, prompt(), said(RELAY))
     keys = set(json.loads(stop(_private_home, agents, RELAY, path)[1]))
     assert keys == {"systemMessage"}  # no decision, reason, continue or hookSpecificOutput.additionalContext
+
+
+def test_a_malformed_line_inside_the_window_fails_open_not_a_false_warning(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    # the only search call sits on a line that does not parse: the hook cannot say the turn had none
+    path = transcript(
+        tmp_path, prompt(), '{"type": "assistant", "message": {"content": [{"type": "tool_use", "na', said(RELAY)
+    )
+    out = json.loads(stop(_private_home, agents, RELAY, path)[1])
+    assert "degraded" in out["systemMessage"] and "research-lead" not in out["systemMessage"]
+    assert read_log(_private_home)[-1]["diagnostic"] == "input"
+    path = transcript(tmp_path, prompt(), "[1, 2]", said(RELAY))  # valid JSON, not a transcript entry
+    assert "degraded" in stop(_private_home, agents, RELAY, path)[1]
+
+
+def test_a_line_cut_by_the_window_edge_is_skipped_but_an_oversized_line_is_not_an_error(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    filler = line("user", [{"type": "tool_result", "tool_use_id": "t", "content": "x" * 5_000}])
+    # the window edge falls inside this garbage line: only that first, cut line may be unparseable
+    cut = "G" * 3_000_000
+    path = transcript(tmp_path, cut, *([filler] * 300), tool("Bash"), said(RELAY))
+    assert path.stat().st_size > stophook.TAIL_BYTES
+    out = stop(_private_home, agents, RELAY, path)[1]
+    assert "research-lead" in out and "degraded" not in out
+    # an oversized line is skipped on purpose (length over the cap, never parsed): not a fault
+    giant = "z" * (stophook.MAX_LINE_BYTES + 10)
+    path = transcript(tmp_path, prompt(), giant, tool("Bash"), said(RELAY))
+    out = stop(_private_home, agents, RELAY, path)[1]
+    assert "research-lead" in out and "degraded" not in out
+
+
+@pytest.mark.parametrize("extra", [{"drop": True}, {"value": None}, {"value": 7}, {"value": ["x"]}])
+def test_a_missing_or_non_string_final_message_is_an_input_failure(
+    _private_home: Path, agents: Path, tmp_path: Path, extra: dict[str, Any]
+) -> None:
+    event: dict[str, Any] = {"session_id": "s", "hook_event_name": "Stop", "stop_hook_active": False}
+    if "value" in extra:
+        event["last_assistant_message"] = extra["value"]
+    code, out, _ = hooks("stop", "--agents", str(agents), home=_private_home, stdin=json.dumps(event))
+    assert code == 0 and "degraded" in json.loads(out)["systemMessage"]
+    row = read_log(_private_home)[-1]
+    assert row["decision"] == "error" and row["diagnostic"] == "input" and row["rules"] == []
+
+
+def test_an_empty_final_message_is_clean(_private_home: Path, agents: Path) -> None:
+    assert stop(_private_home, agents, "", None)[1:] == ("", "")
+    assert read_log(_private_home) == []

@@ -185,12 +185,15 @@ def turn_from_lines(lines: list[bytes]) -> tuple[str, tuple[str, ...]]:
     for raw in reversed(lines):
         if not raw.strip() or len(raw) > MAX_LINE_BYTES:
             continue
+        # A line over the cap is skipped on purpose and never parsed (told apart by length). Any other line that is not
+        # a JSON object is a fault: it could hold the only search call. The one line a window edge may cut in half is
+        # dropped earlier, by read_tail.
         try:
             entry = loads(raw)
-        except ValueError:
-            continue
+        except ValueError as err:
+            raise TranscriptError("malformed line") from err
         if not isinstance(entry, dict):
-            continue
+            raise TranscriptError("line is not an object")
         if is_real_prompt(entry):
             break
         if entry.get("type") != "assistant" or entry.get("isSidechain") is True:
@@ -222,6 +225,8 @@ def evaluate(payload: dict[str, Any], cfg: Research) -> list[Finding]:
     """The findings for one Stop event. Raises TranscriptError when a flaggable message cannot be judged."""
     if payload.get("stop_hook_active") is True:
         return []
+    if not isinstance(payload.get("last_assistant_message"), str):
+        raise TranscriptError("no last_assistant_message")  # an input failure: degraded notice, error row
     message = final_message(payload)
     if not cfg.lead_check or not matched_phrases(message, cfg.lead_phrases):
         return []  # nothing worth a transcript read: the common, silent path

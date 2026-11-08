@@ -941,12 +941,13 @@ def hooks_tail(argv: Sequence[str]) -> list[str] | None:
 
 
 def hook_event(argv: Sequence[str] | None) -> str | None:
-    """The host event an argparse command line serves (`hooks probe`: SessionStart, `hooks guard`: PreToolUse), by
-    position, else None. A near miss is NOT an event here: a person typing `hooks gua` at a terminal keeps argparse's
-    usage error (the real entry sends a near miss to the guard only when no terminal is attached; see guard_words)."""
+    """The host event an argparse command line serves (`hooks probe`: SessionStart, `hooks guard`: PreToolUse,
+    `hooks stop`: Stop), by position, else None. A near miss is NOT an event here: a person typing `hooks gua` at a
+    terminal keeps argparse's usage error (the real entry sends a near miss to the guard only when no terminal is
+    attached; see guard_words)."""
     tail = hooks_tail(argv or [])
-    if tail and tail[0] in ("probe", "guard"):
-        return "SessionStart" if tail[0] == "probe" else "PreToolUse"
+    if tail and tail[0] in ("probe", "guard", "stop"):
+        return {"probe": "SessionStart", "guard": "PreToolUse", "stop": "Stop"}[tail[0]]
     return None
 
 

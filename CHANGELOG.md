@@ -21,6 +21,9 @@
   of the transcript, and fails open with the degraded notice. New `hooks.research` keys `lead_check`, `lead_phrases`,
   `search_tools`; `safo hooks status` counts the rule. The other #84 heuristics (done claims, click paths) stay unbuilt;
   `CHECKS` in `src/safo/stophook.py` is where they would go. Tests: `tests/test_stop_hook.py`. Docs: `docs/hooks.md`.
+  Review fixes: a malformed transcript line inside the window or a missing/non-string `last_assistant_message` now fails
+  open with the degraded notice instead of a false warning or a silent allow, and `hooks stop` is a hook for the
+  stderr contract (a bad `SAFO_APPEND_LOCK_TIMEOUT` prints nothing).
 
 ## 0.2.0 (2026-11-02)
 

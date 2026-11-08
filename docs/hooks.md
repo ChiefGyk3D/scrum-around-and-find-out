@@ -95,7 +95,8 @@ an external fact.
 
 It never blocks and never makes Claude continue. It prints only `{"systemMessage": ...}` and writes a guard-log row
 (rule `research-lead`, decision `warn`; the row holds no message text). Clean turns write nothing. Any error (an
-unreadable transcript, a bad event, a broken `agents.yaml`) is an allow with the same fixed degraded notice the other
+unreadable transcript, a malformed line inside the 1 MiB window, an event without a string `last_assistant_message`, a
+bad event, a broken `agents.yaml`) is an allow with the same fixed degraded notice the other
 hooks print, and an `error` row in the log. `stop_hook_active: true` makes it do nothing.
 
 Settings snippet (not installed by `safo hooks install`; add it to `~/.claude/settings.json` yourself, after review):
@@ -144,7 +145,9 @@ hooks:
   `tool_use` with `name` and `input`, `tool_result`); a person's prompt is a `user` line whose content is a string or has
   a non-`tool_result` block; every line has `isSidechain` (false for the main session; a delegated agent's own calls are
   not in the lead's file, which is what the check needs). One session file was 31 MB with single lines far larger than
-  the average, so the hook reads only the last 1 MiB, keeps the last 2000 lines, and skips any line over 256 KiB.
+  the average, so the hook reads only the last 1 MiB, keeps the last 2000 lines, and skips any line over 256 KiB on purpose (by length, never parsed). The one line the window edge may cut in half is
+  dropped; any other line that is not a JSON object is a fault and fails open, because it could hold the only search call.
+  An empty `last_assistant_message` is a clean message; a missing or non-string one is a fault.
 - The turn is the span after the last person prompt in that window. A window that never reaches a prompt is treated as
   the whole turn.
 
