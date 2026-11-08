@@ -60,11 +60,16 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     return worst
 
 
-def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="safo-ratebudget", description="the shared GitHub API budget and who spent it")
+def add_arguments(p: argparse.ArgumentParser) -> None:
+    """The options, shared by `safo-ratebudget` and `safo ratebudget`."""
     p.add_argument("--by-caller", action="store_true", help="also report calls and writes per caller")
     p.add_argument("--refresh", action="store_true", help="read the free rate_limit endpoint into the ledger first")
     p.add_argument("--json", action="store_true", help="machine-readable output")
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="safo-ratebudget", description="the shared GitHub API budget and who spent it")
+    add_arguments(p)
     return p
 
 
