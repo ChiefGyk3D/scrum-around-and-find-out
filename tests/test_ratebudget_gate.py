@@ -597,3 +597,61 @@ def test_a_future_monotonic_record_with_the_matching_boot_is_repaired_once(tmp_p
 
     mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, sleep_again)
     assert again == [pytest.approx(rb.WRITE_SPACING)]  # a normal spacing after the real launch, not a stuck gate
+
+
+# round 7 (#374): a header block beyond the cap is rejected, never printed as body
+
+CAP = rb.MAX_HEADER_BYTES
+
+
+def block_of(head_length: int) -> str:
+    """An include prelude whose header section (before the blank line) is exactly head_length characters long."""
+    prefix = "HTTP/2.0 200 OK\r\nx-pad: "
+    return prefix + "a" * (head_length - len(prefix)) + "\r\n\r\n"
+
+
+def test_a_header_section_of_exactly_the_cap_is_accepted() -> None:
+    status, _headers, body = rb._split_response(block_of(CAP) + "body")
+    assert (status, body) == (200, "body")
+
+
+def test_a_header_section_one_over_the_cap_is_rejected() -> None:
+    with pytest.raises(rb.HeaderBlockError):
+        rb._split_response(block_of(CAP + 1) + "body")
+
+
+def test_an_unterminated_header_block_is_rejected() -> None:
+    with pytest.raises(rb.HeaderBlockError):
+        rb._split_response("HTTP/2.0 200 OK\r\nx-pad: " + "a" * (CAP * 2))
+
+
+def test_the_wrapper_withholds_an_oversized_header_block_and_keeps_the_exit_code(tmp_path: Path) -> None:
+    h = Harness(tmp_path, block_of(CAP + 1) + "the-body")
+    code = h.go(["api", "repos/o/r"])
+    assert code == 0
+    assert h.out.getvalue() == ""  # neither the status line, nor the headers, nor the body
+    assert "HTTP/2.0" not in h.out.getvalue()
+    assert "withheld" in h.err.getvalue()
+    assert h.ledger.rows()[0]["status"] == 0  # recorded, with no counters trusted
+    assert h.ledger.headroom("core").level == "ok"
+
+
+def test_the_wrapper_keeps_a_failing_exit_code_when_the_headers_are_oversized(tmp_path: Path) -> None:
+    h = Harness(tmp_path, block_of(CAP + 1), code=4)
+    assert h.go(["api", "repos/o/r"]) == 4
+    assert h.out.getvalue() == ""
+
+
+def test_the_wrapper_still_prints_a_body_after_an_accepted_block(tmp_path: Path) -> None:
+    h = Harness(tmp_path, block_of(CAP) + "the-body")
+    assert h.go(["api", "repos/o/r"]) == 0
+    assert h.out.getvalue() == "the-body"
+
+
+def test_the_cap_holds_for_bare_line_feed_terminators_too() -> None:
+    lf = "HTTP/2.0 200 OK\nx-pad: "
+    ok = lf + "a" * (CAP - len(lf)) + "\n\nbody"
+    over = lf + "a" * (CAP + 1 - len(lf)) + "\n\nbody"
+    assert rb._split_response(ok)[0] == 200
+    with pytest.raises(rb.HeaderBlockError):
+        rb._split_response(over)

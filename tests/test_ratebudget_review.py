@@ -462,3 +462,37 @@ def test_a_write_slot_within_the_queue_limit_is_believed(tmp_path: Path) -> None
     state["last_write"] = {"local|*": T0 + 50}
     (b.directory / "state.json").write_text(json.dumps(state))
     assert b.reserve("core", write=True).wait == pytest.approx(51)
+
+
+# round 7: the 0o700 mode is written as stat.S_IRWXU (CI's Semgrep reads the literal as "widely permissive")
+
+
+def test_the_private_modes_are_exactly_700_and_600(tmp_path: Path) -> None:
+    import stat
+
+    b = budget(tmp_path)
+    b.record(caller="a", bucket="core", klass="x", write=False, status=200)
+    assert stat.S_IMODE((b.directory).stat().st_mode) == 0o700
+    assert stat.S_IMODE((b.directory / "ledger.jsonl").stat().st_mode) == 0o600
+    assert stat.S_IMODE((b.directory / "lock").stat().st_mode) == 0o600
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    loose.chmod(0o777)
+    rb.write_private(loose / "f", b"x")
+    assert stat.S_IMODE(loose.stat().st_mode) == 0o700
+
+
+def literal_700(source: str) -> list[int]:
+    return [n for n, line in enumerate(source.splitlines(), 1) if "0o700" in line]
+
+
+def test_no_0o700_literal_remains_in_the_new_modules() -> None:
+    root = Path(rb.__file__).parent
+    names = ("ratebudget.py", "boardmap.py", "card_cli.py", "ratebudget_cli.py")
+    found = {n: literal_700((root / n).read_text()) for n in names}
+    assert all((root / n).stat().st_size > 1000 for n in names)  # something was read
+    assert found == {n: [] for n in names}
+
+
+def test_the_literal_guard_bites() -> None:
+    assert literal_700("os.fchmod(fd, 0o700)\nx = 1\n") == [1]

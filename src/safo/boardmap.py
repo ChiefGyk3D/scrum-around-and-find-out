@@ -141,7 +141,9 @@ def from_json(data: Any) -> BoardMap:
 def to_json(board: BoardMap) -> dict[str, Any]:
     return {
         "project": board.project,
-        "fields": {n: {"id": f.id, "kind": f.kind, "options": f.options} for n, f in sorted(board.fields.items())},
+        "fields": {
+            n: {"id": f.id, "kind": f.kind, "options": dict(f.options)} for n, f in sorted(board.fields.items())
+        },
         "items": dict(sorted(board.items.items())),
     }
 

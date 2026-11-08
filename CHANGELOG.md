@@ -26,7 +26,9 @@
   block another. Round 6: the signal guard covers the whole run (handlers installed together before the gate, a
   signal at any point after a child may exist is forwarded, stopped, reaped, reported as an unknown outcome),
   `safo-card` reports a signal-interrupted PATCH as an unknown outcome (`is_unknown_outcome_exit`), a future same-boot
-  monotonic launch record is repaired once, and concurrent card-map updates are merged under a lock.
+  monotonic launch record is repaired once, and concurrent card-map updates are merged under a lock. Round 7: modes are written as `stat.S_IRWXU` (Semgrep read the 0o700 literal as too
+  permissive; same mode, no suppression), the board snapshot copies the option dicts (#373), and an oversized or
+  unterminated header block is withheld instead of printed as body (#374).
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on

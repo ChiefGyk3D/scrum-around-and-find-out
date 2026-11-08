@@ -511,3 +511,24 @@ def test_merge_save_changes_nothing_when_nothing_changed(tmp_path: Path) -> None
     bm.save(other, path)
     bm.merge_save(path, bm.to_json(mine), mine)  # no diff: must not roll back the other writer
     assert bm.load(path).items["o/r#9"] == 9
+
+
+# round 7 (#373): the snapshot must not share option dicts with the live board
+
+
+def test_a_snapshot_does_not_share_the_option_dicts(tmp_path: Path) -> None:
+    board = seeded()
+    snapshot = bm.to_json(board)
+    assert snapshot["fields"]["Effort"]["options"] is not board.fields["Effort"].options
+    board.fields["Effort"].options["XL"] = "deadbeef"
+    assert "XL" not in snapshot["fields"]["Effort"]["options"]
+
+
+def test_an_option_learned_after_the_snapshot_is_saved(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "boardmap.json"
+    bm.save(bm.default_map(), path)
+    mine = bm.load(path)
+    before = bm.to_json(mine)  # the snapshot is taken first ...
+    mine.fields["Effort"].options["XL"] = "deadbeef"  # ... then an option is learned
+    bm.merge_save(path, before, mine)
+    assert bm.load(path).fields["Effort"].options["XL"] == "deadbeef"

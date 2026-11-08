@@ -154,8 +154,10 @@ UNKNOWN_OUTCOME_MARKER = "outcome unknown"
 def is_unknown_outcome_exit(code: int, stderr: str | None = None) -> bool:
     """True for the exit codes `main` uses when a call may have been sent and its result is not known: 124 (timeout,
     bad output) and 128 plus SIGHUP, SIGINT or SIGTERM (a signal). No other code above 128 is assumed: `gh` itself
-    can exit with any code. If `stderr` is given it must also carry the wrapper's own report, so a `gh` that merely
-    exited 130 is not mistaken for one."""
+    can exit with any code. If `stderr` is given it must also contain a line shaped like the wrapper's report, which
+    keeps a `gh` that merely exited 130 from being mistaken for one. That line is advisory text, not proof of where it
+    came from (the child's own stderr is relayed into the same stream), so a forged one can only make a caller more
+    careful."""
     if code not in UNKNOWN_OUTCOME_EXITS:
         return False
     return stderr is None or any(
@@ -320,6 +322,10 @@ def classify(argv: Sequence[str]) -> Classified:
     return Classified(bucket, _endpoint_class(endpoint), verb not in ("GET", "HEAD") or unknown, False)
 
 
+class HeaderBlockError(ValueError):
+    """The output starts like an HTTP header block that is unterminated or longer than MAX_HEADER_BYTES."""
+
+
 class GateUnavailable(Exception):
     """The launch gate could not be taken (the ledger directory is unusable); nothing was started."""
 
@@ -475,20 +481,20 @@ def _launcher(run: Run) -> Launcher:
 
 
 def open_private_dir(directory: Path, *, create: bool) -> int:
-    """A descriptor for `directory`, which must be ours and is repaired to 0700 when it is looser.
+    """A descriptor for `directory`, which must be ours and is repaired to owner-only (S_IRWXU) when it is looser.
 
     The directory is opened without following a symlink, and every later operation is relative to the descriptor, so
     a name inside cannot be swapped for another directory's entry after this check.
     """
     if create:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.mkdir(mode=stat.S_IRWXU, parents=True, exist_ok=True)
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
         if info.st_uid != os.geteuid():
             raise OSError("the ratebudget directory is not owned by this user")
         if info.st_mode & 0o077:
-            os.fchmod(fd, 0o700)
+            os.fchmod(fd, stat.S_IRWXU)
     except BaseException:
         os.close(fd)
         raise
@@ -1137,9 +1143,9 @@ def _parse_block(text: str) -> tuple[int, str, dict[str, str], str] | None:
     """(status, reason, lower-cased headers, rest) of the header block at the start of `text`, or None."""
     if not text.startswith("HTTP/"):
         return None
-    match = re.search(r"\r?\n\r?\n", text[:MAX_HEADER_BYTES])
-    if match is None:
-        return None
+    match = re.search(r"\r?\n\r?\n", text[: MAX_HEADER_BYTES + 4])
+    if match is None or match.start() > MAX_HEADER_BYTES:
+        raise HeaderBlockError("the header block is unterminated or longer than the cap")
     lines = text[: match.start()].splitlines()
     parts = lines[0].split(" ", 2)
     if len(parts) < 2 or not parts[1].isdigit() or len(parts[1]) != 3:
@@ -1325,7 +1331,17 @@ def _finish(
     guard: _SignalGuard,
 ) -> int:
     stdout = done.stdout or ""
-    status, headers, body = _split_response(stdout) if inject else (0, {}, stdout)
+    try:
+        status, headers, body = _split_response(stdout) if inject else (0, {}, stdout)
+    except HeaderBlockError:
+        # the call was made but its answer cannot be split into headers and body: print none of it, trust none of it
+        err.write("ghw: the response headers were oversized or malformed; the output was withheld\n")
+        if done.stderr:
+            err.write(done.stderr)
+        _record(ledger, env, what, 0, [], None, err)
+        if guard.pending is not None:
+            return 128 + guard.pending
+        return done.returncode
     out.write(body)
     if done.stderr:
         err.write(done.stderr)
