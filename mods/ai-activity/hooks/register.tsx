@@ -44,7 +44,7 @@ function stop(): void {
 // True only when safo-activity is on the path.
 async function isInstalled($: Dollar): Promise<boolean> {
   try {
-    const ran = await $.process.run(PROBE, { timeoutMs: 3000 })
+    const ran = await $.process.run(PROBE, { cwd: '/', timeoutMs: 3000 })
 
     return ran.exitCode === 0
   } catch {
@@ -65,7 +65,7 @@ async function refresh($: Dollar): Promise<void> {
     }
     let text = UNAVAILABLE
     try {
-      const ran = await $.process.run(TABLE, { timeoutMs: 8000 })
+      const ran = await $.process.run(TABLE, { cwd: '/', timeoutMs: 8000 })
       // Empty output (the tool is missing, or there is nothing to say) draws nothing.
       if (ran.exitCode === 0) text = ran.stdout.trim() === '' ? '' : ran.stdout
     } catch {
