@@ -63,6 +63,13 @@ _REDIR_ATTACHED = re.compile(r"(?:\d*|&)(?P<op>>>?\|?|<&|>&|<>|<)(?P<rest>.+)", 
 _HERE_WORD = re.compile(r"<<(?!<)(?P<dash>-?)(?P<rest>.*)", re.S)
 
 
+def _no_tick() -> None:
+    return None
+
+
+_tick: Callable[[], None] = _no_tick  # set by classify() for the length of one call
+
+
 class _Counter:
     def __init__(self) -> None:
         self.n = 0
@@ -70,6 +77,7 @@ class _Counter:
 
 
 def _skip_single(t: str, i: int) -> int:
+    _tick()
     j = t.find("'", i + 1)
     if j < 0:
         raise Unreadable("unterminated quote")
@@ -81,6 +89,7 @@ def _balanced(t: str, i: int) -> int:
     depth = 1
     n = len(t)
     while i < n:
+        _tick()
         c = t[i]
         if c == "\\":
             i += 2
@@ -125,6 +134,7 @@ def _balanced(t: str, i: int) -> int:
 def _backtick(t: str, i: int) -> int:
     j = i
     while j < len(t):
+        _tick()
         if t[j] == "\\":
             j += 2
             continue
@@ -168,6 +178,7 @@ def _dollar(t: str, i: int, acc: dict) -> int:
 def _read_word(t: str, i: int) -> tuple[Word, int]:
     start = i
     n = len(t)
+    _tick()
     acc: dict = {"val": [], "static": True, "expands": False, "subs": []}
     while i < n:
         c = t[i]
@@ -262,6 +273,7 @@ def _heredoc_body(t: str, i: int, hd: Heredoc) -> int:
     n = len(t)
     body: list[str] = []
     while True:
+        _tick()
         nl = t.find("\n", pos)
         line = t[pos:] if nl < 0 else t[pos:nl]
         cmp = line.lstrip("\t") if hd.strip else line
@@ -276,10 +288,25 @@ def _heredoc_body(t: str, i: int, hd: Heredoc) -> int:
         pos = nl + 1
 
 
+_CONT = re.compile(r"(\\+)\n")
+
+
+def _join_continuations(text: str) -> str:
+    """Remove backslash-newline the way bash does, or raise: bash keeps it inside single quotes, $'..', comments and
+    quoted heredoc bodies, and an even run of backslashes before a newline is a literal backslash."""
+    if "\\\n" not in text:
+        return text
+    if any(len(m.group(1)) % 2 == 0 for m in _CONT.finditer(text)):
+        raise Unreadable("a literal backslash before a newline")
+    if re.search(r"['#]|<<", text):
+        raise Unreadable("a continuation beside a quote, a comment or a heredoc")
+    return text.replace("\\\n", "")
+
+
 def parse(text: str, counter: _Counter, tick: Callable[[], None], depth: int = 0) -> list[Unit]:
     if depth > MAX_DEPTH:
         raise Unreadable("too deeply nested")
-    t = text.replace("\\\n", "")
+    t = _join_continuations(text)
     units: list[Unit] = []
     words: list[Word] = []
     pending: list[Heredoc] = []  # bodies still to be read at the next newline
@@ -422,7 +449,15 @@ def _make_unit(words: list[Word], pipe: int, heredocs: list[Heredoc]) -> Unit:
 _QUOTED_PATH = re.compile(
     r"\"\$\{?\w+\}?(?:/[^\"$`\\]*)?/(?P<name>[\w.+-]+)\"|\"\$\{?\w+\}?\"(?:/[^\"$`\\ ]*)?/(?P<name2>[\w.+-]+)"
 )
-RESERVED = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!", "time", "{", "}"})
+_SECRET = re.compile(r"(?<![\w.-])doppler(?![\w-])")
+_TOOLNAME = re.compile(r"(?<![\w.-])(?:curl|wget|nc|ncat|socat|ssh|telnet)(?![\w-])")
+RESERVED = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!", "time", "{", "}", "coproc"})
+# commands that rebind or create other commands, or run an applet by name: the old answer stands
+OPAQUE = frozenset(
+    {"alias", "unalias", "shopt", "enable", "hash", "busybox", "toybox", "ln", "install", "command_not_found_handle"}
+)
+# commands that can copy or rename a program so that it is run under another name
+COPIERS = frozenset({"cp", "mv", "chmod", "rsync", "scp", "dd", "tee"})
 WRAPPERS = frozenset(
     {
         "sudo", "doas", "env", "nohup", "command", "exec", "builtin", "nice", "ionice", "timeout", "stdbuf", "setsid",
@@ -444,10 +479,10 @@ _WRAP_VALUE_OPTS = {
 # commands that cannot run code from their arguments (git, gh and find are checked further below)
 DATA = frozenset(
     {
-        "grep", "egrep", "fgrep", "rg", "ag", "cat", "head", "tail", "less", "more", "ls", "wc", "diff", "cmp", "jq",
-        "sort", "uniq", "cut", "file", "stat", "test", "[", "echo", "printf", "true", "false", "cd", "pwd", "mkdir",
+        "grep", "egrep", "fgrep", "cat", "head", "tail", "ls", "wc", "diff", "cmp", "jq",
+        "uniq", "cut", "file", "stat", "test", "[", "echo", "printf", "true", "false", "cd", "pwd", "mkdir",
         "rm", "cp", "mv", "touch", "chmod", "date", "sleep", "basename", "dirname", "realpath", "readlink", "which",
-        "type", "tr", "column", "nl", "tac", "rev", "fold", "seq", "id", "whoami", "uname", "df", "du", "ln",
+        "type", "tr", "column", "nl", "tac", "rev", "fold", "seq", "id", "whoami", "uname", "df", "du",
     }
 )  # fmt: skip
 GIT_SAFE = frozenset(
@@ -461,7 +496,7 @@ GH_SAFE = frozenset({"pr", "issue", "release", "repo", "run", "workflow", "label
 DOC_EXT = (".md", ".txt", ".json", ".yaml", ".yml", ".diff", ".patch", ".csv", ".toml", ".log", ".out", ".html")
 EXEC_FLAGS = ("-exec", "-execdir", "-ok", "-okdir")
 GIT_EXEC_FLAGS = frozenset({"--exec", "-x", "--extcmd", "--upload-pack", "--receive-pack", "-O"})
-GIT_EXEC_PREFIXES = ("--open-files-in-pager", "--exec=", "--upload-pack=", "--receive-pack=")
+GIT_EXEC_PREFIXES = ("--open-files-in-pager", "--exec=", "--upload-pack=", "--receive-pack=", "-O")
 
 
 @dataclass
@@ -470,6 +505,7 @@ class Eff:
     args: list[Word]
     unit: Unit
     text: str = ""  # the unit's own text: assignments, arguments, redirect targets, here-strings
+    wrapped: bool = False  # assignments or a wrapper (sudo, env, ...) in front of the command
     bodies: list[str] = field(default_factory=list)  # heredoc bodies fed to this command
 
 
@@ -520,6 +556,7 @@ def effective(unit: Unit, counter: _Counter, tick: Callable[[], None], depth: in
         prefix_text.append(words[0].raw)
         words = words[1:]
     cmd = ""
+    wrapped = bool(prefix_text)
     while words:
         first = words[0]
         if first.value is None:
@@ -533,24 +570,31 @@ def effective(unit: Unit, counter: _Counter, tick: Callable[[], None], depth: in
             words = words[1:]
             continue
         if name in WRAPPERS:
+            if name == "env" and any(
+                w.value is None or w.value.startswith(("-S", "--split-string")) for w in words[1:8]
+            ):
+                raise Unreadable("env -S builds a command from a string")
             words = _skip_wrapper(name, words[1:])
+            wrapped = True
             continue
         if name == "function":
             raise Unreadable("function definition")
+        if name in OPAQUE:
+            raise Unreadable("a command that rebinds or creates commands")
         cmd = name
         words = words[1:]
         break
-    eff = Eff(cmd, words, unit)
+    eff = Eff(cmd, words, unit, wrapped=wrapped)
     out.append(eff)
-    pieces = list(prefix_text)
-    pieces += [cmd] if cmd else []  # the command word is part of its text (`printf -v` is one of the patterns)
-    pieces += [w.raw for w in words]
+    pieces = [w.raw for w in unit.words]  # every original word: assignments, wrappers, the command, its arguments
     pieces += [w.raw for _, w in unit.redirs]
     pieces += [w.raw for w in unit.herestrings]
     eff.text = " ".join(pieces)
     eff.bodies = [hd.body for hd in unit.heredocs]
     if cmd == "":
         return
+    if cmd in COPIERS and (_SECRET.search(eff.text.lower()) or _TOOLNAME.search(eff.text.lower())):
+        raise Unreadable("a tool copied or renamed")
     if cmd in SHELLS:
         script = None
         for k, w in enumerate(words):
@@ -573,8 +617,7 @@ def effective(unit: Unit, counter: _Counter, tick: Callable[[], None], depth: in
     elif cmd == "eval":
         _recurse(_static(words), counter, tick, depth, out)
     elif cmd in (".", "source"):
-        if unit.herestrings or unit.heredocs or any(w.value is None for w in words):
-            raise Unreadable("sourced text")
+        raise Unreadable("sourcing a file whose content is not in hand")
     elif cmd == "find":
         for k, w in enumerate(words):
             if w.value in EXEC_FLAGS:
@@ -590,7 +633,16 @@ def effective(unit: Unit, counter: _Counter, tick: Callable[[], None], depth: in
 # The two questions
 
 
+_PROGRAM_OPTIONS = re.compile(
+    r"core\.(?:sshcommand|pager|editor|fsmonitor|hookspath)|alias\.|credential\.helper|exec-path|upload-pack"
+    r"|receive-pack|--pager|--ext-diff|--exec|^!|ProxyCommand",
+    re.I,
+)
+
+
 def _git_data(words: list[Word]) -> bool:
+    if any(_PROGRAM_OPTIONS.search(w.raw) for w in words):
+        return False
     i = 0
     while i < len(words):
         v = words[i].value
@@ -601,12 +653,14 @@ def _git_data(words: list[Word]) -> bool:
             continue
         if v.startswith("-") or v not in GIT_SAFE:
             return False  # -c k=v, --exec-path, an alias or an external subcommand can run programs
-        rest = [w.value for w in words[i + 1 :]]
+        rest = [w.raw for w in words[i + 1 :]]
         return not any(x in GIT_EXEC_FLAGS or (x or "").startswith(GIT_EXEC_PREFIXES) for x in rest)
     return True
 
 
 def _gh_data(words: list[Word]) -> bool:
+    if any(_PROGRAM_OPTIONS.search(w.raw) for w in words):
+        return False
     for w in words:
         if w.value is None:
             return False
@@ -617,7 +671,11 @@ def _gh_data(words: list[Word]) -> bool:
 
 
 def _doc_target(eff: Eff, all_effs: list[Eff]) -> bool:
-    """Every output redirect goes to a document-type file that no other command in the input names."""
+    """Every output redirect goes to a document-type file, no other command in the input names it (any spelling of the
+    path: the base name is compared), and every other command is plain data, so nothing could run or read it as code."""
+    writes = [tw for op, tw in eff.unit.redirs if op not in ("<", "<&", ">&")]
+    if writes and any(o is not eff and o.cmd and not _cmd_is_data(o) for o in all_effs):
+        return False
     for op, tw in eff.unit.redirs:
         if op in ("<", "<&", ">&"):
             continue
@@ -628,7 +686,8 @@ def _doc_target(eff: Eff, all_effs: list[Eff]) -> bool:
             continue
         if not tv.lower().endswith(DOC_EXT):
             return False
-        if any(other is not eff and tv in other.text for other in all_effs):
+        base = posixpath.basename(tv)
+        if any(other is not eff and base in other.text for other in all_effs):
             return False
         # another command with a glob or an expansion for an argument could name the file without spelling it
         if any(w.value is None for other in all_effs if other is not eff for w in other.args):
@@ -637,7 +696,13 @@ def _doc_target(eff: Eff, all_effs: list[Eff]) -> bool:
 
 
 def _is_data(eff: Eff, all_effs: list[Eff]) -> bool:
+    return _cmd_is_data(eff) and _doc_target(eff, all_effs)
+
+
+def _cmd_is_data(eff: Eff) -> bool:
     cmd = eff.cmd
+    if eff.wrapped:
+        return False
     if cmd == "git":
         ok = _git_data(eff.args)
     elif cmd == "gh":
@@ -648,7 +713,7 @@ def _is_data(eff: Eff, all_effs: list[Eff]) -> bool:
         ok = not any(w.value is None or w.value == "-v" for w in eff.args[:1])  # printf -v NAME builds a variable
     else:
         ok = cmd in DATA
-    return ok and _doc_target(eff, all_effs)
+    return ok
 
 
 def classify(
@@ -658,10 +723,15 @@ def classify(
     tick: Callable[[], None],
 ) -> str | None:
     """BUILT, TOOL or None for a command the old check would have refused. Raises Unreadable when unsure."""
+    global _tick
     counter = _Counter()
     effs: list[Eff] = []
-    for u in parse(command, counter, tick):
-        effective(u, counter, tick, 0, effs)
+    _tick = tick
+    try:
+        for u in parse(command, counter, tick):
+            effective(u, counter, tick, 0, effs)
+    finally:
+        _tick = _no_tick
 
     def is_tool(e: Eff) -> bool:
         return e.cmd == "doppler" or bool(e.cmd and network.fullmatch(e.cmd))
@@ -682,6 +752,14 @@ def classify(
     for e in tools:
         if e.cmd == "doppler" and any(w.expands for w in e.args):
             return TOOL
+    names_secret = any(e.cmd and e.cmd != "doppler" and _SECRET.search(texts[id(e)]) for e in effs)
+    has_expansion = any(
+        e.cmd != "doppler" and ("$" in texts[id(e)] or "`" in texts[id(e)]) for e in effs if texts[id(e)]
+    )
+    if names_secret and has_expansion:
+        # a runner, wrapper, script or renamed program that is handed the secret tool, with an expansion somewhere
+        # that could build its arguments: not proven inert, so the old pairing stands
+        return TOOL
     for e in tools:
         if conceal.search(texts[id(e)]):
             return BUILT
