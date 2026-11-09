@@ -1219,6 +1219,31 @@ _NETWORK_TOOL = re.compile(
 )
 
 
+# A heredoc with a QUOTED delimiter is inert text (no expansion happens in it), and when the command that owns it is a
+# plain data sink (cat, tee, git commit -F -, gh ... --body-file -) nothing in it is ever run. Its body is left out of
+# the two "built from escapes" and "secret tool with an expansion" checks only; the vendor, key and store checks still
+# read the whole command. A heredoc fed to an interpreter (python3 - <<'E') is code and is always read in full.
+_HEREDOC = re.compile(
+    r"^(?P<head>[^\n]*?)<<-?[ \t]*(?P<q>['\"])(?P<tag>\w+)(?P=q)(?P<rest>[^\n]*)\n(?P<body>.*?)^[ \t]*(?P=tag)[ \t]*$",
+    re.M | re.S,
+)
+_REST_PLAIN = re.compile(r"\s*(?:>>?\s*[\w./~-]+)?\s*(?:\)\"?)?\s*")  # after the delimiter: a file or a closing `)"`
+_DATA_SINK = re.compile(
+    r"^\s*(?:cat|tee)(?![\w-])|\$\(\s*cat\s*$|(?<![\w.-])git\s+(?:-\S+\s+)*commit\b.*\s(?:-F|--file)\s*-(?:\s|$)"
+    r"|(?<![\w.-])gh\s+.*--(?:body|notes)-file\s+-(?:\s|$)"
+)
+
+
+def _without_inert_heredocs(command: str) -> str:
+    def keep(m: re.Match[str]) -> str:
+        owner = re.split(r"&&|\|\||;|\|", m.group("head"))[-1]  # the command the heredoc is fed to
+        if not _DATA_SINK.search(owner) or not _REST_PLAIN.fullmatch(m.group("rest")):  # `| python3` after it is code
+            return m.group(0)
+        return m.group("head") + "<<" + m.group("tag") + "\n"
+
+    return _HEREDOC.sub(keep, command)
+
+
 def shell_command_class(command: str, deadline: float | None = None) -> str | None:
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
     it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED."""
@@ -1251,10 +1276,14 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
             if secret_tool and any(_SHELL_CONFIG.search(v) for v in (low, pre_low)):
                 found = found or SHELL_STORE
         tick()
-        built = bool(CONCEAL.search(command.lower()) or CONCEAL.search(_join(command).lower()))
+        code = _without_inert_heredocs(command)
+        if code != command:  # recompute what the two checks below look at without the inert bodies
+            joined = _join(code).lower()
+            secret_tool, network = bool(_SECRET_TOOL.search(joined)), bool(_NETWORK_TOOL.search(joined))
+        built = bool(CONCEAL.search(code.lower()) or CONCEAL.search(_join(code).lower()))
         if found is None and built and (network or secret_tool):
             found = SHELL_BUILT
-        if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
+        if found is None and secret_tool and (_DOLLAR.search(code) or "`" in code):
             found = SHELL_TOOL
         if found is None and broker_module_route(views, tick):
             found = SHELL_BROKER_MODULE

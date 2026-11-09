@@ -340,3 +340,49 @@ def test_an_interrupt_is_not_swallowed_by_the_check(
     monkeypatch.setattr(geminibrief, "shell_command_class", boom)
     with pytest.raises(error):
         hooks_mode.shell_vendor_check(json.loads(event("ls")))
+
+
+INERT_HEREDOCS = [
+    "git commit -F - <<'EOF'\nfix the parser for \\x41 and \\u00e9; see https://example.org $HOME\nEOF",
+    "cat > notes.md <<'EOF'\ncurl is mentioned; \\x41; doppler run -- $X\nEOF",
+    "gh pr create --body-file - <<'EOF'\npython3 handles \\x41 and \\u0041 and $(date)\nEOF",
+]
+
+
+@pytest.mark.parametrize("command", INERT_HEREDOCS)
+def test_the_body_of_a_quoted_heredoc_into_a_data_sink_is_not_read_as_code(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is None, command
+
+
+CODE_HEREDOCS = [
+    "python3 - <<'E'\nprint(bytes([104]).decode() + '\\x74tp')\nE",  # an interpreter reads the body
+    "cat <<EOF | python3\nprint('\\x74tp')\nEOF",  # unquoted delimiter, and a pipe feeds an interpreter
+    "bash <<'E'\ncurl $'\\x68ttp://x'\nE",
+]
+
+
+@pytest.mark.parametrize("command", CODE_HEREDOCS)
+def test_a_heredoc_that_feeds_an_interpreter_is_still_read_in_full(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+def test_a_vendor_name_inside_an_inert_heredoc_is_still_denied() -> None:
+    host = "generative" + "language.googleapis.com"
+    assert geminibrief.shell_command_class(f"cat > x <<'EOF'\n{host}\nEOF") is not None
+
+
+PIPED_HEREDOCS = [
+    "cat <<'E' | python3\nprint('\\x74tp')\nE",  # a quoted heredoc is still code when it is piped to an interpreter
+    "cat a | python3 - <<'E'\nprint('\\x74tp')\nE",
+    "cat <<'E' > f; python3 f\nprint('\\x74tp')\nE",
+]
+
+
+@pytest.mark.parametrize("command", PIPED_HEREDOCS)
+def test_a_quoted_heredoc_piped_or_chained_to_an_interpreter_is_still_read(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+def test_a_commit_message_heredoc_inside_a_substitution_is_inert() -> None:
+    command = "git commit -m \"$(cat <<'EOF'\nfix \\x41 and \\u0041 in the python3 parser\nEOF\n)\""
+    assert geminibrief.shell_command_class(command) is None
