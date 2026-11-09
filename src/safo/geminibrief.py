@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import NamedTuple
 
-from safo import shellproof
+from safo import shellproof, shellunits
 from safo.gemini import (
     JOB_CAP,
     RECORD_ID,
@@ -1246,11 +1246,23 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
             return found  # a form the proof does not model
         if parsed.pure():
             return None
+        if found in (SHELL_BUILT, SHELL_TOOL) and _shellunits_clears(command, tick):
+            return None  # the old words-anywhere answer only narrows: no real invocation of a tool occurs
         if parsed.writes_no_file() and _classify(parsed.without_comments(), tick, soft=True) is None:
             return None  # the names sit only in comments, which no shell runs, and no file is written
         return found
     except TimeoutError:
         return SHELL_UNVERIFIED
+
+
+def _shellunits_clears(command: str, tick: Callable[[], None]) -> bool:
+    """True only when `safo.shellunits` reads the command with certainty and finds no real invocation of a tool (its
+    answer is None). Unreadable input, a timeout, any fault and any other answer keep the strict denial."""
+    try:
+        verdict = shellunits.classify(command, CONCEAL, _NETWORK_TOOL, tick)
+    except Exception:  # Unreadable, a timeout or any fault in the reader
+        return False
+    return verdict is None
 
 
 def _classify(command: str, tick: Callable[[], None], soft: bool) -> str | None:
