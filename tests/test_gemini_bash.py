@@ -419,7 +419,7 @@ MORE_BYPASSES = [
     # a `<<` inside a body that is kept is not a heredoc of its own
     f"python3 - <<'X'\nprint(1)\ncat <<'E'\n{HIDDEN}\nE\nX",
     # an open quote from an earlier line: the heredoc line is inside a string
-    f"echo \"\ncat <<'E'\n{HIDDEN}\nE\n\"; eval \"$(cat)\"",
+    f'echo "\ncat <<\'E\'\n{HIDDEN}\nE\n"; eval "$(cat)"',
     # a here-string and a second heredoc on one line keep everything
     f"cat <<<'E'\n{HIDDEN}\nE",
     f"cat <<'A' <<'B'\n{HIDDEN}\nA\nB",
@@ -435,4 +435,57 @@ MORE_BYPASSES = [
 
 @pytest.mark.parametrize("command", MORE_BYPASSES)
 def test_more_shapes_around_the_heredoc_exemption_keep_the_body(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+REDEFINED_SINKS = [
+    f"alias cat=python3\ncat <<'E'\n{HIDDEN}\nE",
+    f"shopt -s expand_aliases; alias git=sh\ngit commit -F - <<'E'\n{HIDDEN}\nE",
+    f"enable -n cat\ncat <<'E'\n{HIDDEN}\nE",
+    f"hash -p /usr/bin/python3 cat\ncat <<'E'\n{HIDDEN}\nE",
+    f"PATH=/tmp/x:$PATH\ncat <<'E'\n{HIDDEN}\nE",
+    f"export BASH_ENV=/tmp/x\ncat <<'E'\n{HIDDEN}\nE",
+    f"gh alias set pc 'pr create'\ngh pr create --body-file - <<'E'\n{HIDDEN}\nE",
+    f"git config alias.commit '!sh'\ngit commit -F - <<'E'\n{HIDDEN}\nE",
+    f"git commit -F - <<'E'\n{HIDDEN}\nE\nalias cat=python3",  # anywhere in the input
+    # the heredoc is not the first command of the input
+    f"echo start\ncat <<'E'\n{HIDDEN}\nE",
+    f"true && cat <<'E'\n{HIDDEN}\nE",
+    # gh: only the built-in noun/verb pairs; an extension or other verb may run any program
+    f"gh extension exec x --body-file - <<'E'\n{HIDDEN}\nE",
+    f"gh pr checkout --body-file - <<'E'\n{HIDDEN}\nE",
+    f"gh myalias go --body-file - <<'E'\n{HIDDEN}\nE",
+]
+
+
+@pytest.mark.parametrize("command", REDEFINED_SINKS)
+def test_a_redefined_or_late_sink_does_not_get_the_exemption(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+def test_the_allowlisted_gh_pairs_and_leading_cd_lines_are_still_exempt() -> None:
+    for head in (
+        "gh pr create --title t --body-file -",
+        "gh issue create --body-file -",
+        "gh pr comment 5 --body-file -",
+    ):
+        assert geminibrief.shell_command_class(f"cd docs\n{head} <<'EOF'\npython3 \\x41 $HOME\nEOF") is None, head
+
+
+QUOTE_AND_REBIND = [
+    # parity of both quote kinds is even, but the shell is still inside a double quote at the `<<`
+    f"git commit -m '\"' -m \"'' -F - <<'E'\n{HIDDEN}\nE",
+    f"git commit -m \"'\" -m '\"' -F - <<'E'\n{HIDDEN}\nE",
+    # a prefix line that rebinds a command name or sets a variable
+    f"builtin hash -p /usr/bin/python3 cat\ncat <<'E'\n{HIDDEN}\nE",
+    f"cat() {{ python3 \"$@\"; }}\ncat <<'E'\n{HIDDEN}\nE",
+    f"foo=1\ncat <<'E'\n{HIDDEN}\nE",
+    f"export LD_PRELOAD=/tmp/x.so\ncat <<'E'\n{HIDDEN}\nE",
+    f"source ./env.sh\ncat <<'E'\n{HIDDEN}\nE",
+    f"cd docs; alias_free=1\ncat <<'E'\n{HIDDEN}\nE",
+]
+
+
+@pytest.mark.parametrize("command", QUOTE_AND_REBIND)
+def test_quote_state_and_a_rebinding_prefix_void_the_exemption(command: str) -> None:
     assert geminibrief.shell_command_class(command) is not None, command

@@ -1232,19 +1232,27 @@ _HEREDOC_OPEN = re.compile(r"(?<!<)<<-?[ \t]*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)")
 _DIR = r"(?:cd[ \t]+[\w./~-]+[ \t]*&&[ \t]*)?"
 _SINK_HEAD = re.compile(
     _DIR + r"(?:cat"
-    r"|git[ \t]+commit(?:[ \t]+[\w./:@=,\"'~-]+)*?[ \t]+(?:-F|--file)[ \t]+-"
-    r"|gh[ \t]+[\w-]+[ \t]+[\w-]+(?:[ \t]+[\w./:@=,\"'~-]+)*?[ \t]+--body-file[ \t]+-)[ \t]*"
+    r"|git[ \t]+commit(?:[ \t]+[\w./:@=,~-]+)*?[ \t]+(?:-F|--file)[ \t]+-"
+    r"|gh[ \t]+(?:pr[ \t]+create|issue[ \t]+create|pr[ \t]+comment)(?:[ \t]+[\w./:@=,~-]+)*?"
+    r"[ \t]+--body-file[ \t]+-)[ \t]*"
 )
 _SINK_SUBST = re.compile(_DIR + r"git[ \t]+commit(?:[ \t]+-[\w-]+)*[ \t]+(?:-m|--message)[ \t]+\"\$\([ \t]*cat[ \t]*")
-_HEAD_CHARS = re.compile(r"[\w ./:@=,\"'~\t&-]*")  # no $ ` ( ) ; | < > # \ { } in the head
-_PREFIX_BAD = re.compile(r"[$`(){}<>|\\#]")
-
-
-def _balanced(text: str) -> bool:
-    return text.count('"') % 2 == 0 and text.count("'") % 2 == 0
+_HEAD_CHARS = re.compile(
+    r"[\w ./:@=,~\t&-]*"
+)  # no quote of either kind, so no quote state to track  # no $ ` ( ) ; | < > # \ { } in the head
+# Anything that can redefine a command (alias, shopt, enable, hash, PATH, BASH_ENV, gh alias, git config, function)
+# anywhere in the input, bodies included, voids the exemption for the whole input.
+_REDEFINES = re.compile(
+    r"(?<![\w-])(?:alias|unalias|shopt|enable|hash|function|command_not_found_handle)(?![\w-])"
+    r"|(?<![\w-])(?:PATH|BASH_ENV|ENV)\s*="
+    r"|(?<![\w-])gh\s+alias\b|(?<![\w-])git\s+(?:-\S+\s+)*config\b"
+)
+_CD_LINE = re.compile(r"[ \t]*(?:cd[ \t]+[\w./~-]+)?[ \t]*")  # the only lines allowed before the heredoc
 
 
 def _without_inert_heredocs(command: str) -> str:
+    if _REDEFINES.search(command):
+        return command
     lines = command.split("\n")
     out: list[str] = []
     i = 0
@@ -1264,14 +1272,12 @@ def _without_inert_heredocs(command: str) -> str:
         if end >= len(lines):
             return command  # no terminator: keep everything
         head, rest = line[: opens.start()], line[opens.end() :]
-        prefix = "\n".join(out[:-1])
         inert = (
             opens.group("q") == "'"
             and not rest.strip()
-            and not _PREFIX_BAD.search(prefix)
-            and _balanced(prefix)
+            and all(_CD_LINE.fullmatch(x) for x in out[:-1])  # the heredoc is the first command of the input
             and (
-                (_HEAD_CHARS.fullmatch(head) and _balanced(head) and _SINK_HEAD.fullmatch(head))
+                (_HEAD_CHARS.fullmatch(head) and _SINK_HEAD.fullmatch(head))
                 or (
                     _SINK_SUBST.fullmatch(head)
                     and end + 1 < len(lines)
