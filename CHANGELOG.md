@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.2.0 (2026-11-09)
+
+- First release that carries the Gemini paid-path broker, its installer and units, the approval-binds-prompt change, the
+  passkey extra, the `safo-guard` entry point and the Action trust hardening. Paid use stays disabled. The release is
+  installed only from a signed annotated tag `v0.2.0` by `packaging/safo_broker_install.py`; the release notes the
+  installer review reads are in the pull request that prepared the release (#341). Everything below was merged after
+  v0.1.2.
+- Enrollment runbook (#339): the PIN prompt stays in the terminal. Steps a2, a3 and a4 set `SSH_ASKPASS_REQUIRE=never`,
+  and the a4 signing command passes the message file as an argument instead of redirecting standard input (the redirect
+  made ssh-keygen ask for the PIN through a graphical askpass program). New step in a4: `scripts/sshsig_flags.py` reads
+  the authenticator flags from a signature and proves the PIN was required (expect `flags=0x05`); tests in
+  `tests/test_sshsig_flags.py`. Verified on 2026-11-02 with hardware keys A and B, including the flags (0x05) and the
+  unplugged-key refusal.
+- SAFO threat model diagram (#246): the Threat Dragon file opened as an unreadable tangle. Rebuilt the geometry only: six
+  aligned boundary boxes with room around their contents, every shape inside its own boundary on a 20 px grid, flows as
+  straight or right-angle lines with explicit vertices (none through a shape), short flow labels on clear stretches, and
+  the shape and boundary names drawn on the canvas. Ids, names, descriptions, threats and mitigations are unchanged.
+  `tests/test_safo_threat_model.py` gains a layout guard (containment, overlap, flow clearance) with a negative case.
+  Checked by opening the file in Threat Dragon 2.6.2 in a headless browser (`scripts/threat_dragon_shots.py`).
+- Rehearsal containment, second round (#263). Review findings are fixed: the sandbox gets a synthetic `/etc` instead of
+  the host's, `bwrap` and `prlimit` are taken only from root-owned system folders (never `PATH`), and the sandbox runs
+  under memory, file size, open file, CPU and task limits with a size-capped memory-backed rehearsal folder; tests show
+  each limit bites. `--keep` now needs `--no-containment`. The header and `docs/gemini-enrollment.md` say what is and is
+  not contained.
+
 - `safo audit` (#389): open pull requests in the listed repositories that cannot merge as they stand. `DRIFT   CONFLICT
   owner/name#n` for `mergeable: CONFLICTING`, a `NOTE    BEHIND ...` for one behind its base, and a count note
   (`mergeability: N open pull requests, C conflicting, B behind, U not yet computed`). A `mergeable` still being
@@ -66,31 +91,6 @@
   Review fixes: a malformed transcript line inside the window or a missing/non-string `last_assistant_message` now fails
   open with the degraded notice instead of a false warning or a silent allow, and `hooks stop` is a hook for the
   stderr contract (a bad `SAFO_APPEND_LOCK_TIMEOUT` prints nothing).
-
-## 0.2.0 (2026-11-02)
-
-- First release that carries the Gemini paid-path broker, its installer and units, the approval-binds-prompt change, the
-  passkey extra, the `safo-guard` entry point and the Action trust hardening. Paid use stays disabled. The release is
-  installed only from a signed annotated tag `v0.2.0` by `packaging/safo_broker_install.py`; the release notes the
-  installer review reads are in the pull request that prepared the release (#341). Everything below was merged after
-  v0.1.2.
-- Enrollment runbook (#339): the PIN prompt stays in the terminal. Steps a2, a3 and a4 set `SSH_ASKPASS_REQUIRE=never`,
-  and the a4 signing command passes the message file as an argument instead of redirecting standard input (the redirect
-  made ssh-keygen ask for the PIN through a graphical askpass program). New step in a4: `scripts/sshsig_flags.py` reads
-  the authenticator flags from a signature and proves the PIN was required (expect `flags=0x05`); tests in
-  `tests/test_sshsig_flags.py`. Verified on 2026-11-02 with hardware keys A and B, including the flags (0x05) and the
-  unplugged-key refusal.
-- SAFO threat model diagram (#246): the Threat Dragon file opened as an unreadable tangle. Rebuilt the geometry only: six
-  aligned boundary boxes with room around their contents, every shape inside its own boundary on a 20 px grid, flows as
-  straight or right-angle lines with explicit vertices (none through a shape), short flow labels on clear stretches, and
-  the shape and boundary names drawn on the canvas. Ids, names, descriptions, threats and mitigations are unchanged.
-  `tests/test_safo_threat_model.py` gains a layout guard (containment, overlap, flow clearance) with a negative case.
-  Checked by opening the file in Threat Dragon 2.6.2 in a headless browser (`scripts/threat_dragon_shots.py`).
-- Rehearsal containment, second round (#263). Review findings are fixed: the sandbox gets a synthetic `/etc` instead of
-  the host's, `bwrap` and `prlimit` are taken only from root-owned system folders (never `PATH`), and the sandbox runs
-  under memory, file size, open file, CPU and task limits with a size-capped memory-backed rehearsal folder; tests show
-  each limit bites. `--keep` now needs `--no-containment`. The header and `docs/gemini-enrollment.md` say what is and is
-  not contained.
 
 - Rehearsal review fixes (#263). The rehearsal now contains the runbook text it runs: it re-runs itself inside a rootless
   bubblewrap sandbox (user, network, IPC, PID and UTS namespaces, read-only `/usr`, `/etc` and checkout, a writable
