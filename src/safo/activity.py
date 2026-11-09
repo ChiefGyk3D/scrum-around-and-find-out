@@ -420,6 +420,8 @@ def _established(env: Mapping[str, str], port: int) -> int | None:
             timeout=2,
             check=False,
             env={"PATH": env.get("PATH", ""), "LC_ALL": "C"},
+            cwd="/",
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -494,6 +496,7 @@ def _gh_json(gh: str, env: Mapping[str, str], path: str, timeout: float) -> Any:
         timeout=timeout,
         check=False,
         env=_gh_env(env),
+        cwd="/",
         stdin=subprocess.DEVNULL,
     )
     if done.returncode != 0 or len(done.stdout) > 2_000_000:
@@ -646,6 +649,23 @@ def copilot_snapshot(env: Mapping[str, str], cfg: Config, now: float, *, fetch: 
     return fresh
 
 
+CHILD_ENV_NAMES = ("HOME", "PATH", "LANG")
+CHILD_ENV_PREFIXES = ("GH_", "GITHUB_", "XDG_", "SAFO_ACTIVITY_")
+
+
+def child_env(env: Mapping[str, str]) -> dict[str, str]:
+    """What a child process may see: the login gh needs, the XDG folders, the locale and our own settings. Nothing
+    else from the caller's environment is passed on."""
+    return {k: v for k, v in env.items() if k in CHILD_ENV_NAMES or k.startswith(CHILD_ENV_PREFIXES)}
+
+
+def background_command(env: Mapping[str, str]) -> tuple[list[str], str]:
+    """The refresh child: the interpreter in isolated mode (-I: no current directory and no PYTHON* variables on the
+    module path), and a trusted working directory, the cache folder."""
+    files = _copilot_files(env)
+    return [sys.executable, "-I", "-m", "safo.activity", "--refresh-copilot"], str(files[0].parent if files else "/")
+
+
 def refresh_in_background(env: Mapping[str, str], now: float) -> None:
     """A status line never waits on the network: a stale Copilot answer starts one detached refresh (at most one per
     30 s) and the next line shows what it found."""
@@ -657,18 +677,21 @@ def refresh_in_background(env: Mapping[str, str], now: float) -> None:
             return
     except OSError:
         pass
-    write_private(files[1], "")
+    if not write_private(files[1], ""):
+        return
     import subprocess
 
+    argv, cwd = background_command(env)
     with contextlib.suppress(OSError):
-        subprocess.Popen(
-            [sys.executable, "-m", "safo.activity", "--refresh-copilot"],
+        subprocess.Popen(  # noqa: S603 - our own interpreter, isolated mode, fixed module and flag
+            argv,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
-            env=dict(env),
+            env=child_env(env),
         )
 
 

@@ -1288,3 +1288,99 @@ def test_the_view_modes_touch_no_routing_or_settings_file(box: Box) -> None:
         box.main(*argv)
     assert snapshot() == before
     assert not (conf / "mode").exists()
+
+
+# -- process launch hardening ------------------------------------------------------------------------------------------
+
+SECRET_VARS = {"AWS_SECRET_ACCESS_KEY": "hunter2", "OPENAI_API_KEY": "sk-test", "MY_PASSWORD": "pw"}
+
+
+def captured_launches(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict[str, Any]]]:
+    seen: list[tuple[list[str], dict[str, Any]]] = []
+
+    class Done:
+        returncode = 1
+        stdout = b""
+
+    def fake_run(argv: list[str], **kw: Any) -> Done:
+        seen.append((argv, kw))
+        return Done()
+
+    def fake_popen(argv: list[str], **kw: Any) -> None:
+        seen.append((argv, kw))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    return seen
+
+
+def test_the_background_refresh_is_isolated_in_a_trusted_directory_with_an_allowlisted_environment(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = captured_launches(monkeypatch)
+    box.vars.update(SECRET_VARS)
+    box.vars.update(GH_TOKEN="t", XDG_DATA_HOME="/x", SAFO_ACTIVITY_PROVIDERS="copilot", LANG="C", PYTHONPATH="/evil")
+    activity.refresh_in_background(box.vars, NOW)
+    assert len(seen) == 1
+    argv, kw = seen[0]
+    assert argv[:2] == [sys.executable, "-I"]
+    assert kw["cwd"] == str(box.run)  # the cache directory, not the caller's directory
+    assert kw["close_fds"] is True
+    assert kw["start_new_session"] is True
+    assert kw["stdin"] == subprocess.DEVNULL
+    child_env = kw["env"]
+    for name in SECRET_VARS:
+        assert name not in child_env
+    assert "PYTHONPATH" not in child_env
+    assert child_env["GH_TOKEN"] == "t"
+    assert child_env["PATH"] == box.vars["PATH"]
+    assert child_env["SAFO_ACTIVITY_PROVIDERS"] == "copilot"
+    assert set(child_env) <= {
+        "HOME",
+        "PATH",
+        "LANG",
+        "GH_TOKEN",
+        "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "SAFO_ACTIVITY_PROVIDERS",
+    }
+
+
+def test_gh_and_ss_run_from_the_filesystem_root_with_a_clean_environment(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = captured_launches(monkeypatch)
+    box.vars.update(SECRET_VARS)
+    box.vars["PYTHONPATH"] = "/evil"
+    activity.fetch_copilot(box.vars, "N0TST", NOW)
+    (box.bin / "ss").write_text("#!/bin/sh\n")
+    (box.bin / "ss").chmod(0o755)
+    activity._established(box.vars, 11434)
+    assert len(seen) >= 2
+    for _argv, kw in seen:
+        assert kw["cwd"] == "/"
+        assert not set(SECRET_VARS) & set(kw["env"])
+        assert "PYTHONPATH" not in kw["env"]
+        assert kw["stdin"] == subprocess.DEVNULL
+
+
+def test_a_planted_package_in_the_working_directory_is_not_imported(box: Box, tmp_path: Path) -> None:
+    planted = tmp_path / "project"
+    (planted / "safo").mkdir(parents=True)
+    marker = tmp_path / "ran"
+    (planted / "safo" / "__init__.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+    (planted / "safo" / "activity.py").write_text("")
+    argv, _cwd = activity.background_command(box.vars)
+    check = [*argv[:-1], "--version"]
+    done = subprocess.run(  # noqa: S603 - our own interpreter on a command built by the code under test
+        check, cwd=planted, capture_output=True, text=True, env=activity.child_env(box.vars), check=False
+    )
+    assert done.stdout.startswith("safo-activity ")
+    assert not marker.exists()
+    # the guard bites: the same module run without isolation does import the planted package
+    plain = subprocess.run(
+        [sys.executable, "-m", "safo.activity", "--version"], cwd=planted, capture_output=True, text=True, check=False
+    )
+    assert marker.exists()
+    assert not plain.stdout.startswith("safo-activity ")
