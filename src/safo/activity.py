@@ -44,7 +44,8 @@ from typing import Any, TextIO, TypeVar
 from urllib.parse import quote, urlsplit
 
 import safo
-from safo.bounded import read_bounded
+from safo import output
+from safo.bounded import MAX_BYTES, loads, read_bounded
 from safo.guardlog import config_dir
 
 T = TypeVar("T")
@@ -74,7 +75,7 @@ CODEX_JOBS_REL = (".claude", "plugins", "data", "codex-openai-codex", "state", "
 CODEX_FILE_CAP = 40
 JOB_BYTES = 65_536
 LEDGER_TAIL_BYTES = 262_144
-LEDGER_TAIL_LINES = 2000
+LEDGER_TAIL_LINES = 1000
 LEDGER_LINE_BYTES = 16_384
 CONFIG_BYTES = 65_536
 DONE_WINDOW = 3600
@@ -203,7 +204,7 @@ def _field(value: object) -> str:
 def read_job(path: str, now: float) -> Job | None:
     """One job file as a Job when it is a running job with a live process or a job completed in the last hour."""
     try:
-        data = json.loads(read_bounded(Path(path), JOB_BYTES))
+        data = loads(read_bounded(Path(path), JOB_BYTES))
     except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict):
@@ -282,7 +283,7 @@ def ledger_path(env: Mapping[str, str], home: str) -> Path | None:
 
 
 def tail_rows(path: Path) -> list[dict[str, Any]] | None:
-    """The parsable object rows among the last 2000 lines; None when the file is not a readable regular file.
+    """The parsable object rows among the last 1000 lines; None when the file is not a readable regular file.
 
     Not the chain-verifying reader: a status line must not raise on a broken chain. It opens without following a
     symlink and without waiting on a FIFO, takes no lock and writes nothing."""
@@ -314,7 +315,7 @@ def tail_rows(path: Path) -> list[dict[str, Any]] | None:
         if not line.strip() or len(line) > LEDGER_LINE_BYTES:
             continue
         try:
-            row = json.loads(line)
+            row = loads(line)
         except (ValueError, RecursionError):
             continue
         if isinstance(row, dict):
@@ -543,9 +544,9 @@ def _gh_json(gh: str, env: Mapping[str, str], path: str, timeout: float) -> Any:
         cwd="/",
         stdin=subprocess.DEVNULL,
     )
-    if done.returncode != 0 or len(done.stdout) > 2_000_000:
+    if done.returncode != 0 or len(done.stdout) > MAX_BYTES:
         raise OSError("gh api failed")
-    return json.loads(done.stdout)
+    return loads(done.stdout)
 
 
 def _login(user: object) -> str:
@@ -703,7 +704,7 @@ def read_copilot_cache(env: Mapping[str, str], now: float) -> CopilotSnap | None
     if files is None or not trusted_file(files[0]):
         return None
     try:
-        data = json.loads(read_bounded(files[0], 100_000))
+        data = loads(read_bounded(files[0], 100_000))
         stamp = float(data["ts"])
         if not isinstance(data["ok"], bool) or now - stamp < 0:
             return None
@@ -767,7 +768,7 @@ def read_state(env: Mapping[str, str]) -> dict[str, float]:
     if files is None or not trusted_file(files[2]):
         return out
     try:
-        data = json.loads(read_bounded(files[2], 4096))
+        data = loads(read_bounded(files[2], 4096))
         for key in out:
             value = _num(data.get(key))
             if value is not None:
@@ -1034,7 +1035,7 @@ def _last_rate_limits(path: str) -> tuple[dict[str, Any], float | None] | None:
         if b"rate_limits" not in line or len(line) > LEDGER_LINE_BYTES:
             continue
         try:
-            row = json.loads(line)
+            row = loads(line)
         except (ValueError, RecursionError):
             continue
         payload = row.get("payload") if isinstance(row, dict) else None
@@ -1102,7 +1103,7 @@ def collect_claude_quota(env: Mapping[str, str], home: str, now: float) -> Quota
         info = os.lstat(path)  # lstat: a symlink is refused, not followed
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
             return Quota()
-        return parse_claude_usage(json.loads(read_bounded(path, CLAUDE_USAGE_BYTES)), now)
+        return parse_claude_usage(loads(read_bounded(path, CLAUDE_USAGE_BYTES)), now)
     except (OSError, ValueError, RecursionError):
         return Quota()
 
@@ -1621,7 +1622,7 @@ def run_options(opts: Options, env: Mapping[str, str], out: TextIO) -> int:
 def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None, out: TextIO | None = None) -> int:
     parsed = parse_args(list(sys.argv[1:] if argv is None else argv))
     if isinstance(parsed, str):
-        sys.stderr.write(f"safo-activity: {parsed}\n{USAGE}")
+        output.write(sys.stderr, f"safo-activity: {parsed}\n{USAGE}".rstrip("\n"))
         return 2
     try:
         return run_options(parsed, os.environ if env is None else env, out or sys.stdout)
