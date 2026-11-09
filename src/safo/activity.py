@@ -31,6 +31,7 @@ import glob
 import json
 import os
 import re
+import secrets
 import signal
 import stat
 import sys
@@ -53,13 +54,21 @@ EVENT_PROVIDERS = ("codex", "ollama", "ledger", "copilot")
 ALIASES = {"gemini": "ledger"}
 DEFAULT_PROVIDERS = ("codex", "quota", "ledger")
 LINE_TTL = 10  # seconds a status line is served from its cache
-COPILOT_TTL = 60  # seconds the Copilot answer is cached
+COPILOT_TTL = 60  # seconds the Copilot answer is cached, and the least time between two refreshes
+COPILOT_MAX_AGE = 600  # a cached answer older than this is no longer shown
+COPILOT_MAX_CALLS = 40  # REST calls in one refresh, the search included
+COPILOT_PAGES = 3
+COPILOT_BACKOFF_CAP = 900
+COPILOT_SPAWN_GAP = 20
+LOCK_STALE = 120  # seconds after which a refresh lock is taken to be left by a dead process
+RATE_FLOOR = 500  # stop refreshing when fewer REST calls than this remain
+REF_RE = re.compile(r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}#[0-9]{1,9}")
 COPILOT_PR_CAP = 15
 COPILOT_CALL_TIMEOUT = 5.0
 COPILOT_DEADLINE = 20.0
 COPILOT_RUN_NAME = "Running Copilot Code Review"
 COPILOT_REVIEWER = "copilot-pull-request-reviewer"
-OLLAMA_TIMEOUT = 1.0
+OLLAMA_TIMEOUT = 1.0  # also the one total deadline for the whole listing, all endpoints
 OLLAMA_ENDPOINT_CAP = 3
 CODEX_JOBS_REL = (".claude", "plugins", "data", "codex-openai-codex", "state", "*", "jobs", "*.json")
 CODEX_FILE_CAP = 40
@@ -209,9 +218,14 @@ def read_job(path: str, now: float) -> Job | None:
     if not status or status in ("failed", "cancelled") or not isinstance(status, str):
         return None
     pid = data.get("pid")
-    if isinstance(pid, bool) or not (isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())):
+    if isinstance(pid, bool) or not (
+        isinstance(pid, int) or (isinstance(pid, str) and pid.isascii() and pid.isdigit() and len(pid) <= 10)
+    ):
         return None
-    number = int(pid)
+    try:
+        number = int(pid)
+    except ValueError:
+        return None
     if number < 2:  # 0 would signal our own process group
         return None
     try:
@@ -405,10 +419,29 @@ def _expiry_note(raw: object, now: float) -> str:
     return f"expires in {human_age(when - now)}"
 
 
-def _established(env: Mapping[str, str], port: int) -> int | None:
-    from safo.credentials import find_executable
+def find_tool(name: str, env: Mapping[str, str]) -> str | None:
+    """The first executable `name` on the absolute entries of PATH that is not inside the current directory or the
+    Actions workspace. A working directory of "/" is no boundary (everything is inside it), so it is not one."""
+    roots = [env["GITHUB_WORKSPACE"]] if env.get("GITHUB_WORKSPACE") else []
+    with contextlib.suppress(OSError):
+        here = os.getcwd()
+        if here != os.sep:
+            roots.append(here)
+    for entry in env.get("PATH", "").split(os.pathsep):
+        if not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, name)
+        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            continue
+        real = os.path.realpath(candidate)
+        if any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in roots):
+            continue
+        return candidate
+    return None
 
-    ss = find_executable("ss", env)
+
+def _established(env: Mapping[str, str], port: int) -> int | None:
+    ss = find_tool("ss", env)
     if ss is None:
         return None
     import subprocess
@@ -437,25 +470,35 @@ def collect_ollama(env: Mapping[str, str], home: str, now: float) -> OllamaSnap:
         return OllamaSnap()
     from safo.ollama import _request  # the guarded client: pinned address, no redirect, no proxy
 
-    models: dict[str, str] = {}
-    answered, busy = False, None
-    for url in urls[:OLLAMA_ENDPOINT_CAP]:
-        try:
-            body = _request(f"{url}/api/ps", data=None, timeout=OLLAMA_TIMEOUT)  # the loaded-model listing only
-        except Exception:  # noqa: S112 - any failure at all means "not answering"; the endpoint is skipped
-            continue
-        rows = body.get("models") if isinstance(body, dict) else None
-        if not isinstance(rows, list):
-            continue
-        answered = True
-        for row in rows:
-            if isinstance(row, dict) and _short_model(row.get("name")):
-                models.setdefault(_short_model(row["name"]), _expiry_note(row.get("expires_at"), now))
-        port = urlsplit(url).port or (443 if url.startswith("https") else 80)
-        count = _established(env, port)
-        if count is not None:
-            busy = (busy or 0) + count
-    return OllamaSnap(True, answered, tuple(models.items()), busy)
+    found: dict[str, Any] = {"models": {}, "answered": False, "busy": None}
+    guard = threading.Lock()
+
+    def work() -> None:
+        for url in urls[:OLLAMA_ENDPOINT_CAP]:
+            try:
+                body = _request(f"{url}/api/ps", data=None, timeout=OLLAMA_TIMEOUT)  # the loaded-model listing only
+            except Exception:  # noqa: S112 - any failure at all means "not answering"; the endpoint is skipped
+                continue
+            rows = body.get("models") if isinstance(body, dict) else None
+            if not isinstance(rows, list):
+                continue
+            port = urlsplit(url).port or (443 if url.startswith("https") else 80)
+            count = _established(env, port)
+            with guard:
+                found["answered"] = True
+                for row in rows:
+                    if isinstance(row, dict) and _short_model(row.get("name")):
+                        found["models"].setdefault(_short_model(row["name"]), _expiry_note(row.get("expires_at"), now))
+                if count is not None:
+                    found["busy"] = (found["busy"] or 0) + count
+
+    # One total deadline for every endpoint: a socket timeout restarts on each byte, so a server that drips bytes
+    # could otherwise hold a status line for as long as it likes. The stuck thread is a daemon and is left behind.
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(OLLAMA_TIMEOUT)
+    with guard:
+        return OllamaSnap(True, found["answered"], tuple(found["models"].items()), found["busy"])
 
 
 # -- copilot --------------------------------------------------------------------------------------------------------
@@ -468,6 +511,7 @@ class CopilotSnap:
     running: tuple[str, ...] = ()  # owner/repo#number with a review run queued or in progress
     unread: tuple[tuple[str, int, int], ...] = ()  # (ref, reviews with a body, inline comments) on the current head
     age: float = 0.0
+    retry_after: float = 0.0  # seconds to leave GitHub alone (low REST quota); never cached
 
 
 def cache_dir(env: Mapping[str, str]) -> Path | None:
@@ -509,7 +553,36 @@ def _login(user: object) -> str:
     return name.removesuffix("[bot]") if isinstance(name, str) else ""
 
 
-def _check_pr(gh: str, env: Mapping[str, str], ref: str, deadline: float) -> tuple[bool, int, int] | None:
+class Budget:
+    """A cap on the REST calls of one refresh, shared by its worker threads."""
+
+    def __init__(self, calls: int) -> None:
+        self.left = calls
+        self._lock = threading.Lock()
+
+    def take(self) -> None:
+        with self._lock:
+            if self.left <= 0:
+                raise OSError("call budget used up")
+            self.left -= 1
+
+
+def _pages(get: Callable[[str], Any], base: str) -> list[Any]:
+    """Up to COPILOT_PAGES pages of 100 items, so a long review history does not hide the newest."""
+    items: list[Any] = []
+    for page in range(1, COPILOT_PAGES + 1):
+        chunk = get(base if page == 1 else f"{base}&page={page}")
+        if not isinstance(chunk, list):
+            break
+        items.extend(chunk)
+        if len(chunk) < 100:
+            break
+    return items
+
+
+def _check_pr(
+    gh: str, env: Mapping[str, str], ref: str, deadline: float, budget: Budget
+) -> tuple[bool, int, int] | None:
     """(review running, reviews with a body on the head, inline comments on the head), counts only."""
     repo, number = ref.split("#")
 
@@ -517,6 +590,7 @@ def _check_pr(gh: str, env: Mapping[str, str], ref: str, deadline: float) -> tup
         left = deadline - time.monotonic()
         if left <= 0:
             raise OSError("deadline")
+        budget.take()
         return _gh_json(gh, env, f"repos/{repo}/{path}", min(COPILOT_CALL_TIMEOUT, left))
 
     try:
@@ -531,11 +605,9 @@ def _check_pr(gh: str, env: Mapping[str, str], ref: str, deadline: float) -> tup
             and r.get("status") in ("queued", "in_progress")
             for r in runs
         )
-        reviews = get(f"pulls/{number}/reviews?per_page=100")
-        comments = get(f"pulls/{number}/comments?per_page=100")
-    except (OSError, ValueError, AttributeError, TypeError, RecursionError):
-        return None
-    except Exception:  # a timeout or a gh that vanished: this pull request is skipped
+        reviews = _pages(get, f"pulls/{number}/reviews?per_page=100")
+        comments = _pages(get, f"pulls/{number}/comments?per_page=100")
+    except Exception:  # a timeout, a spent budget or a gh that vanished: this pull request is skipped
         return None
     bodied = sum(
         1
@@ -554,21 +626,36 @@ def _check_pr(gh: str, env: Mapping[str, str], ref: str, deadline: float) -> tup
     return running, bodied, inline
 
 
+def _low_quota_wait(gh: str, env: Mapping[str, str]) -> float:
+    """Seconds to leave GitHub alone when the REST quota is low (the rate-limit status call is not counted against
+    it); 0 when it is fine or cannot be read."""
+    try:
+        core = _gh_json(gh, env, "rate_limit", COPILOT_CALL_TIMEOUT)["resources"]["core"]
+        remaining, reset = float(core["remaining"]), float(core["reset"])
+    except Exception:  # an unreadable answer is not a reason to stop
+        return 0.0
+    return min(3600.0, max(60.0, reset - time.time())) if remaining < RATE_FLOOR else 0.0
+
+
 def fetch_copilot(env: Mapping[str, str], owner: str, now: float) -> CopilotSnap:
     from concurrent.futures import ThreadPoolExecutor
 
-    from safo.credentials import find_gh
-
-    gh = find_gh(env)
+    gh = find_tool("gh", env)
     if gh is None:
         return CopilotSnap()
+    wait = _low_quota_wait(gh, env)
+    if wait:
+        return CopilotSnap(retry_after=wait)
+    budget = Budget(COPILOT_MAX_CALLS)
     deadline = time.monotonic() + COPILOT_DEADLINE
     try:
         if not owner:
+            budget.take()
             owner = _login(_gh_json(gh, env, "user", COPILOT_CALL_TIMEOUT))
         if not OWNER_RE.fullmatch(owner):
             return CopilotSnap()
         query = quote(f"is:pr is:open user:{owner}")
+        budget.take()
         found = _gh_json(gh, env, f"search/issues?q={query}&per_page={COPILOT_PR_CAP}", COPILOT_CALL_TIMEOUT)
         items = found.get("items") if isinstance(found, dict) else None
         if not isinstance(items, list):
@@ -583,70 +670,162 @@ def fetch_copilot(env: Mapping[str, str], owner: str, now: float) -> CopilotSnap
         if isinstance(number, int) and not isinstance(number, bool) and REPO_RE.fullmatch(repo) and ".." not in repo:
             refs.append(f"{repo}#{number}")
     with ThreadPoolExecutor(max_workers=5) as pool:
-        results = list(pool.map(lambda r: _check_pr(gh, env, r, deadline), refs))
+        results = list(pool.map(lambda r: _check_pr(gh, env, r, deadline, budget), refs))
     running = tuple(r for r, out in zip(refs, results, strict=True) if out and out[0])
     unread = tuple((r, out[1], out[2]) for r, out in zip(refs, results, strict=True) if out and (out[1] or out[2]))
     return CopilotSnap(True, sum(1 for out in results if out is not None), running, unread, 0.0)
 
 
-def _copilot_files(env: Mapping[str, str]) -> tuple[Path, Path] | None:
+def _copilot_files(env: Mapping[str, str]) -> tuple[Path, Path, Path] | None:
+    """The cache, the refresh lock and the retry state, all in the private cache folder."""
     base = cache_dir(env)
-    return (base / "safo-activity-copilot.json", base / "safo-activity-copilot.lock") if base else None
+    if base is None:
+        return None
+    return (
+        base / "safo-activity-copilot.json",
+        base / "safo-activity-copilot.lock",
+        base / "safo-activity-copilot.state",
+    )
+
+
+def trusted_file(path: Path) -> bool:
+    """A regular file of this user that no one else can write; a symlink is not followed."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022
 
 
 def read_copilot_cache(env: Mapping[str, str], now: float) -> CopilotSnap | None:
+    """The cached answer, every value re-checked: a reference must look like owner/repo#number and a count is an int."""
     files = _copilot_files(env)
-    if files is None:
+    if files is None or not trusted_file(files[0]):
         return None
     try:
         data = json.loads(read_bounded(files[0], 100_000))
         stamp = float(data["ts"])
         if not isinstance(data["ok"], bool) or now - stamp < 0:
             return None
-        return CopilotSnap(
-            data["ok"],
-            int(data["checked"]),
-            tuple(str(r) for r in data["running"]),
-            tuple((str(r), int(b), int(i)) for r, b, i in data["unread"]),
-            now - stamp,
+        running = tuple(r for r in data["running"] if isinstance(r, str) and REF_RE.fullmatch(r))
+        unread = tuple(
+            (r, min(int(b), 10_000), min(int(i), 10_000))
+            for r, b, i in data["unread"]
+            if isinstance(r, str) and REF_RE.fullmatch(r)
         )
+        return CopilotSnap(data["ok"], min(max(int(data["checked"]), 0), 1000), running, unread, now - stamp)
     except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return None
 
 
 def write_private(path: Path, text: str) -> bool:
     """Atomic, mode 600, never through a symlink at the target; False on failure (a cache is only a speed-up)."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(6)}")
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.{os.getpid()}")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as handle:
             handle.write(text)
         os.replace(tmp, path)
     except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
         return False
     return True
 
 
-def copilot_snapshot(env: Mapping[str, str], cfg: Config, now: float, *, fetch: bool) -> CopilotSnap | None:
-    """The cached answer when it is under 60 s old, else a fresh one (`fetch`) or the stale one (not `fetch`)."""
-    cached = read_copilot_cache(env, now)
-    if cached is not None and cached.age < COPILOT_TTL:
-        return cached
-    if not fetch:
-        return cached
-    fresh = fetch_copilot(env, cfg.owner, now)
+def acquire_lock(path: Path) -> bool:
+    """Create the lock exclusively. A lock older than LOCK_STALE seconds belongs to a dead refresh and is replaced."""
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+            return True
+        except FileExistsError:
+            try:
+                age = time.time() - os.lstat(path).st_mtime
+            except OSError:
+                continue
+            if age < LOCK_STALE:
+                return False
+            with contextlib.suppress(OSError):
+                path.unlink()
+        except OSError:
+            return False
+    return False
+
+
+def release_lock(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
+def read_state(env: Mapping[str, str]) -> dict[str, float]:
+    files = _copilot_files(env)
+    out = {"next_ok": 0.0, "failures": 0.0, "spawned": 0.0}
+    if files is None or not trusted_file(files[2]):
+        return out
+    try:
+        data = json.loads(read_bounded(files[2], 4096))
+        for key in out:
+            value = _num(data.get(key))
+            if value is not None:
+                out[key] = value
+    except (OSError, ValueError, AttributeError, RecursionError):
+        pass
+    return out
+
+
+def write_state(env: Mapping[str, str], state: Mapping[str, float]) -> None:
     files = _copilot_files(env)
     if files is not None:
-        body = {
-            "ts": now,
-            "ok": fresh.ok,
-            "checked": fresh.checked,
-            "running": list(fresh.running),
-            "unread": [list(u) for u in fresh.unread],
-        }
-        write_private(files[0], json.dumps(body))
-    return fresh
+        write_private(files[2], json.dumps(dict(state)))
+
+
+def failure_wait(failures: int) -> float:
+    """60 s after the first failed refresh, then doubling, capped at 15 minutes."""
+    return float(min(COPILOT_BACKOFF_CAP, COPILOT_TTL * 2 ** max(0, failures - 1)))
+
+
+def refresh_copilot(env: Mapping[str, str], cfg: Config, now: float) -> bool:
+    """The one place that asks GitHub. At most one refresh runs at a time (exclusive lock), at most one per 60 s, none
+    while a failure backoff or a low REST quota says wait. True when it fetched."""
+    files = _copilot_files(env)
+    if files is None or not acquire_lock(files[1]):
+        return False
+    try:
+        cached = read_copilot_cache(env, now)
+        state = read_state(env)
+        if (cached is not None and cached.age < COPILOT_TTL) or now < state["next_ok"]:
+            return False
+        fresh = fetch_copilot(env, cfg.owner, now)
+        if fresh.ok:
+            body = {
+                "ts": now,
+                "ok": True,
+                "checked": fresh.checked,
+                "running": list(fresh.running),
+                "unread": [list(u) for u in fresh.unread],
+            }
+            write_private(files[0], json.dumps(body))
+            write_state(env, {**state, "next_ok": now + COPILOT_TTL, "failures": 0.0})
+        elif fresh.retry_after:
+            write_state(env, {**state, "next_ok": now + fresh.retry_after})
+        else:
+            failures = int(state["failures"]) + 1
+            write_state(env, {**state, "next_ok": now + failure_wait(failures), "failures": float(failures)})
+        return True
+    finally:
+        release_lock(files[1])
+
+
+def copilot_for_view(env: Mapping[str, str], now: float) -> CopilotSnap | None:
+    """What every view shows: the cache, never a fetch. A missing or old cache starts a background refresh."""
+    cached = read_copilot_cache(env, now)
+    if cached is None or cached.age >= COPILOT_TTL:
+        refresh_in_background(env, now)
+    return cached if cached is not None and cached.age < COPILOT_MAX_AGE else None
 
 
 CHILD_ENV_NAMES = ("HOME", "PATH", "LANG")
@@ -666,19 +845,7 @@ def background_command(env: Mapping[str, str]) -> tuple[list[str], str]:
     return [sys.executable, "-I", "-m", "safo.activity", "--refresh-copilot"], str(files[0].parent if files else "/")
 
 
-def refresh_in_background(env: Mapping[str, str], now: float) -> None:
-    """A status line never waits on the network: a stale Copilot answer starts one detached refresh (at most one per
-    30 s) and the next line shows what it found."""
-    files = _copilot_files(env)
-    if files is None:
-        return
-    try:
-        if now - os.lstat(files[1]).st_mtime < 30:
-            return
-    except OSError:
-        pass
-    if not write_private(files[1], ""):
-        return
+def _spawn(env: Mapping[str, str]) -> None:
     import subprocess
 
     argv, cwd = background_command(env)
@@ -693,6 +860,22 @@ def refresh_in_background(env: Mapping[str, str], now: float) -> None:
             close_fds=True,
             env=child_env(env),
         )
+
+
+def refresh_in_background(env: Mapping[str, str], now: float) -> None:
+    """A status line never waits on the network: a missing or old Copilot answer starts one detached refresh, unless a
+    backoff is running, a refresh holds the lock, or one was started in the last 20 s. The child takes the lock."""
+    files = _copilot_files(env)
+    if files is None:
+        return
+    state = read_state(env)
+    if now < state["next_ok"] or 0 <= now - state["spawned"] < COPILOT_SPAWN_GAP:
+        return
+    with contextlib.suppress(OSError):
+        if time.time() - os.lstat(files[1]).st_mtime < LOCK_STALE:
+            return
+    if write_private(files[2], json.dumps({**state, "spawned": now})):
+        _spawn(env)
 
 
 # -- quota ----------------------------------------------------------------------------------------------------------
@@ -956,8 +1139,8 @@ class Reading:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def read_all(env: Mapping[str, str], now: float, cfg: Config, *, network: bool, only: str = "") -> Reading:
-    """Collect the enabled providers (or just `only`). `network` lets Copilot fetch now instead of using its cache."""
+def read_all(env: Mapping[str, str], now: float, cfg: Config, *, only: str = "") -> Reading:
+    """Collect the enabled providers (or just `only`). Copilot is read from its cache; only the refresh asks GitHub."""
     home = env.get("HOME", "")
     out = Reading(now, cfg)
     want = [only] if only else list(cfg.providers)
@@ -972,9 +1155,7 @@ def read_all(env: Mapping[str, str], now: float, cfg: Config, *, network: bool, 
     if "ledger" in want:
         out.ledger = _safe(lambda: collect_ledger(env, home, now), LedgerSnap())
     if "copilot" in want:
-        out.copilot = _safe(lambda: copilot_snapshot(env, cfg, now, fetch=network), None)
-        if not network and (out.copilot is None or out.copilot.age >= COPILOT_TTL):
-            refresh_in_background(env, now)
+        out.copilot = _safe(lambda: copilot_for_view(env, now) or CopilotSnap(), CopilotSnap())
     return out
 
 
@@ -1089,7 +1270,7 @@ def render_table(rd: Reading) -> list[str]:
     cp = rd.copilot
     if cp is not None:
         if not cp.ok:
-            out.append("Copilot: not available (gh missing, not logged in or offline; segment omitted)")
+            out.append("Copilot: not available (no reading yet, gh missing, not logged in or offline; segment omitted)")
         else:
             out.append(
                 f"Copilot: {len(cp.running)} review running, {len(cp.unread)} unread ({cp.checked} open PRs checked)"
@@ -1163,9 +1344,9 @@ def render_json(rd: Reading) -> dict[str, Any]:
 def read_line_cache(path: Path, now: float) -> str | None:
     try:
         info = os.lstat(path)
-        if not stat.S_ISREG(info.st_mode) or not 0 <= now - info.st_mtime < LINE_TTL:
+        if not 0 <= now - info.st_mtime < LINE_TTL or not trusted_file(path):
             return None
-        return read_bounded(path, 4096).decode("utf-8", "replace")
+        return clean(read_bounded(path, 4096).decode("utf-8", "replace"), 400)
     except OSError:
         return None
 
@@ -1178,7 +1359,7 @@ def mode_line(env: Mapping[str, str], out: TextIO, now: float) -> int:
         if hit is not None:
             out.write(hit)
             return 0
-    text = render_line(read_all(env, now, load_config(env), network=False))
+    text = render_line(read_all(env, now, load_config(env)))
     if cache is not None:
         write_private(cache, text)
     out.write(text)
@@ -1186,12 +1367,12 @@ def mode_line(env: Mapping[str, str], out: TextIO, now: float) -> int:
 
 
 def mode_table(env: Mapping[str, str], out: TextIO, now: float) -> int:
-    out.write("\n".join(render_table(read_all(env, now, load_config(env), network=True))) + "\n")
+    out.write("\n".join(render_table(read_all(env, now, load_config(env)))) + "\n")
     return 0
 
 
 def mode_json(env: Mapping[str, str], out: TextIO, now: float) -> int:
-    out.write(json.dumps(render_json(read_all(env, now, load_config(env), network=True)), indent=2) + "\n")
+    out.write(json.dumps(render_json(read_all(env, now, load_config(env))), indent=2) + "\n")
     return 0
 
 
@@ -1239,7 +1420,7 @@ class Observed:
 
 
 def observe(name: str, env: Mapping[str, str], cfg: Config, now: float) -> Observed:
-    rd = read_all(env, now, cfg, network=True, only=name)
+    rd = read_all(env, now, cfg, only=name)
     if name == "codex":
         cx = rd.codex or CodexSnap()
         return Observed(
@@ -1432,7 +1613,7 @@ def run_options(opts: Options, env: Mapping[str, str], out: TextIO) -> int:
     if opts.mode == "events":
         return mode_events(opts.events, env, out)
     if opts.mode == "refresh":
-        copilot_snapshot(env, load_config(env), now, fetch=True)
+        refresh_copilot(env, load_config(env), now)
         return 0
     return mode_line(env, out, now)
 

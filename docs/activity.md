@@ -20,7 +20,7 @@ safo-activity --version
 | `codex` | Running jobs of the Codex plugin: `~/.claude/plugins/data/codex-openai-codex/state/*/jobs/*.json`. A job counts as running when its process is alive; a job completed in the last hour counts as done | on |
 | `quota` | The plan windows (5 hour, weekly) of Codex, from the newest of the three latest `~/.codex/sessions/*/*/*/*.jsonl` files, and of Claude, from a small cache file (below). Local files only, no network | on |
 | `ledger` | The local spend ledger kept by the Gemini wrapper (`ledger:` in `~/.config/safo/gemini.yaml`, else `~/.local/share/safo/gemini-spend-ledger.jsonl`): entries today, the newest one's age, and calls in flight | on |
-| `ollama` | The models a local Ollama server has loaded: one bounded (1 second) `GET /api/ps`, never a generate call | opt in |
+| `ollama` | The models a local Ollama server has loaded: one `GET /api/ps` under a single 1 second total deadline for all endpoints, never a generate call | opt in |
 | `copilot` | Copilot code review on your open pull requests, through `gh` (REST only) | opt in |
 
 A provider that is absent or fails leaves its segment out; nothing raises. On a machine with no configuration only
@@ -50,7 +50,7 @@ credentials in the URL, no redirect, no proxy). Busy or idle comes from `ss`, wh
 
 ### Copilot
 
-Opt in. For the owner's open pull requests (one search request, at most 15 of them) it makes four REST reads per
+Opt in. In the refresh, for the owner's open pull requests (one search request, at most 15 of them) it makes four REST reads per
 pull request through the `gh` login the machine already has: the pull request, its workflow runs of event `dynamic`, its
 reviews and its inline comments. It reports two things:
 
@@ -59,11 +59,29 @@ reviews and its inline comments. It reports two things:
   head, or an inline comment on it. Counts only; no review or comment text is ever read into the output or the cache.
 
 The line segment is `cp N run OWNER/REPO#NUMBER` (the first one) or, when none runs, `cp N unread OWNER/REPO#NUMBER`;
-it shows only when something runs or is unread. Each call is bounded to 5 seconds and the whole read to 20. The answer
-is cached for 60 seconds in `$XDG_RUNTIME_DIR` (else `~/.cache`) as `safo-activity-copilot.json`, mode 600. It never
-uses GraphQL, never reads a board, and the only arguments it gives `gh` are `api` and a path, so it cannot write.
-A status line never waits for it: when the cache is older than 60 seconds the line shows the stale answer (or nothing)
-and starts one detached refresh, at most one per 30 seconds. `--table`, `--json`, `--watch` and `--events` fetch inline.
+it shows only when something runs or is unread.
+
+**Only the background refresh asks GitHub.** Every view (the line, `--table`, `--json`, `--watch`, `--events`) reads the
+cached answer and never fetches. When the cache is missing or older than 60 seconds a view starts one detached refresh
+process and shows what the cache has (nothing, until the first refresh lands; a cache older than 10 minutes is not
+shown). The refresh takes an exclusive lock (a lock older than 2 minutes is taken to be left by a dead process), so
+racing starts do not duplicate it, and it runs at most once per 60 seconds across all processes. It is also bounded by:
+
+- at most 40 REST calls per refresh (pull requests the budget does not reach are skipped), each call 5 seconds, the whole
+  refresh 20 seconds, up to 3 pages of 100 reviews and of inline comments per pull request;
+- a check of the REST rate limit before it starts (the status call is not counted against the quota): with fewer than
+  500 calls left it waits for the reset, at most an hour;
+- a backoff after a failed refresh: 60 seconds, then doubling, capped at 15 minutes, recorded in a state file so a
+  failing fetch is not retried every two seconds. A failure never replaces the last good answer.
+
+Conditional requests (ETag) are not used: `gh api` is called with only `api` and a path, and the behavior of a 304 answer
+through it has not been verified.
+
+Files, all in `$XDG_RUNTIME_DIR` (else `~/.cache`), mode 600, written atomically: `safo-activity-copilot.json` (the
+answer), `.state` (backoff) and `.lock`. A cache of someone else's, writable by others, or a symlink is not read, and
+every value read back is checked again (a reference must look like `owner/repo#number`) and cleaned before it is
+printed. The same holds for the line cache. The refresh never uses GraphQL, never reads a board, and the only arguments
+it gives `gh` are `api` and a path, so it cannot write.
 
 ### Ledger
 
@@ -111,7 +129,7 @@ For each window that has a reset time, the table and `--json` show how fast the 
 - **Band**: `under_pace` below 0.9, `on_pace` from 0.9 to 1.0, `caution` above 1.0 up to 1.3, `over_pace` above 1.3.
 
 Claude windows come from the cache file, Codex windows from the rollout reader. `--json` carries `elapsed_percent`,
-`pace_ratio` and `band` per window (null without a reset time), and `quota.recommendation`.
+`pace_ratio` and `band` per window (null without a reset time), and a `recommendation` key under `quota`.
 
 One combined line, for a dispatch-time prompt, appears in the table and in `--json` only when both the Claude and the
 Codex weekly windows are fresh (30 minutes or younger) and have a reset time; with missing or stale data there is no

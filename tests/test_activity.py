@@ -81,7 +81,11 @@ class Box:
         return path
 
     def read(self, only: str = "", network: bool = False) -> activity.Reading:
-        return activity.read_all(self.vars, NOW, activity.load_config(self.vars), network=network, only=only)
+        """`network` runs the Copilot refresh first (the work the background child does); a view never does."""
+        cfg = activity.load_config(self.vars)
+        if network:
+            activity.refresh_copilot(self.vars, cfg, NOW)
+        return activity.read_all(self.vars, NOW, cfg, only=only)
 
     def line(self) -> str:
         return activity.render_line(self.read())
@@ -92,6 +96,17 @@ class Box:
     def main(self, *argv: str) -> tuple[int, str]:
         out = io.StringIO()
         return activity.main(list(argv), self.vars, out), out.getvalue()
+
+
+REAL_SPAWN = activity._spawn
+
+
+@pytest.fixture(autouse=True)
+def spawns(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
+    """No test starts a real background refresh; each records that one would have started."""
+    started: list[dict[str, str]] = []
+    monkeypatch.setattr(activity, "_spawn", lambda env: started.append(dict(env)))
+    return started
 
 
 @pytest.fixture
@@ -747,11 +762,13 @@ def test_copilot_asks_only_read_only_rest_paths(box: Box, gh: Gh) -> None:
     gh.save()
     box.read(network=True)
     calls = gh.calls()
+    assert [c[1] for c in calls].count("rate_limit") == 1  # the quota check, which GitHub does not count
+    calls = [c for c in calls if c[1] != "rate_limit"]
     assert len(calls) == 5  # search, pull, runs, reviews, comments
     for args in calls:
         assert len(args) == 2
         assert args[0] == "api"
-        assert args[1].startswith(("search/issues?", "repos/"))
+        assert args[1].startswith(("search/issues?", "repos/", "rate_limit"))
         assert "graphql" not in args[1]
         assert not args[1].startswith("-")  # no method, field or input flag can be passed
 
@@ -764,16 +781,14 @@ def test_copilot_is_capped_at_15_pull_requests_and_cached_for_60_seconds(box: Bo
     gh.save()
     first = box.read(network=True).copilot
     assert first is not None
-    assert first.checked == 15
-    made = len(gh.calls())
-    assert made == 1 + 15 * 4
+    made = [c for c in gh.calls() if c[1] != "rate_limit"]
+    assert len(made) == activity.COPILOT_MAX_CALLS  # the budget of one refresh, not 61
+    assert 0 < first.checked < 15  # the pull requests the budget did not reach are skipped, not guessed
     again = box.read(network=True).copilot  # within 60 s: from the cache, no gh call
     assert again is not None
-    assert again.checked == 15
-    assert len(gh.calls()) == made
-    stale = activity.copilot_snapshot(box.vars, activity.load_config(box.vars), NOW + 61 + time.time(), fetch=True)
-    assert stale is not None
-    assert len(gh.calls()) > made  # past 60 s it asks again
+    assert len([c for c in gh.calls() if c[1] != "rate_limit"]) == len(made)
+    assert activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW + 61) is True
+    assert len([c for c in gh.calls() if c[1] != "rate_limit"]) > len(made)  # past 60 s it asks again
 
 
 def test_the_cache_holds_refs_and_counts_never_review_text(box: Box, gh: Gh) -> None:
@@ -792,21 +807,13 @@ def test_the_cache_holds_refs_and_counts_never_review_text(box: Box, gh: Gh) -> 
 
 
 def test_a_status_line_never_waits_for_copilot_and_starts_one_refresh(
-    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+    box: Box, gh: Gh, spawns: list[dict[str, str]]
 ) -> None:
-    spawned: list[list[str]] = []
-
-    def fake_popen(argv: list[str], **kw: Any) -> None:
-        spawned.append(argv)
-        assert kw["start_new_session"] is True
-
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     assert box.line() == ""  # no cache yet: omitted, not waited for
     assert gh.calls() == []
-    assert len(spawned) == 1
-    assert spawned[0][-1] == "--refresh-copilot"
+    assert len(spawns) == 1
     assert box.line() == ""
-    assert len(spawned) == 1  # a second line within 30 s does not start another
+    assert len(spawns) == 1  # a second line right after does not start another
 
 
 def test_copilot_owner_falls_back_to_the_gh_login_and_failures_leave_it_out(box: Box, gh: Gh) -> None:
@@ -1062,21 +1069,24 @@ def test_events_copilot_reports_a_review_starting_and_finishing(box: Box, gh: Gh
     gh.search("N0TST", [("N0TST/a", 1)])
     gh.pr("N0TST/a", 1)
     gh.save()
+    cfg = activity.load_config(box.vars)
 
-    def wipe_cache() -> None:
+    def refresh() -> None:
         for path in box.run.glob("safo-activity-copilot*"):
             path.unlink()
+        activity.refresh_copilot(box.vars, cfg, time.time())
 
     def begin() -> None:
         gh.pr("N0TST/a", 1, running=True)
         gh.save()
-        wipe_cache()
+        refresh()
 
     def done() -> None:
         gh.pr("N0TST/a", 1, reviews=[review("text")])
         gh.save()
-        wipe_cache()
+        refresh()
 
+    refresh()
     lines = run_events(box, "copilot", Clock([begin, done]), max_polls=3)
     assert lines == [
         "copilot: 0 review running, 0 unread",
@@ -1318,6 +1328,7 @@ def test_the_background_refresh_is_isolated_in_a_trusted_directory_with_an_allow
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen = captured_launches(monkeypatch)
+    monkeypatch.setattr(activity, "_spawn", REAL_SPAWN)
     box.vars.update(SECRET_VARS)
     box.vars.update(GH_TOKEN="t", XDG_DATA_HOME="/x", SAFO_ACTIVITY_PROVIDERS="copilot", LANG="C", PYTHONPATH="/evil")
     activity.refresh_in_background(box.vars, NOW)
@@ -1384,3 +1395,249 @@ def test_a_planted_package_in_the_working_directory_is_not_imported(box: Box, tm
     )
     assert marker.exists()
     assert not plain.stdout.startswith("safo-activity ")
+
+
+# -- review fixes (issue 402) ----------------------------------------------------------------------------------------
+
+
+def test_tools_are_found_when_the_working_directory_is_the_filesystem_root(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir("/")  # how the pane runs the command
+    assert activity.find_tool("gh", box.vars) == str(box.bin / "gh")
+    fake_ss(box, 3)
+    assert activity._established(box.vars, 11434) == 3
+
+
+def test_a_tool_inside_the_working_directory_or_on_a_relative_path_entry_is_still_refused(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    planted = project / "ss"
+    planted.write_text("#!/bin/sh\n")
+    planted.chmod(0o755)
+    monkeypatch.chdir(project)
+    assert activity.find_tool("ss", {"PATH": str(project)}) is None  # inside the working directory
+    assert activity.find_tool("ss", {"PATH": "."}) is None  # relative entry
+    assert activity.find_tool("ss", {"PATH": "bin:" + str(project)}) is None
+    assert activity.find_tool("ss", {"PATH": str(project), "GITHUB_WORKSPACE": str(project)}) is None
+    monkeypatch.chdir("/")
+    assert activity.find_tool("ss", {"PATH": "."}) is None  # still relative, with or without the root exemption
+
+
+def test_views_never_fetch_copilot_and_only_the_refresh_does(box: Box, gh: Gh, spawns: list[dict[str, str]]) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1, running=True)
+    gh.save()
+    for argv in ([], ["--table"], ["--json"]):
+        box.main(*argv)
+    assert gh.calls() == []  # no view asked GitHub
+    assert spawns  # a background refresh was started instead
+    assert box.main("--refresh-copilot")[0] == 0
+    assert gh.calls()
+    assert "Copilot: 1 review running" in box.main("--table")[1]
+
+
+def test_a_failing_refresh_backs_off_with_a_growing_capped_wait(box: Box, gh: Gh) -> None:
+    cfg = activity.load_config(box.vars)  # gh has no routes: every fetch fails
+    assert [activity.failure_wait(n) for n in (1, 2, 3, 4, 5, 6, 20)] == [60, 120, 240, 480, 900, 900, 900]
+    assert activity.refresh_copilot(box.vars, cfg, NOW) is True
+    first = len(gh.calls())
+    assert first > 0
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 2) is False  # inside the wait
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 59) is False
+    assert len(gh.calls()) == first
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61) is True  # the second failure waits 120 s
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61 + 119) is False
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61 + 121) is True
+    assert activity.read_state(box.vars)["failures"] == 3
+
+
+def test_views_start_no_refresh_during_a_backoff(box: Box, gh: Gh, spawns: list[dict[str, str]]) -> None:
+    activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW)  # fails, waits 60 s
+    box.read()
+    assert spawns == []
+    activity.refresh_in_background(box.vars, NOW + 61)
+    assert len(spawns) == 1
+
+
+def test_a_low_rest_quota_stops_the_refresh_until_it_resets(box: Box, gh: Gh) -> None:
+    gh.table["rate_limit"] = {"resources": {"core": {"remaining": 10, "reset": time.time() + 600}}}
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    assert activity.refresh_copilot(box.vars, cfg, NOW) is True
+    assert [c[1] for c in gh.calls()] == ["rate_limit"]  # nothing else was asked
+    wait = activity.read_state(box.vars)["next_ok"] - NOW
+    assert 60 <= wait <= 3600
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 30) is False
+
+
+def test_the_refresh_lock_is_exclusive_and_a_dead_one_expires(box: Box) -> None:
+    import threading
+
+    lock = box.run / "safo-activity-copilot.lock"
+    won: list[bool] = []
+    gate = threading.Barrier(8)
+
+    def race() -> None:
+        gate.wait()
+        won.append(activity.acquire_lock(lock))
+
+    threads = [threading.Thread(target=race) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert won.count(True) == 1
+    old = time.time() - activity.LOCK_STALE - 5
+    os.utime(lock, (old, old))
+    assert activity.acquire_lock(lock) is True  # the holder is gone: taken over
+    assert activity.acquire_lock(lock) is False
+    activity.release_lock(lock)
+    assert activity.acquire_lock(lock) is True
+
+
+def test_a_refresh_does_nothing_while_another_holds_the_lock(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1, running=True)
+    gh.save()
+    assert activity.acquire_lock(box.run / "safo-activity-copilot.lock")
+    assert activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW) is False
+    assert gh.calls() == []
+
+
+def test_reviews_and_comments_are_read_across_pages(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1)
+    others = [review("noise", user={"login": "human"}) for _ in range(100)]
+    base = "repos/N0TST/a/pulls/1/reviews?per_page=100"
+    gh.table[base] = others  # page 1: a hundred reviews, none from Copilot
+    gh.table[base + "&page=2"] = [review("The newest review.")]
+    cbase = "repos/N0TST/a/pulls/1/comments?per_page=100"
+    gh.table[cbase] = [{"user": {"login": "human"}, "commit_id": SHA} for _ in range(100)]
+    gh.table[cbase + "&page=2"] = [{"user": BOT, "commit_id": SHA}]
+    gh.save()
+    rd = box.read(network=True).copilot
+    assert rd is not None
+    assert rd.unread == (("N0TST/a#1", 1, 1),)
+    assert not any("page=4" in c[1] for c in gh.calls())  # bounded
+
+
+def test_a_non_ascii_pid_digit_does_not_blank_the_codex_segment(box: Box) -> None:
+    started = stamp(NOW - 90)
+    box.job("good", status="running", phase="p", pid=os.getpid(), kindLabel="k", title="Real job", startedAt=started)
+    box.job("evil", status="running", phase="p", pid="²", kindLabel="k", title="Planted", startedAt=started)
+    box.job("evil2", status="running", phase="p", pid="٣٤", kindLabel="k", title="Planted2", startedAt=started)
+    box.job("huge", status="running", phase="p", pid="9" * 400, kindLabel="k", title="Planted3", startedAt=started)
+    assert box.line() == "cx 1 run Real job"
+    assert "Planted" not in box.table()
+
+
+def test_the_copilot_cache_is_checked_and_cleaned_before_it_is_shown(box: Box, gh: Gh) -> None:
+    path = box.run / "safo-activity-copilot.json"
+    body = {
+        "ts": NOW - 5,
+        "ok": True,
+        "checked": 3,
+        "running": ["N0TST/a#1", "evil\x1b[2J/x#2", "no-number", 7],
+        "unread": [["N0TST/b#2", 1, 0], ["bad\x07/x#1", 1, 1], ["N0TST/c#3", 10**12, "2"]],
+    }
+    path.write_text(json.dumps(body))
+    path.chmod(0o600)
+    rd = box.read().copilot
+    assert rd is not None
+    assert rd.running == ("N0TST/a#1",)
+    assert [u[0] for u in rd.unread] == ["N0TST/b#2", "N0TST/c#3"]
+    assert rd.unread[1][1] == 10_000
+    assert no_ctrl(box.table() + box.line())
+    path.chmod(0o664)  # someone else can write it: not trusted
+    assert box.read().copilot == activity.CopilotSnap()
+    path.chmod(0o600)
+    path.rename(box.run / "real")
+    path.symlink_to(box.run / "real")  # a link is not followed
+    assert box.read().copilot == activity.CopilotSnap()
+
+
+def test_the_line_cache_is_checked_and_cleaned_before_it_is_printed(box: Box) -> None:
+    cache = box.run / "safo-activity.cache"
+    cache.write_text("cx 1 run \x1b[2Jpwned\x07")
+    cache.chmod(0o600)
+    code, out = box.main()
+    assert code == 0
+    assert no_ctrl(out)
+    assert "pwned" in out
+    cache.chmod(0o666)
+    assert activity.read_line_cache(cache, time.time()) is None  # writable by others: not trusted
+    assert "pwned" not in box.main()[1]  # read afresh instead
+
+
+def slow_drip_server(stop: Any) -> tuple[Any, str]:
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    srv.settimeout(0.2)
+
+    def serve() -> None:
+        conns = []
+        while not stop.is_set():
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                continue
+            conns.append(c)
+            threading.Thread(target=drip, args=(c,), daemon=True).start()
+        for c in conns:
+            c.close()
+        srv.close()
+
+    def drip(c: Any) -> None:
+        try:
+            c.recv(4096)
+            c.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 1000\r\n\r\n")
+            for _ in range(40):
+                if stop.is_set():
+                    return
+                c.sendall(b"x")
+                time.sleep(0.3)
+        except OSError:
+            return
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return t, f"http://127.0.0.1:{srv.getsockname()[1]}"
+
+
+def test_a_slow_drip_ollama_cannot_hold_the_status_line_past_one_total_deadline(box: Box) -> None:
+    import threading
+
+    stop = threading.Event()
+    thread, url = slow_drip_server(stop)
+    try:
+        box.vars.update(SAFO_ACTIVITY_PROVIDERS="ollama", LLM_LOCAL_URL=url)
+        began = time.monotonic()
+        text = box.line()
+        took = time.monotonic() - began
+    finally:
+        stop.set()
+        thread.join()
+    assert text == ""
+    assert took < 2.0  # each byte arrives inside the socket timeout; only a total deadline stops it
+
+
+def test_the_private_write_does_not_trip_over_a_leftover_temporary_file(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = box.run / "thing.json"
+    monkeypatch.setattr(os, "getpid", lambda: 4242)
+    (box.run / "thing.json.4242").write_text("left by a killed process")  # the old fixed name
+    assert activity.write_private(target, "one") is True
+    assert activity.write_private(target, "two") is True
+    assert target.read_text() == "two"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    leftovers = sorted(p.name for p in box.run.iterdir() if p.name.startswith("thing.json."))
+    assert leftovers == ["thing.json.4242"]  # our own temporaries are renamed away
