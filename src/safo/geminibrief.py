@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import NamedTuple
 
+from safo import shellunits
 from safo.gemini import (
     JOB_CAP,
     RECORD_ID,
@@ -1252,10 +1253,21 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
                 found = found or SHELL_STORE
         tick()
         built = bool(CONCEAL.search(command.lower()) or CONCEAL.search(_join(command).lower()))
-        if found is None and built and (network or secret_tool):
-            found = SHELL_BUILT
-        if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
-            found = SHELL_TOOL
+        legacy_built = built and (network or secret_tool)
+        legacy_tool = secret_tool and (_DOLLAR.search(command) or "`" in command)
+        if found is None and (legacy_built or legacy_tool):
+            # The old words-anywhere answer only ever narrows: when the command reads with certainty, only a real
+            # invocation of a tool counts (safo.shellunits); anything it cannot read keeps the old answer.
+            try:
+                verdict = shellunits.classify(command, CONCEAL, _NETWORK_TOOL, tick)
+            except TimeoutError:
+                raise
+            except Exception:  # Unreadable, or any fault in the reader: the old answer stands
+                verdict = shellunits.BUILT if legacy_built else shellunits.TOOL
+            if verdict == shellunits.BUILT:
+                found = SHELL_BUILT
+            elif verdict == shellunits.TOOL:
+                found = SHELL_TOOL
         if found is None and broker_module_route(views, tick):
             found = SHELL_BROKER_MODULE
         if found is None:
