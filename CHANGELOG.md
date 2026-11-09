@@ -16,7 +16,7 @@
   `ledger` are read; `SAFO_ACTIVITY_PROVIDERS` or `~/.config/safo/activity.yaml` opt in the rest. Also the Claude Code
   pane `mods/ai-activity/`, which runs `safo-activity --table` only when it is on the path. Tests:
   `tests/test_activity.py` (loopback fake Ollama, fake `gh`, fixture rollouts and ledgers), `mods/ai-activity/hooks/ai-activity.test.tsx`.
-  Docs: `docs/activity.md`. Process-launch hardening of the activity provider was added. Review follow-ups: views read the Copilot cache only and a single locked background refresh fetches it (call budget, rate-limit check, backoff, paging), the pane finds `gh` and `ss` again, and several smaller input and cache checks.
+  Docs: `docs/activity.md`. Process-launch hardening of the activity provider was added. Review follow-ups: the ledger tail was lowered from 2000 to 1000 lines (`LEDGER_TAIL_LINES`) in the CI-fix commit c9c97a2 so that parsing through the bounded JSON loader stays fast on a status line; a call started more than 1000 rows back can look absent. A refresh where most pull request reads fail now counts as failed and backs off; conditional requests (ETag), a 15-call budget with oldest-first rotation, paging to 10 pages, one bounded Ollama listing thread, and checks on cached counts. Earlier: views read the Copilot cache only and a single locked background refresh fetches it (call budget, rate-limit check, backoff, paging), the pane finds `gh` and `ss` again, and several smaller input and cache checks.
 ## 0.2.0 (2026-11-09)
 
 - First release that carries the Gemini paid-path broker, its installer and units, the approval-binds-prompt change, the

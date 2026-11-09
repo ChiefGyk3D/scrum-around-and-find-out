@@ -667,19 +667,48 @@ class Gh:
         self.save()
         script = box.bin / "gh"
         script.write_text(
-            f"#!{sys.executable}\nimport json, sys\nargs = sys.argv[1:]\n"
+            f"#!{sys.executable}\n"
+            "import json, sys, time\n"
+            "args = sys.argv[1:]\n"
             f"open({str(self.log)!r}, 'a').write(json.dumps(args) + '\\n')\n"
             f"routes = json.load(open({str(self.routes)!r}))\n"
-            "if len(args) == 2 and args[0] == 'api' and args[1] in routes:\n"
-            "    print(json.dumps(routes[args[1]]))\n    sys.exit(0)\nsys.exit(1)\n"
+            "etags, status = routes.get('__etags__', {}), routes.get('__status__', {})\n"
+            "time.sleep(routes.get('__sleep__', 0))\n"
+            "headers, cond, path, i = False, None, None, 1\n"
+            "while i < len(args):\n"
+            "    if args[i] == '-i':\n        headers = True\n"
+            "    elif args[i] == '-H':\n        cond = args[i + 1]\n        i += 1\n"
+            "    else:\n        path = args[i]\n"
+            "    i += 1\n"
+            "def fail(code):\n"
+            "    if headers:\n        print('HTTP/2.0 %d X\\n\\n{}' % code)\n"
+            "    sys.exit(1)\n"
+            "if path in status:\n    fail(status[path])\n"
+            "if path not in routes:\n    fail(404)\n"
+            "tag = etags.get(path)\n"
+            "if headers and tag and cond == 'If-None-Match: ' + tag:\n"
+            "    print('HTTP/2.0 304 Not Modified\\nEtag: ' + tag + '\\n')\n    sys.exit(1)\n"
+            "if headers:\n"
+            "    print('HTTP/2.0 200 OK' + ('\\nEtag: ' + tag if tag else '') + '\\n')\n"
+            "print(json.dumps(routes[path]))\n"
         )
         script.chmod(0o755)
 
     def save(self) -> None:
         self.routes.write_text(json.dumps(self.table))
 
-    def calls(self) -> list[list[str]]:
+    def raw_calls(self) -> list[list[str]]:
         return [json.loads(x) for x in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def calls(self) -> list[list[str]]:
+        """Each call as ["api", path]: the flags (-i, -H If-None-Match) are in raw_calls."""
+        return [[c[0], c[-1]] for c in self.raw_calls()]
+
+    def etag(self, path: str, tag: str) -> None:
+        self.table.setdefault("__etags__", {})[path] = tag
+
+    def status(self, path: str, code: int) -> None:
+        self.table.setdefault("__status__", {})[path] = code
 
     def pr(
         self,
@@ -725,12 +754,15 @@ def test_copilot_shows_a_running_review_first(box: Box, gh: Gh) -> None:
     rd = box.read(network=True)
     assert activity.render_line(rd) == "cp 1 run N0TST/a#3"
     table = "\n".join(activity.render_table(rd))
-    assert "Copilot: 1 review running, 1 unread (2 open PRs checked)" in table
+    assert "Copilot: 1 review running, 1 unread (2 of 2 open PRs known)" in table
     assert "N0TST/b#9  unread: 1 review(s) with text, 0 inline comment(s)" in table
     assert "Looks fine" not in table  # counts only, never the text
 
 
-def test_copilot_unread_means_text_or_an_inline_comment_on_the_current_head(box: Box, gh: Gh) -> None:
+def test_copilot_unread_means_text_or_an_inline_comment_on_the_current_head(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(activity, "COPILOT_MAX_CALLS", 100)
     old = "0" * 40
     gh.search("N0TST", [("N0TST/a", 1), ("N0TST/b", 2), ("N0TST/c", 3), ("N0TST/d", 4), ("N0TST/e", 5)])
     gh.pr("N0TST/a", 1, reviews=[review("")])  # an empty body is not unread
@@ -765,12 +797,18 @@ def test_copilot_asks_only_read_only_rest_paths(box: Box, gh: Gh) -> None:
     assert [c[1] for c in calls].count("rate_limit") == 1  # the quota check, which GitHub does not count
     calls = [c for c in calls if c[1] != "rate_limit"]
     assert len(calls) == 5  # search, pull, runs, reviews, comments
-    for args in calls:
-        assert len(args) == 2
+    for args in gh.raw_calls():
         assert args[0] == "api"
-        assert args[1].startswith(("search/issues?", "repos/", "rate_limit"))
-        assert "graphql" not in args[1]
-        assert not args[1].startswith("-")  # no method, field or input flag can be passed
+        path = args[-1]
+        assert path.startswith(("search/issues?", "repos/", "rate_limit"))
+        assert "graphql" not in path
+        flags = args[1:-1]
+        # the only flags: show headers, and a conditional request; never a method, a field, an input or a token
+        assert flags in ([], ["-i"]) or (
+            flags[0] == "-i" and flags[1] == "-H" and flags[2].startswith("If-None-Match: ")
+        )
+        assert len(flags) in (0, 1, 3)
+        assert not any(a in ("-X", "--method", "-f", "-F", "--field", "--input", "--hostname") for a in args)
 
 
 def test_copilot_is_capped_at_15_pull_requests_and_cached_for_60_seconds(box: Box, gh: Gh) -> None:
@@ -781,14 +819,27 @@ def test_copilot_is_capped_at_15_pull_requests_and_cached_for_60_seconds(box: Bo
     gh.save()
     first = box.read(network=True).copilot
     assert first is not None
-    made = [c for c in gh.calls() if c[1] != "rate_limit"]
-    assert len(made) == activity.COPILOT_MAX_CALLS  # the budget of one refresh, not 61
-    assert 0 < first.checked < 15  # the pull requests the budget did not reach are skipped, not guessed
+    counted = [c for c in gh.calls() if c[1] != "rate_limit"]
+    assert len(counted) == 1 + 3 * 4  # the search, then three whole pull requests; a fourth does not fit the budget
+    assert (first.listed, first.checked, first.skipped) == (15, 3, 12)  # the search is capped at 15, 12 are skipped
+    assert "12 not refreshed this round" in "\n".join(activity.render_table(box.read()))
     again = box.read(network=True).copilot  # within 60 s: from the cache, no gh call
-    assert again is not None
-    assert len([c for c in gh.calls() if c[1] != "rate_limit"]) == len(made)
+    assert again == activity.read_copilot_cache(box.vars, NOW)
+    assert len([c for c in gh.calls() if c[1] != "rate_limit"]) == len(counted)
+    # rotation: the next round starts with the pull requests never checked, not with the same three
     assert activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW + 61) is True
-    assert len([c for c in gh.calls() if c[1] != "rate_limit"]) > len(made)  # past 60 s it asks again
+    second = [c[1] for c in gh.calls()[len(counted) + 2 :] if "/pulls/" in c[1] and c[1].count("/") == 4]
+    assert second == [f"repos/N0TST/a/pulls/{n}" for n in (4, 5, 6)]
+    after = activity.read_copilot_cache(box.vars, NOW + 61)
+    assert after is not None
+    assert (after.checked, after.skipped) == (6, 12)
+    now = NOW + 61  # three more rounds reach the rest, oldest first
+    for _ in range(3):
+        now += 61
+        activity.refresh_copilot(box.vars, activity.load_config(box.vars), now)
+    last = activity.read_copilot_cache(box.vars, now)
+    assert last is not None
+    assert last.checked == 15
 
 
 def test_the_cache_holds_refs_and_counts_never_review_text(box: Box, gh: Gh) -> None:
@@ -829,7 +880,7 @@ def test_copilot_owner_falls_back_to_the_gh_login_and_failures_leave_it_out(box:
     gh.save()
     rd = box.read(network=True)
     assert activity.render_line(rd) == ""
-    assert "Copilot: not available" in "\n".join(activity.render_table(rd))
+    assert "Copilot: the last refresh failed (1 in a row)" in "\n".join(activity.render_table(rd))
 
 
 def test_copilot_without_gh_and_with_a_hostile_repo_name(box: Box, gh: Gh) -> None:
@@ -1541,8 +1592,11 @@ def test_the_copilot_cache_is_checked_and_cleaned_before_it_is_shown(box: Box, g
         "ts": NOW - 5,
         "ok": True,
         "checked": 3,
+        "listed": 3,
+        "skipped": 0,
+        "truncated": 0,
         "running": ["N0TST/a#1", "evil\x1b[2J/x#2", "no-number", 7],
-        "unread": [["N0TST/b#2", 1, 0], ["bad\x07/x#1", 1, 1], ["N0TST/c#3", 10**12, "2"]],
+        "unread": [["N0TST/b#2", 1, 0], ["bad\x07/x#1", 1, 1], ["N0TST/c#3", 3, 2]],
     }
     path.write_text(json.dumps(body))
     path.chmod(0o600)
@@ -1550,7 +1604,7 @@ def test_the_copilot_cache_is_checked_and_cleaned_before_it_is_shown(box: Box, g
     assert rd is not None
     assert rd.running == ("N0TST/a#1",)
     assert [u[0] for u in rd.unread] == ["N0TST/b#2", "N0TST/c#3"]
-    assert rd.unread[1][1] == 10_000
+    assert rd.unread[1][1:] == (3, 2)
     assert no_ctrl(box.table() + box.line())
     path.chmod(0o664)  # someone else can write it: not trusted
     assert box.read().copilot == activity.CopilotSnap()
@@ -1641,3 +1695,239 @@ def test_the_private_write_does_not_trip_over_a_leftover_temporary_file(
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     leftovers = sorted(p.name for p in box.run.iterdir() if p.name.startswith("thing.json."))
     assert leftovers == ["thing.json.4242"]  # our own temporaries are renamed away
+
+
+BAD_COUNTS: list[tuple[str, Any]] = [
+    ("checked", -1),
+    ("checked", True),
+    ("checked", 10**12),
+    ("checked", "3"),
+    ("checked", 2.5),
+    ("listed", -5),
+    ("skipped", False),
+    ("truncated", 10**400),
+    ("unread", [["N0TST/b#2", -1, 0]]),
+    ("unread", [["N0TST/b#2", True, 0]]),
+    ("unread", [["N0TST/b#2", 10**9, 0]]),
+    ("unread", [["N0TST/b#2", 1, "2"]]),
+    ("ts", float("nan")),
+    ("ts", NOW + 9999),
+]
+
+
+@pytest.mark.parametrize("field", BAD_COUNTS)
+def test_a_negative_boolean_or_out_of_range_count_makes_the_whole_cache_untrusted(
+    box: Box, field: tuple[str, Any]
+) -> None:
+    body: dict[str, Any] = {
+        "ts": NOW - 5,
+        "ok": True,
+        "checked": 1,
+        "listed": 1,
+        "skipped": 0,
+        "truncated": 0,
+        "running": [],
+        "unread": [],
+    }
+    body[field[0]] = field[1]
+    path = box.run / "safo-activity-copilot.json"
+    path.write_text(json.dumps(body).replace("NaN", "null"))
+    path.chmod(0o600)
+    assert activity.read_copilot_cache(box.vars, NOW) is None
+
+
+# -- second review round (issue 402) -----------------------------------------------------------------------------------
+
+
+def seed_prs(gh: Gh, numbers: list[int], **kw: Any) -> None:
+    gh.search("N0TST", [("N0TST/a", n) for n in numbers])
+    for n in numbers:
+        gh.pr("N0TST/a", n, **kw)
+    gh.save()
+
+
+def test_a_refresh_where_every_pull_request_read_fails_is_a_failed_refresh(box: Box, gh: Gh) -> None:
+    seed_prs(gh, [1, 2, 3])
+    for n in (1, 2, 3):
+        gh.status(f"repos/N0TST/a/pulls/{n}", 404)
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    assert activity.refresh_copilot(box.vars, cfg, NOW) is True
+    state = activity.read_state(box.vars)
+    assert state["failures"] == 1
+    assert state["next_ok"] == NOW + 60
+    assert not (box.run / "safo-activity-copilot.json").exists()  # no "ok, 0 checked" answer was cached
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 30) is False  # backing off
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61) is True
+    assert activity.read_state(box.vars)["next_ok"] == NOW + 61 + 120  # the wait grew
+    table = "\n".join(activity.render_table(box.read()))
+    assert "Copilot: the last refresh failed (2 in a row)" in table
+    assert "0 of" not in table
+    assert "0 unread" not in table
+
+
+def test_more_than_half_failing_is_a_failure_and_half_or_fewer_is_not(box: Box, gh: Gh) -> None:
+    seed_prs(gh, [1, 2, 3])
+    gh.status("repos/N0TST/a/pulls/1", 404)
+    gh.status("repos/N0TST/a/pulls/2", 404)
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    activity.refresh_copilot(box.vars, cfg, NOW)
+    assert activity.read_state(box.vars)["failures"] == 1  # 2 of 3 failed
+    for path in box.run.glob("safo-activity-copilot*"):
+        path.unlink()
+    del gh.table["__status__"]["repos/N0TST/a/pulls/2"]
+    gh.save()
+    activity.refresh_copilot(box.vars, cfg, NOW)
+    assert activity.read_state(box.vars)["failures"] == 0  # 1 of 3 failed
+    cached = activity.read_copilot_cache(box.vars, NOW)
+    assert cached is not None
+    assert cached.checked == 2
+
+
+@pytest.mark.parametrize("code", [403, 429])
+def test_a_403_or_429_stops_the_round_and_waits_longer(box: Box, gh: Gh, code: int) -> None:
+    seed_prs(gh, [1, 2, 3])
+    gh.status("repos/N0TST/a/pulls/1", code)
+    gh.save()
+    activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW)
+    pulls = [c[1] for c in gh.calls() if "/pulls/" in c[1]]
+    assert pulls == ["repos/N0TST/a/pulls/1"]  # nothing else was asked after the refusal
+    assert activity.read_state(box.vars)["next_ok"] == NOW + activity.COPILOT_LIMITED_WAIT
+
+
+def test_unchanged_answers_use_etags_and_are_not_failures(box: Box, gh: Gh) -> None:
+    seed_prs(gh, [1], running=False, reviews=[review("text")])
+    paths = [
+        "repos/N0TST/a/pulls/1",
+        f"repos/N0TST/a/actions/runs?event=dynamic&head_sha={SHA}&per_page=30",
+        "repos/N0TST/a/pulls/1/reviews?per_page=100",
+        "repos/N0TST/a/pulls/1/comments?per_page=100",
+    ]
+    for i, path in enumerate(paths):
+        gh.etag(path, f'"tag{i}"')
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    activity.refresh_copilot(box.vars, cfg, NOW)
+    first = activity.read_copilot_cache(box.vars, NOW)
+    assert first is not None
+    assert first.unread == (("N0TST/a#1", 1, 0),)
+    assert all(not any(a.startswith("If-None-Match") for a in c) for c in gh.raw_calls())  # nothing known yet
+    before = len(gh.raw_calls())
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61) is True
+    conditional = gh.raw_calls()[before:]
+    sent = [c for c in conditional if "-H" in c]
+    assert len(sent) == 4
+    assert {c[c.index("-H") + 1] for c in sent} == {f'If-None-Match: "tag{i}"' for i in range(4)}
+    second = activity.read_copilot_cache(box.vars, NOW + 61)
+    assert second is not None
+    assert second.unread == first.unread  # a 304 means unchanged: the stored counts stand
+    assert activity.read_state(box.vars)["failures"] == 0
+    assert "text" not in (box.run / "safo-activity-copilot.store").read_text()
+
+
+def test_a_304_is_not_charged_to_the_call_budget_and_a_new_head_drops_the_review_etags(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_prs(gh, [1, 2, 3, 4, 5, 6], reviews=[review("t")])
+    for n in range(1, 7):
+        for path in (
+            f"repos/N0TST/a/pulls/{n}",
+            f"repos/N0TST/a/actions/runs?event=dynamic&head_sha={SHA}&per_page=30",
+            f"repos/N0TST/a/pulls/{n}/reviews?per_page=100",
+            f"repos/N0TST/a/pulls/{n}/comments?per_page=100",
+        ):
+            gh.etag(path, f'"e-{n}-{len(path)}"')
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    monkeypatch.setattr(activity, "COPILOT_MAX_CALLS", 100)
+    activity.refresh_copilot(box.vars, cfg, NOW)
+    monkeypatch.setattr(activity, "COPILOT_MAX_CALLS", 15)  # room for 3 full pull requests, 6 are known
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61) is True
+    cached = activity.read_copilot_cache(box.vars, NOW + 61)
+    assert cached is not None
+    assert cached.skipped == 0  # every unchanged read was free, so all six fit
+    # a new head: the reviews and comments are asked again without a tag
+    new_sha = "0123456789abcdef0123456789abcdef01234567"
+    gh.pr("N0TST/a", 1, reviews=[review("t", sha=new_sha)], sha=new_sha)
+    gh.etag("repos/N0TST/a/pulls/1", '"moved"')  # the pull request changed, so GitHub's tag changed
+    gh.save()
+    before = len(gh.raw_calls())
+    activity.refresh_copilot(box.vars, cfg, NOW + 122)
+    again = [c for c in gh.raw_calls()[before:] if "pulls/1/reviews" in c[-1]]
+    assert again
+    assert all("-H" not in c for c in again)
+
+
+def test_pages_are_followed_to_the_last_and_a_hit_cap_is_said(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(activity, "COPILOT_MAX_CALLS", 100)
+    seed_prs(gh, [1])
+    base = "repos/N0TST/a/pulls/1/reviews?per_page=100"
+    for page in range(1, 11):
+        rows = [review("noise", user={"login": "human"}) for _ in range(100)]
+        if page == 7:
+            rows[3] = review("a late review")
+        gh.table[base if page == 1 else f"{base}&page={page}"] = rows
+    gh.save()
+    activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW)
+    cached = activity.read_copilot_cache(box.vars, NOW)
+    assert cached is not None
+    assert cached.unread == (("N0TST/a#1", 1, 0),)  # found on page 7, past the old 3-page limit
+    assert cached.truncated == 1  # ten full pages: the cap was hit
+    assert "are cut at 1000" in "\n".join(activity.render_table(box.read()))
+    assert not any("page=11" in c[1] for c in gh.calls())
+
+
+def test_a_short_last_page_ends_the_paging_without_a_cap_note(box: Box, gh: Gh) -> None:
+    seed_prs(gh, [1])
+    base = "repos/N0TST/a/pulls/1/reviews?per_page=100"
+    gh.table[base] = [review("noise", user={"login": "human"}) for _ in range(100)]
+    gh.table[base + "&page=2"] = [review("x")]
+    gh.save()
+    activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW)
+    cached = activity.read_copilot_cache(box.vars, NOW)
+    assert cached is not None
+    assert cached.truncated == 0
+
+
+def test_the_spawn_marker_and_the_retry_state_do_not_overwrite_each_other(box: Box, gh: Gh, spawns: list[Any]) -> None:
+    cfg = activity.load_config(box.vars)
+    activity.refresh_in_background(box.vars, NOW)  # a view marks that it spawned
+    assert len(spawns) == 1
+    activity.refresh_copilot(box.vars, cfg, NOW)  # a failing refresh records its backoff (gh has no routes)
+    state = activity.read_state(box.vars)
+    assert state["spawned"] == NOW  # the refresh did not write the view's marker away
+    assert state["failures"] == 1
+    activity.refresh_in_background(box.vars, NOW + 10)  # a view marks again, during the backoff: nothing spawns
+    state = activity.read_state(box.vars)
+    assert state["failures"] == 1  # and the view did not write the refresh's state away
+    assert len(spawns) == 1
+
+
+def test_the_refresh_deadline_starts_before_the_first_call(box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch) -> None:
+    gh.table["__sleep__"] = 10
+    gh.save()
+    monkeypatch.setattr(activity, "COPILOT_DEADLINE", 0.3)
+    began = time.monotonic()
+    snap = activity.fetch_copilot(box.vars, "N0TST", NOW)
+    assert time.monotonic() - began < 4  # each early call is held to what is left, not to a fixed 5 s
+    assert snap.ok is False
+
+
+def test_timed_out_ollama_listings_do_not_pile_up_threads(box: Box) -> None:
+    import threading
+
+    stop = threading.Event()
+    thread, url = slow_drip_server(stop)
+    try:
+        box.vars.update(SAFO_ACTIVITY_PROVIDERS="ollama", LLM_LOCAL_URL=url)
+        before = threading.active_count()
+        for _ in range(6):
+            assert box.line() == ""
+        grown = threading.active_count() - before
+    finally:
+        stop.set()
+        thread.join()
+    assert grown <= 2, grown  # one stuck listing at most, however many polls
