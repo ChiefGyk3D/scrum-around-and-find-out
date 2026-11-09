@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import posixpath
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 MAX_DEPTH = 6
@@ -716,11 +716,17 @@ def _gh_data(words: list[Word]) -> bool:
     return True
 
 
+def _ticked(items: list[Eff]) -> Iterator[Eff]:
+    for item in items:
+        _tick()
+        yield item
+
+
 def _doc_target(eff: Eff, all_effs: list[Eff]) -> bool:
     """Every output redirect goes to a document-type file, no other command in the input names it (any spelling of the
     path: the base name is compared), and every other command is plain data, so nothing could run or read it as code."""
     writes = [tw for op, tw in eff.unit.redirs if op not in ("<", "<&", ">&")]
-    if writes and any(o is not eff and o.cmd and not _cmd_is_data(o) for o in all_effs):
+    if writes and any(o is not eff and o.cmd and not _cmd_is_data(o) for o in _ticked(all_effs)):
         return False
     for op, tw in eff.unit.redirs:
         if op in ("<", "<&", ">&"):
@@ -733,12 +739,35 @@ def _doc_target(eff: Eff, all_effs: list[Eff]) -> bool:
         if not tv.lower().endswith(DOC_EXT):
             return False
         base = posixpath.basename(tv)
-        if any(other is not eff and base in other.text for other in all_effs):
+        if any(other is not eff and base in other.text for other in _ticked(all_effs)):
             return False
         # another command with a glob or an expansion for an argument could name the file without spelling it
-        if any(w.value is None for other in all_effs if other is not eff for w in other.args):
+        if any(w.value is None for other in _ticked(all_effs) if other is not eff for w in other.args):
             return False
     return True
+
+
+_INTERPRETER = re.compile(r"(?:python|nodejs|node|perl|ruby|php|lua|deno|bun|pwsh|powershell)[\d.]*")
+_CODE_FLAGS = frozenset({"-c", "-m", "-e", "-E", "-p", "-r", "--eval", "--print", "-command", "-Command"})
+
+
+def _is_interpreter(e: Eff, network: re.Pattern[str]) -> bool:
+    return e.cmd in SHELLS or bool(e.cmd and _INTERPRETER.fullmatch(e.cmd) and network.fullmatch(e.cmd))
+
+
+def _reads_stdin_code(e: Eff) -> bool:
+    """True when the shell or interpreter takes its program from standard input (no -c/-e code, no script file)."""
+    vals = [w.value for w in e.args]
+    if any(v is None for v in vals):
+        return True
+    if "-" in vals or "-s" in vals:
+        return True
+    if e.cmd in SHELLS:
+        if any(v.startswith("-") and not v.startswith("--") and "c" in v[1:] for v in vals if v):
+            return False
+    elif any(v in _CODE_FLAGS for v in vals if v):
+        return False
+    return not any(v and not v.startswith("-") for v in vals)
 
 
 def _is_data(eff: Eff, all_effs: list[Eff]) -> bool:
@@ -771,14 +800,32 @@ def classify(
 ) -> str | None:
     """BUILT, TOOL or None for a command the old check would have refused. Raises Unreadable when unsure."""
     global _tick
-    counter = _Counter()
-    effs: list[Eff] = []
     _tick = tick
     try:
-        for u in parse(command, counter, tick):
-            effective(u, counter, tick, 0, effs)
+        return _classify(command, conceal, network, tick)
     finally:
         _tick = _no_tick
+
+
+def _classify(
+    command: str,
+    conceal: re.Pattern[str],
+    network: re.Pattern[str],
+    tick: Callable[[], None],
+) -> str | None:
+    """BUILT, TOOL or None for a command the old check would have refused. Raises Unreadable when unsure."""
+    counter = _Counter()
+    effs: list[Eff] = []
+    for u in parse(command, counter, tick):
+        effective(u, counter, tick, 0, effs)
+
+    for k, e in enumerate(effs):
+        if (
+            _is_interpreter(e, network)
+            and _reads_stdin_code(e)
+            and any(m.unit.pipe == e.unit.pipe for m in _ticked(effs[:k]))
+        ):
+            raise Unreadable("a pipe feeds a shell or interpreter that reads its input as code")
 
     def is_tool(e: Eff) -> bool:
         return e.cmd == "doppler" or bool(e.cmd and network.fullmatch(e.cmd))
@@ -797,8 +844,10 @@ def classify(
     active_conceal = any(conceal.search(texts[id(e)]) for e in effs)
     tools = [e for e in effs if is_tool(e)]
     for e in tools:
-        if e.cmd == "doppler" and any(w.expands for w in e.args):
-            return TOOL
+        if e.cmd == "doppler":
+            fed = [w for _, w in e.unit.redirs] + e.unit.herestrings
+            if any(w.expands for w in [*e.args, *fed]) or any("$" in b or "`" in b for b in e.bodies):
+                return TOOL
     names_secret = any(e.cmd and e.cmd != "doppler" and _SECRET.search(texts[id(e)]) for e in effs)
     has_expansion = any(
         e.cmd != "doppler" and ("$" in texts[id(e)] or "`" in texts[id(e)]) for e in effs if texts[id(e)]
