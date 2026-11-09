@@ -38,9 +38,9 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, TextIO, TypeVar
+from typing import Any, NamedTuple, TextIO, TypeVar
 from urllib.parse import quote, urlsplit
 
 import safo
@@ -57,12 +57,15 @@ DEFAULT_PROVIDERS = ("codex", "quota", "ledger")
 LINE_TTL = 10  # seconds a status line is served from its cache
 COPILOT_TTL = 60  # seconds the Copilot answer is cached, and the least time between two refreshes
 COPILOT_MAX_AGE = 600  # a cached answer older than this is no longer shown
-COPILOT_MAX_CALLS = 40  # REST calls in one refresh, the search included
-COPILOT_PAGES = 3
+COPILOT_MAX_CALLS = 15  # counted REST calls in one refresh, the search included: at most about 900 an hour
+COPILOT_PR_COST = 4  # the most one pull request costs on its first page of each read
+COPILOT_LIMITED_WAIT = 300  # seconds to stay away after a 403 or 429
+COPILOT_PAGES = 10  # pages of 100 reviews or comments per pull request; the cap is reported
 COPILOT_BACKOFF_CAP = 900
 COPILOT_SPAWN_GAP = 20
 LOCK_STALE = 120  # seconds after which a refresh lock is taken to be left by a dead process
 RATE_FLOOR = 500  # stop refreshing when fewer REST calls than this remain
+ETAG_RE = re.compile(r'(?:W/)?"[A-Za-z0-9._:+/=-]{1,128}"')
 REF_RE = re.compile(r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}#[0-9]{1,9}")
 COPILOT_PR_CAP = 15
 COPILOT_CALL_TIMEOUT = 5.0
@@ -462,6 +465,9 @@ def _established(env: Mapping[str, str], port: int) -> int | None:
     return len([ln for ln in done.stdout.splitlines() if ln.strip()]) if done.returncode == 0 else None
 
 
+_ollama_worker: threading.Thread | None = None  # at most one listing thread is ever left running
+
+
 def collect_ollama(env: Mapping[str, str], home: str, now: float) -> OllamaSnap:
     try:
         urls = _endpoint_urls(env, home)
@@ -495,7 +501,11 @@ def collect_ollama(env: Mapping[str, str], home: str, now: float) -> OllamaSnap:
 
     # One total deadline for every endpoint: a socket timeout restarts on each byte, so a server that drips bytes
     # could otherwise hold a status line for as long as it likes. The stuck thread is a daemon and is left behind.
+    global _ollama_worker
+    if _ollama_worker is not None and _ollama_worker.is_alive():
+        return OllamaSnap(True, False, (), None)  # the last listing is still stuck: no second thread behind it
     worker = threading.Thread(target=work, daemon=True)
+    _ollama_worker = worker
     worker.start()
     worker.join(OLLAMA_TIMEOUT)
     with guard:
@@ -513,6 +523,10 @@ class CopilotSnap:
     unread: tuple[tuple[str, int, int], ...] = ()  # (ref, reviews with a body, inline comments) on the current head
     age: float = 0.0
     retry_after: float = 0.0  # seconds to leave GitHub alone (low REST quota); never cached
+    listed: int = 0  # open pull requests the search returned (at most 15)
+    skipped: int = 0  # of those, not refreshed in the last round (the call budget did not reach them)
+    truncated: int = 0  # pull requests whose reviews or comments hit the page cap
+    failures: int = 0  # refreshes that failed in a row; set when a view reads the state
 
 
 def cache_dir(env: Mapping[str, str]) -> Path | None:
@@ -555,83 +569,195 @@ def _login(user: object) -> str:
 
 
 class Budget:
-    """A cap on the REST calls of one refresh, shared by its worker threads."""
+    """A cap on the counted REST calls of one refresh. An answer GitHub does not count (a 304) is given back."""
 
     def __init__(self, calls: int) -> None:
         self.left = calls
-        self._lock = threading.Lock()
+        self.blocked = False  # GitHub said 403 or 429: stop for this round
 
     def take(self) -> None:
-        with self._lock:
-            if self.left <= 0:
-                raise OSError("call budget used up")
-            self.left -= 1
+        if self.left <= 0 or self.blocked:
+            raise OSError("call budget used up")
+        self.left -= 1
+
+    def give(self) -> None:
+        self.left += 1
 
 
-def _pages(get: Callable[[str], Any], base: str) -> list[Any]:
-    """Up to COPILOT_PAGES pages of 100 items, so a long review history does not hide the newest."""
-    items: list[Any] = []
-    for page in range(1, COPILOT_PAGES + 1):
-        chunk = get(base if page == 1 else f"{base}&page={page}")
-        if not isinstance(chunk, list):
-            break
-        items.extend(chunk)
-        if len(chunk) < 100:
-            break
-    return items
+class GhHttpError(OSError):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
+def _gh_cond(
+    gh: str, env: Mapping[str, str], path: str, etag: str | None, timeout: float
+) -> tuple[int, Any, str | None]:
+    """One REST GET with the headers shown (`-i`) and, when an ETag is known, `If-None-Match`. Returns the status, the
+    parsed body (None for a 304) and the new ETag. Anything but a 2xx or a 304 raises GhHttpError."""
+    import subprocess
+
+    argv = [gh, "api", "-i"]
+    if etag:
+        argv += ["-H", f"If-None-Match: {etag}"]
+    done = subprocess.run(  # noqa: S603 - fixed arguments; the ETag was checked against ETAG_RE and the path is validated
+        [*argv, path],
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+        env=_gh_env(env),
+        cwd="/",
+        stdin=subprocess.DEVNULL,
+    )
+    raw = done.stdout
+    if len(raw) > MAX_BYTES + 16_384:
+        raise OSError("answer too large")
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        head, sep, body = raw.partition(b"\n\n")
+    lines = head.decode("ascii", "replace").splitlines()
+    found = re.match(r"HTTP/\S+ ([0-9]{3})", lines[0]) if lines else None
+    if found is None:
+        raise OSError("no status line")
+    status = int(found.group(1))
+    new = None
+    for ln in lines[1:]:
+        name, _, value = ln.partition(":")
+        if name.strip().lower() == "etag" and ETAG_RE.fullmatch(value.strip()):
+            new = value.strip()
+    if status == 304:
+        return 304, None, new
+    if not 200 <= status < 300:
+        raise GhHttpError(status)
+    return status, loads(body), new
+
+
+def _load_store(env: Mapping[str, str]) -> dict[str, Any]:
+    """Per-pull-request results and ETags of the last refreshes: counts and tags only, every value re-checked."""
+    empty: dict[str, Any] = {"prs": {}, "tags": {}}
+    files = _copilot_files(env)
+    if files is None or not trusted_file(files.store):
+        return empty
+    try:
+        data = loads(read_bounded(files.store, 400_000))
+        prs: dict[str, Any] = {}
+        for ref, row in data["prs"].items():
+            if REF_RE.fullmatch(ref):
+                prs[ref] = {
+                    "checked": float(_num(row["checked"]) or 0.0),
+                    "r": row["r"] is True,
+                    "b": _count(row["b"], 100_000),
+                    "i": _count(row["i"], 100_000),
+                    "t": row["t"] is True,
+                }
+        tags: dict[str, Any] = {}
+        for path, row in data["tags"].items():
+            if path.startswith("repos/") and len(path) < 400 and ETAG_RE.fullmatch(row["etag"]):
+                tags[path] = {"etag": row["etag"], "sha": row.get("sha"), "v": row["v"]}
+        return {"prs": prs, "tags": tags}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        return empty
+
+
+def _count(value: object, top: int) -> int:
+    """A count: an int (not a bool) from 0 to `top`; anything else makes the whole file untrusted."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= top:
+        raise ValueError("count out of range")
+    return value
 
 
 def _check_pr(
-    gh: str, env: Mapping[str, str], ref: str, deadline: float, budget: Budget
-) -> tuple[bool, int, int] | None:
-    """(review running, reviews with a body on the head, inline comments on the head), counts only."""
+    gh: str, env: Mapping[str, str], ref: str, deadline: float, budget: Budget, tags: dict[str, Any], now: float
+) -> dict[str, Any] | None:
+    """The state of one pull request: a review run queued or in progress, and the reviews with text and inline
+    comments by the reviewer account on the current head. Counts only. None when a call failed."""
     repo, number = ref.split("#")
+    path_base = f"repos/{repo}/"
 
-    def get(path: str) -> Any:
+    def get(path: str, extract: Callable[[Any], Any], sha: str | None = None) -> Any:
         left = deadline - time.monotonic()
         if left <= 0:
             raise OSError("deadline")
+        full = path_base + path
+        entry = tags.get(full)
+        etag = entry["etag"] if entry and (sha is None or entry.get("sha") == sha) else None
         budget.take()
-        return _gh_json(gh, env, f"repos/{repo}/{path}", min(COPILOT_CALL_TIMEOUT, left))
+        try:
+            status, body, new = _gh_cond(gh, env, full, etag, min(COPILOT_CALL_TIMEOUT, left))
+        except GhHttpError as err:
+            if err.status in (403, 429):
+                budget.blocked = True
+            raise
+        if status == 304:
+            budget.give()  # GitHub does not count an unchanged answer against the quota
+            if etag is None or entry is None:
+                raise OSError("304 without a stored answer")
+            return entry["v"]
+        value = extract(body)
+        if new:
+            tags[full] = {"etag": new, "sha": sha, "v": value}
+        else:
+            tags.pop(full, None)
+        return value
+
+    def sha_of(body: Any) -> str:
+        found = (body.get("head") or {}).get("sha")
+        if not isinstance(found, str) or not SHA_RE.fullmatch(found):
+            raise ValueError("no head")
+        return found
+
+    def count_pages(kind: str, sha: str) -> tuple[int, bool]:
+        total = 0
+        for page in range(1, COPILOT_PAGES + 1):
+            base = f"pulls/{number}/{kind}?per_page=100"
+
+            def extract(body: Any) -> list[int]:
+                rows = body if isinstance(body, list) else []
+                mine = [r for r in rows if isinstance(r, dict) and _login(r.get("user")) == COPILOT_REVIEWER]
+                on_head = [r for r in mine if r.get("commit_id") == sha]
+                if kind == "reviews":
+                    return [len(rows), sum(1 for r in on_head if isinstance(r.get("body"), str) and r["body"].strip())]
+                return [len(rows), len(on_head)]
+
+            size, counted = get(base if page == 1 else f"{base}&page={page}", extract, sha)
+            total += int(counted)
+            if size < 100:
+                return total, False
+        return total, True
 
     try:
-        sha = (get(f"pulls/{number}").get("head") or {}).get("sha")
-        if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
-            return None
-        runs = get(f"actions/runs?event=dynamic&head_sha={sha}&per_page=30").get("workflow_runs") or []
-        running = any(
-            isinstance(r, dict)
-            and r.get("name") == COPILOT_RUN_NAME
-            and r.get("event") == "dynamic"
-            and r.get("status") in ("queued", "in_progress")
-            for r in runs
+        sha = get(f"pulls/{number}", sha_of)
+        running = get(
+            f"actions/runs?event=dynamic&head_sha={sha}&per_page=30",
+            lambda body: any(
+                isinstance(r, dict)
+                and r.get("name") == COPILOT_RUN_NAME
+                and r.get("event") == "dynamic"
+                and r.get("status") in ("queued", "in_progress")
+                for r in (body.get("workflow_runs") or [])
+            ),
+            sha,
         )
-        reviews = _pages(get, f"pulls/{number}/reviews?per_page=100")
-        comments = _pages(get, f"pulls/{number}/comments?per_page=100")
-    except Exception:  # a timeout, a spent budget or a gh that vanished: this pull request is skipped
+        bodied, cut_r = count_pages("reviews", sha)
+        inline, cut_c = count_pages("comments", sha)
+    except Exception:  # a timeout, a spent budget, a refusal or a gh that vanished: this pull request is not updated
         return None
-    bodied = sum(
-        1
-        for r in reviews
-        if isinstance(r, dict)
-        and _login(r.get("user")) == COPILOT_REVIEWER
-        and r.get("commit_id") == sha
-        and isinstance(r.get("body"), str)
-        and r["body"].strip()
-    )
-    inline = sum(
-        1
-        for c in comments
-        if isinstance(c, dict) and _login(c.get("user")) == COPILOT_REVIEWER and c.get("commit_id") == sha
-    )
-    return running, bodied, inline
+    return {
+        "checked": now,
+        "r": running is True,
+        "b": min(bodied, 100_000),
+        "i": min(inline, 100_000),
+        "t": cut_r or cut_c,
+    }
 
 
-def _low_quota_wait(gh: str, env: Mapping[str, str]) -> float:
+def _low_quota_wait(gh: str, env: Mapping[str, str], deadline: float) -> float:
     """Seconds to leave GitHub alone when the REST quota is low (the rate-limit status call is not counted against
     it); 0 when it is fine or cannot be read."""
     try:
-        core = _gh_json(gh, env, "rate_limit", COPILOT_CALL_TIMEOUT)["resources"]["core"]
+        core = _gh_json(gh, env, "rate_limit", min(COPILOT_CALL_TIMEOUT, max(0.5, deadline - time.monotonic())))[
+            "resources"
+        ]["core"]
         remaining, reset = float(core["remaining"]), float(core["reset"])
     except Exception:  # an unreadable answer is not a reason to stop
         return 0.0
@@ -639,25 +765,30 @@ def _low_quota_wait(gh: str, env: Mapping[str, str]) -> float:
 
 
 def fetch_copilot(env: Mapping[str, str], owner: str, now: float) -> CopilotSnap:
-    from concurrent.futures import ThreadPoolExecutor
-
+    """One refresh: the search, then the pull requests oldest-checked first while the call budget lasts. The result
+    merges what was learned now with what earlier refreshes stored for the pull requests this round did not reach."""
     gh = find_tool("gh", env)
     if gh is None:
         return CopilotSnap()
-    wait = _low_quota_wait(gh, env)
+    deadline = time.monotonic() + COPILOT_DEADLINE  # starts before the first call
+    wait = _low_quota_wait(gh, env, deadline)
     if wait:
         return CopilotSnap(retry_after=wait)
     budget = Budget(COPILOT_MAX_CALLS)
-    deadline = time.monotonic() + COPILOT_DEADLINE
     try:
         if not owner:
             budget.take()
-            owner = _login(_gh_json(gh, env, "user", COPILOT_CALL_TIMEOUT))
+            owner = _login(_gh_json(gh, env, "user", min(COPILOT_CALL_TIMEOUT, max(0.5, deadline - time.monotonic()))))
         if not OWNER_RE.fullmatch(owner):
             return CopilotSnap()
         query = quote(f"is:pr is:open user:{owner}")
         budget.take()
-        found = _gh_json(gh, env, f"search/issues?q={query}&per_page={COPILOT_PR_CAP}", COPILOT_CALL_TIMEOUT)
+        found = _gh_json(
+            gh,
+            env,
+            f"search/issues?q={query}&per_page={COPILOT_PR_CAP}",
+            min(COPILOT_CALL_TIMEOUT, max(0.5, deadline - time.monotonic())),
+        )
         items = found.get("items") if isinstance(found, dict) else None
         if not isinstance(items, list):
             return CopilotSnap()
@@ -670,23 +801,70 @@ def fetch_copilot(env: Mapping[str, str], owner: str, now: float) -> CopilotSnap
         repo = "/".join(str(url).rstrip("/").split("/")[-2:]) if isinstance(url, str) else ""
         if isinstance(number, int) and not isinstance(number, bool) and REPO_RE.fullmatch(repo) and ".." not in repo:
             refs.append(f"{repo}#{number}")
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        results = list(pool.map(lambda r: _check_pr(gh, env, r, deadline, budget), refs))
-    running = tuple(r for r, out in zip(refs, results, strict=True) if out and out[0])
-    unread = tuple((r, out[1], out[2]) for r, out in zip(refs, results, strict=True) if out and (out[1] or out[2]))
-    return CopilotSnap(True, sum(1 for out in results if out is not None), running, unread, 0.0)
+    store = _load_store(env)
+    prs: dict[str, Any] = {r: row for r, row in store["prs"].items() if r in refs}
+    tags: dict[str, Any] = {
+        k: v for k, v in store["tags"].items() if any(k.startswith(f"repos/{r.split('#')[0]}/") for r in refs)
+    }
+    order = sorted(refs, key=lambda r: prs.get(r, {}).get("checked", -1.0))  # never checked first, then oldest
+    attempted = failed = refreshed = 0
+    for ref in order:
+        if budget.blocked or budget.left < COPILOT_PR_COST:
+            break  # not enough budget for a whole pull request: it waits for the next round
+        attempted += 1
+        row = _check_pr(gh, env, ref, deadline, budget, tags, now)
+        if row is None:
+            failed += 1
+        else:
+            prs[ref] = row
+            refreshed += 1
+    if budget.blocked:
+        return CopilotSnap(retry_after=COPILOT_LIMITED_WAIT)
+    if attempted and failed * 2 > attempted:
+        return CopilotSnap()  # most calls failed: a failed refresh, not an empty answer
+    known = [r for r in refs if r in prs]
+    snap = CopilotSnap(
+        True,
+        len(known),
+        tuple(r for r in known if prs[r]["r"]),
+        tuple((r, prs[r]["b"], prs[r]["i"]) for r in known if prs[r]["b"] or prs[r]["i"]),
+        0.0,
+        listed=len(refs),
+        skipped=len(refs) - refreshed,
+        truncated=sum(1 for r in known if prs[r]["t"]),
+    )
+    write_private(_copilot_files_required(env).store, json.dumps({"prs": prs, "tags": tags}))
+    return snap
 
 
-def _copilot_files(env: Mapping[str, str]) -> tuple[Path, Path, Path] | None:
-    """The cache, the refresh lock and the retry state, all in the private cache folder."""
+class CopilotFiles(NamedTuple):
+    cache: Path
+    lock: Path
+    state: Path
+    spawn: Path  # written by views only; the state file is written by the refresh only
+    store: Path
+
+
+def _copilot_files(env: Mapping[str, str]) -> CopilotFiles | None:
+    """The cache, the refresh lock, the retry state, the spawn marker and the store, in the private cache folder."""
     base = cache_dir(env)
     if base is None:
         return None
-    return (
-        base / "safo-activity-copilot.json",
-        base / "safo-activity-copilot.lock",
-        base / "safo-activity-copilot.state",
+    stem = base / "safo-activity-copilot"
+    return CopilotFiles(
+        stem.with_suffix(".json"),
+        stem.with_suffix(".lock"),
+        stem.with_suffix(".state"),
+        stem.with_suffix(".spawn"),
+        stem.with_suffix(".store"),
     )
+
+
+def _copilot_files_required(env: Mapping[str, str]) -> CopilotFiles:
+    files = _copilot_files(env)
+    if files is None:
+        raise OSError("no cache folder")
+    return files
 
 
 def trusted_file(path: Path) -> bool:
@@ -699,23 +877,33 @@ def trusted_file(path: Path) -> bool:
 
 
 def read_copilot_cache(env: Mapping[str, str], now: float) -> CopilotSnap | None:
-    """The cached answer, every value re-checked: a reference must look like owner/repo#number and a count is an int."""
+    """The cached answer, every value re-checked: a reference must look like owner/repo#number and a count is an int
+    in range. One bad value makes the whole file untrusted."""
     files = _copilot_files(env)
-    if files is None or not trusted_file(files[0]):
+    if files is None or not trusted_file(files.cache):
         return None
     try:
-        data = loads(read_bounded(files[0], 100_000))
+        data = loads(read_bounded(files.cache, 100_000))
         stamp = float(data["ts"])
-        if not isinstance(data["ok"], bool) or now - stamp < 0:
+        if not isinstance(data["ok"], bool) or now - stamp < 0 or stamp != stamp:
             return None
         running = tuple(r for r in data["running"] if isinstance(r, str) and REF_RE.fullmatch(r))
         unread = tuple(
-            (r, min(int(b), 10_000), min(int(i), 10_000))
+            (r, _count(b, 10_000), _count(i, 10_000))
             for r, b, i in data["unread"]
             if isinstance(r, str) and REF_RE.fullmatch(r)
         )
-        return CopilotSnap(data["ok"], min(max(int(data["checked"]), 0), 1000), running, unread, now - stamp)
-    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return CopilotSnap(
+            data["ok"],
+            _count(data["checked"], 1000),
+            running,
+            unread,
+            now - stamp,
+            listed=_count(data["listed"], 1000),
+            skipped=_count(data["skipped"], 1000),
+            truncated=_count(data["truncated"], 1000),
+        )
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError):
         return None
 
 
@@ -763,25 +951,29 @@ def release_lock(path: Path) -> None:
 
 
 def read_state(env: Mapping[str, str]) -> dict[str, float]:
+    """The retry state (written only by a refresh holding the lock) and the spawn time (written only by views)."""
     files = _copilot_files(env)
     out = {"next_ok": 0.0, "failures": 0.0, "spawned": 0.0}
-    if files is None or not trusted_file(files[2]):
+    if files is None:
         return out
-    try:
-        data = loads(read_bounded(files[2], 4096))
-        for key in out:
-            value = _num(data.get(key))
-            if value is not None:
-                out[key] = value
-    except (OSError, ValueError, AttributeError, RecursionError):
-        pass
+    for path, keys in ((files.state, ("next_ok", "failures")), (files.spawn, ("spawned",))):
+        if not trusted_file(path):
+            continue
+        try:
+            data = loads(read_bounded(path, 4096))
+            for key in keys:
+                value = _num(data.get(key))
+                if value is not None and 0 <= value < 1e12:
+                    out[key] = value
+        except (OSError, ValueError, AttributeError, RecursionError):
+            continue
     return out
 
 
 def write_state(env: Mapping[str, str], state: Mapping[str, float]) -> None:
     files = _copilot_files(env)
     if files is not None:
-        write_private(files[2], json.dumps(dict(state)))
+        write_private(files.state, json.dumps({k: state[k] for k in ("next_ok", "failures") if k in state}))
 
 
 def failure_wait(failures: int) -> float:
@@ -791,9 +983,10 @@ def failure_wait(failures: int) -> float:
 
 def refresh_copilot(env: Mapping[str, str], cfg: Config, now: float) -> bool:
     """The one place that asks GitHub. At most one refresh runs at a time (exclusive lock), at most one per 60 s, none
-    while a failure backoff or a low REST quota says wait. True when it fetched."""
+    while a failure backoff or a low REST quota says wait. A refresh where most pull request reads failed counts as a
+    failed refresh, with the growing wait. True when it asked."""
     files = _copilot_files(env)
-    if files is None or not acquire_lock(files[1]):
+    if files is None or not acquire_lock(files.lock):
         return False
     try:
         cached = read_copilot_cache(env, now)
@@ -806,27 +999,35 @@ def refresh_copilot(env: Mapping[str, str], cfg: Config, now: float) -> bool:
                 "ts": now,
                 "ok": True,
                 "checked": fresh.checked,
+                "listed": fresh.listed,
+                "skipped": fresh.skipped,
+                "truncated": fresh.truncated,
                 "running": list(fresh.running),
                 "unread": [list(u) for u in fresh.unread],
             }
-            write_private(files[0], json.dumps(body))
-            write_state(env, {**state, "next_ok": now + COPILOT_TTL, "failures": 0.0})
+            write_private(files.cache, json.dumps(body))
+            write_state(env, {"next_ok": now + COPILOT_TTL, "failures": 0.0})
         elif fresh.retry_after:
-            write_state(env, {**state, "next_ok": now + fresh.retry_after})
+            write_state(env, {"next_ok": now + fresh.retry_after, "failures": state["failures"]})
         else:
             failures = int(state["failures"]) + 1
-            write_state(env, {**state, "next_ok": now + failure_wait(failures), "failures": float(failures)})
+            write_state(env, {"next_ok": now + failure_wait(failures), "failures": float(failures)})
         return True
     finally:
-        release_lock(files[1])
+        release_lock(files.lock)
 
 
 def copilot_for_view(env: Mapping[str, str], now: float) -> CopilotSnap | None:
-    """What every view shows: the cache, never a fetch. A missing or old cache starts a background refresh."""
+    """What every view shows: the cache, never a fetch. A missing or old cache starts a background refresh. If the
+    last refresh failed that is said, and no zeros are shown in its place."""
     cached = read_copilot_cache(env, now)
     if cached is None or cached.age >= COPILOT_TTL:
         refresh_in_background(env, now)
-    return cached if cached is not None and cached.age < COPILOT_MAX_AGE else None
+    failures = int(read_state(env)["failures"])
+    shown = cached if cached is not None and cached.age < COPILOT_MAX_AGE else None
+    if failures > 0:
+        return replace(shown, failures=failures) if shown else CopilotSnap(failures=failures)
+    return shown
 
 
 CHILD_ENV_NAMES = ("HOME", "PATH", "LANG")
@@ -843,7 +1044,7 @@ def background_command(env: Mapping[str, str]) -> tuple[list[str], str]:
     """The refresh child: the interpreter in isolated mode (-I: no current directory and no PYTHON* variables on the
     module path), and a trusted working directory, the cache folder."""
     files = _copilot_files(env)
-    return [sys.executable, "-I", "-m", "safo.activity", "--refresh-copilot"], str(files[0].parent if files else "/")
+    return [sys.executable, "-I", "-m", "safo.activity", "--refresh-copilot"], str(files.cache.parent if files else "/")
 
 
 def _spawn(env: Mapping[str, str]) -> None:
@@ -873,9 +1074,9 @@ def refresh_in_background(env: Mapping[str, str], now: float) -> None:
     if now < state["next_ok"] or 0 <= now - state["spawned"] < COPILOT_SPAWN_GAP:
         return
     with contextlib.suppress(OSError):
-        if time.time() - os.lstat(files[1]).st_mtime < LOCK_STALE:
+        if time.time() - os.lstat(files.lock).st_mtime < LOCK_STALE:
             return
-    if write_private(files[2], json.dumps({**state, "spawned": now})):
+    if write_private(files.spawn, json.dumps({"spawned": now})):
         _spawn(env)
 
 
@@ -1270,14 +1471,26 @@ def render_table(rd: Reading) -> list[str]:
                 out.append("  note: in flight = call_start today with no call_end (a crashed call looks the same)")
     cp = rd.copilot
     if cp is not None:
-        if not cp.ok:
-            out.append("Copilot: not available (no reading yet, gh missing, not logged in or offline; segment omitted)")
-        else:
+        if cp.failures:
             out.append(
-                f"Copilot: {len(cp.running)} review running, {len(cp.unread)} unread ({cp.checked} open PRs checked)"
+                f"Copilot: the last refresh failed ({cp.failures} in a row); it retries with a growing wait "
+                + ("and shows the older reading below" if cp.ok else "and has no reading to show")
+            )
+        if not cp.ok:
+            if not cp.failures:
+                out.append(
+                    "Copilot: not available (no reading yet, gh missing, not logged in or offline; segment omitted)"
+                )
+        else:
+            skipped = f", {cp.skipped} not refreshed this round" if cp.skipped else ""
+            out.append(
+                f"Copilot: {len(cp.running)} review running, {len(cp.unread)} unread "
+                f"({cp.checked} of {cp.listed} open PRs known{skipped})"
             )
             out.extend(f"  {ref}  review running" for ref in cp.running)
             out.extend(f"  {ref}  unread: {b} review(s) with text, {i} inline comment(s)" for ref, b, i in cp.unread)
+            if cp.truncated:
+                out.append(f"  note: reviews or comments of {cp.truncated} PR(s) are cut at {COPILOT_PAGES * 100} each")
             out.append("  note: counts only; open the pull request to read the review")
     return out
 

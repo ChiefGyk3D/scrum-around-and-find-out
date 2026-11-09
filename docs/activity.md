@@ -67,25 +67,35 @@ process and shows what the cache has (nothing, until the first refresh lands; a 
 shown). The refresh takes an exclusive lock (a lock older than 2 minutes is taken to be left by a dead process), so
 racing starts do not duplicate it, and it runs at most once per 60 seconds across all processes. It is also bounded by:
 
-- at most 40 REST calls per refresh (pull requests the budget does not reach are skipped), each call 5 seconds, the whole
-  refresh 20 seconds, up to 3 pages of 100 reviews and of inline comments per pull request;
+- at most 15 counted REST calls per refresh, the search included (so about 900 an hour at the very most, with one
+  refresh a minute), each call 5 seconds, the whole refresh 20 seconds counted from its first call. A pull request is
+  read only when the budget can cover it; pull requests are taken oldest-checked first, never-checked ones before all,
+  so the same ones are not skipped every round. What an earlier round learned about a pull request is kept, and the table
+  says how many were not refreshed in the last round (`12 not refreshed this round`);
+- conditional requests: the per-pull-request reads send `If-None-Match` with the stored ETag, and a `304` means
+  unchanged: the stored counts stand, it is not a failure, and it is not charged to the budget (GitHub does not count it
+  against the quota). A new head drops the tags of the reviews and comments. Only counts and tags are stored, never
+  text. This relies on `gh api -i` printing the status line and headers; it is the one place the arguments go beyond
+  `api` and a path (`-i`, and `-H` with `If-None-Match` only);
+- up to 10 pages of 100 reviews and of inline comments per pull request; when the 10th page is still full the table
+  says the counts are cut at 1000;
 - a check of the REST rate limit before it starts (the status call is not counted against the quota): with fewer than
-  500 calls left it waits for the reset, at most an hour;
+  500 calls left it waits for the reset, at most an hour; a `403` or `429` from GitHub ends the round and waits 5 minutes;
 - a backoff after a failed refresh: 60 seconds, then doubling, capped at 15 minutes, recorded in a state file so a
-  failing fetch is not retried every two seconds. A failure never replaces the last good answer.
-
-Conditional requests (ETag) are not used: `gh api` is called with only `api` and a path, and the behavior of a 304 answer
-through it has not been verified.
+  failing fetch is not retried every two seconds. A refresh counts as failed when the search or `gh` fails, or when more
+  than half of the pull request reads it tried failed. A failure never replaces the last good answer, and the table says
+  `the last refresh failed (N in a row)` instead of showing zeros.
 
 Files, all in `$XDG_RUNTIME_DIR` (else `~/.cache`), mode 600, written atomically: `safo-activity-copilot.json` (the
-answer), `.state` (backoff) and `.lock`. A cache of someone else's, writable by others, or a symlink is not read, and
+answer), `.state` (backoff, written only by the refresh), `.spawn` (written only by views), `.store` (per-pull-request
+counts and ETags) and `.lock`. A cache of someone else's, writable by others, or a symlink is not read, and
 every value read back is checked again (a reference must look like `owner/repo#number`) and cleaned before it is
 printed. The same holds for the line cache. The refresh never uses GraphQL, never reads a board, and the only arguments
-it gives `gh` are `api` and a path, so it cannot write.
+it gives `gh` are `api`, a path, and for the conditional reads `-i` and `-H If-None-Match: ...`, so it cannot write.
 
 ### Ledger
 
-Read with a lenient tail reader (the last 256 KiB, the last 1000 lines), not the chain-verifying reader, because a
+Read with a lenient tail reader (the last 256 KiB, the last 1000 lines; a call started before that can look absent), not the chain-verifying reader, because a
 status line must not fail on a broken chain. Unparsable lines are skipped, a symlink or a FIFO is not opened, no lock is
 taken and nothing is written. It shows counts, the action name (`job`) and ages, never a prompt or any other content.
 **In flight** means a `call_start` row from today with no `call_end` row of the same call id; a call that crashed looks
