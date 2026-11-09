@@ -28,6 +28,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
 | `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App installation token on the App credential path, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
 | `agents-status` (the board, Codex, Copilot and the routing-guard counts in one read-only view) | Built, merged on `main` and released in v0.1.0 |
+| `safo-activity` entry point (a one-line status segment, a table, JSON, a watch view and quiet event monitors for Codex jobs and plan windows, the local spend ledger, the local model and Copilot code review; local and read only; the network providers are opt in; a Claude Code pane ships in `mods/ai-activity/`; see [`docs/activity.md`](docs/activity.md)) | Built for #402; in review on a pull request, not yet on `main` |
 | `usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built, merged on `main` and released in v0.1.0 |
 | `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built, merged on `main` and released in v0.1.0 |
 | `outcome add` and `usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built, merged on `main` and released in v0.1.0 |
@@ -163,6 +164,7 @@ replaced are gone.
 - [Board](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board)
 - [Board-yaml](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-yaml)
 - [Agents-status](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Agents-status)
+- [Activity](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Activity)
 - [Lessons](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Lessons)
 - [Measurements](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Measurements)
 - [Action](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Action)
