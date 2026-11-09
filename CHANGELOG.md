@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- `safo-activity` (#402): what Codex, the plan windows, the local spend ledger, the local model and
+  Copilot code review are doing, read only. A new entry point (`safo.activity`; the `safo activity` mode waits for a one-word change to a frozen file, see the pull request): one line for a status
+  line (cached 10 s), `--table`, `--json`, `--watch` (every 2 s) and `--events PROVIDER` (a line only on a state change,
+  at most six per minute and one dropped-count line, ends after 29 minutes and on a signal). Providers: `codex` (jobs of
+  the Codex plugin), `quota` (the 5 hour and weekly windows of Codex from `~/.codex/sessions`, and of Claude from
+  `~/.cache/safo/claude-usage.json`, with `write_claude_usage` for a status line script to fill it; nothing wires it
+  yet), `ledger` (a lenient tail reader, never the chain-verifying one; counts, action names and ages only), and the
+  opt-in network providers `ollama` (one 1 s `GET /api/ps` to an endpoint from the agents config or `$LLM_LOCAL_URL`,
+  never a generate call) and `copilot` (REST only through the machine's `gh` login: is a `Running Copilot Code Review`
+  run queued or in progress on the head, and does `copilot-pull-request-reviewer` have a review with text or an inline
+  comment on it; counts only, at most 15 pull requests, cached 60 s). With no configuration only `codex`, `quota` and
+  `ledger` are read; `SAFO_ACTIVITY_PROVIDERS` or `~/.config/safo/activity.yaml` opt in the rest. Also the Claude Code
+  pane `mods/ai-activity/`, which runs `safo-activity --table` only when it is on the path. Tests:
+  `tests/test_activity.py` (loopback fake Ollama, fake `gh`, fixture rollouts and ledgers), `mods/ai-activity/hooks/ai-activity.test.tsx`.
+  Docs: `docs/activity.md`. Process-launch hardening of the activity provider was added. Review follow-ups: the ledger tail was lowered from 2000 to 1000 lines (`LEDGER_TAIL_LINES`) in the CI-fix commit c9c97a2 so that parsing through the bounded JSON loader stays fast on a status line; a call started more than 1000 rows back can look absent. A refresh where most pull request reads fail now counts as failed and backs off; conditional requests (ETag), a 15-call budget with oldest-first rotation, paging to 10 pages, one bounded Ollama listing thread, and checks on cached counts. Earlier: views read the Copilot cache only and a single locked background refresh fetches it (call budget, rate-limit check, backoff, paging), the pane finds `gh` and `ss` again, and several smaller input and cache checks.
 ## 0.2.0 (2026-11-09)
 
 - First release that carries the Gemini paid-path broker, its installer and units, the approval-binds-prompt change, the

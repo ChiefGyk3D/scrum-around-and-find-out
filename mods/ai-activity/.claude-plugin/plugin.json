@@ -1,0 +1,6 @@
+{
+  "name": "ai-activity",
+  "version": "0.2.0",
+  "description": "A pane beside the chat showing live Codex, plan quota, Ollama, ledger and Copilot review activity from the safo-activity command",
+  "types": "./types/index.d.ts"
+}

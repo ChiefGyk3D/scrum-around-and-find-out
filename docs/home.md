@@ -38,6 +38,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.
 - [Approval issues](approvals.md): how a gate or change approval is read and what it must say.
 - [agents-status](agents-status.md): one read-only view of what every agent is doing.
+- [activity](activity.md): what Codex, the plan windows, the spend ledger, the local model and Copilot review are doing, read only.
 - [Lessons](lessons.md): what went wrong, the evidence, and the rule the code enforces now.
 - [Measurements](measurements.md): what the first month measured, dated and aggregated, and what is not measured yet.
 - [Adoption](adoption.md): create an App, write a `board.yaml`, run it.
