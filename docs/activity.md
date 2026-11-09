@@ -19,7 +19,7 @@ safo-activity --version
 |---|---|---|
 | `codex` | Running jobs of the Codex plugin: `~/.claude/plugins/data/codex-openai-codex/state/*/jobs/*.json`. A job counts as running when its process is alive; a job completed in the last hour counts as done | on |
 | `quota` | The plan windows (5 hour, weekly) of Codex, from the newest of the three latest `~/.codex/sessions/*/*/*/*.jsonl` files, and of Claude, from a small cache file (below). Local files only, no network | on |
-| `ledger` | The local spend ledger kept by the Gemini wrapper (`ledger:` in `~/.config/safo/gemini.yaml`, else `~/.local/share/safo/gemini-spend-ledger.jsonl`): entries today, the newest one's age, and calls in flight | on |
+| `ledger` | The local spend ledger kept by the SAFO wrapper (the `ledger:` key of the wrapper's config file in `~/.config/safo/`, else its default place under `~/.local/share/safo/`): entries today, the newest one's age, and calls in flight | on |
 | `ollama` | The models a local Ollama server has loaded: one `GET /api/ps` under a single 1 second total deadline for all endpoints, never a generate call | opt in |
 | `copilot` | Copilot code review on your open pull requests, through `gh` (REST only) | opt in |
 
@@ -85,7 +85,7 @@ it gives `gh` are `api` and a path, so it cannot write.
 
 ### Ledger
 
-Read with a lenient tail reader (the last 256 KiB, the last 2000 lines), not the chain-verifying reader, because a
+Read with a lenient tail reader (the last 256 KiB, the last 1000 lines), not the chain-verifying reader, because a
 status line must not fail on a broken chain. Unparsable lines are skipped, a symlink or a FIFO is not opened, no lock is
 taken and nothing is written. It shows counts, the action name (`job`) and ages, never a prompt or any other content.
 **In flight** means a `call_start` row from today with no `call_end` row of the same call id; a call that crashed looks
