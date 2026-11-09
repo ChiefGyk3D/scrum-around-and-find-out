@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 MAX_DEPTH = 6
 MAX_UNITS = 400
+MAX_WORD = 4096  # a longer word is refused unread: the old answer stands
 BUILT = "built"
 TOOL = "tool"
 
@@ -181,6 +182,10 @@ def _read_word(t: str, i: int) -> tuple[Word, int]:
     _tick()
     acc: dict = {"val": [], "static": True, "expands": False, "subs": []}
     while i < n:
+        if (i & 63) == 0:
+            _tick()
+        if i - start > MAX_WORD:
+            raise Unreadable("a very long word")
         c = t[i]
         if c == "(" and i > start and t[i - 1] in "<>":
             end = _balanced(t, i + 1)
@@ -213,6 +218,10 @@ def _read_word(t: str, i: int) -> tuple[Word, int]:
             while True:
                 if i >= n:
                     raise Unreadable("unterminated quote")
+                if (i & 63) == 0:
+                    _tick()
+                if i - start > MAX_WORD:
+                    raise Unreadable("a very long word")
                 ch = t[i]
                 if ch == '"':
                     i += 1
@@ -747,7 +756,8 @@ def _cmd_is_data(eff: Eff) -> bool:
     elif cmd == "find":
         ok = not any(w.value in EXEC_FLAGS for w in eff.args)
     elif cmd == "printf":
-        ok = not any(w.value is None or w.value == "-v" for w in eff.args[:1])  # printf -v NAME builds a variable
+        first = eff.args[0].value if eff.args else ""
+        ok = first is not None and (not first.startswith("-") or first == "--")  # -v NAME / -vNAME build a variable
     else:
         ok = cmd in DATA
     return ok
