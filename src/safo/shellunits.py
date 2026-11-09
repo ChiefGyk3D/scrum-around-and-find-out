@@ -548,6 +548,30 @@ def _recurse(script: str, counter: _Counter, tick: Callable[[], None], depth: in
         effective(u, counter, tick, depth + 1, out)
 
 
+def _check_env(rest: list[Word]) -> None:
+    """env builds a command from a string with -S / --split-string (also in clusters and abbreviations), takes other
+    options with values (-C, -a ...), and may carry assignments: only -i, -0, -u NAME, `--` and assignments are read."""
+    k = 0
+    while k < len(rest):
+        v = rest[k].value
+        if v is None:
+            raise Unreadable("dynamic env argument")
+        if _ASSIGN.match(v):
+            k += 1
+        elif v == "--":
+            return
+        elif v in ("-i", "-0", "-", "--ignore-environment", "--null"):
+            k += 1
+        elif v in ("-u", "--unset"):
+            k += 2
+        elif (v.startswith("-u") and not v.startswith("--")) or v.startswith("--unset="):
+            k += 1
+        elif v.startswith("-"):
+            raise Unreadable("an env option that may build a command")
+        else:
+            return
+
+
 def effective(unit: Unit, counter: _Counter, tick: Callable[[], None], depth: int, out: list[Eff]) -> None:
     tick()
     words = list(unit.words)
@@ -570,10 +594,8 @@ def effective(unit: Unit, counter: _Counter, tick: Callable[[], None], depth: in
             words = words[1:]
             continue
         if name in WRAPPERS:
-            if name == "env" and any(
-                w.value is None or w.value.startswith(("-S", "--split-string")) for w in words[1:8]
-            ):
-                raise Unreadable("env -S builds a command from a string")
+            if name == "env":
+                _check_env(words[1:])
             words = _skip_wrapper(name, words[1:])
             wrapped = True
             continue
@@ -640,8 +662,26 @@ _PROGRAM_OPTIONS = re.compile(
 )
 
 
+_VALUE_FLAGS = frozenset({"-m", "--message", "-F", "--file", "-t", "--title", "-b", "--body", "--notes", "-n"})
+
+
+def _plain_words(words: list[Word]) -> bool:
+    """No word can turn into an option or a program: each word is checked as written and as unquoted, and a word
+    holding an expansion is allowed only as the value of a message-type flag or as text that starts with a letter."""
+    for k, w in enumerate(words):
+        for text in (w.raw, w.value or ""):
+            if _PROGRAM_OPTIONS.search(text) or text.startswith(GIT_EXEC_PREFIXES) or text in GIT_EXEC_FLAGS:
+                return False
+        if w.value is None:
+            prev = words[k - 1].value if k else None
+            literal_start = len(w.raw) > 1 and w.raw[0] in "\"'" and w.raw[1] not in "-$`\"'"
+            if prev not in _VALUE_FLAGS and not literal_start:
+                return False
+    return True
+
+
 def _git_data(words: list[Word]) -> bool:
-    if any(_PROGRAM_OPTIONS.search(w.raw) for w in words):
+    if not _plain_words(words):
         return False
     i = 0
     while i < len(words):
@@ -651,15 +691,12 @@ def _git_data(words: list[Word]) -> bool:
         if v == "-C" and i + 1 < len(words):
             i += 2
             continue
-        if v.startswith("-") or v not in GIT_SAFE:
-            return False  # -c k=v, --exec-path, an alias or an external subcommand can run programs
-        rest = [w.raw for w in words[i + 1 :]]
-        return not any(x in GIT_EXEC_FLAGS or (x or "").startswith(GIT_EXEC_PREFIXES) for x in rest)
+        return not v.startswith("-") and v in GIT_SAFE  # -c k=v, an alias or an external subcommand run programs
     return True
 
 
 def _gh_data(words: list[Word]) -> bool:
-    if any(_PROGRAM_OPTIONS.search(w.raw) for w in words):
+    if not _plain_words(words):
         return False
     for w in words:
         if w.value is None:
