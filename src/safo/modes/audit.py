@@ -13,6 +13,7 @@ from safo.errors import EXIT_DRIFT, EXIT_OK, EXIT_UNKNOWN, ConfigError, Malforme
 from safo.gate import gate_findings
 from safo.items import ItemState, collect_work, list_board_items
 from safo.live import LiveBoard, LiveField, load_live
+from safo.mergeability import read_mergeability
 from safo.modes import Mode, register
 from safo.plan import build_plan
 from safo.schema import Board, Field
@@ -111,6 +112,14 @@ def check_tracking(ctx: Context, board: Board, live: LiveBoard, items: list[Item
     held = read_tracked(ctx.client, board, live)
     out.drift += card_findings(board, items, held, repos)
     out.notes += not_configured(board)
+    merge = read_mergeability(ctx.client, board)
+    out.drift += [
+        f"CONFLICT {name} has merge conflicts with its base; rebase or merge the base into it"
+        for name in merge.conflicting
+    ]
+    out.notes += [f"BEHIND {name} is behind its base; update the branch before merging" for name in merge.behind]
+    out.unknown += [f"mergeability of open pull requests could not be read: {why}" for why in merge.malformed]
+    out.notes.append(merge.count_line())
     drift, unknown, notes = gate_findings(ctx.client, board)
     out.drift += drift
     out.unknown += unknown
