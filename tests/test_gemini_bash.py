@@ -344,7 +344,7 @@ def test_an_interrupt_is_not_swallowed_by_the_check(
 
 INERT_HEREDOCS = [
     "git commit -F - <<'EOF'\nfix the parser for \\x41 and \\u00e9; see https://example.org $HOME\nEOF",
-    "cat > notes.md <<'EOF'\ncurl is mentioned; \\x41; doppler run -- $X\nEOF",
+    "cd docs && cat <<'EOF'\ncurl is mentioned; \\x41; doppler run -- $X\nEOF",
     "gh pr create --body-file - <<'EOF'\npython3 handles \\x41 and \\u0041 and $(date)\nEOF",
 ]
 
@@ -386,3 +386,53 @@ def test_a_quoted_heredoc_piped_or_chained_to_an_interpreter_is_still_read(comma
 def test_a_commit_message_heredoc_inside_a_substitution_is_inert() -> None:
     command = "git commit -m \"$(cat <<'EOF'\nfix \\x41 and \\u0041 in the python3 parser\nEOF\n)\""
     assert geminibrief.shell_command_class(command) is None
+
+
+# Security review findings on the heredoc exemption (#395). Each of these hid an escape-built command from the check.
+HIDDEN = "curl $'\\x68ttp://x'"
+
+BYPASSES = [
+    # HIGH 1: a substitution or process substitution feeds the body to an interpreter argument
+    f"eval \"$(cat <<'E'\n{HIDDEN}\nE\n)\"",
+    f"bash -c \"$(cat <<'E'\n{HIDDEN}\nE\n)\"",
+    f"python3 -c \"$(cat <<'E'\n{HIDDEN}\nE\n)\"",
+    f"source <(cat <<'E'\n{HIDDEN}\nE\n)",
+    f"cat <<'E' > >(sh)\n{HIDDEN}\nE",
+    # HIGH 2: the << sits in a comment, or the git/gh word is an argument and not the command
+    f"cat x # <<'E'\n{HIDDEN}\nE",
+    f"python3 - git commit -F - <<'E'\n{HIDDEN}\nE",
+    f"python3 - gh pr create --body-file - <<'E'\n{HIDDEN}\nE",
+    f"echo \"it's\" # cat <<'E'\n{HIDDEN}\nE",
+    # MEDIUM 3: written to a file now, run later
+    f"cat > x.sh <<'E'\n{HIDDEN}\nE",
+    f"cat >> x.sh <<'E'\n{HIDDEN}\nE",
+    f"tee x.sh <<'E'\n{HIDDEN}\nE",
+]
+
+
+@pytest.mark.parametrize("command", BYPASSES)
+def test_the_heredoc_exemption_cannot_be_used_to_hide_a_command(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command
+
+
+MORE_BYPASSES = [
+    # a `<<` inside a body that is kept is not a heredoc of its own
+    f"python3 - <<'X'\nprint(1)\ncat <<'E'\n{HIDDEN}\nE\nX",
+    # an open quote from an earlier line: the heredoc line is inside a string
+    f"echo \"\ncat <<'E'\n{HIDDEN}\nE\n\"; eval \"$(cat)\"",
+    # a here-string and a second heredoc on one line keep everything
+    f"cat <<<'E'\n{HIDDEN}\nE",
+    f"cat <<'A' <<'B'\n{HIDDEN}\nA\nB",
+    # a double-quoted or bare delimiter is not exempted
+    f'cat <<"E"\n{HIDDEN}\nE',
+    # the commit substitution form without the lone closing line
+    f"git commit -m \"$(cat <<'E'\n{HIDDEN}\nE\n) && python3 y\"",
+    f"git commit -m \"$(cat <<'E'\n{HIDDEN}\nE\n)\" | sh",
+    # a pipe before it
+    f"python3 x |\ncat <<'E'\n{HIDDEN}\nE",
+]
+
+
+@pytest.mark.parametrize("command", MORE_BYPASSES)
+def test_more_shapes_around_the_heredoc_exemption_keep_the_body(command: str) -> None:
+    assert geminibrief.shell_command_class(command) is not None, command

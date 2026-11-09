@@ -1219,29 +1219,70 @@ _NETWORK_TOOL = re.compile(
 )
 
 
-# A heredoc with a QUOTED delimiter is inert text (no expansion happens in it), and when the command that owns it is a
-# plain data sink (cat, tee, git commit -F -, gh ... --body-file -) nothing in it is ever run. Its body is left out of
-# the two "built from escapes" and "secret tool with an expansion" checks only; the vendor, key and store checks still
-# read the whole command. A heredoc fed to an interpreter (python3 - <<'E') is code and is always read in full.
-_HEREDOC = re.compile(
-    r"^(?P<head>[^\n]*?)<<-?[ \t]*(?P<q>['\"])(?P<tag>\w+)(?P=q)(?P<rest>[^\n]*)\n(?P<body>.*?)^[ \t]*(?P=tag)[ \t]*$",
-    re.M | re.S,
+# A heredoc body is text, not code, only in a few exactly-shaped commands. Its body is then left out of the two "built
+# from escapes" and "secret tool with an expansion" checks (the vendor, key, store and broker checks still read the
+# whole command). The shapes, each on one line with a QUOTED delimiter and nothing after it:
+#   [cd DIR &&] cat <<'TAG'                      prints to the terminal; no file, no pipe, no substitution
+#   [cd DIR &&] git commit ... -F - <<'TAG'      and   gh <noun> <verb> ... --body-file - <<'TAG'
+#   [cd DIR &&] git commit ... -m "$(cat <<'TAG'   with a lone  )"  line right after the terminator
+# Everything else (an interpreter, a pipe, a file redirect, a process or command substitution, a comment or a quote
+# before the `<<`, a second `<<` on the line, an earlier open quote) keeps the body, so it is read in full. Any doubt
+# keeps the body. A body that is NOT stripped is still skipped over, so a `<<` inside it is never taken for a heredoc.
+_HEREDOC_OPEN = re.compile(r"(?<!<)<<-?[ \t]*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)")
+_DIR = r"(?:cd[ \t]+[\w./~-]+[ \t]*&&[ \t]*)?"
+_SINK_HEAD = re.compile(
+    _DIR + r"(?:cat"
+    r"|git[ \t]+commit(?:[ \t]+[\w./:@=,\"'~-]+)*?[ \t]+(?:-F|--file)[ \t]+-"
+    r"|gh[ \t]+[\w-]+[ \t]+[\w-]+(?:[ \t]+[\w./:@=,\"'~-]+)*?[ \t]+--body-file[ \t]+-)[ \t]*"
 )
-_REST_PLAIN = re.compile(r"\s*(?:>>?\s*[\w./~-]+)?\s*(?:\)\"?)?\s*")  # after the delimiter: a file or a closing `)"`
-_DATA_SINK = re.compile(
-    r"^\s*(?:cat|tee)(?![\w-])|\$\(\s*cat\s*$|(?<![\w.-])git\s+(?:-\S+\s+)*commit\b.*\s(?:-F|--file)\s*-(?:\s|$)"
-    r"|(?<![\w.-])gh\s+.*--(?:body|notes)-file\s+-(?:\s|$)"
-)
+_SINK_SUBST = re.compile(_DIR + r"git[ \t]+commit(?:[ \t]+-[\w-]+)*[ \t]+(?:-m|--message)[ \t]+\"\$\([ \t]*cat[ \t]*")
+_HEAD_CHARS = re.compile(r"[\w ./:@=,\"'~\t&-]*")  # no $ ` ( ) ; | < > # \ { } in the head
+_PREFIX_BAD = re.compile(r"[$`(){}<>|\\#]")
+
+
+def _balanced(text: str) -> bool:
+    return text.count('"') % 2 == 0 and text.count("'") % 2 == 0
 
 
 def _without_inert_heredocs(command: str) -> str:
-    def keep(m: re.Match[str]) -> str:
-        owner = re.split(r"&&|\|\||;|\|", m.group("head"))[-1]  # the command the heredoc is fed to
-        if not _DATA_SINK.search(owner) or not _REST_PLAIN.fullmatch(m.group("rest")):  # `| python3` after it is code
-            return m.group(0)
-        return m.group("head") + "<<" + m.group("tag") + "\n"
-
-    return _HEREDOC.sub(keep, command)
+    lines = command.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        if "<<" not in line:
+            continue
+        opens = _HEREDOC_OPEN.search(line)
+        if opens is None or line.count("<<") != 1:
+            return command  # a here-string, a second heredoc, an odd shape: keep everything
+        tag = opens.group("tag")
+        end = i
+        while end < len(lines) and not re.fullmatch(rf"[ \t]*{re.escape(tag)}[ \t]*", lines[end]):
+            end += 1
+        if end >= len(lines):
+            return command  # no terminator: keep everything
+        head, rest = line[: opens.start()], line[opens.end() :]
+        prefix = "\n".join(out[:-1])
+        inert = (
+            opens.group("q") == "'"
+            and not rest.strip()
+            and not _PREFIX_BAD.search(prefix)
+            and _balanced(prefix)
+            and (
+                (_HEAD_CHARS.fullmatch(head) and _balanced(head) and _SINK_HEAD.fullmatch(head))
+                or (
+                    _SINK_SUBST.fullmatch(head)
+                    and end + 1 < len(lines)
+                    and re.fullmatch(r"[ \t]*\)\"[ \t]*", lines[end + 1])
+                )
+            )
+        )
+        if not inert:
+            out.extend(lines[i:end])  # the body, kept and not scanned for further heredocs
+        i = end
+    return "\n".join(out)
 
 
 def shell_command_class(command: str, deadline: float | None = None) -> str | None:

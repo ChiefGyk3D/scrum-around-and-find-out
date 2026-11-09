@@ -630,7 +630,7 @@ def test_no_detector_pattern_is_missing_from_the_prefilter() -> None:
         "_COMMAND_START", "_GEMINI_OPTION", "_RISK_OPTION", "_RISK_FLAG",
         "RECORD_ID",
         # the Bash command check (#209) is its own scan of a shell command, not a brief detector
-        "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL", "_HEREDOC", "_DATA_SINK", "_REST_PLAIN",
+        "_SHELL_KEY", "_SHELL_PROJECT", "_SHELL_CONFIG", "_SECRET_TOOL", "_NETWORK_TOOL", "_HEREDOC_OPEN", "_SINK_HEAD", "_SINK_SUBST", "_HEAD_CHARS", "_PREFIX_BAD",
         # the broker client module reader (#299): gated by the "broker module" prefilter word or a risk line
         "_BM_ENTRY", "_BM_SCRIPT", "_BM_LOCAL", "_BM_IMPORT", "_BM_CODE", "_BM_DOTTED", "_BM_PATH", "_BM_RUNTIME",
         "_BM_FEED", "_BM_MFLAG", "_BM_OPTION", "_BM_PY_RE", "_BM_ANY_M", "_BM_DYNAMIC",
