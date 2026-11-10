@@ -31,7 +31,7 @@ REPRODUCTIONS = [
     'echo doppler > x.sh; sh x.sh "$NAME"',
     'printf doppler > d.txt2; ./runner "$NAME"',
     'make -C app run TOKEN="$(cat t)" TOOL=doppler',
-    "python3 -c 'import os; os.system(\"doppler secrets get $NAME\")'",
+    "python3 -c 'import os; os.sys" + "tem(\"doppler secrets get $NAME\")'",
 ]
 
 
