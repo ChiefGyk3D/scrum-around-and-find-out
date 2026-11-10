@@ -672,7 +672,16 @@ def unwrap_guarded(command: str) -> str | None:
     if found is None:
         return None
     run = found.group("run")
-    return run if run.split(None, 1)[0] == found.group("probe") and not re.search(r"[;&|`$<>(){}\n]", run) else None
+    return run if COMMAND.fullmatch(run) and run.split(" ", 1)[0] == found.group("probe") else None
+
+
+def _replace_guarded_run(command: str, run: str) -> str:
+    """Replace the command inside a wrapper already accepted by unwrap_guarded()."""
+    found = _GUARDED.fullmatch(command)
+    if found is None:
+        raise ValueError("not a guarded command")
+    start, end = found.span("run")
+    return f"{command[:start]}{run}{command[end:]}"
 
 
 def command_signature(command: str, subcommand: str) -> tuple[str, ...] | None:
@@ -791,8 +800,12 @@ def _ensure(
                     raise ConfigError("settings: ambiguous SAFO hook event/matcher/type; fix by hand")
                 if sig != expected:
                     raise ConfigError("settings: changed invocation; migrate by hand")
-                if isinstance(command, str) and unwrap_guarded(command) is not None:
-                    kept_entry = existing  # the guarded form runs the same command: keep it byte for byte
+                if isinstance(command, str) and (wrapped := unwrap_guarded(command)) is not None and kept_entry is None:
+                    kept_entry = (
+                        existing
+                        if wrapped == entry["command"]
+                        else {**existing, "command": _replace_guarded_run(command, entry["command"])}
+                    )
                 # Normalize all owned fields and collapse duplicates, leaving siblings untouched.
                 if slot is None:
                     slot = len(kept)

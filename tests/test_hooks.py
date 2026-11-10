@@ -2066,6 +2066,78 @@ def test_install_leaves_the_guarded_wrapper_form_alone() -> None:
     assert merged == before
 
 
+def test_install_updates_agent_paths_inside_guarded_wrappers() -> None:
+    from safo.hooks import merge_settings
+
+    settings = _guarded_settings()
+    settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] = (
+        "command -v safo >/dev/null 2>&1 && exec safo hooks probe --agents /old/agents.yaml "
+        "--agents-local /old/local.yaml || exit 0"
+    )
+    settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
+        "command -v safo-guard >/dev/null 2>&1 && exec safo-guard --agents /old/agents.yaml "
+        "--agents-local /old/local.yaml || exit 0"
+    )
+
+    merged, changed = merge_settings(
+        settings,
+        "safo hooks probe --agents /new/agents.yaml --agents-local /new/local.yaml",
+        "safo-guard --agents /new/agents.yaml --agents-local /new/local.yaml",
+    )
+
+    assert changed is True
+    assert merged["hooks"]["SessionStart"][0]["hooks"][0] == {
+        "type": "command",
+        "command": (
+            "command -v safo >/dev/null 2>&1 && exec safo hooks probe --agents /new/agents.yaml "
+            "--agents-local /new/local.yaml || exit 0"
+        ),
+        "timeout": 15,
+    }
+    assert merged["hooks"]["PreToolUse"][0]["hooks"][0] == {
+        "type": "command",
+        "command": (
+            "command -v safo-guard >/dev/null 2>&1 && exec safo-guard --agents /new/agents.yaml "
+            "--agents-local /new/local.yaml || exit 0"
+        ),
+        "timeout": 10,
+        "onFailure": "block",
+    }
+
+
+def test_guarded_duplicates_keep_the_first_entry_deterministically() -> None:
+    from safo.hooks import merge_settings
+
+    settings = _guarded_settings()
+    first = settings["hooks"]["PreToolUse"][0]["hooks"][0]
+    first["marker"] = "first"
+    duplicate = {**first, "marker": "last"}
+    settings["hooks"]["PreToolUse"].append({"hooks": [duplicate], "matcher": "Agent|Task|Bash"})
+
+    merged, changed = merge_settings(settings, "safo hooks probe", "safo-guard")
+
+    assert changed is True
+    assert merged["hooks"]["PreToolUse"] == [{"hooks": [{**first, "marker": "first"}], "matcher": "Agent|Task|Bash"}]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "command -v safo-guard >/dev/null 2>&1 && exec safo-guard\r || exit 0",
+        "command -v 'safo-guard' >/dev/null 2>&1 && exec 'safo-guard' || exit 0",
+        r"command -v safo\-guard >/dev/null 2>&1 && exec safo\-guard || exit 0",
+        "command -v safo-guard >/dev/null 2>&1 && exec safo-guard --agents /tmp/* || exit 0",
+    ],
+)
+def test_wrapper_run_must_be_a_plain_command(command: str) -> None:
+    from safo.hooks import guard_forms, unwrap_guarded
+
+    assert unwrap_guarded(command) is None
+    settings = _guarded_settings()
+    settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = command
+    assert guard_forms(settings) == (set(), [])
+
+
 @pytest.mark.parametrize(
     "command",
     [
