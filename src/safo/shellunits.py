@@ -20,6 +20,7 @@ import posixpath
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from typing import Any
 
 MAX_DEPTH = 6
 MAX_UNITS = 400
@@ -145,7 +146,7 @@ def _backtick(t: str, i: int) -> int:
     raise Unreadable("unterminated backtick")
 
 
-def _dollar(t: str, i: int, acc: dict) -> int:
+def _dollar(t: str, i: int, acc: dict[str, Any]) -> int:
     """Handle a `$` at t[i] (outside single quotes). Returns the new index; records expansions in acc."""
     nxt = t[i + 1 : i + 2]
     if nxt == "(":
@@ -180,7 +181,7 @@ def _read_word(t: str, i: int) -> tuple[Word, int]:
     start = i
     n = len(t)
     _tick()
-    acc: dict = {"val": [], "static": True, "expands": False, "subs": []}
+    acc: dict[str, Any] = {"val": [], "static": True, "expands": False, "subs": []}
     while i < n:
         if (i & 63) == 0:
             _tick()
