@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import re
+import threading
 import time
 
 import pytest
 
-from safo import geminibrief
+from safo import geminibrief, shellunits
 
 REPRODUCTIONS = [
     # env -S splits and expands its value into a command
@@ -52,3 +55,46 @@ def test_a_large_nested_input_is_answered_quickly_and_denied() -> None:
 def test_a_passed_deadline_inside_the_reader_denies() -> None:
     command = "curl $'\\x68ttp://x' " + "'a' " * 15000
     assert geminibrief.shell_command_class(command, time.monotonic() - 1) is not None
+
+
+def test_overlapping_readers_keep_their_own_deadline_callback() -> None:
+    first_started = threading.Event()
+    second_started = threading.Event()
+    finish_second = threading.Event()
+
+    def scan_first() -> None:
+        owner = threading.get_ident()
+        calls = 0
+
+        def tick() -> None:
+            nonlocal calls
+            assert threading.get_ident() == owner
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                assert second_started.wait(2)
+
+        shellunits.classify("echo first", re.compile("x"), re.compile("curl"), tick)
+
+    def scan_second() -> None:
+        assert first_started.wait(2)
+        owner = threading.get_ident()
+
+        def tick() -> None:
+            assert threading.get_ident() == owner
+            second_started.set()
+            assert finish_second.wait(2)
+
+        try:
+            shellunits.classify("echo second", re.compile("x"), re.compile("curl"), tick)
+        finally:
+            finish_second.set()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(scan_first)
+        second = pool.submit(scan_second)
+        try:
+            first.result(timeout=3)
+        finally:
+            finish_second.set()
+        second.result(timeout=3)

@@ -19,6 +19,7 @@ from __future__ import annotations
 import posixpath
 import re
 from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,7 +70,7 @@ def _no_tick() -> None:
     return None
 
 
-_tick: Callable[[], None] = _no_tick  # set by classify() for the length of one call
+_tick: ContextVar[Callable[[], None]] = ContextVar("shellunits_tick", default=_no_tick)
 
 
 class _Counter:
@@ -79,7 +80,7 @@ class _Counter:
 
 
 def _skip_single(t: str, i: int) -> int:
-    _tick()
+    _tick.get()()
     j = t.find("'", i + 1)
     if j < 0:
         raise Unreadable("unterminated quote")
@@ -91,7 +92,7 @@ def _balanced(t: str, i: int) -> int:
     depth = 1
     n = len(t)
     while i < n:
-        _tick()
+        _tick.get()()
         c = t[i]
         if c == "\\":
             i += 2
@@ -136,7 +137,7 @@ def _balanced(t: str, i: int) -> int:
 def _backtick(t: str, i: int) -> int:
     j = i
     while j < len(t):
-        _tick()
+        _tick.get()()
         if t[j] == "\\":
             j += 2
             continue
@@ -180,14 +181,16 @@ def _dollar(t: str, i: int, acc: dict[str, Any]) -> int:
 def _read_word(t: str, i: int) -> tuple[Word, int]:
     start = i
     n = len(t)
-    _tick()
+    _tick.get()()
     acc: dict[str, Any] = {"val": [], "static": True, "expands": False, "subs": []}
     while i < n:
         if (i & 63) == 0:
-            _tick()
+            _tick.get()()
         if i - start > MAX_WORD:
             raise Unreadable("a very long word")
         c = t[i]
+        if c in "<>" and i > start and not re.fullmatch(r"(?:\d*|&)[<>]*", t[start:i]):
+            break
         if c == "(" and i > start and t[i - 1] in "<>":
             end = _balanced(t, i + 1)
             acc["subs"].append(t[i + 1 : end - 1])
@@ -220,7 +223,7 @@ def _read_word(t: str, i: int) -> tuple[Word, int]:
                 if i >= n:
                     raise Unreadable("unterminated quote")
                 if (i & 63) == 0:
-                    _tick()
+                    _tick.get()()
                 if i - start > MAX_WORD:
                     raise Unreadable("a very long word")
                 ch = t[i]
@@ -283,7 +286,7 @@ def _heredoc_body(t: str, i: int, hd: Heredoc) -> int:
     n = len(t)
     body: list[str] = []
     while True:
-        _tick()
+        _tick.get()()
         nl = t.find("\n", pos)
         line = t[pos:] if nl < 0 else t[pos:nl]
         cmp = line.lstrip("\t") if hd.strip else line
@@ -719,7 +722,7 @@ def _gh_data(words: list[Word]) -> bool:
 
 def _ticked(items: list[Eff]) -> Iterator[Eff]:
     for item in items:
-        _tick()
+        _tick.get()()
         yield item
 
 
@@ -740,7 +743,14 @@ def _doc_target(eff: Eff, all_effs: list[Eff]) -> bool:
         if not tv.lower().endswith(DOC_EXT):
             return False
         base = posixpath.basename(tv)
-        if any(other is not eff and base in other.text for other in _ticked(all_effs)):
+        if any(
+            other is not eff
+            and any(
+                word.value is not None and posixpath.basename(word.value) == base
+                for word in [*other.args, *(word for _, word in other.unit.redirs)]
+            )
+            for other in _ticked(all_effs)
+        ):
             return False
         # another command with a glob or an expansion for an argument could name the file without spelling it
         if any(w.value is None for other in _ticked(all_effs) if other is not eff for w in other.args):
@@ -800,12 +810,11 @@ def classify(
     tick: Callable[[], None],
 ) -> str | None:
     """BUILT, TOOL or None for a command the old check would have refused. Raises Unreadable when unsure."""
-    global _tick
-    _tick = tick
+    token = _tick.set(tick)
     try:
         return _classify(command, conceal, network, tick)
     finally:
-        _tick = _no_tick
+        _tick.reset(token)
 
 
 def _classify(
