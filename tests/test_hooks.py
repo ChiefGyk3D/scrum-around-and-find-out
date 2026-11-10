@@ -2034,7 +2034,7 @@ GUARDED_GUARD = "command -v safo-guard >/dev/null 2>&1 && exec safo-guard || exi
 GUARDED_PROBE = "command -v safo >/dev/null 2>&1 && exec safo hooks probe || exit 0"
 
 
-def _guarded_settings() -> dict:
+def _guarded_settings() -> dict[str, Any]:
     return {
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": GUARDED_PROBE, "timeout": 15}]}],
