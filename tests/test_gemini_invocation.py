@@ -78,6 +78,7 @@ STILL_DENIED = [
     f"cat > x.md <<'E'\ncurl {HIDDEN}\nE\nbash x.md",
     f"tee x.sh <<'E'\ncurl {HIDDEN}\nE",
     f"printf 'curl {HIDDEN}' > x.sh; sh x.sh",
+    f"printf 'curl {HIDDEN}'>x.sh; sh x.sh",
     # a data command turned into an executor
     f"git -c alias.x='!curl {HIDDEN}' x",
     f'git rebase -x "curl {HIDDEN}" main',
@@ -108,3 +109,7 @@ STILL_DENIED = [
 @pytest.mark.parametrize("command", STILL_DENIED)
 def test_a_real_invocation_is_still_denied(command: str) -> None:
     assert denied(command), command
+
+
+def test_a_document_name_only_embedded_in_an_argument_does_not_deny() -> None:
+    assert not denied(f"printf 'curl {HIDDEN}' > a.md; echo data.md")
