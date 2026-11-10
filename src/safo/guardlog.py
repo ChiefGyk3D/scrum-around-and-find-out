@@ -111,6 +111,7 @@ DIAGNOSTICS = (
     "unexpected",
     "repo-changed",
     "repo-unbound",
+    "gemini-deny",  # a model-service rule hit (#364): a denial, not a failure
 )
 HEALTH = ("healthy", "degraded", "stale", "unknown")
 RECORD_CAP = 2048
@@ -298,6 +299,8 @@ class GuardCounts:
     local_steps: int
     marked_na: int
     last_flagged: str
+    service_denials: int = 0  # diagnostic gemini-deny: a model-service rule denied the call (#364)
+    parse_failures: int = 0  # diagnostic input: the hook's input could not be parsed
 
 
 def summarise(rows: list[dict[str, Any]]) -> GuardCounts:
@@ -317,6 +320,8 @@ def summarise(rows: list[dict[str, Any]]) -> GuardCounts:
         sum(1 for r in rows if r.get("local_step") is True),
         sum(1 for r in rows if r.get("na") is True),
         last.strip(),
+        sum(1 for r in rows if r.get("diagnostic") == "gemini-deny"),
+        sum(1 for r in rows if r.get("diagnostic") == "input"),
     )
 
 
@@ -348,6 +353,10 @@ def guard_lines(env: Mapping[str, str]) -> list[str]:
     lines.append(
         f"  {counts.total} dispatches since {counts.since}: " + ", ".join(f"{k} {v}" for k, v in counts.decisions)
     )
+    if counts.service_denials:
+        lines.append(f"  model-service denials: {counts.service_denials}")
+    if counts.parse_failures:
+        lines.append(f"  input parse failures: {counts.parse_failures}")
     lines.append(
         "  models: "
         + ", ".join(f"{k} {v}" for k, v in counts.models)

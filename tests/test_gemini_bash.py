@@ -240,7 +240,8 @@ def test_the_hook_denies_a_shell_call_to_the_vendor_even_in_warn_mode(_private_h
     text = reason(out)
     assert "gemini-material" in text and "wrapper" in text and "docs/gemini.md" in text
     assert HOST not in text and "curl" not in text
-    assert read_log(_private_home)[-1]["decision"] == "error"
+    row = read_log(_private_home)[-1]
+    assert (row["decision"], row["diagnostic"], row["health"]) == ("deny", "gemini-deny", "healthy")  # #364
 
 
 def test_the_hook_denies_for_a_sub_agent_call_too(_private_home: Path, agents: Path) -> None:

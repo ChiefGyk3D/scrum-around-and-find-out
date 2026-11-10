@@ -685,7 +685,11 @@ A hook sits inside someone's session, so every error lets the work through, visi
 Under `$XDG_STATE_HOME/safo/hooks` (default `~/.local/state/safo/hooks`), mode 0600: `log.jsonl` (decision, mode, model
 identifier or `unknown`, booleans, rule names, health, diagnostic enum; at most 2048 bytes a record, 4 MiB, one archive)
 and per-session probe files named by a hash of the session id and the merged configuration, holding a completion time,
-booleans and role flags. No prompt, description, address, endpoint name or loaded-model name is stored. Probe files
+booleans and role flags. A shell command denied by the model-service rules (#364) is logged as `decision: deny`,
+`diagnostic: gemini-deny`, `health: healthy`; `safo hooks status` counts those as `model-service denials` and the real
+unparseable-input errors (`diagnostic: input`) as `input parse failures`, on separate lines. A command the check could
+not finish is still a degraded `error` with `input`. A log row with `gemini-deny` is not valid to a safo from before
+this change, which skips it and reports the log as degraded. No prompt, description, address, endpoint name or loaded-model name is stored. Probe files
 untouched for a week are removed when a session starts. The mode lives in `~/.config/safo/mode`.
 
 SAFO creates its own state and config directories mode 0700. Before it uses one, the directory must be owned by the

@@ -72,6 +72,7 @@ never repeated. Unverified: the live shape of the REST items listing and the Epi
 
 ## Not done here
 
-`safo-ratebudget` and `safo-card` are their own console scripts, not `safo` subcommands: a subcommand must also be added
-to `TOP_LEVEL_COMMANDS` in `modes/hooks.py`, which is a guard file (#357) and needs the maintainer's word. This does not change the dispatch guard's issue lookup (a guard file; #357) or the session hooks. Wire `ghw` in
-place of `gh` in briefs and scripts by hand; briefs should say: read issues over REST, no board-wide lists, never poll.
+`safo ratebudget` and `safo card` are subcommands that run the same code as the `safo-ratebudget` and `safo-card`
+scripts (both are in `TOP_LEVEL_COMMANDS` in `modes/hooks.py`, which the dispatch guard reads). This does not change the
+dispatch guard's issue lookup (a guard file; #357, #370) or the session hooks. Wire `ghw` in place of `gh` in briefs and
+scripts by hand; briefs should say: read issues over REST, no board-wide lists, never poll.

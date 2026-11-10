@@ -73,14 +73,19 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="safo-card", description="edit one project card with one REST PATCH")
+def add_arguments(p: argparse.ArgumentParser) -> None:
+    """The arguments, shared by `safo-card` and `safo card`."""
     p.add_argument("issue", help="owner/repo#N")
     p.add_argument("edits", nargs="*", help="Field=Value (Field= clears)")
     p.add_argument("--item-id", type=int, default=0, help="the card's project item id; remembered in the map")
     p.add_argument("--resolve", action="store_true", help="find the item id with two REST reads, once")
     p.add_argument("--option", action="append", default=[], help="learn an option: Field:Name=ID (8 hex digits)")
     p.add_argument("--dry-run", dest="card_dry_run", action="store_true", help="print the request, send nothing")
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="safo-card", description="edit one project card with one REST PATCH")
+    add_arguments(p)
     return p
 
 
