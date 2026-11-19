@@ -2,11 +2,15 @@
 
 ## Unreleased
 
-- Narrow the material rule to vendor invocations (#388). In a Bash command the secret tool and the network tools count
-  only as a command word, and the expansion, the project name, the paid config and `prd` must sit in the same simple
-  command as the tool; prose, here-document bodies, paths, comments and separate commands no longer deny. The vendor
-  host, SDK, key variable, escape-built words beside a run tool and text fed to a shell stay denied. In a brief, a line
-  over 4000 characters that only names the word `gemini` is no longer refused unread. See docs/hooks.md for the lists.
+- Narrow the shell material rule so it fails closed (#388). The old denial stays the default for the whole submitted
+  command; it is relaxed only when a small lexer proves the protected words are text: they stand in comments, or every
+  command is on a short allowlist of text commands (commit message and issue or pull request body options, a
+  file-writing here-document, grep and ripgrep, echo and printf, a few read-only ones) and the words stand in quoted
+  arguments, paths or here-document bodies. A pipe or redirect into a shell or interpreter, `eval`, `source`, a shell or
+  interpreter with an inline-code option, a variable run as a command, wrappers, assignment prefixes and any form the
+  lexer does not model stay denied. The vendor host, SDK and key variable are never relaxed. The part of #388 about a
+  brief line over 4000 characters is NOT fixed: such a line is still refused unread, because an unread line cannot be
+  shown harmless. See docs/hooks.md.
 
 ## 0.2.0 (2026-11-09)
 

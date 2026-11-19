@@ -412,34 +412,42 @@ that must pass the strict check:
 
 The same rules also look at every Bash call, the lead's and a sub-agent's, in the foreground or the background, before
 the lead-never-waits rule runs. This is a cheap, fail-closed deny, not a shell model. A command is denied, in every mode,
-when it names the vendor API host, the Google genai SDK or the key variable (`GEMINI_API_KEY`), or when it runs
-`doppler` with the paid config (`prd_paid`), the secret-store project (`image-gen`) or the config `prd` in the same simple
-command (the names in [Gemini keys](gemini-keys.md) and `examples/gemini.example.yaml`). Quotes, backslashes, line
-continuations, comments and look-alike letters are removed or folded first, the same views the brief scan uses, so
-`gen""erative...` is seen. Two more forms are denied without a name on the page: a word built with escapes (an ANSI-C
-`$'...'` word, a hex, octal or `\u` escape, `printf -v`) in a command that also runs a network tool or `doppler`, and
-`doppler` run with any `$` expansion or backtick in the same simple command. Nothing is resolved: a variable's value is
-never looked up.
+when it names the vendor API host, the Google genai SDK, the key variable (`GEMINI_API_KEY`), the paid config
+(`prd_paid`) or the secret-store project (`image-gen`), or the config `prd` beside `doppler` (the names in
+[Gemini keys](gemini-keys.md) and `examples/gemini.example.yaml`). Quotes, backslashes, line continuations and
+look-alike letters are removed or folded first, the same views the brief scan uses, so `gen""erative...` is seen. Two
+more forms are denied without a name on the page: a word built with escapes (an ANSI-C `$'...'` word, a hex, octal or
+`\u` escape, `printf -v`) in a command that also runs a network tool or `doppler`, and `doppler` with any `$` expansion
+or backtick. All of this applies to the whole submitted command, wherever the words stand. Nothing is resolved: a
+variable's value is never looked up.
 
-Since #388 the material rule fires on an invocation, not on a word. A secret tool or a network tool counts as run only
-where a command word stands: at the start of a simple command, after `; | & ( $(` or a backtick, after a prefix word
-(`env`, `sudo`, `time`, `nohup`, `xargs`, `exec`, `command`, a shell, `-c`, `--`) or after a `NAME=value` word. The
-simple command ends at the next `; | & )`.
+**Narrowing (#388): the denial above is the default and is relaxed only on a positive proof.** A finite list of
+prefixes and wrappers is not a shell grammar, so the check does not try to find the secret tool in command position.
+Instead a small lexer (`src/safo/shellproof.py`) reads the command, and the project name, the paid config, `prd`, an
+expansion beside the secret tool and an escape-built word stop denying only in one of two cases:
 
-**Allowed now** (each is a regression test in the two #388 test files): the tool name, the project name or the paid
-config name as prose, a path, a comment or an argument of another command (a grep, a commit message); a here-document
-or a printf that holds an expansion and names the tool as text; the tool run in one command and an expansion in another;
-an escape sequence beside prose words such as ssh; and a brief line over 4000 characters that only names the vendor in
-prose.
+- **Comments.** The only places those words stand are comments (a `#` that starts a word outside every quote).
+- **Allowlisted text commands.** Every simple command in the submitted command is one of `echo`, `printf` (not `-v`),
+  `cat`, `grep`, `rg` (not `--pre` or `--hostname-bin`), `head`, `tail`, `wc`, `date`, `pwd`, `git commit` (optionally
+  after `-C path`) or `gh issue|pr <comment|create|edit|close|reopen|review|view|list|ready>`, spelled as a plain
+  word. The words stand in quoted arguments, paths, here-document bodies, or a `$(...)` that runs only `date`, `pwd`,
+  `printf` or `echo`. Pipes and `;`, `&&`, `||` between such commands are fine; a redirect to a file is fine (a
+  `/dev/` path other than null, stdin, stdout and stderr is not); a here-document is fine with a quoted or unquoted
+  delimiter (an unquoted body may expand only the same harmless forms).
 
-- **Still denied:** the vendor host, SDK and key variable anywhere in a command; `doppler` run with the project, the
-  paid config or `prd`, or with an expansion or backtick, in the same simple command; the same names and the tool in text
-  fed to a shell (`| sh`, `eval`, `source`); an escape-built word beside a network tool or `doppler` run as a command
-  (also in a separate command on the same line); a command built at run time; the broker client module; a tool word
-  that follows `; & |` even inside prose (the split is not quote-aware); and a long line that holds a declaration,
-  `safo` or any route hint, the vendor host, the paid config, the broker client or a decode form.
-- Converted tests (each pinned a shape listed in #388 as a false positive, and the real invocation beside it is still
-  denied): see the commit message of the #388 change.
+**Denied as before** (no proof, so the old rule stands): anything else in the command. That includes a pipe or redirect
+or here-string into a shell or an interpreter, `eval`, `source` and `.`, a shell with `-c`, an interpreter with an
+inline-code option, a variable whose value is run (`D=...; $D ...`), a command substitution or expansion as the command
+word, `xargs` and `find -exec`, any wrapper (`env`, `timeout`, `nice`, `sudo`, `time`, `command`, `exec` and the like), an
+assignment prefix (`DOPPLER_PROJECT=... cmd`, `env DOPPLER_CONFIG=... cmd`), a subshell or group, a background `&`, a
+line continuation, a control character, a backtick, an unterminated quote or here-document, and every form the lexer
+does not model (any parse doubt is a denial). The vendor host, the SDK, the key variable and the broker client module are
+never relaxed, wherever they stand, a comment or a commit message included. Each is a regression test in
+`tests/test_gemini_bash_narrow.py`; the denying shapes are built from fragments at run time.
+
+**Not fixed by #388: a long line in a brief.** A brief line over 4000 characters that names the vendor is still refused
+unread. A line that is not read cannot be shown harmless (a whole program can fit in it), so that part of issue 388 stays
+open; see `tests/test_gemini_long_line.py`.
 
 Nothing is exempt by where it runs: not the wrapper, not a working directory, not a tool name, not this repository.
 `safo gemini ...` commands as documented name none of the protected names, so the check does not touch them; a command

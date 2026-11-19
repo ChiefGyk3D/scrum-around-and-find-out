@@ -118,8 +118,9 @@ def test_the_classifier_leaves_ordinary_commands_alone(command: str) -> None:
 
 
 def test_the_wrapper_is_not_exempt_when_it_carries_a_name() -> None:
-    # #388 (converted): the paid config as part of a prompt file path is a name, not an invocation, so it is allowed
-    assert geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is None
+    assert (
+        geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is not None
+    )
     assert geminibrief.shell_command_class(f"python3 -m safo gemini quota # {KEY}") is not None
 
 
@@ -211,10 +212,10 @@ def test_nothing_is_exempt_by_where_it_runs_or_what_tool_it_is(command: str) -> 
         f"grep -rn . ~/.config/safo # {PROJECT}",
     ],
 )
-def test_a_bare_secret_store_name_is_not_an_invocation(command: str) -> None:
-    # #388 (converted from the four cases that sat in the denying list above): the project or the paid config named
-    # in a grep argument or a comment, with no secret tool run, is a name and not a route to the key. The same names
-    # given to the secret tool stay denied (test_the_classifier_denies_commands_that_reach_the_vendor_or_its_key).
+def test_a_name_in_a_path_a_pattern_or_a_comment_is_proven_harmless(command: str) -> None:
+    # #388 (converted from four cases that sat in the denying list above): the command is made of allowlisted text
+    # commands, or the name sits in a comment; the same names given to the secret tool stay denied
+    # (test_the_classifier_denies_commands_that_reach_the_vendor_or_its_key, tests/test_gemini_bash_narrow.py).
     assert geminibrief.shell_command_class(command) is None, command
 
 
@@ -234,7 +235,7 @@ def test_a_directory_with_spoofed_marker_files_is_denied(_private_home: Path, ag
     (fake / "src" / "safo").mkdir(parents=True)
     (fake / "src" / "safo" / "geminibrief.py").write_text("")
     (fake / "pyproject.toml").write_text("")
-    # #388 (converted): a bare config name is no longer a denial in any directory; a real vendor call still is
+    # #388 (converted): a bare config name in a cat is proven text and is no denial in any directory; a real route is
     assert not denied(run(agents, _private_home, event(f"cat {PAID}", cwd=fake))[0])
     assert denied(run(agents, _private_home, event(f"curl https://{HOST}", cwd=fake))[0])
 
