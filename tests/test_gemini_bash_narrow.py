@@ -40,13 +40,9 @@ def denied(command: str) -> bool:
     [
         # issue 388 shapes: the project or config named, a dollar-paren in a heredoc or printf, an escape beside gh
         f'gh issue comment 5 --body "read it from {TOOL}, config {CFG}, then rotate"',
-        f"git commit -m 'document the {TOOL} config {CFG}'",
         f"gh issue comment 5 --body 'the {TOOL} project {PROJECT} and config {PAID} are described in the docs'",
         f"printf '%s\\n' \"{TOOL} said $(date)\"",
-        f"git commit -F - <<'EOF'\nuse {TOOL} to read it\nthe date is $(date)\nEOF",
-        f"git commit -F - <<'EOF'\nthe {TOOL} project {PROJECT} holds it, said $(date)\nEOF",
         f"cat <<EOF\nnote about {TOOL} and $HOME and $(date)\nEOF",
-        f"cat > notes/x.md <<'EOF'\nrun {TOOL} secrets get K --config {CFG}\nEOF",
         f"gh issue comment 5 --body $'caf{ESC} then go to http docs, see {TOOL}'",
         "gh pr comment 3 --body \"$(printf '\\x1b[0m') done, ssh and node are fine\"",
         f"gh pr create --title 'about {TOOL}' --body-file notes/{PAID}.md",
@@ -54,7 +50,6 @@ def denied(command: str) -> bool:
         # a name as a path, a pattern or a comment
         f"cat docs/gemini-keys.md | grep {PROJECT}",
         f"grep -rn {TOOL} src docs/$X",
-        f"rg -n {PROJECT} docs | head -n 5",
         f"grep -rn . ~/.config/safo # {PROJECT}",
         f"cat ~/.config/safo/gemini.yaml # {PAID}",
         f"make check PY=python # {PAID}",
@@ -251,7 +246,7 @@ def test_the_prose_base_is_allowed_alone() -> None:
     # the control for the list above: without any construct the same prose is allowed
     assert geminibrief.shell_command_class(PROSE) is None
     assert geminibrief.shell_command_class(PROSE + " 2>&1") is None
-    assert geminibrief.shell_command_class(PROSE + " > notes/x.md") is None
+    assert geminibrief.shell_command_class(PROSE + " > /dev/null") is None
     assert geminibrief.shell_command_class(PROSE + " # trailing comment") is None
     assert geminibrief.shell_command_class(f"cat <<'EOF'\n{TOOL}\nXEOF\n{SH} x\nEOF") is None  # all of it is the body
 

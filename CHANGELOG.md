@@ -4,9 +4,10 @@
 
 - Narrow the shell material rule so it fails closed (#388). The old denial stays the default for the whole submitted
   command; it is relaxed only when a small lexer proves the protected words are text: they stand in comments, or every
-  command is on a short allowlist of text commands (commit message and issue or pull request body options, a
-  file-writing here-document, grep and ripgrep, echo and printf, a few read-only ones) and the words stand in quoted
-  arguments, paths or here-document bodies. A pipe or redirect into a shell or interpreter, `eval`, `source`, a shell or
+  command is on a short allowlist of text commands (issue and pull request body options, grep, echo and printf, a few
+  read-only ones), the words stand in quoted arguments, paths or here-document bodies, and nothing is written to a file.
+  Relaxed: comments, issue and pull request bodies, grep, echo and printf to standard output. NOT relaxed: commit
+  messages (a commit can run hooks or an editor), file-writing here-documents, ripgrep and long brief lines. A pipe or redirect into a shell or interpreter, `eval`, `source`, a shell or
   interpreter with an inline-code option, a variable run as a command, wrappers, assignment prefixes and any form the
   lexer does not model stay denied. The vendor host, SDK and key variable are never relaxed. The part of #388 about a
   brief line over 4000 characters is NOT fixed: such a line is still refused unread, because an unread line cannot be

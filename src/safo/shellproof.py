@@ -21,11 +21,16 @@ import dataclasses
 import re
 from collections.abc import Callable
 
-SAFE_COMMANDS = frozenset({"echo", "printf", "cat", "grep", "rg", "head", "tail", "wc", "date", "pwd"})
+SAFE_COMMANDS = frozenset({"echo", "printf", "cat", "grep", "head", "tail", "wc", "date", "pwd"})
 SUBST_COMMANDS = frozenset({"date", "pwd", "printf", "echo"})  # all a command substitution may run
 GH_AREAS = frozenset({"issue", "pr"})
 GH_VERBS = frozenset({"comment", "create", "edit", "close", "reopen", "review", "view", "list", "ready"})
 DEV_OK = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin"})
+OUT_OK = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})  # the only files a command may write
+GH_BODY_VERBS = frozenset({"comment", "create", "edit", "review"})  # these can start an editor without a body option
+_BODY_OPTION = re.compile(r"-b|--body(-file)?(=.*)?|-F|--body-file(=.*)?")
+_VALUE_OPTIONS = frozenset({"-b", "--body", "-F", "--body-file", "-t", "--title"})
+_EDITOR_OPTION = re.compile(r"--editor(=.*)?|-[A-Za-z]*e[A-Za-z]*")
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _BRACED = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
@@ -69,6 +74,9 @@ class Parsed:
 
     def pure(self) -> bool:
         return all(_command_ok(cmd) for cmd in self.cmds)
+
+    def writes_no_file(self) -> bool:
+        return all(redirects_ok(cmd) for cmd in self.cmds)
 
 
 def parse(command: str, tick: Callable[[], None]) -> Parsed | None:
@@ -421,19 +429,6 @@ def _args_ok(name: str, args: list[Word]) -> bool:
     if name == "printf":
         # `printf -v` builds a variable; an unknown first argument could be that option
         return bool(args) and args[0].value is not None and not args[0].value.startswith("-v")
-    if name == "rg":
-        for word in args:
-            if word.value is None:
-                if word.starts_expanded:
-                    return False  # could expand to an option that runs a program
-                continue
-            option = word.value.split("=", 1)[0]
-            if option.startswith("--") and (
-                option.startswith(("--pre", "--host")) or ("--pre".startswith(option) and len(option) >= 3)
-            ):
-                return False
-            if option.startswith("--") and "--hostname-bin".startswith(option) and len(option) >= 4:
-                return False
     return True
 
 
@@ -447,26 +442,57 @@ def _command_ok(cmd: Cmd) -> bool:
     if name in SAFE_COMMANDS:
         if not _args_ok(name, args):
             return False
-    elif name == "git":
-        i = 0
-        if args and args[0].plain and args[0].value == "-C":
-            i = 2
-        if len(args) <= i or not args[i].plain or args[i].value != "commit":
-            return False
     elif name == "gh":
         if len(args) < 2 or not (args[0].plain and args[1].plain):
             return False
         if args[0].value not in GH_AREAS or args[1].value not in GH_VERBS:
             return False
+        if not _gh_args_ok(args[1].value, args[2:]):
+            return False
     else:
         return False
+    return redirects_ok(cmd)
+
+
+def redirects_ok(cmd: Cmd) -> bool:
+    """Output goes only to the null device or the standard streams; a file is never written. A `<` source is spelled out
+    and is not a device other than the standard ones."""
     for op, target in cmd.redirs:
-        if op in (">", ">>", "<"):
+        if op in (">", ">>"):
+            if target is None or not target.plain or target.value not in OUT_OK:
+                return False
+        elif op == "<":
             if target is None or not target.plain or target.value is None:
-                return False  # the path of a redirect must be spelled out
+                return False
             if "/dev/" in target.value and target.value not in DEV_OK:
                 return False  # a device path can be a network connection
-        elif op == "<<<":
-            if target is None:
-                return False
+        elif op == "<<<" and target is None:
+            return False
     return True
+
+
+def _gh_args_ok(verb: str | None, args: list[Word]) -> bool:
+    """A body or body-file option for the verbs that would otherwise open an editor, and no editor option or option
+    word that is only known at run time."""
+    body = False
+    takes_value = False  # the word before was an option whose value this word is
+    for word in args:
+        value_of_option, takes_value = takes_value, False
+        if word.value is None:
+            if word.starts_expanded and not value_of_option:
+                return False
+            continue
+        takes_value = word.plain and word.value in _VALUE_OPTIONS
+        if value_of_option:
+            continue  # its text is the value, whatever it looks like
+        if _EDITOR_OPTION.fullmatch(word.value):
+            return False
+        if _BODY_OPTION.fullmatch(word.value) and word.plain:
+            body = True
+    if word_requires_body(verb):
+        return body
+    return True
+
+
+def word_requires_body(verb: str | None) -> bool:
+    return verb in GH_BODY_VERBS

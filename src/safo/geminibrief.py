@@ -1246,8 +1246,8 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
             return found  # a form the proof does not model
         if parsed.pure():
             return None
-        if _classify(parsed.without_comments(), tick, soft=True) is None:
-            return None  # the names sit only in comments, which no shell runs
+        if parsed.writes_no_file() and _classify(parsed.without_comments(), tick, soft=True) is None:
+            return None  # the names sit only in comments, which no shell runs, and no file is written
         return found
     except TimeoutError:
         return SHELL_UNVERIFIED

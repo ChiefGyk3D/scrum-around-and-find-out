@@ -428,12 +428,18 @@ expansion beside the secret tool and an escape-built word stop denying only in o
 
 - **Comments.** The only places those words stand are comments (a `#` that starts a word outside every quote).
 - **Allowlisted text commands.** Every simple command in the submitted command is one of `echo`, `printf` (not `-v`),
-  `cat`, `grep`, `rg` (not `--pre` or `--hostname-bin`), `head`, `tail`, `wc`, `date`, `pwd`, `git commit` (optionally
-  after `-C path`) or `gh issue|pr <comment|create|edit|close|reopen|review|view|list|ready>`, spelled as a plain
-  word. The words stand in quoted arguments, paths, here-document bodies, or a `$(...)` that runs only `date`, `pwd`,
-  `printf` or `echo`. Pipes and `;`, `&&`, `||` between such commands are fine; a redirect to a file is fine (a
-  `/dev/` path other than null, stdin, stdout and stderr is not); a here-document is fine with a quoted or unquoted
-  delimiter (an unquoted body may expand only the same harmless forms).
+  `cat`, `grep`, `head`, `tail`, `wc`, `date`, `pwd`, or `gh issue|pr <verb>` (comment, create, edit, review, close,
+  reopen, view, list, ready), spelled as a plain word. The verbs comment, create, edit and review need a body or
+  body-file option and no editor option, so none can open an editor. The words stand in quoted arguments, paths,
+  here-document bodies, or a `$(...)` that runs only `date`, `pwd`, `printf` or `echo`. Pipes and `;`, `&&`, `||`
+  between such commands are fine. Output may go only to standard output, standard error or the null device: **a command
+  that writes to any file is never proven harmless**, and neither is a comment-only command that does.
+
+**Issue 388 shapes, plainly.** Relaxed: protected words in a comment, in an issue or pull-request body (`gh` with a body
+option), as a grep pattern or path, and in `echo` or `printf` to standard output (a `$(date)` or an escape sequence in
+them is fine). NOT relaxed, because the proof cannot show them harmless: a file-writing here-document (`cat > path
+<<EOF`), a commit message (a commit can run hooks or an editor), ripgrep (its options can run a program), and a long
+brief line.
 
 **Denied as before** (no proof, so the old rule stands): anything else in the command. That includes a pipe or redirect
 or here-string into a shell or an interpreter, `eval`, `source` and `.`, a shell with `-c`, an interpreter with an
