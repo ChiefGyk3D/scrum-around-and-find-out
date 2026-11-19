@@ -482,9 +482,9 @@ def _gh_args_ok(verb: str | None, args: list[Word]) -> bool:
             if word.starts_expanded and not value_of_option:
                 return False
             continue
-        takes_value = word.plain and word.value in _VALUE_OPTIONS
         if value_of_option:
-            continue  # its text is the value, whatever it looks like
+            continue  # its text is the value, whatever it looks like; it takes no value of its own
+        takes_value = word.plain and word.value in _VALUE_OPTIONS
         if _EDITOR_OPTION.fullmatch(word.value):
             return False
         if _BODY_OPTION.fullmatch(word.value) and word.plain:
