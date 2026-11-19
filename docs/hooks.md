@@ -427,19 +427,27 @@ Instead a small lexer (`src/safo/shellproof.py`) reads the command, and the proj
 expansion beside the secret tool and an escape-built word stop denying only in one of two cases:
 
 - **Comments.** The only places those words stand are comments (a `#` that starts a word outside every quote).
-- **Allowlisted text commands.** Every simple command in the submitted command is one of `echo`, `printf` (not `-v`),
-  `cat`, `grep`, `head`, `tail`, `wc`, `date`, `pwd`, or `gh issue|pr <verb>` (comment, create, edit, review, close,
-  reopen, view, list, ready), spelled as a plain word. The verbs comment, create, edit and review need a body or
-  body-file option and no editor option, so none can open an editor. The words stand in quoted arguments, paths,
-  here-document bodies, or a `$(...)` that runs only `date`, `pwd`, `printf` or `echo`. Pipes and `;`, `&&`, `||`
-  between such commands are fine. Output may go only to standard output, standard error or the null device: **a command
-  that writes to any file is never proven harmless**, and neither is a comment-only command that does.
+- **Allowlisted commands.** Every simple command in the submitted command is one of: `echo`, `printf` (not `-v`),
+  `cat`, `grep`, `head`, `tail`, `wc`, `date`, `pwd`, or `gh issue|pr <verb>`, spelled as a plain word. The protected
+  words may then stand in any argument, quoted or not, in a path, in a here-document body, or in a `$(...)` that runs
+  only `date`, `pwd`, `printf` or `echo`. This relaxes a name check; it does not prove the commands are text-only:
+  `cat`, `head` and `tail` read files, which is why a `gh` command that receives stdin (it is on the right of a pipe,
+  or has an input redirect, here-document or here-string) is never relaxed.
+  `gh` has a verb-specific POSITIVE option list. comment: `-b/--body`. create: body, `-t/--title`, `-l/--label`,
+  `--draft`. edit: body, title, `--add-label`, `--remove-label`. review: body, `-c/--comment`, `-a/--approve`. close:
+  `-c/--comment`, `-r/--reason`. reopen: `-c/--comment`. view, list and ready: no options. Positional words are numbers
+  or branch names, never a URL. comment, create, edit and review need a literal body option. Anything else is not
+  relaxed: `--body-file`/`-F` (it reads a file or stdin), `--attach`, `--template`, `--recover`, the fill options,
+  `--web`, `-R/--repo` and any host selector, editor options, option clusters, `--`, and any option word known only at
+  run time. Pipes and `;`, `&&`, `||` between listed commands are fine. Output may go only to standard output, standard
+  error or the null device: a command that writes to any file is never relaxed, and neither is a comment-only command
+  that does.
 
-**Issue 388 shapes, plainly.** Relaxed: protected words in a comment, in an issue or pull-request body (`gh` with a body
-option), as a grep pattern or path, and in `echo` or `printf` to standard output (a `$(date)` or an escape sequence in
-them is fine). NOT relaxed, because the proof cannot show them harmless: a file-writing here-document (`cat > path
-<<EOF`), a commit message (a commit can run hooks or an editor), ripgrep (its options can run a program), and a long
-brief line.
+**Issue 388 shapes, plainly.** Relaxed: protected words in a comment; in a `gh` issue or pull-request command with a
+literal body; as a grep pattern or path; in `echo`, `printf`, `cat`, `head`, `tail`, `wc`, `date` and `pwd` to standard
+output (a `$(date)` or an escape sequence in them is fine). NOT relaxed: a file-writing here-document (`cat > path
+<<EOF`), a commit message (a commit can run hooks or an editor), ripgrep (its options can run a program), `gh` with a
+body file, an attachment or another repository, and a long brief line.
 
 **Denied as before** (no proof, so the old rule stands): anything else in the command. That includes a pipe or redirect
 or here-string into a shell or an interpreter, `eval`, `source` and `.`, a shell with `-c`, an interpreter with an

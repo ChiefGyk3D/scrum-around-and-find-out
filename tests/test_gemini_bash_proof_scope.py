@@ -106,8 +106,6 @@ def test_a_code_host_verb_that_can_start_an_editor_needs_a_body_and_no_editor_op
     [
         f"{GH} issue comment 5 --body '{TEXT}'",
         f"{GH} issue comment 5 -b '{TEXT}'",
-        f"{GH} pr comment 3 --body-file notes/{PAID}.md",
-        f"{GH} pr comment 3 -F notes/{PAID}.md",
         f"{GH} pr create --title 'x' --body '{TEXT}'",
         f"{GH} pr edit 3 --body '{TEXT}'",
         f"{GH} pr review 3 --comment --body '{TEXT}'",

@@ -45,7 +45,6 @@ def denied(command: str) -> bool:
         f"cat <<EOF\nnote about {TOOL} and $HOME and $(date)\nEOF",
         f"gh issue comment 5 --body $'caf{ESC} then go to http docs, see {TOOL}'",
         "gh pr comment 3 --body \"$(printf '\\x1b[0m') done, ssh and node are fine\"",
-        f"gh pr create --title 'about {TOOL}' --body-file notes/{PAID}.md",
         f"echo $'\\x41' | grep -c {TOOL}",
         # a name as a path, a pattern or a comment
         f"cat docs/gemini-keys.md | grep {PROJECT}",

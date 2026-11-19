@@ -5,11 +5,14 @@ This is not a shell model and it does not look for danger. It reads a command wi
 two questions, and any form it does not model is a `Doubt`, which the caller treats as "not proven":
 
 * `Parsed.without_comments()`: the command with real comments removed (a `#` that starts a word, outside every quote);
-* `Parsed.pure()`: whether EVERY simple command is on a short allowlist of commands that only print, search, read or
-  write text (echo, printf, cat, grep, rg, head, tail, wc, date, pwd, `git commit`, `gh issue|pr <verb>`), is spelled as
-  a plain word, takes no assignment prefix, no wrapper, no expansion that could become a command, and is not redirected
-  or piped into anything off that list. In such a command every argument, here-document body and redirect target is
-  text: nothing in it is run.
+* `Parsed.pure()`: whether EVERY simple command is on a short allowlist, is spelled as a plain word, takes no
+  assignment prefix, no wrapper and no expansion that could become a command, writes no file, and is not redirected or
+  piped into anything off the list. The list is: echo, printf (not -v), cat, grep, head, tail, wc, date, pwd, and
+  `gh issue|pr <verb>` with a verb-specific POSITIVE option list (a literal body and a few inert metadata options; no
+  body-file, attach, template, recover, fill, web, repository or host selector, and no stdin). Ordinary unquoted
+  arguments are relaxed too, not only quoted ones. This is a relaxation of a name check, not a proof that a command is
+  text: `cat`, `head` and `tail` read files and their output is shown, which is why none of them may feed another
+  command that can publish it.
 
 The caller keeps the old denial and relaxes it only when this module proves the text harmless. A finite list of tools
 is not a shell grammar, so nothing here tries to prove a command dangerous.
@@ -27,10 +30,22 @@ GH_AREAS = frozenset({"issue", "pr"})
 GH_VERBS = frozenset({"comment", "create", "edit", "close", "reopen", "review", "view", "list", "ready"})
 DEV_OK = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin"})
 OUT_OK = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})  # the only files a command may write
-GH_BODY_VERBS = frozenset({"comment", "create", "edit", "review"})  # these can start an editor without a body option
-_BODY_OPTION = re.compile(r"-b|--body(-file)?(=.*)?|-F|--body-file(=.*)?")
-_VALUE_OPTIONS = frozenset({"-b", "--body", "-F", "--body-file", "-t", "--title"})
-_EDITOR_OPTION = re.compile(r"--editor(=.*)?|-[A-Za-z]*e[A-Za-z]*")
+GH_BODY_VERBS = frozenset({"comment", "create", "edit", "review"})  # these need a literal body: no editor opens
+# The positive option list per verb: option name -> takes a value. Anything else, a short cluster, `--` or an option
+# that reads a file, uploads one, picks a repository or host, opens a browser or fills from a branch is not here.
+_GH_OPTIONS: dict[str, dict[str, bool]] = {
+    "comment": {"-b": True, "--body": True},
+    "create": {"-b": True, "--body": True, "-t": True, "--title": True, "-l": True, "--label": True, "--draft": False},
+    "edit": {"-b": True, "--body": True, "-t": True, "--title": True, "--add-label": True, "--remove-label": True},
+    "review": {"-b": True, "--body": True, "-c": False, "--comment": False, "-a": False, "--approve": False},
+    "close": {"-c": True, "--comment": True, "-r": True, "--reason": True},
+    "reopen": {"-c": True, "--comment": True},
+    "view": {},
+    "list": {},
+    "ready": {},
+}
+_GH_BODY = frozenset({"-b", "--body"})
+_GH_POSITIONAL = re.compile(r"[A-Za-z0-9._/-]+")
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _BRACED = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
@@ -55,6 +70,7 @@ class Word:
 class Cmd:
     words: list[Word] = dataclasses.field(default_factory=list)
     redirs: list[tuple[str, Word | None]] = dataclasses.field(default_factory=list)
+    piped: bool = False  # it is on the right of a pipe: it receives stdin
 
 
 @dataclasses.dataclass
@@ -136,7 +152,8 @@ class _Lexer:
             raise Doubt
         if self.cmd.words or self.cmd.redirs:
             self.cmds.append(self.cmd)
-        self.cmd = Cmd()
+            self.cmd = Cmd()
+        # an empty command keeps its flag: a newline right after a pipe continues the pipeline
         self.tick()
 
     # -- quoting and expansion -----------------------------------------------------------------------------------
@@ -349,6 +366,7 @@ class _Lexer:
             if two == "|&":
                 raise Doubt
             self._end_cmd()
+            self.cmd.piped = two != "||"
             self.i = i + (2 if two == "||" else 1)
         elif c == "&":
             if two == "&&":
@@ -447,6 +465,8 @@ def _command_ok(cmd: Cmd) -> bool:
             return False
         if args[0].value not in GH_AREAS or args[1].value not in GH_VERBS:
             return False
+        if cmd.piped or any(op in ("<", "<<", "<<<") for op, _ in cmd.redirs):
+            return False  # stdin could be a file's content
         if not _gh_args_ok(args[1].value, args[2:]):
             return False
     else:
@@ -472,27 +492,27 @@ def redirects_ok(cmd: Cmd) -> bool:
 
 
 def _gh_args_ok(verb: str | None, args: list[Word]) -> bool:
-    """A body or body-file option for the verbs that would otherwise open an editor, and no editor option or option
-    word that is only known at run time."""
+    """Each word is a listed option, the value of one, or a plain positional (a number or branch name, never a URL); the
+    verbs that would open an editor need a literal body option. Anything else is not proven."""
+    options = _GH_OPTIONS.get(verb or "")
+    if options is None:
+        return False
     body = False
-    takes_value = False  # the word before was an option whose value this word is
+    value_pending = False
     for word in args:
-        value_of_option, takes_value = takes_value, False
-        if word.value is None:
-            if word.starts_expanded and not value_of_option:
-                return False
-            continue
-        if value_of_option:
+        if value_pending:
+            value_pending = False
             continue  # its text is the value, whatever it looks like; it takes no value of its own
-        takes_value = word.plain and word.value in _VALUE_OPTIONS
-        if _EDITOR_OPTION.fullmatch(word.value):
+        if word.value is None:
+            return False  # an option word only known at run time
+        name, eq, _ = word.value.partition("=")
+        if name in options:
+            if eq and not options[name]:
+                return False
+            value_pending = options[name] and not eq
+            body = body or name in _GH_BODY
+        elif word.value.startswith("-") or not _GH_POSITIONAL.fullmatch(word.value):
             return False
-        if _BODY_OPTION.fullmatch(word.value) and word.plain:
-            body = True
-    if word_requires_body(verb):
-        return body
-    return True
-
-
-def word_requires_body(verb: str | None) -> bool:
-    return verb in GH_BODY_VERBS
+    if value_pending:
+        return False
+    return body or verb not in GH_BODY_VERBS

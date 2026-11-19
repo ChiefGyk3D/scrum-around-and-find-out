@@ -3,13 +3,14 @@
 ## Unreleased
 
 - Narrow the shell material rule so it fails closed (#388). The old denial stays the default for the whole submitted
-  command; it is relaxed only when a small lexer proves the protected words are text: they stand in comments, or every
-  command is on a short allowlist of text commands (issue and pull request body options, grep, echo and printf, a few
-  read-only ones), the words stand in quoted arguments, paths or here-document bodies, and nothing is written to a file.
-  Relaxed: comments, issue and pull request bodies, grep, echo and printf to standard output. NOT relaxed: commit
-  messages (a commit can run hooks or an editor), file-writing here-documents, ripgrep and long brief lines. A pipe or redirect into a shell or interpreter, `eval`, `source`, a shell or
-  interpreter with an inline-code option, a variable run as a command, wrappers, assignment prefixes and any form the
-  lexer does not model stay denied. The vendor host, SDK and key variable are never relaxed. The part of #388 about a
+  command. It is relaxed only on a positive proof from a small lexer: the protected words stand only in comments, or
+  every command is on a short allowlist and writes no file. The allowlist is `echo` and `printf` to standard output,
+  plain `grep`, `cat`, `head`, `tail`, `wc`, `date`, `pwd`, and `gh issue|pr` with a literal body and a short list of
+  inert options. Ordinary unquoted arguments are relaxed as well as quoted ones. NOT relaxed: `gh` with a body file, an
+  attachment, a template, a repository or host selector, or stdin; commit messages; file-writing here-documents;
+  ripgrep; pipes or redirects into a shell or interpreter; `eval`, `source`, inline-code interpreters, variables run as
+  commands, wrappers, assignment prefixes and any form the lexer does not model. The vendor host, SDK and key variable
+  are never relaxed. The part of #388 about a
   brief line over 4000 characters is NOT fixed: such a line is still refused unread, because an unread line cannot be
   shown harmless. See docs/hooks.md.
 
