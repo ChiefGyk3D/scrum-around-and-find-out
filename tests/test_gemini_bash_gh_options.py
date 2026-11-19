@@ -77,7 +77,6 @@ def test_an_option_that_reads_uploads_or_redirects_keeps_the_denial(command: str
         f"{GH} issue create --title={PROJECT} --body='{TEXT}'",
         f"{GH} issue create -t '{TEXT}' -b '{TEXT}' -l bug",
         f"{GH} issue comment 5 --body '{TEXT}'",
-        f'{GH} issue comment 5 -b "$(date) {TEXT}"',
         f"{GH} pr create -t x -b '{TEXT}' --draft",
         f"{GH} pr edit 3 --title x --body '{TEXT}'",
         f"{GH} pr review 3 --approve --body '{TEXT}'",

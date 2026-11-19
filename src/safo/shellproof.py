@@ -12,7 +12,12 @@ two questions, and any form it does not model is a `Doubt`, which the caller tre
   body-file, attach, template, recover, fill, web, repository or host selector, and no stdin). Ordinary unquoted
   arguments are relaxed too, not only quoted ones. This is a relaxation of a name check, not a proof that a command is
   text: `cat`, `head` and `tail` read files and their output is shown, which is why none of them may feed another
-  command that can publish it.
+  command that can publish it. Every `gh` option value must be a known literal (no variable or command substitution; an
+  ANSI-C string is data) and a body, comment or title option is not repeated.
+
+  LIMITATION (accepted): this proves the command TEXT only. The effective repository and host of a mutating `gh`
+  command come from the environment (GH_REPO, GH_HOST) and repository configuration, which the guard does not inspect.
+  The threat model is an honest or text-injected model, not an attacker who controls the shell environment.
 
 The caller keeps the old denial and relaxes it only when this module proves the text harmless. A finite list of tools
 is not a shell grammar, so nothing here tries to prove a command dangerous.
@@ -45,6 +50,7 @@ _GH_OPTIONS: dict[str, dict[str, bool]] = {
     "ready": {},
 }
 _GH_BODY = frozenset({"-b", "--body"})
+_GH_ONCE = {"-b": "body", "--body": "body", "-c": "comment", "--comment": "comment", "-t": "title", "--title": "title"}
 _GH_POSITIONAL = re.compile(r"[A-Za-z0-9._/-]+")
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -64,6 +70,7 @@ class Word:
     value: str | None  # the text, or None when an expansion or an ANSI-C string is in it
     plain: bool  # made of plain characters only: no quote, escape or expansion
     starts_expanded: bool  # the first thing in the word is an expansion
+    expands: bool = False  # a variable or command substitution is in it (an ANSI-C string is data, not this)
 
 
 @dataclasses.dataclass
@@ -118,6 +125,7 @@ class _Lexer:
         self.plain = True
         self.valued = True
         self.starts_expanded = False
+        self.expands = False
         self.pending_redir: str | None = None
         self.docs: list[tuple[str, bool, bool]] = []  # delimiter, tabs stripped, expansions apply
         self.i = 0
@@ -128,7 +136,8 @@ class _Lexer:
         self.started = True
         self.plain = self.plain and plain
 
-    def _expansion(self) -> None:
+    def _expansion(self, real: bool = True) -> None:
+        self.expands = self.expands or real
         if not self.buf:  # nothing but quotes before it
             self.starts_expanded = True
         self.started = True
@@ -138,8 +147,9 @@ class _Lexer:
     def _push_word(self) -> None:
         if not self.started:
             return
-        word = Word("".join(self.buf) if self.valued else None, self.plain, self.starts_expanded)
+        word = Word("".join(self.buf) if self.valued else None, self.plain, self.starts_expanded, self.expands)
         self.buf, self.started, self.plain, self.valued, self.starts_expanded = [], False, True, True, False
+        self.expands = False
         if self.pending_redir is not None:
             self.cmd.redirs.append((self.pending_redir, word))
             self.pending_redir = None
@@ -174,7 +184,7 @@ class _Lexer:
             if c == "\\":
                 j += 2
             elif c == "'":
-                self._expansion()
+                self._expansion(real=False)
                 self.i = j + 1
                 return
             else:
@@ -493,22 +503,32 @@ def redirects_ok(cmd: Cmd) -> bool:
 
 def _gh_args_ok(verb: str | None, args: list[Word]) -> bool:
     """Each word is a listed option, the value of one, or a plain positional (a number or branch name, never a URL); the
-    verbs that would open an editor need a literal body option. Anything else is not proven."""
+    verbs that would open an editor need a literal body option. Every value must be a known literal: a variable or a
+    command substitution is filled in at run time and can carry local data out. A body, comment or title option is not
+    repeated, so a protected literal cannot hide behind a later value. Anything else is not proven."""
     options = _GH_OPTIONS.get(verb or "")
     if options is None:
         return False
     body = False
     value_pending = False
+    seen: set[str] = set()
     for word in args:
         if value_pending:
+            if word.expands:
+                return False
             value_pending = False
             continue  # its text is the value, whatever it looks like; it takes no value of its own
-        if word.value is None:
+        if word.value is None or word.expands:
             return False  # an option word only known at run time
         name, eq, _ = word.value.partition("=")
         if name in options:
             if eq and not options[name]:
                 return False
+            group = _GH_ONCE.get(name)
+            if group is not None:
+                if group in seen:
+                    return False
+                seen.add(group)
             value_pending = options[name] and not eq
             body = body or name in _GH_BODY
         elif word.value.startswith("-") or not _GH_POSITIONAL.fullmatch(word.value):

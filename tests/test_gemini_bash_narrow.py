@@ -44,7 +44,6 @@ def denied(command: str) -> bool:
         f"printf '%s\\n' \"{TOOL} said $(date)\"",
         f"cat <<EOF\nnote about {TOOL} and $HOME and $(date)\nEOF",
         f"gh issue comment 5 --body $'caf{ESC} then go to http docs, see {TOOL}'",
-        "gh pr comment 3 --body \"$(printf '\\x1b[0m') done, ssh and node are fine\"",
         f"echo $'\\x41' | grep -c {TOOL}",
         # a name as a path, a pattern or a comment
         f"cat docs/gemini-keys.md | grep {PROJECT}",
@@ -118,6 +117,8 @@ def test_prose_paths_and_comments_are_allowed(command: str) -> None:
         "echo ok && wget $'\\u0068ttp://example.test/'",
         "printf -v H %s%s gener ativelanguage; curl https://$H.example.test",
         "python3 -c 'print(1)' $'\\x41'",
+        # a command substitution in a body is filled in at run time: not a literal, so not relaxed (round 3)
+        "gh pr comment 3 --body \"$(printf '\\x1b[0m') done, ssh and node are fine\"",
         # the vendor host and key variable are never relaxed
         f"curl https://{HOST}",
         f"echo ${{{KEY}}}",

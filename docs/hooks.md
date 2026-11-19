@@ -436,12 +436,20 @@ expansion beside the secret tool and an escape-built word stop denying only in o
   `gh` has a verb-specific POSITIVE option list. comment: `-b/--body`. create: body, `-t/--title`, `-l/--label`,
   `--draft`. edit: body, title, `--add-label`, `--remove-label`. review: body, `-c/--comment`, `-a/--approve`. close:
   `-c/--comment`, `-r/--reason`. reopen: `-c/--comment`. view, list and ready: no options. Positional words are numbers
-  or branch names, never a URL. comment, create, edit and review need a literal body option. Anything else is not
-  relaxed: `--body-file`/`-F` (it reads a file or stdin), `--attach`, `--template`, `--recover`, the fill options,
-  `--web`, `-R/--repo` and any host selector, editor options, option clusters, `--`, and any option word known only at
+  or branch names, never a URL. comment, create, edit and review need a literal body option. Every value of every
+  option must be a known literal: a variable, a braced variable or a command substitution in a body, comment, title or
+  label is filled in at run time and is not relaxed (an ANSI-C `$'...'` string is data and counts as a literal). A body,
+  comment or title option is not repeated. Anything else is not relaxed: `--body-file`/`-F` (it reads a file or
+  stdin), `--attach`, `--template`, `--recover`, the fill options, `--web`, `-R/--repo` and any host selector
+  excluded when visible in the command text, editor options, option clusters, `--`, and any option word known only at
   run time. Pipes and `;`, `&&`, `||` between listed commands are fine. Output may go only to standard output, standard
   error or the null device: a command that writes to any file is never relaxed, and neither is a comment-only command
   that does.
+
+  **Limitation, accepted.** The relaxation proves the command TEXT only. The effective repository and host of a
+  mutating `gh` command come from the environment (`GH_REPO`, `GH_HOST`) and the repository's own configuration, which
+  the guard does not inspect. The threat model for this relaxation is an honest or text-injected model, not an attacker
+  who controls the shell environment or the repository configuration.
 
 **Issue 388 shapes, plainly.** Relaxed: protected words in a comment; in a `gh` issue or pull-request command with a
 literal body; as a grep pattern or path; in `echo`, `printf`, `cat`, `head`, `tail`, `wc`, `date` and `pwd` to standard

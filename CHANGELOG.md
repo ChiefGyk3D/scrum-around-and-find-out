@@ -6,8 +6,12 @@
   command. It is relaxed only on a positive proof from a small lexer: the protected words stand only in comments, or
   every command is on a short allowlist and writes no file. The allowlist is `echo` and `printf` to standard output,
   plain `grep`, `cat`, `head`, `tail`, `wc`, `date`, `pwd`, and `gh issue|pr` with a literal body and a short list of
-  inert options. Ordinary unquoted arguments are relaxed as well as quoted ones. NOT relaxed: `gh` with a body file, an
-  attachment, a template, a repository or host selector, or stdin; commit messages; file-writing here-documents;
+  inert options, each value a known literal (no variable or command substitution) and a body, comment or title given
+  once. Ordinary unquoted arguments are relaxed as well as quoted ones. The relaxation proves the command text only: the
+  effective repository and host of a mutating `gh` command come from the environment and repository configuration,
+  which the guard does not inspect; the threat model is an honest or text-injected model, not an attacker who controls
+  the shell environment. NOT relaxed: `gh` with a body file, an attachment, a template, a repository or host selector
+  visible in the command text, or stdin; commit messages; file-writing here-documents;
   ripgrep; pipes or redirects into a shell or interpreter; `eval`, `source`, inline-code interpreters, variables run as
   commands, wrappers, assignment prefixes and any form the lexer does not model. The vendor host, SDK and key variable
   are never relaxed. The part of #388 about a
