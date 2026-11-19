@@ -413,17 +413,69 @@ that must pass the strict check:
 The same rules also look at every Bash call, the lead's and a sub-agent's, in the foreground or the background, before
 the lead-never-waits rule runs. This is a cheap, fail-closed deny, not a shell model. A command is denied, in every mode,
 when it names the vendor API host, the Google genai SDK, the key variable (`GEMINI_API_KEY`), the paid config
-(`prd_paid`), the secret-store project (`image-gen`), or the config `prd` beside `doppler` (the names in
-[Gemini keys](gemini-keys.md) and `examples/gemini.example.yaml`). Quotes, backslashes, line continuations, comments and
+(`prd_paid`) or the secret-store project (`image-gen`), or the config `prd` beside `doppler` (the names in
+[Gemini keys](gemini-keys.md) and `examples/gemini.example.yaml`). Quotes, backslashes, line continuations and
 look-alike letters are removed or folded first, the same views the brief scan uses, so `gen""erative...` is seen. Two
 more forms are denied without a name on the page: a word built with escapes (an ANSI-C `$'...'` word, a hex, octal or
 `\u` escape, `printf -v`) in a command that also runs a network tool or `doppler`, and `doppler` with any `$` expansion
-or backtick. Nothing is resolved: a variable's value is never looked up.
+or backtick. All of this applies to the whole submitted command, wherever the words stand. Nothing is resolved: a
+variable's value is never looked up.
 
-Nothing is exempt: not the wrapper, not a working directory, not a tool name, not this repository. `safo gemini ...`
-commands as documented name none of the protected names, so the check does not touch them; a command that does spell one
-out is denied however it is called or wherever it runs (reading this repository's docs with such a command is denied too;
-the normal `make check`, `pytest` and `git` commands name none and pass). A renamed or hijacked wrapper (an alias, a
+**Narrowing (#388): the denial above is the default and is relaxed only on a positive proof.** A finite list of
+prefixes and wrappers is not a shell grammar, so the check does not try to find the secret tool in command position.
+Instead a small lexer (`src/safo/shellproof.py`) reads the command, and the project name, the paid config, `prd`, an
+expansion beside the secret tool and an escape-built word stop denying only in one of two cases:
+
+- **Comments.** The only places those words stand are comments (a `#` that starts a word outside every quote).
+- **Allowlisted commands.** Every simple command in the submitted command is one of: `echo`, `printf` (not `-v`),
+  `cat`, `grep`, `head`, `tail`, `wc`, `date`, `pwd`, or `gh issue|pr <verb>`, spelled as a plain word. The protected
+  words may then stand in any argument, quoted or not, in a path, in a here-document body, or in a `$(...)` that runs
+  only `date`, `pwd`, `printf` or `echo`. This relaxes a name check; it does not prove the commands are text-only:
+  `cat`, `head` and `tail` read files, which is why a `gh` command that receives stdin (it is on the right of a pipe,
+  or has an input redirect, here-document or here-string) is never relaxed.
+  `gh` has a verb-specific POSITIVE option list. comment: `-b/--body`. create: body, `-t/--title`, `-l/--label`,
+  `--draft`. edit: body, title, `--add-label`, `--remove-label`. review: body, `-c/--comment`, `-a/--approve`. close:
+  `-c/--comment`, `-r/--reason`. reopen: `-c/--comment`. view, list and ready: no options. Positional words are numbers
+  or branch names, never a URL. comment, create, edit and review need a literal body option. Every value of every
+  option must be a known literal: a variable, a braced variable or a command substitution in a body, comment, title or
+  label is filled in at run time and is not relaxed (an ANSI-C `$'...'` string is data and counts as a literal). A body,
+  comment or title option is not repeated. Anything else is not relaxed: `--body-file`/`-F` (it reads a file or
+  stdin), `--attach`, `--template`, `--recover`, the fill options, `--web`, `-R/--repo` and any host selector
+  excluded when visible in the command text, editor options, option clusters, `--`, and any option word known only at
+  run time. Pipes and `;`, `&&`, `||` between listed commands are fine. Output may go only to standard output, standard
+  error or the null device: a command that writes to any file is never relaxed, and neither is a comment-only command
+  that does.
+
+  **Limitation, accepted.** The relaxation proves the command TEXT only. The effective repository and host of a
+  mutating `gh` command come from the environment (`GH_REPO`, `GH_HOST`) and the repository's own configuration, which
+  the guard does not inspect. The threat model for this relaxation is an honest or text-injected model, not an attacker
+  who controls the shell environment or the repository configuration.
+
+**Issue 388 shapes, plainly.** Relaxed: protected words in a comment; in a `gh` issue or pull-request command with a
+literal body; as a grep pattern or path; in `echo`, `printf`, `cat`, `head`, `tail`, `wc`, `date` and `pwd` to standard
+output (a `$(date)` or an escape sequence in them is fine). NOT relaxed: a file-writing here-document (`cat > path
+<<EOF`), a commit message (a commit can run hooks or an editor), ripgrep (its options can run a program), `gh` with a
+body file, an attachment or another repository, and a long brief line.
+
+**Denied as before** (no proof, so the old rule stands): anything else in the command. That includes a pipe or redirect
+or here-string into a shell or an interpreter, `eval`, `source` and `.`, a shell with `-c`, an interpreter with an
+inline-code option, a variable whose value is run (`D=...; $D ...`), a command substitution or expansion as the command
+word, `xargs` and `find -exec`, any wrapper (`env`, `timeout`, `nice`, `sudo`, `time`, `command`, `exec` and the like), an
+assignment prefix (`DOPPLER_PROJECT=... cmd`, `env DOPPLER_CONFIG=... cmd`), a subshell or group, a background `&`, a
+line continuation, a control character, a backtick, an unterminated quote or here-document, and every form the lexer
+does not model (any parse doubt is a denial). The vendor host, the SDK, the key variable and the broker client module are
+never relaxed, wherever they stand, a comment or a commit message included. Each is a regression test in
+`tests/test_gemini_bash_narrow.py`; the denying shapes are built from fragments at run time.
+
+**Not fixed by #388: a long line in a brief.** A brief line over 4000 characters that names the vendor is still refused
+unread. A line that is not read cannot be shown harmless (a whole program can fit in it), so that part of issue 388 stays
+open; see `tests/test_gemini_long_line.py`.
+
+Nothing is exempt by where it runs: not the wrapper, not a working directory, not a tool name, not this repository.
+`safo gemini ...` commands as documented name none of the protected names, so the check does not touch them; a command
+that spells the vendor host, SDK or key variable is denied however it is called or wherever it runs (reading this
+repository's docs with such a command is denied too; the normal `make check`, `pytest` and `git` commands name none and
+pass). A renamed or hijacked wrapper (an alias, a
 function, a changed `PYTHONPATH`) is covered only to the extent the protected names appear in the command text. A command
 longer than 64 KiB is denied unread as "could not be checked in time": no normalization runs on it, so a hostile length costs
 nothing, and the shorter ones are checked against the deadline line by line. The

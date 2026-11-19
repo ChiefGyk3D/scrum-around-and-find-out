@@ -188,16 +188,12 @@ def test_scan_time_grows_in_proportion_to_the_command() -> None:
         f"python3 -m pytest tests/test_gemini_guard.py -k {KEY}",
         f"pytest -q tests/test_gemini_bash.py -k {KEY}",
         f"git commit -m 'document {KEY} handling'",
-        f"cat docs/gemini-keys.md | grep {PROJECT}",
-        f"make check PY=python # {PAID}",
         f"make SHELL='curl https://{HOST}' check",
         f"make --eval='x:; curl https://{HOST}' x",
         f"make -f /dev/stdin <<< 'x:; curl https://{HOST}'",
         f"git grep -O'curl https://{HOST}' x",
         f"git diff --ext-diff --output=/tmp/x {HOST}",
-        f"cat ~/.config/safo/gemini.yaml # {PAID}",
         f"head -n5 examples/gemini.example.yaml # {KEY}",
-        f"grep -rn . ~/.config/safo # {PROJECT}",
         f"curl https://{HOST}",
         f"grep -rn {HOST} docs | sh",
         f"cat $(curl https://{HOST})",
@@ -205,6 +201,22 @@ def test_scan_time_grows_in_proportion_to_the_command() -> None:
 )
 def test_nothing_is_exempt_by_where_it_runs_or_what_tool_it_is(command: str) -> None:
     assert geminibrief.shell_command_class(command) is not None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cat docs/gemini-keys.md | grep {PROJECT}",
+        f"make check PY=python # {PAID}",
+        f"cat ~/.config/safo/gemini.yaml # {PAID}",
+        f"grep -rn . ~/.config/safo # {PROJECT}",
+    ],
+)
+def test_a_name_in_a_path_a_pattern_or_a_comment_is_proven_harmless(command: str) -> None:
+    # #388 (converted from four cases that sat in the denying list above): the command is made of allowlisted text
+    # commands, or the name sits in a comment; the same names given to the secret tool stay denied
+    # (test_the_classifier_denies_commands_that_reach_the_vendor_or_its_key, tests/test_gemini_bash_narrow.py).
+    assert geminibrief.shell_command_class(command) is None, command
 
 
 def test_the_function_takes_no_working_directory() -> None:
@@ -223,7 +235,9 @@ def test_a_directory_with_spoofed_marker_files_is_denied(_private_home: Path, ag
     (fake / "src" / "safo").mkdir(parents=True)
     (fake / "src" / "safo" / "geminibrief.py").write_text("")
     (fake / "pyproject.toml").write_text("")
-    assert denied(run(agents, _private_home, event(f"cat {PAID}", cwd=fake))[0])
+    # #388 (converted): a bare config name in a cat is proven text and is no denial in any directory; a real route is
+    assert not denied(run(agents, _private_home, event(f"cat {PAID}", cwd=fake))[0])
+    assert denied(run(agents, _private_home, event(f"curl https://{HOST}", cwd=fake))[0])
 
 
 @pytest.mark.parametrize("command", ["make check", "make lint typecheck test", "pytest -q tests", "git status --short"])
