@@ -412,18 +412,40 @@ that must pass the strict check:
 
 The same rules also look at every Bash call, the lead's and a sub-agent's, in the foreground or the background, before
 the lead-never-waits rule runs. This is a cheap, fail-closed deny, not a shell model. A command is denied, in every mode,
-when it names the vendor API host, the Google genai SDK, the key variable (`GEMINI_API_KEY`), the paid config
-(`prd_paid`), the secret-store project (`image-gen`), or the config `prd` beside `doppler` (the names in
-[Gemini keys](gemini-keys.md) and `examples/gemini.example.yaml`). Quotes, backslashes, line continuations, comments and
-look-alike letters are removed or folded first, the same views the brief scan uses, so `gen""erative...` is seen. Two
-more forms are denied without a name on the page: a word built with escapes (an ANSI-C `$'...'` word, a hex, octal or
-`\u` escape, `printf -v`) in a command that also runs a network tool or `doppler`, and `doppler` with any `$` expansion
-or backtick. Nothing is resolved: a variable's value is never looked up.
+when it names the vendor API host, the Google genai SDK or the key variable (`GEMINI_API_KEY`), or when it runs
+`doppler` with the paid config (`prd_paid`), the secret-store project (`image-gen`) or the config `prd` in the same simple
+command (the names in [Gemini keys](gemini-keys.md) and `examples/gemini.example.yaml`). Quotes, backslashes, line
+continuations, comments and look-alike letters are removed or folded first, the same views the brief scan uses, so
+`gen""erative...` is seen. Two more forms are denied without a name on the page: a word built with escapes (an ANSI-C
+`$'...'` word, a hex, octal or `\u` escape, `printf -v`) in a command that also runs a network tool or `doppler`, and
+`doppler` run with any `$` expansion or backtick in the same simple command. Nothing is resolved: a variable's value is
+never looked up.
 
-Nothing is exempt: not the wrapper, not a working directory, not a tool name, not this repository. `safo gemini ...`
-commands as documented name none of the protected names, so the check does not touch them; a command that does spell one
-out is denied however it is called or wherever it runs (reading this repository's docs with such a command is denied too;
-the normal `make check`, `pytest` and `git` commands name none and pass). A renamed or hijacked wrapper (an alias, a
+Since #388 the material rule fires on an invocation, not on a word. A secret tool or a network tool counts as run only
+where a command word stands: at the start of a simple command, after `; | & ( $(` or a backtick, after a prefix word
+(`env`, `sudo`, `time`, `nohup`, `xargs`, `exec`, `command`, a shell, `-c`, `--`) or after a `NAME=value` word. The
+simple command ends at the next `; | & )`.
+
+**Allowed now** (each is a regression test in the two #388 test files): the tool name, the project name or the paid
+config name as prose, a path, a comment or an argument of another command (a grep, a commit message); a here-document
+or a printf that holds an expansion and names the tool as text; the tool run in one command and an expansion in another;
+an escape sequence beside prose words such as ssh; and a brief line over 4000 characters that only names the vendor in
+prose.
+
+- **Still denied:** the vendor host, SDK and key variable anywhere in a command; `doppler` run with the project, the
+  paid config or `prd`, or with an expansion or backtick, in the same simple command; the same names and the tool in text
+  fed to a shell (`| sh`, `eval`, `source`); an escape-built word beside a network tool or `doppler` run as a command
+  (also in a separate command on the same line); a command built at run time; the broker client module; a tool word
+  that follows `; & |` even inside prose (the split is not quote-aware); and a long line that holds a declaration,
+  `safo` or any route hint, the vendor host, the paid config, the broker client or a decode form.
+- Converted tests (each pinned a shape listed in #388 as a false positive, and the real invocation beside it is still
+  denied): see the commit message of the #388 change.
+
+Nothing is exempt by where it runs: not the wrapper, not a working directory, not a tool name, not this repository.
+`safo gemini ...` commands as documented name none of the protected names, so the check does not touch them; a command
+that spells the vendor host, SDK or key variable is denied however it is called or wherever it runs (reading this
+repository's docs with such a command is denied too; the normal `make check`, `pytest` and `git` commands name none and
+pass). A renamed or hijacked wrapper (an alias, a
 function, a changed `PYTHONPATH`) is covered only to the extent the protected names appear in the command text. A command
 longer than 64 KiB is denied unread as "could not be checked in time": no normalization runs on it, so a hostile length costs
 nothing, and the shorter ones are checked against the deadline line by line. The

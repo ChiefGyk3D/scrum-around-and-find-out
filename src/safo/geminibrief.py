@@ -25,6 +25,7 @@ Nothing here repeats any text of the brief in a reason.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import re
 import shlex
 import time
@@ -260,16 +261,22 @@ def normalized(text: str) -> str:
     return "\n".join(_views(line)[2] for line in _join(text).splitlines())
 
 
-def relevant(text: str) -> bool:
+def relevant(text: str, *, long_line: bool = False) -> bool:
     """False only when no detector could possibly fire. It runs the detector patterns over the very views `_scan_line`
     builds, link targets included: the decode detector reads the text with its backslashes, every other one the cleaned
     lower case text. Words built with escapes (ANSI-C quoting, `printf -v`, hex or octal escapes) make a brief relevant
-    on their own, since the words and the options may both be what the escapes hide."""
+    on their own, since the words and the options may both be what the escapes hide.
+
+    `long_line` (#388) is for a line too long to read: the bare word `gemini` is not enough on its own there, because
+    prose names it; the line counts when it is a declaration line or carries any other signal (the word `safo` is a
+    route hint and still counts)."""
     concealed = False
     for line in _join(text).splitlines():
         norm, _, low, pre_low, pre_raw = _views(line)
         raw = norm.lower()
         if _risk_line(norm, low) or has_route_hint(low) or has_route_hint(pre_low):
+            return True
+        if long_line and DECLARATION.match(low):
             return True
         for name, pattern in PREFILTER:
             if name == "conceal":
@@ -278,6 +285,8 @@ def relevant(text: str) -> bool:
                 if pattern.search(raw) or pattern.search(pre_raw):
                     return True
             elif pattern.search(low) or pattern.search(pre_low):
+                if long_line and name == "gemini":
+                    continue
                 return True
     return concealed
 
@@ -1105,7 +1114,7 @@ def _findings(
     for number, line in enumerate(lines, 1):
         tick()
         if len(line) > LINE_CAP:
-            if relevant(line):
+            if relevant(line, long_line=True):
                 steps.append(
                     Step(
                         unreadable=True,
@@ -1218,6 +1227,28 @@ _NETWORK_TOOL = re.compile(
     r"|httpie|http|https|aria2c|lwp-request|powershell|pwsh)(?![\w-])"
 )
 
+# A tool counts only where a command word stands (#388): at the start of a simple command, after a prefix word, an
+# assignment, `-c` or `--`. The same word in prose (a commit message, a comment, a here-document body) is not a run.
+_COMMAND_POSITION = (
+    r"(?:^|[;&|({`\n]|\$\()\s*(?:(?:[a-z_]\w*=\S*|env|command|exec|nohup|time|sudo|builtin|xargs|then|do|else"
+    r"|-c|--|(?:ba|z|da|k)?sh)\s+)*(?:\S*/)?"
+)
+
+
+_RUN_LATER = r"\|\s*(?:ba|z|da|k)?sh\b|\b(?:eval|source)\b"  # text handed to a shell to run
+
+
+@functools.cache
+def _invocation(tool: str) -> re.Pattern[str]:
+    return re.compile(_COMMAND_POSITION + "(?:" + tool + ")(?![\\w-])" + r"(?P<rest>[^;&|)\n]*)")
+
+
+def _invoked(view: str, tool: re.Pattern[str]) -> list[str]:
+    """The rest of the simple command after each place `tool` stands as a command word in one line (the text up to the
+    next `; | & )` or the end of the line); empty when the tool is only named."""
+    pattern = _invocation(tool.pattern.removeprefix("(?<![\\w.-])").removesuffix("(?![\\w-])"))
+    return [m.group("rest") for m in pattern.finditer(view)]
+
 
 def shell_command_class(command: str, deadline: float | None = None) -> str | None:
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
@@ -1233,7 +1264,7 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         tick()
         lines = _join(command).splitlines() or [command]
         found: str | None = None
-        secret_tool = network = False
+        secret_tool = network = expanded = False
         views: list[str] = []
         for line in lines:
             tick()
@@ -1244,17 +1275,22 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
                     found = found or SHELL_VENDOR
                 if _SHELL_KEY.search(view):
                     found = found or SHELL_KEY
-                if PAID_CONFIG.search(view) or _SHELL_PROJECT.search(view):
-                    found = found or SHELL_STORE
-                secret_tool = secret_tool or bool(_SECRET_TOOL.search(view))
-                network = network or bool(_NETWORK_TOOL.search(view))
-            if secret_tool and any(_SHELL_CONFIG.search(v) for v in (low, pre_low)):
-                found = found or SHELL_STORE
+                named = bool(PAID_CONFIG.search(view) or _SHELL_PROJECT.search(view))
+                if named and _SECRET_TOOL.search(view) and re.search(_RUN_LATER, view):
+                    found = found or SHELL_STORE  # the name and the tool in text that is fed to a shell
+                for rest in _invoked(view, _SECRET_TOOL):
+                    secret_tool = True
+                    # #388: the names count where the tool is run, not as a word, a path or a comment
+                    if _SHELL_CONFIG.search(rest) or PAID_CONFIG.search(rest) or _SHELL_PROJECT.search(rest):
+                        found = found or SHELL_STORE
+                    if _DOLLAR.search(rest) or "`" in rest:
+                        expanded = True
+                network = network or bool(_invoked(view, _NETWORK_TOOL))
         tick()
         built = bool(CONCEAL.search(command.lower()) or CONCEAL.search(_join(command).lower()))
         if found is None and built and (network or secret_tool):
             found = SHELL_BUILT
-        if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
+        if found is None and expanded:
             found = SHELL_TOOL
         if found is None and broker_module_route(views, tick):
             found = SHELL_BROKER_MODULE

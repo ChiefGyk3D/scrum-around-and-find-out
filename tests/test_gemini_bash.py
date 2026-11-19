@@ -118,9 +118,8 @@ def test_the_classifier_leaves_ordinary_commands_alone(command: str) -> None:
 
 
 def test_the_wrapper_is_not_exempt_when_it_carries_a_name() -> None:
-    assert (
-        geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is not None
-    )
+    # #388 (converted): the paid config as part of a prompt file path is a name, not an invocation, so it is allowed
+    assert geminibrief.shell_command_class(f"safo gemini ask --model m --prompt-file docs/{PAID}.md --job j") is None
     assert geminibrief.shell_command_class(f"python3 -m safo gemini quota # {KEY}") is not None
 
 
@@ -188,16 +187,12 @@ def test_scan_time_grows_in_proportion_to_the_command() -> None:
         f"python3 -m pytest tests/test_gemini_guard.py -k {KEY}",
         f"pytest -q tests/test_gemini_bash.py -k {KEY}",
         f"git commit -m 'document {KEY} handling'",
-        f"cat docs/gemini-keys.md | grep {PROJECT}",
-        f"make check PY=python # {PAID}",
         f"make SHELL='curl https://{HOST}' check",
         f"make --eval='x:; curl https://{HOST}' x",
         f"make -f /dev/stdin <<< 'x:; curl https://{HOST}'",
         f"git grep -O'curl https://{HOST}' x",
         f"git diff --ext-diff --output=/tmp/x {HOST}",
-        f"cat ~/.config/safo/gemini.yaml # {PAID}",
         f"head -n5 examples/gemini.example.yaml # {KEY}",
-        f"grep -rn . ~/.config/safo # {PROJECT}",
         f"curl https://{HOST}",
         f"grep -rn {HOST} docs | sh",
         f"cat $(curl https://{HOST})",
@@ -205,6 +200,22 @@ def test_scan_time_grows_in_proportion_to_the_command() -> None:
 )
 def test_nothing_is_exempt_by_where_it_runs_or_what_tool_it_is(command: str) -> None:
     assert geminibrief.shell_command_class(command) is not None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cat docs/gemini-keys.md | grep {PROJECT}",
+        f"make check PY=python # {PAID}",
+        f"cat ~/.config/safo/gemini.yaml # {PAID}",
+        f"grep -rn . ~/.config/safo # {PROJECT}",
+    ],
+)
+def test_a_bare_secret_store_name_is_not_an_invocation(command: str) -> None:
+    # #388 (converted from the four cases that sat in the denying list above): the project or the paid config named
+    # in a grep argument or a comment, with no secret tool run, is a name and not a route to the key. The same names
+    # given to the secret tool stay denied (test_the_classifier_denies_commands_that_reach_the_vendor_or_its_key).
+    assert geminibrief.shell_command_class(command) is None, command
 
 
 def test_the_function_takes_no_working_directory() -> None:
@@ -223,7 +234,9 @@ def test_a_directory_with_spoofed_marker_files_is_denied(_private_home: Path, ag
     (fake / "src" / "safo").mkdir(parents=True)
     (fake / "src" / "safo" / "geminibrief.py").write_text("")
     (fake / "pyproject.toml").write_text("")
-    assert denied(run(agents, _private_home, event(f"cat {PAID}", cwd=fake))[0])
+    # #388 (converted): a bare config name is no longer a denial in any directory; a real vendor call still is
+    assert not denied(run(agents, _private_home, event(f"cat {PAID}", cwd=fake))[0])
+    assert denied(run(agents, _private_home, event(f"curl https://{HOST}", cwd=fake))[0])
 
 
 @pytest.mark.parametrize("command", ["make check", "make lint typecheck test", "pytest -q tests", "git status --short"])
