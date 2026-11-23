@@ -134,6 +134,7 @@ class Tracking:
     epic_field: str = "Epic"
     effort_field: str = "Effort"
     exempt_repos: tuple[str, ...] = ()  # owner/name: pull requests there need no linked issue
+    exempt_authors: tuple[str, ...] = ()  # GitHub logins (`dependabot`): their pull requests need no linked issue
 
 
 @dataclass(frozen=True)
@@ -695,7 +696,7 @@ def _parse_gate_exempt(r: Reader, raw: object, key: str) -> tuple[str, ...]:
 
 
 def _parse_tracking(r: Reader, raw: object) -> Tracking:
-    m = r.mapping(raw, "rules.tracking", {"kind_field", "epic_field", "effort_field", "exempt_repos"})
+    m = r.mapping(raw, "rules.tracking", {"kind_field", "epic_field", "effort_field", "exempt_repos", "exempt_authors"})
     d = Tracking()
     exempt: list[str] = []
     for i, name in enumerate(_capped(r, m.get("exempt_repos", []), "rules.tracking.exempt_repos", MAX_EXEMPT)):
@@ -704,11 +705,18 @@ def _parse_tracking(r: Reader, raw: object) -> Tracking:
         if not (LOGIN.fullmatch(owner) and REPO_NAME.fullmatch(repo)):
             raise r.fail(f"rules.tracking.exempt_repos[{i}]", "expected owner/name")
         exempt.append(text)
+    authors: list[str] = []
+    for i, name in enumerate(_capped(r, m.get("exempt_authors", []), "rules.tracking.exempt_authors", MAX_EXEMPT)):
+        text = r.string(name, f"rules.tracking.exempt_authors[{i}]")
+        if not LOGIN.fullmatch(text.removesuffix("[bot]")):
+            raise r.fail(f"rules.tracking.exempt_authors[{i}]", "expected a GitHub login")
+        authors.append(text)
     return Tracking(
         r.string(m.get("kind_field", d.kind_field), "rules.tracking.kind_field", empty=True),
         r.string(m.get("epic_field", d.epic_field), "rules.tracking.epic_field", empty=True),
         r.string(m.get("effort_field", d.effort_field), "rules.tracking.effort_field", empty=True),
         tuple(exempt),
+        tuple(authors),
     )
 
 

@@ -201,6 +201,7 @@ def _link_json(c: FContent) -> JSON:
         "merged": c.state == "MERGED",
         "closedAt": c.closed_at,
         "body": c.body,
+        "author": None if c.author is None else {"login": c.author},
         "repository": {"nameWithOwner": c.repo},
         "closingIssuesReferences": {"totalCount": c.closing},
     }

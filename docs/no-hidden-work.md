@@ -235,13 +235,17 @@ rules:
     epic_field: Epic        # default Epic
     effort_field: Effort    # default Effort
     exempt_repos: []        # owner/name: pull requests there need no linked issue
+    exempt_authors: []      # GitHub logins (e.g. dependabot): their pull requests need no linked issue
 ```
 
 A Kind, Epic or Effort field may be any type; only whether it holds a value is read. A field `board.yaml` does not define
 is **not configured**: the audit skips that check, prints a `NOTE ... check not configured` line, and does not call the
 board clean on the strength of a check it did not run. Open pull requests are always checked for a link; merged ones
 within `rules.add_closed_days` days of today. A body links an issue when GitHub counts a closing reference or the text has
-`Refs`, `Closes`, `Fixes` or `Resolves` followed by an issue number other than the pull request's own.
+`Refs`, `Closes`, `Fixes` or `Resolves` followed by an issue number other than the pull request's own. A pull request
+whose author is listed in `exempt_authors` (GraphQL reports the bot as `dependabot`; REST spells it `dependabot[bot]`,
+and either spelling matches, without case) needs no link, in the audit and in sync. A pull request with no readable
+author, such as one from a deleted account, is still checked.
 
 Exit codes are unchanged: 0 clean, 1 drift, 2 cannot tell.
 
