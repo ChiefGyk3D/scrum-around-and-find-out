@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared-directory deletion guard: `safo-rmguard`, a PreToolUse hook for Bash (#422).
+"""Shared-directory guard: `safo-rmguard`, a PreToolUse hook for Bash (#422).
 
 On 2026-11-23 a reviewer agent ran `rm -rf ... *.py *.log` inside `~/.local/share/reach-around-dev` and deleted another
 session's logs and helper scripts. Brief text is instruction only, so this is a check on the command itself.
@@ -8,18 +8,23 @@ It is its own entry point and its own module on purpose: the dispatch guard (`sa
 `safo.geminibrief`) is frozen (owner decision 2026-10-30), so nothing here touches it. The installed hook list gets one
 more PreToolUse entry for Bash (docs/rmguard.md); nothing installs it for you.
 
-WHAT IS EVALUATED: a command is tokenized and checked only when its text (backslash-newline pairs removed) holds a
-delete word (`rm`, `rmdir`, `unlink`, `shred`, a whole-word `-delete`, `find` with `-exec`/`-execdir`/`-ok`/`-okdir`;
-quotes and backslashes removed first, so `r''m` counts), a character that can build one (`$`, a backtick, `?`, `*`, `[`,
-`{`: `r?`, `r[m]`, `/bin/r*`, `$RM`, `r$'m'`), or a shared zone (`-dev`, `/tmp/claude`, `.local`). Every other command
-(`ls`, `git status`) returns allow at once, unparsed: a bug in the tokenizer cannot lock the shell for it. Evaluating is
-not blocking: without a delete word written out, a command is blocked only when its command word is built from an
-expansion or pattern and one of its own arguments names a shared zone.
+PROGRAM FAMILIES JUDGED (and only these; docs/rmguard.md has the table): `rm`, `rmdir`, `unlink`, `shred`; `find` with
+`-delete` or an `-exec` of anything not read-only (after the GNU global options `-H -L -P -O -D`); `git clean`;
+`truncate`; `rsync` with `--delete*` or `--remove-*-files`; `tar --remove-files`; `mv`; `cp /dev/null`; `dd of=`; `tee`
+without `-a`; and truncating redirections (`>`, `>|`, `&>`, `: > file`). Not covered: any other program, a script,
+`python -c shutil.rmtree`, `git reset --hard`, a container bind mount, an alias or a function.
+
+WHAT IS EVALUATED: when the working directory is inside a shared zone, every command. Elsewhere, a command whose text
+(backslash-newline pairs removed) holds a delete word (`rm`, `rmdir`, `unlink`, `shred`, a whole-word `-delete`, `find`
+with `-exec`/`-execdir`/`-ok`/`-okdir`; quotes and backslashes removed first, so `r''m` counts), a character that can
+build one (`$`, a backtick, `?`, `*`, `[`, `{`: `r?`, `r[m]`, `/bin/r*`, `$RM`, `r$'m'`), or a shared zone (`-dev`,
+`/tmp/claude`, `.local`). Every other command (`ls`, `git status`) returns allow at once, unparsed.
 
 MODE: `safo-rmguard --mode enforce` (the default, and what any other value means) or `--mode warn`. The mode lives in
 the hook command in the settings entry the owner controls, never in an environment variable an agent could set. In warn
 mode nothing is ever blocked; each would-be block is appended, redacted, to
-`~/.local/share/reach-around-lead/rmguard-warn.log` (folder 0700, file 0600).
+`~/.local/share/reach-around-lead/rmguard-warn.log` (folder 0700, file 0600, written through directory descriptors with
+no symlink followed).
 
 SHARED ZONES (where the rule applies):
 
@@ -27,31 +32,22 @@ SHARED ZONES (where the rule applies):
   (`~/.local/share`, `~/.local`, `~`), since removing a parent removes the zone;
 * the harness scratchpad parent `/tmp/claude-*` (and `/tmp`, `/`, for the same reason).
 
-WHAT IS BLOCKED, once evaluated, inside a shared zone or when it cannot be shown to be elsewhere: `rm`, `unlink`,
-`shred` and `rmdir` (and `xargs` running them), and `find` with `-delete` or an `-exec` of anything that is not a known
-read-only tool, when any target
+WHAT IS ALLOWED: an exact path (no glob, no expansion) STRICTLY BELOW `<dev>/agents/<name>/` (files, and recursive
+removal of a subfolder), or strictly below a session's `/tmp/claude-*/<project>/<session>/scratchpad`. DENIED in a zone:
+any glob, a zone or its parent, any other path, and the agent folder root `<dev>/agents/<name>` itself, recursive or
+not: the hook cannot tell whose folder it is, so agent folder roots are removed by the owner in a batch. A target that
+cannot be resolved is denied (an expansion other than `$HOME`/`~` or a literal variable, in a recursive delete or
+unquoted; a quoted one when a zone is in sight or the cwd is unknown or inside one).
 
-* holds an unquoted glob (`*`, `?`, `[`, a brace list), or
-* is a shared zone itself or a parent of one, or
-* is anything else in a shared zone that is not an EXACT path under a per-agent scratch folder, or
-* cannot be resolved (an expansion other than `$HOME`/`~`, in a recursive delete or unquoted, a quoted one when the
-  command mentions a zone or the working directory is unknown or inside one, and any relative or globbed target after
-  a `cd` it could not follow).
+FAIL CLOSED: for an evaluated command, whatever cannot be read (a syntax error, nesting deeper than MAX_DEPTH, a
+timeout after TIMEOUT_SECONDS, an internal error) is a deny; so is an unreadable event whose text holds a delete word.
+For a command that was never evaluated a crash is an allow, logged to `rmguard-error.log`. Not Bash, or no command:
+allowed.
 
-WHAT IS ALLOWED: a target that is an exact path (no glob, no expansion) under `<dev>/agents/<name>` (the folder itself
-included, so an agent can remove its own folder by its exact path), or strictly under a session's
-`/tmp/claude-*/<project>/<session>/scratchpad`.
-
-FAIL CLOSED: a command that holds a delete word as written and cannot be parsed (an unterminated quote, nesting deeper
-than MAX_DEPTH) is denied; so is an internal error, a timeout (TIMEOUT_SECONDS) or an unreadable event whose text holds
-a delete word. The same failures for any other command allow, and are logged to `rmguard-error.log` beside the warn
-log. Not Bash, or no command: allowed.
-
-It is a tokenizer for the common shapes, not a shell parser. NOT covered: an alias or function that hides `rm`, a
-script or `python -c "shutil.rmtree(...)"` that deletes, a symlink that points into a zone (paths are resolved by
-text, never by the file system), `xargs` input that comes from somewhere the command does not show, a command word
-built from an expansion, HOME changed by means the text scan does not see, and the per-agent folder not being the one
-named in a brief (the brief is not visible to a hook). The folder shape `agents/<name>` is the convention.
+It is a tokenizer for the common shapes, not a shell parser. NOT covered: paths are compared as text, never resolved
+through the file system (a symlink into a zone), `xargs` input the command does not show, a command word built from an
+expansion whose own arguments name no zone, HOME changed by means the text scan does not see, and which agent is
+running (the hook has no session identity).
 """
 
 from __future__ import annotations
@@ -64,6 +60,7 @@ import posixpath
 import re
 import shlex
 import signal
+import stat
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, NamedTuple
@@ -113,6 +110,12 @@ _ZONE_TEXT = re.compile(r"-dev(?![A-Za-z0-9_.])|/tmp/claude|\.local(?![A-Za-z0-9
 _SUSPECT = re.compile(r"[$`?*\[{]")
 # Any mention of HOME that is not a plain `$HOME` or `${HOME}` read: an assignment, export, unset, read, `${HOME:=x}`...
 _HOME_REDEFINED = re.compile(r"(?<![\w$])(?<!\$\{)HOME(?!\w)|\$\{HOME[^}]")
+# Commands that can set a variable in ways the text scan does not follow: HOME is then unknown too (A3).
+_HOME_COMMANDS = re.compile(
+    r"(?<![\w-])(?:eval|declare|typeset|read|source|mapfile|readarray)(?![\w-])|printf\s+-v|(?:^|[;&|\n(])\s*\.\s+\S"
+)
+# Text that defeats variable tracking altogether: eval, source, `. file`, a function definition.
+_NO_BIND = re.compile(r"(?<![\w-])(?:eval|source|function)(?![\w-])|(?:^|[;&|\n(])\s*\.\s+\S|[\w-]+\s*\(\)\s*\{?")
 
 
 class Word(NamedTuple):
@@ -142,6 +145,7 @@ class UnknownCommand(Unparseable):
 class Finding(NamedTuple):
     reason: str  # fixed wording per kind
     target: str  # the offending path as written (shortened), "" when none
+    hint: str = ""  # "agent-root" when the target is an agents/<name> folder root
 
 
 class Timeout(Exception):
@@ -162,11 +166,14 @@ def plain_delete_word(text: str) -> bool:
     return False
 
 
-def has_delete_word(text: str) -> bool:
-    """Should this command be evaluated? True when it holds a delete word as written, when it holds a character that
-    can build one (`$`, a backtick, `?`, `*`, `[`, `{`: `r?`, `r[m]`, `/bin/r*`, `$RM`, `r$'m'`), or when it mentions a
-    shared zone. Backslash-newline pairs are removed first (`r\\<newline>m` is `rm`). Only a command that does none of
-    these is allowed without being parsed."""
+def has_delete_word(text: str, cwd: str | None = None, home: str | None = None) -> bool:
+    """Should this command be evaluated? True when the working directory is inside a shared zone (every command there
+    is judged: `git clean`, a redirection and `mv` hold no delete word), when the text holds a delete word as written,
+    when it holds a character that can build one (`$`, a backtick, `?`, `*`, `[`, `{`: `r?`, `r[m]`, `/bin/r*`, `$RM`,
+    `r$'m'`), or when it mentions a shared zone. Backslash-newline pairs are removed first (`r\\<newline>m` is `rm`).
+    Only a command that does none of these is allowed without being parsed."""
+    if cwd and home and cwd.startswith("/") and Zones(home).roots(norm(cwd)) is not None:
+        return True
     text = text.replace("\\\n", "")
     return plain_delete_word(text) or bool(_SUSPECT.search(text)) or bool(_ZONE_TEXT.search(text))
 
@@ -190,6 +197,8 @@ class Scanner:
         for clause in _TAINT_CLAUSE.finditer(text):
             self.tainted.update(_NAME.findall(clause.group()))
         self.tainted.update(_TAINT_APPEND.findall(text))
+        self.no_bind = bool(_NO_BIND.search(text))  # eval, source or a function: nothing is bound
+        self.depth = 0  # open parentheses: an assignment inside a subshell does not reach the caller
         self.i = 0
         self.nested: list[str] = []
         self.commands: list[Cmd] = []
@@ -218,9 +227,18 @@ class Scanner:
     def separator(self, sep: str) -> None:
         """A command boundary. A newline or `;` with nothing before it changes nothing."""
         if self.cur and all(_ASSIGN.match(w.text) for w in self.cur):  # assignments only: they bind for what follows
+            # Bound only when it surely ran in this shell: not after `&&`, `||`, `|` or `&`, not before `|` or `&`
+            # (a pipeline stage or a background job is a subshell), not inside parentheses, not near eval or a function.
+            sure = (
+                not self.no_bind
+                and self.depth == 0
+                and self.last in ("", ";", "\n", ")")
+                and sep not in ("|", "|&", "&")
+            )
             for name, value in self.staged.items():
-                if value is None:
+                if value is None or not sure:
                     self.vars.pop(name, None)
+                    self.tainted.add(name)
                 else:
                     self.vars[name] = value
         if self.cur:
@@ -296,8 +314,9 @@ class Scanner:
         elif not in_dq and s.startswith('$"', i):
             self.i = i + 1
             self.double(buf, st)
-        elif s.startswith("$((", i):  # arithmetic: its words are numbers and operators, not commands (a limit)
+        elif s.startswith("$((", i):  # arithmetic: no commands, but a substitution inside it runs
             end = self.matching(i + 2, "(", ")")
+            self.arithmetic_substitutions(i + 3, end)
             st["expands"] = True
             buf.append("\0")
             self.i = end + 1
@@ -331,6 +350,23 @@ class Scanner:
                     st["expands"] = True  # an expansion form this scanner does not model: fail closed
                     buf.append("\0")
                 self.i = i + 1
+
+    def arithmetic_substitutions(self, j: int, end: int) -> None:
+        """Queue every `$(...)`, backtick and `<(...)` inside an arithmetic body: they are commands."""
+        s = self.s
+        while j < end:
+            if (s.startswith("$(", j) and not s.startswith("$((", j)) or s.startswith("<(", j) or s.startswith(">(", j):
+                close = self.matching(j + 2, "(", ")")
+                self.nested.append(s[j + 2 : close])
+                j = close + 1
+            elif s[j] == "`":
+                close = s.find("`", j + 1)
+                if close < 0:
+                    raise Unparseable
+                self.nested.append(s[j + 1 : close])
+                j = close + 1
+            else:
+                j += 1
 
     def variable(self, name: str, buf: list[str], st: dict[str, Any]) -> None:
         """`$name`: its value when it was assigned a plain literal earlier in this command line, else unknown."""
@@ -486,6 +522,7 @@ class Scanner:
                 self.operator(buf, st)
             elif c in "()":
                 self.end_word(buf, st)
+                self.depth += 1 if c == "(" else -1
                 self.separator(c)  # closes any command before it
                 self.commands.append(Cmd([], self.last, c, c))
                 self.last = c
@@ -590,7 +627,12 @@ class Zones:
         parts = path[len(root) :].strip("/").split("/") if path != root else []
         if posixpath.dirname(root) == TMP:  # a harness scratchpad parent, not a dev folder of a home that is under /tmp
             return len(parts) >= 4 and parts[2] == "scratchpad"
-        return len(parts) >= 2 and parts[0] == "agents" and parts[1] not in ("", ".", "..")
+        # Strictly below agents/<name>/: the <name> folder itself (the root) is removed by the owner, in a batch.
+        return len(parts) >= 3 and parts[0] == "agents" and parts[1] not in ("", ".", "..")
+
+    def is_agent_root(self, path: str, root: str) -> bool:
+        parts = path[len(root) :].strip("/").split("/") if path != root else []
+        return posixpath.dirname(root) != TMP and len(parts) == 2 and parts[0] == "agents" and parts[1] != ""
 
     def judge(self, path: str, glob: bool) -> str:
         """'ok' (exact, under a per-agent folder), 'shared' (blocked), 'outside' (not our business)."""
@@ -654,11 +696,32 @@ class Checker:
         path, glob = resolved
         if self.zones.judge(path, glob) != "shared":
             return None
+        return self.shared_finding(word, path, shown)
+
+    def shared_finding(self, word: Word, path: str, shown: str) -> Finding:
         if word.glob is not None:
             return Finding("a glob inside a shared dev directory", shown)
-        if self.zones.is_parent(path) or path == self.zones.roots(path):
+        root = self.zones.roots(path)
+        if self.zones.is_parent(path) or path == root:
             return Finding("removal of a shared dev directory or one of its parents", shown)
+        if root is not None and self.zones.is_agent_root(path, root):
+            return Finding("removal of an agent folder root", shown, "agent-root")
         return Finding("a path in a shared dev directory outside a per-agent folder", shown)
+
+    def judge_soft(self, word: Word) -> Finding | None:
+        """For programs other than the deleters (a redirection, mv, truncate...): a target that cannot be resolved only
+        counts when a zone is in sight or the working directory is inside one."""
+        shown = word.text.replace("\0", "?").replace(self.home, "~")[:120]
+        resolved = resolve(word, self.cwd)
+        if resolved is None:
+            inside = self.cwd is not None and self.zones.roots(self.cwd) is not None
+            if self.mentions_zone or inside:
+                return Finding("a target that cannot be resolved (an expansion, or a relative path)", shown)
+            return None
+        path, glob = resolved
+        if self.zones.judge(path, glob) != "shared":
+            return None
+        return self.shared_finding(word, path, shown)
 
     @staticmethod
     def drop_redirects(words: list[Word]) -> list[Word]:
@@ -750,7 +813,35 @@ class Checker:
         res = resolve(word, self.cwd)
         return (res[0] if res else None,)
 
+    def existing_shared(self, word: Word) -> Finding | None:
+        """For a redirection or `tee`: a target in a shared zone that already exists (a glob counts, it may match one).
+        Creating a new file truncates nothing, and a target that cannot be resolved is not judged."""
+        resolved = resolve(word, self.cwd)
+        if resolved is None:
+            return None
+        path, glob = resolved
+        if self.zones.judge(path, glob) != "shared" or (not glob and not os.path.lexists(path)):
+            return None
+        shown = word.text.replace("\0", "?").replace(self.home, "~")[:120]
+        return self.shared_finding(word, path, shown)
+
+    def redirections(self, words: list[Word]) -> Finding | None:
+        """A `>`, `>|` or `&>` truncates an existing target (`: > file`, `echo x > file`); `>>` appends and is not
+        judged, and a file that does not exist yet is only created."""
+        for n, w in enumerate(words):
+            if not w.redir or n + 1 >= len(words):
+                continue
+            target = words[n + 1]
+            if w.text in (">", ">|", "&>") or (w.text == ">&" and not target.text.isdigit() and target.text != "-"):
+                found = self.existing_shared(target)
+                if found:
+                    return Finding("a redirection that truncates " + found.reason, found.target, found.hint)
+        return None
+
     def command(self, words: list[Word], depth: int) -> Finding | None:
+        found = self.redirections(words)
+        if found:
+            return found
         words = self.drop_redirects(words)
         pre = self.prefix(words)
         if pre.split is not None:
@@ -813,6 +904,184 @@ class Checker:
             return self.find(args)
         if name in DELETERS:
             return self.delete(args, extra_dynamic=False)
+        handler = {
+            "git": self.git,
+            "truncate": self.truncate,
+            "rsync": self.rsync,
+            "tar": self.tar,
+            "mv": self.mv,
+            "cp": self.cp,
+            "dd": self.dd,
+            "tee": self.tee,
+        }.get(name)
+        return handler(args) if handler else None
+
+    @staticmethod
+    def operands(args: list[Word], takes: frozenset[str]) -> tuple[list[Word], list[Word]]:
+        """(operands, values of the options in `takes`): words that are not options, and what those options consumed."""
+        out: list[Word] = []
+        values: list[Word] = []
+        after_dd = False
+        skip = False
+        for a in args:
+            if skip:
+                values.append(a)
+                skip = False
+            elif not after_dd and not a.quoted and a.text == "--":
+                after_dd = True
+            elif not after_dd and a.text.startswith("-") and len(a.text) > 1:
+                if a.text in takes:
+                    skip = True
+                elif a.text.startswith("--") and "=" in a.text and a.text.split("=", 1)[0] in takes:
+                    values.append(Word(a.text.split("=", 1)[1], None, a.expands, a.quoted))
+            else:
+                out.append(a)
+        return out, values
+
+    def judge_all(self, words: list[Word]) -> Finding | None:
+        for w in words:
+            found = self.judge_soft(w)
+            if found:
+                return found
+        return None
+
+    def git(self, args: list[Word]) -> Finding | None:
+        """`git clean` removes untracked files from the working tree it runs in (or the pathspecs it is given)."""
+        base = self.cwd
+        i = 0
+        while i < len(args):
+            t = args[i].text
+            if t == "-C" and i + 1 < len(args):
+                base = self.chdir_of(args[i + 1])[0]
+                i += 2
+            elif t in ("-c", "--exec-path", "--namespace", "--super-prefix", "--config-env") and i + 1 < len(args):
+                i += 2
+            elif t.startswith(("--work-tree=", "--git-dir=")):
+                if t.startswith("--work-tree="):
+                    base = self.chdir_of(Word(t.split("=", 1)[1], None, False, False))[0]
+                i += 1
+            elif t in ("--work-tree", "--git-dir") and i + 1 < len(args):
+                if t == "--work-tree":
+                    base = self.chdir_of(args[i + 1])[0]
+                i += 2
+            elif t.startswith("-"):
+                i += 1
+            else:
+                break
+        if i >= len(args) or args[i].text != "clean":
+            return None
+        rest = args[i + 1 :]
+        for a in rest:
+            if a.text == "--dry-run" or (a.text.startswith("-") and not a.text.startswith("--") and "n" in a.text):
+                return None  # a dry run removes nothing
+        pathspecs, _ = self.operands(rest, frozenset({"-e", "--exclude"}))
+        saved = self.cwd
+        self.cwd = base
+        try:
+            if pathspecs:
+                return self.judge_all(pathspecs)
+            if base is None:
+                return (
+                    Finding("`git clean` in a working directory that could not be followed", "")
+                    if self.mentions_zone
+                    else None
+                )
+            found = self.judge_soft(Word(".", None, False, False))
+            return Finding("`git clean` in " + found.reason, found.target, found.hint) if found else None
+        finally:
+            self.cwd = saved
+
+    def truncate(self, args: list[Word]) -> Finding | None:
+        targets, _ = self.operands(args, frozenset({"-s", "--size", "-r", "--reference"}))
+        return self.judge_all(targets)
+
+    def rsync(self, args: list[Word]) -> Finding | None:
+        if not any(
+            a.text.startswith(("--delete", "--del", "--remove-source-files", "--remove-sent-files")) for a in args
+        ):
+            return None
+        takes = frozenset({"-e", "--rsh", "--exclude", "--include", "-f", "--filter", "--files-from", "--rsync-path"})
+        targets, _ = self.operands(args, takes | {"--log-file", "--temp-dir", "-T", "--exclude-from", "--include-from"})
+        return self.judge_all(targets)
+
+    def tar(self, args: list[Word]) -> Finding | None:
+        if not any(a.text == "--remove-files" for a in args):
+            return None
+        saved = self.cwd
+        pending = ""  # what the previous word asked for: "" nothing, "file" an archive or list, "dir" a -C directory
+        first = True
+        try:
+            for a in args:
+                t = a.text
+                if pending:
+                    if pending == "dir":
+                        self.cwd = self.chdir_of(a)[0]
+                    pending = ""
+                elif first and not t.startswith("-"):  # an old-style option cluster (`cf x.tar`)
+                    pending = "dir" if "C" in t else ("file" if "f" in t else "")
+                elif t in ("-C", "--directory"):
+                    pending = "dir"
+                elif t.startswith("--directory="):
+                    self.cwd = self.chdir_of(Word(t.split("=", 1)[1], None, False, False))[0]
+                elif t in ("-f", "--file", "-T", "--files-from", "-X", "--exclude-from"):
+                    pending = "file"
+                elif t.startswith("--"):
+                    pass
+                elif t.startswith("-"):
+                    pending = "file" if "f" in t[1:] else ("dir" if "C" in t[1:] else "")
+                else:
+                    found = self.judge_soft(a)
+                    if found:
+                        return found
+                first = False
+            return None
+        finally:
+            self.cwd = saved
+
+    @staticmethod
+    def target_directories(args: list[Word]) -> list[Word]:
+        """The directory given to `-t` / `--target-directory` of mv and cp."""
+        out: list[Word] = []
+        for n, a in enumerate(args):
+            if a.text in ("-t", "--target-directory") and n + 1 < len(args):
+                out.append(args[n + 1])
+            elif a.text.startswith("--target-directory="):
+                out.append(Word(a.text.split("=", 1)[1], None, a.expands, a.quoted))
+            elif a.text.startswith("-t") and len(a.text) > 2 and not a.text.startswith("--"):
+                out.append(Word(a.text[2:], None, a.expands, a.quoted))
+        return out
+
+    def mv(self, args: list[Word]) -> Finding | None:
+        operands, _ = self.operands(args, frozenset({"-t", "--target-directory", "-S", "--suffix"}))
+        return self.judge_all(operands + self.target_directories(args))
+
+    def cp(self, args: list[Word]) -> Finding | None:
+        operands, _ = self.operands(args, frozenset({"-t", "--target-directory", "-S", "--suffix"}))
+        if not any(o.text in ("/dev/null", "/dev/zero") for o in operands):
+            return None
+        rest = [o for o in operands if o.text not in ("/dev/null", "/dev/zero")]
+        return self.judge_all(rest + self.target_directories(args))
+
+    def dd(self, args: list[Word]) -> Finding | None:
+        for a in args:
+            if a.text.startswith("of="):
+                glob = a.glob - 3 if a.glob is not None and a.glob >= 3 else None
+                found = self.judge_soft(Word(a.text[3:], glob, a.expands, a.quoted))
+                if found:
+                    return found
+        return None
+
+    def tee(self, args: list[Word]) -> Finding | None:
+        if any(
+            a.text in ("-a", "--append") or (a.text.startswith("-") and not a.text.startswith("--") and "a" in a.text)
+            for a in args
+        ):
+            return None
+        targets, _ = self.operands(args, frozenset())
+        for t in targets:
+            found = self.existing_shared(t)
+            if found:
+                return found
         return None
 
     def follow_cd(self, args: list[Word]) -> None:
@@ -828,9 +1097,12 @@ class Checker:
         for n, a in enumerate(args):
             if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", a.text) and n + 1 < len(args):
                 body = args[n + 1]
-                if body.expands:
-                    raise Unparseable
-                return self.nested_text(body.text, depth)
+                if body.expands and not body.text.replace("\0", "").strip():
+                    # the whole body is an expansion: nothing to read, so only a zone in sight or in the cwd matters
+                    if self.mentions_zone or (self.cwd is not None and self.zones.roots(self.cwd) is not None):
+                        raise UnknownCommand
+                    return None
+                return self.nested_text(body.text, depth)  # a body with unknown pieces is read with them unresolved
         return None
 
     def nested_text(self, text: str, depth: int, *, unknown_cwd: bool = False) -> Finding | None:
@@ -892,8 +1164,20 @@ class Checker:
         return posixpath.basename(head.text) not in READ_ONLY
 
     def find(self, args: list[Word]) -> Finding | None:
-        starts: list[Word] = []
         n = 0
+        while n < len(args) and not args[n].quoted:  # GNU global options come before the start paths
+            t = args[n].text
+            if t in ("-H", "-L", "-P") or (t.startswith("-O") and t[2:].isdigit()):
+                n += 1
+            elif t == "-D":
+                if n + 1 >= len(args):
+                    raise Unparseable
+                n += 2
+            elif t.startswith("-D") and len(t) > 2:
+                n += 1
+            else:
+                break
+        starts: list[Word] = []
         while n < len(args) and not (args[n].text.startswith(("-", "(", "!")) and not args[n].quoted):
             starts.append(args[n])
             n += 1
@@ -913,13 +1197,17 @@ class Checker:
             m += 1
         if not deleting:
             return None
+        if any(a.text.startswith("-files0-from") for a in args):
+            raise Unparseable  # the start paths come from a file this hook cannot read
         if not starts:
             starts = [Word(".", None, False, False)]
         for s in starts:
             found = self.judge_word(s, True)
             if found:
                 return Finding(
-                    "`find` that deletes in or from a shared dev directory (" + found.reason + ")", found.target
+                    "`find` that deletes in or from a shared dev directory (" + found.reason + ")",
+                    found.target,
+                    found.hint,
                 )
         return None
 
@@ -965,23 +1253,26 @@ class Checker:
         return None
 
 
+def home_unknown(command: str) -> bool:
+    """Could HOME have been changed by this command? Looked for in the text with quotes and backslashes removed (so
+    `H""OME=x` counts) and, since nested bodies are part of that text, in every nested body too."""
+    flat = _QUOTES.sub("", command.replace("\\\n", ""))
+    return bool(_HOME_REDEFINED.search(flat) or _HOME_COMMANDS.search(flat))
+
+
 def check(command: str, home: str, cwd: str | None) -> Finding | None:
-    """The finding that makes `command` a deny, or None to allow. A command with no delete word, no character that can
-    build one and no zone in sight is allowed at once, unparsed. One that holds a delete word and cannot be read fails
-    closed; so does one whose command word is built from an expansion or pattern and aimed at a zone."""
-    if not has_delete_word(command):
+    """The finding that makes `command` a deny, or None to allow. A command that holds no delete word, no character
+    that can build one, no zone and whose cwd is outside every zone is allowed at once, unparsed. Anything else is
+    evaluated, and what cannot be read (a syntax error, nesting, a timeout, an internal error) is a deny."""
+    if not has_delete_word(command, cwd, home):
         return None
-    checker = Checker(home, cwd, None if _HOME_REDEFINED.search(command) else home)
+    checker = Checker(home, cwd, None if home_unknown(command) else home)
     try:
         return checker.scan(command)
     except UnknownCommand:
         return Finding("a command word built from an expansion or a pattern, aimed at a shared dev directory", "")
     except (Unparseable, RecursionError):
-        # A syntax error the tokenizer cannot read: block only when a delete word was written out; without one
-        # there is nothing to say it deletes, and a command that merely looks odd is not worth a lock.
-        if plain_delete_word(command):
-            return Finding("a command too tangled to check (unterminated quote, nesting or a built command word)", "")
-        return None
+        return Finding("a command too tangled to check (unterminated quote, nesting or a built command word)", "")
 
 
 # -- the hook -------------------------------------------------------------------------------------------------------
@@ -989,13 +1280,20 @@ def check(command: str, home: str, cwd: str | None) -> Finding | None:
 
 def message(found: Finding) -> str:
     target = f" (target: {found.target})" if found.target else ""
+    if found.hint == "agent-root":
+        return (
+            f"safo rmguard: blocked, {found.reason}{target}. Agent folder roots are removed by the owner in a batch, "
+            "not by an agent: leave it. Inside your per-agent folder you may delete exact files and subfolders below "
+            "the root, but not the root itself. To hand the folder over, print its exact name for the owner with: "
+            f"ls -d -- {shlex.quote(found.target)}"
+        )
     return (
         f"safo rmguard: blocked, {found.reason}{target}. Shared dev directories (~/.local/share/*-dev and the "
-        "scratchpad parent /tmp/claude-*) hold other sessions' logs and scripts, so nothing there is deleted by "
-        "pattern or by parent. Instead: work in your own per-agent folder (for example "
-        "~/.local/share/<project>-dev/agents/<issue>-<role>/), and clean up by the EXACT path of that folder or of a "
-        "file inside it, with no wildcard and no parent. To clear a pattern, list the files first and remove each by "
-        "exact name inside your own folder."
+        "scratchpad parent /tmp/claude-*) hold other sessions' work, so nothing there is deleted, truncated or moved "
+        "by pattern, by parent or by a path outside an agent folder. Instead: work in a per-agent folder (for example "
+        "~/.local/share/<project>-dev/agents/<issue>-<role>/) and delete only the EXACT path of a file or subfolder "
+        "strictly below its root, with no wildcard and no parent. The folder root itself is removed by the owner in a "
+        "batch; to clear a pattern, list the files first and remove each by exact name."
     )
 
 
@@ -1023,14 +1321,43 @@ def redact(command: str, home: str) -> str:
     return text[:MAX_LOGGED_CHARS] + ("...<cut>" if len(text) > MAX_LOGGED_CHARS else "")
 
 
-def append_log(home: str, name: str, line: str) -> None:
-    """Append one line to a log in the lead-only folder (0700, file 0600). Never raises: a log must not block."""
+def _append_log(home: str, name: str, line: str) -> None:
+    """Open the lead-only folder component by component through directory descriptors (no symlink is followed, every
+    component must belong to this user), repair the folder to 0700, and append to a regular file this user owns."""
+    uid = os.getuid()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)  # the home itself may sit behind a mount link
     try:
-        folder = os.path.join(home, *LEAD_FOLDER)
-        os.makedirs(folder, mode=0o700, exist_ok=True)
-        fd = os.open(os.path.join(folder, name), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        for n, part in enumerate(LEAD_FOLDER):
+            try:
+                nxt = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o700, dir_fd=fd)
+                nxt = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+            info = os.fstat(fd)
+            if info.st_uid != uid:
+                raise PermissionError(part)
+            if n == len(LEAD_FOLDER) - 1 and stat.S_IMODE(info.st_mode) != 0o700:
+                os.fchmod(fd, 0o700)
+        log = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+        try:
+            info = os.fstat(log)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1:
+                raise PermissionError(name)
+            os.fchmod(log, 0o600)
+            os.write(log, (line + "\n").encode("utf-8", "replace"))
+        finally:
+            os.close(log)
+    finally:
+        os.close(fd)
+
+
+def append_log(home: str, name: str, line: str) -> None:
+    """Append one line to a log in the lead-only folder. Never raises: a log must not block anything."""
+    try:
+        _append_log(home, name, line)
     except OSError:
         return
 
@@ -1088,11 +1415,11 @@ class Outcome(NamedTuple):
     note: str  # a failure that was allowed (no delete word), for the error log
 
 
-def gate(text: str) -> tuple[bool, bool, str]:
+def gate(text: str, cwd: str | None = None, home: str | None = None) -> tuple[bool, bool, str]:
     """(evaluate it, it holds a delete word, note). If the gate itself crashes, a plain substring decides both and the
     note says so."""
     try:
-        return has_delete_word(text), plain_delete_word(text), ""
+        return has_delete_word(text, cwd, home), plain_delete_word(text), ""
     except Exception:
         held = any(word in text for word in ("rm", "unlink", "shred", "-delete", "-exec", "-ok"))
         return held, held, "internal error in the delete-word gate"
@@ -1115,15 +1442,13 @@ def evaluate(raw: str, home: str, default_cwd: str | None) -> Outcome:
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return Outcome("", "", "")
-    look, held, note = gate(command)
+    cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else default_cwd
+    look, _, note = gate(command, cwd, home)
     if not look:
         return Outcome("", command, note)
-    cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else default_cwd
     try:
         found = run_check(command, home, cwd)
-    except Exception:  # fail closed when a delete word is there, a timeout included; the message names no command text
-        if not held:
-            return Outcome("", command, "internal error while checking a command with no delete word; allowed")
+    except Exception:  # fail closed: an evaluated command that crashes or times out is blocked
         reason = "safo rmguard: blocked, an internal error while checking the command (fail closed). Retry it."
         return Outcome(reason, command, "")
     return Outcome(message(found) if found else "", command, "")

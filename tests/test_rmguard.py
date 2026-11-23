@@ -137,6 +137,71 @@ BLOCKED = [
     pytest.param(f"`echo rm` -rf {DEV}/*.log", "/", id="r3-backtick-command"),
     pytest.param(f'"$RM" -rf {DEV}/*.log', "/", id="r3-quoted-expansion-command"),
     pytest.param("$RM -rf *.log", DEV, id="r3-expansion-command-cwd-in-zone"),
+    # round 4 (Daybreak): D3 agent folder roots are removed by the owner in a batch
+    pytest.param(f"rm -rf {AGENT}", "/", id="d3-agent-root-recursive"),
+    pytest.param(f"rm -r {AGENT}/", "/", id="d3-agent-root-trailing-slash"),
+    pytest.param(f"rm -rf {DEV}/agents/other-session", "/", id="d3-other-agent-root"),
+    pytest.param(f"rmdir {AGENT}", "/", id="d3-agent-root-rmdir"),
+    pytest.param("rm -rf ~/.local/share/reach-around-dev/agents/422-reviewer", "/", id="d3-agent-root-tilde"),
+    pytest.param("rm -rf $HOME/.local/share/reach-around-dev/agents/422-reviewer", "/", id="d3-agent-root-home-var"),
+    pytest.param(f"find {AGENT} -name '*.pyc' -delete", "/", id="d3-find-start-at-agent-root"),
+    pytest.param("find . -delete", AGENT, id="d3-find-cwd-agent-root"),
+    pytest.param("rm -rf ../../other", f"{AGENT}/work", id="d3-dotdot-out-of-agent-folder"),
+    # D1: every command is evaluated when the cwd is inside a zone; other destructive programs
+    pytest.param("git clean -fdx", DEV, id="d1-git-clean-cwd-zone"),
+    pytest.param("git clean -fdx", f"{DEV}/repo", id="d1-git-clean-cwd-zone-subdir"),
+    pytest.param(f"git -C {DEV} clean -fd", "/", id="d1-git-clean-dash-C"),
+    pytest.param(f"git clean -fdx -- {DEV}/x", "/", id="d1-git-clean-pathspec"),
+    pytest.param(f"truncate -s 0 {DEV}/a.log", "/", id="d1-truncate"),
+    pytest.param("truncate -s0 *.log", DEV, id="d1-truncate-glob-cwd"),
+    pytest.param(f"rsync -a --delete /work/src/ {DEV}/dest/", "/", id="d1-rsync-delete"),
+    pytest.param(f"rsync --remove-source-files {DEV}/a.log /work/", "/", id="d1-rsync-remove-source"),
+    pytest.param(f"tar --remove-files -cf /work/x.tar -C {DEV} .", "/", id="d1-tar-remove-files-C"),
+    pytest.param("tar --remove-files -cf /work/x.tar .", DEV, id="d1-tar-remove-files-cwd"),
+    pytest.param(f"mv {DEV}/a.log /work/", "/", id="d1-mv-source-in-zone"),
+    pytest.param(f"mv /work/x {DEV}/a.log", "/", id="d1-mv-onto-zone"),
+    pytest.param(f"mv -t {DEV} /work/x", "/", id="d1-mv-target-dir"),
+    pytest.param(f"cp /dev/null {DEV}/a.log", "/", id="d1-cp-dev-null"),
+    pytest.param(f"dd if=/dev/null of={DEV}/a.log", "/", id="d1-dd-of"),
+    # D2: GNU find global options before the start path
+    pytest.param(f"find -H {DEV} -delete", "/work", id="d2-find-H"),
+    pytest.param(f"find -L {DEV} -delete", "/work", id="d2-find-L"),
+    pytest.param(f"find -P {DEV} -delete", "/work", id="d2-find-P"),
+    pytest.param(f"find -O3 {DEV} -delete", "/work", id="d2-find-O3"),
+    pytest.param(f"find -D tree {DEV} -delete", "/work", id="d2-find-D-tree"),
+    pytest.param(f"find -H -L -P -O2 -D opt,exec {DEV} -name x -delete", "/work", id="d2-find-all-options"),
+    pytest.param("find -H -delete", DEV, id="d2-find-option-then-default-start"),
+    pytest.param("find -files0-from /work/list -delete", "/work", id="d2-find-files0-from"),
+    pytest.param(f"find -H {DEV} -exec rm {{}} +", "/work", id="d2-find-H-exec"),
+    # A1: arithmetic bodies are scanned for substitutions
+    pytest.param(f"echo $(( $(rm -rf {DEV}/*.log) + 1 ))", "/", id="a1-arith-substitution"),
+    pytest.param(f"echo $(( `rm -rf {DEV}/*.log` ))", "/", id="a1-arith-backtick"),
+    pytest.param(f"echo $(( 1 + $(( $(rm -rf {DEV}/*.log) )) ))", "/", id="a1-arith-nested"),
+    # A2: evaluated, so a syntax error is a deny
+    pytest.param(f'ls {DEV}/*.log "unterminated', "/", id="a2-zone-syntax-error"),
+    pytest.param("echo $'unterminated", "/", id="a2-ansi-unterminated"),
+    pytest.param('echo "x $HOME', "/", id="a2-suspect-unterminated"),
+    # A3: HOME changed by means the first scan missed
+    pytest.param('export H""OME=/x; rm -rf ~/y', "/", id="a3-home-quoted-name"),
+    pytest.param("export H\\OME=/x; rm -rf ~/y", "/", id="a3-home-backslash-name"),
+    pytest.param("read HOME <<< /x; rm -rf ~/y", "/", id="a3-home-read"),
+    pytest.param("declare HOME=/x; rm -rf ~/y", "/", id="a3-home-declare"),
+    pytest.param("printf -v HOME %s /x; rm -rf ~/y", "/", id="a3-home-printf-v"),
+    pytest.param("source ./env.sh; rm -rf ~/y/z", "/", id="a3-home-source"),
+    pytest.param("eval 'x=1'; rm -rf ~/y", "/", id="a3-home-eval"),
+    pytest.param("bash -c 'HOME=/x rm -rf ~/y'", "/", id="a3-home-nested"),
+    # A4: a variable assigned conditionally, in a pipe, a subshell, the background or eval is unknown afterwards
+    pytest.param("S=~/.local/share/reach-around-dev; false && S=/work; rm -rf $S/y", "/", id="a4-and-assignment"),
+    pytest.param("S=~/.local/share/reach-around-dev; false || S=/work; rm -rf $S/y", "/", id="a4-or-assignment"),
+    pytest.param("S=~/.local/share/reach-around-dev; S=/work | cat; rm -rf $S/y", "/", id="a4-pipe-assignment"),
+    pytest.param("S=~/.local/share/reach-around-dev; (S=/work); rm -rf $S/y", "/", id="a4-subshell-assignment"),
+    pytest.param("S=~/.local/share/reach-around-dev; S=/work & rm -rf $S/y", "/", id="a4-background-assignment"),
+    pytest.param("S=~/.local/share/reach-around-dev; eval 'S=/work'; rm -rf $S/y", "/", id="a4-eval-assignment"),
+    pytest.param(
+        "f() { S=/work; }; S=~/.local/share/reach-around-dev; f; rm -rf $S/y", "/", id="a4-function-assignment"
+    ),
+    pytest.param('bash -c "rm -rf $D/*.log"', "/", id="a2-bash-c-with-unknown-piece-and-delete"),
+    pytest.param('bash -c "$CMD"', DEV, id="a2-bash-c-whole-body-unknown"),
     # fail closed: it cannot tell where these point
     pytest.param('rm -rf "$SOMEDIR"', "/", id="unknown-expansion-recursive"),
     pytest.param("rm -f $SOMEFILE", "/", id="unknown-expansion-unquoted"),
@@ -146,17 +211,14 @@ BLOCKED = [
 ]
 
 ALLOWED = [
-    pytest.param(f"rm -rf {AGENT}", "/", id="own-folder-exact"),
     pytest.param(f"rm -rf {AGENT}/venv", "/", id="own-subfolder-exact"),
     pytest.param(f"rm {AGENT}/old.log {AGENT}/old.py", "/", id="own-files-exact"),
-    pytest.param("rm -rf ~/.local/share/reach-around-dev/agents/422-reviewer", "/", id="tilde-exact"),
-    pytest.param("rm -rf $HOME/.local/share/reach-around-dev/agents/422-reviewer", "/", id="home-var-exact"),
     pytest.param("rm -rf venv", AGENT, id="relative-exact-in-own-folder"),
     pytest.param("cd ~/.local/share/reach-around-dev/agents/422-reviewer && rm -rf repo", "/", id="cd-then-exact"),
-    pytest.param(f"find {AGENT} -name '*.pyc' -delete", "/", id="find-delete-in-own-folder"),
-    pytest.param("find . -name '*.pyc' -delete", AGENT, id="find-delete-cwd-own-folder"),
+    pytest.param(f"find {AGENT}/work -name '*.pyc' -delete", "/", id="find-delete-in-own-folder"),
+    pytest.param("find . -name '*.pyc' -delete", f"{AGENT}/work", id="find-delete-cwd-own-folder"),
     pytest.param(f"rm -rf {PAD}/work", "/", id="scratchpad-exact"),
-    pytest.param(f"ls {AGENT} | xargs rm", AGENT, id="xargs-in-own-folder"),
+    pytest.param(f"ls {AGENT}/work | xargs rm", f"{AGENT}/work", id="xargs-in-own-folder"),
     pytest.param("rm -rf build dist *.egg-info", "/work/repo", id="outside-glob"),
     pytest.param("rm -rf ~/src/project/node_modules", "/", id="outside-exact"),
     pytest.param("rm -f /tmp/safo-test.log", "/", id="tmp-file-outside-claude"),
@@ -171,8 +233,29 @@ ALLOWED = [
     pytest.param('git commit -m "it\'s fine"', "/", id="apostrophe-in-double-quotes"),
     pytest.param("echo 'unterminated", "/", id="unterminated-no-delete-word"),
     pytest.param("ls", "/", id="plain"),
+    pytest.param('bash -c "$CMD"', "/work", id="a2-bash-c-whole-body-unknown-outside-zone"),
+    pytest.param('timeout 4 bash -c "echo > /dev/tcp/$h/$p"', "/", id="d1-bash-c-with-unknown-pieces-and-no-delete"),
+    # round 4: what stays allowed
+    pytest.param(f"rm -rf {AGENT}/sub/dir", "/", id="d3-recursive-subdir-below-agent-root"),
+    pytest.param(f"rm {AGENT}/f.log", "/", id="d3-file-below-agent-root"),
+    pytest.param("git clean -fdx", f"{AGENT}/work", id="d1-git-clean-in-agent-folder"),
+    pytest.param("git clean -n", DEV, id="d1-git-clean-dry-run"),
+    pytest.param("git clean -fdx", "/work/repo", id="d1-git-clean-outside"),
+    pytest.param("git status", DEV, id="d1-evaluated-and-harmless"),
+    pytest.param(f"echo hi >> {DEV}/a.log", "/", id="d1-append-is-not-truncation"),
+    pytest.param(f"echo x > {AGENT}/out.log", "/", id="d1-redirect-into-agent-folder"),
+    pytest.param("echo x > /work/o 2>/dev/null", "/", id="d1-redirect-outside"),
+    pytest.param(f"truncate -s 0 {AGENT}/a.log", "/", id="d1-truncate-in-agent-folder"),
+    pytest.param(f"mv /work/x {AGENT}/y", "/", id="d1-mv-into-agent-folder"),
+    pytest.param(f"cp /dev/null {AGENT}/a.log", "/", id="d1-cp-dev-null-agent-folder"),
+    pytest.param(f"cp /work/a {DEV}/b", "/", id="d1-cp-is-not-judged"),
+    pytest.param("rsync -a /work/a/ /work/b/", "/", id="d1-rsync-no-delete"),
+    pytest.param("find -H . -delete", "/work", id="d2-find-H-outside"),
+    pytest.param(f"find -H {AGENT}/work -name x -delete", "/work", id="d2-find-H-agent-folder"),
+    pytest.param(f"find -D tree {AGENT}/work -delete", "/work", id="d2-find-D-agent-folder"),
+    pytest.param("S=/work/x; rm -rf $S/y", "/", id="a4-unconditional-assignment-binds"),
+    pytest.param("S=/work/x\nrm -rf $S/y", "/", id="a4-newline-assignment-binds"),
     pytest.param(f'cd {DEV}; echo "$(( $(cat t) / 1000 ))C"', "/", id="r3-arithmetic-is-not-a-command"),
-    pytest.param(f'ls {DEV}/*.log "unterminated', "/", id="r3-zone-syntax-error-no-delete-word"),
     pytest.param(f"$VENV/bin/python {AGENT}/t.py", "/", id="r3-unknown-command-in-agent-folder"),
     pytest.param("$VENV/bin/python -m pytest tests", "/work", id="r3-unknown-command-outside-zone"),
     # the glob offset counts characters, not the pieces a `~` or `$HOME` expands into
@@ -181,8 +264,8 @@ ALLOWED = [
     pytest.param("S=/tmp/claude-1000/p/s/scratchpad; rm -f $S/one $S/two/three", "/", id="variable-names-scratchpad"),
     # round 2: these must stay allowed
     pytest.param("rm -rf venv >/dev/null 2>&1", AGENT, id="r2-redirect-after-exact"),
-    pytest.param(f"2>/dev/null rm -rf {AGENT}", "/", id="r2-redirect-ahead-exact"),
-    pytest.param(f"rm -rf $'{AGENT}'", "/", id="r2-ansi-c-exact-agent"),
+    pytest.param(f"2>/dev/null rm -rf {AGENT}/x", "/", id="r2-redirect-ahead-exact"),
+    pytest.param(f"rm -rf $'{AGENT}/x'", "/", id="r2-ansi-c-exact-agent"),
     pytest.param(f"find {DEV} -exec ls -l {{}} \\;", "/", id="r2-find-exec-readonly"),
     pytest.param(f"find {DEV} -exec env grep -l x {{}} +", "/", id="r2-find-exec-env-readonly"),
     pytest.param(f"(cd {DEV}); rm -rf build", "/work/repo", id="r2-subshell-cd-restores"),
@@ -191,7 +274,6 @@ ALLOWED = [
     pytest.param('for f in a b; do rm "$f"; done', "/work/repo", id="r2-loop-outside-zone"),
     # the narrowing: no delete word means no parsing at all, so an odd command is never in the way
     pytest.param("$RM -rf x", "/", id="r2-no-delete-word-expansion-command"),
-    pytest.param("echo $'unterminated", "/", id="r2-no-delete-word-ansi-unterminated"),
     pytest.param('git commit -m "it\'s the HOME dir"; HOME=/x ls', "/", id="r2-no-delete-word-home"),
 ]
 
@@ -208,7 +290,7 @@ def test_allowed(command: str, cwd: str) -> None:
 
 def test_the_tables_are_not_empty() -> None:
     # collect loosely, assert strictly: a parametrization typo cannot make the guard tests pass by collecting nothing
-    assert len(BLOCKED) > 80
+    assert len(BLOCKED) > 140
     assert len(ALLOWED) > 20
 
 
@@ -232,11 +314,12 @@ def test_hook_denies_the_damage_command_with_a_message_that_says_what_to_do(caps
     assert "per-agent folder" in reason
     assert "agents/<issue>-<role>" in reason
     assert "EXACT path" in reason
+    assert "owner" in reason and "batch" in reason
     assert "—" not in reason  # no em dash
 
 
 def test_hook_allows_the_own_folder_command(capsys: pytest.CaptureFixture[str]) -> None:
-    assert run_hook(event(f"rm -rf {AGENT}"), capsys) == ""
+    assert run_hook(event(f"rm -rf {AGENT}/venv"), capsys) == ""
 
 
 def test_hook_ignores_other_tools_and_missing_commands(capsys: pytest.CaptureFixture[str]) -> None:
@@ -294,15 +377,26 @@ def test_hook_blocks_on_a_timeout_with_a_delete_word_and_never_parses_without_on
     assert run_hook(event("echo hi"), capsys) == ""  # check() is not even called
 
 
-def test_a_crash_on_a_command_that_only_looks_suspect_allows_and_logs(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+def test_a_crash_on_an_evaluated_command_blocks_even_without_a_delete_word(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def boom(*_: object) -> None:
         raise RuntimeError("bug")
 
     monkeypatch.setattr(rmguard, "check", boom)
-    assert run_hook(event("echo $HOME"), capsys, home=str(tmp_path)) == ""
-    assert "internal error" in (tmp_path / LEAD / "rmguard-error.log").read_text()
+    assert "internal error" in run_hook(event("echo $HOME"), capsys)
+    assert run_hook(event("echo hi"), capsys) == ""  # never evaluated, so nothing to crash
+
+
+def test_a_timeout_on_an_evaluated_command_blocks_even_without_a_delete_word(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def slow(*_: object) -> None:
+        time.sleep(5)
+
+    monkeypatch.setattr(rmguard, "check", slow)
+    monkeypatch.setattr(rmguard, "TIMEOUT_SECONDS", 0.05)
+    assert "internal error" in run_hook(event("ls *.log"), capsys)
 
 
 def test_no_delete_word_returns_before_any_parsing(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+import rmguard_shell
 from safo import rmguard
 
 BASH = shutil.which("bash")
@@ -57,7 +57,7 @@ ALLOWED = [
     ("cd {W} && rm *.o", "/"),
     ("(cd {D}); rm {W}/x.o", "{W}"),
     ("rm {D}/agents/me/ok.log", "/"),
-    ("2>/dev/null rm -rf {D}/agents/me", "/"),
+    ("2>/dev/null rm -rf {D}/agents/me/ok.log", "/"),
     ("env -C {W} rm x.o", "/"),
 ]
 
@@ -81,8 +81,7 @@ def world(tmp_path: Path) -> dict[str, str]:
 def touched(command: str, cwd: str, w: dict[str, str]) -> list[str]:
     env = {"HOME": w["H"], "PATH": f"{w['bin']}:/usr/bin:/bin", "OUT": w["out"], "LC_ALL": "C"}
     Path(w["out"]).write_text("")
-    assert BASH is not None
-    subprocess.run([BASH, "-c", command], cwd=cwd, env=env, check=False, capture_output=True, timeout=20)  # noqa: S603
+    rmguard_shell.run_bash(command, cwd, env)
     return [line for line in Path(w["out"]).read_text().splitlines() if line]
 
 

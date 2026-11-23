@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.limit and total > args.limit:
             total -= 1
             break
-        if not rmguard.has_delete_word(command):
+        if not rmguard.has_delete_word(command, cwd, home):
             continue
         gated += 1
         plain = rmguard.plain_delete_word(command)
