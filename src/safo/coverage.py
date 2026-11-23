@@ -27,7 +27,7 @@ Q_PULL_LINKS = """query RepoPullRefs($owner: String!, $name: String!, $endCursor
     pullRequests(states: [OPEN, MERGED], first: 100, after: $endCursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number state merged closedAt body repository { nameWithOwner }
+        id number state merged closedAt body author { __typename login } repository { nameWithOwner }
         closingIssuesReferences(first: 1) { totalCount }
       }
     }
@@ -37,7 +37,7 @@ Q_PULL_LINKS = """query RepoPullRefs($owner: String!, $name: String!, $endCursor
 Q_PULL_LINK = """query PullRefs($id: ID!) {
   node(id: $id) {
     ... on PullRequest {
-      id number body repository { nameWithOwner }
+      id number body author { __typename login } repository { nameWithOwner }
       closingIssuesReferences(first: 1) { totalCount }
     }
   }
@@ -115,6 +115,7 @@ class Pull:
     repo: str
     number: int
     linked: bool
+    author: str | None = None  # the login of a bot author; None for a person, a deleted account or anything unreadable
 
 
 def links_issue(body: str, repo: str, number: int) -> bool:
@@ -146,7 +147,22 @@ def _pull(node: JSON, repo: str, since: dt.date | None) -> Pull | None:
     count = refs.get("totalCount") if isinstance(refs, dict) else None
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
         raise MalformedDataError(f"pull request {repo}#{number}: closingIssuesReferences has no count")
-    return Pull(repo, number, count > 0 or links_issue(body or "", repo, number))
+    return Pull(repo, number, count > 0 or links_issue(body or "", repo, number), _author(node))
+
+
+def author_key(login: str) -> str:
+    """A login as compared: lower case, without the `[bot]` suffix REST adds (GraphQL reports `dependabot`)."""
+    low = login.lower()
+    return low.removesuffix("[bot]")
+
+
+def _author(node: JSON) -> str | None:
+    """The author's login, only when GitHub says the author is a Bot: a person's login is never exempt."""
+    author = node.get("author")
+    if not isinstance(author, dict) or author.get("__typename") != "Bot":
+        return None
+    login = author.get("login")
+    return login if isinstance(login, str) else None  # anything else stays unexempt: fail closed
 
 
 def unlinked_pulls(client: Client, board: Board, today: dt.date) -> tuple[list[str], list[str]]:
@@ -160,6 +176,7 @@ def unlinked_pulls(client: Client, board: Board, today: dt.date) -> tuple[list[s
     except OverflowError:
         since = dt.date.min
     exempt = {r.lower() for r in board.rules.tracking.exempt_repos}
+    authors = {author_key(a) for a in board.rules.tracking.exempt_authors}
     found: list[str] = []
     unreachable: list[str] = []
     for repo in board.repositories:
@@ -169,22 +186,31 @@ def unlinked_pulls(client: Client, board: Board, today: dt.date) -> tuple[list[s
         try:
             for node in client.nodes(Q_PULL_LINKS, variables, ("repository", "pullRequests"), ("number", "state")):
                 pull = _pull(node, _canonical_repo(node, f"a pull request of {repo.full_name}"), since)
-                if pull is not None and not pull.linked:
+                if pull is not None and not pull.linked and not _author_exempt(pull.author, authors):
                     found.append(f"{pull.repo}#{pull.number}")
         except NotFoundError:
             unreachable.append(repo.full_name)
     return found, unreachable
 
 
-def pull_is_linked(client: Client, node_id: str) -> bool | None:
-    """Whether one pull request links an issue; None when the node is not a pull request."""
+def _author_exempt(author: str | None, exempt: set[str]) -> bool:
+    return author is not None and author_key(author) in exempt
+
+
+def pull_is_linked(client: Client, node_id: str, exempt_authors: Sequence[str] = ()) -> bool | None:
+    """Whether one pull request links an issue, or needs none because its author is in `exempt_authors`.
+
+    None when the node is not a pull request.
+    """
     data = client.execute(Q_PULL_LINK, {"id": node_id})
     node = data.get("node")
     if not isinstance(node, dict) or "number" not in node:
         return None
     repo = _canonical_repo(node, "a pull request")
     pull = _pull({**node, "state": "OPEN", "merged": False}, repo, None)
-    return None if pull is None else pull.linked
+    if pull is None:
+        return None
+    return pull.linked or _author_exempt(pull.author, {author_key(a) for a in exempt_authors})
 
 
 def card_findings(

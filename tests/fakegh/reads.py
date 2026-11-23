@@ -193,6 +193,13 @@ def closed_pulls(fake: FakeGitHub, v: JSON) -> JSON:
     return _repo_read(fake, v, "pullRequests", ("PullRequest",), ("CLOSED", "MERGED"))
 
 
+def _author_json(c: FContent) -> JSON:
+    out: JSON = {"login": c.author}
+    if c.author_type is not None:
+        out["__typename"] = c.author_type
+    return out
+
+
 def _link_json(c: FContent) -> JSON:
     return {
         "id": c.id,
@@ -201,6 +208,7 @@ def _link_json(c: FContent) -> JSON:
         "merged": c.state == "MERGED",
         "closedAt": c.closed_at,
         "body": c.body,
+        "author": None if c.author is None else _author_json(c),
         "repository": {"nameWithOwner": c.repo},
         "closingIssuesReferences": {"totalCount": c.closing},
     }

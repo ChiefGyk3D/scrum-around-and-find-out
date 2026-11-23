@@ -112,6 +112,11 @@ def check_tracking(ctx: Context, board: Board, live: LiveBoard, items: list[Item
     held = read_tracked(ctx.client, board, live)
     out.drift += card_findings(board, items, held, repos)
     out.notes += not_configured(board)
+    if board.rules.tracking.exempt_authors:
+        names = ", ".join(board.rules.tracking.exempt_authors)
+        out.notes.append(
+            f"pull requests by these bot accounts need no linked issue (rules.tracking.exempt_authors): {names}"
+        )
     merge = read_mergeability(ctx.client, board)
     out.drift += [
         f"CONFLICT {name} has merge conflicts with its base; rebase or merge the base into it"

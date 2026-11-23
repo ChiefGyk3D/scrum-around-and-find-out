@@ -102,6 +102,8 @@ class FContent:
     closing: int = 0  # how many issues GitHub itself counts as closed by a pull request
     mergeable: Any = "MERGEABLE"  # MERGEABLE | CONFLICTING | UNKNOWN (GitHub is still computing), or raw garbage
     merge_state: Any = "CLEAN"  # mergeStateStatus: CLEAN | BEHIND | DIRTY | BLOCKED ...
+    author: Any = None  # the author's login, None for a deleted account (GitHub sends `author: null`)
+    author_type: Any = "Bot"  # the author's GraphQL __typename: Bot | User | ... (None leaves it out)
 
 
 @dataclass

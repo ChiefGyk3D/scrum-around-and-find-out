@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New `rules.tracking.exempt_authors` (#420): a list of bot-account logins (GraphQL typename `Bot`; a person with the same login is never exempt) whose pull requests need no linked issue in
+  `safo audit` and `safo sync`, so Dependabot pull requests are not drift. Matching ignores case and a `[bot]` suffix; a
+  pull request with no readable author is still reported. Default empty: nothing changes until a board lists a login. `safo audit` prints one NOTE naming the active entries.
+  A `board.yaml` that sets the key is refused as an unknown key by a SAFO build without this change.
 - Narrow the shell material rule so it fails closed (#388). The old denial stays the default for the whole submitted
   command. It is relaxed only on a positive proof from a small lexer: the protected words stand only in comments, or
   every command is on a short allowlist and writes no file. The allowlist is `echo` and `printf` to standard output,
