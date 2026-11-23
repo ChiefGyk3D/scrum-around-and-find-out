@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- New `safo-rmguard` (#422), a separate PreToolUse hook for Bash that blocks deleting by glob, by parent, or outside a
+  per-agent folder inside the shared dev directories (`~/.local/share/*-dev` and the scratchpad parent `/tmp/claude-*`):
+  `rm`, `unlink`, `shred`, `rmdir`, `xargs` of them, and `find ... -delete` or `-exec rm`. Only an exact path (no glob)
+  under `<dev>/agents/<name>` or a session's scratchpad passes; a command it cannot read is denied when it mentions a
+  delete word or a shared zone. It is its own module and entry point, so the frozen dispatch guard is untouched. Nothing
+  installs it: the owner adds one hook entry (docs/rmguard.md).
 - New `rules.tracking.exempt_authors` (#420): a list of bot-account logins (GraphQL typename `Bot`; a person with the same login is never exempt) whose pull requests need no linked issue in
   `safo audit` and `safo sync`, so Dependabot pull requests are not drift. Matching ignores case and a `[bot]` suffix; a
   pull request with no readable author is still reported. Default empty: nothing changes until a board lists a login. `safo audit` prints one NOTE naming the active entries.
