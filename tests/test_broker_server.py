@@ -13,6 +13,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -776,9 +777,24 @@ def test_a_third_connection_from_one_uid_is_closed_unread(tmp_path: Path, env: E
     listener.close()
 
 
+def wait_until_idle(server: Any, seconds: float = 5.0) -> None:
+    """Block until the server reports no open connection (a bounded wait on its own count, not a retry)."""
+    end = time.monotonic() + seconds
+    while server.open_connections and time.monotonic() < end:
+        time.sleep(0.002)
+    assert server.open_connections == 0
+
+
 def test_counts_return_to_zero_and_a_new_connection_is_served_after_the_old_ones_close(
-    tmp_path: Path, env: Env
+    tmp_path: Path, env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    release = env.server._release
+
+    def slow_release(*args: Any) -> None:
+        time.sleep(0.05)  # the slot is freed a moment after the socket closes: the order the real server has
+        release(*args)
+
+    monkeypatch.setattr(env.server, "_release", slow_release)  # a fixed delay makes that order certain
     listener, thread, _ = unix_server(tmp_path, env)
     for _ in range(6):  # more than the per-uid cap, one after another
         client = connect(tmp_path)
@@ -786,6 +802,7 @@ def test_counts_return_to_zero_and_a_new_connection_is_served_after_the_old_ones
         client.shutdown(socket.SHUT_WR)
         assert json.loads(split_frames(read_all(client))[0])["ok"] is True
         client.close()
+        wait_until_idle(env.server)  # the server frees the slot after it closes the socket: wait, do not race it
     env.server.stop()
     join_or_fail(thread)
     listener.close()
