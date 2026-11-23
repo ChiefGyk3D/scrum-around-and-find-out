@@ -3,38 +3,48 @@
 Issue #422. On 2026-11-23 a reviewer agent ran `rm -rf ... *.py *.log` inside `~/.local/share/reach-around-dev` and
 deleted another session's logs and helper scripts. A brief is instruction only, so this is a check on the command.
 
+## What it is, and what it is not
+
+A check on the TEXT of one Bash command, run before the command runs. It stops honest mistakes and naive or
+prompt-injected destructive commands that name a shared dev directory. It is a speed bump, not a sandbox: it does not
+observe what a program does, it does not know which agent is running, and anything that can edit the settings file or
+the launcher (the same user can, with the Edit and Write tools) can turn it off. For a boundary that holds against an
+adversary, the hook and its configuration must sit under a different privilege (managed settings, a root-owned
+executable, filesystem controls the agent does not have). This page says so at every step it matters.
+
 ## What it covers, exactly
 
-The hook judges these program families, and only these. It is a check on the text of one Bash command, a speed bump,
-not a sandbox.
+The hook judges these program families, and only these.
 
 | Family | What is judged |
 | :- | :- |
 | `rm`, `rmdir`, `unlink`, `shred` | every target (also through `sudo`, `env`, `nice`, `timeout`, `bash -c`, `eval`, `$(...)`, backticks, `xargs`, `parallel`) |
-| `find` | `-delete`, or `-exec`/`-execdir`/`-ok`/`-okdir` of anything that is not a known read-only tool; the start paths, after the GNU global options `-H -L -P -Olevel -D opt` |
-| `git clean` | the working tree it runs in (the cwd, `git -C dir`, `--work-tree`) or its pathspecs; `-n`/`--dry-run` is allowed |
+| `find` | `-delete`, or `-exec`/`-execdir`/`-ok`/`-okdir` of anything that is not a known read-only tool; the start paths, after the GNU global options `-H -L -P -Olevel -D opt`; an unknown `--long` option or `-files0-from` fails closed |
+| `git` | only status, log, diff, show, fetch, branch, tag, add, commit, push and a few other read-mostly subcommands pass; every other subcommand (`clean`, `reset`, `checkout`, `restore`, `rm`, `stash`, `switch`, `merge`, `rebase`, `pull`, `worktree`, an alias, an unknown global option) is judged by the work tree it would run in (the cwd, `git -C dir`, `--work-tree`); `git clean` is parsed like git does (`-e` takes a value, only `-n` and exactly `--dry-run` are dry runs) and `GIT_WORK_TREE`, `GIT_DIR` and `GIT_CONFIG*` fail closed when a zone is in sight |
 | `truncate` | every target file |
-| `rsync` with `--delete*`, `--remove-source-files` or `--remove-sent-files` | every source and destination operand |
-| `tar --remove-files` | every member operand, after any `-C dir` |
-| `mv` | every source, the destination and `-t dir` (moving out of, or onto, a protected path) |
-| `cp /dev/null` and `cp /dev/zero` | the destination |
+| `rsync` | with any `--delete*`, `--remove-*files` option or an abbreviation of one, or an option it does not know: every source and destination operand |
+| `tar --remove-files` | also `--recursive-unlink` and `--unlink-first`, an abbreviation of one (3+ letters), or an unknown long option: every member operand, after any `-C dir` |
+| `mv` | every source, the destination and `-t dir` (also abbreviated, `--target-dir`) |
+| `cp` | `cp /dev/null` and `cp /dev/zero` always; any other `cp` onto a file that exists (or that an earlier command of the line wrote) |
 | `dd` | the `of=` target |
-| `tee` without `-a` | every target |
-| a truncating redirection | the target of `>`, `>|`, `&>`, `: > file`, `echo x > file`; `>>` (append) is not judged |
+| `tee` without `-a` | every target that exists (or that an earlier command of the line wrote) |
+| `sed -i`, `perl -i`/`-pi`, `awk -i inplace`, `ed`, `install`, `ln -f`/`-sf` | the files they edit or replace, when they exist in a zone |
+| `python -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`, `lua -e` | the program text cannot be read: denied when it names a zone, or when the cwd is inside one |
+| a truncating redirection | the target of `>`, `>|`, `&>`, `: > file`, `echo x > file`, when it exists (or an earlier command of the line wrote it); `>>` appends and is not judged |
 
-Not covered: any other program (a script, `python -c "shutil.rmtree(...)"`, `perl -e unlink`, `sed -i`, `git reset
---hard`, `git checkout -- .`, `git stash`, a container with a bind mount, `cp` onto a file that is not `/dev/null`, an
-alias or a function that hides one of the above); a symlink that points into a zone (paths are compared as text); and
-`xargs` input the command does not show. If you need one of those covered, it is a change to this file, not a setting.
+Not covered: any other program (a script file, `python script.py`, `sed` without `-i`, `git reset --hard` through a
+program that is not git, a container with a bind mount, an alias or a function that hides one of the above); a symlink
+that points into a zone (paths are compared as text); `xargs` input the command does not show. If you need one of
+those covered, it is a change to this file, not a setting.
 
 ## What is protected
 
 Shared zones: `~/.local/share/<anything>-dev` (and everything below), the parents above them (`~/.local/share`,
-`~/.local`, `~`, `/tmp`, `/`), and `/tmp/claude-*` (the harness scratchpad parent).
+`~/.local`, `~`, the ancestors of `~`, `/tmp`, `/`), and `/tmp/claude-*` (the harness scratchpad parent).
 
 Allowed, for the families above: an exact path (no glob, no expansion) STRICTLY BELOW `<dev>/agents/<name>/`, for
 files and for recursive removal of a subfolder, and strictly below `/tmp/claude-*/<project>/<session>/scratchpad`.
-Everything outside the zones is untouched.
+This includes truncating redirects onto files there. Everything outside the zones is untouched.
 
 Denied, inside a zone: any glob; a zone or one of its parents; any path that is not strictly below `agents/<name>/`;
 and **the agent folder root `<dev>/agents/<name>` itself**, recursive or not, whoever owns it. The hook cannot tell
@@ -43,29 +53,36 @@ folder roots in a batch. The deny message says so and gives the command that pri
 `ls -d -- '<path>'`.
 
 A target that cannot be resolved (an expansion other than `$HOME`/`~` or a variable assigned a plain literal by an
-unconditional `;`/newline command, in a recursive delete or unquoted; a quoted one when the command mentions a zone or
-the working directory is inside one; a relative or globbed target after a `cd` it could not follow) is denied.
+unconditional `;`/newline command) is denied in a recursive delete or when unquoted, and for the softer families when a
+zone is in sight: named in the command (also with quotes or backslashes in its name), or the working directory is in a
+zone or in a parent of one (`~`, `~/.local`, `~/.local/share`, `/tmp`, `/`). One exception that is a known limit: a
+redirect or `tee` target whose written part already lies strictly below an agent folder or the scratchpad
+(`$HOME/.../agents/me/work/$name`) is trusted not to hold `..` in the unknown part.
 
 ## What is evaluated, and what can block
 
 When the working directory is inside a zone, every command is evaluated. Elsewhere a command is evaluated when its text
 (backslash-newline pairs removed) holds a delete word, a character that can build one (`$`, a backtick, `?`, `*`, `[`,
-`{`), or a shared zone (`-dev`, `/tmp/claude`, `.local`). Only a command with none of these (`ls`, `git status`) is
-allowed at once with no parsing, so a tokenizer bug cannot lock the shell for it.
+`{`), or a shared zone name (`-dev`, `/tmp/claude`, `.local`), also when the name is quoted, escaped or split
+(`reach-around-d''ev`). Only a command with none of these (`ls`, `git status`) is allowed at once with no parsing.
 
 For an evaluated command, whatever the hook cannot read is a deny: a syntax error, nesting deeper than three levels, a
-timeout (3 seconds, a signal timer) or an internal error. For a command that was never evaluated, a crash is an allow
-and one line goes to `~/.local/share/reach-around-lead/rmguard-error.log`.
+timeout (3 seconds, a signal timer) or an internal error. `bash -c "$X"` whose whole body is an expansion is denied when
+a zone is in sight, the cwd is in or above a zone, or the line holds a delete word anywhere.
+
+A command longer than 64 KB is decided by its first 64 KB, deterministically: a delete word or a zone name there, or a cwd
+inside a zone, is a deny; otherwise it is allowed and one line goes to `~/.local/share/reach-around-lead/rmguard-error.log`.
+For a command that was never evaluated, a crash is an allow and the same log gets a line.
 
 How the shell is read: redirections are dropped before the command word is chosen; `$'...'` is decoded and `$"..."` read
 as double quotes; a leading `//` is the same path as `/`; `cd`, `pushd` and `popd` are followed in order, a subshell
 `( ... )` gets its own working directory, and a `cd` in a pipeline stage, in the background or either side of `||` makes
-the directory unknown; `$(( ))` arithmetic is scanned for substitutions (`$(...)`, backticks, `<(...)`); a variable
-assigned a plain literal binds only in an unconditional `;`/newline sequence at the top level (not after `&&`, `||`,
-`|`, `&`, not in a subshell, and not at all when the text uses `eval`, `source`, `. file` or defines a function);
-if `HOME` is assigned, exported, unset, read or defaulted anywhere in the command, written plainly or with quotes and
-backslashes in the name, or the command uses `eval`, `declare`, `typeset`, `printf -v`, `read`, `source`, `mapfile`,
-then `~` and `$HOME` are unknown.
+the directory unknown; `$(( ))` arithmetic is scanned for substitutions; a variable assigned a plain literal binds only
+in an unconditional `;`/newline sequence at the top level (not after `&&`, `||`, `|`, `&`, not in a subshell, not at all
+when the text uses `eval`, `source`, `. file` or defines a function); if `HOME` is assigned, exported, unset, read or
+defaulted anywhere in the command, `~` and `$HOME` are unknown. A target a truncating redirect, `tee`, `cp`, `mv`,
+`install`, `ln` or `touch` wrote earlier in the same line counts as existing for the later commands of that line, and a
+write it cannot place makes every later redirect target in a zone count as existing.
 
 ## Mode: warn first, then enforce
 
@@ -81,6 +98,11 @@ settings entry the owner controls.
 - Both logs are written through directory descriptors: no symlink is followed, every directory component and the file
   must belong to the current user, the file must be a regular file with one link, the folder is repaired to 0700 and the
   file to 0600. A log that cannot be written that way is skipped, never followed.
+- `safo-rmguard --record-integrity` writes the SHA-256 of the launcher (`~/.config/safo/rmguard-hook`) and of the
+  rmguard entries of `~/.claude/settings.json` to `rmguard-integrity.json` in the same folder. In WARN mode every run
+  compares them with that record and logs one line to `rmguard-error.log` when either differs, once per change. It does
+  not prevent a change, it only makes one visible; it is not tamper-proof (whoever can change the launcher can change the
+  record too). Run `--record-integrity` again after you change either file on purpose.
 
 ## Install: owner steps, nothing here changes a config file
 
@@ -97,12 +119,12 @@ Take a timestamped backup first and look at the diff before editing: `cp -p ~/.c
 ```
 
 Read `~/.local/share/reach-around-lead/rmguard-warn.log` for a period (a week is the suggestion) and run the replay
-below. **The owner chooses enforce only after that warn-mode period**, by their own decision.
+below. **The owner chooses enforce only after that warn-mode period**, by their own decision, against the promotion
+threshold below.
 
 **Enforce mode** blocks, and it also blocks when the program cannot start, so it must not point into the pipx
 environment (a pipx upgrade can remove the script and would then lock every Bash call). Use `"onFailure": "block"` and a
-launcher the owner owns, kept outside the pipx environment, for example `~/.config/safo/rmguard-hook` (mode 0755, owned
-by the owner, not writable by the agents' tools if the owner can arrange it):
+launcher the owner owns, kept outside the pipx environment, for example `~/.config/safo/rmguard-hook` (mode 0755):
 
 ```sh
 #!/bin/sh
@@ -130,6 +152,27 @@ the point and also the cost: that is why recovery below must work from a plain t
 Files that change on install: `~/.claude/settings.json` (one new hook entry), the launcher script (enforce only), and
 the pipx `safo` environment (new console script `safo-rmguard`). `~/.config/safo/*`, `agents.yaml`,
 `~/dotfiles/claude/tools/*` and the existing `safo-guard` entries do not change.
+
+### Residual risk, said plainly
+
+Enforce mode protects against accidental and naive destructive Bash commands, and against a prompt-injected agent that
+does not think to look at the hook. It does not stop an agent running as the same user that edits the launcher, the
+settings entry or `~/.claude/settings.json` with the Edit or Write tools (the hook matches Bash only), switches the hook
+to warn mode, sets `disableAllHooks` for a new session, or replaces the recorded hashes. File ownership and mode 0755 do
+not tell the human owner from an agent with the same UID. The integrity self-check makes such a change visible in warn
+mode, nothing more. Do not call this tamper-proof.
+
+### Promotion threshold, and what the replay says
+
+Do not promote warn mode to enforce until, over at least two weeks of real use, every logged would-be block has been read
+and classified (a real mistake caught, an old habit moved into `agents/<name>/`, a false positive reported and fixed) and
+the unexplained remainder is close to zero. The replay below is the baseline. On the owner's own history (run
+2026-11-23 over the 18,217 Bash commands in `~/.claude/projects`) 15,831 commands are evaluated and 1,623 would be
+blocked (10.3 percent): 1,395 name a shared zone (almost all of them work done in `~/.local/share/*-dev` outside an agent
+folder, which is the point of the rule), 161 run with a cwd in a zone, 21 run from a parent of one, and 46 are elsewhere
+(unknown expansions, inline programs, git in an unknown cwd): those 67 are the false-positive candidates. 577 of the
+blocks are truncating redirects onto files that already exist in a shared zone. Blocking
+one command in ten is too much for an always-on hook before the habits move, so the enforce switch is the owner's call after the warn period, not a default.
 
 ## Recovery, from a plain terminal outside the session
 
@@ -174,14 +217,16 @@ follows from the pages but was not run; UNTESTED means no live session was start
 A tokenizer for common shapes, not a shell parser. Beyond the families listed under "Not covered": a command word built
 from an expansion whose own arguments name no zone is allowed; a variable set by `read`, a loop, `+=`, `declare` or
 `export` is treated as unknown, not tracked; a `HOME` change by means the text does not show; an `xargs` input the
-command does not show is denied only when the cwd or another word is in a zone; and a hook cannot see which agent is
-running, which is why agent folder roots are never removable by an agent.
+command does not show is denied only when the cwd or another word is in a zone; the existence rule reads the file system
+before the command runs, so another process can race it; a hook cannot see which agent is running, which is why agent
+folder roots are never removable by an agent.
 
 ## Tests and replay
 
-`tests/test_rmguard_sentinel.py` runs destructive commands under real bash and the real tools (`find`, `git clean`,
-`rsync`, `tar`, `truncate`, `dd`, `mv`, `cp`, redirections, wrappers, variable tricks) against disposable sentinel
-files and asserts: if real bash removed or emptied a sentinel in a shared zone, rmguard denied the command text. A
-missing tool fails under CI instead of skipping. `tools/rmguard_replay.py` (not run in CI) reads the Bash commands in
+`tests/test_rmguard_sentinel.py` runs destructive commands under real bash and the real tools (`find`, `git`, `rsync`,
+`tar`, `truncate`, `dd`, `mv`, `cp`, `sed`, `perl`, `python3`, `install`, `ln`, redirections, wrappers, variable
+tricks, a quoted zone name, long-option abbreviations) against disposable sentinel files and asserts: if real bash
+removed or emptied a sentinel in a shared zone, rmguard denied the command text. A missing tool fails under CI (the `CI`
+environment variable) and skips elsewhere. `tools/rmguard_replay.py` (not run in CI) reads the Bash commands in
 `~/.claude/projects/*/*.jsonl`, runs each through the rule in dry run, and prints counts and every blocked command,
 redacted. Run it before switching from warn to enforce, and after a change to the rule.

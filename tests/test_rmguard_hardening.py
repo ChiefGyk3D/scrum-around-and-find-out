@@ -198,3 +198,12 @@ def test_the_docs_name_the_covered_families_and_not_a_blanket_claim() -> None:
         assert family in text
     assert "not covered" in text.lower()
     assert "own folder" not in text.lower()
+
+
+def test_the_docs_state_the_residual_risk_the_integrity_check_and_the_promotion_threshold() -> None:
+    text = DOC.read_text()
+    assert "--record-integrity" in text
+    assert "not tamper-proof" in text.lower() or "tamper-proof" in text.lower()
+    assert "same user" in text.lower() or "same uid" in text.lower()
+    assert "promotion threshold" in text.lower()
+    assert "Edit and Write" in text

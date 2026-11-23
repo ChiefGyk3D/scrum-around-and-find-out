@@ -234,7 +234,9 @@ ALLOWED = [
     pytest.param("echo 'unterminated", "/", id="unterminated-no-delete-word"),
     pytest.param("ls", "/", id="plain"),
     pytest.param('bash -c "$CMD"', "/work", id="a2-bash-c-whole-body-unknown-outside-zone"),
-    pytest.param('timeout 4 bash -c "echo > /dev/tcp/$h/$p"', "/", id="d1-bash-c-with-unknown-pieces-and-no-delete"),
+    pytest.param(
+        'timeout 4 bash -c "echo > /dev/tcp/$h/$p"', "/work", id="d1-bash-c-with-unknown-pieces-and-no-delete"
+    ),
     # round 4: what stays allowed
     pytest.param(f"rm -rf {AGENT}/sub/dir", "/", id="d3-recursive-subdir-below-agent-root"),
     pytest.param(f"rm {AGENT}/f.log", "/", id="d3-file-below-agent-root"),

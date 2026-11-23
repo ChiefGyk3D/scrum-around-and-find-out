@@ -9,22 +9,27 @@ It is its own entry point and its own module on purpose: the dispatch guard (`sa
 more PreToolUse entry for Bash (docs/rmguard.md); nothing installs it for you.
 
 PROGRAM FAMILIES JUDGED (and only these; docs/rmguard.md has the table): `rm`, `rmdir`, `unlink`, `shred`; `find` with
-`-delete` or an `-exec` of anything not read-only (after the GNU global options `-H -L -P -O -D`); `git clean`;
-`truncate`; `rsync` with `--delete*` or `--remove-*-files`; `tar --remove-files`; `mv`; `cp /dev/null`; `dd of=`; `tee`
-without `-a`; and truncating redirections (`>`, `>|`, `&>`, `: > file`). Not covered: any other program, a script,
-`python -c shutil.rmtree`, `git reset --hard`, a container bind mount, an alias or a function.
+`-delete` or an `-exec` of anything not read-only (after the GNU global options); `git` (a short list of read-mostly
+subcommands passes, every other subcommand is judged by its work tree); `truncate`; `rsync` and `tar` with delete or
+remove options or an unknown long option (abbreviations included); `mv`; `cp` onto /dev/null sources or an existing
+file; `dd of=`; `tee`; `sed -i`, `perl -i`, `awk -i inplace`, `ed`, `install`, `ln -f` on existing files; an inline
+`python -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`; and truncating redirections. Not covered: any other program, a
+script, a container bind mount, an alias or a function, a symlink into a zone.
 
 WHAT IS EVALUATED: when the working directory is inside a shared zone, every command. Elsewhere, a command whose text
 (backslash-newline pairs removed) holds a delete word (`rm`, `rmdir`, `unlink`, `shred`, a whole-word `-delete`, `find`
 with `-exec`/`-execdir`/`-ok`/`-okdir`; quotes and backslashes removed first, so `r''m` counts), a character that can
-build one (`$`, a backtick, `?`, `*`, `[`, `{`: `r?`, `r[m]`, `/bin/r*`, `$RM`, `r$'m'`), or a shared zone (`-dev`,
-`/tmp/claude`, `.local`). Every other command (`ls`, `git status`) returns allow at once, unparsed.
+build one (`$`, a backtick, `?`, `*`, `[`, `{`), or a shared zone name (`-dev`, `/tmp/claude`, `.local`; also with its
+quotes or backslashes removed, so `reach-around-d''ev` counts). Every other command returns allow at once, unparsed. A
+command over MAX_SCAN_CHARS is decided by its first MAX_SCAN_CHARS characters (a delete word or zone name there is a
+deny, otherwise an allow that is logged).
 
 MODE: `safo-rmguard --mode enforce` (the default, and what any other value means) or `--mode warn`. The mode lives in
 the hook command in the settings entry the owner controls, never in an environment variable an agent could set. In warn
 mode nothing is ever blocked; each would-be block is appended, redacted, to
 `~/.local/share/reach-around-lead/rmguard-warn.log` (folder 0700, file 0600, written through directory descriptors with
-no symlink followed).
+no symlink followed). `--record-integrity` records hashes of the launcher and the settings entry; warn mode logs once
+when either differs (visibility only, not tamper-proof: a same-UID agent can change both).
 
 SHARED ZONES (where the rule applies):
 
@@ -54,6 +59,7 @@ from __future__ import annotations
 
 import datetime as dt
 import fnmatch
+import hashlib
 import json
 import os
 import posixpath
@@ -71,7 +77,7 @@ from safo.leadwait import WRAPPERS, _ansi_c
 # creates anything there, so the temp-file lint (S108) does not apply.
 TMP = os.sep + "tmp"
 MAX_DEPTH = 3
-MAX_COMMAND_CHARS = 200_000
+MAX_SCAN_CHARS = 64 * 1024  # a command longer than this is decided by its first MAX_SCAN_CHARS characters
 TIMEOUT_SECONDS = 3.0
 LEAD_FOLDER = (".local", "share", "reach-around-lead")
 MAX_LOGGED_CHARS = 500
@@ -79,6 +85,60 @@ MAX_LOGGED_CHARS = 500
 WRAPS = {name: opts for name, opts in WRAPPERS.items() if name not in ("xargs", "parallel")}
 WRAPS["builtin"] = frozenset()
 POSITIONAL = frozenset({"flock", "taskset", "chrt"})  # one operand (lock file, CPU mask, priority) before the command
+
+
+def _names(text: str) -> frozenset[str]:
+    return frozenset(text.split())
+
+
+# Git subcommands that cannot change a work tree: anything not here is judged by the tree it runs in (that covers
+# `clean`, `reset`, `checkout`, `restore`, `rm`, `stash`, `switch`, `merge`, `rebase`, `pull`, `worktree`, an alias).
+GIT_SAFE = _names(
+    """
+    add archive blame branch bundle cat-file check-attr check-ignore check-ref-format cherry clone commit
+    config count-objects describe diff diff-files diff-index diff-tree fetch for-each-ref format-patch fsck
+    get-tar-commit-id grep hash-object help init log ls-files ls-remote ls-tree merge-base merge-tree name-rev
+    notes push range-diff reflog remote rev-list rev-parse shortlog show show-branch show-ref status symbolic-
+    ref tag var verify-commit verify-tag version whatchanged
+    """
+)
+GIT_GLOBAL_LONG = _names(
+    """
+    --bare --config-env --exec-path --git-dir --glob-pathspecs --help --html-path --icase-pathspecs --info-
+    path --literal-pathspecs --man-path --namespace --no-advice --no-optional-locks --no-pager --no-replace-
+    objects --noglob-pathspecs --paginate --super-prefix --version --work-tree
+    """
+)
+TAR_LONG = _names(
+    """
+    absolute-names after-date anchored append auto-compress backup blocking-factor bzip2 catenate checkpoint
+    checkpoint-action compare compress concatenate confirmation create delete dereference diff directory
+    exclude exclude-backups exclude-caches exclude-from exclude-tag exclude-vcs extract file files-from format
+    get gnu group gunzip gzip hard-dereference help hole-detection ignore-case ignore-failed-read ignore-zeros
+    include incremental index-file info-script interactive keep-newer-files keep-old-files label level list
+    listed-incremental lzip lzma lzop mode mtime multi-volume new-volume-script newer newer-mtime no-anchored
+    no-ignore-case no-null no-overwrite-dir no-recursion no-same-owner no-same-permissions no-wildcards null
+    numeric-owner older-mtime one-file-system overwrite overwrite-dir owner pax-option posix preserve-order
+    preserve-permissions quiet read-full-records record-size recursion recursive-unlink remove-files same-
+    order same-owner same-permissions show-defaults show-omitted-dirs silent skip-old-files sort sparse strip-
+    components suffix tape-length test-label to-command to-stdout totals touch transform uncompress ungzip
+    unlink-first update usage use-compress-program verbose verify version volno-file warning wildcards xform
+    xz zstd
+    """
+)
+RSYNC_LONG = _names(
+    """
+    append archive backup backup-dir bwlimit checksum chmod chown compare-dest compress contimeout copy-dest
+    copy-links debug delete delete-after delete-before delete-delay delete-during delete-excluded delete-
+    missing-args dirs dry-run exclude exclude-from existing files-from filter force from0 fuzzy group groupmap
+    hard-links help human-readable ignore-errors ignore-existing include include-from info inplace itemize-
+    changes link-dest links list-only log-file log-file-format max-size min-size mkpath modify-window munge-
+    links no-dirs no-motd no-relative no-whole-file numeric-ids old-args one-file-system owner partial
+    partial-dir perms port progress protect-args prune-empty-dirs quiet recursive relative remove-sent-files
+    remove-source-files rsh rsync-path safe-links size-only sparse stats suffix temp-dir timeout times update
+    usermap verbose version whole-file
+    """
+)
 DELETERS = frozenset({"rm", "unlink", "shred", "rmdir"})
 SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 # `find -exec <tool>` is not a delete when the tool is one of these (after any wrapper such as env or nice).
@@ -102,6 +162,11 @@ _TAINT_CLAUSE = re.compile(
 _TAINT_APPEND = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\+=")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ZONE_WORDS = re.compile(r"-dev(?:/|\Z)|/tmp/claude")
+# A zone NAME (not a parent): a dev folder or the scratchpad parent. A parent needs a name or a building character
+# to reach one.
+_ZONE_NAME = re.compile(r"-dev(?![A-Za-z0-9_.])|/tmp/claude")
+# Git environment that moves the work tree, the repository or the configuration (so an alias can appear from nowhere).
+_GIT_ENV = re.compile(r"GIT_(?:WORK_TREE|DIR|COMMON_DIR|INDEX_FILE|NAMESPACE|CONFIG\w*|ALTERNATE\w*|OBJECT_DIRECTORY)")
 # Text that makes a shared zone worth a look even when no delete word shows: a dev folder, the scratchpad parent, or a
 # zone parent (`.local/share`, `.local`).
 _ZONE_TEXT = re.compile(r"-dev(?![A-Za-z0-9_.])|/tmp/claude|\.local(?![A-Za-z0-9_.-])")
@@ -166,16 +231,22 @@ def plain_delete_word(text: str) -> bool:
     return False
 
 
+def zone_text(text: str) -> bool:
+    """Does the text name a zone, as written or with its quotes and backslashes removed (`reach-around-d''ev`)?"""
+    text = text.replace("\\\n", "")
+    return any(_ZONE_TEXT.search(v) for v in (text, _QUOTES.sub("", text), _QUOTES.sub(" ", text)))
+
+
 def has_delete_word(text: str, cwd: str | None = None, home: str | None = None) -> bool:
     """Should this command be evaluated? True when the working directory is inside a shared zone (every command there
     is judged: `git clean`, a redirection and `mv` hold no delete word), when the text holds a delete word as written,
     when it holds a character that can build one (`$`, a backtick, `?`, `*`, `[`, `{`: `r?`, `r[m]`, `/bin/r*`, `$RM`,
-    `r$'m'`), or when it mentions a shared zone. Backslash-newline pairs are removed first (`r\\<newline>m` is `rm`).
-    Only a command that does none of these is allowed without being parsed."""
+    `r$'m'`), or when it mentions a shared zone, also with its name quoted or split by backslashes. Backslash-newline
+    pairs are removed first. Only a command that does none of these is allowed without being parsed."""
     if cwd and home and cwd.startswith("/") and Zones(home).roots(norm(cwd)) is not None:
         return True
     text = text.replace("\\\n", "")
-    return plain_delete_word(text) or bool(_SUSPECT.search(text)) or bool(_ZONE_TEXT.search(text))
+    return plain_delete_word(text) or bool(_SUSPECT.search(text)) or zone_text(text)
 
 
 def norm(path: str) -> str:
@@ -203,6 +274,7 @@ class Scanner:
         self.nested: list[str] = []
         self.commands: list[Cmd] = []
         self.cur: list[Word] = []
+        self.only_assign = True  # every word of the current command so far is an assignment word
         self.last = ""  # the separator that ended the previous command
         self.pending: list[tuple[str, bool, bool]] = []  # (delimiter, strip tabs, quoted)
 
@@ -216,17 +288,19 @@ class Scanner:
         if buf or st["quoted"]:
             word = Word("".join(buf), st["glob"], st["expands"], st["quoted"])
             m = _ASSIGN.match(word.text)
-            if m and all(_ASSIGN.match(w.text) for w in self.cur):  # an assignment word at command position
+            if m and self.only_assign:  # an assignment word at command position
                 name = word.text[: m.end() - 1]
                 clean = not word.expands and word.glob is None and not re.search(r"[\s*?\[{]", word.text[m.end() :])
                 self.staged[name] = word.text[m.end() :] if clean and name not in self.tainted else None
+            if not m:
+                self.only_assign = False
             self.cur.append(word)
         buf.clear()
         st.update(glob=None, expands=False, quoted=False)
 
     def separator(self, sep: str) -> None:
         """A command boundary. A newline or `;` with nothing before it changes nothing."""
-        if self.cur and all(_ASSIGN.match(w.text) for w in self.cur):  # assignments only: they bind for what follows
+        if self.cur and self.only_assign:  # assignments only: they bind for what follows
             # Bound only when it surely ran in this shell: not after `&&`, `||`, `|` or `&`, not before `|` or `&`
             # (a pipeline stage or a background job is a subshell), not inside parentheses, not near eval or a function.
             sure = (
@@ -243,6 +317,7 @@ class Scanner:
                     self.vars[name] = value
         if self.cur:
             self.staged = {}
+            self.only_assign = True
         if self.cur:
             self.commands.append(Cmd(self.cur, self.last, sep))
             self.cur = []
@@ -465,11 +540,13 @@ class Scanner:
             close = self.matching(end + 1, "(", ")")
             self.nested.append(s[end + 1 : close])
             self.cur.append(Word("\0", None, True, False))
+            self.only_assign = False
             self.i = close + 1
             return
         if op in ("<<", "<<-"):
             self.heredoc_start(end, op == "<<-")
         self.cur.append(Word(op, None, False, False, True))
+        self.only_assign = False
         self.i = end
 
     def run(self) -> list[Cmd]:
@@ -556,8 +633,8 @@ class Scanner:
         """A `~` expands at the start of a word and after the `=` (or a `:`) of an assignment word."""
         if not buf:
             return True
-        before = "".join(buf)
-        return before.endswith(("=", ":")) and bool(_ASSIGN.match(before))
+        # Linear: only the last piece and the first few are looked at, never the whole buffer again.
+        return buf[-1].endswith(("=", ":")) and bool(_ASSIGN.match("".join(buf[:64])))
 
     def brace_list(self) -> bool:
         end = self.s.find("}", self.i)
@@ -597,7 +674,7 @@ class Scanner:
                 self.i += 1
 
 
-# -- zones ----------------------------------------------------------------------------------------------------------
+# -- zones -----------------------------------------------------------------------------------------------------------
 
 
 class Zones:
@@ -621,7 +698,8 @@ class Zones:
         return None
 
     def is_parent(self, path: str) -> bool:
-        return path in self.parents or path == "/"
+        """The path is a zone's parent: the home or an ancestor of the home, `~/.local`, `~/.local/share`, /tmp, `/`."""
+        return path in self.parents or path == "/" or self.home.startswith(path.rstrip("/") + "/")
 
     def agent_exact(self, path: str, root: str) -> bool:
         parts = path[len(root) :].strip("/").split("/") if path != root else []
@@ -661,13 +739,14 @@ def resolve(word: Word, cwd: str | None) -> tuple[str, bool] | None:
     return norm(posixpath.join(cwd, text or ".")), glob
 
 
-# -- the check ------------------------------------------------------------------------------------------------------
+# -- the check -------------------------------------------------------------------------------------------------------
 
 
 class Prefix(NamedTuple):
     at: int  # where the command word is
     chdir: tuple[str | None] | None  # a directory change by `env -C` or `sudo -D`: (resolved directory or None)
     split: str | None  # `env -S` text, to be scanned as a command line
+    assigns: tuple[Word, ...] = ()  # the NAME=value words in front of the command (also those after `env`)
 
 
 class Checker:
@@ -677,11 +756,23 @@ class Checker:
         self.zones = Zones(home)
         self.cwd = norm(cwd) if cwd and cwd.startswith("/") else None
         self.mentions_zone = False
+        self.zone_named = False  # the text names a zone (as written, or with quotes and backslashes removed)
+        self.plain = False  # the text holds a delete word as written
+        self.git_env = False  # the text sets GIT_DIR, GIT_WORK_TREE or GIT_CONFIG*
+        self.created: set[str] = set()  # targets an earlier command of this line wrote (so they exist by now)
+        self.unknown_write = False  # an earlier command wrote somewhere that could not be resolved
         self.moved = False  # the command being checked changed the shell's directory
+        self.assigns: tuple[Word, ...] = ()
+
+    def near_zone(self) -> bool:
+        """Is a zone in sight: named in the command, or the working directory in one or above one?"""
+        if self.mentions_zone or self.zone_named:
+            return True
+        return self.cwd is not None and (self.zones.roots(self.cwd) is not None or self.zones.is_parent(self.cwd))
 
     def blind(self) -> bool:
         """Is there a reason to doubt an expansion we cannot read: a zone in the command, or no safe directory?"""
-        return self.mentions_zone or self.cwd is None or self.zones.roots(self.cwd) is not None
+        return self.near_zone() or self.cwd is None
 
     def judge_word(self, word: Word, recursive: bool) -> Finding | None:
         shown = word.text.replace("\0", "?").replace(self.home, "~")[:120]
@@ -714,8 +805,7 @@ class Checker:
         shown = word.text.replace("\0", "?").replace(self.home, "~")[:120]
         resolved = resolve(word, self.cwd)
         if resolved is None:
-            inside = self.cwd is not None and self.zones.roots(self.cwd) is not None
-            if self.mentions_zone or inside:
+            if self.near_zone():
                 return Finding("a target that cannot be resolved (an expansion, or a relative path)", shown)
             return None
         path, glob = resolved
@@ -740,9 +830,12 @@ class Checker:
         """Skip leading assignments, keywords and transparent wrappers; find the command word."""
         i = 0
         chdir: tuple[str | None] | None = None
+        assigns: list[Word] = []
         while i < len(words):
             w = words[i]
             if not w.quoted and (_ASSIGN.match(w.text) or w.text in _KEYWORDS):
+                if _ASSIGN.match(w.text):
+                    assigns.append(w)
                 i += 1
             elif posixpath.basename(w.text) in WRAPS and not w.expands:
                 name = posixpath.basename(w.text)
@@ -757,7 +850,7 @@ class Checker:
                     ):
                         break  # the command word itself is built from an expansion: simple() decides what that means
                     if name == "env" and self.is_split(t):
-                        return Prefix(i, chdir, self.split_text(words, i))
+                        return Prefix(i, chdir, self.split_text(words, i), tuple(assigns))
                     if name in ("env", "sudo") and (t in (flag, "--chdir") or t.startswith("--chdir=")):
                         if t.startswith("--chdir="):
                             chdir = self.chdir_of(Word(t.split("=", 1)[1], None, False, False))
@@ -777,6 +870,8 @@ class Checker:
                         or _ASSIGN.match(t)
                         or (_NUMBERISH.fullmatch(t) and name in ("timeout", "nice"))
                     ):
+                        if _ASSIGN.match(t):
+                            assigns.append(nxt)
                         i += 1
                     else:
                         break
@@ -784,7 +879,7 @@ class Checker:
                     i += 1
             else:
                 break
-        return Prefix(i, chdir, None)
+        return Prefix(i, chdir, None, tuple(assigns))
 
     @staticmethod
     def is_split(t: str) -> bool:
@@ -813,29 +908,56 @@ class Checker:
         res = resolve(word, self.cwd)
         return (res[0] if res else None,)
 
-    def existing_shared(self, word: Word) -> Finding | None:
-        """For a redirection or `tee`: a target in a shared zone that already exists (a glob counts, it may match one).
-        Creating a new file truncates nothing, and a target that cannot be resolved is not judged."""
+    def note_written(self, word: Word) -> None:
+        """An earlier command of this line writes `word`: from now on that target exists (or may, if unplaced)."""
         resolved = resolve(word, self.cwd)
         if resolved is None:
+            self.unknown_write = True
+        elif not resolved[1]:
+            self.created.add(resolved[0])
+
+    def literal_agent_prefix(self, word: Word) -> bool:
+        """The written part of the target, before its first unknown piece, already lies strictly below an agent folder
+        or the scratchpad (`$HOME/.../agents/me/work/$name`). A known limit: the unknown piece could hold `..`."""
+        head = word.text.split("\0", 1)[0]
+        if not head.startswith("/") or ".." in head.split("/"):
+            return False
+        return self.zones.judge(posixpath.join(norm(head.rsplit("/", 1)[0] or "/"), "x"), False) == "ok"
+
+    def existing_shared(self, word: Word) -> Finding | None:
+        """For a redirection, `tee`, `cp` onto a file and the in-place editors: a target in a shared zone that exists,
+        or that an earlier command of this same line created or may have created. Creating a brand-new file truncates
+        nothing. A target that cannot be resolved follows the soft rule (judged when a zone is in sight)."""
+        shown = word.text.replace("\0", "?").replace(self.home, "~")[:120]
+        resolved = resolve(word, self.cwd)
+        if resolved is None:
+            if self.near_zone() and not self.literal_agent_prefix(word):
+                return Finding("a target that cannot be resolved (an expansion, or a relative path)", shown)
             return None
         path, glob = resolved
-        if self.zones.judge(path, glob) != "shared" or (not glob and not os.path.lexists(path)):
+        if self.zones.judge(path, glob) != "shared":
             return None
-        shown = word.text.replace("\0", "?").replace(self.home, "~")[:120]
+        if not glob and not (path in self.created or self.unknown_write or os.path.lexists(path)):
+            return None
         return self.shared_finding(word, path, shown)
 
     def redirections(self, words: list[Word]) -> Finding | None:
-        """A `>`, `>|` or `&>` truncates an existing target (`: > file`, `echo x > file`); `>>` appends and is not
-        judged, and a file that does not exist yet is only created."""
+        """A `>`, `>|` or `&>` truncates its target (`: > file`, `echo x > file`); `>>` appends and is not judged. A
+        target that does not exist yet is only created, unless an earlier command of this line made it."""
         for n, w in enumerate(words):
             if not w.redir or n + 1 >= len(words):
                 continue
             target = words[n + 1]
-            if w.text in (">", ">|", "&>") or (w.text == ">&" and not target.text.isdigit() and target.text != "-"):
+            writes = w.text in (">", ">|", "&>", ">>", "&>>", "<>") or (
+                w.text == ">&" and not target.text.isdigit() and target.text != "-"
+            )
+            if not writes:
+                continue
+            if w.text != ">>" and w.text != "&>>":
                 found = self.existing_shared(target)
                 if found:
                     return Finding("a redirection that truncates " + found.reason, found.target, found.hint)
+            self.note_written(target)
         return None
 
     def command(self, words: list[Word], depth: int) -> Finding | None:
@@ -850,6 +972,7 @@ class Checker:
         if pre.at >= len(words):
             return None
         rest = words[pre.at :]
+        self.assigns = pre.assigns
         return self.in_cwd(pre.chdir, lambda: self.simple(rest, depth))
 
     def in_cwd(self, chdir: tuple[str | None] | None, fn: Callable[[], Finding | None]) -> Finding | None:
@@ -872,6 +995,8 @@ class Checker:
             if resolved is None:
                 if _ZONE_WORDS.search(a.text) and "/scratchpad/" not in a.text and "/agents/" not in a.text:
                     return True
+                if self.cwd is not None and (self.zones.roots(self.cwd) is not None or self.zones.is_parent(self.cwd)):
+                    return True  # an argument it cannot place, from a directory in or above a zone
             elif self.zones.judge(*resolved) == "shared":
                 return True
         return False
@@ -904,6 +1029,9 @@ class Checker:
             return self.find(args)
         if name in DELETERS:
             return self.delete(args, extra_dynamic=False)
+        base = name.rstrip("0123456789.")
+        if base in ("python", "pypy", "python-config"):
+            base = "python"
         handler = {
             "git": self.git,
             "truncate": self.truncate,
@@ -913,27 +1041,54 @@ class Checker:
             "cp": self.cp,
             "dd": self.dd,
             "tee": self.tee,
-        }.get(name)
+            "touch": self.touch,
+            "sed": self.sed,
+            "perl": self.perl,
+            "ed": self.ed,
+            "awk": self.awk,
+            "gawk": self.awk,
+            "mawk": self.awk,
+            "nawk": self.awk,
+            "install": self.install,
+            "ln": self.ln,
+            "python": self.interpreter,
+            "ruby": self.interpreter,
+            "node": self.interpreter,
+            "nodejs": self.interpreter,
+            "php": self.interpreter,
+            "lua": self.interpreter,
+        }.get(base if base in ("python", "ruby", "node", "nodejs", "php", "lua") else name)
         return handler(args) if handler else None
 
     @staticmethod
-    def operands(args: list[Word], takes: frozenset[str]) -> tuple[list[Word], list[Word]]:
-        """(operands, values of the options in `takes`): words that are not options, and what those options consumed."""
+    def long_is(text: str, full: str, minimum: int = 3) -> bool:
+        """Is `text` a GNU-style long option that is `--full` or an abbreviation of it (at least `minimum` letters)?"""
+        if not text.startswith("--"):
+            return False
+        name = text[2:].split("=", 1)[0]
+        return len(name) >= minimum and full.startswith(name)
+
+    @classmethod
+    def operands(cls, args: list[Word], takes: frozenset[str]) -> tuple[list[Word], list[Word]]:
+        """(operands, values of the options in `takes`): words that are not options, and what those options consumed.
+        A long option in `takes` also matches by abbreviation (`--target-dir` for `--target-directory`)."""
         out: list[Word] = []
         values: list[Word] = []
+        longs = [t[2:] for t in takes if t.startswith("--")]
         after_dd = False
         skip = False
         for a in args:
+            t = a.text
             if skip:
                 values.append(a)
                 skip = False
-            elif not after_dd and not a.quoted and a.text == "--":
+            elif not after_dd and not a.quoted and t == "--":
                 after_dd = True
-            elif not after_dd and a.text.startswith("-") and len(a.text) > 1:
-                if a.text in takes:
+            elif not after_dd and t.startswith("-") and len(t) > 1:
+                if t in takes or (t.startswith("--") and "=" not in t and any(cls.long_is(t, f) for f in longs)):
                     skip = True
-                elif a.text.startswith("--") and "=" in a.text and a.text.split("=", 1)[0] in takes:
-                    values.append(Word(a.text.split("=", 1)[1], None, a.expands, a.quoted))
+                elif t.startswith("--") and "=" in t and any(cls.long_is(t, f) for f in longs):
+                    values.append(Word(t.split("=", 1)[1], None, a.expands, a.quoted))
             else:
                 out.append(a)
         return out, values
@@ -945,9 +1100,20 @@ class Checker:
                 return found
         return None
 
+    def judge_existing_all(self, words: list[Word]) -> Finding | None:
+        for w in words:
+            found = self.existing_shared(w)
+            if found:
+                return found
+        return None
+
+    # git -----------------------------------------------------------------------------------------------------
+
     def git(self, args: list[Word]) -> Finding | None:
-        """`git clean` removes untracked files from the working tree it runs in (or the pathspecs it is given)."""
+        """Only a short list of subcommands that cannot change a work tree is passed. Anything else (clean, reset,
+        checkout, rm, stash, an alias, an unknown option) is judged by the tree it would run in."""
         base = self.cwd
+        unknown = False
         i = 0
         while i < len(args):
             t = args[i].text
@@ -964,48 +1130,116 @@ class Checker:
                 if t == "--work-tree":
                     base = self.chdir_of(args[i + 1])[0]
                 i += 2
+            elif t.startswith("--"):
+                if t.split("=", 1)[0] not in GIT_GLOBAL_LONG:
+                    unknown = True
+                i += 1
+            elif t.startswith("-") and t not in ("-p", "-P", "-h", "-v"):
+                unknown = True
+                i += 1
             elif t.startswith("-"):
                 i += 1
             else:
                 break
-        if i >= len(args) or args[i].text != "clean":
+        sub = args[i].text if i < len(args) else ""
+        if not unknown and sub in GIT_SAFE:
             return None
         rest = args[i + 1 :]
-        for a in rest:
-            if a.text == "--dry-run" or (a.text.startswith("-") and not a.text.startswith("--") and "n" in a.text):
+        dry = False
+        pathspecs: list[Word] = []
+        if sub == "clean" and not unknown:
+            dry, pathspecs = self.clean_options(rest)
+            if dry:
                 return None  # a dry run removes nothing
-        pathspecs, _ = self.operands(rest, frozenset({"-e", "--exclude"}))
         saved = self.cwd
         self.cwd = base
         try:
+            env_set = self.git_env or any(_GIT_ENV.match(a.text) for a in self.assigns)
+            # the work tree may come from GIT_WORK_TREE or GIT_DIR: it cannot be told, so a zone in sight decides
+            if env_set and self.near_zone():
+                return Finding("a git command whose work tree is set by the environment, aimed near a zone", "")
             if pathspecs:
                 return self.judge_all(pathspecs)
             if base is None:
-                return (
-                    Finding("`git clean` in a working directory that could not be followed", "")
-                    if self.mentions_zone
-                    else None
-                )
+                if self.near_zone():
+                    return Finding("`git " + (sub or "?") + "` in a working directory that could not be followed", "")
+                return None
             found = self.judge_soft(Word(".", None, False, False))
-            return Finding("`git clean` in " + found.reason, found.target, found.hint) if found else None
+            return Finding("`git " + (sub or "?") + "` in " + found.reason, found.target, found.hint) if found else None
         finally:
             self.cwd = saved
 
+    def clean_options(self, rest: list[Word]) -> tuple[bool, list[Word]]:
+        """Parse `git clean` options the way git does: short options cluster, `-e` takes a value (the rest of its
+        cluster, or the next word), `--exclude` takes one, `-n` and `--dry-run` are the only dry-run flags (an
+        abbreviation is not trusted). Returns (dry run, the pathspec operands)."""
+        dry = False
+        operands: list[Word] = []
+        skip = False
+        after_dd = False
+        for a in rest:
+            t = a.text
+            if skip:
+                skip = False
+            elif after_dd:
+                operands.append(a)
+            elif t == "--":
+                after_dd = True
+            elif t.startswith("--"):
+                if t == "--dry-run":
+                    dry = True
+                elif t == "--exclude":
+                    skip = True
+            elif t.startswith("-") and len(t) > 1:
+                for k, ch in enumerate(t[1:]):
+                    if ch == "n":
+                        dry = True
+                    elif ch == "e":
+                        skip = k == len(t) - 2  # the value is the next word unless it is the rest of the cluster
+                        break
+            else:
+                operands.append(a)
+        return dry, operands
+
+    # the plain destructive programs --------------------------------------------------------------------------
+
     def truncate(self, args: list[Word]) -> Finding | None:
         targets, _ = self.operands(args, frozenset({"-s", "--size", "-r", "--reference"}))
-        return self.judge_all(targets)
+        found = self.judge_all(targets)
+        for t in targets:
+            self.note_written(t)
+        return found
+
+    def long_options(self, args: list[Word], known: frozenset[str]) -> tuple[list[str], list[str]]:
+        """(known long options, unknown ones), by name; an abbreviation of a known option (3+ letters) is known."""
+        good: list[str] = []
+        bad: list[str] = []
+        for a in args:
+            if not a.text.startswith("--") or a.text == "--" or a.quoted:
+                continue
+            name = a.text[2:].split("=", 1)[0]
+            match = [k for k in known if k == name or (len(name) >= 3 and k.startswith(name))]
+            (good if match else bad).extend(match or [name])
+        return good, bad
 
     def rsync(self, args: list[Word]) -> Finding | None:
-        if not any(
-            a.text.startswith(("--delete", "--del", "--remove-source-files", "--remove-sent-files")) for a in args
-        ):
+        good, bad = self.long_options(args, RSYNC_LONG)
+        destructive = bool(bad) or any(g.startswith(("delete", "remove")) for g in good)
+        if not destructive:
             return None
         takes = frozenset({"-e", "--rsh", "--exclude", "--include", "-f", "--filter", "--files-from", "--rsync-path"})
-        targets, _ = self.operands(args, takes | {"--log-file", "--temp-dir", "-T", "--exclude-from", "--include-from"})
-        return self.judge_all(targets)
+        operands, _ = self.operands(
+            args, takes | {"--log-file", "--temp-dir", "-T", "--exclude-from", "--include-from"}
+        )
+        found = self.judge_all(operands)
+        if operands:
+            self.note_written(operands[-1])
+        return found
 
     def tar(self, args: list[Word]) -> Finding | None:
-        if not any(a.text == "--remove-files" for a in args):
+        good, bad = self.long_options(args, TAR_LONG)
+        destructive = bool(bad) or any(g in ("remove-files", "recursive-unlink", "unlink-first") for g in good)
+        if not destructive:
             return None
         saved = self.cwd
         pending = ""  # what the previous word asked for: "" nothing, "file" an archive or list, "dir" a -C directory
@@ -1019,11 +1253,13 @@ class Checker:
                     pending = ""
                 elif first and not t.startswith("-"):  # an old-style option cluster (`cf x.tar`)
                     pending = "dir" if "C" in t else ("file" if "f" in t else "")
-                elif t in ("-C", "--directory"):
+                elif t in ("-C", "--directory") or (self.long_is(t, "directory") and "=" not in t):
                     pending = "dir"
-                elif t.startswith("--directory="):
+                elif t.startswith("--dir") and "=" in t and self.long_is(t, "directory"):
                     self.cwd = self.chdir_of(Word(t.split("=", 1)[1], None, False, False))[0]
-                elif t in ("-f", "--file", "-T", "--files-from", "-X", "--exclude-from"):
+                elif t in ("-f", "--file", "-T", "--files-from", "-X", "--exclude-from") or (
+                    "=" not in t and any(self.long_is(t, f) for f in ("file", "files-from", "exclude-from"))
+                ):
                     pending = "file"
                 elif t.startswith("--"):
                     pass
@@ -1038,50 +1274,150 @@ class Checker:
         finally:
             self.cwd = saved
 
-    @staticmethod
-    def target_directories(args: list[Word]) -> list[Word]:
-        """The directory given to `-t` / `--target-directory` of mv and cp."""
+    def target_directories(self, args: list[Word]) -> list[Word]:
+        """The directory given to `-t` / `--target-directory` (or an abbreviation) of mv, cp, install and ln."""
         out: list[Word] = []
         for n, a in enumerate(args):
-            if a.text in ("-t", "--target-directory") and n + 1 < len(args):
-                out.append(args[n + 1])
-            elif a.text.startswith("--target-directory="):
-                out.append(Word(a.text.split("=", 1)[1], None, a.expands, a.quoted))
-            elif a.text.startswith("-t") and len(a.text) > 2 and not a.text.startswith("--"):
-                out.append(Word(a.text[2:], None, a.expands, a.quoted))
+            t = a.text
+            if t in ("-t", "--target-directory") or (
+                t.startswith("--") and "=" not in t and self.long_is(t, "target-directory")
+            ):
+                if n + 1 < len(args):
+                    out.append(args[n + 1])
+            elif t.startswith("--") and "=" in t and self.long_is(t, "target-directory"):
+                out.append(Word(t.split("=", 1)[1], None, a.expands, a.quoted))
+            elif t.startswith("-t") and len(t) > 2 and not t.startswith("--"):
+                out.append(Word(t[2:], None, a.expands, a.quoted))
         return out
 
+    MV_TAKES = frozenset({"-t", "--target-directory", "-S", "--suffix"})
+
     def mv(self, args: list[Word]) -> Finding | None:
-        operands, _ = self.operands(args, frozenset({"-t", "--target-directory", "-S", "--suffix"}))
-        return self.judge_all(operands + self.target_directories(args))
+        operands, _ = self.operands(args, self.MV_TAKES)
+        dests = self.target_directories(args)
+        found = self.judge_all(operands + dests)
+        for w in dests or operands[-1:]:
+            self.note_written(w)
+        return found
 
     def cp(self, args: list[Word]) -> Finding | None:
-        operands, _ = self.operands(args, frozenset({"-t", "--target-directory", "-S", "--suffix"}))
-        if not any(o.text in ("/dev/null", "/dev/zero") for o in operands):
-            return None
-        rest = [o for o in operands if o.text not in ("/dev/null", "/dev/zero")]
-        return self.judge_all(rest + self.target_directories(args))
+        operands, _ = self.operands(args, self.MV_TAKES)
+        dests = self.target_directories(args)
+        sources = [o for o in operands if o.text not in ("/dev/null", "/dev/zero")]
+        found: Finding | None = None
+        if len(sources) < len(operands):  # `cp /dev/null file`: a truncation, judged whether or not the file exists
+            found = self.judge_all(sources + dests)
+        else:  # any other copy overwrites an existing target only
+            found = self.judge_existing_all(dests or operands[-1:])
+        for w in dests or operands[-1:]:
+            self.note_written(w)
+        return found
+
+    def install(self, args: list[Word]) -> Finding | None:
+        operands, _ = self.operands(args, self.MV_TAKES | {"-m", "--mode", "-o", "--owner", "-g", "--group"})
+        dests = self.target_directories(args) or (operands[-1:] if len(operands) > 1 else [])
+        found = self.judge_existing_all(dests)
+        for w in dests:
+            self.note_written(w)
+        return found
+
+    def ln(self, args: list[Word]) -> Finding | None:
+        forced = any(
+            (a.text.startswith("-") and not a.text.startswith("--") and "f" in a.text)
+            or self.long_is(a.text, "force", 3)
+            for a in args
+        )
+        operands, _ = self.operands(args, self.MV_TAKES)
+        dests = self.target_directories(args) or operands[-1:]
+        found = self.judge_existing_all(dests) if forced else None
+        for w in dests:
+            self.note_written(w)
+        return found
+
+    def touch(self, args: list[Word]) -> Finding | None:
+        operands, _ = self.operands(args, frozenset({"-d", "--date", "-r", "--reference", "-t"}))
+        for w in operands:
+            self.note_written(w)
+        return None
 
     def dd(self, args: list[Word]) -> Finding | None:
         for a in args:
             if a.text.startswith("of="):
                 glob = a.glob - 3 if a.glob is not None and a.glob >= 3 else None
-                found = self.judge_soft(Word(a.text[3:], glob, a.expands, a.quoted))
+                word = Word(a.text[3:], glob, a.expands, a.quoted)
+                found = self.judge_soft(word)
+                self.note_written(word)
                 if found:
                     return found
         return None
 
     def tee(self, args: list[Word]) -> Finding | None:
-        if any(
+        targets, _ = self.operands(args, frozenset())
+        append = any(
             a.text in ("-a", "--append") or (a.text.startswith("-") and not a.text.startswith("--") and "a" in a.text)
             for a in args
-        ):
-            return None
-        targets, _ = self.operands(args, frozenset())
+        )
+        found = None if append else self.judge_existing_all(targets)
         for t in targets:
-            found = self.existing_shared(t)
-            if found:
-                return found
+            self.note_written(t)
+        return found
+
+    # in-place editors ----------------------------------------------------------------------------------------
+
+    def sed(self, args: list[Word]) -> Finding | None:
+        inplace = any(
+            (a.text.startswith("-") and not a.text.startswith("--") and "i" in a.text.split("e")[0].split("f")[0])
+            or self.long_is(a.text, "in-place", 3)
+            for a in args
+        )
+        if not inplace:
+            return None
+        operands, _ = self.operands(args, frozenset({"-e", "--expression", "-f", "--file", "-l", "--line-length"}))
+        return self.judge_existing_all(operands)
+
+    def perl(self, args: list[Word]) -> Finding | None:
+        found = self.interpreter(args)
+        if found:
+            return found
+        if not any(a.text.startswith("-") and not a.text.startswith("--") and "i" in a.text for a in args):
+            return None
+        operands, _ = self.operands(args, frozenset({"-e", "-E", "-I", "-M", "-m", "-x"}))
+        return self.judge_existing_all(operands)
+
+    def ed(self, args: list[Word]) -> Finding | None:
+        operands, _ = self.operands(args, frozenset({"-p", "--prompt"}))
+        return self.judge_existing_all(operands)
+
+    def awk(self, args: list[Word]) -> Finding | None:
+        inplace = any(
+            (a.text == "-i" and n + 1 < len(args) and args[n + 1].text == "inplace")
+            or a.text in ("-iinplace", "--include=inplace")
+            for n, a in enumerate(args)
+        )
+        if not inplace:
+            return None
+        operands, _ = self.operands(args, frozenset({"-i", "-f", "-v", "-F", "--include", "--file", "--assign"}))
+        return self.judge_existing_all(operands)
+
+    def interpreter(self, args: list[Word]) -> Finding | None:
+        """`python -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`: code the hook cannot read. Fail closed when the cwd
+        is in or above a zone, or the program text names one."""
+        code: list[Word] = []
+        for n, a in enumerate(args):
+            t = a.text
+            if t in ("-c", "-e", "-E", "-r", "--eval", "-p", "--print") and n + 1 < len(args):
+                code.append(args[n + 1])
+            elif t.startswith("-c") and len(t) > 2 and not t.startswith("--") and t[1] == "c":
+                code.append(Word(t[2:], None, a.expands, a.quoted))
+            elif re.fullmatch(r"-[a-zA-Z]*[ceEr]", t) and n + 1 < len(args):
+                code.append(args[n + 1])
+        if not code:
+            return None
+        if self.cwd is not None and self.zones.roots(self.cwd) is not None:
+            return Finding("an inline program run from a shared dev directory", "")
+        for c in code:
+            if zone_text(c.text) or ("\0" in c.text and self.near_zone()):
+                return Finding("an inline program that names a shared dev directory", "")
         return None
 
     def follow_cd(self, args: list[Word]) -> None:
@@ -1098,8 +1434,9 @@ class Checker:
             if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", a.text) and n + 1 < len(args):
                 body = args[n + 1]
                 if body.expands and not body.text.replace("\0", "").strip():
-                    # the whole body is an expansion: nothing to read, so only a zone in sight or in the cwd matters
-                    if self.mentions_zone or (self.cwd is not None and self.zones.roots(self.cwd) is not None):
+                    # the whole body is an expansion: nothing to read, so a zone in sight, the cwd in or above one,
+                    # or a delete word elsewhere in the line decides
+                    if self.near_zone() or self.plain:
                         raise UnknownCommand
                     return None
                 return self.nested_text(body.text, depth)  # a body with unknown pieces is read with them unresolved
@@ -1199,6 +1536,8 @@ class Checker:
             return None
         if any(a.text.startswith("-files0-from") for a in args):
             raise Unparseable  # the start paths come from a file this hook cannot read
+        if any(a.text.startswith("--") and a.text not in ("--help", "--version") and not a.quoted for a in args):
+            raise Unparseable  # a GNU-style long option find does not have: the layout is not understood
         if not starts:
             starts = [Word(".", None, False, False)]
         for s in starts:
@@ -1212,8 +1551,6 @@ class Checker:
         return None
 
     def scan(self, text: str, depth: int = 0) -> Finding | None:
-        if len(text) > MAX_COMMAND_CHARS:
-            raise Unparseable
         sc = Scanner(text, self.scan_home)
         commands = sc.run()
         for cmd in commands:
@@ -1260,13 +1597,31 @@ def home_unknown(command: str) -> bool:
     return bool(_HOME_REDEFINED.search(flat) or _HOME_COMMANDS.search(flat))
 
 
+def too_large(command: str, home: str, cwd: str | None) -> Finding | None:
+    """A command longer than MAX_SCAN_CHARS is decided by its first MAX_SCAN_CHARS characters, deterministically: a
+    delete word or a zone name there (or a cwd inside a zone) is a deny, anything else an allow (the caller logs it)."""
+    head = command[:MAX_SCAN_CHARS]
+    inside = bool(cwd and cwd.startswith("/") and Zones(home).roots(norm(cwd)) is not None)
+    if inside or plain_delete_word(head) or zone_text(head):
+        return Finding("a command too large to check, with a delete word or a zone in its first 64 KB", "")
+    return None
+
+
 def check(command: str, home: str, cwd: str | None) -> Finding | None:
     """The finding that makes `command` a deny, or None to allow. A command that holds no delete word, no character
     that can build one, no zone and whose cwd is outside every zone is allowed at once, unparsed. Anything else is
-    evaluated, and what cannot be read (a syntax error, nesting, a timeout, an internal error) is a deny."""
+    evaluated, and what cannot be read (a syntax error, nesting, a timeout, an internal error) is a deny. A command
+    over MAX_SCAN_CHARS is decided by its head (see too_large)."""
     if not has_delete_word(command, cwd, home):
         return None
+    if len(command) > MAX_SCAN_CHARS:
+        return too_large(command, home, cwd)
     checker = Checker(home, cwd, None if home_unknown(command) else home)
+    checker.zone_named = any(
+        _ZONE_NAME.search(v) for v in (command, _QUOTES.sub("", command), _QUOTES.sub(" ", command))
+    )
+    checker.plain = plain_delete_word(command)
+    checker.git_env = bool(_GIT_ENV.search(_QUOTES.sub("", command)))
     try:
         return checker.scan(command)
     except UnknownCommand:
@@ -1275,7 +1630,7 @@ def check(command: str, home: str, cwd: str | None) -> Finding | None:
         return Finding("a command too tangled to check (unterminated quote, nesting or a built command word)", "")
 
 
-# -- the hook -------------------------------------------------------------------------------------------------------
+# -- the hook --------------------------------------------------------------------------------------------------------
 
 
 def message(found: Finding) -> str:
@@ -1321,19 +1676,22 @@ def redact(command: str, home: str) -> str:
     return text[:MAX_LOGGED_CHARS] + ("...<cut>" if len(text) > MAX_LOGGED_CHARS else "")
 
 
-def _append_log(home: str, name: str, line: str) -> None:
-    """Open the lead-only folder component by component through directory descriptors (no symlink is followed, every
-    component must belong to this user), repair the folder to 0700, and append to a regular file this user owns."""
+def _lead_file(home: str, name: str, flags: int) -> int:
+    """Open `name` in the lead-only folder through directory descriptors and return its descriptor. No symlink is
+    followed, every component must belong to this user, the folder is repaired to 0700, and the file must be a regular
+    file with one link, owned by this user, repaired to 0600."""
     uid = os.getuid()
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    dflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)  # the home itself may sit behind a mount link
     try:
         for n, part in enumerate(LEAD_FOLDER):
             try:
-                nxt = os.open(part, flags, dir_fd=fd)
+                nxt = os.open(part, dflags, dir_fd=fd)
             except FileNotFoundError:
+                if flags & os.O_CREAT == 0:
+                    raise
                 os.mkdir(part, 0o700, dir_fd=fd)
-                nxt = os.open(part, flags, dir_fd=fd)
+                nxt = os.open(part, dflags, dir_fd=fd)
             os.close(fd)
             fd = nxt
             info = os.fstat(fd)
@@ -1341,17 +1699,26 @@ def _append_log(home: str, name: str, line: str) -> None:
                 raise PermissionError(part)
             if n == len(LEAD_FOLDER) - 1 and stat.S_IMODE(info.st_mode) != 0o700:
                 os.fchmod(fd, 0o700)
-        log = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+        opened = os.open(name, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
         try:
-            info = os.fstat(log)
+            info = os.fstat(opened)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1:
                 raise PermissionError(name)
-            os.fchmod(log, 0o600)
-            os.write(log, (line + "\n").encode("utf-8", "replace"))
-        finally:
-            os.close(log)
+            os.fchmod(opened, 0o600)
+        except BaseException:
+            os.close(opened)
+            raise
+        return opened
     finally:
         os.close(fd)
+
+
+def _append_log(home: str, name: str, line: str) -> None:
+    log = _lead_file(home, name, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    try:
+        os.write(log, (line + "\n").encode("utf-8", "replace"))
+    finally:
+        os.close(log)
 
 
 def append_log(home: str, name: str, line: str) -> None:
@@ -1360,6 +1727,100 @@ def append_log(home: str, name: str, line: str) -> None:
         _append_log(home, name, line)
     except OSError:
         return
+
+
+def read_small(home: str, name: str) -> str | None:
+    """A small file of the lead-only folder, or None when it is missing or cannot be read safely."""
+    try:
+        fd = _lead_file(home, name, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        return os.read(fd, 65536).decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def write_small(home: str, name: str, text: str) -> bool:
+    try:
+        fd = _lead_file(home, name, os.O_WRONLY | os.O_CREAT)
+    except OSError:
+        return False
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, text.encode("utf-8", "replace"))
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+# -- integrity self-check (warn mode) --------------------------------------------------------------------------------
+# A same-UID agent can edit the launcher or the settings entry; nothing here prevents that. This only makes a change
+# visible: a hash of each is recorded on request, and warn mode logs once when either differs from the record.
+
+LAUNCHER = (".config", "safo", "rmguard-hook")
+SETTINGS = (".claude", "settings.json")
+INTEGRITY_RECORD = "rmguard-integrity.json"
+INTEGRITY_STATE = "rmguard-integrity.state"
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def integrity_now(home: str) -> dict[str, str]:
+    """{"launcher": hash or "missing", "settings": hash of the rmguard hook entries or "absent"}."""
+    out = {"launcher": "missing", "settings": "absent"}
+    try:
+        with open(os.path.join(home, *LAUNCHER), "rb") as handle:
+            out["launcher"] = _digest(handle.read(1_000_000))
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(home, *SETTINGS), "rb") as handle:
+            data = json.loads(handle.read(4_000_000))
+        entries = [
+            entry
+            for entry in data.get("hooks", {}).get("PreToolUse", [])
+            if "rmguard" in json.dumps(entry, sort_keys=True)
+        ]
+        out["settings"] = _digest(json.dumps(entries, sort_keys=True).encode()) if entries else "absent"
+    except (OSError, ValueError, AttributeError):
+        out["settings"] = "unreadable"
+    return out
+
+
+def record_integrity(home: str) -> bool:
+    return write_small(home, INTEGRITY_RECORD, json.dumps(integrity_now(home), sort_keys=True))
+
+
+def integrity_check(home: str, when: dt.datetime) -> None:
+    """Warn mode: log one line when the launcher or the settings entry differ from the recorded hash. A line is written
+    once per change (the last logged difference is kept), and again if it changes back and then differs anew."""
+    recorded = read_small(home, INTEGRITY_RECORD)
+    if recorded is None:
+        return
+    try:
+        was = json.loads(recorded)
+    except ValueError:
+        return
+    now = integrity_now(home)
+    differs = sorted(k for k in now if was.get(k) != now[k])
+    signature = ",".join(f"{k}={now[k][:12]}" for k in differs)
+    last = read_small(home, INTEGRITY_STATE) or ""
+    if signature and signature != last:
+        what = " and ".join("the launcher" if k == "launcher" else "the settings entry" for k in differs)
+        append_log(
+            home,
+            "rmguard-error.log",
+            f"{when.strftime('%Y-%m-%dT%H:%M:%SZ')}\twarn\tintegrity: {what} differ from the record\t",
+        )
+    if signature != last:
+        write_small(home, INTEGRITY_STATE, signature)
 
 
 def log_line(mode: str, reason: str, command: str, home: str, now: dt.datetime) -> str:
@@ -1451,6 +1912,8 @@ def evaluate(raw: str, home: str, default_cwd: str | None) -> Outcome:
     except Exception:  # fail closed: an evaluated command that crashes or times out is blocked
         reason = "safo rmguard: blocked, an internal error while checking the command (fail closed). Retry it."
         return Outcome(reason, command, "")
+    if found is None and len(command) > MAX_SCAN_CHARS:
+        return Outcome("", command, "command too large to check; allowed (no delete word or zone in its first 64 KB)")
     return Outcome(message(found) if found else "", command, "")
 
 
@@ -1461,9 +1924,15 @@ def main(
     now: dt.datetime | None = None,
 ) -> int:
     """Read one event, print a deny when the rule bites (enforce) or log one line (warn). Never raises."""
-    mode = parse_mode(sys.argv[1:] if argv is None else argv)
+    words = sys.argv[1:] if argv is None else list(argv)
+    mode = parse_mode(words)
     home = home or os.path.expanduser("~")
     when = now or dt.datetime.now(dt.UTC)
+    if "--record-integrity" in words:
+        print("rmguard integrity record " + ("written" if record_integrity(home) else "NOT written"))
+        return 0
+    if mode == "warn":
+        integrity_check(home, when)
     try:
         raw = "".join(stdin) if stdin is not None else sys.stdin.read()
     except (OSError, UnicodeError):

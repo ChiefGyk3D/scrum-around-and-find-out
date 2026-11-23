@@ -104,6 +104,46 @@ DENIED = [
     ("declare HOME={D}; rm ~/a.log", "{W}"),
     ("printf -v HOME %s {D}; rm ~/a.log", "{W}"),
     ("read HOME <<< {D}; rm ~/a.log", "{W}"),
+    # round 3 (Daybreak round 2): the zone name quoted or escaped, from the parent folder
+    ("truncate -s 0 reach-around-d''ev/a.log", "{S}"),
+    ("truncate -s 0 reach-around-d\\ev/a.log", "{S}"),
+    ("git -C reach-around-d\\ev/repo clean -fd", "{S}"),
+    ("mv ~/.lo''cal/share/reach-around-d''ev/a.log {W}/", "{W}"),
+    (": > reach-around-d\\ev/a.log", "{S}"),
+    # git: aliases, GIT_* variables, other destructive subcommands
+    ("git -C {R} config alias.wipe clean; git -C {R} wipe -fdx", "{W}"),
+    ("git -c alias.wipe=clean -C {R} wipe -fdx", "{W}"),
+    ("GIT_WORK_TREE={R} GIT_DIR={R}/.git git clean -fdx", "{W}"),
+    ("export GIT_WORK_TREE={R}; export GIT_DIR={R}/.git; git clean -fdx", "{W}"),
+    ("git --git-dir={R}/.git --work-tree={R} clean -fdx", "{W}"),
+    ("env GIT_WORK_TREE={R} GIT_DIR={R}/.git git clean -fdx", "{W}"),
+    ("git -C {R} rm -q t.txt", "{W}"),
+    ("git -C {R} clean -fd -e -n", "{W}"),
+    ("git -C {R} clean -fde x", "{W}"),
+    ("git -C {R} clean -fd --exclude=-n", "{W}"),
+    # other writers that replace or edit an existing protected file
+    ("sed -i 's/.*/gone/' {D}/a.log", "{W}"),
+    ("sed -i.bak -e 's/S/T/' {D}/a.log", "{W}"),
+    ("perl -pi -e '$_=\"\"' {D}/a.log", "{W}"),
+    ("perl -i.bak -pe 's/S/T/' {D}/a.log", "{W}"),
+    ("install -m 644 {W}/a.log {D}/a.log", "{W}"),
+    ("ln -sf {W}/a.log {D}/a.log", "{W}"),
+    ("cp {W}/a.log {D}/a.log", "{W}"),
+    ("python3 -c \"import os; os.remove('{D}/a.log')\"", "{W}"),
+    ("python3 -c \"open('{D}/a.log','w').close()\"", "{W}"),
+    ("perl -e 'unlink q({D}/a.log)'", "{W}"),
+    # the redirect target created earlier in the same line
+    ("cp {W}/a.log {D}/sub/b.log; : > {D}/sub/b.log", "{W}"),
+    # bash -c with a body the hook cannot read, from the cwd of a protected parent
+    ("export X='cd reach-around-dev && rm a.log'; bash -c \"$X\"", "{S}"),
+    ("bash -c \"$(printf 'cd reach-around-dev && rm a.log')\"", "{S}"),
+    ("export X='rm {D}/a.log'; rm -f /nonexistent-x; bash -c \"$X\"", "{W}"),
+    # long-option abbreviations
+    ("tar --remove -cf {W}/x.tar -C {D} sub", "{W}"),
+    ("tar --remove-f -cf {W}/x.tar -C {D} sub", "{W}"),
+    ("rsync -a --del {W}/empty/ {D}/sub/", "{W}"),
+    ("mv --target-dir={D} {W}/a.log", "{W}"),
+    ("mv --target={D} {W}/a.log", "{W}"),
 ]
 
 ALLOWED = [
@@ -140,6 +180,7 @@ def build(tmp_path: Path, git: bool) -> dict[str, str]:
         dev / "a.log",
         dev / "sub/b.log",
         dev / "repo/u.log",
+        dev / "repo/t.txt",
         agent / "ok.log",
         agent / "sub2/ok2.log",
         work / "x.o",
@@ -157,6 +198,7 @@ def build(tmp_path: Path, git: bool) -> dict[str, str]:
         (repo / "u.log").write_text(expected(repo / "u.log", str(home)))
     return {
         "H": str(home),
+        "S": str(home / ".local/share"),
         "D": str(dev),
         "W": str(work),
         "R": str(dev / "repo"),
@@ -186,6 +228,10 @@ def run_in_bash(command: str, cwd: str, world: dict[str, str]) -> None:
         "LC_ALL": "C",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
     }
     if rmguard_shell.bash_path(env["PATH"]) is None:
         if CI:
@@ -199,8 +245,12 @@ def fill(template: str, world: dict[str, str]) -> str:
 
 
 def tools_for(command: str) -> list[str]:
-    words = command.replace(";", " ").replace("&", " ").split()
-    return [t for t in ("git", "rsync", "tar", "truncate", "find", "shred", "dd") if t in words]
+    words = command.replace(";", " ").replace("&", " ").replace("|", " ").split()
+    return [
+        t
+        for t in ("git", "rsync", "tar", "truncate", "find", "shred", "dd", "sed", "perl", "install", "python3")
+        if t in words
+    ]
 
 
 @pytest.mark.parametrize(("template", "cwd"), DENIED)
@@ -236,5 +286,5 @@ def test_when_bash_touches_only_agent_or_outside_files_the_guard_allows(
 
 
 def test_the_tables_are_not_empty() -> None:
-    assert len(DENIED) > 60
+    assert len(DENIED) > 90
     assert len(ALLOWED) > 8
