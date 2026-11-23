@@ -207,3 +207,22 @@ def test_the_docs_state_the_residual_risk_the_integrity_check_and_the_promotion_
     assert "same user" in text.lower() or "same uid" in text.lower()
     assert "promotion threshold" in text.lower()
     assert "Edit and Write" in text
+
+
+def test_the_deny_answer_is_valid_json_and_goes_out_through_the_output_module(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    command = "rm -rf " + str(tmp_path) + "/.local/share/x-dev/a::b/*.py"
+    assert rmguard.main([], io.StringIO(event(command)), str(tmp_path)) == 0
+    answer = json.loads(capsys.readouterr().out)
+    reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+    assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "a::b" in reason  # the double colon survives intact inside the JSON string
+
+
+def test_the_docs_cite_only_hosts_and_file_names_the_privacy_scan_accepts() -> None:
+    from privacy import findings
+
+    assert findings(DOC.read_text(), "docs/rmguard.md") == []
+    assert findings("see rmguard-warn.log and https://code.claude.com/docs/en/hooks.md") == []
+    assert findings("NAS at storage-01.local") != []  # the scan still bites on a real private name

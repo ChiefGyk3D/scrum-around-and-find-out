@@ -71,6 +71,8 @@ import sys
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, NamedTuple
 
+from safo import output
+from safo.bounded import loads
 from safo.leadwait import WRAPPERS, _ansi_c
 
 # The shared scratch parent. Built, not written as a literal: this module only compares paths against it and never
@@ -1698,7 +1700,7 @@ def _lead_file(home: str, name: str, flags: int) -> int:
             if info.st_uid != uid:
                 raise PermissionError(part)
             if n == len(LEAD_FOLDER) - 1 and stat.S_IMODE(info.st_mode) != 0o700:
-                os.fchmod(fd, 0o700)
+                os.fchmod(fd, stat.S_IRWXU)  # owner-only; a directory needs the x bit
         opened = os.open(name, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
         try:
             info = os.fstat(opened)
@@ -1782,7 +1784,7 @@ def integrity_now(home: str) -> dict[str, str]:
         pass
     try:
         with open(os.path.join(home, *SETTINGS), "rb") as handle:
-            data = json.loads(handle.read(4_000_000))
+            data = loads(handle.read(4_000_000))
         entries = [
             entry
             for entry in data.get("hooks", {}).get("PreToolUse", [])
@@ -1805,7 +1807,7 @@ def integrity_check(home: str, when: dt.datetime) -> None:
     if recorded is None:
         return
     try:
-        was = json.loads(recorded)
+        was = loads(recorded)
     except ValueError:
         return
     now = integrity_now(home)
@@ -1841,7 +1843,9 @@ def parse_mode(argv: Sequence[str]) -> str:
 
 
 def deny_json(reason: str) -> str:
-    return json.dumps(
+    """The hook's deny answer. `::` is written as a JSON escape, so the output module's workflow-command escaping
+    (which would corrupt the JSON) finds nothing to change."""
+    text = json.dumps(
         {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -1850,6 +1854,7 @@ def deny_json(reason: str) -> str:
             }
         }
     )
+    return text.replace("::", ":\\u003a")
 
 
 def _on_alarm(_signum: int, _frame: object) -> None:
@@ -1889,7 +1894,7 @@ def gate(text: str, cwd: str | None = None, home: str | None = None) -> tuple[bo
 def evaluate(raw: str, home: str, default_cwd: str | None) -> Outcome:
     """Decide for one raw event."""
     try:
-        event = json.loads(raw)
+        event = loads(raw)
         if not isinstance(event, dict):
             raise ValueError
     except ValueError:
@@ -1929,7 +1934,7 @@ def main(
     home = home or os.path.expanduser("~")
     when = now or dt.datetime.now(dt.UTC)
     if "--record-integrity" in words:
-        print("rmguard integrity record " + ("written" if record_integrity(home) else "NOT written"))
+        output.write(sys.stdout, "rmguard integrity record " + ("written" if record_integrity(home) else "NOT written"))
         return 0
     if mode == "warn":
         integrity_check(home, when)
@@ -1949,7 +1954,7 @@ def main(
         short = outcome.reason.removeprefix("safo rmguard: blocked, ").split(". Shared dev", 1)[0]
         append_log(home, "rmguard-warn.log", log_line(mode, short, outcome.command, home, when))
         return 0
-    print(deny_json(outcome.reason))
+    output.write(sys.stdout, deny_json(outcome.reason))
     return 0
 
 

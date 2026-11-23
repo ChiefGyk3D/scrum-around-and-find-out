@@ -86,6 +86,7 @@ FILE_SUFFIXES = {
     "json",
     "jsonl",
     "txt",
+    "log",  # a log file name (docs/rmguard.md); `.log` is not a top-level domain
     "sh",
     "toml",
     "lock",
@@ -123,6 +124,7 @@ ALLOWED_HOSTS = {
     "generativelanguage.googleapis.com",  # the Gemini API host the key is sent to, and the vendor docs host
     "ai.google.dev",
     "openssh.com",  # the domain in OpenSSH key type names such as sk-ssh-ed25519@openssh.com
+    "code.claude.com",  # the Claude Code documentation pages read for docs/rmguard.md
     "developers.yubico.com",  # vendor pages read for docs/gemini-keys.md
     "immurok.com",
     "localhost",  # the loopback name of the passkey page in docs/gemini-passkeys.md

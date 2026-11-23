@@ -107,7 +107,7 @@ settings entry the owner controls.
 ## Install: owner steps, nothing here changes a config file
 
 Take a timestamped backup first and look at the diff before editing: `cp -p ~/.claude/settings.json
-~/.claude/settings.json.bak-$(date +%Y%m%d-%H%M%S)`.
+~/.claude/settings-backup-$(date +%Y%m%d-%H%M%S).json`.
 
 **Warn mode** is the entry to start with. It has no `onFailure`, so it can only log and never blocks, whatever happens:
 
@@ -177,7 +177,7 @@ one command in ten is too much for an always-on hook before the habits move, so 
 ## Recovery, from a plain terminal outside the session
 
 ```
-cp -p ~/.claude/settings.json.bak-<timestamp> ~/.claude/settings.json
+cp -p ~/.claude/settings-backup-<timestamp>.json ~/.claude/settings.json
 ```
 
 with the timestamped backup taken before the install. `cp` writes through a symlink, so a symlinked settings file is
