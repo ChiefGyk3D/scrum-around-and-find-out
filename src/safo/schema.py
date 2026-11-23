@@ -134,7 +134,9 @@ class Tracking:
     epic_field: str = "Epic"
     effort_field: str = "Effort"
     exempt_repos: tuple[str, ...] = ()  # owner/name: pull requests there need no linked issue
-    exempt_authors: tuple[str, ...] = ()  # GitHub logins (`dependabot`): their pull requests need no linked issue
+    exempt_authors: tuple[
+        str, ...
+    ] = ()  # logins of bot accounts (`dependabot`): their pull requests need no linked issue
 
 
 @dataclass(frozen=True)
@@ -708,7 +710,7 @@ def _parse_tracking(r: Reader, raw: object) -> Tracking:
     authors: list[str] = []
     for i, name in enumerate(_capped(r, m.get("exempt_authors", []), "rules.tracking.exempt_authors", MAX_EXEMPT)):
         text = r.string(name, f"rules.tracking.exempt_authors[{i}]")
-        if not LOGIN.fullmatch(text.removesuffix("[bot]")):
+        if not LOGIN.fullmatch(text.lower().removesuffix("[bot]")):
             raise r.fail(f"rules.tracking.exempt_authors[{i}]", "expected a GitHub login")
         authors.append(text)
     return Tracking(

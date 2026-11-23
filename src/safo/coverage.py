@@ -27,7 +27,7 @@ Q_PULL_LINKS = """query RepoPullRefs($owner: String!, $name: String!, $endCursor
     pullRequests(states: [OPEN, MERGED], first: 100, after: $endCursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number state merged closedAt body author { login } repository { nameWithOwner }
+        id number state merged closedAt body author { __typename login } repository { nameWithOwner }
         closingIssuesReferences(first: 1) { totalCount }
       }
     }
@@ -37,7 +37,7 @@ Q_PULL_LINKS = """query RepoPullRefs($owner: String!, $name: String!, $endCursor
 Q_PULL_LINK = """query PullRefs($id: ID!) {
   node(id: $id) {
     ... on PullRequest {
-      id number body author { login } repository { nameWithOwner }
+      id number body author { __typename login } repository { nameWithOwner }
       closingIssuesReferences(first: 1) { totalCount }
     }
   }
@@ -115,7 +115,7 @@ class Pull:
     repo: str
     number: int
     linked: bool
-    author: str | None = None  # the login GitHub reports; None for a deleted account or an unreadable value
+    author: str | None = None  # the login of a bot author; None for a person, a deleted account or anything unreadable
 
 
 def links_issue(body: str, repo: str, number: int) -> bool:
@@ -157,9 +157,12 @@ def author_key(login: str) -> str:
 
 
 def _author(node: JSON) -> str | None:
+    """The author's login, only when GitHub says the author is a Bot: a person's login is never exempt."""
     author = node.get("author")
-    login = author.get("login") if isinstance(author, dict) else None
-    return login if isinstance(login, str) and login else None  # anything else stays unexempt: fail closed
+    if not isinstance(author, dict) or author.get("__typename") != "Bot":
+        return None
+    login = author.get("login")
+    return login if isinstance(login, str) else None  # anything else stays unexempt: fail closed
 
 
 def unlinked_pulls(client: Client, board: Board, today: dt.date) -> tuple[list[str], list[str]]:

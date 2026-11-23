@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from pathlib import Path
 
 import yaml
 
-from safo.schema import RULES_KEYS
+from safo.schema import RULES_KEYS, Tracking
 
 ROOT = Path(__file__).parent.parent
 DOC = (ROOT / "docs" / "board-yaml.md").read_text(encoding="utf-8")
@@ -47,3 +48,13 @@ def test_the_guard_bites() -> None:
     without = "\n".join(line for line in DOC.splitlines() if "`gate_exempt_repos`" not in line)
     assert "gate_exempt_repos" in undocumented(RULES_KEYS, without)
     assert undocumented(frozenset({"brand_new_key"}), DOC) == ["brand_new_key"]
+
+
+def test_every_tracking_subkey_has_a_row_in_board_yaml_md() -> None:
+    """The per-key guard above stops at the top level; `rules.tracking` holds keys of its own."""
+    keys = frozenset(f.name for f in dataclasses.fields(Tracking))
+    assert {"exempt_repos", "exempt_authors"} <= keys
+    assert undocumented(keys, DOC) == []
+    shown = set(EXAMPLE["rules"]["tracking"])
+    assert shown <= keys
+    assert {"exempt_repos", "exempt_authors"} <= shown

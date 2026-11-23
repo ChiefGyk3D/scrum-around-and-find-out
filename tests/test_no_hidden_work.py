@@ -111,10 +111,12 @@ def test_an_exempt_repository_is_not_checked_for_links(fake: FakeGitHub, client:
     assert "has no linked" not in run_audit(fake, client, board)[1]
 
 
-def _author_run(fake: FakeGitHub, client: Client, author: Any, exempt: tuple[str, ...]) -> str:
+def _author_run(
+    fake: FakeGitHub, client: Client, author: Any, exempt: tuple[str, ...], author_type: Any = "Bot"
+) -> str:
     board, project = build_world(fake)
     board = with_tracking(board, Tracking(exempt_authors=exempt))
-    pr = fake.add_content("acme/widgets", "PullRequest", 2, body="", author=author)
+    pr = fake.add_content("acme/widgets", "PullRequest", 2, body="", author=author, author_type=author_type)
     fake.add_item(project, pr, Status="In progress", Area="Core", Priority="P2 later")
     return run_audit(fake, client, board)[1]
 
@@ -129,6 +131,27 @@ def test_a_pull_request_by_another_author_is_still_checked(fake: FakeGitHub, cli
 
 def test_with_no_exempt_authors_a_bot_pull_request_is_still_checked(fake: FakeGitHub, client: Client) -> None:
     assert "PULL acme/widgets#2 has no linked" in _author_run(fake, client, "dependabot", ())
+
+
+@pytest.mark.parametrize("author_type", ["User", "Organization", "Mannequin", None, 7])
+def test_an_author_that_is_not_a_bot_is_never_exempt_even_with_the_same_login(
+    fake: FakeGitHub, client: Client, author_type: Any
+) -> None:
+    """Bot accounts only: a person, or a missing or odd typename, with the login is still checked."""
+    assert "PULL acme/widgets#2 has no linked" in _author_run(fake, client, "dependabot", ("dependabot",), author_type)
+
+
+def test_audit_notes_the_active_exempt_authors_and_keeps_the_exit_code(fake: FakeGitHub, client: Client) -> None:
+    board, _ = build_world(fake)
+    board = with_tracking(board, Tracking(exempt_authors=("dependabot", "renovate")))
+    baseline = run_audit(fake, client, with_tracking(board, Tracking()))
+    code, text = run_audit(fake, client, board)
+    assert (
+        "NOTE    pull requests by these bot accounts need no linked issue "
+        "(rules.tracking.exempt_authors): dependabot, renovate" in text
+    )
+    assert code == baseline[0]
+    assert "exempt_authors" not in baseline[1]
 
 
 @pytest.mark.parametrize(
@@ -146,7 +169,7 @@ def test_author_matching_ignores_case_and_the_bot_suffix(
     assert "has no linked" not in _author_run(fake, client, author, (listed,))
 
 
-@pytest.mark.parametrize("author", [None, "", 7, "dependabot-evil"])
+@pytest.mark.parametrize("author", [None, 7, "dependabot-evil"])
 def test_a_missing_or_odd_author_is_still_reported(fake: FakeGitHub, client: Client, author: Any) -> None:
     """A deleted account (`author: null`) or a value that is not a login never earns the exemption."""
     assert "PULL acme/widgets#2 has no linked" in _author_run(fake, client, author, ("dependabot",))
@@ -268,9 +291,9 @@ def test_board_yaml_reads_the_tracking_section() -> None:
 
 def test_board_yaml_reads_exempt_authors() -> None:
     data = board_data()
-    data["rules"]["tracking"] = {"exempt_authors": ["dependabot", "renovate[bot]"]}
+    data["rules"]["tracking"] = {"exempt_authors": ["dependabot", "Renovate[BOT]"]}
     t = parse_board(data, check_fields=False).rules.tracking
-    assert t.exempt_authors == ("dependabot", "renovate[bot]")
+    assert t.exempt_authors == ("dependabot", "Renovate[BOT]")
 
 
 @pytest.mark.parametrize("bad", [["a/b"], [3], ["has space"], [""], "dependabot", ["x"] * 201])
@@ -382,6 +405,13 @@ def test_sync_does_not_flag_an_exempt_author_but_flags_another(
     human = fake.add_content("acme/widgets", "PullRequest", 6, body="no link", author="octocat")
     assert "HUMAN" not in run_sync(fake, client, pull_event(tmp_path, 5, bot.id), board)[1]
     assert "HUMAN" in run_sync(fake, client, pull_event(tmp_path, 6, human.id), board)[1]
+
+
+def test_sync_does_not_exempt_a_person_with_an_exempt_login(fake: FakeGitHub, client: Client, tmp_path: Path) -> None:
+    board, _ = build_world(fake)
+    board = with_tracking(board, Tracking(exempt_authors=("dependabot",)))
+    pr = fake.add_content("acme/widgets", "PullRequest", 5, body="no link", author="dependabot", author_type="User")
+    assert "HUMAN" in run_sync(fake, client, pull_event(tmp_path, 5, pr.id), board)[1]
 
 
 # -- the shapes GitHub sends, and the cards a run adds ---------------------------------------------------
