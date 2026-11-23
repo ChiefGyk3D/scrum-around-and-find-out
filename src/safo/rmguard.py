@@ -251,6 +251,11 @@ def has_delete_word(text: str, cwd: str | None = None, home: str | None = None) 
     return plain_delete_word(text) or bool(_SUSPECT.search(text)) or zone_text(text)
 
 
+def shifted(glob: int | None) -> int | None:
+    """The glob offset of an option word with its two-letter flag (`-C`) cut off the front."""
+    return glob - 2 if glob is not None and glob >= 2 else None
+
+
 def norm(path: str) -> str:
     """normpath, with a leading run of slashes collapsed (`//x` and `/x` are the same file on Linux)."""
     out = posixpath.normpath(path)
@@ -1116,12 +1121,19 @@ class Checker:
         checkout, rm, stash, an alias, an unknown option) is judged by the tree it would run in."""
         base = self.cwd
         unknown = False
+        lost = False  # a `-C` directory that could not be resolved
         i = 0
         while i < len(args):
             t = args[i].text
             if t == "-C" and i + 1 < len(args):
                 base = self.chdir_of(args[i + 1])[0]
+                lost = lost or base is None
                 i += 2
+            elif t.startswith("-C") and len(t) > 2:  # the attached form, `-C<dir>`
+                attached = Word(t[2:], shifted(args[i].glob), args[i].expands, args[i].quoted)
+                base = self.chdir_of(attached)[0]
+                lost = lost or base is None
+                i += 1
             elif t in ("-c", "--exec-path", "--namespace", "--super-prefix", "--config-env") and i + 1 < len(args):
                 i += 2
             elif t.startswith(("--work-tree=", "--git-dir=")):
@@ -1153,6 +1165,8 @@ class Checker:
             dry, pathspecs = self.clean_options(rest)
             if dry:
                 return None  # a dry run removes nothing
+        if lost:
+            return Finding("`git -C` with a directory that could not be resolved", "")
         saved = self.cwd
         self.cwd = base
         try:
@@ -1257,6 +1271,11 @@ class Checker:
                     pending = "dir" if "C" in t else ("file" if "f" in t else "")
                 elif t in ("-C", "--directory") or (self.long_is(t, "directory") and "=" not in t):
                     pending = "dir"
+                elif t.startswith("-C") and len(t) > 2:  # the attached form, `-C<dir>`
+                    attached = Word(t[2:], shifted(a.glob), a.expands, a.quoted)
+                    self.cwd = self.chdir_of(attached)[0]
+                    if self.cwd is None:
+                        return Finding("`tar -C` with a directory that could not be resolved", "")
                 elif t.startswith("--dir") and "=" in t and self.long_is(t, "directory"):
                     self.cwd = self.chdir_of(Word(t.split("=", 1)[1], None, False, False))[0]
                 elif t in ("-f", "--file", "-T", "--files-from", "-X", "--exclude-from") or (
@@ -1684,7 +1703,7 @@ def _lead_file(home: str, name: str, flags: int) -> int:
     file with one link, owned by this user, repaired to 0600."""
     uid = os.getuid()
     dflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)  # the home itself may sit behind a mount link
+    fd = os.open(home, dflags)  # the home itself must not be a link; a link in a parent of it is the system's own
     try:
         for n, part in enumerate(LEAD_FOLDER):
             try:

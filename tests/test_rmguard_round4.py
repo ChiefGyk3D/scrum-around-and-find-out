@@ -386,3 +386,25 @@ def test_a_redirect_target_with_an_unknown_tail_below_the_agent_folder_or_scratc
     assert deny(f"ls {DEV}/x; echo y > {DEV}/$NAME", "/work")
     assert deny(f"ls {DEV}/x; echo y > $LOG", "/work")
     assert deny(f"ls {DEV}/x; echo y > {AGENT}/../$NAME", "/work")  # a `..` in the written part is never trusted
+
+
+def test_the_attached_short_forms_of_git_dash_c_and_tar_dash_c_are_followed() -> None:
+    assert deny(f"git -C{DEV}/repo clean -fdx", "/work")
+    assert deny(f"git -C{DEV}/repo checkout -f", "/work")
+    assert deny(f"tar --remove-files -cf /work/x.tar -C{DEV} sub", "/work")
+    assert not deny(f"git -C{AGENT}/work clean -fdx", "/work")
+    assert not deny(f"tar --remove-files -cf /work/x.tar -C{AGENT}/work sub", "/work")
+    assert not deny("git -C/work/repo clean -fdx", "/work")
+
+
+def test_an_attached_directory_that_cannot_be_resolved_fails_closed() -> None:
+    assert deny("git -C$D clean -fdx", "/work")
+    assert deny('git -C"$D" clean -fdx', "/work")
+    assert deny("tar --remove-files -cf /work/x.tar -C$D sub", "/work")
+    assert not deny("git -C/work/repo status", "/work")
+
+
+def test_a_duplicate_key_in_the_hook_event_is_refused_not_merged(capsys: pytest.CaptureFixture[str]) -> None:
+    raw = '{"tool_name": "Bash", "tool_name": "Read", "cwd": "/", "tool_input": {"command": "rm -rf /x/y"}}'
+    assert rmguard.main([], io.StringIO(raw), HOME) == 0
+    assert "could not be read" in capsys.readouterr().out

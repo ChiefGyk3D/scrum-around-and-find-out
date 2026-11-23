@@ -118,6 +118,10 @@ Take a timestamped backup first and look at the diff before editing: `cp -p ~/.c
 }
 ```
 
+Both entries use `timeout` 10: the hook answers within its own 3 second limit, so Claude Code's timeout is only the backstop.
+The two entries in short: warn is `safo-rmguard --mode warn`, timeout 10, no `onFailure`; enforce is the owner launcher, timeout
+10, `"onFailure": "block"`.
+
 Read `~/.local/share/reach-around-lead/rmguard-warn.log` for a period (a week is the suggestion) and run the replay
 below. **The owner chooses enforce only after that warn-mode period**, by their own decision, against the promotion
 threshold below.

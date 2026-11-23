@@ -140,6 +140,7 @@ DENIED = [
     ("export X='rm {D}/a.log'; rm -f /nonexistent-x; bash -c \"$X\"", "{W}"),
     # long-option abbreviations
     ("tar --remove -cf {W}/x.tar -C {D} sub", "{W}"),
+    ("tar --remove-files -cf {W}/x.tar -C{D} sub", "{W}"),
     ("tar --remove-f -cf {W}/x.tar -C {D} sub", "{W}"),
     ("rsync -a --del {W}/empty/ {D}/sub/", "{W}"),
     ("mv --target-dir={D} {W}/a.log", "{W}"),

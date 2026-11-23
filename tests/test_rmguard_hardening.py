@@ -226,3 +226,14 @@ def test_the_docs_cite_only_hosts_and_file_names_the_privacy_scan_accepts() -> N
     assert findings(DOC.read_text(), "docs/rmguard.md") == []
     assert findings("see rmguard-warn.log and https://code.claude.com/docs/en/hooks.md") == []
     assert findings("NAS at storage-01.local") != []  # the scan still bites on a real private name
+
+
+def test_a_home_that_is_a_symlink_is_not_followed(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert warn(would_block(link), link) == 0
+    assert list(real.iterdir()) == []  # nothing was written through the link
+    assert warn(would_block(real), real) == 0  # the real directory still works
+    assert (lead_dir(real) / "rmguard-warn.log").exists()
