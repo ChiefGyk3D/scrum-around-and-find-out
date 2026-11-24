@@ -27,8 +27,17 @@ What it does, in order, and stops at the first refusal with NO codex call (exit 
 2. For `implementer` and `review`, checks the worktree: a linked git worktree (its `.git` is a file, its top level is
    the folder named) under `~/.local/share/<name>-dev/` or a `.claude/worktrees/` folder below the account home. An
    `implementer` run also needs a clean tree, except for paths named with `--allow-dirty` (repeatable).
-3. Starts codex by an absolute path, no shell, with an allow-list environment (a fixed PATH plus the directories of
-   codex and node, HOME from the account database, CODEX_HOME, locale, a private TMPDIR; no `GH_*`, no tokens, no
+3. Finds codex (and node) ONLY through the private config `~/.config/safo/codex-run.json`, a JSON object with the key
+   "codex" (an absolute, normalized path) and optionally "node"; the caller's PATH is never searched, and an unset
+   or unusable config is exit 2 naming the expected key. The binary, its real path and EVERY folder above both must be
+   owned by this user or root and not writable by group or other (a sticky folder such as /tmp passes when root or
+   we own it). The config file itself must be ours and not group or world writable.
+   Git runs (worktree checks) with the global and system config and attributes switched off, `core.hooksPath` at
+   /dev/null, `core.fsmonitor` off, `protocol.allow` never and no optional locks. The worktree's `.git` file must name
+   a `<main>/.git/worktrees/<name>` folder outside the worktree, below the home, ours, that names the worktree back.
+   A repository whose own config sets a filter, textconv, include, alias, URL rewrite or similar program key is
+   refused. Then it starts codex by an absolute path, no shell, with an allow-list environment (a fixed PATH plus the
+   directories of codex and node, HOME from the account database, CODEX_HOME, locale, a private TMPDIR; no `GH_*`, no tokens, no
    `*_API_KEY`, no secret-manager variables), `--ignore-user-config` and `--ignore-rules` (so `config.toml` cannot
    add a tool server or change the sandbox), `--ephemeral`, stdin from the prompt copy, its own process group, and a
    hard timeout (default 1800 s, at most 3600 s). On a timeout the whole process group is killed (exit 124).
@@ -103,6 +112,7 @@ LEDGER_NAME = "codex-runs.jsonl"
 RESULTS_NAME = "codex-runs"
 SCRATCH_NAME = "codex-run-scratch"
 DENY_LIST = (".config", "safo", "codex-deny.txt")
+CONFIG_FILE = (".config", "safo", "codex-run.json")
 
 
 class CodexRunError(SafoError):
@@ -293,14 +303,33 @@ def git_env(home: str) -> dict[str, str]:
         "LC_ALL": LOCALE,
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_TERMINAL_PROMPT": "0",
     }
+
+
+# Options on every git call: repository-controlled settings that start programs are overridden on the command line
+# (which beats the repository's own config), and the repository is never locked or written to.
+GIT_HARDENING = (
+    "--no-optional-locks",
+    "-c",
+    f"core.hooksPath={os.devnull}",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "protocol.allow=never",
+)
+# Keys of the repository's own config that can start a program or redirect git in ways the options above do not cover
+# (a content filter named by an attributes file, a textconv, an include of another file, a URL rewrite, an alias).
+DANGEROUS_CONFIG_PREFIXES = ("filter.", "include.", "includeif.", "alias.", "url.", "credential.")
+DANGEROUS_CONFIG_SUFFIXES = (".textconv", ".clean", ".smudge", ".process", ".command", ".external")
+DANGEROUS_CONFIG_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.askpass", "core.gitproxy")
 
 
 def _git(git: str, home: str, root: str, *args: str) -> str:
     try:
         done = subprocess.run(  # noqa: S603 - absolute git, fixed argv, no shell, stdin closed, bounded time
-            [git, "-c", "core.fsmonitor=false", "-C", root, *args],
+            [git, *GIT_HARDENING, "-C", root, *args],
             env=git_env(home),
             capture_output=True,
             stdin=subprocess.DEVNULL,
@@ -312,6 +341,65 @@ def _git(git: str, home: str, root: str, *args: str) -> str:
     if done.returncode != 0:
         raise CodexRunError("the worktree is not a usable git work tree; nothing was run")
     return done.stdout.decode("utf-8", "replace")
+
+
+def _read_small(path: str, limit: int = 4096) -> str:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            return handle.read(limit).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def check_gitfile(marker: str, worktree: str, home: str) -> None:
+    """The worktree's `.git` file must name a git directory `<main>/.git/worktrees/<name>` that lies OUTSIDE the
+    worktree, below the account home, owned by us, and that names this worktree back. A gitfile aimed anywhere else
+    (inside the worktree, at another repository, at a folder someone else controls) is refused before git runs."""
+    text = _read_small(marker).strip()
+    if not text.startswith("gitdir:") or "\n" in text:
+        raise CodexRunError("the worktree's .git file does not name a git directory; nothing was run")
+    target = text[len("gitdir:") :].strip()
+    gitdir = os.path.realpath(target if os.path.isabs(target) else os.path.join(worktree, target))
+    parent = os.path.dirname(gitdir)
+    shape = os.path.basename(parent) == "worktrees" and os.path.basename(os.path.dirname(parent)) == ".git"
+    st = os.stat(gitdir) if os.path.isdir(gitdir) else None
+    if (
+        not shape
+        or st is None
+        or _under(gitdir, worktree)
+        or not _under(gitdir, os.path.realpath(home))
+        or st.st_uid != os.geteuid()
+        or st.st_mode & 0o022
+    ):
+        raise CodexRunError(
+            "the worktree's .git file does not point into a main repository's .git/worktrees folder that we own "
+            "outside the worktree; nothing was run"
+        )
+    back = _read_small(os.path.join(gitdir, "gitdir")).strip()
+    if not back or os.path.realpath(back) != os.path.join(worktree, ".git"):
+        raise CodexRunError("the git directory does not name this worktree back; nothing was run")
+
+
+def check_repo_config(git: str, home: str, root: str) -> None:
+    """Refuse a repository whose own config can start a program through a setting the command-line options do not
+    override (a content filter, a textconv, an include, an alias). Listing config runs nothing."""
+    listing = _git(git, home, root, "config", "--list", "-z")
+    for entry in listing.split("\0"):
+        key = entry.split("\n", 1)[0].lower()
+        if (
+            key.startswith(DANGEROUS_CONFIG_PREFIXES)
+            or key.endswith(DANGEROUS_CONFIG_SUFFIXES)
+            or key in DANGEROUS_CONFIG_KEYS
+        ):
+            raise CodexRunError(
+                f"the repository config sets {output.line(key[:60])}, which can start a program; nothing was run"
+            )
 
 
 def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -> str:
@@ -327,12 +415,14 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
     marker = os.path.join(real, ".git")
     if os.path.islink(marker) or not os.path.isfile(marker):
         raise CodexRunError("the folder is not a linked git worktree (its .git is not a plain file); nothing was run")
+    check_gitfile(marker, real, home)
     git = shutil.which("git", path=SAFE_PATH)
     if not git:
         raise CodexRunError("git was not found; nothing was run")
     top = os.path.realpath(_git(git, home, real, "rev-parse", "--show-toplevel").strip())
     if top != real:
         raise CodexRunError("the folder named is not the top of its git worktree; nothing was run")
+    check_repo_config(git, home, real)
     if cls == "implementer":
         raw = _git(git, home, real, "status", "--porcelain=v1", "-z", "--untracked-files=all")
         dirty = _dirty_paths(raw)
@@ -365,15 +455,65 @@ def _dirty_paths(raw: str) -> list[str]:
 # -- codex, its environment, and its argument list ------------------------------------------------------------------
 
 
-def find_binary(name: str, env: Mapping[str, str]) -> str | None:
-    found = shutil.which(name, path=env.get("PATH", ""))
-    return os.path.abspath(found) if found else None
+def _trusted_chain(path: str, what: str) -> None:
+    """Every component of `path`, from the root down, is owned by this user or root and is not writable by group or
+    other. A sticky folder (such as /tmp) passes when root or we own it: others cannot replace entries in it. A symlink
+    is judged by its owner, its target by the walk over the real path."""
+    parts = [p for p in path.split("/") if p]
+    current = "/"
+    for part in ["", *parts]:
+        current = os.path.join(current, part) if part else "/"
+        try:
+            st = os.lstat(current)
+        except OSError:
+            raise CodexRunError(f"the {what} path cannot be examined; nothing was run") from None
+        if st.st_uid not in (0, os.geteuid()):
+            raise CodexRunError(f"the {what} path has a component owned by someone else; nothing was run")
+        if stat.S_ISLNK(st.st_mode):
+            continue
+        sticky_ok = stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX
+        if st.st_mode & 0o022 and not sticky_ok:
+            raise CodexRunError(f"the {what} path has a component that group or others can write; nothing was run")
 
 
-def check_codex(binary: str) -> None:
-    st = os.stat(binary)
-    if not stat.S_ISREG(st.st_mode) or not os.access(binary, os.X_OK) or st.st_mode & 0o022:
-        raise CodexRunError("the codex binary is not a plain executable that only its owner can write; nothing was run")
+def trusted_binary(path: str, what: str) -> str:
+    """The absolute path, after checking the file, its real path and every folder above both."""
+    if not path or "\0" in path or not os.path.isabs(path) or os.path.normpath(path) != path:
+        raise CodexRunError(f"the {what} path in the config is not a normalized absolute path; nothing was run")
+    real = os.path.realpath(path)
+    for item in dict.fromkeys((path, real)):
+        _trusted_chain(item, what)
+    st = os.stat(real)
+    if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
+        raise CodexRunError(f"the {what} binary is not a plain executable file; nothing was run")
+    return path
+
+
+def configured_binaries(home: str) -> tuple[str, str | None]:
+    """(codex, node) from `~/.config/safo/codex-run.json`. They are never looked up on the caller's PATH."""
+    path = os.path.join(home, *CONFIG_FILE)
+    expected = f'expected {path} holding a JSON object with the key "codex" (an absolute path) and optionally "node"'
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise CodexRunError(f"codex is not configured: {expected}; nothing was run") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o022 or st.st_size > 4096:
+            raise CodexRunError("the codex-run config is not a plain private file; nothing was run")
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            raw = handle.read(4097)
+    finally:
+        os.close(fd)
+    try:
+        config = loads(raw)
+    except ValueError:
+        raise CodexRunError(f"the codex-run config is not valid JSON: {expected}; nothing was run") from None
+    codex = config.get("codex") if isinstance(config, dict) else None
+    node = config.get("node") if isinstance(config, dict) else None
+    if not isinstance(codex, str) or not (node is None or isinstance(node, str)):
+        raise CodexRunError(f"the codex-run config lacks a usable key: {expected}; nothing was run")
+    return trusted_binary(codex, "codex"), (trusted_binary(node, "node") if node else None)
 
 
 def child_path(codex: str, node: str | None) -> str:
@@ -597,11 +737,7 @@ def execute(args: argparse.Namespace, caller_env: Mapping[str, str], home: str) 
     prompt = read_prompt(args.prompt_file, home)
     scan_prompt(prompt, home)
     worktree = check_worktree(args.worktree, home, cls, args.allow_dirty) if cls in NEEDS_WORKTREE else ""
-    codex = find_binary("codex", caller_env)
-    if not codex:
-        raise CodexRunError("codex was not found on PATH; nothing was run")
-    check_codex(codex)
-    node = find_binary("node", caller_env)
+    codex, node = configured_binaries(home)
     ledger = open_ledger(home)
     meta = empty = ""
     now = dt.datetime.now(dt.UTC)

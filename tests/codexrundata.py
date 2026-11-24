@@ -98,6 +98,10 @@ def make_world(tmp: Path) -> World:
     fake = bin_dir / "codex"
     fake.write_text(FAKE.format(python=sys.executable, base=str(bin_dir), output=OUTPUT_CANARY))
     fake.chmod(0o755)
+    config = home / ".config" / "safo" / "codex-run.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"codex": str(fake)}))
+    config.chmod(0o600)
     (bin_dir / "mode").write_text("ok")
     repo = dev / "repo"
     repo.mkdir()

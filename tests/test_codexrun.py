@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from codexrundata import OUTPUT_CANARY, PROMPT_CANARY, World, make_world
+from gitrepo import git
 from safo import codexrun
 
 
@@ -178,7 +181,7 @@ def test_refuses_a_secret_shaped_prompt(world: World) -> None:
 
 def test_refuses_an_entry_of_the_private_deny_list(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     deny = world.home / ".config" / "safo" / "codex-deny.txt"
-    deny.parent.mkdir(parents=True)
+    deny.parent.mkdir(parents=True, exist_ok=True)
     deny.write_text("# private\nsecretword\n")
     deny.chmod(0o600)
     code = go(world, "review", prompt=world.write_prompt("this holds SecretWord inside\n", "d.txt"))
@@ -216,17 +219,129 @@ def test_refuses_a_timeout_out_of_bounds(world: World, seconds: str) -> None:
     refused(world, go(world, "review", "--timeout", seconds))
 
 
-def test_refuses_when_codex_is_not_found(world: World) -> None:
-    code = codexrun.main(
-        ["--class", "review", "--prompt-file", str(world.prompt), "--worktree", str(world.worktree)],
-        env={"PATH": "/usr/bin:/bin"},
-        home=str(world.home),
-    )
-    refused(world, code)
+def test_unset_config_is_exit_2_naming_the_key_and_the_callers_path_is_never_searched(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (world.home / ".config" / "safo" / "codex-run.json").unlink()
+    assert (world.bin / "codex").exists() and str(world.bin) in world.env["PATH"]  # a codex IS on the caller's PATH
+    refused(world, go(world, "review"))
+    err = capsys.readouterr().err
+    assert '"codex"' in err and "codex-run.json" in err
+
+
+@pytest.mark.parametrize("body", ["not json", "[]", '{"node": "/usr/bin/node"}', '{"codex": "relative/codex"}'])
+def test_refuses_an_unusable_config(world: World, body: str) -> None:
+    config = world.home / ".config" / "safo" / "codex-run.json"
+    config.write_text(body)
+    refused(world, go(world, "review"))
+
+
+def test_refuses_a_config_that_others_can_write(world: World) -> None:
+    (world.home / ".config" / "safo" / "codex-run.json").chmod(0o664)
+    refused(world, go(world, "review"))
 
 
 def test_refuses_a_codex_binary_others_can_write(world: World) -> None:
     (world.bin / "codex").chmod(0o777)
+    refused(world, go(world, "review"))
+
+
+def test_refuses_a_codex_in_a_folder_others_can_write(world: World) -> None:
+    world.bin.chmod(0o775)  # the folder holding the binary
+    refused(world, go(world, "review"))
+
+
+def test_refuses_a_codex_whose_real_path_runs_through_a_writable_folder(world: World, tmp_path: Path) -> None:
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "codex").write_text((world.bin / "codex").read_text())
+    (loose / "codex").chmod(0o755)
+    loose.chmod(0o777)
+    link = world.bin / "codex-link"
+    link.symlink_to(loose / "codex")
+    config = world.home / ".config" / "safo" / "codex-run.json"
+    config.write_text(f'{{"codex": "{link}"}}')
+    refused(world, go(world, "review"))
+
+
+def test_refuses_a_codex_owned_by_someone_else(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 4242)  # we are "not the owner" of anything here
+    assert codexrun.main(["--class", "review", "--prompt-file", "x"], env=world.env, home=str(world.home)) == 2
+    assert world.calls() == []
+
+
+# -- git: nothing the repository controls may run ---------------------------------------------------------------
+
+
+def hostile_script(tmp_path: Path) -> Path:
+    marker = tmp_path / "ran-marker"
+    script = tmp_path / "hostile.sh"
+    script.write_text(f"#!/bin/sh\necho ran > {marker}\n")
+    script.chmod(0o755)
+    return marker
+
+
+def test_a_hostile_fsmonitor_in_the_repository_config_never_runs(world: World, tmp_path: Path) -> None:
+    marker = hostile_script(tmp_path)
+    git(world.dev / "repo", "config", "core.fsmonitor", str(tmp_path / "hostile.sh"))
+    assert go(world, "implementer") == 0
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "key", ["filter.x.clean", "filter.x.smudge", "diff.x.textconv", "alias.st", "include.path", "core.sshCommand"]
+)
+def test_a_program_key_in_the_repository_config_is_refused_and_never_runs(
+    world: World, tmp_path: Path, key: str
+) -> None:
+    marker = hostile_script(tmp_path)
+    git(world.dev / "repo", "config", key, str(tmp_path / "hostile.sh"))
+    refused(world, go(world, "implementer"))
+    assert not marker.exists()
+    refused(world, go(world, "review"))
+
+
+def test_git_runs_with_the_hardening_options_and_a_clean_environment(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[list[str], dict[str, str]]] = []
+    real_run = subprocess.run
+
+    def spy(argv: list[str], **kwargs: Any) -> Any:
+        seen.append((list(argv), dict(kwargs["env"])))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    assert go(world, "implementer") == 0
+    assert seen
+    for argv, env in seen:
+        for word in ("--no-optional-locks", "core.fsmonitor=false", "protocol.allow=never", "core.hooksPath=/dev/null"):
+            assert word in argv
+        assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+        assert env["GIT_ATTR_NOSYSTEM"] == "1"
+
+
+def test_a_gitfile_pointing_inside_the_worktree_is_refused(world: World) -> None:
+    fake = world.worktree / "fakegit" / ".git" / "worktrees" / "wt"
+    fake.mkdir(parents=True)
+    (fake / "gitdir").write_text(str(world.worktree / ".git"))
+    (world.worktree / ".git").write_text(f"gitdir: {fake}\n")
+    refused(world, go(world, "implementer"))
+
+
+def test_a_gitfile_pointing_at_another_repository_is_refused(world: World) -> None:
+    (world.worktree / ".git").write_text(f"gitdir: {world.dev / 'repo' / '.git'}\n")  # not .git/worktrees/<name>
+    refused(world, go(world, "review"))
+    (world.worktree / ".git").write_text("gitdir: /tmp\n")
+    refused(world, go(world, "review"))
+    (world.worktree / ".git").write_text("not a gitfile\n")
+    refused(world, go(world, "review"))
+
+
+def test_a_gitfile_that_the_git_directory_does_not_name_back_is_refused(world: World) -> None:
+    other = world.dev / "agents" / "other"
+    git(world.dev / "repo", "worktree", "add", "-q", "-b", "other", str(other))
+    (world.worktree / ".git").write_text((other / ".git").read_text())  # a real worktree gitdir, of another folder
     refused(world, go(world, "review"))
 
 
