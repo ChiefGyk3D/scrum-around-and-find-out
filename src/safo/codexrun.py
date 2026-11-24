@@ -42,24 +42,43 @@ What it does, in order, and stops at the first refusal with NO codex call (exit 
    `config.toml` cannot
    add a tool server or change the sandbox), `--ephemeral`, stdin from the prompt copy, its own process group, and a
    hard timeout (default 1800 s, at most 3600 s). On a timeout the whole process group is killed (exit 124).
-4. Looks for the cybersecurity-risk cutoff (the phrase "flagged for possible cybersecurity risk" in codex's error
-   stream or in a short final message). If found: exit 40, say which tier was set, and tell the lead to fix the tier.
-   It never rewords the prompt, never retries, never falls back to another model (the Daybreak fallback is not
-   active; only the owner decides one).
-5. Appends ONE row to `~/.local/state/safo/codex-runs.jsonl`: ts, class, model, sandbox, tier, exit, codex_exit,
-   seconds, prompt_bytes, prompt_sha256. Never the prompt, never the output text. The ledger is opened BEFORE the run,
-   so a run that could not be recorded does not start.
+4. Looks for the cybersecurity-risk cutoff: a NONZERO codex exit AND the phrase "flagged for possible cybersecurity
+   risk" in codex's error stream or in a structured `error` / `turn.failed` event of the JSONL stream (both files
+   scanned whole). The final message is model text and is never read, so a prompt cannot fake a cutoff. If found:
+   exit 40, say which tier was set, and tell the lead to fix the tier. It never rewords the prompt, never retries,
+   never falls back to another model (the Daybreak fallback is not active; only the owner decides one).
+5. Writes a `started` row to `~/.local/state/safo/codex-runs.jsonl` BEFORE codex starts (no row, no run), then a
+   `finished` row with the same `run` id: ts, class, model, sandbox, tier, confined, exit, codex_exit, seconds,
+   prompt_bytes, prompt_sha256. Never the prompt, never the output text. If the closing row cannot be written the exit
+   is 50, never 0.
 6. Prints one summary line on standard output with the result path (the final message, under
    `~/.local/state/safo/codex-runs/`, mode 0600).
 
 Exit codes: 0 done; 2 refused or could not start (nothing ran); 30 codex failed (its own code is in the ledger);
-40 tier filtered; 124 timed out.
+40 tier filtered; 50 ran but the closing ledger row failed; 124 timed out.
 
-What it does NOT do (and the Daybreak review should weigh): the read-only sandbox lets codex READ any file the account
-can read, so "empty folder" fixes the starting point, not a read fence; a same-user process can change a file between
-the checks and the run (the prompt is copied, the worktree is not); the sandbox network switch for `implementer` is the
-`sandbox_workspace_write.network_access` setting, and is only as strong as codex's own sandbox. It does not edit any
-guard or settings file; the permission rule that lets the lead run it without a prompt is phase 3, by the owner.
+Read confinement (security and copy classes). Codex's `read-only` sandbox restricts WRITES, not reads (its docs list
+`read-only`, `workspace-write`, `danger-full-access` and permission profiles `[permissions.<name>]`; they document no
+readable-roots key; read 2026-11-24, profile details unverified). So an empty working folder is a starting point, not
+a fence. These two classes therefore run inside bubblewrap (`bwrap`, configured path, default /usr/bin/bwrap): a fresh
+mount namespace with NO account home, no ~/.ssh, no ~/.config; every namespace but the network unshared; the child
+dies with the wrapper. If bwrap cannot make the namespace the run is refused (exit 2): no confinement, no run. What a
+prompt CAN still read in there: /usr and a few /etc network files (read only); the folders holding codex and node
+and the config's `ro_paths` (read only); the config's `rw_paths`; the whole codex home, auth.json included (it is
+mounted read-write because codex must authenticate and keep state); the empty folder, the private run folder and the
+result file. It can reach the network (codex needs its service), so anything in that list can leave. Residual risks:
+the codex home's auth token is exposed to the prompt; the prompt text itself and `ro_paths` are the owner's choice;
+bwrap needs unprivileged user namespaces; and codex's own sandbox nested inside this one was NOT run or verified.
+Setting `"confinement": "none"` in the config turns this off (a warning on every run, `confined: false` in the
+ledger); it exists for hosts without namespaces and for the unit tests. The `implementer` and `review` classes need
+the worktree and git and are NOT read-confined: they can read what the account can.
+
+What it does NOT do (and the Daybreak review should weigh): a same-user process can still race the worktree between
+the checks and the run (the prompt is copied; the worktree and its git directory are re-checked by device and inode
+just before the start, which narrows the window and does not close it); the sandbox network switch for `implementer`
+is the `sandbox_workspace_write.network_access` setting, and is only as strong as codex's own sandbox. CODEX_HOME is
+never inherited: it is the config's "codex_home" (default ~/.codex), a real private folder of ours. It does not edit
+any guard or settings file; the permission rule that lets the lead run it without a prompt is phase 3, by the owner.
 """
 
 from __future__ import annotations
@@ -104,9 +123,11 @@ DAYBREAK_TIER = "daybreak_blue"
 DEFAULT_TIMEOUT = 1800
 MAX_TIMEOUT = 3600
 MAX_PROMPT_BYTES = 512 * 1024
-MAX_TAIL = 1024 * 1024  # how much of codex's error stream is read for the cutoff phrase
-SHORT_MESSAGE = 8 * 1024  # a final message this small may be the cutoff notice itself; a long review is not
+MAX_EVENT_LINE = 4 * 1024 * 1024  # longest event line read whole; a longer one is read in pieces and not parsed
 FILTER_PHRASE = "flagged for possible cybersecurity risk"
+FILTER_EVENT_TYPES = ("error", "turn.failed")
+DEFAULT_BWRAP = "/usr/bin/bwrap"
+EXIT_UNRECORDED = 50  # codex ran but the closing ledger row could not be written
 
 STATE_PARTS = (".local", "state", "safo")
 LEDGER_NAME = "codex-runs.jsonl"
@@ -252,6 +273,15 @@ def read_prompt(path: str, home: str) -> Prompt:
             raise CodexRunError("the prompt file is not a regular file (a FIFO, a device or a folder); nothing was run")
         if st.st_uid != os.geteuid() or st.st_mode & 0o022:
             raise CodexRunError("the prompt file is not ours or is writable by others; nothing was run")
+        if st.st_nlink != 1:
+            # a hard link is a second name of an inode that may live outside the allowed folders; realpath cannot tell
+            raise CodexRunError("the prompt file has more than one hard link; nothing was run")
+        try:
+            opened = os.readlink(f"/proc/self/fd/{fd}")  # where the descriptor we hold really is, not the path given
+        except OSError:
+            raise CodexRunError("the prompt file's location cannot be verified; nothing was run") from None
+        if not allowed_prompt_folder(os.path.realpath(opened), home):
+            raise CodexRunError("the opened prompt file is outside the allowed folders; nothing was run")
         if st.st_size < 1 or st.st_size > MAX_PROMPT_BYTES:
             raise CodexRunError(f"the prompt file must be 1 to {MAX_PROMPT_BYTES} bytes; nothing was run")
         with os.fdopen(os.dup(fd), "rb") as handle:
@@ -358,7 +388,7 @@ def _read_small(path: str, limit: int = 4096) -> str:
         os.close(fd)
 
 
-def check_gitfile(marker: str, worktree: str, home: str) -> None:
+def check_gitfile(marker: str, worktree: str, home: str) -> str:
     """The worktree's `.git` file must name a git directory `<main>/.git/worktrees/<name>` that lies OUTSIDE the
     worktree, below the account home, owned by us, and that names this worktree back. A gitfile aimed anywhere else
     (inside the worktree, at another repository, at a folder someone else controls) is refused before git runs."""
@@ -382,9 +412,22 @@ def check_gitfile(marker: str, worktree: str, home: str) -> None:
             "the worktree's .git file does not point into a main repository's .git/worktrees folder that we own "
             "outside the worktree; nothing was run"
         )
+    _trusted_chain(gitdir, "git directory")  # every parent up to the root: ours or root's, not group/other writable
+    _trusted_chain(os.path.dirname(os.path.dirname(parent)), "main repository")
     back = _read_small(os.path.join(gitdir, "gitdir")).strip()
     if not back or os.path.realpath(back) != os.path.join(worktree, ".git"):
         raise CodexRunError("the git directory does not name this worktree back; nothing was run")
+    return gitdir
+
+
+def worktree_identity(worktree: str, home: str) -> tuple[tuple[int, int], ...]:
+    """(device, inode) of the worktree, its `.git` file and its git directory, to compare just before codex starts."""
+    gitdir = check_gitfile(os.path.join(worktree, ".git"), worktree, home)
+    try:
+        stats = (os.lstat(worktree), os.lstat(os.path.join(worktree, ".git")), os.lstat(gitdir))
+        return tuple((s.st_dev, s.st_ino) for s in stats)
+    except OSError:
+        raise CodexRunError("the worktree changed while it was being checked; nothing was run") from None
 
 
 def check_repo_config(git: str, home: str, root: str) -> None:
@@ -413,6 +456,7 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
             "the worktree is not a folder under ~/.local/share/<name>-dev or a .claude/worktrees folder; "
             "nothing was run"
         )
+    _trusted_chain(real, "worktree")  # every folder from the root down: ours or root's, not group/other writable
     marker = os.path.join(real, ".git")
     if os.path.islink(marker) or not os.path.isfile(marker):
         raise CodexRunError("the folder is not a linked git worktree (its .git is not a plain file); nothing was run")
@@ -490,8 +534,54 @@ def trusted_binary(path: str, what: str) -> str:
     return path
 
 
-def configured_binaries(home: str) -> tuple[str, str | None]:
-    """(codex, node) from `~/.config/safo/codex-run.json`. They are never looked up on the caller's PATH."""
+@dataclass(frozen=True)
+class RunConfig:
+    codex: str
+    node: str | None
+    codex_home: str
+    bwrap: str
+    confine: bool
+    ro_paths: tuple[str, ...]
+    rw_paths: tuple[str, ...]
+
+
+def _path_list(config: Mapping[str, object], key: str, home: str) -> tuple[str, ...]:
+    raw = config.get(key, [])
+    if not isinstance(raw, list) or len(raw) > 32:
+        raise CodexRunError(f'the codex-run config key "{key}" must be a list of at most 32 paths; nothing was run')
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not os.path.isabs(item) or os.path.normpath(item) != item or "\0" in item:
+            raise CodexRunError(f'the codex-run config key "{key}" holds a path that is not normalized absolute')
+        if item == "/" or _under(os.path.realpath(home), os.path.realpath(item)):
+            raise CodexRunError(f'the codex-run config key "{key}" would expose the account home; nothing was run')
+        out.append(item)
+    return tuple(out)
+
+
+def _checked_codex_home(path: str) -> str:
+    """CODEX_HOME is chosen here, from the owner's config, never taken from the caller's environment: an absolute,
+    normalized real folder (no link anywhere in it), ours, private, every parent trusted."""
+    if not path or "\0" in path or not os.path.isabs(path) or os.path.normpath(path) != path:
+        raise CodexRunError("the codex home is not a normalized absolute path; nothing was run")
+    try:
+        st = os.lstat(path)
+    except OSError:
+        raise CodexRunError("the codex home folder does not exist; nothing was run") from None
+    if (
+        not stat.S_ISDIR(st.st_mode)
+        or os.path.realpath(path) != path
+        or st.st_uid != os.geteuid()
+        or st.st_mode & 0o022
+    ):
+        raise CodexRunError("the codex home is not a real private folder of ours; nothing was run")
+    _trusted_chain(path, "codex home")
+    return path
+
+
+def configured_binaries(home: str, *, need_confinement: bool = False) -> RunConfig:
+    """The owner's `~/.config/safo/codex-run.json`: codex and node (never looked up on the caller's PATH), the
+    codex home, and the confinement settings."""
     path = os.path.join(home, *CONFIG_FILE)
     expected = f'expected {path} holding a JSON object with the key "codex" (an absolute path) and optionally "node"'
     try:
@@ -514,7 +604,26 @@ def configured_binaries(home: str) -> tuple[str, str | None]:
     node = config.get("node") if isinstance(config, dict) else None
     if not isinstance(codex, str) or not (node is None or isinstance(node, str)):
         raise CodexRunError(f"the codex-run config lacks a usable key: {expected}; nothing was run")
-    return trusted_binary(codex, "codex"), (trusted_binary(node, "node") if node else None)
+    mode = config.get("confinement", "bwrap") if isinstance(config, dict) else "bwrap"
+    if mode not in ("bwrap", "none"):
+        raise CodexRunError('the codex-run config key "confinement" must be "bwrap" or "none"; nothing was run')
+    bwrap_path = config.get("bwrap", DEFAULT_BWRAP) if isinstance(config, dict) else DEFAULT_BWRAP
+    if not isinstance(bwrap_path, str):
+        raise CodexRunError('the codex-run config key "bwrap" must be a path; nothing was run')
+    confine = mode == "bwrap"
+    assert isinstance(config, dict)  # noqa: S101 - narrowed above; a non-dict config has no usable "codex"
+    codex_home = config.get("codex_home", os.path.join(home, ".codex"))
+    if not isinstance(codex_home, str):
+        raise CodexRunError('the codex-run config key "codex_home" must be a path; nothing was run')
+    return RunConfig(
+        codex=trusted_binary(codex, "codex"),
+        node=trusted_binary(node, "node") if node else None,
+        codex_home=_checked_codex_home(codex_home),
+        bwrap=trusted_binary(bwrap_path, "bwrap") if confine and need_confinement else bwrap_path,
+        confine=confine,
+        ro_paths=_path_list(config, "ro_paths", home),
+        rw_paths=_path_list(config, "rw_paths", home),
+    )
 
 
 def child_path(codex: str, node: str | None) -> str:
@@ -527,11 +636,9 @@ def child_path(codex: str, node: str | None) -> str:
     return ":".join([*dirs, SAFE_PATH])
 
 
-def child_env(home: str, codex: str, node: str | None, caller: Mapping[str, str], scratch: str) -> dict[str, str]:
-    """The whole environment of codex: this allow-list, built here, never a copy of the caller's."""
-    codex_home = caller.get("CODEX_HOME", "")
-    if not (codex_home and os.path.isabs(codex_home) and os.path.isdir(codex_home)):
-        codex_home = os.path.join(home, ".codex")
+def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch: str) -> dict[str, str]:
+    """The whole environment of codex: this allow-list, built here, never a copy of the caller's. `codex_home` comes
+    from the owner's config (checked), never from the caller's CODEX_HOME."""
     return {
         "PATH": child_path(codex, node),
         "HOME": home,
@@ -565,6 +672,67 @@ def build_argv(codex: str, cls: str, root: str, out: str) -> list[str]:
         argv += ["-c", "sandbox_workspace_write.network_access=false"]
     argv += ["-C", root, "-o", out, "-"]
     return argv
+
+
+# -- read confinement (the empty-folder classes) -------------------------------------------------------------------
+# Codex's own read-only sandbox does not restrict READS: a prompt can make it read any file the account can. So the
+# security and copy classes run inside a bubblewrap mount namespace in which the account home does not exist at all.
+
+ETC_FILES = (
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/ssl",
+    "/etc/ca-certificates",
+    "/etc/localtime",
+)
+
+
+def _exposed_binary_dirs(cfg: RunConfig) -> list[str]:
+    dirs: list[str] = []
+    for item in (cfg.codex, os.path.realpath(cfg.codex), cfg.node, os.path.realpath(cfg.node) if cfg.node else None):
+        if item and os.path.dirname(item) not in dirs:
+            dirs.append(os.path.dirname(item))
+    return dirs
+
+
+def confine_argv(cfg: RunConfig, argv: Sequence[str], root: str, meta: str, result: str) -> list[str]:
+    """`argv` wrapped in bwrap. Visible inside: /usr (read only, with the /lib /bin links), a few /etc network files,
+    a fresh /proc /dev /tmp, the folders of codex and node (read only), the config's `ro_paths` (read only) and
+    `rw_paths`, the codex home (read-write: auth and state), the empty working folder, the private run folder and the
+    result file. Nothing else: not the home, not ~/.ssh, not ~/.config. The network stays shared (codex must reach
+    its service); every other namespace is unshared and the child dies with this process."""
+    out = [
+        cfg.bwrap, "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
+        "--ro-bind", "/usr", "/usr",
+        "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+        "--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
+        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",  # noqa: S108 - a fresh empty /tmp inside the namespace
+    ]  # fmt: skip
+    for etc in ETC_FILES:
+        out += ["--ro-bind-try", etc, etc]
+    for folder in (*_exposed_binary_dirs(cfg), *cfg.ro_paths):
+        out += ["--ro-bind-try", folder, folder]
+    for folder in (*cfg.rw_paths, cfg.codex_home, root, meta, result):
+        out += ["--bind", folder, folder]
+    return [*out, "--chdir", root, "--", *argv]
+
+
+def confinement_works(cfg: RunConfig) -> bool:
+    """A real, trivial bwrap run with the same namespace options: when this machine cannot make the namespace, the
+    confined classes refuse instead of running unconfined."""
+    probe = [
+        cfg.bwrap, "--unshare-all", "--share-net", "--die-with-parent", "--ro-bind", "/usr", "/usr",
+        "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+        "--", "/usr/bin/true",
+    ]  # fmt: skip
+    try:
+        done = subprocess.run(  # noqa: S603 - the trusted bwrap, fixed argv, no shell, stdin closed, bounded time
+            probe, env={"PATH": SAFE_PATH}, capture_output=True, stdin=subprocess.DEVNULL, timeout=20, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
 
 
 # -- private folders and the ledger --------------------------------------------------------------------------------
@@ -611,11 +779,25 @@ def open_ledger(home: str) -> int:
 
 
 def ledger_row(
-    cls: str, prompt: Prompt, exit_code: int, codex_exit: int | None, seconds: float, now: dt.datetime
+    cls: str,
+    prompt: Prompt,
+    exit_code: int | None,
+    codex_exit: int | None,
+    seconds: float,
+    now: dt.datetime,
+    *,
+    run: str,
+    status: str,
+    confined: bool,
 ) -> dict[str, object]:
-    """Counts, names and a hash. Never the prompt, never the output."""
+    """Counts, names and a hash. Never the prompt, never the output. Two rows per run share `run`: `started` (written
+    before codex starts; no row, no run) and `finished`. A `started` row with no `finished` row is a run that did not
+    end cleanly or could not be recorded."""
     spec = SPECS[cls]
     return {
+        "run": run,
+        "status": status,
+        "confined": confined,
         "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "class": cls,
         "model": spec.model,
@@ -643,41 +825,68 @@ def append_row(fd: int, row: Mapping[str, object]) -> None:
 # -- the run ----------------------------------------------------------------------------------------------------
 
 
-def _tail(path: str, limit: int) -> str:
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - limit))
-            return handle.read(limit).decode("utf-8", "replace")
-    except OSError:
-        return ""
-
-
 def _squash(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-def tier_filtered(stderr_path: str, events_path: str, out_path: str) -> bool:
-    """True when codex was cut off by the cybersecurity-risk filter. The phrase counts in the error stream, in an
-    error event, and in a SHORT final message; a long review that merely quotes it does not."""
-    if FILTER_PHRASE in _squash(_tail(stderr_path, MAX_TAIL)):
-        return True
-    for raw in _tail(events_path, MAX_TAIL).splitlines():
-        if FILTER_PHRASE not in _squash(raw):
-            continue
-        try:
-            event = loads(raw)
-        except ValueError:
-            continue
-        kind = str(event.get("type", "")) if isinstance(event, dict) else ""
-        if "error" in kind or "fail" in kind:
-            return True
+def _stream_has_phrase(path: str) -> bool:
+    """The phrase anywhere in the whole file, read in chunks (a carry joins the chunk edges): padding after a real
+    notice cannot push it out of view."""
+    carry = ""
     try:
-        small = os.path.getsize(out_path) <= SHORT_MESSAGE
+        with open(path, "rb") as handle:
+            while chunk := handle.read(65536):
+                text = _squash(carry + chunk.decode("utf-8", "replace"))
+                if FILTER_PHRASE in text:
+                    return True
+                carry = text[-(len(FILTER_PHRASE) + 8) :]
     except OSError:
         return False
-    return small and FILTER_PHRASE in _squash(_tail(out_path, SHORT_MESSAGE))
+    return False
+
+
+def _strings(value: object, depth: int = 0) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if depth > 6:
+        return []
+    if isinstance(value, dict):
+        return [s for item in value.values() for s in _strings(item, depth + 1)]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item, depth + 1)]
+    return []
+
+
+def _events_have_phrase(path: str) -> bool:
+    """A structured error event (`type` is one of FILTER_EVENT_TYPES) whose text holds the phrase. Model output arrives
+    in other event types (messages, items), so it cannot make one of these."""
+    try:
+        with open(path, "rb") as handle:
+            for raw in iter(lambda: handle.readline(MAX_EVENT_LINE), b""):
+                if FILTER_PHRASE not in _squash(raw.decode("utf-8", "replace")):
+                    continue
+                try:
+                    event = loads(raw)
+                except ValueError:
+                    continue
+                is_error = isinstance(event, dict) and event.get("type") in FILTER_EVENT_TYPES
+                if is_error and any(FILTER_PHRASE in _squash(text) for text in _strings(event)):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def tier_filtered(code: int, timed_out: bool, stderr_path: str, events_path: str) -> bool:
+    """True when codex was cut off by the cybersecurity-risk filter. Needs BOTH a failed codex exit (a run that exits
+    0 was not cut off, whatever its final message says) AND the phrase in codex's own error stream or in a structured
+    error event of the JSONL stream. The final message is never read: it is model text. The files are scanned whole.
+    The event type names in FILTER_EVENT_TYPES and the stderr wording are ASSUMED from codex's `--json` mode, not
+    verified against a live cutoff (no real codex run was made); if a real cutoff takes another shape the run is
+    reported as exit 30 (codex failed), never as success."""
+    if timed_out or code == 0:
+        return False
+    return _stream_has_phrase(stderr_path) or _events_have_phrase(events_path)
 
 
 def _kill_group(pgid: int) -> None:
@@ -737,11 +946,25 @@ def execute(args: argparse.Namespace, caller_env: Mapping[str, str], home: str) 
     spec = SPECS[cls]
     prompt = read_prompt(args.prompt_file, home)
     scan_prompt(prompt, home)
+    del caller_env  # nothing is inherited from the caller: not PATH, not CODEX_HOME
     worktree = check_worktree(args.worktree, home, cls, args.allow_dirty) if cls in NEEDS_WORKTREE else ""
-    codex, node = configured_binaries(home)
+    identity = worktree_identity(worktree, home) if worktree else ()
+    confined_class = spec.root == "empty"
+    cfg = configured_binaries(home, need_confinement=confined_class)
+    confined = confined_class and cfg.confine
+    if confined and not confinement_works(cfg):
+        raise CodexRunError(
+            f"the {cls} class must run in a read-confined namespace and bubblewrap cannot make one here; "
+            "no confinement, no run; nothing was run"
+        )
+    if confined_class and not confined:
+        output.write(
+            sys.stderr, "safo-codex-run: warning: confinement is switched off in the config; codex can read the account"
+        )
     ledger = open_ledger(home)
     meta = empty = ""
     now = dt.datetime.now(dt.UTC)
+    run_id = secrets.token_hex(8)
     started = time.monotonic()
     try:
         scratch_parent = private_chain(home, (*STATE_PARTS, SCRATCH_NAME))
@@ -755,11 +978,21 @@ def execute(args: argparse.Namespace, caller_env: Mapping[str, str], home: str) 
         root = empty or worktree
         if empty and os.listdir(empty):
             raise CodexRunError("the empty working folder is not empty; nothing was run")
-        argv = build_argv(codex, cls, root, result)
-        env = child_env(home, codex, node, caller_env, meta)
+        argv = build_argv(cfg.codex, cls, root, result)
+        if confined:
+            argv = confine_argv(cfg, argv, root, meta, result)
+        env = child_env(home, cfg.codex, cfg.node, cfg.codex_home, meta)
+        if worktree and worktree_identity(worktree, home) != identity:
+            raise CodexRunError("the worktree was replaced after it was checked; nothing was run")
+        try:  # no row, no run: the audit trail is written BEFORE codex starts
+            append_row(
+                ledger, ledger_row(cls, prompt, None, None, 0.0, now, run=run_id, status="started", confined=confined)
+            )
+        except OSError:
+            raise CodexRunError("the ledger row could not be written; nothing was run") from None
         code, timed_out = run_codex(argv, env, root, copy_path, meta, args.timeout)
         seconds = time.monotonic() - started
-        filtered = tier_filtered(os.path.join(meta, "stderr"), os.path.join(meta, "events"), result)
+        filtered = tier_filtered(code, timed_out, os.path.join(meta, "stderr"), os.path.join(meta, "events"))
         if filtered:
             final = EXIT_FILTERED
         elif timed_out:
@@ -770,11 +1003,26 @@ def execute(args: argparse.Namespace, caller_env: Mapping[str, str], home: str) 
             final = EXIT_OK
         if empty and os.listdir(empty):
             output.write(sys.stderr, "safo-codex-run: warning: the empty working folder was written to during the run")
-        row = ledger_row(cls, prompt, final, None if timed_out else code, seconds, now)
+        row = ledger_row(
+            cls,
+            prompt,
+            final,
+            None if timed_out else code,
+            seconds,
+            now,
+            run=run_id,
+            status="finished",
+            confined=confined,
+        )
         try:
             append_row(ledger, row)
         except OSError:
-            output.write(sys.stderr, "safo-codex-run: warning: the ledger row could not be written")
+            final = EXIT_UNRECORDED
+            output.write(
+                sys.stderr,
+                f"safo-codex-run: codex ran (run {run_id}) but the closing ledger row could not be written; "
+                "the started row is the only record",
+            )
         if filtered:
             tier = f"--cyber-access-program {spec.tier}, model {spec.model}" if spec.tier else "no cyber tier flag"
             output.write(

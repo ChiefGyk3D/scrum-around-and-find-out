@@ -379,10 +379,27 @@ def test_filter_in_the_error_stream_exits_40_and_calls_codex_once(
     assert row["exit"] == 40 and row["codex_exit"] == 1
 
 
-def test_filter_in_a_short_final_message_exits_40_even_when_codex_exits_0(world: World) -> None:
+def test_a_final_message_that_says_the_phrase_cannot_fake_a_cutoff(world: World) -> None:
+    # was: exit 40 for a short final message holding the phrase. That text is model output, so a prompt could fake a
+    # cutoff with it; a cutoff now needs a failed codex exit plus the phrase in codex's own streams (Daybreak r1).
     world.mode("filter-short")
-    assert go(world, "security") == 40
+    assert go(world, "security") == 0
     assert len(world.calls()) == 1
+
+
+def test_a_structured_error_event_with_a_failed_exit_is_a_cutoff(world: World) -> None:
+    world.mode("filter-event")
+    assert go(world, "security") == 40
+
+
+def test_the_phrase_in_a_model_event_is_not_a_cutoff(world: World) -> None:
+    world.mode("spoof-event")  # an item event (model text) holding the phrase, codex exit 1
+    assert go(world, "security") == 30
+
+
+def test_padding_after_the_notice_cannot_hide_a_cutoff(world: World) -> None:
+    world.mode("filter-padded")  # the notice, then 3 MB more on the error stream
+    assert go(world, "security") == 40
 
 
 def test_filter_on_a_general_class_says_no_tier_flag_was_set(world: World, capsys: pytest.CaptureFixture[str]) -> None:
@@ -439,7 +456,8 @@ def test_environment_is_an_allow_list(world: World, tmp_path: Path) -> None:
     assert set(env) <= {"PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"}
     assert {"PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"} <= set(env)
     assert env["HOME"] == str(world.home)
-    assert env["CODEX_HOME"] == str(tmp_path)
+    # was: == str(tmp_path) (the caller's CODEX_HOME was inherited); now the owner config's, never the caller's
+    assert env["CODEX_HOME"] == str(world.home / ".codex")
     assert env["PATH"].split(":")[0] == str(world.bin)
     assert os.path.dirname(env["TMPDIR"]).endswith("codex-run-scratch")
     for name in ("GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "DOPPLER_TOKEN", "AWS_SECRET_ACCESS_KEY", "PYTHONPATH"):
@@ -488,8 +506,9 @@ def test_one_ledger_row_per_run_with_counts_and_a_hash_only(world: World) -> Non
     assert go(world, "security") == 0
     first, second = world.ledger()
     data = world.prompt.read_bytes()
-    assert set(first) == {
+    assert set(first) == {  # plus run, status and confined (the started/finished pair, Daybreak r1)
         "ts", "class", "model", "sandbox", "tier", "exit", "codex_exit", "seconds", "prompt_bytes", "prompt_sha256",
+        "run", "status", "confined",
     }  # fmt: skip
     assert first["class"] == "review" and first["model"] == "gpt-6.1-terra" and first["tier"] == "none"
     assert second["class"] == "security" and second["tier"] == "daybreak_blue"
@@ -523,3 +542,155 @@ def test_a_run_that_cannot_be_recorded_does_not_start(world: World) -> None:
     (state / "codex-runs.jsonl").symlink_to(world.home / "elsewhere")
     assert go(world, "review") == 2
     assert world.calls() == []
+
+
+def flaky_ledger(monkeypatch: pytest.MonkeyPatch, fail_on: str) -> None:
+    real = codexrun.append_row
+
+    def append(fd: int, row: Any) -> None:
+        if row["status"] == fail_on:
+            raise OSError(28, "No space left on device")
+        real(fd, row)
+
+    monkeypatch.setattr(codexrun, "append_row", append)
+
+
+def test_a_started_row_that_cannot_be_written_means_codex_never_starts(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flaky_ledger(monkeypatch, "started")
+    assert go(world, "review") == 2
+    assert world.calls() == [] and world.ledger_all() == []
+
+
+def test_a_closing_row_that_cannot_be_written_is_never_exit_0(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    flaky_ledger(monkeypatch, "finished")
+    assert go(world, "review") == codexrun.EXIT_UNRECORDED
+    assert len(world.calls()) == 1
+    (row,) = world.ledger_all()  # the started row survives as the record
+    assert row["status"] == "started" and row["exit"] is None
+    assert "could not be written" in capsys.readouterr().err
+
+
+def test_every_run_leaves_a_started_and_a_finished_row_with_one_run_id(world: World) -> None:
+    assert go(world, "review") == 0
+    started, finished = world.ledger_all()
+    assert (started["status"], finished["status"]) == ("started", "finished")
+    assert started["run"] == finished["run"]
+
+
+# -- 6. prompt confinement: hard links ------------------------------------------------------------------------------
+
+
+def test_refuses_a_hard_link_to_a_file_outside_the_allowed_folders(world: World, tmp_path: Path) -> None:
+    outside = tmp_path / "private-notes"
+    outside.write_text("plain words with no secret shape\n")
+    outside.chmod(0o600)
+    link = world.dev / "prompts" / "hard.txt"
+    os.link(outside, link)
+    refused(world, go(world, "review", prompt=link))
+
+
+# -- 7. CODEX_HOME comes from the owner config, never from the caller ----------------------------------------------
+
+
+def test_the_callers_codex_home_is_never_inherited(world: World, tmp_path: Path) -> None:
+    other = tmp_path / "repo-controlled"
+    other.mkdir(mode=0o700)
+    world.env["CODEX_HOME"] = str(other)
+    assert go(world, "review") == 0
+    assert world.calls()[0]["env"]["CODEX_HOME"] == str(world.home / ".codex")
+
+
+def test_codex_home_can_be_set_in_the_owner_config(world: World) -> None:
+    mine = world.home / "other-codex"
+    mine.mkdir(mode=0o700)
+    world.configure(codex_home=str(mine))
+    assert go(world, "review") == 0
+    assert world.calls()[0]["env"]["CODEX_HOME"] == str(mine)
+
+
+def test_a_codex_home_that_is_unsafe_is_refused(world: World, tmp_path: Path) -> None:
+    (world.home / ".codex").chmod(0o770)  # group writable
+    refused(world, go(world, "review"))
+    (world.home / ".codex").chmod(0o700)
+    real = world.home / "real-codex"
+    real.mkdir(mode=0o700)
+    link = world.home / "link-codex"
+    link.symlink_to(real)
+    world.configure(codex_home=str(link))
+    refused(world, go(world, "review"))
+    world.configure(codex_home=str(world.home / "missing"))
+    refused(world, go(world, "review"))
+    world.configure(codex_home="relative/codex")
+    refused(world, go(world, "review"))
+
+
+# -- 8. worktree: parents and identity ------------------------------------------------------------------------------
+
+
+def test_a_worktree_below_a_group_writable_parent_is_refused(world: World) -> None:
+    (world.dev / "agents").chmod(0o775)
+    refused(world, go(world, "review"))
+
+
+def test_a_worktree_replaced_between_the_check_and_the_start_is_refused(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_env = codexrun.child_env
+
+    def swap(*args: Any, **kwargs: Any) -> Any:
+        marker = (world.worktree / ".git").read_text()
+        world.worktree.rename(world.worktree.with_name("wt-old"))
+        world.worktree.mkdir()
+        (world.worktree / ".git").write_text(marker)
+        return real_env(*args, **kwargs)
+
+    monkeypatch.setattr(codexrun, "child_env", swap)
+    refused(world, go(world, "review"))
+
+
+# -- 9. read confinement of the empty-folder classes ----------------------------------------------------------------
+
+
+def bwrap_usable() -> bool:
+    cfg = codexrun.RunConfig("", None, "", codexrun.DEFAULT_BWRAP, True, (), ())
+    return os.path.exists(cfg.bwrap) and codexrun.confinement_works(cfg)
+
+
+@pytest.mark.parametrize("cls", ["security", "copy"])
+def test_confined_classes_refuse_when_the_namespace_cannot_be_made(world: World, cls: str) -> None:
+    broken = world.bin / "bwrap"
+    broken.write_text("#!/bin/sh\nexit 1\n")
+    broken.chmod(0o755)
+    world.configure(confinement="bwrap", bwrap=str(broken))
+    refused(world, go(world, cls))
+    assert go(world, "review") == 0  # the worktree classes are not read-confined
+
+
+@pytest.mark.skipif(not bwrap_usable(), reason="bubblewrap cannot make a user namespace here")
+@pytest.mark.parametrize("cls", ["security", "copy"])
+def test_a_prompt_cannot_read_the_account_in_the_confined_classes(world: World, cls: str) -> None:
+    secret = world.home / "secret.txt"
+    secret.write_text("PRIVATE-ACCOUNT-DATA\n")
+    (world.bin / "probe").write_text(str(secret))
+    assert go(world, cls) == 0  # confinement off: the fake reads the file, proving the probe works
+    assert world.calls()[-1]["probe"] == "read:PRIVATE-ACCOUNT-DATA\n"
+    world.configure(confinement="bwrap")
+    assert go(world, cls) == 0
+    call = world.calls()[-1]
+    assert call["probe"] == "blocked"
+    assert call["argv"][call["argv"].index("-s") + 1] == "read-only"
+    assert call["env"]["CODEX_HOME"] == str(world.home / ".codex")
+    (row,) = world.ledger()[-1:]
+    assert row["confined"] is True
+
+
+def test_a_config_path_that_would_expose_the_home_is_refused(world: World) -> None:
+    for key in ("ro_paths", "rw_paths"):
+        world.configure(**{key: [str(world.home)]})
+        refused(world, go(world, "review"))
+        world.configure(**{key: [str(world.home.parent)]})
+        refused(world, go(world, "review"))

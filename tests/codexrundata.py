@@ -28,7 +28,15 @@ import json, os, sys, time
 base = {base!r}
 mode = open(base + "/mode").read().strip()
 argv = sys.argv[1:]
+probe = "none"
+if os.path.exists(base + "/probe"):
+    target = open(base + "/probe").read().strip()
+    try:
+        probe = "read:" + open(target).read()
+    except OSError:
+        probe = "blocked"
 record = {{
+    "probe": probe,
     "argv": argv,
     "env": dict(os.environ),
     "cwd": os.getcwd(),
@@ -42,6 +50,16 @@ if mode == "ok":
     open(out, "w").write("{output} done\\n")
 elif mode == "filter":
     sys.stderr.write("This request was flagged for possible cybersecurity risk.\\n")
+    sys.exit(1)
+elif mode == "filter-event":
+    print(json.dumps({{"type": "error", "message": "Flagged for possible cybersecurity risk."}}))
+    sys.exit(1)
+elif mode == "spoof-event":
+    print(json.dumps({{"type": "item.completed", "text": "flagged for possible cybersecurity risk"}}))
+    sys.exit(1)
+elif mode == "filter-padded":
+    sys.stderr.write("flagged for possible cybersecurity risk\\n")
+    sys.stderr.write("x" * 3000000)
     sys.exit(1)
 elif mode == "filter-short":
     open(out, "w").write("Flagged for possible\\ncybersecurity risk. Confirm the access program.\\n")
@@ -75,11 +93,28 @@ class World:
             return []
         return [json.loads(line) for line in path.read_text().splitlines()]
 
-    def ledger(self) -> list[dict[str, Any]]:
+    def ledger_all(self) -> list[dict[str, Any]]:
         path = self.home / ".local" / "state" / "safo" / "codex-runs.jsonl"
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def ledger(self) -> list[dict[str, Any]]:
+        """The closing rows only: one per finished run."""
+        return [row for row in self.ledger_all() if row["status"] == "finished"]
+
+    def configure(self, **extra: Any) -> None:
+        """Rewrite the owner config: the fake codex, the test world's own paths, and any extra or changed key."""
+        config = self.home / ".config" / "safo" / "codex-run.json"
+        body: dict[str, Any] = {
+            "codex": str(self.bin / "codex"),
+            "confinement": "none",
+            "ro_paths": sorted({sys.prefix, sys.base_prefix}),
+            "rw_paths": [str(self.bin)],
+        }
+        body.update(extra)
+        config.write_text(json.dumps(body))
+        config.chmod(0o600)
 
     def write_prompt(self, text: str, name: str = "p.txt") -> Path:
         path = self.dev / "prompts" / name
@@ -96,12 +131,12 @@ def make_world(tmp: Path) -> World:
     bin_dir = tmp / "fakebin"
     bin_dir.mkdir()
     fake = bin_dir / "codex"
-    fake.write_text(FAKE.format(python=sys.executable, base=str(bin_dir), output=OUTPUT_CANARY))
+    fake.write_text(FAKE.format(python=os.path.abspath(sys.executable), base=str(bin_dir), output=OUTPUT_CANARY))
     fake.chmod(0o755)
     config = home / ".config" / "safo" / "codex-run.json"
     config.parent.mkdir(parents=True)
-    config.write_text(json.dumps({"codex": str(fake)}))
-    config.chmod(0o600)
+    (home / ".codex").mkdir(mode=0o700)
+    (home / ".codex").chmod(0o700)
     (bin_dir / "mode").write_text("ok")
     repo = dev / "repo"
     repo.mkdir()
@@ -123,6 +158,7 @@ def make_world(tmp: Path) -> World:
         },
     )
     world = World(home, dev, bin_dir, dev / "prompts" / "p.txt", worktree, {"PATH": f"{bin_dir}:/usr/bin:/bin"})
+    world.configure()
     world.write_prompt(f"Review the change. {PROMPT_CANARY}\n")
     assert stat.S_ISREG(world.prompt.stat().st_mode)
     return world
