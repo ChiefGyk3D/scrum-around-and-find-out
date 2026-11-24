@@ -67,7 +67,8 @@ prompt CAN still read in there: /usr and a few /etc network files (read only); t
 their folders: a codex that needs a package folder, such as a node script, needs it named in `ro_paths`) and the
 config's `ro_paths` (read only); no exposed path may be or contain the account home (exit 2); the config's
 `rw_paths`; the whole codex home, auth.json included (it is mounted read-write because codex must authenticate and
-keep state); the empty folder, the private run folder and the result file. It can reach the network (codex needs its service), so anything in that list can leave. Residual risks:
+keep state); the empty folder, the private run folder and the result file. It can reach the network (codex needs its
+service), so anything in that list can leave. Residual risks:
 the codex home's auth token is exposed to the prompt; the prompt text itself and `ro_paths` are the owner's choice;
 bwrap needs unprivileged user namespaces; and codex's own sandbox nested inside this one was NOT run or verified.
 Setting `"confinement": "none"` in the config turns this off (a warning on every run, `confined: false` in the
