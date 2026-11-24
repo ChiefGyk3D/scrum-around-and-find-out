@@ -329,6 +329,24 @@ def test_a_gitfile_pointing_inside_the_worktree_is_refused(world: World) -> None
     refused(world, go(world, "implementer"))
 
 
+def test_check_gitfile_names_the_inside_the_worktree_case(world: World) -> None:
+    fake = world.worktree / "fakegit" / ".git" / "worktrees" / "wt"
+    fake.mkdir(parents=True)
+    (fake / "gitdir").write_text(str(world.worktree / ".git"))
+    marker = world.worktree / ".git"
+    marker.write_text(f"gitdir: {fake}\n")
+    with pytest.raises(codexrun.CodexRunError, match="outside the worktree"):
+        codexrun.check_gitfile(str(marker), str(world.worktree.resolve()), str(world.home))
+
+
+def test_trusted_binary_refuses_an_owner_that_is_not_us_or_root(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    codex = str(world.bin / "codex")
+    assert codexrun.trusted_binary(codex, "codex") == codex
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 4242)
+    with pytest.raises(codexrun.CodexRunError, match="owned by someone else"):
+        codexrun.trusted_binary(codex, "codex")
+
+
 def test_a_gitfile_pointing_at_another_repository_is_refused(world: World) -> None:
     (world.worktree / ".git").write_text(f"gitdir: {world.dev / 'repo' / '.git'}\n")  # not .git/worktrees/<name>
     refused(world, go(world, "review"))

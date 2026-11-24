@@ -38,7 +38,8 @@ What it does, in order, and stops at the first refusal with NO codex call (exit 
    A repository whose own config sets a filter, textconv, include, alias, URL rewrite or similar program key is
    refused. Then it starts codex by an absolute path, no shell, with an allow-list environment (a fixed PATH plus the
    directories of codex and node, HOME from the account database, CODEX_HOME, locale, a private TMPDIR; no `GH_*`,
-   no tokens, no `*_API_KEY`, no secret-manager variables), `--ignore-user-config` and `--ignore-rules` (so `config.toml` cannot
+   no tokens, no `*_API_KEY`, no secret-manager variables), `--ignore-user-config` and `--ignore-rules` (so
+   `config.toml` cannot
    add a tool server or change the sandbox), `--ephemeral`, stdin from the prompt copy, its own process group, and a
    hard timeout (default 1800 s, at most 3600 s). On a timeout the whole process group is killed (exit 124).
 4. Looks for the cybersecurity-risk cutoff (the phrase "flagged for possible cybersecurity risk" in codex's error
