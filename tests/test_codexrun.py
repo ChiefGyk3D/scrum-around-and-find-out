@@ -675,7 +675,7 @@ def test_confined_classes_refuse_when_the_namespace_cannot_be_made(world: World,
 def test_a_prompt_cannot_read_the_account_in_the_confined_classes(world: World, cls: str) -> None:
     secret = world.home / "secret.txt"
     secret.write_text("PRIVATE-ACCOUNT-DATA\n")
-    (world.bin / "probe").write_text(str(secret))
+    (world.bin / "state" / "probe").write_text(str(secret))
     assert go(world, cls) == 0  # confinement off: the fake reads the file, proving the probe works
     assert world.calls()[-1]["probe"] == "read:PRIVATE-ACCOUNT-DATA\n"
     world.configure(confinement="bwrap")
@@ -686,6 +686,40 @@ def test_a_prompt_cannot_read_the_account_in_the_confined_classes(world: World, 
     assert call["env"]["CODEX_HOME"] == str(world.home / ".codex")
     (row,) = world.ledger()[-1:]
     assert row["confined"] is True
+
+
+@pytest.mark.skipif(not bwrap_usable(), reason="bubblewrap cannot make a user namespace here")
+def test_a_binary_folder_is_not_exposed_only_the_binary(world: World) -> None:
+    sibling = (
+        world.bin / "sibling-secret.txt"
+    )  # next to codex, as a private file next to a binary under a home would be
+    sibling.write_text("SIBLING-DATA\n")
+    (world.bin / "state" / "probe").write_text(str(sibling))
+    assert go(world, "security") == 0
+    assert world.calls()[-1]["probe"] == "read:SIBLING-DATA\n"  # unconfined: readable, so the probe works
+    world.configure(confinement="bwrap")
+    assert go(world, "security") == 0
+    assert world.calls()[-1]["probe"] == "blocked"
+
+
+def test_confine_argv_binds_the_binary_file_not_its_folder(world: World) -> None:
+    cfg = codexrun.configured_binaries(str(world.home), need_confinement=False)
+    argv = codexrun.confine_argv(cfg, [cfg.codex], "/x/root", "/x/meta", "/x/res", str(world.home))
+    binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--ro-bind-try"]
+    assert cfg.codex in binds and str(world.bin) not in binds
+
+
+def test_an_exposed_path_that_is_or_contains_the_home_is_refused(world: World) -> None:
+    cfg = codexrun.configured_binaries(str(world.home), need_confinement=False)
+    home = str(world.home)
+    for bad in (home, str(world.home.parent), "/"):
+        for field in ("ro_paths", "rw_paths"):
+            hostile = codexrun.RunConfig(**{**cfg.__dict__, field: (bad,)})
+            with pytest.raises(codexrun.CodexRunError, match="account home"):
+                codexrun.confine_argv(hostile, [cfg.codex], "/x/root", "/x/meta", "/x/res", home)
+    world.home.chmod(0o700)
+    world.configure(codex_home=home)  # a private folder of ours, but it IS the home
+    refused(world, go(world, "review"))
 
 
 def test_a_config_path_that_would_expose_the_home_is_refused(world: World) -> None:

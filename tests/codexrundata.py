@@ -26,11 +26,12 @@ FAKE = """#!{python}
 import json, os, sys, time
 
 base = {base!r}
+base = base + "/state"  # the only folder of the fake's home that is bound read-write; the binary's folder is not
 mode = open(base + "/mode").read().strip()
 argv = sys.argv[1:]
 probe = "none"
 if os.path.exists(base + "/probe"):
-    target = open(base + "/probe").read().strip()
+    target = open(base + "/probe").read().strip()  # the path to try to read
     try:
         probe = "read:" + open(target).read()
     except OSError:
@@ -85,10 +86,10 @@ class World:
     env: dict[str, str]
 
     def mode(self, name: str) -> None:
-        (self.bin / "mode").write_text(name)
+        (self.bin / "state" / "mode").write_text(name)
 
     def calls(self) -> list[dict[str, Any]]:
-        path = self.bin / "calls.jsonl"
+        path = self.bin / "state" / "calls.jsonl"
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text().splitlines()]
@@ -110,7 +111,7 @@ class World:
             "codex": str(self.bin / "codex"),
             "confinement": "none",
             "ro_paths": sorted({sys.prefix, sys.base_prefix}),
-            "rw_paths": [str(self.bin)],
+            "rw_paths": [str(self.bin / "state")],
         }
         body.update(extra)
         config.write_text(json.dumps(body))
@@ -137,7 +138,8 @@ def make_world(tmp: Path) -> World:
     config.parent.mkdir(parents=True)
     (home / ".codex").mkdir(mode=0o700)
     (home / ".codex").chmod(0o700)
-    (bin_dir / "mode").write_text("ok")
+    (bin_dir / "state").mkdir()
+    (bin_dir / "state" / "mode").write_text("ok")
     repo = dev / "repo"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")

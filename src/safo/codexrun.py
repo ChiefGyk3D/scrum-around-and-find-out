@@ -63,9 +63,10 @@ readable-roots key; read 2026-11-24, profile details unverified). So an empty wo
 a fence. These two classes therefore run inside bubblewrap (`bwrap`, configured path, default /usr/bin/bwrap): a fresh
 mount namespace with NO account home, no ~/.ssh, no ~/.config; every namespace but the network unshared; the child
 dies with the wrapper. If bwrap cannot make the namespace the run is refused (exit 2): no confinement, no run. What a
-prompt CAN still read in there: /usr and a few /etc network files (read only); the folders holding codex and node
-and the config's `ro_paths` (read only); the config's `rw_paths`; the whole codex home, auth.json included (it is
-mounted read-write because codex must authenticate and keep state); the empty folder, the private run folder and the
+prompt CAN still read in there: /usr and a few /etc network files (read only); the codex and node binary files (not
+their folders: a codex that needs a package folder, such as a node script, needs it named in `ro_paths`) and the
+config's `ro_paths` (read only); no exposed path may be or contain the account home (exit 2); the config's
+`rw_paths`; the whole codex home, auth.json included (it is mounted read-write because codex must authenticate and keep state); the empty folder, the private run folder and the
 result file. It can reach the network (codex needs its service), so anything in that list can leave. Residual risks:
 the codex home's auth token is exposed to the prompt; the prompt text itself and `ro_paths` are the owner's choice;
 bwrap needs unprivileged user namespaces; and codex's own sandbox nested inside this one was NOT run or verified.
@@ -615,6 +616,7 @@ def configured_binaries(home: str, *, need_confinement: bool = False) -> RunConf
     codex_home = config.get("codex_home", os.path.join(home, ".codex"))
     if not isinstance(codex_home, str):
         raise CodexRunError('the codex-run config key "codex_home" must be a path; nothing was run')
+    _refuse_home_exposure([codex_home], home)
     return RunConfig(
         codex=trusted_binary(codex, "codex"),
         node=trusted_binary(node, "node") if node else None,
@@ -688,17 +690,30 @@ ETC_FILES = (
 )
 
 
-def _exposed_binary_dirs(cfg: RunConfig) -> list[str]:
-    dirs: list[str] = []
+def _exposed_binary_files(cfg: RunConfig) -> list[str]:
+    """The binaries THEMSELVES (and their link targets), never the folders they sit in: a binary under the home must
+    not expose its siblings. Runtime files a binary needs beyond itself are named in the config's `ro_paths`."""
+    files: list[str] = []
     for item in (cfg.codex, os.path.realpath(cfg.codex), cfg.node, os.path.realpath(cfg.node) if cfg.node else None):
-        if item and os.path.dirname(item) not in dirs:
-            dirs.append(os.path.dirname(item))
-    return dirs
+        if item and item not in files:
+            files.append(item)
+    return files
 
 
-def confine_argv(cfg: RunConfig, argv: Sequence[str], root: str, meta: str, result: str) -> list[str]:
+def _refuse_home_exposure(paths: Sequence[str], home: str) -> None:
+    real_home = os.path.realpath(home)
+    for item in paths:
+        real = os.path.realpath(item)
+        if real == "/" or _under(real_home, real):
+            raise CodexRunError(
+                "a path to be exposed in the namespace is or contains the account home; nothing was run"
+            )
+
+
+def confine_argv(cfg: RunConfig, argv: Sequence[str], root: str, meta: str, result: str, home: str) -> list[str]:
     """`argv` wrapped in bwrap. Visible inside: /usr (read only, with the /lib /bin links), a few /etc network files,
-    a fresh /proc /dev /tmp, the folders of codex and node (read only), the config's `ro_paths` (read only) and
+    a fresh /proc /dev /tmp, the codex and node binary FILES (read only; not their folders), the config's
+    `ro_paths` (read only) and
     `rw_paths`, the codex home (read-write: auth and state), the empty working folder, the private run folder and the
     result file. Nothing else: not the home, not ~/.ssh, not ~/.config. The network stays shared (codex must reach
     its service); every other namespace is unshared and the child dies with this process."""
@@ -711,10 +726,13 @@ def confine_argv(cfg: RunConfig, argv: Sequence[str], root: str, meta: str, resu
     ]  # fmt: skip
     for etc in ETC_FILES:
         out += ["--ro-bind-try", etc, etc]
-    for folder in (*_exposed_binary_dirs(cfg), *cfg.ro_paths):
-        out += ["--ro-bind-try", folder, folder]
-    for folder in (*cfg.rw_paths, cfg.codex_home, root, meta, result):
-        out += ["--bind", folder, folder]
+    read_only = (*_exposed_binary_files(cfg), *cfg.ro_paths)
+    writable = (*cfg.rw_paths, cfg.codex_home, root, meta, result)
+    _refuse_home_exposure([*read_only, *writable], home)  # every exposed path, whatever put it on the list
+    for item in read_only:
+        out += ["--ro-bind-try", item, item]
+    for item in writable:
+        out += ["--bind", item, item]
     return [*out, "--chdir", root, "--", *argv]
 
 
@@ -980,7 +998,7 @@ def execute(args: argparse.Namespace, caller_env: Mapping[str, str], home: str) 
             raise CodexRunError("the empty working folder is not empty; nothing was run")
         argv = build_argv(cfg.codex, cls, root, result)
         if confined:
-            argv = confine_argv(cfg, argv, root, meta, result)
+            argv = confine_argv(cfg, argv, root, meta, result, home)
         env = child_env(home, cfg.codex, cfg.node, cfg.codex_home, meta)
         if worktree and worktree_identity(worktree, home) != identity:
             raise CodexRunError("the worktree was replaced after it was checked; nothing was run")
