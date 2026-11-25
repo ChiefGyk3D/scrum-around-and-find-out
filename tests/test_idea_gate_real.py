@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from hooksdata import agents_file
-from safo import idea_gate
+from safo import idea_gate, idea_gate_io
 from safo.errors import SafoError
 
 NOW = dt.datetime(2026, 11, 25, tzinfo=dt.UTC)
@@ -37,12 +37,17 @@ def script(path: Path, text: str) -> Path:
 
 
 class Box:
-    def __init__(self, tmp: Path) -> None:
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.home = tmp / "home"
         self.bin = tmp / "bin"
         self.log = tmp / "log"
         for d in (self.home, self.bin, self.log):
             d.mkdir()
+        # hermetic: the fallback PATH (used when no trusted PATH entry is left) holds nothing, so a gh installed on the
+        # machine (a CI runner has one in /usr/bin) can never be found or run by a test
+        self.fallback = tmp / "fallback"
+        self.fallback.mkdir()
+        monkeypatch.setattr(idea_gate_io, "FALLBACK_PATH", str(self.fallback))
         script(self.bin / "gh", GH.replace("@LOG@", str(self.log)))
         self.env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home)}
 
@@ -60,8 +65,8 @@ class Box:
 
 
 @pytest.fixture
-def box(tmp_path: Path) -> Box:
-    return Box(tmp_path)
+def box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Box:
+    return Box(tmp_path, monkeypatch)
 
 
 def test_issue_and_comment_bodies_go_over_stdin_never_argv(box: Box) -> None:

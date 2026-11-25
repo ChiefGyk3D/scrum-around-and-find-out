@@ -22,8 +22,8 @@ from test_idea_gate_real import GH, Box, script
 
 
 @pytest.fixture
-def box(tmp_path: Path) -> Box:
-    return Box(tmp_path)
+def box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Box:
+    return Box(tmp_path, monkeypatch)
 
 
 def loose_dir(parent: Path, name: str) -> Path:
