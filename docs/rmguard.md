@@ -30,6 +30,9 @@ The hook judges these program families, and only these.
 | `tee` without `-a` | every target that exists (or that an earlier command of the line wrote) |
 | `sed -i`, `perl -i`/`-pi`, `awk -i inplace`, `ed`, `install`, `ln -f`/`-sf` | the files they edit or replace, when they exist in a zone |
 | `python -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`, `lua -e` | the program text cannot be read: denied when it names a zone, or when the cwd is inside one |
+| a shell or interpreter that reads its program from standard input (no script operand, or `-s`, `-`, `/dev/stdin`) | a heredoc body (quoted or not), a here-string and a heredoc piped in are read like a `-c` string; a pipeline into a shell, a process substitution (`bash <(cmd)`), a descriptor (`<&3`) and a script written earlier in the same line fail closed when a zone is in sight or the line holds a delete word; an interpreter's program counts when it can remove or overwrite and names a zone |
+| `su -c`, `script -c`, `flock -c`, `watch`, `busybox`/`toybox`, a command word with blanks (`sudo -s 'cmd'`) | the command string they hand to a shell is read like a `-c` string |
+| output-file options of the otherwise safe `git` subcommands and of `find` | `--output`, `-o`, `bundle create`, `config --file` and `find -fprint`/`-fls` judge an existing target; programs named by `--upload-pack`, `--exec`, a program-valued `-c` setting and `GIT_PAGER` are read as command lines |
 | a truncating redirection | the target of `>`, `>|`, `&>`, `: > file`, `echo x > file`, when it exists (or an earlier command of the line wrote it); `>>` appends and is not judged |
 
 Not covered: any other program (a script file, `python script.py`, `sed` without `-i`, `git reset --hard` through a
@@ -61,7 +64,7 @@ redirect or `tee` target whose written part already lies strictly below an agent
 
 ## What is evaluated, and what can block
 
-When the working directory is inside a zone, every command is evaluated. Elsewhere a command is evaluated when its text
+When the working directory is inside a zone or is the parent of one (`~/.local/share`, `~/.local`, the home, `/tmp`, `/`), every command is evaluated. Elsewhere a command is evaluated when its text
 (backslash-newline pairs removed) holds a delete word, a character that can build one (`$`, a backtick, `?`, `*`, `[`,
 `{`), or a shared zone name (`-dev`, `/tmp/claude`, `.local`), also when the name is quoted, escaped or split
 (`reach-around-d''ev`). Only a command with none of these (`ls`, `git status`) is allowed at once with no parsing.

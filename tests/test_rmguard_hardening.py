@@ -39,7 +39,7 @@ def would_block(home: Path) -> str:
         ("git clean -fdx", "/home/u/.local/share/reach-around-dev/agents/a/work", True),
         ("git clean -fdx", "/tmp/claude-1000/p/s/scratchpad", True),
         ("git clean -fdx", "/home/u/src/repo", False),
-        ("git clean -fdx", "/home/u", False),
+        ("git clean -fdx", "/home/u", True),  # the parent of a zone: a relative path reaches one without naming it
         ("git clean -fdx", None, False),
     ],
 )

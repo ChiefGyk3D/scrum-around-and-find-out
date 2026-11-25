@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- rmguard hardening (#424): more of what a command can hide is read or fails closed, and the cheap gate opens in more places. Warn-mode semantics are unchanged.
 - New `safo-rmguard` (#422), a separate PreToolUse hook for Bash that guards the shared dev directories
   (`~/.local/share/*-dev` and the scratchpad parent `/tmp/claude-*`) against wildcard, parent and out-of-folder deletes,
   truncation, moves and in-place edits. It judges these families only: `rm`/`rmdir`/`unlink`/`shred`, `find -delete` and
