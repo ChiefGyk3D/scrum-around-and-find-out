@@ -27,6 +27,7 @@ from safo.tracking import Ref, State
 GOOD = "acme/widgets#12"
 OPEN_ISSUE = '{"state":"OPEN","url":"https://github.com/acme/widgets/issues/12"}'
 CLOSED_ISSUE = '{"state":"CLOSED","url":"https://github.com/acme/widgets/issues/12"}'
+REST_OPEN = '{"state":"open","pull_request":false}'
 OPEN_PULL = '{"state":"OPEN","url":"https://github.com/acme/widgets/pull/12"}'
 
 
@@ -164,10 +165,11 @@ def lookup(run: Any, which: Any = lambda name: "/usr/bin/gh") -> State:
 
 
 def test_the_lookup_is_an_argument_list_with_no_shell_and_only_reads() -> None:
-    run, calls = fake_run()
-    assert lookup(run) == "open"
+    run, calls = fake_run(REST_OPEN)
+    assert lookup(run) == "open" and len(calls) == 1, "REST answered, so GraphQL is not asked"
     argv, kwargs = calls[0]
-    assert argv == ["/usr/bin/gh", "issue", "view", "12", "--repo", "acme/widgets", "--json", "state,url"]
+    assert argv[:3] == ["/usr/bin/gh", "api", "repos/acme/widgets/issues/12"] and argv[3] == "--jq"
+    assert not {"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"} & set(argv)
     assert not kwargs.get("shell") and kwargs["stdin"] == subprocess.DEVNULL and kwargs["timeout"] > 0
     assert not {"create", "edit", "close", "comment", "reopen", "delete"} & set(argv)
 
@@ -364,17 +366,46 @@ def test_the_repository_lists_are_validated(bad: Any, key: str) -> None:
 # -- through the command line, with a stand-in gh ----------------------------------------------------------
 
 
-def stand_in_gh(folder: Path, answers: dict[str, str]) -> Path:
-    """A `gh` that logs its arguments and answers a read by issue number; it fails for any other command."""
+def rest_form(graphql_answer: str) -> str:
+    """What `gh api ... --jq` prints for the issue a `gh issue view --json state,url` answer describes."""
+    try:
+        data = json.loads(graphql_answer)
+        pull = "/pull/" in data["url"]
+        return json.dumps({"state": data["state"].lower(), "pull_request": pull})
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return graphql_answer
+
+
+def stand_in_gh(
+    folder: Path, answers: dict[str, str], *, rest: bool = True, graphql: bool = True, rest_answers: str | None = None
+) -> Path:
+    """A `gh` that logs its arguments and answers a read by issue number; it fails for any other command.
+
+    `answers` are the `gh issue view` (GraphQL) answers; the REST answer for the same number is derived from them
+    unless `rest_answers` is given. `rest=False` / `graphql=False` make that source fail as if rate limited.
+    """
     bin_dir = folder / "bin"
     bin_dir.mkdir()
     log = folder / "gh.log"
-    cases = "\n".join(f"  \"{n}\") echo '{out}' ;;" for n, out in answers.items())
+    gql = "\n".join(f"  \"{n}\") echo '{out}' ;;" for n, out in answers.items())
+    api = "\n".join(
+        f"  \"{n}\") echo '{rest_form(out) if rest_answers is None else rest_answers}' ;;" for n, out in answers.items()
+    )
+    limited = 'echo "GraphQL: API rate limit already exceeded (HTTP 403)" >&2; exit 1'
     script = (
         "#!/bin/sh\n"
         f'printf "%s\\n" "$*" >> "{log}"\n'
-        'if [ "$1" != issue ] || [ "$2" != view ]; then echo "mutation attempted" >&2; exit 9; fi\n'
-        'case "$3" in\n' + cases + '\n  *) echo "Could not resolve to an issue" >&2; exit 1 ;;\nesac\n'
+        'if [ "$1" = api ]; then\n'
+        + ("" if rest else '  echo "HTTP 403: rate limit" >&2; exit 1\n')
+        + '  case "${2##*/}" in\n'
+        + api
+        + '\n  *) echo "Not Found (HTTP 404)" >&2; exit 1 ;;\n  esac\n'
+        'elif [ "$1" = issue ] && [ "$2" = view ]; then\n'
+        + (f"  {limited}\n" if not graphql else "")
+        + '  case "$3" in\n'
+        + gql
+        + '\n  *) echo "Could not resolve to an issue" >&2; exit 1 ;;\n  esac\n'
+        'else echo "mutation attempted" >&2; exit 9; fi\n'
     )
     path = bin_dir / "gh"
     path.write_text(script)
@@ -428,7 +459,9 @@ def test_an_open_github_item_passes_after_one_read_only_lookup(
     payload = dispatch(prompt=f"issue: {GOOD}\nwork", tracked=False)
     out, log = run_guard(_private_home, agents, payload, bin_dir)
     assert out == "" and log[-1]["decision"] == "allow"
-    assert (tmp_path / "gh.log").read_text().splitlines() == ["issue view 12 --repo acme/widgets --json state,url"]
+    assert (tmp_path / "gh.log").read_text().splitlines() == [
+        'api repos/acme/widgets/issues/12 --jq {state: .state, pull_request: has("pull_request")}'
+    ]
 
 
 @pytest.mark.parametrize(

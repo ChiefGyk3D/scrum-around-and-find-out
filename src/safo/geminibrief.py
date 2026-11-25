@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import NamedTuple
 
+from safo import shellproof
 from safo.gemini import (
     JOB_CAP,
     RECORD_ID,
@@ -1221,7 +1222,13 @@ _NETWORK_TOOL = re.compile(
 
 def shell_command_class(command: str, deadline: float | None = None) -> str | None:
     """The fixed phrase class of what makes one Bash command a direct route to the vendor API or its key, or None when
-    it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED."""
+    it is fine. Fails closed: past the deadline it answers SHELL_UNVERIFIED.
+
+    The default is the old denial (#388): the secret tool with a project or config name, an expansion or a backtick, a
+    word built from escapes, or a project or config name by itself, anywhere in the command. It is relaxed only on a
+    positive proof from `safo.shellproof`: the protected words sit in comments, or the whole command is made of
+    allowlisted text commands and they sit in quoted arguments, paths or here-document bodies. The vendor host, the SDK,
+    the key variable and the broker module are never relaxed. A form the proof does not model keeps the denial."""
 
     def tick() -> None:
         if deadline is not None and time.monotonic() > deadline:
@@ -1231,35 +1238,49 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         return SHELL_UNVERIFIED  # before any normalization: the cost of the check never depends on a hostile length
     try:
         tick()
-        lines = _join(command).splitlines() or [command]
-        found: str | None = None
-        secret_tool = network = False
-        views: list[str] = []
-        for line in lines:
-            tick()
-            _, _, low, pre_low, _pre_raw = _views(line)
-            views.extend((low, pre_low))
-            for view in (low, pre_low):
-                if VENDOR_RE.search(view) or SDK.search(view):
-                    found = found or SHELL_VENDOR
-                if _SHELL_KEY.search(view):
-                    found = found or SHELL_KEY
-                if PAID_CONFIG.search(view) or _SHELL_PROJECT.search(view):
-                    found = found or SHELL_STORE
-                secret_tool = secret_tool or bool(_SECRET_TOOL.search(view))
-                network = network or bool(_NETWORK_TOOL.search(view))
-            if secret_tool and any(_SHELL_CONFIG.search(v) for v in (low, pre_low)):
-                found = found or SHELL_STORE
-        tick()
-        built = bool(CONCEAL.search(command.lower()) or CONCEAL.search(_join(command).lower()))
-        if found is None and built and (network or secret_tool):
-            found = SHELL_BUILT
-        if found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
-            found = SHELL_TOOL
-        if found is None and broker_module_route(views, tick):
-            found = SHELL_BROKER_MODULE
-        if found is None:
+        found = _classify(command, tick, soft=True)
+        if found is None or _classify(command, tick, soft=False) is not None:
+            return found
+        parsed = shellproof.parse(command, tick)
+        if parsed is None:
+            return found  # a form the proof does not model
+        if parsed.pure():
             return None
+        if parsed.writes_no_file() and _classify(parsed.without_comments(), tick, soft=True) is None:
+            return None  # the names sit only in comments, which no shell runs, and no file is written
         return found
     except TimeoutError:
         return SHELL_UNVERIFIED
+
+
+def _classify(command: str, tick: Callable[[], None], soft: bool) -> str | None:
+    """The old classification. `soft=False` leaves out the three classes the proof may relax (a project or config name,
+    an expansion beside the secret tool, a word built from escapes), so what it finds is never relaxed."""
+    lines = _join(command).splitlines() or [command]
+    found: str | None = None
+    secret_tool = network = False
+    views: list[str] = []
+    for line in lines:
+        tick()
+        _, _, low, pre_low, _pre_raw = _views(line)
+        views.extend((low, pre_low))
+        for view in (low, pre_low):
+            if VENDOR_RE.search(view) or SDK.search(view):
+                found = found or SHELL_VENDOR
+            if _SHELL_KEY.search(view):
+                found = found or SHELL_KEY
+            if soft and (PAID_CONFIG.search(view) or _SHELL_PROJECT.search(view)):
+                found = found or SHELL_STORE
+            secret_tool = secret_tool or bool(_SECRET_TOOL.search(view))
+            network = network or bool(_NETWORK_TOOL.search(view))
+        if soft and secret_tool and any(_SHELL_CONFIG.search(v) for v in (low, pre_low)):
+            found = found or SHELL_STORE
+    tick()
+    built = bool(CONCEAL.search(command.lower()) or CONCEAL.search(_join(command).lower()))
+    if soft and found is None and built and (network or secret_tool):
+        found = SHELL_BUILT
+    if soft and found is None and secret_tool and (_DOLLAR.search(command) or "`" in command):
+        found = SHELL_TOOL
+    if found is None and broker_module_route(views, tick):
+        found = SHELL_BROKER_MODULE
+    return found

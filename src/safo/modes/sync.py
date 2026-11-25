@@ -222,7 +222,7 @@ def needs_a_human(ctx: Context, live: LiveBoard, repo: Repository, content: Cont
     if (
         content.kind == "pr"
         and repo.full_name.lower() not in exempt
-        and pull_is_linked(ctx.client, content.id) is False
+        and pull_is_linked(ctx.client, content.id, board.rules.tracking.exempt_authors) is False
     ):
         lines.append(f"{label} is a pull request with no linked issue: add `Refs #n` or `Closes #n`")
     card = None if ctx.client.dry_run else find_item(ctx.client, board, live, content.id)

@@ -16,8 +16,15 @@ it was half filled, or when only one of two required checks had reported.
 3. **Re-runs** a cancelled job once per run, and a job whose only failed step is the egress canary (`EX-0001`, an
    approved risk exception) at most twice per run. Any other failure is real and is never re-run. The gate failing
    beside a job that is being re-run is not counted as a second failure.
-4. **Requires 0 unresolved review threads.** Otherwise it stops and lists them. This is a different exit code from a CI
-   failure.
+4. **Requires 0 unresolved review threads.** Otherwise it stops (exit 3) and prints each one: the file and line, the
+   comment's link, the author, and the first 600 characters of the comment (control and format characters stripped,
+   newlines folded to spaces, `[truncated]` after a cut). It never resolves a thread and never merges past one. This is
+   a different exit code from a CI failure.
+   With `--wait-for-review SECONDS` (0 to 900, default 0), it first waits for a review by the automated reviewer
+   (`copilot-pull-request-reviewer`) on the pinned head, polling every `--interval` seconds through REST
+   (`gh api repos/OWNER/REPO/pulls/N/reviews`). The wait ends at the first such review, at SECONDS, at `--timeout` or at
+   `--max-polls`, whichever comes first; if none arrived it prints a `NOTICE` and goes on to the thread check either way.
+   A head that moves during the wait stops with exit 4, as everywhere else.
 5. **Merges**, retries once on "Base branch was modified", then reads the state back and reports `MERGED` only if GitHub
    says so.
 

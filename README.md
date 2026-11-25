@@ -176,12 +176,14 @@ replaced are gone.
 - [Security-findings](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Security-findings)
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
+- [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)
 - [Gemini enrollment](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-enrollment)
 - [Gemini passkeys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-passkeys)
 - [Gemini broker](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker)
 - [Gemini broker threat model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker-threat-model)
+- [Rmguard](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Rmguard): `safo-rmguard`, the Bash hook that guards shared dev directories
 - [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
 - [Safo-threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Safo-threat-model)
 - [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)

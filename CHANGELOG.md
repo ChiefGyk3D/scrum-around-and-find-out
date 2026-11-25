@@ -9,30 +9,45 @@
   keeps its required-argument error and refuses `--days` and `--json`. Reads the typed `llm-local` rows (calls by
   status and failure reason, outcomes joined by call id with accept rates, orphans) and the guard's `na_reason_class`. Docs: `docs/usage.md`, with the task-type table.
   Tests: `tests/test_local_report.py`.
-- `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
-  head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
-  the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on
-  "Base branch was modified", and can push and open the pull request first. Tests: `tests/test_ship.py`, against a fake gh.
-- Research discipline (#353), warn only, by the maintainer's explicit word of 2026-11-07 despite the guard freeze. New
-  dispatch rules `research-route` (a research brief goes to an agent type that cannot search) and `research-ladder` (a
-  research brief has no `research:` line; `research: n/a - <why>` turns both off for that brief), and `safo handoff
-  shape` (report-not-found: a report that says not found, blocked or 403 without two listed queries or a named fallback;
-  shape only, not truth). No deny path, `block` mode included. New `hooks.research` block in `agents.yaml` (`route`,
-  `ladder`, `report_not_found`, `intent_keywords`, `search_types`, `na_marker`); `safo hooks status` counts both rules.
-  Tests: `tests/test_research_rules.py`, `tests/test_reportshape.py`. Docs: `docs/look-before-instructing.md`.
-- Lead-side research check (#84, rule `research-lead`), warn only, by the maintainer's word of 2026-11-07. New Stop hook
-  `safo hooks stop`: when the final message of a turn relays "not found", "no statement found", "needs your decision"
-  and the like about an external fact and the turn made no WebSearch, WebFetch or listed documentation call, it shows a
-  `systemMessage` ("run a web search before relaying not found") and writes a guard-log row. It never blocks and never
-  makes Claude continue (no `decision`, no `additionalContext`), honors `stop_hook_active`, reads only the last 1 MiB
-  of the transcript, and fails open with the degraded notice. New `hooks.research` keys `lead_check`, `lead_phrases`,
-  `search_tools`; `safo hooks status` counts the rule. The other #84 heuristics (done claims, click paths) stay unbuilt;
-  `CHECKS` in `src/safo/stophook.py` is where they would go. Tests: `tests/test_stop_hook.py`. Docs: `docs/hooks.md`.
-  Review fixes: a malformed transcript line inside the window or a missing/non-string `last_assistant_message` now fails
-  open with the degraded notice instead of a false warning or a silent allow, and `hooks stop` is a hook for the
-  stderr contract (a bad `SAFO_APPEND_LOCK_TIMEOUT` prints nothing).
+- New `safo-rmguard` (#422), a separate PreToolUse hook for Bash that guards the shared dev directories
+  (`~/.local/share/*-dev` and the scratchpad parent `/tmp/claude-*`) against wildcard, parent and out-of-folder deletes,
+  truncation, moves and in-place edits. It judges these families only: `rm`/`rmdir`/`unlink`/`shred`, `find -delete` and
+  `-exec` (with the GNU global options), `git` (read-mostly subcommands pass, every other one is judged by its work
+  tree, including aliases and `GIT_WORK_TREE`), `truncate`, `rsync` and `tar` with delete options (abbreviations and
+  unknown long options fail closed), `mv`, `cp`, `dd`, `tee`, `sed -i`, `perl -i`, `awk -i inplace`, `ed`, `install`,
+  `ln -f`, inline `python -c`/`perl -e`/`ruby -e`/`node -e`, and truncating redirections; anything else is not covered
+  (docs/rmguard.md lists it). Only an exact path strictly below `<dev>/agents/<name>/` passes; the agent folder root
+  itself is removed by the owner in a batch. A command is evaluated when the cwd is in a zone or its text holds a delete
+  word, a character that can build one or a zone name (also quoted or escaped); what an evaluated command makes unreadable
+  (syntax error, timeout, crash) is a deny, and a command over 64 KB is decided by its first 64 KB.
+  `safo-rmguard --mode warn|enforce` (default enforce, set in the hook command, never the environment): warn never blocks,
+  logs redacted would-be blocks to `~/.local/share/reach-around-lead/rmguard-warn.log` through directory descriptors (no
+  symlink followed) and, after `--record-integrity`, logs when the launcher or the settings entry changes. Install is an
+  owner step with two documented entries: warn (no `onFailure`) and enforce (`onFailure: block` plus an owner-owned
+  launcher outside the pipx environment), a residual-risk statement and a promotion threshold. It is its own module and
+  entry point, so the frozen dispatch guard is untouched. Tests include a sentinel-file differential against real bash,
+  git, find, rsync, tar, sed, perl and python. `tools/rmguard_replay.py` replays real Bash history in dry run.
+- New `rules.tracking.exempt_authors` (#420): a list of bot-account logins (GraphQL typename `Bot`; a person with the same login is never exempt) whose pull requests need no linked issue in
+  `safo audit` and `safo sync`, so Dependabot pull requests are not drift. Matching ignores case and a `[bot]` suffix; a
+  pull request with no readable author is still reported. Default empty: nothing changes until a board lists a login. `safo audit` prints one NOTE naming the active entries.
+  A `board.yaml` that sets the key is refused as an unknown key by a SAFO build without this change.
+- Narrow the shell material rule so it fails closed (#388). The old denial stays the default for the whole submitted
+  command. It is relaxed only on a positive proof from a small lexer: the protected words stand only in comments, or
+  every command is on a short allowlist and writes no file. The allowlist is `echo` and `printf` to standard output,
+  plain `grep`, `cat`, `head`, `tail`, `wc`, `date`, `pwd`, and `gh issue|pr` with a literal body and a short list of
+  inert options, each value a known literal (no variable or command substitution) and a body, comment or title given
+  once. Ordinary unquoted arguments are relaxed as well as quoted ones. The relaxation proves the command text only: the
+  effective repository and host of a mutating `gh` command come from the environment and repository configuration,
+  which the guard does not inspect; the threat model is an honest or text-injected model, not an attacker who controls
+  the shell environment. NOT relaxed: `gh` with a body file, an attachment, a template, a repository or host selector
+  visible in the command text, or stdin; commit messages; file-writing here-documents;
+  ripgrep; pipes or redirects into a shell or interpreter; `eval`, `source`, inline-code interpreters, variables run as
+  commands, wrappers, assignment prefixes and any form the lexer does not model. The vendor host, SDK and key variable
+  are never relaxed. The part of #388 about a
+  brief line over 4000 characters is NOT fixed: such a line is still refused unread, because an unread line cannot be
+  shown harmless. See docs/hooks.md.
 
-## 0.2.0 (2026-11-02)
+## 0.2.0 (2026-11-09)
 
 - First release that carries the Gemini paid-path broker, its installer and units, the approval-binds-prompt change, the
   passkey extra, the `safo-guard` entry point and the Action trust hardening. Paid use stays disabled. The release is
@@ -56,6 +71,71 @@
   under memory, file size, open file, CPU and task limits with a size-capped memory-backed rehearsal folder; tests show
   each limit bites. `--keep` now needs `--no-containment`. The header and `docs/gemini-enrollment.md` say what is and is
   not contained.
+
+- `safo audit` (#389): open pull requests in the listed repositories that cannot merge as they stand. `DRIFT   CONFLICT
+  owner/name#n` for `mergeable: CONFLICTING`, a `NOTE    BEHIND ...` for one behind its base, and a count note
+  (`mergeability: N open pull requests, C conflicting, B behind, U not yet computed`). A `mergeable` still being
+  computed (`UNKNOWN`/null) is counted, never drift; an unrecognized value exits 2. One GraphQL read per repository
+  (`safo.mergeability`), never a project listing. Tests: `tests/test_audit_mergeability.py`.
+- Shared GitHub API budget (#356, #358; umbrella #355, rules #204). `ghw` (new entry point, `safo.ratebudget`) is `gh`
+  with a per-bucket call ledger under `~/.local/state/safo/ratebudget` (file lock): the worst counter across response
+  headers and the `rate_limit` endpoint is the truth, 70% warns, 90% refuses (exit 75) until reset, `Retry-After` and
+  secondary-limit answers block the bucket, writes are spaced at least one second across processes, nothing is replayed.
+  `safo-ratebudget [--by-caller] [--refresh]` prints the status line and a per-caller report; a one-line cache
+  (`statusline.txt`) is kept for a statusline. `safo-card` edits one project card with one REST PATCH from a persisted
+  map of item, field and option ids (`safo.boardmap`) and never lists the board. Tests: `tests/test_ratebudget.py`,
+  `tests/test_ratebudget_mode.py`, `tests/test_boardmap.py`. Docs: `docs/ratebudget.md`. Not wired into the dispatch
+  guard (a guard file; #357). Round 2 (review): counters, blocks and the write queue are scoped by a host and
+  credential fingerprint; one global write queue; a queued writer re-checks before it launches; counters are saved
+  before the audit row; the state directory is made private and used by descriptor; persisted times are bounded; a
+  repeated or malformed rate-limit header rejects the answer; compact option spellings count as writes; `--resolve`
+  needs a positive repository match. Round 3: the scope follows the authenticated account (not the token), an
+  account that cannot be told gets a conservative unknown scope, a GraphQL secondary limit sent with HTTP 200 blocks,
+  `boardmap.json` is read with the same private-directory checks as it is written, and the write-slot bound is the
+  queue limit. Round 4 (#367, #368): a launch gate spaces writes from the last actual launch (the child is spawned
+  while the account's gate lock is held, then the lock is released), and a hostile identity cache is validated record by
+  record and fails open. The real `gh` child now runs in its own process group so a timeout ends it and its children. Round 5: SIGINT, SIGTERM and
+  SIGHUP are forwarded to that group while `ghw` waits (grace, SIGKILL, reap; unknown outcome, exit 128+signal); launch
+  spacing is read from the monotonic clock of the same boot, and a launch recorded in the future fails closed for one
+  spacing instead of being dropped; the launch gate lock is a file per account, so one account's stalled spawn does not
+  block another. Round 6: the signal guard covers the whole run (handlers installed together before the gate, a
+  signal at any point after a child may exist is forwarded, stopped, reaped, reported as an unknown outcome),
+  `safo-card` reports a signal-interrupted PATCH as an unknown outcome (`is_unknown_outcome_exit`), a future same-boot
+  monotonic launch record is repaired once, and concurrent card-map updates are merged under a lock. Round 7: modes are written as `stat.S_IRWXU` (Semgrep read the 0o700 literal as too
+  permissive; same mode, no suppression), the board snapshot copies the option dicts (#373), and an oversized or
+  unterminated header block is withheld instead of printed as body (#374).
+- `safo-ship` (#371): on exit 3 each unresolved review thread is printed with its author, file:line, link and the first
+  600 characters of the comment (control characters stripped, `[truncated]` after a cut). New `--wait-for-review SECONDS`
+  (0 to 900, default 0) waits, within `--timeout` and `--max-polls`, for the automated reviewer's review of the pinned
+  head before the thread check, then goes on either way with a notice if none came. It never resolves a thread and never
+  merges past one. Tests: `tests/test_ship_review.py`. Docs: `docs/ship.md`.
+- Dispatch guard issue check (#370): the open-issue check reads REST (`gh api repos/OWNER/REPO/issues/N`) first, so a
+  rate-limited GraphQL no longer denies valid briefs; GraphQL (`gh issue view`) is the fallback, and the check fails
+  closed only when both fail. A pull request number is refused as before. A positive answer is cached for five minutes
+  per issue in `issue-cache.json` in the state directory; negative and error answers are never cached. The denial text
+  names the source. Nothing new is denied. Tests: `tests/test_tracking_rest.py`.
+- `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
+  head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
+  the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on
+  "Base branch was modified", and can push and open the pull request first. Tests: `tests/test_ship.py`, against a fake gh.
+- Research discipline (#353), warn only, by the maintainer's explicit word of 2026-11-07 despite the guard freeze. New
+  dispatch rules `research-route` (a research brief goes to an agent type that cannot search) and `research-ladder` (a
+  research brief has no `research:` line; `research: n/a - <why>` turns both off for that brief), and `safo handoff
+  shape` (report-not-found: a report that says not found, blocked or 403 without two listed queries or a named fallback;
+  shape only, not truth). No deny path, `block` mode included. New `hooks.research` block in `agents.yaml` (`route`,
+  `ladder`, `report_not_found`, `intent_keywords`, `search_types`, `na_marker`); `safo hooks status` counts both rules.
+  Tests: `tests/test_research_rules.py`, `tests/test_reportshape.py`. Docs: `docs/look-before-instructing.md`.
+- Lead-side research check (#84, rule `research-lead`), warn only, by the maintainer's word of 2026-11-07. New Stop hook
+  `safo hooks stop`: when the final message of a turn relays "not found", "no statement found", "needs your decision"
+  and the like about an external fact and the turn made no WebSearch, WebFetch or listed documentation call, it shows a
+  `systemMessage` ("run a web search before relaying not found") and writes a guard-log row. It never blocks and never
+  makes Claude continue (no `decision`, no `additionalContext`), honors `stop_hook_active`, reads only the last 1 MiB
+  of the transcript, and fails open with the degraded notice. New `hooks.research` keys `lead_check`, `lead_phrases`,
+  `search_tools`; `safo hooks status` counts the rule. The other #84 heuristics (done claims, click paths) stay unbuilt;
+  `CHECKS` in `src/safo/stophook.py` is where they would go. Tests: `tests/test_stop_hook.py`. Docs: `docs/hooks.md`.
+  Review fixes: a malformed transcript line inside the window or a missing/non-string `last_assistant_message` now fails
+  open with the degraded notice instead of a false warning or a silent allow, and `hooks stop` is a hook for the
+  stderr contract (a bad `SAFO_APPEND_LOCK_TIMEOUT` prints nothing).
 
 - Rehearsal review fixes (#263). The rehearsal now contains the runbook text it runs: it re-runs itself inside a rootless
   bubblewrap sandbox (user, network, IPC, PID and UTS namespaces, read-only `/usr`, `/etc` and checkout, a writable

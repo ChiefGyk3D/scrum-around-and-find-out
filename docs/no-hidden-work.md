@@ -12,6 +12,7 @@ File the issue first. Put it on the board. Then start. Link it from the pull req
 |---|---|---|
 | `safo hooks guard` | A subagent brief must carry a line of its own, `issue: owner/repo#123` (or `issue: KEY-123`). The reference is checked read-only: it must exist and be open. | `warn` reports, `block` denies |
 | `safo audit` | Exits 1 for a pull request that links no issue, a pull request or issue that is not on the board, a card with no Status, Area, Kind, Epic or Effort, a closed issue that is not Done, a Done card with no Done-on date. Each finding names the item. | read-only |
+| `safo audit` (mergeability) | Exits 1 with `CONFLICT owner/name#n` for an open pull request whose `mergeable` is `CONFLICTING`; prints a `BEHIND owner/name#n` note (exit code unchanged) for one that is behind its base; always prints a `NOTE    mergeability: N open pull requests, C conflicting, B behind, U not yet computed` count. A `mergeable` that GitHub has not computed yet (`UNKNOWN` or null) is counted in `U` and is never drift. One read per listed repository, no project-wide listing. | read-only |
 | `safo audit` (branch gate) | Exits 1 with `NO-GATE owner/name` for a listed repository whose default branch has no protection or active ruleset, is protected without the gate check (`CI green`), or allows force pushes. Exits 2 when the protection cannot be read. See [The branch gate](#the-branch-gate). | read-only |
 | `safo reconcile` and `safo sync` | Add the missing cards and set Status and Done-on. What no rule can decide is printed as `HUMAN ...` and leaves the exit code at 1: a pull request with no linked issue, a missing Kind, Epic, Effort, or an Area no rule fills. | writes only what is mechanical |
 | A pull request check | Fails a pull request with no `Refs #n` or `Closes #n`. Not built here: it is a reusable workflow in git-your-ship-together. | CI |
@@ -24,8 +25,13 @@ Put this line, by itself, in every brief:
 issue: ChiefGyk3D/example#123
 ```
 
-- A GitHub reference is `owner/repo#N`. The guard runs `gh issue view N --repo owner/repo --json state`, a read, from an
-  argument list with no shell. The reference must match a strict pattern first, so shell metacharacters never reach a
+- A GitHub reference is `owner/repo#N`. The guard first reads `gh api repos/owner/repo/issues/N` (REST, which has its own rate-limit counter
+  and tells an issue from a pull request by the `pull_request` key). Only if REST gives no usable answer does it run
+  `gh issue view N --repo owner/repo --json state,url` (GraphQL). Both are reads from an argument list with no shell.
+  A positive answer (open issue) is cached for five minutes in `issue-cache.json` in the guard's state directory
+  (owner-only, atomic write, at most 64 entries, repository names, numbers and times only); closed, missing and failed
+  answers are never cached, a corrupt or foreign entry is ignored. A denial names the source that answered (`REST`,
+  `GraphQL`) or that both failed. The reference must match a strict pattern first, so shell metacharacters never reach a
   process; a rejected reference is not echoed back.
 - A Jira-style key, `KEY-123`, is accepted by its shape alone, because no Jira instance exists today. See the mapping below.
 - No line, an invalid line, a missing or closed issue: in `block` mode the dispatch is denied with a message that says how
@@ -229,13 +235,19 @@ rules:
     epic_field: Epic        # default Epic
     effort_field: Effort    # default Effort
     exempt_repos: []        # owner/name: pull requests there need no linked issue
+    exempt_authors: []      # bot-account logins (e.g. dependabot): their pull requests need no linked issue
 ```
 
 A Kind, Epic or Effort field may be any type; only whether it holds a value is read. A field `board.yaml` does not define
 is **not configured**: the audit skips that check, prints a `NOTE ... check not configured` line, and does not call the
 board clean on the strength of a check it did not run. Open pull requests are always checked for a link; merged ones
 within `rules.add_closed_days` days of today. A body links an issue when GitHub counts a closing reference or the text has
-`Refs`, `Closes`, `Fixes` or `Resolves` followed by an issue number other than the pull request's own.
+`Refs`, `Closes`, `Fixes` or `Resolves` followed by an issue number other than the pull request's own. A pull request
+whose author is a bot account (GraphQL typename `Bot`) listed in `exempt_authors` (GraphQL reports the bot as `dependabot`; REST spells it `dependabot[bot]`,
+and either spelling matches, without case) needs no link, in the audit and in sync. A pull request with no readable
+author, such as one from a deleted account, and a person whose login matches an entry, is still checked. The audit prints
+one `NOTE` naming the active entries. A `board.yaml` with this key is refused as an unknown key by a SAFO build older
+than this change.
 
 Exit codes are unchanged: 0 clean, 1 drift, 2 cannot tell.
 

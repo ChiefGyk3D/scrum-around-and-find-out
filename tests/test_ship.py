@@ -50,6 +50,9 @@ STUB = textwrap.dedent(
         reply(pop("merges"))
     if key == "api graphql":
         reply({{"out": json.dumps(pop("threads"))}})
+    if rest[0] == "api" and "/reviews" in rest[1]:
+        state.setdefault("reviews", [[]])
+        reply({{"out": "\\n".join(json.dumps(i) for i in pop("reviews"))}})
     if rest[0] == "api" and "/pulls" in rest[1]:
         reply({{"out": json.dumps(state.get("commit_pulls", []))}})
     if rest[0] == "api":
@@ -97,13 +100,13 @@ CLEAN: dict[str, Any] = {
 }
 
 
-def threads(*unresolved: str) -> dict[str, Any]:
+def threads(*unresolved: str, body: str = "please fix this", author: str = "x") -> dict[str, Any]:
     nodes = [
         {
             "isResolved": False,
             "path": p,
             "line": 3,
-            "comments": {"nodes": [{"author": {"login": "x"}, "url": f"https://x/{p}"}]},
+            "comments": {"nodes": [{"author": {"login": author}, "url": f"https://x/{p}", "body": body}]},
         }
         for p in unresolved
     ] + [{"isResolved": True, "path": "done.py", "line": 1, "comments": {"nodes": []}}]

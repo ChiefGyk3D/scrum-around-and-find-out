@@ -12,7 +12,8 @@ For each pull request, in order:
    An empty rollup, a missing required check, or any run still queued or in progress is PENDING, never done.
 3. A cancelled job is re-run once. A job whose only failed step is the approved egress canary (EX-0001) is re-run, at
    most twice per run. Any other failure is real and is never re-run.
-4. Require 0 unresolved review threads; otherwise stop and list them.
+4. Optionally (`--wait-for-review SECONDS`) wait, bounded, for the automated reviewer's review of the pinned head, then
+   require 0 unresolved review threads; otherwise stop and list each (author, file:line, first 600 characters).
 5. Merge with `--match-head-commit <pinned sha>`, retry once on "Base branch was modified", then read the state back.
 
 `--open-pr` first pushes the branch (never forced), opens the pull request from `--title` and `--issue`, and pins the
@@ -34,6 +35,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TextIO
@@ -60,6 +62,9 @@ FAILING = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"
 SHA = re.compile(r"[0-9a-f]{40}")
 SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+BODY_LIMIT = 600  # characters of a review comment printed per thread; never more
+MAX_WAIT_FOR_REVIEW = 900
+REVIEWER_LOGINS = ("copilot-pull-request-reviewer", "copilot")  # the automated reviewer, compared without case
 RUN_URL = re.compile(r"/actions/runs/(\d+)(?:/job/(\d+))?")
 
 Run = Callable[..., Any]
@@ -82,6 +87,31 @@ class Check:
     run_id: str = ""
     job_id: str = ""
     url: str = ""
+
+
+def clean(text: str, limit: int) -> tuple[str, bool]:
+    """(`text` as one line without control or format characters, cut to `limit` characters; whether it was cut)."""
+    kept = []
+    for char in text:
+        if char.isspace():
+            kept.append(" ")
+        elif unicodedata.category(char)[0] != "C":
+            kept.append(char)
+    flat = " ".join("".join(kept).split())
+    return flat[:limit], len(flat) > limit
+
+
+@dataclass(frozen=True)
+class Thread:
+    where: str  # path:line
+    author: str
+    url: str
+    body: str  # already cleaned and cut to BODY_LIMIT
+    cut: bool
+
+    def lines(self) -> list[str]:
+        shown = f"{self.body} [truncated]" if self.cut else self.body
+        return [f"  {self.where} {self.url}".rstrip(), f'    {self.author or "?"}: "{shown}"']
 
 
 @dataclass
@@ -227,7 +257,9 @@ class Watcher:
         delete_branch: bool,
         sleep: Sleep = time.sleep,
         clock: Clock = time.monotonic,
+        wait_for_review: float = 0.0,
     ):
+        self.wait_for_review = wait_for_review
         self.gh, self.out = gh, out
         self.timeout, self.interval, self.max_polls = timeout, interval, max_polls
         self.method, self.delete_branch = method, delete_branch
@@ -269,14 +301,14 @@ class Watcher:
                 names.append(context)
         return names
 
-    def threads(self, repo: str, number: int) -> list[str]:
+    def threads(self, repo: str, number: int) -> list[Thread]:
         owner, name = repo.split("/", 1)
         query = (
             "query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name)"
             "{pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}"
-            "nodes{isResolved path line comments(first:1){nodes{author{login} url}}}}}}}"
+            "nodes{isResolved path line comments(first:1){nodes{author{login} url body}}}}}}}"
         )
-        unresolved: list[str] = []
+        unresolved: list[Thread] = []
         cursor = ""
         for _ in range(20):
             args = ["api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}"]
@@ -292,11 +324,60 @@ class Watcher:
             for node in nodes:
                 if isinstance(node, dict) and not node.get("isResolved"):
                     first = ((node.get("comments") or {}).get("nodes") or [{}])[0] or {}
-                    where = f"{node.get('path') or '?'}:{node.get('line') or '?'}"
-                    unresolved.append(f"{where} {first.get('url') or ''}".strip())
+                    where = clean(f"{node.get('path') or '?'}:{node.get('line') or '?'}", 300)[0]
+                    author = clean(str((first.get("author") or {}).get("login") or ""), 100)[0]
+                    body, cut = clean(str(first.get("body") or ""), BODY_LIMIT)
+                    unresolved.append(Thread(where, author, clean(str(first.get("url") or ""), 300)[0], body, cut))
             if not more:
                 return unresolved
         raise ShipError(EXIT_ERROR, "more than 2000 review threads: not read in full")
+
+    def reviewed(self, repo: str, number: int, pin: str) -> bool:
+        """True when the automated reviewer has a review on exactly the pinned commit (a read; REST)."""
+        code, out, err = self.gh.gh_call(
+            "api",
+            f"repos/{repo}/pulls/{number}/reviews?per_page=100",
+            "--paginate",
+            "--jq",
+            ".[] | {login: .user.login, commit: .commit_id}",
+        )
+        if code != 0:
+            raise ShipError(EXIT_ERROR, f"cannot read the reviews of #{number}: {err.strip()[:200]}")
+        for raw in out.splitlines():
+            if not raw.strip():
+                continue
+            try:
+                item = bounded.loads(raw)
+                login, commit = str(item["login"] or "").lower(), str(item["commit"] or "")
+            except (ValueError, KeyError, TypeError):
+                raise ShipError(EXIT_ERROR, "unreadable reviews answer") from None
+            if commit == pin and login.removesuffix("[bot]") in REVIEWER_LOGINS:
+                return True
+        return False
+
+    def await_review(self, repo: str, number: int, pin: str, deadline: float) -> Result | None:
+        """Wait for the automated reviewer's review of the pinned head, bounded by `--wait-for-review`, by `--timeout`
+        (as `deadline`) and by `--max-polls`. It goes on either way, with a notice when none came; a moved head
+        ends it."""
+        if self.wait_for_review <= 0:
+            return None
+        end = min(deadline, self.clock() + self.wait_for_review)
+        for poll in range(1, self.max_polls + 1):
+            if end - self.clock() <= 0:  # no gh call is started after the deadline
+                break
+            head = str(self.view(repo, number)["headRefOid"])
+            if head != pin:
+                return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
+            if end - self.clock() <= 0:  # the head read used the rest of the time
+                break
+            if self.reviewed(repo, number, pin):
+                return None
+            left = end - self.clock()
+            if left <= 0 or poll == self.max_polls:
+                break
+            self.sleep(min(self.interval, left))
+        self.say(f"NOTICE no review by the automated reviewer on {pin[:12]} arrived within the wait; checking threads")
+        return None
 
     # CI
 
@@ -435,8 +516,12 @@ class Watcher:
 
     def one(self, repo: str, number: int, expect: str = "") -> Result:
         try:
+            started = self.clock()
             pin = expect or str(self.view(repo, number)["headRefOid"])
             ended = self.wait_ci(repo, number, pin)
+            if ended is not None:
+                return ended
+            ended = self.await_review(repo, number, pin, started + self.timeout)
             if ended is not None:
                 return ended
             open_threads = self.threads(repo, number)
@@ -445,7 +530,7 @@ class Watcher:
                     EXIT_THREADS,
                     "THREADS",
                     f"{len(open_threads)} unresolved review thread(s)",
-                    [f"  {t}" for t in open_threads],
+                    [line for t in open_threads for line in t.lines()],
                 )
             return self.merge(repo, number, pin)
         except ShipError as error:
@@ -487,6 +572,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", type=float, default=20.0, help="seconds between polls, 1 to 300 (default 20)")
     p.add_argument("--max-polls", type=int, default=120, help="poll cap per PR, at most 1000 (default 120)")
     p.add_argument("--method", choices=("squash", "merge", "rebase"), default="squash")
+    p.add_argument(
+        "--wait-for-review",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="after CI is green, wait up to this long (0 to 900, default 0; within --timeout and --max-polls) for the "
+        "automated reviewer's review of the pinned head before the thread check; then go on either way",
+    )
     p.add_argument("--delete-branch", action="store_true")
     p.add_argument(
         "--open-pr", action="store_true", help="push the branch and open the PR first (needs --title, --issue)"
@@ -508,6 +601,8 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error("--timeout must be 1 to 7200")
     if not 1 <= args.max_polls <= 1000:
         parser.error("--max-polls must be 1 to 1000")
+    if not 0 <= args.wait_for_review <= MAX_WAIT_FOR_REVIEW:
+        parser.error(f"--wait-for-review must be 0 to {MAX_WAIT_FOR_REVIEW}")
     if args.expect_head and (not SHA.fullmatch(args.expect_head) or len(args.pr) > 1 or args.open_pr):
         parser.error("--expect-head is one 40-hex commit for one existing PR")
     if args.branch and not BRANCH.fullmatch(args.branch):
@@ -556,6 +651,7 @@ def main(
         delete_branch=args.delete_branch,
         sleep=sleep,
         clock=clock,
+        wait_for_review=args.wait_for_review,
     )
     results: list[tuple[str, Result]] = []
     try:

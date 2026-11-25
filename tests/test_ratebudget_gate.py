@@ -1,0 +1,657 @@
+# SPDX-License-Identifier: Apache-2.0
+"""#367 (the launch gate) and #368 (a hostile identity cache must fail open)."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from safo import ratebudget as rb
+from test_ratebudget import OK, T0, Clock, Harness, budget, counter, done, http
+
+DIR = ".local/state/safo/ratebudget"
+WRITE = ["api", "-X", "PATCH", "repos/o/r/issues/1", "-f", "a=b"]
+
+
+def lock_is_held(directory: Path, name: str = "lock") -> bool:
+    """True when another descriptor cannot take the named lock file of the directory right now."""
+    fd = (directory / name).open("a")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        fd.close()
+
+
+# 367: the gate
+
+
+def test_a_paused_first_ticket_cannot_launch_right_behind_the_second(tmp_path: Path) -> None:
+    clock = Clock()
+    b = budget(tmp_path, clock)
+    first = b.reserve("core", write=True)  # slot T0
+    second = b.reserve("core", write=True)  # slot T0 + 1
+    assert first.wait == 0
+    assert second.wait == pytest.approx(1)
+    launched: list[float] = []
+
+    def start() -> str:
+        launched.append(clock.now)
+        return "child"
+
+    def sleep(seconds: float) -> None:
+        clock.now += seconds
+
+    clock.now = T0 + 1.0  # the second ticket wakes on time and goes
+    b.launch_gate(start, sleep)
+    clock.now = T0 + 1.2  # the first ticket was descheduled past the second's slot
+    b.launch_gate(start, sleep)
+    assert launched == [pytest.approx(T0 + 1.0), pytest.approx(T0 + 2.0)]
+    assert launched[1] - launched[0] >= rb.WRITE_SPACING
+
+
+def test_the_gate_waits_from_the_last_actual_launch(tmp_path: Path) -> None:
+    clock = Clock()
+    b = budget(tmp_path, clock)
+    b.launch_gate(lambda: None, lambda s: None)  # a launch at T0
+    clock.now = T0 + 0.4
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    b.launch_gate(lambda: None, sleep)
+    assert slept == [pytest.approx(0.6)]
+
+
+def test_the_gate_records_the_real_launch_time(tmp_path: Path) -> None:
+    clock = Clock()
+    b = budget(tmp_path, clock)
+
+    def start() -> None:
+        clock.now += 0.3  # spawning took a while
+
+    b.launch_gate(start, lambda s: None)
+    state = json.loads((b.directory / "state.json").read_text())
+    assert state["last_launch"] == {"local|*": pytest.approx(T0 + 0.3, rel=0, abs=1e-6)}
+
+
+def test_the_child_is_started_while_the_gate_is_held(tmp_path: Path) -> None:
+    b = budget(tmp_path)
+    seen: list[tuple[bool, bool]] = []
+    b.launch_gate(
+        lambda: seen.append((lock_is_held(b.directory, b.gate_lock_name), lock_is_held(b.directory))), lambda s: None
+    )
+    assert seen == [(True, False)]  # the account's gate is held at the spawn; the shared state lock is not
+    assert not lock_is_held(b.directory, b.gate_lock_name)  # and it is released as soon as the start returns
+
+
+def test_a_failed_spawn_still_counts_as_a_launch(tmp_path: Path) -> None:
+    clock = Clock()
+    b = budget(tmp_path, clock)
+
+    def boom() -> None:
+        raise OSError("exec failed")
+
+    with pytest.raises(OSError, match="exec failed"):
+        b.launch_gate(boom, lambda s: None)
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    b.launch_gate(lambda: None, sleep)
+    assert slept  # the next one waited: an ambiguous spawn is not free
+
+
+@pytest.mark.parametrize("ahead", [6.0, 3600.0, 4_000_000_000.0])
+def test_a_launch_recorded_in_the_future_fails_closed_for_one_spacing(tmp_path: Path, ahead: float) -> None:
+    """The wall clock stepped back (or the record is corrupt): wait one spacing, once, never launch at once."""
+    clock = Clock()
+    b = budget(tmp_path, clock)
+    b.launch_gate(lambda: None, lambda s: None)
+    state = json.loads((b.directory / "state.json").read_text())
+    state["last_launch"] = {"local|*": T0 + ahead}
+    (b.directory / "state.json").write_text(json.dumps(state))
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    b.launch_gate(lambda: None, sleep)
+    assert slept == [pytest.approx(rb.WRITE_SPACING)]  # bounded: one spacing, however far ahead the record is
+    assert json.loads((b.directory / "state.json").read_text())["last_launch"]  # clamped, not deleted
+
+
+def test_a_backward_step_after_a_launch_does_not_allow_an_immediate_second_launch(tmp_path: Path) -> None:
+    clock = Clock()
+    b = budget(tmp_path, clock)
+    b.launch_gate(lambda: None, lambda s: None)  # a launch at T0
+    clock.now = T0 - 6  # the wall clock is corrected backwards
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    b.launch_gate(lambda: None, sleep)
+    assert slept
+
+
+class Mono:
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def mono_budget(tmp_path: Path, clock: Clock, mono: Mono, boot: str = "boot-a") -> rb.Budget:
+    return rb.Budget(tmp_path / "rb", clock, "local", mono=mono, boot_id=boot)
+
+
+def test_same_boot_spacing_uses_the_monotonic_clock_not_the_wall_clock(tmp_path: Path) -> None:
+    clock, mono = Clock(), Mono()
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, lambda s: None)
+    clock.now = T0 - 3600  # the wall clock jumps an hour back
+    mono.now += 5.0  # but five real seconds passed
+    slept: list[float] = []
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, slept.append)
+    assert slept == []  # exact: no needless wait after a wall-clock step
+
+
+def test_same_boot_spacing_still_waits_when_the_wall_clock_says_otherwise(tmp_path: Path) -> None:
+    clock, mono = Clock(), Mono()
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, lambda s: None)
+    clock.now = T0 + 3600  # the wall clock jumps an hour forward
+    mono.now += 0.25
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        mono.now += seconds
+
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, sleep)
+    assert slept == [pytest.approx(0.75)]
+
+
+def test_another_boot_falls_back_to_the_wall_clock(tmp_path: Path) -> None:
+    clock, mono = Clock(), Mono()
+    mono_budget(tmp_path, clock, mono, "boot-a").launch_gate(lambda: None, lambda s: None)
+    mono.now = 5.0  # a fresh boot: the monotonic clock restarted
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    mono_budget(tmp_path, clock, mono, "boot-b").launch_gate(lambda: None, sleep)
+    assert slept == [pytest.approx(1.0)]  # the wall clock shows the last launch a moment ago
+
+
+def test_the_boot_id_reader_accepts_only_a_uuid(tmp_path: Path) -> None:
+    good = tmp_path / "id"
+    good.write_text("0123abcd-0123-4567-89ab-0123456789ab\n")
+    assert rb.read_boot_id(good) == "0123abcd-0123-4567-89ab-0123456789ab"
+    good.write_text("../../etc\n")
+    assert rb.read_boot_id(good) is None
+    assert rb.read_boot_id(tmp_path / "missing") is None
+
+
+# the gate lock is per account
+
+
+def test_one_accounts_stalled_spawn_does_not_block_another_account(tmp_path: Path) -> None:
+    import threading
+
+    a = rb.Budget(tmp_path / "rb", Clock(), "acct-a")
+    b = rb.Budget(tmp_path / "rb", Clock(), "acct-b")
+    a_in_spawn, release_a = threading.Event(), threading.Event()
+    a_result: list[str] = []
+
+    def stalled_spawn() -> str:
+        a_in_spawn.set()
+        release_a.wait(10)
+        return "a"
+
+    worker = threading.Thread(target=lambda: a_result.append(a.launch_gate(stalled_spawn, lambda s: None)))
+    worker.start()
+    try:
+        assert a_in_spawn.wait(5)
+        b_done = threading.Event()
+        b_results: list[str] = []
+
+        def other_account() -> None:
+            b_results.append(b.launch_gate(lambda: "b", lambda s: None))  # its own gate lock
+            b.observe([counter()])  # and the shared state is free for everyone meanwhile
+            b_results.append(b.reserve("core", write=True).action)
+            b_results.append(a.reserve("core", write=False).action)
+            b_done.set()
+
+        threading.Thread(target=other_account, daemon=True).start()
+        assert b_done.wait(3), "account B was blocked by account A's stalled spawn"
+        assert b_results == ["b", "go", "go"]
+    finally:
+        release_a.set()
+        worker.join(10)
+    assert a_result == ["a"]
+
+
+def test_the_same_accounts_second_launcher_waits_for_the_gate_and_gives_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    monkeypatch.setattr(rb, "GATE_LOCK_WAIT_SECONDS", 0.3)
+    a = rb.Budget(tmp_path / "rb", Clock(), "acct-a")
+    again = rb.Budget(tmp_path / "rb", Clock(), "acct-a")
+    in_spawn, release = threading.Event(), threading.Event()
+
+    def stalled() -> None:
+        in_spawn.set()
+        release.wait(10)
+
+    worker = threading.Thread(target=lambda: a.launch_gate(stalled, lambda s: None))
+    worker.start()
+    try:
+        assert in_spawn.wait(5)
+        with pytest.raises(rb.GateBusy):
+            again.launch_gate(lambda: None, lambda s: None)
+    finally:
+        release.set()
+        worker.join(10)
+
+
+def test_the_gate_lock_name_is_a_hash_of_the_scope() -> None:
+    a = rb.Budget(Path("/x"), Clock(), "acct-a").gate_lock_name
+    b = rb.Budget(Path("/x"), Clock(), "../../etc/passwd").gate_lock_name
+    assert a != b
+    assert "/" not in b
+    assert a.startswith("gate-")
+    assert a.endswith(".lock")
+
+
+def test_the_gate_gives_up_after_bounded_tries(tmp_path: Path) -> None:
+    b = budget(tmp_path)
+    b.launch_gate(lambda: None, lambda s: None)
+    with pytest.raises(rb.GateBusy):
+        b.launch_gate(lambda: None, lambda s: None)  # the clock never moves, so it never becomes ready
+
+
+def test_a_broken_lock_is_gate_unavailable_and_nothing_started(tmp_path: Path) -> None:
+    b = budget(tmp_path)
+    b.observe([])
+    (b.directory / "lock").unlink()
+    (b.directory / "lock").symlink_to(tmp_path / "elsewhere")
+    started: list[int] = []
+    with pytest.raises(rb.GateUnavailable):
+        b.launch_gate(lambda: started.append(1), lambda s: None)
+    assert started == []
+
+
+# 367: the wrapper uses it
+
+
+def test_wrapper_writes_launch_at_least_a_second_apart(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    h.advance = True
+    for _ in range(3):
+        assert h.go(WRITE) == 0
+    gaps = [b - a for a, b in zip(h.launches, h.launches[1:], strict=False)]
+    assert len(h.launches) == 3
+    assert all(g >= rb.WRITE_SPACING - 1e-9 for g in gaps)
+
+
+def test_wrapper_reads_do_not_use_the_gate(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    for _ in range(3):
+        h.go(["api", "repos/o/r"])
+    assert h.slept == []
+    assert json.loads((tmp_path / DIR / "state.json").read_text())["last_launch"] == {}
+
+
+class Handle:
+    def __init__(self, directory: Path, log: list[str], gate: str) -> None:
+        self.directory, self.log, self.gate = directory, log, gate
+
+    def wait(self) -> subprocess.CompletedProcess[str]:
+        held = lock_is_held(self.directory) or lock_is_held(self.directory, self.gate)
+        self.log.append("held-while-running" if held else "free-while-running")
+        return done(http("200 OK", OK, "{}"))
+
+    def stop(self, signum: int) -> None:
+        return None
+
+
+def test_the_gate_is_released_after_the_spawn_not_after_the_child_exits(tmp_path: Path) -> None:
+    from io import StringIO
+
+    log: list[str] = []
+    directory = tmp_path / DIR
+
+    def launch(command: list[str], stdin: str | None) -> Handle:
+        log.append("held-at-spawn" if lock_is_held(directory, h.ledger.gate_lock_name) else "free-at-spawn")
+        return Handle(directory, log, h.ledger.gate_lock_name)
+
+    h = Harness(tmp_path)
+    h.advance = True
+    h.go(WRITE)  # creates the directory and the lock
+    log.clear()
+    code = rb.main(
+        WRITE,
+        env=h.env,
+        out=StringIO(),
+        err=StringIO(),
+        run=h.run,
+        sleep=h.sleep,
+        clock=h.clock,
+        gh="/usr/bin/gh",
+        launch=launch,
+    )
+    assert code == 0
+    assert log == ["held-at-spawn", "free-while-running"]
+
+
+def test_wrapper_goes_ahead_when_the_gate_is_unavailable(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    h.go(["api", "repos/o/r"])
+    (tmp_path / DIR / "lock").unlink()
+    (tmp_path / DIR / "lock").symlink_to(tmp_path / "elsewhere")
+    h.err.truncate(0)
+    h.err.seek(0)
+    assert h.go(WRITE) == 0
+    assert len(h.calls) == 2  # launched once, not twice
+    assert "unavailable" in h.err.getvalue()
+
+
+def test_wrapper_refuses_when_the_gate_stays_busy(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    h.go(WRITE)
+    h.calls.clear()
+    # the sleep stub does not move the clock, so the gate never opens
+    code = h.go(WRITE)
+    assert code == rb.EXIT_THROTTLED
+    assert h.calls == []
+    assert "launch gate" in h.err.getvalue()
+
+
+# 368: a hostile but valid identity cache fails open
+
+SCOPE_ARGS = ["api", "x"]
+
+
+def put_cache(tmp_path: Path, content: str) -> None:
+    d = tmp_path / DIR
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    f = d / "identity.json"
+    f.write_text(content)
+    f.chmod(0o600)
+
+
+HOSTILE = [
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"at": "yesterday", "scope": null}}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"at": [1], "scope": null}}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"at": null, "scope": null}}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"at": true, "scope": null}}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"scope": null}}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": 5}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": [1, 2]}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"at": 1e999, "scope": null}}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"at": ' + "9" * 400 + ', "scope": null}}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"at": 1, "scope": 7}}}',
+    '{"ids": {"aaaaaaaaaaaaaaaaaaaa": {"at": 1, "scope": "not-hex"}}}',
+    '{"ids": {"not a key": {"at": 1, "scope": null}}}',
+    '{"ids": []}',
+    '{"ids": "x"}',
+    '{"ids": null}',
+    "[]",
+    "5",
+    "[" * 200 + "]" * 200,
+]
+
+
+@pytest.mark.parametrize("content", HOSTILE)
+def test_a_hostile_identity_cache_does_not_crash_the_wrapper(tmp_path: Path, content: str) -> None:
+    put_cache(tmp_path, content)
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    h.cred = "fresh-credential"  # a cache miss, so the cache is maintained, not just read
+    assert h.go(["api", "repos/o/r"]) == 0
+    assert len(h.calls) == 1
+    assert h.ledger.rows()  # and the ledger still works
+
+
+@pytest.mark.parametrize("content", HOSTILE)
+def test_a_hostile_identity_cache_is_cleaned_up_on_the_next_write(tmp_path: Path, content: str) -> None:
+    put_cache(tmp_path, content)
+    clock = Clock()
+
+    def run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return done("octocat\n")
+
+    rb.scope_for({"GH_TOKEN": "c1"}, SCOPE_ARGS, run, "/usr/bin/gh", tmp_path / DIR, clock)
+    data = json.loads((tmp_path / DIR / "identity.json").read_text())
+    assert all(isinstance(v, dict) and isinstance(v.get("at"), int | float) for v in data["ids"].values())
+    assert len(data["ids"]) == 1  # the malformed records are gone, the fresh one is in
+
+
+def test_a_cache_maintenance_error_is_ledger_unavailable_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise TypeError("hostile")
+
+    monkeypatch.setattr(rb, "_identity_put", boom)
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    assert h.go(["api", "repos/o/r"]) == 0
+    assert len(h.calls) == 1
+
+
+@pytest.mark.parametrize("error", [TypeError("x"), ValueError("x"), OverflowError("x")])
+def test_those_errors_from_the_budget_setup_fail_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(rb, "scope_for", boom)
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    assert h.go(["api", "repos/o/r"]) == 0
+    assert "unavailable" in h.err.getvalue()
+    assert len(h.calls) == 1
+
+
+# the real launcher (Popen) against a stand-in gh executable
+
+
+def fake_gh(tmp_path: Path, body: str) -> str:
+    script = tmp_path / "fake-gh"
+    script.write_text("#!/bin/sh\n" + body)
+    script.chmod(0o755)
+    return str(script)
+
+
+def real_main(tmp_path: Path, gh: str, argv: list[str], stdin: str | None = None) -> tuple[int, str, str]:
+    from io import StringIO
+
+    out, err = StringIO(), StringIO()
+    env = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "GH_TOKEN": "tok", "SAFO_CALLER": "t"}
+    code = rb.main(argv, env=env, out=out, err=err, gh=gh, stdin=stdin)
+    return code, out.getvalue(), err.getvalue()
+
+
+def test_the_real_launcher_passes_the_request_body_and_returns_the_output(tmp_path: Path) -> None:
+    gh = fake_gh(tmp_path, "printf 'HTTP/2.0 200 OK\\r\\n\\r\\n'\ncat\n")
+    code, out, _ = real_main(tmp_path, gh, ["api", "-X", "PATCH", "x/y", "--input", "-"], stdin="hello")
+    assert code == 0
+    assert out == "hello"
+
+
+def test_the_real_launcher_kills_a_child_that_outlives_the_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rb, "GH_TIMEOUT_SECONDS", 0.5)
+    gh = fake_gh(tmp_path, 'case "$2" in user) echo octocat;; *) sleep 30;; esac\n')
+    started = time.monotonic()
+    code, _, err = real_main(tmp_path, gh, ["api", "-X", "PATCH", "x/y", "-f", "a=b"])
+    assert time.monotonic() - started < 3  # the child's own child (sleep 30) was ended too, not waited for
+    assert code == rb.EXIT_UNKNOWN_OUTCOME
+    assert "outcome unknown" in err
+
+
+def test_wrapper_waits_again_when_another_process_launched_during_its_sleep(tmp_path: Path) -> None:
+    h = Harness(tmp_path, http("200 OK", OK, "{}"))
+    h.advance = True
+    h.go(WRITE)  # launch at T0
+    fired: list[int] = []
+
+    def other_process(_seconds: float) -> None:
+        if not fired:  # an earlier ticket, descheduled until now, launches during this writer's sleep
+            fired.append(1)
+            h.ledger.launch_gate(lambda: h.launches.append(h.clock.now), h.sleep)
+
+    h.on_sleep = other_process
+    assert h.go(WRITE) == 0
+    gaps = [b - a for a, b in zip(h.launches, h.launches[1:], strict=False)]
+    assert len(h.launches) == 3
+    assert all(g >= rb.WRITE_SPACING - 1e-9 for g in gaps)
+
+
+def test_scope_for_itself_survives_a_cache_maintenance_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise OverflowError("hostile")
+
+    monkeypatch.setattr(rb, "_identity_put", boom)
+
+    def run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return done("octocat\n")
+
+    assert not rb.scope_for({"GH_TOKEN": "c"}, SCOPE_ARGS, run, "/usr/bin/gh", tmp_path / DIR, Clock()).unknown
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        '{"at": "yesterday", "scope": null}',
+        '{"at": [1], "scope": null}',
+        '{"at": null}',
+        '{"at": 1, "scope": 7}',
+        '{"at": 1, "scope": "zz"}',
+        '{"at": ' + "9" * 400 + ', "scope": null}',
+        "5",
+        "[]",
+    ],
+)
+def test_a_hostile_record_at_the_credentials_own_key_is_a_miss(tmp_path: Path, entry: str) -> None:
+    key = rb._hash("credential", "github.com", "c1")
+    put_cache(tmp_path, '{"ids": {"' + key + '": ' + entry + "}}")
+
+    def run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return done("octocat\n")
+
+    got = rb.scope_for({"GH_TOKEN": "c1"}, SCOPE_ARGS, run, "/usr/bin/gh", tmp_path / DIR, Clock())
+    assert not got.unknown  # asked again, and the bad record was replaced
+    data = json.loads((tmp_path / DIR / "identity.json").read_text())
+    assert data["ids"][key]["scope"] == got.name
+
+
+# round 6: a hostile same-boot monotonic record in the future is repaired like a future wall record
+
+
+def test_a_future_monotonic_record_with_the_matching_boot_is_repaired_once(tmp_path: Path) -> None:
+    clock, mono = Clock(), Mono()
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, lambda s: None)
+    state = json.loads((tmp_path / "rb" / "state.json").read_text())
+    state["launch_mono"]["local|*"] = {"boot": "boot-a", "t": 999_999_999_999.0}
+    (tmp_path / "rb" / "state.json").write_text(json.dumps(state))
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        mono.now += seconds
+        clock.now += seconds
+
+    b = mono_budget(tmp_path, clock, mono)
+    assert b.launch_gate(lambda: "went", sleep) == "went"
+    assert slept == [pytest.approx(rb.WRITE_SPACING)]  # exactly one spacing, then it proceeded
+    repaired = json.loads((tmp_path / "rb" / "state.json").read_text())["launch_mono"]["local|*"]
+    assert repaired["t"] < 1e6  # rewritten from the current monotonic clock, not left as it was
+    again: list[float] = []
+
+    def sleep_again(seconds: float) -> None:
+        again.append(seconds)
+        mono.now += seconds
+
+    mono_budget(tmp_path, clock, mono).launch_gate(lambda: None, sleep_again)
+    assert again == [pytest.approx(rb.WRITE_SPACING)]  # a normal spacing after the real launch, not a stuck gate
+
+
+# round 7 (#374): a header block beyond the cap is rejected, never printed as body
+
+CAP = rb.MAX_HEADER_BYTES
+
+
+def block_of(head_length: int) -> str:
+    """An include prelude whose header section (before the blank line) is exactly head_length characters long."""
+    prefix = "HTTP/2.0 200 OK\r\nx-pad: "
+    return prefix + "a" * (head_length - len(prefix)) + "\r\n\r\n"
+
+
+def test_a_header_section_of_exactly_the_cap_is_accepted() -> None:
+    status, _headers, body = rb._split_response(block_of(CAP) + "body")
+    assert (status, body) == (200, "body")
+
+
+def test_a_header_section_one_over_the_cap_is_rejected() -> None:
+    with pytest.raises(rb.HeaderBlockError):
+        rb._split_response(block_of(CAP + 1) + "body")
+
+
+def test_an_unterminated_header_block_is_rejected() -> None:
+    with pytest.raises(rb.HeaderBlockError):
+        rb._split_response("HTTP/2.0 200 OK\r\nx-pad: " + "a" * (CAP * 2))
+
+
+def test_the_wrapper_withholds_an_oversized_header_block_and_keeps_the_exit_code(tmp_path: Path) -> None:
+    h = Harness(tmp_path, block_of(CAP + 1) + "the-body")
+    code = h.go(["api", "repos/o/r"])
+    assert code == 0
+    assert h.out.getvalue() == ""  # neither the status line, nor the headers, nor the body
+    assert "HTTP/2.0" not in h.out.getvalue()
+    assert "withheld" in h.err.getvalue()
+    assert h.ledger.rows()[0]["status"] == 0  # recorded, with no counters trusted
+    assert h.ledger.headroom("core").level == "ok"
+
+
+def test_the_wrapper_keeps_a_failing_exit_code_when_the_headers_are_oversized(tmp_path: Path) -> None:
+    h = Harness(tmp_path, block_of(CAP + 1), code=4)
+    assert h.go(["api", "repos/o/r"]) == 4
+    assert h.out.getvalue() == ""
+
+
+def test_the_wrapper_still_prints_a_body_after_an_accepted_block(tmp_path: Path) -> None:
+    h = Harness(tmp_path, block_of(CAP) + "the-body")
+    assert h.go(["api", "repos/o/r"]) == 0
+    assert h.out.getvalue() == "the-body"
+
+
+def test_the_cap_holds_for_bare_line_feed_terminators_too() -> None:
+    lf = "HTTP/2.0 200 OK\nx-pad: "
+    ok = lf + "a" * (CAP - len(lf)) + "\n\nbody"
+    over = lf + "a" * (CAP + 1 - len(lf)) + "\n\nbody"
+    assert rb._split_response(ok)[0] == 200
+    with pytest.raises(rb.HeaderBlockError):
+        rb._split_response(over)

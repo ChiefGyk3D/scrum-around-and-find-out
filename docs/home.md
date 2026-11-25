@@ -22,6 +22,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Gemini broker threat model](gemini-broker-threat-model.md): assets, actors, ranked risks, mitigations and verifications for that design.
 - [The Action](action.md): what it trusts from its caller: the trusted events, the bound revision the board file is read from, and what is and is not guaranteed.
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
+- [safo-rmguard](rmguard.md): the Bash hook that blocks wildcard and parent deletes in shared dev directories.
 - [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
 - [Look before instructing](look-before-instructing.md): prior art, then the vendor's docs page, then the live system; never a click path from memory.
 - [Done means verified](done-means-verified.md): "done" needs an observation this turn through the user's path, plus the destructive-step checklist.
@@ -33,6 +34,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Claude Code plugins](plugins.md): set up the Codex and Ollama plugins, and where each one fits.
 - [Prerequisites](prerequisites.md): the tools, plugins, packs and accounts SAFO leans on, with verified minimum versions, and `safo doctor` to check them.
 - [Local LLM](local-llm.md): what a local model is good and bad at, and the guard that keeps it from evicting a resident model.
+- [Shared GitHub API budget and card edits](ratebudget.md): `ghw`, `safo-ratebudget` and `safo-card`: one budget view for every session, one REST call per card edit.
 - [Limits](limits.md): reading each tool's real usage and deciding when to switch.
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.
 - [Approval issues](approvals.md): how a gate or change approval is read and what it must say.

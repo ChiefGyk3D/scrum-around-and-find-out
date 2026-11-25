@@ -193,6 +193,13 @@ def closed_pulls(fake: FakeGitHub, v: JSON) -> JSON:
     return _repo_read(fake, v, "pullRequests", ("PullRequest",), ("CLOSED", "MERGED"))
 
 
+def _author_json(c: FContent) -> JSON:
+    out: JSON = {"login": c.author}
+    if c.author_type is not None:
+        out["__typename"] = c.author_type
+    return out
+
+
 def _link_json(c: FContent) -> JSON:
     return {
         "id": c.id,
@@ -201,6 +208,7 @@ def _link_json(c: FContent) -> JSON:
         "merged": c.state == "MERGED",
         "closedAt": c.closed_at,
         "body": c.body,
+        "author": None if c.author is None else _author_json(c),
         "repository": {"nameWithOwner": c.repo},
         "closingIssuesReferences": {"totalCount": c.closing},
     }
@@ -216,6 +224,30 @@ def pull_links(fake: FakeGitHub, v: JSON) -> JSON:
             {"repository": None},
         )
     rows = [_link_json(c) for c in repo.contents if c.kind == "PullRequest"]
+    return {"repository": {"pullRequests": fake.connection(rows, v)}}
+
+
+@handler("RepoPullMergeable")
+def pull_mergeable(fake: FakeGitHub, v: JSON) -> JSON:
+    """Open pull requests of one repository with their mergeable and mergeStateStatus."""
+    repo = fake.repos.get(f"{v['owner']}/{v['name']}".lower())
+    if repo is None or not repo.installed:
+        raise GqlError(
+            "NOT_FOUND",
+            f"Could not resolve to a Repository with the name '{v['owner']}/{v['name']}'.",
+            {"repository": None},
+        )
+    rows = [
+        {
+            "number": c.number,
+            "state": c.state,
+            "repository": {"nameWithOwner": c.repo},
+            "mergeable": c.mergeable,
+            "mergeStateStatus": c.merge_state,
+        }
+        for c in repo.contents
+        if c.kind == "PullRequest" and c.state == "OPEN"
+    ]
     return {"repository": {"pullRequests": fake.connection(rows, v)}}
 
 

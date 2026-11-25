@@ -463,6 +463,7 @@ def emit_then_persist(
     clear_marker: Ident | None = None,
     claim: Path | None = None,
     refresh: Path | None = None,
+    after_emit: Callable[[], None] | None = None,
 ) -> None:
     """The one tail of every guard path. The decision (`data`, or nothing to say) is written and flushed FIRST. If that
     fails nothing else is done; the caller turns it into the exit code. After the line is out:
@@ -501,6 +502,9 @@ def emit_then_persist(
         except Exception:
             with contextlib.suppress(Exception):
                 write_log_failed(folder)
+        if after_emit is not None:  # last and optional: the audit writes come first; this never changes the line
+            with contextlib.suppress(Exception):
+                after_emit()
 
     left = (run.hard - time.monotonic()) if run.hard is not None else APPEND_LOCK_TIMEOUT + 1.0
     with contextlib.suppress(Exception):
@@ -875,6 +879,7 @@ def finish(
     clear: Ident | None = None,
     claim: Path | None = None,
     refresh: Path | None = None,
+    after_emit: Callable[[], None] | None = None,
 ) -> None:
     """The shared tail of the Agent and Bash paths: build the one line (the decision plus every applicable notice, in
     priority order) and hand it to emit_then_persist. `notices` are (visible text, log code)."""
@@ -889,7 +894,9 @@ def finish(
     elif note:
         context = data["hookSpecificOutput"].get("additionalContext")
         data["hookSpecificOutput"]["additionalContext"] = f"{context} {note}" if context else note
-    emit_then_persist(ctx, run, data if out_text or notices or note else None, folder, record, clear, claim, refresh)
+    emit_then_persist(
+        ctx, run, data if out_text or notices or note else None, folder, record, clear, claim, refresh, after_emit
+    )
 
 
 GLOBAL_VALUE_OPTIONS = ("--board", "--gh-user")  # the top-level options that take the next word as their value
@@ -1277,7 +1284,16 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
     def remaining() -> float:
         return deadline - time.monotonic()
 
-    resolve = ctx.issue_lookup or tracking.gh_resolver(ctx.run, ctx.which, ctx.env, remaining)
+    cache_writes: list[tuple[tracking.Ref, float]] = []
+    resolve = ctx.issue_lookup or tracking.gh_resolver(
+        ctx.run,
+        ctx.which,
+        ctx.env,
+        remaining,
+        None if slow else folder,
+        bounded=lambda work: run_bounded(work, io_budget(run), run),
+        deferred=cache_writes,
+    )
     # `bound` was read above (bound at SessionStart; never read from the working tree here)
 
     def repo() -> str | None:
@@ -1348,7 +1364,14 @@ def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = N
         marker[1] if marker else None,
         path if seen.first else None,
         path if bound else None,
+        after_emit=(lambda: store_cache(folder, cache_writes)) if folder is not None and cache_writes else None,
     )
+
+
+def store_cache(folder: Path, writes: list[tuple[tracking.Ref, float]]) -> None:
+    """The issue cache's writes, run only after the verdict is out, inside the post-delivery worker (bounded there)."""
+    for ref, stamp in writes:
+        tracking.cache_store(folder, ref, stamp)
 
 
 def lead_wait(

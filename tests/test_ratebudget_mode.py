@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+"""`safo-ratebudget`: the status line and the by-caller report, from a ledger in a private HOME."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+from localcli import tool
+from meterdata import NOW
+from safo import ratebudget as rb
+from safo import ratebudget_cli
+
+
+def ledger(home: Path) -> rb.Budget:
+    # the scope `safo-ratebudget` computes in these tests: no gh on PATH, no credential in the environment
+    scope = rb.scope_for({"HOME": str(home), "PATH": ""}, [], subprocess.run, None)
+    return rb.Budget(
+        home / ".local" / "state" / "safo" / "ratebudget", lambda: NOW.timestamp(), scope.name, unknown=scope.unknown
+    )
+
+
+def seed(home: Path, remaining: int) -> None:
+    b = ledger(home)
+    counter = rb.Counter("core/header", "core", 5000, remaining, NOW.timestamp() + 600)
+    b.record(caller="agent-a", bucket="core", klass="repos/*/*/issues/#", write=True, status=200, counters=[counter])
+
+
+def test_empty_ledger(tmp_path: Path) -> None:
+    code, out, _ = tool(ratebudget_cli.main, home=tmp_path)
+    assert code == 0
+    assert out.splitlines()[0] == "ratebudget: no calls recorded"
+    assert "which account" in out  # no gh here, so the account is unknown, and the status says so
+
+
+def test_status_line_ok_exits_zero(tmp_path: Path) -> None:
+    seed(tmp_path, 4000)
+    code, out, _ = tool(ratebudget_cli.main, home=tmp_path)
+    assert code == 0
+    assert "core 20%" in out
+
+
+def test_warn_exits_one(tmp_path: Path) -> None:
+    seed(tmp_path, 2000)  # 60% used: WARN for an unknown account (50%), ok for a known one
+    code, out, _ = tool(ratebudget_cli.main, home=tmp_path)
+    assert code == 1
+    assert "WARN" in out
+
+
+def test_by_caller(tmp_path: Path) -> None:
+    seed(tmp_path, 4000)
+    _, out, _ = tool(ratebudget_cli.main, "--by-caller", home=tmp_path)
+    assert "agent-a" in out
+    assert "core 1 calls (1 writes)" in out
+
+
+def test_json(tmp_path: Path) -> None:
+    seed(tmp_path, 4000)
+    _, out, _ = tool(ratebudget_cli.main, "--by-caller", "--json", home=tmp_path)
+    data = json.loads(out)
+    assert data["by_caller"] == {"agent-a": {"core": {"calls": 1, "writes": 1}}}
+    assert data["line"].startswith("ratebudget:")

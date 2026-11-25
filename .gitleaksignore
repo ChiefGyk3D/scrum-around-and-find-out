@@ -1,23 +1,21 @@
-# Test fixtures in commit dd7d893 (build/group4, T8): a fake PEM header and two
-# 40-hex action pins that the generic rules match. Later commits build them at
-# run time; the scan reads every ref (--all), so the old commit stays flagged.
-dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_mask.py:private-key:15
-dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_action.py:generic-api-key:144
-dd7d8934d6621be4492976ad7ae8f00ca40a3f19:tests/test_action.py:generic-api-key:145
+# Reviewed test fixtures, path-and-rule form (file:rule:line). GYST v1.31.0 defaults the gitleaks scope to
+# pr-commits, and a tree scan can only match this form, never the commit-bound one (commit:file:rule:line); a rebase
+# or squash also orphans a commit id (GYST#336, #367). Each is a fake string; none is a credential.
 
-# Test fixture in commit ead90c5 (#197): the doctor test planted a fake token-shaped marker to prove it is
-# never printed. Later commits build it from plain words at run time; the scan reads every commit.
-ead90c5ecb5aabff96b724cc336db335b9f62e36:tests/test_doctor.py:generic-api-key:23
+# tests/test_mask.py: a fake PEM header (no key body); tests/test_action.py: two 40-hex action pins (public commit ids).
+# Later commits build or no longer carry them as literals.
+tests/test_mask.py:private-key:15
+tests/test_action.py:generic-api-key:144
+tests/test_action.py:generic-api-key:145
 
-# Same fixture, as it stands after the rebase onto main: the commit that adds it is now 4f2c057.
-# Exact fingerprint only; later commits build the marker at run time.
-4f2c0577ef624c33d985ec0a094aeb33576dfb66:tests/test_doctor.py:generic-api-key:23
+# tests/test_doctor.py: a fake token-shaped marker planted to prove it is never printed (#197). Later commits build
+# it from plain words at run time. Two commit ids (before and after a rebase) collapse to this one entry.
+tests/test_doctor.py:generic-api-key:23
 
-# Fake test fixture in the phase 4b client commit on feat/260-broker-client (a key-shaped string in a test). The owning
-# PR replaces the literal with a value built at run time; the old commit stays reachable, and the scan reads every
-# branch. This entry can go when that branch is squash-merged.
-2f52019bda07c69d59c525491c37996c3036c169:tests/test_broker_client.py:generic-api-key:228
+# tests/test_broker_client.py (phase 4b client, feat/260-broker-client): a key-shaped string in a test. The owning PR
+# builds it at run time; the old commit stays reachable. Can go when that branch is squash-merged.
+tests/test_broker_client.py:generic-api-key:228
 
-# Fake test fixture in the enrollment preflight commit on feat/263-enrollment-prep. Same situation: replaced in the
-# owning PR, the old commit stays reachable, and this entry can go when the branch is squash-merged.
-4767aaaeb4ca263e930bdcd052cc6f7eb77b26a6:tests/test_gemini_preflight.py:generic-api-key:22
+# tests/test_gemini_preflight.py (enrollment preflight, feat/263-enrollment-prep): a base64 public-key blob built
+# from bytes 0..31 in a fake runner. Can go when that branch is squash-merged.
+tests/test_gemini_preflight.py:generic-api-key:22
