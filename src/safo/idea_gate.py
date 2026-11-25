@@ -292,6 +292,9 @@ def issue_verdict(args: argparse.Namespace, deps: Deps) -> tuple[str, str, tuple
     text = f"{args.title}\n{args.body}"
     if len(text) > routes.TEXT_LIMIT:
         return (explicit.name if explicit else "unclassified"), "unclassified", (), "the text is too large to classify"
+    risky = routes.unclassifiable(text)
+    if risky:
+        return "unclassified", "unclassified", (), f"the text has {risky}, so it cannot be classified"
     private = [(c, m) for c, m in routes.matching(table, text) if c.private]
     if explicit is not None and explicit.private:
         return explicit.name, "explicit", (), f"{explicit.name} is a private-workflow class"

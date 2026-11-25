@@ -266,13 +266,49 @@ class Decision:
 
 
 def _fold(text: str) -> str:
-    """NFKC, no format characters (zero-width, soft hyphen, bidi marks), case folded."""
-    plain = unicodedata.normalize("NFKC", text)
-    return "".join(c for c in plain if unicodedata.category(c) != "Cf").casefold()
+    """NFKD, no format characters (zero-width, soft hyphen, bidi marks) and no combining marks (so an accent does not
+    hide a word: o-acute folds to o), case folded."""
+    plain = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in plain if unicodedata.category(c) not in ("Cf", "Mn")).casefold()
 
 
 def _norm(text: str) -> str:
     return SEPARATORS.sub(" ", _fold(text)).strip()
+
+
+HAZARDS = (
+    "control characters",
+    "invisible or format characters (zero-width, bidirectional, tag)",
+    "combining marks or variation selectors",
+    "private-use or unassigned characters",
+    "letters or numerals outside accented Latin (Cyrillic, Greek, CJK, non-ASCII digits)",
+)
+
+
+def _hazard(char: str) -> int:
+    """The index in HAZARDS of what makes this character able to hide a word, or -1 when it cannot."""
+    kind = unicodedata.category(char)
+    if kind == "Cc":
+        return -1 if char in "\t\n\r" else 0
+    if kind == "Cf":
+        return 1
+    if kind in ("Mn", "Me"):
+        return 2
+    if kind in ("Co", "Cn", "Cs"):
+        return 3
+    if kind[0] in "LN" and not char.isascii():
+        parts = unicodedata.normalize("NFD", char)  # an ASCII letter and accents: e-acute, n-tilde, u-diaeresis
+        accented = kind[0] == "L" and len(parts) > 1 and parts[0].isascii()
+        return -1 if accented and all(unicodedata.category(m) == "Mn" for m in parts[1:]) else 4
+    return -1
+
+
+def unclassifiable(text: str) -> str:
+    """ "" when the text is plain enough to classify, else the class of character that can hide a word from the matcher
+    (never the character itself). After NFKC only ASCII, accented Latin letters, and symbols, punctuation and spaces
+    pass. One pass over the distinct characters, so it is linear in the text."""
+    found = [h for h in map(_hazard, set(unicodedata.normalize("NFKC", text))) if h >= 0]
+    return HAZARDS[min(found)] if found else ""
 
 
 def _words(text: str) -> tuple[str, ...]:
@@ -298,7 +334,8 @@ def matching(table: RouteTable, text: str) -> list[tuple[RouteClass, tuple[str, 
     size: it is normalised once and split into words once, and the keywords and path hints of every class are looked
     up as word sequences in sets. A keyword matches whole words; punctuation only separates them, so `side, project`
     and `c++` (the word `c`) match too, which can only add private matches, never lose one."""
-    plain, folded = _norm(text), _fold(text)
+    folded = _fold(text)
+    plain = SEPARATORS.sub(" ", folded).strip()
     words = {c.name: [(_norm(k), _words(_norm(k))) for k in c.keywords] for c in table.classes}
     wanted_words = {w for ws in words.values() for _, w in ws if w}
     tokens = _words(plain)

@@ -113,7 +113,16 @@ folding, removing zero-width and other format characters, and reading runs of wh
 as one space; whole words only. The work is linear in the text: it is normalised and split into words once, and the
 keywords (at most 4 words each) and path hints (at most 4 segments) of every class are looked up as word sequences in
 sets, never one scan per term. Punctuation only separates words, so `side, project` and `c++` (the word `c`) match too;
-that can add private matches, never lose one. A public target's decision is written as a `routed` record first, with `outcome`
+that can add private matches, never lose one. Accents are folded away for matching (an o-acute matches `o`).
+
+A text a public target cannot classify is refused like private wording (exit 1, naming the class of character, never
+echoing it) unless both override elements are present: after NFKC, the title or body has an invisible or format
+character (zero-width, bidirectional controls, tag characters), a combining mark or variation selector that does not
+compose into a letter, a control character other than tab and newline, a private-use or unassigned character, or a
+letter or numeral that is not ASCII or an ASCII letter with accents. So Cyrillic and Greek lookalikes, CJK and other
+non-Latin text, non-ASCII digits, Latin letters with no ASCII base (o-slash, sharp s) and emoji written with a variation
+selector or joiner are all refused for a public target. Plain accented Latin, ordinary punctuation, quotes and emoji
+without a variation selector pass. A private target is not affected. A public target's decision is written as a `routed` record first, with `outcome`
 `public-product`, `override` or `refused`. The cross-project and idea-gate rules still apply on top.
 
 The target can still turn public between a lookup and the create. The window is made as small as it can be, not closed:

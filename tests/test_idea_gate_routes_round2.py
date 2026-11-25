@@ -81,7 +81,10 @@ def test_explicit_product_in_a_public_other_repo_is_filed(tmp_path: Path) -> Non
 def test_private_wording_is_found_after_normalising(tmp_path: Path, title: str) -> None:
     f = Fakes(tmp_path)
     code, _, err = file_in(f, Looks(True), title=title)
-    assert code == 1 and "private-workflow" in err and f.created == []
+    assert code == 1 and f.created == []
+    assert "private-workflow" in err or "cannot be classified" in err  # an invisible character is refused outright
+    # the matcher itself still sees through the normalisation, whatever the refusal rule says
+    assert any(c.private for c, _ in routes.matching(routes.default_table(), title))
 
 
 def test_private_wording_after_the_old_cutoff_is_still_found(tmp_path: Path) -> None:
