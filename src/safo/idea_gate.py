@@ -1,20 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """safo-file: the idea gate and the cross-project line (issue #443), a wrapper in the style of `safo file` (#348).
 
-A tool, not a guard: it never touches the dispatch guard, the hooks, `~/.config/safo` (it only READS agents.yaml
-through the normal loader) or settings.json. It creates no repository, epic or card, ever.
+A tool, not a guard, and ADVISORY by design for same-repo filing: nothing forces an agent to run `check` first, and a
+same-repo `issue` works without it (owner decision: the gate is for new ideas and cross-repo filing). Routing a direct
+`gh issue create` here is a follow-up in the frozen guard's territory, not in this module. It never touches the
+dispatch guard, the hooks, `~/.config/safo` (it only READS agents.yaml through the normal loader) or settings.json. It
+creates no repository, epic or card, ever.
 
     safo-file check IDEA --working-repo o/r [--answer ANSWER] [--owner-ok] [--timebox 30m] [--parking o/r#N]
-    safo-file issue --repo o/r --working-repo o/r --title T --body B
+    safo-file issue --repo o/r --working-repo o/r --title T --body B [--allow-other-owner]
     safo-file report [--working-repo o/r]
 
 `check` matches the idea against `hooks.tracking_repos`, `gh repo list` and a pluggable memory search
-(`$SAFO_MEMORY_SEARCH`: a command; the idea is its last argument; each output line is one hit), prints the top hits,
-and requires exactly one ANSWER: `extends:<repo>`, `new-project` (needs `--owner-ok`) or `tangent` (prints one
+(`$SAFO_MEMORY_SEARCH`: a command that is run as `<command> -- <idea>`; each output line is one hit), prints the top
+hits, and requires exactly one ANSWER: `extends:<repo>`, `new-project` (needs `--owner-ok`) or `tangent` (prints one
 parking-lot body with a time box; with `--parking` it posts that body as a comment on that one issue).
 
-`issue` files one issue through `gh`. Filing in a repo other than the working repo needs a `cross-project: <reason>`
-line in the body. Every filing is appended to a ledger; `report` counts, in code, those whose repo differs.
+`issue` files one issue through `gh` (the body goes over stdin, never argv). Filing in a repo other than the working
+repo needs a `cross-project: <reason>` line in the body. Every filing is appended to a ledger; `report` counts, in
+code, those whose repo differs.
+
+ENFORCED here: `issue` in another repo needs a non-empty `cross-project: <reason>` line (outside a code fence) and
+`--allow-other-owner` when the owner differs; the ledger is opened and checked before the issue is created; `check`
+needs exactly one answer; `new-project` needs `--owner-ok`. NOT enforced: that `check` ran, that the reason is true
+(the line is a reminder, not an adversary-proof control), and anything an agent does by calling `gh` directly.
+See docs/file.md.
 
 Exit codes: 0 done, 1 refused (a rule), 2 a bad command line or an error, 3 an answer is still needed.
 """
@@ -22,21 +32,28 @@ Exit codes: 0 done, 1 refused (a rule), 2 a bad command line or an error, 3 an a
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
 import re
+import select
 import shlex
+import shutil
+import signal
+import stat
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
 from safo import output
-from safo.credentials import find_gh
+from safo.credentials import AMBIENT_GH_VARIABLES, find_gh
 from safo.errors import SafoError
+from safo.trust import read_trusted_regular_file
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -45,10 +62,14 @@ EXIT_NEEDS_ANSWER = 3
 
 TOP = 5
 CALL_TIMEOUT = 60
-REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}")
-PARKING = re.compile(r"([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,8})")
+MEMORY_TIMEOUT = 10
+MEMORY_CAP = 65_536  # bytes read from the memory command, never more
+LEDGER_LIMIT = 8 * 1024 * 1024
+REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}")
+PARKING = re.compile(r"([A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.{1,2}#)[A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,8})")
 TIMEBOX = re.compile(r"[1-9][0-9]{0,2}[mh]")
 CROSS = re.compile(r"^cross-project:[ \t]*(\S.*)$", re.MULTILINE)
+FENCE = re.compile(r"^ {0,3}(```|~~~)")
 WORD = re.compile(r"[a-z0-9]{3,}")
 ANSWERS = "extends:<repo>, new-project, tangent"
 
@@ -129,7 +150,8 @@ def check(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, now: d
     else:
         body = tangent_body(args.idea, args.timebox, args.working_repo, now)
         output.write(out, "tangent: parking-lot body (no repo, epic or card):")
-        out.write(body)
+        for text in body.splitlines():  # shown escaped; the raw text goes only to GitHub
+            output.write(out, text)
         if args.parking:
             m = PARKING.fullmatch(args.parking)
             if not m:
@@ -146,47 +168,94 @@ def _show(out: TextIO, hits: Sequence[tuple[int, str, str]]) -> None:
         output.write(out, "  (none)")
 
 
+def outside_fences(body: str) -> str:
+    """The body without fenced code blocks (an unclosed fence runs to the end), so a quoted line cannot count."""
+    kept: list[str] = []
+    fence = ""
+    for text in body.splitlines():
+        m = FENCE.match(text)
+        if m and not fence:
+            fence = m.group(1)
+        elif m and m.group(1) == fence:
+            fence = ""
+        elif not fence:
+            kept.append(text)
+    return "\n".join(kept)
+
+
+def open_ledger(path: Path) -> int:
+    """A descriptor to append to, opened without following a link and judged regular; before any issue exists."""
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, flags, 0o600)
+    except OSError as problem:
+        raise SafoError(f"the ledger cannot be opened for appending ({problem.strerror}); nothing was filed") from None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise SafoError("the ledger is not a regular file; nothing was filed")
+    return fd
+
+
 def file_issue(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, now: dt.datetime) -> int:
     for name in (args.repo, args.working_repo):
         if not REPO.fullmatch(name):
             raise SafoError(f"expected owner/name, got {name!r}")
     cross = args.repo != args.working_repo
-    reason = CROSS.search(args.body)
-    if cross and not reason:
+    other_owner = args.repo.split("/")[0].lower() != args.working_repo.split("/")[0].lower()
+    if cross and other_owner and not args.allow_other_owner:
+        output.write(err, f"refused: {args.repo} has another owner than {args.working_repo}; pass --allow-other-owner")
+        return EXIT_REFUSED
+    if cross and not CROSS.search(outside_fences(args.body)):
         output.write(
             err,
             f"refused: {args.repo} is not the working repo {args.working_repo}; "
             "the body needs a `cross-project: <reason>` line",
         )
         return EXIT_REFUSED
-    url = deps.create_issue(args.repo, args.title, args.body)
-    entry = {"ts": now.isoformat(), "repo": args.repo, "working_repo": args.working_repo, "url": url}
-    deps.ledger.parent.mkdir(parents=True, exist_ok=True)
-    with deps.ledger.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    fd = open_ledger(deps.ledger)
+    try:
+        url = deps.create_issue(args.repo, args.title, args.body)
+        entry = {"ts": now.isoformat(), "repo": args.repo, "working_repo": args.working_repo, "url": url}
+        try:
+            os.write(fd, (json.dumps(entry) + "\n").encode())
+        except OSError:
+            output.write(err, f"safo-file: the issue was filed ({url}) but the ledger write failed")
+            return EXIT_ERROR
+    finally:
+        os.close(fd)
     output.write(out, url)
     return EXIT_OK
 
 
-def count_mismatches(ledger: Path, working: str | None) -> tuple[int, int]:
-    """(issues whose repo differs from the working repo, all issues), optionally for one working repo."""
-    total = differ = 0
-    if not ledger.exists():
-        return 0, 0
-    for raw in ledger.read_text(encoding="utf-8").splitlines():
+def count_mismatches(ledger: Path, working: str | None) -> tuple[int, int, int]:
+    """(issues whose repo differs from the working repo, all issues, corrupt lines skipped), optionally for one
+    working repo. A missing ledger is zero; an unreadable, linked, non-regular or oversize one is a SafoError."""
+    if not ledger.is_symlink() and not ledger.exists():
+        return 0, 0, 0
+    text = read_trusted_regular_file(ledger, LEDGER_LIMIT).decode("utf-8", "replace")
+    total = differ = corrupt = 0
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
         try:
             e = json.loads(raw)
         except ValueError:
+            e = None
+        if not isinstance(e, dict) or not isinstance(e.get("repo"), str) or not isinstance(e.get("working_repo"), str):
+            corrupt += 1
             continue
-        if not isinstance(e, dict) or (working and e.get("working_repo") != working):
+        if working and e["working_repo"] != working:
             continue
         total += 1
-        differ += e.get("repo") != e.get("working_repo")
-    return differ, total
+        differ += e["repo"] != e["working_repo"]
+    return differ, total, corrupt
 
 
-def report(args: argparse.Namespace, deps: Deps, out: TextIO) -> int:
-    differ, total = count_mismatches(deps.ledger, args.working_repo)
+def report(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO) -> int:
+    differ, total, corrupt = count_mismatches(deps.ledger, args.working_repo)
+    if corrupt:
+        output.write(err, f"safo-file: skipped {corrupt} corrupt ledger line(s)")
     output.write(out, f"cross-project issues: {differ} of {total}")
     return EXIT_OK
 
@@ -206,6 +275,7 @@ def parser() -> argparse.ArgumentParser:
     i.add_argument("--working-repo", required=True)
     i.add_argument("--title", required=True)
     i.add_argument("--body", required=True)
+    i.add_argument("--allow-other-owner", action="store_true", help="allow a repo owned by someone else")
     r = sub.add_parser("report", help="count issues whose repo differs from the working repo")
     r.add_argument("--working-repo", default=None)
     for s in (c, i, r):
@@ -213,14 +283,93 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
-def _gh(env: Mapping[str, str], run: Callable[..., subprocess.CompletedProcess[str]], *argv: str) -> str:
+def _scrubbed(env: Mapping[str, str]) -> dict[str, str]:
+    return {k: v for k, v in env.items() if k not in AMBIENT_GH_VARIABLES}
+
+
+def _gh(
+    env: Mapping[str, str], run: Callable[..., subprocess.CompletedProcess[str]], *argv: str, body: str = ""
+) -> str:
+    """One gh call: a fixed argument list, the body (if any) on stdin, no ambient token, bounded."""
     path = find_gh(env)
     if path is None:
         raise SafoError("gh must be on PATH")
-    done = run([path, *argv], capture_output=True, text=True, timeout=CALL_TIMEOUT, check=False, env=dict(env))
+    try:
+        done = run(
+            [path, *argv],
+            input=body or None,
+            stdin=None if body else subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=CALL_TIMEOUT,
+            check=False,
+            env=_scrubbed(env),
+        )
+    except subprocess.TimeoutExpired:
+        raise SafoError(f"gh {argv[0]} {argv[1]} timed out") from None
+    except (OSError, UnicodeError) as problem:
+        raise SafoError(f"gh {argv[0]} {argv[1]} could not run: {type(problem).__name__}") from None
     if done.returncode != 0:
         raise SafoError(f"gh {argv[0]} {argv[1]} failed: {done.stderr.strip()[:200]}")
     return done.stdout
+
+
+def run_memory(env: Mapping[str, str], idea: str) -> list[str]:
+    """The pluggable memory search: `$SAFO_MEMORY_SEARCH -- <idea>`. At most MEMORY_CAP bytes are read, for at most
+    MEMORY_TIMEOUT seconds; the child's whole process group is killed afterwards."""
+    raw = env.get("SAFO_MEMORY_SEARCH")
+    if raw is None or raw == "":
+        return []
+    try:
+        cmd = shlex.split(raw)
+    except ValueError:
+        raise SafoError("SAFO_MEMORY_SEARCH cannot be parsed") from None
+    if not cmd:
+        raise SafoError("SAFO_MEMORY_SEARCH is blank")
+    exe = cmd[0] if "/" in cmd[0] else shutil.which(cmd[0], path=env.get("PATH", ""))
+    if not exe or not os.path.isfile(exe) or not os.access(exe, os.X_OK):
+        raise SafoError("SAFO_MEMORY_SEARCH does not name an executable file")
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - a fixed argument list, no shell; the idea follows `--`
+            [exe, *cmd[1:], "--", idea],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_scrubbed(env),
+            start_new_session=True,
+        )
+    except OSError as problem:
+        raise SafoError(f"the memory command could not start: {problem.strerror}") from None
+    if proc.stdout is None:
+        raise SafoError("the memory command has no output pipe")
+    data = b""
+    capped = timed_out = False
+    deadline = time.monotonic() + MEMORY_TIMEOUT
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                timed_out = True
+                break
+            if not select.select([proc.stdout], [], [], left)[0]:
+                continue
+            chunk = os.read(proc.stdout.fileno(), MEMORY_CAP + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > MEMORY_CAP:
+                capped = True
+                break
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.stdout.close()
+        proc.wait()
+    if timed_out:
+        raise SafoError("the memory command timed out")
+    if not capped and proc.returncode not in (0, -signal.SIGKILL):
+        raise SafoError("the memory command failed")
+    return data[:MEMORY_CAP].decode("utf-8", "replace").splitlines()
 
 
 def real_deps(args: argparse.Namespace, env: Mapping[str, str], now: dt.datetime) -> Deps:
@@ -242,22 +391,18 @@ def real_deps(args: argparse.Namespace, env: Mapping[str, str], now: dt.datetime
         if not owner:
             return []
         raw = _gh(env, run, "repo", "list", owner, "--limit", "200", "--json", "nameWithOwner,description")
-        return [(x["nameWithOwner"], x.get("description") or "") for x in json.loads(raw)]
-
-    def memory(idea: str) -> list[str]:
-        cmd = env.get("SAFO_MEMORY_SEARCH", "")
-        if not cmd:
-            return []
-        done = run([*shlex.split(cmd), idea], capture_output=True, text=True, timeout=CALL_TIMEOUT, check=False)
-        return done.stdout.splitlines() if done.returncode == 0 else []
+        try:
+            return [(x["nameWithOwner"], x.get("description") or "") for x in json.loads(raw)]
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise SafoError("gh repo list answered something unreadable") from None
 
     def create(repo: str, title: str, body: str) -> str:
-        return _gh(env, run, "issue", "create", "--repo", repo, "--title", title, "--body", body).strip()
+        return _gh(env, run, "issue", "create", "--repo", repo, "--title", title, "--body-file", "-", body=body).strip()
 
     def comment(repo: str, number: int, body: str) -> None:
-        _gh(env, run, "issue", "comment", str(number), "--repo", repo, "--body", body)
+        _gh(env, run, "issue", "comment", str(number), "--repo", repo, "--body-file", "-", body=body)
 
-    return Deps(tracking, gh_repos, memory, create, comment, ledger)
+    return Deps(tracking, gh_repos, lambda idea: run_memory(env, idea), create, comment, ledger)
 
 
 def main(
@@ -284,7 +429,7 @@ def main(
             return check(args, deps, out, err, now)
         if args.cmd == "issue":
             return file_issue(args, deps, out, err, now)
-        return report(args, deps, out)
+        return report(args, deps, out, err)
     except SafoError as problem:
         output.write(err, f"safo-file: {problem}")
         return EXIT_ERROR
