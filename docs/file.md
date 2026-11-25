@@ -35,7 +35,7 @@ each source by shared words (counted in code) and exits 3 until you give exactly
 - `tangent`: prints one parking-lot body with a time box (default 30m). With `--parking o/r#N` the body is posted as a
   comment on that one issue. No repo, epic or card.
 
-Everything shown passes through `safo.output`: control characters and `::` workflow-command prefixes are escaped. The
+Everything shown is escaped before it is printed: control characters and `::` workflow-command prefixes are made harmless. The
 raw text is sent only to GitHub.
 
 `safo-file issue --repo o/r --working-repo o/r --title T --body B [--allow-other-owner] [--ledger PATH]`

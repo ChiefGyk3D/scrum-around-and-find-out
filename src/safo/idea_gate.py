@@ -47,8 +47,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from safo import bounded, output
 from safo import idea_gate_io as gio
-from safo import output
 from safo.agentsfile import load_agents_merged
 from safo.credentials import find_gh
 from safo.errors import SafoError
@@ -261,8 +261,8 @@ def count_mismatches(ledger: Path, working: str | None) -> tuple[int, int, int, 
         if not raw.strip():
             continue
         try:
-            e = json.loads(raw)
-        except ValueError:
+            e = bounded.loads(raw)
+        except (ValueError, RecursionError):
             e = None
         ok = (
             isinstance(e, dict)
@@ -386,8 +386,8 @@ def real_deps(args: argparse.Namespace, env: Mapping[str, str], now: dt.datetime
             return []
         raw = _gh(env, "repo", "list", owner, "--limit", "200", "--json", "nameWithOwner,description")
         try:
-            return [(x["nameWithOwner"], x.get("description") or "") for x in json.loads(raw)]
-        except (ValueError, KeyError, TypeError, AttributeError):
+            return [(x["nameWithOwner"], x.get("description") or "") for x in bounded.loads(raw)]
+        except (ValueError, RecursionError, KeyError, TypeError, AttributeError):
             raise SafoError("gh repo list answered something unreadable") from None
 
     def create(repo: str, title: str, body: str) -> str:
