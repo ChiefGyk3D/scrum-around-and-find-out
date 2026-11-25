@@ -47,7 +47,7 @@ def test_labels_that_could_hold_prompt_text_are_classed_as_other(_private_home: 
             typed("call", id="c" * 12, model="m" * 41, task="x" * 41, status="ok"),  # one character too long
             typed("call", id="d" * 12, model="gemma4:12b", task="not-a-documented-task", status="ok"),
             typed("call", id="e" * 12, model="gemma4:12b", task="triage", status="ok"),
-            typed("call", id="f" * 12, model="m", task="triage", status="failed", reason=SECRET),
+            typed("call", id="f" * 12, model="gemma4:12b", task="triage", status="failed", reason=SECRET),
         ],
     )
     (_private_home / ".local/state/llm-local").mkdir(parents=True)
@@ -115,17 +115,101 @@ def test_a_file_that_another_user_owns_is_refused(_private_home: Path, monkeypat
     assert data["llm_local"]["calls"] == 0 and "not read:" in text
 
 
-def test_a_group_write_is_allowed_only_for_the_users_own_group(
-    _private_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    folder = seed(_private_home)
+TOKEN = "a" * 40  # a credential-shaped string that matches any character pattern
+
+
+def test_a_token_shaped_string_is_other_as_a_model_a_reason_or_a_counter_key(_private_home: Path) -> None:
+    put(
+        _private_home / ".local/share/llm-local/calls.jsonl",
+        [
+            typed("call", id="a" * 12, model=TOKEN, task="triage", status="ok"),
+            typed("call", id="b" * 12, model="gemma4:12b", task="triage", status="failed", reason=TOKEN),
+            typed("call", id="c" * 12, model="gemma4:12b", task="triage", status="failed", reason="timeout"),
+        ],
+    )
+    (_private_home / ".local/state/llm-local").mkdir(parents=True)
+    (_private_home / ".local/state/llm-local/state.json").write_text(json.dumps({"counters": {TOKEN: 1, "busy": 2}}))
+    put(_private_home / ".local/state/agent-dispatch-guard/log.jsonl", [{**row("2026-10-06T10:00:00"), "model": TOKEN}])
+    text, data = report(_private_home)
+    assert TOKEN not in text and TOKEN not in json.dumps(data)
+    ll = data["llm_local"]
+    assert ll["by_model"] == {"other": 1} and ll["failed"]["by_reason"] == {"other": 1, "timeout": 1}
+    assert ll["counters"] == {"busy": 2, "other": 1} and list(data["dispatch"]["by_model"]) == ["other"]
+
+
+class Group:
+    def __init__(self, members: list[str]) -> None:
+        self.gr_mem = members
+
+
+class Account:
+    def __init__(self, name: str, uid: int, gid: int) -> None:
+        self.pw_name, self.pw_uid, self.pw_gid = name, uid, gid
+
+
+def shim_accounts(monkeypatch: pytest.MonkeyPatch, members: list[str], others_with_gid: int = 0) -> None:
+    me = Account("me", os.geteuid(), os.getegid())
+    people = [me, *[Account(f"x{n}", os.geteuid() + 1 + n, os.getegid()) for n in range(others_with_gid)]]
+    monkeypatch.setattr(local_report.pwd, "getpwuid", lambda uid: me)
+    monkeypatch.setattr(local_report.pwd, "getpwall", lambda: people)
+    monkeypatch.setattr(local_report.grp, "getgrgid", lambda gid: Group(members))
+
+
+def group_writable(home: Path) -> None:
+    folder = seed(home)
     folder.chmod(0o775)
     (folder / "calls.jsonl").chmod(0o664)
-    _, own = report(_private_home)
-    assert own["llm_local"]["calls"] == 1  # a private group, as on a default desktop
+
+
+def test_a_group_write_is_accepted_only_in_a_private_group(
+    _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    group_writable(_private_home)
+    shim_accounts(monkeypatch, members=["me"])
+    assert report(_private_home)[1]["llm_local"]["calls"] == 1  # nobody else is in the group
+    shim_accounts(monkeypatch, members=["me", "other"])
+    assert report(_private_home)[1]["llm_local"]["calls"] == 0  # a shared group
+    shim_accounts(monkeypatch, members=[], others_with_gid=1)
+    assert report(_private_home)[1]["llm_local"]["calls"] == 0  # another account has it as its primary group
+
+
+def test_a_group_lookup_error_refuses(_private_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    group_writable(_private_home)
+    shim_accounts(monkeypatch, members=[])
+
+    def fail(gid: int) -> Group:
+        raise KeyError(gid)
+
+    monkeypatch.setattr(local_report.grp, "getgrgid", fail)
+    assert report(_private_home)[1]["llm_local"]["calls"] == 0
+    shim_accounts(monkeypatch, members=[])
     monkeypatch.setattr(local_report, "current_gid", lambda: os.getegid() + 1)
-    _, other = report(_private_home)
-    assert other["llm_local"]["calls"] == 0 and other["llm_local"]["refused"]
+    assert report(_private_home)[1]["llm_local"]["calls"] == 0  # a group that is not the user's own
+
+
+def test_the_home_directory_is_checked_before_anything_under_it(_private_home: Path, tmp_path: Path) -> None:
+    seed(_private_home)
+    text, _ = report(_private_home)
+    assert "not read: the home directory" not in text
+    link = tmp_path / "home-link"
+    link.symlink_to(_private_home)
+    _, out, _ = cli("local", "report", "--days", "60", home=link)
+    assert "not read: the home directory" in out
+    _, out, _ = cli("local", "report", "--days", "60", home=_private_home, extra_env={"HOME": "relative/home"})
+    assert "not read: the home directory" in out and "relative" not in out
+
+
+def test_a_home_directory_another_user_owns_or_others_can_write_is_refused(
+    _private_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(_private_home)
+    _private_home.chmod(0o700 | OTHER_WRITE)
+    text, data = report(_private_home)
+    assert data["llm_local"]["calls"] == 0 and "not read: the home directory" in text
+    _private_home.chmod(0o700)
+    monkeypatch.setattr(local_report, "current_uid", lambda: os.geteuid() + 1)
+    text, data = report(_private_home)
+    assert data["llm_local"]["calls"] == 0 and "not read: the home directory" in text
 
 
 def test_a_call_row_that_does_not_validate_never_becomes_a_join_target(_private_home: Path) -> None:

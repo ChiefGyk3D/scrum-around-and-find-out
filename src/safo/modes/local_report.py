@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 from collections import Counter
@@ -81,6 +83,7 @@ class Refused(Exception):
 
 
 REFUSED_WALK = "a directory on the path is a symlink, not a directory, not yours or writable by others"
+REFUSED_HOME = "the home directory is not an absolute path, is a symlink, is not yours or is writable by others"
 REFUSED_FILE = "the file is a symlink, not a regular file, not yours or writable by others"
 
 
@@ -92,11 +95,25 @@ def current_gid() -> int:
     return os.getegid()
 
 
+def private_group(gid: int) -> bool:
+    """True only when nobody but this user is in the group: no other listed member and no other account whose primary
+    group it is. Any lookup error is "not private"."""
+    try:
+        me = pwd.getpwuid(current_uid()).pw_name
+        if any(member != me for member in grp.getgrgid(gid).gr_mem):
+            return False
+        return all(entry.pw_uid == current_uid() for entry in pwd.getpwall() if entry.pw_gid == gid)
+    except (KeyError, OSError, ValueError):
+        return False
+
+
 def unsafe(info: os.stat_result) -> bool:
-    """Not owned by this user, or writable by anyone else (a group write is allowed only for the user's own group)."""
+    """Not owned by this user, or writable by anyone else (a group write only in the user's own private group)."""
     if info.st_uid != current_uid() or info.st_mode & stat.S_IWOTH:
         return True
-    return bool(info.st_mode & stat.S_IWGRP) and info.st_gid != current_gid()
+    if not info.st_mode & stat.S_IWGRP:
+        return False
+    return info.st_gid != current_gid() or not private_group(info.st_gid)
 
 
 def open_confined(anchor: Path, parts: tuple[str, ...]) -> int:
@@ -104,10 +121,19 @@ def open_confined(anchor: Path, parts: tuple[str, ...]) -> int:
 
     FileNotFoundError when something is absent; Refused when a directory is a symlink or not a directory, a directory
     or the file is not owned by this user or is group or world writable, or the file is not a regular file. The anchor
-    (the home directory) is the user's own and is opened as it is.
+    (the home directory) must be an absolute path, not a symlink, and pass the same ownership and mode check.
     """
-    dfd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
+    if not anchor.is_absolute():
+        raise Refused(REFUSED_HOME)
     try:
+        dfd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        raise Refused(REFUSED_HOME) from None
+    try:
+        if unsafe(os.fstat(dfd)):
+            raise Refused(REFUSED_HOME)
         for name in parts[:-1]:
             try:
                 nfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
@@ -228,9 +254,10 @@ def week_of(day: dt.date) -> str:
     return f"{iso.year}-W{iso.week:02d}"
 
 
-SAFE_LABEL = re.compile(r"[a-z0-9._:-]{1,40}")
-MAX_UNKNOWN = 10_000  # distinct unknown labels remembered, only to count them
-# The task labels the tool documents (docs/usage.md); any other task text may be prompt text, so it is classed `other`.
+MAX_UNKNOWN = 10_000  # distinct unknown labels remembered, only to count them (as hashes: the text is never kept)
+# Allowlists, not patterns: a short lowercase token can be a credential fragment, so text from a log is printed only
+# when it is one of these constants. Everything else is `other`.
+# The task labels the tool documents (docs/usage.md).
 KNOWN_TASKS = frozenset(
     {
         "smoke",
@@ -254,20 +281,37 @@ KNOWN_TASKS = frozenset(
         "gap-issue",
     }
 )
+KNOWN_MODELS = frozenset({"gemma4:12b", "qwen3.5:4b", "llama-guard3:8b"})  # the local models the docs name
+KNOWN_DISPATCH_MODELS = frozenset({"sonnet", "haiku", "opus", "fable", "unknown"})  # what the dispatch guard logs
+# The failure reasons llm-local writes (its REASONS constant) and the admission counters it keeps.
+KNOWN_REASONS = frozenset(
+    {
+        "busy",
+        "unreachable",
+        "timeout",
+        "over-budget",
+        "bad-response",
+        "bad-config",
+        "bad-input",
+        "interrupted",
+        "internal",
+    }
+)
+KNOWN_COUNTERS = frozenset({"admit", "busy", "eviction"})
 
 
 class Labels:
     """Classifies free text from a log into a fixed safe set. The text of an unknown label is never kept: only how
     many distinct ones were seen."""
 
-    def __init__(self, known: frozenset[str] | None = None) -> None:
+    def __init__(self, known: frozenset[str]) -> None:
         self.known = known
         self.unknown: set[str] = set()
 
     def __call__(self, value: Any) -> str:
         if not isinstance(value, str) or not value:
             return "(none)"
-        if SAFE_LABEL.fullmatch(value) and (self.known is None or value in self.known):
+        if value in self.known:
             return value
         if len(self.unknown) < MAX_UNKNOWN:
             self.unknown.add(hashlib.sha256(value.encode("utf-8", "replace")).hexdigest())
@@ -275,7 +319,7 @@ class Labels:
 
 
 def safe_key(key: str) -> str:
-    return key if SAFE_LABEL.fullmatch(key) else OTHER
+    return key if key in KNOWN_COUNTERS else OTHER
 
 
 def bump(counter: Counter[str], key: str) -> None:
@@ -295,7 +339,7 @@ def dispatch_flags(row: Mapping[str, Any]) -> dict[str, int]:
 
 
 def dispatch_section(src: Source, since: dt.date, today: dt.date) -> dict[str, Any]:
-    models = Labels()
+    models = Labels(KNOWN_DISPATCH_MODELS)
     by_day: dict[str, Counter[str]] = {}
     by_week: dict[str, Counter[str]] = {}
     by_model: dict[str, Counter[str]] = {}
@@ -406,7 +450,7 @@ def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) ->
         src = home_read(env, *folder, "calls.jsonl")  # the first calls log that exists; never both
         if src.found or src.refused:
             break
-    tasks, models, reasons = Labels(KNOWN_TASKS), Labels(), Labels()
+    tasks, models, reasons = Labels(KNOWN_TASKS), Labels(KNOWN_MODELS), Labels(KNOWN_REASONS)
     by_task: Counter[str] = Counter()
     by_model: Counter[str] = Counter()
     by_day: Counter[str] = Counter()

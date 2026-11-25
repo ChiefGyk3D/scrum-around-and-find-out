@@ -58,16 +58,21 @@ and `~/.local/share/llm-local` hold a `calls.jsonl`, only the first is read. The
 and `kind=outcome` rows (accepted, rewritten, discarded, fact-error) are joined to their call by id. The latest outcome of a
 call counts; an outcome with no call is counted as an orphan; the accept rate by task and by model is computed in code. A
 row of an unknown kind, status or outcome is counted as malformed. When the dispatch-guard rows carry `na_reason_class`, its
-counts per day and week appear under the dispatch section. Free text in a log can hold prompt text, so a label is printed only when it is a safe label: at most 40 characters of
-lowercase letters, digits, dot, underscore, colon and dash, and, for a task, one of the documented task labels (smoke,
-triage, summary, digest, classify, draft, outline, pr-body, issue-draft, ci-summary, lesson-draft, alert-triage,
-bots-triage, dotsync-summary, idle-classify, kind-effort-draft, pack-summary, standards-digest, gap-issue). Models, failure
-reasons and counter names follow the same pattern. Anything else is counted under `other`, and the report prints how many
-distinct labels were classed that way, never their text. The files are opened by walking each directory from the home
-directory with `O_NOFOLLOW`; a symlinked directory, a directory or file that another user owns or that others can write
-to (a group write is allowed only for your own group), or a file that is not regular is not read, and the report says
-so without naming the path. A call id counts as known only from a call row that validates (timestamp and status), so a
-malformed row cannot make a later outcome count as joined. The report ends with a MISSING DATA section naming what the
+counts per day and week appear under the dispatch section. Free text in a log can hold prompt text or a credential fragment, so a label is printed only when it is on a fixed
+list, never because it looks safe. Tasks: smoke, triage, summary, digest, classify, draft, outline, pr-body, issue-draft,
+ci-summary, lesson-draft, alert-triage, bots-triage, dotsync-summary, idle-classify, kind-effort-draft, pack-summary,
+standards-digest, gap-issue. Local models: gemma4:12b, qwen3.5:4b and llama-guard3:8b. Dispatch models: sonnet, haiku,
+opus, fable and unknown. Failure reasons are the ones `llm-local` writes (busy, unreachable, timeout, over-budget,
+bad-response, bad-config, bad-input, interrupted, internal) and the admission counters are admit, busy and eviction.
+Anything else is counted under `other`, and the report prints how many distinct labels were classed that way, never
+their text. The files are opened by walking each directory from the home directory with `O_NOFOLLOW`. The home directory
+must be an absolute path and not a symlink. Every directory and file on the way must be owned by you and not writable
+by others; a group write is accepted only when the group is yours and private (no other member and no other account has
+it as its primary group; a lookup error counts as not private). A file that is not regular is not read either. In each
+case the report says so with a fixed message, never the path. A call id counts as known only from a call row that
+validates (timestamp and status), so a malformed row cannot make a later outcome count as joined. The first valid row
+for an id wins, so a process that can append to the log can shadow an id: the report is a baseline over a log your own
+tools write, not an audit trail. The report ends with a MISSING DATA section naming what the
 records still cannot say (which brief made a call, tokens saved, outcomes for calls from before the typed records) and the
 one-line change that would record it. The exit code is 0; `--days` outside the range is an error.
 
