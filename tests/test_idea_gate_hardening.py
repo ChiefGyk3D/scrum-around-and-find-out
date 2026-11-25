@@ -33,7 +33,7 @@ SECRETS = {
     "GH_TOKEN": "s5",
     "SSH_PRIVATE_KEY": "s6",
 }
-ALLOWED = {"HOME": "/h", "USER": "u", "LANG": "C", "LC_ALL": "C", "TERM": "xterm", "TZ": "UTC"}
+ALLOWED = {"USER": "u", "LANG": "C", "LC_ALL": "C", "TERM": "xterm", "TZ": "UTC"}
 
 
 def mem_exe(box: Box, name: str = "mem", body: str = "echo hit") -> Path:
@@ -103,28 +103,31 @@ def test_memory_trusted_path_and_bare_name_are_accepted(box: Box) -> None:
 
 def test_gh_in_a_group_writable_directory_is_exit_2(box: Box) -> None:
     box.bin.chmod(0o775)
+    only = {"PATH": str(box.bin)}  # no other gh on PATH: the real one must never run in a test
     with pytest.raises(SafoError, match="writable"):
-        box.deps().gh_repos()
+        box.deps(**only).gh_repos()
     err = io.StringIO()
     argv = ["issue", "--repo", "o/r", "--working-repo", "o/r", "--title", "t", "--body", "b"]
     argv += ["--ledger", str(box.log / "l.jsonl")]
-    assert idea_gate.main(argv, env=box.env, out=io.StringIO(), err=err) == 2 and "writable" in err.getvalue()
+    env = {**box.env, **only}
+    assert idea_gate.main(argv, env=env, out=io.StringIO(), err=err) == 2 and "writable" in err.getvalue()
 
 
 # ---- 2. environment ----------------------------------------------------------------------------------------------
 
 
 def test_only_allowlisted_variables_reach_gh_and_the_memory_command(box: Box) -> None:
-    env = {**SECRETS, **ALLOWED, "PATH": f":rel/bin:{box.bin}:/usr/bin"}
+    env = {**SECRETS, **ALLOWED, "GH_HOST": "evil.example", "PATH": f":rel/bin:{box.bin}:/usr/bin"}
     box.deps(**env).create_issue("o/r", "t", "b")
     seen = dict(x.split("=", 1) for x in (box.log / "env").read_text().splitlines() if "=" in x)
     mem_exe(box, "mem", "env")
     got = dict(x.split("=", 1) for x in box.deps(SAFO_MEMORY_SEARCH="mem", **env).memory("i") if "=" in x)
     for child in (seen, got):
-        for name in SECRETS:
+        for name in (*SECRETS, "GH_HOST"):
             assert name not in child, name
         for name, value in ALLOWED.items():
             assert child[name] == value
+        assert child["HOME"] == str(box.home)
         assert child["PATH"] == f"{box.bin}:/usr/bin"  # empty and relative entries dropped
 
 

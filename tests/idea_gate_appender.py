@@ -13,16 +13,18 @@ from safo import idea_gate_io
 
 
 def short(fd: int, data: bytes | memoryview) -> int:
-    return os.write(fd, bytes(data[:1000]))  # many small writes, so unserialized records would interleave
+    time.sleep(0.001)  # slow, small writes: two unserialized records are certain to overlap
+    return os.write(fd, bytes(data[:1000]))
 
 
 def main(ledger: str, start: str, tag: str, count: int) -> None:
     fd = idea_gate_io.open_ledger(Path(ledger))
+    records = [(json.dumps({"tag": tag, "i": i, "pad": tag * 200_000}) + "\n").encode() for i in range(count)]
+    Path(start).with_name(f"ready-{tag}").write_text("")
     while not Path(start).exists():
-        time.sleep(0.005)
-    for i in range(count):
-        record = json.dumps({"tag": tag, "i": i, "pad": tag * 70_000}) + "\n"
-        idea_gate_io.write_all(fd, record.encode(), short)
+        time.sleep(0.002)
+    for record in records:
+        idea_gate_io.write_all(fd, record, short)
     os.close(fd)
 
 

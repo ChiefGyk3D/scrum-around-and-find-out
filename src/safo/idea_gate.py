@@ -233,13 +233,13 @@ def file_issue(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, n
     try:
         try:
             gio.write_all(fd, record("pending", rid, args, now), write_fd)
-        except OSError:
-            raise SafoError("the ledger cannot be written; nothing was filed") from None
+        except OSError as problem:
+            raise SafoError(f"the ledger cannot be written ({problem}); nothing was filed") from None
         url = deps.create_issue(args.repo, args.title, args.body)[:URL_SHOWN]
         try:
             gio.write_all(fd, record("committed", rid, args, now, url=url), write_fd)
-        except OSError:
-            output.write(err, f"safo-file: the issue was created but not recorded in the ledger: {url}")
+        except OSError as problem:
+            output.write(err, f"safo-file: the issue was created but not recorded in the ledger ({problem}): {url}")
             return EXIT_ERROR
     finally:
         os.close(fd)
@@ -328,7 +328,7 @@ def _gh(env: Mapping[str, str], *argv: str, body: str = "") -> str:
     cenv = gio.child_env(env, "gh")
     found = find_gh(gio.lookup_env(env))
     if found is None:
-        raise SafoError("gh must be on PATH")
+        raise gio.explain_missing("gh", env, "gh")
     path = gio.trusted_executable(found, "gh")
     ran = gio.run_bounded(
         [path, *argv], env=cenv, stdin_text=body, out_cap=GH_OUT_CAP, err_cap=GH_ERR_CAP, timeout=CALL_TIMEOUT

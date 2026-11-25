@@ -69,17 +69,29 @@ Each child gets its own allowlist. The memory command gets only PATH, HOME, USER
 no `GH_*`, no `XDG_*`, no session bus. `gh` gets those plus `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
 `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` (a keyring-stored login) and `GH_CONFIG_DIR`, but not
 `GH_HOST`. Nothing else, so `GH_TOKEN` and `GITHUB_TOKEN` are not passed: `gh` must be logged in with its own stored
-credentials. PATH keeps only absolute directories that are owned by you or root and not writable by group or others
-(nor any directory above them; a root-owned sticky directory such as /tmp is accepted, a file never is); if none are
-left it is `/usr/bin:/bin`. `gh` runs from the same kind of trusted path, in its own process group, with 1 MB of stdout
-and 64 KB of stderr at most and a 60 second limit. After a normal exit nothing is signalled; on a timeout or a cap the
-whole group is killed before the leader is reaped.
+credentials.
+
+- HOME must be an absolute directory owned by you, not group or other writable, with trusted parents. If it is not,
+  `gh` is not run (exit 2) and the memory command simply gets no HOME.
+- `GH_CONFIG_DIR` and the `XDG_*` directories must pass the same test and have no symbolic link in their path; a value
+  that fails is dropped, and `gh` falls back to its defaults under HOME.
+- PATH keeps only absolute directories that are owned by you or root, not writable by group or others, with every
+  directory above them passing too. A symlinked entry is judged both as named and by its resolved target and the
+  target's parents. A root-owned sticky directory such as /tmp is accepted, a file never is. If nothing is left PATH is
+  `/usr/bin:/bin`. `gh` and a bare-name memory command are looked up on this same trusted PATH, so an untrusted earlier
+  directory cannot mask a trusted later one; if the only copy is in an untrusted directory the error (exit 2) names the
+  directory and the reason.
+- `gh` runs from a trusted absolute path, in its own process group, with 1 MB of stdout and 64 KB of stderr at most and
+  a 60 second limit. After a normal exit nothing is signalled; on a timeout or a cap the whole group is killed before
+  the leader is reaped.
+
+The ledger lock is tried without blocking for 5 seconds at most; a ledger that stays locked is an error (exit 2), and
+after an issue was created the URL is still printed.
 
 ## Known limits
 
 - An executable replaced between the trust check and the launch is not caught. It needs write access to directories the
   policy already requires to be closed to others.
-- The filesystem root directory itself is not trust-checked.
 
 ## Exit codes
 

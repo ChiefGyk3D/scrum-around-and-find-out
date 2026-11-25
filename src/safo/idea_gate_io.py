@@ -49,6 +49,8 @@ ENV_GH_EXTRA = frozenset(
     }
 )
 FALLBACK_PATH = "/usr/bin:/bin"
+LOCK_SECONDS = 5.0
+LOCK_POLL = 0.02
 REAP_SECONDS = 5
 READ_PIECE = 65_536
 GROUP_OR_OTHER_WRITE = stat.S_IWGRP | stat.S_IWOTH
@@ -69,33 +71,110 @@ def _untrusted(info: os.stat_result | SimpleNamespace, *, directory: bool) -> st
     return ""
 
 
-def _dir_trusted(path: str) -> bool:
-    """The directory and every directory above it pass the trust policy."""
-    for target in (*_chain(path), path):
-        try:
-            info = os.stat(target)
-        except OSError:
-            return False
-        if not stat.S_ISDIR(info.st_mode) or _untrusted(info, directory=True):
-            return False
-    return True
+def _dir_problem(path: str) -> str:
+    """Why this directory is not trusted, or "": it and every directory above it, as named AND as resolved (a symlink
+    entry is judged by its target and the target's ancestors too), pass the directory policy."""
+    for base in dict.fromkeys((path, os.path.realpath(path))):
+        for target in (*_chain(base), base):
+            try:
+                info = os.stat(target)
+            except OSError:
+                return f"{Path(target).name or target} cannot be checked"
+            if not stat.S_ISDIR(info.st_mode):
+                return f"{Path(target).name or target} is not a directory"
+            bad = _untrusted(info, directory=True)
+            if bad:
+                return f"{Path(target).name or target} is {bad}"
+    return ""
 
 
-def absolute_path(value: str) -> str:
-    return os.pathsep.join(e for e in value.split(os.pathsep) if e and os.path.isabs(e))
+def absolute_entries(value: str) -> list[str]:
+    return [e for e in value.split(os.pathsep) if e and os.path.isabs(e)]
+
+
+def trusted_entries(value: str) -> list[str]:
+    return [e for e in dict.fromkeys(absolute_entries(value)) if not _dir_problem(e)]
+
+
+def trusted_path(value: str) -> str:
+    return os.pathsep.join(trusted_entries(value)) or FALLBACK_PATH
 
 
 def lookup_env(env: Mapping[str, str]) -> dict[str, str]:
-    """Only used to FIND an executable: absolute PATH entries; the executable itself then passes trusted_executable."""
-    return {"PATH": absolute_path(env.get("PATH", ""))}
+    """The PATH an executable is looked up on: the same trusted entries the child gets."""
+    return {"PATH": trusted_path(env.get("PATH", ""))}
+
+
+def explain_missing(name: str, env: Mapping[str, str], what: str) -> SafoError:
+    """The error for a command that is not on the trusted PATH; it names an untrusted directory that has one."""
+    for entry in absolute_entries(env.get("PATH", "")):
+        problem = _dir_problem(entry)
+        candidate = os.path.join(entry, name)
+        if problem and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return SafoError(f"{what} was found only in {entry}, which is not trusted: {problem}")
+    return SafoError(f"{what} was not found on PATH")
+
+
+def _config_problem(value: str, home: str | None, *, symlinks_ok: bool) -> str:
+    """Why this configuration root is not safe to hand to gh, or "": an absolute directory owned by the effective user,
+    not group or other writable, with trusted ancestors and (unless `symlinks_ok`) no symlink component."""
+    if not os.path.isabs(value):
+        return "is not an absolute path"
+    try:
+        info = os.stat(value)
+    except OSError:
+        return "is not an existing directory"
+    if not stat.S_ISDIR(info.st_mode):
+        return "is not a directory"
+    if info.st_uid != effective_uid():
+        return "is not owned by this user"
+    if info.st_mode & GROUP_OR_OTHER_WRITE:
+        return "is writable by its group or by others"
+    for target in _chain(os.path.normpath(value)):
+        try:
+            bad = _untrusted(os.stat(target), directory=True)
+        except OSError:
+            return "cannot be checked"
+        if bad:
+            return f"has a parent directory {bad}"
+    if not symlinks_ok:
+        real, plain = os.path.realpath(value), os.path.normpath(value)
+        if home is not None and os.path.commonpath([plain, home]) == home:
+            plain = os.path.join(os.path.realpath(home), os.path.relpath(plain, home))
+        if real != plain:
+            return "has a symbolic link in its path"
+    return ""
+
+
+CONFIG_NAMES = (
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+)
 
 
 def child_env(env: Mapping[str, str], kind: str) -> dict[str, str]:
-    """The allowlisted environment for `kind` ("gh" or "memory"); PATH keeps only trusted absolute directories."""
+    """The allowlisted environment for `kind` ("gh" or "memory"). PATH keeps only trusted directories. HOME and gh's
+    configuration roots are validated: a bad HOME stops gh (a SafoError) and is dropped for the memory command; a bad
+    gh root is dropped, so gh falls back to its defaults under HOME."""
     allowed = ENV_BASE | ENV_GH_EXTRA if kind == "gh" else ENV_BASE
     out = {k: v for k, v in env.items() if k in allowed or SAFE_LC.fullmatch(k)}
-    kept = [e for e in absolute_path(out.get("PATH", "")).split(os.pathsep) if e and _dir_trusted(e)]
-    out["PATH"] = os.pathsep.join(kept) or FALLBACK_PATH
+    out["PATH"] = trusted_path(out.get("PATH", ""))
+    home = out.get("HOME")
+    if home is not None:
+        problem = _config_problem(home, None, symlinks_ok=True)
+        if problem:
+            if kind == "gh":
+                raise SafoError(f"gh cannot be run safely: HOME {problem}")
+            del out["HOME"]
+            home = None
+    if kind == "gh":
+        for name in CONFIG_NAMES:
+            if name in out and _config_problem(out[name], home, symlinks_ok=False):
+                del out[name]
     return out
 
 
@@ -133,7 +212,7 @@ def resolve_command(name: str, env: Mapping[str, str], what: str) -> str:
         return trusted_executable(name, what)
     found = shutil.which(name, path=lookup_env(env)["PATH"])
     if not found:
-        raise SafoError(f"{what} was not found on PATH")
+        raise explain_missing(name, env, what)
     return trusted_executable(found, what)
 
 
@@ -238,11 +317,24 @@ def run_bounded(
     return Ran(proc.returncode, bufs["out"], bufs["err"], capped["out"], capped["err"], timed_out)
 
 
+def _lock(fd: int) -> None:
+    """An exclusive flock, tried without blocking for at most LOCK_SECONDS; then a clear TimeoutError."""
+    deadline = time.monotonic() + LOCK_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("ledger lock timeout: another process holds the ledger lock") from None
+            time.sleep(LOCK_POLL)
+
+
 def write_all(fd: int, data: bytes, write=os.write) -> None:  # type: ignore[no-untyped-def]
     """Write every byte of one record, looping over short writes and retrying an interrupted one without advancing.
     An exclusive lock on the descriptor is held for the whole record, so concurrent writers cannot interleave."""
     view = memoryview(data)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    _lock(fd)
     try:
         while view:
             try:

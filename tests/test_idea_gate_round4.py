@@ -61,16 +61,8 @@ def test_root_sticky_applies_to_directories_not_files() -> None:
 
 # ---- 3. separate environments ------------------------------------------------------------------------------------
 
-GH_ONLY = {
-    "GH_CONFIG_DIR": "/c",
-    "XDG_CONFIG_HOME": "/x1",
-    "XDG_DATA_HOME": "/x2",
-    "XDG_STATE_HOME": "/x3",
-    "XDG_CACHE_HOME": "/x4",
-    "XDG_RUNTIME_DIR": "/run/x",
-    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/x/bus",
-}
-COMMON = {"HOME": "/h", "USER": "u", "LOGNAME": "u", "LANG": "C", "LC_ALL": "C", "TERM": "xterm", "TZ": "UTC"}
+GH_DIRS = ("GH_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")
+COMMON = {"USER": "u", "LOGNAME": "u", "LANG": "C", "LC_ALL": "C", "TERM": "xterm", "TZ": "UTC"}
 
 
 def parsed(lines: list[str]) -> dict[str, str]:
@@ -78,17 +70,23 @@ def parsed(lines: list[str]) -> dict[str, str]:
 
 
 def test_memory_gets_the_small_environment_and_gh_never_gets_gh_host(box: Box) -> None:
-    env = {**COMMON, **GH_ONLY, "GH_HOST": "evil.example", "PATH": f"{box.bin}:/usr/bin"}
+    dirs = {}
+    for name in GH_DIRS:
+        dirs[name] = str(box.home / name.lower())
+        Path(dirs[name]).mkdir(mode=0o700)
+    gh_only = {**dirs, "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/x/bus"}
+    env = {**COMMON, **gh_only, "GH_HOST": "evil.example", "PATH": f"{box.bin}:/usr/bin"}
     box.deps(**env).create_issue("o/r", "t", "b")
     gh_saw = parsed((box.log / "env").read_text().splitlines())
     script(box.bin / "mem", "#!/bin/sh\nenv\n")
     mem_saw = parsed(box.deps(SAFO_MEMORY_SEARCH="mem", **env).memory("i"))
     assert "GH_HOST" not in gh_saw
-    for name, value in {**COMMON, **GH_ONLY}.items():
+    for name, value in {**COMMON, **gh_only}.items():
         assert gh_saw[name] == value
     for name, value in COMMON.items():
         assert mem_saw[name] == value
-    for name in (*GH_ONLY, "GH_HOST"):
+    assert gh_saw["HOME"] == mem_saw["HOME"] == str(box.home)
+    for name in (*gh_only, "GH_HOST"):
         assert name not in mem_saw, name
 
 
@@ -144,16 +142,14 @@ def test_two_processes_appending_large_records_leave_whole_lines(tmp_path: Path)
     ledger, start = tmp_path / "l.jsonl", tmp_path / "go"
     here = Path(__file__).parent
     env = {**os.environ, "PYTHONPATH": f"{here.parent / 'src'}:{here}"}
-    kids = [
-        subprocess.Popen(  # noqa: S603 - fixed argument list: this interpreter and a helper in tests/
-            [sys.executable, str(here / "idea_gate_appender.py"), str(ledger), str(start), tag, "20"], env=env
-        )
-        for tag in ("a", "b")
-    ]
-    time.sleep(1.0)  # both are open and waiting
+    argv = [sys.executable, str(here / "idea_gate_appender.py"), str(ledger), str(start)]
+    kids = [subprocess.Popen([*argv, tag, "6"], env=env) for tag in ("a", "b")]  # noqa: S603 - this interpreter, a helper
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and not all((tmp_path / f"ready-{t}").exists() for t in ("a", "b")):
+        time.sleep(0.01)  # a barrier: both writers are open, each holds its whole record, neither has written
+    assert all((tmp_path / f"ready-{t}").exists() for t in ("a", "b"))
     start.write_text("")
     assert [k.wait(timeout=120) for k in kids] == [0, 0]
-    lines = ledger.read_text().splitlines()
-    rows = [json.loads(x) for x in lines]  # a torn line would not parse
-    assert len(rows) == 40 and all(len(r["pad"]) == 70_000 and set(r["pad"]) == {r["tag"]} for r in rows)
+    rows = [json.loads(x) for x in ledger.read_text().splitlines()]  # a torn line would not parse
+    assert len(rows) == 12 and all(len(r["pad"]) == 200_000 and set(r["pad"]) == {r["tag"]} for r in rows)
     assert stat.S_ISREG(ledger.stat().st_mode)
