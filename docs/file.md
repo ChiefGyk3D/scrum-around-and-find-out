@@ -43,7 +43,7 @@ raw text is sent only to GitHub.
 Files one issue with `gh issue create --body-file -`: the body goes over stdin, never argv. The ledger (default
 `~/.local/state/safo/file-ledger.jsonl`) gets a `pending` record before the issue is created and a `committed` record
 with the URL after. If the second write fails, the URL is printed on stderr as "created but not recorded" and the exit
-is 2. A pending record with no commit means gh failed or the process stopped in between: look for the issue. The
+is 2. A pending record with no commit means gh failed or the process stopped in between: look for the issue. Each record is written under an exclusive lock on the ledger, so two `safo-file` processes cannot interleave lines. The
 ledger directory must be owned by you and not writable by group or others, no component of its path may be a symlink,
 and an existing ledger must be owned by you and not group or other writable; a new one is created 0600.
 
@@ -65,11 +65,21 @@ no memory hits.
 
 ## The child environment
 
-`gh` and the memory command get only: PATH (absolute entries only), HOME, USER, LOGNAME, LANG, `LC_*`, TERM, TZ,
-`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`,
-`DBUS_SESSION_BUS_ADDRESS` (a keyring-stored gh login), `GH_CONFIG_DIR` and `GH_HOST`. Nothing else, so `GH_TOKEN`
-and `GITHUB_TOKEN` are not passed: `gh` must be logged in with its own stored credentials. `gh` runs from the same
-kind of trusted path, in its own process group, with 1 MB of stdout and 64 KB of stderr at most and a 60 second limit.
+Each child gets its own allowlist. The memory command gets only PATH, HOME, USER, LOGNAME, LANG, `LC_*`, TERM and TZ:
+no `GH_*`, no `XDG_*`, no session bus. `gh` gets those plus `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` (a keyring-stored login) and `GH_CONFIG_DIR`, but not
+`GH_HOST`. Nothing else, so `GH_TOKEN` and `GITHUB_TOKEN` are not passed: `gh` must be logged in with its own stored
+credentials. PATH keeps only absolute directories that are owned by you or root and not writable by group or others
+(nor any directory above them; a root-owned sticky directory such as /tmp is accepted, a file never is); if none are
+left it is `/usr/bin:/bin`. `gh` runs from the same kind of trusted path, in its own process group, with 1 MB of stdout
+and 64 KB of stderr at most and a 60 second limit. After a normal exit nothing is signalled; on a timeout or a cap the
+whole group is killed before the leader is reaped.
+
+## Known limits
+
+- An executable replaced between the trust check and the launch is not caught. It needs write access to directories the
+  policy already requires to be closed to others.
+- The filesystem root directory itself is not trust-checked.
 
 ## Exit codes
 

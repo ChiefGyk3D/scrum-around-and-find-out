@@ -325,8 +325,8 @@ def _text(data: bytes) -> str:
 def _gh(env: Mapping[str, str], *argv: str, body: str = "") -> str:
     """One gh call: a trusted absolute executable, an allowlisted environment, the body (if any) on stdin, bounded
     output and time, the whole process group gone afterwards."""
-    cenv = gio.child_env(env)
-    found = find_gh(cenv)
+    cenv = gio.child_env(env, "gh")
+    found = find_gh(gio.lookup_env(env))
     if found is None:
         raise SafoError("gh must be on PATH")
     path = gio.trusted_executable(found, "gh")
@@ -357,7 +357,11 @@ def run_memory(env: Mapping[str, str], idea: str) -> list[str]:
         raise SafoError("SAFO_MEMORY_SEARCH is blank")
     exe = gio.resolve_command(cmd[0], env, "the SAFO_MEMORY_SEARCH command")
     ran = gio.run_bounded(
-        [exe, *cmd[1:], "--", idea], env=gio.child_env(env), out_cap=MEMORY_CAP, err_cap=0, timeout=MEMORY_TIMEOUT
+        [exe, *cmd[1:], "--", idea],
+        env=gio.child_env(env, "memory"),
+        out_cap=MEMORY_CAP,
+        err_cap=0,
+        timeout=MEMORY_TIMEOUT,
     )
     if ran.timed_out:
         raise SafoError("the memory command timed out")

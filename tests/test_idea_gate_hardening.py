@@ -6,8 +6,10 @@ from __future__ import annotations
 import io
 import json
 import os
+import stat
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,7 +33,7 @@ SECRETS = {
     "GH_TOKEN": "s5",
     "SSH_PRIVATE_KEY": "s6",
 }
-ALLOWED = {"HOME": "/h", "USER": "u", "LANG": "C", "LC_ALL": "C", "TERM": "xterm", "TZ": "UTC", "GH_HOST": "github.com"}
+ALLOWED = {"HOME": "/h", "USER": "u", "LANG": "C", "LC_ALL": "C", "TERM": "xterm", "TZ": "UTC"}
 
 
 def mem_exe(box: Box, name: str = "mem", body: str = "echo hit") -> Path:
@@ -72,14 +74,28 @@ def test_memory_group_writable_file_or_parent_is_refused(box: Box) -> None:
         mem_with(box, "mem")  # found on PATH: the same checks
 
 
-def test_memory_owned_by_another_user_is_refused(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+def foreign(info: os.stat_result) -> os.stat_result:
+    """The same stat result, owned by a user that is neither the caller nor root."""
+    fields = list(info)
+    fields[4] = os.geteuid() + 1
+    return os.stat_result(fields)
+
+
+def test_memory_file_owned_by_another_user_is_refused(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
     exe = mem_exe(box)
-    monkeypatch.setattr(idea_gate_io, "effective_uid", lambda: os.geteuid() + 1)
-    with pytest.raises(SafoError, match="another user"):
+    real_stat = os.stat
+
+    def stat_(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        info = real_stat(path, *args, **kwargs)
+        return foreign(info) if str(path) == str(exe) else info  # only the file; every directory is still fine
+
+    monkeypatch.setattr(idea_gate_io.os, "stat", stat_)
+    with pytest.raises(SafoError, match="mem is owned by another user"):
         mem_with(box, str(exe))
 
 
 def test_memory_trusted_path_and_bare_name_are_accepted(box: Box) -> None:
+    # guards against a false refusal (the hardening must not reject a normal install); it does not test the hardening
     exe = mem_exe(box)
     assert mem_with(box, str(exe)) == ["hit"]
     assert mem_with(box, "mem") == ["hit"]
@@ -168,10 +184,16 @@ def test_ledger_owned_by_another_user_is_refused(tmp_path: Path, monkeypatch: py
     ledger = tmp_path / "l.jsonl"
     ledger.write_text("")
     ledger.chmod(0o600)
-    monkeypatch.setattr(idea_gate_io, "effective_uid", lambda: os.geteuid() + 1)
+    real_fstat = os.fstat
+
+    def fstat_(fd: int) -> os.stat_result:
+        info = real_fstat(fd)
+        return foreign(info) if stat.S_ISREG(info.st_mode) else info  # only the file; the directories stay fine
+
+    monkeypatch.setattr(idea_gate_io.os, "fstat", fstat_)
     f = Fakes(tmp_path)
     code, _, err = issue(f, ledger)
-    assert code == 2 and "owned" in err and f.created == []
+    assert code == 2 and "ledger is not owned" in err and f.created == []
 
 
 def test_group_writable_ledger_or_parent_is_refused(tmp_path: Path) -> None:
@@ -191,6 +213,7 @@ def test_group_writable_ledger_or_parent_is_refused(tmp_path: Path) -> None:
 
 
 def test_new_ledger_is_created_0600_whatever_the_umask(tmp_path: Path) -> None:
+    # guards against a false refusal of a fresh ledger (and its 0600 mode); the refusals are the tests around it
     old = os.umask(0)
     try:
         f = Fakes(tmp_path)
@@ -345,6 +368,7 @@ def test_names_github_rejects_are_rejected(tmp_path: Path, bad: str) -> None:
 
 @pytest.mark.parametrize("good", [f"{'a' * 39}/r", "a-b-c/x.y_z", "9/9"])
 def test_names_github_accepts_are_accepted(tmp_path: Path, good: str) -> None:
+    # guards against a false refusal of valid GitHub names, not the hardening
     f = Fakes(tmp_path)
     argv = ["issue", "--repo", good, "--working-repo", good, "--title", "t", "--body", "b"]
     assert go(f, *argv)[0] == 0
