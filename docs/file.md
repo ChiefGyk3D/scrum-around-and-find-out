@@ -89,12 +89,12 @@ exit 2 with the reason (never the path). A key you give replaces that key's defa
 built in is added and needs a `repo`.
 
 ```toml
-[classes.homelab]
+[classes."homelab"]
 repo = "ChiefGyk3D/homelab-ops"
 keywords = ["homelab", "proxmox", "side project"]   # whole words or phrases: a-z, 0-9, space . _ + -
 paths = ["infra", "ops/runner"]                      # path segments
 
-[classes.radio]                                       # a new class: repo is required, private defaults to true
+[classes."radio"]                                       # a new class: repo is required, private defaults to true
 repo = "ChiefGyk3D/radio-notes"
 keywords = ["sdr", "meshtastic"]
 ```
