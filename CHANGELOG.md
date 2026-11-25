@@ -4,8 +4,10 @@
 
 - `safo local report` (#372, #380): read-only counts of local-model use per day, week and model from the dispatch-guard
   log, the `safo hooks status` guard counts and the `llm-local` calls and admission state, with a MISSING DATA section
-  and `--json`. Bounded reads, malformed lines counted, output through the repo writer. Tests:
-  `tests/test_local_report.py`. Docs: `docs/usage.md`.
+  and `--json`. Nothing is written or created (the hooks log is read without its lock). Bounded reads, malformed, torn
+  and future-dated rows counted, strict timestamps judged on the local date, output through the repo writer. `local run`
+  keeps its required-argument error and refuses `--days` and `--json`. Docs: `docs/usage.md`, with the task-type table.
+  Tests: `tests/test_local_report.py`.
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on

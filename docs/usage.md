@@ -39,14 +39,45 @@ unknown rather than as stale usage. `--json` prints the same data for a script; 
 ## Local-model use report
 
 `safo local report [--days N] [--json]` counts, by code and from local files only, how often the local model is really
-used (#372, baseline #380). No model is called and nothing is written. It prints, per day, per week and per model (the
-last 28 days unless `--days`): dispatches, dispatches with the local LLM reachable, briefs that named a real local step,
-briefs with a `local-llm` line, and briefs with neither. The sources are the dispatch-guard log
-(`~/.local/state/agent-dispatch-guard/log.jsonl`), the `safo hooks status` counts (same code), and the `llm-local` calls
-log and `state.json` (calls by task and model, admit and busy counts). Each file is opened without following a symlink,
-read at most 8 MiB and 100,000 lines from the end, and a malformed or torn line is counted, not fatal. The report ends with
-a MISSING DATA section naming what cannot be counted yet (the reason text of `local-llm: n/a`, which brief made a call,
-accepted or rewritten outcomes) and the one-line change that would record it. The exit code is 0.
+used (#372, baseline #380). No model is called and nothing is written or created: every file is only read. It prints,
+per day, per week and per model (the last 28 days unless `--days`, 1 to 3660): dispatches, dispatches with the local LLM
+reachable, briefs that name llm-local (the guard's `local_step`, a substring match on the brief text, so it shows that a
+brief mentions llm-local and not that a step ran), briefs with a `local-llm` line, and briefs with neither. The sources
+are the dispatch-guard log (`~/.local/state/agent-dispatch-guard/log.jsonl`), the `safo hooks status` counts (the same
+`guardlog.summarise`, read without taking the log's lock), and the `llm-local` calls log and `state.json` (calls by task
+and model, admit and busy counts). The dispatch-guard and `llm-local` files are looked for under the home directory
+only, the way their writers place them, and ignore `XDG_STATE_HOME` and `XDG_DATA_HOME`; the hooks log keeps following
+`XDG_STATE_HOME`, as the guard that writes it does.
+
+Safety: each file is opened without following a symlink or waiting on a FIFO, only the last 8 MiB and 100,000 lines are
+read, and a line that is malformed, torn (no trailing newline), over 4 KiB or has a timestamp that is not exactly
+`YYYY-MM-DDTHH:MM:SS` is counted, not fatal. The logs carry local time without a zone, so "today" and the window use the
+local date of the clock; a row dated after today is counted as malformed and as future. If both `~/.local/state/llm-local`
+and `~/.local/share/llm-local` hold a `calls.jsonl`, only the first is read. The report ends with a MISSING DATA section
+naming what cannot be counted yet (the reason text of `local-llm: n/a`, which brief made a call, accepted or rewritten
+outcomes) and the one-line change that would record it. The exit code is 0; `--days` outside the range is an error.
+
+### What the local model is for
+
+From the maintainer's measurements (issue #372, 2026-11-07): most agents skipped the local model when it was optional, and
+the two that used it got a false technical claim and invented content. So it is for structure and first-draft prose that a
+paid model or a person then checks, and not for facts.
+
+| Task type | Local model? | Notes |
+|---|---|---|
+| Issue triage digests, classification (kind, priority, effort drafts) | yes | code does the grouping and counting; the model writes prose over a structure that is already correct |
+| Summaries of logs and CI output | yes | the agent checks it against the source |
+| Pull request body and commit message drafts | yes | the agent verifies every claim |
+| Outlines and lesson first drafts | yes, to be fact-checked | never published unchecked |
+| Embeddings and search | yes, as a separate executor | `local run` is generation only |
+| Facts about a system, a protocol or a product | no | a MINIX behavior was misstated and an RSA key pair for TCG OPAL was invented |
+| Code, and anything that changes state | no | stays on Claude or Codex |
+| Security and adversarial review | no | always the cyber-program tier |
+
+Model and prompt shape: `gemma4:12b` at 131072 for longer inputs and `qwen3.5:4b` at 8192 for short ones. Send exactly the
+`num_ctx` the model is loaded with, and `think=false` for cheap text tasks. The brief template line
+(`local-llm: step N drafts X with llm-local; agent verifies every claim`) belongs to the DoIA and dotfiles brief
+template, not to this repository.
 
 ## Routing
 

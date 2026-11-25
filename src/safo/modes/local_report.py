@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import stat
 from collections import Counter
 from collections.abc import Mapping
@@ -29,6 +30,7 @@ MAX_LINE_BYTES = 4096
 MAX_LABELS = 200  # distinct task labels or models kept; the rest are counted as "(other)"
 MAX_LABEL = 64
 MAX_DAYS = 3660
+TS_SHAPE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}")  # exactly what the writers log
 DEFAULT_DAYS = 28
 OTHER = "(other)"
 
@@ -36,8 +38,8 @@ OTHER = "(other)"
 MISSING = (
     (
         "reason text of `local-llm: n/a` lines",
-        "the guard log keeps only the boolean `na`; add `na_reason` (first 120 characters, controls escaped) to the "
-        "guard's log record",
+        "the dispatch guard log keeps only the booleans `local_step` and `local_line` (the `na` boolean exists only in "
+        "the safo hooks log); add `na_reason` (first 120 characters, controls escaped) to the guard's log record",
     ),
     (
         "which brief or issue made each llm-local call",
@@ -45,7 +47,7 @@ MISSING = (
         "`issue:` line) as `brief`",
     ),
     (
-        "whether a brief that named a local step really called the model",
+        "whether a brief that names llm-local really called the model",
         "the guard log has no brief id; add `brief` (the issue ref) to the guard's log record so it can be joined "
         "with calls.jsonl",
     ),
@@ -74,6 +76,7 @@ class Source:
         self.found = False
         self.truncated = False
         self.malformed = 0
+        self.future = 0  # rows dated after today; they are also counted in `malformed`
         self.lines: list[bytes] = []
 
 
@@ -90,6 +93,7 @@ def read_lines(path: Path) -> Source:
             return src
         src.found = True
         start = max(0, info.st_size - MAX_FILE_BYTES)
+        cut = start > 0 and os.pread(fd, 1, start - 1) != b"\n"  # the first line starts before the window
         os.lseek(fd, start, os.SEEK_SET)
         chunks: list[bytes] = []
         total = 0
@@ -107,7 +111,8 @@ def read_lines(path: Path) -> Source:
     raw = b"".join(chunks).splitlines(keepends=True)
     if start > 0:
         src.truncated = True
-        raw = raw[1:]  # the first line is cut in the middle
+        if cut:
+            raw = raw[1:]  # the first line is cut in the middle
     if len(raw) > MAX_LINES:
         src.truncated = True
         raw = raw[-MAX_LINES:]
@@ -137,12 +142,25 @@ def json_rows(src: Source) -> list[dict[str, Any]]:
 
 def day_of(row: Mapping[str, Any]) -> dt.date | None:
     ts = row.get("ts")
-    if not isinstance(ts, str):
+    if not isinstance(ts, str) or not TS_SHAPE.fullmatch(ts):
         return None
     try:
-        return dt.datetime.fromisoformat(ts[:19]).date()
+        return dt.date.fromisoformat(ts[:10]) if dt.time.fromisoformat(ts[11:]) is not None else None
     except ValueError:
         return None
+
+
+def in_window(src: Source, row: Mapping[str, Any], since: dt.date, today: dt.date) -> dt.date | None:
+    """The row's day when it is inside the window; None otherwise. A bad timestamp or a future row is counted."""
+    day = day_of(row)
+    if day is None:
+        src.malformed += 1
+        return None
+    if day > today:
+        src.malformed += 1
+        src.future += 1
+        return None
+    return day if day >= since else None
 
 
 def week_of(day: dt.date) -> str:
@@ -170,18 +188,15 @@ def dispatch_flags(row: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
-def dispatch_section(path: Path, since: dt.date) -> dict[str, Any]:
+def dispatch_section(path: Path, since: dt.date, today: dt.date) -> dict[str, Any]:
     src = read_lines(path)
     by_day: dict[str, Counter[str]] = {}
     by_week: dict[str, Counter[str]] = {}
     by_model: dict[str, Counter[str]] = {}
     rows = 0
     for row in json_rows(src):
-        day = day_of(row)
+        day = in_window(src, row, since, today)
         if day is None:
-            src.malformed += 1
-            continue
-        if day < since:
             continue
         rows += 1
         flags = dispatch_flags(row)
@@ -194,6 +209,7 @@ def dispatch_section(path: Path, since: dt.date) -> dict[str, Any]:
         "found": src.found,
         "rows": rows,
         "malformed": src.malformed,
+        "future": src.future,
         "truncated": src.truncated,
         "by_day": {k: dict(by_day[k]) for k in sorted(by_day)},
         "by_week": {k: dict(by_week[k]) for k in sorted(by_week)},
@@ -201,15 +217,27 @@ def dispatch_section(path: Path, since: dt.date) -> dict[str, Any]:
     }
 
 
-def hooks_section(env: Mapping[str, str], since: dt.date) -> dict[str, Any]:
-    folder = guardlog.state_dir(env)
-    rows = guardlog.read_log(folder / guardlog.LOG_NAME if folder else None)  # the code `safo hooks status` uses
-    rows = [r for r in rows if (day_of(r) or since) >= since]
+def hooks_section(env: Mapping[str, str], since: dt.date, today: dt.date) -> dict[str, Any]:
+    """The `safo hooks status` counts (guardlog.summarise), from rows read here without taking the log's lock."""
+    folder = guardlog.state_dir(env)  # the hooks log honors XDG_STATE_HOME, as the guard that writes it does
+    path = folder / guardlog.LOG_NAME if folder else None
+    src = (
+        read_lines(path) if path is not None and guardlog.trusted_dir(path.parent) else Source(Path(guardlog.LOG_NAME))
+    )
+    rows = []
+    for row in json_rows(src):
+        if not guardlog.valid_record(row):
+            src.malformed += 1
+        elif in_window(src, row, since, today) is not None:
+            rows.append(row)
     counts = guardlog.summarise(rows)
     return {
-        "found": bool(rows),
+        "found": src.found,
         "total": counts.total,
         "since": counts.since,
+        "malformed": src.malformed,
+        "future": src.future,
+        "truncated": src.truncated,
         "decisions": dict(counts.decisions),
         "models": dict(counts.models),
         "rules": dict(counts.rules),
@@ -218,12 +246,10 @@ def hooks_section(env: Mapping[str, str], since: dt.date) -> dict[str, Any]:
     }
 
 
-def _dir(env: Mapping[str, str], xdg: str, fallback: tuple[str, ...]) -> Path | None:
-    chosen = env.get(xdg, "")
-    if chosen and Path(chosen).is_absolute():
-        return Path(chosen) / "llm-local"
+def home_path(env: Mapping[str, str], *parts: str) -> Path | None:
+    """Under HOME only: the guard and llm-local write there and ignore the XDG variables."""
     home = env.get("HOME", "")
-    return Path(home).joinpath(*fallback, "llm-local") if home else None
+    return Path(home).joinpath(*parts) if home else None
 
 
 def counters_of(path: Path) -> dict[str, int]:
@@ -240,8 +266,9 @@ def counters_of(path: Path) -> dict[str, int]:
     return out
 
 
-def llm_local_section(env: Mapping[str, str], since: dt.date) -> dict[str, Any]:
-    state, share = _dir(env, "XDG_STATE_HOME", (".local", "state")), _dir(env, "XDG_DATA_HOME", (".local", "share"))
+def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) -> dict[str, Any]:
+    state = home_path(env, ".local", "state", "llm-local")
+    share = home_path(env, ".local", "share", "llm-local")
     src = Source(Path("calls.jsonl"))
     for folder in (state, share):  # the first calls log that exists; never both, so no call is counted twice
         if folder is not None:
@@ -254,11 +281,8 @@ def llm_local_section(env: Mapping[str, str], since: dt.date) -> dict[str, Any]:
     by_week: Counter[str] = Counter()
     calls = tokens = 0
     for row in json_rows(src):
-        day = day_of(row)
+        day = in_window(src, row, since, today)
         if day is None:
-            src.malformed += 1
-            continue
-        if day < since:
             continue
         calls += 1
         bump(by_task, label(row.get("task")))
@@ -274,6 +298,7 @@ def llm_local_section(env: Mapping[str, str], since: dt.date) -> dict[str, Any]:
         "calls": calls,
         "tokens": tokens,
         "malformed": src.malformed,
+        "future": src.future,
         "truncated": src.truncated,
         "by_task": dict(sorted(by_task.items())),
         "by_model": dict(sorted(by_model.items())),
@@ -284,28 +309,31 @@ def llm_local_section(env: Mapping[str, str], since: dt.date) -> dict[str, Any]:
 
 
 def build(env: Mapping[str, str], today: dt.date, days: int) -> dict[str, Any]:
+    """`today` is the local date: the logs carry local time without a zone."""
     since = today - dt.timedelta(days=days - 1)
-    home = env.get("HOME", "")
-    base = _dir(env, "XDG_STATE_HOME", (".local", "state"))
-    state_root = base.parent if base else (Path(home) / ".local" / "state" if home else Path("."))
-    dispatch = dispatch_section(state_root / "agent-dispatch-guard" / "log.jsonl", since)
-    missing = [{"what": what, "change": change} for what, change in MISSING]
+    log = home_path(env, ".local", "state", "agent-dispatch-guard", "log.jsonl")
+    dispatch = dispatch_section(log, since, today) if log else dispatch_section(Path("log.jsonl"), since, today)
     return {
         "generated": today.isoformat(),
         "days": days,
         "since": since.isoformat(),
         "dispatch": dispatch,
-        "hooks": hooks_section(env, since),
-        "llm_local": llm_local_section(env, since),
-        "missing": missing,
+        "hooks": hooks_section(env, since, today),
+        "llm_local": llm_local_section(env, since, today),
+        "missing": [{"what": what, "change": change} for what, change in MISSING],
     }
 
 
 def _flags_line(name: str, c: Mapping[str, int]) -> str:
     return (
-        f"  {name}  dispatches {c['dispatches']}  reachable {c['reachable']}  local step {c['local_step']}  "
+        f"  {name}  dispatches {c['dispatches']}  reachable {c['reachable']}  names llm-local {c['local_step']}  "
         f"local-llm line {c['local_line']}  neither {c['neither']}"
     )
+
+
+def skipped(section: Mapping[str, Any]) -> str:
+    future = f" ({section['future']} dated in the future)" if section["future"] else ""
+    return f"malformed lines skipped: {section['malformed']}{future}"
 
 
 def text(report: Mapping[str, Any]) -> list[str]:
@@ -315,7 +343,7 @@ def text(report: Mapping[str, Any]) -> list[str]:
     if not d["found"]:
         out.append("  no dispatch log found")
     else:
-        out.append(f"  {d['rows']} dispatches in the window; malformed lines skipped: {d['malformed']}")
+        out.append(f"  {d['rows']} dispatches in the window; {skipped(d)}")
         if d["truncated"]:
             out.append("  only the newest part of the file was read (size or line cap)")
         out.append(" by day")
@@ -331,7 +359,7 @@ def text(report: Mapping[str, Any]) -> list[str]:
         out.append(
             f"  {h['total']} dispatches since {h['since']}: " + ", ".join(f"{k} {v}" for k, v in h["decisions"].items())
         )
-        out.append(f"  briefs with a local step {h['local_steps']}, marked n/a {h['marked_na']}")
+        out.append(f"  briefs with a local step {h['local_steps']}, marked n/a {h['marked_na']}; {skipped(h)}")
         out.append("  models: " + ", ".join(f"{k} {v}" for k, v in h["models"].items()))
         if h["rules"]:
             out.append("  rules flagged: " + ", ".join(f"{k} {v}" for k, v in h["rules"].items()))
@@ -339,9 +367,7 @@ def text(report: Mapping[str, Any]) -> list[str]:
     if not ll["found"]:
         out.append("  no llm-local calls log found")
     else:
-        out.append(
-            f"  {ll['calls']} calls, {ll['tokens']:,} tokens in the window; malformed lines skipped: {ll['malformed']}"
-        )
+        out.append(f"  {ll['calls']} calls, {ll['tokens']:,} tokens in the window; {skipped(ll)}")
         if ll["truncated"]:
             out.append("  only the newest part of the file was read (size or line cap)")
         out.append("  by task: " + (", ".join(f"{k} {v}" for k, v in ll["by_task"].items()) or "none"))
@@ -357,9 +383,11 @@ def text(report: Mapping[str, Any]) -> list[str]:
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
-    if not (0 < args.days <= MAX_DAYS):
+    days = DEFAULT_DAYS if args.days is None else args.days
+    if not (0 < days <= MAX_DAYS):
         raise ConfigError(f"--days must be above 0 and at most {MAX_DAYS}")
-    report = build(ctx.env, ctx.now.date(), args.days)
+    # the logs carry local time without a zone, so the window ends on the local date of the clock
+    report = build(ctx.env, ctx.now.astimezone().date(), days)
     if args.json:
         # one line, ASCII only; `::` is written as a JSON escape so no value can start a workflow command
         ctx.say(json.dumps(report, separators=(",", ":")).replace("::", ":\\u003a"))
