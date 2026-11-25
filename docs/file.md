@@ -54,6 +54,66 @@ count on stderr, and so is the number of pending records that never committed. A
 regular file, not owned by you, group or other writable, or larger than 8 MB exits 2. Only filings made through
 `safo-file issue` are counted.
 
+## The routing table (#455)
+
+The owner decided that the private repositories are the default home for general work, so `safo-file` can say where a
+piece of work belongs and keeps private-workflow work out of public repos. The decision is made by code, from keyword and
+path-hint lists, never by a model.
+
+| Class | Default destination | Private |
+| --- | --- | --- |
+| `product` | the working repo, when it is in `tracking_repos` | no |
+| `homelab` (homelab, infra, runner, ops) | `ChiefGyk3D/homelab-ops` | yes |
+| `ai-tooling` (AI tooling and config) | `ChiefGyk3D/AI-Shit` | yes |
+| `research` (research and evaluation) | `ChiefGyk3D/research-notes` | yes |
+| `tangent` (unclassified and tangents) | `ChiefGyk3D/workbench` | yes |
+
+`safo-file route DESCRIPTION --working-repo o/r [--class NAME] [--ledger PATH]`
+
+Prints `destination:`, `class:` and `reason:` (the matched keywords and path hints, or `explicit class NAME`). Exit 0 when
+the class is decided. Exit 3 when nothing matched, or when the work is `product` but the working repo is not tracked: the
+destination is then only the default (`ChiefGyk3D/workbench`), printed as `(default only)`; pass `--class` to decide.
+The decision is appended to the ledger as a `routed` record (class, destination, how it was decided, the matched terms;
+never the description). `report` ignores `routed` records, and a route that cannot be recorded exits 2 with no output.
+
+Matching: a keyword counts when it appears as a whole word or phrase, ignoring case (`ops` does not match `hopscotch`).
+A path hint counts when it equals a whole segment of a path-like word (`notes/jan.md` matches `notes`; the plain word
+`notes` does not). A class scores one point per distinct keyword or hint matched. The highest score wins. A tie goes to
+a private class over a public one, then to the class earlier in the table (product, homelab, ai-tooling, research,
+tangent, then classes the file adds, in file order).
+
+The table lives in `~/.config/safo-file/routes.toml`, which is not under `~/.config/safo`; no environment variable moves
+it. Without the file the defaults above apply. The file must be a regular file you own, not writable by group or others,
+with no symbolic link in its path and closed directories above it, at most 64 KB, valid UTF-8 and TOML; anything else is
+exit 2 with the reason (never the path). A key you give replaces that key's default; a class the file names that is not
+built in is added and needs a `repo`.
+
+```toml
+[classes.homelab]
+repo = "ChiefGyk3D/homelab-ops"
+keywords = ["homelab", "proxmox", "side project"]   # whole words or phrases: a-z, 0-9, space . _ + -
+paths = ["infra", "ops/runner"]                      # path segments
+
+[classes.radio]                                       # a new class: repo is required, private defaults to true
+repo = "ChiefGyk3D/radio-notes"
+keywords = ["sdr", "meshtastic"]
+```
+
+`product` takes no `repo` and is never private. At most 32 classes and 200 terms per list.
+
+**Public repos.** `safo-file issue ... [--class NAME] [--allow-public]` finds the work's class from `--class`, else from
+what the title and body match (no match means no class, and the issue is filed as before). A private class in a public
+repo is refused (exit 1) unless the command has `--allow-public` AND the body has a `public-ok: <reason>` line outside a
+code fence. Whether the repo is public comes from `gh api repos/o/r --jq .private`; the answer is cached next to the
+ledger (`repo-visibility.jsonl`, same trust rules, believed for 5 minutes). If the lookup fails or answers something
+unexpected the issue is refused with exit 2 (fail closed). Every decided issue writes a `routed` record first, with
+`outcome` `private-repo`, `override` or `refused`. The cross-project and idea-gate rules still apply on top.
+
+**Parking lot.** `safo-file check ... --answer tangent --parking-number N` posts the parking-lot body to issue N in the
+table's `tangent` repo (workbench by default). Without `--parking` or `--parking-number` it prints the default
+parking-lot repo and posts nothing. `--parking o/r#N` still works alone; both together is exit 2. `safo-file` never
+creates an issue for this.
+
 ## The memory search
 
 Set `SAFO_MEMORY_SEARCH` to a command. It is run as `<command> -- <idea>`, so it must accept `--` before its positional
@@ -95,4 +155,4 @@ after an issue was created the URL is still printed.
 
 ## Exit codes
 
-0 done, 1 refused by a rule, 2 an error or bad command line, 3 an answer is still needed.
+0 done, 1 refused by a rule, 2 an error or bad command line, 3 an answer is still needed (`route`: the class could not be decided).

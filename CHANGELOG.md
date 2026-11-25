@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo-file`: routing table with private repos by default and workbench for tangents (#455, epic #347; `safo.idea_gate_routes`). New `route` subcommand prints the destination repo and why (keyword and path-hint matching by code, classes product, homelab, ai-tooling, research, tangent; exit 3 when undecided); the table is data in `~/.config/safo-file/routes.toml` (trusted file, bounded, exit 2 when malformed). `issue` refuses private-workflow work in a public repo unless `--allow-public` and a `public-ok:` line are given, and fails closed when `gh` cannot say whether the repo is public; `check` takes the tangent repo as the default parking-lot repo (`--parking-number`). Decisions are `routed` ledger records. Tests: `tests/test_idea_gate_routes.py`.
 - New `safo-file` (#443, epic #347; `safo.idea_gate`), a wrapper in the style of the planned `safo file` (#348), not a guard.
   `check` matches an idea against `hooks.tracking_repos`, `gh repo list` and a pluggable memory search
   (`SAFO_MEMORY_SEARCH`), prints the top hits and requires exactly one answer: `extends:<repo>`, `new-project` (needs

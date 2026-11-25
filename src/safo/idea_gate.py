@@ -8,8 +8,11 @@ dispatch guard, the hooks, `~/.config/safo` (it only READS the one file `~/.conf
 shared loader, with no override and no environment redirect) or settings.json. It creates no repository, epic or
 card, ever.
 
-    safo-file check IDEA --working-repo o/r [--answer ANSWER] [--owner-ok] [--timebox 30m] [--parking o/r#N]
+    safo-file check IDEA --working-repo o/r [--answer ANSWER] [--owner-ok] [--timebox 30m]
+                     [--parking o/r#N | --parking-number N]
     safo-file issue --repo o/r --working-repo o/r --title T --body B [--allow-other-owner]
+                    [--class NAME] [--allow-public]
+    safo-file route DESCRIPTION --working-repo o/r [--class NAME]
     safo-file report [--working-repo o/r]
 
 `check` matches the idea against `hooks.tracking_repos`, `gh repo list` and a pluggable memory search
@@ -21,6 +24,13 @@ parking-lot body with a time box; with `--parking` it posts that body as a comme
 repo needs a `cross-project: <reason>` line in the body. The ledger gets a `pending` record BEFORE the issue is created
 and a `committed` record (with the URL) after; `report` counts, in code, the committed filings whose repo differs and
 names the pending ones that never committed.
+
+`route` prints the destination repo for a piece of work and why (the routing table of issue #455, in
+`safo.idea_gate_routes`; matching is by keyword and path hint, never a model) and records the decision in the ledger
+as a `routed` record. Exit 3 means the class could not be decided and the destination is only the default. `issue`
+refuses a private-workflow class (homelab, ai-tooling, research, tangent, or any class the routes file marks private)
+in a public repo unless `--allow-public` and a `public-ok: <reason>` body line are both given; whether the repo is
+public comes from `gh api` and a failed lookup refuses (exit 2).
 
 ENFORCED here: `issue` in another repo needs a non-empty `cross-project: <reason>` line (outside a code fence) and
 `--allow-other-owner` when the owner differs; the ledger is opened and checked before the issue is created; `check`
@@ -49,9 +59,11 @@ from typing import TextIO
 
 from safo import bounded, output
 from safo import idea_gate_io as gio
+from safo import idea_gate_routes as routes
 from safo.agentsfile import load_agents_merged
 from safo.credentials import find_gh
 from safo.errors import SafoError
+from safo.idea_gate_routes import is_repo
 from safo.localfiles import refuse_workspace
 from safo.trust import read_trusted_regular_file
 
@@ -68,27 +80,17 @@ GH_OUT_CAP = 1_048_576
 GH_ERR_CAP = 65_536
 URL_SHOWN = 2_000  # characters of a returned URL that are shown and recorded
 LEDGER_LIMIT = 8 * 1024 * 1024
-OWNER = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")  # GitHub: no leading, trailing or doubled hyphen
-NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
 NUMBER = re.compile(r"[1-9][0-9]{0,8}")
 TIMEBOX = re.compile(r"[1-9][0-9]{0,2}[mh]")
 CROSS = re.compile(r"^cross-project:[ \t]*(\S.*)$", re.MULTILINE)
+PUBLIC_OK = re.compile(r"^public-ok:[ \t]*(\S.*)$", re.MULTILINE)
+DESCRIPTION_LIMIT = 2_000
+VISIBILITY_CACHE = "repo-visibility.jsonl"  # next to the ledger
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 WORD = re.compile(r"[a-z0-9]{3,}")
 ANSWERS = "extends:<repo>, new-project, tangent"
 
 write_fd = os.write  # the ledger's write call; a test replaces it to make a short or a failing write
-
-
-def is_repo(name: str) -> bool:
-    owner, sep, repo = name.partition("/")
-    return (
-        bool(sep)
-        and len(owner) <= 39
-        and bool(OWNER.fullmatch(owner))
-        and bool(NAME.fullmatch(repo))
-        and (repo not in (".", ".."))
-    )
 
 
 def same_repo(a: str, b: str) -> bool:
@@ -105,6 +107,8 @@ class Deps:
     create_issue: Callable[[str, str, str], str]  # repo, title, body -> url
     comment: Callable[[str, int, str], None]  # repo, issue number, body
     ledger: Path
+    routes: Callable[[], routes.RouteTable] = routes.default_table
+    is_public: Callable[[str], bool] | None = None  # True when the repo is public; raises SafoError on any doubt
 
 
 def words(text: str) -> set[str]:
@@ -173,12 +177,23 @@ def check(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, now: d
         output.write(out, "tangent: parking-lot body (no repo, epic or card):")
         for text in body.splitlines():  # shown escaped; the raw text goes only to GitHub
             output.write(out, text)
-        if args.parking:
-            target, _, number = args.parking.rpartition("#")
+        parking = args.parking
+        if args.parking_number:
+            if parking:
+                raise SafoError("give --parking or --parking-number, not both")
+            if not NUMBER.fullmatch(args.parking_number):
+                raise SafoError("--parking-number must be an issue number")
+            parking = f"{deps.routes().fallback.repo}#{args.parking_number}"
+        if parking:
+            target, _, number = parking.rpartition("#")
             if not (is_repo(target) and NUMBER.fullmatch(number)):
                 raise SafoError("--parking must be owner/repo#N")
             deps.comment(target, int(number), body)
-            output.write(out, f"posted to {args.parking}")
+            output.write(out, f"posted to {parking}")
+        else:
+            output.write(
+                out, f"parking-lot repo: {deps.routes().fallback.repo} (pass --parking-number N to post to that issue)"
+            )
     return EXIT_OK
 
 
@@ -212,6 +227,50 @@ def record(state: str, rid: str, args: argparse.Namespace, now: dt.datetime, **e
     return (json.dumps({**entry, **extra}) + "\n").encode()
 
 
+def routed_record(
+    rid: str, now: dt.datetime, repo: str, working: str, d: routes.RouteClass, how: str, matched: Sequence[str],
+    decided: bool, **extra: str,
+) -> bytes:  # fmt: skip
+    """The ledger record of one routing decision (its own record type, `routed`). The description is never stored."""
+    entry = {
+        "state": "routed", "id": rid, "ts": now.isoformat(), "repo": repo, "working_repo": working,
+        "class": d.name, "how": how, "matched": list(matched[: routes.MATCHED_SHOWN]), "decided": decided,
+    }  # fmt: skip
+    return (json.dumps({**entry, **extra}) + "\n").encode()
+
+
+def append(fd: int, data: bytes, what: str) -> None:
+    try:
+        gio.write_all(fd, data, write_fd)
+    except OSError as problem:
+        raise SafoError(f"the ledger cannot be written ({problem}); {what}") from None
+
+
+def route_cmd(args: argparse.Namespace, deps: Deps, out: TextIO, now: dt.datetime) -> int:
+    d = routes.decide(deps.routes(), args.description, args.route_class, args.working_repo, deps.tracking)
+    fd = gio.open_ledger(deps.ledger)
+    try:
+        record_bytes = routed_record(
+            secrets.token_hex(8), now, d.repo, args.working_repo, d.cls, d.how, d.matched, d.decided
+        )
+        append(fd, record_bytes, "the decision was not recorded")
+    finally:
+        os.close(fd)
+    output.write(out, f"destination: {d.repo}" + ("" if d.decided else " (default only)"))
+    output.write(out, f"class: {d.cls.name}" + ("" if d.decided else " (not decided)"))
+    output.write(out, f"reason: {d.reason}")
+    return EXIT_OK if d.decided else EXIT_NEEDS_ANSWER
+
+
+def issue_class(args: argparse.Namespace, deps: Deps) -> tuple[routes.RouteClass, str, tuple[str, ...]] | None:
+    """The class of the work: the explicit --class, else what the title and body match, else None (undecided)."""
+    table = deps.routes()
+    if args.route_class:
+        return routes.find_class(table, args.route_class), "explicit", ()
+    hit = routes.classify(table, f"{args.title}\n{args.body}")
+    return None if hit is None else (hit[0], "matched", hit[1])
+
+
 def file_issue(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, now: dt.datetime) -> int:
     for name in (args.repo, args.working_repo):
         if not is_repo(name):
@@ -228,9 +287,32 @@ def file_issue(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, n
             "the body needs a `cross-project: <reason>` line",
         )
         return EXIT_REFUSED
+    found = issue_class(args, deps)
     fd = gio.open_ledger(deps.ledger)
     rid = secrets.token_hex(8)
     try:
+        if found is not None:
+            cls, how, matched = found
+            outcome = "filed"
+            if cls.private:
+                if deps.is_public is None:
+                    raise SafoError(f"cannot tell whether {args.repo} is public; nothing was filed")
+                outcome = "private-repo"
+                if deps.is_public(args.repo):
+                    allowed = args.allow_public and PUBLIC_OK.search(outside_fences(args.body))
+                    outcome = "override" if allowed else "refused"
+            append(
+                fd,
+                routed_record(rid, now, args.repo, args.working_repo, cls, how, matched, True, outcome=outcome),
+                "nothing was filed",
+            )
+            if outcome == "refused":
+                output.write(
+                    err,
+                    f"refused: {args.repo} is public and this is {cls.name} work, which stays private; pass "
+                    "--allow-public and put a `public-ok: <reason>` line in the body",
+                )
+                return EXIT_REFUSED
         try:
             gio.write_all(fd, record("pending", rid, args, now), write_fd)
         except OSError as problem:
@@ -266,7 +348,7 @@ def count_mismatches(ledger: Path, working: str | None) -> tuple[int, int, int, 
             e = None
         ok = (
             isinstance(e, dict)
-            and e.get("state") in ("pending", "committed")
+            and e.get("state") in ("pending", "committed", "routed")
             and isinstance(e.get("id"), str)
             and isinstance(e.get("repo"), str)
             and isinstance(e.get("working_repo"), str)
@@ -276,6 +358,8 @@ def count_mismatches(ledger: Path, working: str | None) -> tuple[int, int, int, 
             continue
         if working and not same_repo(e["working_repo"], working):
             continue
+        if e["state"] == "routed":
+            continue  # a routing decision, not a filing
         if e["state"] == "pending":
             pending.add(e["id"])
             continue
@@ -305,15 +389,22 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--owner-ok", action="store_true", help="the owner's explicit OK for a new project")
     c.add_argument("--timebox", default="30m", help="tangent time box, like 30m or 2h")
     c.add_argument("--parking", default="", help="the one parking-lot issue, owner/repo#N, to post a tangent to")
+    c.add_argument("--parking-number", default="", help="that issue's number in the table's tangent repo (workbench)")
     i = sub.add_parser("issue", help="file one issue; another repo needs a cross-project line")
     i.add_argument("--repo", required=True)
     i.add_argument("--working-repo", required=True)
     i.add_argument("--title", required=True)
     i.add_argument("--body", required=True)
     i.add_argument("--allow-other-owner", action="store_true", help="allow a repo owned by someone else")
+    i.add_argument("--class", dest="route_class", default="", help="the work's class (default: matched from the text)")
+    i.add_argument("--allow-public", action="store_true", help="allow private-workflow work in a public repo")
+    t = sub.add_parser("route", help="print the destination repo for a piece of work and why")
+    t.add_argument("description")
+    t.add_argument("--working-repo", required=True)
+    t.add_argument("--class", dest="route_class", default="", help="decide the class yourself")
     r = sub.add_parser("report", help="count issues whose repo differs from the working repo")
     r.add_argument("--working-repo", default=None)
-    for s in (c, i, r):
+    for s in (c, i, r, t):
         s.add_argument("--ledger", default="", help="filing ledger (default: ~/.local/state/safo/file-ledger.jsonl)")
     return p
 
@@ -398,7 +489,25 @@ def real_deps(args: argparse.Namespace, env: Mapping[str, str], now: dt.datetime
     def comment(repo: str, number: int, body: str) -> None:
         _gh(env, "issue", "comment", str(number), "--repo", repo, "--body-file", "-", body=body)
 
-    return Deps(tracking, gh_repos, lambda idea: run_memory(env, idea), create, comment, ledger)
+    def fetch_private(repo: str) -> bool:
+        raw = _gh(env, "api", f"repos/{repo}", "--jq", ".private").strip()
+        if raw not in ("true", "false"):
+            raise SafoError(f"gh api answered something unreadable about {repo}; refusing")
+        return raw == "false"
+
+    def is_public(repo: str) -> bool:
+        return routes.cached_visibility(ledger.parent / VISIBILITY_CACHE, repo, now, fetch_private)
+
+    return Deps(
+        tracking,
+        gh_repos,
+        lambda idea: run_memory(env, idea),
+        create,
+        comment,
+        ledger,
+        routes=lambda: routes.load_table(str(home)),
+        is_public=is_public,
+    )
 
 
 def main(
@@ -417,6 +526,10 @@ def main(
         args = parser().parse_args(argv)
         if args.cmd == "check" and not (TIMEBOX.fullmatch(args.timebox) and is_repo(args.working_repo)):
             raise SafoError("--timebox must look like 30m or 2h, and --working-repo must be owner/name")
+        if args.cmd == "route" and not is_repo(args.working_repo):
+            raise SafoError("--working-repo must be owner/name")
+        if args.cmd == "route" and len(args.description) > DESCRIPTION_LIMIT:
+            raise SafoError(f"the description is longer than {DESCRIPTION_LIMIT} characters")
         if deps is None:
             deps = real_deps(args, env, now)
         elif getattr(args, "ledger", ""):
@@ -425,6 +538,8 @@ def main(
             return check(args, deps, out, err, now)
         if args.cmd == "issue":
             return file_issue(args, deps, out, err, now)
+        if args.cmd == "route":
+            return route_cmd(args, deps, out, now)
         return report(args, deps, out, err)
     except SafoError as problem:
         output.write(err, f"safo-file: {problem}")
