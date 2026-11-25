@@ -5,7 +5,6 @@ Every gh call is a fake and HOME is a temporary directory; nothing touches the n
 
 from __future__ import annotations
 
-import datetime as dt
 import io
 import json
 import os
@@ -189,7 +188,17 @@ BAD_FILES = [
     pytest.param(b"[classes.homelab]\nkeywords = [1]\n", "keywords", id="bad-keyword-type"),
     pytest.param(b'[classes.homelab]\nkeywords = ["Bad!!"]\n', "keywords", id="bad-keyword-chars"),
     pytest.param(b'[classes.homelab]\npaths = ["../etc"]\n', "paths", id="bad-path-hint"),
-    pytest.param(b'[classes.homelab]\nprivate = "yes"\n', "private", id="bad-private-type"),
+    pytest.param(b"[classes.homelab]\nprivate = false\n", "private", id="built-in-class-made-public"),
+    pytest.param(b"[classes.homelab]\nprivate = true\n", "private", id="private-key-at-all"),
+    pytest.param(b'[classes.extra]\nrepo = "o/x"\nprivate = false\n', "private", id="custom-class-made-public"),
+    pytest.param(b"[classes.product]\nprivate = true\n", "private", id="product-private-key"),
+    pytest.param(b"[classes]\nhomelab = false\n", "must be a table", id="class-removed"),
+    pytest.param(b'[classes.tangent]\nvisibility = "public"\n', "unknown key", id="equivalent-key"),
+    pytest.param(b'[classes.homelab]\nkeywords = [""]\n', "keywords", id="empty-keyword"),
+    pytest.param(b'[classes.homelab]\nkeywords = ["  "]\n', "keywords", id="blank-keyword"),
+    pytest.param(b'[classes.homelab]\nkeywords = ["a.*"]\n', "keywords", id="regex-star"),
+    pytest.param(b'[classes.homelab]\nkeywords = ["(x"]\n', "keywords", id="regex-paren"),
+    pytest.param(b'[classes.homelab]\nkeywords = ["a|b"]\n', "keywords", id="regex-alternation"),
     pytest.param(b'[classes.Bad_Name]\nrepo = "o/x"\n', "class name", id="bad-class-name"),
     pytest.param(b'[classes.extra]\nkeywords = ["x"]\n', "needs a repo", id="new-class-without-repo"),
     pytest.param(b'[classes.product]\nrepo = "o/x"\n', "product", id="product-with-a-repo"),
@@ -296,7 +305,7 @@ def test_a_private_workflow_class_is_filed_in_a_private_repo(tmp_path: Path, nam
     f = Fakes(tmp_path)
     code, out, _ = issue(f, "--class", name, public=lambda repo: False)
     assert code == 0 and len(f.created) == 1 and out.strip().endswith("/1")
-    assert [r["state"] for r in ledger_records(f)] == ["routed", "pending", "committed"]
+    assert [r["state"] for r in ledger_records(f)] == ["pending", "committed"]  # a private target is not a decision
 
 
 def test_the_override_needs_both_the_flag_and_a_reason_line(tmp_path: Path) -> None:
@@ -310,18 +319,6 @@ def test_the_override_needs_both_the_flag_and_a_reason_line(tmp_path: Path) -> N
     code, _, _ = issue(f, "--class", "homelab", "--allow-public", body=f"x\n{reason}", public=lambda r: True)
     assert code == 0 and len(f.created) == 1
     assert ledger_records(f)[-3]["outcome"] == "override"
-
-
-def test_a_product_issue_needs_no_lookup_and_is_filed_in_a_public_repo(tmp_path: Path) -> None:
-    f = Fakes(tmp_path)
-    assert issue(f, "--class", "product", public=never)[0] == 0
-    assert len(f.created) == 1
-
-
-def test_an_issue_with_no_decided_class_is_filed_without_a_lookup(tmp_path: Path) -> None:
-    f = Fakes(tmp_path)
-    assert issue(f, public=never)[0] == 0
-    assert len(f.created) == 1
 
 
 def test_the_class_is_found_from_the_title_and_body_when_none_is_given(tmp_path: Path) -> None:
@@ -341,8 +338,12 @@ def test_a_failed_visibility_lookup_fails_closed(tmp_path: Path) -> None:
 
     code, _, err = issue(f, "--class", "homelab", public=broken)
     assert code == 2 and "gh api failed" in err and f.created == []
-    code, _, err = issue(f, "--class", "homelab")  # no way to look it up at all
-    assert code == 2 and "cannot tell whether" in err and f.created == []
+    d = f.deps()
+    d.is_public = None  # no way to look it up at all
+    err_io = io.StringIO()
+    argv = ["issue", "--repo", "o/pub", "--working-repo", "o/pub", "--title", "t", "--body", "b"]
+    assert idea_gate.main(argv, deps=d, out=io.StringIO(), err=err_io, now=NOW) == 2
+    assert "cannot tell whether" in err_io.getvalue() and f.created == []
 
 
 def test_an_unknown_class_on_an_issue_is_an_error(tmp_path: Path) -> None:
@@ -367,15 +368,15 @@ def vis_box(tmp_path: Path, answer: str) -> Box:
     return box
 
 
-def test_the_real_lookup_reads_gh_api_and_caches_it_beside_the_ledger(tmp_path: Path) -> None:
+def test_the_real_lookup_is_live_each_time_and_leaves_no_cache(tmp_path: Path) -> None:
     box = vis_box(tmp_path, "true\n")
     d = box.deps()
     assert d.is_public is not None
-    assert d.is_public("o/r") is False and d.is_public("O/R") is False  # the second answer is the cache's
-    assert (box.log / "argv").read_text().count("api repos/o/r") == 1
-    cache = [json.loads(x) for x in (box.log / "repo-visibility.jsonl").read_text().splitlines()]
-    assert cache[0]["repo"] == "o/r" and cache[0]["public"] is False
-    assert (box.log / "repo-visibility.jsonl").stat().st_mode & 0o777 == 0o600
+    assert d.is_public("o/r") is False
+    (box.log / "answer").write_text("false\n")  # the repo became public
+    assert d.is_public("o/r") is True
+    assert (box.log / "argv").read_text().count("api repos/o/r") == 2
+    assert sorted(p.name for p in box.log.iterdir()) == ["answer", "argv"]  # no cache file of any name
 
 
 @pytest.mark.parametrize("answer", ["maybe\n", "", "true false\n"])
@@ -396,28 +397,15 @@ def test_a_failing_gh_lookup_fails_closed(tmp_path: Path) -> None:
         d.is_public("o/r")
 
 
-def test_a_stale_or_tampered_cache_entry_is_not_believed(tmp_path: Path) -> None:
-    path = tmp_path / "vis.jsonl"
-    calls: list[str] = []
-
-    def fetch(repo: str) -> bool:
-        calls.append(repo)
-        return True
-
-    old = (NOW - dt.timedelta(seconds=routes.VISIBILITY_TTL + 1)).isoformat()
-    path.write_text(json.dumps({"repo": "o/r", "public": False, "ts": old}) + "\n")
-    path.chmod(0o600)
-    assert routes.cached_visibility(path, "o/r", NOW, fetch) is True  # stale: asked again
-    assert calls == ["o/r"]
-    assert routes.cached_visibility(path, "o/r", NOW, fetch) is True  # fresh now: not asked
-    assert calls == ["o/r"]
-    path.write_text("not json\n")
-    assert routes.cached_visibility(path, "o/r", NOW, fetch) is True  # corrupt: asked again
-    assert calls == ["o/r", "o/r"]
-    path.chmod(0o666)  # an untrusted cache is ignored, never believed
-    path.write_text(json.dumps({"repo": "o/z", "public": False, "ts": NOW.isoformat()}) + "\n")
-    assert routes.cached_visibility(path, "o/z", NOW, fetch) is True
-    assert calls == ["o/r", "o/r", "o/z"]
+def test_a_well_formed_fresh_cache_file_is_never_believed(tmp_path: Path) -> None:
+    box = vis_box(tmp_path, "false\n")  # the repo is public
+    entry = {"repo": "o/r", "public": False, "ts": NOW.isoformat()}
+    cache = box.log / "repo-visibility.jsonl"
+    cache.write_text(json.dumps(entry) + "\n")
+    cache.chmod(0o600)
+    d = box.deps()
+    assert d.is_public is not None
+    assert d.is_public("o/r") is True
 
 
 # ---- check: the parking-lot default ------------------------------------------------------------------------------

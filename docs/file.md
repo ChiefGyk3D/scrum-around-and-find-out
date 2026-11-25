@@ -94,20 +94,23 @@ repo = "ChiefGyk3D/homelab-ops"
 keywords = ["homelab", "proxmox", "side project"]   # whole words or phrases: a-z, 0-9, space . _ + -
 paths = ["infra", "ops/runner"]                      # path segments
 
-[classes."radio"]                                       # a new class: repo is required, private defaults to true
+[classes."radio"]                                       # a new class: repo is required
 repo = "ChiefGyk3D/radio-notes"
 keywords = ["sdr", "meshtastic"]
 ```
 
-`product` takes no `repo` and is never private. At most 32 classes and 200 terms per list.
+Every class except `product` is always private, and the file cannot say otherwise: a `private` key (any value), an unknown key such as `visibility`, or a class that is not a table is refused with exit 2, so the file cannot turn the public-repo refusal off. `product` takes no `repo`. At most 32 classes and 200 terms per list.
 
-**Public repos.** `safo-file issue ... [--class NAME] [--allow-public]` finds the work's class from `--class`, else from
-what the title and body match (no match means no class, and the issue is filed as before). A private class in a public
-repo is refused (exit 1) unless the command has `--allow-public` AND the body has a `public-ok: <reason>` line outside a
-code fence. Whether the repo is public comes from `gh api repos/o/r --jq .private`; the answer is cached next to the
-ledger (`repo-visibility.jsonl`, same trust rules, believed for 5 minutes). If the lookup fails or answers something
-unexpected the issue is refused with exit 2 (fail closed). Every decided issue writes a `routed` record first, with
-`outcome` `private-repo`, `override` or `refused`. The cross-project and idea-gate rules still apply on top.
+**Public repos.** `safo-file issue ... [--class NAME] [--allow-public]` ALWAYS asks GitHub whether the target repo is
+public (`gh api repos/o/r --jq .private`, live for every filing, no cache; a failed, unreadable or missing lookup refuses
+with exit 2). A public target takes the issue only when ALL of these hold: no private class matches the title and body,
+the text is at most 1 MiB (more is unclassified, so refused), and the work is positively product (`--class product`, or
+the target is the working repo). Anything else is refused (exit 1) unless the command has `--allow-public` AND the body
+has a `public-ok: <reason>` line at the start of a line, outside a code fence (a quoted or indented line does not
+count). `--class product` never overrides private wording. Matching reads the whole text after Unicode NFKC, case
+folding, removing zero-width and other format characters, and reading runs of whitespace, hyphens, underscores and dots
+as one space; whole words only. A public target's decision is written as a `routed` record first, with `outcome`
+`public-product`, `override` or `refused`. The cross-project and idea-gate rules still apply on top.
 
 **Parking lot.** `safo-file check ... --answer tangent --parking-number N` posts the parking-lot body to issue N in the
 table's `tangent` repo (workbench by default). Without `--parking` or `--parking-number` it prints the default

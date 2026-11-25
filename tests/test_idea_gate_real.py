@@ -25,6 +25,7 @@ env >> "@LOG@/env"
 if [ "$1 $2" = "repo list" ]; then echo '[{"nameWithOwner":"o/agent-box","description":null}]'; exit 0; fi
 if [ -e "@LOG@/sleep" ]; then sleep 30; fi
 if [ -e "@LOG@/fail" ]; then echo nope >&2; exit 1; fi
+if [ "$1" = "api" ]; then echo true; exit 0; fi
 cat > "@LOG@/stdin"
 echo https://github.com/o/r/issues/9
 """
@@ -164,7 +165,8 @@ def test_gh_error_text_and_a_returned_url_are_shown_escaped_and_bounded(box: Box
     err = io.StringIO()
     assert idea_gate.main(argv, env=box.env, out=io.StringIO(), err=err) == 2
     assert "\x1b" not in err.getvalue() and "::error::" not in err.getvalue()
-    long_line = "cat > /dev/null\nprintf '\\033[31m::error::x'\nhead -c 200000 /dev/zero | tr '\\0' 'u'\n"
+    long_line = "[ \"$1\" = api ] && echo true && exit 0\ncat > /dev/null\nprintf '\\033[31m::error::x'\n"
+    long_line += "head -c 200000 /dev/zero | tr '\\0' 'u'\n"
     script(box.bin / "gh", "#!/bin/sh\n" + long_line)
     out = io.StringIO()
     argv[-1] = str(box.log / "l2.jsonl")

@@ -85,7 +85,6 @@ TIMEBOX = re.compile(r"[1-9][0-9]{0,2}[mh]")
 CROSS = re.compile(r"^cross-project:[ \t]*(\S.*)$", re.MULTILINE)
 PUBLIC_OK = re.compile(r"^public-ok:[ \t]*(\S.*)$", re.MULTILINE)
 DESCRIPTION_LIMIT = 2_000
-VISIBILITY_CACHE = "repo-visibility.jsonl"  # next to the ledger
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 WORD = re.compile(r"[a-z0-9]{3,}")
 ANSWERS = "extends:<repo>, new-project, tangent"
@@ -228,13 +227,13 @@ def record(state: str, rid: str, args: argparse.Namespace, now: dt.datetime, **e
 
 
 def routed_record(
-    rid: str, now: dt.datetime, repo: str, working: str, d: routes.RouteClass, how: str, matched: Sequence[str],
+    rid: str, now: dt.datetime, repo: str, working: str, cls: str, how: str, matched: Sequence[str],
     decided: bool, **extra: str,
 ) -> bytes:  # fmt: skip
     """The ledger record of one routing decision (its own record type, `routed`). The description is never stored."""
     entry = {
         "state": "routed", "id": rid, "ts": now.isoformat(), "repo": repo, "working_repo": working,
-        "class": d.name, "how": how, "matched": list(matched[: routes.MATCHED_SHOWN]), "decided": decided,
+        "class": cls, "how": how, "matched": list(matched[: routes.MATCHED_SHOWN]), "decided": decided,
     }  # fmt: skip
     return (json.dumps({**entry, **extra}) + "\n").encode()
 
@@ -251,7 +250,7 @@ def route_cmd(args: argparse.Namespace, deps: Deps, out: TextIO, now: dt.datetim
     fd = gio.open_ledger(deps.ledger)
     try:
         record_bytes = routed_record(
-            secrets.token_hex(8), now, d.repo, args.working_repo, d.cls, d.how, d.matched, d.decided
+            secrets.token_hex(8), now, d.repo, args.working_repo, d.cls.name, d.how, d.matched, d.decided
         )
         append(fd, record_bytes, "the decision was not recorded")
     finally:
@@ -262,13 +261,30 @@ def route_cmd(args: argparse.Namespace, deps: Deps, out: TextIO, now: dt.datetim
     return EXIT_OK if d.decided else EXIT_NEEDS_ANSWER
 
 
-def issue_class(args: argparse.Namespace, deps: Deps) -> tuple[routes.RouteClass, str, tuple[str, ...]] | None:
-    """The class of the work: the explicit --class, else what the title and body match, else None (undecided)."""
+def issue_verdict(args: argparse.Namespace, deps: Deps) -> tuple[str, str, tuple[str, ...], str]:
+    """(class name, how it was decided, what matched, why a PUBLIC target would be refused or "" when it would not).
+    A public target takes work only when no private class matches the whole text, the text is small enough to scan,
+    and the work is positively product: `--class product`, or the target is the working repo."""
     table = deps.routes()
-    if args.route_class:
-        return routes.find_class(table, args.route_class), "explicit", ()
-    hit = routes.classify(table, f"{args.title}\n{args.body}")
-    return None if hit is None else (hit[0], "matched", hit[1])
+    explicit = routes.find_class(table, args.route_class) if args.route_class else None
+    text = f"{args.title}\n{args.body}"
+    if len(text) > routes.TEXT_LIMIT:
+        return (explicit.name if explicit else "unclassified"), "unclassified", (), "the text is too large to classify"
+    private = [(c, m) for c, m in routes.matching(table, text) if c.private]
+    if explicit is not None and explicit.private:
+        return explicit.name, "explicit", (), f"{explicit.name} is a private-workflow class"
+    if private:
+        names = ", ".join(c.name for c, _ in private)
+        terms = tuple(t for _, m in private for t in m)
+        return private[0][0].name, "matched", terms, f"private-workflow wording matched ({names})"
+    if (explicit is not None) or same_repo(args.repo, args.working_repo):
+        return routes.PRODUCT, "explicit" if explicit else "working-repo", (), ""
+    return (
+        "unclassified",
+        "unclassified",
+        (),
+        "the work is not positively product (use --class product or the working repo)",
+    )
 
 
 def file_issue(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, now: dt.datetime) -> int:
@@ -287,32 +303,27 @@ def file_issue(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, n
             "the body needs a `cross-project: <reason>` line",
         )
         return EXIT_REFUSED
-    found = issue_class(args, deps)
+    verdict = issue_verdict(args, deps)
     fd = gio.open_ledger(deps.ledger)
     rid = secrets.token_hex(8)
     try:
-        if found is not None:
-            cls, how, matched = found
-            outcome = "filed"
-            if cls.private:
-                if deps.is_public is None:
-                    raise SafoError(f"cannot tell whether {args.repo} is public; nothing was filed")
-                outcome = "private-repo"
-                if deps.is_public(args.repo):
-                    allowed = args.allow_public and PUBLIC_OK.search(outside_fences(args.body))
-                    outcome = "override" if allowed else "refused"
-            append(
-                fd,
-                routed_record(rid, now, args.repo, args.working_repo, cls, how, matched, True, outcome=outcome),
-                "nothing was filed",
+        if deps.is_public is None:
+            raise SafoError(f"cannot tell whether {args.repo} is public; nothing was filed")
+        cls, how, matched, why = verdict
+        outcome = "private-repo"
+        if deps.is_public(args.repo):  # a live lookup for every filing; any doubt raises and nothing is filed
+            override = args.allow_public and PUBLIC_OK.search(outside_fences(args.body))
+            outcome = "public-product" if not why else ("override" if override else "refused")
+        if outcome != "private-repo":  # the decisions that matter are the ones about a public target
+            routed = routed_record(rid, now, args.repo, args.working_repo, cls, how, matched, True, outcome=outcome)
+            append(fd, routed, "nothing was filed")
+        if outcome == "refused":
+            output.write(
+                err,
+                f"refused: {args.repo} is public and {why}; pass --allow-public and put a "
+                "`public-ok: <reason>` line in the body",
             )
-            if outcome == "refused":
-                output.write(
-                    err,
-                    f"refused: {args.repo} is public and this is {cls.name} work, which stays private; pass "
-                    "--allow-public and put a `public-ok: <reason>` line in the body",
-                )
-                return EXIT_REFUSED
+            return EXIT_REFUSED
         try:
             gio.write_all(fd, record("pending", rid, args, now), write_fd)
         except OSError as problem:
@@ -489,14 +500,11 @@ def real_deps(args: argparse.Namespace, env: Mapping[str, str], now: dt.datetime
     def comment(repo: str, number: int, body: str) -> None:
         _gh(env, "issue", "comment", str(number), "--repo", repo, "--body-file", "-", body=body)
 
-    def fetch_private(repo: str) -> bool:
+    def fetch_public(repo: str) -> bool:  # live, once per filing; there is no cache
         raw = _gh(env, "api", f"repos/{repo}", "--jq", ".private").strip()
         if raw not in ("true", "false"):
             raise SafoError(f"gh api answered something unreadable about {repo}; refusing")
         return raw == "false"
-
-    def is_public(repo: str) -> bool:
-        return routes.cached_visibility(ledger.parent / VISIBILITY_CACHE, repo, now, fetch_private)
 
     return Deps(
         tracking,
@@ -506,7 +514,7 @@ def real_deps(args: argparse.Namespace, env: Mapping[str, str], now: dt.datetime
         comment,
         ledger,
         routes=lambda: routes.load_table(str(home)),
-        is_public=is_public,
+        is_public=fetch_public,
     )
 
 

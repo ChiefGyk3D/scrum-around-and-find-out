@@ -20,24 +20,27 @@ valid UTF-8 and TOML, only the keys below. An absent file means the defaults; an
 
     [classes.homelab]            # a built-in class: the keys given REPLACE the default value
     repo = "owner/name"          # required for a new class; not allowed for `product`
-    private = true               # default true; `product` is never private
     keywords = ["proxmox", "side project"]
     paths = ["infra", "ops/runner"]
+
+Every class except `product` is ALWAYS private: the file cannot set a `private` key (it is refused, exit 2),
+so it cannot turn off the public-repo refusal. It may change destinations, keywords and path hints only.
+
+Normalisation before matching (text and terms alike): Unicode NFKC, case fold, every format character (zero-width
+marks, soft hyphen, bidirectional marks) removed, and runs of whitespace, hyphens, underscores and dots read as one
+space; then whole words only.
 """
 
 from __future__ import annotations
 
-import contextlib
-import datetime as dt
-import json
 import os
 import re
 import tomllib
+import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from safo import idea_gate_io as gio
 from safo.errors import SafoError
 from safo.trust import read_trusted_regular_file
 
@@ -52,11 +55,10 @@ FALLBACK = "tangent"
 ROUTES_LIMIT = 65_536
 MAX_CLASSES = 32
 MAX_TERMS = 200
-TEXT_LIMIT = 20_000  # characters of a description that are matched
+TEXT_LIMIT = 1_048_576  # characters matched; more than this is unclassified (refused for a public target)
 MATCHED_SHOWN = 20  # matched terms that are printed or recorded
-VISIBILITY_TTL = 300  # seconds a cached repo visibility answer is believed
-VISIBILITY_LIMIT = 1_048_576
-CLASS_KEYS = frozenset({"repo", "private", "keywords", "paths"})
+CLASS_KEYS = frozenset({"repo", "keywords", "paths"})
+SEPARATORS = re.compile(r"[\s._-]+")
 PATH_STRIP = "\"'()[]{}<>,;:!?"
 
 
@@ -200,17 +202,16 @@ def _merge(table: dict[str, object]) -> RouteTable:
             raise _bad("a class name is lowercase letters, digits and hyphens, starting with a letter")
         if not isinstance(spec, dict):
             raise _bad(f"class {name} must be a table")
+        if "private" in spec:
+            raise _bad(f"class {name}: private cannot be set; every class except product is always private")
         extra = set(spec) - CLASS_KEYS
         if extra:
             raise _bad(f"unknown key {sorted(extra)[0]!r} in class {name}")
         base = merged.get(name)
         repo = spec.get("repo", base.repo if base else "")
-        private = spec.get("private", base.private if base else True)
-        if not isinstance(private, bool):
-            raise _bad(f"class {name}: private must be true or false")
         if name == PRODUCT:
-            if "repo" in spec or "private" in spec:
-                raise _bad("the product class takes no repo and is never private: its repo is the working repo")
+            if "repo" in spec:
+                raise _bad("the product class takes no repo: its repo is the working repo")
         elif not (isinstance(repo, str) and is_repo(repo)):
             raise _bad(f"class {name} needs a repo written as owner/name")
         keywords = _terms(spec["keywords"], "keywords", name, path=False) if "keywords" in spec else None
@@ -218,7 +219,7 @@ def _merge(table: dict[str, object]) -> RouteTable:
         merged[name] = RouteClass(
             name,
             str(repo),
-            private,
+            name != PRODUCT,
             keywords if keywords is not None else (base.keywords if base else ()),
             paths if paths is not None else (base.paths if base else ()),
         )
@@ -258,12 +259,23 @@ class Decision:
     decided: bool
 
 
+def _fold(text: str) -> str:
+    """NFKC, no format characters (zero-width, soft hyphen, bidi marks), case folded."""
+    plain = unicodedata.normalize("NFKC", text)
+    return "".join(c for c in plain if unicodedata.category(c) != "Cf").casefold()
+
+
 def _norm(text: str) -> str:
-    return " ".join(text[:TEXT_LIMIT].lower().split())
+    return SEPARATORS.sub(" ", _fold(text)).strip()
 
 
 def _word_hits(text: str, terms: Sequence[str]) -> list[str]:
-    return [t for t in terms if re.search(rf"(?<![a-z0-9]){re.escape(t)}(?![a-z0-9])", text)]
+    hits: dict[str, None] = {}
+    for term in terms:
+        word = _norm(term)
+        if word and re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text):
+            hits[word] = None
+    return list(hits)
 
 
 def _path_hits(text: str, hints: Sequence[str]) -> list[str]:
@@ -272,19 +284,22 @@ def _path_hits(text: str, hints: Sequence[str]) -> list[str]:
     return [h for h in hints if any(f"/{h}/" in s for s in shaped)]
 
 
+def matching(table: RouteTable, text: str) -> list[tuple[RouteClass, tuple[str, ...]]]:
+    """Every class that matched, in table order, with what it matched. The whole text is scanned."""
+    plain, folded = _norm(text), _fold(text)
+    out: list[tuple[RouteClass, tuple[str, ...]]] = []
+    for cls in table.classes:
+        found = [f"keyword {k}" for k in _word_hits(plain, cls.keywords)]
+        found += [f"path {p}" for p in _path_hits(folded, cls.paths)]
+        if found:
+            out.append((cls, tuple(found)))
+    return out
+
+
 def classify(table: RouteTable, text: str) -> tuple[RouteClass, tuple[str, ...]] | None:
     """The winning class and what it matched, or None when nothing matched. Deterministic: see the module docstring."""
-    plain = _norm(text)
-    best: tuple[tuple[int, bool, int], RouteClass, tuple[str, ...]] | None = None
-    for index, cls in enumerate(table.classes):
-        found = [f"keyword {k}" for k in _word_hits(plain, cls.keywords)]
-        found += [f"path {p}" for p in _path_hits(plain, cls.paths)]
-        if not found:
-            continue
-        rank = (-len(found), not cls.private, index)
-        if best is None or rank < best[0]:
-            best = (rank, cls, tuple(found))
-    return None if best is None else (best[1], best[2])
+    ranked = [((-len(m), not c.private, i), c, m) for i, (c, m) in enumerate(matching(table, text))]
+    return None if not ranked else min(ranked, key=lambda r: r[0])[1:]
 
 
 def find_class(table: RouteTable, name: str) -> RouteClass:
@@ -323,49 +338,3 @@ def decide(
     return Decision(
         cls, fb.repo, "default", matched[:MATCHED_SHOWN], f"{why}, but {working} is not a tracked product repo", False
     )
-
-
-# ---- repository visibility, cached beside the ledger -------------------------------------------------------------
-
-
-def _fresh_answer(path: Path, key: str, now: dt.datetime) -> bool | None:
-    """The newest cached answer for `key` that is younger than the TTL, or None. An untrusted, unreadable, oversize or
-    corrupt cache is ignored (asking again is always safe); it is never believed."""
-    try:
-        os.lstat(path)
-        text = read_trusted_regular_file(path, VISIBILITY_LIMIT).decode("utf-8", "replace")
-    except (OSError, SafoError):
-        return None
-    answer: bool | None = None
-    for raw in text.splitlines():
-        try:
-            e = json.loads(raw)
-            when = dt.datetime.fromisoformat(e["ts"])
-            ok = (
-                e["repo"] == key
-                and isinstance(e["public"], bool)
-                and 0 <= (now - when).total_seconds() <= VISIBILITY_TTL
-            )
-        except (ValueError, KeyError, TypeError):
-            continue
-        answer = e["public"] if ok else answer
-    return answer
-
-
-def cached_visibility(path: Path, repo: str, now: dt.datetime, fetch: Callable[[str], bool]) -> bool:
-    """True when `repo` is public. `fetch` asks GitHub and raises a SafoError on any doubt (the caller fails closed).
-    The answer is appended to `path` (next to the ledger, same trust rules) and believed for VISIBILITY_TTL seconds."""
-    key = repo.lower()
-    hit = _fresh_answer(path, key, now)
-    if hit is not None:
-        return hit
-    public = fetch(repo)
-    with contextlib.suppress(OSError, SafoError, TimeoutError):  # the cache is an optimization, not an answer
-        if not path.exists() or path.stat().st_size < VISIBILITY_LIMIT // 2:  # a cache grown past this is left alone
-            fd = gio.open_ledger(path)
-            try:
-                line = json.dumps({"repo": key, "public": public, "ts": now.isoformat()}) + "\n"
-                gio.write_all(fd, line.encode())
-            finally:
-                os.close(fd)
-    return public
