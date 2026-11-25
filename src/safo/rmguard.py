@@ -1112,7 +1112,7 @@ class Checker:
             return self.in_cwd(pre.chdir, lambda: self.nested_text(split, depth))
         if pre.at >= len(words):
             if self.sudo_shell(words):  # `sudo -s` / `sudo -i` with no command: a shell reading standard input
-                return self.stdin_program(depth, program_is_shell=True)
+                return self.stdin_program(depth, program_runs_sh=True)
             return None
         rest = words[pre.at :]
         self.assigns = pre.assigns
@@ -1182,7 +1182,7 @@ class Checker:
             return self.shell(args, depth)
         if name in ("su", "script"):
             if self.c_body(args) is None:  # no -c: it starts a shell that reads its commands from standard input
-                return self.stdin_program(depth, program_is_shell=True)
+                return self.stdin_program(depth, program_runs_sh=True)
             return self.shell_c(args, depth)
         if name in ("source", "."):
             return self.source(args, depth)
@@ -1744,7 +1744,7 @@ class Checker:
         if not code:
             reads, operand = self.interpreter_reads_stdin(args)
             if reads:
-                return self.stdin_program(self.depth, program_is_shell=False)
+                return self.stdin_program(self.depth, program_runs_sh=False)
             return self.hidden_program(operand)
         if self.cwd is not None and self.zones.roots(self.cwd) is not None:
             return Finding("an inline program run from a shared dev directory", "")
@@ -1797,7 +1797,7 @@ class Checker:
             return self.shell_c(args, depth)
         reads, operand = self.shell_reads_stdin(args)
         if reads:
-            return self.stdin_program(depth, program_is_shell=True)
+            return self.stdin_program(depth, program_runs_sh=True)
         return self.hidden_program(operand)
 
     def shell_option_text(self, args: list[Word], depth: int) -> Finding | None:
@@ -1897,10 +1897,10 @@ class Checker:
         """`source /dev/stdin` and `. /dev/stdin` run what the heredoc, here-string or pipeline supplies; a process
         substitution and a script written earlier in the line cannot be read."""
         if args and args[0].text in STDIN_PATHS:
-            return self.stdin_program(depth, program_is_shell=True)
+            return self.stdin_program(depth, program_runs_sh=True)
         return self.hidden_program(args[0] if args else None)
 
-    def stdin_program(self, depth: int, *, program_is_shell: bool) -> Finding | None:
+    def stdin_program(self, depth: int, *, program_runs_sh: bool) -> Finding | None:
         """The program a shell or interpreter reads from standard input. A heredoc body (quoted or not) and a
         here-string are read as written, also when an earlier stage of a pipeline feeds it. A pipeline whose stages show
         nothing to read fails closed when a zone is in sight or a stage holds a delete word or names a zone."""
@@ -1912,7 +1912,7 @@ class Checker:
                 fed.extend(Word(b, None, False, True) for b in c.stdin)
                 stages += " " + " ".join(w.text.replace("\0", "") for w in c.words)
                 unknown = unknown or any(w.expands for w in c.words)
-        if not program_is_shell:
+        if not program_runs_sh:
             return self.interpreter_stdin(fed, stages)
         for word in fed:
             found = self.run_text(word, depth)
