@@ -300,8 +300,81 @@ def test_probe_reports_an_unreachable_local_llm_and_still_succeeds(_private_home
     code, out, _ = hooks("probe", "--agents", str(agents), home=_private_home)
     assert code == 0
     message = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert message.startswith("Local LLM: UNREACHABLE") and "not required in briefs" in message
+    assert message.startswith("Local LLM: UNREACHABLE")
+    assert_four_choices(message)
+    assert "Route text work" not in message and "Haiku" not in message, "a hook line is not approval to reroute"
     assert json.loads(probe_file(_private_home, agents).read_text())["reachable"] is False
+
+
+# -- probe: the not-seen notice names four choices and covers the runner (#462) -----------------------------------
+
+CHOICES = ("yes", "no", "retry", "troubleshoot")
+
+
+def assert_four_choices(message: str) -> None:
+    assert "tell the owner this turn" in message.lower()
+    assert "before troubleshooting or any workaround" in message
+    for choice in CHOICES:
+        assert f"{choice} (" in message, choice
+    assert "not approval" in message
+
+
+def runner_script(tmp_path: Path, code: int) -> str:
+    script = tmp_path / f"runner-status-{code}"
+    script.write_text(f"#!/bin/sh\nexit {code}\n")
+    script.chmod(0o700)
+    return str(script)
+
+
+def probe_message(home: Path, agents: Path, **env: str) -> str:
+    code, out, _ = hooks("probe", "--agents", str(agents), home=home, env=env)
+    assert code == 0
+    return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_probe_ok_and_no_runner_configured_says_nothing_about_a_runner(_private_home: Path, tmp_path: Path) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        message = probe_message(_private_home, path)
+    assert message.startswith("Local LLM: REACHABLE.")
+    assert "Runner" not in message and "owner" not in message
+
+
+def test_probe_failed_names_the_four_choices_not_a_cheaper_model(_private_home: Path, agents: Path) -> None:
+    message = probe_message(_private_home, agents)
+    assert message.startswith("Local LLM: UNREACHABLE")
+    assert_four_choices(message)
+    assert "Route text work" not in message
+
+
+def test_runner_configured_and_down_names_the_four_choices(_private_home: Path, tmp_path: Path) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        message = probe_message(_private_home, path, SAFO_RUNNER_STATUS=runner_script(tmp_path, 1))
+    assert message.startswith("Local LLM: REACHABLE.")
+    assert "Runner: NOT SEEN" in message
+    assert_four_choices(message)
+
+
+def test_runner_command_that_cannot_start_counts_as_down(_private_home: Path, agents: Path) -> None:
+    message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS="/nonexistent/runner-status")
+    assert "Runner: NOT SEEN" in message
+
+
+def test_runner_configured_and_up_is_one_quiet_line(_private_home: Path, agents: Path, tmp_path: Path) -> None:
+    message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS=runner_script(tmp_path, 0))
+    assert "Runner: reachable." in message and "NOT SEEN" not in message
+
+
+def test_runner_exit_75_is_busy_not_unreachable(_private_home: Path, agents: Path, tmp_path: Path) -> None:
+    message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS=runner_script(tmp_path, 75))
+    assert "Runner: busy" in message and "NOT SEEN" not in message
+    assert "retry or wait" in message
+
+
+def test_blank_runner_config_is_not_applicable_and_never_an_error(_private_home: Path, agents: Path) -> None:
+    message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS="  ")
+    assert "Runner" not in message
 
 
 def test_probe_counts_only_a_general_endpoint_as_the_local_llm_being_there(_private_home: Path, tmp_path: Path) -> None:

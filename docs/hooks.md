@@ -12,6 +12,8 @@ approval token, and that includes a model that a prompt injection has talked int
 | `safo hooks mode warn\|block` | none | `warn` reports a broken rule and allows the dispatch (the default); `block` denies it. |
 | `safo hooks status [--session ID --agents PATH] [--settings PATH]` | none | Which form of the guard hook is installed (`new`, `legacy`, `mixed`, `absent`, `ineffective`, `unknown`), the mode, the retained counts, the health of the hooks and of the last probe. |
 
+The probe also runs the runner's read-only status command when `SAFO_RUNNER_STATUS` is set (a command line, no shell, 8 s; for example `ssh <host> status`). Exit 0 is reachable, exit 75 is busy (retry or wait, no notice), any other exit, a command that cannot start or a timeout is not seen. Unset or blank means not applicable, never an error. When the local LLM or the runner is not seen, the session line tells the owner to be told that turn, before troubleshooting or any workaround, and to be asked four choices: yes (continue without it, temporary, scoped to named tasks), no, retry, troubleshoot. A hook line is not approval (#462).
+
 A line `safo hooks guard ...` from an earlier install is the legacy form. It keeps working (see below) and `install`
 migrates it.
 

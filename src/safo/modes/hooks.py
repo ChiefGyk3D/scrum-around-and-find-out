@@ -82,6 +82,7 @@ from safo.hooks import (
     read_state,
     refresh_bound_repo,
     reprobe,
+    runner_status,
     save_state,
     session_message,
     session_output,
@@ -1096,7 +1097,7 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
             raise ValueError("the session has no bound repository")
         code = "state-write"
         prune_state(folder, ctx.now.timestamp())
-        ctx.say(session_output(session_message(doc, state)))
+        ctx.say(session_output(session_message(doc, state, runner_status(ctx.run, ctx.env))))
     except TimeoutError:
         diagnostic(ctx, "timeout" if code == "input" else code, "SessionStart")
     except Exception:
