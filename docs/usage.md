@@ -44,7 +44,7 @@ per day, per week and per model (the last 28 days unless `--days`, 1 to 3660): d
 reachable, briefs that name llm-local (the guard's `local_step`, a substring match on the brief text, so it shows that a
 brief mentions llm-local and not that a step ran), briefs with a `local-llm` line, and briefs with neither. The sources
 are the dispatch-guard log (`~/.local/state/agent-dispatch-guard/log.jsonl`), the `safo hooks status` counts (the same
-`guardlog.summarise`, read without taking the log's lock), and the `llm-local` calls log and `state.json` (calls by task
+summary function, read without taking the log's lock), and the `llm-local` calls log and `state.json` (calls by task
 and model, admit and busy counts). The dispatch-guard and `llm-local` files are looked for under the home directory
 only, the way their writers place them, and ignore `XDG_STATE_HOME` and `XDG_DATA_HOME`; the hooks log keeps following
 `XDG_STATE_HOME`, as the guard that writes it does.
