@@ -108,12 +108,15 @@ the text is at most 1 MiB (more is unclassified, so refused), and the work is po
 the target is the working repo). Anything else is refused (exit 1) unless the command has `--allow-public` AND the body
 has a `public-ok: <reason>` line at the start of a line, outside a code fence (a quoted or indented line does not
 count). The reason must be real: at least 12 characters, at least two different words with letters that are not
-placeholders (TODO, TBD, none, n/a, ok, yes, test), and more than one repeated character; the first valid line counts. `--class product` never overrides private wording. Matching reads the whole text after Unicode NFKC, case
+placeholders (TODO, TBD, none, n/a, ok, yes, test), and more than one repeated character; the first valid line counts. The whole line, keyword and reason, must be plain
+ASCII: a lookalike, zero-width or accented character anywhere in it makes the line invalid (the message does not show the
+character). `--class product` never overrides private wording. Matching reads the whole text after Unicode NFKC, case
 folding, removing zero-width and other format characters, and reading runs of whitespace, hyphens, underscores and dots
 as one space; whole words only. The work is linear in the text: it is normalised and split into words once, and the
 keywords (at most 4 words each) and path hints (at most 4 segments) of every class are looked up as word sequences in
-sets, never one scan per term. Punctuation only separates words, so `side, project` and `c++` (the word `c`) match too;
-that can add private matches, never lose one. Accents are folded away for matching (an o-acute matches `o`).
+sets, never one scan per term. Punctuation only separates words, so `side, project` and `c++` (the word `c`) match too
+(a phrase keyword matches across punctuation); a single-word keyword split by punctuation is not found (see Known
+limits). Accents are folded away for matching (an o-acute matches `o`).
 
 A text a public target cannot classify is refused like private wording (exit 1, naming the class of character, never
 echoing it) unless both override elements are present: after NFKC, the title or body has an invisible or format
@@ -176,6 +179,13 @@ after an issue was created the URL is still printed.
 
 - An executable replaced between the trust check and the launch is not caught. It needs write access to directories the
   policy already requires to be closed to others.
+- Classification is best effort against accidents, such as an assistant naming a private project in a public issue. It
+  is not a defense against deliberately obfuscated text. A private keyword split by ASCII punctuation inside the word
+  (`prox-mox`), padded with digits or Markdown delimiters, or written as an HTML entity, percent-encoding or an ASCII
+  `\u` escape is not recognized, and a carriage return is treated like any other separator. The cheap ASCII defenses
+  that do exist: hyphens, underscores, dots and runs of whitespace fold to one space, case folds, and accents fold. The
+  Unicode defenses (refusing invisible, combining and lookalike characters for a public target) and the `public-ok`
+  rules are separate and stay in force.
 
 ## Exit codes
 

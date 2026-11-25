@@ -88,6 +88,7 @@ PUBLIC_OK = re.compile(r"^public-ok:[ \t]*(\S.*)$", re.MULTILINE)
 PLACEHOLDER_WORDS = frozenset({"todo", "tbd", "none", "na", "n", "a", "ok", "yes", "no", "test", "tests", "x"})
 REASON_MIN = 12
 OVERRIDE_HELP = "pass --allow-public and put a `public-ok: <reason>` line in the body"
+ASCII_HELP = "the public-ok line must be plain ASCII (it has a non-ASCII character, which is not shown); retype it"
 REASON_HELP = (
     f"the public-ok reason must be at least {REASON_MIN} characters with at least two different words that are not "
     "placeholders (TODO, TBD, none, n/a, ok, yes, test)"
@@ -238,9 +239,15 @@ def public_ok_reason(body: str) -> tuple[bool, str]:
     """(a valid reason line is present, why not). The line is `public-ok: <reason>` outside a code fence; the first
     valid one counts. A reason is real when it has REASON_MIN characters and two different words that are not
     placeholders."""
-    reasons = [m.group(1).strip() for m in PUBLIC_OK.finditer(outside_fences(body))]
+    visible = outside_fences(body)
+    # the whole line, keyword and reason, must be plain ASCII: a lookalike or invisible character cannot validate it
+    found = list(PUBLIC_OK.finditer(visible))
+    reasons = [m.group(1).strip() for m in found if m.group(0).isascii()]
+    lookalike = any(not m.group(0).isascii() for m in found) or any(  # a keyword spelled with another alphabet
+        not x.isascii() and ":" in x and len(x.partition(":")[0].strip()) <= 12 for x in visible.splitlines()
+    )
     if not reasons:
-        return False, ""
+        return False, ASCII_HELP if lookalike else ""
     for reason in reasons:
         words = set(re.findall(r"[^\W\d_]+", reason.casefold())) - PLACEHOLDER_WORDS
         if len(reason) >= REASON_MIN and len(words) >= 2 and len(set(reason.replace(" ", ""))) >= 3:
