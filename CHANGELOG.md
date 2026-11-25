@@ -9,6 +9,11 @@
   the body on stdin; another repo needs a `cross-project: <reason>` line outside a code fence, and another owner needs
   `--allow-other-owner`; the ledger is checked before the issue is created. `report` counts, in code, the issues whose repo
   differs from the working repo. Advisory by design for same-repo filing (docs/file.md). Tests: `tests/test_idea_gate*.py`.
+  Hardening (`safo.idea_gate_io`): `gh` and the memory command run only from a trusted absolute path (not in the working
+  directory, no owner but you or root, no group or other write on it or above it), with an allowlisted environment (no
+  `SAFO_*`, no token or cloud variables), their own process group, capped output and a deadline; the ledger is opened
+  through directory descriptors with no link followed, owner and mode checks, `pending` before and `committed` after the
+  issue; `check` reads only `~/.config/safo/agents.yaml`.
 
 - New `safo-rmguard` (#422), a separate PreToolUse hook for Bash that guards the shared dev directories
   (`~/.local/share/*-dev` and the scratchpad parent `/tmp/claude-*`) against wildcard, parent and out-of-folder deletes,

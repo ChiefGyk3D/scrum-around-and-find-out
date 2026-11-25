@@ -19,12 +19,12 @@ from safo.errors import SafoError
 NOW = dt.datetime(2026, 11, 25, tzinfo=dt.UTC)
 
 GH = """#!/bin/sh
-echo "$@" >> "$LOG/argv"
-env >> "$LOG/env"
+echo "$@" >> "@LOG@/argv"
+env >> "@LOG@/env"
 if [ "$1 $2" = "repo list" ]; then echo '[{"nameWithOwner":"o/agent-box","description":null}]'; exit 0; fi
-if [ -n "$GH_SLEEP" ]; then sleep 30; fi
-if [ -n "$GH_FAIL" ]; then echo nope >&2; exit 1; fi
-cat > "$LOG/stdin"
+if [ -e "@LOG@/sleep" ]; then sleep 30; fi
+if [ -e "@LOG@/fail" ]; then echo nope >&2; exit 1; fi
+cat > "@LOG@/stdin"
 echo https://github.com/o/r/issues/9
 """
 
@@ -42,12 +42,15 @@ class Box:
         self.log = tmp / "log"
         for d in (self.home, self.bin, self.log):
             d.mkdir()
-        script(self.bin / "gh", GH)
-        self.env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home), "LOG": str(self.log)}
+        script(self.bin / "gh", GH.replace("@LOG@", str(self.log)))
+        self.env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home)}
 
     def deps(self, **env: str) -> idea_gate.Deps:
         args = argparse.Namespace(working_repo="o/r", ledger=str(self.log / "ledger.jsonl"))
         return idea_gate.real_deps(args, {**self.env, **env}, NOW)
+
+    def flag(self, name: str) -> None:
+        (self.log / name).write_text("")
 
     def agents(self, **hooks: object) -> None:
         d = self.home / ".config" / "safo"
@@ -77,10 +80,12 @@ def test_gh_repos_reads_the_owner_list(box: Box) -> None:
 
 def test_gh_failure_missing_and_timeout_are_clean_errors(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SafoError, match="failed"):
-        box.deps(GH_FAIL="1").create_issue("o/r", "t", "b")
+        box.flag("fail")
+        box.deps().create_issue("o/r", "t", "b")
     monkeypatch.setattr(idea_gate, "CALL_TIMEOUT", 0.5)
     with pytest.raises(SafoError, match="timed out"):
-        box.deps(GH_SLEEP="1").create_issue("o/r", "t", "b")
+        box.flag("sleep")
+        box.deps().create_issue("o/r", "t", "b")
     missing = idea_gate.real_deps(argparse.Namespace(working_repo="o/r", ledger=""), {"PATH": "/nonexistent"}, NOW)
     with pytest.raises(SafoError, match="gh"):
         missing.gh_repos()
@@ -88,7 +93,8 @@ def test_gh_failure_missing_and_timeout_are_clean_errors(box: Box, monkeypatch: 
 
 def test_main_exits_2_when_gh_times_out(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(idea_gate, "CALL_TIMEOUT", 0.5)
-    env = {**box.env, "GH_SLEEP": "1"}
+    box.flag("sleep")
+    env = box.env
     ledger = str(box.log / "l.jsonl")
     argv = ["issue", "--repo", "o/r", "--working-repo", "o/r", "--title", "t", "--body", "b", "--ledger", ledger]
     err = io.StringIO()
@@ -97,7 +103,7 @@ def test_main_exits_2_when_gh_times_out(box: Box, monkeypatch: pytest.MonkeyPatc
 
 def test_tracking_repos_come_from_the_agents_file_and_a_repeat_is_harmless(box: Box) -> None:
     box.agents(tracking_repos=["o/a", "o/b", "o/a"])
-    assert set(box.deps().tracking()) == {"o/a", "o/b"}
+    assert list(box.deps().tracking()) == ["o/a", "o/b"]  # a list: a repeat must be dropped by the code
 
 
 def test_a_duplicate_key_in_the_agents_file_is_exit_2(box: Box) -> None:
@@ -143,6 +149,22 @@ def test_memory_huge_output_is_capped_and_the_child_stopped(box: Box) -> None:
     hits = memory(box, "yes 'a hit line'")
     assert time.monotonic() - start < 10
     assert 0 < sum(len(h) for h in hits) <= idea_gate.MEMORY_CAP
+
+
+def test_gh_error_text_and_a_returned_url_are_shown_escaped_and_bounded(box: Box) -> None:
+    script(box.bin / "gh", '#!/bin/sh\nprintf "\\033[31m::error::boom\\n" >&2\nexit 1\n')
+    argv = ["issue", "--repo", "o/r", "--working-repo", "o/r", "--title", "t", "--body", "b"]
+    argv += ["--ledger", str(box.log / "l.jsonl")]
+    err = io.StringIO()
+    assert idea_gate.main(argv, env=box.env, out=io.StringIO(), err=err) == 2
+    assert "\x1b" not in err.getvalue() and "::error::" not in err.getvalue()
+    long_line = "cat > /dev/null\nprintf '\\033[31m::error::x'\nhead -c 200000 /dev/zero | tr '\\0' 'u'\n"
+    script(box.bin / "gh", "#!/bin/sh\n" + long_line)
+    out = io.StringIO()
+    argv[-1] = str(box.log / "l2.jsonl")
+    assert idea_gate.main(argv, env=box.env, out=out, err=io.StringIO()) == 0
+    assert "\x1b" not in out.getvalue() and "::error::" not in out.getvalue()
+    assert len(out.getvalue()) < idea_gate.URL_SHOWN + 200
 
 
 def test_memory_failure_exit_is_an_error(box: Box) -> None:

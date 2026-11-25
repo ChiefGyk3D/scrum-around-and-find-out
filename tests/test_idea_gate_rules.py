@@ -3,12 +3,10 @@
 
 from __future__ import annotations
 
-import io
 import os
 from pathlib import Path
 
 from safo import idea_gate
-from safo.errors import SafoError
 from test_idea_gate import WORK, Fakes, go
 
 
@@ -81,19 +79,6 @@ def test_report_refuses_a_symlink_a_fifo_and_an_oversize_ledger(tmp_path: Path) 
         h.truncate(idea_gate.LEDGER_LIMIT + 1)
     f.ledger.chmod(0o600)
     assert go(f, "report")[0] == 2
-
-
-def test_a_failed_create_leaves_no_ledger_line(tmp_path: Path) -> None:
-    f = Fakes(tmp_path)
-    deps = f.deps()
-
-    def boom(repo: str, title: str, body: str) -> str:
-        raise SafoError("gh down")
-
-    deps.create_issue = boom
-    argv = ["issue", "--repo", WORK, "--working-repo", WORK, "--title", "t", "--body", "b"]
-    assert idea_gate.main(argv, deps=deps, out=io.StringIO(), err=io.StringIO()) == 2
-    assert not f.ledger.exists() or f.ledger.read_text() == ""
 
 
 def test_hostile_idea_is_shown_escaped_and_posted_raw(tmp_path: Path) -> None:
