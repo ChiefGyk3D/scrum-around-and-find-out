@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from hooksdata import agents_file
-from safo import idea_gate, idea_gate_io
+from safo import idea_gate
 from safo.errors import SafoError
 from test_idea_gate import WORK, Fakes, go
 from test_idea_gate_real import Box, script
@@ -89,7 +89,7 @@ def test_memory_file_owned_by_another_user_is_refused(box: Box, monkeypatch: pyt
         info = real_stat(path, *args, **kwargs)
         return foreign(info) if str(path) == str(exe) else info  # only the file; every directory is still fine
 
-    monkeypatch.setattr(idea_gate_io.os, "stat", stat_)
+    monkeypatch.setattr(os, "stat", stat_)
     with pytest.raises(SafoError, match="mem is owned by another user"):
         mem_with(box, str(exe))
 
@@ -193,7 +193,7 @@ def test_ledger_owned_by_another_user_is_refused(tmp_path: Path, monkeypatch: py
         info = real_fstat(fd)
         return foreign(info) if stat.S_ISREG(info.st_mode) else info  # only the file; the directories stay fine
 
-    monkeypatch.setattr(idea_gate_io.os, "fstat", fstat_)
+    monkeypatch.setattr(os, "fstat", fstat_)
     f = Fakes(tmp_path)
     code, _, err = issue(f, ledger)
     assert code == 2 and "ledger is not owned" in err and f.created == []

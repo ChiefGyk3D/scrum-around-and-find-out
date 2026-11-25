@@ -8,6 +8,7 @@ import datetime as dt
 import io
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -52,7 +53,7 @@ class Box:
     def flag(self, name: str) -> None:
         (self.log / name).write_text("")
 
-    def agents(self, **hooks: object) -> None:
+    def agents(self, **hooks: Any) -> None:
         d = self.home / ".config" / "safo"
         d.mkdir(parents=True, mode=0o700)
         agents_file(d / "agents.yaml", **hooks)

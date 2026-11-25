@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -65,7 +66,7 @@ GH_DIRS = ("GH_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"
 COMMON = {"USER": "u", "LOGNAME": "u", "LANG": "C", "LC_ALL": "C", "TERM": "xterm", "TZ": "UTC"}
 
 
-def parsed(lines: list[str]) -> dict[str, str]:
+def parsed(lines: Sequence[str]) -> dict[str, str]:
     return dict(x.split("=", 1) for x in lines if "=" in x)
 
 

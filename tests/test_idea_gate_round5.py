@@ -133,7 +133,7 @@ def test_a_home_owned_by_another_user_stops_gh(box: Box, monkeypatch: pytest.Mon
         fields[4] = os.geteuid() + 1  # only HOME itself: its parents stay trusted
         return os.stat_result(fields)
 
-    monkeypatch.setattr(idea_gate_io.os, "stat", stat_)
+    monkeypatch.setattr(os, "stat", stat_)
     with pytest.raises(SafoError, match="HOME is not owned by this user"):
         box.deps().create_issue("o/r", "t", "b")
 
