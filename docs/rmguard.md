@@ -228,6 +228,28 @@ command does not show is denied only when the cwd or another word is in a zone; 
 before the command runs, so another process can race it; a hook cannot see which agent is running, which is why agent
 folder roots are never removable by an agent.
 
+### What the guard tries to cover, and what it does not
+
+The guard is accident prevention for the shared development directories, running in warn mode first: it reads the text of
+one command and stops honest mistakes and plain destructive commands that name a zone. It does not try to stop a
+determined bypass by text construction, nor program text assembled at run time (a string built from pieces, a path
+joined or changed by the program itself, a module or script that fetches or generates its own code). It checks these
+classes: direct and wrapped delete, move, truncate and overwrite commands; shell and interpreter code given as `-c` text,
+a heredoc, a here-string or a pipeline, including a shell started by `sudo -s`, `su` or `script` and code handed on by a
+multicall binary; program settings passed to git on the command line or through the environment (`-c`,
+`--config-env`, `GIT_CONFIG_COUNT` with its key and value variables, `GIT_CONFIG_PARAMETERS`), read for a value that
+runs a program; and inline programs that name a zone outside an agent folder or a scratchpad.
+
+Known gaps, accepted for now:
+
+- The list of git settings that run a program is a name pattern, not complete. Settings such as a proxy or driver
+  command, a clean or smudge filter, a process filter, a hooks path, protocol allowance and `ext::` URLs can still run
+  a program.
+- The agent-folder and scratchpad exemption is judged one token at a time, after normalizing the path. A program that
+  joins path pieces itself or changes its working directory before acting can still reach a zone path.
+- An interpreter run with `-m` is treated as not reading its program from standard input, though some modules do read
+  code from it.
+
 ## Tests and replay
 
 `tests/test_rmguard_sentinel.py` runs destructive commands under real bash and the real tools (`find`, `git`, `rsync`,

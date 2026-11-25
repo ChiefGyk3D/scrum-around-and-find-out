@@ -1076,14 +1076,15 @@ class Checker:
             self.note_written(target)
         return None
 
-    def command(self, words: list[Word], depth: int) -> Finding | None:
-        self.here = tuple(
-            words[n + 1] for n, w in enumerate(words) if w.redir and w.text == "<<<" and n + 1 < len(words)
-        )
-        self.fd_in = any(
-            w.redir and w.text == "<&" and n + 1 < len(words) and words[n + 1].text.isdigit()
-            for n, w in enumerate(words)
-        )
+    def command(self, words: list[Word], depth: int, *, recursed: bool = False) -> Finding | None:
+        if not recursed:  # a multicall binary hands the SAME redirections to the command it runs
+            self.here = tuple(
+                words[n + 1] for n, w in enumerate(words) if w.redir and w.text == "<<<" and n + 1 < len(words)
+            )
+            self.fd_in = any(
+                w.redir and w.text == "<&" and n + 1 < len(words) and words[n + 1].text.isdigit()
+                for n, w in enumerate(words)
+            )
         found = self.redirections(words)
         if found:
             return found
@@ -1093,10 +1094,24 @@ class Checker:
             split = pre.split
             return self.in_cwd(pre.chdir, lambda: self.nested_text(split, depth))
         if pre.at >= len(words):
+            if self.sudo_shell(words):  # `sudo -s` / `sudo -i` with no command: a shell reading standard input
+                return self.stdin_program(depth, program_is_shell=True)
             return None
         rest = words[pre.at :]
         self.assigns = pre.assigns
         return self.in_cwd(pre.chdir, lambda: self.simple(rest, depth))
+
+    @staticmethod
+    def sudo_shell(words: list[Word]) -> bool:
+        """`sudo` given -s, -i (or --shell, --login), possibly bundled (`-Es`), and left with no command to run."""
+        seen = False
+        for w in words:
+            t = w.text
+            if posixpath.basename(t) == "sudo" and not w.expands:
+                seen = True
+            elif seen and (t in ("--shell", "--login") or re.fullmatch(r"-[a-zA-Z]*[si][a-zA-Z]*", t)):
+                return True
+        return False
 
     def in_cwd(self, chdir: tuple[str | None] | None, fn: Callable[[], Finding | None]) -> Finding | None:
         """Run fn with the working directory a wrapper such as `env -C` sets for the command it runs."""
@@ -1149,6 +1164,8 @@ class Checker:
         if name in SHELLS:
             return self.shell(args, depth)
         if name in ("su", "script"):
+            if self.c_body(args) is None:  # no -c: it starts a shell that reads its commands from standard input
+                return self.stdin_program(depth, program_is_shell=True)
             return self.shell_c(args, depth)
         if name in ("source", "."):
             return self.source(args, depth)
@@ -1157,7 +1174,7 @@ class Checker:
                 return None
             if depth >= MAX_DEPTH:
                 raise Unparseable
-            return self.command(args, depth + 1)
+            return self.command(args, depth + 1, recursed=True)
         if name == "watch":
             return self.watch(args, depth)
         if name == "eval":
@@ -1255,6 +1272,7 @@ class Checker:
         unknown = False
         lost = False  # a `-C` directory that could not be resolved
         configs: list[Word] = []  # the values of `-c key=value`
+        env_configs: list[str] = []  # the values of `--config-env key=ENVVAR`
         i = 0
         while i < len(args):
             t = args[i].text
@@ -1270,7 +1288,12 @@ class Checker:
             elif t in ("-c", "--exec-path", "--namespace", "--super-prefix", "--config-env") and i + 1 < len(args):
                 if t == "-c":
                     configs.append(args[i + 1])
+                elif t == "--config-env":
+                    env_configs.append(args[i + 1].text)
                 i += 2
+            elif t.startswith("--config-env="):
+                env_configs.append(t.split("=", 1)[1])
+                i += 1
             elif t.startswith(("--work-tree=", "--git-dir=")):
                 if t.startswith("--work-tree="):
                     base = self.chdir_of(Word(t.split("=", 1)[1], None, False, False))[0]
@@ -1299,6 +1322,9 @@ class Checker:
                 found = self.nested_text(value.removeprefix("!"), self.depth)
                 if found:
                     return found
+        found = self.git_env_config(env_configs)
+        if found:
+            return found
         for assign in self.assigns:
             name, _, value = assign.text.partition("=")
             if value and name in _GIT_EXEC_ENV:
@@ -1333,6 +1359,54 @@ class Checker:
             return Finding("`git " + (sub or "?") + "` in " + found.reason, found.target, found.hint) if found else None
         finally:
             self.cwd = saved
+
+    def git_config_item(self, key: str, value: str | None, expands: bool = False) -> Finding | None:
+        """One configuration pair that came from the environment. A value that names a program (or an alias that runs
+        a shell) is read like a command line; a value that cannot be read (None) fails closed for such a key."""
+        runs = bool(_GIT_EXEC_KEY.search(key) or key.lower().startswith("alias.") or not key)
+        if value is None:
+            return Finding("git configuration for a program setting that cannot be read here", "") if runs else None
+        if _GIT_EXEC_KEY.search(key) or value.startswith("!") or expands:
+            return self.nested_text(value.removeprefix("!"), self.depth)
+        return None
+
+    def git_env_config(self, env_configs: list[str]) -> Finding | None:
+        """Configuration passed through the environment: `--config-env key=NAME` (NAME read from the assignments on
+        this command line), GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n, and GIT_CONFIG_PARAMETERS."""
+        known: dict[str, str] = {}
+        for assign in self.assigns:
+            name, _, value = assign.text.partition("=")
+            known[name] = value
+        for item in env_configs:
+            key, _, var = item.partition("=")
+            found = self.git_config_item(key, known.get(var))
+            if found:
+                return found
+        if "GIT_CONFIG_COUNT" in known:
+            try:
+                count = int(known["GIT_CONFIG_COUNT"])
+            except ValueError:
+                return Finding("git configuration from the environment with a count that cannot be read", "")
+            for n in range(min(max(count, 0), 64)):
+                key = known.get(f"GIT_CONFIG_KEY_{n}")
+                if key is None:
+                    return Finding("git configuration from the environment that cannot be read here", "")
+                found = self.git_config_item(key, known.get(f"GIT_CONFIG_VALUE_{n}"))
+                if found:
+                    return found
+            if count > 64:
+                return Finding("git configuration from the environment with too many entries to read", "")
+        if "GIT_CONFIG_PARAMETERS" in known:
+            try:
+                pairs = shlex.split(known["GIT_CONFIG_PARAMETERS"])
+            except ValueError:
+                return Finding("git configuration parameters that cannot be read here", "")
+            for pair in pairs:
+                key, _, value = pair.partition("=")
+                found = self.git_config_item(key, value)
+                if found:
+                    return found
+        return None
 
     @staticmethod
     def abbreviates(name: str, full: str, minimum: int = 3) -> bool:
