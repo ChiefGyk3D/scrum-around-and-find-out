@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from safo import guardlog
-from safo.bounded import MAX_BYTES, loads, read_bounded
+from safo.bounded import MAX_BYTES, loads
 from safo.context import LocalContext
 from safo.errors import EXIT_OK, ConfigError
 
@@ -28,11 +29,10 @@ MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_LINES = 100_000
 MAX_LINE_BYTES = 4096
 MAX_LABELS = 200  # distinct task labels or models kept; the rest are counted as "(other)"
-MAX_LABEL = 64
 MAX_DAYS = 3660
 TS_SHAPE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}")  # exactly what the writers log
 DEFAULT_DAYS = 28
-OTHER = "(other)"
+OTHER = "other"
 
 # The typed llm-local records (kind call or outcome) and the guard's na_reason_class now provide outcomes, failures,
 # the reason class and load-fresh, so only what they still lack is listed here, with the one-line change.
@@ -69,23 +69,88 @@ class Source:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.found = False
+        self.refused = ""  # why the file was not opened (a fixed phrase, never the path)
         self.truncated = False
         self.malformed = 0
         self.future = 0  # rows dated after today; they are also counted in `malformed`
         self.lines: list[bytes] = []
 
 
-def read_lines(path: Path) -> Source:
-    """The last MAX_LINES complete lines of at most the last MAX_FILE_BYTES bytes of a regular file."""
-    src = Source(path)
+class Refused(Exception):
+    """A directory or file on the way is not safe to read; the text is a fixed phrase, never part of the path."""
+
+
+REFUSED_WALK = "a directory on the path is a symlink, not a directory, not yours or writable by others"
+REFUSED_FILE = "the file is a symlink, not a regular file, not yours or writable by others"
+
+
+def current_uid() -> int:
+    return os.geteuid()
+
+
+def current_gid() -> int:
+    return os.getegid()
+
+
+def unsafe(info: os.stat_result) -> bool:
+    """Not owned by this user, or writable by anyone else (a group write is allowed only for the user's own group)."""
+    if info.st_uid != current_uid() or info.st_mode & stat.S_IWOTH:
+        return True
+    return bool(info.st_mode & stat.S_IWGRP) and info.st_gid != current_gid()
+
+
+def open_confined(anchor: Path, parts: tuple[str, ...]) -> int:
+    """Open anchor/parts for reading, walking the directories with openat and O_NOFOLLOW at every component.
+
+    FileNotFoundError when something is absent; Refused when a directory is a symlink or not a directory, a directory
+    or the file is not owned by this user or is group or world writable, or the file is not a regular file. The anchor
+    (the home directory) is the user's own and is opened as it is.
+    """
+    dfd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return src  # absent, a symlink or unreadable: nothing is read
+        for name in parts[:-1]:
+            try:
+                nfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            except (FileNotFoundError, NotADirectoryError) as err:
+                if isinstance(err, FileNotFoundError):
+                    raise
+                raise Refused(REFUSED_WALK) from None
+            except OSError:
+                raise Refused(REFUSED_WALK) from None  # ELOOP: a symlink
+            os.close(dfd)
+            dfd = nfd
+            if unsafe(os.fstat(dfd)):
+                raise Refused(REFUSED_WALK)
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        except FileNotFoundError:
+            raise
+        except OSError:
+            raise Refused(REFUSED_FILE) from None
+    finally:
+        os.close(dfd)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            return src
+        if not stat.S_ISREG(info.st_mode) or unsafe(info):
+            raise Refused(REFUSED_FILE)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_lines(anchor: Path, *parts: str) -> Source:
+    """The last MAX_LINES complete lines of at most the last MAX_FILE_BYTES bytes of a regular file."""
+    src = Source(anchor.joinpath(*parts))
+    try:
+        fd = open_confined(anchor, parts)
+    except Refused as why:
+        src.refused = str(why)
+        return src
+    except OSError:
+        return src  # absent or unreadable: nothing is read
+    try:
+        info = os.fstat(fd)
         src.found = True
         start = max(0, info.st_size - MAX_FILE_BYTES)
         cut = start > 0 and os.pread(fd, 1, start - 1) != b"\n"  # the first line starts before the window
@@ -163,8 +228,54 @@ def week_of(day: dt.date) -> str:
     return f"{iso.year}-W{iso.week:02d}"
 
 
-def label(value: Any) -> str:
-    return value[:MAX_LABEL] if isinstance(value, str) and value else "(none)"
+SAFE_LABEL = re.compile(r"[a-z0-9._:-]{1,40}")
+MAX_UNKNOWN = 10_000  # distinct unknown labels remembered, only to count them
+# The task labels the tool documents (docs/usage.md); any other task text may be prompt text, so it is classed `other`.
+KNOWN_TASKS = frozenset(
+    {
+        "smoke",
+        "triage",
+        "summary",
+        "digest",
+        "classify",
+        "draft",
+        "outline",
+        "pr-body",
+        "issue-draft",
+        "ci-summary",
+        "lesson-draft",
+        "alert-triage",
+        "bots-triage",
+        "dotsync-summary",
+        "idle-classify",
+        "kind-effort-draft",
+        "pack-summary",
+        "standards-digest",
+        "gap-issue",
+    }
+)
+
+
+class Labels:
+    """Classifies free text from a log into a fixed safe set. The text of an unknown label is never kept: only how
+    many distinct ones were seen."""
+
+    def __init__(self, known: frozenset[str] | None = None) -> None:
+        self.known = known
+        self.unknown: set[str] = set()
+
+    def __call__(self, value: Any) -> str:
+        if not isinstance(value, str) or not value:
+            return "(none)"
+        if SAFE_LABEL.fullmatch(value) and (self.known is None or value in self.known):
+            return value
+        if len(self.unknown) < MAX_UNKNOWN:
+            self.unknown.add(hashlib.sha256(value.encode("utf-8", "replace")).hexdigest())
+        return OTHER
+
+
+def safe_key(key: str) -> str:
+    return key if SAFE_LABEL.fullmatch(key) else OTHER
 
 
 def bump(counter: Counter[str], key: str) -> None:
@@ -183,8 +294,8 @@ def dispatch_flags(row: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
-def dispatch_section(path: Path, since: dt.date, today: dt.date) -> dict[str, Any]:
-    src = read_lines(path)
+def dispatch_section(src: Source, since: dt.date, today: dt.date) -> dict[str, Any]:
+    models = Labels()
     by_day: dict[str, Counter[str]] = {}
     by_week: dict[str, Counter[str]] = {}
     by_model: dict[str, Counter[str]] = {}
@@ -204,13 +315,15 @@ def dispatch_section(path: Path, since: dt.date, today: dt.date) -> dict[str, An
             class_total[name] += 1
             class_day.setdefault(day.isoformat(), Counter())[name] += 1
             class_week.setdefault(week_of(day), Counter())[name] += 1
-        model = label(row.get("model"))
+        model = models(row.get("model"))
         if model not in by_model and len(by_model) >= MAX_LABELS:
             model = OTHER
         for table, key in ((by_day, day.isoformat()), (by_week, week_of(day)), (by_model, model)):
             table.setdefault(key, Counter()).update(flags)
     return {
         "found": src.found,
+        "refused": src.refused,
+        "unknown_labels": {"model": len(models.unknown)},
         "rows": rows,
         "malformed": src.malformed,
         "future": src.future,
@@ -229,10 +342,9 @@ def dispatch_section(path: Path, since: dt.date, today: dt.date) -> dict[str, An
 def hooks_section(env: Mapping[str, str], since: dt.date, today: dt.date) -> dict[str, Any]:
     """The `safo hooks status` counts (guardlog.summarise), from rows read here without taking the log's lock."""
     folder = guardlog.state_dir(env)  # the hooks log honors XDG_STATE_HOME, as the guard that writes it does
-    path = folder / guardlog.LOG_NAME if folder else None
-    src = (
-        read_lines(path) if path is not None and guardlog.trusted_dir(path.parent) else Source(Path(guardlog.LOG_NAME))
-    )
+    src = Source(Path(guardlog.LOG_NAME))
+    if folder is not None and guardlog.trusted_dir(folder):
+        src = read_lines(folder, guardlog.LOG_NAME)
     rows = []
     for row in json_rows(src):
         if not guardlog.valid_record(row):
@@ -242,6 +354,7 @@ def hooks_section(env: Mapping[str, str], since: dt.date, today: dt.date) -> dic
     counts = guardlog.summarise(rows)
     return {
         "found": src.found,
+        "refused": src.refused,
         "total": counts.total,
         "since": counts.since,
         "malformed": src.malformed,
@@ -255,35 +368,45 @@ def hooks_section(env: Mapping[str, str], since: dt.date, today: dt.date) -> dic
     }
 
 
-def home_path(env: Mapping[str, str], *parts: str) -> Path | None:
-    """Under HOME only: the guard and llm-local write there and ignore the XDG variables."""
+def home_read(env: Mapping[str, str], *parts: str) -> Source:
+    """Under HOME only (the guard and llm-local write there and ignore the XDG variables), every directory checked."""
     home = env.get("HOME", "")
-    return Path(home).joinpath(*parts) if home else None
+    return read_lines(Path(home), *parts) if home else Source(Path(parts[-1]))
 
 
-def counters_of(path: Path) -> dict[str, int]:
+def counters_of(env: Mapping[str, str], *parts: str) -> dict[str, int]:
+    """The admission counters; a key that is not a safe label is added to `other`."""
+    home = env.get("HOME", "")
+    if not home:
+        return {}
     try:
-        data = loads(read_bounded(path, MAX_BYTES + 1))
+        fd = open_confined(Path(home), parts)
+    except (Refused, OSError):
+        return {}
+    try:
+        data = loads(os.read(fd, MAX_BYTES + 1))
     except (OSError, ValueError, UnicodeError):
         return {}
+    finally:
+        os.close(fd)
     raw = data.get("counters") if isinstance(data, dict) else None
     out: dict[str, int] = {}
     if isinstance(raw, dict):
         for key, value in list(raw.items())[:MAX_LABELS]:
             if isinstance(key, str) and type(value) is int and 0 <= value <= 10**12:
-                out[key[:MAX_LABEL]] = value
+                name = safe_key(key)
+                out[name] = min(out.get(name, 0) + value, 10**12)
     return out
 
 
 def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) -> dict[str, Any]:
-    state = home_path(env, ".local", "state", "llm-local")
-    share = home_path(env, ".local", "share", "llm-local")
+    state = (".local", "state", "llm-local")
     src = Source(Path("calls.jsonl"))
-    for folder in (state, share):  # the first calls log that exists; never both, so no call is counted twice
-        if folder is not None:
-            src = read_lines(folder / "calls.jsonl")
-            if src.found:
-                break
+    for folder in (state, (".local", "share", "llm-local")):
+        src = home_read(env, *folder, "calls.jsonl")  # the first calls log that exists; never both
+        if src.found or src.refused:
+            break
+    tasks, models, reasons = Labels(KNOWN_TASKS), Labels(), Labels()
     by_task: Counter[str] = Counter()
     by_model: Counter[str] = Counter()
     by_day: Counter[str] = Counter()
@@ -297,8 +420,19 @@ def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) ->
     for row in json_rows(src):
         kind = row.get("kind", "call")
         cid = row.get("id")
-        if kind == "call" and isinstance(cid, str) and len(cid) <= MAX_ID and len(known) < MAX_LINES:
-            known[cid] = (label(row.get("task")), label(row.get("model")))
+        status = row.get("status", "ok")
+        stamp = day_of(row)
+        # a call id is known only from a row that validates (kind, timestamp, status); the first row of an id wins
+        if (
+            kind == "call"
+            and status in ("ok", "failed", "busy")
+            and stamp is not None
+            and stamp <= today
+            and isinstance(cid, str)
+            and len(cid) <= MAX_ID
+            and len(known) < MAX_LINES
+        ):
+            known.setdefault(cid, (tasks(row.get("task")), models(row.get("model"))))
         day = in_window(src, row, since, today)
         if day is None:
             continue
@@ -308,17 +442,16 @@ def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) ->
             else:
                 src.malformed += 1
             continue
-        status = row.get("status", "ok")
         if kind != "call" or status not in ("ok", "failed", "busy"):
             src.malformed += 1  # an unknown kind or status is counted, never guessed at
             continue
         if status != "ok":
-            bump(failed if status == "failed" else busy, label(row.get("reason")))
+            bump(failed if status == "failed" else busy, reasons(row.get("reason")))
             continue
         calls += 1
         ok_ids.append(cid if isinstance(cid, str) else None)
-        bump(by_task, label(row.get("task")))
-        bump(by_model, label(row.get("model")))
+        bump(by_task, tasks(row.get("task")))
+        bump(by_model, models(row.get("model")))
         by_day[day.isoformat()] += 1
         by_week[week_of(day)] += 1
         for field in ("prompt_tokens", "eval_tokens"):
@@ -335,6 +468,8 @@ def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) ->
             accepted[axis][name] += what == "accepted"
     return {
         "found": src.found,
+        "refused": src.refused,
+        "unknown_labels": {"task": len(tasks.unknown), "model": len(models.unknown), "reason": len(reasons.unknown)},
         "calls": calls,
         "tokens": tokens,
         "malformed": src.malformed,
@@ -358,15 +493,14 @@ def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) ->
                 for axis in ("task", "model")
             },
         },
-        "counters": counters_of(state / "state.json") if state else {},
+        "counters": counters_of(env, *state, "state.json"),
     }
 
 
 def build(env: Mapping[str, str], today: dt.date, days: int) -> dict[str, Any]:
     """`today` is the local date: the logs carry local time without a zone."""
     since = today - dt.timedelta(days=days - 1)
-    log = home_path(env, ".local", "state", "agent-dispatch-guard", "log.jsonl")
-    dispatch = dispatch_section(log, since, today) if log else dispatch_section(Path("log.jsonl"), since, today)
+    dispatch = dispatch_section(home_read(env, ".local", "state", "agent-dispatch-guard", "log.jsonl"), since, today)
     return {
         "generated": today.isoformat(),
         "days": days,
@@ -421,10 +555,14 @@ def text(report: Mapping[str, Any]) -> list[str]:
     d, h, ll = report["dispatch"], report["hooks"], report["llm_local"]
     out = [f"Local-model use, {report['since']} to {report['generated']} ({report['days']} days)", ""]
     out.append("Dispatch guard log (agent-dispatch-guard/log.jsonl)")
-    if not d["found"]:
+    if d["refused"]:
+        out.append(f"  not read: {d['refused']}")
+    elif not d["found"]:
         out.append("  no dispatch log found")
     else:
         out.append(f"  {d['rows']} dispatches in the window; {skipped(d)}")
+        if d["unknown_labels"]["model"]:
+            out.append(f"  models classed as other (text never shown): {d['unknown_labels']['model']} distinct")
         if d["truncated"]:
             out.append("  only the newest part of the file was read (size or line cap)")
         out.append(" by day")
@@ -439,7 +577,9 @@ def text(report: Mapping[str, Any]) -> list[str]:
             out += [f"  {k}  " + ", ".join(f"{n} {c}" for n, c in v.items()) for k, v in nc["by_day"].items()]
             out += [f"  {k}  " + ", ".join(f"{n} {c}" for n, c in v.items()) for k, v in nc["by_week"].items()]
     out += ["", "Routing guard (safo hooks status counts)"]
-    if not h["total"]:
+    if h["refused"]:
+        out.append(f"  not read: {h['refused']}")
+    elif not h["total"]:
         out.append("  no hooks guard rows in the window")
     else:
         out.append(
@@ -450,7 +590,9 @@ def text(report: Mapping[str, Any]) -> list[str]:
         if h["rules"]:
             out.append("  rules flagged: " + ", ".join(f"{k} {v}" for k, v in h["rules"].items()))
     out += ["", "llm-local"]
-    if not ll["found"]:
+    if ll["refused"]:
+        out.append(f"  not read: {ll['refused']}")
+    elif not ll["found"]:
         out.append("  no llm-local calls log found")
     else:
         out.append(f"  {ll['calls']} calls, {ll['tokens']:,} tokens in the window; {skipped(ll)}")
@@ -461,6 +603,9 @@ def text(report: Mapping[str, Any]) -> list[str]:
         out.append("  by day: " + (", ".join(f"{k} {v}" for k, v in ll["by_day"].items()) or "none"))
         out.append("  by week: " + (", ".join(f"{k} {v}" for k, v in ll["by_week"].items()) or "none"))
         out += llm_extra_lines(ll)
+        unknown = {k: v for k, v in ll["unknown_labels"].items() if v}
+        if unknown:
+            out.append("  classed as other (text never shown), distinct labels: " + pairs(unknown))
     c = ll["counters"]
     out.append("  admission (all time): " + ("  ".join(f"{k} {v}" for k, v in sorted(c.items())) or "no state.json"))
     out += ["", "MISSING DATA (cannot be counted today; the one-line change that would record it)"]

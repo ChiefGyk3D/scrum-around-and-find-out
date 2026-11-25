@@ -14,7 +14,6 @@ import pytest
 from localcli import cli
 from test_local_report import ESC, call, put, row
 
-BS = chr(92)
 A, B, C, D = "a" * 12, "b" * 12, "c" * 12, "d" * 12
 
 
@@ -55,7 +54,7 @@ def typed_home(_private_home: Path) -> Path:
     put(
         _private_home / ".local/share/llm-local/calls.jsonl",
         [
-            call("2026-10-05T09:30:00", "gemma4:12b", "old"),  # an old-tool row: no kind, a successful call
+            call("2026-10-05T09:30:00", "gemma4:12b", "summary"),  # an old-tool row: no kind, a successful call
             good_call(A, "triage"),
             good_call(B, "draft", "qwen3.5:4b"),
             typed("call", id=C, model="m", task="triage", status="failed", exit_code=2, reason="timeout"),
@@ -78,7 +77,7 @@ def test_typed_rows_are_counted_by_kind_and_status(typed_home: Path) -> None:
     ll = json.loads(out)["llm_local"]
     assert code == 0
     assert ll["calls"] == 3 and ll["tokens"] == 45  # the old row and two ok calls; failed and busy rows add none
-    assert ll["by_task"] == {"draft": 1, "old": 1, "triage": 1}
+    assert ll["by_task"] == {"draft": 1, "summary": 1, "triage": 1}
     assert ll["failed"] == {"total": 2, "by_reason": {"timeout": 2}}
     assert ll["busy"] == {"total": 1, "by_reason": {"busy": 1}}
     assert ll["malformed"] == 3  # the unknown kind, the unknown status and the unknown outcome
@@ -100,7 +99,7 @@ def test_the_text_report_shows_failures_busy_and_outcomes(typed_home: Path) -> N
     assert "accept rate by task: draft 0%, triage 100%" in out
 
 
-def test_hostile_labels_in_typed_rows_are_escaped_and_capped(_private_home: Path) -> None:
+def test_hostile_labels_in_typed_rows_are_classed_not_printed(_private_home: Path) -> None:
     hostile = f"x{ESC}[2J::stop-commands::y" + "z" * 200
     put(
         _private_home / ".local/share/llm-local/calls.jsonl",
@@ -112,9 +111,10 @@ def test_hostile_labels_in_typed_rows_are_escaped_and_capped(_private_home: Path
         ],
     )
     _, out, _ = cli("local", "report", "--days", "60", home=_private_home)
-    assert ESC not in out and "::stop" not in out and f"x{BS}x1b[2J" in out and "z" * 70 not in out
+    assert ESC not in out and "::stop" not in out and "zzz" not in out and "stop-commands" not in out
     _, out, _ = cli("local", "report", "--json", "--days", "60", home=_private_home)
-    assert "::" not in out and json.loads(out)["llm_local"]["outcomes"]["joined"] == 1
+    ll = json.loads(out)["llm_local"]
+    assert "::" not in out and ll["outcomes"]["joined"] == 1 and ll["by_task"] == {"other": 1}
 
 
 def test_a_future_typed_row_is_dropped_like_any_other(_private_home: Path) -> None:

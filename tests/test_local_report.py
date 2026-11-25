@@ -155,13 +155,13 @@ def test_empty_home_is_exit_zero_and_still_lists_missing_data(_private_home: Pat
     assert "no dispatch log" in out and "no llm-local calls log" in out and "MISSING DATA" in out
 
 
-def test_terminal_control_characters_in_a_task_label_are_escaped(_private_home: Path) -> None:
+def test_terminal_control_characters_in_a_task_label_are_classed_not_printed(_private_home: Path) -> None:
     put(
         _private_home / ".local/share/llm-local/calls.jsonl",
         [call("2026-10-06T09:30:00", "m", f"evil{ESC}[2J::stop-commands::x")],
     )
     code, out, _ = cli("local", "report", "--days", "60", home=_private_home)
-    assert code == 0 and ESC not in out and "::stop" not in out and "evil\\x1b[2J" in out
+    assert code == 0 and ESC not in out and "::stop" not in out and "evil" not in out  # classed as other
 
 
 def test_reads_are_capped_and_say_so(fixture_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -354,7 +354,7 @@ def test_a_valid_last_line_with_no_newline_is_a_torn_line_and_not_counted(_priva
 def test_json_output_never_carries_a_double_colon(_private_home: Path) -> None:
     put(_private_home / ".local/share/llm-local/calls.jsonl", [call("2026-10-06T09:30:00", "m", "a::b")])
     code, out, _ = cli("local", "report", "--json", "--days", "60", home=_private_home)
-    assert code == 0 and "::" not in out and json.loads(out)["llm_local"]["by_task"] == {"a::b": 1}
+    assert code == 0 and "::" not in out and json.loads(out)["llm_local"]["by_task"] == {"other": 1}
 
 
 @pytest.mark.parametrize("days", ["0", "-1", "3661", "99999999999999999999"])
@@ -364,10 +364,10 @@ def test_days_out_of_range_is_a_clear_error(_private_home: Path, days: str) -> N
 
 
 def test_only_the_first_calls_log_is_read(_private_home: Path) -> None:
-    put(_private_home / ".local/state/llm-local/calls.jsonl", [call("2026-10-06T09:30:00", "m", "first")])
-    put(_private_home / ".local/share/llm-local/calls.jsonl", [call("2026-10-06T09:30:00", "m", "second")] * 2)
+    put(_private_home / ".local/state/llm-local/calls.jsonl", [call("2026-10-06T09:30:00", "m", "triage")])
+    put(_private_home / ".local/share/llm-local/calls.jsonl", [call("2026-10-06T09:30:00", "m", "summary")] * 2)
     _, out, _ = cli("local", "report", "--json", "--days", "60", home=_private_home)
-    assert json.loads(out)["llm_local"]["by_task"] == {"first": 1}
+    assert json.loads(out)["llm_local"]["by_task"] == {"triage": 1}
 
 
 def test_llm_local_and_dispatch_files_are_found_under_home_ignoring_xdg(fixture_home: Path, tmp_path: Path) -> None:
