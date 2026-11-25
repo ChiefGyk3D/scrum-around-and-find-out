@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,7 +19,7 @@ A, B, C, D = "a" * 12, "b" * 12, "c" * 12, "d" * 12
 
 
 @pytest.fixture(autouse=True)
-def _utc(monkeypatch: pytest.MonkeyPatch):
+def _utc(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("TZ", "UTC")
     time.tzset()
     yield
@@ -25,11 +27,11 @@ def _utc(monkeypatch: pytest.MonkeyPatch):
     time.tzset()
 
 
-def typed(kind: str, ts: str = "2026-10-06T09:30:00", **fields: object) -> dict:
+def typed(kind: str, ts: str = "2026-10-06T09:30:00", **fields: object) -> dict[str, Any]:
     return {"kind": kind, "ts": ts, **fields}
 
 
-def good_call(cid: str, task: str, model: str = "gemma4:12b") -> dict:
+def good_call(cid: str, task: str, model: str = "gemma4:12b") -> dict[str, Any]:
     return typed(
         "call",
         id=cid,
@@ -44,7 +46,7 @@ def good_call(cid: str, task: str, model: str = "gemma4:12b") -> dict:
     )
 
 
-def outcome(cid: str, what: str, ts: str = "2026-10-06T10:00:00") -> dict:
+def outcome(cid: str, what: str, ts: str = "2026-10-06T10:00:00") -> dict[str, Any]:
     return typed("outcome", ts, id=cid, outcome=what)
 
 
@@ -126,7 +128,7 @@ def test_a_future_typed_row_is_dropped_like_any_other(_private_home: Path) -> No
 
 
 def test_the_na_reason_class_is_counted_by_day_and_week(_private_home: Path) -> None:
-    def classed(ts: str, value: object) -> dict:
+    def classed(ts: str, value: object) -> dict[str, Any]:
         return {**row(ts), "na_reason_class": value}
 
     put(

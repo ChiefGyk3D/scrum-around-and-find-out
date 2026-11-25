@@ -9,7 +9,9 @@ import json
 import os
 import signal
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,7 +24,7 @@ OLD_ERROR = "safo local: error: the following arguments are required: --shape, -
 
 
 @pytest.fixture(autouse=True)
-def _utc(monkeypatch: pytest.MonkeyPatch):
+def _utc(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """The guard writes local time without a zone; the tests pin the machine zone so dates do not move."""
     monkeypatch.setenv("TZ", "UTC")
     time.tzset()
@@ -37,8 +39,10 @@ def at(home: Path, now: dt.datetime, *argv: str, extra: dict[str, str] | None = 
     return main(list(argv), env=env, out=out, err=err, now=now), out.getvalue(), err.getvalue()
 
 
-def row(ts: str, model: str = "sonnet", *, reach: bool = True, step: bool = False, line: bool | None = None) -> dict:
-    out: dict = {
+def row(
+    ts: str, model: str = "sonnet", *, reach: bool = True, step: bool = False, line: bool | None = None
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "ts": ts,
         "decision": "allow",
         "mode": "block",
@@ -58,7 +62,7 @@ def put(path: Path, rows: list[object], tail: str = "") -> None:
     path.write_text("".join((r if isinstance(r, str) else json.dumps(r)) + "\n" for r in rows) + tail)
 
 
-def call(ts: str, model: str, task: str) -> dict:
+def call(ts: str, model: str, task: str) -> dict[str, Any]:
     return {"ts": ts, "model": model, "task": task, "prompt_tokens": 10, "eval_tokens": 5, "seconds": 1.0}
 
 
