@@ -54,6 +54,93 @@ count on stderr, and so is the number of pending records that never committed. A
 regular file, not owned by you, group or other writable, or larger than 8 MB exits 2. Only filings made through
 `safo-file issue` are counted.
 
+## The routing table (#455)
+
+The owner decided that the private repositories are the default home for general work, so `safo-file` can say where a
+piece of work belongs and keeps private-workflow work out of public repos. The decision is made by code, from keyword and
+path-hint lists, never by a model.
+
+| Class | Default destination | Private |
+| --- | --- | --- |
+| `product` | the working repo, when it is in `tracking_repos` | no |
+| `homelab` (homelab, infra, runner, ops) | `ChiefGyk3D/homelab-ops` | yes |
+| `ai-tooling` (AI tooling and config) | `ChiefGyk3D/AI-Shit` | yes |
+| `research` (research and evaluation) | `ChiefGyk3D/research-notes` | yes |
+| `tangent` (unclassified and tangents) | `ChiefGyk3D/workbench` | yes |
+
+`safo-file route DESCRIPTION --working-repo o/r [--class NAME] [--ledger PATH]`
+
+Prints `destination:`, `class:` and `reason:` (the matched keywords and path hints, or `explicit class NAME`). Exit 0 when
+the class is decided. Exit 3 when nothing matched, or when the work is `product` but the working repo is not tracked: the
+destination is then only the default (`ChiefGyk3D/workbench`), printed as `(default only)`; pass `--class` to decide.
+The decision is appended to the ledger as a `routed` record (class, destination, how it was decided, the matched terms;
+never the description). `report` ignores `routed` records, and a route that cannot be recorded exits 2 with no output.
+
+Matching: a keyword counts when it appears as a whole word or phrase, ignoring case (`ops` does not match `hopscotch`).
+A path hint counts when it equals a whole segment of a path-like word (`notes/jan.md` matches `notes`; the plain word
+`notes` does not). A class scores one point per distinct keyword or hint matched. The highest score wins. A tie goes to
+a private class over a public one, then to the class earlier in the table (product, homelab, ai-tooling, research,
+tangent, then classes the file adds, in file order).
+
+The table lives in `~/.config/safo-file/routes.toml`, which is not under `~/.config/safo`; no environment variable moves
+it. Without the file the defaults above apply. The file must be a regular file you own, not writable by group or others,
+with no symbolic link in its path and closed directories above it, at most 64 KB, valid UTF-8 and TOML; anything else is
+exit 2 with the reason (never the path). A key you give replaces that key's default; a class the file names that is not
+built in is added and needs a `repo`.
+
+```toml
+[classes."homelab"]
+repo = "ChiefGyk3D/homelab-ops"
+keywords = ["homelab", "proxmox", "side project"]   # whole words or phrases: a-z, 0-9, space . _ + -
+paths = ["infra", "ops/runner"]                      # path segments
+
+[classes."radio"]                                       # a new class: repo is required
+repo = "ChiefGyk3D/radio-notes"
+keywords = ["sdr", "meshtastic"]
+```
+
+Every class except `product` is always private, and the file cannot say otherwise: a `private` key (any value), an unknown key such as `visibility`, or a class that is not a table is refused with exit 2, so the file cannot turn the public-repo refusal off. `product` takes no `repo`. At most 32 classes and 200 terms per list.
+
+**Public repos.** `safo-file issue ... [--class NAME] [--allow-public]` ALWAYS asks GitHub whether the target repo is
+public (`gh api repos/o/r --jq .private`, live for every filing, no cache; a failed, unreadable or missing lookup refuses
+with exit 2). A public target takes the issue only when ALL of these hold: no private class matches the title and body,
+the text is at most 1 MiB (more is unclassified, so refused), and the work is positively product (`--class product`, or
+the target is the working repo). Anything else is refused (exit 1) unless the command has `--allow-public` AND the body
+has a `public-ok: <reason>` line at the start of a line, outside a code fence (a quoted or indented line does not
+count). The reason must be real: at least 12 characters, at least two different words with letters that are not
+placeholders (TODO, TBD, none, n/a, ok, yes, test), and more than one repeated character; the first valid line counts. The whole line, keyword and reason, must be plain
+ASCII: a lookalike, zero-width or accented character anywhere in it makes the line invalid (the message does not show the
+character). `--class product` never overrides private wording. Matching reads the whole text after Unicode NFKC, case
+folding, removing zero-width and other format characters, and reading runs of whitespace, hyphens, underscores and dots
+as one space; whole words only. The work is linear in the text: it is normalised and split into words once, and the
+keywords (at most 4 words each) and path hints (at most 4 segments) of every class are looked up as word sequences in
+sets, never one scan per term. Punctuation only separates words, so `side, project` and `c++` (the word `c`) match too
+(a phrase keyword matches across punctuation); a single-word keyword split by punctuation is not found (see Known
+limits). Accents are folded away for matching (an o-acute matches `o`).
+
+A text a public target cannot classify is refused like private wording (exit 1, naming the class of character, never
+echoing it) unless both override elements are present: after NFKC, the title or body has an invisible or format
+character (zero-width, bidirectional controls, tag characters), a combining mark or variation selector that does not
+compose into a letter, a control character other than tab and newline, a private-use or unassigned character, or a
+letter or numeral that is not ASCII or an ASCII letter with accents. So Cyrillic and Greek lookalikes, CJK and other
+non-Latin text, non-ASCII digits, Latin letters with no ASCII base (o-slash, sharp s) and emoji written with a variation
+selector or joiner are all refused for a public target. Plain accented Latin, ordinary punctuation, quotes and emoji
+without a variation selector pass. A private target is not affected. A public target's decision is written as a `routed` record first, with `outcome`
+`public-product`, `override` or `refused`. The cross-project and idea-gate rules still apply on top.
+
+The target can still turn public between a lookup and the create. The window is made as small as it can be, not closed:
+after the decision and the `pending` record, `safo-file` looks the repo up once more immediately before `gh issue create`
+(a repo that is public by then needs the same decision, else exit 1), and for private-workflow work looks once more
+immediately after it. If the repo is public then, the output has a loud `EXPOSED` line naming the issue URL, the ledger
+gets a `routed` record with `outcome` `exposed`, and the exit is 2, so the owner can close or edit the issue. If that last
+lookup fails, the URL is printed with a note that visibility could not be checked (exit 2). A flip inside the create call
+itself is caught only by the last lookup, after the fact.
+
+**Parking lot.** `safo-file check ... --answer tangent --parking-number N` posts the parking-lot body to issue N in the
+table's `tangent` repo (workbench by default). Without `--parking` or `--parking-number` it prints the default
+parking-lot repo and posts nothing. `--parking o/r#N` still works alone; both together is exit 2. `safo-file` never
+creates an issue for this.
+
 ## The memory search
 
 Set `SAFO_MEMORY_SEARCH` to a command. It is run as `<command> -- <idea>`, so it must accept `--` before its positional
@@ -92,7 +179,14 @@ after an issue was created the URL is still printed.
 
 - An executable replaced between the trust check and the launch is not caught. It needs write access to directories the
   policy already requires to be closed to others.
+- Classification is best effort against accidents, such as an assistant naming a private project in a public issue. It
+  is not a defense against deliberately obfuscated text. A private keyword split by ASCII punctuation inside the word
+  (`prox-mox`), padded with digits or Markdown delimiters, or written as an HTML entity, percent-encoding or an ASCII
+  `\u` escape is not recognized, and a carriage return is treated like any other separator. The cheap ASCII defenses
+  that do exist: hyphens, underscores, dots and runs of whitespace fold to one space, case folds, and accents fold. The
+  Unicode defenses (refusing invisible, combining and lookalike characters for a public target) and the `public-ok`
+  rules are separate and stay in force.
 
 ## Exit codes
 
-0 done, 1 refused by a rule, 2 an error or bad command line, 3 an answer is still needed.
+0 done, 1 refused by a rule, 2 an error or bad command line, 3 an answer is still needed (`route`: the class could not be decided).

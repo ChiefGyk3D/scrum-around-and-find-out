@@ -40,6 +40,7 @@ class Fakes:
             create_issue=create,
             comment=comment,
             ledger=self.ledger,
+            is_public=lambda repo: False,  # every filing looks its target up; these tests file into private repos
         )
 
 
