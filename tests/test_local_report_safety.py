@@ -4,8 +4,10 @@ row that does not validate never becomes a join target (Daybreak round 1 of #372
 
 from __future__ import annotations
 
+import grp
 import json
 import os
+import pwd
 import stat
 import time
 from collections.abc import Iterator
@@ -150,9 +152,9 @@ class Account:
 def shim_accounts(monkeypatch: pytest.MonkeyPatch, members: list[str], others_with_gid: int = 0) -> None:
     me = Account("me", os.geteuid(), os.getegid())
     people = [me, *[Account(f"x{n}", os.geteuid() + 1 + n, os.getegid()) for n in range(others_with_gid)]]
-    monkeypatch.setattr(local_report.pwd, "getpwuid", lambda uid: me)
-    monkeypatch.setattr(local_report.pwd, "getpwall", lambda: people)
-    monkeypatch.setattr(local_report.grp, "getgrgid", lambda gid: Group(members))
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: me)
+    monkeypatch.setattr(pwd, "getpwall", lambda: people)
+    monkeypatch.setattr(grp, "getgrgid", lambda gid: Group(members))
 
 
 def group_writable(home: Path) -> None:
@@ -180,7 +182,7 @@ def test_a_group_lookup_error_refuses(_private_home: Path, monkeypatch: pytest.M
     def fail(gid: int) -> Group:
         raise KeyError(gid)
 
-    monkeypatch.setattr(local_report.grp, "getgrgid", fail)
+    monkeypatch.setattr(grp, "getgrgid", fail)
     assert report(_private_home)[1]["llm_local"]["calls"] == 0
     shim_accounts(monkeypatch, members=[])
     monkeypatch.setattr(local_report, "current_gid", lambda: os.getegid() + 1)
