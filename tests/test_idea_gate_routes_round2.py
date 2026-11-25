@@ -141,7 +141,7 @@ def test_a_repo_that_became_public_between_two_filings_is_caught(tmp_path: Path)
 def test_a_routes_file_that_is_a_fifo_or_has_another_owner_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    box = Box(tmp_path)
+    box = Box(tmp_path, monkeypatch)
     box.agents(tracking_repos=[WORK])
     d = box.home / ".config" / "safo-file"
     d.mkdir(parents=True, mode=0o700)
@@ -155,8 +155,8 @@ def test_a_routes_file_that_is_a_fifo_or_has_another_owner_is_refused(
     assert code == 2 and "routes file" in err and "owned" in err
 
 
-def test_a_keyword_with_a_metacharacter_matches_literally(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_a_keyword_with_a_metacharacter_matches_literally(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = Box(tmp_path, monkeypatch)
     box.agents(tracking_repos=[WORK])
     write_routes(box, '[classes.lang]\nrepo = "o/lang"\nkeywords = ["c++"]\n')
     code, out, _ = go_real(box, "route", "port it to C++ soon", "--working-repo", WORK)
@@ -177,8 +177,10 @@ def test_a_custom_class_added_by_config_is_private_and_refused_in_a_public_repo(
     assert code == 1 and f.created == []
 
 
-def test_a_class_loaded_from_the_file_is_private_whatever_it_says(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_a_class_loaded_from_the_file_is_private_whatever_it_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, monkeypatch)
     write_routes(box, '[classes.lang]\nrepo = "o/lang"\nkeywords = ["zig"]\n')
     table = routes.load_table(str(box.home))
     assert [c.name for c in table.classes if not c.private] == ["product"]

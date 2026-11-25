@@ -155,15 +155,17 @@ def go_real(box: Box, *argv: str) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
-def test_an_absent_routes_file_means_the_built_in_defaults(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_an_absent_routes_file_means_the_built_in_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = Box(tmp_path, monkeypatch)
     box.agents(tracking_repos=[WORK])
     code, out, _ = go_real(box, "route", "rebuild the proxmox runner", "--working-repo", WORK)
     assert code == 0 and HOMELAB in out
 
 
-def test_the_routes_file_changes_a_repo_adds_words_and_adds_a_class(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_the_routes_file_changes_a_repo_adds_words_and_adds_a_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, monkeypatch)
     box.agents(tracking_repos=[WORK])
     write_routes(
         box,
@@ -207,8 +209,10 @@ BAD_FILES = [
 
 
 @pytest.mark.parametrize(("data", "why"), BAD_FILES)
-def test_a_bad_routes_file_is_exit_2_with_a_reason(tmp_path: Path, data: bytes, why: str) -> None:
-    box = Box(tmp_path)
+def test_a_bad_routes_file_is_exit_2_with_a_reason(
+    tmp_path: Path, data: bytes, why: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, monkeypatch)
     box.agents(tracking_repos=[WORK])
     write_routes(box, data)
     code, out, err = go_real(box, "route", "rebuild the proxmox runner", "--working-repo", WORK)
@@ -217,16 +221,16 @@ def test_a_bad_routes_file_is_exit_2_with_a_reason(tmp_path: Path, data: bytes, 
     assert str(box.home) not in err  # the message names the rule, not the path
 
 
-def test_a_group_writable_routes_file_is_refused(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_a_group_writable_routes_file_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = Box(tmp_path, monkeypatch)
     box.agents(tracking_repos=[WORK])
     write_routes(box, "", mode=0o660)
     code, _, err = go_real(box, "route", "x", "--working-repo", WORK, "--class", "homelab")
     assert code == 2 and "writable by its group or by others" in err
 
 
-def test_a_symlinked_routes_file_is_refused(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_a_symlinked_routes_file_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = Box(tmp_path, monkeypatch)
     box.agents(tracking_repos=[WORK])
     real = tmp_path / "real.toml"
     real.write_text("")
@@ -238,8 +242,10 @@ def test_a_symlinked_routes_file_is_refused(tmp_path: Path) -> None:
     assert code == 2 and "routes file" in err and "symbolic link" in err
 
 
-def test_a_routes_file_in_a_group_writable_directory_is_refused(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_a_routes_file_in_a_group_writable_directory_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, monkeypatch)
     box.agents(tracking_repos=[WORK])
     path = write_routes(box, "")
     path.parent.chmod(0o770)
@@ -247,8 +253,8 @@ def test_a_routes_file_in_a_group_writable_directory_is_refused(tmp_path: Path) 
     assert code == 2 and "routes file" in err and "directory" in err
 
 
-def test_the_routes_file_is_not_under_the_guard_directory(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_the_routes_file_is_not_under_the_guard_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = Box(tmp_path, monkeypatch)
     assert routes.routes_path(box.env["HOME"]) == box.home / ".config" / "safo-file" / "routes.toml"
     assert ".config/safo/" not in str(routes.routes_path(box.env["HOME"]))
 
@@ -361,15 +367,15 @@ exit 1
 """
 
 
-def vis_box(tmp_path: Path, answer: str) -> Box:
-    box = Box(tmp_path)
+def vis_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str) -> Box:
+    box = Box(tmp_path, monkeypatch)
     script(box.bin / "gh", VIS_GH.replace("@LOG@", str(box.log)))
     (box.log / "answer").write_text(answer)
     return box
 
 
-def test_the_real_lookup_is_live_each_time_and_leaves_no_cache(tmp_path: Path) -> None:
-    box = vis_box(tmp_path, "true\n")
+def test_the_real_lookup_is_live_each_time_and_leaves_no_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = vis_box(tmp_path, monkeypatch, "true\n")
     d = box.deps()
     assert d.is_public is not None
     assert d.is_public("o/r") is False
@@ -380,16 +386,16 @@ def test_the_real_lookup_is_live_each_time_and_leaves_no_cache(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("answer", ["maybe\n", "", "true false\n"])
-def test_an_unreadable_gh_answer_fails_closed(tmp_path: Path, answer: str) -> None:
-    box = vis_box(tmp_path, answer)
+def test_an_unreadable_gh_answer_fails_closed(tmp_path: Path, answer: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = vis_box(tmp_path, monkeypatch, answer)
     d = box.deps()
     assert d.is_public is not None
     with pytest.raises(SafoError, match="unreadable"):
         d.is_public("o/r")
 
 
-def test_a_failing_gh_lookup_fails_closed(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_a_failing_gh_lookup_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = Box(tmp_path, monkeypatch)
     box.flag("fail")
     d = box.deps()
     assert d.is_public is not None
@@ -397,8 +403,8 @@ def test_a_failing_gh_lookup_fails_closed(tmp_path: Path) -> None:
         d.is_public("o/r")
 
 
-def test_a_well_formed_fresh_cache_file_is_never_believed(tmp_path: Path) -> None:
-    box = vis_box(tmp_path, "false\n")  # the repo is public
+def test_a_well_formed_fresh_cache_file_is_never_believed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = vis_box(tmp_path, monkeypatch, "false\n")  # the repo is public
     entry = {"repo": "o/r", "public": False, "ts": NOW.isoformat()}
     cache = box.log / "repo-visibility.jsonl"
     cache.write_text(json.dumps(entry) + "\n")
@@ -451,8 +457,8 @@ def test_an_explicit_parking_still_wins_when_given_alone(tmp_path: Path) -> None
     assert f.comments[0][:2] == ("o/p", 1)
 
 
-def test_the_environment_is_not_consulted_for_the_routes_file(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_the_environment_is_not_consulted_for_the_routes_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = Box(tmp_path, monkeypatch)
     other = tmp_path / "other.toml"
     other.write_text('[classes.homelab]\nrepo = "o/evil"\n')
     other.chmod(0o600)

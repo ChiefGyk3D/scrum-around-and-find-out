@@ -204,8 +204,10 @@ def test_a_matcher_hit_in_a_full_size_text_is_still_found() -> None:
     assert any(c.name == chosen.name and f"keyword {term}" in m for c, m in hits)
 
 
-def test_a_keyword_of_more_than_four_words_or_a_hint_of_more_than_four_segments_is_refused(tmp_path: Path) -> None:
-    box = Box(tmp_path)
+def test_a_keyword_of_more_than_four_words_or_a_hint_of_more_than_four_segments_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, monkeypatch)
     for data in ('keywords = ["a b c d e"]', 'paths = ["a/b/c/d/e"]'):
         write_routes(box, f"[classes.homelab]\n{data}\n")
         with pytest.raises(SafoError, match="at most 4"):
