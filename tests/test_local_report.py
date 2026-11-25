@@ -118,7 +118,7 @@ def test_text_report_counts_per_day_week_and_model(fixture_home: Path) -> None:
     assert "briefs with a local step 2, marked n/a 1" in out  # the hooks guard counts, from safo.guardlog
     assert "triage 2" in out and "smoke 1" in out and "malformed lines skipped: 1" in out
     assert "admit 55  busy 3" in out
-    assert "MISSING DATA" in out and "na_reason" in out
+    assert "MISSING DATA" in out and "replaces_tokens" in out
 
 
 def test_json_report_is_one_document_with_the_same_counts(fixture_home: Path) -> None:
@@ -384,9 +384,3 @@ def test_llm_local_and_dispatch_files_are_found_under_home_ignoring_xdg(fixture_
         and data["llm_local"]["counters"]["admit"] == 55
         and data["dispatch"]["rows"] == 5
     )
-
-
-def test_missing_data_names_the_real_fields(fixture_home: Path) -> None:
-    _, out, _ = cli("local", "report", "--json", home=fixture_home)
-    text = " ".join(m["what"] + " " + m["change"] for m in json.loads(out)["missing"])
-    assert "only in the safo hooks log" in text and "local_line" in text

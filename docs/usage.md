@@ -53,9 +53,14 @@ Safety: each file is opened without following a symlink or waiting on a FIFO, on
 read, and a line that is malformed, torn (no trailing newline), over 4 KiB or has a timestamp that is not exactly
 `YYYY-MM-DDTHH:MM:SS` is counted, not fatal. The logs carry local time without a zone, so "today" and the window use the
 local date of the clock; a row dated after today is counted as malformed and as future. If both `~/.local/state/llm-local`
-and `~/.local/share/llm-local` hold a `calls.jsonl`, only the first is read. The report ends with a MISSING DATA section
-naming what cannot be counted yet (the reason text of `local-llm: n/a`, which brief made a call, accepted or rewritten
-outcomes) and the one-line change that would record it. The exit code is 0; `--days` outside the range is an error.
+and `~/.local/share/llm-local` hold a `calls.jsonl`, only the first is read. The `llm-local` calls log carries typed rows: `kind=call` rows count as calls when `status` is `ok` (rows with no
+`kind`, written by the old tool, count as ok calls too), `failed` and `busy` rows are listed on their own lines by reason,
+and `kind=outcome` rows (accepted, rewritten, discarded, fact-error) are joined to their call by id. The latest outcome of a
+call counts; an outcome with no call is counted as an orphan; the accept rate by task and by model is computed in code. A
+row of an unknown kind, status or outcome is counted as malformed. When the dispatch-guard rows carry `na_reason_class`, its
+counts per day and week appear under the dispatch section. The report ends with a MISSING DATA section naming what the
+records still cannot say (which brief made a call, tokens saved, outcomes for calls from before the typed records) and the
+one-line change that would record it. The exit code is 0; `--days` outside the range is an error.
 
 ### What the local model is for
 

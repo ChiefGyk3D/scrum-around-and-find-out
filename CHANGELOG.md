@@ -6,7 +6,8 @@
   log, the `safo hooks status` guard counts and the `llm-local` calls and admission state, with a MISSING DATA section
   and `--json`. Nothing is written or created (the hooks log is read without its lock). Bounded reads, malformed, torn
   and future-dated rows counted, strict timestamps judged on the local date, output through the repo writer. `local run`
-  keeps its required-argument error and refuses `--days` and `--json`. Docs: `docs/usage.md`, with the task-type table.
+  keeps its required-argument error and refuses `--days` and `--json`. Reads the typed `llm-local` rows (calls by
+  status and failure reason, outcomes joined by call id with accept rates, orphans) and the guard's `na_reason_class`. Docs: `docs/usage.md`, with the task-type table.
   Tests: `tests/test_local_report.py`.
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and

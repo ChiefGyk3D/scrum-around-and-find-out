@@ -34,38 +34,33 @@ TS_SHAPE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}") 
 DEFAULT_DAYS = 28
 OTHER = "(other)"
 
-# What cannot be counted today, and the one-line change that would record it.
+# The typed llm-local records (kind call or outcome) and the guard's na_reason_class now provide outcomes, failures,
+# the reason class and load-fresh, so only what they still lack is listed here, with the one-line change.
 MISSING = (
     (
-        "reason text of `local-llm: n/a` lines",
-        "the dispatch guard log keeps only the booleans `local_step` and `local_line` (the `na` boolean exists only in "
-        "the safo hooks log); add `na_reason` (first 120 characters, controls escaped) to the guard's log record",
-    ),
-    (
         "which brief or issue made each llm-local call",
-        "calls.jsonl has task, model and tokens only; have `llm-local` also record `$LLM_LOCAL_BRIEF` (the brief's "
-        "`issue:` line) as `brief`",
+        "calls carry an id but no brief; have `llm-local` also record `$LLM_LOCAL_BRIEF` (the brief's `issue:` line) "
+        "as `brief`",
     ),
     (
         "whether a brief that names llm-local really called the model",
-        "the guard log has no brief id; add `brief` (the issue ref) to the guard's log record so it can be joined "
-        "with calls.jsonl",
-    ),
-    (
-        "accepted, rewritten or discarded outcome of a local draft",
-        "nothing records it; add an `--outcome accepted|rewritten|discarded` option to `safo outcome add` (or the "
-        "outcomes row) for local drafts",
-    ),
-    (
-        "admit and busy counts per day",
-        "state.json keeps cumulative counters only; have `llm-local` append one snapshot row per day to a "
-        "counters.jsonl",
+        "the dispatch guard log has no brief id; add `brief` (the issue ref) to its log record so it can be joined "
+        "with the calls log",
     ),
     (
         "tokens saved on the paid model by a local draft",
         "no field relates a draft to the paid tokens it replaced; record `replaces_tokens` (estimate) on the call row",
     ),
+    (
+        "outcomes for calls made before the typed records",
+        "rows written by the old tool have no kind or id, so they can never get an outcome; nothing to change, they "
+        "leave the window with time",
+    ),
 )
+OUTCOMES = ("accepted", "rewritten", "discarded", "fact-error")
+NA_CLASSES = ("code", "state-change", "security", "credentials", "verbatim", "other")
+INVALID = "(invalid)"
+MAX_ID = 64
 
 
 class Source:
@@ -193,6 +188,9 @@ def dispatch_section(path: Path, since: dt.date, today: dt.date) -> dict[str, An
     by_day: dict[str, Counter[str]] = {}
     by_week: dict[str, Counter[str]] = {}
     by_model: dict[str, Counter[str]] = {}
+    class_day: dict[str, Counter[str]] = {}
+    class_week: dict[str, Counter[str]] = {}
+    class_total: Counter[str] = Counter()
     rows = 0
     for row in json_rows(src):
         day = in_window(src, row, since, today)
@@ -200,6 +198,12 @@ def dispatch_section(path: Path, since: dt.date, today: dt.date) -> dict[str, An
             continue
         rows += 1
         flags = dispatch_flags(row)
+        found = row.get("na_reason_class")
+        if found is not None:  # null and an absent field (an older row) are not counted
+            name = found if isinstance(found, str) and found in NA_CLASSES else INVALID
+            class_total[name] += 1
+            class_day.setdefault(day.isoformat(), Counter())[name] += 1
+            class_week.setdefault(week_of(day), Counter())[name] += 1
         model = label(row.get("model"))
         if model not in by_model and len(by_model) >= MAX_LABELS:
             model = OTHER
@@ -214,6 +218,11 @@ def dispatch_section(path: Path, since: dt.date, today: dt.date) -> dict[str, An
         "by_day": {k: dict(by_day[k]) for k in sorted(by_day)},
         "by_week": {k: dict(by_week[k]) for k in sorted(by_week)},
         "by_model": {k: dict(by_model[k]) for k in sorted(by_model)},
+        "na_reason_class": {
+            "by_day": {k: dict(sorted(class_day[k].items())) for k in sorted(class_day)},
+            "by_week": {k: dict(sorted(class_week[k].items())) for k in sorted(class_week)},
+            "total": dict(sorted(class_total.items())),
+        },
     }
 
 
@@ -279,12 +288,35 @@ def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) ->
     by_model: Counter[str] = Counter()
     by_day: Counter[str] = Counter()
     by_week: Counter[str] = Counter()
+    failed: Counter[str] = Counter()
+    busy: Counter[str] = Counter()
     calls = tokens = 0
+    known: dict[str, tuple[str, str]] = {}  # call id -> (task, model), from every call row, in or out of the window
+    answered: dict[str, str] = {}  # call id -> its latest outcome in the window
+    ok_ids: list[str | None] = []
     for row in json_rows(src):
+        kind = row.get("kind", "call")
+        cid = row.get("id")
+        if kind == "call" and isinstance(cid, str) and len(cid) <= MAX_ID and len(known) < MAX_LINES:
+            known[cid] = (label(row.get("task")), label(row.get("model")))
         day = in_window(src, row, since, today)
         if day is None:
             continue
+        if kind == "outcome":
+            if isinstance(cid, str) and len(cid) <= MAX_ID and row.get("outcome") in OUTCOMES:
+                answered[cid] = row["outcome"]  # the file is in time order: the latest outcome of a call wins
+            else:
+                src.malformed += 1
+            continue
+        status = row.get("status", "ok")
+        if kind != "call" or status not in ("ok", "failed", "busy"):
+            src.malformed += 1  # an unknown kind or status is counted, never guessed at
+            continue
+        if status != "ok":
+            bump(failed if status == "failed" else busy, label(row.get("reason")))
+            continue
         calls += 1
+        ok_ids.append(cid if isinstance(cid, str) else None)
         bump(by_task, label(row.get("task")))
         bump(by_model, label(row.get("model")))
         by_day[day.isoformat()] += 1
@@ -293,6 +325,14 @@ def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) ->
             value = row.get(field)
             if type(value) is int and 0 <= value <= 10**9:
                 tokens += value
+    joined = {cid: what for cid, what in answered.items() if cid in known}
+    by_outcome = Counter(joined.values())
+    totals: dict[str, Counter[str]] = {"task": Counter(), "model": Counter()}
+    accepted: dict[str, Counter[str]] = {"task": Counter(), "model": Counter()}
+    for cid, what in joined.items():
+        for axis, name in zip(("task", "model"), known[cid], strict=True):
+            totals[axis][name] += 1
+            accepted[axis][name] += what == "accepted"
     return {
         "found": src.found,
         "calls": calls,
@@ -304,6 +344,20 @@ def llm_local_section(env: Mapping[str, str], since: dt.date, today: dt.date) ->
         "by_model": dict(sorted(by_model.items())),
         "by_day": dict(sorted(by_day.items())),
         "by_week": dict(sorted(by_week.items())),
+        "failed": {"total": sum(failed.values()), "by_reason": dict(sorted(failed.items()))},
+        "busy": {"total": sum(busy.values()), "by_reason": dict(sorted(busy.items()))},
+        "outcomes": {
+            "by_outcome": dict(sorted(by_outcome.items())),
+            "joined": len(joined),
+            "orphans": len(answered) - len(joined),
+            "calls_without_outcome": sum(1 for cid in ok_ids if cid is None or cid not in answered),
+            "accept_rate": {
+                f"by_{axis}": {
+                    name: round(accepted[axis][name] / total, 3) for name, total in sorted(totals[axis].items())
+                }
+                for axis in ("task", "model")
+            },
+        },
         "counters": counters_of(state / "state.json") if state else {},
     }
 
@@ -336,6 +390,33 @@ def skipped(section: Mapping[str, Any]) -> str:
     return f"malformed lines skipped: {section['malformed']}{future}"
 
 
+def pairs(table: Mapping[str, Any]) -> str:
+    return ", ".join(f"{k} {v}" for k, v in table.items())
+
+
+def llm_extra_lines(ll: Mapping[str, Any]) -> list[str]:
+    out = []
+    for name in ("failed", "busy"):
+        if ll[name]["total"]:
+            out.append(f"  {name} {ll[name]['total']}: {pairs(ll[name]['by_reason'])}")
+    o = ll["outcomes"]
+    if o["by_outcome"] or o["orphans"]:
+        out.append(
+            f"  outcomes: {pairs(o['by_outcome']) or 'none'}; {o['joined']} joined to a call, "
+            f"{o['calls_without_outcome']} calls without an outcome"
+        )
+        if o["orphans"]:
+            plural = "outcome has" if o["orphans"] == 1 else "outcomes have"
+            out.append(f"  {o['orphans']} {plural} no call (orphan)")
+        for axis in ("task", "model"):
+            rates = o["accept_rate"][f"by_{axis}"]
+            if rates:
+                out.append(
+                    f"  accept rate by {axis}: " + ", ".join(f"{k} {round(v * 100):g}%" for k, v in rates.items())
+                )
+    return out
+
+
 def text(report: Mapping[str, Any]) -> list[str]:
     d, h, ll = report["dispatch"], report["hooks"], report["llm_local"]
     out = [f"Local-model use, {report['since']} to {report['generated']} ({report['days']} days)", ""]
@@ -352,6 +433,11 @@ def text(report: Mapping[str, Any]) -> list[str]:
         out += [_flags_line(k, v) for k, v in d["by_week"].items()]
         out.append(" by model")
         out += [_flags_line(k, v) for k, v in d["by_model"].items()]
+        nc = d["na_reason_class"]
+        if nc["total"]:
+            out.append(" n/a reason class (by the guard, from the `local-llm: n/a` line)")
+            out += [f"  {k}  " + ", ".join(f"{n} {c}" for n, c in v.items()) for k, v in nc["by_day"].items()]
+            out += [f"  {k}  " + ", ".join(f"{n} {c}" for n, c in v.items()) for k, v in nc["by_week"].items()]
     out += ["", "Routing guard (safo hooks status counts)"]
     if not h["total"]:
         out.append("  no hooks guard rows in the window")
@@ -374,6 +460,7 @@ def text(report: Mapping[str, Any]) -> list[str]:
         out.append("  by model: " + (", ".join(f"{k} {v}" for k, v in ll["by_model"].items()) or "none"))
         out.append("  by day: " + (", ".join(f"{k} {v}" for k, v in ll["by_day"].items()) or "none"))
         out.append("  by week: " + (", ".join(f"{k} {v}" for k, v in ll["by_week"].items()) or "none"))
+        out += llm_extra_lines(ll)
     c = ll["counters"]
     out.append("  admission (all time): " + ("  ".join(f"{k} {v}" for k, v in sorted(c.items())) or "no state.json"))
     out += ["", "MISSING DATA (cannot be counted today; the one-line change that would record it)"]
