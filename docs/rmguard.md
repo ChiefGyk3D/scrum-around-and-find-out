@@ -228,6 +228,11 @@ command does not show is denied only when the cwd or another word is in a zone; 
 before the command runs, so another process can race it; a hook cannot see which agent is running, which is why agent
 folder roots are never removable by an agent.
 
+This is a warn-mode accident guard, not a sandbox. A determined bypass that constructs program text at run time (a path
+or command assembled by an inline or fed program, a script on disk, option parsing of wrapper commands that differs
+from the real tool) is out of scope; wrapper option parsing is best effort. A program that builds paths gets no
+agent-folder exemption.
+
 ### What the guard tries to cover, and what it does not
 
 The guard is accident prevention for the shared development directories, running in warn mode first: it reads the text of

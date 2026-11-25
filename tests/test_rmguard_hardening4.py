@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""rmguard hardening (#424), round 3: regression cases. Names are generic on purpose; the specifics are tracked privately."""
+"""rmguard hardening (#424), round 3: regression cases. Names are generic on purpose."""
 
 from __future__ import annotations
 

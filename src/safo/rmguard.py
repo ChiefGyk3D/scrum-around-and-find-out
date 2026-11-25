@@ -152,6 +152,14 @@ INTERP_VALUE_OPTIONS = frozenset(
     {"-W", "-X", "-Q", "-I", "-r", "-C", "-M", "-F", "-l", "-d", "-x", "-E", "--require", "--import", "--loader"}
 )
 PROCSUB = "\0<("  # the text of a word that is a process substitution (it holds a NUL, so it reads as an expansion)
+SHELL_KNOWN_LONG = frozenset(
+    {
+        "--login", "--norc", "--noprofile", "--posix", "--rcfile", "--init-file", "--restricted", "--verbose",
+        "--version", "--help", "--noediting", "--debugger", "--interactive", "--command", "--init-command",
+        "--no-config", "--private", "--no-execute", "--profile", "--debug",
+    }
+)  # fmt: skip
+SHELL_KNOWN_SHORT = frozenset("abefhilmnprstuvxBCDEHILOPTcokCNPV+")
 STDIN_PATHS = frozenset({"/dev/stdin", "/proc/self/fd/0", "/dev/fd/0"})
 # Program-running settings of git: a configuration key that names a command, and the environment names that do.
 _GIT_EXEC_KEY = re.compile(r"(?i)(?:pager|fsmonitor|command|editor|external|helper|program|textconv|askpass|cmd|exec)")
@@ -297,14 +305,23 @@ def _agent_area(piece: str, zones: Zones) -> bool:
     return root is not None and zones.agent_exact(path, root)
 
 
+# Anything that builds or changes a path at run time: a join, a concatenation, a format, an f-string, a chdir, a
+# relative segment. A program holding one cannot be judged token by token.
+_PATH_BUILD = re.compile(
+    r"\.\.|\bjoin|pathlib|\bPath\b|chdir|\bcd\b|os\.path|resolve|expanduser|getcwd|\bcwd\b|\+|%|\.format|\{|"
+    r"\bf[\"']|\bsprintf|\bconcat|\$|`"
+)
+
+
 def names_zone_outside_agents(text: str, home: str) -> bool:
     """Does the text name a zone in a path that is not, once normalized, an agent folder or a scratchpad? Checked on
     the text as written and with its quotes and backslashes removed. Fails closed: a token it cannot place counts."""
     text = text.replace("\\\n", "")
     zones = Zones(home)
+    built = bool(_PATH_BUILD.search(text))  # a program that builds paths gets no agent-area exemption at all
     for flat in (text, _QUOTES.sub("", text)):
         for token in _ZONE_TOKEN.findall(flat):
-            if not _agent_area(token, zones):
+            if built or not _agent_area(token, zones):
                 return True
     return False
 
@@ -1388,10 +1405,10 @@ class Checker:
             except ValueError:
                 return Finding("git configuration from the environment with a count that cannot be read", "")
             for n in range(min(max(count, 0), 64)):
-                key = known.get(f"GIT_CONFIG_KEY_{n}")
-                if key is None:
+                env_key = known.get(f"GIT_CONFIG_KEY_{n}")
+                if env_key is None:
                     return Finding("git configuration from the environment that cannot be read here", "")
-                found = self.git_config_item(key, known.get(f"GIT_CONFIG_VALUE_{n}"))
+                found = self.git_config_item(env_key, known.get(f"GIT_CONFIG_VALUE_{n}"))
                 if found:
                     return found
             if count > 64:
@@ -1773,12 +1790,45 @@ class Checker:
     def shell(self, args: list[Word], depth: int) -> Finding | None:
         """A shell: its `-c` string is code; with no script operand (or `-s`, `-`, /dev/stdin) it reads its program from
         standard input, which a heredoc, a here-string or a pipeline can fill."""
+        found = self.shell_option_text(args, depth)
+        if found:
+            return found
         if self.c_body(args) is not None:
             return self.shell_c(args, depth)
         reads, operand = self.shell_reads_stdin(args)
         if reads:
             return self.stdin_program(depth, program_is_shell=True)
         return self.hidden_program(operand)
+
+    def shell_option_text(self, args: list[Word], depth: int) -> Finding | None:
+        """fish takes command strings from -C and --init-command. For any shell, an option this reader does not know
+        fails closed: every argument is scanned as possible command text."""
+        for n, a in enumerate(args):
+            t = a.text
+            if t in ("-C", "--init-command") and n + 1 < len(args):
+                found = self.run_text(args[n + 1], depth)
+            elif t.startswith("--init-command="):
+                found = self.run_text(Word(t.split("=", 1)[1], None, a.expands, a.quoted), depth)
+            else:
+                continue
+            if found:
+                return found
+        unknown = False
+        for a in args:
+            t = a.text
+            if t in ("--", "-") or not t.startswith(("-", "+")):
+                break  # the script operand ends the options
+            if t.startswith("--"):
+                unknown = unknown or t.split("=", 1)[0] not in SHELL_KNOWN_LONG
+            elif any(ch not in SHELL_KNOWN_SHORT for ch in t[1:]):
+                unknown = True
+        if not unknown:
+            return None
+        for a in args:
+            found = self.run_text(a, depth)
+            if found:
+                return found
+        return None
 
     def hidden_program(self, operand: Word | None) -> Finding | None:
         """A program whose text cannot be read here: a process substitution (`bash <(cmd)`) or a script an earlier
