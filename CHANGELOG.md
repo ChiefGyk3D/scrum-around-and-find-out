@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `safo local report` (#372, #380): read-only counts of local-model use per day, week and model from the dispatch-guard
+  log, the `safo hooks status` guard counts and the `llm-local` calls and admission state, with a MISSING DATA section
+  and `--json`. Bounded reads, malformed lines counted, output through the repo writer. Tests:
+  `tests/test_local_report.py`. Docs: `docs/usage.md`.
 - `safo-ship` (#85): the tested merge watcher, a new entry point (`safo.ship`), documented in `docs/ship.md`. It pins the
   head, waits (bounded) for a complete rollup with `CI green` and every required check, re-runs a cancelled job once and
   the EX-0001 canary at most twice, stops on unresolved review threads, merges with `--match-head-commit`, retries once on

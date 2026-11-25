@@ -9,6 +9,7 @@ safo route research                 # which agent should take a task of this sha
 safo outcome add --agent codex --shape research --review-rounds 1 --note "..."
 safo usage --report                 # the month, from the outcomes log
 safo local run --shape ci-log-summary --prompt-file log-summary.txt
+safo local report                   # how often briefs and sessions really used the local model
 safo hooks install                  # make Claude Code enforce the routing rules (warn mode first)
 safo hooks status                   # the guard mode and what it has logged
 ```
@@ -34,6 +35,18 @@ Its only network requests are the two it cannot avoid, both made with your own l
 
 A half-written last line (an agent is still writing) is skipped. A Codex window whose reset time has passed is reported as
 unknown rather than as stale usage. `--json` prints the same data for a script; the exit code is always 0.
+
+## Local-model use report
+
+`safo local report [--days N] [--json]` counts, by code and from local files only, how often the local model is really
+used (#372, baseline #380). No model is called and nothing is written. It prints, per day, per week and per model (the
+last 28 days unless `--days`): dispatches, dispatches with the local LLM reachable, briefs that named a real local step,
+briefs with a `local-llm` line, and briefs with neither. The sources are the dispatch-guard log
+(`~/.local/state/agent-dispatch-guard/log.jsonl`), the `safo hooks status` counts (same code), and the `llm-local` calls
+log and `state.json` (calls by task and model, admit and busy counts). Each file is opened without following a symlink,
+read at most 8 MiB and 100,000 lines from the end, and a malformed or torn line is counted, not fatal. The report ends with
+a MISSING DATA section naming what cannot be counted yet (the reason text of `local-llm: n/a`, which brief made a call,
+accepted or rewritten outcomes) and the one-line change that would record it. The exit code is 0.
 
 ## Routing
 
