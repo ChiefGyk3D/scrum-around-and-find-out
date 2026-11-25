@@ -177,6 +177,7 @@ replaced are gone.
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
+- [safo-file](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/File): the idea gate and the cross-project line for filing work
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)
 - [Gemini enrollment](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-enrollment)
