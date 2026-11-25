@@ -45,6 +45,7 @@ Exit codes: 0 done, 1 refused (a rule), 2 a bad command line or an error, 3 an a
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -84,6 +85,13 @@ NUMBER = re.compile(r"[1-9][0-9]{0,8}")
 TIMEBOX = re.compile(r"[1-9][0-9]{0,2}[mh]")
 CROSS = re.compile(r"^cross-project:[ \t]*(\S.*)$", re.MULTILINE)
 PUBLIC_OK = re.compile(r"^public-ok:[ \t]*(\S.*)$", re.MULTILINE)
+PLACEHOLDER_WORDS = frozenset({"todo", "tbd", "none", "na", "n", "a", "ok", "yes", "no", "test", "tests", "x"})
+REASON_MIN = 12
+OVERRIDE_HELP = "pass --allow-public and put a `public-ok: <reason>` line in the body"
+REASON_HELP = (
+    f"the public-ok reason must be at least {REASON_MIN} characters with at least two different words that are not "
+    "placeholders (TODO, TBD, none, n/a, ok, yes, test)"
+)
 DESCRIPTION_LIMIT = 2_000
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 WORD = re.compile(r"[a-z0-9]{3,}")
@@ -226,6 +234,20 @@ def record(state: str, rid: str, args: argparse.Namespace, now: dt.datetime, **e
     return (json.dumps({**entry, **extra}) + "\n").encode()
 
 
+def public_ok_reason(body: str) -> tuple[bool, str]:
+    """(a valid reason line is present, why not). The line is `public-ok: <reason>` outside a code fence; the first
+    valid one counts. A reason is real when it has REASON_MIN characters and two different words that are not
+    placeholders."""
+    reasons = [m.group(1).strip() for m in PUBLIC_OK.finditer(outside_fences(body))]
+    if not reasons:
+        return False, ""
+    for reason in reasons:
+        words = set(re.findall(r"[^\W\d_]+", reason.casefold())) - PLACEHOLDER_WORDS
+        if len(reason) >= REASON_MIN and len(words) >= 2 and len(set(reason.replace(" ", ""))) >= 3:
+            return True, ""
+    return False, REASON_HELP
+
+
 def routed_record(
     rid: str, now: dt.datetime, repo: str, working: str, cls: str, how: str, matched: Sequence[str],
     decided: bool, **extra: str,
@@ -310,30 +332,48 @@ def file_issue(args: argparse.Namespace, deps: Deps, out: TextIO, err: TextIO, n
         if deps.is_public is None:
             raise SafoError(f"cannot tell whether {args.repo} is public; nothing was filed")
         cls, how, matched, why = verdict
+        reason_ok, reason_problem = public_ok_reason(args.body) if args.allow_public else (False, "")
         outcome = "private-repo"
         if deps.is_public(args.repo):  # a live lookup for every filing; any doubt raises and nothing is filed
-            override = args.allow_public and PUBLIC_OK.search(outside_fences(args.body))
-            outcome = "public-product" if not why else ("override" if override else "refused")
+            outcome = "public-product" if not why else ("override" if reason_ok else "refused")
         if outcome != "private-repo":  # the decisions that matter are the ones about a public target
             routed = routed_record(rid, now, args.repo, args.working_repo, cls, how, matched, True, outcome=outcome)
             append(fd, routed, "nothing was filed")
         if outcome == "refused":
-            output.write(
-                err,
-                f"refused: {args.repo} is public and {why}; pass --allow-public and put a "
-                "`public-ok: <reason>` line in the body",
-            )
+            output.write(err, f"refused: {args.repo} is public and {why}; {reason_problem or OVERRIDE_HELP}")
             return EXIT_REFUSED
         try:
             gio.write_all(fd, record("pending", rid, args, now), write_fd)
         except OSError as problem:
             raise SafoError(f"the ledger cannot be written ({problem}); nothing was filed") from None
+        # The lookup and the create are adjacent, so the window in which the repo can turn public is as small as it
+        # can be made; it cannot be closed (docs/file.md). A repo that is public now needs the same decision again.
+        public_now = deps.is_public(args.repo)
+        if public_now and why and outcome != "override":
+            output.write(
+                err, f"refused: {args.repo} became public just before filing; {reason_problem or OVERRIDE_HELP}"
+            )
+            return EXIT_REFUSED
         url = deps.create_issue(args.repo, args.title, args.body)[:URL_SHOWN]
         try:
             gio.write_all(fd, record("committed", rid, args, now, url=url), write_fd)
         except OSError as problem:
             output.write(err, f"safo-file: the issue was created but not recorded in the ledger ({problem}): {url}")
             return EXIT_ERROR
+        if why and not public_now:  # private-workflow work: look once more, right after the create
+            try:
+                exposed = deps.is_public(args.repo)
+            except SafoError:
+                output.write(err, f"safo-file: the issue was created ({url}) but its visibility could not be checked")
+                return EXIT_ERROR
+            if exposed:
+                output.write(err, f"safo-file: EXPOSED: {args.repo} became public while this issue was filed: {url}")
+                with contextlib.suppress(SafoError):  # the error line is out; the record is best effort
+                    exposure = routed_record(
+                        rid, now, args.repo, args.working_repo, cls, how, matched, True, outcome="exposed"
+                    )
+                    append(fd, exposure, "the exposure was not recorded")
+                return EXIT_ERROR
     finally:
         os.close(fd)
     output.write(out, url)

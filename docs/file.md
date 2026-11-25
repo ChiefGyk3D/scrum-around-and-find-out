@@ -107,10 +107,22 @@ with exit 2). A public target takes the issue only when ALL of these hold: no pr
 the text is at most 1 MiB (more is unclassified, so refused), and the work is positively product (`--class product`, or
 the target is the working repo). Anything else is refused (exit 1) unless the command has `--allow-public` AND the body
 has a `public-ok: <reason>` line at the start of a line, outside a code fence (a quoted or indented line does not
-count). `--class product` never overrides private wording. Matching reads the whole text after Unicode NFKC, case
+count). The reason must be real: at least 12 characters, at least two different words with letters that are not
+placeholders (TODO, TBD, none, n/a, ok, yes, test), and more than one repeated character; the first valid line counts. `--class product` never overrides private wording. Matching reads the whole text after Unicode NFKC, case
 folding, removing zero-width and other format characters, and reading runs of whitespace, hyphens, underscores and dots
-as one space; whole words only. A public target's decision is written as a `routed` record first, with `outcome`
+as one space; whole words only. The work is linear in the text: it is normalised and split into words once, and the
+keywords (at most 4 words each) and path hints (at most 4 segments) of every class are looked up as word sequences in
+sets, never one scan per term. Punctuation only separates words, so `side, project` and `c++` (the word `c`) match too;
+that can add private matches, never lose one. A public target's decision is written as a `routed` record first, with `outcome`
 `public-product`, `override` or `refused`. The cross-project and idea-gate rules still apply on top.
+
+The target can still turn public between a lookup and the create. The window is made as small as it can be, not closed:
+after the decision and the `pending` record, `safo-file` looks the repo up once more immediately before `gh issue create`
+(a repo that is public by then needs the same decision, else exit 1), and for private-workflow work looks once more
+immediately after it. If the repo is public then, the output has a loud `EXPOSED` line naming the issue URL, the ledger
+gets a `routed` record with `outcome` `exposed`, and the exit is 2, so the owner can close or edit the issue. If that last
+lookup fails, the URL is printed with a note that visibility could not be checked (exit 2). A flip inside the create call
+itself is caught only by the last lookup, after the fact.
 
 **Parking lot.** `safo-file check ... --answer tangent --parking-number N` posts the parking-lot body to issue N in the
 table's `tangent` repo (workbench by default). Without `--parking` or `--parking-number` it prints the default

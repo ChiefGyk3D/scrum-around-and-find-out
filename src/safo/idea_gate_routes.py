@@ -59,6 +59,8 @@ TEXT_LIMIT = 1_048_576  # characters matched; more than this is unclassified (re
 MATCHED_SHOWN = 20  # matched terms that are printed or recorded
 CLASS_KEYS = frozenset({"repo", "keywords", "paths"})
 SEPARATORS = re.compile(r"[\s._-]+")
+WORD = re.compile(r"\w+")
+MAX_WORDS = 4  # words in a keyword, segments in a path hint: bounds the work per position of the text
 PATH_STRIP = "\"'()[]{}<>,;:!?"
 
 
@@ -181,8 +183,12 @@ def _terms(value: object, key: str, name: str, *, path: bool) -> tuple[str, ...]
         if path:
             term = term.strip("/")
             ok = bool(term) and all(HINT_SEGMENT.fullmatch(s) and s not in (".", "..") for s in term.split("/"))
+            long = len(term.split("/")) > MAX_WORDS
         else:
             ok = bool(KEYWORD.fullmatch(term)) and not term.endswith(" ")
+            long = len(_words(_norm(term))) > MAX_WORDS
+        if ok and long:
+            raise _bad(f"class {name}: {key} entries have at most {MAX_WORDS} words or path segments")
         if not ok:
             raise _bad(f"class {name}: {key} has an entry that is empty or uses characters that are not allowed")
         seen[term] = None
@@ -269,28 +275,47 @@ def _norm(text: str) -> str:
     return SEPARATORS.sub(" ", _fold(text)).strip()
 
 
-def _word_hits(text: str, terms: Sequence[str]) -> list[str]:
-    hits: dict[str, None] = {}
-    for term in terms:
-        word = _norm(term)
-        if word and re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text):
-            hits[word] = None
-    return list(hits)
+def _words(text: str) -> tuple[str, ...]:
+    return tuple(WORD.findall(text))
 
 
-def _path_hits(text: str, hints: Sequence[str]) -> list[str]:
-    tokens = [t.strip(PATH_STRIP).rstrip(".") for t in text.split()]
-    shaped = [f"/{t.strip('/')}/" for t in tokens if "/" in t or re.search(r"[a-z0-9]\.[a-z0-9]", t)]
-    return [h for h in hints if any(f"/{h}/" in s for s in shaped)]
+def _grams(tokens: Sequence[str], lengths: set[int], wanted: set[tuple[str, ...]]) -> set[tuple[str, ...]]:
+    """Which of the `wanted` word sequences occur in `tokens`: one pass per distinct length, never one per term."""
+    found: set[tuple[str, ...]] = set()
+    for size in sorted(lengths):
+        if size == 1:
+            found |= {(t,) for t in set(tokens)} & wanted
+            continue
+        for at in range(len(tokens) - size + 1):
+            gram = tuple(tokens[at : at + size])
+            if gram in wanted:
+                found.add(gram)
+    return found
 
 
 def matching(table: RouteTable, text: str) -> list[tuple[RouteClass, tuple[str, ...]]]:
-    """Every class that matched, in table order, with what it matched. The whole text is scanned."""
+    """Every class that matched, in table order, with what it matched. The whole text is scanned, in time linear in its
+    size: it is normalised once and split into words once, and the keywords and path hints of every class are looked
+    up as word sequences in sets. A keyword matches whole words; punctuation only separates them, so `side, project`
+    and `c++` (the word `c`) match too, which can only add private matches, never lose one."""
     plain, folded = _norm(text), _fold(text)
+    words = {c.name: [(_norm(k), _words(_norm(k))) for k in c.keywords] for c in table.classes}
+    wanted_words = {w for ws in words.values() for _, w in ws if w}
+    tokens = _words(plain)
+    present = _grams(tokens, {len(w) for w in wanted_words}, wanted_words)
+    wanted_paths = {tuple(h.split("/")) for c in table.classes for h in c.paths}
+    segments = [
+        t.strip("/").split("/")
+        for t in (w.strip(PATH_STRIP).rstrip(".") for w in folded.split())
+        if "/" in t or re.search(r"[a-z0-9]\.[a-z0-9]", t)
+    ]
+    here: set[tuple[str, ...]] = set()
+    for seg in segments:
+        here |= _grams(seg, {len(h) for h in wanted_paths}, wanted_paths)
     out: list[tuple[RouteClass, tuple[str, ...]]] = []
     for cls in table.classes:
-        found = [f"keyword {k}" for k in _word_hits(plain, cls.keywords)]
-        found += [f"path {p}" for p in _path_hits(folded, cls.paths)]
+        kw = dict.fromkeys(label for label, w in words[cls.name] if w and w in present)
+        found = [f"keyword {k}" for k in kw] + [f"path {h}" for h in cls.paths if tuple(h.split("/")) in here]
         if found:
             out.append((cls, tuple(found)))
     return out

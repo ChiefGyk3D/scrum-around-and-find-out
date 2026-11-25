@@ -43,8 +43,8 @@ def file_in(
 
 def test_every_filing_looks_the_target_up_even_with_no_class(tmp_path: Path) -> None:
     f, look = Fakes(tmp_path), Looks(False)
-    assert file_in(f, look)[0] == 0 and look.calls == 1
-    assert file_in(f, look, "--class", "product")[0] == 0 and look.calls == 2
+    assert file_in(f, look)[0] == 0 and look.calls == 2  # once to decide, once right before the create
+    assert file_in(f, look, "--class", "product")[0] == 0 and look.calls == 4
 
 
 def test_unclassified_work_in_a_public_repo_that_is_not_the_working_repo_is_refused(tmp_path: Path) -> None:
@@ -132,7 +132,7 @@ def test_a_repo_that_became_public_between_two_filings_is_caught(tmp_path: Path)
     f, look = Fakes(tmp_path), Looks(False)
     assert file_in(f, look, "--class", "homelab")[0] == 0
     look.public = True
-    assert file_in(f, look, "--class", "homelab")[0] == 1 and look.calls == 2
+    assert file_in(f, look, "--class", "homelab")[0] == 1 and look.calls == 4  # 3 for the first, 1 for the refusal
 
 
 def test_a_routes_file_that_is_a_fifo_or_has_another_owner_is_refused(
