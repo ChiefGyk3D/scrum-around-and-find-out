@@ -30,6 +30,9 @@ The hook judges these program families, and only these.
 | `tee` without `-a` | every target that exists (or that an earlier command of the line wrote) |
 | `sed -i`, `perl -i`/`-pi`, `awk -i inplace`, `ed`, `install`, `ln -f`/`-sf` | the files they edit or replace, when they exist in a zone |
 | `python -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`, `lua -e` | the program text cannot be read: denied when it names a zone, or when the cwd is inside one |
+| a shell or interpreter that reads its program from standard input (no script operand, or `-s`, `-`, `/dev/stdin`) | a heredoc body (quoted or not), a here-string and a heredoc piped in are read like a `-c` string; a pipeline into a shell, a process substitution (`bash <(cmd)`), a descriptor (`<&3`) and a script written earlier in the same line fail closed when a zone is in sight or the line holds a delete word; an interpreter's program counts when it can remove or overwrite and names a zone |
+| `su -c`, `script -c`, `flock -c`, `watch`, `busybox`/`toybox`, a command word with blanks (`sudo -s 'cmd'`) | the command string they hand to a shell is read like a `-c` string |
+| output-file options of the otherwise safe `git` subcommands and of `find` | `--output`, `-o`, `bundle create`, `config --file` and `find -fprint`/`-fls` judge an existing target; programs named by `--upload-pack`, `--exec`, a program-valued `-c` setting and `GIT_PAGER` are read as command lines |
 | a truncating redirection | the target of `>`, `>|`, `&>`, `: > file`, `echo x > file`, when it exists (or an earlier command of the line wrote it); `>>` appends and is not judged |
 
 Not covered: any other program (a script file, `python script.py`, `sed` without `-i`, `git reset --hard` through a
@@ -61,7 +64,7 @@ redirect or `tee` target whose written part already lies strictly below an agent
 
 ## What is evaluated, and what can block
 
-When the working directory is inside a zone, every command is evaluated. Elsewhere a command is evaluated when its text
+When the working directory is inside a zone or is the parent of one (`~/.local/share`, `~/.local`, the home, `/tmp`, `/`), every command is evaluated. Elsewhere a command is evaluated when its text
 (backslash-newline pairs removed) holds a delete word, a character that can build one (`$`, a backtick, `?`, `*`, `[`,
 `{`), or a shared zone name (`-dev`, `/tmp/claude`, `.local`), also when the name is quoted, escaped or split
 (`reach-around-d''ev`). Only a command with none of these (`ls`, `git status`) is allowed at once with no parsing.
@@ -224,6 +227,33 @@ from an expansion whose own arguments name no zone is allowed; a variable set by
 command does not show is denied only when the cwd or another word is in a zone; the existence rule reads the file system
 before the command runs, so another process can race it; a hook cannot see which agent is running, which is why agent
 folder roots are never removable by an agent.
+
+This is a warn-mode accident guard, not a sandbox. A determined bypass that constructs program text at run time (a path
+or command assembled by an inline or fed program, a script on disk, option parsing of wrapper commands that differs
+from the real tool) is out of scope; wrapper option parsing is best effort. A program that builds paths gets no
+agent-folder exemption.
+
+### What the guard tries to cover, and what it does not
+
+The guard is accident prevention for the shared development directories, running in warn mode first: it reads the text of
+one command and stops honest mistakes and plain destructive commands that name a zone. It does not try to stop a
+determined bypass by text construction, nor program text assembled at run time (a string built from pieces, a path
+joined or changed by the program itself, a module or script that fetches or generates its own code). It checks these
+classes: direct and wrapped delete, move, truncate and overwrite commands; shell and interpreter code given as `-c` text,
+a heredoc, a here-string or a pipeline, including a shell started by `sudo -s`, `su` or `script` and code handed on by a
+multicall binary; program settings passed to git on the command line or through the environment (`-c`,
+`--config-env`, `GIT_CONFIG_COUNT` with its key and value variables, `GIT_CONFIG_PARAMETERS`), read for a value that
+runs a program; and inline programs that name a zone outside an agent folder or a scratchpad.
+
+Known gaps, accepted for now:
+
+- The list of git settings that run a program is a name pattern, not complete. Settings such as a proxy or driver
+  command, a clean or smudge filter, a process filter, a hooks path, protocol allowance and `ext::` URLs can still run
+  a program.
+- The agent-folder and scratchpad exemption is judged one token at a time, after normalizing the path. A program that
+  joins path pieces itself or changes its working directory before acting can still reach a zone path.
+- An interpreter run with `-m` is treated as not reading its program from standard input, though some modules do read
+  code from it.
 
 ## Tests and replay
 

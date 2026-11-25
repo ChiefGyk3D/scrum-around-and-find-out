@@ -16,7 +16,8 @@ file; `dd of=`; `tee`; `sed -i`, `perl -i`, `awk -i inplace`, `ed`, `install`, `
 `python -c`, `perl -e`, `ruby -e`, `node -e`, `php -r`; and truncating redirections. Not covered: any other program, a
 script, a container bind mount, an alias or a function, a symlink into a zone.
 
-WHAT IS EVALUATED: when the working directory is inside a shared zone, every command. Elsewhere, a command whose text
+WHAT IS EVALUATED: when the working directory is inside a shared zone or is the parent of one, every command.
+Elsewhere, a command whose text
 (backslash-newline pairs removed) holds a delete word (`rm`, `rmdir`, `unlink`, `shred`, a whole-word `-delete`, `find`
 with `-exec`/`-execdir`/`-ok`/`-okdir`; quotes and backslashes removed first, so `r''m` counts), a character that can
 build one (`$`, a backtick, `?`, `*`, `[`, `{`), or a shared zone name (`-dev`, `/tmp/claude`, `.local`; also with its
@@ -142,7 +143,41 @@ RSYNC_LONG = _names(
     """
 )
 DELETERS = frozenset({"rm", "unlink", "shred", "rmdir"})
-SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "ash", "mksh", "fish", "csh", "tcsh", "rbash", "yash"})
+# Interpreters whose program can come from an inline option (`-c`, `-e`) or from standard input.
+INTERPRETERS = frozenset({"python", "ruby", "node", "nodejs", "php", "lua", "perl"})
+# Options of a shell or interpreter that take a separate value, so the word after them is not the script operand.
+SHELL_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file", "--debugger"})
+INTERP_VALUE_OPTIONS = frozenset(
+    {"-W", "-X", "-Q", "-I", "-r", "-C", "-M", "-F", "-l", "-d", "-x", "-E", "--require", "--import", "--loader"}
+)
+PROCSUB = "\0<("  # the text of a word that is a process substitution (it holds a NUL, so it reads as an expansion)
+SHELL_KNOWN_LONG = frozenset(
+    {
+        "--login", "--norc", "--noprofile", "--posix", "--rcfile", "--init-file", "--restricted", "--verbose",
+        "--version", "--help", "--noediting", "--debugger", "--interactive", "--command", "--init-command",
+        "--no-config", "--private", "--no-execute", "--profile", "--debug",
+    }
+)  # fmt: skip
+SHELL_KNOWN_SHORT = frozenset("abefhilmnprstuvxBCDEHILOPTcokCNPV+")
+STDIN_PATHS = frozenset({"/dev/stdin", "/proc/self/fd/0", "/dev/fd/0"})
+# Program-running settings of git: a configuration key that names a command, and the environment names that do.
+_GIT_EXEC_KEY = re.compile(r"(?i)(?:pager|fsmonitor|command|editor|external|helper|program|textconv|askpass|cmd|exec)")
+_GIT_EXEC_ENV = frozenset(
+    {
+        "GIT_PAGER",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_ASKPASS",
+        "GIT_EDITOR",
+        "GIT_SEQUENCE_EDITOR",
+        "GIT_PROXY_COMMAND",
+        "PAGER",
+        "EDITOR",
+        "VISUAL",
+    }
+)
 # `find -exec <tool>` is not a delete when the tool is one of these (after any wrapper such as env or nice).
 READ_ONLY = frozenset(
     {"ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "file", "stat", "du", "echo", "printf", "test", "["}
@@ -157,6 +192,10 @@ _DELETE_WORD = re.compile(r"(?<![A-Za-z0-9_])(?:rm|rmdir|unlink|shred)(?![A-Za-z
 _FIND_WORD = re.compile(r"(?<![A-Za-z0-9_])find(?![A-Za-z0-9_])")
 _DELETE_FLAG = re.compile(r"(?<![A-Za-z0-9_-])-delete(?![A-Za-z0-9_-])")
 _EXEC_FLAG = re.compile(r"-(?:exec|execdir|ok|okdir)(?![A-Za-z])")
+# A GNU-style long option that deletes or removes (rsync, tar, ...), or an abbreviation that is only `--del`/`--dele`.
+_LONG_DELETE = re.compile(
+    r"(?<![A-Za-z0-9_-])--(?:(?:delete|remove|unlink|recursive-unlink)|del(?:e(?:t)?)?(?![A-Za-z-]))"
+)
 # Names that something other than a plain `NAME=value` can change: loop variables, read, `+=`, declare. Never tracked.
 _TAINT_CLAUSE = re.compile(
     r"(?:^|[;&|\n({]|\bdo\b|\bthen\b)\s*(?:for|select|read|mapfile|readarray|getopts|local|declare|typeset|export|printf\s+-v|unset)\b[^;\n|&)]*"
@@ -182,6 +221,14 @@ _HOME_COMMANDS = re.compile(
     r"(?<![\w-])(?:eval|declare|typeset|read|source|mapfile|readarray)(?![\w-])|printf\s+-v|(?:^|[;&|\n(])\s*\.\s+\S"
 )
 # Text that defeats variable tracking altogether: eval, source, `. file`, a function definition.
+# What an interpreter program fed on standard input must hold to be judged: a call that removes, moves, runs a command
+# or opens a file for writing.
+_PROGRAM_DESTRUCTIVE = re.compile(
+    r"(?i)rmtree|unlink|os\.remove|rmdir|rename|shutil|os\.replace|\.move\(|truncate|os\.system|popen|exec[lv]|spawn"
+    r"|\brm\b|rmSync|rimraf|write_text|write_bytes|writeFile|appendFile|symlink|open\s*\([^)]*,\s*(?:mode\s*=\s*)?[\"'][rbt]*[wax+][wabxt+]*[\"']"
+)
+# Text of an awk program that can run a command: `system(...)`, `| "cmd"`, `"cmd" |`, `|&`, `getline`.
+_AWK_RUNS = re.compile(r"system\s*\(|\|\s*[\"'(]|[\"')]\s*\||\|&|\bgetline\b")
 _NO_BIND = re.compile(r"(?<![\w-])(?:eval|source|function)(?![\w-])|(?:^|[;&|\n(])\s*\.\s+\S|[\w-]+\s*\(\)\s*\{?")
 
 
@@ -198,6 +245,7 @@ class Cmd(NamedTuple):
     prev: str  # the separator that ended the command before this one ("" at the start)
     nxt: str  # the separator that ends this command ("" at the end)
     paren: str = ""  # "(" or ")" for a subshell boundary marker (words is empty then)
+    stdin: tuple[str, ...] = ()  # heredoc bodies fed to this command (read as written, quoted or not)
 
 
 class Unparseable(Exception):
@@ -227,9 +275,54 @@ def plain_delete_word(text: str) -> bool:
         if (
             _DELETE_WORD.search(flat)
             or _DELETE_FLAG.search(flat)
+            or _LONG_DELETE.search(flat)
             or (_FIND_WORD.search(flat) and _EXEC_FLAG.search(flat))
         ):
             return True
+    return False
+
+
+# A word that names a dev folder or the scratchpad parent, or is a bare zone parent (`~/.local`, `~/.local/share`).
+_ZONE_TOKEN = re.compile(
+    r"[^\s'\"]*(?:-dev(?![A-Za-z0-9_.])|/tmp/claude)[^\s'\"]*|[^\s'\"]*\.local(?:/share)?/?(?=[\s'\"]|$)"
+)
+
+
+def _agent_area(piece: str, zones: Zones) -> bool:
+    """Is the piece, normalized, a path at the agent folder root or below it, or below a harness scratchpad? Anything
+    with a `..` segment, a relative or unreadable path, or a lexical match only (`x-dev/shared/agents/f`) is not."""
+    cut = [i for i in (piece.find("/"), piece.find("~"), piece.find("$HOME"), piece.find("${HOME}")) if i >= 0]
+    piece = piece[min(cut) :].strip(";|&()<>,") if cut else piece  # drop `os.remove(`, `path=` in front of the path
+    if piece.startswith("~/") or piece == "~":
+        piece = zones.home + piece[1:]
+    for var in ("${HOME}", "$HOME"):
+        if piece.startswith(var):
+            piece = zones.home + piece[len(var) :]
+    if not piece.startswith("/") or any(seg == ".." for seg in piece.split("/")) or "$" in piece or "\0" in piece:
+        return False
+    path = norm(piece)
+    root = zones.roots(path)
+    return root is not None and zones.agent_exact(path, root)
+
+
+# Anything that builds or changes a path at run time: a join, a concatenation, a format, an f-string, a chdir, a
+# relative segment. A program holding one cannot be judged token by token.
+_PATH_BUILD = re.compile(
+    r"\.\.|\bjoin|pathlib|\bPath\b|chdir|\bcd\b|os\.path|resolve|expanduser|getcwd|\bcwd\b|\+|%|\.format|\{|"
+    r"\bf[\"']|\bsprintf|\bconcat|\$|`"
+)
+
+
+def names_zone_outside_agents(text: str, home: str) -> bool:
+    """Does the text name a zone in a path that is not, once normalized, an agent folder or a scratchpad? Checked on
+    the text as written and with its quotes and backslashes removed. Fails closed: a token it cannot place counts."""
+    text = text.replace("\\\n", "")
+    zones = Zones(home)
+    built = bool(_PATH_BUILD.search(text))  # a program that builds paths gets no agent-area exemption at all
+    for flat in (text, _QUOTES.sub("", text)):
+        for token in _ZONE_TOKEN.findall(flat):
+            if built or not _agent_area(token, zones):
+                return True
     return False
 
 
@@ -241,12 +334,17 @@ def zone_text(text: str) -> bool:
 
 def has_delete_word(text: str, cwd: str | None = None, home: str | None = None) -> bool:
     """Should this command be evaluated? True when the working directory is inside a shared zone (every command there
-    is judged: `git clean`, a redirection and `mv` hold no delete word), when the text holds a delete word as written,
+    is judged: `git clean`, a redirection and `mv` hold no delete word; the same for the parent of a zone, since a
+    relative path from there reaches a zone without naming it), when the text holds a delete word as written,
     when it holds a character that can build one (`$`, a backtick, `?`, `*`, `[`, `{`: `r?`, `r[m]`, `/bin/r*`, `$RM`,
     `r$'m'`), or when it mentions a shared zone, also with its name quoted or split by backslashes. Backslash-newline
     pairs are removed first. Only a command that does none of these is allowed without being parsed."""
-    if cwd and home and cwd.startswith("/") and Zones(home).roots(norm(cwd)) is not None:
-        return True
+    if cwd and home and cwd.startswith("/"):
+        zones = Zones(home)
+        here = norm(cwd)
+        # inside a zone, or in the parent of one (a relative path from there reaches a zone without naming it)
+        if zones.roots(here) is not None or zones.is_parent(here):
+            return True
     text = text.replace("\\\n", "")
     return plain_delete_word(text) or bool(_SUSPECT.search(text)) or zone_text(text)
 
@@ -283,7 +381,8 @@ class Scanner:
         self.cur: list[Word] = []
         self.only_assign = True  # every word of the current command so far is an assignment word
         self.last = ""  # the separator that ended the previous command
-        self.pending: list[tuple[str, bool, bool]] = []  # (delimiter, strip tabs, quoted)
+        self.pending: list[tuple[str, bool, bool, int]] = []  # (delimiter, strip tabs, quoted, command index)
+        self.bodies: dict[int, list[str]] = {}  # command index -> heredoc bodies
 
     def home_text(self, st: dict[str, Any]) -> str:
         if self.home is None:
@@ -326,7 +425,7 @@ class Scanner:
             self.staged = {}
             self.only_assign = True
         if self.cur:
-            self.commands.append(Cmd(self.cur, self.last, sep))
+            self.commands.append(Cmd(self.cur, self.last, sep, "", tuple(self.bodies.get(len(self.commands), ()))))
             self.cur = []
             self.last = sep
         elif sep not in (";", "\n", ""):
@@ -462,7 +561,7 @@ class Scanner:
     def heredoc_bodies(self) -> None:
         """At the newline after a heredoc operator: read each pending body to its delimiter."""
         s = self.s
-        for delim, strip, quoted in self.pending:
+        for delim, strip, quoted, index in self.pending:
             start = self.i
             while True:
                 if start > len(s):
@@ -471,6 +570,9 @@ class Scanner:
                 line = s[start : nl if nl >= 0 else len(s)]
                 if (line.lstrip("\t") if strip else line) == delim:
                     body = s[self.i : start]
+                    self.bodies.setdefault(index, []).append(body)
+                    if index < len(self.commands):  # the command was closed by the newline that starts the body
+                        self.commands[index] = self.commands[index]._replace(stdin=tuple(self.bodies[index]))
                     if not quoted and ("$(" in body or "`" in body):
                         self.nested.append(body)
                     self.i = nl + 1 if nl >= 0 else len(s)
@@ -499,7 +601,7 @@ class Scanner:
     def heredoc_start(self, op_end: int, strip: bool) -> None:
         """After `<<` or `<<-` (ending at op_end): note the delimiter word."""
         delim, strip2, quoted, _ = self.read_delimiter(op_end)
-        self.pending.append((delim, strip or strip2, quoted))
+        self.pending.append((delim, strip or strip2, quoted, len(self.commands)))
 
     def read_delimiter(self, op_end: int) -> tuple[str, bool, bool, int]:
         """The heredoc delimiter word after `<<` (index op_end): (word, `<<-`, any part quoted, index past it)."""
@@ -546,7 +648,7 @@ class Scanner:
         if op in ("<", ">") and s.startswith("(", end):  # process substitution: code, and a word of its own
             close = self.matching(end + 1, "(", ")")
             self.nested.append(s[end + 1 : close])
-            self.cur.append(Word("\0", None, True, False))
+            self.cur.append(Word(PROCSUB, None, True, False))
             self.only_assign = False
             self.i = close + 1
             return
@@ -770,6 +872,11 @@ class Checker:
         self.unknown_write = False  # an earlier command wrote somewhere that could not be resolved
         self.moved = False  # the command being checked changed the shell's directory
         self.assigns: tuple[Word, ...] = ()
+        self.bodies: tuple[str, ...] = ()  # heredoc bodies fed to the command being checked
+        self.here: tuple[Word, ...] = ()  # here-string words fed to it
+        self.fd_in = False  # its standard input is a descriptor (`<&3`)
+        self.upstream: tuple[Cmd, ...] | None = None  # the earlier stages of the pipeline it reads from (None: none)
+        self.depth = 0  # nesting depth of the command being checked (handlers that scan text need it)
 
     def near_zone(self) -> bool:
         """Is a zone in sight: named in the command, or the working directory in one or above one?"""
@@ -840,7 +947,8 @@ class Checker:
         assigns: list[Word] = []
         while i < len(words):
             w = words[i]
-            if not w.quoted and (_ASSIGN.match(w.text) or w.text in _KEYWORDS):
+            # an assignment is one whether or not its value is quoted (`NAME='a b' rm`); a quoted keyword is a command
+            if _ASSIGN.match(w.text) or (not w.quoted and w.text in _KEYWORDS):
                 if _ASSIGN.match(w.text):
                     assigns.append(w)
                 i += 1
@@ -858,6 +966,8 @@ class Checker:
                         break  # the command word itself is built from an expansion: simple() decides what that means
                     if name == "env" and self.is_split(t):
                         return Prefix(i, chdir, self.split_text(words, i), tuple(assigns))
+                    if name == "flock" and (t in ("-c", "--command") or t.startswith("--command=")):
+                        return Prefix(i, chdir, self.flock_text(words, i), tuple(assigns))
                     if name in ("env", "sudo") and (t in (flag, "--chdir") or t.startswith("--chdir=")):
                         if t.startswith("--chdir="):
                             chdir = self.chdir_of(Word(t.split("=", 1)[1], None, False, False))
@@ -884,9 +994,25 @@ class Checker:
                         break
                 if name in POSITIONAL and i < len(words):
                     i += 1
+                    if (
+                        name == "flock"
+                        and i < len(words)
+                        and (words[i].text in ("-c", "--command") or words[i].text.startswith("--command="))
+                    ):
+                        return Prefix(i, chdir, self.flock_text(words, i), tuple(assigns))
             else:
                 break
         return Prefix(i, chdir, None, tuple(assigns))
+
+    @staticmethod
+    def flock_text(words: list[Word], i: int) -> str:
+        """The command string of `flock ... -c <command>` (the shell runs it)."""
+        t = words[i].text
+        if t.startswith("--command="):
+            return t.split("=", 1)[1]
+        if i + 1 >= len(words):
+            raise Unparseable
+        return words[i + 1].text
 
     @staticmethod
     def is_split(t: str) -> bool:
@@ -967,7 +1093,15 @@ class Checker:
             self.note_written(target)
         return None
 
-    def command(self, words: list[Word], depth: int) -> Finding | None:
+    def command(self, words: list[Word], depth: int, *, recursed: bool = False) -> Finding | None:
+        if not recursed:  # a multicall binary hands the SAME redirections to the command it runs
+            self.here = tuple(
+                words[n + 1] for n, w in enumerate(words) if w.redir and w.text == "<<<" and n + 1 < len(words)
+            )
+            self.fd_in = any(
+                w.redir and w.text == "<&" and n + 1 < len(words) and words[n + 1].text.isdigit()
+                for n, w in enumerate(words)
+            )
         found = self.redirections(words)
         if found:
             return found
@@ -977,10 +1111,24 @@ class Checker:
             split = pre.split
             return self.in_cwd(pre.chdir, lambda: self.nested_text(split, depth))
         if pre.at >= len(words):
+            if self.sudo_shell(words):  # `sudo -s` / `sudo -i` with no command: a shell reading standard input
+                return self.stdin_program(depth, program_runs_sh=True)
             return None
         rest = words[pre.at :]
         self.assigns = pre.assigns
         return self.in_cwd(pre.chdir, lambda: self.simple(rest, depth))
+
+    @staticmethod
+    def sudo_shell(words: list[Word]) -> bool:
+        """`sudo` given -s, -i (or --shell, --login), possibly bundled (`-Es`), and left with no command to run."""
+        seen = False
+        for w in words:
+            t = w.text
+            if posixpath.basename(t) == "sudo" and not w.expands:
+                seen = True
+            elif seen and (t in ("--shell", "--login") or re.fullmatch(r"-[a-zA-Z]*[si][a-zA-Z]*", t)):
+                return True
+        return False
 
     def in_cwd(self, chdir: tuple[str | None] | None, fn: Callable[[], Finding | None]) -> Finding | None:
         """Run fn with the working directory a wrapper such as `env -C` sets for the command it runs."""
@@ -1017,6 +1165,10 @@ class Checker:
             if self.args_touch_zone(self.drop_redirects(words[1:])):
                 raise UnknownCommand
             return None
+        self.depth = depth
+        if any(ch.isspace() for ch in head.text):
+            # a command word that holds blanks (`sudo -s 'rm -rf x'`): a shell reads it as a command line
+            return self.nested_text(" ".join(w.text for w in words), depth)
         name = posixpath.basename(head.text)
         args = words[1:]
         if name in ("cd", "pushd"):
@@ -1027,7 +1179,21 @@ class Checker:
             self.moved = True
             return None
         if name in SHELLS:
+            return self.shell(args, depth)
+        if name in ("su", "script"):
+            if self.c_body(args) is None:  # no -c: it starts a shell that reads its commands from standard input
+                return self.stdin_program(depth, program_runs_sh=True)
             return self.shell_c(args, depth)
+        if name in ("source", "."):
+            return self.source(args, depth)
+        if name in ("busybox", "toybox"):
+            if not args:
+                return None
+            if depth >= MAX_DEPTH:
+                raise Unparseable
+            return self.command(args, depth + 1, recursed=True)
+        if name == "watch":
+            return self.watch(args, depth)
         if name == "eval":
             return self.nested_text(" ".join(a.text for a in args), depth)
         if name in ("xargs", "parallel"):
@@ -1122,6 +1288,8 @@ class Checker:
         base = self.cwd
         unknown = False
         lost = False  # a `-C` directory that could not be resolved
+        configs: list[Word] = []  # the values of `-c key=value`
+        env_configs: list[str] = []  # the values of `--config-env key=ENVVAR`
         i = 0
         while i < len(args):
             t = args[i].text
@@ -1135,7 +1303,14 @@ class Checker:
                 lost = lost or base is None
                 i += 1
             elif t in ("-c", "--exec-path", "--namespace", "--super-prefix", "--config-env") and i + 1 < len(args):
+                if t == "-c":
+                    configs.append(args[i + 1])
+                elif t == "--config-env":
+                    env_configs.append(args[i + 1].text)
                 i += 2
+            elif t.startswith("--config-env="):
+                env_configs.append(t.split("=", 1)[1])
+                i += 1
             elif t.startswith(("--work-tree=", "--git-dir=")):
                 if t.startswith("--work-tree="):
                     base = self.chdir_of(Word(t.split("=", 1)[1], None, False, False))[0]
@@ -1156,9 +1331,26 @@ class Checker:
             else:
                 break
         sub = args[i].text if i < len(args) else ""
-        if not unknown and sub in GIT_SAFE:
-            return None
+        # A setting that names a program (`-c core.pager=...`, `-c alias.x=!...`, GIT_PAGER=...) runs it, whatever the
+        # subcommand: read its text like a command line.
+        for cfg in configs:
+            key, _, value = cfg.text.partition("=")
+            if value and (_GIT_EXEC_KEY.search(key) or value.startswith("!") or cfg.expands):
+                found = self.nested_text(value.removeprefix("!"), self.depth)
+                if found:
+                    return found
+        found = self.git_env_config(env_configs)
+        if found:
+            return found
+        for assign in self.assigns:
+            name, _, value = assign.text.partition("=")
+            if value and name in _GIT_EXEC_ENV:
+                found = self.nested_text(value, self.depth)
+                if found:
+                    return found
         rest = args[i + 1 :]
+        if not unknown and sub in GIT_SAFE:
+            return self.git_safe(sub, rest, base, lost)
         dry = False
         pathspecs: list[Word] = []
         if sub == "clean" and not unknown:
@@ -1182,6 +1374,119 @@ class Checker:
                 return None
             found = self.judge_soft(Word(".", None, False, False))
             return Finding("`git " + (sub or "?") + "` in " + found.reason, found.target, found.hint) if found else None
+        finally:
+            self.cwd = saved
+
+    def git_config_item(self, key: str, value: str | None, expands: bool = False) -> Finding | None:
+        """One configuration pair that came from the environment. A value that names a program (or an alias that runs
+        a shell) is read like a command line; a value that cannot be read (None) fails closed for such a key."""
+        runs = bool(_GIT_EXEC_KEY.search(key) or key.lower().startswith("alias.") or not key)
+        if value is None:
+            return Finding("git configuration for a program setting that cannot be read here", "") if runs else None
+        if _GIT_EXEC_KEY.search(key) or value.startswith("!") or expands:
+            return self.nested_text(value.removeprefix("!"), self.depth)
+        return None
+
+    def git_env_config(self, env_configs: list[str]) -> Finding | None:
+        """Configuration passed through the environment: `--config-env key=NAME` (NAME read from the assignments on
+        this command line), GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n, and GIT_CONFIG_PARAMETERS."""
+        known: dict[str, str] = {}
+        for assign in self.assigns:
+            name, _, value = assign.text.partition("=")
+            known[name] = value
+        for item in env_configs:
+            key, _, var = item.partition("=")
+            found = self.git_config_item(key, known.get(var))
+            if found:
+                return found
+        if "GIT_CONFIG_COUNT" in known:
+            try:
+                count = int(known["GIT_CONFIG_COUNT"])
+            except ValueError:
+                return Finding("git configuration from the environment with a count that cannot be read", "")
+            for n in range(min(max(count, 0), 64)):
+                env_key = known.get(f"GIT_CONFIG_KEY_{n}")
+                if env_key is None:
+                    return Finding("git configuration from the environment that cannot be read here", "")
+                found = self.git_config_item(env_key, known.get(f"GIT_CONFIG_VALUE_{n}"))
+                if found:
+                    return found
+            if count > 64:
+                return Finding("git configuration from the environment with too many entries to read", "")
+        if "GIT_CONFIG_PARAMETERS" in known:
+            try:
+                pairs = shlex.split(known["GIT_CONFIG_PARAMETERS"])
+            except ValueError:
+                return Finding("git configuration parameters that cannot be read here", "")
+            for pair in pairs:
+                key, _, value = pair.partition("=")
+                found = self.git_config_item(key, value)
+                if found:
+                    return found
+        return None
+
+    @staticmethod
+    def abbreviates(name: str, full: str, minimum: int = 3) -> bool:
+        return len(name) >= minimum and full.startswith(name)
+
+    def git_safe(self, sub: str, rest: list[Word], base: str | None, lost: bool) -> Finding | None:
+        """A subcommand that cannot change a work tree can still write the file an option names (`--output`, `-o`,
+        `bundle create`, `config --file`) and run a program an option names (`--upload-pack`, `--exec`). A target that
+        exists in a shared zone, or a program text that deletes, is a finding."""
+        targets: list[Word] = []
+        programs: list[Word] = []
+        operands = 0
+        k = 0
+        while k < len(rest):
+            a = rest[k]
+            t = a.text
+            if t == "--":
+                break
+            nxt = rest[k + 1] if k + 1 < len(rest) else None
+            if t.startswith("--"):
+                name, eq, value = t[2:].partition("=")
+                word = Word(value, None, a.expands, a.quoted) if eq else nxt
+                if self.abbreviates(name, "output") or self.abbreviates(name, "output-directory"):
+                    if word:
+                        targets.append(word)
+                elif sub == "config" and name == "file" and word:
+                    targets.append(word)
+                elif (
+                    self.abbreviates(name, "upload-pack")
+                    or self.abbreviates(name, "receive-pack", 4)
+                    or self.abbreviates(name, "exec")
+                ) and word:
+                    programs.append(word)
+            elif t.startswith("-o") and sub in ("archive", "format-patch"):
+                if len(t) > 2:
+                    targets.append(Word(t[2:], shifted(a.glob), a.expands, a.quoted))
+                elif nxt:
+                    targets.append(nxt)
+            elif t == "-f" and sub == "config" and nxt:
+                targets.append(nxt)
+            elif t == "-u" and sub == "clone" and nxt:
+                programs.append(nxt)
+            elif sub == "bundle" and not t.startswith("-"):
+                operands += 1
+                if operands == 2 and rest[0].text == "create":
+                    targets.append(a)
+            k += 1
+        if not targets and not programs:
+            return None
+        saved = self.cwd
+        self.cwd = base
+        try:
+            for program in programs:
+                found = self.run_text(program, self.depth)
+                if found:
+                    return found
+            if lost and targets:
+                return Finding("`git -C` with a directory that could not be resolved", "")
+            for target in targets:
+                found = self.existing_shared(target)
+                if found:
+                    return Finding("`git " + sub + "` that writes " + found.reason, found.target, found.hint)
+            return None
         finally:
             self.cwd = saved
 
@@ -1410,6 +1715,10 @@ class Checker:
         return self.judge_existing_all(operands)
 
     def awk(self, args: list[Word]) -> Finding | None:
+        for a in args:  # a program that runs commands (`system`, a pipe, `getline`) is read like an inline program
+            in_zone = self.cwd is not None and self.zones.roots(self.cwd) is not None
+            if not a.text.startswith("-") and _AWK_RUNS.search(a.text) and (in_zone or zone_text(a.text)):
+                return Finding("an awk program that runs commands, aimed at a shared dev directory", "")
         inplace = any(
             (a.text == "-i" and n + 1 < len(args) and args[n + 1].text == "inplace")
             or a.text in ("-iinplace", "--include=inplace")
@@ -1433,7 +1742,10 @@ class Checker:
             elif re.fullmatch(r"-[a-zA-Z]*[ceEr]", t) and n + 1 < len(args):
                 code.append(args[n + 1])
         if not code:
-            return None
+            reads, operand = self.interpreter_reads_stdin(args)
+            if reads:
+                return self.stdin_program(self.depth, program_runs_sh=False)
+            return self.hidden_program(operand)
         if self.cwd is not None and self.zones.roots(self.cwd) is not None:
             return Finding("an inline program run from a shared dev directory", "")
         for c in code:
@@ -1450,18 +1762,205 @@ class Checker:
         res = resolve(targets[0], self.cwd)
         self.cwd = res[0] if res else None
 
-    def shell_c(self, args: list[Word], depth: int) -> Finding | None:
+    @staticmethod
+    def c_body(args: list[Word]) -> Word | None:
+        """The command string given to `-c` (or `--command`), if any."""
         for n, a in enumerate(args):
-            if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", a.text) and n + 1 < len(args):
-                body = args[n + 1]
-                if body.expands and not body.text.replace("\0", "").strip():
-                    # the whole body is an expansion: nothing to read, so a zone in sight, the cwd in or above one,
-                    # or a delete word elsewhere in the line decides
-                    if self.near_zone() or self.plain:
-                        raise UnknownCommand
-                    return None
-                return self.nested_text(body.text, depth)  # a body with unknown pieces is read with them unresolved
+            t = a.text
+            if (re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", t) or t == "--command") and n + 1 < len(args):
+                return args[n + 1]
+            if t.startswith("--command="):
+                return Word(t.split("=", 1)[1], None, a.expands, a.quoted)
         return None
+
+    def run_text(self, body: Word, depth: int) -> Finding | None:
+        """Scan a word a shell is going to run as a command line."""
+        if body.expands and not body.text.replace("\0", "").strip():
+            # the whole body is an expansion: nothing to read, so a zone in sight, the cwd in or above one,
+            # or a delete word elsewhere in the line decides
+            if self.near_zone() or self.plain:
+                raise UnknownCommand
+            return None
+        return self.nested_text(body.text, depth)  # a body with unknown pieces is read with them unresolved
+
+    def shell_c(self, args: list[Word], depth: int) -> Finding | None:
+        body = self.c_body(args)
+        return self.run_text(body, depth) if body is not None else None
+
+    def shell(self, args: list[Word], depth: int) -> Finding | None:
+        """A shell: its `-c` string is code; with no script operand (or `-s`, `-`, /dev/stdin) it reads its program from
+        standard input, which a heredoc, a here-string or a pipeline can fill."""
+        found = self.shell_option_text(args, depth)
+        if found:
+            return found
+        if self.c_body(args) is not None:
+            return self.shell_c(args, depth)
+        reads, operand = self.shell_reads_stdin(args)
+        if reads:
+            return self.stdin_program(depth, program_runs_sh=True)
+        return self.hidden_program(operand)
+
+    def shell_option_text(self, args: list[Word], depth: int) -> Finding | None:
+        """fish takes command strings from -C and --init-command. For any shell, an option this reader does not know
+        fails closed: every argument is scanned as possible command text."""
+        for n, a in enumerate(args):
+            t = a.text
+            if t in ("-C", "--init-command") and n + 1 < len(args):
+                found = self.run_text(args[n + 1], depth)
+            elif t.startswith("--init-command="):
+                found = self.run_text(Word(t.split("=", 1)[1], None, a.expands, a.quoted), depth)
+            else:
+                continue
+            if found:
+                return found
+        unknown = False
+        for a in args:
+            t = a.text
+            if t in ("--", "-") or not t.startswith(("-", "+")):
+                break  # the script operand ends the options
+            if t.startswith("--"):
+                unknown = unknown or t.split("=", 1)[0] not in SHELL_KNOWN_LONG
+            elif any(ch not in SHELL_KNOWN_SHORT for ch in t[1:]):
+                unknown = True
+        if not unknown:
+            return None
+        for a in args:
+            found = self.run_text(a, depth)
+            if found:
+                return found
+        return None
+
+    def hidden_program(self, operand: Word | None) -> Finding | None:
+        """A program whose text cannot be read here: a process substitution (`bash <(cmd)`) or a script an earlier
+        command of this line wrote. It fails closed when a zone is in sight or the line holds a delete word."""
+        if operand is None or not (self.near_zone() or self.plain):
+            return None
+        if operand.text.startswith(PROCSUB):
+            return Finding("a program read from a process substitution, aimed at or near a shared dev directory", "")
+        resolved = resolve(operand, self.cwd)
+        # the agent's own folder or scratchpad is where scripts are written and run: only a delete word in view counts
+        own = resolved is not None and self.zones.judge(resolved[0], False) == "ok"
+        if (
+            operand.text not in STDIN_PATHS
+            and not (own and not self.plain)
+            and ((resolved is not None and resolved[0] in self.created) or (resolved is None and self.unknown_write))
+        ):
+            return Finding(
+                "a script written earlier in the same command line, aimed at or near a shared dev directory", ""
+            )
+        return None
+
+    @staticmethod
+    def shell_reads_stdin(args: list[Word]) -> tuple[bool, Word | None]:
+        operands: list[Word] = []
+        dash = s_flag = skip = False
+        for a in args:
+            t = a.text
+            if skip:
+                skip = False
+            elif t == "--":
+                continue
+            elif t == "-":
+                dash = True
+            elif t in SHELL_VALUE_OPTIONS:
+                skip = True
+            elif t.startswith("--") or not t.startswith(("-", "+")):
+                if not t.startswith("--"):
+                    operands.append(a)
+                    break  # options end at the first operand (the script)
+            else:
+                s_flag = s_flag or (t[0] == "-" and "s" in t[1:])
+                skip = any(ch in "oO" for ch in t[1:])  # `-o name`, `-eo name`, `+o name`: the next word is a value
+        operand = operands[0] if operands else None
+        return dash or s_flag or operand is None or operand.text in STDIN_PATHS, operand
+
+    @staticmethod
+    def interpreter_reads_stdin(args: list[Word]) -> tuple[bool, Word | None]:
+        """(reads its program from standard input, the script operand): no script operand, `-` or /dev/stdin means
+        standard input."""
+        skip = False
+        for a in args:
+            t = a.text
+            if skip:
+                skip = False
+            elif t == "-":
+                return True, None
+            elif t == "-m":
+                return False, None  # runs a module
+            elif t in INTERP_VALUE_OPTIONS:
+                skip = True
+            elif not t.startswith("-"):
+                return t in STDIN_PATHS, a
+        return True, None
+
+    def source(self, args: list[Word], depth: int) -> Finding | None:
+        """`source /dev/stdin` and `. /dev/stdin` run what the heredoc, here-string or pipeline supplies; a process
+        substitution and a script written earlier in the line cannot be read."""
+        if args and args[0].text in STDIN_PATHS:
+            return self.stdin_program(depth, program_runs_sh=True)
+        return self.hidden_program(args[0] if args else None)
+
+    def stdin_program(self, depth: int, *, program_runs_sh: bool) -> Finding | None:
+        """The program a shell or interpreter reads from standard input. A heredoc body (quoted or not) and a
+        here-string are read as written, also when an earlier stage of a pipeline feeds it. A pipeline whose stages show
+        nothing to read fails closed when a zone is in sight or a stage holds a delete word or names a zone."""
+        fed = [Word(b, None, False, True) for b in self.bodies] + list(self.here)
+        stages = ""
+        unknown = False
+        if self.upstream is not None:
+            for c in self.upstream:
+                fed.extend(Word(b, None, False, True) for b in c.stdin)
+                stages += " " + " ".join(w.text.replace("\0", "") for w in c.words)
+                unknown = unknown or any(w.expands for w in c.words)
+        if not program_runs_sh:
+            return self.interpreter_stdin(fed, stages)
+        for word in fed:
+            found = self.run_text(word, depth)
+            if found:
+                return found
+        if self.fd_in and (self.near_zone() or self.plain):  # `bash <&3`: a descriptor an earlier command filled
+            return Finding(
+                "a shell that reads its program from a descriptor, aimed at or near a shared dev directory", ""
+            )
+        if self.upstream is not None and (
+            self.near_zone() or plain_delete_word(stages) or zone_text(stages) or (unknown and self.plain)
+        ):
+            return Finding(
+                "a shell that reads its program from a pipeline, aimed at or near a shared dev directory", ""
+            )
+        return None
+
+    def interpreter_stdin(self, fed: list[Word], stages: str) -> Finding | None:
+        """The program text (heredoc, here-string, pipeline) of an interpreter. Unlike an inline `-c` program, a whole
+        script is routinely fed this way, so it counts only when it holds something that can remove or overwrite and
+        names a zone (or runs from one, or from a place near one with a path it cannot read)."""
+        texts = [w.text for w in fed] + ([stages] if stages.strip() else [])
+        in_zone = self.cwd is not None and self.zones.roots(self.cwd) is not None
+        for text in texts:
+            if not _PROGRAM_DESTRUCTIVE.search(text):
+                continue
+            if in_zone:
+                return Finding("an inline program run from a shared dev directory", "")
+            if names_zone_outside_agents(text, self.zones.home) or ("\0" in text and self.near_zone()):
+                return Finding("an inline program that names a shared dev directory", "")
+        return None
+
+    def watch(self, args: list[Word], depth: int) -> Finding | None:
+        """`watch` hands its operands to `sh -c`."""
+        rest: list[Word] = []
+        skip = False
+        for a in args:
+            if skip:
+                skip = False
+            elif rest:
+                rest.append(a)
+            elif a.text in ("-n", "--interval"):
+                skip = True
+            elif not a.text.startswith("-"):
+                rest.append(a)
+        if not rest:
+            return None
+        return self.nested_text(" ".join(w.text for w in rest), depth)
 
     def nested_text(self, text: str, depth: int, *, unknown_cwd: bool = False) -> Finding | None:
         """Scan text a command runs in its own shell: a directory change inside it never reaches the caller."""
@@ -1484,7 +1983,7 @@ class Checker:
                 after_dd = True
             elif not after_dd and a.text.startswith("-") and len(a.text) > 1:
                 if a.text.startswith("--"):
-                    recursive |= a.text == "--recursive"
+                    recursive |= self.long_is(a.text, "recursive", 1) or self.long_is(a.text, "dir", 1)
                 else:
                     recursive |= any(ch in a.text for ch in "rRd")
             else:
@@ -1553,6 +2052,12 @@ class Checker:
                     deleting = True
                 m = end
             m += 1
+        for k, a in enumerate(args):  # the output-file actions truncate an existing file
+            if a.text in ("-fprint", "-fprint0", "-fls", "-fprintf") and not a.quoted and k + 1 < len(args):
+                found = self.existing_shared(args[k + 1])
+                if found:
+                    return Finding("`find " + a.text + "` that writes " + found.reason, found.target, found.hint)
+                self.note_written(args[k + 1])
         if not deleting:
             return None
         if any(a.text.startswith("-files0-from") for a in args):
@@ -1585,6 +2090,7 @@ class Checker:
                     self.mentions_zone = True
         moved_any = False
         stack: list[str | None] = []
+        chain: list[Cmd] = []  # the stages of the pipeline so far
         for cmd in commands:
             if cmd.paren == "(":
                 stack.append(self.cwd)
@@ -1594,6 +2100,11 @@ class Checker:
                     self.cwd = stack.pop()
                 continue
             self.moved = False
+            piped = cmd.prev in ("|", "|&")
+            chain = chain if piped else []
+            self.bodies = cmd.stdin
+            self.upstream = tuple(chain) if piped else None
+            chain.append(cmd)
             found = self.command(cmd.words, depth)
             if found:
                 return found
