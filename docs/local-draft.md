@@ -57,15 +57,22 @@ safo audit | safo-draft digest board-drift -
   giving an ASCII skeleton. Every non-ASCII character must either reduce to printable ASCII (`Caf` plus U+00E9
   reduces to `Cafe`; a fullwidth letter is folded by NFKC) or be on a short allowlist: curly single and double quotes
   (U+2018 to U+201D), en dash U+2013, bullet U+2022, ellipsis U+2026, the multiplication sign U+00D7, arrows U+2190 to
-  U+2193, and emoji (U+1F300 to U+1FAFF, U+2600 to U+27BF without the dingbat digit forms U+2776 to U+2793, U+2B50,
-  U+2B55). An emoji must also pass a name test: any whose Unicode name contains DIGIT, LETTER, LATIN, NUMBER, KEYCAP,
-  INPUT SYMBOL, SQUARED, CIRCLED, NEGATIVE, PARENTHESIZED or REGIONAL, or that has no name, is refused (keycap ten
-  would otherwise spell a digit in `FN` plus keycap plus `pr`), as are U+1F4AF, U+1F51E, U+1F3B1, U+24C2, U+2139,
-  U+2122, U+00AE and U+00A9. The test sweeps the whole range; 2235 code points stay allowed, including the check
-  mark, cross mark, warning sign, rocket, robot face, eyes, thumbs up, party popper, wrench, hammer, bug, lock, key,
-  fire and sparkles. The multiplication sign U+00D7 and the ballot-x marks U+2715 to U+2718 count as the letter `x`
-  for matching, in drafts and in deny values alike (`Acme` plus U+00D7 plus `Labs` matches a deny value
-  `AcmeXLabs`). Anything else (Cyrillic, Greek, Armenian, Cherokee, Hangul jamo, dotless i, small capitals, modifier
+  U+2193, and an explicit list of 39 pictographs (below). Nothing else outside ASCII passes: no emoji range, no
+  name test. Every other code point, including every emoji not on the list, the ballot-x marks U+2715 to U+2718,
+  U+00AE and U+00A9, is refused. The list: check mark U+2714, white heavy check mark U+2705, cross mark U+274C,
+  warning sign U+26A0, rocket U+1F680, robot face U+1F916, eyes U+1F440, thumbs up U+1F44D, thumbs down U+1F44E,
+  party popper U+1F389, wrench U+1F527, hammer U+1F528, bug U+1F41B, locked U+1F512, key U+1F511, fire U+1F525,
+  sparkles U+2728, heavy exclamation mark U+2757, light bulb U+1F4A1, memo U+1F4DD, package U+1F4E6, books U+1F4DA,
+  hourglass U+231B, stopwatch U+23F1, black right arrow U+27A1, up arrow U+2B06, down arrow U+2B07, clipboard
+  U+1F4CB, pushpin U+1F4CC, magnifying glass U+1F50D, gear U+2699, shield U+1F6E1, thinking face U+1F914, waving hand
+  U+1F44B, folded hands U+1F64F, clapping hands U+1F44F, red circle U+1F534, green circle U+1F7E2 and yellow circle
+  U+1F7E1. The link symbol is not on it. Add a pictograph only with a test that its name has no letter or digit
+  (the guard test caps the list at 45 and checks each name for DIGIT, LETTER, LATIN, KEYCAP, NUMBER, SQUARED,
+  CIRCLED, NEGATIVE, PARENTHESIZED and INPUT SYMBOL). The multiplication sign U+00D7 and the cross mark count as
+  the letter `x` for matching, and the three circles count as the letter `o` (they can read as one), in drafts and
+  in deny values alike (`Acme` plus U+00D7 plus `Labs` matches a deny value `AcmeXLabs`). Characters that NFKC folds
+  to ASCII (circled M, the trade mark sign) are kept as the letters they fold to. Anything else (Cyrillic, Greek,
+  Armenian, Cherokee, Hangul jamo, dotless i, small capitals, modifier
   letters, letterlike symbols, operator lookalikes such as U+2208, currency signs such as the euro sign, other
   arrows) refuses the draft or title with "characters that cannot be reduced to ASCII: refused (line N)"; the reason never
   holds the characters. Currency signs are refused on purpose: write `EUR` or `USD`. The variation selector U+FE0F

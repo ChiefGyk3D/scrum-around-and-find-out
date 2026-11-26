@@ -1317,7 +1317,7 @@ def test_r6_m2_symbols_and_lookalikes_are_refused(cp: int) -> None:
         "wait" + chr(0x2026),
         "3 " + chr(0xD7) + " 4",
         chr(0x2190) + chr(0x2191) + chr(0x2192) + chr(0x2193),
-        chr(0x1F300) + chr(0x1FAF0) + chr(0x2705) + chr(0x2B50) + chr(0x2B55) + chr(0x2600) + chr(0x27BF),
+        chr(0x1F680) + chr(0x1F916) + chr(0x2705) + chr(0x274C) + chr(0x26A0) + chr(0x1F7E2) + chr(0x2B07),
         "Caf" + chr(0xE9),
     ],
 )
@@ -1457,77 +1457,98 @@ def test_r8_scan_is_linear() -> None:
         assert time.process_time() - start < 2.0, text[:6]
 
 
-# Round 9: letter and digit emoji, multiplication sign.
+# Round 11: only an explicit allowlist of pictographs (replaces the round 9 name denylist and range allowance).
+_DENY = "matched private deny entry"
 _FORBIDDEN_WORDS = (
-    "DIGIT", "LETTER", "LATIN", "NUMBER", "KEYCAP", "INPUT SYMBOL", "SQUARED", "CIRCLED", "NEGATIVE",
-    "PARENTHESIZED", "REGIONAL",
-)  # fmt: skip
-_WORK_EMOJI = (
-    0x2705, 0x274C, 0x26A0, 0x1F680, 0x1F916, 0x1F440, 0x1F44D, 0x1F389,
-    0x1F527, 0x1F528, 0x1F41B, 0x1F512, 0x1F511, 0x1F525, 0x2728,
+    "DIGIT", "LETTER", "LATIN", "KEYCAP", "NUMBER", "SQUARED", "CIRCLED", "NEGATIVE", "PARENTHESIZED",
+    "INPUT SYMBOL",
 )  # fmt: skip
 
 
-def _bad_cp(n: int) -> bool:
+def _picto() -> list[str]:
+    return sorted(localdraft._PICTOGRAPHS)
+
+
+def test_r11_every_allowlisted_pictograph_is_accepted() -> None:
+    assert len(_picto()) >= 30
+    for c in _picto():
+        assert localdraft._allowed_symbol(c), hex(ord(c))
+        assert _why("done " + c) == [], hex(ord(c))
+    assert localdraft.check_text("pr", f"Body\n\n{FOOTER}") == []
+    assert chr(0x1F916) in localdraft._PICTOGRAPHS
+
+
+def test_r11_allowlist_is_small_and_has_no_letter_or_digit_names() -> None:
     import unicodedata
 
-    try:
-        name = unicodedata.name(chr(n))
-    except ValueError:
-        return True
-    return any(w in name for w in _FORBIDDEN_WORDS)
+    assert len(localdraft._PICTOGRAPHS) <= 45
+    assert chr(0x1F517) not in localdraft._PICTOGRAPHS  # link symbol is not allowed
+    for c in _picto():
+        name = unicodedata.name(c)
+        assert not any(w in name for w in _FORBIDDEN_WORDS), name
+        decomposed = unicodedata.normalize("NFKD", c)
+        assert not any(x.isalnum() and x.isascii() for x in decomposed), name
+    # the guard bites: a keycap and a squared letter would fail the name test
+    for bad in (chr(0x1F51F), chr(0x1F170), chr(0x1F4AF)):
+        assert bad not in localdraft._PICTOGRAPHS
+    assert any(w in unicodedata.name(chr(0x1F51F)) for w in _FORBIDDEN_WORDS)
 
 
-def test_r9_d1_keycap_reproductions_refused() -> None:
+def test_r11_every_other_pictograph_code_point_is_refused() -> None:
+    def sweep() -> None:
+        refused = 0
+        for n in (*range(0x1F300, 0x1FB00), *range(0x2600, 0x27C0)):
+            c = chr(n)
+            if c in localdraft._PICTOGRAPHS:
+                continue
+            assert not localdraft._allowed_symbol(c), hex(n)
+            assert not localdraft._skeleton(c)[1], hex(n)
+            refused += 1
+        assert refused > 2000
+
+    _within_deadline(30, sweep)
+    assert any(_NO_REDUCE in x for x in _why("x " + chr(0x1F517)))
+
+
+def test_r11_reviewer_reproductions_refused() -> None:
     k = chr(0x1F51F)
-    for text, deny in (
-        ("FN" + k + "pr", []),
-        ("W" + k + "AW", []),
-        ("serial " + k + "23456", []),
-        ("FN" + k + "pr", ["FN31pr"]),
+    for text in (
+        "FN" + k + "pr",
+        "W" + k + "AW",
+        "serial " + k + "23456",
+        "FN" + chr(0x1F522) + "pr",
+        *(chr(n) for n in (*range(0x1F519, 0x1F51E), 0x1F6BE, 0x1F3E7, 0x2B55, 0x2613, 0x274E, 0x1F5D9)),
+        *(chr(n) for n in (*range(0x1F5F4, 0x1F5F8), *range(0x1F7A8, 0x1F7AF))),
     ):
-        assert any("cannot be reduced" in x for x in _why(text, deny=deny)), text
+        assert any(_NO_REDUCE in x for x in _why(text)), ascii(text)
+    for deny in ([], ["FN31pr"]):
+        assert any(_NO_REDUCE in x for x in _why("FN" + k + "pr", deny=deny))
 
 
-def test_r9_d1_every_letter_digit_emoji_refused() -> None:
-    n_checked = 0
-    spans = (range(0x1F170, 0x1F18A), range(0x1F191, 0x1F19B), range(0x1F520, 0x1F525))
-    singles = (0x1F18E, 0x1F17F, 0x1F51F, 0x1F522, 0x1F4AF, 0x1F51E, 0x1F3B1)
-    for n in (*(x for r in spans for x in r), *singles):
-        assert not localdraft._allowed_symbol(chr(n)), hex(n)
-        n_checked += 1
-    assert n_checked > 40
-    for n in (0x24C2, 0x2139, 0x2122, 0xAE, 0xA9):
-        assert not localdraft._allowed_symbol(chr(n)), hex(n)
+def test_r11_removed_x_marks_and_letterlike_signs_refused() -> None:
+    for n in (0x2715, 0x2716, 0x2717, 0x2718, 0xAE, 0xA9, 0x1F4AF, 0x1F51E, 0x1F3B1):
+        assert any(_NO_REDUCE in x for x in _why("a" + chr(n) + "b")), hex(n)
 
 
-def test_r9_d1_sweep_of_allowed_ranges() -> None:
-    kept = 0
-    for n in (*range(0x1F300, 0x1FB00), *range(0x2600, 0x27C0), 0x2B50, 0x2B55):
-        if localdraft._allowed_symbol(chr(n)):
-            kept += 1
-            assert not _bad_cp(n), hex(n)
-    assert kept > 500
-    for n in range(0x1F300, 0x1FB00):
-        if _bad_cp(n):
-            assert not localdraft._allowed_symbol(chr(n)), hex(n)
-
-
-def test_r9_d1_work_emoji_and_footer_stay_valid() -> None:
-    for n in _WORK_EMOJI:
-        assert localdraft._allowed_symbol(chr(n)), hex(n)
-        assert _why("done " + chr(n)) == [], hex(n)
-    assert localdraft.check_text("pr", f"Body\n\n{FOOTER}") == []
-
-
-def test_r9_d2_multiplication_sign_is_an_x() -> None:
-    m = chr(0xD7)
-    assert any("matched private deny entry" in x for x in _why("Acme" + m + "Labs", deny=["AcmeXLabs"]))
+def test_r11_multiplication_sign_and_cross_mark_are_an_x() -> None:
+    m, cross = chr(0xD7), chr(0x274C)
+    assert any(_DENY in x for x in _why("Acme" + m + "Labs", deny=["AcmeXLabs"]))
     assert _why("3" + m + "4") == []
-    assert any("matched private deny entry" in x for x in _why("AcmeXLabs", deny=["Acme" + m + "Labs"]))
-    assert any("matched private deny entry" in x for x in _why("Acme" + m + "Labs", deny=["Acme" + m + "Labs"]))
-    for n in (0x2715, 0x2716, 0x2717, 0x2718):
-        assert any("matched private deny entry" in x for x in _why("Acme" + chr(n) + "Labs", deny=["AcmeXLabs"]))
+    assert any(_DENY in x for x in _why("AcmeXLabs", deny=["Acme" + m + "Labs"]))
+    assert any(_DENY in x for x in _why("Acme" + m + "Labs", deny=["Acme" + m + "Labs"]))
+    assert any(_DENY in x for x in _why("Acme" + cross + "labs", deny=["Acmexlabs"]))
+    assert any(_DENY in x for x in _why("Acmexlabs", deny=["Acme" + cross + "labs"]))
+    assert any(_DENY in x for x in _why("Acme" + cross + "labs", deny=["Acme"]))
+
+
+def test_r11_colored_circles_are_an_o() -> None:
+    for n in (0x1F534, 0x1F7E2, 0x1F7E1):
+        c = chr(n)
+        assert any(_DENY in x for x in _why("F" + c + c + "d", deny=["Food"])), hex(n)
+        assert any(_DENY in x for x in _why("Foo", deny=["F" + c + c])), hex(n)
+        assert any(_DENY in x for x in _why("Fo" + c + " bar", deny=["Foobar"])), hex(n)
+        assert _why("status " + c + " ok") == []
+    assert any(_DENY in x for x in _why("Fo" + chr(0x1F534), deny=["Foo"]))
 
 
 # round 10: refusals name the offending line and say what to change, and never echo the draft

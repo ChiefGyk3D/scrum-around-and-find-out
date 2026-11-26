@@ -353,48 +353,74 @@ class DenyEntry:
 _TYPOGRAPHY = frozenset(chr(c) for c in (*range(0x2018, 0x201E), 0x2013, 0x2022, 0x2026, 0xD7, *range(0x2190, 0x2194)))
 
 
-_X_MARKS = frozenset(chr(c) for c in (0xD7, 0x2715, 0x2716, 0x2717, 0x2718))
-_LETTER_DIGIT_WORDS = (
-    "DIGIT", "LETTER", "LATIN", "NUMBER", "KEYCAP", "INPUT SYMBOL", "SQUARED", "CIRCLED", "NEGATIVE",
-    "PARENTHESIZED", "REGIONAL",
-)  # fmt: skip
-# Emoji that show letters or digits without such a name (hundred points, no one under eighteen, billiards 8 ball),
-# plus letterlike signs that are refused outright.
-_SHOWS_TEXT = frozenset(
-    chr(c) for c in (0x1F4AF, 0x1F51E, 0x1F3B1, 0x1F51F, 0x1F522, 0x24C2, 0x2139, 0x2122, 0xAE, 0xA9)
+# The pictographs a draft may hold, and nothing else outside typography. Each is named; none may show a letter or a
+# digit in its picture or its Unicode name. Add one only with a test that its name has no letter or digit.
+_PICTOGRAPHS = frozenset(
+    chr(c)
+    for c in (
+        0x2714,  # heavy check mark
+        0x2705,  # white heavy check mark
+        0x274C,  # cross mark (an x in the skeleton)
+        0x26A0,  # warning sign
+        0x1F680,  # rocket
+        0x1F916,  # robot face (the pull request footer)
+        0x1F440,  # eyes
+        0x1F44D,  # thumbs up
+        0x1F44E,  # thumbs down
+        0x1F389,  # party popper
+        0x1F527,  # wrench
+        0x1F528,  # hammer
+        0x1F41B,  # bug
+        0x1F512,  # locked
+        0x1F511,  # key
+        0x1F525,  # fire
+        0x2728,  # sparkles
+        0x2757,  # heavy exclamation mark symbol
+        0x1F4A1,  # electric light bulb
+        0x1F4DD,  # memo
+        0x1F4E6,  # package
+        0x1F4DA,  # books
+        0x231B,  # hourglass
+        0x23F1,  # stopwatch
+        0x27A1,  # black rightwards arrow
+        0x2B06,  # upwards black arrow
+        0x2B07,  # downwards black arrow
+        0x1F4CB,  # clipboard
+        0x1F4CC,  # pushpin
+        0x1F50D,  # left-pointing magnifying glass
+        0x2699,  # gear
+        0x1F6E1,  # shield
+        0x1F914,  # thinking face
+        0x1F44B,  # waving hand
+        0x1F64F,  # folded hands
+        0x1F44F,  # clapping hands
+        0x1F534,  # large red circle (an o in the skeleton)
+        0x1F7E2,  # large green circle (an o in the skeleton)
+        0x1F7E1,  # large yellow circle (an o in the skeleton)
+    )
 )
+# Characters that read as a letter in the skeleton: the multiplication sign and the cross mark look like `x`, the
+# colored circles like `o`.
+_LOOKS_LIKE = {chr(0xD7): "x", chr(0x274C): "x", chr(0x1F534): "o", chr(0x1F7E2): "o", chr(0x1F7E1): "o"}
 
 
 def _allowed_symbol(c: str) -> bool:
-    """Typographic punctuation and emoji that stay in a draft but add nothing to the skeleton. Variation selectors
-    (U+FE0F) and the dingbat digit forms (U+2776 to U+2793) are not on the list. An emoji must also pass a name test:
-    keycaps, input symbols, squared, circled, negative, parenthesized and regional forms and anything whose name says
-    digit, letter, latin or number are refused, as is a code point with no name (fail closed)."""
-    n = ord(c)
-    if c in _TYPOGRAPHY:
-        return True
-    if c in _SHOWS_TEXT:
-        return False
-    if not (0x1F300 <= n <= 0x1FAFF or n in (0x2B50, 0x2B55) or (0x2600 <= n <= 0x27BF and not 0x2776 <= n <= 0x2793)):
-        return False
-    try:
-        name = unicodedata.name(c)
-    except ValueError:
-        return False
-    return not any(w in name for w in _LETTER_DIGIT_WORDS)
+    """Typographic punctuation and the explicit pictograph list: kept in a draft, nothing else. Variation selectors
+    (U+FE0F) are not on the list."""
+    return c in _TYPOGRAPHY or c in _PICTOGRAPHS
 
 
 def _skeleton(text: str) -> tuple[str, bool]:
     """(ASCII skeleton, reducible). NFKC, then NFKD with combining marks removed. Every non-ASCII character must
     either reduce to printable ASCII (a precomposed accent: U+00E9 becomes `e`) or be on the typography and emoji
-    allowlist (`_allowed_symbol`, left out of the skeleton). Anything else (Cyrillic, Greek, dotless i, small
-    capitals, letterlike or operator lookalikes, currency signs, modifier letters) makes the text not reducible; it is
-    left out of the skeleton and the caller must refuse."""
+    allowlist (`_allowed_symbol`; a few read as a letter, see `_LOOKS_LIKE`). Anything else (Cyrillic, Greek, dotless
+    i, small capitals, letterlike or operator lookalikes, currency signs, modifier letters) makes the text not
+    reducible; it is left out of the skeleton and the caller must refuse."""
     out: list[str] = []
     reducible = True
     for c in unicodedata.normalize("NFKC", text):
-        if c in _X_MARKS:
-            out.append("x")
+        if c in _LOOKS_LIKE:
+            out.append(_LOOKS_LIKE[c])
             continue
         if c.isascii():
             out.append(c)
