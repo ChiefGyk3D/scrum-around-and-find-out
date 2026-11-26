@@ -32,8 +32,8 @@ python -m safo.runner_check ...        # same entry point
 ```
 
 It reads one command line or a brief and flags a local full suite or sweep. For a flagged command on a public repo it
-prints the `ra-remote --plan` form and the real form. It never runs ra-remote and never contacts the runner. It fails
-closed: anything it cannot prove public stays local.
+prints the `ra-remote --plan` form and the real form. It never runs ra-remote and never contacts the runner (its only
+network use is the publication proof below). It fails closed: anything it cannot prove public stays local.
 
 ### What is classified as a full suite or sweep
 
@@ -132,17 +132,43 @@ M nested git directories; K symlinks leaving the tree). Commit them, add them to
 
 The runner copies the worktree, and the content verification compares it with the local `HEAD` tree. That only proves
 the bytes are the commit's bytes; a local commit that was never pushed may hold private material. So the gate also
-refuses unless `HEAD` is published: "keep local: HEAD is not published on a public remote (N commits ahead of the
-remote branches, or never pushed); push it first and fetch". `HEAD` must equal, or be an ancestor of, at least one
-remote-tracking ref (`git merge-base --is-ancestor`, through the isolated git environment). Only refs under a name that
-`git remote` lists count; a stray `refs/remotes/ghost/...` is ignored. It also refuses a detached `HEAD` that no remote
-ref contains, an unborn `HEAD`, a repository with no remote-tracking refs ("never fetched"), and more than 200 refs
-("cannot tell"). Counts only, never names.
+proves that `HEAD` is part of the public repository's history, and refuses otherwise ("keep local: cannot tell: could
+not verify that HEAD is published (<class>)"). The class is one fixed word, never a URL, output or error text:
+`network`, `timeout`, `unparseable`, `no-local-tip`, `not-ancestor`, `remote-identity`, `too-many-tips` or `git`.
 
-Limit, stated plainly: the check trusts the LOCAL remote-tracking refs and does not contact the network. A stale fetch
-can lag the real remote (a refusal, never a false pass), but it cannot make private commits look published unless
-someone creates a remote-tracking ref by hand, which is the owner's own action. Every remote is already required to be
-public (repo class), so any remote-tracking ref of a listed remote qualifies.
+Decision (round 6, replacing "the checker never contacts the network"): local metadata cannot prove publication. A
+Daybreak review found two reproductions, so the check now asks the public remote itself:
+
+1. Remote-tracking refs carry no provenance. A repository cloned from a private source keeps private commits under
+   `refs/remotes/origin/*`; after the normal operation `git remote set-url origin <public github url>` the old gate
+   treated those private commits as published.
+2. Replace refs forge ancestry. `git replace` swaps the public tip for a synthetic commit that descends from a private
+   `HEAD`, so `git merge-base --is-ancestor` said yes. Grafts and the commit-graph file are the same class of local
+   history rewriting.
+
+The proof, in order:
+
+- The URL is rebuilt from the validated components only: `https://github.com/<owner>/<name>.git`, lowercase ASCII,
+  from the owner and name that the repo class parsed. Every remote must name the same pair, else "remote-identity".
+  Credentials, ports, paths and queries in the stored URL never reach the proof.
+- One anonymous, read-only `git ls-remote --heads --tags` of that URL. The process gets a minimal environment (`PATH`, an
+  empty private `HOME`, no prompts, no askpass, no global or system git config, no proxy variables) and runs outside the
+  repository, with `protocol.allow=never`, `protocol.https.allow=always`, no credential helper, no proxy and no
+  redirects. Limits: 20 seconds, 1 MiB of output, 20000 refs; lines must be `<40 or 64 hex> <ref>`; only
+  `refs/heads/*` and `refs/tags/*` (peeled lines included) count. Any failure (offline, timeout, non-zero exit, a 404 for
+  a private or renamed repository, a parse error, a cap) refuses.
+- `HEAD` is published only when at least one listed tip exists in the local repository (object ids are content
+  addressed, so a local commit equal to a public tip is that public commit) and `git merge-base --is-ancestor HEAD <tip>`
+  returns 0. A clone of a private source has none of the public tips. At most 200 existing tips are tried.
+- Every git call of the gate disables local history rewriting: `--no-replace-objects`, `core.useReplaceRefs=false`,
+  `GIT_NO_REPLACE_OBJECTS=1`, `core.commitGraph=false`, an empty `core.alternateRefsCommand`, and `GIT_GRAFT_FILE` pointing
+  at an empty file.
+- No cache: a fresh proof every run. The proof runs only when a command would be suggested, so a targeted command never
+  touches the network.
+
+This makes the checker contact github.com once per suggestion. It needs network access. Offline, the answer is "keep
+local" (never a false pass): the work simply runs locally until the network is back. The proof is anonymous, so it
+cannot see a private repository; that is intended, since a private repository is never published.
 
 #### Content verification (the authority)
 

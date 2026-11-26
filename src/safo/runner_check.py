@@ -14,7 +14,9 @@ wins. A set-but-empty allowlist means no repo is public. Any git transport overr
 live in the safo config dir; the whole path must be free of symlinks and owner-only. A content gate (untracked files,
 nested git dirs, symlinks leaving the tree, secret-looking names) keeps a dirty public worktree local. Advice is given
 only for a worktree under a folder
-`ra-remote` allows. `--strict` exits 1 only when a public repo runs a full suite or sweep locally.
+`ra-remote` allows. `--strict` exits 1 only when a public repo runs a full suite or sweep locally. Before it suggests a
+command it proves that HEAD is published: one anonymous `git ls-remote` of the validated github.com URL (the
+only network use).
 One metrics line per check goes to `$XDG_STATE_HOME/safo/runner-check.jsonl` (class, decision, repo class; no command).
 """
 
@@ -32,9 +34,10 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -619,11 +622,19 @@ def _git(repo: Path, env: Mapping[str, str], *args: str) -> str:
 # Mirrors `git_list` in ra-remote (the one function that selects the files it copies): the environment names
 # GIT_CONFIG_GLOBAL=/dev/null and GIT_CONFIG_NOSYSTEM=1, ra-remote first unsets every other GIT_* variable, and the
 # command carries these -c overrides. Nothing outside the worktree may decide which files are listed.
+#
+# The same calls also decide ancestry for the published-HEAD proof, so every local history-rewriting feature is off:
+# replace refs (`--no-replace-objects`, core.useReplaceRefs, GIT_NO_REPLACE_OBJECTS), grafts (GIT_GRAFT_FILE points at
+# an empty file), the commit-graph file, and alternate-ref commands.
 SELECTION_CONFIG = (
     "core.fsmonitor=false",
     "core.untrackedCache=false",
     "core.excludesFile=/dev/null",
     "core.hooksPath=/dev/null",
+    "core.useReplaceRefs=false",
+    "core.commitGraph=false",
+    "core.alternateRefsCommand=",
+    "advice.graftFileDeprecated=false",
 )
 
 
@@ -635,8 +646,10 @@ def _git_for_selection(
     genv["GIT_TERMINAL_PROMPT"] = "0"
     genv["GIT_CONFIG_GLOBAL"] = "/dev/null"
     genv["GIT_CONFIG_NOSYSTEM"] = "1"
+    genv["GIT_NO_REPLACE_OBJECTS"] = "1"
+    genv["GIT_GRAFT_FILE"] = "/dev/null"
     flags = [word for pair in SELECTION_CONFIG for word in ("-c", pair)]
-    return _spawn(repo, genv, [*flags, *args], data)
+    return _spawn(repo, genv, ["--no-replace-objects", *flags, *args], data)
 
 
 def _git_z(repo: Path, env: Mapping[str, str], *args: str) -> list[str] | None:
@@ -750,7 +763,7 @@ class ContentGate:
     modified: int = 0
     filtered: bool = False
     bounded: bool = False
-    unpublished: str = ""  # the refusal text of the published-HEAD gate; empty when HEAD is on a public remote ref
+    unpublished: str = ""  # the refusal text of the published-HEAD proof; empty when HEAD is proved public
 
     def refusal(self) -> str | None:
         parts = [t for t in (self.unpublished, self._differs(), self._unverifiable(), self._copies()) if t]
@@ -791,65 +804,162 @@ class ContentGate:
         return text + f". Commit them, add them to .gitignore, or clone a clean copy under ~/{DEV_FOLDERS[0]} first"
 
 
-REF_LIMIT = 200
+LISTING_SECONDS = 20
+LISTING_BYTES = 1024 * 1024
+LISTING_REFS = 20000
+LOCAL_TIP_LIMIT = 200  # existing local tips tried for the ancestry test; more is refused ("cannot tell")
+LISTING_LINE = re.compile(r"([0-9a-f]{40}|[0-9a-f]{64})[ \t](refs/(?:heads|tags)/\S+)")
 
 
-def _count(worktree: Path, env: Mapping[str, str], *args: str) -> int | None:
-    done = _git_for_selection(worktree, env, "rev-list", "--count", *args)
+class ProofError(Exception):
+    """The publication proof could not be made. `klass` is a fixed word; never the URL, output or error text."""
+
+    def __init__(self, klass: str) -> None:
+        super().__init__(klass)
+        self.klass = klass
+
+
+def _ls_remote(url: str) -> list[str]:
+    """Tip object ids of the public remote's heads and tags (peeled tag lines included), anonymously over HTTPS.
+
+    Nothing from the caller's environment, git configuration or repository reaches this process."""
+    git = shutil.which("git")
+    if git is None:
+        raise ProofError("network")
+    with tempfile.TemporaryDirectory(prefix="safo-ls-") as home:
+        genv = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": home,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "/bin/false",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_COUNT": "0",
+        }
+        argv = [
+            git,
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "protocol.https.allow=always",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "http.proxy=",
+            "-c",
+            "core.askpass=",
+            "-c",
+            "http.followRedirects=false",
+            "ls-remote",
+            "--heads",
+            "--tags",
+            url,
+        ]
+        try:
+            done = subprocess.run(  # noqa: S603 - fixed git argv built from validated names, no shell
+                argv,
+                capture_output=True,
+                timeout=LISTING_SECONDS,
+                check=False,
+                env=genv,
+                cwd=home,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            raise ProofError("timeout") from None
+        except (OSError, subprocess.SubprocessError):
+            raise ProofError("network") from None
+    if done.returncode != 0:
+        raise ProofError("network")
+    if len(done.stdout) > LISTING_BYTES:
+        raise ProofError("unparseable")
+    lines = done.stdout.decode("ascii", errors="replace").splitlines()
+    if len(lines) > LISTING_REFS:
+        raise ProofError("unparseable")
+    tips: list[str] = []
+    for line in lines:
+        match = LISTING_LINE.fullmatch(line)
+        if match is None:
+            if re.fullmatch(r"([0-9a-f]{40}|[0-9a-f]{64})[ \t]refs/\S+", line):
+                continue  # a well-formed line for some other ref namespace: not a branch or tag tip
+            raise ProofError("unparseable")
+        tips.append(match.group(1))
+    return tips
+
+
+def _proof_url(worktree: Path, env: Mapping[str, str]) -> str | None:
+    """The one public URL built from the validated owner and name; None unless every remote names the same repo."""
+    done = _git_for_selection(worktree, env, "remote", "-v")
     if done is None or done.returncode != 0:
         return None
-    text = done.stdout.decode("ascii", errors="replace").strip()
-    return int(text) if text.isdigit() else None
-
-
-def _remote_ref_ids(worktree: Path, env: Mapping[str, str]) -> list[str] | None:
-    """Object ids of the remote-tracking refs that sit under a configured remote; None when git cannot say."""
-    names = _git_for_selection(worktree, env, "remote")
-    refs = _git_for_selection(worktree, env, "for-each-ref", "--format=%(objectname) %(refname)%00", "refs/remotes")
-    if names is None or refs is None or names.returncode != 0 or refs.returncode != 0:
+    urls: list[str] = []
+    for line in done.stdout.decode("utf-8", errors="replace").splitlines():
+        match = REMOTE_LINE.match(line)
+        if match is None:
+            return None
+        urls.append(match.group(2))
+    if not urls:
         return None
-    remotes = [n for n in names.stdout.decode("utf-8", errors="surrogateescape").split("\n") if n]
-    ids: list[str] = []
-    for raw in refs.stdout.split(b"\0"):
-        oid, _, ref = raw.decode("utf-8", errors="surrogateescape").strip("\n").partition(" ")
-        tail = ref.removeprefix("refs/remotes/")
-        # a ref under a remote name that `git remote` does not list is a stray: it proves nothing
-        if oid and tail != ref and any(tail.startswith(f"{r}/") for r in remotes):
-            ids.append(oid)
-    return ids
+    pairs = {parse_remote(u) for u in urls}
+    if len(pairs) != 1 or None in pairs:
+        return None
+    pair = next(iter(pairs))
+    if pair is None or not all(p.isascii() and SEGMENT.fullmatch(p) for p in pair):
+        return None
+    return f"https://{PUBLIC_HOST}/{pair[0]}/{pair[1]}.git"
 
 
-def _published(worktree: Path, env: Mapping[str, str]) -> str:
-    """Refusal text unless HEAD is reachable from a remote-tracking ref of a configured (public) remote.
+def _unproven(klass: str) -> str:
+    return f"keep local: cannot tell: could not verify that HEAD is published ({klass})"
 
-    Trusts the local remote-tracking refs and never contacts the network. Counts only, never names."""
+
+def _local_tips(worktree: Path, env: Mapping[str, str], tips: Sequence[str]) -> list[str] | None:
+    """The listed tips whose commit exists in this repository (`T^{commit}` resolves), checked in one git call."""
+    if not tips:
+        return []
+    data = "".join(f"{oid}^{{commit}}\n" for oid in tips).encode("ascii")
+    done = _git_for_selection(worktree, env, "cat-file", "--batch-check", data=data)
+    if done is None or done.returncode != 0:
+        return None
+    rows = done.stdout.decode("ascii", errors="replace").splitlines()
+    if len(rows) != len(tips):
+        return None
+    return [oid for oid, row in zip(tips, rows, strict=True) if row.endswith(" missing") is False and " commit " in row]
+
+
+def _published(worktree: Path, env: Mapping[str, str], ls_remote: Callable[[str], list[str]] | None = None) -> str:
+    """Refusal text unless HEAD is proved to be part of the public repository's history.
+
+    The proof asks the public remote (anonymous ls-remote of the URL rebuilt from the validated owner and name) for
+    its branch and tag tips; HEAD must equal or be an ancestor of a tip that also exists locally. Local remote-tracking
+    refs prove nothing (no provenance); replace refs and grafts are off. Fixed words only, never names."""
     head = _git_for_selection(worktree, env, "rev-parse", "--verify", "-q", "HEAD^{commit}")
-    ids = _remote_ref_ids(worktree, env)
-    if head is None or head.returncode not in (0, 1) or ids is None:
-        return "keep local: cannot tell whether HEAD is published on a public remote (git failed)"
+    if head is None or head.returncode not in (0, 1):
+        return _unproven("git")
     if head.returncode == 1:
-        return "keep local: HEAD is not published on a public remote (there is no commit yet); push it first and fetch"
-    if len(ids) > REF_LIMIT:
-        return f"keep local: cannot tell whether HEAD is published (more than {REF_LIMIT} remote-tracking refs)"
-    unique = sorted(set(ids))
-    for oid in unique:
+        return "keep local: HEAD is not published on a public remote (there is no commit yet); push it first"
+    url = _proof_url(worktree, env)
+    if url is None:
+        return _unproven("remote-identity")
+    try:
+        tips = (ls_remote or _ls_remote)(url)
+    except ProofError as exc:
+        return _unproven(exc.klass)
+    unique = sorted(set(tips))
+    present = _local_tips(worktree, env, unique)
+    if present is None:
+        return _unproven("git")
+    if not present:
+        return _unproven("no-local-tip")
+    if len(present) > LOCAL_TIP_LIMIT:
+        return _unproven("too-many-tips")
+    for oid in present:
         done = _git_for_selection(worktree, env, "merge-base", "--is-ancestor", "HEAD", oid)
         if done is None or done.returncode not in (0, 1):
-            return "keep local: cannot tell whether HEAD is published on a public remote (git failed)"
+            return _unproven("git")
         if done.returncode == 0:
             return ""
-    ahead = _count(worktree, env, "HEAD", *(["--not", *unique] if unique else []))
-    if ahead is None:
-        return "keep local: cannot tell whether HEAD is published on a public remote (git failed)"
-    if not unique:
-        return (
-            f"keep local: HEAD is not published on a public remote (never fetched: no remote-tracking refs, "
-            f"{ahead} commits); push it first and fetch"
-        )
-    return (
-        f"keep local: HEAD is not published on a public remote ({ahead} commits ahead of the remote branches, "
-        "or never pushed); push it first and fetch"
-    )
+    return _unproven("not-ancestor")
 
 
 def _nested_git(root: Path) -> tuple[int, bool]:
@@ -1110,12 +1220,14 @@ def _verify_content(
     return Verdict(len(bad), False, filtered)
 
 
-def content_gate(worktree: Path, env: Mapping[str, str]) -> ContentGate:
+def content_gate(
+    worktree: Path, env: Mapping[str, str], ls_remote: Callable[[str], list[str]] | None = None
+) -> ContentGate:
     """Inspect what ra-remote would copy (tracked plus untracked and not ignored; it skips ignored files)."""
     copied = _git_z(worktree, env, "ls-files", "-c", "-o", "--exclude-standard")
     untracked = _git_z(worktree, env, "ls-files", "-o", "--exclude-standard")
     modified = _modified(worktree, env)
-    unpublished = _published(worktree, env)
+    unpublished = _published(worktree, env, ls_remote)
     if copied is None or untracked is None or modified is None:
         return ContentGate(incomplete=True, modified=modified or 0, unpublished=unpublished)
     verdict = _verify_content(worktree, env, copied, untracked)
@@ -1196,7 +1308,15 @@ def _advice(f: Finding, worktree: str, out: TextIO) -> None:
         )
 
 
-def main(argv: Sequence[str], *, env: Mapping[str, str], out: TextIO, err: TextIO, stdin: TextIO | None = None) -> int:
+def main(
+    argv: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    out: TextIO,
+    err: TextIO,
+    stdin: TextIO | None = None,
+    ls_remote: Callable[[str], list[str]] | None = None,
+) -> int:
     parser = argparse.ArgumentParser(prog="safo-runner-check", description=__doc__.split("\n\n")[0] if __doc__ else "")
     parser.add_argument(
         "--strict", action="store_true", help="exit 1 when a public repo runs a full suite or sweep locally"
@@ -1237,7 +1357,7 @@ def main(argv: Sequence[str], *, env: Mapping[str, str], out: TextIO, err: TextI
             decision = "keep-local-worktree"
         if decision == "suggest-remote":
             if not checked:
-                refusal, checked = content_gate(worktree, env).refusal(), True
+                refusal, checked = content_gate(worktree, env, ls_remote).refusal(), True
             if refusal:
                 decision = "keep-local-content"
         rows.append((f.klass, decision, rclass))

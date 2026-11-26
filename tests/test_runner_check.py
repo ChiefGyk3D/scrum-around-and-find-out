@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""safo-runner-check: classify full-suite and mutation commands and print the ra-remote form (#485). No network."""
+"""safo-runner-check: classify full-suite and mutation commands and print the ra-remote form (#485).
+
+Tests never touch the network: every publication proof uses an injected fake listing."""
 
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ import os
 import shlex
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -59,9 +61,36 @@ def env_for(tmp_path: Path, **extra: str) -> dict[str, str]:
     return {"HOME": str(tmp_path / "home"), "XDG_STATE_HOME": str(tmp_path / "state"), **extra}
 
 
-def run(argv: list[str], env: dict[str, str], stdin: str = "") -> tuple[int, str, str]:
+def local_tips(repo: Path, calls: list[str] | None = None) -> Callable[[str], list[str]]:
+    """A fake public listing: the object ids of the repo's own remote-tracking refs (never touches the network)."""
+
+    def fake(url: str) -> list[str]:
+        if calls is not None:
+            calls.append(url)
+        refs = _git_out(repo, "for-each-ref", "--format=%(objectname)", "refs/remotes").decode("ascii")
+        return refs.split()
+
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that reaches the real listing without injecting a fake fails loudly instead of using the network."""
+
+    def forbidden(url: str) -> list[str]:
+        raise AssertionError("the real _ls_remote was reached from a test")
+
+    monkeypatch.setattr(rc, "_ls_remote", forbidden)
+
+
+def run(
+    argv: list[str], env: dict[str, str], stdin: str = "", ls_remote: Callable[[str], list[str]] | None = None
+) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
-    code = rc.main(argv, env=env, out=out, err=err, stdin=io.StringIO(stdin))
+    if ls_remote is None:
+        repo = argv[argv.index("--repo") + 1] if "--repo" in argv else "."
+        ls_remote = local_tips(Path(repo))
+    code = rc.main(argv, env=env, out=out, err=err, stdin=io.StringIO(stdin), ls_remote=ls_remote)
     return code, out.getvalue(), err.getvalue()
 
 
@@ -1108,7 +1137,7 @@ def test_clean_repo_is_not_flagged_as_modified(tmp_path: Path) -> None:
 def test_modified_gate_failure_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = clean_repo(tmp_path)
     monkeypatch.setattr(rc, "_git_for_selection", lambda *a, **k: None)
-    gate = rc.content_gate(repo, env_for(tmp_path))
+    gate = rc.content_gate(repo, env_for(tmp_path), ls_remote=local_tips(repo))
     assert gate.refusal() is not None
 
 
@@ -1157,12 +1186,13 @@ def test_selection_runs_with_the_ra_remote_environment(tmp_path: Path, monkeypat
     original = subprocess.run
 
     def recording(argv: list[str], *a: Any, **kw: Any) -> Any:
-        calls.append((list(argv), dict(kw.get("env") or {})))
+        if argv[0] != "git":  # the fake listing's own calls use the bare name; the gate resolves the path
+            calls.append((list(argv), dict(kw.get("env") or {})))
         return original(argv, *a, **kw)
 
     monkeypatch.setattr(subprocess, "run", recording)
     env = env_for(tmp_path, GIT_DIR="/nonexistent", GIT_INDEX_FILE="/nonexistent", XDG_CONFIG_HOME="/nonexistent")
-    assert rc.content_gate(repo, env).refusal() is None
+    assert rc.content_gate(repo, env, ls_remote=local_tips(repo)).refusal() is None
     assert len(calls) >= 4  # ls-files twice, status, ls-files -v, diff --cached (at least)
     for argv, genv in calls:
         assert genv["GIT_CONFIG_GLOBAL"] == "/dev/null"
@@ -1515,7 +1545,7 @@ def test_entry_count_over_the_limit_is_refused(tmp_path: Path, monkeypatch: pyte
 def test_verification_failure_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = clean_repo(tmp_path)
     monkeypatch.setattr(rc, "_verify_content", lambda *a, **k: None)
-    assert rc.content_gate(repo, env_for(tmp_path)).refusal() is not None
+    assert rc.content_gate(repo, env_for(tmp_path), ls_remote=local_tips(repo)).refusal() is not None
 
 
 def test_verification_ignores_repository_stat_and_status_settings(tmp_path: Path) -> None:
@@ -1640,7 +1670,7 @@ def test_verification_alone_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     repo = clean_repo(tmp_path)
     scenario(repo)
     monkeypatch.setattr(rc, "_modified", lambda *a, **k: 0)  # as if git status, ls-files -v and the diff were clean
-    gate = rc.content_gate(repo, env_for(tmp_path))
+    gate = rc.content_gate(repo, env_for(tmp_path), ls_remote=local_tips(repo))
     assert gate.modified >= 1
     assert gate.refusal() is not None
 
@@ -1652,110 +1682,198 @@ def test_verification_alone_passes_a_clean_repo(tmp_path: Path, monkeypatch: pyt
     (repo / "run.sh").chmod(0o755)
     commit_all(repo)
     monkeypatch.setattr(rc, "_modified", lambda *a, **k: 0)
-    assert rc.content_gate(repo, env_for(tmp_path)).refusal() is None
+    assert rc.content_gate(repo, env_for(tmp_path), ls_remote=local_tips(repo)).refusal() is None
 
 
-# ---- round 5: HEAD must be published on a public remote ---------------------------------------------------------
+# ---- round 6: publication is proved against the public remote, never against local metadata ----------------------
 
-NOT_PUBLISHED = "keep local: HEAD is not published on a public remote"
+NOT_PUBLISHED = "keep local: cannot tell: could not verify that HEAD is published"
+PROOF_URL = "https://github.com/chiefgyk3d/demo.git"
 
 
-def assert_unpublished(code: int, out: str) -> None:
+def assert_unpublished(code: int, out: str, klass: str | None = None) -> None:
     assert code == 0
     assert NOT_PUBLISHED in out
     assert "ra-remote" not in out
+    if klass:
+        assert f"{NOT_PUBLISHED} ({klass})" in out
 
 
-def test_local_commit_not_on_any_remote_ref_is_refused(tmp_path: Path) -> None:
-    # reviewer reproduction: a clean local commit holding private material, never pushed
-    repo = make_repo(tmp_path, REPO_URL, fetched=False)
-    (repo / "private-plan.txt").write_text("secret plans\n", encoding="utf-8")
+def commit(repo: Path, name: str, text: str = "x\n") -> str:
+    (repo / name).write_text(text, encoding="utf-8")
     commit_all(repo, publish=False)
-    code, out = strict(tmp_path, repo)
-    assert_unpublished(code, out)
+    return _git_out(repo, "rev-parse", "HEAD").decode("ascii").strip()
+
+
+def listing(*oids: str) -> Callable[[str], list[str]]:
+    return lambda url: list(oids)
+
+
+def failing(klass: str) -> Callable[[str], list[str]]:
+    def fake(url: str) -> list[str]:
+        raise rc.ProofError(klass)
+
+    return fake
+
+
+def proof(
+    tmp_path: Path, repo: Path, ls_remote: Callable[[str], list[str]], command: str = "pytest"
+) -> tuple[int, str]:
+    code, out, _ = run(
+        ["--strict", "--repo", str(repo), "--command", command], env_for(tmp_path, **PUBLIC), ls_remote=ls_remote
+    )
+    return code, out
+
+
+def head_of(repo: Path) -> str:
+    return _git_out(repo, "rev-parse", "HEAD").decode("ascii").strip()
+
+
+def test_local_commit_not_on_the_public_remote_is_refused(tmp_path: Path) -> None:
+    # reviewer reproduction: a clean local commit holding private material, never pushed
+    repo = clean_repo(tmp_path)
+    public_tip = head_of(repo)
+    commit(repo, "private-plan.txt", "secret plans\n")
+    code, out = proof(tmp_path, repo, listing(public_tip))
+    assert_unpublished(code, out, "not-ancestor")
     assert "private-plan" not in out
     assert "secret" not in out
 
 
-def test_head_equal_to_remote_ref_passes(tmp_path: Path) -> None:
-    code, out = strict(tmp_path, clean_repo(tmp_path))
+def test_head_equal_to_a_listed_tip_passes(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    code, out = proof(tmp_path, repo, listing(head_of(repo)))
     assert code == 1
     assert "-> ra-remote --plan" in out
 
 
-def test_head_ancestor_of_remote_ref_passes(tmp_path: Path) -> None:
+def test_head_ancestor_of_a_listed_tip_passes(tmp_path: Path) -> None:
     repo = clean_repo(tmp_path)
-    (repo / "b.py").write_text("y = 2\n", encoding="utf-8")
-    commit_all(repo)  # remote ref now at the newer commit
-    _git(repo, "reset", "-q", "--hard", "HEAD~1")  # HEAD is an ancestor of refs/remotes/origin/main
-    code, out = strict(tmp_path, repo)
+    old = head_of(repo)
+    tip = commit(repo, "b.py", "y = 2\n")
+    _git(repo, "reset", "-q", "--hard", old)  # HEAD is an ancestor of the listed tip, which still exists locally
+    code, out = proof(tmp_path, repo, listing(tip))
     assert code == 1
     assert "-> ra-remote --plan" in out
 
 
-def test_commits_ahead_of_remote_ref_are_counted_not_named(tmp_path: Path) -> None:
+def test_listed_tip_that_is_an_ancestor_of_head_does_not_pass(tmp_path: Path) -> None:
     repo = clean_repo(tmp_path)
-    for name in ("one-private.txt", "two-private.txt"):
-        (repo / name).write_text("x\n", encoding="utf-8")
-        commit_all(repo, publish=False)
-    code, out = strict(tmp_path, repo)
-    assert_unpublished(code, out)
-    assert "(2 commits ahead of the remote branches, or never pushed)" in out
-    assert "push it first and fetch" in out
-    assert "private" not in out
+    base = head_of(repo)
+    commit(repo, "b.py", "y = 2\n")
+    assert_unpublished(*proof(tmp_path, repo, listing(base)), "not-ancestor")
 
 
-def test_stray_ref_under_a_remote_that_does_not_exist_is_ignored(tmp_path: Path) -> None:
-    repo = make_repo(tmp_path, REPO_URL, fetched=False)
-    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
-    commit_all(repo, publish=False)
-    _git(repo, "update-ref", "refs/remotes/ghost/main", "HEAD")
-    code, out = strict(tmp_path, repo)
-    assert_unpublished(code, out)
+def test_listed_tips_missing_locally_are_not_proof(tmp_path: Path) -> None:
+    # reviewer reproduction 1: a clone of a private source whose origin URL was changed to the public one
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    src = scratch / "src"
+    src.mkdir()
+    _git(src, "init", "-q")
+    (src / "payload.txt").write_text("not public bytes\n", encoding="utf-8")
+    commit_all(src, publish=False)
+    bare = scratch / "private.git"
+    _git(scratch, "clone", "-q", "--bare", str(src), str(bare))
+    repo = tmp_path / "home" / ".local" / "share" / "reach-around-dev" / "repo"
+    repo.parent.mkdir(parents=True)
+    _git(scratch, "clone", "-q", str(bare), str(repo))
+    _git(repo, "remote", "set-url", "origin", REPO_URL)
+    public_only_tip = "1" * 40  # the real public listing names commits this repository has never seen
+    code, out = proof(tmp_path, repo, listing(public_only_tip))
+    assert_unpublished(code, out, "no-local-tip")
+    assert "payload" not in out
 
 
-def test_no_remote_tracking_refs_at_all_is_refused(tmp_path: Path) -> None:
-    repo = make_repo(tmp_path, REPO_URL, fetched=False)
-    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
-    commit_all(repo, publish=False)
-    code, out = strict(tmp_path, repo)
-    assert_unpublished(code, out)
-    assert "never fetched: no remote-tracking refs" in out
+def test_too_many_existing_tips_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    first = head_of(repo)
+    second = commit(repo, "b.py")
+    monkeypatch.setattr(rc, "LOCAL_TIP_LIMIT", 1)
+    assert_unpublished(*proof(tmp_path, repo, listing(first, second)), "too-many-tips")
+
+
+def test_an_empty_listing_is_refused(tmp_path: Path) -> None:
+    assert_unpublished(*proof(tmp_path, clean_repo(tmp_path), listing()), "no-local-tip")
 
 
 def test_unborn_head_is_refused(tmp_path: Path) -> None:
     repo = make_repo(tmp_path, REPO_URL, fetched=False)
-    _git(repo, "update-ref", "refs/remotes/origin/main", "4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-    code, out = strict(tmp_path, repo)
+    code, out = proof(tmp_path, repo, listing("4b825dc642cb6eb9a060e54bf8d69288fbee4904"))
     assert code == 0
     assert "ra-remote" not in out
 
 
-def test_detached_head_without_a_containing_remote_ref_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("klass", ["network", "timeout", "unparseable"])
+def test_every_listing_failure_is_refused_with_only_the_class(tmp_path: Path, klass: str) -> None:
     repo = clean_repo(tmp_path)
-    (repo / "b.py").write_text("y = 2\n", encoding="utf-8")
-    commit_all(repo, publish=False)
-    _git(repo, "checkout", "-q", "--detach", "HEAD")
-    assert_unpublished(*strict(tmp_path, repo))
+    code, out = proof(tmp_path, repo, failing(klass))
+    assert_unpublished(code, out, klass)
+    assert "github.com/chiefgyk3d/demo" not in out
+    assert "http" not in out.split("keep local: cannot tell: could not verify")[1]
 
 
-def test_ref_bound_refuses_when_there_are_too_many(tmp_path: Path) -> None:
-    repo = clean_repo(tmp_path)
-    for n in range(rc.REF_LIMIT + 1):
-        _git(repo, "update-ref", f"refs/remotes/origin/b{n}", "HEAD")
-    code, out = strict(tmp_path, repo)
-    assert code == 0
-    assert "keep local: cannot tell whether HEAD is published (more than" in out
-    assert "ra-remote" not in out
-
-
-def test_ref_bound_exactly_at_the_limit_still_works(tmp_path: Path) -> None:
-    repo = clean_repo(tmp_path)  # one ref already
-    for n in range(rc.REF_LIMIT - 1):
-        _git(repo, "update-ref", f"refs/remotes/origin/b{n}", "HEAD")
-    code, out = strict(tmp_path, repo)
+def test_the_proof_url_is_built_from_validated_components_only(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, "https://user:tok3n@github.com/ChiefGyk3D/Demo.git/", fetched=False)
+    commit(repo, "a.py")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    calls: list[str] = []
+    code, out, err = run(
+        ["--strict", "--repo", str(repo), "--command", "pytest"],
+        env_for(tmp_path, **PUBLIC),
+        ls_remote=local_tips(repo, calls),
+    )
     assert code == 1
-    assert "-> ra-remote --plan" in out
+    assert calls == [PROOF_URL]
+    assert "tok3n" not in out + err
+    rows = (tmp_path / "state" / "safo" / "runner-check.jsonl").read_text(encoding="utf-8")
+    assert "tok3n" not in rows
+
+
+def test_remotes_naming_different_repos_refuse(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL, extra=(("up", "https://github.com/ChiefGyk3D/other"),))
+    calls: list[str] = []
+    gate = rc.content_gate(repo, env_for(tmp_path, **PUBLIC), ls_remote=local_tips(repo, calls))
+    assert gate.refusal() is not None
+    assert f"{NOT_PUBLISHED} (remote-identity)" in (gate.refusal() or "")
+    assert calls == []
+
+
+def test_the_same_repo_under_several_remotes_still_proves(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL, extra=(("up", "git@github.com:ChiefGyk3D/demo.git"),))
+    calls: list[str] = []
+    assert rc.content_gate(repo, env_for(tmp_path, **PUBLIC), ls_remote=local_tips(repo, calls)).refusal() is None
+    assert calls == [PROOF_URL]
+
+
+def test_the_proof_runs_only_when_a_command_would_be_suggested(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    calls: list[str] = []
+    for command in ("pytest tests/test_a.py", "ls"):
+        code, _, _ = run(
+            ["--strict", "--repo", str(repo), "--command", command],
+            env_for(tmp_path, **PUBLIC),
+            ls_remote=local_tips(repo, calls),
+        )
+        assert code == 0
+    assert calls == []
+    run(
+        ["--strict", "--repo", str(repo), "--command", "pytest"],
+        env_for(tmp_path, **PUBLIC),
+        ls_remote=local_tips(repo, calls),
+    )
+    assert calls == [PROOF_URL]  # one network call per invocation, no cache
+
+
+def test_the_proof_runs_once_per_invocation(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    calls: list[str] = []
+    run(
+        ["--strict", "--repo", str(repo), "--command", "pytest\nmutmut run"],
+        env_for(tmp_path, **PUBLIC),
+        ls_remote=local_tips(repo, calls),
+    )
+    assert len(calls) <= 1
 
 
 def test_publish_check_ignores_repository_config_and_caller_git_env(tmp_path: Path) -> None:
@@ -1765,16 +1883,211 @@ def test_publish_check_ignores_repository_config_and_caller_git_env(tmp_path: Pa
     code, out = strict(tmp_path, repo, GIT_NAMESPACE="other")  # unisolated git would look under another namespace
     assert code == 1
     assert "-> ra-remote --plan" in out
-    # and an unpublished commit stays refused under the same hostile settings
-    (repo / "c.py").write_text("z = 3\n", encoding="utf-8")
-    commit_all(repo, publish=False)
-    assert_unpublished(*strict(tmp_path, repo, GIT_NAMESPACE="other"))
+    tip = head_of(repo)
+    commit(repo, "c.py", "z = 3\n")
+    assert_unpublished(*proof(tmp_path, repo, listing(tip)))
 
 
-def test_publish_check_is_not_run_for_commands_that_need_no_remote(tmp_path: Path) -> None:
-    repo = make_repo(tmp_path, REPO_URL)
-    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
-    commit_all(repo, publish=False)
-    code, out = strict(tmp_path, repo, command="pytest tests/test_a.py")
-    assert code == 0
-    assert NOT_PUBLISHED not in out
+# ---- replace refs, grafts and commit graphs must not forge the ancestry -------------------------------------------
+
+
+def private_head_over_public_tip(tmp_path: Path) -> tuple[Path, str, str]:
+    """A repo whose HEAD is a private commit on top of the one listed public tip; both exist locally."""
+    repo = clean_repo(tmp_path)
+    tip = head_of(repo)
+    commit(repo, "payload.txt", "private bytes\n")
+    return repo, head_of(repo), tip
+
+
+def test_replace_refs_cannot_forge_the_ancestry(tmp_path: Path) -> None:
+    # reviewer reproduction 2: the public tip is replaced by a synthetic commit that descends from the private HEAD
+    repo, private, tip = private_head_over_public_tip(tmp_path)
+    tree = _git_out(repo, "rev-parse", "HEAD^{tree}").decode("ascii").strip()
+    synthetic = (
+        _git_out(
+            repo,
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit-tree",
+            tree,
+            "-p",
+            private,
+            "-m",
+            "synthetic",
+        )
+        .decode("ascii")
+        .strip()
+    )
+    _git(repo, "replace", tip, synthetic)
+    # plain git is fooled (the premise of the attack), the helper is not
+    fooled = subprocess.run(  # noqa: S603 - test fixture
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", "HEAD", tip],  # noqa: S607 - test fixture
+        capture_output=True,
+        check=False,
+    )
+    assert fooled.returncode == 0
+    assert_unpublished(*proof(tmp_path, repo, listing(tip)), "not-ancestor")
+
+
+def test_a_graft_file_cannot_forge_the_ancestry(tmp_path: Path) -> None:
+    repo, private, tip = private_head_over_public_tip(tmp_path)
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    (repo / ".git" / "info" / "grafts").write_text(f"{tip} {private}\n", encoding="ascii")  # tip "descends" from HEAD
+    assert_unpublished(*proof(tmp_path, repo, listing(tip)), "not-ancestor")
+
+
+def test_a_commit_graph_is_not_trusted(tmp_path: Path) -> None:
+    repo, _, tip = private_head_over_public_tip(tmp_path)
+    _git(repo, "commit-graph", "write", "--reachable")
+    assert_unpublished(*proof(tmp_path, repo, listing(tip)), "not-ancestor")
+
+
+def test_every_gate_git_call_carries_the_history_isolation_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = clean_repo(tmp_path)
+    calls: list[tuple[list[str], dict[str, str]]] = []
+    real = subprocess.run
+
+    def spy(argv: list[str], **kwargs: Any) -> Any:
+        if argv[0] != "git":  # the fake listing's own calls use the bare name; the gate resolves the path
+            calls.append((list(argv), dict(kwargs.get("env") or {})))
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    rc.content_gate(repo, env_for(tmp_path, **PUBLIC), ls_remote=local_tips(repo))
+    assert calls
+    for argv, env in calls:
+        for flag in ("--no-replace-objects", "core.useReplaceRefs=false", "core.commitGraph=false"):
+            assert flag in argv, (flag, argv)
+        assert "core.alternateRefsCommand=" in argv
+        assert "advice.graftFileDeprecated=false" in argv
+        assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
+        assert env["GIT_GRAFT_FILE"] == "/dev/null"
+
+
+# ---- the real listing: isolation, strict parsing and bounds (subprocess.run is patched, nothing executes) ----------
+
+OID = "a" * 40
+
+
+class Done:
+    def __init__(self, stdout: bytes = b"", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def patched_run(monkeypatch: pytest.MonkeyPatch, result: Any) -> list[dict[str, Any]]:
+    recorded: list[dict[str, Any]] = []
+
+    def fake(argv: list[str], **kwargs: Any) -> Any:
+        recorded.append({"argv": list(argv), **kwargs})
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(rc, "_ls_remote", _REAL_LS_REMOTE)
+    return recorded
+
+
+_REAL_LS_REMOTE = rc._ls_remote
+
+
+def test_real_listing_command_is_fully_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ("http_proxy", "HTTPS_PROXY", "all_proxy", "NO_PROXY", "GIT_DIR", "GIT_SSH_COMMAND"):
+        monkeypatch.setenv(var, "http://proxy.invalid:3128")
+    recorded = patched_run(monkeypatch, Done(f"{OID}\trefs/heads/main\n".encode()))
+    assert rc._ls_remote(PROOF_URL) == [OID]
+    (call,) = recorded
+    argv, env = call["argv"], call["env"]
+    assert argv[-4:] == ["ls-remote", "--heads", "--tags", PROOF_URL]
+    for pair in (
+        "protocol.allow=never",
+        "protocol.https.allow=always",
+        "credential.helper=",
+        "http.proxy=",
+        "core.askpass=",
+    ):
+        assert argv[argv.index(pair) - 1] == "-c"
+    assert call["timeout"] == 20
+    assert call["stdin"] == subprocess.DEVNULL
+    assert set(env) == {
+        "PATH",
+        "HOME",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_ASKPASS",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_COUNT",
+    }
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_ASKPASS"] == "/bin/false"
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_COUNT"] == "0"
+    assert not any("proxy" in k.lower() for k in env)
+    assert env["HOME"] != os.environ.get("HOME")
+    assert call["cwd"] != os.getcwd()  # never discovers the caller's repository
+
+
+def test_real_listing_parses_strictly_and_keeps_only_heads_and_tags(monkeypatch: pytest.MonkeyPatch) -> None:
+    long_oid = "b" * 64
+    text = f"{OID}\trefs/heads/main\n{long_oid}\trefs/tags/v1\n{OID}\trefs/tags/v1^{{}}\n{OID}\trefs/pull/1/head\n"
+    patched_run(monkeypatch, Done(text.encode()))
+    assert rc._ls_remote(PROOF_URL) == [OID, long_oid, OID]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not an oid\trefs/heads/main\n",
+        f"{OID[:-1]}\trefs/heads/main\n",
+        f"{OID.upper()}\trefs/heads/main\n",
+        f"{OID}\n",
+        f"{OID}\trefs/heads/main\ngarbage\n",
+    ],
+)
+def test_real_listing_unparseable_output_is_refused(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    patched_run(monkeypatch, Done(text.encode()))
+    with pytest.raises(rc.ProofError) as info:
+        rc._ls_remote(PROOF_URL)
+    assert info.value.klass == "unparseable"
+
+
+def test_real_listing_size_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    patched_run(monkeypatch, Done(b"x" * (rc.LISTING_BYTES + 1)))
+    with pytest.raises(rc.ProofError) as info:
+        rc._ls_remote(PROOF_URL)
+    assert info.value.klass == "unparseable"
+
+
+def test_real_listing_line_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rc, "LISTING_BYTES", 10**9)  # isolate the line cap from the byte cap
+    line = f"{OID}\trefs/heads/b\n"
+    patched_run(monkeypatch, Done((line * (rc.LISTING_REFS + 1)).encode()))
+    with pytest.raises(rc.ProofError) as info:
+        rc._ls_remote(PROOF_URL)
+    assert info.value.klass == "unparseable"
+    patched_run(monkeypatch, Done((line * rc.LISTING_REFS).encode()))
+    assert len(rc._ls_remote(PROOF_URL)) == rc.LISTING_REFS
+
+
+@pytest.mark.parametrize(
+    ("result", "klass"),
+    [
+        (subprocess.TimeoutExpired(["git"], 20), "timeout"),
+        (OSError("boom"), "network"),
+        (Done(b"", 128), "network"),
+    ],
+)
+def test_real_listing_failures_map_to_fixed_classes(monkeypatch: pytest.MonkeyPatch, result: Any, klass: str) -> None:
+    patched_run(monkeypatch, result)
+    with pytest.raises(rc.ProofError) as info:
+        rc._ls_remote(PROOF_URL)
+    assert info.value.klass == klass
+    assert PROOF_URL not in str(info.value)
