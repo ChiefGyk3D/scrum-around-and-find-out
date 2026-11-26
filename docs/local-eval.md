@@ -10,6 +10,7 @@ rules in [Routing](routing.md).
 ```sh
 safo-eval run --models qwen3.5:4b,gemma4:12b --tasks all --repeats 3 --out ./eval-out --calibrate 12
 safo-eval report --runs ./eval-out/runs.jsonl --out ./eval-out     # rebuild report.md from a JSONL
+safo-eval report --runs ./eval-out/runs.jsonl --out ./eval-out --rescore   # re-score stored outputs, no model call
 safo-eval calibrate --runs ./eval-out/runs.jsonl --n 12 --out ./eval-out/spot-check.md
 ```
 
@@ -27,6 +28,14 @@ Per run, by code: fact recall (share of the fixture's `facts` found in the outpu
 the format check and the length bound. A run passes when recall is 0.8 or more, there are no forbidden hits, the format
 is valid and the output is within `max_chars`. The table shows pass rate, mean recall, median latency, tokens per second,
 the number of runs with a forbidden hit, and the busy and failed counts.
+
+Code fences: for `json` and `json-object` formats the scorer strips exactly one outer markdown code fence (an opening
+line of three backticks with an optional language tag, a closing line of three backticks, only whitespace outside)
+before the strict JSON check. Text before or after the fence, an unclosed fence, or a second fence still fails the
+format check. Each run records `fenced: true` when a fence was stripped, and the report shows the fenced share per task
+and model next to the pass rate. A model with a fenced share above 0 passes only because of the strip, so a downstream
+consumer of its output must strip one outer fence too. `report --rescore` recomputes every stored output with the
+current scorer, without calling a model, and writes `report-rescored.md` and `runs-rescored.jsonl`.
 
 ## Add a fixture
 
@@ -58,17 +67,22 @@ Add one JSON file under `eval/fixtures/<task>/`. The task type is the directory 
 
 ## Read the routing table
 
-For each task the report takes the best pass rate of any model and applies one rule:
+For each task the report takes the best model by the lower bound of the 95 percent Wilson interval of its pass rate
+(the `95% CI` column shows the whole interval) and applies one rule to that lower bound, so a cell with few runs cannot
+qualify on luck: two passes out of two has a rate of 1.00 but a lower bound of about 0.34.
 
-| best pass rate | tier |
+| best lower bound | tier |
 |---|---|
 | 0.9 or more | local only: `local-qwen` or `local-gemma`, whichever scored higher (a tie goes to qwen) |
 | 0.6 up to 0.9 | `local-then-claude-check`: the local model drafts, a Claude model checks against the source |
 | below 0.6, or no scored runs | `claude` |
 
+The thresholds are unchanged (0.9 and 0.6); only what they are applied to changed. Reaching a 0.9 lower bound takes
+about 40 clean runs in a cell, so most cells land in the check tier until the sample grows.
+
 The thresholds are constants in `src/safo/localeval.py` (`LOCAL_MIN`, `CHECK_MIN`, `PASS_RECALL`). A small sample is a
 lead, not a verdict: with two repeats over six fixtures a task has twelve scored runs per model, so one miss moves the
-rate by about eight points. Spot-check with `--calibrate` before trusting a table, and re-run after a model or prompt
+rate by about eight points, and the interval is wide. Spot-check with `--calibrate` before trusting a table, and re-run after a model or prompt
 change.
 
 ## How the table drives enforcement

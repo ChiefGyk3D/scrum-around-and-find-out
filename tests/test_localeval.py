@@ -67,6 +67,44 @@ def test_json_format_checks() -> None:
     assert not le.score_output(obj, "[1, 2]").format_ok
 
 
+def tri() -> le.Fixture:  # a json-object fixture
+    return fx(required_format="json-object", facts=(le.Fact("x"),), forbidden=())
+
+
+FENCED = '```json\n{"x": 1}\n```'
+
+
+def test_one_outer_fence_is_stripped_and_flagged() -> None:
+    for out in (FENCED, '\n  ```\n{"x": 1}\n```  \n', '```JSON5\n{"x": 1}\n```'):
+        s = le.score_output(tri(), out)
+        assert s.format_ok and s.passed and s.fenced, out
+
+
+def test_unfenced_json_passes_with_fenced_false() -> None:
+    s = le.score_output(tri(), '{"x": 1}')
+    assert s.format_ok and s.passed and not s.fenced
+
+
+@pytest.mark.parametrize(
+    "out",
+    [
+        'Here you go:\n```json\n{"x": 1}\n```',
+        '```json\n{"x": 1}\n```\nHope that helps',
+        '```json\n{"x": 1}\n```\n```json\n{"x": 1}\n```',
+        '```json\n{"x": 1}',
+        '```json {"x": 1} ```',
+    ],
+)
+def test_anything_else_around_the_fence_fails(out: str) -> None:
+    s = le.score_output(tri(), out)
+    assert not s.format_ok and not s.passed
+
+
+def test_fence_is_not_stripped_for_non_json_formats() -> None:
+    s = le.score_output(fx(required_format="any"), "```\nalpha beta\n```")
+    assert s.format_ok and not s.fenced
+
+
 def test_regex_format() -> None:
     f = fx(required_format=r"regex:^(feat|fix): ", facts=(le.Fact("x"),), forbidden=())
     assert le.score_output(f, "fix: x").format_ok
@@ -267,15 +305,65 @@ def test_all_busy_gives_no_verdict_and_routes_to_claude() -> None:
     ],
 )
 def test_tier_thresholds(rates: dict[str, float], tier: str) -> None:
-    assert le.tier_for({m: {"pass_rate": r} for m, r in rates.items()})[0] == tier
+    assert le.tier_for({m: {"pass_rate": r, "ci_low": r} for m, r in rates.items()})[0] == tier
+
+
+def test_few_runs_cannot_qualify_on_luck() -> None:
+    # 2 of 2 passes is a 1.00 rate but the Wilson lower bound is about 0.34: claude, not local
+    s = le.summarize([rec("pr-summary", "qwen3.5:4b"), rec("pr-summary", "qwen3.5:4b")])[("pr-summary", "qwen3.5:4b")]
+    assert s["pass_rate"] == 1.0 and s["ci_low"] < 0.4
+    assert le.tier_for({"qwen3.5:4b": s})[0] == "claude"
+    many = le.summarize([rec("pr-summary", "qwen3.5:4b") for _ in range(60)])[("pr-summary", "qwen3.5:4b")]
+    assert many["ci_low"] >= le.LOCAL_MIN and le.tier_for({"qwen3.5:4b": many})[0] == "local-qwen"
+
+
+def test_wilson_interval_known_values() -> None:
+    lo, hi = le.wilson(5, 10)
+    assert (round(lo, 3), round(hi, 3)) == (0.237, 0.763)
+    assert le.wilson(0, 0) == (0.0, 1.0)
+    lo, hi = le.wilson(10, 10)
+    assert hi == pytest.approx(1.0) and round(lo, 3) == 0.722
 
 
 def test_report_has_table_and_routing_rule() -> None:
-    runs = [rec("pr-summary", "qwen3.5:4b") for _ in range(3)] + [rec("commit-message", "qwen3.5:4b", passed=False)]
+    runs = [rec("pr-summary", "qwen3.5:4b") for _ in range(40)] + [rec("commit-message", "qwen3.5:4b", passed=False)]
     text = le.render_report(runs)
-    assert "| pr-summary | qwen3.5:4b | 3 | 1.00 |" in text
+    assert "| pr-summary | qwen3.5:4b | 40 | 1.00 |" in text
     assert "## ROUTING TABLE" in text and ">= 0.9: local only" in text
     assert "| pr-summary | local-qwen |" in text and "| commit-message | claude |" in text
+
+
+def test_report_shows_fenced_share_and_confidence() -> None:
+    runs = [rec("issue-triage", "m") for _ in range(4)]
+    for r in runs[:3]:
+        r["score"]["fenced"] = True
+    text = le.render_report(runs)
+    assert "| fenced |" in text and "| 95% CI |" in text
+    assert "| issue-triage | m | 4 | 1.00 | [0.51, 1.00] | 1.00 | 0.75 |" in text
+    assert "lower bound" in text
+
+
+def test_rescore_recomputes_scores_without_calling_the_model(tmp_path: Path) -> None:
+    root = tmp_path / "fx"
+    _write_fixture(
+        root,
+        "issue-triage",
+        "01",
+        {"task": "issue-triage", "input": "i", "facts": ["x"], "max_chars": 100, "required_format": "json-object"},
+    )
+    old = rec("issue-triage", "m")
+    old["fixture"] = "issue-triage/01"
+    old["output"] = FENCED
+    old["score"]["passed"] = False
+    old["score"]["format_ok"] = False
+    runs_in = tmp_path / "runs.jsonl"
+    runs_in.write_text(json.dumps(old) + "\n", encoding="utf-8")
+    out = tmp_path / "o"
+    assert le.entry(["report", "--runs", str(runs_in), "--out", str(out), "--rescore", "--fixtures", str(root)]) == 0
+    new = json.loads((out / "runs-rescored.jsonl").read_text().splitlines()[0])
+    assert new["score"]["passed"] and new["score"]["fenced"]
+    assert "| issue-triage | m | 1 | 1.00 |" in (out / "report-rescored.md").read_text()
+    assert json.loads(runs_in.read_text())["score"]["passed"] is False  # input untouched
 
 
 # ---- calibration and CLI

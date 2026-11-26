@@ -2,7 +2,7 @@
 """safo-eval: score the local LLM against synthetic work items with ground truth, and derive a routing table (#484).
 
     safo-eval run --models qwen3.5:4b,gemma4:12b --tasks all --repeats 3 --out DIR [--calibrate N]
-    safo-eval report --runs DIR/runs.jsonl --out DIR
+    safo-eval report --runs DIR/runs.jsonl --out DIR [--rescore]
     safo-eval calibrate --runs DIR/runs.jsonl --n 10 --out FILE
 
 Scoring is code only (fact recall, forbidden hits, format, length); no model ever grades a model. Calls go through
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import re
 import statistics
@@ -91,6 +92,7 @@ class Score:
     format_ok: bool
     length_ok: bool
     passed: bool = field(default=False)
+    fenced: bool = False  # one outer code fence was stripped before the json check
 
 
 def load_fixture(path: Path) -> Fixture:
@@ -138,17 +140,36 @@ def _fact_matches(fact: Fact, output: str) -> bool:
     return any(re.search(v, output, re.IGNORECASE) for v in fact.variants)
 
 
-def _format_ok(spec: str, output: str) -> bool:
+_FENCE = re.compile(r"\A\s*```[\w+.-]*[ \t]*\n(?P<body>.*?)\n[ \t]*```\s*\Z", re.DOTALL)
+
+
+def strip_one_fence(output: str) -> tuple[str, bool]:
+    """Remove exactly one outer markdown code fence; only whitespace may sit outside it.
+
+    Text before or after the fence, an unclosed fence, or a second fence inside leaves the output unchanged.
+    """
+    m = _FENCE.match(output)
+    if m is None:
+        return output, False
+    body = m.group("body")
+    if any(line.lstrip().startswith("```") for line in body.splitlines()):
+        return output, False
+    return body, True
+
+
+def _format_ok(spec: str, output: str) -> tuple[bool, bool]:
+    """Returns (format ok, whether an outer fence was stripped to get there)."""
     if spec == "any":
-        return True
+        return True, False
     if spec in ("json", "json-object"):
+        body, fenced = strip_one_fence(output)
         try:
-            data = json.loads(output.strip())
+            data = json.loads(body.strip())
         except ValueError:
-            return False
-        return isinstance(data, dict) if spec == "json-object" else True
+            return False, fenced
+        return (isinstance(data, dict) if spec == "json-object" else True), fenced
     if spec.startswith("regex:"):
-        return re.search(spec[len("regex:") :], output, re.DOTALL) is not None
+        return re.search(spec[len("regex:") :], output, re.DOTALL) is not None, False
     raise EvalError(f"unknown required_format {spec!r}")
 
 
@@ -156,10 +177,10 @@ def score_output(fixture: Fixture, output: str) -> Score:
     missed = [f.text for f in fixture.facts if not _fact_matches(f, output)]
     recall = 1.0 - len(missed) / len(fixture.facts)
     hits = [p for p in fixture.forbidden if re.search(p, output, re.IGNORECASE)]
-    fmt = _format_ok(fixture.required_format, output)
+    fmt, fenced = _format_ok(fixture.required_format, output)
     length = len(output) <= fixture.max_chars
     passed = recall >= PASS_RECALL and not hits and fmt and length
-    return Score(recall, missed, hits, fmt, length, passed)
+    return Score(recall, missed, hits, fmt, length, passed, fenced)
 
 
 def build_prompt(fixture: Fixture) -> str:
@@ -243,11 +264,23 @@ def run_one(
             "format_ok": score.format_ok,
             "length_ok": score.length_ok,
             "passed": score.passed,
+            "fenced": score.fenced,
         }
         break
     record["attempts"] = attempts
     record["latency_s"] = round(time.monotonic() - started, 3)
     return record
+
+
+def wilson(passed: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95 percent Wilson score interval for a pass rate; (0, 1) when there are no scored runs."""
+    if n <= 0:
+        return 0.0, 1.0
+    p = passed / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
 
 
 def summarize(runs: Sequence[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
@@ -260,11 +293,16 @@ def summarize(runs: Sequence[dict[str, Any]]) -> dict[tuple[str, str], dict[str,
         failed = sum(1 for r in rs if r["status"] == "failed")
         passed = sum(1 for r in ok if r["score"]["passed"])
         denom = len(ok) + failed  # busy is not an error and not a verdict
+        ci_low, ci_high = wilson(passed, denom)
+        fenced = sum(1 for r in ok if r["score"].get("fenced"))
         rates = [r["eval_tokens"] / r["call_seconds"] for r in ok if r.get("eval_tokens") and r.get("call_seconds")]
         out[key] = {
             "runs": len(rs),
             "scored": denom,
             "pass_rate": passed / denom if denom else None,
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+            "fenced_share": fenced / len(ok) if ok else None,
             "mean_recall": statistics.fmean(r["score"]["recall"] for r in ok) if ok else None,
             "median_latency": statistics.median(r["latency_s"] for r in ok) if ok else None,
             "tok_per_s": statistics.median(rates) if rates else None,
@@ -276,18 +314,19 @@ def summarize(runs: Sequence[dict[str, Any]]) -> dict[tuple[str, str], dict[str,
 
 
 def tier_for(task_stats: dict[str, dict[str, Any]]) -> tuple[str, str]:
-    """task_stats maps model -> summary. Returns (tier, reason) using the stated thresholds."""
-    rated = {m: s["pass_rate"] for m, s in task_stats.items() if s["pass_rate"] is not None}
+    """task_stats maps model -> summary. Returns (tier, reason); thresholds apply to the Wilson lower bound."""
+    rated = {m: s["ci_low"] for m, s in task_stats.items() if s["pass_rate"] is not None}
     if not rated:
         return "claude", "no scored runs"
     # highest pass rate wins; a tie goes to the smaller model (qwen) by sort order
     best = max(sorted(rated, key=lambda m: (MODEL_TIER.get(m) != "local-qwen", m)), key=lambda m: rated[m])
     rate = rated[best]
+    shown = f"{best} lower bound {rate:.2f} (pass rate {task_stats[best]['pass_rate']:.2f})"
     if rate >= LOCAL_MIN:
-        return MODEL_TIER.get(best, f"local-{best}"), f"{best} pass rate {rate:.2f} >= {LOCAL_MIN}"
+        return MODEL_TIER.get(best, f"local-{best}"), f"{shown} >= {LOCAL_MIN}"
     if rate >= CHECK_MIN:
-        return "local-then-claude-check", f"best pass rate {rate:.2f} ({best}) in [{CHECK_MIN}, {LOCAL_MIN})"
-    return "claude", f"best pass rate {rate:.2f} ({best}) < {CHECK_MIN}"
+        return "local-then-claude-check", f"{shown} in [{CHECK_MIN}, {LOCAL_MIN})"
+    return "claude", f"{shown} < {CHECK_MIN}"
 
 
 def _fmt(value: float | None, spec: str = ".2f") -> str:
@@ -300,28 +339,34 @@ def render_report(runs: Sequence[dict[str, Any]]) -> str:
     models = sorted({k[1] for k in stats})
     lines = ["# Local LLM evaluation", "", f"Runs: {len(runs)}. Scoring is code only (see docs/local-eval.md).", ""]
     lines += [
-        "| task | model | runs | pass rate | mean recall | median latency s | tok/s | forbidden | busy | failed |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| task | model | runs | pass rate | 95% CI | mean recall | fenced | median latency s | tok/s | forbidden "
+        "| busy | failed |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for t in tasks:
         for m in models:
             s = stats.get((t, m))
             if s:
                 lines.append(
-                    f"| {t} | {m} | {s['runs']} | {_fmt(s['pass_rate'])} | {_fmt(s['mean_recall'])} | "
-                    f"{_fmt(s['median_latency'], '.1f')} | {_fmt(s['tok_per_s'], '.0f')} | {s['forbidden_runs']} | "
+                    f"| {t} | {m} | {s['runs']} | {_fmt(s['pass_rate'])} | "
+                    f"[{_fmt(s['ci_low'])}, {_fmt(s['ci_high'])}] | {_fmt(s['mean_recall'])} | "
+                    f"{_fmt(s['fenced_share'])} | {_fmt(s['median_latency'], '.1f')} | "
+                    f"{_fmt(s['tok_per_s'], '.0f')} | {s['forbidden_runs']} | "
                     f"{s['busy']} | {s['failed']} |"
                 )
     lines += [
         "",
         "## ROUTING TABLE",
         "",
-        "Rule, applied by code: take the best model pass rate for the task (failed runs count as not passed, busy runs "
-        f"are left out). A run passes when recall >= {PASS_RECALL}, no forbidden string appears, the format is valid "
-        "and the length bound holds.",
-        f"- pass rate >= {LOCAL_MIN}: local only (local-qwen or local-gemma, whichever scored higher; ties go to qwen)",
-        f"- {CHECK_MIN} <= pass rate < {LOCAL_MIN}: local-then-claude-check",
-        f"- pass rate < {CHECK_MIN}, or no scored runs: claude",
+        "Rule, applied by code: take the best model for the task by the lower bound of the 95% Wilson interval of its "
+        "pass rate (failed runs count as not passed, busy runs are left out), so a cell with few runs cannot qualify "
+        "on luck. A fenced share above 0 means the model wrapped its JSON in a code fence: a downstream consumer must "
+        f"strip one outer fence too. A run passes when recall >= {PASS_RECALL}, no forbidden string appears, the "
+        "format is valid and the length bound holds.",
+        f"- lower bound >= {LOCAL_MIN}: local only (local-qwen or local-gemma, whichever scored higher; ties go to "
+        "qwen)",
+        f"- {CHECK_MIN} <= lower bound < {LOCAL_MIN}: local-then-claude-check",
+        f"- lower bound < {CHECK_MIN}, or no scored runs: claude",
         "",
         "| task | tier | why |",
         "|---|---|---|",
@@ -358,6 +403,30 @@ def _read_runs(path: Path) -> list[dict[str, Any]]:
         raise EvalError(f"cannot read runs {path}: {exc}") from exc
 
 
+def rescore(runs: Sequence[dict[str, Any]], fixtures: Sequence[Fixture]) -> list[dict[str, Any]]:
+    """Recompute the score of every ok run from its stored output. No model call."""
+    by_id = {f.id: f for f in fixtures}
+    out: list[dict[str, Any]] = []
+    for r in runs:
+        new = dict(r)
+        if r["status"] == "ok":
+            fx = by_id.get(r["fixture"])
+            if fx is None:
+                raise EvalError(f"no fixture for {r['fixture']}")
+            sc = score_output(fx, r["output"])
+            new["score"] = {
+                "recall": sc.recall,
+                "facts_missed": sc.facts_missed,
+                "forbidden_hits": sc.forbidden_hits,
+                "format_ok": sc.format_ok,
+                "length_ok": sc.length_ok,
+                "passed": sc.passed,
+                "fenced": sc.fenced,
+            }
+        out.append(new)
+    return out
+
+
 def run_all(
     fixtures: Sequence[Fixture], models: Sequence[str], repeats: int, runs_path: Path, **kw: Any
 ) -> list[dict[str, Any]]:
@@ -390,6 +459,8 @@ def entry(argv: Sequence[str] | None = None) -> int:
     rp = sub.add_parser("report")
     rp.add_argument("--runs", required=True, type=Path)
     rp.add_argument("--out", required=True, type=Path)
+    rp.add_argument("--rescore", action="store_true", help="re-score stored outputs; writes report-rescored.md")
+    rp.add_argument("--fixtures", type=Path, default=FIXTURES_DEFAULT)
     c = sub.add_parser("calibrate")
     c.add_argument("--runs", required=True, type=Path)
     c.add_argument("--n", required=True, type=int)
@@ -411,7 +482,15 @@ def entry(argv: Sequence[str] | None = None) -> int:
             print(f"{len(runs)} runs; report at {args.out / 'report.md'}")
         elif args.cmd == "report":
             args.out.mkdir(parents=True, exist_ok=True)
-            (args.out / "report.md").write_text(render_report(_read_runs(args.runs)), encoding="utf-8")
+            runs = _read_runs(args.runs)
+            if args.rescore:
+                runs = rescore(runs, load_fixtures(args.fixtures))
+                (args.out / "runs-rescored.jsonl").write_text(
+                    "".join(json.dumps(r) + "\n" for r in runs), encoding="utf-8"
+                )
+                (args.out / "report-rescored.md").write_text(render_report(runs), encoding="utf-8")
+            else:
+                (args.out / "report.md").write_text(render_report(runs), encoding="utf-8")
         else:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(calibration_sample(_read_runs(args.runs), args.n), encoding="utf-8")
