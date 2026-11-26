@@ -1,0 +1,38 @@
+{
+  "task": "ci-log-digest",
+  "input": "2026-05-20T08:20:10Z Job web-build started\n09:00:00Z [command]/usr/bin/git config --local --get remote.origin.url\n09:00:07Z Download action repository 'example-org/setup-tool@v2' (SHA:bef3a160714f9a23bef7ca05adb3fcf43868e6d9)\n09:00:12Z [command]/usr/bin/git config --local --get remote.origin.url\n09:00:09Z Received 8823393 of 112046076 (90.7%), 1.7 MBs/sec\n09:00:36Z ##[group]Set up job\n09:00:10Z Post job cleanup.\n09:00:18Z Post job cleanup.\n09:00:14Z ##[group]Restore tools\n09:00:16Z Download action repository 'example-org/setup-tool@v2' (SHA:aa6d761d81ec415fb58380f799f3801a625c4b6e)\n09:01:12Z ##[endgroup]\n09:01:20Z ##[endgroup]\n09:01:39Z Temporarily overriding HOME='/home/runner/work/_temp/b9568b96'\n09:00:24Z ##[endgroup]\n09:01:31Z Post job cleanup.\n09:01:24Z ##[endgroup]\n09:00:30Z ##[endgroup]\n09:02:08Z Temporarily overriding HOME='/home/runner/work/_temp/270dafeb'\n09:02:16Z Download action repository 'example-org/setup-tool@v3' (SHA:9c1f6fdeb998621c8c3b5a318a8a5e70be33d926)\n09:02:24Z [command]/usr/bin/git config --local --get remote.origin.url\n09:01:16Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:40Z [command]/usr/bin/git config --local --get remote.origin.url\n09:03:09Z Temporarily overriding HOME='/home/runner/work/_temp/15138210'\n09:03:18Z [command]/usr/bin/git config --local --get remote.origin.url\n09:03:04Z Post job cleanup.\n09:02:00Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:55Z ##[endgroup]\n09:01:18Z Download action repository 'example-org/setup-tool@v4' (SHA:5b7e6e8e810005b5a7cb10e26000ef40b50a0533)\n09:02:15Z Received 47387762 of 99820216 (19.0%), 14.2 MBs/sec\n09:03:44Z ##[group]Checkout\n09:00:58Z ##[group]Print environment\n09:02:00Z ##[endgroup]\n09:03:06Z Received 84169615 of 176360581 (56.2%), 1.3 MBs/sec\n09:02:08Z [command]/usr/bin/git config --local --get remote.origin.url\n09:03:51Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:50Z [command]/usr/bin/git config --local --get remote.origin.url\n09:04:05Z Post job cleanup.\n09:02:24Z Download action repository 'example-org/setup-tool@v5' (SHA:e59ffed5df33208154e2289b4d423037cd8530a2)\n09:03:42Z ##[group]Set up job\n09:01:54Z Temporarily overriding HOME='/home/runner/work/_temp/4e56a94c'\n09:05:12Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:40Z Received 86457805 of 114154977 (26.6%), 36.1 MBs/sec\n09:05:28Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:06Z ##[endgroup]\n09:05:01Z Received 69426485 of 132397136 (57.8%), 6.3 MBs/sec\n09:05:08Z Received 47580721 of 111331974 (85.5%), 40.1 MBs/sec\n09:06:00Z Post job cleanup.\n09:04:36Z [command]/usr/bin/git config --local --get remote.origin.url\n09:04:42Z ##[endgroup]\n09:07:12Z Post job cleanup.\n09:04:54Z Post job cleanup.\n09:01:40Z Received 21441745 of 142073237 (40.1%), 20.7 MBs/sec\n09:04:15Z Post job cleanup.\n2026-05-20T08:21:44Z ##[group]Run actions/cache@v4\n2026-05-20T08:21:49Z ##[warning]Failed to restore cache entry. Key: pnpm-store-linux-a41c, error: Unexpected end of archive\n2026-05-20T08:21:49Z Cache not restored, continuing without it\n2026-05-20T08:21:49Z ##[endgroup]\n2026-05-20T08:21:50Z ##[group]Run pnpm install --offline --frozen-lockfile\n2026-05-20T08:21:52Z  ERR_PNPM_NO_OFFLINE_TARBALL  A package is missing from the store but cannot download it in offline mode: left-pad-lite, version 2.0.3\n2026-05-20T08:21:52Z ##[error]Process completed with exit code 1.\n09:06:04Z Post job cleanup.\n09:06:11Z ##[group]Warm caches\n09:03:36Z ##[group]Set up job\n09:01:50Z ##[group]Set up job\n09:07:28Z Received 36397351 of 100613615 (76.5%), 1.0 MBs/sec\n09:01:54Z [command]/usr/bin/git config --local --get remote.origin.url\n09:08:42Z Download action repository 'example-org/setup-tool@v5' (SHA:eff96f6ec601b442645a3c2d14dc8fd387ef83b7)\n09:02:57Z Download action repository 'example-org/setup-tool@v4' (SHA:b27701a5432a6b0d6e18845d2fe338653f7a6157)\n09:02:00Z Temporarily overriding HOME='/home/runner/work/_temp/74c750a7'\n09:07:07Z Post job cleanup.\n09:06:12Z [command]/usr/bin/git config --local --get remote.origin.url\n09:03:09Z Post job cleanup.\n09:05:20Z ##[endgroup]\n09:05:25Z Received 46916690 of 114234381 (94.9%), 13.9 MBs/sec\n09:03:18Z Download action repository 'example-org/setup-tool@v4' (SHA:b6cf09d74754f154a24dcd7832e6058f57f30718)\n09:03:21Z Received 72892237 of 106454744 (35.3%), 5.7 MBs/sec\n09:02:16Z Download action repository 'example-org/setup-tool@v2' (SHA:01d6be732c8b4eeda074a66c99532d239ee86aca)\n09:09:12Z Post job cleanup.\n09:02:20Z [command]/usr/bin/git config --local --get remote.origin.url\n09:05:55Z [command]/usr/bin/git config --local --get remote.origin.url\n09:10:48Z Download action repository 'example-org/setup-tool@v5' (SHA:f5159b6d50447a188e8cd758d314a378bf6f43a7)\n09:03:39Z ##[group]Upload logs\n09:04:56Z Temporarily overriding HOME='/home/runner/work/_temp/0645fbc4'\n09:05:00Z [command]/usr/bin/git config --local --get remote.origin.url\n09:07:36Z Download action repository 'example-org/setup-tool@v3' (SHA:6ae9b6ec3a86686bd6f277c3e5713e4e16a9b6a4)\n09:11:33Z [command]/usr/bin/git config --local --get remote.origin.url\n09:06:30Z Temporarily overriding HOME='/home/runner/work/_temp/5b462153'\n09:02:38Z ##[group]Checkout",
+  "facts": [
+    "pnpm-store-linux-a41c",
+    "left-pad-lite",
+    {
+      "text": "offline",
+      "variants": [
+        "\\boffline\\b",
+        "\\bwithout (network|downloading)\\b"
+      ]
+    },
+    {
+      "text": "restore",
+      "variants": [
+        "\\brestor\\w+",
+        "\\bunexpected end of archive\\b",
+        "\\bcorrupt\\w*"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bregistry (is )?(down|unavailable)\\b",
+    "\\b(404|503)\\b",
+    "\\bnot found in (the )?lockfile\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "web-build failed because the package registry was down and left-pad-lite could not be downloaded.",
+    "pnpm install failed since left-pad-lite is missing from the lockfile and must be added."
+  ],
+  "correct_alts": [
+    "The web-build job failed in pnpm install --offline because the cache restore for pnpm-store-linux-a41c broke with a truncated archive, so the store was empty and left-pad-lite 2.0.3 could not be fetched offline.\nThe cache warning was the root cause, not the install step.",
+    "Restoring the pnpm cache failed (unexpected end of archive for key pnpm-store-linux-a41c), and because the next step installs offline it died on the missing left-pad-lite tarball, so the install step is only the symptom of the broken restore."
+  ]
+}

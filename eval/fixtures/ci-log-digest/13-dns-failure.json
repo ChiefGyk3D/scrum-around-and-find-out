@@ -1,0 +1,45 @@
+{
+  "task": "ci-log-digest",
+  "input": "2026-04-11T14:01:55Z Job integration started\n09:00:00Z Download action repository 'example-org/setup-tool@v2' (SHA:3ba6ea1c0d25aa8b230f39de85eb90bba415c4c8)\n09:00:04Z [command]/usr/bin/git config --local --get remote.origin.url\n09:00:10Z Post job cleanup.\n09:00:12Z Post job cleanup.\n09:00:36Z Received 87407848 of 174434486 (60.6%), 1.6 MBs/sec\n09:00:10Z Post job cleanup.\n09:00:24Z ##[endgroup]\n09:00:42Z Received 86373705 of 169874619 (72.8%), 3.7 MBs/sec\n09:00:56Z [command]/usr/bin/git config --local --get remote.origin.url\n09:00:18Z Post job cleanup.\n09:00:40Z Download action repository 'example-org/setup-tool@v2' (SHA:6c4220eca4d2af1dbf2737d95fd86a6c42302b7d)\n09:00:55Z Download action repository 'example-org/setup-tool@v3' (SHA:096ce859bb65512296191675ee935fc2118e5331)\n09:01:36Z Download action repository 'example-org/setup-tool@v1' (SHA:874a18738af36f599e70252311acfb0ddd12968b)\n09:01:18Z Received 58287019 of 95848603 (45.8%), 19.2 MBs/sec\n09:00:28Z [command]/usr/bin/git config --local --get remote.origin.url\n09:01:15Z ##[group]Set up job\n09:00:48Z ##[group]Run formatter check\n09:01:08Z ##[group]Collect coverage\n09:00:54Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:13Z Post job cleanup.\n09:03:00Z ##[endgroup]\n09:02:06Z Received 87113548 of 182785245 (55.0%), 35.0 MBs/sec\n09:01:28Z [command]/usr/bin/git config --local --get remote.origin.url\n09:00:46Z ##[endgroup]\n09:03:36Z ##[group]Print environment\n09:01:40Z Post job cleanup.\n09:02:36Z Download action repository 'example-org/setup-tool@v4' (SHA:1fac1cc90134e9a39ccf53af02ecd4946013e022)\n09:04:03Z ##[endgroup]\n09:01:24Z ##[endgroup]\n09:03:52Z ##[group]Run formatter check\n09:02:00Z Received 74354899 of 146061731 (37.4%), 14.1 MBs/sec\n09:01:33Z Post job cleanup.\n09:01:36Z Received 48795061 of 106763302 (1.7%), 6.1 MBs/sec\n09:03:18Z [command]/usr/bin/git config --local --get remote.origin.url\n2026-04-11T14:02:30Z ##[group]Run make fetch-fixtures\n2026-04-11T14:02:30Z curl: (6) Could not resolve host: artifacts.example.com\n2026-04-11T14:02:35Z retrying in 5 s (attempt 2 of 3)\n2026-04-11T14:02:40Z curl: (6) Could not resolve host: artifacts.example.com\n2026-04-11T14:02:50Z retrying in 10 s (attempt 3 of 3)\n2026-04-11T14:03:05Z curl: (6) Could not resolve host: artifacts.example.com\n2026-04-11T14:03:05Z make: *** [Makefile:48: fetch-fixtures] Error 6\n2026-04-11T14:03:05Z ##[error]Process completed with exit code 2.\n09:03:58Z Post job cleanup.\n09:02:55Z Download action repository 'example-org/setup-tool@v5' (SHA:60f326303005ccb7d4bfca65ea48fe5764ce86c8)\n09:02:24Z Temporarily overriding HOME='/home/runner/work/_temp/832cbaff'\n09:03:05Z ##[endgroup]\n09:05:42Z Temporarily overriding HOME='/home/runner/work/_temp/a98c8bec'\n09:01:18Z ##[group]Unpack fixtures\n09:01:20Z Received 75180469 of 117316748 (60.7%), 3.6 MBs/sec\n09:01:22Z Temporarily overriding HOME='/home/runner/work/_temp/cb2f0dd7'\n09:06:18Z Post job cleanup.\n09:01:26Z Received 44082424 of 109152569 (58.9%), 12.2 MBs/sec\n09:03:40Z ##[endgroup]\n09:04:30Z [command]/usr/bin/git config --local --get remote.origin.url\n09:01:32Z ##[group]Upload logs\n09:02:21Z Temporarily overriding HOME='/home/runner/work/_temp/fdf17e32'\n09:01:36Z ##[endgroup]\n09:05:43Z Post job cleanup.",
+  "facts": [
+    "artifacts.example.com",
+    {
+      "text": "fetch-fixtures",
+      "variants": [
+        "\\bfetch fixtures\\b"
+      ]
+    },
+    {
+      "text": "Could not resolve host",
+      "variants": [
+        "\\bDNS\\b",
+        "\\bname resolution\\b",
+        "\\bresolv\\w+"
+      ]
+    },
+    {
+      "text": "3 attempts",
+      "variants": [
+        "\\b(3|three) (attempts|tries|retries)\\b",
+        "\\battempt 3 of 3\\b",
+        "\\bafter (3|three)\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bcertificate\\b",
+    "\\bTLS\\b",
+    "\\b(404|503)\\b",
+    "\\bconnection refused\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "fetch-fixtures failed because artifacts.example.com returned a 503 error after 3 attempts.",
+    "The download broke because the TLS certificate of artifacts.example.com has expired."
+  ],
+  "correct_alts": [
+    "The integration job failed in make fetch-fixtures: curl could not resolve artifacts.example.com, a DNS failure, and it gave up after 3 attempts.\nSo the host name did not resolve from the runner, and nothing was downloaded.",
+    "Name resolution for artifacts.example.com failed on every try (three attempts), since curl exited with error 6 and make stopped at fetch-fixtures."
+  ]
+}

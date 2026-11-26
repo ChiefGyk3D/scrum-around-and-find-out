@@ -1,0 +1,35 @@
+{
+  "task": "doc-skeleton",
+  "input": "Runbook: renewing the TLS certificate of the example-gateway. Renew when 30 days remain; the limit is written as 30 days and must be kept verbatim. Sections: Check expiry, Renew, Reload gateway.",
+  "facts": [
+    "Check expiry",
+    "Renew",
+    "Reload gateway",
+    {
+      "text": "30 days",
+      "variants": [
+        "\\b30 ?days?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b(3|13|20|60|300) days?\\b"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Check expiry\n# Renew\n# Reload gateway\n30 days",
+    "# Certificate renewal runbook 30 days\n## Check expiry\nCheck expiry goes here in one line.\n## Reload gateway\nReload gateway goes here in one line.",
+    "# Certificate renewal runbook\n## Check expiry\nCheck expiry goes here in one line.\n## Renew\nRenew goes here in one line.\n## Reload gateway\nReload gateway goes here in one line.",
+    "# Certificate renewal runbook 30 days\n## Check expiry\n## Renew\n## Reload gateway"
+  ],
+  "sections": [
+    "Check expiry",
+    "Renew",
+    "Reload gateway"
+  ],
+  "correct_alts": [
+    "# Certificate renewal runbook 30 days\n## Check expiry\nPlaceholder: describe check expiry here.\n## Renew\nPlaceholder: describe renew here.\n## Reload gateway\nPlaceholder: describe reload gateway here.",
+    "# Certificate renewal runbook\n\nValue to keep: 30 days\n\n### 1. Check expiry\nTODO: write the check expiry part.\n### 2. Renew\nTODO: write the renew part.\n### 3. Reload gateway\nTODO: write the reload gateway part."
+  ]
+}

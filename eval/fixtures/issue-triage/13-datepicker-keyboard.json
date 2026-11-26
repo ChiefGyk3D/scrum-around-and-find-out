@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, a11y, feature, docs.\nEpics: E-ui, E-api, E-ci.\nRule: anything that blocks keyboard or screen reader use is a11y; it is also a bug, but a11y wins.\nIssue: The date picker cannot be opened with the keyboard: tabbing from the From field jumps straight past the calendar button.",
+  "facts": [
+    {
+      "text": "\"label\": \"a11y\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"a11y\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-ui\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-ui\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!a11y\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-ui\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"bug\", \"epic\": \"E-ui\"}",
+    "{\"label\": \"a11y\", \"epic\": \"E-api\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-ui\", \"label\": \"a11y\"}",
+    "```json\n{\n \"label\": \"a11y\",\n \"epic\": \"E-ui\"\n}\n```",
+    "{\"label\": \"a11y\", \"epic\": \"E-ui\", \"note\": \"see rule\"}"
+  ]
+}

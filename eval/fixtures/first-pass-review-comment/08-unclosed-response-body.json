@@ -1,0 +1,42 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n func fetchStatus(url string) (int, error) {\n     resp, err := http.Get(url)\n     if err != nil {\n         return 0, err\n     }\n-    defer resp.Body.Close()\n     return resp.StatusCode, nil\n }\n```\nIntent: return the HTTP status code of a GET request.",
+  "facts": [
+    "fetchStatus",
+    {
+      "text": "never closed",
+      "variants": [
+        "(not|never|n't|without|no longer|forgot\\w*|missing|removed|dropped|lost)\\b.{0,40}\\bclos\\w*",
+        "\\bunclosed\\b",
+        "\\bleaks?\\b",
+        "\\bresource leak\\w*",
+        "\\bdefer\\b.{0,40}(removed|dropped|missing|gone)",
+        "(removed|dropped|deleted) (the )?defer"
+      ]
+    },
+    {
+      "text": "response body",
+      "variants": [
+        "\\bresp\\.Body\\b",
+        "\\bBody\\b",
+        "\\bconnections?\\b",
+        "\\bhttp response\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\brace\\b",
+    "\\btimeout\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "fetchStatus: the function should accept a context so the request can be cancelled.",
+    "fetchStatus: http.Get has no timeout set, add a client with a deadline."
+  ],
+  "correct_alts": [
+    "fetchStatus never closes the response body, so the underlying connection leaks on every call.",
+    "The defer for resp.Body.Close was removed in fetchStatus, which leaves the HTTP response unclosed.",
+    "fetchStatus forgets to close the body after reading the status code, and that leaks a connection per request."
+  ]
+}

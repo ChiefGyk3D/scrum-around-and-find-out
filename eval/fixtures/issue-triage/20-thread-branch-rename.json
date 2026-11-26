@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: docs, chore, bug, feature, question.\nEpics: E-ci, E-docs-site, E-platform.\nRule: if the change touches prose only it is docs; if it also touches config or scripts it is chore.\nIssue: Reply chain, message 0: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 1: attached the weekly status table again, same numbers as before. Reply chain, message 2: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 3: attached the weekly status table again, same numbers as before. Reply chain, message 4: scheduling a call, times proposed were not suitable, trying next week. Reply chain, message 5: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 6: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 7: asked whether the old workaround still applies, nobody replied. Reply chain, message 8: asked whether the old workaround still applies, nobody replied. Reply chain, message 9: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 10: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 11: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 12: attached the weekly status table again, same numbers as before. Reply chain, message 13: asked whether the old workaround still applies, nobody replied. Reply chain, message 14: scheduling a call, times proposed were not suitable, trying next week. Reply chain, message 15: asked whether the old workaround still applies, nobody replied. Reply chain, message 16: asked whether the old workaround still applies, nobody replied. Reply chain, message 17: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 18: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 19: attached the weekly status table again, same numbers as before. Reply chain, message 20: attached the weekly status table again, same numbers as before. Reply chain, message 21: attached the weekly status table again, same numbers as before. Reply chain, message 22: asked whether the old workaround still applies, nobody replied. Reply chain, message 23: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 24: scheduling a call, times proposed were not suitable, trying next week. Reply chain, message 25: asked whether the old workaround still applies, nobody replied. Reply chain, message 26: asked whether the old workaround still applies, nobody replied. Reply chain, message 27: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 28: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 29: scheduling a call, times proposed were not suitable, trying next week. Reply chain, message 30: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 31: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 32: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 33: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 34: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 35: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 36: attached the weekly status table again, same numbers as before. Reply chain, message 37: attached the weekly status table again, same numbers as before. Reply chain, message 38: attached the weekly status table again, same numbers as before. Reply chain, message 39: attached the weekly status table again, same numbers as before. Reply chain, message 40: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 41: scheduling a call, times proposed were not suitable, trying next week. Reply chain, message 42: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 43: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 44: attached the weekly status table again, same numbers as before. Reply chain, message 45: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 46: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 47: scheduling a call, times proposed were not suitable, trying next week. Reply chain, message 48: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 49: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 50: thanks for the update, will check with the team and come back, nothing resolved yet. Reply chain, message 51: scheduling a call, times proposed were not suitable, trying next week. Reply chain, message 52: attached the weekly status table again, same numbers as before. Reply chain, message 53: attached the weekly status table again, same numbers as before. Reply chain, message 54: forwarded the earlier summary to the account owner, no answer so far. Reply chain, message 55: attached the weekly status table again, same numbers as before. Reply chain, message 56: scheduling a call, times proposed were not suitable, trying next week. Reply chain, message 57: asked whether the old workaround still applies, nobody replied. Summary of the request: rename the default branch from master to main, which means editing the README, the CI config and two release scripts.",
+  "facts": [
+    {
+      "text": "\"label\": \"chore\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"chore\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-ci\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-ci\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!chore\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-ci\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"docs\", \"epic\": \"E-ci\"}",
+    "{\"label\": \"chore\", \"epic\": \"E-docs-site\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-ci\", \"label\": \"chore\"}",
+    "```json\n{\n \"label\": \"chore\",\n \"epic\": \"E-ci\"\n}\n```",
+    "{\"label\": \"chore\", \"epic\": \"E-ci\", \"note\": \"see rule\"}"
+  ]
+}

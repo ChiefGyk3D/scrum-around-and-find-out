@@ -1,0 +1,45 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n class Stats:\n     def __init__(self):\n         self.hits = 0\n         self.lock = threading.Lock()\n \n     def record_hit(self):\n-        with self.lock:\n-            self.hits += 1\n+        self.hits += 1\n```\nIntent: many worker threads call record_hit and the count must be exact.",
+  "facts": [
+    "record_hit",
+    {
+      "text": "race condition",
+      "variants": [
+        "\\brace\\b",
+        "not (thread[- ]safe|atomic)",
+        "read-modify-write",
+        "data race",
+        "lost updates?",
+        "unsynchroni[sz]ed",
+        "without (the |a )?lock",
+        "no longer (holds?|takes?|acquires?|uses?) (the |a )?lock",
+        "(drops?|removed?|dropped) the lock"
+      ]
+    },
+    {
+      "text": "lock",
+      "variants": [
+        "\\block\\b",
+        "\\bmutex\\b",
+        "\\bsynchroni[sz]\\w+",
+        "\\batomic\\w*"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bdeadlock\\b",
+    "\\bSQL\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "record_hit: rename hits to hit_count so the attribute reads better.",
+    "record_hit: the Lock created in the constructor should be an RLock."
+  ],
+  "correct_alts": [
+    "record_hit has a race condition: it increments hits without taking the lock, so concurrent threads lose updates.",
+    "The lock is still created but record_hit no longer uses it, which makes the shared counter increment unsynchronized.",
+    "record_hit updates self.hits without holding the lock, and that read-modify-write races between worker threads."
+  ]
+}

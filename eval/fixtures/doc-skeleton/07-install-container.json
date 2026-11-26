@@ -1,0 +1,36 @@
+{
+  "task": "doc-skeleton",
+  "input": "Write the installation guide for example-agent when it runs in a container. The image tag to document is 4.12.1 (copy exactly). Sections: Requirements, Pull the image, Verify the container.",
+  "facts": [
+    "Requirements",
+    "Pull the image",
+    "Verify the container",
+    {
+      "text": "4.12.1",
+      "variants": [
+        "(?<![\\d.])4\\.12\\.1(?!\\d)"
+      ]
+    }
+  ],
+  "forbidden": [
+    "(?<![\\d.])4\\.12\\.(0|2)(?!\\d)",
+    "(?<![\\d.])4\\.11\\.1(?!\\d)"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Requirements\n# Pull the image\n# Verify the container\n4.12.1",
+    "# Container install guide 4.12.1\n## Requirements\nRequirements goes here in one line.\n## Verify the container\nVerify the container goes here in one line.",
+    "# Container install guide\n## Requirements\nRequirements goes here in one line.\n## Pull the image\nPull the image goes here in one line.\n## Verify the container\nVerify the container goes here in one line.",
+    "# Container install guide 4.12.1\n## Requirements\n## Pull the image\n## Verify the container"
+  ],
+  "sections": [
+    "Requirements",
+    "Pull the image",
+    "Verify the container"
+  ],
+  "correct_alts": [
+    "# Container install guide 4.12.1\n## Requirements\nPlaceholder: describe requirements here.\n## Pull the image\nPlaceholder: describe pull the image here.\n## Verify the container\nPlaceholder: describe verify the container here.",
+    "# Container install guide\n\nValue to keep: 4.12.1\n\n### 1. Requirements\nTODO: write the requirements part.\n### 2. Pull the image\nTODO: write the pull the image part.\n### 3. Verify the container\nTODO: write the verify the container part."
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "task": "doc-skeleton",
+  "input": "Reference page for the exampletool command line. The flag for the retry limit is --max-retries (verbatim). Sections: Synopsis, Options, Exit codes.",
+  "facts": [
+    "Synopsis",
+    "Options",
+    "Exit codes",
+    "--max-retries"
+  ],
+  "forbidden": [
+    "--retries\\b",
+    "--max-retry\\b",
+    "--retry-max\\b"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Synopsis\n# Options\n# Exit codes\n--max-retries",
+    "# exampletool reference --max-retries\n## Synopsis\nSynopsis goes here in one line.\n## Exit codes\nExit codes goes here in one line.",
+    "# exampletool reference\n## Synopsis\nSynopsis goes here in one line.\n## Options\nOptions goes here in one line.\n## Exit codes\nExit codes goes here in one line.",
+    "# exampletool reference --max-retries\n## Synopsis\n## Options\n## Exit codes"
+  ],
+  "sections": [
+    "Synopsis",
+    "Options",
+    "Exit codes"
+  ],
+  "correct_alts": [
+    "# exampletool reference --max-retries\n## Synopsis\nPlaceholder: describe synopsis here.\n## Options\nPlaceholder: describe options here.\n## Exit codes\nPlaceholder: describe exit codes here.",
+    "# exampletool reference\n\nValue to keep: --max-retries\n\n### 1. Synopsis\nTODO: write the synopsis part.\n### 2. Options\nTODO: write the options part.\n### 3. Exit codes\nTODO: write the exit codes part."
+  ]
+}

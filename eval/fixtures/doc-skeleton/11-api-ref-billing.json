@@ -1,0 +1,32 @@
+{
+  "task": "doc-skeleton",
+  "input": "API reference for the example-billing service. The base path is /v2/invoices, to be copied verbatim. Sections: Create invoice, Fetch invoice, Delete invoice. - Ticket note 0: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 1: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 2: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 3: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 4: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 5: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 6: someone asked about the old wiki page, no action taken, left for a later pass. - Ticket note 7: someone asked about the old wiki page, no action taken, left for a later pass. - Ticket note 8: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 9: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 10: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 11: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 12: someone asked about the old wiki page, no action taken, left for a later pass. - Ticket note 13: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Ticket note 14: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 15: draft wording was passed around by mail, comments still open, no sign-off recorded. - Ticket note 16: someone asked about the old wiki page, no action taken, left for a later pass. - Ticket note 17: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Ticket note 18: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 19: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 20: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 21: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Ticket note 22: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 23: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 24: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 25: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 26: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 27: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 28: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 29: someone asked about the old wiki page, no action taken, left for a later pass. ",
+  "facts": [
+    "Create invoice",
+    "Fetch invoice",
+    "Delete invoice",
+    "/v2/invoices"
+  ],
+  "forbidden": [
+    "/v1/invoices",
+    "/v3/invoices",
+    "/v2/invoice(?!s)"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Create invoice\n# Fetch invoice\n# Delete invoice\n/v2/invoices",
+    "# Billing API reference /v2/invoices\n## Create invoice\nCreate invoice goes here in one line.\n## Delete invoice\nDelete invoice goes here in one line.",
+    "# Billing API reference\n## Create invoice\nCreate invoice goes here in one line.\n## Fetch invoice\nFetch invoice goes here in one line.\n## Delete invoice\nDelete invoice goes here in one line.",
+    "# Billing API reference /v2/invoices\n## Create invoice\n## Fetch invoice\n## Delete invoice"
+  ],
+  "sections": [
+    "Create invoice",
+    "Fetch invoice",
+    "Delete invoice"
+  ],
+  "correct_alts": [
+    "# Billing API reference /v2/invoices\n## Create invoice\nPlaceholder: describe create invoice here.\n## Fetch invoice\nPlaceholder: describe fetch invoice here.\n## Delete invoice\nPlaceholder: describe delete invoice here.",
+    "# Billing API reference\n\nValue to keep: /v2/invoices\n\n### 1. Create invoice\nTODO: write the create invoice part.\n### 2. Fetch invoice\nTODO: write the fetch invoice part.\n### 3. Delete invoice\nTODO: write the delete invoice part."
+  ]
+}

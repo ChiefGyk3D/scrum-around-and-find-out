@@ -1,0 +1,41 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def is_expired(token):\n-    now = datetime.now(timezone.utc)\n+    now = datetime.now()\n     return token.expires_at < now\n```\nIntent: token.expires_at is a timezone-aware UTC value.",
+  "facts": [
+    "is_expired",
+    {
+      "text": "naive datetime",
+      "variants": [
+        "\\bnaive\\b",
+        "time ?zone\\w*",
+        "\\btz\\b",
+        "\\bUTC\\b",
+        "\\blocal time\\b"
+      ]
+    },
+    {
+      "text": "expires_at",
+      "variants": [
+        "\\bexpires_at\\b",
+        "\\baware\\b",
+        "\\bTypeError\\b",
+        "\\bcompar\\w+"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bperformance\\b",
+    "\\bleap seconds?\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "is_expired: use datetime.utcnow for clarity and cache the value.",
+    "is_expired: the method name should start with has_ rather than is_."
+  ],
+  "correct_alts": [
+    "is_expired builds a naive datetime with datetime.now(), so comparing it with the aware expires_at raises a TypeError or drifts by the local offset.",
+    "The timezone was dropped in is_expired: now is naive local time, while expires_at is aware UTC.",
+    "is_expired lost its UTC argument, and that makes the comparison against expires_at wrong on any machine that is not set to UTC."
+  ]
+}

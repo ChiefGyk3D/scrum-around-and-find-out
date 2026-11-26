@@ -1,0 +1,42 @@
+{
+  "task": "ci-log-digest",
+  "input": "[13:00:02] job package-release started\n[09:00:00] AR  build/libsched.a\n[09:00:08] LD  build/bin/render-tool\n[09:00:06] CC  src/auth/auth_21.o\n[09:00:18] AR  build/libstore.a\n[09:00:08] AR  build/libstore.a\n[09:00:15] progress 89% (65/499 units)\n[09:00:12] LD  build/bin/auth-tool\n[09:01:03] LD  build/bin/core-tool\n[09:00:24] CC  src/core/core_19.o\n[09:00:36] LD  build/bin/core-tool\n[09:00:50] progress 13% (155/416 units)\n[09:01:39] note: auth.c:13: unused parameter is expected here\n[09:00:48] note: util.c:702: unused parameter is expected here\n[09:01:57] progress 28% (6/489 units)\n[09:00:28] AR  build/libutil.a\n[09:01:30] note: codec.c:463: unused parameter is expected here\n[09:01:36] AR  build/libcli.a\n[09:02:16] LD  build/bin/parse-tool\n[09:01:12] LD  build/bin/core-tool\n[09:02:32] LD  build/bin/cli-tool\n[09:01:00] AR  build/libcli.a\n[09:02:27] AR  build/libqueue.a\n[09:02:56] CC  src/render/render_7.o\n[09:02:41] LD  build/bin/net-tool\n[09:03:36] LD  build/bin/util-tool\n[09:01:40] AR  build/libcli.a\n[09:03:54] AR  build/libparse.a\n[09:02:42] AR  build/libsched.a\n[09:03:16] progress 49% (76/436 units)\n[09:02:54] progress 54% (289/411 units)\n[09:02:00] progress 13% (255/490 units)\n[09:01:33] progress 71% (355/468 units)\n[09:04:16] CC  src/queue/queue_11.o\n[09:03:18] AR  build/libparse.a\n[09:01:42] AR  build/libnet.a\n[09:01:45] progress 58% (97/419 units)\n[09:01:48] CC  src/index/index_24.o\n[09:04:19] progress 83% (400/476 units)\n[09:05:42] progress 23% (76/426 units)\n[09:02:36] CC  src/render/render_5.o\n[09:04:00] note: net.c:383: unused parameter is expected here\n[09:04:47] CC  src/core/core_26.o\n[09:04:12] note: core.c:96: unused parameter is expected here\n[09:01:26] note: core.c:847: unused parameter is expected here\n[09:01:28] AR  build/libutil.a\n[09:02:15] note: render.c:261: unused parameter is expected here\n[09:03:50] progress 72% (319/477 units)\n[09:03:08] note: store.c:364: unused parameter is expected here\n[09:04:48] progress 99% (76/476 units)\n[09:03:16] CC  src/sched/sched_2.o\n[09:05:00] LD  build/bin/store-tool\n[09:02:33] note: parse.c:219: unused parameter is expected here\n[09:03:28] progress 61% (112/472 units)\n[09:01:46] CC  src/sched/sched_16.o\n[09:06:18] progress 27% (132/482 units)\n[09:01:50] note: parse.c:269: unused parameter is expected here\n[09:06:32] AR  build/librender.a\n[09:03:48] AR  build/libutil.a\n[09:07:44] LD  build/bin/core-tool\n[09:02:57] progress 81% (377/428 units)\n[09:05:00] note: sched.c:15: unused parameter is expected here\n[09:04:04] AR  build/librender.a\n[13:07:41] unpacking artifact bundle-linux-x64.tar (2.4 GB)\n[13:07:58] tar: dist/assets/video-0042.bin: Wrote only 4096 of 10240 bytes\n[13:07:58] tar: dist/assets/video-0043.bin: Cannot write: No space left on device\n[13:07:58] tar: Exiting with failure status due to previous errors\n[13:07:59] df -h /: /dev/sda1  50G  50G  0  100% /\n[13:07:59] ERROR step unpack-bundle failed (exit 2)\n[09:05:10] AR  build/libindex.a\n[09:05:15] note: util.c:148: unused parameter is expected here\n[09:05:20] LD  build/bin/index-tool\n[09:04:20] note: net.c:41: unused parameter is expected here\n[09:04:24] note: auth.c:55: unused parameter is expected here\n[09:07:49] note: queue.c:858: unused parameter is expected here\n[09:10:12] AR  build/libnet.a\n[09:04:36] AR  build/librender.a\n[09:10:30] note: auth.c:620: unused parameter is expected here\n[09:03:33] progress 78% (356/413 units)\n[09:07:12] progress 86% (149/446 units)\n[09:04:52] CC  src/index/index_14.o\n[09:08:38] AR  build/libparse.a\n[09:08:45] CC  src/codec/codec_10.o\n[09:05:04] AR  build/libsched.a\n[09:05:08] CC  src/core/core_11.o\n[09:02:36] CC  src/net/net_18.o\n[09:03:57] progress 40% (305/478 units)\n[09:05:20] note: auth.c:896: unused parameter is expected here\n[09:10:48] LD  build/bin/core-tool\n[09:02:44] CC  src/render/render_10.o\n[09:08:18] CC  src/net/net_3.o\n[09:02:48] CC  src/parse/parse_10.o\n[09:09:55] CC  src/index/index_26.o\n[09:08:36] CC  src/sched/sched_13.o\n[09:13:03] note: render.c:464: unused parameter is expected here\n[09:10:16] progress 2% (47/461 units)\n[09:05:56] note: index.c:155: unused parameter is expected here\n[09:09:00] LD  build/bin/index-tool\n[09:06:04] CC  src/index/index_20.o\n[09:03:04] LD  build/bin/parse-tool\n[09:03:06] LD  build/bin/render-tool\n[09:14:06] note: net.c:437: unused parameter is expected here\n[09:07:55] LD  build/bin/cli-tool\n[09:11:12] note: parse.c:813: unused parameter is expected here\n[09:09:42] note: auth.c:289: unused parameter is expected here\n[09:08:10] CC  src/codec/codec_28.o\n[09:08:15] LD  build/bin/codec-tool\n[09:06:40] CC  src/cli/cli_19.o\n[09:06:44] LD  build/bin/queue-tool\n[09:15:18] CC  src/render/render_19.o\n[09:13:44] note: core.c:855: unused parameter is expected here\n[09:10:24] LD  build/bin/net-tool\n[09:08:45] AR  build/libindex.a\n[09:08:50] AR  build/libqueue.a\n[09:05:21] LD  build/bin/codec-tool\n[09:07:12] LD  build/bin/index-tool\n[09:12:43] progress 1% (60/499 units)",
+  "facts": [
+    {
+      "text": "No space left on device",
+      "variants": [
+        "\\bdisk (is )?full\\b",
+        "\\bENOSPC\\b",
+        "\\bout of (disk )?space\\b"
+      ]
+    },
+    {
+      "text": "unpack-bundle",
+      "variants": [
+        "\\bunpack\\w*"
+      ]
+    },
+    {
+      "text": "100%",
+      "variants": [
+        "\\b100 ?(%|percent)\\b"
+      ]
+    },
+    "package-release"
+  ],
+  "forbidden": [
+    "\\bpermission\\b",
+    "\\bout of memory\\b",
+    "\\bcorrupt\\w* (archive|tarball)\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "package-release failed because the tarball is corrupt and tar could not read it.",
+    "The unpack step was killed because the runner ran out of memory."
+  ],
+  "correct_alts": [
+    "The package-release job failed in unpack-bundle because the runner disk is full: tar hit No space left on device while writing video-0043.bin, and the root volume shows 100% used.\nFreeing space or using a bigger runner would fix it.",
+    "Extraction of the 2.4 GB bundle stopped when the disk ran out of space (100% used), so unpack-bundle exited with status 2 and the package-release job went red."
+  ]
+}

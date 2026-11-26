@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, feature, docs, security, question, performance.\nEpics: E-auth (login, tokens, sessions), E-billing (invoices, payments), E-search (index, queries), E-platform (workers, deploys, logging).\nRule: any credential that reaches a log is security, even when the cause is an ordinary bug.\nIssue: The sync worker prints the full Authorization header in debug logs, so bearer tokens end up in the shared log index. Seen on build 812.",
+  "facts": [
+    {
+      "text": "\"label\": \"security\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"security\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-platform\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-platform\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!security\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-platform\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"bug\", \"epic\": \"E-platform\"}",
+    "{\"label\": \"security\", \"epic\": \"E-auth\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-platform\", \"label\": \"security\"}",
+    "```json\n{\n \"label\": \"security\",\n \"epic\": \"E-platform\"\n}\n```",
+    "{\"label\": \"security\", \"epic\": \"E-platform\", \"note\": \"see rule\"}"
+  ]
+}

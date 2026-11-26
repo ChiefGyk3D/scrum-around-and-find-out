@@ -1,0 +1,42 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def _flatten_0(value):\n     \"\"\"Helper 0: unchanged utility kept for the callers below.\"\"\"\n     return value * 7 if value else 7\n \n def _clamp_1(value):\n     \"\"\"Helper 1: unchanged utility kept for the callers below.\"\"\"\n     return max(0, min(value, 67))\n \n def _bucket_2(value):\n     \"\"\"Helper 2: unchanged utility kept for the callers below.\"\"\"\n     return value * 46 if value else 46\n \n def _wrap_3(value):\n     \"\"\"Helper 3: unchanged utility kept for the callers below.\"\"\"\n     return max(0, min(value, 76))\n \n def _trim_4(value):\n     \"\"\"Helper 4: unchanged utility kept for the callers below.\"\"\"\n     return value.strip().lower()[:35]\n \n def _wrap_5(value):\n     \"\"\"Helper 5: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 54] for i in range(0, len(value), 54)]\n \n def _wrap_6(value):\n     \"\"\"Helper 6: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 15] for i in range(0, len(value), 15)]\n \n def _wrap_7(value):\n     \"\"\"Helper 7: unchanged utility kept for the callers below.\"\"\"\n     return value * 4 if value else 4\n \n def _trim_8(value):\n     \"\"\"Helper 8: unchanged utility kept for the callers below.\"\"\"\n     return value.strip().lower()[:27]\n \n def _pad_9(value):\n     \"\"\"Helper 9: unchanged utility kept for the callers below.\"\"\"\n     return value * 16 if value else 16\n \n def _rotate_10(value):\n     \"\"\"Helper 10: unchanged utility kept for the callers below.\"\"\"\n     return value.strip().lower()[:51]\n \n def _clamp_11(value):\n     \"\"\"Helper 11: unchanged utility kept for the callers below.\"\"\"\n     return value.strip().lower()[:55]\n \n def _clamp_12(value):\n     \"\"\"Helper 12: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _bucket_13(value):\n     \"\"\"Helper 13: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 58] for i in range(0, len(value), 58)]\n \n def _trim_14(value):\n     \"\"\"Helper 14: unchanged utility kept for the callers below.\"\"\"\n     return max(0, min(value, 66))\n \n def _flatten_15(value):\n     \"\"\"Helper 15: unchanged utility kept for the callers below.\"\"\"\n     return max(0, min(value, 54))\n \n def _label_16(value):\n     \"\"\"Helper 16: unchanged utility kept for the callers below.\"\"\"\n     return value.strip().lower()[:75]\n \n def _pad_17(value):\n     \"\"\"Helper 17: unchanged utility kept for the callers below.\"\"\"\n     return max(0, min(value, 51))\n \n def _slugify_18(value):\n     \"\"\"Helper 18: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _clamp_19(value):\n     \"\"\"Helper 19: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _normalize_20(value):\n     \"\"\"Helper 20: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _trim_21(value):\n     \"\"\"Helper 21: unchanged utility kept for the callers below.\"\"\"\n     return value * 17 if value else 17\n \n def _rotate_22(value):\n     \"\"\"Helper 22: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _scale_23(value):\n     \"\"\"Helper 23: unchanged utility kept for the callers below.\"\"\"\n     return value * 56 if value else 56\n \n def _slugify_24(value):\n     \"\"\"Helper 24: unchanged utility kept for the callers below.\"\"\"\n     return max(0, min(value, 2))\n \n def _clamp_25(value):\n     \"\"\"Helper 25: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _bucket_26(value):\n     \"\"\"Helper 26: unchanged utility kept for the callers below.\"\"\"\n     return value.strip().lower()[:59]\n \n def _flatten_27(value):\n     \"\"\"Helper 27: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 92] for i in range(0, len(value), 92)]\n \n def _slugify_28(value):\n     \"\"\"Helper 28: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 62] for i in range(0, len(value), 62)]\n \n def _rotate_29(value):\n     \"\"\"Helper 29: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 53] for i in range(0, len(value), 53)]\n \n-EMAIL_RE = re.compile(r\"^[^@\\s]+@[^@\\s]+\\.[a-z]+$\")\n+EMAIL_RE = re.compile(r\"^([a-z0-9]+\\.?)+@example\\.com$\")\n \n def is_company_email(addr):\n     return EMAIL_RE.match(addr) is not None\n def _chunk_0(value):\n     \"\"\"Helper 0: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _rotate_1(value):\n     \"\"\"Helper 1: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 40] for i in range(0, len(value), 40)]\n \n def _flatten_2(value):\n     \"\"\"Helper 2: unchanged utility kept for the callers below.\"\"\"\n     return value.strip().lower()[:7]\n \n def _pad_3(value):\n     \"\"\"Helper 3: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _clamp_4(value):\n     \"\"\"Helper 4: unchanged utility kept for the callers below.\"\"\"\n     return value.strip().lower()[:61]\n \n def _rotate_5(value):\n     \"\"\"Helper 5: unchanged utility kept for the callers below.\"\"\"\n     return \"-\".join(part for part in str(value).split() if part)\n \n def _flatten_6(value):\n     \"\"\"Helper 6: unchanged utility kept for the callers below.\"\"\"\n     return max(0, min(value, 4))\n \n def _bucket_7(value):\n     \"\"\"Helper 7: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 85] for i in range(0, len(value), 85)]\n \n def _clamp_8(value):\n     \"\"\"Helper 8: unchanged utility kept for the callers below.\"\"\"\n     return max(0, min(value, 12))\n \n def _slugify_9(value):\n     \"\"\"Helper 9: unchanged utility kept for the callers below.\"\"\"\n     return [value[i:i + 57] for i in range(0, len(value), 57)]\n \n```\nIntent: accept only addresses on the company domain.",
+  "facts": [
+    "is_company_email",
+    {
+      "text": "catastrophic backtracking",
+      "variants": [
+        "backtrack\\w*",
+        "\\bReDoS\\b",
+        "exponential",
+        "nested (quantifier|repetition|group)s?",
+        "denial[- ]of[- ]service",
+        "\\bhangs?\\b.{0,40}(long|crafted|input)",
+        "super-?linear"
+      ]
+    },
+    {
+      "text": "regex",
+      "variants": [
+        "regular expressions?",
+        "\\bpattern\\b",
+        "\\bEMAIL_RE\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bSQL\\b",
+    "\\bcase[- ]insensitiv\\w+"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "is_company_email: the regex only allows lowercase letters, so uppercase addresses fail.",
+    "is_company_email: use the email-validator library instead of a regex."
+  ],
+  "correct_alts": [
+    "is_company_email relies on a regex with catastrophic backtracking: the nested quantifier in ([a-z0-9]+\\.?)+ takes exponential time on a crafted input.",
+    "The new EMAIL_RE pattern repeats a group that already repeats, and that makes is_company_email vulnerable to ReDoS on long non-matching names.",
+    "is_company_email can hang because the regex backtracks exponentially when the address nearly matches."
+  ]
+}

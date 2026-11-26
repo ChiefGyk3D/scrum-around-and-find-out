@@ -1,0 +1,35 @@
+{
+  "task": "doc-skeleton",
+  "input": "Runbook for failing over the example-orders database. The promotion must finish within 45 seconds; copy that limit verbatim. Sections: Detect, Promote replica, Confirm writes.",
+  "facts": [
+    "Detect",
+    "Promote replica",
+    "Confirm writes",
+    {
+      "text": "45 seconds",
+      "variants": [
+        "\\b45 ?s(ec(onds?)?)?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b(4|40|54|450|90) ?s(ec(onds?)?)?\\b"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Detect\n# Promote replica\n# Confirm writes\n45 seconds",
+    "# Database failover runbook 45 seconds\n## Detect\nDetect goes here in one line.\n## Confirm writes\nConfirm writes goes here in one line.",
+    "# Database failover runbook\n## Detect\nDetect goes here in one line.\n## Promote replica\nPromote replica goes here in one line.\n## Confirm writes\nConfirm writes goes here in one line.",
+    "# Database failover runbook 45 seconds\n## Detect\n## Promote replica\n## Confirm writes"
+  ],
+  "sections": [
+    "Detect",
+    "Promote replica",
+    "Confirm writes"
+  ],
+  "correct_alts": [
+    "# Database failover runbook 45 seconds\n## Detect\nPlaceholder: describe detect here.\n## Promote replica\nPlaceholder: describe promote replica here.\n## Confirm writes\nPlaceholder: describe confirm writes here.",
+    "# Database failover runbook\n\nValue to keep: 45 seconds\n\n### 1. Detect\nTODO: write the detect part.\n### 2. Promote replica\nTODO: write the promote replica part.\n### 3. Confirm writes\nTODO: write the confirm writes part."
+  ]
+}

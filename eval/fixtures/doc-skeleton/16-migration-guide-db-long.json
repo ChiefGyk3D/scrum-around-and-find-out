@@ -1,0 +1,36 @@
+{
+  "task": "doc-skeleton",
+  "input": "- Thread note 0: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 1: meeting 12 minutes over, agenda items moved to the following session. - Thread note 2: meeting 12 minutes over, agenda items moved to the following session. - Thread note 3: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 4: meeting 12 minutes over, agenda items moved to the following session. - Thread note 5: someone asked about the old wiki page, no action taken, left for a later pass. - Thread note 6: meeting 12 minutes over, agenda items moved to the following session. - Thread note 7: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Thread note 8: meeting 12 minutes over, agenda items moved to the following session. - Thread note 9: contact list needs a refresh, not part of this document, ignore for now. - Thread note 10: contact list needs a refresh, not part of this document, ignore for now. - Thread note 11: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 12: someone asked about the old wiki page, no action taken, left for a later pass. - Thread note 13: contact list needs a refresh, not part of this document, ignore for now. - Thread note 14: someone asked about the old wiki page, no action taken, left for a later pass. - Thread note 15: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Thread note 16: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 17: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 18: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 19: contact list needs a refresh, not part of this document, ignore for now. - Thread note 20: someone asked about the old wiki page, no action taken, left for a later pass. - Thread note 21: contact list needs a refresh, not part of this document, ignore for now. - Thread note 22: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Thread note 23: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 24: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Thread note 25: someone asked about the old wiki page, no action taken, left for a later pass. - Thread note 26: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Thread note 27: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 28: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Thread note 29: someone asked about the old wiki page, no action taken, left for a later pass. - Thread note 30: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Thread note 31: contact list needs a refresh, not part of this document, ignore for now. - Thread note 32: contact list needs a refresh, not part of this document, ignore for now. - Thread note 33: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Thread note 34: meeting 12 minutes over, agenda items moved to the following session. - Thread note 35: meeting 12 minutes over, agenda items moved to the following session. - Thread note 36: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Thread note 37: contact list needs a refresh, not part of this document, ignore for now. - Thread note 38: contact list needs a refresh, not part of this document, ignore for now. - Thread note 39: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 40: someone asked about the old wiki page, no action taken, left for a later pass. - Thread note 41: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 42: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 43: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 44: meeting 12 minutes over, agenda items moved to the following session. - Thread note 45: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Thread note 46: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 47: meeting 12 minutes over, agenda items moved to the following session. - Thread note 48: meeting 12 minutes over, agenda items moved to the following session. - Thread note 49: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Thread note 50: contact list needs a refresh, not part of this document, ignore for now. - Thread note 51: someone asked about the old wiki page, no action taken, left for a later pass. - Thread note 52: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Thread note 53: draft wording was passed around by mail, comments still open, no sign-off recorded. - Thread note 54: reviewer suggested a different screenshot, not confirmed, parked in the backlog. Migration guide from example-db 2.x to 3.0.0 (copy 3.0.0 exactly). Sections: Before you upgrade, Breaking changes, Rollback. Skip the thread notes.",
+  "facts": [
+    "Before you upgrade",
+    "Breaking changes",
+    "Rollback",
+    {
+      "text": "3.0.0",
+      "variants": [
+        "(?<![\\d.])3\\.0\\.0(?!\\d)"
+      ]
+    }
+  ],
+  "forbidden": [
+    "(?<![\\d.])3\\.0\\.[1-9](?!\\d)",
+    "(?<![\\d.])2\\.9\\.0(?!\\d)"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Before you upgrade\n# Breaking changes\n# Rollback\n3.0.0",
+    "# Upgrade guide 3.0.0\n## Before you upgrade\nBefore you upgrade goes here in one line.\n## Rollback\nRollback goes here in one line.",
+    "# Upgrade guide\n## Before you upgrade\nBefore you upgrade goes here in one line.\n## Breaking changes\nBreaking changes goes here in one line.\n## Rollback\nRollback goes here in one line.",
+    "# Upgrade guide 3.0.0\n## Before you upgrade\n## Breaking changes\n## Rollback"
+  ],
+  "sections": [
+    "Before you upgrade",
+    "Breaking changes",
+    "Rollback"
+  ],
+  "correct_alts": [
+    "# Upgrade guide 3.0.0\n## Before you upgrade\nPlaceholder: describe before you upgrade here.\n## Breaking changes\nPlaceholder: describe breaking changes here.\n## Rollback\nPlaceholder: describe rollback here.",
+    "# Upgrade guide\n\nValue to keep: 3.0.0\n\n### 1. Before you upgrade\nTODO: write the before you upgrade part.\n### 2. Breaking changes\nTODO: write the breaking changes part.\n### 3. Rollback\nTODO: write the rollback part."
+  ]
+}

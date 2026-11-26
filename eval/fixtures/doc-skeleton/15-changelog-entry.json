@@ -1,0 +1,36 @@
+{
+  "task": "doc-skeleton",
+  "input": "Changelog entry for release 5.0.0 of example-cli (copy the version exactly). Sections: Added, Changed, Removed.",
+  "facts": [
+    "Added",
+    "Changed",
+    "Removed",
+    {
+      "text": "5.0.0",
+      "variants": [
+        "(?<![\\d.])5\\.0\\.0(?!\\d)"
+      ]
+    }
+  ],
+  "forbidden": [
+    "(?<![\\d.])5\\.0\\.[1-9](?!\\d)",
+    "(?<![\\d.])4\\.9\\.0(?!\\d)"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Added\n# Changed\n# Removed\n5.0.0",
+    "# example-cli changelog 5.0.0\n## Added\nAdded goes here in one line.\n## Removed\nRemoved goes here in one line.",
+    "# example-cli changelog\n## Added\nAdded goes here in one line.\n## Changed\nChanged goes here in one line.\n## Removed\nRemoved goes here in one line.",
+    "# example-cli changelog 5.0.0\n## Added\n## Changed\n## Removed"
+  ],
+  "sections": [
+    "Added",
+    "Changed",
+    "Removed"
+  ],
+  "correct_alts": [
+    "# example-cli changelog 5.0.0\n## Added\nPlaceholder: describe added here.\n## Changed\nPlaceholder: describe changed here.\n## Removed\nPlaceholder: describe removed here.",
+    "# example-cli changelog\n\nValue to keep: 5.0.0\n\n### 1. Added\nTODO: write the added part.\n### 2. Changed\nTODO: write the changed part.\n### 3. Removed\nTODO: write the removed part."
+  ]
+}

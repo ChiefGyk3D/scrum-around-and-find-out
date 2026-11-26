@@ -1,0 +1,36 @@
+{
+  "task": "doc-skeleton",
+  "input": "- Meeting note 0: contact list needs a refresh, not part of this document, ignore for now. - Meeting note 1: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 2: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 3: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 4: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 5: someone asked about the old wiki page, no action taken, left for a later pass. - Meeting note 6: meeting 12 minutes over, agenda items moved to the following session. - Meeting note 7: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 8: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 9: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 10: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 11: someone asked about the old wiki page, no action taken, left for a later pass. - Meeting note 12: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 13: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 14: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 15: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 16: meeting 12 minutes over, agenda items moved to the following session. - Meeting note 17: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 18: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 19: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 20: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 21: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 22: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 23: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 24: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 25: someone asked about the old wiki page, no action taken, left for a later pass. - Meeting note 26: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 27: someone asked about the old wiki page, no action taken, left for a later pass. - Meeting note 28: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 29: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 30: meeting 12 minutes over, agenda items moved to the following session. - Meeting note 31: meeting 12 minutes over, agenda items moved to the following session. - Meeting note 32: contact list needs a refresh, not part of this document, ignore for now. - Meeting note 33: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 34: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 35: meeting 12 minutes over, agenda items moved to the following session. - Meeting note 36: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 37: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Meeting note 38: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 39: contact list needs a refresh, not part of this document, ignore for now. - Meeting note 40: meeting 12 minutes over, agenda items moved to the following session. - Meeting note 41: meeting 12 minutes over, agenda items moved to the following session. - Meeting note 42: meeting 12 minutes over, agenda items moved to the following session. - Meeting note 43: contact list needs a refresh, not part of this document, ignore for now. - Meeting note 44: draft wording was passed around by mail, comments still open, no sign-off recorded. - Meeting note 45: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 46: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Meeting note 47: someone asked about the old wiki page, no action taken, left for a later pass. - Meeting note 48: contact list needs a refresh, not part of this document, ignore for now. - Meeting note 49: meeting 12 minutes over, agenda items moved to the following session. Architecture decision record for adopting queue-lib 1.4.0 (copy the version exactly). Sections: Context, Decision, Consequences. The meeting notes are not part of the record.",
+  "facts": [
+    "Context",
+    "Decision",
+    "Consequences",
+    {
+      "text": "1.4.0",
+      "variants": [
+        "(?<![\\d.])1\\.4\\.0(?!\\d)"
+      ]
+    }
+  ],
+  "forbidden": [
+    "(?<![\\d.])1\\.4\\.[1-9](?!\\d)",
+    "(?<![\\d.])1\\.3\\.0(?!\\d)"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Context\n# Decision\n# Consequences\n1.4.0",
+    "# ADR: adopt queue-lib 1.4.0\n## Context\nContext goes here in one line.\n## Consequences\nConsequences goes here in one line.",
+    "# ADR: adopt queue-lib\n## Context\nContext goes here in one line.\n## Decision\nDecision goes here in one line.\n## Consequences\nConsequences goes here in one line.",
+    "# ADR: adopt queue-lib 1.4.0\n## Context\n## Decision\n## Consequences"
+  ],
+  "sections": [
+    "Context",
+    "Decision",
+    "Consequences"
+  ],
+  "correct_alts": [
+    "# ADR: adopt queue-lib 1.4.0\n## Context\nPlaceholder: describe context here.\n## Decision\nPlaceholder: describe decision here.\n## Consequences\nPlaceholder: describe consequences here.",
+    "# ADR: adopt queue-lib\n\nValue to keep: 1.4.0\n\n### 1. Context\nTODO: write the context part.\n### 2. Decision\nTODO: write the decision part.\n### 3. Consequences\nTODO: write the consequences part."
+  ]
+}

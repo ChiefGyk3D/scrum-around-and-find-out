@@ -1,0 +1,43 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n function pageNumbers(total, perPage) {\n   const pages = Math.ceil(total / perPage);\n   const out = [];\n-  for (let i = 1; i <= pages; i++) {\n+  for (let i = 1; i < pages; i++) {\n     out.push(i);\n   }\n   return out;\n }\n```\nIntent: list every page number from 1 up to and including the last page.",
+  "facts": [
+    "pageNumbers",
+    {
+      "text": "off-by-one",
+      "variants": [
+        "off[- ]by[- ]one",
+        "(drops?|skips?|omits?|misses?|excludes?|never (reaches|includes))\\b.{0,30}\\blast (page|number)",
+        "(loop )?(stops?|ends?|runs?) one (page |iteration |step )?(early|short)",
+        "one (page )?(short|too few|fewer)",
+        "strict(ly)? (less|<)"
+      ]
+    },
+    {
+      "text": "last page",
+      "variants": [
+        "\\bfinal page\\b",
+        "\\blast (number|page)\\b",
+        "\\bi < pages\\b",
+        "\\bpages\\b.{0,30}(<=|inclusive)",
+        "\\binclusive\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bnaming\\b",
+    "\\bcamel ?case\\b",
+    "\\bMath\\.ceil\\b.{0,40}\\b(wrong|bug)\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "pageNumbers: the variable name out is too short, rename it to result.",
+    "pageNumbers: Math.ceil may return a float, wrap it in parseInt for safety."
+  ],
+  "correct_alts": [
+    "pageNumbers has an off-by-one error: the loop condition uses i < pages so the last page is never included.",
+    "The loop in pageNumbers stops one iteration early, which drops the final page from the list.",
+    "pageNumbers changed the comparison to a strict less-than, so it skips the last page that the intent says must be listed."
+  ]
+}

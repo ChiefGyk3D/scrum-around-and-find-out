@@ -1,0 +1,43 @@
+{
+  "task": "ci-log-digest",
+  "input": "$ pytest tests --reruns 2 -ra\ntests/test_delta.py::test_delta_24 PASSED\ntests/test_beta.py::test_beta_9 PASSED\ntests/test_theta.py::test_theta_30 PASSED   [50%]\nDEBUG eta: fixture setup took 778 ms\nDEBUG eta: fixture setup took 117 ms\ntests/test_beta.py::test_beta_5 PASSED\ntests/test_alpha.py::test_alpha_16 PASSED   [89%]\ntests/test_gamma.py::test_gamma_5 PASSED   [70%]\nDEBUG gamma: fixture setup took 599 ms\ntests/test_zeta.py::test_zeta_28 PASSED\nDEBUG zeta: fixture setup took 639 ms\ntests/test_gamma.py::test_gamma_23 PASSED\ntests/test_delta.py::test_delta_16 PASSED   [2%]\nINFO  epsilon: using seed 40105\ntests/test_gamma.py::test_gamma_8 PASSED   [22%]\nDEBUG gamma: fixture setup took 816 ms\nINFO  gamma: using seed 54752\ntests/test_eta.py::test_eta_27 PASSED\nDEBUG alpha: fixture setup took 534 ms\ntests/test_gamma.py::test_gamma_33 PASSED\ntests/test_delta.py::test_delta_2 PASSED\nINFO  epsilon: using seed 85652\ntests/test_delta.py::test_delta_40 PASSED   [5%]\ntests/test_gamma.py::test_gamma_28 PASSED   [57%]\ntests/test_delta.py::test_delta_32 PASSED\nINFO  theta: using seed 12852\ntests/test_eta.py::test_eta_24 PASSED\ntests/test_theta.py::test_theta_8 PASSED\ntests/test_zeta.py::test_zeta_34 PASSED   [12%]\ntests/test_delta.py::test_delta_34 PASSED   [50%]\nDEBUG alpha: fixture setup took 82 ms\nDEBUG eta: fixture setup took 561 ms\nDEBUG zeta: fixture setup took 852 ms\nDEBUG beta: fixture setup took 388 ms\nDEBUG delta: fixture setup took 393 ms\ntests/test_zeta.py::test_zeta_28 PASSED\nINFO  epsilon: using seed 36505\nDEBUG beta: fixture setup took 281 ms\nINFO  epsilon: using seed 33507\nDEBUG delta: fixture setup took 850 ms\ntests/test_theta.py::test_theta_8 PASSED   [50%]\nDEBUG eta: fixture setup took 625 ms\nDEBUG beta: fixture setup took 890 ms\ntests/test_beta.py::test_beta_9 PASSED\ntests/test_zeta.py::test_zeta_3 PASSED\ntests/integration/test_stream.py::test_websocket_reconnect FAILED                                  [ 61%]\nE   TimeoutError: no frame received within 30.0s\nRERUN tests/integration/test_stream.py::test_websocket_reconnect (attempt 2 of 3)\ntests/integration/test_stream.py::test_websocket_reconnect PASSED                                  [ 61%]\nFLAKY: test_websocket_reconnect passed only after 1 rerun\nERROR: flaky-fail policy is on, a test that needs a rerun fails the job\nDEBUG delta: fixture setup took 228 ms\nDEBUG zeta: fixture setup took 739 ms\nINFO  eta: using seed 20498\ntests/test_beta.py::test_beta_35 PASSED   [29%]\ntests/test_zeta.py::test_zeta_7 PASSED   [7%]\nINFO  gamma: using seed 97488\ntests/test_beta.py::test_beta_6 PASSED   [18%]\nINFO  zeta: using seed 18698\nINFO  alpha: using seed 38662\nINFO  eta: using seed 94064\nINFO  zeta: using seed 90145\nDEBUG gamma: fixture setup took 519 ms\nINFO  delta: using seed 18666\nDEBUG theta: fixture setup took 33 ms\ntests/test_epsilon.py::test_epsilon_25 PASSED   [90%]\n==== 120 passed, 1 flaky in 48.77s ====\nexit code 1",
+  "facts": [
+    "test_websocket_reconnect",
+    {
+      "text": "30",
+      "variants": [
+        "\\b30(\\.0)? ?s(ec(onds?)?)?\\b"
+      ]
+    },
+    {
+      "text": "rerun",
+      "variants": [
+        "\\bre-?run\\w*",
+        "\\bretr(y|ied|ies)\\b",
+        "\\bsecond attempt\\b"
+      ]
+    },
+    {
+      "text": "flaky",
+      "variants": [
+        "\\bflak\\w+",
+        "\\bintermittent\\w*",
+        "\\bnon-?determin\\w+"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b(3|three) tests? failed\\b",
+    "\\bpermanent(ly)? (broken|fail\\w*)\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "test_websocket_reconnect failed for good after 3 attempts, so the stream code is broken.",
+    "The job failed because 120 tests were flaky and had to be rerun."
+  ],
+  "correct_alts": [
+    "The job failed because of the flaky-fail policy: test_websocket_reconnect hit a 30 second timeout on its first run and only passed on a rerun.\nSo the test is just unreliable and needs a look, the code itself is not known to be broken.",
+    "test_websocket_reconnect timed out waiting for a frame for 30 s, then passed when retried.\nThe pipeline turned red since any flaky test that needs one rerun is treated as a failure here."
+  ]
+}
