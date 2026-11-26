@@ -3,7 +3,8 @@
 
     safo-eval run --models qwen3.5:4b,gemma4:12b --tasks all --repeats 3 --out DIR [--calibrate N]
     safo-eval report --runs DIR/runs.jsonl --out DIR [--rescore]
-    safo-eval calibrate --runs DIR/runs.jsonl --n 10 --out FILE
+    safo-eval calibrate --runs DIR/runs.jsonl --n 30 --out DIR       # writes DIR/calibration.json to fill in
+    safo-eval calibrate --ingest DIR/calibration.json --out DIR      # reads the verdicts, writes the agreement file
 
 Scoring is code only (fact recall, forbidden hits, format, length); no model ever grades a model. Calls go through
 `llm-local`, one at a time, stdin always /dev/null. Exit 75 (queue busy) is retried with backoff and then recorded as
@@ -13,11 +14,13 @@ busy, never as an error. Any other failure is recorded and counted, never hidden
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import random
 import re
+import stat
 import statistics
 import subprocess
 import sys
@@ -59,6 +62,13 @@ INSTRUCTIONS: dict[str, str] = {
 PASS_RECALL = 0.8
 LOCAL_MIN = 0.9  # best model pass rate at or above this: local only
 CHECK_MIN = 0.6  # at or above this but below LOCAL_MIN: local draft, Claude checks
+CAL_SAMPLE_DEFAULT = 30  # passing outputs sampled per (task, model) cell for human or reviewer verdicts
+CAL_MIN_VERDICTS = 20  # fewer verdicts than this and the cell is not calibrated
+CAL_MIN_LOWER = 0.9  # lower bound of the ok share needed for local-only
+# one-sided 95 percent: only the low side matters, and 30 of 30 ok clears 0.9 with it (1.96 gives 0.886)
+CAL_Z = 1.645
+CAL_FORMAT = "safo-eval-calibration-1"
+CAL_MAX_BYTES = 50_000_000
 MODEL_TIER = {"qwen3.5:4b": "local-qwen", "gemma4:12b": "local-gemma"}
 DEFAULT_CALL_LOG = Path.home() / ".local/share/llm-local/calls.jsonl"
 BUSY_EXIT = 75
@@ -92,6 +102,8 @@ class Fixture:
     max_chars: int
     required_format: str  # any | json | json-object | regex:<pattern>
     wrong: tuple[str, ...] = ()  # known-wrong outputs: a guard test asserts none of them passes
+    sections: tuple[str, ...] = ()  # doc-skeleton: the facts that must be headings (default: every fact)
+    correct_alts: tuple[str, ...] = ()  # valid alternative outputs: a guard test asserts every one passes
 
 
 @dataclass
@@ -125,6 +137,8 @@ def load_fixture(path: Path) -> Fixture:
             max_chars=int(raw["max_chars"]),
             required_format=str(raw.get("required_format", "any")),
             wrong=tuple(str(x) for x in raw.get("wrong", [])),
+            sections=tuple(str(x) for x in raw.get("sections", [])),
+            correct_alts=tuple(str(x) for x in raw.get("correct_alts", [])),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise EvalError(f"bad fixture {path.name}: {exc}") from exc
@@ -149,16 +163,22 @@ def load_fixtures(root: Path, tasks: Sequence[str] | None = None) -> list[Fixtur
     return fixtures
 
 
-def _fact_matches(fact: Fact, output: str) -> bool:
-    """The fact text counts on word boundaries (60 is not in 600, Install is not in Uninstall); a text of two
-    characters or fewer is also case-sensitive (Z is not in zebra). Variants are regexes written by the fixture."""
+def _fact_spans(fact: Fact, output: str) -> list[tuple[int, int]]:
+    """Every place the fact matches. The fact text counts on word boundaries (60 is not in 600, Install is not in
+    Uninstall); a text of two characters or fewer is also case-sensitive (Z is not in zebra, Id is not id). Variants
+    are regexes written by the fixture."""
     text = fact.text
     pattern = (r"(?<!\w)" if text[:1].isalnum() or text[:1] == "_" else "") + re.escape(text)
     pattern += r"(?!\w)" if text[-1:].isalnum() or text[-1:] == "_" else ""
     flags = 0 if len(text) <= 2 else re.IGNORECASE
-    if re.search(pattern, output, flags):
-        return True
-    return any(re.search(v, output, re.IGNORECASE) for v in fact.variants)
+    spans = [m.span() for m in re.finditer(pattern, output, flags)]
+    for v in fact.variants:
+        spans += [m.span() for m in re.finditer(v, output, re.IGNORECASE)]
+    return spans
+
+
+def _fact_matches(fact: Fact, output: str) -> bool:
+    return bool(_fact_spans(fact, output))
 
 
 _FENCE = re.compile(r"\A\s*```[\w+.-]*[ \t]*\n(?P<body>.*?)\n[ \t]*```\s*\Z", re.DOTALL)
@@ -236,6 +256,66 @@ def facts_only(fixture: Fixture, output: str) -> bool:
     return sum(1 for t in tokens if t not in fact_tokens) / len(tokens) < FACTS_ONLY_MIN
 
 
+STOPWORDS = frozenset(
+    {
+        *("a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "in", "is", "it", "its"),
+        *("of", "on", "or", "that", "the", "this", "to", "was", "were", "with", "not", "but", "if", "so", "then"),
+        *("than", "there", "these", "those", "which", "who", "will", "would", "can", "could", "should", "may"),
+        *("might", "do", "does", "did", "into", "out", "up"),
+    }
+)
+CI_MIN_NOVEL = 8  # ci-log-digest: content words that are neither fact words nor words of the input
+REVIEW_MIN_WORDS = 8  # first-pass-review-comment: words outside the facts (the function name is fact one)
+NEAR_CHARS = 80  # a causal or locator phrase must sit within this many characters of a fact
+# a digest must say why or where: one of these words or phrases, near a fact
+CAUSAL = re.compile(
+    r"\b(?:because|caused|cause|due to|failed at|failed in|in step|at line|after|when|since|root cause|during|while)\b",
+    re.IGNORECASE,
+)
+# a review comment states the defect in a full sentence: one of these verbs or auxiliaries in it
+DEFECT_VERB = re.compile(
+    r"\b(?:is|are|was|were|will|can|could|may|might|does|do|did|never|should|must|has|have|had|isn't|doesn't|don't|"
+    r"won't|can't|leaks?|leaked|leaving|left|overwrites?|overwrote|skips?|skipped|ignores?|ignored|returns?|returned|"
+    r"raises?|raised|mutates?|mutated|shares?|shared|concatenat(?:es|ed|ing)|drops?|dropped|omits?|omitted|misses?|"
+    r"missed|excludes?|excluded|uses?|used|opens?|opened|closes?|closed|fails?|failed|evaluat(?:es|ed)|"
+    r"accumulat(?:es|ed)|persists?|persisted|allows?|allowed|builds?|built|compar(?:es|ed)|treats?|treated|reads?|"
+    r"writes?|wrote|appends?|appended|lacks?|breaks?|broke|splic(?:es|ed|ing)|inserts?|inserted|interpolat(?:es|ed)|"
+    r"removes?|removed|loses?|lost|replac(?:es|ed)|reus(?:es|ed)|forgets?|forgot|passes|passed|accepts?|trusts?|"
+    r"exposes?|exposed|divid(?:es|ed)|makes?|made|multipl(?:ies|ied)|subtracts?|subtracted|applies|applied|"
+    r"computes?|computed|calculat(?:es|ed)|produces?|produced|gives?|gave|takes?|took)\b",
+    re.IGNORECASE,
+)
+
+
+def _all_fact_spans(fixture: Fixture, output: str) -> list[tuple[int, int]]:
+    return [sp for f in fixture.facts for sp in _fact_spans(f, output)]
+
+
+def _fact_tokens(fixture: Fixture) -> set[str]:
+    return {t for f in fixture.facts for t in _words(f.text)}
+
+
+def outside_words(fixture: Fixture, output: str) -> list[str]:
+    """The words of the output that are not words of a fact text (the function name is fact one)."""
+    tokens = _fact_tokens(fixture)
+    return [w for w in _words(output) if w not in tokens]
+
+
+def novel_words(fixture: Fixture, output: str) -> set[str]:
+    """Content words of the output that are not fact words and not words of the input: what the model added."""
+    known = set(_words(fixture.input)) | STOPWORDS
+    return {w for w in outside_words(fixture, output) if len(w) >= 3 and w not in known}
+
+
+def causal_near_fact(fixture: Fixture, output: str) -> bool:
+    spans = _all_fact_spans(fixture, output)
+    return any(
+        max(0, fs - cb, ca - fe) <= NEAR_CHARS
+        for ca, cb in (m.span() for m in CAUSAL.finditer(output))
+        for fs, fe in spans
+    )
+
+
 def _title_ok(line: str) -> bool:
     title = re.sub(r"^[#*\s]+", "", line).strip()
     title = re.sub(r"^title:\s*", "", title, flags=re.IGNORECASE).rstrip("* ").strip()
@@ -261,18 +341,30 @@ def _structure_ok(fixture: Fixture, output: str) -> bool:
     if task == "ci-log-digest":  # at most six lines, and no log line copied
         flat = _norm(fixture.input)
         quoted = any(len(_norm(ln).split()) >= 4 and _norm(ln) in flat for ln in lines)
-        return len(lines) <= 6 and not quoted
-    if task == "first-pass-review-comment":  # at most 3 lines; a sentence names the function and the defect class
-        if len(lines) > 3:
+        return (
+            len(lines) <= 6
+            and not quoted
+            and len(novel_words(fixture, output)) >= CI_MIN_NOVEL
+            and causal_near_fact(fixture, output)
+        )
+    if task == "first-pass-review-comment":  # at most 3 lines; a full sentence names the function and the defect
+        if len(lines) > 3 or len(outside_words(fixture, output)) < REVIEW_MIN_WORDS:
             return False
         subject, defect = fixture.facts[0], fixture.facts[1:]
         sentences = [x for x in re.split(r"(?<=[.!?])\s+|\n", output) if len(x.split()) >= 5]
+
         # the function and the defect class must sit in one sentence, or in two sentences next to each other
-        windows = [" ".join(sentences[i : i + 2]) for i in range(len(sentences))]
-        return any(_fact_matches(subject, w) and any(_fact_matches(d, w) for d in defect) for w in windows)
+        # and the sentence that states the defect carries a verb, so it is a statement and not a label
+        def stated(x: str) -> bool:
+            return DEFECT_VERB.search(x) is not None and any(_fact_matches(d, x) for d in defect)
+
+        return any(
+            _fact_matches(subject, " ".join(sentences[i : i + 2])) and any(stated(x) for x in sentences[i : i + 2])
+            for i in range(len(sentences))
+        )
     if task == "doc-skeleton":  # a title heading, then each named section as a heading with a placeholder line
         heads = [_HEADING.match(ln) for ln in lines]
-        names = {f.text.lower() for f in fixture.facts}
+        names = {x.lower() for x in (fixture.sections or tuple(f.text for f in fixture.facts))}
 
         def clean(m: re.Match[str]) -> str:
             return re.sub(r"^\d+[.)]\s*", "", m.group("text")).rstrip(":. ").lower()
@@ -496,20 +588,55 @@ def summarize(runs: Sequence[dict[str, Any]]) -> dict[tuple[str, str], dict[str,
     return out
 
 
-def tier_for(task_stats: dict[str, dict[str, Any]]) -> tuple[str, str]:
-    """task_stats maps model -> summary. Returns (tier, reason); thresholds apply to the Wilson lower bound."""
+def agreement(ok: int, wrong: int) -> dict[str, Any]:
+    """Agreement of the verdicts for one cell: the ok share with its one-sided 95 percent Wilson interval."""
+    n = ok + wrong
+    lo, hi = wilson(ok, n, CAL_Z)
+    return {"verdicts": n, "ok": ok, "wrong": wrong, "ok_share": ok / n if n else None, "ci_low": lo, "ci_high": hi}
+
+
+def cal_status(cell: dict[str, Any] | None) -> str:
+    """none: no verdict yet; partial: fewer than CAL_MIN_VERDICTS; done: enough verdicts (good or bad)."""
+    n = cell["verdicts"] if cell else 0
+    return "none" if n == 0 else "partial" if n < CAL_MIN_VERDICTS else "done"
+
+
+def calibration_ok(cell: dict[str, Any] | None) -> bool:
+    return cell is not None and cell["verdicts"] >= CAL_MIN_VERDICTS and cell["ci_low"] >= CAL_MIN_LOWER
+
+
+def tier_for(
+    task_stats: dict[str, dict[str, Any]], calibration: dict[str, dict[str, Any]] | None = None
+) -> tuple[str, str]:
+    """task_stats maps model -> summary, calibration maps model -> agreement for this task. Returns (tier, reason).
+    The pass-rate thresholds apply to the Wilson lower bound; local-only also needs a calibrated cell, so a
+    cell that passes the scorer but was never checked by a person can be at best local-then-claude-check."""
+    cal = calibration or {}
     rated = {m: s["ci_low"] for m, s in task_stats.items() if s["pass_rate"] is not None}
     if not rated:
         return "claude", "no scored runs"
-    # highest pass rate wins; a tie goes to the smaller model (qwen) by sort order
-    best = max(sorted(rated, key=lambda m: (MODEL_TIER.get(m) != "local-qwen", m)), key=lambda m: rated[m])
+
+    def pick(models: list[str]) -> str:  # highest lower bound wins; a tie goes to the smaller model (qwen)
+        return max(sorted(models, key=lambda m: (MODEL_TIER.get(m) != "local-qwen", m)), key=lambda m: rated[m])
+
+    def shown(m: str) -> str:
+        return f"{m} lower bound {rated[m]:.2f} (pass rate {task_stats[m]['pass_rate']:.2f})"
+
+    qualified = [m for m in rated if rated[m] >= LOCAL_MIN and calibration_ok(cal.get(m))]
+    if qualified:
+        best = pick(qualified)
+        return MODEL_TIER.get(best, f"local-{best}"), f"{shown(best)} >= {LOCAL_MIN}, calibrated"
+    best = pick(list(rated))
     rate = rated[best]
-    shown = f"{best} lower bound {rate:.2f} (pass rate {task_stats[best]['pass_rate']:.2f})"
     if rate >= LOCAL_MIN:
-        return MODEL_TIER.get(best, f"local-{best}"), f"{shown} >= {LOCAL_MIN}"
+        need = f"needs {CAL_MIN_VERDICTS}+ verdicts and ok lower bound >= {CAL_MIN_LOWER}"
+        return (
+            "local-then-claude-check",
+            f"{shown(best)} >= {LOCAL_MIN} but calibration {cal_status(cal.get(best))}: {need}",
+        )
     if rate >= CHECK_MIN:
-        return "local-then-claude-check", f"{shown} in [{CHECK_MIN}, {LOCAL_MIN})"
-    return "claude", f"{shown} < {CHECK_MIN}"
+        return "local-then-claude-check", f"{shown(best)} in [{CHECK_MIN}, {LOCAL_MIN})"
+    return "claude", f"{shown(best)} < {CHECK_MIN}"
 
 
 def _fmt(value: float | None, spec: str = ".2f") -> str:
@@ -519,7 +646,7 @@ def _fmt(value: float | None, spec: str = ".2f") -> str:
 def hour_of(run: dict[str, Any]) -> int | None:
     """UTC hour a run started in: from hour_utc, else from ts; None for rows recorded before timestamps existed."""
     hour = run.get("hour_utc")
-    if isinstance(hour, int) and 0 <= hour <= 23:
+    if isinstance(hour, int) and not isinstance(hour, bool) and 0 <= hour <= 23:  # True is not hour 1
         return hour
     ts = run.get("ts")
     if isinstance(ts, str):
@@ -567,7 +694,10 @@ def render_time_buckets(runs: Sequence[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def render_report(runs: Sequence[dict[str, Any]]) -> str:
+def render_report(
+    runs: Sequence[dict[str, Any]], calibration: dict[tuple[str, str], dict[str, Any]] | None = None
+) -> str:
+    cals = calibration or {}
     stats = summarize(runs)
     tasks = [t for t in TASKS if any(k[0] == t for k in stats)]
     models = sorted({k[1] for k in stats})
@@ -597,8 +727,9 @@ def render_report(runs: Sequence[dict[str, Any]]) -> str:
         "on luck. A fenced share above 0 means the model wrapped its JSON in a code fence: a downstream consumer must "
         f"strip one outer fence too. A run passes when recall >= {PASS_RECALL}, no forbidden string appears, the "
         "format is valid and the length bound holds.",
-        f"- lower bound >= {LOCAL_MIN}: local only (local-qwen or local-gemma, whichever scored higher; ties go to "
-        "qwen)",
+        f"- lower bound >= {LOCAL_MIN} and calibrated (at least {CAL_MIN_VERDICTS} verdicts, ok-share lower bound >= "
+        f"{CAL_MIN_LOWER}): local only (local-qwen or local-gemma, whichever scored higher; ties go to qwen)",
+        f"- lower bound >= {LOCAL_MIN} but not calibrated: local-then-claude-check",
         f"- {CHECK_MIN} <= lower bound < {LOCAL_MIN}: local-then-claude-check",
         f"- lower bound < {CHECK_MIN}, or no scored runs: claude",
         "",
@@ -606,8 +737,29 @@ def render_report(runs: Sequence[dict[str, Any]]) -> str:
         "|---|---|---|",
     ]
     for t in tasks:
-        tier, why = tier_for({m: s for (tt, m), s in stats.items() if tt == t})
+        tier, why = tier_for(
+            {m: s for (tt, m), s in stats.items() if tt == t}, {m: c for (tt, m), c in cals.items() if tt == t}
+        )
         lines.append(f"| {t} | {tier} | {why} |")
+    lines += [
+        "",
+        "## CALIBRATION",
+        "",
+        f"Per cell: none (no verdict), partial (under {CAL_MIN_VERDICTS}), done ({CAL_MIN_VERDICTS} or more). "
+        "Verdicts are human or reviewer ok/wrong calls on passing outputs; the ok share's lower bound is one-sided "
+        "95%. A pass means the facts are present and the shape is right, not that the answer is meaningful.",
+        "",
+        "| task | model | status | verdicts | ok share | ok lower bound |",
+        "|---|---|---|---|---|---|",
+    ]
+    for t in tasks:
+        for m in models:
+            if (t, m) in stats:
+                c = cals.get((t, m))
+                lines.append(
+                    f"| {t} | {m} | {cal_status(c)} | {c['verdicts'] if c else 0} | "
+                    f"{_fmt(c['ok_share'] if c else None)} | {_fmt(c['ci_low'] if c else None)} |"
+                )
     lines += render_time_buckets(runs)
     return "\n".join(lines) + "\n"
 
@@ -629,6 +781,110 @@ def calibration_sample(runs: Sequence[dict[str, Any]], n: int, seed: int | None 
             "",
         ]
     return "\n".join(parts)
+
+
+def calibration_file(runs: Sequence[dict[str, Any]], n: int, seed: int = 0) -> dict[str, Any]:
+    """The file a person or reviewer fills in: up to n PASSING outputs per (task, model) cell (all of them when
+    fewer pass), each with an id and an empty verdict (ok or wrong)."""
+    cells: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for r in runs:
+        if r["status"] == "ok" and r["score"]["passed"]:
+            cells[(r["task"], r["model"])].append(r)
+    rng = random.Random(seed)  # noqa: S311 - audit sampling, not security
+    entries: list[dict[str, Any]] = []
+    for task, model in sorted(cells):
+        for r in rng.sample(cells[(task, model)], min(n, len(cells[(task, model)]))):
+            raw = json.dumps([task, model, r["fixture"], r.get("repeat"), r["output"]])
+            entries.append(
+                {
+                    "id": hashlib.sha256(raw.encode()).hexdigest()[:12],
+                    "task": task,
+                    "model": model,
+                    "fixture": r["fixture"],
+                    "output": r["output"],
+                    "verdict": "",
+                }
+            )
+    note = "Set verdict to exactly ok or wrong for each entry you judged; leave the rest empty."
+    return {"format": CAL_FORMAT, "instructions": note, "entries": entries}
+
+
+def ingest_verdicts(doc: Any) -> dict[tuple[str, str], dict[str, Any]]:
+    """Agreement per (task, model) cell from a filled calibration file. Only the verdicts ok and wrong count; an
+    empty verdict is not yet judged; any other value, a duplicate id or an unknown task is an error."""
+    if not isinstance(doc, dict) or doc.get("format") != CAL_FORMAT or not isinstance(doc.get("entries"), list):
+        raise EvalError("not a safo-eval calibration file")
+    counts: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    seen: set[str] = set()
+    for e in doc["entries"]:
+        if not isinstance(e, dict):
+            raise EvalError("bad calibration entry")
+        eid, task, model, verdict = e.get("id"), e.get("task"), e.get("model"), e.get("verdict")
+        if not isinstance(eid, str) or not eid or eid in seen:
+            raise EvalError(f"missing or duplicate calibration id {eid!r}")
+        seen.add(eid)
+        if task not in TASKS or not isinstance(model, str) or not model:
+            raise EvalError(f"bad task or model in calibration entry {eid}")
+        if not isinstance(verdict, str) or verdict not in ("", "ok", "wrong"):
+            raise EvalError(f"entry {eid}: verdict must be exactly ok or wrong, got {verdict!r}")
+        cell = counts[(task, model)]
+        if verdict == "ok":
+            cell[0] += 1
+        elif verdict == "wrong":
+            cell[1] += 1
+    return {k: agreement(v[0], v[1]) for k, v in counts.items()}
+
+
+def agreement_doc(cells: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "format": CAL_FORMAT + "-agreement",
+        "cells": [{"task": t, "model": m, **c} for (t, m), c in sorted(cells.items())],
+    }
+
+
+def load_agreement(doc: Any) -> dict[tuple[str, str], dict[str, Any]]:
+    """Read an agreement file back. Only the ok and wrong counts are trusted; the shares are recomputed."""
+    if not isinstance(doc, dict) or doc.get("format") != CAL_FORMAT + "-agreement":
+        raise EvalError("not a safo-eval calibration agreement file")
+    if not isinstance(doc.get("cells"), list):
+        raise EvalError("not a safo-eval calibration agreement file")
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for c in doc["cells"]:
+        try:
+            ok, wrong, task, model = c["ok"], c["wrong"], c["task"], c["model"]
+        except (KeyError, TypeError) as exc:
+            raise EvalError("bad agreement cell") from exc
+        counts_ok = all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in (ok, wrong))
+        if not counts_ok or task not in TASKS or not isinstance(model, str):
+            raise EvalError("bad agreement cell")
+        out[(task, model)] = agreement(ok, wrong)
+    return out
+
+
+def _read_private(path: Path) -> str:
+    """Read a verdict or agreement file: a regular file we own, readable by the owner only, never through a symlink."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise EvalError(f"cannot read {path}: {exc.strerror}") from exc
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+            raise EvalError(f"refusing {path}: must be a regular file owned by you with mode 0600 or 0400")
+        data = fh.read(CAL_MAX_BYTES + 1)
+    if len(data) > CAL_MAX_BYTES:
+        raise EvalError(f"{path} is too large")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EvalError(f"{path} is not UTF-8") from exc
+
+
+def _read_json_private(path: Path) -> Any:
+    try:
+        return json.loads(_read_private(path))
+    except ValueError as exc:
+        raise EvalError(f"{path} is not valid JSON") from exc
 
 
 def _read_runs(path: Path) -> list[dict[str, Any]]:
@@ -688,10 +944,13 @@ def entry(argv: Sequence[str] | None = None) -> int:
     rp.add_argument("--out", required=True, type=Path)
     rp.add_argument("--rescore", action="store_true", help="re-score stored outputs; writes report-rescored.md")
     rp.add_argument("--fixtures", type=Path, default=FIXTURES_DEFAULT)
-    c = sub.add_parser("calibrate")
-    c.add_argument("--runs", required=True, type=Path)
-    c.add_argument("--n", required=True, type=int)
-    c.add_argument("--out", required=True, type=Path)
+    rp.add_argument("--calibration", type=Path, help="calibration-agreement.json from `calibrate --ingest`")
+    c = sub.add_parser("calibrate", help="sample passing outputs to check by hand, or ingest the verdicts")
+    c.add_argument("--runs", type=Path, help="runs JSONL to sample passing outputs from")
+    c.add_argument("--n", type=int, default=CAL_SAMPLE_DEFAULT, help="outputs per (task, model) cell")
+    c.add_argument("--seed", type=int, default=0)
+    c.add_argument("--ingest", type=Path, help="a filled calibration.json: store the agreement per cell")
+    c.add_argument("--out", required=True, type=Path, help="output directory")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "run":
@@ -710,15 +969,23 @@ def entry(argv: Sequence[str] | None = None) -> int:
         elif args.cmd == "report":
             _private_dir(args.out)
             runs = _read_runs(args.runs)
+            cals = load_agreement(_read_json_private(args.calibration)) if args.calibration else None
             if args.rescore:
                 runs = rescore(runs, load_fixtures(args.fixtures))
                 _write_private(args.out / "runs-rescored.jsonl", "".join(json.dumps(r) + "\n" for r in runs))
-                _write_private(args.out / "report-rescored.md", render_report(runs))
+                _write_private(args.out / "report-rescored.md", render_report(runs, cals))
             else:
-                _write_private(args.out / "report.md", render_report(runs))
+                _write_private(args.out / "report.md", render_report(runs, cals))
+        elif args.ingest:
+            cells = ingest_verdicts(_read_json_private(args.ingest))
+            _private_dir(args.out)
+            _write_private(args.out / "calibration-agreement.json", json.dumps(agreement_doc(cells), indent=1) + "\n")
         else:
-            _private_dir(args.out.parent)
-            _write_private(args.out, calibration_sample(_read_runs(args.runs), args.n))
+            if args.runs is None or args.n < 1:
+                raise EvalError("calibrate needs --runs and --n >= 1, or --ingest")
+            doc = calibration_file(_read_runs(args.runs), args.n, args.seed)
+            _private_dir(args.out)
+            _write_private(args.out / "calibration.json", json.dumps(doc, indent=1) + "\n")
     except EvalError as exc:
         print(f"safo-eval: {exc}", file=sys.stderr)
         return 2

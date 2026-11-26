@@ -7,7 +7,13 @@
       "text": "SQL injection",
       "variants": [
         "\\binject\\w*",
-        "concatenat\\w+.{0,40}(SQL|quer|string|name)"
+        "concatenat\\w+.{0,40}(SQL|quer|string|name)",
+        "\\bglu(ed|ing)\\b",
+        "\\bconcatenat\\w+",
+        "\\bstring (building|formatting|interpolation).{0,80}(inject|alter the query|crafted)",
+        "(inject|alter the query|crafted).{0,80}\\bstring (building|formatting|interpolation)",
+        "\\bparameteri[sz]\\w*",
+        "\\bplaceholders?\\b"
       ]
     }
   ],
@@ -16,6 +22,13 @@
   "required_format": "any",
   "wrong": [
     "find_user: the query is too long, split it across several lines.",
-    "find_user: SELECT * returns every column, list the columns you need."
+    "find_user: SELECT * returns every column, list the columns you need.",
+    "find_user: add a docstring that says what the function returns for a missing user name."
+  ],
+  "correct_alts": [
+    "find_user builds the query by gluing name into the SQL string, so a crafted value can alter the query.",
+    "find_user is concatenating the user name into the statement instead of binding a parameter here.",
+    "In find_user the string formatting of name into the query allows an attacker to inject SQL.",
+    "find_user dropped the parameterized query and now splices the raw name into the statement."
   ]
 }

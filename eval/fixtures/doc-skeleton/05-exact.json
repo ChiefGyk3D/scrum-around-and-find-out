@@ -4,7 +4,13 @@
   "facts": [
     "Versioning",
     "Tagging",
-    "Publishing"
+    "Publishing",
+    {
+      "text": "3.7",
+      "variants": [
+        "(?<![\\d.])3\\.7(?!\\d)"
+      ]
+    }
   ],
   "forbidden": [
     "(?<![\\d.])3\\.8(?!\\d)",
@@ -15,6 +21,15 @@
   "wrong": [
     "# Guide\n## Tagging\nOne line about tagging goes here.\n## Publishing\nOne line about publishing goes here.",
     "# Versioning\n# Tagging\n# Publishing",
-    "# Release process v3.8\n## Versioning\nHow versions work.\n## Tagging\nHow tags work.\n## Publishing\nHow to publish."
+    "# Release process v3.8\n## Versioning\nHow versions work.\n## Tagging\nHow tags work.\n## Publishing\nHow to publish.",
+    "# Release process\n## Versioning\nHow versions work.\n## Tagging\nHow tags work.\n## Publishing\nHow to publish."
+  ],
+  "sections": [
+    "Versioning",
+    "Tagging",
+    "Publishing"
+  ],
+  "correct_alts": [
+    "# Release process v3.7\n## Versioning\nHow versions work.\n## Tagging\nHow tags work.\n## Publishing\nHow to publish."
   ]
 }

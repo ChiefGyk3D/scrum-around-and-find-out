@@ -10,7 +10,11 @@
         "/ ?100\\b",
         "\\bdivid\\w*.{0,15}100",
         "\\bpct\\b.{0,40}(not|never|without|missing|forgot)",
-        "\\bdivisor\\b"
+        "\\bdivisor\\b",
+        "\\bdivision\\b.{0,15}100",
+        "\\bfraction\\b",
+        "(missing|removed|dropped|lost|no longer).{0,30}\\b100\\b",
+        "\\bdivides? (pct|it|the)\\b"
       ]
     }
   ],
@@ -22,5 +26,10 @@
   "wrong": [
     "apply_discount: price can be negative here, add a check for it.",
     "apply_discount: the helper comments above are repetitive, trim them."
+  ],
+  "correct_alts": [
+    "apply_discount no longer divides pct by 100, so a discount of 15 makes the price negative.",
+    "apply_discount drops the / 100 conversion, so the multiplier is wrong for values like 15.",
+    "apply_discount is missing the 100 divisor, which treats pct as a fraction instead of a whole number."
   ]
 }

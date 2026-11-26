@@ -13,7 +13,10 @@
         "\\binclusive\\b",
         "(>=|greater than or equal).{0,40}(>|strict)",
         "(>|strict\\w*).{0,40}(>=|greater than or equal)",
-        "\\bexcludes? (age )?18\\b"
+        "\\bexcludes? (age )?18\\b",
+        "(should|must|needs? to) (be |use |stay |remain )?(>=|greater than or equal)",
+        "\\b18[- ]year[- ]olds?\\b",
+        "\\bat least 18\\b"
       ]
     }
   ],
@@ -23,5 +26,11 @@
   "wrong": [
     "is_adult: >= is faster than other operators in general.",
     "is_adult: the age parameter should be validated as an int."
+  ],
+  "correct_alts": [
+    "is_adult now uses > instead of >=, so someone who is exactly 18 is no longer treated as an adult.",
+    "is_adult excludes age 18 because the comparison became strict.",
+    "is_adult has an off by one at the cutoff, since 18 and over should count as adults.",
+    "is_adult should use >= so that 18-year-olds are included in the result."
   ]
 }

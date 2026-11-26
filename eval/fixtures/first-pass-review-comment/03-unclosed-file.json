@@ -12,7 +12,11 @@
         "\\bleaks?\\b.{0,20}(file|handle|descriptor)",
         "context manager",
         "(lost|removed|dropped|no longer (uses?|using)) .{0,20}\\bwith\\b",
-        "\\bresource leaks?\\b"
+        "\\bresource leaks?\\b",
+        "\\bforget\\w*",
+        "\\bleav\\w+ .{0,20}\\bopen\\b",
+        "\\b(never|not) (be )?(released|freed)\\b",
+        "\\bwithout (a )?(closing|close)\\b"
       ]
     }
   ],
@@ -22,5 +26,10 @@
   "wrong": [
     "read_cfg: variable name conflicts with a builtin, rename it.",
     "read_cfg: reads the whole file at once, stream it line by line instead."
+  ],
+  "correct_alts": [
+    "read_cfg opens the file without closing it, so the file handle leaks.",
+    "read_cfg no longer uses a context manager and leaves the descriptor open after the read.",
+    "read_cfg forgets to close the file handle once the read finishes."
   ]
 }
