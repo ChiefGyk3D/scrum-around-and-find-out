@@ -40,9 +40,9 @@ safo audit | safo-draft digest board-drift -
   overrides. `llm-local` is always called with stdin from /dev/null, because it hangs on an open stdin.
 - **Checks before filing** (a failing draft is printed with the reasons and never filed, even with `--yes`). The
   same checks run on the body and on `--title` (a title failure is named `title: ...`): no em dash (U+2014 and the
-  look-alikes U+FE58, U+FE31, U+2E3A, U+2E3B; the horizontal bar U+2015 is not blocked), no IPv4 or IPv6 address, no
+  look-alike dashes; the horizontal bar U+2015 is not blocked), no IPv4 or IPv6 address, no
   `.lan`/`.local`/`.internal` style hostname, no serial number (`serial`, `serial number`, `s/n`, `SN` followed by a
-  value of 6 or more characters with a digit), no claude.ai URL (with or without a scheme) or `Claude-Session:`
+  value of 6 or more characters with a digit), no Claude web app session URL (with or without a scheme) or `Claude-Session:`
   trailer, no callsign or grid shape, no HTML, no unusual characters, and no private deny entry.
 - **Unusual characters fail closed.** After Unicode NFKC normalization, a draft or title is refused when it holds a
   combining mark (categories Mn, Me), a format character (Cf: zero-width, bidi, variation selectors and tag characters
@@ -93,7 +93,7 @@ safo audit | safo-draft digest board-drift -
   Also refused: a paragraph with an escaped bracket (backslash then `[` or `]`) and a later `]:`, whatever comes
   before it. The reason is "markdown reference definitions are not allowed in drafts: a `[` followed later by `]:` in the
   same paragraph (line N). Reword it, put the text in a code span without brackets, or split the paragraph; write
-  URLs plainly." Only `str.find` runs, so the scan is linear. Allowed: `- [x] done`, `[ ]`, `a[0]`, `see [1]` (no colon), and a `]:` in a
+  URLs plainly." Only a plain substring search runs, so the scan is linear. Allowed: `- [x] done`, `[ ]`, `a[0]`, `see [1]` (no colon), and a `]:` in a
   paragraph with no earlier `[` (`ok]: fine`). Known over-blocks, accepted as the safe side: `the range is [0, 5]:
   inclusive`, `arr[0]: the first item`, and any paragraph that mixes a `[` with a later `]:` for another reason.
   Rewrite those without the colon right after the bracket. Bare URLs are scanned as written. The exact pull request
@@ -137,28 +137,25 @@ safo audit | safo-draft digest board-drift -
   joined with nothing between them (raw and canonical), so a value split between them is caught. The reason reads
   `title and body combined: ...`.
 - **IPv6.** A run of hex digits, colons and dots is tried as an address, also behind a label (`ipv6:`, `addr:`), with a
-  `%zone`, before punctuation, and before trailing word characters (`fe80::1x`, `fe80::abcdxyz`,
-  `2001:db8::deadbeefSECRET` are flagged). For each `::` in a run, the prefix up to and including it, and the prefix plus
+  `%zone`, before punctuation, and before trailing word characters (a link-local or documentation address followed by letters is still flagged). For each `::` in a run, the prefix up to and including it, and the prefix plus
   the hextets directly after it, are tried as separate candidates. Scope-likeness is decided per candidate, for the
   identifier right after that candidate's own `::`: it is held to the stricter rule (two or more hextets before the
-  `::`) only when that character is a letter that is not a hex digit (`std::vector`, `note::x`), or when the word there
+  `::`) only when that character is a letter that is not a hex digit (a C++ scope name, for example), or when the word there
   holds an underscore and both sides are one or two hex characters (`a::b_c`). A scope-like `::` elsewhere in the same
-  run does not hide a real address (`fe80::1::note::x`, `a::b::fe80::1` are flagged). Times and MAC addresses (`12:30:45`, `aa:bb:cc:dd:ee:ff`) do not
-  parse as addresses, and a prefix with fewer than two hextets before a trailing `::` (`fe80::`, `e::`) is not flagged.
+  run does not hide a real address (a real address after a scope-like `::` is still flagged). Times and MAC addresses do not
+  parse as addresses, and a prefix with fewer than two hextets before a trailing `::` (a bare link-local prefix, for example) is not flagged.
   Over-blocking is accepted: a name such as `Config::default` starts with hex characters after the `::` and is flagged
   as an address.
 - **Callsign and grid heuristics, and the over-blocking tradeoff.** A callsign is flagged by shape (1-2 letters, one
-  digit, 1-3 letters) in any case with no cue word needed: `W1AW`, `w1aw`, and with an SSID suffix of a hyphen and one
-  or two digits (`W1AW-7`). A 4-character grid square (two letters A-R, two digits: `EM48`) is flagged the same way,
-  and so is the 6-character form (`EM48ab`), and either form after `grid`, `locator` or `maidenhead`. A hyphen or
-  underscore is a separator, not part of the token: `call-W1AW`, `grid-FN31`, `w1aw_x`, `my-w1aw-x` and
-  `https://example.test/path/W1AW-x` are blocked. Only ASCII letters and digits next to the shape keep it from
+  digit, 1-3 letters) in any case with no cue word needed: `N0CALL`-shaped tokens in upper or lower case, also with an SSID suffix of a hyphen and one
+  or two digits. A 4-character grid square (two letters A-R, two digits) is flagged the same way,
+  and so is the 6-character form (two more letters), and either form after `grid`, `locator` or `maidenhead`. A hyphen or
+  underscore is a separator, not part of the token: a callsign shape joined to other words by hyphens or underscores, or inside a URL path, is blocked. Only ASCII letters and digits next to the shape keep it from
   matching, so a 40-hex commit hash is not flagged, and a whole UUID (8-4-4-4-12 hex) is masked first because its
   four-character groups (`a1bc`, `ab12`) have those shapes; a lone `a1bc` is flagged. Over-blocking is the safe side:
   a lowercase word such as `ab12`, `id01` or `a1b` is blocked and a human lists the legitimate ones in an allow list.
 - **The allow list.** Only the owner placeholders `N0CALL`, `N0TST` and `FN31pr` are built in, exact and
-  case-sensitive (`fn31pr` and `FN31` are blocked). Technical tokens with the shape, such as `K8S`, `K3S`, `E2E`,
-  `P2P`, `W3C`, `I2C`, are blocked by default. `docs/draft-allow.example.txt` lists the usual ones: copy the lines you
+  case-sensitive (the lowercase and the 4-character forms are blocked). Technical tokens with the shape, such as the Kubernetes and Kubernetes-lite short names and the usual `2`-in-the-middle abbreviations, are blocked by default. `contrib/draft-allow.example.txt` lists the usual ones: copy the lines you
   want into your own file and point `SAFO_DRAFT_ALLOW_FILE` at it (one per line or comma separated, any mix of commas and
   whitespace; blank lines and `#` comment lines are skipped; matching ignores case; the file follows the same ownership and permission rules as the deny file). `SAFO_DRAFT_ALLOW` takes the same, one per line or comma separated. Allow and deny files over 64 KB (65536 bytes)
   are refused.
@@ -173,9 +170,9 @@ safo audit | safo-draft digest board-drift -
 - **Size and timeouts.** The whole prompt is capped at 100000 encoded bytes (the kernel allows 131072 per argument). A
   larger input is refused before `llm-local` is called, exit 2, with a message saying it is a local input error and
   nothing was sent; it is not truncated. Model output over 20000 characters is refused as `draft too long to check safely` (exit 2, nothing filed). A title over 300 characters is refused as `title too long` (exit 2, before any model call, nothing filed; the message never echoes the title), and `check_draft` and `check_text` refuse over-long inputs themselves. `--facts` is decoded as UTF-8 with replacement. A timeout of `llm-local`
-  (900 s) exits 11, with the Twingate/server NOT verified line. A timeout of `gh` (120 s) exits 11 and says the filing
+  (900 s) exits 11, with the line saying the VPN and the server were NOT verified. A timeout of `gh` (120 s) exits 11 and says the filing
   state is unknown: check with `gh` before retrying.
-- **Any other failure** exits non-zero, prints the exact failure, and states that Twingate and the local server were NOT
+- **Any other failure** exits non-zero, prints the exact failure, and states that the VPN and the local server were NOT
   verified. There is no fallback to a Claude model; the decision to use one is the owner's.
 
 ## Metrics

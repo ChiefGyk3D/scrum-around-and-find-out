@@ -946,7 +946,7 @@ def test_r4b5_only_the_owner_placeholders_are_built_in() -> None:
 
 
 def test_r4b5_example_allow_file_is_loadable_and_comment_headed(env: Env) -> None:
-    example = Path(localdraft.__file__).parents[2] / "docs" / "draft-allow.example.txt"
+    example = Path(localdraft.__file__).parents[2] / "contrib" / "draft-allow.example.txt"
     lines = example.read_text().splitlines()
     assert lines[0].startswith("#") and "SAFO_DRAFT_ALLOW_FILE" in "\n".join(lines[:5])
     tokens = [x for x in lines if x and not x.startswith("#")]

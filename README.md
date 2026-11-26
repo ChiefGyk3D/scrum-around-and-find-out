@@ -198,6 +198,7 @@ replaced are gone.
 - [Personas](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Personas)
 - [Plugins](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Plugins)
 - [Local-llm](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-llm)
+- [Local-draft](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-draft): `safo-draft`, local-first drafts and digests
 - [Prerequisites](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Prerequisites)
 - [No-hidden-work](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/No-hidden-work)
 

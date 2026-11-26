@@ -45,6 +45,8 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TextIO
 
+from safo import bounded
+
 SHORT_MODEL = "qwen3.5:4b"
 LONG_MODEL = "gemma4:12b"
 LONG_INPUT = 600  # characters of prompt plus facts above which the long model is used
@@ -78,7 +80,7 @@ EXIT_TABLE = (
 )
 
 # The only built-in allowed tokens: the owner-named placeholders, exact and case-sensitive. Everything else with the
-# shape of a callsign or grid is blocked; docs/draft-allow.example.txt lists tech tokens to copy into an allow file.
+# shape of a callsign or grid is blocked; contrib/draft-allow.example.txt lists tech tokens to copy into an allow file.
 _BUILTIN_ALLOWED = frozenset({"N0CALL", "N0TST", "FN31pr"})
 _CALL_SHAPE = r"[A-Z]{1,2}[0-9][A-Z]{1,3}"
 _EDGE_BEFORE = r"(?<![A-Za-z0-9])"  # hyphen and underscore are separators, not token characters
@@ -523,7 +525,7 @@ def _read_private_file(path: str, what: str) -> str | None:
             raise Failure(f"{what} is not a regular file; refusing to read it", EXIT_ERROR)
         if info.st_uid != os.geteuid():
             raise Failure(f"{what} is not owned by you; refusing to read it", EXIT_ERROR)
-        if info.st_mode & 0o022:
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise Failure(f"{what} is group or world writable; run chmod go-w on it", EXIT_ERROR)
         data = handle.read(MAX_CONFIG_BYTES + 1)
     if len(data) > MAX_CONFIG_BYTES:
@@ -1016,14 +1018,14 @@ def _log_call(env: Mapping[str, str], now: dt.datetime, sub: str, model: str, co
     path = _state_path(env)
     row = {"ts": now.isoformat(), "subcommand": sub, "model": model, "exit": code, "chars_in": n_in, "chars_out": n_out}
     try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=stat.S_IRWXU)
         info = path.parent.lstat()
         if stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid():
             return  # a symlinked or foreign state directory is never written or chmodded
-        path.parent.chmod(0o700)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        path.parent.chmod(stat.S_IRWXU)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, stat.S_IRUSR | stat.S_IWUSR)
         with os.fdopen(fd, "a") as handle:
-            os.fchmod(handle.fileno(), 0o600)
+            os.fchmod(handle.fileno(), stat.S_IRUSR | stat.S_IWUSR)
             handle.write(json.dumps(row) + "\n")
     except OSError:
         pass  # metrics must never block the work
@@ -1035,7 +1037,7 @@ def report(env: Mapping[str, str], out: TextIO) -> int:
     if path.is_file():
         for raw in path.read_text().splitlines():
             try:
-                row = json.loads(raw)
+                row = bounded.loads(raw)
                 year, wk, _ = dt.datetime.fromisoformat(row["ts"]).isocalendar()
                 weeks[f"{year}-W{wk:02d}"][str(row["subcommand"])] += 1
                 weeks[f"{year}-W{wk:02d}"]["_failed"] += 1 if row.get("exit") != 0 else 0
