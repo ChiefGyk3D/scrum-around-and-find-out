@@ -1,0 +1,35 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def read_cfg(path):\n-    with open(path) as fh:\n-        return fh.read()\n+    fh = open(path)\n+    return fh.read()\n```",
+  "facts": [
+    "read_cfg",
+    {
+      "text": "never closed",
+      "variants": [
+        "(not|never|n't|without|no|missing|forgot\\w*).{0,40}\\bclos\\w*",
+        "\\bunclosed\\b",
+        "(file|handle|descriptor)s? (leak|left open|stays? open|remains? open)",
+        "\\bleaks?\\b.{0,20}(file|handle|descriptor)",
+        "context manager",
+        "(lost|removed|dropped|no longer (uses?|using)) .{0,20}\\bwith\\b",
+        "\\bresource leaks?\\b",
+        "\\bforget\\w*",
+        "\\bleav\\w+ .{0,20}\\bopen\\b",
+        "\\b(never|not) (be )?(released|freed)\\b",
+        "\\bwithout (a )?(closing|close)\\b"
+      ]
+    }
+  ],
+  "forbidden": [],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "read_cfg: variable name conflicts with a builtin, rename it.",
+    "read_cfg: reads the whole file at once, stream it line by line instead."
+  ],
+  "correct_alts": [
+    "read_cfg opens the file without closing it, so the file handle leaks.",
+    "read_cfg no longer uses a context manager and leaves the descriptor open after the read.",
+    "read_cfg forgets to close the file handle once the read finishes."
+  ]
+}

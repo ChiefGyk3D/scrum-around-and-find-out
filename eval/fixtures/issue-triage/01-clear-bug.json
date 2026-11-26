@@ -1,0 +1,28 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, enhancement, docs, security, question.\nEpics: E1-auth, E2-reporting, E3-docs-site, E4-ci.\nIssue: Clicking Save on the profile page throws a 500 error when the display name contains an apostrophe.",
+  "facts": [
+    {
+      "text": "\"label\": \"bug\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"bug\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E1-auth\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E1-auth\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!bug\")",
+    "\"epic\"\\s*:\\s*\"(?!E1-auth\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"security\", \"epic\": \"E1-auth\"}",
+    "{\"label\": \"bug\", \"epic\": \"E4-ci\"}"
+  ]
+}

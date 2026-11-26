@@ -1,0 +1,21 @@
+{
+  "task": "ci-log-digest",
+  "input": "$ pytest -q\n..........F.....\nFAILED tests/test_billing.py::test_invoice_rounding - AssertionError: assert 10.05 == 10.04\n1 failed, 15 passed in 3.2s\nexit code 1",
+  "facts": [
+    "test_invoice_rounding",
+    "test_billing.py",
+    "10.05",
+    "10.04",
+    "1 failed"
+  ],
+  "forbidden": [
+    "test_invoice_total",
+    "\\b16 passed"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "Billing tests failed: test_invoice_total rounded wrong in test_billing.py, expected 10.05 got 10.04 and 16 passed.",
+    "The run failed with an assertion error in the billing tests; one check expected 100.5 but got 100.4, 1 failed."
+  ]
+}

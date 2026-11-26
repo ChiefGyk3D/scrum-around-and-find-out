@@ -1,0 +1,20 @@
+{
+  "task": "ci-log-digest",
+  "input": "FAILED tests/test_auth.py::test_token_expiry - KeyError: 'exp'\nFAILED tests/test_auth.py::test_refresh - ConnectionError: example-idp.local\n2 failed, 58 passed in 9.9s\nNote: test_refresh needs the fake IdP; test_token_expiry does not.",
+  "facts": [
+    "test_token_expiry",
+    "test_refresh",
+    "KeyError",
+    "58 passed"
+  ],
+  "forbidden": [
+    "\\b59 passed",
+    "\\b3 failed"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "3 failed, 59 passed: test_token_expiry and test_refresh both need the fake IdP.",
+    "Two auth tests failed because of a missing key and a network error in the suite."
+  ]
+}
