@@ -1,0 +1,38 @@
+{
+  "task": "pr-summary",
+  "input": "Test PR: tests/test_scheduler.py::test_scheduler_tick was flaky because it slept 2 seconds and compared wall time. Replaced time.sleep(2) with a fake clock from freezegun. Ran 200 times locally with no failure. Production code untouched.",
+  "facts": [
+    "tests/test_scheduler.py",
+    "test_scheduler_tick",
+    {
+      "text": "freezegun",
+      "variants": [
+        "\\bfreezegun\\b",
+        "\\bfake clock\\b"
+      ]
+    },
+    {
+      "text": "200",
+      "variants": [
+        "\\b200\\b",
+        "\\btwo hundred\\b"
+      ]
+    },
+    "time.sleep(2)"
+  ],
+  "forbidden": [
+    "\\bproduction code (?:was )?(?:changed|modified|fixed)",
+    "\\b2000\\b",
+    "\\b20 times\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Fix flaky scheduler test\n- test_scheduler_tick in tests/test_scheduler.py now uses freezegun\n- ran 2000 times, time.sleep(2) removed",
+    "Scheduler change\n- production code now ticks with a fake clock\n- ran 200 times"
+  ],
+  "correct_alts": [
+    "Make test_scheduler_tick deterministic.\n- tests/test_scheduler.py used time.sleep(2) and checked wall-clock time, which made it flaky.\n- A frozen clock from freezegun replaces the sleep.\n- It passed two hundred repeated local runs. Application code is unchanged.",
+    "A flaky scheduler test is now stable.\n\n- The wait of time.sleep(2) is gone from test_scheduler_tick in tests/test_scheduler.py.\n- Time is controlled with freezegun.\n- 200 local runs, zero failures; nothing outside the test changed."
+  ]
+}

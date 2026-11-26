@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, feature, enhancement, docs, question.\nEpics: E-auth, E-billing, E-search, E-platform.\nRule: a new capability is a feature; a change to something that already exists is an enhancement.\nIssue: The invoice list already has a status filter. Please let it remember my last choice between visits.",
+  "facts": [
+    {
+      "text": "\"label\": \"enhancement\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"enhancement\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-billing\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-billing\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!enhancement\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-billing\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"feature\", \"epic\": \"E-billing\"}",
+    "{\"label\": \"enhancement\", \"epic\": \"E-search\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-billing\", \"label\": \"enhancement\"}",
+    "```json\n{\n \"label\": \"enhancement\",\n \"epic\": \"E-billing\"\n}\n```",
+    "{\"label\": \"enhancement\", \"epic\": \"E-billing\", \"note\": \"see rule\"}"
+  ]
+}

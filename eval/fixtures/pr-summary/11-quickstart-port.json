@@ -1,0 +1,36 @@
+{
+  "task": "pr-summary",
+  "input": "Docs-only PR. docs/quickstart.md told readers to open http://app.example.com:8080 but the container listens on 8443 with TLS. Fixed the URL to https://app.example.com:8443 and fixed the curl example that used -k. No code changes.",
+  "facts": [
+    "docs/quickstart.md",
+    "8080",
+    "8443",
+    {
+      "text": "https://app.example.com:8443",
+      "variants": [
+        "https://app.example.com:8443"
+      ]
+    },
+    {
+      "text": "-k",
+      "variants": [
+        "(?<![\\w-])-k\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bcode (?:change|fix)",
+    "\\bport 8043\\b",
+    "\\b8844\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Fix quickstart port\n- docs/quickstart.md now says 8080 instead of 8443\n- code changes in the container",
+    "Quickstart update\n- URL is https://app.example.com:8443\n- the curl -k example was added"
+  ],
+  "correct_alts": [
+    "Correct the quickstart URL.\n- docs/quickstart.md pointed at port 8080, but the container serves TLS on 8443.\n- The link is now https://app.example.com:8443.\n- The curl example no longer relies on -k. Only documentation changed.",
+    "A documentation fix for the getting started guide.\n\n- Replaces the wrong 8080 address in docs/quickstart.md with https://app.example.com:8443.\n- Removes the -k flag from the curl snippet.\n- No source files are touched."
+  ]
+}

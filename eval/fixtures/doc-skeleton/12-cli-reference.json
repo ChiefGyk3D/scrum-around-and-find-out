@@ -1,0 +1,32 @@
+{
+  "task": "doc-skeleton",
+  "input": "Reference page for the exampletool command line. The flag for the retry limit is --max-retries (verbatim). Sections: Synopsis, Options, Exit codes.",
+  "facts": [
+    "Synopsis",
+    "Options",
+    "Exit codes",
+    "--max-retries"
+  ],
+  "forbidden": [
+    "--retries\\b",
+    "--max-retry\\b",
+    "--retry-max\\b"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# exampletool(1)\n\n### Synopsis\nThe usage line is still to be written.\n\n### Options\nList each flag here.\n\n### Exit codes\nList the exit codes here.",
+    "# Command line reference\n\nStart with the retry flag --max-retry, then read the sections below.\n\n## Options\nFlags go here.\n\n## Synopsis\nThe usage line goes here.\n\n## Exit codes\nThe codes go here.",
+    "# exampletool\n\nSynopsis, Options and Exit codes are described below. The retry flag is --max-retries.",
+    "# Synopsis\n## Options\nList each flag here, including --max-retries.\n## Exit codes\nList the exit codes here."
+  ],
+  "sections": [
+    "Synopsis",
+    "Options",
+    "Exit codes"
+  ],
+  "correct_alts": [
+    "# exampletool(1)\n\n### Synopsis\nThe usage line is still to be written.\n\n### Options\nList each flag here, including --max-retries.\n\n### Exit codes\nList the exit codes here.",
+    "# Command line reference\n\nStart with the retry flag --max-retries, then read the sections below.\n\n## Options\nFlags go here.\n\n## Synopsis\nThe usage line goes here.\n\n## Exit codes\nThe codes go here."
+  ]
+}

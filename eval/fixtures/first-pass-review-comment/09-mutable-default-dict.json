@@ -1,0 +1,42 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def build_headers(extra, base={\"Accept\": \"application/json\"}):\n+    base.update(extra)\n+    return base\n-    headers = dict(base)\n-    headers.update(extra)\n-    return headers\n```\nIntent: return a fresh set of request headers for each call.",
+  "facts": [
+    "build_headers",
+    {
+      "text": "mutable default",
+      "variants": [
+        "mutable (default|dict|argument|arg|value|object)",
+        "shared (state|between|across)",
+        "same (dict|object|mapping)",
+        "default (dict|argument|arg|value|mapping).{0,60}(shared|mutated|persists?|reused|updated|accumulat\\w+|changes?|in place)",
+        "\\bshared default\\b",
+        "default (dict|mapping)",
+        "(updates?|mutates?|modif\\w+) the default",
+        "evaluated once"
+      ]
+    },
+    {
+      "text": "headers",
+      "variants": [
+        "\\bheaders?\\b",
+        "\\bbase\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bSQL\\b",
+    "\\bperformance\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "build_headers: add a docstring and type hints for the extra parameter.",
+    "build_headers: the Accept header should be text/html instead of JSON."
+  ],
+  "correct_alts": [
+    "build_headers mutates its mutable default dict, so the extra headers from one call persist into the next.",
+    "In build_headers the base argument is a default dict that update changes in place, and every later call shares those leaked headers.",
+    "build_headers returns the same shared default mapping each time because it no longer copies it, so headers accumulate across calls."
+  ]
+}

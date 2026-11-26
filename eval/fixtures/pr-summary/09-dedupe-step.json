@@ -1,0 +1,33 @@
+{
+  "task": "pr-summary",
+  "input": "Pipeline PR: new step in pipeline/dedupe.py drops duplicate events keyed on (user_id, event_id). On last week's sample it removed 2.1% of rows. Batch size stays at 5000. Step is registered after normalize and before enrich in pipeline/main.py.",
+  "facts": [
+    "pipeline/dedupe.py",
+    "(user_id, event_id)",
+    {
+      "text": "2.1%",
+      "variants": [
+        "\\b2\\.1\\s?%",
+        "\\b2\\.1 percent\\b"
+      ]
+    },
+    "5000",
+    "pipeline/main.py"
+  ],
+  "forbidden": [
+    "\\b1\\.2%",
+    "\\b2\\.0%",
+    "\\b500\\b(?!\\d)",
+    "before normalize"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Dedupe events\n- pipeline/dedupe.py drops duplicates by (user_id, event_id), removing 1.2% of rows\n- batch size stays 5000",
+    "Add a pipeline step\n- registered before normalize in pipeline/main.py\n- removes 2.1% of rows"
+  ],
+  "correct_alts": [
+    "Add a duplicate-removal stage to the pipeline.\n- pipeline/dedupe.py discards repeated events identified by (user_id, event_id).\n- About 2.1 percent of the sample rows were duplicates.\n- The stage runs between normalize and enrich, wired up in pipeline/main.py; batches stay at 5000.",
+    "Duplicates are now filtered out of the event stream.\n\n- Keys are (user_id, event_id), implemented in pipeline/dedupe.py.\n- A week of sample data shrank by 2.1%.\n- pipeline/main.py runs it after normalize; the batch size of 5000 is unchanged."
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "task": "doc-skeleton",
+  "input": "Runbook for failing over the example-orders database. The promotion must finish within 45 seconds; copy that limit verbatim. Sections: Detect, Promote replica, Confirm writes.",
+  "facts": [
+    "Detect",
+    "Promote replica",
+    "Confirm writes",
+    {
+      "text": "45 seconds",
+      "variants": [
+        "\\b45 ?s(ec(onds?)?)?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b(4|40|54|450|90) ?s(ec(onds?)?)?\\b"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Failing over example-orders\n\n## Detect\n_Write how the outage is noticed._\n\n## Promote replica\n_Write the promotion steps._\n\n## Confirm writes\n_Write how to prove writes work again._",
+    "# Orders database failover runbook\n\nContents:\n- Detect\n- Promote replica\n- Confirm writes\n\nThe limit is 45 seconds.",
+    "# Failing over example-orders, 45 seconds\n\n## Detect\n## Promote replica\n_Write the promotion steps._\n## Confirm writes\n_Write how to prove writes work again._",
+    "# Failover runbook\n\nPromotion must finish within 40 seconds.\n\n## Detect\nTo be written.\n\n## Promote replica\nTo be written.\n\n## Confirm writes\nTo be written."
+  ],
+  "sections": [
+    "Detect",
+    "Promote replica",
+    "Confirm writes"
+  ],
+  "correct_alts": [
+    "# Failing over example-orders\n\nThis runbook keeps the promotion window of 45 seconds.\n\n## Detect\n_Write how the outage is noticed._\n\n## Promote replica\n_Write the promotion steps._\n\n## Confirm writes\n_Write how to prove writes work again._",
+    "# Orders database failover runbook\n\nContents:\n- Detect\n- Promote replica\n- Confirm writes\n\n### Detect\n(to be written)\n\n### Promote replica\n(to be written; the limit is 45 seconds)\n\n### Confirm writes\n(to be written)"
+  ]
+}

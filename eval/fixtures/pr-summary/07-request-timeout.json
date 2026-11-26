@@ -1,0 +1,38 @@
+{
+  "task": "pr-summary",
+  "input": "Change in server.py: the default request timeout goes from 30 seconds to 45 seconds. It can be set with the environment variable APP_REQUEST_TIMEOUT_S. docs/config.md updated with the new default. Deferred to a later PR: per-route timeouts.",
+  "facts": [
+    "server.py",
+    {
+      "text": "45 seconds",
+      "variants": [
+        "\\b45\\s?(?:seconds|s)\\b",
+        "\\bforty-five seconds\\b"
+      ]
+    },
+    {
+      "text": "30 seconds",
+      "variants": [
+        "\\b30\\s?(?:seconds|s)\\b",
+        "\\bthirty seconds\\b"
+      ]
+    },
+    "APP_REQUEST_TIMEOUT_S",
+    "docs/config.md"
+  ],
+  "forbidden": [
+    "\\b54\\b",
+    "\\b450\\b",
+    "per-route"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Raise the request timeout\n- server.py default is now 54 seconds, up from 30 seconds\n- set it with APP_REQUEST_TIMEOUT_S",
+    "Timeout update\n- adds per-route timeouts in server.py\n- documents APP_REQUEST_TIMEOUT_S in docs/config.md"
+  ],
+  "correct_alts": [
+    "Longer default request timeout.\n- server.py now waits forty-five seconds instead of thirty seconds by default.\n- The value can be overridden through APP_REQUEST_TIMEOUT_S.\n- docs/config.md lists the new default.",
+    "This PR lifts the default timeout for requests from 30 seconds to 45 seconds.\n\n- The change is in server.py.\n- Operators can tune it with the APP_REQUEST_TIMEOUT_S variable.\n- The configuration page docs/config.md reflects the new number."
+  ]
+}

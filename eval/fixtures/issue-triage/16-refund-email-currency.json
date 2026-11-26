@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, feature, docs, question.\nEpics: E-billing (invoices, payments, refunds), E-notify (emails, push, templates), E-ui.\nRule: when two epics could own an issue, choose the epic that owns the directory in the stack trace or the diff.\nIssue: The refund confirmation email shows a dollar sign for a euro refund. The template lives in services/notify/templates/refund.html, although the email is sent when a billing refund completes.",
+  "facts": [
+    {
+      "text": "\"label\": \"bug\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"bug\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-notify\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-notify\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!bug\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-notify\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"feature\", \"epic\": \"E-notify\"}",
+    "{\"label\": \"bug\", \"epic\": \"E-billing\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-notify\", \"label\": \"bug\"}",
+    "```json\n{\n \"label\": \"bug\",\n \"epic\": \"E-notify\"\n}\n```",
+    "{\"label\": \"bug\", \"epic\": \"E-notify\", \"note\": \"see rule\"}"
+  ]
+}

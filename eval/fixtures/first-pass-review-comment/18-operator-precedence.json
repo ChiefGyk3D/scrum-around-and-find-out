@@ -1,0 +1,40 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def can_edit(user, doc):\n-    return (user.is_admin or user.id == doc.owner_id) and not doc.locked\n+    return user.is_admin or user.id == doc.owner_id and not doc.locked\n```\nIntent: nobody may edit a locked document, admins included.",
+  "facts": [
+    "can_edit",
+    {
+      "text": "operator precedence",
+      "variants": [
+        "precedence",
+        "(and|or) binds? (tighter|first|more tightly)",
+        "missing (the )?(parenthes\\w+|brackets)",
+        "(dropped|removed|lost) (the )?parenthes\\w+",
+        "\\bparenthes\\w+",
+        "grouping"
+      ]
+    },
+    {
+      "text": "locked",
+      "variants": [
+        "\\blocked\\b",
+        "\\block\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bSQL\\b",
+    "\\bnaming\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "can_edit: the name should be can_modify to match the rest of the API.",
+    "can_edit: user.id == doc.owner_id should use a helper function."
+  ],
+  "correct_alts": [
+    "can_edit has an operator precedence bug: without the parentheses, and binds tighter than or, so admins can edit a locked document.",
+    "The dropped parentheses in can_edit change the grouping, which lets an admin pass even when the doc is locked.",
+    "can_edit now has an operator precedence problem: and binds tighter than or, so the locked check no longer applies to admins."
+  ]
+}

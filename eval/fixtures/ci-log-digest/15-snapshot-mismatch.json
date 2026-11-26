@@ -1,0 +1,33 @@
+{
+  "task": "ci-log-digest",
+  "input": "$ npm test -- --ci\n PASS  src/components/__tests__/Modal.test.tsx (1.76 s)\n    ✓ renders without crashing (15 ms)\n    ✓ renders without crashing (45 ms)\n    ✓ handles empty props (30 ms)\n[09:00:28] watching 187 files\nconsole.warn: deprecated prop in Toast\n PASS  src/components/__tests__/Sidebar.test.tsx (1.46 s)\nconsole.warn: deprecated prop in Tabs\n    ✓ renders without crashing (65 ms)\n    ✓ handles empty props (50 ms)\n    ✓ handles empty props (15 ms)\nconsole.warn: deprecated prop in Table\n    ✓ handles empty props (60 ms)\n    ✓ handles empty props (8 ms)\nconsole.warn: deprecated prop in Tabs\n  Sidebar component\n  Card component\n  Form component\n PASS  src/components/__tests__/Form.test.tsx (2.50 s)\n  Tabs component\n  Card component\n  Avatar component\n    ✓ renders without crashing (73 ms)\nconsole.warn: deprecated prop in Sidebar\n    ✓ handles empty props (27 ms)\n    ✓ handles empty props (21 ms)\n  Modal component\n PASS  src/components/__tests__/Toast.test.tsx (8.69 s)\n    ✓ handles empty props (4 ms)\n PASS  src/components/__tests__/Sidebar.test.tsx (1.95 s)\n    ✓ handles empty props (34 ms)\n    ✓ renders without crashing (22 ms)\nconsole.warn: deprecated prop in Card\n    ✓ handles empty props (52 ms)\n[09:03:36] watching 186 files\n    ✓ handles empty props (34 ms)\n  Avatar component\n[09:03:54] watching 114 files\n    ✓ renders without crashing (29 ms)\n  Tabs component\n FAIL  src/components/__tests__/Header.test.tsx\n  ● Header › renders collapsed nav\n    expect(received).toMatchSnapshot()\n    Snapshot name: `Header renders collapsed nav 1`\n    - Snapshot  - 1\n    + Received  + 1\n    -   aria-expanded=\"false\"\n    +   aria-expanded=\"true\"\nSnapshot Summary\n › 1 snapshot failed from 1 test suite. Inspect your code changes or run `npm test -- -u` to update them.\n › 1 snapshot obsolete from 1 test suite.\n  Modal component\n  Toast component\n PASS  src/components/__tests__/Avatar.test.tsx (4.81 s)\n    ✓ handles empty props (29 ms)\n    ✓ renders without crashing (76 ms)\nconsole.warn: deprecated prop in Tabs\n PASS  src/components/__tests__/Modal.test.tsx (7.99 s)\n  Header component\nconsole.warn: deprecated prop in Modal\n PASS  src/components/__tests__/Table.test.tsx (9.75 s)\nconsole.warn: deprecated prop in Card\n PASS  src/components/__tests__/Tabs.test.tsx (4.38 s)\n PASS  src/components/__tests__/Avatar.test.tsx (3.60 s)\n  Table component\n[09:07:28] watching 66 files\n    ✓ renders without crashing (24 ms)\nconsole.warn: deprecated prop in Tabs\nTests:       1 failed, 41 passed, 42 total\nSnapshots:   1 failed, 1 obsolete, 9 passed, 11 total",
+  "facts": [
+    "Header.test.tsx",
+    "aria-expanded",
+    {
+      "text": "1 snapshot failed",
+      "variants": [
+        "\\bone snapshot (failed|mismatch\\w*)\\b",
+        "\\b1 snapshot (mismatch|diff\\w*)\\b",
+        "\\bsnapshot (mismatch|diff)\\b"
+      ]
+    },
+    "collapsed nav"
+  ],
+  "forbidden": [
+    "(?:because|caused by|due to|cause is|root cause)\\b[^.\\n]{0,40}\\bobsolete\\b|\\bobsolete\\b[^.\\n]{0,40}\\b(?:caused|is the cause|broke|failed the)\\b",
+    "\\b2 (tests|snapshots) failed\\b",
+    "\\bsnapshot (file )?(is )?missing\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "Header.test.tsx failed because an obsolete snapshot has to be deleted, and 2 snapshots failed.",
+    "The test run failed with a render error in Header, the collapsed nav threw an exception."
+  ],
+  "correct_alts": [
+    "One snapshot failed in Header.test.tsx: the collapsed nav test now renders aria-expanded as true while the stored snapshot expects false.\nEither the component changed on purpose and the snapshot needs an update, or the attribute is a real regression.",
+    "The test run broke in Header.test.tsx because the Header collapsed nav output no longer matches its saved snapshot, aria-expanded flipped from false to true.\nThat is 1 snapshot failed, with everything else passing.",
+    "Header.test.tsx has 1 snapshot failed because the collapsed nav now renders aria-expanded as true where the stored snapshot says false.\nThe obsolete entry in the summary is only a leftover warning, so it is not what turned the run red."
+  ]
+}

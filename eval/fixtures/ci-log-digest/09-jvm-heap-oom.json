@@ -1,0 +1,50 @@
+{
+  "task": "ci-log-digest",
+  "input": "$ ./gradlew test --continue\n> Task :rates:classes UP-TO-DATE\n> Task :notify:processResources NO-SOURCE\n> Task :ledger:jar UP-TO-DATE\n> Task :rates:jar UP-TO-DATE\n> Task :invoice:jar UP-TO-DATE\nledger.LedgerTest > case47 PASSED\ntax.TaxTest > case46 PASSED\n> Task :limits:processResources NO-SOURCE\n> Task :export:compileJava UP-TO-DATE\n> Task :tax:jar UP-TO-DATE\ninvoice.InvoiceTest > case50 PASSED\n> Task :invoice:classes UP-TO-DATE\n> Task :export:processResources NO-SOURCE\n> Task :limits:compileJava UP-TO-DATE\n> Task :notify:processResources NO-SOURCE\n> Task :limits:classes UP-TO-DATE\n> Task :ledger:compileJava UP-TO-DATE\nlimits.LimitsTest > case4 PASSED\n> Task :rates:compileJava UP-TO-DATE\n> Task :export:compileJava UP-TO-DATE\n> Task :ledger:jar UP-TO-DATE\n> Task :export:processResources NO-SOURCE\n> Task :audit:compileJava UP-TO-DATE\n> Task :tax:compileJava UP-TO-DATE\ninvoice.InvoiceTest > case37 PASSED\n> Task :export:compileJava UP-TO-DATE\n> Task :limits:compileJava UP-TO-DATE\n> Task :tax:jar UP-TO-DATE\n> Task :ledger:classes UP-TO-DATE\n> Task :tax:classes UP-TO-DATE\nledger.LedgerTest > case8 PASSED\n> Task :export:jar UP-TO-DATE\n> Task :ledger:classes UP-TO-DATE\n> Task :invoice:classes UP-TO-DATE\n> Task :invoice:jar UP-TO-DATE\n> Task :audit:processResources NO-SOURCE\n> Task :limits:jar UP-TO-DATE\n> Task :ledger:jar UP-TO-DATE\naudit.AuditTest > case1 PASSED\n> Task :invoice:processResources NO-SOURCE\n> Task :rates:classes UP-TO-DATE\n> Task :invoice:classes UP-TO-DATE\n> Task :invoice:compileJava UP-TO-DATE\n> Task :ledger:jar UP-TO-DATE\n> Task :limits:classes UP-TO-DATE\n> Task :export:compileJava UP-TO-DATE\n> Task :limits:processResources NO-SOURCE\ninvoice.InvoiceTest > case49 PASSED\n> Task :audit:jar UP-TO-DATE\n> Task :audit:classes UP-TO-DATE\n> Task :tax:classes UP-TO-DATE\n> Task :ledger:processResources NO-SOURCE\n> Task :notify:compileJava UP-TO-DATE\n> Task :tax:compileJava UP-TO-DATE\n> Task :ledger:processResources NO-SOURCE\n> Task :limits:jar UP-TO-DATE\n> Task :ledger:classes UP-TO-DATE\n> Task :payments:test\n\nPaymentsBatchTest > settlesLargeBatch FAILED\n    java.lang.OutOfMemoryError: Java heap space\n        at java.base/java.util.Arrays.copyOf(Arrays.java:3512)\n        at com.example.payments.BatchBuffer.grow(BatchBuffer.java:77)\nGradle Test Executor 4 finished with non-zero exit value 1\nTest worker JVM args: -Xmx512m -XX:+UseG1GC\nnotify.NotifyTest > case10 PASSED\n> Task :notify:compileJava UP-TO-DATE\n> Task :notify:compileJava UP-TO-DATE\ninvoice.InvoiceTest > case27 PASSED\n> Task :tax:jar UP-TO-DATE\n> Task :limits:processResources NO-SOURCE\n> Task :notify:jar UP-TO-DATE\n> Task :rates:compileJava UP-TO-DATE\n> Task :ledger:jar UP-TO-DATE\n> Task :tax:compileJava UP-TO-DATE\n> Task :tax:processResources NO-SOURCE\n> Task :ledger:processResources NO-SOURCE\n> Task :rates:jar UP-TO-DATE\n> Task :limits:processResources NO-SOURCE\n> Task :rates:classes UP-TO-DATE\n> Task :invoice:compileJava UP-TO-DATE\n> Task :limits:classes UP-TO-DATE\n> Task :invoice:jar UP-TO-DATE\n> Task :notify:processResources NO-SOURCE\n> Task :tax:compileJava UP-TO-DATE\n> Task :rates:compileJava UP-TO-DATE\n> Task :rates:compileJava UP-TO-DATE\n> Task :ledger:processResources NO-SOURCE\n> Task :rates:classes UP-TO-DATE\n> Task :rates:processResources NO-SOURCE\n> Task :ledger:jar UP-TO-DATE\n> Task :invoice:compileJava UP-TO-DATE\n> Task :limits:jar UP-TO-DATE\n> Task :invoice:processResources NO-SOURCE\n> Task :ledger:processResources NO-SOURCE\n> Task :invoice:compileJava UP-TO-DATE\naudit.AuditTest > case40 PASSED\n> Task :rates:compileJava UP-TO-DATE\nFAILURE: Build failed with an exception.\n* What went wrong: Execution failed for task ':payments:test'.",
+  "facts": [
+    {
+      "text": ":payments:test",
+      "variants": [
+        "\\bpayments:test\\b",
+        "\\bpayments (module|test task)\\b"
+      ]
+    },
+    {
+      "text": "OutOfMemoryError",
+      "variants": [
+        "\\bout of (java )?(heap|memory)\\b",
+        "\\bOOM\\b",
+        "\\bheap (space|exhaust\\w+)\\b"
+      ]
+    },
+    {
+      "text": "512m",
+      "variants": [
+        "\\b512 ?(m|MB)\\b",
+        "Xmx512m"
+      ]
+    },
+    "settlesLargeBatch"
+  ],
+  "forbidden": [
+    "\\bExit(ed)? (code |value )?137\\b",
+    "\\bsegmentation fault\\b",
+    "\\bkilled by the (kernel|OOM killer)\\b",
+    "\\bkernel\\b",
+    "\\bOOM[- ]killer\\b",
+    "\\b(?:SIGKILL|signal 9)\\b",
+    "\\b(?:machine|host|runner|system|node|server)\\b[^.\\n]{0,30}\\b(?:ran out of|out of|exhausted)\\s+(?:system |physical |host )?memory\\b",
+    "\\bexit(?:ed)?\\b[^.\\n]{0,20}\\b137\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "The payments test task was killed by the kernel with exit 137 after running out of system memory.",
+    "settlesLargeBatch failed an assertion in :payments:test because the batch total was wrong.",
+    "The machine ran out of memory and the kernel killed the worker during :payments:test, so settlesLargeBatch never finished with a 512m limit."
+  ],
+  "correct_alts": [
+    "The :payments:test task failed because the settlesLargeBatch test ran out of Java heap: the test JVM is capped at 512m and BatchBuffer.grow kept copying a bigger array.\nRaising the test heap above 512m or shrinking the batch should fix it.",
+    "OutOfMemoryError in settlesLargeBatch (:payments:test) because the worker JVM only gets 512m. The buffer growth exhausted the heap, so Gradle marked the whole task as failed."
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, feature, docs, security, question, performance.\nEpics: E-auth (login, tokens, sessions), E-billing (invoices, payments), E-search (index, queries), E-platform (workers, deploys, logging).\nRule: a slowdown with correct output is performance, not bug.\nIssue: The search page now takes 14 s for a 10k result query, it used to take 2 s. The results themselves are exactly right.",
+  "facts": [
+    {
+      "text": "\"label\": \"performance\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"performance\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-search\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-search\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!performance\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-search\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"bug\", \"epic\": \"E-search\"}",
+    "{\"label\": \"performance\", \"epic\": \"E-platform\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-search\", \"label\": \"performance\"}",
+    "```json\n{\n \"label\": \"performance\",\n \"epic\": \"E-search\"\n}\n```",
+    "{\"label\": \"performance\", \"epic\": \"E-search\", \"note\": \"see rule\"}"
+  ]
+}

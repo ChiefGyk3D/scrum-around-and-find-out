@@ -1,0 +1,31 @@
+{
+  "task": "commit-message",
+  "input": "Change: in ios/Reachability.swift, handleNetworkChange() crashed on iOS 16.7 when the callback fired from a background thread. It now dispatches to the main queue. Fixes #2041. Not included: the Android reachability code.",
+  "facts": [
+    "handleNetworkChange",
+    "iOS 16.7",
+    "Reachability.swift",
+    {
+      "text": "#2041",
+      "variants": [
+        "#2041\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bfeat:",
+    "\\bchore:",
+    "\\bAndroid\\b",
+    "#2014"
+  ],
+  "max_chars": 600,
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
+  "wrong": [
+    "feat: handle network change on iOS 16.7\n\nAdds handleNetworkChange to Reachability.swift, fixes #2041.",
+    "fix: dispatch handleNetworkChange to main queue\n\nCrash on iOS 16.1 in Reachability.swift, closes #2014."
+  ],
+  "correct_alts": [
+    "fix: run handleNetworkChange on the main queue\n\nThe callback in Reachability.swift could fire from a background thread and crash iOS 16.7. Hop to the main queue first. Fixes #2041.",
+    "fix: stop the iOS 16.7 crash in network callbacks\n\nhandleNetworkChange now dispatches to the main thread, which avoids the background-thread crash in Reachability.swift (#2041)."
+  ]
+}

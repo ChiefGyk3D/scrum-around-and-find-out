@@ -1,0 +1,36 @@
+{
+  "task": "issue-draft",
+  "input": "Support chat export, long.\n[09:00] marcus-example: the dashboard looks quiet today, no new alerts (cli #806)\n[09:07] tomas-example: checked the old thread, no new information there (cli #388)\n[09:14] tomas-example: anyone seen the staging queue stall again, or is it just me (cli #911)\n[09:21] tomas-example: I am out Friday, ping dana-example for reviews (cli #287)\n[09:28] lena-example: I am out Friday, ping dana-example for reviews (cli #341)\n[09:35] dana-example: pushed a small cleanup, nothing to review yet (cli #479)\n[09:42] lena-example: the dashboard looks quiet today, no new alerts (cli #170)\n[09:49] marcus-example: anyone seen the staging queue stall again, or is it just me (cli #338)\n[09:56] omar-example: pushed a small cleanup, nothing to review yet (cli #547)\n[10:03] omar-example: the dashboard looks quiet today, no new alerts (cli #730)\n[10:10] tomas-example: pushed a small cleanup, nothing to review yet (cli #436)\n[10:17] lena-example: bumped the minor docs typo, will batch it with the next change (cli #810)\n[10:24] dana-example: checked the old thread, no new information there (cli #477)\n[10:31] dana-example: the weekly sync moved to Thursday, please update calendars (cli #858)\n[10:38] dana-example: will look at the backlog after lunch (cli #928)\n[10:45] dana-example: bumped the minor docs typo, will batch it with the next change (cli #264)\n[10:52] lena-example: ok to close the stale draft from last month? (cli #451)\n[10:59] tomas-example: bumped the minor docs typo, will batch it with the next change (cli #254)\n[11:06] marcus-example: checked the old thread, no new information there (cli #138)\n[11:13] tomas-example: anyone seen the staging queue stall again, or is it just me (cli #176)\n[11:20] marcus-example: anyone seen the staging queue stall again, or is it just me (cli #789)\n[11:27] omar-example: unrelated: the coffee machine on floor two is broken again (cli #847)\n[11:34] dana-example: will look at the backlog after lunch (cli #673)\n[11:41] tomas-example: I am out Friday, ping dana-example for reviews (cli #946)\n[13:05] lena-example: repro: fetchctl list --since=7d exits with code 64 and prints usage, but --since 7d works. Version 1.9.3.\n[13:07] omar-example: the equals form is documented in the manpage so it should work. Expected exit code 0.\n[09:00] marcus-example: anyone seen the staging queue stall again, or is it just me (cli #124)\n[09:07] lena-example: bumped the minor docs typo, will batch it with the next change (cli #288)\n[09:14] omar-example: will look at the backlog after lunch (cli #857)\n[09:21] omar-example: reminder: the retro notes are in the team folder (cli #911)\n[09:28] dana-example: anyone seen the staging queue stall again, or is it just me (cli #375)\n[09:35] dana-example: reminder: the retro notes are in the team folder (cli #715)\n[09:42] marcus-example: I am out Friday, ping dana-example for reviews (cli #801)\n[09:49] omar-example: the dashboard looks quiet today, no new alerts (cli #825)\n[09:56] dana-example: unrelated: the coffee machine on floor two is broken again (cli #121)\n[10:03] lena-example: lint is green on my branch, waiting on a second pair of eyes (cli #418)\n[10:10] tomas-example: anyone seen the staging queue stall again, or is it just me (cli #284)\n[10:17] dana-example: unrelated: the coffee machine on floor two is broken again (cli #643)\n[10:24] omar-example: unrelated: the coffee machine on floor two is broken again (cli #162)\n[10:31] omar-example: reminder: the retro notes are in the team folder (cli #727)\n[10:38] priya-example: lint is green on my branch, waiting on a second pair of eyes (cli #288)\n[10:45] tomas-example: lint is green on my branch, waiting on a second pair of eyes (cli #899)\n[10:52] omar-example: I am out Friday, ping dana-example for reviews (cli #245)\n[10:59] priya-example: lint is green on my branch, waiting on a second pair of eyes (cli #783)\n[11:06] omar-example: the weekly sync moved to Thursday, please update calendars (cli #542)\n[11:13] dana-example: reminder: the retro notes are in the team folder (cli #644)\n[11:20] dana-example: the dashboard looks quiet today, no new alerts (cli #357)\n[11:27] lena-example: lint is green on my branch, waiting on a second pair of eyes (cli #629)\n[11:34] tomas-example: the dashboard looks quiet today, no new alerts (cli #776)\n[11:41] marcus-example: lint is green on my branch, waiting on a second pair of eyes (cli #676)",
+  "facts": [
+    "fetchctl",
+    "--since=7d",
+    {
+      "text": "64",
+      "variants": [
+        "\\b(?:64|sixty-four)\\b"
+      ]
+    },
+    "1.9.3",
+    {
+      "text": "exit code",
+      "variants": [
+        "\\bexit(?:s with)?(?: status| code)\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "--since 7d.{0,40}\\b(?:fails|broken)",
+    "\\b46\\b",
+    "\\b1\\.9\\.8\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: since flag broken\n- fetchctl list --since 7d fails with exit code 46\n- version 1.9.3",
+    "Title: Flag parsing\n- --since=7d prints usage\n- nothing more known"
+  ],
+  "correct_alts": [
+    "fetchctl rejects --since=7d\n- With the equals form the command prints usage and exits with code 64; the space form works.\n- Seen on version 1.9.3.\n- The manpage documents --since=7d, so the expected exit code is 0.",
+    "Equals-style --since is not parsed by fetchctl\nRunning fetchctl list --since=7d ends in usage output and status 64, whereas --since 7d is accepted. Release 1.9.3 shows it. The documented syntax should succeed."
+  ]
+}

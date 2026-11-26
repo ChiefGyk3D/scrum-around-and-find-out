@@ -1,0 +1,35 @@
+{
+  "task": "doc-skeleton",
+  "input": "- Background note 0: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Background note 1: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Background note 2: contact list needs a refresh, not part of this document, ignore for now. - Background note 3: contact list needs a refresh, not part of this document, ignore for now. - Background note 4: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Background note 5: someone asked about the old wiki page, no action taken, left for a later pass. - Background note 6: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 7: contact list needs a refresh, not part of this document, ignore for now. - Background note 8: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 9: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 10: contact list needs a refresh, not part of this document, ignore for now. - Background note 11: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Background note 12: contact list needs a refresh, not part of this document, ignore for now. - Background note 13: meeting 12 minutes over, agenda items moved to the following session. - Background note 14: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 15: meeting 12 minutes over, agenda items moved to the following session. - Background note 16: contact list needs a refresh, not part of this document, ignore for now. - Background note 17: meeting 12 minutes over, agenda items moved to the following session. - Background note 18: meeting 12 minutes over, agenda items moved to the following session. - Background note 19: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Background note 20: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 21: someone asked about the old wiki page, no action taken, left for a later pass. - Background note 22: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 23: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 24: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 25: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 26: contact list needs a refresh, not part of this document, ignore for now. - Background note 27: contact list needs a refresh, not part of this document, ignore for now. - Background note 28: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Background note 29: someone asked about the old wiki page, no action taken, left for a later pass. - Background note 30: someone asked about the old wiki page, no action taken, left for a later pass. - Background note 31: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Background note 32: contact list needs a refresh, not part of this document, ignore for now. - Background note 33: contact list needs a refresh, not part of this document, ignore for now. - Background note 34: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 35: someone asked about the old wiki page, no action taken, left for a later pass. - Background note 36: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Background note 37: contact list needs a refresh, not part of this document, ignore for now. - Background note 38: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Background note 39: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Background note 40: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Background note 41: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 42: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Background note 43: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Background note 44: draft wording was passed around by mail, comments still open, no sign-off recorded. - Background note 45: someone asked about the old wiki page, no action taken, left for a later pass. - Background note 46: meeting 12 minutes over, agenda items moved to the following session. - Background note 47: meeting 12 minutes over, agenda items moved to the following session. - Background note 48: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Background note 49: meeting 12 minutes over, agenda items moved to the following session. - Background note 50: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Background note 51: call notes from the planning sync, nothing decided yet, owner to follow up next week. Security policy for example-lib. The coordinated disclosure window is 90 days, copy that figure verbatim. Sections: Supported versions, Reporting a vulnerability, Disclosure timeline. Ignore the background notes.",
+  "facts": [
+    "Supported versions",
+    "Reporting a vulnerability",
+    "Disclosure timeline",
+    {
+      "text": "90 days",
+      "variants": [
+        "\\b90 ?days?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b(9|30|45|60|120|180) days?\\b"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Supported versions\n# Reporting a vulnerability\n# Disclosure timeline\n90 days",
+    "# Security policy 90 days\n## Supported versions\nSupported versions goes here in one line.\n## Disclosure timeline\nDisclosure timeline goes here in one line.",
+    "# Security policy\n## Supported versions\nSupported versions goes here in one line.\n## Reporting a vulnerability\nReporting a vulnerability goes here in one line.\n## Disclosure timeline\nDisclosure timeline goes here in one line.",
+    "# Security policy 90 days\n## Supported versions\n## Reporting a vulnerability\n## Disclosure timeline"
+  ],
+  "sections": [
+    "Supported versions",
+    "Reporting a vulnerability",
+    "Disclosure timeline"
+  ],
+  "correct_alts": [
+    "# Security policy 90 days\n## Supported versions\nPlaceholder: describe supported versions here.\n## Reporting a vulnerability\nPlaceholder: describe reporting a vulnerability here.\n## Disclosure timeline\nPlaceholder: describe disclosure timeline here.",
+    "# Security policy\n\nValue to keep: 90 days\n\n### 1. Supported versions\nTODO: write the supported versions part.\n### 2. Reporting a vulnerability\nTODO: write the reporting a vulnerability part.\n### 3. Disclosure timeline\nTODO: write the disclosure timeline part."
+  ]
+}

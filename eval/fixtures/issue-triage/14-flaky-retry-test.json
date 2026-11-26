@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, flaky-test, chore, feature.\nEpics: E-ci, E-sync, E-ui.\nRule: a failure that disappears on rerun with no user-visible symptom is flaky-test, not bug.\nEpic rule: a test that only fails in CI belongs to E-ci, whatever feature the test covers; E-sync owns only user-visible sync defects.\nIssue: tests/test_sync.py::test_retry fails about 1 run in 8 on CI and passes locally and on rerun. Nobody has reported a sync problem in production.",
+  "facts": [
+    {
+      "text": "\"label\": \"flaky-test\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"flaky\\-test\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-ci\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-ci\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!flaky\\-test\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-ci\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"bug\", \"epic\": \"E-ci\"}",
+    "{\"label\": \"flaky-test\", \"epic\": \"E-sync\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-ci\", \"label\": \"flaky-test\"}",
+    "```json\n{\n \"label\": \"flaky-test\",\n \"epic\": \"E-ci\"\n}\n```",
+    "{\"label\": \"flaky-test\", \"epic\": \"E-ci\", \"note\": \"see rule\"}"
+  ]
+}

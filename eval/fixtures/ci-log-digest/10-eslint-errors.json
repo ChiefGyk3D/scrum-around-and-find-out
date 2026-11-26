@@ -1,0 +1,44 @@
+{
+  "task": "ci-log-digest",
+  "input": "$ npx eslint src --max-warnings 10\n    ✓ handles empty props (74 ms)\n PASS  src/components/__tests__/Toast.test.tsx (5.93 s)\n    ✓ handles empty props (18 ms)\n    ✓ handles empty props (39 ms)\n  Modal component\nconsole.warn: deprecated prop in Modal\n  Toast component\nconsole.warn: deprecated prop in Modal\n  Footer component\n    ✓ handles empty props (25 ms)\n    ✓ renders without crashing (36 ms)\n    ✓ renders without crashing (23 ms)\n  Tabs component\n    ✓ handles empty props (75 ms)\n  Modal component\n    ✓ handles empty props (54 ms)\n PASS  src/components/__tests__/Toast.test.tsx (3.81 s)\n PASS  src/components/__tests__/Toast.test.tsx (9.18 s)\n    ✓ handles empty props (59 ms)\nconsole.warn: deprecated prop in Form\n  Avatar component\n[09:02:48] watching 73 files\n  Table component\n  Toast component\n[09:02:24] watching 128 files\n    ✓ renders without crashing (72 ms)\n[09:03:28] watching 107 files\n    ✓ renders without crashing (12 ms)\n    ✓ handles empty props (60 ms)\n    ✓ renders without crashing (57 ms)\nconsole.warn: deprecated prop in Toast\n[09:01:33] watching 162 files\n    ✓ handles empty props (42 ms)\n    ✓ renders without crashing (78 ms)\n  Footer component\nconsole.warn: deprecated prop in Card\nconsole.warn: deprecated prop in Modal\nconsole.warn: deprecated prop in Form\n    ✓ handles empty props (66 ms)\n    ✓ handles empty props (57 ms)\n  Toast component\n[09:02:44] watching 173 files\n PASS  src/components/__tests__/Modal.test.tsx (7.56 s)\n[09:02:52] watching 35 files\n    ✓ handles empty props (6 ms)\n    ✓ handles empty props (21 ms)\nconsole.warn: deprecated prop in Form\n[09:02:21] watching 118 files\n  Table component\nconsole.warn: deprecated prop in Avatar\n/work/app/src/cart/total.ts\n   14:7   error    'discountRate' is assigned a value but never used  no-unused-vars\n   52:12  error    Expected '===' and instead saw '=='                eqeqeq\n/work/app/src/cart/legacy.ts\n   9:3    warning  Unexpected console statement                       no-console\n   31:3   warning  Unexpected console statement                       no-console\n✖ 4 problems (2 errors, 2 warnings)\n    ✓ renders without crashing (52 ms)\n    ✓ handles empty props (68 ms)\n PASS  src/components/__tests__/Header.test.tsx (1.93 s)\n  Form component\n PASS  src/components/__tests__/Table.test.tsx (4.41 s)\n[09:03:40] watching 41 files\nconsole.warn: deprecated prop in Tabs\n    ✓ renders without crashing (49 ms)\n PASS  src/components/__tests__/Sidebar.test.tsx (1.61 s)\n  Sidebar component\n PASS  src/components/__tests__/Table.test.tsx (2.77 s)\n  Table component\n  Header component\n    ✓ renders without crashing (4 ms)\n  Toast component\n    ✓ handles empty props (61 ms)\nconsole.warn: deprecated prop in Card\n PASS  src/components/__tests__/Form.test.tsx (9.58 s)\nconsole.warn: deprecated prop in Toast\n  Footer component\nnpm ERR! Lifecycle script `lint` failed with error: exit 1",
+  "facts": [
+    "total.ts",
+    {
+      "text": "no-unused-vars",
+      "variants": [
+        "\\bunused[ -]var\\w*",
+        "\\bnever used\\b"
+      ]
+    },
+    {
+      "text": "eqeqeq",
+      "variants": [
+        "\\bstrict equality\\b",
+        "'==='",
+        "\\b== instead of ===\\b"
+      ]
+    },
+    {
+      "text": "2 errors",
+      "variants": [
+        "\\btwo errors?\\b",
+        "\\b2 lint errors?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b4 errors\\b",
+    "\\bno-console\\b[^\\n]{0,30}\\b(fail\\w*|error)\\b",
+    "\\bprettier\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "ESLint failed with 4 errors in legacy.ts, mostly console statements.",
+    "The lint step broke because of formatting differences that prettier would fix in total.ts."
+  ],
+  "correct_alts": [
+    "The lint step failed because src/cart/total.ts has 2 errors: an unused variable (no-unused-vars) and a loose comparison that violates eqeqeq.\nThe two console warnings in legacy.ts do not break the build.",
+    "ESLint reported two errors in total.ts, one for no-unused-vars and one for eqeqeq, since the file assigns a value it never reads and compares with a double equals sign."
+  ]
+}

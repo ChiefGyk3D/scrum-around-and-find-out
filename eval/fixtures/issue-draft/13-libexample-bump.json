@@ -1,0 +1,31 @@
+{
+  "task": "issue-draft",
+  "input": "Dependency: bump libexample from 4.2.9 to 5.0.1. The 5.x line removes Codec.open_legacy(), which we call in tests/test_codec.py and in src/pipeline/io.py. Release notes say 5.0.0 had a data race, so skip 5.0.0. No other breaking change affects us.",
+  "facts": [
+    "libexample",
+    "4.2.9",
+    "5.0.1",
+    "Codec.open_legacy",
+    {
+      "text": "tests/test_codec.py",
+      "variants": [
+        "\\btest_codec\\.py\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b5\\.0\\.0\\b.{0,20}\\b(?:upgrade|bump|target)",
+    "\\b4\\.9\\.2\\b",
+    "\\b5\\.0\\.2\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Update libexample\n- bump from 4.2.9 to 5.0.2\n- replace Codec.open_legacy in tests/test_codec.py",
+    "Title: Dependency work\n- libexample 5.0.1 is needed\n- nothing else changes"
+  ],
+  "correct_alts": [
+    "Upgrade libexample to 5.0.1\n- Move from 4.2.9 to 5.0.1, skipping 5.0.0 because of its data race.\n- Codec.open_legacy() was removed in 5.x, so callers in tests/test_codec.py and src/pipeline/io.py need updating.\n- No other breaking change applies to us.",
+    "Bump libexample 4.2.9 -> 5.0.1\nThe 5.0.0 release has a race condition, so target 5.0.1. The legacy opener Codec.open_legacy no longer exists and is used in tests/test_codec.py as well as the pipeline io module, which must be adapted."
+  ]
+}
