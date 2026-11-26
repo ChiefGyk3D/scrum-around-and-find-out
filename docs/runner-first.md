@@ -15,7 +15,8 @@ Runner-first checks (issue: OWNER/REPO#N):
   stryker) run through ra-remote, never locally. Never use pytest -n: pytest-xdist is not in the repo deps.
 - Environment (set by the owner, never stored in a repo): RA_RUNNER_HOST=<ssh alias>, RA_RUNNER_KEY=<path to the
   runner-only key>, RA_RUNNER_USER=<runner account>.
-- Command: ra-remote [--timeout S] [--cpus N] [--memory Ng] [--py V] [--no-deps] [--fetch REL] WORKTREE -- COMMAND...
+- Command: ra-remote [--timeout SECS] [--cpus N] [--memory Ng] [--visual] [--py V] [--no-deps] [--fetch RELPATH]...
+  [--fetch-to DIR] [--plan] WORKTREE -- COMMAND...
   Try `ra-remote --plan WORKTREE -- COMMAND...` first: it prints what would be sent and connects nowhere.
 - The worktree must be under ~/.local/share/reach-around-dev (or another folder ra-remote allows) and be a PUBLIC
   checkout. Private repos, the instance repo, the brand repo and lead notes never go to the runner; run those locally.
@@ -37,17 +38,26 @@ closed: anything it cannot prove public stays local.
 ### What is classified as a full suite or sweep
 
 A name counts only in the command position of a segment, after env assignments and the wrappers `time`, `nohup`,
-`command`, `exec`, `nice`, `timeout`, `env`, `uv run`, `poetry run`, `pipenv run`, `pdm run`, `hatch run`, `npx`, `bunx`,
-`pnpm exec`, `npm exec`, `xargs`, `python -m`, and `bash|sh|zsh|dash|ksh -c STRING` (the string is checked too). Segments
-split on `&&`, `||`, `;`, `|`, `&`, newline, parentheses, backticks and `$(...)`. So `pip install pytest`, `which pytest`,
-`echo pytest`, `grep pytest f` and `ssh host pytest` are not suites.
+`command`, `exec`, `builtin`, `nice`, `ionice`, `timeout`, `env`, `stdbuf`, `setsid`, `chrt`, `taskset`, `unbuffer`,
+`flock`, `xvfb-run`, `uv run`, `poetry run`, `pipenv run`, `pdm run`, `hatch run`, `npx`, `bunx`, `pnpm exec`,
+`npm exec`, `yarn run`, `xargs`, `python -m`, and `bash|sh|zsh|dash|ksh -c STRING` (the string is checked too). For each
+wrapper the checker consumes the wrapper's own options and an optional `--` end-of-options marker, then continues on
+what follows, so `command -- pytest`, `nohup -- pytest`, `timeout 60 -- pytest` and `taskset -c 0 -- pytest` are
+suites. Segments split on `&&`, `||`, `;`, `|`, `&`, newline, parentheses, backticks and `$(...)`.
+
+Fail-closed rule: when, after the wrappers, the head is not a command the checker knows, any later word equal (case
+sensitive) to `pytest`, `vitest`, `jest`, `tox`, `nox`, `unittest`, `mutmut`, `cosmic-ray` or `stryker`, or `test` after
+`make|npm|pnpm|yarn|cargo|go|mvn|gradle`, makes the line a local full suite (a false positive is accepted; a missed suite
+under `--strict` is not). Known non-runner heads stay unflagged: `pip`, `pip3`, `uv pip`, `which`, `echo`, `printf`,
+`grep`, `rg`, `cat`, `less`, `ls`, `ssh`, `scp`, `git`, `apt`, `apt-get`, `brew`, `man`, `type`, `command -v`. So
+`pip install pytest`, `which pytest`, `man pytest`, `echo pytest`, `grep pytest f` and `ssh host pytest` are not suites.
 
 - pytest: with no file, no `::` id and no `-k`/`--lf`/`--ff`. Directories count as full. Values of `--deselect`,
   `--ignore`, `--ignore-glob`, `--junitxml`, `-p`, `--rootdir`, `--confcutdir`, `--cov`, `-c`, `-o` (and similar) are not
   targets. `--version`, `--help`, `--collect-only` and similar do not run tests.
 - mutation sweeps: `mutmut`, `cosmic-ray`, `stryker`.
 - JavaScript: `vitest [run]` with no file; `npm|pnpm|yarn test`, `t`, `run test`, `run test:*`.
-- `tox`, `nox`; `make test`, `make check`.
+- `jest` (like `vitest`); `tox`, `nox`; `make test`, `make check`.
 - `python -m unittest` with no module (or `discover`); `go test` with no package or `./...` and no `-run`;
   `cargo test` with no filter and no `--test`; `mvn test` without `-Dtest`; `gradle`/`gradlew test` without `--tests`.
 - A command already wrapped in `ra-remote` is accepted.
@@ -62,26 +72,61 @@ that changes meaning.
 
 ### Repo class (decision rules, in order)
 
-1. Read every remote (`git remote -v`, fetch and push). Each must parse as a `github.com` https, ssh or scp-like
+1. Transport overrides: if any of these is set the repo is "cannot tell: git transport is overridden (setting NAME)" and
+   stays local. Environment: `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`, any `GIT_CONFIG_*`. Effective git
+   configuration (`git config --show-origin --get-regexp`, includes followed): `core.sshcommand`, `core.gitproxy`,
+   `remote.*.vcs`, `remote.*.proxy`, `remote.*.pushurl`, `url.*.insteadof`, `url.*.pushinsteadof`, and an `includeIf`
+   with a `gitdir` condition. Only the setting key is named, never a value. The checker also runs git with the
+   environment it was given, so the real global git configuration of the caller is what is read.
+2. Read every remote (`git remote -v`, fetch and push). Each must parse as a `github.com` https, ssh or scp-like
    `owner/name` URL; the host is parsed, so `https://evil.com/github.com/owner/x` is rejected. Userinfo is never printed.
-   No remote, or any remote that does not parse: "cannot tell: keep local".
-2. Denylist, always wins: built-in name patterns `*-instance`, `reach-around-instance`, `*brand*`, `*dotfiles*`,
+   Non-ASCII owner or repository names are rejected. No remote, or any remote that does not parse: "cannot tell: keep
+   local".
+3. Denylist, always wins: built-in name patterns `*-instance`, `reach-around-instance`, `*brand*`, `*dotfiles*`,
    `*ai-shit*`, `*lead*`, `*notes*`, `*private*`, `*secret*`, `*homelab-identity*`, plus one name or glob per line in
-   `~/.config/safo/runner-never` (matched against `name` and `owner/name`). A match on any remote: "looks private".
-3. Allowlist mode: if `SAFO_PUBLIC_REPOS` (comma list of `owner/name`) or the file `public-repos` is set, the repo is
-   public only when every remote is listed. Otherwise "looks private".
-4. No allowlist: owner-level trust. `SAFO_PUBLIC_OWNERS` (comma list) or the file `public-owners`; every remote owner must
-   be listed. The output then says "public: owner listed, no denylist match".
-5. Anything else: "cannot tell: keep local".
+   `~/.config/safo/runner-never` (matched against `name` and `owner/name`). Names are normalized first (NFKC, lowercase,
+   trailing slashes, dots and spaces stripped, `.git` suffixes removed until stable) and matched in both the normalized
+   and the raw form, so `x-instance.git.git`, `x-instance.GIT` and `x-instance.` are denied. A match on any remote:
+   "looks private".
+4. Allowlist mode: if `SAFO_PUBLIC_REPOS` (comma list of `owner/name`) is set, even to an empty string, or the file
+   `public-repos` exists, even when empty, the repo is public only when every remote is listed. An empty allowlist means
+   no repo is public. Otherwise "looks private".
+5. No allowlist: owner-level trust. `SAFO_PUBLIC_OWNERS` (comma list; set means used, even if empty) or the file
+   `public-owners`; every remote owner must be listed. The output then says "public: owner listed, no denylist match".
+6. Anything else: "cannot tell: keep local".
 
 The config files (`runner-never`, `public-repos`, `public-owners`) sit in `$XDG_CONFIG_HOME/safo` (else
-`~/.config/safo`), are created by the owner and only read here. A file, or its folder, that is a symlink, is not yours,
-or is group or world writable makes the repo "cannot tell: keep local".
+`~/.config/safo`), are created by the owner and only read here. Every component of the path is checked with `lstat` from
+the root: a symlink anywhere in the ancestry (including `XDG_CONFIG_HOME` itself or its parents), a `..` component, an
+ancestor below the home folder that is not yours or is group or world writable, or a folder or file that is not yours
+or is group or world writable, makes the repo "cannot tell: keep local". The file is opened with `O_NOFOLLOW`, and its
+inode, device and mode on the open descriptor must equal the earlier `lstat` (a file swapped in between is refused).
+
+### Content gate (before any command is printed)
+
+Classifying the remote proves nothing about the files `ra-remote` would copy (tracked files, untracked files that are
+not ignored, symlinks, nested repositories; gitignored files and unsafe index entries are skipped, and ra-remote itself
+refuses nested `.git` entries). So for a public repo the checker also inspects the worktree and refuses
+("keep local: the worktree holds files the runner would copy that are not in the public repository (N untracked files;
+M nested git directories; K symlinks leaving the tree). Commit them, add them to .gitignore, or clone a clean copy under
+~/.local/share/reach-around-dev first") when any of these holds:
+
+- `git ls-files --others --exclude-standard` is not empty (a count, never names);
+- a nested `.git` directory or file exists anywhere below the root (iterative `scandir` walk, symlinks not followed,
+  bounded to 200000 entries: when the bound is hit, or a directory cannot be read, the tree is refused);
+- a tracked or untracked-not-ignored symlink resolves outside the worktree;
+- a tracked or untracked-not-ignored path has a component that looks like a secret even when it is tracked: `.env`,
+  `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `*.pfx`, `*.kdbx`, `.netrc`, `credentials*`,
+  `*secret*` (reported as "secret-looking file names present", a count only).
+
+A refusal is "keep local", not a violation: `--strict` exits 0 for it. `--strict` exits 1 only when a public, clean repo
+in an allowed folder runs a full suite or sweep locally. The decision is recorded as `keep-local-content`; names of files
+are never printed or stored.
 
 ### Dev-folder rule
 
 The ra-remote command is printed only when the resolved worktree (symlinks and `..` resolved, a real path check, never a
-substring test) is strictly below `~/.local/share/reach-around-dev`, `~/.local/share/safo-dev/agents` or
+substring test, resolved in exactly one place) is strictly below `~/.local/share/reach-around-dev`, `~/.local/share/safo-dev/agents` or
 `~/.local/share/chatty-kathy-dev` (the fixed list in `ra-remote`). Otherwise: "keep local: the worktree is outside the
 runner's allowed folders (move or clone it under ~/.local/share/reach-around-dev first)".
 

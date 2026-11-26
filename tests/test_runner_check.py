@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shlex
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -541,3 +544,468 @@ def test_module_entry_point(tmp_path: Path) -> None:
     )
     assert done.returncode == 0
     assert "no local full suite" in done.stdout
+
+
+# ---- fix round 2 (#485): content gate, transport overrides, wrappers, allowlist, ancestry, names -------------------
+
+REPO_URL = "https://github.com/ChiefGyk3D/demo"
+PUBLIC_REPO_ENV = {"SAFO_PUBLIC_REPOS": "ChiefGyk3D/demo"}
+
+
+def commit_all(repo: Path) -> None:
+    _git(repo, "add", "-A")
+    _git(
+        repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "x",
+    )
+
+
+def clean_repo(tmp_path: Path, name: str = "repo") -> Path:
+    repo = make_repo(tmp_path, REPO_URL, name)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo)
+    return repo
+
+
+def strict(tmp_path: Path, repo: Path, command: str = "pytest", **extra: str) -> tuple[int, str]:
+    code, out, _ = run(
+        ["--strict", "--repo", str(repo), "--command", command], env_for(tmp_path, **{**PUBLIC, **extra})
+    )
+    return code, out
+
+
+def assert_kept_local(code: int, out: str) -> None:
+    assert code == 0  # keep-local is not a violation
+    assert "keep local: the worktree holds files the runner would copy" in out
+    assert "ra-remote" not in out
+
+
+def test_clean_public_repo_still_gets_the_command(tmp_path: Path) -> None:
+    code, out = strict(tmp_path, clean_repo(tmp_path))
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+
+
+def test_gitignored_files_are_not_a_content_problem(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / ".gitignore").write_text(".env\n", encoding="utf-8")
+    commit_all(repo)
+    (repo / ".env").write_text("TOKEN=x\n", encoding="utf-8")  # ignored: ra-remote never copies it
+    code, out = strict(tmp_path, repo)
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+
+
+def test_untracked_file_keeps_local_and_prints_counts_only(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "private-plan.txt").write_text("x\n", encoding="utf-8")
+    code, out = strict(tmp_path, repo)
+    assert_kept_local(code, out)
+    assert "(1 untracked files; 0 nested git directories; 0 symlinks leaving the tree)" in out
+    assert "private-plan" not in out
+    assert "clone a clean copy under" in out
+
+
+def test_untracked_env_file_reviewer_reproduction(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / ".env").write_text("TOKEN=private\n", encoding="utf-8")
+    code, out = strict(tmp_path, repo)
+    assert_kept_local(code, out)
+    assert ".env" not in out
+    assert "TOKEN" not in out
+
+
+def test_untracked_nested_repo_reviewer_reproduction(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    nested = repo / "vendor"
+    nested.mkdir()
+    _git(nested, "init", "-q")
+    _git(nested, "remote", "add", "origin", "git@github.com:private-owner/secret.git")
+    (nested / "secret.txt").write_text("private material\n", encoding="utf-8")
+    code, out = strict(tmp_path, repo)
+    assert_kept_local(code, out)
+    assert "1 nested git directories" in out
+    assert "private-owner" not in out
+    assert "vendor" not in out
+
+
+def test_tracked_nested_git_directory_alone_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    nested = repo / "vendor"
+    nested.mkdir()
+    _git(nested, "init", "-q")
+    (nested / "m.py").write_text("y = 1\n", encoding="utf-8")
+    commit_all(nested)
+    commit_all(repo)  # a tracked gitlink: no untracked file, nothing secret-looking
+    code, out = strict(tmp_path, repo)
+    assert_kept_local(code, out)
+    assert "(0 untracked files; 1 nested git directories; 0 symlinks leaving the tree)" in out
+
+
+def test_tracked_symlink_leaving_the_tree_is_refused(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    repo = clean_repo(tmp_path)
+    (repo / "link").symlink_to(outside)
+    commit_all(repo)
+    code, out = strict(tmp_path, repo)
+    assert_kept_local(code, out)
+    assert "(0 untracked files; 0 nested git directories; 1 symlinks leaving the tree)" in out
+    assert "outside-dir" not in out
+
+
+def test_untracked_symlink_to_outside_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "notes-link").symlink_to(tmp_path)
+    code, out = strict(tmp_path, repo)
+    assert_kept_local(code, out)
+    assert "1 symlinks leaving the tree" in out
+
+
+def test_tracked_symlink_inside_the_tree_is_fine(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "alias.py").symlink_to("a.py")
+    commit_all(repo)
+    code, out = strict(tmp_path, repo)
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".env",
+        ".env.production",
+        "server.pem",
+        "tls.key",
+        "id_rsa",
+        "id_ed25519.pub",
+        "store.p12",
+        "store.pfx",
+        "vault.kdbx",
+        ".netrc",
+        "credentials.json",
+        "my-secret-notes.txt",
+    ],
+)
+def test_tracked_secret_looking_names_are_refused(tmp_path: Path, name: str) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / name).write_text("x\n", encoding="utf-8")
+    commit_all(repo)
+    code, out = strict(tmp_path, repo)
+    assert_kept_local(code, out)
+    assert "secret-looking file names present" in out
+    assert "(0 untracked files; 0 nested git directories; 0 symlinks leaving the tree)" in out
+    assert name not in out
+
+
+def test_secret_looking_directory_name_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "mysecrets").mkdir()
+    (repo / "mysecrets" / "a.txt").write_text("x\n", encoding="utf-8")
+    commit_all(repo)
+    _, out = strict(tmp_path, repo)
+    assert "secret-looking file names present" in out
+
+
+def test_walk_bound_is_enforced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    for i in range(6):
+        (repo / f"f{i}.py").write_text("x\n", encoding="utf-8")
+    commit_all(repo)
+    monkeypatch.setattr(rc, "WALK_LIMIT", 3)
+    code, out = strict(tmp_path, repo)
+    assert_kept_local(code, out)
+    assert "could not be fully checked" in out
+
+
+def test_content_gate_runs_only_for_suggestions(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    code, out = strict(tmp_path, repo, "pytest tests/a.py")
+    assert code == 0
+    assert "no local full suite" in out
+
+
+def test_keep_local_content_is_recorded_without_names(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    strict(tmp_path, repo)
+    rows = (tmp_path / "state" / "safo" / "runner-check.jsonl").read_text(encoding="utf-8")
+    assert "keep-local-content" in rows
+    assert "x.txt" not in rows
+
+
+# ---- F2: git transport overrides ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("config", "shown"),
+    [
+        (("core.sshCommand", "evil-value"), "core.sshcommand"),
+        (("core.gitProxy", "evil-value"), "core.gitproxy"),
+        (("remote.origin.vcs", "evil-value"), "remote.*.vcs"),
+        (("remote.origin.proxy", "evil-value"), "remote.*.proxy"),
+        (("remote.origin.pushurl", "https://github.com/ChiefGyk3D/demo"), "remote.*.pushurl"),
+        (("url.https://evil-value/.insteadOf", "https://zzz/"), "url.*.insteadof"),
+        (("url.https://evil-value/.pushInsteadOf", "https://zzz/"), "url.*.pushinsteadof"),
+        (("includeIf.gitdir:/evil-value/.path", "x.cfg"), "includeIf gitdir"),
+    ],
+)
+def test_config_transport_override_is_cannot_tell(tmp_path: Path, config: tuple[str, str], shown: str) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "config", config[0], config[1])
+    code, out = strict(tmp_path, repo)
+    assert code == 0
+    assert f"cannot tell: keep local (git transport is overridden (setting {shown}))" in out
+    assert "evil-value" not in out
+    assert "ra-remote" not in out
+
+
+@pytest.mark.parametrize("var", ["GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND", "GIT_CONFIG_COUNT"])
+def test_env_transport_override_is_cannot_tell(tmp_path: Path, var: str) -> None:
+    repo = clean_repo(tmp_path)
+    code, out = strict(tmp_path, repo, **{var: "evil-value"})
+    assert code == 0
+    assert f"git transport is overridden (setting {var.replace('GIT_CONFIG_COUNT', 'GIT_CONFIG_*')})" in out
+    assert "evil-value" not in out
+    assert "ra-remote" not in out
+
+
+# ---- F3: wrappers and the fail-closed rule ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "command -- pytest",
+        "nohup -- pytest",
+        "exec -a x -- pytest",
+        "env -i -- pytest",
+        "time -p -- pytest",
+        "timeout 60 -- pytest",
+        "timeout -s KILL 60 -- pytest",
+        "stdbuf -oL -- pytest",
+        "taskset -c 0 -- pytest",
+        "builtin -- pytest",
+        "nice -n 5 -- pytest",
+        "ionice -c 3 -- pytest",
+        "setsid -- pytest",
+        "chrt -f 10 pytest",
+        "unbuffer -- pytest",
+        "flock -n /tmp/l -- pytest",
+        "xvfb-run -a -- pytest",
+        "yarn run vitest",
+        "pipenv run -- pytest",
+        "sudo pytest",  # unknown head: fail closed
+        "sudo mutmut run",
+        "sudo make test",
+        "somewrapper --flag jest",
+    ],
+)
+def test_wrapper_end_of_options_does_not_hide_a_suite(command: str) -> None:
+    assert rc.classify(command) != []
+
+
+def test_strict_fails_for_the_reviewer_reproductions(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    for command in ("command -- pytest", "nohup -- pytest"):
+        code, out = strict(tmp_path, repo, command)
+        assert code == 1, out
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip install pytest",
+        "pip3 install pytest",
+        "uv pip install pytest",
+        "which pytest",
+        "man pytest",
+        "type pytest",
+        "command -v pytest",
+        "printf pytest",
+        "cat pytest",
+        "less pytest",
+        "ls pytest",
+        "rg pytest src",
+        "scp pytest host:",
+        "git log pytest",
+        "apt install pytest",
+        "apt-get install pytest",
+        "brew install pytest",
+        "command -- which pytest",
+        "pytest tests/a.py",
+        "nohup -- pytest tests/a.py",
+    ],
+)
+def test_known_non_runner_heads_stay_unflagged(command: str) -> None:
+    assert rc.classify(command) == []
+
+
+# ---- F4: an empty allowlist means no repo is public ---------------------------------------------------------------
+
+
+def test_empty_allowlist_file_means_no_repo_is_public(tmp_path: Path) -> None:
+    cfg = tmp_path / "xdgc" / "safo"
+    cfg.mkdir(parents=True)
+    (cfg / "public-repos").write_text("# nothing yet\n", encoding="utf-8")
+    out = verdict(tmp_path, clean_repo(tmp_path), XDG_CONFIG_HOME=str(tmp_path / "xdgc"))
+    assert "not in the repo allowlist" in out
+    assert "ra-remote" not in out
+
+
+def test_empty_allowlist_env_means_no_repo_is_public(tmp_path: Path) -> None:
+    out = verdict(tmp_path, clean_repo(tmp_path), SAFO_PUBLIC_REPOS="")
+    assert "not in the repo allowlist" in out
+    assert "ra-remote" not in out
+
+
+def test_unset_allowlist_still_falls_back_to_owner_trust(tmp_path: Path) -> None:
+    assert "public: owner listed" in verdict(tmp_path, clean_repo(tmp_path))
+
+
+# ---- F5: config ancestry and races --------------------------------------------------------------------------------
+
+
+def _owners_cfg(base: Path) -> Path:
+    cfg = base / "safo"
+    cfg.mkdir(parents=True)
+    cfg.chmod(0o700)
+    (cfg / "public-owners").write_text("chiefgyk3d\n", encoding="utf-8")
+    (cfg / "public-owners").chmod(0o600)
+    return cfg
+
+
+def _no_env_owners(tmp_path: Path, xdg: Path, repo: Path) -> str:
+    env = env_for(tmp_path, XDG_CONFIG_HOME=str(xdg))
+    _, out, _ = run(["--repo", str(repo), "--command", "pytest"], env)
+    return out
+
+
+def test_owner_only_config_is_accepted(tmp_path: Path) -> None:
+    _owners_cfg(tmp_path / "xdgc")
+    out = _no_env_owners(tmp_path, tmp_path / "xdgc", clean_repo(tmp_path))
+    assert "public: owner listed" in out
+
+
+def test_symlinked_xdg_config_home_is_refused(tmp_path: Path) -> None:
+    _owners_cfg(tmp_path / "realcfg")
+    (tmp_path / "cfg-link").symlink_to(tmp_path / "realcfg")
+    out = _no_env_owners(tmp_path, tmp_path / "cfg-link", clean_repo(tmp_path))
+    assert "not owner-only" in out
+    assert "ra-remote" not in out
+
+
+def test_symlinked_parent_of_the_xdg_folder_is_refused(tmp_path: Path) -> None:
+    _owners_cfg(tmp_path / "real" / "cfg")
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    out = _no_env_owners(tmp_path, tmp_path / "link" / "cfg", clean_repo(tmp_path))
+    assert "not owner-only" in out
+    assert "ra-remote" not in out
+
+
+def test_symlinked_safo_folder_is_refused(tmp_path: Path) -> None:
+    real = _owners_cfg(tmp_path / "elsewhere")
+    (tmp_path / "xdgc").mkdir()
+    (tmp_path / "xdgc" / "safo").symlink_to(real)
+    out = _no_env_owners(tmp_path, tmp_path / "xdgc", clean_repo(tmp_path))
+    assert "not owner-only" in out
+
+
+def test_group_writable_ancestor_below_home_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    _owners_cfg(tmp_path / "home" / ".config")
+    env = {"HOME": str(tmp_path / "home"), "XDG_STATE_HOME": str(tmp_path / "state")}
+    _, ok, _ = run(["--repo", str(repo), "--command", "pytest"], env)
+    assert "public: owner listed" in ok
+    (tmp_path / "home" / ".config").chmod(0o777)
+    _, out, _ = run(["--repo", str(repo), "--command", "pytest"], env)
+    assert "not owner-only" in out
+    assert "ra-remote" not in out
+
+
+def test_config_file_swapped_between_check_and_open_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _owners_cfg(tmp_path / "xdgc")
+    target = cfg / "public-owners"
+    real_open = os.open
+
+    def swapping_open(path: Any, *args: Any, **kwargs: Any) -> int:
+        if str(path) == str(target):
+            target.unlink()
+            target.write_text("someone-else\n", encoding="utf-8")
+            target.chmod(0o600)
+        return real_open(path, *args, **kwargs)
+
+    repo = clean_repo(tmp_path)
+    monkeypatch.setattr(os, "open", swapping_open)
+    out = _no_env_owners(tmp_path, tmp_path / "xdgc", repo)
+    assert "not owner-only" in out
+    assert "ra-remote" not in out
+
+
+# ---- F6: repository name normalization ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/ChiefGyk3D/reach-around-instance.git.git",
+        "https://github.com/ChiefGyk3D/reach-around-instance.GIT",
+        "https://github.com/ChiefGyk3D/reach-around-instance.git.GIT.git",
+        "https://github.com/ChiefGyk3D/reach-around-instance.",
+        "https://github.com/ChiefGyk3D/reach-around-instance/",
+        "https://github.com/ChiefGyk3D/reach-around-instance.git/",
+    ],
+)
+def test_denylisted_name_variants_are_still_denied(tmp_path: Path, url: str) -> None:
+    out = verdict(tmp_path, make_repo(tmp_path, url))
+    assert "denylist match" in out
+    assert "ra-remote" not in out
+
+
+def test_fullwidth_lookalike_is_cannot_tell(tmp_path: Path) -> None:
+    lookalike = chr(0xFF52) + "each-around-instance"  # fullwidth r
+    out = verdict(tmp_path, make_repo(tmp_path, f"https://github.com/ChiefGyk3D/{lookalike}"))
+    assert "cannot tell: keep local" in out
+    assert "ra-remote" not in out
+    owner_look = verdict(tmp_path, make_repo(tmp_path, "https://github.com/" + chr(0xFF23) + "hiefGyk3D/demo", "o"))
+    assert "cannot tell: keep local" in owner_look
+
+
+def test_parse_remote_normalizes_names() -> None:
+    assert rc.parse_remote("https://github.com/Own/Name.git.GIT/") == ("own", "name")
+    assert rc.parse_remote("https://github.com/Own/Name.") == ("own", "name")
+    assert rc.parse_remote("https://github.com/Own/N" + chr(0xFF41) + "me") is None
+
+
+# ---- single worktree resolution point -----------------------------------------------------------------------------
+
+
+def test_symlinked_worktree_is_resolved_once_in_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = make_repo(tmp_path, REPO_URL, "real", dev=False)
+    (real / "a.py").write_text("x\n", encoding="utf-8")
+    commit_all(real)
+    link = tmp_path / "home" / ".local" / "share" / "reach-around-dev" / "link"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+    original = rc._git
+
+    def lying_git(repo: Path, env: Mapping[str, str], *args: str) -> str:
+        if args[:2] == ("rev-parse", "--show-toplevel"):
+            return str(link)  # as if git reported the symlinked path
+        return original(repo, env, *args)
+
+    monkeypatch.setattr(rc, "_git", lying_git)
+    code, out, _ = run(["--strict", "--repo", str(link), "--command", "pytest"], env_for(tmp_path, **PUBLIC))
+    assert code == 0
+    assert "keep local: the worktree is outside" in out
+    assert "ra-remote --plan" not in out
