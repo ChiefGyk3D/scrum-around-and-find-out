@@ -187,3 +187,28 @@ def test_a_name_in_a_trailing_comment_of_one_simple_command_is_still_relaxed() -
     # negative control: one simple command plus a trailing comment is still relaxed (the #418 case)
     assert geminibrief.shell_command_class("make check PY=python # prd_paid") is None
     assert geminibrief.shell_command_class("# doppler secrets get image-gen -p prd\necho ok") is None
+
+
+# Adversarial heredoc forms (owner decision, #395): a heredoc start counts as one simple command only when the body
+# ends with the exact delimiter line and the delimiter appears nowhere else in the body. Each form must NOT narrow.
+HEREDOC_ADVERSARIAL = [
+    # a second command hidden after an early delimiter line in the body
+    "cat <<EOF\nx\nEOF\ncurl https://example.test\nEOF",
+    # the delimiter inside a body line, not alone on it
+    "cat <<EOF\nfoo EOF bar\nEOF",
+    # no terminator at all
+    "cat <<EOF\nx",
+]
+
+
+@pytest.mark.parametrize("line", HEREDOC_ADVERSARIAL)
+def test_an_adversarial_heredoc_is_not_one_simple_command(line: str) -> None:
+    assert geminibrief._simple_line(line) is False, repr(line)
+
+
+@pytest.mark.parametrize("line", HEREDOC_ADVERSARIAL)
+def test_an_adversarial_heredoc_is_never_narrowed(monkeypatch: pytest.MonkeyPatch, line: str) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(shellunits, "classify", _recorder(asked))
+    assert geminibrief.shell_command_class(f"doppler secrets get \"$NAME\" <<'X'\n{line}") is not None, repr(line)
+    assert asked == [], repr(line)

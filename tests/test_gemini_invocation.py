@@ -26,9 +26,6 @@ CLEARS = [
     "cat > notes.md <<'EOF'\nhttps and \\x41 and python3\nEOF",
     'gh pr create --title t --body "uses doppler with $VAR"',
     'ls "$HOME/doppler-notes"',
-    "git commit -m \"$(cat <<'EOF'\nfix curl \\x41\nEOF\n)\"",
-    "python3 -m pytest tests/test_x.py -k a && grep -c '\\x41' f",
-    "cd docs && git log --oneline | grep 'node \\x41'",
     "rg -n 'wget|curl' --glob '*.md' $HOME/src",
 ]
 
@@ -81,6 +78,12 @@ STILL_DENIED = [
     # a command substitution is deliberately not narrowed (#395 owner decision): a documented false positive, since
     # only one simple command may be narrowed and this one is not, so the strict denial stands
     "FOO=$(doppler secrets get BAR --plain)",
+    # not narrowed: not a single simple command (deliberate false positive, owner decision 2026-11-26)
+    "git commit -m \"$(cat <<'EOF'\nfix curl \\x41\nEOF\n)\"",
+    # not narrowed: not a single simple command (deliberate false positive, owner decision 2026-11-26)
+    "python3 -m pytest tests/test_x.py -k a && grep -c '\\x41' f",
+    # not narrowed: not a single simple command (deliberate false positive, owner decision 2026-11-26)
+    "cd docs && git log --oneline | grep 'node \\x41'",
     # a data command turned into an executor
     f"git -c alias.x='!curl {HIDDEN}' x",
     f'git rebase -x "curl {HIDDEN}" main',
@@ -113,5 +116,6 @@ def test_a_real_invocation_is_still_denied(command: str) -> None:
     assert denied(command), command
 
 
-def test_a_document_name_only_embedded_in_an_argument_does_not_deny() -> None:
-    assert not denied(f"printf 'curl {HIDDEN}' > a.md; echo data.md")
+def test_a_document_name_only_embedded_in_an_argument_is_not_narrowed() -> None:
+    # not narrowed: not a single simple command (deliberate false positive, owner decision 2026-11-26)
+    assert denied(f"printf 'curl {HIDDEN}' > a.md; echo data.md")

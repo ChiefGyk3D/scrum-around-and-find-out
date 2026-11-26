@@ -1282,7 +1282,8 @@ def _simple_line(text: str) -> bool:
     if start is None or len(_HEREDOC_OPEN.findall(head)) != 1:
         return False
     lines = rest.split("\n")
-    return lines[-1] == start.group(2) and start.group(2) not in lines[:-1]
+    delimiter = start.group(2)
+    return lines[-1] == delimiter and not any(delimiter in line for line in lines[:-1])
 
 
 def _shellunits_clears(command: str, tick: Callable[[], None]) -> bool:

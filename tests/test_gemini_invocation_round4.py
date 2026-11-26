@@ -45,7 +45,6 @@ def test_a_round_four_reproduction_stays_denied(command: str) -> None:
 
 CLEARS = [
     'git commit -m "fix curl \\x41 in $HOME"',
-    "git commit -m \"$(cat <<'EOF'\nfix curl \\x41\nEOF\n)\"",
     'gh pr create --title "t" --body "curl \\x41 $VAR"',
     "env -i FOO=1 grep -c '\\x41' f",
 ]
@@ -54,3 +53,8 @@ CLEARS = [
 @pytest.mark.parametrize("command", CLEARS)
 def test_plain_data_forms_still_clear(command: str) -> None:
     assert geminibrief.shell_command_class(command) is None, command
+
+
+def test_a_substitution_in_a_heredoc_is_not_narrowed() -> None:
+    # not narrowed: not a single simple command (deliberate false positive, owner decision 2026-11-26)
+    assert geminibrief.shell_command_class("git commit -m \"$(cat <<'EOF'\nfix curl \\x41\nEOF\n)\"") is not None
