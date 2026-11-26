@@ -53,18 +53,27 @@ safo audit | safo-draft digest board-drift -
   (category So, such as the robot in the pull request footer) are fine. A letter plus a combining accent that NFKC
   composes (`e` plus U+0301) passes; one it cannot compose (`1` plus U+0301) is refused. An emoji written with a
   variation selector is refused.
-- **Non-ASCII letters fail closed.** After NFKC the text is decomposed (NFKD) and combining marks are dropped, giving
-  an ASCII skeleton. A letter is allowed only when its base is an ASCII letter: `Caf` plus U+00E9 reduces to `Cafe`,
-  and a fullwidth letter is folded by NFKC. Any other letter or digit (Cyrillic, Greek, Armenian, Cherokee, dotless
-  i, Latin small capitals, letterlike symbols such as U+2127) refuses the draft or title with "letters that cannot be
-  reduced to ASCII: refused"; the reason never holds the characters. Deny matching and squashing use the skeleton, so
-  a Cyrillic look-alike cannot slip a private value past the match. A deny value that holds such a letter is a config
-  error naming the line. Emoji and other symbols are fine.
+- **Non-ASCII characters fail closed.** After NFKC the text is decomposed (NFKD) and combining marks are dropped,
+  giving an ASCII skeleton. Every non-ASCII character must either reduce to printable ASCII (`Caf` plus U+00E9
+  reduces to `Cafe`; a fullwidth letter is folded by NFKC) or be on a short allowlist: curly single and double quotes
+  (U+2018 to U+201D), en dash U+2013, bullet U+2022, ellipsis U+2026, the multiplication sign U+00D7, arrows U+2190 to
+  U+2193, and emoji (U+1F300 to U+1FAFF, U+2600 to U+27BF without the dingbat digit forms U+2776 to U+2793, U+2B50,
+  U+2B55). Anything else (Cyrillic, Greek, Armenian, Cherokee, Hangul jamo, dotless i, small capitals, modifier
+  letters, letterlike symbols, operator lookalikes such as U+2208, currency signs such as the euro sign, other
+  arrows) refuses the draft or title with "characters that cannot be reduced to ASCII: refused"; the reason never
+  holds the characters. Currency signs are refused on purpose: write `EUR` or `USD`. The variation selector U+FE0F
+  stays refused. Deny matching and squashing use the skeleton, so a lookalike cannot slip a private value past the
+  match. A deny value that holds such a character is a config error naming the line.
 - **Markdown links are refused.** Inline links and images (`](` and `![`), reference uses (`][`) and reference
-  definitions (a line that starts with `[...]:`) fail with "markdown links are not allowed in drafts; write the URL
-  plainly", because the rendered text differs from the source the checks see. Bare URLs are scanned as written;
-  `- [x] done`, `[ ]` and `a[0]` pass. The exact pull request footer line is exempt. This over-blocks docs-style
-  prose full of links; that is the safe side.
+  definitions fail with "markdown links are not allowed in drafts; write the URL plainly", because the rendered text
+  differs from the source the checks see. A definition is caught after any run of leading block markers (`>`, `-`,
+  `*`, `+`, `1.`, `1)`, repeatedly: `> - [id]: url`), whenever the line then starts with `[` and holds `]:`, and
+  when a label spans lines (a line starting with `[` and no `]`, then a later line in the same paragraph holding
+  `]:`; a blank line ends the paragraph). Bare URLs are scanned as written; `- [x] done`, `[ ]`, `see [1]` and `a[0]`
+  pass, and so does prose with `]:` mid-line after text that does not start with `[` (`note about a[0]: the first`);
+  that last choice keeps ordinary sentences, and a definition cannot start mid-line. `[x]: note` at the start of a
+  line is refused. The exact pull request footer line is exempt. This over-blocks docs-style prose full of links;
+  that is the safe side.
 - **HTML is refused, not decoded.** A draft with an HTML tag, comment or declaration (`<` followed by a letter, `!`, `/`
   or `?`) or a character reference (`&name;`, `&#65;`, `&#x41;`, and the same without the semicolon when a word
   boundary follows) fails with "HTML is not allowed in drafts; use plain markdown". `a < b` and `x<=y` pass. This also

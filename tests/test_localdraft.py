@@ -1109,7 +1109,7 @@ def test_r4b7_known_overblock_is_documented_and_real() -> None:
 
 
 # round 5, R1: homoglyphs fail closed, deny matching on an ASCII skeleton
-_NO_REDUCE = "letters that cannot be reduced to ASCII: refused"
+_NO_REDUCE = "characters that cannot be reduced to ASCII: refused"
 
 
 @pytest.mark.parametrize(
@@ -1237,3 +1237,102 @@ def test_r5_3_real_addresses_are_flagged(text: str) -> None:
 )
 def test_r5_3_scopes_times_and_macs_stay_unflagged(text: str) -> None:
     assert not any("IP address" in x for x in _why(text)), text
+
+
+# round 6, M1: reference definitions inside block quotes, list items and multi-line labels
+@pytest.mark.parametrize(
+    "text",
+    [
+        "> [id]: https://example.test/x",
+        ">[id]: https://example.test/x",
+        "- [id]: https://example.test/x",
+        "* [id]: https://example.test/x",
+        "+ [id]: https://example.test/x",
+        "1. [id]: https://example.test/x",
+        "12) [id]: https://example.test/x",
+        "> - [id]: https://example.test/x",
+        ">> 1. * [id]: https://example.test/x",
+        "  \t> \t- [id]: https://example.test/x",
+        "[long\nlabel]: https://example.test/x",
+        "[a\nb\nc]: https://example.test/x",
+        "> [long\n> label]: https://example.test/x",
+        "intro\n\n- [long\n  label]: https://example.test/x",
+        "[id]: https://example.test/x",
+    ],
+)
+def test_r6_m1_nested_and_multiline_definitions_are_refused(text: str) -> None:
+    assert any("markdown links are not allowed" in x for x in _why(text)), ascii(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "- [x] done",
+        "- [ ] todo",
+        "> - [x] done",
+        "1. [ ] todo",
+        "a[0] = 1",
+        "see [1]",
+        "- see [1] for: more",
+        "note about arr[0]: the first item",
+        "[x]",
+        "[open\n\nnew paragraph]: x",
+        "[open\nno colon here]",
+    ],
+)
+def test_r6_m1_checkboxes_and_prose_still_pass(text: str) -> None:
+    assert not any("markdown links" in x for x in _why(text)), ascii(text)
+
+
+def test_r6_m1_scan_is_linear() -> None:
+    import time
+
+    for text in ("> " * 9000, "- " * 9000, "[\n" * 9000, ">" * 19000 + "[a]", "1. " * 6000):
+        start = time.process_time()
+        localdraft.check_text("comment", text)
+        assert time.process_time() - start < 2.0, text[:6]
+
+
+# round 6, M2: every non-ASCII character reduces or is on the allowlist
+_NO_REDUCE_ANY = "characters that cannot be reduced to ASCII: refused"
+
+
+@pytest.mark.parametrize(
+    "cp",
+    [0x2C6F, 0xA7B3, 0x2B9, 0x2C2, 0x2208, 0x13AA, 0x1100, 0x20AC, 0xA3, 0x2211, 0x2022 + 0x1000, 0x2192 + 4, 0x2776],
+)
+def test_r6_m2_symbols_and_lookalikes_are_refused(cp: int) -> None:
+    text = "pay " + chr(cp) + " now"
+    why = _why(text)
+    assert _NO_REDUCE_ANY in why, hex(cp)
+    assert not any(chr(cp) in x for x in why)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        chr(0x2018) + "quoted" + chr(0x2019) + " " + chr(0x201C) + "x" + chr(0x201D),
+        "a " + chr(0x2013) + " b",
+        chr(0x2022) + " bullet",
+        "wait" + chr(0x2026),
+        "3 " + chr(0xD7) + " 4",
+        chr(0x2190) + chr(0x2191) + chr(0x2192) + chr(0x2193),
+        chr(0x1F300) + chr(0x1FAF0) + chr(0x2705) + chr(0x2B50) + chr(0x2B55) + chr(0x2600) + chr(0x27BF),
+        "Caf" + chr(0xE9),
+    ],
+)
+def test_r6_m2_typography_and_emoji_pass(text: str) -> None:
+    assert _why(text) == [], ascii(text)
+
+
+def test_r6_m2_variation_selector_and_dingbat_digits_stay_refused() -> None:
+    assert _why(chr(0x2705) + chr(0xFE0F)) != []
+    assert _NO_REDUCE_ANY in _why(chr(0x2776))
+    assert _NO_REDUCE_ANY in _why(chr(0x2793))
+
+
+def test_r6_m2_precomposed_accent_squashes_to_ascii() -> None:
+    assert localdraft._skeleton("Caf" + chr(0xE9)) == ("Cafe", True)
+    assert localdraft._squash("Caf" + chr(0xE9)) == "cafe"
+    assert localdraft._skeleton("a" + chr(0x2208) + "b")[1] is False
+    assert localdraft._skeleton("a" + chr(0x2192) + "b") == ("ab", True)

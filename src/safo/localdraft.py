@@ -129,8 +129,8 @@ MAX_CONFIG_BYTES = 65_536
 MIN_DENY_CHARS = 3  # a deny value that squashes to fewer characters would match almost anything
 _DENY_MARK = "matched private deny entry"
 _BAD_CATEGORIES = frozenset({"Mn", "Me", "Cf", "Cc", "Co", "Cn", "Cs", "Zl", "Zp"})
-_NO_REDUCE = "letters that cannot be reduced to ASCII: refused"
-_NO_REDUCE_CONFIG = "a deny value holds letters that cannot be reduced to ASCII"
+_NO_REDUCE = "characters that cannot be reduced to ASCII: refused"
+_NO_REDUCE_CONFIG = "a deny value holds characters that cannot be reduced to ASCII"
 _NO_DENY_NOTE = "safo-draft: no private deny file configured: only heuristics are active"
 
 
@@ -142,10 +142,26 @@ class DenyEntry:
     squashed: str
 
 
+_TYPOGRAPHY = frozenset(chr(c) for c in (*range(0x2018, 0x201E), 0x2013, 0x2022, 0x2026, 0xD7, *range(0x2190, 0x2194)))
+
+
+def _allowed_symbol(c: str) -> bool:
+    """Typographic punctuation and emoji that stay in a draft but add nothing to the skeleton. Variation selectors
+    (U+FE0F) and the dingbat digit forms (U+2776 to U+2793, which read as numbers) are not on the list."""
+    n = ord(c)
+    if c in _TYPOGRAPHY:
+        return True
+    if 0x1F300 <= n <= 0x1FAFF or n in (0x2B50, 0x2B55):
+        return True
+    return 0x2600 <= n <= 0x27BF and not 0x2776 <= n <= 0x2793
+
+
 def _skeleton(text: str) -> tuple[str, bool]:
-    """(ASCII skeleton, reducible). NFKC, then NFKD with combining marks removed: a letter is kept only when its base
-    is an ASCII letter. A letter or digit that is not ASCII after that (Cyrillic, Greek, dotless i, small capitals,
-    letterlike symbols) makes the text not reducible; it is left out of the skeleton and the caller must refuse."""
+    """(ASCII skeleton, reducible). NFKC, then NFKD with combining marks removed. Every non-ASCII character must
+    either reduce to printable ASCII (a precomposed accent: U+00E9 becomes `e`) or be on the typography and emoji
+    allowlist (`_allowed_symbol`, left out of the skeleton). Anything else (Cyrillic, Greek, dotless i, small
+    capitals, letterlike or operator lookalikes, currency signs, modifier letters) makes the text not reducible; it is
+    left out of the skeleton and the caller must refuse."""
     out: list[str] = []
     reducible = True
     for c in unicodedata.normalize("NFKC", text):
@@ -153,9 +169,9 @@ def _skeleton(text: str) -> tuple[str, bool]:
             out.append(c)
             continue
         base = "".join(x for x in unicodedata.normalize("NFKD", c) if not unicodedata.combining(x))
-        if base and base.isascii():
+        if base and base.isascii() and base.isprintable():
             out.append(base)
-        elif unicodedata.category(c)[0] in ("L", "N") or 0x2100 <= ord(c) <= 0x214F:
+        elif not _allowed_symbol(c):
             reducible = False
     return "".join(out), reducible
 
@@ -285,19 +301,47 @@ def _has_html(text: str) -> bool:
     return bool(_HTML_START.search(text) or _HTML_REF.search(text))
 
 
+def _strip_block_markers(line: str) -> str:
+    """Remove any run of leading block markers: spaces and tabs, `>`, `-`/`*`/`+` and `1.`/`1)` followed by a space or
+    tab (or the end of the line). Linear: each step consumes at least one character."""
+    i, n = 0, len(line)
+    while i < n:
+        c = line[i]
+        if c in " \t>" or (c in "-*+" and (i + 1 == n or line[i + 1] in " \t")):
+            i += 1
+        elif c.isdigit():
+            j = i
+            while j < n and line[j].isdigit() and j - i < 10:
+                j += 1
+            if j < n and line[j] in ".)" and (j + 1 == n or line[j + 1] in " \t") and j > i:
+                i = j + 1
+            else:
+                break
+        else:
+            break
+    return line[i:]
+
+
 def _has_md_link(text: str) -> bool:
-    """Inline links and images (`](`, `![`), reference uses (`][`) and reference definitions (a line that starts with
-    `[...]:` after optional spaces). Linear: only `str.find` and `in` scans, no backtracking. The exact PR footer is
-    exempt."""
+    """Inline links and images (`](`, `![`), reference uses (`][`) and reference definitions. A definition is refused
+    after any run of block markers (block quote, bullet, numbered item) is stripped: a line that starts with `[` and
+    holds `]:` anywhere, or a label that spans lines (a line that starts with `[` and has no `]`, then a later line of
+    the same paragraph that holds `]:`; a blank line ends the paragraph). Prose with `]:` mid-line after text that
+    does not start with `[` (`note about a[0]: the first`) is allowed, as are `- [x] done` and `see [1]`. Linear: only
+    `str.find` and `in` scans, no backtracking. The exact PR footer is exempt."""
     text = text.replace(PR_FOOTER, "")
     if "](" in text or "![" in text or "][" in text:
         return True
+    open_label = False
     for line in text.splitlines():
-        rest = line.lstrip(" \t")
-        if rest.startswith("["):
-            close = rest.find("]")
-            if close > 0 and rest.startswith(":", close + 1):
+        rest = _strip_block_markers(line)
+        if not rest.strip():
+            open_label = False
+            continue
+        if open_label or rest.startswith("["):
+            if "]:" in rest:
                 return True
+            open_label = "]" not in rest
     return False
 
 
