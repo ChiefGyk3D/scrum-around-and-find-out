@@ -1,0 +1,37 @@
+{
+  "task": "issue-draft",
+  "input": "Web service triage log.\n2026-03-12 14:00:00 INFO gateway-1 connection pool idle queue=7 took=52ms\n2026-03-12 14:00:03 INFO gateway-2 heartbeat ok queue=8 took=16ms\n2026-03-12 14:00:06 INFO gateway-2 cache hit ratio steady queue=9 took=6ms\n2026-03-12 14:00:09 INFO gateway-1 cache hit ratio steady queue=14 took=70ms\n2026-03-12 14:00:12 INFO gateway-4 scrape complete queue=26 took=28ms\n2026-03-12 14:00:15 INFO gateway-1 heartbeat ok queue=1 took=53ms\n2026-03-12 14:00:18 INFO gateway-3 cache hit ratio steady queue=13 took=44ms\n2026-03-12 14:00:21 INFO gateway-4 gc pause short queue=38 took=33ms\n2026-03-12 14:00:24 INFO gateway-2 cache hit ratio steady queue=26 took=76ms\n2026-03-12 14:00:27 INFO gateway-1 heartbeat ok queue=11 took=47ms\n2026-03-12 14:00:30 INFO gateway-2 cache hit ratio steady queue=9 took=50ms\n2026-03-12 14:00:33 INFO gateway-1 heartbeat ok queue=33 took=58ms\n2026-03-12 14:00:36 INFO gateway-2 cache hit ratio steady queue=27 took=49ms\n2026-03-12 14:00:39 INFO gateway-2 gc pause short queue=14 took=63ms\n2026-03-12 14:00:42 INFO gateway-1 gc pause short queue=21 took=39ms\n2026-03-12 14:00:45 INFO gateway-3 scrape complete queue=25 took=63ms\n2026-03-12 14:00:48 INFO gateway-3 cache hit ratio steady queue=6 took=41ms\n2026-03-12 14:00:51 INFO gateway-2 scrape complete queue=39 took=71ms\n2026-03-12 14:00:54 INFO gateway-3 heartbeat ok queue=11 took=26ms\n2026-03-12 14:00:57 INFO gateway-1 scrape complete queue=23 took=14ms\n2026-03-12 14:01:00 INFO gateway-4 gc pause short queue=19 took=85ms\n2026-03-12 14:01:03 INFO gateway-2 heartbeat ok queue=29 took=27ms\n2026-03-12 14:01:06 INFO gateway-3 connection pool idle queue=25 took=8ms\n2026-03-12 14:01:09 INFO gateway-1 gc pause short queue=6 took=83ms\n2026-03-12 14:01:12 INFO gateway-1 cache hit ratio steady queue=12 took=44ms\n2026-03-12 14:01:15 INFO gateway-2 cache hit ratio steady queue=30 took=9ms\n2026-03-12 14:01:18 INFO gateway-4 scrape complete queue=32 took=37ms\n2026-03-12 14:01:21 INFO gateway-3 scrape complete queue=31 took=83ms\n2026-03-12 14:01:24 INFO gateway-1 heartbeat ok queue=31 took=19ms\n2026-03-12 14:01:27 INFO gateway-4 heartbeat ok queue=16 took=64ms\n2026-03-12 14:31:07 WARN gateway-2 response header X-RateLimit-Remaining=-3 for client key k_demo_01\n2026-03-12 14:31:08 WARN gateway-2 Retry-After header absent on 429\n2026-03-12 14:00:00 INFO gateway-1 cache hit ratio steady queue=9 took=40ms\n2026-03-12 14:00:03 INFO gateway-2 connection pool idle queue=1 took=6ms\n2026-03-12 14:00:06 INFO gateway-1 gc pause short queue=32 took=44ms\n2026-03-12 14:00:09 INFO gateway-1 scrape complete queue=30 took=49ms\n2026-03-12 14:00:12 INFO gateway-1 scrape complete queue=8 took=69ms\n2026-03-12 14:00:15 INFO gateway-1 connection pool idle queue=12 took=38ms\n2026-03-12 14:00:18 INFO gateway-2 connection pool idle queue=5 took=44ms\n2026-03-12 14:00:21 INFO gateway-1 heartbeat ok queue=33 took=16ms\n2026-03-12 14:00:24 INFO gateway-2 connection pool idle queue=1 took=57ms\n2026-03-12 14:00:27 INFO gateway-1 heartbeat ok queue=35 took=47ms\n2026-03-12 14:00:30 INFO gateway-2 cache hit ratio steady queue=29 took=41ms\n2026-03-12 14:00:33 INFO gateway-4 cache hit ratio steady queue=34 took=40ms\n2026-03-12 14:00:36 INFO gateway-1 heartbeat ok queue=37 took=39ms\n2026-03-12 14:00:39 INFO gateway-2 gc pause short queue=21 took=12ms\n2026-03-12 14:00:42 INFO gateway-2 connection pool idle queue=18 took=56ms\n2026-03-12 14:00:45 INFO gateway-1 connection pool idle queue=0 took=25ms\n2026-03-12 14:00:48 INFO gateway-4 cache hit ratio steady queue=5 took=9ms\n2026-03-12 14:00:51 INFO gateway-2 gc pause short queue=3 took=72ms\n2026-03-12 14:00:54 INFO gateway-3 cache hit ratio steady queue=24 took=9ms\n2026-03-12 14:00:57 INFO gateway-2 scrape complete queue=2 took=64ms\n2026-03-12 14:01:00 INFO gateway-1 scrape complete queue=33 took=90ms\n2026-03-12 14:01:03 INFO gateway-3 gc pause short queue=31 took=63ms\n2026-03-12 14:01:06 INFO gateway-2 scrape complete queue=20 took=69ms\n2026-03-12 14:01:09 INFO gateway-2 cache hit ratio steady queue=24 took=50ms\n2026-03-12 14:01:12 INFO gateway-3 cache hit ratio steady queue=32 took=18ms\n2026-03-12 14:01:15 INFO gateway-3 gc pause short queue=8 took=81ms\n2026-03-12 14:01:18 INFO gateway-2 heartbeat ok queue=31 took=5ms\n2026-03-12 14:01:21 INFO gateway-1 heartbeat ok queue=37 took=23ms\n2026-03-12 14:01:24 INFO gateway-3 connection pool idle queue=14 took=60ms\n2026-03-12 14:01:27 INFO gateway-4 heartbeat ok queue=20 took=57ms\nSummary: the header X-RateLimit-Remaining goes negative under bursts in gateway/limiter.go. Should clamp at 0. The missing Retry-After is tracked in another issue and is out of scope here.",
+  "facts": [
+    "X-RateLimit-Remaining",
+    {
+      "text": "-3",
+      "variants": [
+        "(?<![\\w.])-3\\b"
+      ]
+    },
+    "gateway/limiter.go",
+    {
+      "text": "clamp",
+      "variants": [
+        "\\bclamp(?:ed|ing|s)?\\b",
+        "\\bfloor(?:ed)?\\b",
+        "\\bnever (?:go|be) below 0\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "Retry-After",
+    "\\bk_demo_10\\b",
+    "\\b-30\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Rate limit header bug\n- X-RateLimit-Remaining shows -30 under bursts\n- also Retry-After is missing on 429",
+    "Title: Negative remaining\n- the header goes negative in the limiter\n- someone should look at it"
+  ],
+  "correct_alts": [
+    "X-RateLimit-Remaining goes negative under bursts\n- A client received X-RateLimit-Remaining=-3 during a burst.\n- The counter is computed in gateway/limiter.go and should clamp at 0.\n- Keep the 429 header discussion out of this one.",
+    "Clamp X-RateLimit-Remaining at zero\nUnder burst traffic the gateway reports a remaining quota of -3, a value that makes no sense to clients. The calculation in gateway/limiter.go needs a floor of 0."
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "task": "ci-log-digest",
+  "input": "[10:38:00] job build-release started\n[10:38:01] note: queue.c:21: unused parameter is expected here\n[10:38:04] progress 44% (108/407 units)\n[10:38:07] CC  src/store/store_17.o\n[10:38:10] AR  build/libauth.a\n[10:38:13] CC  src/cli/cli_13.o\n[10:38:16] LD  build/bin/store-tool\n[10:38:19] CC  src/cli/cli_1.o\n[10:38:22] note: auth.c:89: unused parameter is expected here\n[10:38:25] note: render.c:357: unused parameter is expected here\n[10:38:28] LD  build/bin/store-tool\n[10:38:31] AR  build/libnet.a\n[10:38:34] LD  build/bin/core-tool\n[10:38:38] note: index.c:641: unused parameter is expected here\n[10:38:41] progress 89% (14/416 units)\n[10:38:44] LD  build/bin/parse-tool\n[10:38:47] note: core.c:604: unused parameter is expected here\n[10:38:50] CC  src/codec/codec_1.o\n[10:38:53] note: sched.c:647: unused parameter is expected here\n[10:38:56] LD  build/bin/codec-tool\n[10:38:59] note: parse.c:40: unused parameter is expected here\n[10:39:02] LD  build/bin/net-tool\n[10:39:05] AR  build/libparse.a\n[10:39:08] progress 99% (117/452 units)\n[10:39:11] CC  src/sched/sched_17.o\n[10:39:15] LD  build/bin/render-tool\n[10:39:18] AR  build/libqueue.a\n[10:39:21] note: net.c:444: unused parameter is expected here\n[10:39:24] CC  src/queue/queue_13.o\n[10:39:27] LD  build/bin/index-tool\n[10:39:30] LD  build/bin/core-tool\n[10:39:33] CC  src/cli/cli_20.o\n[10:39:36] progress 82% (199/453 units)\n[10:39:39] note: core.c:716: unused parameter is expected here\n[10:39:42] CC  src/codec/codec_25.o\n[10:39:45] LD  build/bin/core-tool\n[10:39:48] LD  build/bin/auth-tool\n[10:39:52] note: net.c:22: unused parameter is expected here\n[10:39:55] AR  build/libsched.a\n[10:39:58] LD  build/bin/codec-tool\n[10:40:01] progress 71% (80/476 units)\n[10:40:04] CC  src/codec/codec_13.o\n[10:40:07] LD  build/bin/net-tool\n[10:40:10] LD  build/bin/index-tool\n[10:40:13] AR  build/libnet.a\n[10:40:16] LD  build/bin/codec-tool\n[10:40:19] LD  build/bin/parse-tool\n[10:40:22] note: auth.c:601: unused parameter is expected here\n[10:40:25] progress 27% (63/499 units)\n[10:40:29] progress 49% (271/432 units)\n[10:40:32] CC  src/render/render_5.o\n[10:40:35] CC  src/queue/queue_27.o\n[10:40:38] progress 4% (172/409 units)\n[10:40:41] CC  src/index/index_10.o\n[10:40:44] CC  src/parse/parse_23.o\n[10:40:47] LD  build/bin/codec-tool\n[10:40:50] note: queue.c:778: unused parameter is expected here\n[10:40:53] LD  build/bin/store-tool\n[10:40:56] AR  build/libcore.a\n[10:40:59] LD  build/bin/util-tool\n[10:41:02] note: render.c:890: unused parameter is expected here\n[10:41:06] progress 25% (348/417 units)\n[10:41:07] STEP prepare-cache-dir\n[10:41:07] whoami: runner (uid 1001)\n[10:41:07] mkdir: cannot create directory '/var/cache/example-app/build': Permission denied\n[10:41:07] Error: EACCES: permission denied, mkdir '/var/cache/example-app/build'\n[10:41:07] errno: -13, syscall: 'mkdir'\n[10:41:07] hint: /var/cache/example-app is owned by root:root with mode 0755\n[10:41:08] AR  build/libindex.a\n[10:41:14] AR  build/libparse.a\n[10:41:21] AR  build/libindex.a\n[10:41:28] progress 36% (265/470 units)\n[10:41:35] CC  src/store/store_9.o\n[10:41:42] CC  src/auth/auth_15.o\n[10:41:49] progress 12% (225/483 units)\n[10:41:56] CC  src/util/util_26.o\n[10:42:03] AR  build/libutil.a\n[10:42:10] LD  build/bin/queue-tool\n[10:42:17] CC  src/store/store_29.o\n[10:42:24] note: net.c:718: unused parameter is expected here\n[10:42:31] progress 41% (253/450 units)\n[10:42:38] CC  src/render/render_30.o\n[10:42:45] note: render.c:356: unused parameter is expected here\n[10:42:52] CC  src/store/store_7.o\n[10:42:59] CC  src/core/core_1.o\n[10:43:06] note: util.c:652: unused parameter is expected here\n[10:43:13] CC  src/util/util_24.o\n[10:43:20] LD  build/bin/core-tool\n[10:43:27] progress 75% (159/482 units)\n[10:43:34] CC  src/queue/queue_28.o\n[10:43:41] progress 27% (76/423 units)\n[10:43:48] LD  build/bin/core-tool\n[10:43:55] note: cli.c:31: unused parameter is expected here\n[10:44:02] CC  src/codec/codec_15.o\n[10:44:09] note: index.c:555: unused parameter is expected here\n[10:44:16] CC  src/queue/queue_20.o\n[10:44:23] note: parse.c:337: unused parameter is expected here\n[10:44:30] AR  build/libcodec.a\n[10:44:37] AR  build/libauth.a\n[10:44:44] note: parse.c:10: unused parameter is expected here\n[10:44:51] CC  src/codec/codec_3.o\n[10:44:58] progress 23% (143/475 units)\n[10:45:05] LD  build/bin/codec-tool\n[10:45:12] note: auth.c:236: unused parameter is expected here\n[10:45:19] CC  src/parse/parse_3.o\n[10:45:26] note: parse.c:502: unused parameter is expected here\n[10:45:33] AR  build/libstore.a\n[10:45:40] job build-release failed with status 1",
+  "facts": [
+    {
+      "text": "EACCES",
+      "variants": [
+        "\\bpermission denied\\b",
+        "\\bnot permitted\\b"
+      ]
+    },
+    "/var/cache/example-app",
+    "mkdir",
+    "runner"
+  ],
+  "forbidden": [
+    "\\bENOENT\\b",
+    "\\b(disk|no space)\\b[^\\n]{0,20}\\bfull\\b",
+    "\\bENOSPC\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "The build failed because /var/cache/example-app does not exist and mkdir could not find the parent.",
+    "build-release ran out of disk space while writing into /var/cache/example-app."
+  ],
+  "correct_alts": [
+    "The build-release job failed at the prepare-cache-dir step: mkdir hit EACCES because the runner user cannot create folders under /var/cache/example-app, which root owns.\nGranting the runner write access or using a path it owns would fix it.",
+    "EACCES from mkdir on /var/cache/example-app: because the job runs as runner (uid 1001) and the directory belongs to root with mode 0755, the build could not make its cache folder, so the release job aborted early and nothing was compiled."
+  ]
+}

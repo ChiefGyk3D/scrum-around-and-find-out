@@ -1,0 +1,36 @@
+{
+  "task": "doc-skeleton",
+  "input": "Contributing guide for example-framework. Pull requests target the branch release/6.2.0 (copy exactly). Sections: Fork and clone, Commit style, Open a pull request.",
+  "facts": [
+    "Fork and clone",
+    "Commit style",
+    "Open a pull request",
+    {
+      "text": "release/6.2.0",
+      "variants": [
+        "(?<![\\w/.-])release/6\\.2\\.0(?!\\d)"
+      ]
+    }
+  ],
+  "forbidden": [
+    "(?<![\\d.])6\\.2\\.[1-9](?!\\d)",
+    "(?<![\\d.])6\\.1\\.0(?!\\d)"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Contributing to example-framework\n\nOpen pull requests against 6.2.0.\n\n## Fork and clone\nExplain forking and cloning here.\n\n## Commit style\nExplain the commit message rules here.\n\n## Open a pull request\nExplain the pull request steps here.",
+    "# Contributing\n\nContents:\n- Fork and clone\n- Commit style\n- Open a pull request\n\nTarget branch: release/6.2.0",
+    "# Contributing to example-framework\n\nOpen pull requests against release/6.1.0.\n\n## Fork and clone\nExplain it.\n\n## Commit style\nExplain it.\n\n## Open a pull request\nExplain it.",
+    "# Fork and clone\n# Commit style\n# Open a pull request\nrelease/6.2.0"
+  ],
+  "sections": [
+    "Fork and clone",
+    "Commit style",
+    "Open a pull request"
+  ],
+  "correct_alts": [
+    "# Contributing to example-framework\n\nOpen pull requests against release/6.2.0.\n\n## Fork and clone\nExplain forking and cloning here.\n\n## Commit style\nExplain the commit message rules here.\n\n## Open a pull request\nExplain the pull request steps here.",
+    "# Contributing\n\nContents:\n- Fork and clone\n- Commit style\n- Open a pull request\n\n### Fork and clone\n(to be written)\n\n### Commit style\n(to be written)\n\n### Open a pull request\n(to be written; target branch release/6.2.0)"
+  ]
+}

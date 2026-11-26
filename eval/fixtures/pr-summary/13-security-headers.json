@@ -1,0 +1,27 @@
+{
+  "task": "pr-summary",
+  "input": "Security hardening PR: middleware/headers.py now sends Content-Security-Policy: default-src 'self' and Strict-Transport-Security: max-age=31536000. The X-Powered-By header is removed. Report-only mode was considered and rejected. Tests in tests/test_headers.py.",
+  "facts": [
+    "middleware/headers.py",
+    "default-src 'self'",
+    "max-age=31536000",
+    "X-Powered-By",
+    "tests/test_headers.py"
+  ],
+  "forbidden": [
+    "(?<!not )(?<!never )\\b(?:in|use[sd]?|using|adopt\\w*|add|adds|added|adding|enable[sd]?|ship\\w*|run\\w*)\\s+(?:a\\s+)?report-only",
+    "max-age=3153600\\b",
+    "includeSubDomains"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Add security headers\n- middleware/headers.py sends default-src 'self' and max-age=3153600\n- removes X-Powered-By",
+    "Headers hardening\n- CSP in report-only mode with default-src 'self'\n- HSTS max-age=31536000, tests/test_headers.py"
+  ],
+  "correct_alts": [
+    "Send CSP and HSTS headers.\n- middleware/headers.py adds a Content-Security-Policy of default-src 'self'.\n- HSTS is set with max-age=31536000.\n- The X-Powered-By header is dropped.\n- New checks live in tests/test_headers.py.",
+    "Responses now carry hardened security headers.\n\n- Policy: default-src 'self', in middleware/headers.py.\n- Transport security lasts max-age=31536000 seconds.\n- X-Powered-By no longer leaks the stack.\n- Covered by tests/test_headers.py.",
+    "Harden the response headers, and enforce the policy rather than trial it.\n- middleware/headers.py sends default-src 'self' and max-age=31536000.\n- X-Powered-By is removed.\n- Report-only mode was considered and rejected.\n- Tests: tests/test_headers.py."
+  ]
+}

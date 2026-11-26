@@ -428,9 +428,9 @@ def test_leak_scanner_bites() -> None:
 
 def test_shipped_fixtures_cover_every_task_and_are_clean() -> None:
     fixtures = le.load_fixtures(FIXTURES)
-    assert len(fixtures) >= 42
+    assert len(fixtures) == FIXTURE_TOTAL
     for task in le.TASKS:
-        assert len([f for f in fixtures if f.task == task]) >= 6, task
+        assert len([f for f in fixtures if f.task == task]) == FIXTURE_COUNT[task], task
     for f in fixtures:
         assert not leaks(f.input), f.id
         assert not leaks(" ".join(x.text for x in f.facts)), f.id
@@ -573,15 +573,20 @@ def gaming(kind: str, f: le.Fixture) -> str:
     return "\n".join(f"# {t}" for t in texts)
 
 
+# fixtures shipped per task (#484): every task has 20, 140 in all
+FIXTURE_COUNT: dict[str, int] = {task: 20 for task in le.TASKS}
+FIXTURE_TOTAL = sum(FIXTURE_COUNT.values())
+
+
 @pytest.mark.parametrize("kind", ["echo", "facts", "headings"])
-def test_gaming_shims_pass_at_most_one_fixture_per_task(kind: str) -> None:
+def test_gaming_shims_pass_no_fixture_per_task(kind: str) -> None:
     fixtures = le.load_fixtures(FIXTURES)
-    assert len(fixtures) >= 42
+    assert len(fixtures) == FIXTURE_TOTAL
     for task in le.TASKS:
         mine = [f for f in fixtures if f.task == task]
-        assert len(mine) == 6, task
+        assert len(mine) == FIXTURE_COUNT[task], task
         passed = [f.id for f in mine if le.score_output(f, gaming(kind, f)).passed]
-        assert len(passed) <= 1, (kind, task, passed)
+        assert passed == [], (kind, task, passed)  # measured: each of these shims passes 0
 
 
 def test_gaming_guard_bites_on_a_loose_fixture() -> None:
@@ -592,7 +597,7 @@ def test_gaming_guard_bites_on_a_loose_fixture() -> None:
 
 def test_every_fixture_lists_two_wrong_outputs_and_none_passes() -> None:
     fixtures = le.load_fixtures(FIXTURES)
-    assert len(fixtures) >= 42
+    assert len(fixtures) == FIXTURE_TOTAL
     for f in fixtures:
         assert len(f.wrong) >= 2, f.id
         for w in f.wrong:
@@ -760,7 +765,9 @@ def test_every_must_copy_value_stated_in_an_input_is_a_required_fact() -> None:
         if re.search(r"copy exactly|must be copied|exactly as", f.input, re.IGNORECASE):
             value = re.search(r"\b(?:v)?(\d+(?:\.\d+)+)\b", f.input)
             assert value is not None, f.id
-            assert value.group(1) in [x.text for x in f.facts], f.id
+            # the value itself, or the exact token the input says to copy when it is a path such as release/6.2.0
+            texts = [x.text for x in f.facts]
+            assert any(t == value.group(1) or t.endswith("/" + value.group(1)) for t in texts), f.id
 
 
 def shim_b(f: le.Fixture) -> str:
@@ -796,12 +803,12 @@ def shim_e(f: le.Fixture) -> str:
 # shim (e) is the right shape with filler plus the facts. For these tasks it still passes more than one fixture:
 # a pass means the facts are present and the shape is right, not that the answer is meaningful (docs/local-eval.md).
 KNOWN_SHIM_E_LIMIT: dict[str, int] = {
-    "issue-draft": 6,
-    "ci-log-digest": 6,
-    "pr-summary": 6,
-    "commit-message": 6,
-    "first-pass-review-comment": 6,
-    "doc-skeleton": 6,
+    "issue-draft": 20,
+    "ci-log-digest": 20,
+    "pr-summary": 20,
+    "commit-message": 17,
+    "first-pass-review-comment": 20,
+    "doc-skeleton": 20,
 }
 
 
@@ -809,23 +816,24 @@ def test_known_shim_limitation_is_documented_for_every_listed_task() -> None:
     doc = (Path(__file__).resolve().parents[1] / "docs" / "local-eval.md").read_text(encoding="utf-8")
     assert "a pass means the facts are present and the shape is right, not that the answer is meaningful" in doc.lower()
     section = doc.split("## Known limitation")[1].split("\n## ")[0]
-    listed = set(re.findall(r"^- `([a-z-]+)` \(6 of 6", section, re.MULTILINE))
-    assert listed == set(KNOWN_SHIM_E_LIMIT)  # the doc list and the test list say the same tasks
+    listed = {t: (int(a), int(b)) for t, a, b in re.findall(r"^- `([a-z-]+)` \((\d+) of (\d+)", section, re.MULTILINE)}
+    # the doc list and the test list say the same tasks, with the same exact counts out of the fixtures shipped
+    assert listed == {t: (n, FIXTURE_COUNT[t]) for t, n in KNOWN_SHIM_E_LIMIT.items()}
 
 
 @pytest.mark.parametrize("kind", ["b", "e"])
-def test_template_and_shape_shims_pass_at_most_one_fixture_per_task(kind: str) -> None:
+def test_template_and_shape_shims_pass_only_the_documented_fixtures(kind: str) -> None:
     fixtures = le.load_fixtures(FIXTURES)
-    assert len(fixtures) >= 42
+    assert len(fixtures) == FIXTURE_TOTAL
     build = shim_b if kind == "b" else shim_e
     for task in le.TASKS:
         mine = [f for f in fixtures if f.task == task]
-        assert len(mine) == 6, task
+        assert len(mine) == FIXTURE_COUNT[task], task
         passed = [f.id for f in mine if le.score_output(f, build(f)).passed]
         if kind == "e" and task in KNOWN_SHIM_E_LIMIT:
             assert len(passed) == KNOWN_SHIM_E_LIMIT[task], (task, passed)  # the documented limitation stays exact
         else:
-            assert len(passed) <= 1, (kind, task, passed)
+            assert passed == [], (kind, task, passed)  # measured: 0
 
 
 def test_ci_digest_needs_added_words_and_a_causal_phrase_near_a_fact() -> None:

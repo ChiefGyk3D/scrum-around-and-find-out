@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, feature, wontfix, question, docs.\nEpics: E-cli, E-docs-site, E-api.\nRule: a request to restore something the changelog says was removed on purpose is wontfix.\nIssue: Please bring back the --legacy-output flag. The 3.0 changelog says it was dropped because the output formats were unified, but my scripts still use it.",
+  "facts": [
+    {
+      "text": "\"label\": \"wontfix\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"wontfix\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-cli\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-cli\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!wontfix\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-cli\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"feature\", \"epic\": \"E-cli\"}",
+    "{\"label\": \"wontfix\", \"epic\": \"E-docs-site\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-cli\", \"label\": \"wontfix\"}",
+    "```json\n{\n \"label\": \"wontfix\",\n \"epic\": \"E-cli\"\n}\n```",
+    "{\"label\": \"wontfix\", \"epic\": \"E-cli\", \"note\": \"see rule\"}"
+  ]
+}

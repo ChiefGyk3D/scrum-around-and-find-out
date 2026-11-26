@@ -1,0 +1,40 @@
+{
+  "task": "ci-log-digest",
+  "input": "$ alembic upgrade head\nDEBUG beta: fixture setup took 278 ms\nINFO  epsilon: using seed 90683\nDEBUG eta: fixture setup took 892 ms\nDEBUG epsilon: fixture setup took 165 ms\ntests/test_gamma.py::test_gamma_1 PASSED\nINFO  beta: using seed 77452\nDEBUG beta: fixture setup took 653 ms\nDEBUG gamma: fixture setup took 689 ms\nDEBUG theta: fixture setup took 818 ms\ntests/test_beta.py::test_beta_8 PASSED\ntests/test_gamma.py::test_gamma_27 PASSED\nDEBUG eta: fixture setup took 396 ms\nDEBUG theta: fixture setup took 610 ms\nINFO  theta: using seed 81657\nINFO  beta: using seed 35968\nDEBUG alpha: fixture setup took 356 ms\ntests/test_theta.py::test_theta_17 PASSED\ntests/test_theta.py::test_theta_7 PASSED   [50%]\nDEBUG epsilon: fixture setup took 519 ms\ntests/test_epsilon.py::test_epsilon_8 PASSED\ntests/test_delta.py::test_delta_33 PASSED   [34%]\ntests/test_zeta.py::test_zeta_24 PASSED   [5%]\nDEBUG delta: fixture setup took 251 ms\nINFO  theta: using seed 57283\ntests/test_zeta.py::test_zeta_6 PASSED\nINFO  gamma: using seed 17472\nINFO  alpha: using seed 71946\ntests/test_eta.py::test_eta_29 PASSED   [29%]\nDEBUG gamma: fixture setup took 881 ms\nDEBUG alpha: fixture setup took 273 ms\ntests/test_beta.py::test_beta_24 PASSED\ntests/test_beta.py::test_beta_8 PASSED   [7%]\ntests/test_beta.py::test_beta_20 PASSED   [6%]\ntests/test_alpha.py::test_alpha_29 PASSED\ntests/test_epsilon.py::test_epsilon_6 PASSED\nINFO  delta: using seed 17177\ntests/test_eta.py::test_eta_29 PASSED\nDEBUG epsilon: fixture setup took 826 ms\ntests/test_delta.py::test_delta_34 PASSED\nINFO  theta: using seed 79843\nINFO  epsilon: using seed 94783\ntests/test_delta.py::test_delta_34 PASSED   [16%]\nINFO  delta: using seed 12858\nDEBUG alpha: fixture setup took 832 ms\ntests/test_eta.py::test_eta_30 PASSED\ntests/test_gamma.py::test_gamma_24 PASSED\nDEBUG zeta: fixture setup took 698 ms\nINFO  theta: using seed 80919\ntests/test_gamma.py::test_gamma_31 PASSED   [40%]\nDEBUG alpha: fixture setup took 315 ms\ntests/test_epsilon.py::test_epsilon_12 PASSED   [17%]\nINFO  beta: using seed 41536\nDEBUG theta: fixture setup took 360 ms\nDEBUG zeta: fixture setup took 16 ms\ntests/test_epsilon.py::test_epsilon_11 PASSED\nINFO  delta: using seed 15695\ntests/test_beta.py::test_beta_39 PASSED   [98%]\nINFO  alpha: using seed 71584\nINFO  delta: using seed 83101\ntests/test_beta.py::test_beta_6 PASSED   [72%]\nINFO  beta: using seed 42545\ntests/test_beta.py::test_beta_8 PASSED   [65%]\nINFO  theta: using seed 6195\ntests/test_zeta.py::test_zeta_4 PASSED   [69%]\nDEBUG beta: fixture setup took 802 ms\nINFO  [alembic.runtime.migration] Context impl PostgresqlImpl.\nINFO  [alembic.runtime.migration] Will assume transactional DDL.\nERROR [alembic.util.messaging] Multiple head revisions are present for given argument 'head'; please specify a specific target revision, '<branchname>@head' to narrow to a specific head, or 'heads' for all heads\n  Heads: 3f1a9c2d7b10 (add_invoice_index), 9be4410ac2f7 (drop_legacy_flags)\n  Both revisions descend from 51c0d8e2a6b4 (create_flags_table)\nDEBUG eta: fixture setup took 69 ms\nINFO  theta: using seed 21074\ntests/test_epsilon.py::test_epsilon_16 PASSED\ntests/test_epsilon.py::test_epsilon_33 PASSED   [82%]\ntests/test_delta.py::test_delta_26 PASSED\ntests/test_delta.py::test_delta_3 PASSED   [36%]\ntests/test_zeta.py::test_zeta_15 PASSED   [7%]\nINFO  alpha: using seed 36854\ntests/test_theta.py::test_theta_4 PASSED   [64%]\ntests/test_epsilon.py::test_epsilon_13 PASSED\nINFO  theta: using seed 43585\ntests/test_zeta.py::test_zeta_19 PASSED\nINFO  alpha: using seed 25750\ntests/test_epsilon.py::test_epsilon_29 PASSED\ntests/test_eta.py::test_eta_37 PASSED\nDEBUG delta: fixture setup took 732 ms\nDEBUG zeta: fixture setup took 723 ms\nDEBUG eta: fixture setup took 19 ms\nINFO  beta: using seed 31523\ntests/test_alpha.py::test_alpha_9 PASSED   [53%]\nmake: *** [migrate] Error 255",
+  "facts": [
+    "3f1a9c2d7b10",
+    "9be4410ac2f7",
+    {
+      "text": "multiple heads",
+      "variants": [
+        "\\bmultiple head\\w*",
+        "\\btwo (migration )?heads\\b",
+        "\\b2 heads\\b",
+        "\\bdiverg\\w+",
+        "\\bbranches collide\\b",
+        "\\bseparate heads\\b"
+      ]
+    },
+    {
+      "text": "alembic",
+      "variants": [
+        "\\bmigrations?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bdeadlock\\b",
+    "\\block timeout\\b",
+    "\\bconnection\\b[^\\n]{0,20}\\brefused\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "alembic failed because of a deadlock while running the add_invoice_index migration.",
+    "The migration job could not reach Postgres and the connection was refused."
+  ],
+  "correct_alts": [
+    "The migration step failed because alembic found multiple heads: revisions 3f1a9c2d7b10 and 9be4410ac2f7 both build on 51c0d8e2a6b4, so upgrade head is ambiguous.\nA merge revision or an explicit target is needed.",
+    "Two migration branches collide. Alembic refused to run since 3f1a9c2d7b10 (add_invoice_index) and 9be4410ac2f7 (drop_legacy_flags) are separate heads of the history."
+  ]
+}

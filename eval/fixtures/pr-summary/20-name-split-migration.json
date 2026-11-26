@@ -1,0 +1,37 @@
+{
+  "task": "pr-summary",
+  "input": "Migration PR with context.\n2026-03-12 14:00:00 INFO migrator-4 gc pause short queue=35 took=70ms\n2026-03-12 14:00:03 INFO migrator-4 connection pool idle queue=1 took=22ms\n2026-03-12 14:00:06 INFO migrator-2 connection pool idle queue=38 took=2ms\n2026-03-12 14:00:09 INFO migrator-3 gc pause short queue=22 took=30ms\n2026-03-12 14:00:12 INFO migrator-3 cache hit ratio steady queue=38 took=11ms\n2026-03-12 14:00:15 INFO migrator-2 scrape complete queue=19 took=76ms\n2026-03-12 14:00:18 INFO migrator-2 gc pause short queue=11 took=51ms\n2026-03-12 14:00:21 INFO migrator-2 connection pool idle queue=15 took=59ms\n2026-03-12 14:00:24 INFO migrator-1 scrape complete queue=27 took=46ms\n2026-03-12 14:00:27 INFO migrator-3 gc pause short queue=17 took=76ms\n2026-03-12 14:00:30 INFO migrator-3 heartbeat ok queue=10 took=9ms\n2026-03-12 14:00:33 INFO migrator-4 gc pause short queue=17 took=25ms\n2026-03-12 14:00:36 INFO migrator-2 connection pool idle queue=6 took=30ms\n2026-03-12 14:00:39 INFO migrator-2 heartbeat ok queue=11 took=81ms\n2026-03-12 14:00:42 INFO migrator-3 connection pool idle queue=2 took=4ms\n2026-03-12 14:00:45 INFO migrator-4 scrape complete queue=11 took=19ms\n2026-03-12 14:00:48 INFO migrator-1 connection pool idle queue=24 took=32ms\n2026-03-12 14:00:51 INFO migrator-1 scrape complete queue=22 took=3ms\n2026-03-12 14:00:54 INFO migrator-2 gc pause short queue=29 took=55ms\n2026-03-12 14:00:57 INFO migrator-3 heartbeat ok queue=26 took=6ms\n2026-03-12 14:01:00 INFO migrator-4 cache hit ratio steady queue=6 took=5ms\n2026-03-12 14:01:03 INFO migrator-4 cache hit ratio steady queue=22 took=38ms\n2026-03-12 14:01:06 INFO migrator-1 connection pool idle queue=32 took=51ms\n2026-03-12 14:01:09 INFO migrator-3 cache hit ratio steady queue=17 took=53ms\n2026-03-12 14:01:12 INFO migrator-3 connection pool idle queue=34 took=77ms\n2026-03-12 14:01:15 INFO migrator-2 scrape complete queue=2 took=68ms\n2026-03-12 14:01:18 INFO migrator-1 cache hit ratio steady queue=4 took=33ms\n2026-03-12 14:01:21 INFO migrator-3 heartbeat ok queue=19 took=67ms\nMigration 0057_split_name adds first_name and last_name to users. A backfill splits the old full_name on the first space, in batches of 2000 rows. Rollback drops the two columns and keeps full_name. Estimated runtime on staging data: 7 minutes.\n2026-03-12 14:00:00 INFO migrator-2 connection pool idle queue=32 took=39ms\n2026-03-12 14:00:03 INFO migrator-2 cache hit ratio steady queue=16 took=22ms\n2026-03-12 14:00:06 INFO migrator-1 connection pool idle queue=30 took=76ms\n2026-03-12 14:00:09 INFO migrator-1 cache hit ratio steady queue=19 took=73ms\n2026-03-12 14:00:12 INFO migrator-2 heartbeat ok queue=30 took=12ms\n2026-03-12 14:00:15 INFO migrator-3 gc pause short queue=31 took=13ms\n2026-03-12 14:00:18 INFO migrator-4 cache hit ratio steady queue=0 took=32ms\n2026-03-12 14:00:21 INFO migrator-3 gc pause short queue=1 took=70ms\n2026-03-12 14:00:24 INFO migrator-3 scrape complete queue=28 took=55ms\n2026-03-12 14:00:27 INFO migrator-4 gc pause short queue=25 took=86ms\n2026-03-12 14:00:30 INFO migrator-3 heartbeat ok queue=22 took=40ms\n2026-03-12 14:00:33 INFO migrator-1 cache hit ratio steady queue=19 took=7ms\n2026-03-12 14:00:36 INFO migrator-2 heartbeat ok queue=22 took=17ms\n2026-03-12 14:00:39 INFO migrator-1 scrape complete queue=21 took=5ms\n2026-03-12 14:00:42 INFO migrator-4 scrape complete queue=26 took=2ms\n2026-03-12 14:00:45 INFO migrator-3 gc pause short queue=35 took=27ms\n2026-03-12 14:00:48 INFO migrator-1 connection pool idle queue=27 took=5ms\n2026-03-12 14:00:51 INFO migrator-1 scrape complete queue=26 took=49ms\n2026-03-12 14:00:54 INFO migrator-4 heartbeat ok queue=21 took=11ms\n2026-03-12 14:00:57 INFO migrator-4 connection pool idle queue=25 took=50ms\n2026-03-12 14:01:00 INFO migrator-3 scrape complete queue=2 took=83ms\n2026-03-12 14:01:03 INFO migrator-4 gc pause short queue=15 took=87ms\n2026-03-12 14:01:06 INFO migrator-1 heartbeat ok queue=24 took=58ms\n2026-03-12 14:01:09 INFO migrator-3 cache hit ratio steady queue=11 took=56ms\n2026-03-12 14:01:12 INFO migrator-4 scrape complete queue=8 took=83ms\n2026-03-12 14:01:15 INFO migrator-3 gc pause short queue=10 took=27ms\n2026-03-12 14:01:18 INFO migrator-3 connection pool idle queue=14 took=52ms\n2026-03-12 14:01:21 INFO migrator-2 heartbeat ok queue=15 took=90ms\nOut of scope: removing full_name, planned for next quarter.",
+  "facts": [
+    "0057_split_name",
+    "first_name",
+    "last_name",
+    "full_name",
+    {
+      "text": "2000",
+      "variants": [
+        "\\b2,?000\\b"
+      ]
+    },
+    {
+      "text": "7 minutes",
+      "variants": [
+        "\\b(?:7|seven) minutes\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bremov(?:es|ed|ing) full_name\\b",
+    "\\b20000\\b",
+    "\\b70 minutes\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Split user names\n- 0057_split_name adds first_name and last_name, backfills in batches of 20000\n- takes 7 minutes",
+    "Name migration\n- 0057_split_name removes full_name after the backfill\n- first_name and last_name are added in 2000 row batches"
+  ],
+  "correct_alts": [
+    "Add separate first and last name columns.\n- 0057_split_name creates first_name and last_name on users.\n- A backfill splits full_name at the first space, 2000 rows per batch.\n- Rollback drops the new columns; full_name stays. Staging estimate: 7 minutes.",
+    "Users get first_name and last_name.\n\n- The 0057_split_name migration fills them from full_name using batches of 2,000.\n- It should take about seven minutes on staging-sized data.\n- Reverting drops the new fields only."
+  ]
+}

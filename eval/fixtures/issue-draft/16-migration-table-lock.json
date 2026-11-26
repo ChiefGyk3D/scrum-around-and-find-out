@@ -1,0 +1,37 @@
+{
+  "task": "issue-draft",
+  "input": "Migration problem: 0042_add_index on the events table took a full table lock for 25 minutes in staging with about 18 million rows. Production would block writes. Use CREATE INDEX CONCURRENTLY and split it out of the transaction. The table is events, the column is created_at.",
+  "facts": [
+    "0042_add_index",
+    {
+      "text": "25 minutes",
+      "variants": [
+        "\\b(?:25|twenty-five) minutes\\b"
+      ]
+    },
+    {
+      "text": "18 million",
+      "variants": [
+        "\\b18 million\\b",
+        "\\b18,000,000\\b"
+      ]
+    },
+    "CREATE INDEX CONCURRENTLY",
+    "created_at"
+  ],
+  "forbidden": [
+    "\\b52 minutes\\b",
+    "\\b81 million\\b",
+    "DROP TABLE"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Migration locks table\n- 0042_add_index blocked the events table for 52 minutes\n- about 81 million rows",
+    "Title: Index migration\n- use CREATE INDEX on created_at\n- 0042_add_index is slow"
+  ],
+  "correct_alts": [
+    "Migration 0042_add_index locks the events table\n- In staging it held a full lock for 25 minutes across roughly 18 million rows.\n- That would block writes in production.\n- Rewrite it with CREATE INDEX CONCURRENTLY on created_at, outside a transaction.",
+    "Make 0042_add_index non-blocking\nThe migration freezes writes to events for twenty-five minutes at 18 million rows. Build the created_at index with CREATE INDEX CONCURRENTLY instead, in its own non-transactional step."
+  ]
+}

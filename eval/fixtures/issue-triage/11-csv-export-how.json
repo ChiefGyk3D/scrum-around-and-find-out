@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, feature, docs, question, chore.\nEpics: E-reports, E-auth, E-platform.\nRule: a how-do-I message is a question, even if the honest answer may be no; only a request that says add or please build is a feature.\nIssue: Is there a way to export all projects to CSV in one go? I looked through the reports menu and could not find a button.",
+  "facts": [
+    {
+      "text": "\"label\": \"question\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"question\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-reports\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-reports\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!question\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-reports\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"feature\", \"epic\": \"E-reports\"}",
+    "{\"label\": \"question\", \"epic\": \"E-platform\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-reports\", \"label\": \"question\"}",
+    "```json\n{\n \"label\": \"question\",\n \"epic\": \"E-reports\"\n}\n```",
+    "{\"label\": \"question\", \"epic\": \"E-reports\", \"note\": \"see rule\"}"
+  ]
+}

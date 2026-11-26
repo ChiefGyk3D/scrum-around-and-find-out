@@ -1,0 +1,40 @@
+{
+  "task": "issue-draft",
+  "input": "CI config notes: .github/workflows/release.yml runs on every push to any branch, which wastes about 90 runner minutes a day. It should trigger only on tags matching v*. Also setup-node still pins Node 18 which is end of life, move it to Node 22.",
+  "facts": [
+    "release.yml",
+    {
+      "text": "v*",
+      "variants": [
+        "\\bv\\*"
+      ]
+    },
+    {
+      "text": "90 runner minutes",
+      "variants": [
+        "\\b(?:90|ninety) runner[- ]minutes\\b"
+      ]
+    },
+    {
+      "text": "Node 22",
+      "variants": [
+        "\\bNode(?:\\.js)?\\s*22\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bNode 20\\b",
+    "\\b9 runner minutes\\b",
+    "\\bevery tag\\b.{0,10}\\bbranch"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Release workflow too chatty\n- release.yml runs on every push, about 9 runner minutes a day\n- trigger only on tags matching v*",
+    "Title: Update Node\n- move setup-node to Node 20\n- release.yml trigger fix"
+  ],
+  "correct_alts": [
+    "Release workflow runs on every push\n- release.yml fires on any branch and burns around ninety runner minutes per day.\n- It should run only for tags that match v*.\n- setup-node also needs to move from Node 18 to Node 22.",
+    "Limit release.yml to version tags\nThe release pipeline is triggered by all pushes, costing 90 runner minutes daily. Restrict it to v* tags. While there, replace the end-of-life Node 18 with Node 22."
+  ]
+}

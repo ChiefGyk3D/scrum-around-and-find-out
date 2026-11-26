@@ -1,0 +1,43 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def read_upload(base_dir, name):\n-    path = os.path.join(base_dir, os.path.basename(name))\n+    path = os.path.join(base_dir, name)\n     with open(path, \"rb\") as fh:\n         return fh.read()\n```\nIntent: serve a file that was uploaded into base_dir.",
+  "facts": [
+    "read_upload",
+    {
+      "text": "path traversal",
+      "variants": [
+        "travers\\w+",
+        "\\.\\./",
+        "escap\\w+ (the )?(base|upload|directory|folder)",
+        "outside (of )?(the )?(base|upload|directory)",
+        "absolute path",
+        "arbitrary files?"
+      ]
+    },
+    {
+      "text": "basename",
+      "variants": [
+        "base ?name",
+        "sanitiz\\w+",
+        "\\bstrips?\\b",
+        "\\bvalidat\\w+",
+        "\\bresolve\\w*"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bSQL\\b",
+    "\\bbinary mode\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "read_upload: the file is opened in binary mode, but the name suggests text.",
+    "read_upload: reading the entire file at once may use too much memory."
+  ],
+  "correct_alts": [
+    "read_upload allows path traversal: it dropped os.path.basename, so a name like ../../etc/passwd escapes base_dir.",
+    "Without the basename call, read_upload can read arbitrary files through an absolute path or dot-dot segments in name.",
+    "read_upload can let a caller traverse out of the upload folder because it no longer sanitizes name."
+  ]
+}

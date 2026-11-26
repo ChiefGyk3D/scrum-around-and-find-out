@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, duplicate, wontfix, question, feature.\nEpics: E-auth, E-billing, E-search.\nRule: an issue that names an open report with the same stack trace is duplicate.\nIssue: Login shows a blank page after the SSO redirect on Safari. This is the same problem as the open issue 'Blank page after SSO on Safari' (#212), and the stack trace is identical.",
+  "facts": [
+    {
+      "text": "\"label\": \"duplicate\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"duplicate\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-auth\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-auth\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!duplicate\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-auth\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"bug\", \"epic\": \"E-auth\"}",
+    "{\"label\": \"duplicate\", \"epic\": \"E-search\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-auth\", \"label\": \"duplicate\"}",
+    "```json\n{\n \"label\": \"duplicate\",\n \"epic\": \"E-auth\"\n}\n```",
+    "{\"label\": \"duplicate\", \"epic\": \"E-auth\", \"note\": \"see rule\"}"
+  ]
+}

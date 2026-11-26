@@ -1,0 +1,32 @@
+{
+  "task": "doc-skeleton",
+  "input": "API reference for the example-billing service. The base path is /v2/invoices, to be copied verbatim. Sections: Create invoice, Fetch invoice, Delete invoice. - Ticket note 0: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 1: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 2: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 3: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 4: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 5: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 6: someone asked about the old wiki page, no action taken, left for a later pass. - Ticket note 7: someone asked about the old wiki page, no action taken, left for a later pass. - Ticket note 8: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 9: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 10: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 11: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 12: someone asked about the old wiki page, no action taken, left for a later pass. - Ticket note 13: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Ticket note 14: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 15: draft wording was passed around by mail, comments still open, no sign-off recorded. - Ticket note 16: someone asked about the old wiki page, no action taken, left for a later pass. - Ticket note 17: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Ticket note 18: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 19: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 20: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 21: call notes from the planning sync, nothing decided yet, owner to follow up next week. - Ticket note 22: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 23: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 24: meeting 12 minutes over, agenda items moved to the following session. - Ticket note 25: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 26: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 27: reviewer suggested a different screenshot, not confirmed, parked in the backlog. - Ticket note 28: contact list needs a refresh, not part of this document, ignore for now. - Ticket note 29: someone asked about the old wiki page, no action taken, left for a later pass. ",
+  "facts": [
+    "Create invoice",
+    "Fetch invoice",
+    "Delete invoice",
+    "/v2/invoices"
+  ],
+  "forbidden": [
+    "/v1/invoices",
+    "/v3/invoices",
+    "/v2/invoice(?!s)"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Billing API\n\nBase path: /v2/invoices\n\n| Operation | Status |\n|---|---|\n| Create invoice | draft |\n| Fetch invoice | draft |\n| Delete invoice | draft |",
+    "## Billing API reference\n\nEvery path starts with /v2/invoice.\n\n### Create invoice\nWrite the request and response here.\n\n### Fetch invoice\nWrite the request and response here.\n\n### Delete invoice\nWrite the request and response here.",
+    "# Create invoice\nPOST /v2/invoices, write the details here.\n# Fetch invoice\nGET /v2/invoices, write the details here.\n# Delete invoice\nDELETE /v2/invoices, write the details here.",
+    "# Billing API\n\nBase path: /v1/invoices\n\n## Create invoice\nDescribe it.\n\n## Fetch invoice\nDescribe it.\n\n## Delete invoice\nDescribe it."
+  ],
+  "sections": [
+    "Create invoice",
+    "Fetch invoice",
+    "Delete invoice"
+  ],
+  "correct_alts": [
+    "# Billing API\n\nBase path: /v2/invoices\n\n| Operation | Status |\n|---|---|\n| Create invoice | draft |\n| Fetch invoice | draft |\n| Delete invoice | draft |\n\n## Create invoice\nDescribe the request body and the response.\n\n## Fetch invoice\nDescribe the lookup and the response.\n\n## Delete invoice\nDescribe the removal and the response.",
+    "## Billing API reference\n\nEvery path starts with /v2/invoices.\n\n### Create invoice\nWrite the request and response here.\n\n### Fetch invoice\nWrite the request and response here.\n\n### Delete invoice\nWrite the request and response here."
+  ]
+}

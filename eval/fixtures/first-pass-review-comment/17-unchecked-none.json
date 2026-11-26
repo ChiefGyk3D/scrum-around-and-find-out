@@ -1,0 +1,47 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def owner_email(db, repo_id):\n     repo = db.find_repo(repo_id)\n-    if repo is None:\n-        return None\n     return repo.owner.email\n```\nIntent: return None when the repository does not exist.",
+  "facts": [
+    "owner_email",
+    {
+      "text": "unchecked None",
+      "variants": [
+        "None\\b.{0,40}(check|guard|handled?)",
+        "(missing|removed|dropped|lost|deleted) (the )?(None|null) (check|guard|case)",
+        "\\bAttributeError\\b",
+        "\\bNoneType\\b",
+        "(crash\\w*|raises?|fails?|breaks?).{0,40}(missing|unknown|not found|does not exist)",
+        "no longer (checks?|guards?|handles?)",
+        "(missing|unknown) (repo|repository).{0,50}(crash\\w*|raises?|fails?|breaks?)",
+        "\\bguard\\b.{0,20}removed",
+        "removed.{0,15}guard",
+        "None case",
+        "unhandled"
+      ]
+    },
+    {
+      "text": "find_repo",
+      "variants": [
+        "\\bfind_repo\\b",
+        "\\brepo\\b",
+        "\\bmissing (repo|repository)\\b",
+        "\\bunknown (repo|repository)\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bSQL\\b",
+    "\\bperformance\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "owner_email: add a type hint for the return value and a docstring.",
+    "owner_email: repo.owner.email chains three lookups, use a helper."
+  ],
+  "correct_alts": [
+    "owner_email no longer checks the None that find_repo returns, so an unknown repo raises an AttributeError.",
+    "The guard was removed in owner_email, which dereferences repo.owner on a missing repository and crashes instead of returning None.",
+    "owner_email assumes find_repo always finds something, so the None case is unhandled."
+  ]
+}

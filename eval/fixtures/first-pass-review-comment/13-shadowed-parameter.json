@@ -1,0 +1,39 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def total_with_tax(items, rate):\n     total = 0\n     for item in items:\n-        total += item.price * (1 + rate)\n+        for rate in item.rates:\n+            total += item.price * (1 + rate)\n     return total\n```\nIntent: apply the single tax rate given as the argument to every item.",
+  "facts": [
+    "total_with_tax",
+    {
+      "text": "shadows",
+      "variants": [
+        "shadow\\w*",
+        "(overwrites?|reuses?|rebinds?|clobbers?|reassigns?|hides?) (the )?(parameter|argument|rate|outer)",
+        "same name as (the )?(parameter|argument)",
+        "loop variable.{0,40}(parameter|argument|rate)"
+      ]
+    },
+    {
+      "text": "rate",
+      "variants": [
+        "\\brates?\\b",
+        "\\bparameter\\b",
+        "\\bargument\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bperformance\\b",
+    "\\bint(eger)? overflow\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "total_with_tax: the nested loop makes this quadratic, use a comprehension.",
+    "total_with_tax: total starts as an int, so use 0.0 for money."
+  ],
+  "correct_alts": [
+    "total_with_tax has a loop variable rate that shadows the rate parameter, so the passed-in tax rate is never used.",
+    "In total_with_tax the inner for rate reuses the argument name and overwrites it, hiding the single rate the caller supplied.",
+    "total_with_tax shadows the rate argument inside the loop, and that applies per-item rates instead of the one given."
+  ]
+}

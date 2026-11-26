@@ -1,0 +1,30 @@
+{
+  "task": "pr-summary",
+  "input": "Adds --dry-run to `syncctl push`. With the flag nothing is uploaded; the command prints the plan and exits with code 2 if a conflict is found. Tests in tests/test_push.py cover both paths. Not part of this PR: the retry rewrite, that is a follow-up.",
+  "facts": [
+    "--dry-run",
+    "syncctl push",
+    {
+      "text": "code 2",
+      "variants": [
+        "\\b(?:exit )?(?:code|status) 2\\b"
+      ]
+    },
+    "tests/test_push.py"
+  ],
+  "forbidden": [
+    "\\bretry\\b",
+    "\\bcode 1\\b",
+    "\\bupload(?:s|ed)? (?:the )?files\\b.{0,20}\\bdry"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Add dry run to syncctl\n- --dry-run uploads a preview\n- exits with code 1 on conflicts, see tests/test_push.py",
+    "Retry rewrite for syncctl push\n- adds --dry-run and a new retry loop\n- exits with code 2 on conflicts"
+  ],
+  "correct_alts": [
+    "Preview mode for pushes.\n- syncctl push accepts a new --dry-run flag that uploads nothing and prints what would happen.\n- A conflict makes it exit with code 2.\n- tests/test_push.py exercises the clean and the conflicting run.",
+    "Users can now rehearse a push with --dry-run.\n- The plan is printed and no data leaves the machine.\n- On a conflict the command finishes with status 2.\n- New cases in tests/test_push.py check this for syncctl push."
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "task": "ci-log-digest",
+  "input": "$ mypy --strict billing\nINFO  gamma: using seed 26944\ntests/test_theta.py::test_theta_31 PASSED   [38%]\ntests/test_epsilon.py::test_epsilon_21 PASSED   [67%]\ntests/test_gamma.py::test_gamma_13 PASSED   [95%]\nINFO  theta: using seed 45924\nDEBUG delta: fixture setup took 608 ms\nINFO  epsilon: using seed 37874\nINFO  gamma: using seed 85836\ntests/test_gamma.py::test_gamma_33 PASSED   [62%]\ntests/test_epsilon.py::test_epsilon_35 PASSED\ntests/test_theta.py::test_theta_31 PASSED   [20%]\nINFO  beta: using seed 83547\ntests/test_alpha.py::test_alpha_6 PASSED   [62%]\nDEBUG eta: fixture setup took 725 ms\nDEBUG gamma: fixture setup took 867 ms\ntests/test_gamma.py::test_gamma_35 PASSED   [3%]\nINFO  gamma: using seed 73909\nINFO  beta: using seed 56312\ntests/test_theta.py::test_theta_36 PASSED   [61%]\nDEBUG delta: fixture setup took 748 ms\ntests/test_theta.py::test_theta_6 PASSED   [46%]\ntests/test_gamma.py::test_gamma_17 PASSED   [10%]\nDEBUG gamma: fixture setup took 383 ms\ntests/test_zeta.py::test_zeta_39 PASSED   [35%]\ntests/test_eta.py::test_eta_27 PASSED\nDEBUG epsilon: fixture setup took 263 ms\nINFO  beta: using seed 18872\nINFO  beta: using seed 74091\ntests/test_beta.py::test_beta_5 PASSED   [60%]\nINFO  beta: using seed 65368\ntests/test_eta.py::test_eta_30 PASSED   [97%]\nDEBUG delta: fixture setup took 678 ms\ntests/test_beta.py::test_beta_1 PASSED   [36%]\nINFO  zeta: using seed 94048\ntests/test_epsilon.py::test_epsilon_34 PASSED   [55%]\nDEBUG epsilon: fixture setup took 628 ms\ntests/test_theta.py::test_theta_4 PASSED\ntests/test_theta.py::test_theta_19 PASSED   [91%]\ntests/test_delta.py::test_delta_11 PASSED   [39%]\nbilling/ledger.py:88: error: Argument 1 to \"post_entry\" has incompatible type \"str\"; expected \"int\"  [arg-type]\nbilling/ledger.py:131: error: Incompatible return type in \"close_period\" (got \"None\", expected \"Decimal\")  [return-value]\nbilling/ledger.py:204: error: Item \"None\" of \"Optional[Account]\" has no attribute \"balance\"  [union-attr]\nFound 3 errors in 1 file (checked 62 source files)\ntests/test_eta.py::test_eta_36 PASSED   [23%]\nINFO  theta: using seed 25738\nINFO  zeta: using seed 26715\ntests/test_zeta.py::test_zeta_36 PASSED\nINFO  beta: using seed 12777\nDEBUG epsilon: fixture setup took 71 ms\ntests/test_gamma.py::test_gamma_22 PASSED   [2%]\ntests/test_alpha.py::test_alpha_14 PASSED   [31%]\nDEBUG zeta: fixture setup took 37 ms\ntests/test_gamma.py::test_gamma_16 PASSED   [86%]\nDEBUG zeta: fixture setup took 797 ms\nDEBUG zeta: fixture setup took 240 ms\nDEBUG eta: fixture setup took 804 ms\nINFO  theta: using seed 31223\nINFO  epsilon: using seed 41245\ntests/test_zeta.py::test_zeta_17 PASSED\nmake: *** [typecheck] Error 1",
+  "facts": [
+    "ledger.py",
+    {
+      "text": "3 errors",
+      "variants": [
+        "\\bthree (type )?errors\\b",
+        "\\b3 type errors\\b"
+      ]
+    },
+    "close_period",
+    {
+      "text": "union-attr",
+      "variants": [
+        "\\bOptional\\b",
+        "\\bNone\\b[^\\n]{0,60}\\b(balance|account)\\b",
+        "\\bunion\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b62 errors\\b",
+    "\\bsyntax error\\b",
+    "\\bruff\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "mypy found 62 errors across the billing package because the whole tree is untyped.",
+    "The typecheck failed on a syntax error in ledger.py near close_period."
+  ],
+  "correct_alts": [
+    "The typecheck step failed because mypy found 3 errors, all in billing/ledger.py: a str passed where an int is expected, close_period returning None instead of a Decimal, and a union-attr problem on an Optional account.\nThe other source files are clean.",
+    "mypy --strict rejected ledger.py with three type errors, one of them in close_period, since a value can be None where the code assumes an account object."
+  ]
+}

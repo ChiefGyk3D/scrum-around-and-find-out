@@ -200,6 +200,7 @@ replaced are gone.
 - [Local-llm](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-llm)
 - [Local-draft](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-draft): `safo-draft`, local-first drafts and digests
 - [Local-eval](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-eval): `safo-eval`, scoring the local models on routed work
+- [Runner-first](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Runner-first): `safo-runner-check`, heavy work on a public repo goes to the runner
 - [Prerequisites](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Prerequisites)
 - [No-hidden-work](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/No-hidden-work)
 

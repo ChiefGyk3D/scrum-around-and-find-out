@@ -1,0 +1,31 @@
+{
+  "task": "commit-message",
+  "input": "Change: added aria-label=\"Close dialog\" to the icon-only close button in Dialog.tsx, and set a minimum touch target of 44x44 px in dialog.css. Screen readers announced only button before.",
+  "facts": [
+    "aria-label",
+    "Close dialog",
+    "Dialog.tsx",
+    {
+      "text": "44x44",
+      "variants": [
+        "\\b44\\s?[x×]\\s?44\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bfeat:",
+    "\\bchore:",
+    "\\b40x40\\b",
+    "\\b48x48\\b"
+  ],
+  "max_chars": 600,
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
+  "wrong": [
+    "fix: label the close button in Dialog.tsx\n\nAdds aria-label Close dialog and a 48x48 touch target.",
+    "feat: add accessibility attributes\n\naria-label in Dialog.tsx, 44x44 target."
+  ],
+  "correct_alts": [
+    "fix: name the dialog close button for screen readers\n\nDialog.tsx now gives the icon button aria-label=\"Close dialog\", and dialog.css enforces a 44x44 px minimum target.",
+    "fix: make the close icon accessible\n\nThe button was announced only as button. Add the label Close dialog (aria-label) in Dialog.tsx and a 44x44 px hit area in dialog.css."
+  ]
+}
