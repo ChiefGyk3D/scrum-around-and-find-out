@@ -103,7 +103,7 @@ The config files (`runner-never`, `public-repos`, `public-owners`) sit in `$XDG_
 the root: a symlink anywhere in the ancestry (including `XDG_CONFIG_HOME` itself or its parents), a `..` component, an
 ancestor below the home folder that is not yours or is group or world writable, or a folder or file that is not yours
 or is group or world writable, makes the repo "cannot tell: keep local". The file is opened with `O_NOFOLLOW`, and its
-inode, device and mode on the open descriptor must equal the earlier `lstat` (a file swapped in between is refused).
+inode, device, mode, size, mtime and ctime on the open descriptor must equal the earlier `lstat` (a file swapped in between is refused, even when the filesystem reuses the inode number).
 
 ### Content gate (before any command is printed)
 
