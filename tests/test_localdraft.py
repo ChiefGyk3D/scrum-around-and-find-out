@@ -127,7 +127,6 @@ def test_interactive_accept_files(env: Env) -> None:
         ("grid EM48ab is mine", "grid square"),
         ("https://claude.ai/code/session_abc", "session URL"),
         ("Claude-Session: abc", "Session trailer"),
-        ("works at Acmecorp", "denied word"),
     ],
 )
 def test_checks_refuse_and_name_reason(env: Env, bad: str, reason: str) -> None:
@@ -137,11 +136,11 @@ def test_checks_refuse_and_name_reason(env: Env, bad: str, reason: str) -> None:
     assert code == 1
     assert reason in out + err
     assert env.read("gh.args") == ""
-    assert bad in out  # the failed draft is still shown
+    assert bad in out  # the failed draft is still shown (unless a private deny entry matched, see round 4b tests)
 
 
 def test_checks_allow_placeholders_and_clean_text(env: Env) -> None:
-    assert localdraft.check_text("issue", "N0CALL on FN31pr uses K8S and 10 items\n\nPart of epic #445") == []
+    assert localdraft.check_text("issue", "N0CALL and N0TST on FN31pr use 10 items\n\nPart of epic #445") == []
 
 
 def test_issue_needs_epic_line_or_flag(env: Env) -> None:
@@ -426,9 +425,9 @@ def test_tightened_heuristics(text: str, reason: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "N0CALL and N0TST and K1ABC",
-        "grid FN31pr and fn31PR",
-        "the K8S cluster, P2P and E2E",
+        "N0CALL and N0TST",
+        "grid FN31pr",
+        "the cluster and 10 items",
         "at 12:30:45 on std::vector, note::x",
         "the serial numbers are listed",
         "see claude.ai for docs",
@@ -609,13 +608,13 @@ def test_f1_obfuscated_text_is_blocked(text: str) -> None:
     assert localdraft.check_title(text, deny=["Acmecorp"]) != [], text
 
 
-def test_f1_ordinary_entities_still_pass() -> None:
-    assert localdraft.check_text("comment", "a &amp; b, 1 &lt; 2, R&amp;D", deny=["Acmecorp"]) == []
+def test_f1_ordinary_text_and_comparisons_still_pass() -> None:
+    assert localdraft.check_text("comment", "a < b, 1 < 2, x<=y, a > b", deny=["Acmecorp"]) == []
 
 
 def test_f1_canonicalize_is_bounded_and_idempotent_on_plain_text() -> None:
     assert localdraft.canonicalize("plain text") == "plain text"
-    assert localdraft.canonicalize("&amp;amp;amp;amp;#46;").count("#46") >= 0  # terminates after 3 rounds
+    assert localdraft.canonicalize("&amp;#46;") == "&amp;#46;"  # entities are refused, never decoded (round 4b)
 
 
 @pytest.mark.parametrize("text", ["w1aw", "W1AW", "em48", "EM48", "fn31pq", "call w1aw/p", "x em48."])
@@ -627,11 +626,9 @@ def test_f2_bare_callsign_and_four_char_grid_blocked(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "N0CALL N0TST K1ABC FN31pr fn31",
-        "K8S k8s P2P b2b E2E a2a M2M H2O h2o",
+        "N0CALL N0TST FN31pr",
         "commit 3f786850e387550fdab836ed7e6dc881de23001b",
         "id 123e4567-e89b-12d3-a456-426614174000",
-        "id ab12-cd34-ef56 and w1aw_x and my-w1aw-x",
         "version 1.2.3 build 4567 and ipv6 x86_64",
     ],
 )
@@ -666,11 +663,12 @@ def test_f3_clean_title_and_body_pass_together() -> None:
 def test_f4_checks_are_linear() -> None:
     import time
 
+    # CPU time, not wall clock: load on the machine cannot fail it, quadratic code still does
     for text in ("a." * 32000, "a." * 31990 + "invalid", "http://" * 9000, "\n" * 30000, "a:" * 32000, "<!--" * 16000):
-        start = time.perf_counter()
+        start = time.process_time()
         localdraft.check_text("comment", text)
         localdraft.check_draft("issue", text, text)
-        assert time.perf_counter() - start < 1.0, text[:12]
+        assert time.process_time() - start < 2.0, text[:12]
 
 
 def test_f4_long_model_output_is_refused(env: Env) -> None:
@@ -707,8 +705,8 @@ def test_s1_callsign_with_ssid_is_blocked(text: str) -> None:
 
 
 @pytest.mark.parametrize("text", ["my-w1aw-x", "w1aw-x", "w1aw-123", "w1aw-7a", "a-w1aw-7"])
-def test_s1_hyphen_then_letter_or_longer_stays_a_longer_token(text: str) -> None:
-    assert not any("callsign" in x for x in localdraft.check_text("comment", text)), text
+def test_s1_hyphen_is_a_separator_so_these_are_blocked(text: str) -> None:
+    assert any("callsign" in x for x in localdraft.check_text("comment", text)), text
 
 
 @pytest.mark.parametrize("text", ["2001:db8::", "fd00:1234::", "see fe80:1::, ok", "net 2001:db8:abcd::/48"])
@@ -739,3 +737,300 @@ def test_s3_padding_and_trailing_word_characters_do_not_hide_an_address(text: st
 @pytest.mark.parametrize("text", ["std::vector", "note::x", "a::b_c", "use fe80:: here"])
 def test_s3_scope_and_single_hextet_cases_stay_unflagged(text: str) -> None:
     assert not any("IP address" in x for x in localdraft.check_text("comment", text)), text
+
+
+# round 4b: fail closed on exotic text, refuse HTML, exact private values
+def _why(text: str, **kw: Any) -> list[str]:
+    return localdraft.check_text("comment", text, **kw)
+
+
+def _deny_file(env: Env, text: str, mode: int = 0o600) -> Path:
+    path = Path(env.env["HOME"]) / ".config" / "safo" / "draft-deny"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(mode)
+    return path
+
+
+# item 1: fail closed charset
+@pytest.mark.parametrize(
+    "text",
+    [
+        "de W1\u0301AW",  # combining acute after a digit
+        "de W1\ufe0fAW",  # variation selector
+        "grid F\u0301N31",
+        "a \u202e b",  # bidi override
+        "a \U000e0041 b",  # tag character
+        "a\u200bb",  # zero width space
+        "a\u00a0b",  # non-breaking space (NFKC would turn it into a plain space)
+        "a\u3000b",  # ideographic space
+        "a\u2028b",  # line separator
+        "a\ue000b",  # private use
+        "a\x1bb",  # control character
+        "a\ud800b",  # lone surrogate
+    ],
+)
+def test_r4b1_exotic_characters_are_refused(text: str) -> None:
+    assert any("unusual character" in x for x in _why(text)), repr(text)
+    assert any("unusual character" in x for x in localdraft.check_title(text)), repr(text)
+
+
+def test_r4b1_ordinary_text_with_accents_and_emoji_passes() -> None:
+    assert _why("Caf\u00e9 na\u00efve, tab\there\r\nline two") == []
+    assert _why("Cafe\u0301 decomposed composes under NFKC") == []
+    assert localdraft.check_text("pr", f"Body\n\n{FOOTER}") == []
+    assert _why("done \u2705 \U0001f916") == []
+
+
+def test_r4b1_exotic_draft_is_never_filed_even_with_yes(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("de W1\u0301AW\n\nPart of epic #445")
+    code, out, _ = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_REFUSED and "unusual character" in out
+    assert env.read("gh.args") == ""
+
+
+# item 2: HTML is refused, not decoded
+@pytest.mark.parametrize(
+    "text",
+    [
+        '<img src="invalid" alt="W1&#65;W">',
+        "Acme<!-- -->corp",
+        "<b>x</b>",
+        "a</div>",
+        "x<!doctype",
+        "x<?php",
+        "tom &amp; jerry",
+        "&#65;",
+        "&#x41;",
+        "&copy 2026",
+        "&#65 next",
+        "R&D",
+        "\uff1cb\uff1e",  # full-width angle brackets are < and > under NFKC
+    ],
+)
+def test_r4b2_html_is_refused(text: str) -> None:
+    assert any("HTML is not allowed in drafts; use plain markdown" in x for x in _why(text)), text
+    assert any("HTML is not allowed" in x for x in localdraft.check_title(text)), text
+
+
+@pytest.mark.parametrize("text", ["a < b", "x<=y", "1 < 2 and 3 > 2", "a<1", "if x <- y then", "fish & chips"])
+def test_r4b2_comparisons_and_loose_ampersands_stay_allowed(text: str) -> None:
+    assert _why(text) == [], text
+
+
+def test_r4b2_canonicalize_no_longer_decodes_or_strips_html() -> None:
+    assert localdraft.canonicalize("&#46; <b>x</b> <!-- c -->") == "&#46; <b>x</b> <!-- c -->"
+
+
+# item 3: markdown punctuation
+@pytest.mark.parametrize(
+    "text",
+    [
+        "de W1**AW**",
+        "grid FN**31**",
+        "see box.**lan**",
+        "ssh 192.168.**1**.1",
+        "serial: ABC**123**",
+        "https://claude.**ai**/share/secret",
+        "de W1`AW`",
+        "de W1~~AW~~",
+        "de W1\\AW",
+    ],
+)
+def test_r4b3_markdown_punctuation_does_not_hide_a_token(text: str) -> None:
+    assert _why(text) != [], text
+    assert localdraft.check_title(text) != [], text
+
+
+def test_r4b3_markdown_split_deny_value_is_blocked() -> None:
+    assert _why("works at Ac**me** Corp", deny=["Acme Corp"]) != []
+    assert localdraft.canonicalize("a*b`c~d\\e_f-g") == "abcde_f-g"  # underscore and hyphen stay
+
+
+# item 4: hyphen and underscore are separators
+@pytest.mark.parametrize(
+    "text",
+    ["call-W1AW", "grid-FN31", "w1aw_x", "https://example.test/path/W1AW-x", "my-w1aw-x", "x_EM48_y", "grid-EM48ab"],
+)
+def test_r4b4_hyphen_and_underscore_are_separators(text: str) -> None:
+    assert any("callsign" in x or "grid" in x for x in _why(text)), text
+
+
+def test_r4b4_long_hex_and_uuid_do_not_collide() -> None:
+    assert _why("commit 3f786850e387550fdab836ed7e6dc881de23001b") == []
+    assert _why("id 550e8400-e29b-41d4-a716-446655440000") == []
+    # four-hex-character groups can have the shape of a callsign (a1bc) or a grid (ab12); a whole UUID is not flagged
+    assert _why("id 123e4567-a1bc-12d3-ab12-426614174000") == []
+    assert _why("id 123e4567-a1bc-12d3-ab12-426614174000".upper()) == []
+    assert _why("bare group a1bc") != []  # the mask is for whole UUIDs only
+
+
+# item 5: allow list
+def test_r4b5_only_the_owner_placeholders_are_built_in() -> None:
+    assert _why("N0CALL N0TST FN31pr") == []
+    for text in ("FN31", "K3S", "K8S", "K1ABC", "fn31pr", "FN31PR", "P2P", "W3C", "N8N", "I2C", "M3U"):
+        assert _why(f"see {text} here") != [], text
+
+
+def test_r4b5_example_allow_file_is_loadable_and_comment_headed(env: Env) -> None:
+    example = Path(localdraft.__file__).parents[2] / "docs" / "draft-allow.example.txt"
+    lines = example.read_text().splitlines()
+    assert lines[0].startswith("#") and "SAFO_DRAFT_ALLOW_FILE" in "\n".join(lines[:5])
+    tokens = [x for x in lines if x and not x.startswith("#")]
+    assert {"K8S", "K3S", "E2E", "FN31", "W3C"} <= set(tokens)
+    copy = Path(env.env["HOME"]) / "allow.txt"
+    copy.write_text(example.read_text())
+    copy.chmod(0o600)
+    env.env["SAFO_DRAFT_ALLOW_FILE"] = str(copy)
+    (env.dir / "llm.reply").write_text("the K3S and K8S cluster")
+    code, _, _ = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == 0
+
+
+def test_r4b5_world_writable_allow_file_is_refused(env: Env) -> None:
+    copy = Path(env.env["HOME"]) / "allow.txt"
+    copy.write_text("K3S\n")
+    copy.chmod(0o666)
+    env.env["SAFO_DRAFT_ALLOW_FILE"] = str(copy)
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "writable" in err
+    assert env.read("llm.count") == ""
+
+
+# item 6: exact private deny file
+@pytest.mark.parametrize(
+    "text",
+    ["Acme-Corp", "Ac**me** Corp", "A c m e C o r p", "ACME corp", "Acme\ncorp", "ac_me.corp", "A\u200bcme Corp"],
+)
+def test_r4b6_deny_value_is_matched_squashed(text: str) -> None:
+    why = _why(f"works at {text} today", deny=["Acme Corp"])
+    assert any("matched private deny entry #1" in x for x in why), text
+
+
+def test_r4b6_deny_matching_covers_title_body_and_their_join() -> None:
+    why = localdraft.check_draft("issue", "Ac", "me Corp\n\nPart of epic #445", deny=["x y z", "Acme Corp"])
+    assert any("title and body combined" in x and "private deny entry #2" in x for x in why), why
+    why = localdraft.check_draft("issue", "At Acme-Corp", "Body\n\nPart of epic #445", deny=["Acme Corp"])
+    assert any(x.startswith("title: ") and "#1" in x for x in why), why
+
+
+def test_r4b6_deny_file_end_to_end_never_prints_or_logs_the_value(env: Env) -> None:
+    _deny_file(env, "# private values\n\nQuux Industries\nAcme Corp\n")
+    (env.dir / "llm.reply").write_text("We work with Ac**me** Corp.\n\nPart of epic #445")
+    code, out, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "PROMPT Acme Corp"])
+    assert code == localdraft.EXIT_REFUSED
+    assert "matched private deny entry #4" in out  # line number in the file, comments and blanks counted
+    for stream in (out, err, (env.state / "safo" / "local-share.jsonl").read_text()):
+        assert "Acme" not in stream and "Ac**me**" not in stream and "Quux" not in stream
+    assert env.read("gh.args") == ""
+    assert env.metrics()[-1]["exit"] == localdraft.EXIT_REFUSED
+
+
+def test_r4b6_deny_hit_in_the_title_never_prints_the_title(env: Env) -> None:
+    _deny_file(env, "Acme Corp\n")
+    code, out, err = env.run(["issue", "--repo", "o/r", "--title", "About Acme-Corp", "--yes", "x"])
+    assert code == localdraft.EXIT_REFUSED and "title: matched private deny entry #1" in out
+    assert "Acme" not in out + err
+
+
+def test_r4b6_other_failures_still_print_the_draft(env: Env) -> None:
+    _deny_file(env, "Acme Corp\n")
+    (env.dir / "llm.reply").write_text("de W1AW\n\nPart of epic #445")
+    code, out, _ = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_REFUSED and "de W1AW" in out
+
+
+def test_r4b6_short_value_is_a_config_error_naming_the_line_not_the_value(env: Env) -> None:
+    _deny_file(env, "# c\nAcme Corp\n\nzq\n")
+    code, out, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR
+    assert "line 4" in err and "zq" not in err + out
+    assert env.read("llm.count") == "" and env.read("gh.args") == ""
+    _deny_file(env, "a-b\n")  # squashes to two characters
+    code, _, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "line 1" in err
+
+
+def test_r4b6_symlinked_deny_file_is_refused(env: Env, tmp_path: Path) -> None:
+    real = tmp_path / "real-deny"
+    real.write_text("Acme Corp\n")
+    real.chmod(0o600)
+    link = Path(env.env["HOME"]) / ".config" / "safo" / "draft-deny"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+    code, _, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "symlink" in err
+    assert env.read("llm.count") == ""
+
+
+@pytest.mark.parametrize("mode", [0o666, 0o662, 0o620, 0o626])
+def test_r4b6_group_or_world_writable_deny_file_is_refused(env: Env, mode: int) -> None:
+    _deny_file(env, "Acme Corp\n", mode)
+    code, _, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "writable" in err
+    assert env.read("llm.count") == ""
+
+
+def test_r4b6_group_readable_deny_file_is_accepted(env: Env) -> None:
+    _deny_file(env, "Acme Corp\n", 0o640)
+    code, _, _ = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == 0
+
+
+def test_r4b6_fifo_deny_file_is_refused_without_hanging(env: Env) -> None:
+    import os
+
+    path = Path(env.env["HOME"]) / ".config" / "safo" / "draft-deny"
+    path.parent.mkdir(parents=True)
+    os.mkfifo(path)
+    code, _, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "regular file" in err
+
+
+def test_r4b6_missing_default_file_notes_it_once_and_continues(env: Env) -> None:
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == 0
+    assert err.count("no private deny file configured: only heuristics are active") == 1
+
+
+def test_r4b6_present_file_prints_no_note(env: Env) -> None:
+    _deny_file(env, "Acme Corp\n")
+    _, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert "no private deny file" not in err
+
+
+def test_r4b6_explicit_missing_file_is_refused(env: Env) -> None:
+    env.env["SAFO_DRAFT_DENY_FILE"] = str(Path(env.env["HOME"]) / "typo")
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "not found" in err
+
+
+def test_r4b6_env_deny_list_uses_the_same_squashed_matching(env: Env) -> None:
+    env.env["SAFO_DRAFT_DENY"] = "Acme Corp, Quux Industries"
+    (env.dir / "llm.reply").write_text("hello Quux-Industries\n\nPart of epic #445")
+    code, out, _ = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_REFUSED and "matched private deny entry" in out and "Quux" not in out
+    env.env["SAFO_DRAFT_DENY"] = "zq"
+    code, _, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "zq" not in err
+
+
+# item 7: IPv6 scope rule
+@pytest.mark.parametrize(
+    "text",
+    ["fe80::abcdxyz", "2001:db8::deadbeefSECRET", "fe80::1xyz", "fe80::abcd_x", "fe80::1_x", "x fe80::1:2:3_ok"],
+)
+def test_r4b7_addresses_followed_by_letters_are_flagged(text: str) -> None:
+    assert any("IP address" in x for x in _why(text)), text
+
+
+@pytest.mark.parametrize(
+    "text", ["std::vector", "note::x", "a::b_c", "use fe80:: here", "12:30:45", "aa:bb:cc:dd:ee:ff"]
+)
+def test_r4b7_scopes_times_and_macs_are_not_flagged(text: str) -> None:
+    assert not any("IP address" in x for x in _why(text)), text
+
+
+def test_r4b7_known_overblock_is_documented_and_real() -> None:
+    assert any("IP address" in x for x in _why("Config::default"))
+    assert "Config::default" in Path(localdraft.__file__).parents[2].joinpath("docs", "local-draft.md").read_text()

@@ -18,16 +18,18 @@ Every call appends one JSON line (no content) to `$XDG_STATE_HOME/safo/local-sha
 backoff, then passed on. Any other failure exits non-zero, prints the failure, and says Twingate and the local server
 were NOT verified; there is never a silent fallback to a Claude model.
 
-Employer and other private words are not hard-coded (this repository is public): put them, comma separated, in
-`SAFO_DRAFT_DENY`, or one per line in the file named by `SAFO_DRAFT_DENY_FILE`. See docs/local-draft.md.
+Employer and other private words are not hard-coded (this repository is public): put them, one per line, in the
+private deny file (`SAFO_DRAFT_DENY_FILE`, default `~/.config/safo/draft-deny`), or comma separated in
+`SAFO_DRAFT_DENY`. A deny value is matched exactly after squashing both sides to lowercase ASCII letters and digits,
+and a reason names only the entry number, never the value. See docs/local-draft.md.
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import datetime as dt
-import html
 import ipaddress
 import json
 import os
@@ -55,7 +57,6 @@ PR_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 # U+2014 em dash and its small, vertical and two/three-em look-alikes. U+2015 (horizontal bar) is not blocked.
 EM_DASHES = "".join(chr(c) for c in (0x2014, 0xFE58, 0xFE31, 0x2E3A, 0x2E3B))
 MAX_CHECK_CHARS = 20_000  # model output longer than this is refused, not checked
-CANON_ROUNDS = 3
 NOT_VERIFIED = "Twingate and the local server were NOT verified; nothing was sent to a Claude model."
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_DECLINED, EXIT_TIMEOUT, EXIT_INTERNAL, EXIT_GH_FAILED, EXIT_BUSY = (
@@ -74,39 +75,26 @@ EXIT_TABLE = (
     "error; 13 gh failed (filing or commenting); 75 local queue still busy; any other code is the llm-local exit code"
 )
 
-_PLACEHOLDERS = {"N0CALL", "N0TST", "FN31PR", "FN31", "K1ABC"}
-# Common technical tokens that have the shape of a callsign or grid. Extend with SAFO_DRAFT_ALLOW.
-_TECH_TOKENS = {
-    "K8S",
-    "P2P",
-    "B2B",
-    "E2E",
-    "A2A",
-    "M2M",
-    "H2O",  # the original set
-    "K3S",
-    "N8N",
-    "W3C",
-    "C2PA",
-    "I2C",
-    "I2S",
-    "E2EE",
-    "L2TP",
-    "M3U",  # added in round 3, from docs and common tech terms
-}
+# The only built-in allowed tokens: the owner-named placeholders, exact and case-sensitive. Everything else with the
+# shape of a callsign or grid is blocked; docs/draft-allow.example.txt lists tech tokens to copy into an allow file.
+_BUILTIN_ALLOWED = frozenset({"N0CALL", "N0TST", "FN31pr"})
 _CALL_SHAPE = r"[A-Z]{1,2}[0-9][A-Z]{1,3}"
-_EDGE_BEFORE = r"(?<![A-Za-z0-9_-])"  # not inside a longer alphanumeric, hyphenated or underscore token
-_EDGE_AFTER = r"(?![A-Za-z0-9_-])"
-# any case, no cue needed; an optional APRS-style SSID (`-7`, `-15`) is part of the callsign. A hyphen followed by a
-# letter or a third digit still makes a longer token (`my-w1aw-x`), left to the allow list for false positives.
+_EDGE_BEFORE = r"(?<![A-Za-z0-9])"  # hyphen and underscore are separators, not token characters
+_EDGE_AFTER = r"(?![A-Za-z0-9])"
+# any case, no cue needed; an optional APRS-style SSID (`-7`, `-15`) is part of the callsign
 _CALLSIGN = re.compile(rf"{_EDGE_BEFORE}{_CALL_SHAPE}(?:-\d{{1,2}})?{_EDGE_AFTER}", re.IGNORECASE)
 _CALLSIGN_CTX = re.compile(
-    rf"\b(?:call\s*sign|call|de)\b(?:\s+is)?[\s:=]+({_CALL_SHAPE})\b", re.IGNORECASE
+    rf"\b(?:call\s*sign|call|de)\b(?:\s+is)?[\s:=]+({_CALL_SHAPE}){_EDGE_AFTER}", re.IGNORECASE
 )  # any case after a cue, even inside a hyphenated token
-_GRID6 = re.compile(r"\b[A-R]{2}[0-9]{2}[A-X]{2}\b", re.IGNORECASE)
+_GRID6 = re.compile(rf"{_EDGE_BEFORE}[A-R]{{2}}[0-9]{{2}}[A-X]{{2}}{_EDGE_AFTER}", re.IGNORECASE)
 _GRID4 = re.compile(rf"{_EDGE_BEFORE}[A-R]{{2}}[0-9]{{2}}{_EDGE_AFTER}", re.IGNORECASE)
 _GRID_CTX = re.compile(
-    r"\b(?:grid(?:\s*square)?|locator|maidenhead)\b[\s:=]+([A-R]{2}[0-9]{2}(?:[A-X]{2})?)\b", re.IGNORECASE
+    rf"\b(?:grid(?:\s*square)?|locator|maidenhead)\b[\s:=]+([A-R]{{2}}[0-9]{{2}}(?:[A-X]{{2}})?){_EDGE_AFTER}",
+    re.IGNORECASE,
+)
+# a whole UUID is masked before the callsign and grid scan: its 4-hex groups (`a1bc`, `ab12`) have those shapes
+_UUID = re.compile(
+    r"(?<![0-9A-Fa-f-])[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}(?![0-9A-Fa-f-])", re.I
 )
 _IPV4 = re.compile(r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b")
 _IPV6_RUN = re.compile(r"[0-9A-Fa-f:.]+(?:%[\w.-]+)?")
@@ -116,8 +104,9 @@ _SERIAL = re.compile(
     r"\b(?:serial(?:\s+(?:number|no\.?|num))?|s/n|sn)[\s:#=]+(?=[A-Z0-9-]*\d)[A-Z0-9-]{6,}", re.IGNORECASE
 )
 _SESSION_TRAILER = re.compile(r"^[ \t]*claude-session[ \t]*:", re.IGNORECASE | re.MULTILINE)
-_MD_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
-_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
+_MD_PUNCT = re.compile(r"[*`~\\]")  # emphasis, code, strikethrough and escape characters vanish when rendered
+_HTML_START = re.compile(r"<[A-Za-z!/?]")  # a tag, a comment, a declaration, a closing tag, a processing instruction
+_HTML_REF = re.compile(r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*)(?:;|\b)")
 _EPIC = re.compile(r"^[ \t]*(?:epic\s*:\s*\S+|part of epic\s+#\d+)", re.IGNORECASE | re.MULTILINE)
 
 _FAILURE = re.compile(r"##\[error\]|\berror\b|\bfailed\b|\bfailure\b|traceback|exit code [1-9]|\bFAIL\b", re.IGNORECASE)
@@ -134,59 +123,136 @@ class Failure(Exception):
         self.code = code
 
 
-def _words(env: Mapping[str, str], var: str) -> list[str]:
-    words = [w.strip() for w in env.get(var, "").split(",")]
-    path = env.get(f"{var}_FILE")
-    if path and Path(path).is_file():
-        words += [w.strip() for w in Path(path).read_text(errors="replace").splitlines()]
-    return [w for w in words if w]
+MAX_CONFIG_BYTES = 65_536
+MIN_DENY_CHARS = 3  # a deny value that squashes to fewer characters would match almost anything
+_DENY_MARK = "matched private deny entry"
+_BAD_CATEGORIES = frozenset({"Mn", "Me", "Cf", "Cc", "Co", "Cn", "Cs", "Zl", "Zp"})
+_NO_DENY_NOTE = "safo-draft: no private deny file configured: only heuristics are active"
 
 
-def deny_words(env: Mapping[str, str]) -> list[str]:
-    return _words(env, "SAFO_DRAFT_DENY")
+@dataclasses.dataclass(frozen=True)
+class DenyEntry:
+    """A private value, squashed. `label` names it in a reason (`#4` is line 4 of the file); the value is not kept."""
+
+    label: str
+    squashed: str
+
+
+def _squash(text: str) -> str:
+    """NFKC, lowercase, and only ASCII letters and digits kept: `Ac**me** Corp` and `A-c-m-e corp` squash alike."""
+    return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKC", text).lower())
+
+
+def _read_private_file(path: str, what: str) -> str | None:
+    """Read a config file only if it is a regular, non-symlink file of this user that nobody else can write.
+
+    Returns None when the file does not exist. The checks run on the opened descriptor, so a swap after the check
+    cannot change what is read, and O_NONBLOCK keeps a FIFO from hanging the open.
+    """
+    try:
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            raise Failure(f"{what} is a symlink; refusing to read it", EXIT_ERROR)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as problem:
+        raise Failure(f"{what} cannot be opened: {problem.strerror}", EXIT_ERROR) from None
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise Failure(f"{what} is not a regular file; refusing to read it", EXIT_ERROR)
+        if info.st_uid != os.geteuid():
+            raise Failure(f"{what} is not owned by you; refusing to read it", EXIT_ERROR)
+        if info.st_mode & 0o022:
+            raise Failure(f"{what} is group or world writable; run chmod go-w on it", EXIT_ERROR)
+        data = handle.read(MAX_CONFIG_BYTES + 1)
+    if len(data) > MAX_CONFIG_BYTES:
+        raise Failure(f"{what} is larger than {MAX_CONFIG_BYTES} bytes", EXIT_ERROR)
+    return data.decode("utf-8", errors="replace")
+
+
+def _config_lines(text: str) -> list[tuple[int, str]]:
+    """(line number, value) for each line that is not blank and does not start with `#`."""
+    rows = [(n, line.strip()) for n, line in enumerate(text.splitlines(), 1)]
+    return [(n, line) for n, line in rows if line and not line.startswith("#")]
+
+
+def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
+    """The private deny entries: the file (default ~/.config/safo/draft-deny) and the comma separated SAFO_DRAFT_DENY.
+
+    A value that squashes to fewer than MIN_DENY_CHARS characters is a config error naming the line, not the value.
+    A missing default file is noted once on `err`; a file named by SAFO_DRAFT_DENY_FILE that is missing is an error.
+    """
+    entries: list[DenyEntry] = []
+    explicit = env.get("SAFO_DRAFT_DENY_FILE")
+    path = explicit or str(Path(env.get("HOME", str(Path.home()))) / ".config" / "safo" / "draft-deny")
+    text = _read_private_file(path, "SAFO_DRAFT_DENY_FILE")
+    if text is None:
+        if explicit:
+            raise Failure("SAFO_DRAFT_DENY_FILE names a file that was not found", EXIT_ERROR)
+        err.write(_NO_DENY_NOTE + "\n")
+    else:
+        for n, value in _config_lines(text):
+            squashed = _squash(value)
+            if len(squashed) < MIN_DENY_CHARS:
+                raise Failure(
+                    f"SAFO_DRAFT_DENY_FILE line {n}: a deny value needs at least {MIN_DENY_CHARS} letters or digits",
+                    EXIT_ERROR,
+                )
+            entries.append(DenyEntry(f"#{n}", squashed))
+    for i, value in enumerate((w.strip() for w in env.get("SAFO_DRAFT_DENY", "").split(",")), 1):
+        if not value:
+            continue
+        squashed = _squash(value)
+        if len(squashed) < MIN_DENY_CHARS:
+            raise Failure(
+                f"SAFO_DRAFT_DENY entry {i}: a deny value needs at least {MIN_DENY_CHARS} letters or digits",
+                EXIT_ERROR,
+            )
+        entries.append(DenyEntry(f"SAFO_DRAFT_DENY#{i}", squashed))
+    return entries
 
 
 def allow_words(env: Mapping[str, str]) -> list[str]:
-    return _words(env, "SAFO_DRAFT_ALLOW")
-
-
-def _strip_comments(text: str) -> str:
-    """Remove `<!-- ... -->` in one linear pass; an unterminated comment is left as it is."""
-    out: list[str] = []
-    pos = 0
-    while True:
-        start = text.find("<!--", pos)
-        if start < 0:
-            break
-        end = text.find("-->", start + 4)
-        if end < 0:
-            break
-        out.append(text[pos:start])
-        pos = end + 3
-    out.append(text[pos:])
-    return "".join(out)
-
-
-def _canonical_round(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text)
-    text = "".join(c for c in text if unicodedata.category(c) != "Cf")  # zero-width, soft hyphen, BOM, bidi marks
-    text = html.unescape(text)
-    text = _TAG.sub("", _strip_comments(text))
-    return _MD_ESCAPE.sub(r"\1", text)
+    """Extra allowed tokens: SAFO_DRAFT_ALLOW (comma separated), SAFO_DRAFT_ALLOW_FILE (a line each, `#` comments)."""
+    words = [w.strip() for w in env.get("SAFO_DRAFT_ALLOW", "").split(",")]
+    path = env.get("SAFO_DRAFT_ALLOW_FILE")
+    if path:
+        text = _read_private_file(path, "SAFO_DRAFT_ALLOW_FILE")
+        if text is None:
+            raise Failure("SAFO_DRAFT_ALLOW_FILE names a file that was not found", EXIT_ERROR)
+        words += [value for _, value in _config_lines(text)]
+    return [w for w in words if w]
 
 
 def canonicalize(text: str) -> str:
-    """The render-equivalent form of a text: what a reader sees after Markdown and HTML are rendered.
+    """The render-equivalent form of a text for the token checks: NFKC, then the Markdown punctuation removed.
 
-    NFKC, format and zero-width characters dropped, HTML entities decoded, HTML comments and tags removed, Markdown
-    escapes removed; repeated to a fixed point, at most CANON_ROUNDS times (so `&amp;#46;` becomes a dot).
+    `*`, backtick, `~` and backslash disappear when Markdown renders (`W1**AW**` reads `W1AW`); `_` and `-` stay.
+    HTML is not decoded or stripped: a draft that holds any is refused by `_has_html`.
     """
-    for _ in range(CANON_ROUNDS):
-        new = _canonical_round(text)
-        if new == text:
-            break
-        text = new
-    return text
+    return _MD_PUNCT.sub("", unicodedata.normalize("NFKC", text))
+
+
+def _has_unusual_characters(text: str) -> bool:
+    """Combining marks, format (zero-width, bidi, tag), control, private-use, unassigned and surrogate characters, and
+    any space other than U+0020, in the NFKC form or (for spaces, which NFKC folds to U+0020) in the raw text."""
+    for c in text:
+        if c.isascii():
+            if (c < " " and c not in "\n\r\t") or c == "\x7f":
+                return True
+        elif unicodedata.category(c) in ("Zs", "Zl", "Zp"):
+            return True
+    for c in unicodedata.normalize("NFKC", text):
+        if not c.isascii():
+            kind = unicodedata.category(c)
+            if kind in _BAD_CATEGORIES or kind == "Zs":
+                return True
+    return False
+
+
+def _has_html(text: str) -> bool:
+    return bool(_HTML_START.search(text) or _HTML_REF.search(text))
 
 
 def _has_private_host(text: str) -> bool:
@@ -214,16 +280,26 @@ _MAX_IPV6_CHARS = 46  # the longest valid IPv6 text (with an embedded IPv4) is 4
 
 
 def _is_scope(text: str, run_start: int, run: str) -> bool:
-    """`std::vector`: a `::` followed by an identifier that cannot be a hextet is a C++ style scope, not an address."""
-    at = run.find("::")
+    """`std::vector`: is the text after the LAST `::` of this run a C++ style scope name rather than an address?
+
+    Scope-like only when the character right after that `::` is a letter that is not a hex digit (`std::vector`,
+    `note::x`), or when the word there holds an underscore and both sides are single or double hex characters
+    (`a::b_c`). Anything else (`fe80::abcdxyz`, `fe80::1_x`, `Config::default`) is tried as an address, so
+    over-blocking of `Config::default` style names is accepted.
+    """
+    at = run.rfind("::")
     if at < 0:
         return False
     begin = run_start + at + 2
-    ident = re.match(r"\w{1,64}", text[begin:])
-    if not ident:
+    word = re.match(r"\w{1,64}", text[begin:])
+    if not word:
         return False
-    word = ident.group()
-    return (word[0].isalpha() or word[0] == "_") and any(c not in _HEXTET for c in word)
+    first = word.group()[0]
+    if first.isalpha() and first not in _HEXTET:
+        return True
+    lead = len(word.group()) - len(word.group().lstrip("0123456789abcdefABCDEF"))
+    before = run[:at].rsplit(":", 1)[-1]
+    return "_" in word.group() and lead <= 2 and len(before) <= 2
 
 
 def _hextets_before(cand: str, at: int) -> int:
@@ -236,9 +312,10 @@ def _has_ipv6(text: str) -> bool:
 
     A leading label such as `ipv6:` or `addr:` is shed by also trying each suffix that starts after a colon. Trailing
     word characters do not hide an address (`fe80::1x`), and trailing dots or colons (padding) are stripped before the
-    length cap, so they do not either. A prefix that ends in `::` is flagged when it has at least two non-empty hextets
-    before the `::` (`2001:db8::`, `fd00:1234::`); one hextet (`e::`, `fe80::`) is not. A C++ style scope
-    (`std::vector`, `a::b_c`) is only flagged when the run before it holds two or more hextets before the `::`.
+    length cap, so they do not either. The prefix of a run up to its last `::` is also tried, so an address whose
+    tail is not valid hex (`2001:db8::deadbeefSECRET`) is still flagged. A prefix that ends in `::` is flagged when it
+    has at least two non-empty hextets before the `::` (`2001:db8::`, `fd00:1234::`); one hextet (`e::`, `fe80::`)
+    is not. A scope-like run (see `_is_scope`) is only flagged with two or more hextets before the `::`.
     """
     for match in _IPV6_RUN.finditer(text):
         run = match.group()
@@ -248,15 +325,17 @@ def _has_ipv6(text: str) -> bool:
         strict = _is_scope(text, match.start(), run)
         lead = len(run) - len(run.lstrip("."))
         end = len(run.rstrip(".:"))
-        has_prefix = run.startswith("::", end) and end > 0
+        last = run.rfind("::")
         starts = [lead] + [i + 1 for i, ch in enumerate(run) if ch == ":" and i + 1 >= lead]
         for start in starts:
             if end - start > _MAX_IPV6_CHARS:
                 continue
             cands = [run[start:end]]
-            if has_prefix:
+            if run.startswith("::", end) and end > 0:
                 cands.append(run[start : end + 2])
-            for cand in cands:
+            if last >= start:
+                cands.append(run[start : last + 2])  # the prefix up to the last `::`
+            for cand in dict.fromkeys(cands):
                 if not cand or cand.startswith(".") or cand.strip(":") == "":
                     continue
                 at = cand.find("::")
@@ -272,19 +351,34 @@ def _has_ipv6(text: str) -> bool:
     return False
 
 
-def _deny_hit(text: str, deny: Sequence[str]) -> bool:
-    lowered = text.lower()
-    squeezed = re.sub(r"\s+", "", lowered)  # a denied value split by a line break or space is still found
-    for word in deny:
-        low = word.lower()
-        if low in lowered or re.sub(r"\s+", "", low) in squeezed:
-            return True
-    return False
+def _entries(deny: Sequence[str | DenyEntry]) -> list[DenyEntry]:
+    """Plain strings (the API used by tests) become entries numbered by position; empty squashed values are skipped."""
+    rows = [x if isinstance(x, DenyEntry) else DenyEntry(f"#{i}", _squash(x)) for i, x in enumerate(deny, 1)]
+    return [x for x in rows if x.squashed]
 
 
-def _single_checks(text: str, deny: Sequence[str], allow: Sequence[str]) -> list[str]:
-    ok = {w.upper() for w in (*_PLACEHOLDERS, *_TECH_TOKENS, *allow)}
+def _deny_reasons(parts: Sequence[str], deny: Sequence[str | DenyEntry]) -> list[str]:
+    """Reasons for each deny entry found in the squashed form of the parts joined with nothing between them.
+
+    The squashed form drops every character that is not an ASCII letter or digit, so a value split by spacing,
+    punctuation, Markdown, zero-width characters or a line break is still found. A reason holds the entry label only.
+    """
+    squashed = "".join(_squash(p) for p in parts)
+    return [f"{_DENY_MARK} {e.label}" for e in _entries(deny) if e.squashed in squashed]
+
+
+def _is_allowed(token: str, allow: set[str]) -> bool:
+    base = token.split("-", 1)[0]  # an SSID suffix does not change the callsign
+    return base in _BUILTIN_ALLOWED or base.upper() in allow
+
+
+def _single_checks(text: str, allow: Sequence[str], charset: bool) -> list[str]:
+    ok = {w.upper() for w in allow}
     why: list[str] = []
+    if charset and _has_unusual_characters(text):
+        why.append("unusual characters found (combining, invisible, bidi, tag, private-use or a non-ASCII space)")
+    if _has_html(text):
+        why.append("HTML is not allowed in drafts; use plain markdown")
     if any(c in text for c in EM_DASHES):
         why.append("em dash found (use a comma, colon or hyphen)")
     if _IPV4.search(text) or _has_ipv6(text):
@@ -293,8 +387,11 @@ def _single_checks(text: str, deny: Sequence[str], allow: Sequence[str]) -> list
         why.append("hostname found")
     if _SERIAL.search(text):
         why.append("serial number found")
-    calls = [m for m in _CALLSIGN.findall(text) + _CALLSIGN_CTX.findall(text) if m.upper() not in ok]
-    grids = [m for m in _GRID6.findall(text) + _GRID4.findall(text) + _GRID_CTX.findall(text) if m.upper() not in ok]
+    shaped = _UUID.sub(" ", text)
+    calls = [m for m in _CALLSIGN.findall(shaped) + _CALLSIGN_CTX.findall(shaped) if not _is_allowed(m, ok)]
+    grids = [
+        m for m in _GRID6.findall(shaped) + _GRID4.findall(shaped) + _GRID_CTX.findall(shaped) if not _is_allowed(m, ok)
+    ]
     if calls:
         why.append("amateur radio callsign pattern found (use N0CALL; SAFO_DRAFT_ALLOW lists exceptions)")
     if grids:
@@ -303,27 +400,25 @@ def _single_checks(text: str, deny: Sequence[str], allow: Sequence[str]) -> list
         why.append("claude.ai session URL found")
     if _SESSION_TRAILER.search(text):
         why.append("Claude-Session trailer found")
-    if _deny_hit(text, deny):
-        why.append("denied word found (SAFO_DRAFT_DENY)")
     return why
 
 
-def _generic_checks(text: str, deny: Sequence[str], allow: Sequence[str]) -> list[str]:
+def _generic_checks(text: str, allow: Sequence[str]) -> list[str]:
     """Checks for any text that gets published. Every check runs on the raw text and on its canonical form."""
-    why = _single_checks(text, deny, allow)
+    why = _single_checks(text, allow, True)
     canon = canonicalize(text)
     if canon != text:
-        why += [x for x in _single_checks(canon, deny, allow) if x not in why]
+        why += [x for x in _single_checks(canon, allow, False) if x not in why]
     return why
 
 
-def check_title(title: str, deny: Sequence[str] = (), allow: Sequence[str] = ()) -> list[str]:
-    return [f"title: {x}" for x in _generic_checks(title, deny, allow)]
+def check_title(title: str, deny: Sequence[str | DenyEntry] = (), allow: Sequence[str] = ()) -> list[str]:
+    return [f"title: {x}" for x in _generic_checks(title, allow) + _deny_reasons([title], deny)]
 
 
-def check_text(kind: str, text: str, deny: Sequence[str] = (), allow: Sequence[str] = ()) -> list[str]:
+def check_text(kind: str, text: str, deny: Sequence[str | DenyEntry] = (), allow: Sequence[str] = ()) -> list[str]:
     """The reasons a draft may not be filed. An empty list means it passed."""
-    why = _generic_checks(text, deny, allow)
+    why = _generic_checks(text, allow) + _deny_reasons([text], deny)
     if kind == "pr":
         lines = [x for x in text.splitlines() if x.strip()]
         if not lines or lines[-1].strip() != PR_FOOTER:
@@ -334,7 +429,11 @@ def check_text(kind: str, text: str, deny: Sequence[str] = (), allow: Sequence[s
 
 
 def check_draft(
-    kind: str, title: str | None, body: str, deny: Sequence[str] = (), allow: Sequence[str] = ()
+    kind: str,
+    title: str | None,
+    body: str,
+    deny: Sequence[str | DenyEntry] = (),
+    allow: Sequence[str] = (),
 ) -> list[str]:
     """All reasons a draft may not be filed: the body, the title, and the title and body read together."""
     why = check_text(kind, body, deny, allow)
@@ -342,11 +441,11 @@ def check_draft(
         return why
     why += check_title(title, deny, allow)
     seen = {x.removeprefix("title: ") for x in why}
-    for joiner in ("\n", ""):
-        for x in _generic_checks(f"{title}{joiner}{body}", deny, allow):
-            if x not in seen:
-                seen.add(x)
-                why.append(f"title and body combined: {x}")
+    combined = [x for joiner in ("\n", "") for x in _generic_checks(f"{title}{joiner}{body}", allow)]
+    for x in combined + _deny_reasons([title, body], deny):
+        if x not in seen:
+            seen.add(x)
+            why.append(f"title and body combined: {x}")
     return why
 
 
@@ -517,6 +616,7 @@ def _with_footer(body: str) -> str:
 
 def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
     kind = args.cmd
+    deny, allow = load_deny(ctx.env, ctx.err), allow_words(ctx.env)  # a config error stops the run before any call
     facts = _read_facts(args.facts, ctx.stdin)
     if not args.prompt and not facts:
         raise Failure("give a short prompt or --facts FILE", EXIT_ERROR)
@@ -535,9 +635,11 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
         body = _with_footer(body)
     if kind == "issue" and args.epic and not _EPIC.search(body):
         body = f"{body.rstrip()}\n\nPart of epic #{args.epic}"
-    ctx.out.write(f"--- draft {kind} ---\n{body}\n--- end draft ---\n")
-    deny, allow = deny_words(ctx.env), allow_words(ctx.env)
     why = check_draft(kind, None if kind == "comment" else args.title, body, deny, allow)
+    if any(_DENY_MARK in x for x in why):
+        ctx.out.write(f"--- draft {kind} withheld: it matched a private deny entry ---\n")  # never echo the value
+    else:
+        ctx.out.write(f"--- draft {kind} ---\n{body}\n--- end draft ---\n")
     if why:
         ctx.out.write("NOT FILED. The draft failed these checks:\n" + "".join(f"  - {x}\n" for x in why))
         return EXIT_REFUSED
@@ -581,9 +683,9 @@ def _digest(args: argparse.Namespace, ctx: Ctx) -> int:
 
 class Ctx:
     def __init__(
-        self, env: Mapping[str, str], out: TextIO, stdin: TextIO, sleep: Callable[[float], None], sub: str
+        self, env: Mapping[str, str], out: TextIO, err: TextIO, stdin: TextIO, sleep: Callable[[float], None], sub: str
     ) -> None:
-        self.env, self.out, self.stdin, self.sleep, self.sub = env, out, stdin, sleep, sub
+        self.env, self.out, self.err, self.stdin, self.sleep, self.sub = env, out, err, stdin, sleep, sub
         self.model, self.chars_in, self.chars_out = "", 0, 0
 
 
@@ -636,7 +738,7 @@ def main(
     if not args.cmd:
         err.write("safo-draft: give a subcommand (issue, pr, comment, digest) or --report\n")
         return EXIT_ERROR
-    ctx = Ctx(env, out, stdin, sleep, args.cmd)
+    ctx = Ctx(env, out, err, stdin, sleep, args.cmd)
     code = EXIT_OK
     try:
         code = _digest(args, ctx) if args.cmd == "digest" else _draft(args, ctx)

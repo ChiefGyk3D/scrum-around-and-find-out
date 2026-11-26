@@ -1,0 +1,22 @@
+# Example allow list for safo-draft (issue #482). Copy the tokens you want into your own file and point
+# SAFO_DRAFT_ALLOW_FILE at it (one token per line, `#` starts a comment line, matching ignores case). The file must be
+# yours and not group or world writable. These tokens have the shape of an amateur radio callsign or grid square, so
+# safo-draft blocks them by default; only N0CALL, N0TST and FN31pr are built in.
+K8S
+K3S
+P2P
+B2B
+E2E
+E2EE
+A2A
+M2M
+H2O
+N8N
+W3C
+C2PA
+I2C
+I2S
+L2TP
+M3U
+K1ABC
+FN31
