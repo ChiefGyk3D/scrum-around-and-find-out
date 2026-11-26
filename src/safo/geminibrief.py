@@ -1259,6 +1259,29 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
 _NOT_SIMPLE_CHARS = frozenset(";&|()`")
 _HEREDOC_START = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*$")
 _HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)")
+_ASSIGNMENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+# A first word that changes how the rest of the line runs: a reserved word or compound opener, or a command that runs
+# another command. Such a line is never one simple command, so it is never narrowed.
+_SHADOW_WORDS = frozenset(
+    {
+        "!", "time", "{", "}", "[[", "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case",
+        "esac", "select", "function", "coproc", "command", "builtin", "exec", "eval", "nohup", "sudo", "env", "xargs",
+        "nice", "timeout", "stdbuf", "setsid",
+    }
+)  # fmt: skip
+
+
+def _shadowed_first_word(text: str) -> bool:
+    """True when the first word, after any plain assignment prefixes, is a shadow word. Quotes and backslashes are
+    removed first, so `"time"` and `\\time` count as `time`. An assignment whose value is quoted or expanded is refused
+    here too: its prefix is not plain."""
+    for word in text.split():
+        if _ASSIGNMENT_WORD.match(word):
+            if any(c in word for c in "'\"\\$`"):
+                return True
+            continue
+        return re.sub(r"[\\'\"]", "", word) in _SHADOW_WORDS
+    return False
 
 
 def _simple_line(text: str) -> bool:
@@ -1274,6 +1297,8 @@ def _simple_line(text: str) -> bool:
     if any((ord(c) < 32 and c not in "\t\n") or ord(c) == 127 for c in text):
         return False
     if any(c in _NOT_SIMPLE_CHARS for c in text):
+        return False
+    if _shadowed_first_word(text):
         return False
     head, newline, rest = text.partition("\n")
     if not newline:

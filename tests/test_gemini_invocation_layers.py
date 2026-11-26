@@ -162,12 +162,52 @@ SIMPLE_LINES = [
     ("echo a\x00b", False),
     ("echo `", False),
     ("FOO=$(doppler secrets get BAR --plain)", False),
+    # a reserved word, a compound opener or a wrapper as the first word (after plain assignments, blanks, quotes or a
+    # backslash escape) is not one simple command; the reported inputs are the first two rows
+    ('! git commit -m "fix curl \\x41"', False),
+    ('time git commit -m "fix curl \\x41"', False),
+    ("ls git status", True),
+    ("FOO=1 ls -l", True),
+    ('FOO="x" ls', False),
+    ("FOO=$X ls", False),
+    ("FOO=1 BAR=2 time x", False),
+    ("FOO=1 ! x", False),
+    ("FOO=1 {", False),
+    ("FOO=1 ls", True),
 ]
+
+SHADOW_WORDS = [
+    "!", "time", "{", "}", "[[", "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case",
+    "esac", "select", "function", "coproc", "command", "builtin", "exec", "eval", "nohup", "sudo", "env", "xargs",
+    "nice", "timeout", "stdbuf", "setsid",
+]  # fmt: skip
+# every shadowing word, bare, after blanks or a tab, after one assignment prefix, backslash-escaped, and quoted
+SIMPLE_LINES.extend(
+    row
+    for word in SHADOW_WORDS
+    for row in [
+        (f"{word} git status", False),
+        (f"  {word} git status", False),
+        (f"\t{word} git status", False),
+        (f"FOO=1 {word} git status", False),
+        (f"\\{word} git status", False),
+        (f'"{word}" git status', False),
+    ]
+)
 
 
 @pytest.mark.parametrize(("line", "simple"), SIMPLE_LINES)
 def test_the_precondition_is_strict_about_one_simple_command(line: str, simple: bool) -> None:
     assert geminibrief._simple_line(line) is simple, repr(line)
+
+
+@pytest.mark.parametrize("command", ['! git commit -m "fix curl \\x41"', 'time git commit -m "fix curl \\x41"'])
+def test_a_reserved_word_first_is_never_narrowed(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    # The reader must never be consulted for these, and the strict denial stands (the reported Medium).
+    asked: list[str] = []
+    monkeypatch.setattr(shellunits, "classify", _recorder(asked))
+    assert geminibrief.shell_command_class(command) is not None, command
+    assert asked == [], command
 
 
 # The comment-only relaxation (#395 review finding, owner decision): a name in a comment is no proof unless the rest of
