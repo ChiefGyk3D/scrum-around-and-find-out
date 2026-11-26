@@ -1336,3 +1336,85 @@ def test_r6_m2_precomposed_accent_squashes_to_ascii() -> None:
     assert localdraft._squash("Caf" + chr(0xE9)) == "cafe"
     assert localdraft._skeleton("a" + chr(0x2208) + "b")[1] is False
     assert localdraft._skeleton("a" + chr(0x2192) + "b") == ("ab", True)
+
+
+# round 7 item 1: SSID handling
+@pytest.mark.parametrize("text", ["N0TST-7", "FN31pr-1", "N0CALL-15", "call N0TST-7 here"])
+def test_r7_allowed_placeholder_with_ssid_passes(text: str) -> None:
+    assert _why(text) == []
+
+
+@pytest.mark.parametrize("text", ["W1AW-7", "w1aw-15", "de W1AW-7", "x W1AW-7 y"])
+def test_r7_real_callsign_with_ssid_is_blocked(text: str) -> None:
+    assert any("callsign" in x for x in _why(text)), text
+
+
+def test_r7_allow_file_entry_covers_the_ssid_form() -> None:
+    assert _why("K8S-2", allow=["k8s"]) == []
+    assert any("callsign" in x for x in _why("K8S-2"))
+
+
+# round 7 item 2: an empty deny file is not silent
+def test_r7_empty_default_deny_file_notes_once_and_continues(env: Env) -> None:
+    _deny_file(env, "# only a comment\n\n")
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == 0
+    assert err.count("deny file has no entries: only heuristics are active") == 1
+
+
+def test_r7_empty_explicit_deny_file_is_an_error(env: Env) -> None:
+    path = env.dir / "deny.txt"
+    path.write_text("# nothing\n")
+    path.chmod(0o600)
+    env.env["SAFO_DRAFT_DENY_FILE"] = str(path)
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "no entries" in err
+    assert env.read("llm.args") == ""
+
+
+def test_r7_nonempty_deny_file_prints_no_empty_note(env: Env) -> None:
+    _deny_file(env, "Acme Corp\n")
+    _, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert "no entries" not in err
+
+
+# round 7 item 3: inline comments and common words
+def test_r7_inline_comment_is_stripped_in_deny_file(env: Env) -> None:
+    _deny_file(env, "acme corp # my employer\n")
+    entries = localdraft.load_deny(env.env, io.StringIO())
+    assert [e.squashed for e in entries] == ["acmecorp"]
+    assert _why("hi Acme-Corp", deny=entries) != []
+
+
+def test_r7_hash_without_leading_space_stays_in_the_value(env: Env) -> None:
+    _deny_file(env, "acme#corp\n")
+    entries = localdraft.load_deny(env.env, io.StringIO())
+    assert [e.squashed for e in entries] == ["acmecorp"]
+
+
+def test_r7_inline_comment_is_stripped_in_allow_file(env: Env) -> None:
+    path = env.dir / "allow.txt"
+    path.write_text("k8s # kubernetes\ne2e\t# tests\n")
+    path.chmod(0o600)
+    env.env["SAFO_DRAFT_ALLOW_FILE"] = str(path)
+    assert localdraft.allow_words(env.env) == ["k8s", "e2e"]
+
+
+def test_r7_common_word_deny_entry_warns_with_line_numbers_only(env: Env) -> None:
+    _deny_file(env, "# c\nAcme Corp\nThe\nhome # h\n")
+    err = io.StringIO()
+    localdraft.load_deny(env.env, err)
+    text = err.getvalue()
+    assert text.count("common English word") == 1 and "lines 3, 4" in text
+    assert "Acme" not in text and "home" not in text.replace("lines", "")
+
+
+def test_r7_uncommon_deny_entry_does_not_warn(env: Env) -> None:
+    _deny_file(env, "Acme Corp\n")
+    err = io.StringIO()
+    localdraft.load_deny(env.env, err)
+    assert "common English word" not in err.getvalue()
+
+
+def test_r7_failure_sets_code() -> None:
+    assert localdraft.Failure("x", 7).code == 7

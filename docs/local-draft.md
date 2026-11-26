@@ -84,7 +84,11 @@ safo audit | safo-draft digest board-drift -
   so `W1**AW**`, `box.**lan**`, `192.168.**1**.1` and `https://claude.**ai**/x` are read as what they spell). `_` and
   `-` are not removed.
 - **The private deny file.** `SAFO_DRAFT_DENY_FILE` (default `~/.config/safo/draft-deny`) holds one value per line;
-  blank lines and lines starting with `#` are ignored. A comma separated `SAFO_DRAFT_DENY` still works and is matched
+  blank lines and lines starting with `#` are ignored. A hash preceded by whitespace starts an inline comment, so
+  `acme corp # my employer` is the value `acme corp`; a hash with no whitespace before it stays part of the value
+  (`acme#corp`). The allow file takes the same inline comments. A deny value that squashes to a very common English
+  word (`the`, `home`, `work`, `test`, `user`, `data`, and about 200 more, built in) prints a one-time stderr warning
+  naming the line numbers, never the values, because it would block ordinary text. A comma separated `SAFO_DRAFT_DENY` still works and is matched
   the same way. Matching is exact on a squashed form: NFKC, lowercase, and every character that is not an ASCII letter
   or digit deleted, for the title, the body and the two read together, and for every deny value. So the value
   `Acme Corp` matches `Acme-Corp`, `Ac**me** Corp`, `A c m e C o r p`, `ACME corp` and a value split by a line break or
@@ -92,7 +96,9 @@ safo audit | safo-draft digest board-drift -
   call, naming the line number and never the value. The file must be a regular file (not a symlink, not a FIFO) owned
   by you and not group or world writable, else the run stops with that reason. A missing default file prints once to
   stderr `no private deny file configured: only heuristics are active` and the run continues; a missing file named by
-  `SAFO_DRAFT_DENY_FILE` is an error (a typo must not switch the guarantee off). A reason reads
+  `SAFO_DRAFT_DENY_FILE` is an error (a typo must not switch the guarantee off). A deny file that exists but holds no entries (empty or only
+  comments) is treated the same way: the default file prints once to stderr `deny file has no entries: only heuristics
+  are active` and the run continues; an empty file named by `SAFO_DRAFT_DENY_FILE` is an error (exit 2). A reason reads
   `matched private deny entry #4` (the line number; `SAFO_DRAFT_DENY#2` for the second comma separated value) and never
   holds the value. When an entry matches, the draft itself is not printed (it would hold the value), and the metrics
   line never holds content.

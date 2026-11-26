@@ -83,8 +83,8 @@ _BUILTIN_ALLOWED = frozenset({"N0CALL", "N0TST", "FN31pr"})
 _CALL_SHAPE = r"[A-Z]{1,2}[0-9][A-Z]{1,3}"
 _EDGE_BEFORE = r"(?<![A-Za-z0-9])"  # hyphen and underscore are separators, not token characters
 _EDGE_AFTER = r"(?![A-Za-z0-9])"
-# any case, no cue needed; an optional APRS-style SSID (`-7`, `-15`) is part of the callsign
-_CALLSIGN = re.compile(rf"{_EDGE_BEFORE}{_CALL_SHAPE}(?:-\d{{1,2}})?{_EDGE_AFTER}", re.IGNORECASE)
+# any case, no cue needed; a hyphen is a separator, so `W1AW-7` (an SSID) is found as `W1AW` and `N0TST-7` as `N0TST`
+_CALLSIGN = re.compile(rf"{_EDGE_BEFORE}{_CALL_SHAPE}{_EDGE_AFTER}", re.IGNORECASE)
 _CALLSIGN_CTX = re.compile(
     rf"\b(?:call\s*sign|call|de)\b(?:\s+is)?[\s:=]+({_CALL_SHAPE}){_EDGE_AFTER}", re.IGNORECASE
 )  # any case after a cue, even inside a hyphenated token
@@ -132,6 +132,214 @@ _BAD_CATEGORIES = frozenset({"Mn", "Me", "Cf", "Cc", "Co", "Cn", "Cs", "Zl", "Zp
 _NO_REDUCE = "characters that cannot be reduced to ASCII: refused"
 _NO_REDUCE_CONFIG = "a deny value holds characters that cannot be reduced to ASCII"
 _NO_DENY_NOTE = "safo-draft: no private deny file configured: only heuristics are active"
+_EMPTY_DENY_NOTE = "safo-draft: deny file has no entries: only heuristics are active"
+_INLINE_COMMENT = re.compile(r"\s+#.*$")  # a hash preceded by whitespace starts a comment; `a#b` keeps its hash
+# a deny entry that squashes to one of these would block ordinary text; load_deny warns (line number only)
+_COMMON_WORDS = frozenset(
+    [
+        "about",
+        "admin",
+        "after",
+        "all",
+        "and",
+        "any",
+        "are",
+        "area",
+        "base",
+        "because",
+        "been",
+        "before",
+        "being",
+        "boy",
+        "but",
+        "can",
+        "case",
+        "city",
+        "client",
+        "club",
+        "code",
+        "come",
+        "company",
+        "could",
+        "data",
+        "day",
+        "default",
+        "demo",
+        "did",
+        "door",
+        "east",
+        "example",
+        "face",
+        "fact",
+        "file",
+        "first",
+        "for",
+        "from",
+        "game",
+        "get",
+        "girl",
+        "good",
+        "great",
+        "group",
+        "had",
+        "hand",
+        "has",
+        "have",
+        "head",
+        "help",
+        "her",
+        "here",
+        "high",
+        "him",
+        "his",
+        "hold",
+        "home",
+        "host",
+        "house",
+        "how",
+        "idea",
+        "info",
+        "item",
+        "its",
+        "just",
+        "kind",
+        "know",
+        "large",
+        "last",
+        "left",
+        "let",
+        "life",
+        "like",
+        "line",
+        "list",
+        "little",
+        "local",
+        "long",
+        "look",
+        "love",
+        "main",
+        "make",
+        "man",
+        "many",
+        "mind",
+        "money",
+        "more",
+        "move",
+        "much",
+        "name",
+        "never",
+        "new",
+        "next",
+        "not",
+        "note",
+        "now",
+        "number",
+        "office",
+        "old",
+        "one",
+        "only",
+        "open",
+        "other",
+        "our",
+        "out",
+        "over",
+        "page",
+        "part",
+        "past",
+        "place",
+        "plan",
+        "play",
+        "point",
+        "power",
+        "private",
+        "project",
+        "public",
+        "put",
+        "real",
+        "rest",
+        "right",
+        "road",
+        "room",
+        "root",
+        "rule",
+        "sample",
+        "say",
+        "school",
+        "see",
+        "server",
+        "service",
+        "she",
+        "should",
+        "side",
+        "site",
+        "small",
+        "some",
+        "state",
+        "stay",
+        "stop",
+        "such",
+        "system",
+        "take",
+        "team",
+        "tell",
+        "temp",
+        "term",
+        "test",
+        "text",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "time",
+        "too",
+        "town",
+        "tree",
+        "turn",
+        "two",
+        "type",
+        "under",
+        "use",
+        "user",
+        "value",
+        "very",
+        "view",
+        "walk",
+        "wall",
+        "want",
+        "was",
+        "water",
+        "way",
+        "week",
+        "well",
+        "were",
+        "west",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "wife",
+        "will",
+        "wind",
+        "wish",
+        "with",
+        "word",
+        "work",
+        "world",
+        "would",
+        "year",
+        "you",
+        "your",
+        "zone",
+    ]
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -210,9 +418,13 @@ def _read_private_file(path: str, what: str) -> str | None:
 
 
 def _config_lines(text: str) -> list[tuple[int, str]]:
-    """(line number, value) for each line that is not blank and does not start with `#`."""
+    """(line number, value) for each line that is not blank and does not start with `#`.
+
+    A hash preceded by whitespace starts an inline comment, removed with the whitespace before it.
+    """
     rows = [(n, line.strip()) for n, line in enumerate(text.splitlines(), 1)]
-    return [(n, line) for n, line in rows if line and not line.startswith("#")]
+    rows = [(n, line) for n, line in rows if line and not line.startswith("#")]
+    return [(n, stripped) for n, line in rows if (stripped := _INLINE_COMMENT.sub("", line).strip())]
 
 
 def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
@@ -230,8 +442,16 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
             raise Failure("SAFO_DRAFT_DENY_FILE names a file that was not found", EXIT_ERROR)
         err.write(_NO_DENY_NOTE + "\n")
     else:
-        for n, value in _config_lines(text):
+        rows = _config_lines(text)
+        if not rows:
+            if explicit:
+                raise Failure("SAFO_DRAFT_DENY_FILE has no entries", EXIT_ERROR)
+            err.write(_EMPTY_DENY_NOTE + "\n")
+        common: list[int] = []
+        for n, value in rows:
             squashed = _squash(value)
+            if squashed in _COMMON_WORDS:
+                common.append(n)
             if not _skeleton(value)[1]:
                 raise Failure(f"SAFO_DRAFT_DENY_FILE line {n}: {_NO_REDUCE_CONFIG}", EXIT_ERROR)
             if len(squashed) < MIN_DENY_CHARS:
@@ -240,6 +460,12 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
                     EXIT_ERROR,
                 )
             entries.append(DenyEntry(f"#{n}", squashed))
+        if common:
+            lines = ", ".join(str(n) for n in common)
+            err.write(
+                f"safo-draft: deny file {'line' if len(common) == 1 else 'lines'} {lines}: "
+                "a very common English word that will block ordinary text\n"
+            )
     for i, value in enumerate((w.strip() for w in env.get("SAFO_DRAFT_DENY", "").split(",")), 1):
         if not value:
             continue
@@ -464,8 +690,7 @@ def _deny_reasons(parts: Sequence[str], deny: Sequence[str | DenyEntry]) -> list
 
 
 def _is_allowed(token: str, allow: set[str]) -> bool:
-    base = token.split("-", 1)[0]  # an SSID suffix does not change the callsign
-    return base in _BUILTIN_ALLOWED or base.upper() in allow
+    return token in _BUILTIN_ALLOWED or token.upper() in allow
 
 
 def _single_checks(text: str, allow: Sequence[str], charset: bool) -> list[str]:
