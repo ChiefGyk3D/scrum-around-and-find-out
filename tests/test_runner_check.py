@@ -24,6 +24,12 @@ def _git(path: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)  # noqa: S603, S607 - test fixture
 
 
+def _git_out(path: Path, *args: str, check: bool = True) -> bytes:
+    argv = ["git", "-C", str(path), *args]
+    done = subprocess.run(argv, check=check, capture_output=True)  # noqa: S603 - test fixture, fixed git argv
+    return done.stdout
+
+
 def make_repo(
     tmp_path: Path,
     remote: str | None,
@@ -1009,3 +1015,232 @@ def test_symlinked_worktree_is_resolved_once_in_main(tmp_path: Path, monkeypatch
     assert code == 0
     assert "keep local: the worktree is outside" in out
     assert "ra-remote --plan" not in out
+
+
+# ---- G1: modified tracked files and the content gate ---------------------------------------------------------------
+
+
+def assert_differs(code: int, out: str) -> None:
+    assert code == 0  # keep-local is not a violation
+    assert "keep local: " in out
+    assert "tracked files differ from the public commit" in out
+    assert "commit or discard them first" in out
+    assert "ra-remote" not in out
+    assert "a.py" not in out  # counts only, never names
+
+
+def test_modified_tracked_file_reviewer_reproduction(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / "settings.txt").write_text("public placeholder\n", encoding="utf-8")
+    commit_all(repo)
+    (repo / "settings.txt").write_text("API_TOKEN=locally-added-private-value\n", encoding="utf-8")
+    code, out = strict(tmp_path, repo)
+    assert_differs(code, out)
+    assert "settings.txt" not in out
+    assert "API_TOKEN" not in out
+
+
+def test_staged_change_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    _git(repo, "checkout", "-q", "--", "a.py")  # worktree matches HEAD again, only the index differs
+    assert_differs(*strict(tmp_path, repo))
+
+
+def test_intent_to_add_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "new.py").write_text("TOKEN = 'x'\n", encoding="utf-8")
+    _git(repo, "add", "-N", "new.py")
+    code, out = strict(tmp_path, repo)
+    assert code == 0
+    assert "ra-remote" not in out
+    assert "tracked files differ" in out
+    assert "new.py" not in out
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_hidden_modifications_are_refused(tmp_path: Path, flag: str) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "update-index", flag, "a.py")
+    (repo / "a.py").write_text("SECRET = 1\n", encoding="utf-8")  # git status shows nothing
+    assert _git_out(repo, "status", "--porcelain") == b""
+    assert_differs(*strict(tmp_path, repo))
+
+
+def test_unmerged_index_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    ident = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+    _git(repo, "checkout", "-q", "-b", "side")
+    (repo / "a.py").write_text("x = 'side'\n", encoding="utf-8")
+    _git(repo, *ident, "commit", "-qam", "side")
+    _git(repo, "checkout", "-q", "-")
+    (repo / "a.py").write_text("x = 'main'\n", encoding="utf-8")
+    _git(repo, *ident, "commit", "-qam", "main")
+    _git_out(repo, *ident, "merge", "side", check=False)  # the merge must conflict
+    assert_differs(*strict(tmp_path, repo))
+
+
+def test_tracked_files_without_a_head_commit_are_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", "a.py")  # nothing committed: nothing proves these bytes are public
+    code, out = strict(tmp_path, repo)
+    assert code == 0
+    assert "ra-remote" not in out
+
+
+def test_clean_repo_is_not_flagged_as_modified(tmp_path: Path) -> None:
+    code, out = strict(tmp_path, clean_repo(tmp_path))
+    assert code == 1
+    assert "differ" not in out
+    assert "-> ra-remote --plan" in out
+
+
+def test_modified_gate_failure_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    monkeypatch.setattr(rc, "_git_for_selection", lambda *a, **k: None)
+    gate = rc.content_gate(repo, env_for(tmp_path))
+    assert gate.refusal() is not None
+
+
+# ---- G2: the checker sees the files ra-remote would copy ------------------------------------------------------------
+
+
+def test_core_excludes_file_does_not_hide_a_file(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    ignore = tmp_path / "global-ignore"
+    ignore.write_text("internal.txt\n", encoding="utf-8")
+    _git(repo, "config", "core.excludesFile", str(ignore))
+    (repo / "internal.txt").write_text("private\n", encoding="utf-8")
+    assert_kept_local(*strict(tmp_path, repo))
+
+
+def test_global_xdg_excludes_do_not_hide_a_file(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    xdg = tmp_path / "xdg"
+    (xdg / "git").mkdir(parents=True)
+    (xdg / "git" / "ignore").write_text("internal.txt\n", encoding="utf-8")
+    (repo / "internal.txt").write_text("private\n", encoding="utf-8")
+    assert_kept_local(*strict(tmp_path, repo, XDG_CONFIG_HOME=str(xdg)))
+
+
+def test_global_gitconfig_excludes_do_not_hide_a_file(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    ignore = tmp_path / "global-ignore"
+    ignore.write_text("internal.txt\n", encoding="utf-8")
+    (tmp_path / "home" / ".gitconfig").write_text(f"[core]\n\texcludesFile = {ignore}\n", encoding="utf-8")
+    (repo / "internal.txt").write_text("private\n", encoding="utf-8")
+    assert_kept_local(*strict(tmp_path, repo))
+
+
+def test_info_exclude_is_still_honored(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / ".git" / "info" / "exclude").write_text("internal.txt\n", encoding="utf-8")
+    (repo / "internal.txt").write_text("private\n", encoding="utf-8")  # ra-remote skips it too
+    code, out = strict(tmp_path, repo)
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+
+
+def test_selection_runs_with_the_ra_remote_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    calls: list[tuple[list[str], dict[str, str]]] = []
+    original = subprocess.run
+
+    def recording(argv: list[str], *a: Any, **kw: Any) -> Any:
+        calls.append((list(argv), dict(kw.get("env") or {})))
+        return original(argv, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", recording)
+    env = env_for(tmp_path, GIT_DIR="/nonexistent", GIT_INDEX_FILE="/nonexistent", XDG_CONFIG_HOME="/nonexistent")
+    assert rc.content_gate(repo, env).refusal() is None
+    assert len(calls) >= 4  # ls-files twice, status, ls-files -v, diff --cached (at least)
+    for argv, genv in calls:
+        assert genv["GIT_CONFIG_GLOBAL"] == "/dev/null"
+        assert genv["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert "GIT_DIR" not in genv
+        assert "GIT_INDEX_FILE" not in genv
+        pairs = [argv[i + 1] for i, word in enumerate(argv) if word == "-c"]
+        for want in (
+            "core.fsmonitor=false",
+            "core.untrackedCache=false",
+            "core.excludesFile=/dev/null",
+            "core.hooksPath=/dev/null",
+        ):
+            assert want in pairs
+
+
+def test_transport_query_still_reads_the_effective_config(tmp_path: Path) -> None:
+    # F2 is about where the remote points, not which files are copied: it must see the caller's own config.
+    repo = clean_repo(tmp_path)
+    (tmp_path / "home" / ".gitconfig").write_text('[url "https://evil-value/"]\n\tinsteadOf = https://zzz/\n', "utf-8")
+    code, out = strict(tmp_path, repo)
+    assert code == 0
+    assert "setting url.*.insteadof" in out
+
+
+# ---- G3: a bound that is hit is ambiguous, so it is a full suite -----------------------------------------------------
+
+
+def nest_bash(command: str, levels: int) -> str:
+    for _ in range(levels):
+        command = "bash -c " + shlex.quote(command)
+    return command
+
+
+@pytest.mark.parametrize("levels", [5, 6, 9])
+def test_deep_shell_nesting_is_treated_as_full(levels: int) -> None:
+    found = rc.classify(nest_bash("true", levels))
+    assert [f.klass for f in found] == ["full-suite"]
+    assert found[0].note == "nesting too deep to read: treat as a local full suite"
+
+
+def test_shallow_shell_nesting_still_reads_through() -> None:
+    assert rc.classify(nest_bash("true", 3)) == []
+    assert [f.klass for f in rc.classify(nest_bash("pytest", 3))] == ["full-suite"]
+
+
+def test_deep_nesting_inside_ra_remote_is_treated_as_full() -> None:
+    found = rc.classify("ra-remote /w -- " + nest_bash("true", 6))
+    assert [f.klass for f in found] == ["full-suite"]
+    assert found[0].wrapped is False
+
+
+def test_too_many_wrappers_is_treated_as_full() -> None:
+    found = rc.classify("nohup " * 12 + "true")
+    assert [f.klass for f in found] == ["full-suite"]
+    assert found[0].note
+
+
+def test_ten_wrappers_still_read() -> None:
+    assert rc.classify("nohup " * 10 + "true") == []
+    assert [f.klass for f in rc.classify("nohup " * 10 + "pytest")] == ["full-suite"]
+
+
+def test_deep_nesting_is_a_strict_violation_with_its_reason(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    code, out = strict(tmp_path, repo, nest_bash("true", 6))
+    assert code == 1
+    assert "nesting too deep to read: treat as a local full suite" in out
+
+
+# ---- G4: every transport query key is named ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("config", "shown"),
+    [
+        (("include.path", "x.cfg"), "include.path"),
+        (("protocol.ext.allow", "always"), "protocol.*"),
+        (("protocol.allow", "always"), "protocol.*"),
+    ],
+)
+def test_include_and_protocol_are_named(tmp_path: Path, config: tuple[str, str], shown: str) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "config", config[0], config[1])
+    code, out = strict(tmp_path, repo)
+    assert code == 0
+    assert f"cannot tell: keep local (git transport is overridden (setting {shown}))" in out
+    assert "x.cfg" not in out
+    assert "ra-remote" not in out

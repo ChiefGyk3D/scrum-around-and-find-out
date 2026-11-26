@@ -94,6 +94,9 @@ CARGO_VALUE_OPTS = frozenset(
 )
 MAKE_VALUE_OPTS = frozenset({"-C", "-f", "-j", "-I", "-o", "-W"})
 WALK_LIMIT = 200_000
+SHELL_DEPTH_LIMIT = 4
+WRAPPER_LIMIT = 10
+TOO_DEEP = "nesting too deep to read: treat as a local full suite"
 SECRET_NAMES = (
     ".env",
     ".env.*",
@@ -153,6 +156,11 @@ class Finding:
     wrapped: bool
     simple: bool = False
     argv: tuple[str, ...] = ()
+    note: str = ""
+
+
+class _TooDeep(Exception):
+    """A bound was reached while reading a command: ambiguous, so it counts as a full suite (fail closed)."""
 
 
 def _tokens(segment: str) -> list[str]:
@@ -227,7 +235,7 @@ def _drop_options(ws: list[str], value_opts: frozenset[str]) -> list[str]:
 def _command_words(words: Sequence[str]) -> list[str]:
     """Strip env assignments and known wrappers (their options and a `--` marker); return the real command words."""
     ws = list(words)
-    for _ in range(10):
+    for _ in range(WRAPPER_LIMIT + 1):
         while ws and ASSIGN.match(ws[0]):
             ws.pop(0)
         if not ws:
@@ -285,7 +293,7 @@ def _command_words(words: Sequence[str]) -> list[str]:
                 return ws
         else:
             return ws
-    return ws
+    raise _TooDeep  # still unwrapping after the bound: what runs is unknown
 
 
 def _fail_closed(ws: Sequence[str]) -> tuple[str, bool] | None:
@@ -379,8 +387,10 @@ def _tool_class(base: str, rest: list[str]) -> str | None:
 
 def _classify_words(words: Sequence[str], depth: int) -> tuple[str, bool] | None:
     ws = _command_words(words)
-    if not ws or depth > 4:
+    if not ws:
         return None
+    if depth > SHELL_DEPTH_LIMIT:
+        raise _TooDeep
     base, rest = Path(ws[0]).name, ws[1:]
     if base == "ra-remote":
         inner = rest[rest.index("--") + 1 :] if "--" in rest else []
@@ -406,7 +416,13 @@ def classify(command: str, depth: int = 0) -> list[Finding]:
     out: list[Finding] = []
     for seg in segs:
         words = _tokens(seg)
-        hit = _classify_words(words, depth)
+        try:
+            hit = _classify_words(words, depth)
+        except _TooDeep:
+            if depth:
+                raise  # the outermost call reports it, once
+            out.append(Finding(FULL, seg, False, simple, tuple(words), TOO_DEEP))
+            continue
         if hit:
             out.append(Finding(hit[0], seg, hit[1], simple, tuple(words)))
     return out
@@ -565,12 +581,17 @@ def _git_env(env: Mapping[str, str]) -> dict[str, str]:
 
 
 def _git_run(repo: Path, env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess[bytes] | None:
+    """Git with the caller's effective configuration: for questions about where a remote points."""
+    return _spawn(repo, _git_env(env), args)
+
+
+def _spawn(repo: Path, genv: dict[str, str], args: Sequence[str]) -> subprocess.CompletedProcess[bytes] | None:
     git = shutil.which("git")
     if git is None:
         return None
     try:
         return subprocess.run(  # noqa: S603 - fixed git argv, no shell
-            [git, "-C", str(repo), *args], capture_output=True, timeout=30, check=False, env=_git_env(env)
+            [git, "-C", str(repo), *args], capture_output=True, timeout=30, check=False, env=genv
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -583,9 +604,30 @@ def _git(repo: Path, env: Mapping[str, str], *args: str) -> str:
     return done.stdout.decode("utf-8", errors="replace").strip()
 
 
+# Mirrors `git_list` in ra-remote (the one function that selects the files it copies): the environment names
+# GIT_CONFIG_GLOBAL=/dev/null and GIT_CONFIG_NOSYSTEM=1, ra-remote first unsets every other GIT_* variable, and the
+# command carries these -c overrides. Nothing outside the worktree may decide which files are listed.
+SELECTION_CONFIG = (
+    "core.fsmonitor=false",
+    "core.untrackedCache=false",
+    "core.excludesFile=/dev/null",
+    "core.hooksPath=/dev/null",
+)
+
+
+def _git_for_selection(repo: Path, env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess[bytes] | None:
+    """Every git call that lists or inspects the files ra-remote would copy goes through here."""
+    genv = {k: v for k, v in _git_env(env).items() if not k.startswith("GIT_")}
+    genv["GIT_TERMINAL_PROMPT"] = "0"
+    genv["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    genv["GIT_CONFIG_NOSYSTEM"] = "1"
+    flags = [word for pair in SELECTION_CONFIG for word in ("-c", pair)]
+    return _spawn(repo, genv, [*flags, *args])
+
+
 def _git_z(repo: Path, env: Mapping[str, str], *args: str) -> list[str] | None:
-    """NUL-separated git output as a list; None when git failed."""
-    done = _git_run(repo, env, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args, "-z")
+    """NUL-separated output of a selection call as a list; None when git failed."""
+    done = _git_for_selection(repo, env, *args, "-z")
     if done is None or done.returncode != 0:
         return None
     return [e.decode("utf-8", errors="surrogateescape") for e in done.stdout.split(b"\0") if e]
@@ -612,8 +654,12 @@ def _override_name(key: str) -> str | None:
     hit = re.fullmatch(r"url\..+\.(insteadof|pushinsteadof)", k)
     if hit:
         return f"url.*.{hit.group(1)}"
-    if k.startswith("includeif.gitdir"):
-        return "includeIf gitdir"
+    if k == "include.path":
+        return k
+    if k.startswith("protocol."):
+        return "protocol.*"
+    if k.startswith("includeif."):
+        return "includeIf gitdir" if k.startswith("includeif.gitdir") else "includeIf"
     return None
 
 
@@ -685,10 +731,23 @@ class ContentGate:
     symlinks: int = 0
     secrets: int = 0
     incomplete: bool = False
+    modified: int = 0
 
     def refusal(self) -> str | None:
+        parts = [t for t in (self._differs(), self._copies()) if t]
+        return "\n  ".join(parts) or None
+
+    def _differs(self) -> str:
+        if not self.modified:
+            return ""
+        return (
+            f"keep local: {self.modified} tracked files differ from the public commit (modified, staged, "
+            "intent-to-add, assume-unchanged or skip-worktree); commit or discard them first"
+        )
+
+    def _copies(self) -> str:
         if not (self.untracked or self.nested or self.symlinks or self.secrets or self.incomplete):
-            return None
+            return ""
         text = (
             "keep local: the worktree holds files the runner would copy that are not in the public repository "
             f"({self.untracked} untracked files; {self.nested} nested git directories; "
@@ -723,12 +782,30 @@ def _nested_git(root: Path) -> tuple[int, bool]:
     return nested, False
 
 
+def _modified(worktree: Path, env: Mapping[str, str]) -> int | None:
+    """Tracked entries whose current bytes may differ from the commit; None when git cannot say (fail closed)."""
+    status = _git_z(worktree, env, "status", "--porcelain=v1", "--untracked-files=no")
+    tags = _git_z(worktree, env, "ls-files", "-v")
+    cached = _git_for_selection(worktree, env, "diff", "--cached", "--quiet")
+    head = _git_for_selection(worktree, env, "rev-parse", "--verify", "-q", "HEAD")
+    if status is None or tags is None or cached is None or head is None or cached.returncode not in (0, 1):
+        return None
+    # `ls-files -v` tags every entry; only `H` (cached, normal) is acceptable. Lowercase is assume-unchanged, `S` is
+    # skip-worktree, `M` unmerged, `R` removed, `C` modified, `K` to be killed.
+    odd = sum(1 for entry in tags if entry[:1] != "H")
+    count = len(status) + odd + (cached.returncode == 1 and not (status or odd))
+    if head.returncode != 0 and tags:
+        return None  # tracked entries with no commit to compare against
+    return count
+
+
 def content_gate(worktree: Path, env: Mapping[str, str]) -> ContentGate:
     """Inspect what ra-remote would copy (tracked plus untracked and not ignored; it skips ignored files)."""
     copied = _git_z(worktree, env, "ls-files", "-c", "-o", "--exclude-standard")
     untracked = _git_z(worktree, env, "ls-files", "-o", "--exclude-standard")
-    if copied is None or untracked is None:
-        return ContentGate(incomplete=True)
+    modified = _modified(worktree, env)
+    if copied is None or untracked is None or modified is None:
+        return ContentGate(incomplete=True, modified=modified or 0)
     nested, incomplete = _nested_git(worktree)
     root = os.path.realpath(worktree)
     symlinks = secrets = 0
@@ -738,7 +815,7 @@ def content_gate(worktree: Path, env: Mapping[str, str]) -> ContentGate:
             target = os.path.realpath(full)
             symlinks += target != root and not target.startswith(root + os.sep)
         secrets += any(fnmatch.fnmatchcase(part.lower(), pat) for part in rel.split("/") for pat in SECRET_NAMES)
-    return ContentGate(len(untracked), nested, symlinks, secrets, incomplete)
+    return ContentGate(len(untracked), nested, symlinks, secrets, incomplete, modified)
 
 
 def worktree_allowed(worktree: Path, env: Mapping[str, str]) -> bool:
@@ -852,6 +929,8 @@ def main(argv: Sequence[str], *, env: Mapping[str, str], out: TextIO, err: TextI
             violation = True
             out.write(f"local {f.klass}: {f.command}\n")
             out.write("  reason: heavy work on a public repo goes to the runner (2.1x to 2.7x faster)\n")
+            if f.note:
+                out.write(f"  note: {f.note}\n")
             _advice(f, shlex.quote(str(worktree)), out)
         elif decision == "keep-local-content":
             out.write(f"local {f.klass}: {f.command}\n  {refusal}\n")

@@ -75,8 +75,8 @@ that changes meaning.
 1. Transport overrides: if any of these is set the repo is "cannot tell: git transport is overridden (setting NAME)" and
    stays local. Environment: `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`, any `GIT_CONFIG_*`. Effective git
    configuration (`git config --show-origin --get-regexp`, includes followed): `core.sshcommand`, `core.gitproxy`,
-   `remote.*.vcs`, `remote.*.proxy`, `remote.*.pushurl`, `url.*.insteadof`, `url.*.pushinsteadof`, and an `includeIf`
-   with a `gitdir` condition. Only the setting key is named, never a value. The checker also runs git with the
+   `remote.*.vcs`, `remote.*.proxy`, `remote.*.pushurl`, `url.*.insteadof`, `url.*.pushinsteadof`, `include.path`,
+   `protocol.*`, and any `includeIf` (named `includeIf gitdir` or `includeIf`). Only the setting key is named, never a value. The checker also runs git with the
    environment it was given, so the real global git configuration of the caller is what is read.
 2. Read every remote (`git remote -v`, fetch and push). Each must parse as a `github.com` https, ssh or scp-like
    `owner/name` URL; the host is parsed, so `https://evil.com/github.com/owner/x` is rejected. Userinfo is never printed.
@@ -112,12 +112,38 @@ M nested git directories; K symlinks leaving the tree). Commit them, add them to
 ~/.local/share/reach-around-dev first") when any of these holds:
 
 - `git ls-files --others --exclude-standard` is not empty (a count, never names);
+- any tracked entry differs from the public commit, because `ra-remote` copies the current worktree bytes, not the
+  commit: "keep local: N tracked files differ from the public commit (modified, staged, intent-to-add, assume-unchanged
+  or skip-worktree); commit or discard them first". It holds when `git status --porcelain=v1 --untracked-files=no -z`
+  is not empty (this also covers staged, intent-to-add and unmerged entries), when `git ls-files -v` shows any tag
+  other than `H` (lowercase is assume-unchanged, `S` is skip-worktree), when `git diff --cached --quiet` fails, or when
+  tracked entries exist but `HEAD` does not resolve to a commit. A git failure is a refusal too. Counts only, never
+  names;
 - a nested `.git` directory or file exists anywhere below the root (iterative `scandir` walk, symlinks not followed,
   bounded to 200000 entries: when the bound is hit, or a directory cannot be read, the tree is refused);
 - a tracked or untracked-not-ignored symlink resolves outside the worktree;
 - a tracked or untracked-not-ignored path has a component that looks like a secret even when it is tracked: `.env`,
   `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `*.pfx`, `*.kdbx`, `.netrc`, `credentials*`,
   `*secret*` (reported as "secret-looking file names present", a count only).
+
+#### Same file selection as ra-remote
+
+Every git call that lists or inspects files (`ls-files`, `status`, `diff --cached`, `rev-parse HEAD`) goes through one
+helper, `_git_for_selection`, which mirrors `git_list` in `~/.local/bin/ra-remote`:
+
+```
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  git ... -c core.fsmonitor=false -c core.untrackedCache=false \
+          -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null ...
+```
+
+`ra-remote` also unsets every other `GIT_*` variable first, so the helper drops them (`GIT_DIR`, `GIT_INDEX_FILE` and
+the like). Result: a `core.excludesFile`, a global or XDG ignore file or a system config can no longer hide a file from
+the checker that `ra-remote` would copy; `.git/info/exclude` and `.gitignore` still apply to both. The checker runs `git -C
+WORKTREE` where `ra-remote` passes `--git-dir` and `--work-tree`; the worktree is already resolved once in `main`.
+
+The transport query (repo class, rule 1) deliberately does not use the helper: it reads the effective configuration,
+because it asks where a remote really points, not which files are copied.
 
 A refusal is "keep local", not a violation: `--strict` exits 0 for it. `--strict` exits 1 only when a public, clean repo
 in an allowed folder runs a full suite or sweep locally. The decision is recorded as `keep-local-content`; names of files
@@ -135,3 +161,18 @@ runner's allowed folders (move or clone it under ~/.local/share/reach-around-dev
 Each check appends one line to `~/.local/state/safo/runner-check.jsonl` (`$XDG_STATE_HOME` honored): time, class,
 decision and repo class. The command text is never stored. The `safo` state directory is kept at mode 0700 and the file
 at 0600 (enforced on existing ones too, symlinks not followed).
+
+### Bounds fail closed
+
+Reading a command is bounded: shell nesting (`bash -c` inside `bash -c`, or inside `ra-remote`) deeper than 4, and more
+than 10 stacked wrappers (`nohup`, `env`, `timeout` and so on). Reaching a bound is ambiguous, so the line counts as a
+full suite and `--strict` flags it with the note "nesting too deep to read: treat as a local full suite". The walk bound
+of the content gate refuses the tree. No other bound exists in the classifier.
+
+### Out of scope
+
+- Shell functions, aliases, differently named Make targets and package scripts that run a suite are not recognized: the
+  classification is static and literal, on the command position only.
+- A secret already committed to a genuinely public repository is out of scope (it is already public). The content gate
+  refuses what is not public: untracked files, modified tracked files, nested repositories, outside symlinks and
+  secret-looking names.
