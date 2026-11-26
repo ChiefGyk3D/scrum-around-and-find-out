@@ -1217,23 +1217,27 @@ def test_r5_new_scans_are_linear() -> None:
 _IPV6_MIXES = [":", "::", ":a", "1:", "a::", "a:", "1::", ":::a", ":.", "ab:cd::", "f:e::", "a:b:c:d:e:f:1:"]
 
 
-def _cpu_time(fn: Any, text: str) -> float:
+def _cpu_time(fn: Any, text: str, clock: Any = None) -> float:
     import time
 
+    now = clock or time.process_time
     best = float("inf")
     for _ in range(3):  # the fastest of three runs, so scheduling noise on a loaded runner cannot fail it
-        start = time.process_time()
+        start = now()
         fn(text)
-        best = min(best, time.process_time() - start)
+        best = min(best, now() - start)
     return best
 
 
-def _assert_scales(fn: Any, unit: str, sizes: tuple[int, int] = (5000, 20000)) -> None:
-    """CPU time at a size and at 4x that size: at most 8x (linear about 4x, quadratic about 16x); 20000 under 1 s."""
+def _assert_scales(fn: Any, unit: str, sizes: tuple[int, int] = (5000, 20000), clock: Any = None) -> None:
+    """CPU time at a size and at 4x that size: at most 8x (linear about 4x, quadratic about 16x); 20000 under 1 s.
+
+    clock defaults to time.process_time; a test may inject a fake clock to make the check independent of CPU speed.
+    """
     times = []
     for size in sizes:
         text = (unit * (size // len(unit) + 1))[:size]
-        times.append(_cpu_time(fn, text))
+        times.append(_cpu_time(fn, text, clock))
     small, big = times
     # a 0.03 s floor keeps timer noise on millisecond runs from deciding the ratio
     assert big <= 8 * max(small, 0.03), (unit, times)
@@ -1246,16 +1250,34 @@ def test_r6_ipv6_scan_scales_linearly(unit: str) -> None:
     _within_deadline(30, lambda: _assert_scales(lambda t: localdraft.check_text("comment", t), unit))
 
 
-def test_r6_scaling_guard_bites() -> None:
-    def quadratic(text: str) -> None:
-        total = 0
-        for i in range(len(text)):
-            total += sum(1 for _ in text[i:])  # O(n^2) work
-        assert total >= 0
+class _WorkClock:
+    """A fake clock: each unit of work a toy function reports advances time by a fixed cost, whatever the CPU speed."""
 
-    # 1000 -> 4000 characters: quadratic work grows 16x and clears the 8x bound even with the 0.03 s floor
+    def __init__(self) -> None:
+        self.units = 0
+
+    def __call__(self) -> float:
+        return self.units * 1e-6
+
+
+def _fake_scaling(cost: Any) -> None:
+    clock = _WorkClock()
+
+    def fn(text: str) -> None:
+        clock.units += cost(len(text))
+
+    _assert_scales(fn, ":", sizes=(1000, 4000), clock=clock)
+
+
+def test_r6_scaling_guard_bites() -> None:
+    # 1000 -> 4000 characters: quadratic cost grows exactly 16x (1 s -> 16 s), above the 8x bound
     with pytest.raises(AssertionError):
-        _assert_scales(quadratic, ":", sizes=(1000, 4000))
+        _fake_scaling(lambda n: n * n)
+
+
+def test_r6_scaling_guard_passes_linear_and_constant() -> None:
+    _fake_scaling(lambda n: n)  # exactly 4x
+    _fake_scaling(lambda n: 1)  # constant
 
 
 # round 5, R3: IPv6 scope-likeness is decided per candidate
