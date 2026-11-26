@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -854,6 +855,66 @@ def test_review_comment_needs_eight_words_and_a_verb_in_the_defect_sentence() ->
     assert not s.passed and "structure" in s.reasons
 
 
+NEGATED = [  # a sentence that names the defect only to say there is none
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user builds the query from name, so there is no SQL injection risk here.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user is safe because the SQL injection concern does not apply to this query.",
+    ),
+    (
+        "first-pass-review-comment/06-wrong-compare",
+        "is_adult is fine: the boundary is correct and the comparison handles the edge.",
+    ),
+    (
+        "first-pass-review-comment/06-wrong-compare",
+        "is_adult has no boundary problem, the check is ok and harmless as written here.",
+    ),
+    (
+        "first-pass-review-comment/06-wrong-compare",
+        "is_adult handles the boundary correctly, so the comparison is right for every age.",
+    ),
+]
+DEFECT_STATING = [  # not, never and without state the defect, so they stay allowed
+    (
+        "first-pass-review-comment/03-unclosed-file",
+        "read_cfg never closes the file handle after reading it, so the descriptor stays open.",
+    ),
+    (
+        "first-pass-review-comment/03-unclosed-file",
+        "read_cfg does not close the file after the read, so the handle leaks until exit.",
+    ),
+    (
+        "first-pass-review-comment/03-unclosed-file",
+        "read_cfg opens the file without closing it, so the file handle leaks for the whole run.",
+    ),
+    (
+        "first-pass-review-comment/05-long-diff",
+        "apply_discount no longer divides pct by 100, so a discount of 15 makes the price negative.",
+    ),
+]
+
+
+@pytest.mark.parametrize(("fid", "text"), NEGATED)
+def test_a_review_comment_that_denies_the_defect_fails(fid: str, text: str) -> None:
+    s = le.score_output(shipped()[fid], text)
+    assert not s.passed and "structure" in s.reasons, text
+
+
+@pytest.mark.parametrize(("fid", "text"), DEFECT_STATING)
+def test_a_review_comment_that_states_the_defect_with_not_never_without_passes(fid: str, text: str) -> None:
+    assert le.score_output(shipped()[fid], text).passed, text
+
+
+def test_negation_markers_are_documented_and_the_wrong_lists_still_fail() -> None:
+    assert set(le.NEGATION_MARKERS) == {"no", "correct", "correctly", "safe", "fine", "ok", "harmless"}
+    assert not {"not", "never", "without"} & set(le.NEGATION_MARKERS)
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "local-eval.md").read_text(encoding="utf-8")
+    assert all(f"`{m}`" in doc for m in le.NEGATION_MARKERS)
+
+
 CORRECT_ALTS: dict[str, list[str]] = {
     "first-pass-review-comment/02-sql-concat": [
         "find_user builds the query by gluing name into the SQL string, so a crafted value can alter the query.",
@@ -889,6 +950,12 @@ def test_correct_alts_are_loaded_from_the_fixture(tmp_path: Path) -> None:
 
 # ---- calibration gate
 
+RUNS_SHA = "ab" * 32  # stands in for the sha256 of a runs file in the in-memory tests
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
 
 def passing_runs(task: str, model: str, n: int) -> list[dict[str, Any]]:
     runs = []
@@ -897,6 +964,14 @@ def passing_runs(task: str, model: str, n: int) -> list[dict[str, Any]]:
         r["output"] = f"output {i}"
         runs.append(r)
     return runs
+
+
+def sample(runs: list[dict[str, Any]], n: int, seed: int = 0) -> dict[str, Any]:
+    return le.calibration_file(runs, n, seed, RUNS_SHA)
+
+
+def ingest(doc: dict[str, Any], runs: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    return le.ingest_verdicts(doc, runs, RUNS_SHA)
 
 
 def fill(doc: dict[str, Any], ok: int, wrong: int) -> dict[str, Any]:
@@ -909,14 +984,30 @@ def fill(doc: dict[str, Any], ok: int, wrong: int) -> dict[str, Any]:
 def test_calibration_file_samples_passing_outputs_per_cell() -> None:
     runs = passing_runs("pr-summary", "m1", 40) + passing_runs("pr-summary", "m2", 10)
     runs += [rec("pr-summary", "m1", passed=False) | {"output": "bad"} for _ in range(5)]
-    doc = le.calibration_file(runs, 30, seed=1)
+    doc = sample(runs, 30, seed=1)
     by_cell: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for e in doc["entries"]:
         by_cell.setdefault((e["task"], e["model"]), []).append(e)
     assert len(by_cell[("pr-summary", "m1")]) == 30 and len(by_cell[("pr-summary", "m2")]) == 10  # all if fewer
     assert all(e["verdict"] == "" and e["id"] and e["output"].startswith("output") for e in doc["entries"])
     assert len({e["id"] for e in doc["entries"]}) == 40
-    assert le.calibration_file(runs, 30, seed=1) == doc  # seedable
+    assert sample(runs, 30, seed=1) == doc  # seedable
+    assert doc["runs_sha256"] == RUNS_SHA and doc["n"] == 30 and doc["seed"] == 1
+
+
+def test_sample_ids_come_from_the_run_not_from_a_counter() -> None:
+    runs = passing_runs("pr-summary", "m1", 40)
+    a, b = sample(runs, 20, seed=1), sample(runs, 20, seed=2)
+    ids_a = {e["output"]: e["id"] for e in a["entries"]}
+    ids_b = {e["output"]: e["id"] for e in b["entries"]}
+    common = set(ids_a) & set(ids_b)
+    assert common and all(ids_a[o] == ids_b[o] for o in common)  # the same run keeps its id in another draw
+    assert not any(re.fullmatch(r"\d{1,6}", e["id"]) for e in a["entries"])
+    assert all(e["output_sha256"] == sha(e["output"]) for e in a["entries"])
+    moved = [dict(r) for r in runs]
+    moved[0]["ts"] = "2026-01-01T00:00:00Z"  # a different run record gets a different id
+    assert le.run_id(0, moved[0]) != le.run_id(0, runs[0])
+    assert le.run_id(1, runs[0]) != le.run_id(0, runs[0])
 
 
 def test_perfect_pass_rate_without_calibration_is_only_local_then_claude_check() -> None:
@@ -932,12 +1023,12 @@ def test_perfect_pass_rate_without_calibration_is_only_local_then_claude_check()
 def test_thirty_five_ok_verdicts_unlock_local_only_and_nothing_weaker_does() -> None:
     runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
     cell = ("pr-summary", "qwen3.5:4b")
-    cal35 = le.ingest_verdicts(fill(le.calibration_file(runs, 35), 35, 0))
+    cal35 = ingest(fill(sample(runs, 35), 35, 0), runs)
     assert cal35[cell]["verdicts"] == 35 and cal35[cell]["ci_low"] >= le.CAL_MIN_LOWER
     assert "| pr-summary | local-qwen |" in le.render_report(runs, cal35)
     weaker = {"34 of 35 ok": (34, 1), "30 of 30 ok": (30, 0), "20 ok 5 wrong": (20, 5)}
     for name, (ok, wrong) in weaker.items():
-        cal = le.ingest_verdicts(fill(le.calibration_file(runs, ok + wrong), ok, wrong))
+        cal = ingest(fill(sample(runs, ok + wrong), ok, wrong), runs)
         assert cal[cell]["ok"] == ok and cal[cell]["wrong"] == wrong, name
         assert not le.calibration_ok(cal[cell]), name
         assert "| pr-summary | local-then-claude-check |" in le.render_report(runs, cal), name
@@ -949,18 +1040,33 @@ def test_calibration_bound_is_two_sided_and_needs_thirty_five_verdicts() -> None
     assert le.agreement(30, 0)["ci_low"] < le.CAL_MIN_LOWER
     runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
     cell = ("pr-summary", "qwen3.5:4b")
-    few = le.ingest_verdicts(fill(le.calibration_file(runs, 35), 34, 0))
+    few = ingest(fill(sample(runs, 35), 34, 0), runs)
     assert few[cell]["verdicts"] == 34 and le.cal_status(few[cell]) == "partial"
     assert not le.calibration_ok(few[cell])
     assert "| pr-summary | local-then-claude-check |" in le.render_report(runs, few)
     assert le.cal_status(None) == "none"
-    assert le.cal_status(le.ingest_verdicts(fill(le.calibration_file(runs, 35), 0, 0)).get(cell)) == "none"
-    assert le.cal_status(le.agreement(30, 5)) == "done"
+    assert le.cal_status(ingest(fill(sample(runs, 35), 0, 0), runs).get(cell)) == "none"
+    assert le.cal_status(le.agreement(35, 0)) == "done"
+
+
+def test_a_failed_calibration_is_its_own_status_and_names_the_bound() -> None:
+    assert le.cal_status(le.agreement(30, 5)) == "failed"  # 35 verdicts, ok share bound far below 0.9
+    assert le.cal_status(le.agreement(34, 1)) == "failed"
+    assert le.cal_status(le.agreement(35, 0)) == "done" and le.cal_status(le.agreement(10, 0)) == "partial"
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    cell = ("pr-summary", "qwen3.5:4b")
+    bad = {cell: le.agreement(25, 10)}
+    lo = f"{bad[cell]['ci_low']:.2f}"
+    assert lo == "0.55"
+    tier, why = le.tier_for({"qwen3.5:4b": le.summarize(runs)[cell]}, {"qwen3.5:4b": bad[cell]})
+    assert tier == "local-then-claude-check" and f"calibration failed: ok lower bound {lo} < 0.9" in why
+    text = le.render_report(runs, bad)
+    assert "| pr-summary | qwen3.5:4b | failed | 35 |" in text and f"calibration failed: ok lower bound {lo}" in text
 
 
 def test_calibration_gate_does_not_lower_the_pass_rate_gate() -> None:
     runs = passing_runs("pr-summary", "qwen3.5:4b", 4)  # lower bound far below 0.9
-    cal = le.ingest_verdicts(fill(le.calibration_file(runs, 35), 4, 0))
+    cal = ingest(fill(sample(runs, 35), 4, 0), runs)
     assert "| pr-summary | local-qwen |" not in le.render_report(runs, cal)
     stats = le.summarize(runs)[("pr-summary", "qwen3.5:4b")]
     assert le.tier_for({"qwen3.5:4b": stats}, {"qwen3.5:4b": CAL_OK})[0] != "local-qwen"
@@ -968,40 +1074,193 @@ def test_calibration_gate_does_not_lower_the_pass_rate_gate() -> None:
 
 @pytest.mark.parametrize("bad", ["OK", "yes", "Wrong", "ok ", "1", "good", None, True, 1])
 def test_bad_verdict_strings_are_rejected(bad: Any) -> None:
-    doc = le.calibration_file(passing_runs("pr-summary", "m", 3), 3)
+    runs = passing_runs("pr-summary", "m", 3)
+    doc = sample(runs, 3)
     doc["entries"][0]["verdict"] = bad
     with pytest.raises(le.EvalError):
-        le.ingest_verdicts(doc)
+        ingest(doc, runs)
 
 
 def test_ingest_rejects_duplicate_ids_and_unknown_cells() -> None:
-    doc = le.calibration_file(passing_runs("pr-summary", "m", 3), 3)
+    runs = passing_runs("pr-summary", "m", 3)
+    doc = sample(runs, 3)
     doc["entries"][1]["id"] = doc["entries"][0]["id"]
     with pytest.raises(le.EvalError):
-        le.ingest_verdicts(doc)
-    doc = le.calibration_file(passing_runs("pr-summary", "m", 3), 3)
+        ingest(doc, runs)
+    doc = sample(runs, 3)
     doc["entries"][0]["task"] = "bogus"
     with pytest.raises(le.EvalError):
-        le.ingest_verdicts(doc)
+        ingest(doc, runs)
+
+
+# ---- the verdicts are bound to the runs that were sampled (finding 1)
+
+
+def invented_doc(count: int, sha_value: str = RUNS_SHA) -> dict[str, Any]:
+    """The reviewer's reproduction: a hand-written file of ok verdicts for ids that were never sampled."""
+    entries = [
+        {
+            "id": f"{i:012x}",
+            "task": "pr-summary",
+            "model": "qwen3.5:4b",
+            "fixture": "pr-summary/1",
+            "output": f"invented text {i}",
+            "output_sha256": sha(f"invented text {i}"),
+            "verdict": "ok",
+        }
+        for i in range(count)
+    ]
+    return {"format": le.CAL_FORMAT, "runs_sha256": sha_value, "n": 35, "seed": 0, "entries": entries}
+
+
+def test_thirty_five_invented_ok_verdicts_are_rejected_and_unlock_nothing() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    with pytest.raises(le.EvalError) as err:
+        ingest(invented_doc(35), runs)
+    text = str(err.value)
+    assert "35 of 35" in text and "invented text" not in text  # the count, never the output text
+    # one foreign entry among real ones rejects the whole file
+    doc = fill(sample(runs, 35), 35, 0)
+    doc["entries"][3]["id"] = "0" * 12
+    with pytest.raises(le.EvalError, match="1 of 35"):
+        ingest(doc, runs)
+
+
+def test_verdicts_for_really_sampled_ids_are_accepted() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    cal = ingest(fill(sample(runs, 35), 35, 0), runs)
+    assert le.calibration_ok(cal[("pr-summary", "qwen3.5:4b")])
+
+
+def test_an_id_from_another_cell_is_rejected() -> None:
+    runs = passing_runs("pr-summary", "m1", 40) + passing_runs("pr-summary", "m2", 40)
+    doc = fill(sample(runs, 35), 70, 0)
+    moved = next(e for e in doc["entries"] if e["model"] == "m2")
+    moved["model"] = "m1"  # the id is a real sampled id, but of the other cell
+    with pytest.raises(le.EvalError, match="1 of 70"):
+        ingest(doc, runs)
+
+
+def test_a_changed_output_or_output_hash_is_rejected() -> None:
+    runs = passing_runs("pr-summary", "m", 40)
+    doc = fill(sample(runs, 35), 35, 0)
+    doc["entries"][0]["output_sha256"] = sha("some other output")
+    with pytest.raises(le.EvalError, match="1 of 35"):
+        ingest(doc, runs)
+    doc = fill(sample(runs, 35), 35, 0)
+    doc["entries"][0]["output"] = "an output nobody sampled"  # hash field untouched, text swapped
+    with pytest.raises(le.EvalError, match="1 of 35"):
+        ingest(doc, runs)
+
+
+def test_a_verdict_file_made_for_other_runs_is_rejected() -> None:
+    runs = passing_runs("pr-summary", "m", 40)
+    doc = fill(sample(runs, 35), 35, 0)
+    with pytest.raises(le.EvalError, match="runs file"):
+        le.ingest_verdicts(doc, runs, "cd" * 32)  # the runs file changed after sampling
+    no_hash = fill(sample(runs, 35), 35, 0)
+    del no_hash["runs_sha256"]
+    with pytest.raises(le.EvalError, match="runs file"):
+        ingest(no_hash, runs)
+
+
+def agreement_for(runs: list[dict[str, Any]], ok: int, wrong: int) -> dict[str, Any]:
+    doc = fill(sample(runs, ok + wrong), ok, wrong)
+    return le.agreement_doc(ingest(doc, runs), RUNS_SHA, le.judged_ids(doc))
+
+
+def test_agreement_file_round_trips_and_drives_the_gate() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    cal = le.load_agreement(agreement_for(runs, 35, 0), RUNS_SHA)
+    assert "| pr-summary | local-qwen |" in le.render_report(runs, cal)
+
+
+def test_a_hand_edited_agreement_file_is_not_calibrated() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    doc = agreement_for(runs, 20, 15)
+    doc["cells"][0]["ok"], doc["cells"][0]["wrong"] = 35, 0  # edited counts, integrity field left alone
+    with pytest.raises(le.CalibrationMismatch, match="integrity"):
+        le.load_agreement(doc, RUNS_SHA)
+    doc = agreement_for(runs, 35, 0)
+    doc["accepted_ids"] = doc["accepted_ids"][:-1]  # ids dropped
+    with pytest.raises(le.CalibrationMismatch, match="integrity"):
+        le.load_agreement(doc, RUNS_SHA)
+    with pytest.raises(le.CalibrationMismatch, match="runs file"):
+        le.load_agreement(agreement_for(runs, 35, 0), "cd" * 32)  # a different runs file
+
+
+def test_cli_ingest_needs_the_runs_and_rejects_invented_files(tmp_path: Path) -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    runs_in = tmp_path / "runs.jsonl"
+    runs_in.write_text("".join(json.dumps(r) + "\n" for r in runs), encoding="utf-8")
+    real_sha = hashlib.sha256(runs_in.read_bytes()).hexdigest()
+    fake = tmp_path / "fake.json"
+    fake.write_text(json.dumps(invented_doc(35, real_sha)), encoding="utf-8")
+    fake.chmod(0o600)
+    out = tmp_path / "o"
+    assert le.entry(["calibrate", "--ingest", str(fake), "--out", str(out)]) == 2  # no --runs
+    assert le.entry(["calibrate", "--ingest", str(fake), "--runs", str(runs_in), "--out", str(out)]) == 2
+    assert not (out / "calibration-agreement.json").exists()
+
+
+def cli_calibrate(tmp_path: Path, runs: list[dict[str, Any]], ok: int, wrong: int) -> tuple[Path, Path]:
+    runs_in = tmp_path / "runs.jsonl"
+    runs_in.write_text("".join(json.dumps(r) + "\n" for r in runs), encoding="utf-8")
+    out = tmp_path / "cal"
+    assert le.entry(["calibrate", "--runs", str(runs_in), "--out", str(out), "--n", str(ok + wrong)]) == 0
+    sample_path = out / "calibration.json"
+    sample_path.write_text(json.dumps(fill(json.loads(sample_path.read_text()), ok, wrong)), encoding="utf-8")
+    sample_path.chmod(0o600)
+    done = tmp_path / "done"
+    args = ["calibrate", "--ingest", str(sample_path), "--runs", str(runs_in), "--out", str(done)]
+    assert le.entry(args) == 0
+    return runs_in, done / "calibration-agreement.json"
+
+
+def test_cli_a_changed_runs_file_closes_the_gate_loudly(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    runs_in, agreement_path = cli_calibrate(tmp_path, runs, 35, 0)
+    rep = tmp_path / "rep"
+    assert le.entry(["report", "--runs", str(runs_in), "--out", str(rep), "--calibration", str(agreement_path)]) == 0
+    assert "| pr-summary | local-qwen |" in (rep / "report.md").read_text()
+    changed = [dict(r) for r in runs]
+    changed[0]["latency_s"] = 99.0  # any change to the runs file changes its hash
+    other = tmp_path / "other.jsonl"
+    other.write_text("".join(json.dumps(r) + "\n" for r in changed), encoding="utf-8")
+    rep2 = tmp_path / "rep2"
+    capsys.readouterr()
+    assert le.entry(["report", "--runs", str(other), "--out", str(rep2), "--calibration", str(agreement_path)]) == 0
+    text = (rep2 / "report.md").read_text()
+    assert "| pr-summary | local-qwen |" not in text and "| pr-summary | local-then-claude-check |" in text
+    assert "CALIBRATION IGNORED" in text and "WARNING" in capsys.readouterr().err
+
+
+def test_cli_a_hand_edited_agreement_file_closes_the_gate_loudly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    runs_in, agreement_path = cli_calibrate(tmp_path, runs, 20, 15)
+    doc = json.loads(agreement_path.read_text())
+    doc["cells"][0]["ok"], doc["cells"][0]["wrong"] = 35, 0
+    agreement_path.write_text(json.dumps(doc), encoding="utf-8")
+    rep = tmp_path / "rep"
+    capsys.readouterr()
+    assert le.entry(["report", "--runs", str(runs_in), "--out", str(rep), "--calibration", str(agreement_path)]) == 0
+    text = (rep / "report.md").read_text()
+    assert "| pr-summary | local-qwen |" not in text and "CALIBRATION IGNORED" in text and "integrity" in text
+    assert "WARNING" in capsys.readouterr().err
 
 
 def test_cli_calibrate_sample_then_ingest_then_report(tmp_path: Path) -> None:
     runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
-    runs_in = tmp_path / "runs.jsonl"
-    runs_in.write_text("".join(json.dumps(r) + "\n" for r in runs), encoding="utf-8")
-    out = tmp_path / "cal"
-    assert le.entry(["calibrate", "--runs", str(runs_in), "--out", str(out), "--n", "35"]) == 0
-    sample = out / "calibration.json"
-    doc = json.loads(sample.read_text())
-    assert len(doc["entries"]) == 35 and mode(sample) == 0o600 and mode(out) == 0o700
-    sample.write_text(json.dumps(fill(doc, 35, 0)), encoding="utf-8")
-    sample.chmod(0o600)
-    done = tmp_path / "done"
-    assert le.entry(["calibrate", "--ingest", str(sample), "--out", str(done)]) == 0
-    agreement = done / "calibration-agreement.json"
-    assert mode(agreement) == 0o600
+    runs_in, agreement_path = cli_calibrate(tmp_path, runs, 35, 0)
+    sample_path = tmp_path / "cal" / "calibration.json"
+    doc = json.loads(sample_path.read_text())
+    assert len(doc["entries"]) == 35 and mode(sample_path) == 0o600 and mode(tmp_path / "cal") == 0o700
+    assert doc["runs_sha256"] == hashlib.sha256(runs_in.read_bytes()).hexdigest()
+    assert mode(agreement_path) == 0o600
     rep = tmp_path / "rep"
-    assert le.entry(["report", "--runs", str(runs_in), "--out", str(rep), "--calibration", str(agreement)]) == 0
+    assert le.entry(["report", "--runs", str(runs_in), "--out", str(rep), "--calibration", str(agreement_path)]) == 0
     text = (rep / "report.md").read_text()
     assert "| pr-summary | local-qwen |" in text and "done" in text
     plain = tmp_path / "plain"
@@ -1010,18 +1269,33 @@ def test_cli_calibrate_sample_then_ingest_then_report(tmp_path: Path) -> None:
 
 
 def test_cli_ingest_rejects_bad_verdicts_symlinks_and_open_modes(tmp_path: Path) -> None:
-    doc = le.calibration_file(passing_runs("pr-summary", "m", 3), 3)
+    runs = passing_runs("pr-summary", "m", 3)
+    runs_in = tmp_path / "runs.jsonl"
+    runs_in.write_text("".join(json.dumps(r) + "\n" for r in runs), encoding="utf-8")
+    run_sha = hashlib.sha256(runs_in.read_bytes()).hexdigest()
+    base = ["--runs", str(runs_in), "--out", str(tmp_path / "o")]
+    doc = le.calibration_file(runs, 3, 0, run_sha)
     doc["entries"][0]["verdict"] = "maybe"
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps(doc), encoding="utf-8")
     bad.chmod(0o600)
-    assert le.entry(["calibrate", "--ingest", str(bad), "--out", str(tmp_path / "o")]) == 2
+    assert le.entry(["calibrate", "--ingest", str(bad), *base]) == 2
     good = tmp_path / "good.json"
-    good.write_text(json.dumps(le.calibration_file(passing_runs("pr-summary", "m", 3), 3)), encoding="utf-8")
+    good.write_text(json.dumps(le.calibration_file(runs, 3, 0, run_sha)), encoding="utf-8")
     good.chmod(0o644)  # group and other can read: refused
-    assert le.entry(["calibrate", "--ingest", str(good), "--out", str(tmp_path / "o")]) == 2
+    assert le.entry(["calibrate", "--ingest", str(good), *base]) == 2
     good.chmod(0o600)
     link = tmp_path / "link.json"
     link.symlink_to(good)
-    assert le.entry(["calibrate", "--ingest", str(link), "--out", str(tmp_path / "o")]) == 2
-    assert le.entry(["calibrate", "--ingest", str(good), "--out", str(tmp_path / "o")]) == 0
+    assert le.entry(["calibrate", "--ingest", str(link), *base]) == 2
+    assert le.entry(["calibrate", "--ingest", str(good), *base]) == 0
+
+
+def test_read_private_refuses_a_file_owned_by_someone_else(tmp_path: Path) -> None:
+    p = tmp_path / "v.json"
+    p.write_text("{}", encoding="utf-8")
+    p.chmod(0o600)
+    assert le._read_private(p) == "{}"
+    assert le._read_private(p, uid=os.getuid()) == "{}"
+    with pytest.raises(le.EvalError, match="owned by you"):
+        le._read_private(p, uid=os.getuid() + 1)  # the owner check bites when the uid differs

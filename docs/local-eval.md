@@ -56,7 +56,7 @@ fixtures before the round-5 tightening and passes none now.
   root cause, during, while) within 80 characters of a fact.
   first-pass-review-comment: at most three lines, at least 8 words that are not words of a fact, and the function and
   the defect class in one sentence or two neighboring sentences, the sentence that states the defect carrying a verb or
-  auxiliary (`DEFECT_VERB`: is, are, will, can, may, does, never, should, must, leaks, skips, returns, ...). doc-skeleton: a title heading, then each named section as a heading followed by a placeholder
+  auxiliary (`DEFECT_VERB`: is, are, will, can, may, does, never, should, must, leaks, skips, returns, ...) and no negation marker next to the defect fact (see Known limitation). doc-skeleton: a title heading, then each named section as a heading followed by a placeholder
   line. commit-message and issue-triage keep their `required_format`.
 - **Copy cap.** The share of the output that is copied from the input, as the larger of the share of lines of four or
   more words found verbatim in the input and the share of 8-word shingles found in the input, may not exceed 0.5
@@ -82,11 +82,24 @@ says `too few` and no rate. Older records without `ts` show under `unknown`.
 
 ## Known limitation: what a pass means
 
-A pass means the facts are present and the shape is right, not that the answer is meaningful. The scorer cannot read:
-a shim that writes the required shape with generic filler words and then the facts (shim (e) in the tests) still passes
-these tasks, because the shape is the whole content of the check. After round 5 the template sentence and the
-facts-only shims pass none; shim (e) passes 6 of 6 fixtures of each task below (a test keeps the count exact, so the
-list cannot drift):
+A pass means the facts are present and the shape is right, not that the answer is meaningful. Code cannot read. The
+tightening in the scorer raises the cost of lazy output; it does not defeat generic templates, and this page does not
+claim it does. Plainly:
+
+- (a) A trivial causal template with all the facts passes 6 of 6 fixtures of `ci-log-digest` and of
+  `first-pass-review-comment`. The two example templates are the `shim (e)` templates in `tests/test_localeval.py`
+  (`SHAPE["ci-log-digest"]`: "A generic summary of the job output goes here. It names what stopped and why, because of
+  <facts>." and the review-comment template "The function <fact one> is wrong here: <the defect facts> is the defect,
+  and it is a generic remark of filler."). A test keeps the count exact, so the list cannot drift.
+- (b) A wrong statement that contradicts the defect can pass because code cannot judge negation or meaning: "the
+  slice is fine, so there is no off-by-one" is caught only where the negation guard below sees a marker next to the
+  fact, and "so there is no SQL injection risk" depends on that list. Any wording outside it passes if the facts and
+  shape are there.
+- (c) Therefore calibration with real verdicts is the only mitigation, and the gate is only as strong as the binding
+  of those verdicts to the sampled runs (next section).
+
+After round 5 the template sentence (`The change fixes <fact1>, <fact2>, and <fact3>.`) and the facts-only shims pass
+none; shim (e) passes 6 of 6 fixtures of each task below:
 
 - `issue-draft` (6 of 6)
 - `ci-log-digest` (6 of 6)
@@ -98,19 +111,42 @@ list cannot drift):
 `issue-triage` passes none (the JSON labels are the answer). Every one of the six tasks above needs calibration before
 it can go local-only; in fact the routing rule now requires it for every cell (next section).
 
+**Negation guard (first-pass-review-comment only).** An output fails `structure` when a defect fact has one of the
+markers `no`, `correct`, `correctly`, `safe`, `fine`, `ok`, `harmless` within three words of it in the same sentence
+(`NEGATION_MARKERS`, `NEG_WINDOW`): "so there is no SQL injection risk" and "the boundary is correct" fail. `not`,
+`never` and `without` are not markers because they state defects ("never closes the file", "does not close the file"),
+and `no longer` is skipped for the same reason. The guard is a word list, not understanding: it also fails an honest
+"there is no parameterization" next to the fact, and it misses every denial worded some other way.
+
 ## Calibration gate (before local-only)
 
 A cell is one (task, model). The scorer pass rate alone can no longer route a cell to local-only:
 
 1. `safo-eval calibrate --runs runs.jsonl --out DIR --n 35` writes `DIR/calibration.json`: up to 35 PASSING outputs
-   per cell (all of them when fewer pass), each with an `id` and an empty `verdict`.
+   per cell (all of them when fewer pass). The file names the sha256 of the runs file it sampled from (`runs_sha256`),
+   `n` and `seed`; each entry has an `id` derived from the run (a hash of its position in the runs file, `ts`, task,
+   model and the output hash, not a counter), the `output_sha256` and an empty `verdict`.
 2. A person or a reviewer sets each `verdict` to exactly `ok` or `wrong` (an empty one means not judged yet).
-3. `safo-eval calibrate --ingest DIR/calibration.json --out DIR` reads the verdicts and stores the agreement per cell in
-   `DIR/calibration-agreement.json` (ok and wrong counts, ok share, Wilson interval). Any other verdict string, a
-   duplicate id or an unknown task is an error. Verdict and agreement files are read only when they are regular files
-   you own with mode 0600 or 0400, never through a symlink; results are written 0600 in a 0700 directory.
-4. `safo-eval report ... --calibration DIR/calibration-agreement.json` applies the rule and shows a CALIBRATION table
-   with the status per cell: `none` (no verdict), `partial` (under 35), `done` (35 or more).
+3. `safo-eval calibrate --ingest DIR/calibration.json --runs runs.jsonl --out DIR` draws the same sample again from
+   the runs file (same seed) and accepts a verdict ONLY for ids in that sample whose task, model and output hash match.
+   One foreign entry, a changed output or hash, a runs file whose sha256 differs, a missing `--runs`, any other verdict
+   string, a duplicate id or an unknown task rejects the whole file (exit 2; the error names a count, never output
+   text). The accepted counts are stored per cell in `DIR/calibration-agreement.json` together with the runs sha256,
+   the accepted ids and an `integrity` field: the sha256 over the counts, the runs hash and the sorted accepted ids.
+   Verdict and agreement files are read only when they are regular files you own with mode 0600 or 0400, never
+   through a symlink; results are written 0600 in a 0700 directory.
+4. `safo-eval report --runs runs.jsonl ... --calibration DIR/calibration-agreement.json` recomputes the integrity
+   field and compares the runs hash with the file given to `--runs`. A mismatch (an edited agreement file, or another
+   runs file) means no cell is calibrated: a loud WARNING on stderr and a CALIBRATION IGNORED line in the report, and
+   the routing stays at `local-then-claude-check`. The CALIBRATION table shows the status per cell: `none` (no
+   verdict), `partial` (under 35), `failed` (35 or more but the ok lower bound under 0.9; the routing reason reads
+   `calibration failed: ok lower bound 0.71 < 0.9`), `done` (35 or more and the bound clears 0.9).
+
+**What this defends against.** Mistakes (a stale file, verdicts from another run) and an agent that writes verdicts or
+counts without having the sample: it cannot unlock local-only without ids that exist in the runs file. It does NOT
+defend against the owner editing files: the integrity field has no key, so a solo owner who rewrites the agreement
+file, recomputes the hash, or edits the runs file and re-samples can always get a pass. That is accepted for one
+person. The gate is also only as good as the verdicts themselves.
 
 A cell reaches local-only only when both hold: (a) the 95 percent Wilson lower bound of the scorer pass rate is at
 least 0.9, and (b) there are at least 35 verdicts and the lower bound of the ok share is at least 0.9. Otherwise the

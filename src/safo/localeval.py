@@ -69,6 +69,7 @@ CAL_MIN_LOWER = 0.9  # lower bound of the ok share needed for local-only
 CAL_Z = 1.96
 CAL_FORMAT = "safo-eval-calibration-1"
 CAL_MAX_BYTES = 50_000_000
+CAL_MAX_N = 100_000  # an n above this in a calibration file is not a sample size
 MODEL_TIER = {"qwen3.5:4b": "local-qwen", "gemma4:12b": "local-gemma"}
 DEFAULT_CALL_LOG = Path.home() / ".local/share/llm-local/calls.jsonl"
 BUSY_EXIT = 75
@@ -287,6 +288,31 @@ DEFECT_VERB = re.compile(
 )
 
 
+# a review comment that names the defect only to deny it ("so there is no SQL injection risk", "the boundary is
+# correct") is wrong. A marker within NEG_WINDOW words of a defect fact, in the same sentence, fails the structure.
+# not, never and without are left out on purpose: "never closes the file" states the defect. So does "no longer".
+NEGATION_MARKERS = ("no", "correct", "correctly", "safe", "fine", "ok", "harmless")
+NEG_WINDOW = 3
+_TOKEN = re.compile(r"[A-Za-z0-9_']+")
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n")
+
+
+def denies_defect(defect: Sequence[Fact], output: str) -> bool:
+    for sentence in _SENT_SPLIT.split(output):
+        toks = [(m.group().lower(), m.start(), m.end()) for m in _TOKEN.finditer(sentence)]
+        for fact in defect:
+            for fs, fe in _fact_spans(fact, sentence):
+                inside = [i for i, (_, s, e) in enumerate(toks) if s < fe and e > fs]
+                if not inside:
+                    continue
+                lo, hi = inside[0], inside[-1]
+                for i in [*range(max(0, lo - NEG_WINDOW), lo), *range(hi + 1, min(len(toks), hi + 1 + NEG_WINDOW))]:
+                    longer = i + 1 < len(toks) and toks[i + 1][0] == "longer"  # "no longer divides" states the defect
+                    if toks[i][0] in NEGATION_MARKERS and not (toks[i][0] == "no" and longer):
+                        return True
+    return False
+
+
 def _all_fact_spans(fixture: Fixture, output: str) -> list[tuple[int, int]]:
     return [sp for f in fixture.facts for sp in _fact_spans(f, output)]
 
@@ -358,7 +384,7 @@ def _structure_ok(fixture: Fixture, output: str) -> bool:
         def stated(x: str) -> bool:
             return DEFECT_VERB.search(x) is not None and any(_fact_matches(d, x) for d in defect)
 
-        return any(
+        return not denies_defect(defect, output) and any(
             _fact_matches(subject, " ".join(sentences[i : i + 2])) and any(stated(x) for x in sentences[i : i + 2])
             for i in range(len(sentences))
         )
@@ -596,9 +622,14 @@ def agreement(ok: int, wrong: int) -> dict[str, Any]:
 
 
 def cal_status(cell: dict[str, Any] | None) -> str:
-    """none: no verdict yet; partial: fewer than CAL_MIN_VERDICTS; done: enough verdicts (good or bad)."""
+    """none: no verdict yet; partial: fewer than CAL_MIN_VERDICTS; failed: enough verdicts but the ok share's lower
+    bound is under CAL_MIN_LOWER; done: enough verdicts and the bound clears it."""
     n = cell["verdicts"] if cell else 0
-    return "none" if n == 0 else "partial" if n < CAL_MIN_VERDICTS else "done"
+    if cell is None or n == 0:
+        return "none"
+    if n < CAL_MIN_VERDICTS:
+        return "partial"
+    return "done" if cell["ci_low"] >= CAL_MIN_LOWER else "failed"
 
 
 def calibration_ok(cell: dict[str, Any] | None) -> bool:
@@ -629,11 +660,13 @@ def tier_for(
     best = pick(list(rated))
     rate = rated[best]
     if rate >= LOCAL_MIN:
-        need = f"needs {CAL_MIN_VERDICTS}+ verdicts and ok lower bound >= {CAL_MIN_LOWER}"
-        return (
-            "local-then-claude-check",
-            f"{shown(best)} >= {LOCAL_MIN} but calibration {cal_status(cal.get(best))}: {need}",
-        )
+        cell = cal.get(best)
+        if cell is not None and cal_status(cell) == "failed":
+            why = f"calibration failed: ok lower bound {cell['ci_low']:.2f} < {CAL_MIN_LOWER}"
+        else:
+            need = f"needs {CAL_MIN_VERDICTS}+ verdicts and ok lower bound >= {CAL_MIN_LOWER}"
+            why = f"calibration {cal_status(cell)}: {need}"
+        return "local-then-claude-check", f"{shown(best)} >= {LOCAL_MIN} but {why}"
     if rate >= CHECK_MIN:
         return "local-then-claude-check", f"{shown(best)} in [{CHECK_MIN}, {LOCAL_MIN})"
     return "claude", f"{shown(best)} < {CHECK_MIN}"
@@ -695,7 +728,9 @@ def render_time_buckets(runs: Sequence[dict[str, Any]]) -> list[str]:
 
 
 def render_report(
-    runs: Sequence[dict[str, Any]], calibration: dict[tuple[str, str], dict[str, Any]] | None = None
+    runs: Sequence[dict[str, Any]],
+    calibration: dict[tuple[str, str], dict[str, Any]] | None = None,
+    calibration_note: str | None = None,
 ) -> str:
     cals = calibration or {}
     stats = summarize(runs)
@@ -745,11 +780,17 @@ def render_report(
         "",
         "## CALIBRATION",
         "",
-        f"Per cell: none (no verdict), partial (under {CAL_MIN_VERDICTS}), done ({CAL_MIN_VERDICTS} or more). "
+        f"Per cell: none (no verdict), partial (under {CAL_MIN_VERDICTS}), failed ({CAL_MIN_VERDICTS} or more but "
+        f"the ok lower bound is under {CAL_MIN_LOWER}), done ({CAL_MIN_VERDICTS} or more and the bound clears it). "
         "Verdicts are human or reviewer ok/wrong calls on passing outputs; the ok share's lower bound is the two-sided "
         "95% Wilson bound. A pass means the facts are present and the shape is right, "
         "not that the answer is meaningful.",
         "",
+        *(
+            [f"**CALIBRATION IGNORED: {calibration_note}. No cell counts as calibrated.**", ""]
+            if calibration_note
+            else []
+        ),
         "| task | model | status | verdicts | ok share | ok lower bound |",
         "|---|---|---|---|---|---|",
     ]
@@ -784,67 +825,141 @@ def calibration_sample(runs: Sequence[dict[str, Any]], n: int, seed: int | None 
     return "\n".join(parts)
 
 
-def calibration_file(runs: Sequence[dict[str, Any]], n: int, seed: int = 0) -> dict[str, Any]:
+def output_sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def run_id(index: int, run: dict[str, Any]) -> str:
+    """A stable id for one run record: its position in the runs file, its timestamp when it has one, its task and
+    model, and the hash of its output. The same run has the same id in every draw; a counter would not."""
+    raw = json.dumps([index, run.get("ts"), run.get("task"), run.get("model"), output_sha(str(run.get("output", "")))])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def calibration_file(runs: Sequence[dict[str, Any]], n: int, seed: int = 0, runs_sha: str = "") -> dict[str, Any]:
     """The file a person or reviewer fills in: up to n PASSING outputs per (task, model) cell (all of them when
-    fewer pass), each with an id and an empty verdict (ok or wrong)."""
-    cells: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for r in runs:
+    fewer pass), each with an id derived from the run, the hash of its output and an empty verdict (ok or wrong).
+    runs_sha256 is the sha256 of the runs file sampled from; ingest recomputes this same sample from the runs."""
+    cells: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    for i, r in enumerate(runs):
         if r["status"] == "ok" and r["score"]["passed"]:
-            cells[(r["task"], r["model"])].append(r)
+            cells[(r["task"], r["model"])].append((i, r))
     rng = random.Random(seed)  # noqa: S311 - audit sampling, not security
     entries: list[dict[str, Any]] = []
     for task, model in sorted(cells):
-        for r in rng.sample(cells[(task, model)], min(n, len(cells[(task, model)]))):
-            raw = json.dumps([task, model, r["fixture"], r.get("repeat"), r["output"]])
+        for i, r in rng.sample(cells[(task, model)], min(n, len(cells[(task, model)]))):
             entries.append(
                 {
-                    "id": hashlib.sha256(raw.encode()).hexdigest()[:12],
+                    "id": run_id(i, r),
                     "task": task,
                     "model": model,
                     "fixture": r["fixture"],
                     "output": r["output"],
+                    "output_sha256": output_sha(r["output"]),
                     "verdict": "",
                 }
             )
     note = "Set verdict to exactly ok or wrong for each entry you judged; leave the rest empty."
-    return {"format": CAL_FORMAT, "instructions": note, "entries": entries}
+    return {
+        "format": CAL_FORMAT,
+        "runs_sha256": runs_sha,
+        "n": n,
+        "seed": seed,
+        "instructions": note,
+        "entries": entries,
+    }
 
 
-def ingest_verdicts(doc: Any) -> dict[tuple[str, str], dict[str, Any]]:
-    """Agreement per (task, model) cell from a filled calibration file. Only the verdicts ok and wrong count; an
-    empty verdict is not yet judged; any other value, a duplicate id or an unknown task is an error."""
+def _is_int(x: Any) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def ingest_verdicts(doc: Any, runs: Sequence[dict[str, Any]], runs_sha: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Agreement per (task, model) cell from a filled calibration file, bound to the runs it was sampled from. The
+    file must name the sha256 of this runs file; the sample is drawn again from the runs with the stored n and seed,
+    and every entry must be one of its ids with the same task, model and output hash, else the whole file is
+    rejected (the error names a count, never output text). Only the verdicts ok and wrong count; an empty verdict
+    is not yet judged; any other value, a duplicate id or an unknown task is an error."""
     if not isinstance(doc, dict) or doc.get("format") != CAL_FORMAT or not isinstance(doc.get("entries"), list):
         raise EvalError("not a safo-eval calibration file")
+    if doc.get("runs_sha256") != runs_sha:
+        raise EvalError("the runs file is not the one this calibration file was sampled from (sha256 differs)")
+    n, seed = doc.get("n"), doc.get("seed")
+    if not isinstance(n, int) or isinstance(n, bool) or not isinstance(seed, int) or isinstance(seed, bool):
+        raise EvalError("calibration file has no valid n and seed")
+    if not 1 <= n <= CAL_MAX_N:
+        raise EvalError("calibration file has no valid n and seed")
+    expected = {e["id"]: e for e in calibration_file(runs, n, seed, runs_sha)["entries"]}
     counts: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     seen: set[str] = set()
+    foreign = 0
     for e in doc["entries"]:
         if not isinstance(e, dict):
             raise EvalError("bad calibration entry")
         eid, task, model, verdict = e.get("id"), e.get("task"), e.get("model"), e.get("verdict")
         if not isinstance(eid, str) or not eid or eid in seen:
-            raise EvalError(f"missing or duplicate calibration id {eid!r}")
+            raise EvalError("missing or duplicate calibration id")
         seen.add(eid)
         if task not in TASKS or not isinstance(model, str) or not model:
-            raise EvalError(f"bad task or model in calibration entry {eid}")
+            raise EvalError("bad task or model in a calibration entry")
         if not isinstance(verdict, str) or verdict not in ("", "ok", "wrong"):
-            raise EvalError(f"entry {eid}: verdict must be exactly ok or wrong, got {verdict!r}")
+            raise EvalError("a calibration verdict must be exactly ok or wrong")
+        want = expected.get(eid)
+        if want is None:
+            foreign += 1  # an id that was never sampled from these runs
+            continue
+        out = e.get("output")
+        same_output = (
+            e.get("output_sha256") == want["output_sha256"]
+            and isinstance(out, str)
+            and output_sha(out) == want["output_sha256"]
+        )
+        if (task, model) != (want["task"], want["model"]) or not same_output:
+            foreign += 1  # a real id with another cell or another output
+            continue
         cell = counts[(task, model)]
         if verdict == "ok":
             cell[0] += 1
         elif verdict == "wrong":
             cell[1] += 1
+    if foreign:
+        raise EvalError(
+            f"{foreign} of {len(doc['entries'])} calibration entries are not in the sample drawn from this runs file "
+            "(id, task, model or output hash differ); the whole file is rejected"
+        )
     return {k: agreement(v[0], v[1]) for k, v in counts.items()}
 
 
-def agreement_doc(cells: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+def judged_ids(doc: dict[str, Any]) -> list[str]:
+    """Sorted ids of the entries that carry a counted verdict (call after ingest_verdicts accepted the file)."""
+    return sorted(e["id"] for e in doc["entries"] if e.get("verdict") in ("ok", "wrong"))
+
+
+class CalibrationMismatch(EvalError):
+    """An agreement file that does not belong to these runs or was edited: not calibrated, said loudly."""
+
+
+def _integrity(cells: Sequence[tuple[str, str, int, int]], runs_sha: str, ids: Sequence[str]) -> str:
+    """sha256 over the counts, the runs hash and the sorted accepted ids. No key: it catches a slipped or a careless
+    edit and an agent that writes counts without the sample; the owner can always recompute it (docs/local-eval.md)."""
+    raw = json.dumps({"runs": runs_sha, "cells": sorted(cells), "ids": sorted(ids)}, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def agreement_doc(cells: dict[tuple[str, str], dict[str, Any]], runs_sha: str, ids: Sequence[str]) -> dict[str, Any]:
+    counted = [(t, m, c["ok"], c["wrong"]) for (t, m), c in cells.items()]
     return {
         "format": CAL_FORMAT + "-agreement",
+        "runs_sha256": runs_sha,
         "cells": [{"task": t, "model": m, **c} for (t, m), c in sorted(cells.items())],
+        "accepted_ids": sorted(ids),
+        "integrity": _integrity(counted, runs_sha, ids),
     }
 
 
-def load_agreement(doc: Any) -> dict[tuple[str, str], dict[str, Any]]:
-    """Read an agreement file back. Only the ok and wrong counts are trusted; the shares are recomputed."""
+def load_agreement(doc: Any, runs_sha: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Read an agreement file back for this runs file. Only the ok and wrong counts are trusted, and only when the
+    file names this runs file and its integrity field matches; else CalibrationMismatch (not calibrated)."""
     if not isinstance(doc, dict) or doc.get("format") != CAL_FORMAT + "-agreement":
         raise EvalError("not a safo-eval calibration agreement file")
     if not isinstance(doc.get("cells"), list):
@@ -855,22 +970,33 @@ def load_agreement(doc: Any) -> dict[tuple[str, str], dict[str, Any]]:
             ok, wrong, task, model = c["ok"], c["wrong"], c["task"], c["model"]
         except (KeyError, TypeError) as exc:
             raise EvalError("bad agreement cell") from exc
-        counts_ok = all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in (ok, wrong))
+        counts_ok = all(_is_int(x) and x >= 0 for x in (ok, wrong))
         if not counts_ok or task not in TASKS or not isinstance(model, str):
             raise EvalError("bad agreement cell")
         out[(task, model)] = agreement(ok, wrong)
+    if doc.get("runs_sha256") != runs_sha:
+        raise CalibrationMismatch("the agreement file was made from a different runs file (sha256 differs)")
+    ids = doc.get("accepted_ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise CalibrationMismatch("the agreement file has no accepted ids (integrity cannot be checked)")
+    counted = [(t, m, c["ok"], c["wrong"]) for (t, m), c in out.items()]
+    total = sum(ok + wrong for _, _, ok, wrong in counted)
+    if _integrity(counted, runs_sha, ids) != doc.get("integrity") or total != len(ids):
+        raise CalibrationMismatch("the agreement file's integrity field does not match its counts and ids (edited?)")
     return out
 
 
-def _read_private(path: Path) -> str:
-    """Read a verdict or agreement file: a regular file we own, readable by the owner only, never through a symlink."""
+def _read_private(path: Path, uid: int | None = None) -> str:
+    """Read a verdict or agreement file: a regular file we own, readable by the owner only, never through a symlink.
+    uid is the expected owner (the current user when None); a test passes another one."""
+    owner = os.getuid() if uid is None else uid
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         raise EvalError(f"cannot read {path}: {exc.strerror}") from exc
     with os.fdopen(fd, "rb") as fh:
         st = os.fstat(fh.fileno())
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != owner or st.st_mode & 0o077:
             raise EvalError(f"refusing {path}: must be a regular file owned by you with mode 0600 or 0400")
         data = fh.read(CAL_MAX_BYTES + 1)
     if len(data) > CAL_MAX_BYTES:
@@ -888,11 +1014,18 @@ def _read_json_private(path: Path) -> Any:
         raise EvalError(f"{path} is not valid JSON") from exc
 
 
-def _read_runs(path: Path) -> list[dict[str, Any]]:
+def _read_runs_hashed(path: Path) -> tuple[list[dict[str, Any]], str]:
+    """The runs and the sha256 of the file's bytes: the calibration is bound to that hash."""
     try:
-        return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        raw = path.read_bytes()
+        runs = [json.loads(ln) for ln in raw.decode("utf-8").splitlines() if ln.strip()]
     except (OSError, ValueError) as exc:
         raise EvalError(f"cannot read runs {path}: {exc}") from exc
+    return runs, hashlib.sha256(raw).hexdigest()
+
+
+def _read_runs(path: Path) -> list[dict[str, Any]]:
+    return _read_runs_hashed(path)[0]
 
 
 def rescore(runs: Sequence[dict[str, Any]], fixtures: Sequence[Fixture]) -> list[dict[str, Any]]:
@@ -945,9 +1078,13 @@ def entry(argv: Sequence[str] | None = None) -> int:
     rp.add_argument("--out", required=True, type=Path)
     rp.add_argument("--rescore", action="store_true", help="re-score stored outputs; writes report-rescored.md")
     rp.add_argument("--fixtures", type=Path, default=FIXTURES_DEFAULT)
-    rp.add_argument("--calibration", type=Path, help="calibration-agreement.json from `calibrate --ingest`")
+    rp.add_argument(
+        "--calibration",
+        type=Path,
+        help="calibration-agreement.json from `calibrate --ingest`; only counts when --runs is the sampled file",
+    )
     c = sub.add_parser("calibrate", help="sample passing outputs to check by hand, or ingest the verdicts")
-    c.add_argument("--runs", type=Path, help="runs JSONL to sample passing outputs from")
+    c.add_argument("--runs", type=Path, help="runs JSONL to sample passing outputs from (also needed with --ingest)")
     c.add_argument("--n", type=int, default=CAL_SAMPLE_DEFAULT, help="outputs per (task, model) cell")
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--ingest", type=Path, help="a filled calibration.json: store the agreement per cell")
@@ -969,22 +1106,34 @@ def entry(argv: Sequence[str] | None = None) -> int:
             print(f"{len(runs)} runs; report at {args.out / 'report.md'}")
         elif args.cmd == "report":
             _private_dir(args.out)
-            runs = _read_runs(args.runs)
-            cals = load_agreement(_read_json_private(args.calibration)) if args.calibration else None
+            runs, runs_sha = _read_runs_hashed(args.runs)
+            cals, note = None, None
+            if args.calibration:
+                try:
+                    cals = load_agreement(_read_json_private(args.calibration), runs_sha)
+                except CalibrationMismatch as exc:
+                    note = str(exc)
+                    print(f"safo-eval: WARNING: calibration ignored, no cell is calibrated: {note}", file=sys.stderr)
             if args.rescore:
                 runs = rescore(runs, load_fixtures(args.fixtures))
                 _write_private(args.out / "runs-rescored.jsonl", "".join(json.dumps(r) + "\n" for r in runs))
-                _write_private(args.out / "report-rescored.md", render_report(runs, cals))
+                _write_private(args.out / "report-rescored.md", render_report(runs, cals, note))
             else:
-                _write_private(args.out / "report.md", render_report(runs, cals))
+                _write_private(args.out / "report.md", render_report(runs, cals, note))
         elif args.ingest:
-            cells = ingest_verdicts(_read_json_private(args.ingest))
+            if args.runs is None:
+                raise EvalError("calibrate --ingest needs --runs: the verdicts are checked against the sampled runs")
+            runs, runs_sha = _read_runs_hashed(args.runs)
+            filled = _read_json_private(args.ingest)
+            cells = ingest_verdicts(filled, runs, runs_sha)
+            agreed = agreement_doc(cells, runs_sha, judged_ids(filled))
             _private_dir(args.out)
-            _write_private(args.out / "calibration-agreement.json", json.dumps(agreement_doc(cells), indent=1) + "\n")
+            _write_private(args.out / "calibration-agreement.json", json.dumps(agreed, indent=1) + "\n")
         else:
             if args.runs is None or args.n < 1:
                 raise EvalError("calibrate needs --runs and --n >= 1, or --ingest")
-            doc = calibration_file(_read_runs(args.runs), args.n, args.seed)
+            runs, runs_sha = _read_runs_hashed(args.runs)
+            doc = calibration_file(runs, args.n, args.seed, runs_sha)
             _private_dir(args.out)
             _write_private(args.out / "calibration.json", json.dumps(doc, indent=1) + "\n")
     except EvalError as exc:
