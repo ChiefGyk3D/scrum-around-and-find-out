@@ -698,3 +698,44 @@ def test_f5_ipv6_followed_by_word_characters_is_flagged(text: str) -> None:
 )
 def test_f5_scope_times_and_macs_still_not_flagged(text: str) -> None:
     assert not any("IP address" in x for x in localdraft.check_text("comment", text)), text
+
+
+# round 4a: S1 SSID callsigns, S2 IPv6 prefixes, S3 padding and scope heuristic
+@pytest.mark.parametrize("text", ["W1AW-7", "w1aw-15", "de W1AW-9", "call w1aw-0.", "x (W1AW-12) y"])
+def test_s1_callsign_with_ssid_is_blocked(text: str) -> None:
+    assert any("callsign" in x for x in localdraft.check_text("comment", text)), text
+
+
+@pytest.mark.parametrize("text", ["my-w1aw-x", "w1aw-x", "w1aw-123", "w1aw-7a", "a-w1aw-7"])
+def test_s1_hyphen_then_letter_or_longer_stays_a_longer_token(text: str) -> None:
+    assert not any("callsign" in x for x in localdraft.check_text("comment", text)), text
+
+
+@pytest.mark.parametrize("text", ["2001:db8::", "fd00:1234::", "see fe80:1::, ok", "net 2001:db8:abcd::/48"])
+def test_s2_ipv6_prefixes_are_flagged(text: str) -> None:
+    assert any("IP address" in x for x in localdraft.check_text("comment", text)), text
+
+
+@pytest.mark.parametrize("text", ["e::", "a::", "std::vector", "note::x", "fe80::", "12:30:45", "aa:bb:cc:dd:ee:ff"])
+def test_s2_one_hextet_prefixes_and_non_addresses_stay_unflagged(text: str) -> None:
+    assert not any("IP address" in x for x in localdraft.check_text("comment", text)), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "fe80::1" + "." * 60,
+        "2001:db8::1" + ":" * 50,
+        "fe80::1xyz",
+        "2001:db8::1g",
+        "2001:db8::a1xyz",
+        "fe80::1:abcdz",
+    ],
+)
+def test_s3_padding_and_trailing_word_characters_do_not_hide_an_address(text: str) -> None:
+    assert any("IP address" in x for x in localdraft.check_text("comment", text)), text
+
+
+@pytest.mark.parametrize("text", ["std::vector", "note::x", "a::b_c", "use fe80:: here"])
+def test_s3_scope_and_single_hextet_cases_stay_unflagged(text: str) -> None:
+    assert not any("IP address" in x for x in localdraft.check_text("comment", text)), text

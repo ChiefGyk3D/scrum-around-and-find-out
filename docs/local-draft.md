@@ -47,10 +47,16 @@ safo audit | safo-draft digest board-drift -
 - **IPv6.** A run of hex digits, colons and dots is tried as an address, also behind a label (`ipv6:`, `addr:`), with a
   `%zone`, before punctuation, and before trailing word characters (`fe80::1x`, `2001:db8::1_ab` are flagged). Skipped:
   the C++ style scope (`::` followed by an identifier that is not a hex group, `std::vector`, `note::x`), runs with
-  times and MAC addresses (`12:30:45`, `aa:bb:cc:dd:ee:ff` do not parse as addresses), and an address with
-  nothing after its `::` (`fe80::`).
+  times and MAC addresses (`12:30:45`, `aa:bb:cc:dd:ee:ff` do not parse as addresses), and a prefix with fewer than
+  two hextets before a trailing `::` (`fe80::`, `e::`). A prefix with two or more (`2001:db8::`, `fd00:1234::`) is
+  flagged. Trailing dots or colons used as padding are stripped before the length cap, so they do not hide an address
+  (`fe80::1` followed by 60 dots). When the `::` is followed by an identifier (the scope case), the hex-and-colon
+  prefix is still tried and is flagged only with two or more hextets before the `::` (`2001:db8::a1xyz`), so
+  `std::vector` and `a::b_c` pass.
 - **Callsign and grid heuristics, and the over-blocking tradeoff.** A callsign is flagged by shape (1-2 letters, one
-  digit, 1-3 letters) in any case with no cue word needed: `W1AW`, `w1aw` and `fn31pq`-style tokens are all blocked. A
+  digit, 1-3 letters) in any case with no cue word needed: `W1AW`, `w1aw` and `fn31pq`-style tokens are all blocked, also with an SSID suffix of a hyphen and one or two digits
+  (`W1AW-7`, `w1aw-15`). A hyphen followed by a letter or a third digit (`my-w1aw-x`, `w1aw-123`) is a longer
+  hyphenated token and is not matched; list false positives in the allow list. A
   4-character grid square (two letters A-R, two digits: `EM48`, `em48`) is flagged the same way, and so is the
   6-character form (`EM48ab`), and either form after `grid`, `locator` or `maidenhead`. The shape must stand alone: a
   match inside a longer alphanumeric, hyphenated or underscore token is ignored, so 40-hex commit hashes, UUIDs and

@@ -97,7 +97,9 @@ _TECH_TOKENS = {
 _CALL_SHAPE = r"[A-Z]{1,2}[0-9][A-Z]{1,3}"
 _EDGE_BEFORE = r"(?<![A-Za-z0-9_-])"  # not inside a longer alphanumeric, hyphenated or underscore token
 _EDGE_AFTER = r"(?![A-Za-z0-9_-])"
-_CALLSIGN = re.compile(rf"{_EDGE_BEFORE}{_CALL_SHAPE}{_EDGE_AFTER}", re.IGNORECASE)  # any case, no cue needed
+# any case, no cue needed; an optional APRS-style SSID (`-7`, `-15`) is part of the callsign. A hyphen followed by a
+# letter or a third digit still makes a longer token (`my-w1aw-x`), left to the allow list for false positives.
+_CALLSIGN = re.compile(rf"{_EDGE_BEFORE}{_CALL_SHAPE}(?:-\d{{1,2}})?{_EDGE_AFTER}", re.IGNORECASE)
 _CALLSIGN_CTX = re.compile(
     rf"\b(?:call\s*sign|call|de)\b(?:\s+is)?[\s:=]+({_CALL_SHAPE})\b", re.IGNORECASE
 )  # any case after a cue, even inside a hyphenated token
@@ -224,28 +226,44 @@ def _is_scope(text: str, run_start: int, run: str) -> bool:
     return (word[0].isalpha() or word[0] == "_") and any(c not in _HEXTET for c in word)
 
 
+def _hextets_before(cand: str, at: int) -> int:
+    parts = cand[:at].split(":")
+    return len(parts) if all(parts) else 0
+
+
 def _has_ipv6(text: str) -> bool:
     """Scan every maximal run of hex, colon and dot characters (and an optional %zone) for an IPv6 address.
 
     A leading label such as `ipv6:` or `addr:` is shed by also trying each suffix that starts after a colon. Trailing
-    word characters do not hide an address (`fe80::1x`). Only the C++ scope case is skipped, and an address with
-    nothing after its `::` (`e::`) is not flagged.
+    word characters do not hide an address (`fe80::1x`), and trailing dots or colons (padding) are stripped before the
+    length cap, so they do not either. A prefix that ends in `::` is flagged when it has at least two non-empty hextets
+    before the `::` (`2001:db8::`, `fd00:1234::`); one hextet (`e::`, `fe80::`) is not. A C++ style scope
+    (`std::vector`, `a::b_c`) is only flagged when the run before it holds two or more hextets before the `::`.
     """
     for match in _IPV6_RUN.finditer(text):
         run = match.group()
         if run.count(":") < 2:
             continue
         run = run.split("%", 1)[0]
-        if _is_scope(text, match.start(), run):
-            continue
-        starts = [0] + [i + 1 for i, ch in enumerate(run) if ch == ":"]
+        strict = _is_scope(text, match.start(), run)
+        lead = len(run) - len(run.lstrip("."))
+        end = len(run.rstrip(".:"))
+        has_prefix = run.startswith("::", end) and end > 0
+        starts = [lead] + [i + 1 for i, ch in enumerate(run) if ch == ":" and i + 1 >= lead]
         for start in starts:
-            if len(run) - start > _MAX_IPV6_CHARS:
+            if end - start > _MAX_IPV6_CHARS:
                 continue
-            token = run[start:].strip(".")
-            for cand in {token, token.rstrip(":")}:
-                if "::" in cand and not cand.split("::", 1)[1]:
+            cands = [run[start:end]]
+            if has_prefix:
+                cands.append(run[start : end + 2])
+            for cand in cands:
+                if not cand or cand.startswith(".") or cand.strip(":") == "":
                     continue
+                at = cand.find("::")
+                if at >= 0:
+                    after = cand[at + 2 :]
+                    if (not after or strict) and _hextets_before(cand, at) < 2:
+                        continue
                 try:
                     ipaddress.IPv6Address(cand)
                 except ValueError:
