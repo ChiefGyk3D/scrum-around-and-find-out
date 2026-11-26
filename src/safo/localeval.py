@@ -3,7 +3,7 @@
 
     safo-eval run --models qwen3.5:4b,gemma4:12b --tasks all --repeats 3 --out DIR [--calibrate N]
     safo-eval report --runs DIR/runs.jsonl --out DIR [--rescore]
-    safo-eval calibrate --runs DIR/runs.jsonl --n 30 --out DIR       # writes DIR/calibration.json to fill in
+    safo-eval calibrate --runs DIR/runs.jsonl --n 35 --out DIR       # writes DIR/calibration.json to fill in
     safo-eval calibrate --ingest DIR/calibration.json --out DIR      # reads the verdicts, writes the agreement file
 
 Scoring is code only (fact recall, forbidden hits, format, length); no model ever grades a model. Calls go through
@@ -62,11 +62,11 @@ INSTRUCTIONS: dict[str, str] = {
 PASS_RECALL = 0.8
 LOCAL_MIN = 0.9  # best model pass rate at or above this: local only
 CHECK_MIN = 0.6  # at or above this but below LOCAL_MIN: local draft, Claude checks
-CAL_SAMPLE_DEFAULT = 30  # passing outputs sampled per (task, model) cell for human or reviewer verdicts
-CAL_MIN_VERDICTS = 20  # fewer verdicts than this and the cell is not calibrated
+CAL_SAMPLE_DEFAULT = 35  # passing outputs sampled per (task, model) cell for human or reviewer verdicts
+CAL_MIN_VERDICTS = 35  # fewer verdicts than this and the cell is not calibrated
 CAL_MIN_LOWER = 0.9  # lower bound of the ok share needed for local-only
-# one-sided 95 percent: only the low side matters, and 30 of 30 ok clears 0.9 with it (1.96 gives 0.886)
-CAL_Z = 1.645
+# two-sided 95 percent, the same as the pass-rate gate: 35 of 35 ok gives about 0.901, 34 of 35 does not
+CAL_Z = 1.96
 CAL_FORMAT = "safo-eval-calibration-1"
 CAL_MAX_BYTES = 50_000_000
 MODEL_TIER = {"qwen3.5:4b": "local-qwen", "gemma4:12b": "local-gemma"}
@@ -589,7 +589,7 @@ def summarize(runs: Sequence[dict[str, Any]]) -> dict[tuple[str, str], dict[str,
 
 
 def agreement(ok: int, wrong: int) -> dict[str, Any]:
-    """Agreement of the verdicts for one cell: the ok share with its one-sided 95 percent Wilson interval."""
+    """Agreement of the verdicts for one cell: the ok share with its two-sided 95 percent Wilson interval."""
     n = ok + wrong
     lo, hi = wilson(ok, n, CAL_Z)
     return {"verdicts": n, "ok": ok, "wrong": wrong, "ok_share": ok / n if n else None, "ci_low": lo, "ci_high": hi}
@@ -746,8 +746,9 @@ def render_report(
         "## CALIBRATION",
         "",
         f"Per cell: none (no verdict), partial (under {CAL_MIN_VERDICTS}), done ({CAL_MIN_VERDICTS} or more). "
-        "Verdicts are human or reviewer ok/wrong calls on passing outputs; the ok share's lower bound is one-sided "
-        "95%. A pass means the facts are present and the shape is right, not that the answer is meaningful.",
+        "Verdicts are human or reviewer ok/wrong calls on passing outputs; the ok share's lower bound is the two-sided "
+        "95% Wilson bound. A pass means the facts are present and the shape is right, "
+        "not that the answer is meaningful.",
         "",
         "| task | model | status | verdicts | ok share | ok lower bound |",
         "|---|---|---|---|---|---|",

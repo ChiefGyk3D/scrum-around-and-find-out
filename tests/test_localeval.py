@@ -311,7 +311,7 @@ def test_tier_thresholds(rates: dict[str, float], tier: str) -> None:
     assert le.tier_for(stats, {m: CAL_OK for m in rates})[0] == tier
 
 
-CAL_OK = le.agreement(30, 0)  # a calibrated cell: 30 ok verdicts, 0 wrong
+CAL_OK = le.agreement(35, 0)  # a calibrated cell: 35 ok verdicts, 0 wrong
 
 
 def test_few_runs_cannot_qualify_on_luck() -> None:
@@ -929,32 +929,38 @@ def test_perfect_pass_rate_without_calibration_is_only_local_then_claude_check()
     assert "| pr-summary | qwen3.5:4b | 60 |" in le.render_report(runs) and "none" in le.render_report(runs)
 
 
-def test_thirty_ok_verdicts_unlock_local_only_and_twenty_ok_five_wrong_do_not() -> None:
+def test_thirty_five_ok_verdicts_unlock_local_only_and_nothing_weaker_does() -> None:
     runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
     cell = ("pr-summary", "qwen3.5:4b")
-    cal30 = le.ingest_verdicts(fill(le.calibration_file(runs, 30), 30, 0))
-    assert cal30[cell]["verdicts"] == 30 and cal30[cell]["ci_low"] >= le.CAL_MIN_LOWER
-    assert "| pr-summary | local-qwen |" in le.render_report(runs, cal30)
-    cal25 = le.ingest_verdicts(fill(le.calibration_file(runs, 25), 20, 5))
-    assert cal25[cell]["ok"] == 20 and cal25[cell]["wrong"] == 5 and cal25[cell]["ci_low"] < le.CAL_MIN_LOWER
-    assert "| pr-summary | local-then-claude-check |" in le.render_report(runs, cal25)
+    cal35 = le.ingest_verdicts(fill(le.calibration_file(runs, 35), 35, 0))
+    assert cal35[cell]["verdicts"] == 35 and cal35[cell]["ci_low"] >= le.CAL_MIN_LOWER
+    assert "| pr-summary | local-qwen |" in le.render_report(runs, cal35)
+    weaker = {"34 of 35 ok": (34, 1), "30 of 30 ok": (30, 0), "20 ok 5 wrong": (20, 5)}
+    for name, (ok, wrong) in weaker.items():
+        cal = le.ingest_verdicts(fill(le.calibration_file(runs, ok + wrong), ok, wrong))
+        assert cal[cell]["ok"] == ok and cal[cell]["wrong"] == wrong, name
+        assert not le.calibration_ok(cal[cell]), name
+        assert "| pr-summary | local-then-claude-check |" in le.render_report(runs, cal), name
 
 
-def test_calibration_needs_twenty_verdicts_even_when_all_ok() -> None:
+def test_calibration_bound_is_two_sided_and_needs_thirty_five_verdicts() -> None:
+    assert le.CAL_Z == 1.96 and le.CAL_MIN_VERDICTS == 35 and le.CAL_SAMPLE_DEFAULT == 35
+    assert round(le.agreement(35, 0)["ci_low"], 3) == 0.901
+    assert le.agreement(30, 0)["ci_low"] < le.CAL_MIN_LOWER
     runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
     cell = ("pr-summary", "qwen3.5:4b")
-    few = le.ingest_verdicts(fill(le.calibration_file(runs, 30), 19, 0))
-    assert few[cell]["verdicts"] == 19 and le.cal_status(few[cell]) == "partial"
+    few = le.ingest_verdicts(fill(le.calibration_file(runs, 35), 34, 0))
+    assert few[cell]["verdicts"] == 34 and le.cal_status(few[cell]) == "partial"
     assert not le.calibration_ok(few[cell])
     assert "| pr-summary | local-then-claude-check |" in le.render_report(runs, few)
     assert le.cal_status(None) == "none"
-    assert le.cal_status(le.ingest_verdicts(fill(le.calibration_file(runs, 30), 0, 0)).get(cell)) == "none"
-    assert le.cal_status(le.agreement(20, 5)) == "done"
+    assert le.cal_status(le.ingest_verdicts(fill(le.calibration_file(runs, 35), 0, 0)).get(cell)) == "none"
+    assert le.cal_status(le.agreement(30, 5)) == "done"
 
 
 def test_calibration_gate_does_not_lower_the_pass_rate_gate() -> None:
     runs = passing_runs("pr-summary", "qwen3.5:4b", 4)  # lower bound far below 0.9
-    cal = le.ingest_verdicts(fill(le.calibration_file(runs, 30), 4, 0))
+    cal = le.ingest_verdicts(fill(le.calibration_file(runs, 35), 4, 0))
     assert "| pr-summary | local-qwen |" not in le.render_report(runs, cal)
     stats = le.summarize(runs)[("pr-summary", "qwen3.5:4b")]
     assert le.tier_for({"qwen3.5:4b": stats}, {"qwen3.5:4b": CAL_OK})[0] != "local-qwen"
@@ -984,11 +990,11 @@ def test_cli_calibrate_sample_then_ingest_then_report(tmp_path: Path) -> None:
     runs_in = tmp_path / "runs.jsonl"
     runs_in.write_text("".join(json.dumps(r) + "\n" for r in runs), encoding="utf-8")
     out = tmp_path / "cal"
-    assert le.entry(["calibrate", "--runs", str(runs_in), "--out", str(out), "--n", "30"]) == 0
+    assert le.entry(["calibrate", "--runs", str(runs_in), "--out", str(out), "--n", "35"]) == 0
     sample = out / "calibration.json"
     doc = json.loads(sample.read_text())
-    assert len(doc["entries"]) == 30 and mode(sample) == 0o600 and mode(out) == 0o700
-    sample.write_text(json.dumps(fill(doc, 30, 0)), encoding="utf-8")
+    assert len(doc["entries"]) == 35 and mode(sample) == 0o600 and mode(out) == 0o700
+    sample.write_text(json.dumps(fill(doc, 35, 0)), encoding="utf-8")
     sample.chmod(0o600)
     done = tmp_path / "done"
     assert le.entry(["calibrate", "--ingest", str(sample), "--out", str(done)]) == 0

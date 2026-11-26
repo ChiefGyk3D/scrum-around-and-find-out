@@ -11,7 +11,7 @@ rules in [Routing](routing.md).
 safo-eval run --models qwen3.5:4b,gemma4:12b --tasks all --repeats 3 --out ./eval-out --calibrate 12
 safo-eval report --runs ./eval-out/runs.jsonl --out ./eval-out     # rebuild report.md from a JSONL
 safo-eval report --runs ./eval-out/runs.jsonl --out ./eval-out --rescore   # re-score stored outputs, no model call
-safo-eval calibrate --runs ./eval-out/runs.jsonl --n 30 --out ./eval-out/cal            # sample to judge by hand
+safo-eval calibrate --runs ./eval-out/runs.jsonl --n 35 --out ./eval-out/cal            # sample to judge by hand
 safo-eval calibrate --ingest ./eval-out/cal/calibration.json --out ./eval-out/cal         # store the verdicts
 safo-eval report --runs ./eval-out/runs.jsonl --out ./eval-out --calibration ./eval-out/cal/calibration-agreement.json
 ```
@@ -102,7 +102,7 @@ it can go local-only; in fact the routing rule now requires it for every cell (n
 
 A cell is one (task, model). The scorer pass rate alone can no longer route a cell to local-only:
 
-1. `safo-eval calibrate --runs runs.jsonl --out DIR --n 30` writes `DIR/calibration.json`: up to 30 PASSING outputs
+1. `safo-eval calibrate --runs runs.jsonl --out DIR --n 35` writes `DIR/calibration.json`: up to 35 PASSING outputs
    per cell (all of them when fewer pass), each with an `id` and an empty `verdict`.
 2. A person or a reviewer sets each `verdict` to exactly `ok` or `wrong` (an empty one means not judged yet).
 3. `safo-eval calibrate --ingest DIR/calibration.json --out DIR` reads the verdicts and stores the agreement per cell in
@@ -110,14 +110,14 @@ A cell is one (task, model). The scorer pass rate alone can no longer route a ce
    duplicate id or an unknown task is an error. Verdict and agreement files are read only when they are regular files
    you own with mode 0600 or 0400, never through a symlink; results are written 0600 in a 0700 directory.
 4. `safo-eval report ... --calibration DIR/calibration-agreement.json` applies the rule and shows a CALIBRATION table
-   with the status per cell: `none` (no verdict), `partial` (under 20), `done` (20 or more).
+   with the status per cell: `none` (no verdict), `partial` (under 35), `done` (35 or more).
 
 A cell reaches local-only only when both hold: (a) the 95 percent Wilson lower bound of the scorer pass rate is at
-least 0.9, and (b) there are at least 20 verdicts and the lower bound of the ok share is at least 0.9. Otherwise the
-best it can be is `local-then-claude-check`. Constants: `CAL_SAMPLE_DEFAULT` 30, `CAL_MIN_VERDICTS` 20,
-`CAL_MIN_LOWER` 0.9. The ok-share bound is one-sided (z = 1.645, `CAL_Z`), because only the low side matters for a
-"good enough" claim; with the two-sided 1.96 used for the pass rate, 30 of 30 ok gives 0.886 and would never clear 0.9
-(35 of 35 would). With the one-sided bound, 30 of 30 ok clears it and 29 of 30 does not; 20 ok and 5 wrong does not.
+least 0.9, and (b) there are at least 35 verdicts and the lower bound of the ok share is at least 0.9. Otherwise the
+best it can be is `local-then-claude-check`. Constants: `CAL_SAMPLE_DEFAULT` 35, `CAL_MIN_VERDICTS` 35,
+`CAL_MIN_LOWER` 0.9. The ok-share bound is the same two-sided 95 percent Wilson bound as the pass rate (z = 1.96,
+`CAL_Z`), so 35 of 35 ok gives about 0.901 and clears 0.9. 34 of 35 ok does not, 30 of 30 ok does not (0.886), and 20 ok
+with 5 wrong does not.
 
 ## Add a fixture
 
