@@ -1819,3 +1819,59 @@ def test_r13_nfkc_expansion_is_refused_before_the_scans() -> None:
     assert spent < 1.0, spent
     assert any(_LONG in x for x in localdraft.check_draft("comment", None, text)), title
     assert not any(_LONG in x for x in _why(chr(0xFDFA) * 100))  # a short expanding text is still checked
+
+
+# round 14: a draft that could not be fully checked is withheld, and the deny match still runs on the bounded source
+_WITHHELD = "could not be fully checked"
+_BIG = chr(0xFDFA) * 4445  # 80010 characters after NFKC, under the 20000-character source cap
+
+
+def _run_big(env: Env, body: str, title: str = "T", deny: str = "ZebraEmployer") -> tuple[int, str]:
+    env.env["SAFO_DRAFT_DENY"] = deny
+    (env.dir / "llm.reply").write_text(body + "\n\nPart of epic #445")
+    code, out, _ = env.run(["issue", "--repo", "o/r", "--title", title, "--yes", "x"])
+    assert env.read("gh.args") == ""
+    return code, out
+
+
+def test_r14_expanding_draft_with_deny_value_is_withheld(env: Env) -> None:
+    code, out = _run_big(env, _BIG + " ZebraEmployer")
+    assert code == localdraft.EXIT_REFUSED
+    assert _WITHHELD in out and "matched private deny entry SAFO_DRAFT_DENY#1" in out
+    assert "ZebraEmployer" not in out and chr(0xFDFA) not in out and "Part of epic" not in out
+    assert "(line" not in out
+
+
+def test_r14_expanding_draft_without_deny_hit_is_withheld(env: Env) -> None:
+    code, out = _run_big(env, _BIG + " harmless words")
+    assert code == localdraft.EXIT_REFUSED
+    assert _WITHHELD in out and _LONG in out
+    assert "harmless" not in out and chr(0xFDFA) not in out and "(line" not in out
+
+
+def test_r14_deny_value_split_across_title_and_body_is_refused_silently(env: Env) -> None:
+    code, out = _run_big(env, _BIG + " Employer", title="Zebra")
+    assert code == localdraft.EXIT_REFUSED
+    assert (
+        _WITHHELD in out and "title and body combined" in out and "matched private deny entry SAFO_DRAFT_DENY#1" in out
+    )
+    assert "Zebra" not in out and "Employer" not in out and chr(0xFDFA) not in out
+
+
+def test_r14_long_title_is_withheld() -> None:
+    title = "SecretTitleText " + "a" * 400
+    why = localdraft.check_draft("issue", title, "ok\n\nPart of epic #1", deny=["SecretTitleText"])
+    assert any("too long to check safely" in x for x in why) and any(_DENY in x for x in why)
+    assert any("too long to check safely" in x for x in localdraft.check_title(title))
+
+
+def test_r14_overlong_text_still_names_the_deny_entry() -> None:
+    why = localdraft.check_text("comment", "a" * 20001 + " ZebraEmployer", deny=["ZebraEmployer"])
+    assert any(_DENY in x and "#1" in x for x in why) and any("too long to check safely" in x for x in why)
+
+
+def test_r14_normal_refusal_still_prints_the_draft(env: Env) -> None:
+    env.env["SAFO_DRAFT_DENY"] = "ZebraEmployer"
+    (env.dir / "llm.reply").write_text("call KB1ABC now\n\nPart of epic #445")
+    code, out, _ = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_REFUSED and "call KB1ABC now" in out and _WITHHELD not in out

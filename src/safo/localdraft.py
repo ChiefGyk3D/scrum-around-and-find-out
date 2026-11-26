@@ -141,6 +141,7 @@ _VARIATION_SELECTOR = chr(0xFE0F)
 _TOUCH = "a look-alike symbol touches a letter or digit (line {n}): write the letter or leave a space"
 MAX_EXPANDED_CHARS = 4 * MAX_CHECK_CHARS  # NFKC can expand one character into 18; a longer form is refused unchecked
 _TOO_LONG = f"draft too long to check safely (limit {MAX_CHECK_CHARS} characters, or {MAX_EXPANDED_CHARS} after NFKC)"
+_UNCHECKED = "too long to check safely"
 _NO_REDUCE_CONFIG = "a deny value holds characters that cannot be reduced to ASCII"
 _NO_DENY_NOTE = "safo-draft: no private deny file configured: only heuristics are active"
 _EMPTY_DENY_NOTE = "safo-draft: deny file has no entries: only heuristics are active"
@@ -815,6 +816,27 @@ def _entries(deny: Sequence[str | DenyEntry]) -> list[DenyEntry]:
     return [x for x in rows if x.squashed]
 
 
+def _bounded_squash(text: str) -> tuple[str, str]:
+    """Two squashes that never expand: the ASCII letters and digits of the raw source, and the skeleton squash only
+    when the source is within the cap and its NFKC form stays within the expansion cap (else the raw one again)."""
+    raw = re.sub(r"[^a-z0-9]", "", "".join(c for c in text if c.isascii()).lower())
+    if len(text) > MAX_CHECK_CHARS or _expands(text):
+        return raw, raw
+    return raw, _squash(text)
+
+
+def _bounded_deny_reasons(parts: Sequence[str], deny: Sequence[str | DenyEntry]) -> list[str]:
+    """Deny matching for a text that is too long to check fully: only the bounded source forms are searched, so a
+    private value written in plain ASCII is still named (the draft is withheld either way)."""
+    pairs = [_bounded_squash(p) for p in parts]
+    forms = ["".join(x[0] for x in pairs), "".join(x[1] for x in pairs)]
+    return [
+        f"{_DENY_MARK} {e.label}"
+        for e in _entries(deny)
+        if any(v and v in f for v in (e.squashed, e.dropped) for f in forms)
+    ]
+
+
 def _deny_reasons(parts: Sequence[str], deny: Sequence[str | DenyEntry]) -> list[str]:
     """Reasons for each deny entry found in the squashed form of the parts joined with nothing between them.
 
@@ -903,16 +925,21 @@ def _generic_checks(text: str, allow: Sequence[str]) -> list[str]:
 
 def check_title(title: str, deny: Sequence[str | DenyEntry] = (), allow: Sequence[str] = ()) -> list[str]:
     if len(title) > MAX_TITLE_CHARS:
-        return [f"title: title too long to check safely (limit {MAX_TITLE_CHARS} characters)"]
+        return [f"title: title too long to check safely (limit {MAX_TITLE_CHARS} characters)"] + [
+            f"title: {x}" for x in _bounded_deny_reasons([title], deny)
+        ]
     return [f"title: {x}" for x in _generic_checks(title, allow) + _deny_reasons([title], deny)]
 
 
 def check_text(kind: str, text: str, deny: Sequence[str | DenyEntry] = (), allow: Sequence[str] = ()) -> list[str]:
     """The reasons a draft may not be filed. An empty list means it passed."""
     if len(text) > MAX_CHECK_CHARS:
-        return [f"text too long to check safely (limit {MAX_CHECK_CHARS} characters)"]
+        return [
+            f"text too long to check safely (limit {MAX_CHECK_CHARS} characters)",
+            *_bounded_deny_reasons([text], deny),
+        ]
     if _expands(text):
-        return [_TOO_LONG]
+        return [_TOO_LONG, *_bounded_deny_reasons([text], deny)]
     why = _generic_checks(text, allow) + _deny_reasons([text], deny)
     if kind == "pr":
         lines = [x for x in text.splitlines() if x.strip()]
@@ -941,7 +968,11 @@ def check_draft(
         return why
     why += check_title(title, deny, allow)
     if len(title) > MAX_TITLE_CHARS or len(body) > MAX_CHECK_CHARS or _expands(body):
-        return why  # the combined checks would run on an unbounded text
+        # the combined checks would run on an unbounded text; only the bounded deny match runs
+        seen = {_reason_class(x.removeprefix("title: ")) for x in why}
+        return why + [
+            f"title and body combined: {x}" for x in _bounded_deny_reasons([title, body], deny) if x not in seen
+        ]
     seen = {_reason_class(x.removeprefix("title: ")) for x in why}
     combined = [x for joiner in ("\n", "") for x in _generic_checks(f"{title}{joiner}{body}", allow)]
     for x in combined + _deny_reasons([title, body], deny):
@@ -1144,7 +1175,11 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
     if kind == "issue" and args.epic and not _EPIC.search(body):
         body = f"{body.rstrip()}\n\nPart of epic #{args.epic}"
     why = check_draft(kind, None if kind == "comment" else args.title, body, deny, allow)
-    if any(_DENY_MARK in x for x in why):
+    unchecked = any(_UNCHECKED in x for x in why)
+    if unchecked:  # fail closed: a draft that could not be fully checked is never echoed, nor any line number
+        ctx.out.write(f"--- draft {kind} withheld: it could not be fully checked ---\n")
+        why = [_reason_class(x) for x in why if _UNCHECKED in x or _DENY_MARK in x]
+    elif any(_DENY_MARK in x for x in why):
         ctx.out.write(f"--- draft {kind} withheld: it matched a private deny entry ---\n")  # never echo the value
     else:
         ctx.out.write(f"--- draft {kind} ---\n{body}\n--- end draft ---\n")
