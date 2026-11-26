@@ -1542,7 +1542,8 @@ def test_r11_removed_x_marks_and_letterlike_signs_refused() -> None:
 def test_r11_multiplication_sign_and_cross_mark_are_an_x() -> None:
     m, cross = chr(0xD7), chr(0x274C)
     assert any(_DENY in x for x in _why("Acme" + m + "Labs", deny=["AcmeXLabs"]))
-    assert _why("3" + m + "4") == []
+    assert any(_TOUCH in x for x in _why("3" + m + "4"))  # round 13: touching a digit is refused
+    assert _why("3 " + m + " 4") == []
     assert any(_DENY in x for x in _why("AcmeXLabs", deny=["Acme" + m + "Labs"]))
     assert any(_DENY in x for x in _why("Acme" + m + "Labs", deny=["Acme" + m + "Labs"]))
     assert any(_DENY in x for x in _why("Acme" + cross + "labs", deny=["Acmexlabs"]))
@@ -1557,6 +1558,7 @@ def test_r11_colored_circles_are_an_o() -> None:
         assert any(_DENY in x for x in _why("Foo", deny=["F" + c + c])), hex(n)
         assert any(_DENY in x for x in _why("Fo" + c + " bar", deny=["Foobar"])), hex(n)
         assert _why("status " + c + " ok") == []
+        assert any(_TOUCH in x for x in _why("Fo" + c + " bar"))
     assert any(_DENY in x for x in _why("Fo" + chr(0x1F534), deny=["Foo"]))
 
 
@@ -1715,4 +1717,105 @@ def test_r12_lookalike_symbols_match_both_readings() -> None:
     assert any(_DENY in x for x in _why("Acme" + cross + "labs", deny=["Acme" + cross + "labs"]))
     both = localdraft.check_draft("comment", "Acme" + m, "Labs", deny=["AcmeLabs"])
     assert any(_DENY in x for x in both), both
-    assert _why("Acme Co" + m + "ffee", deny=["Acmetea"]) == []
+    assert not any(_DENY in x for x in _why("Acme Co" + m + "ffee", deny=["Acmetea"]))
+
+
+# round 13: look-alike symbols touching a letter or digit are refused, and every heuristic runs on all readings
+_TOUCH = "a look-alike symbol touches a letter or digit"
+_LONG = "draft too long to check safely"
+_SELECTOR = chr(0xFE0F)
+
+
+def _lookalike_cases() -> list[str]:
+    m, cross, red = chr(0xD7), chr(0x274C), chr(0x1F534)
+    return [
+        "x1" + m + "x",
+        "FN31p" + m,
+        "F" + red + "31pr",
+        "box.l" + red + "cal",
+        "serial AB" + cross + "1234",
+        "3" + m + "4",
+        m + "a",
+    ]
+
+
+@pytest.mark.parametrize("selector", ["", _SELECTOR])
+def test_r13_touching_lookalikes_are_refused(selector: str) -> None:
+    cross, red = chr(0x274C), chr(0x1F534)
+    for text in _lookalike_cases():
+        for sym in (cross, red):
+            if sym in text:
+                text = text.replace(sym, sym + selector)
+        assert any(_TOUCH in x for x in _why(text)), ascii(text)
+        assert any(_TOUCH in x for x in localdraft.check_title(text)), ascii(text)
+    for n in (0xD7, 0x274C, 0x1F534, 0x1F7E2, 0x1F7E1):
+        c = chr(n) + (selector if n != 0xD7 else "")
+        for text in ("a" + c, c + "a", "7" + c, c + "7", "Caf" + chr(0xE9) + c):
+            assert any(_TOUCH in x for x in _why(text)), (hex(n), ascii(text))
+    why = _why("fine\nsecond " + chr(0xD7) + "a")
+    assert any(_TOUCH in x and "(line 2)" in x for x in why), why
+
+
+def test_r13_standalone_lookalikes_pass() -> None:
+    m, cross, red, green, yellow = chr(0xD7), chr(0x274C), chr(0x1F534), chr(0x1F7E2), chr(0x1F7E1)
+    for text in (
+        "done " + cross,
+        cross + " failed",
+        cross + _SELECTOR + " failed",
+        "- " + red + " down\n- " + green + " up\n- " + yellow + " slow",
+        "status: " + red + ", then " + green + ".",
+        "3 " + m + " 4",
+        "(" + red + ")",
+        "a " + cross + _SELECTOR + ", b",
+    ):
+        assert _why(text) == [], ascii(text)
+
+
+def test_r13_selector_forms_are_judged_like_plain_forms() -> None:
+    red = chr(0x1F534)
+    assert _why("a" + red + _SELECTOR) == _why("a" + red) != []
+
+
+def test_r13_letter_reading_alone_catches_a_heuristic_hit() -> None:
+    m = chr(0xD7)
+    text = m + ".lan"  # letter reading `x.lan`; the dropped reading `.lan` and the raw text hold no host
+    assert localdraft._skeleton(text, False)[0] == ".lan"
+    assert "hostname found" in _why(text)
+    assert _why(".lan") == []
+
+
+def test_r13_dropped_reading_alone_catches_a_heuristic_hit() -> None:
+    m = chr(0xD7)
+    text = (
+        "serial " + m + " ABC1234"
+    )  # dropped reading `serial  ABC1234`; the letter reading `serial x ABC1234` has none
+    assert localdraft._skeleton(text)[0] == "serial x ABC1234"
+    assert "serial number found" in _why(text)
+    assert "serial number found" not in _why("serial x ABC1234")
+
+
+def test_r13_skeleton_keeps_ascii_structure() -> None:
+    m = chr(0xD7)
+    for letters, want in ((True, "box.x lan:\n7, x"), (False, "box. lan:\n7, ")):
+        assert localdraft._skeleton("box." + m + " lan:\n7, " + m, letters)[0] == want
+
+
+def test_r13_deny_matching_still_works_for_the_repro_inputs() -> None:
+    m, red = chr(0xD7), chr(0x1F534)
+    assert any(_DENY in x for x in _why("Acme" + m + "Labs", deny=["AcmexLabs"]))
+    assert any(_DENY in x for x in _why("Acme" + m + "Labs", deny=["AcmeLabs"]))
+    assert any(_DENY in x for x in _why("Fo" + red + "o", deny=["Foo"]))
+
+
+def test_r13_nfkc_expansion_is_refused_before_the_scans() -> None:
+    import time
+
+    text = chr(0xFDFA) * 20000
+    start = time.process_time()
+    why = _why(text)
+    title = localdraft.check_draft("issue", "T", text + "\n\nPart of epic #1")
+    spent = time.process_time() - start
+    assert why == [x for x in why if _LONG in x] and why, why
+    assert spent < 1.0, spent
+    assert any(_LONG in x for x in localdraft.check_draft("comment", None, text)), title
+    assert not any(_LONG in x for x in _why(chr(0xFDFA) * 100))  # a short expanding text is still checked

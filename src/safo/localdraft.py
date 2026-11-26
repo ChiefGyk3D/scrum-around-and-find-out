@@ -138,6 +138,9 @@ _UNUSUAL = (
     "combining character)"
 )
 _VARIATION_SELECTOR = chr(0xFE0F)
+_TOUCH = "a look-alike symbol touches a letter or digit (line {n}): write the letter or leave a space"
+MAX_EXPANDED_CHARS = 4 * MAX_CHECK_CHARS  # NFKC can expand one character into 18; a longer form is refused unchecked
+_TOO_LONG = f"draft too long to check safely (limit {MAX_CHECK_CHARS} characters, or {MAX_EXPANDED_CHARS} after NFKC)"
 _NO_REDUCE_CONFIG = "a deny value holds characters that cannot be reduced to ASCII"
 _NO_DENY_NOTE = "safo-draft: no private deny file configured: only heuristics are active"
 _EMPTY_DENY_NOTE = "safo-draft: deny file has no entries: only heuristics are active"
@@ -461,6 +464,30 @@ def _skeleton(text: str, letters: bool = True) -> tuple[str, bool]:
         elif not _allowed_symbol(c):
             reducible = False
     return "".join(out), reducible
+
+
+def _ascii_alnum(c: str) -> bool:
+    """Whether a character is, or reduces to, an ASCII letter or digit (so `é` counts as an `e`)."""
+    if c.isascii():
+        return c.isalnum()
+    return any(x.isascii() and x.isalnum() for x in unicodedata.normalize("NFKD", c))
+
+
+def _touch_line(text: str) -> int:
+    """Line of the first look-alike symbol that touches a letter or digit on either side, or 0 for none. A symbol
+    that touches one is read two ways (`x` or nothing) and so cannot be told from a letter in a token."""
+    plain = _strip_selector(text)
+    for i, c in enumerate(plain):
+        if c in _LOOKS_LIKE and (
+            (i > 0 and _ascii_alnum(plain[i - 1])) or (i + 1 < len(plain) and _ascii_alnum(plain[i + 1]))
+        ):
+            return _line_at(plain, i)
+    return 0
+
+
+def _expands(text: str) -> bool:
+    """Whether the NFKC form of a text is longer than the checks may scan."""
+    return len(unicodedata.normalize("NFKC", text)) > MAX_EXPANDED_CHARS
 
 
 def _squash(text: str, letters: bool = True) -> str:
@@ -852,11 +879,25 @@ def _single_checks(text: str, allow: Sequence[str], charset: bool) -> list[str]:
 
 
 def _generic_checks(text: str, allow: Sequence[str]) -> list[str]:
-    """Checks for any text that gets published. Every check runs on the raw text and on its canonical form."""
+    """Checks for any text that gets published. Every heuristic runs on four texts: the raw text, its canonical form,
+    and the ASCII skeleton of the canonical form read two ways (a look-alike symbol as a letter, and dropped). A reason
+    is reported once by class."""
     why = _single_checks(text, allow, True)
     canon = canonicalize(text)
-    if canon != text:
-        why += [x for x in _single_checks(canon, allow, False) if x not in why]
+    if n := _touch_line(canon):
+        why.append(_TOUCH.format(n=n))
+    seen = {_reason_class(x) for x in why}
+    others = [canon] if canon != text else []
+    bare = canon.replace(PR_FOOTER, "")  # the exact footer is exempt; its emoji would not survive the skeleton
+    for letters in (True, False):
+        form = _skeleton(bare, letters)[0]
+        if form not in (text, *others):  # a text already scanned is not scanned again
+            others.append(form)
+    for other in others:
+        for x in _single_checks(other, allow, False):
+            if (cls := _reason_class(x)) not in seen:
+                seen.add(cls)
+                why.append(x)
     return why
 
 
@@ -870,6 +911,8 @@ def check_text(kind: str, text: str, deny: Sequence[str | DenyEntry] = (), allow
     """The reasons a draft may not be filed. An empty list means it passed."""
     if len(text) > MAX_CHECK_CHARS:
         return [f"text too long to check safely (limit {MAX_CHECK_CHARS} characters)"]
+    if _expands(text):
+        return [_TOO_LONG]
     why = _generic_checks(text, allow) + _deny_reasons([text], deny)
     if kind == "pr":
         lines = [x for x in text.splitlines() if x.strip()]
@@ -897,7 +940,7 @@ def check_draft(
     if title is None:
         return why
     why += check_title(title, deny, allow)
-    if len(title) > MAX_TITLE_CHARS or len(body) > MAX_CHECK_CHARS:
+    if len(title) > MAX_TITLE_CHARS or len(body) > MAX_CHECK_CHARS or _expands(body):
         return why  # the combined checks would run on an unbounded text
     seen = {_reason_class(x.removeprefix("title: ")) for x in why}
     combined = [x for joiner in ("\n", "") for x in _generic_checks(f"{title}{joiner}{body}", allow)]
