@@ -21,11 +21,13 @@ if [ -t 0 ]; then echo TTY >> "$SHIM_DIR/llm.stdin"; else cat >> "$SHIM_DIR/llm.
 n=$(cat "$SHIM_DIR/llm.count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$SHIM_DIR/llm.count"
 if [ -f "$SHIM_DIR/llm.busy" ] && [ "$n" -le "$(cat "$SHIM_DIR/llm.busy")" ]; then echo "busy" >&2; exit 75; fi
 if [ -f "$SHIM_DIR/llm.fail" ]; then echo "connection refused" >&2; exit 7; fi
+if [ -f "$SHIM_DIR/llm.sleep" ]; then exec sleep 5; fi
 cat "$SHIM_DIR/llm.reply"
 """
 GH_SHIM = """#!/usr/bin/env bash
 echo "$@" >> "$SHIM_DIR/gh.args"
 cat >> "$SHIM_DIR/gh.stdin"
+if [ -f "$SHIM_DIR/gh.sleep" ]; then exec sleep 5; fi
 echo "https://github.com/o/r/issues/9"
 """
 
@@ -101,7 +103,7 @@ def test_model_choice_short_vs_long(env: Env) -> None:
 def test_interactive_decline_does_not_file(env: Env) -> None:
     (env.dir / "llm.reply").write_text("Body\n\nPart of epic #445")
     code, out, _ = env.run(["issue", "--repo", "o/r", "--title", "T", "x"], stdin="n\n")
-    assert code == 1
+    assert code == localdraft.EXIT_DECLINED
     assert "Body" in out
     assert env.read("gh.args") == ""
 
@@ -313,3 +315,186 @@ def test_report_counts_per_week(env: Env) -> None:
     assert "2026-W47" in out and "2026-W48" in out
     line47 = next(x for x in out.splitlines() if "2026-W47" in x)
     assert "2" in line47
+
+
+EPIC = "\n\nPart of epic #445"
+
+
+# finding 1: timeouts
+def test_llm_local_timeout_has_own_code_and_message(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(localdraft, "LLM_TIMEOUT", 1)
+    (env.dir / "llm.sleep").write_text("1")
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_TIMEOUT != localdraft.EXIT_REFUSED
+    assert "timed out" in err and "NOT verified" in err and "Twingate" in err
+    assert env.metrics()[-1]["exit"] == localdraft.EXIT_TIMEOUT
+    assert env.read("gh.args") == ""
+
+
+def test_gh_timeout_says_state_unknown(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(localdraft, "GH_TIMEOUT", 1)
+    (env.dir / "gh.sleep").write_text("1")
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_TIMEOUT
+    assert "unknown" in err and "check with gh" in err
+    assert env.metrics()[-1]["exit"] == localdraft.EXIT_TIMEOUT
+
+
+# finding 2: facts decoding
+def test_facts_with_invalid_utf8_do_not_crash(env: Env) -> None:
+    facts = env.dir / "facts.bin"
+    facts.write_bytes(b"ok " + bytes([0xFF, 0xFE]) + b" tail")
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "--facts", str(facts)])
+    assert code == 0, err
+    assert "tail" in env.read("llm.args")
+
+
+# finding 3: byte cap
+def test_facts_cap_counts_bytes_and_refuses_before_llm_local(env: Env) -> None:
+    facts = env.dir / "facts.txt"
+    facts.write_text(chr(0xE9) * 100_000)  # 200000 bytes in UTF-8
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "--facts", str(facts)])
+    assert code == localdraft.EXIT_ERROR
+    assert "too large" in err and "NOT verified" not in err
+    assert env.read("llm.count") == ""
+    assert env.read("gh.args") == ""
+
+
+def test_facts_cap_does_not_refuse_small_multibyte(env: Env) -> None:
+    facts = env.dir / "facts.txt"
+    facts.write_text(chr(0xE9) * 10_000)
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "--facts", str(facts)])
+    assert code == 0, err
+
+
+# finding 4: title checks
+def test_title_is_checked_even_with_yes(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("Clean body" + EPIC)
+    title = f"de W1AW at 10.0.0.5 {chr(0x2014)} now"
+    code, out, err = env.run(["issue", "--repo", "o/r", "--title", title, "--yes", "x"])
+    assert code == localdraft.EXIT_REFUSED
+    text = out + err
+    assert "title" in text and "callsign" in text and "IP address" in text and "em dash" in text
+    assert env.read("gh.args") == ""
+    code, _, _ = env.run(["issue", "--repo", "o/r", "--title", "Clean title", "--yes", "x"])
+    assert code == 0
+
+
+def test_pr_title_is_checked(env: Env) -> None:
+    code, out, _ = env.run(["pr", "--repo", "o/r", "--title", "see box01.lan", "--yes", "x"])
+    assert code == localdraft.EXIT_REFUSED and "title" in out and env.read("gh.args") == ""
+
+
+# finding 5: em dash variants
+@pytest.mark.parametrize("cp", [0x2014, 0xFE58, 0xFE31, 0x2E3A, 0x2E3B])
+def test_em_dash_variants_blocked(cp: int) -> None:
+    assert any("em dash" in x for x in localdraft.check_text("comment", f"a {chr(cp)} b"))
+
+
+def test_en_dash_and_hyphen_are_not_em_dashes() -> None:
+    assert localdraft.check_text("comment", f"a {chr(0x2013)} b - c") == []
+
+
+# finding 6: heuristics
+@pytest.mark.parametrize(
+    "text,reason",
+    [
+        ("de KD2ABC here", "callsign"),
+        ("de VK3AB here", "callsign"),
+        ("my call is g4xyz ok", "callsign"),
+        ("callsign: kd2abc", "callsign"),
+        ("locator em48 is mine", "grid square"),
+        ("grid em48ab", "grid square"),
+        ("grid: Fn31PQ", "grid square"),
+        ("at EM48ab today", "grid square"),
+        ("at em48AB today", "grid square"),
+        ("host fe80::1 up", "IP address"),
+        ("addr 2001:db8:85a3::8a2e:370:7334 x", "IP address"),
+        ("see [::1]:8080", "IP address"),
+        ("SN: ABC12345", "serial"),
+        ("sn ABC12345", "serial"),
+        ("serial ABC12345", "serial"),
+        ("claude.ai/code/session_abc", "session URL"),
+        ("www.claude.ai/chat/abc", "session URL"),
+    ],
+)
+def test_tightened_heuristics(text: str, reason: str) -> None:
+    assert any(reason in x for x in localdraft.check_text("comment", text)), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "N0CALL and N0TST and K1ABC",
+        "grid FN31pr and fn31PR",
+        "the K8S cluster, P2P and E2E",
+        "at 12:30:45 on std::vector, note::x",
+        "the serial numbers are listed",
+        "see claude.ai for docs",
+        "version 1.2.3 build 4567",
+    ],
+)
+def test_tightened_heuristics_do_not_overblock_these(text: str) -> None:
+    assert localdraft.check_text("comment", text) == [], text
+
+
+def test_allow_list_passes_a_specific_token(env: Env) -> None:
+    assert localdraft.check_text("comment", "see B2X1", allow=["B2X1"]) == []
+    assert localdraft.check_text("comment", "see W1AW") != []
+    assert localdraft.check_text("comment", "see W1AW", allow=["w1aw"]) == []
+    assert localdraft.check_text("comment", "de W1AW", allow=["KD2ABC"]) != []
+    env.env["SAFO_DRAFT_ALLOW"] = "W1AW"
+    (env.dir / "llm.reply").write_text("de W1AW")
+    code, _, _ = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == 0
+
+
+# finding 7: footer variant
+def test_pr_footer_variant_is_replaced(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("Body\n\n🤖 Generated with Claude Code (variant)")
+    code, _, _ = env.run(["pr", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == 0
+    body = env.read("gh.stdin")
+    assert body.rstrip("\n").endswith(FOOTER)
+    assert body.count("Generated with") == 1 and "variant" not in body
+
+
+# finding 8: metrics file mode
+def test_existing_metrics_file_is_tightened(env: Env) -> None:
+    directory = env.state / "safo"
+    directory.mkdir(parents=True)
+    directory.chmod(0o777)
+    path = directory / "local-share.jsonl"
+    path.write_text("")
+    path.chmod(0o666)
+    env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert len(env.metrics()) == 1
+
+
+# finding 9: exit codes
+def test_exit_codes_are_distinct_and_documented() -> None:
+    codes = {
+        localdraft.EXIT_OK,
+        localdraft.EXIT_REFUSED,
+        localdraft.EXIT_ERROR,
+        localdraft.EXIT_DECLINED,
+        localdraft.EXIT_TIMEOUT,
+        localdraft.EXIT_INTERNAL,
+        localdraft.EXIT_BUSY,
+    }
+    assert len(codes) == 7
+    text = localdraft.parser().format_help().lower()
+    for name in ("declined", "refused", "timeout", "unexpected"):
+        assert name in text
+
+
+def test_unexpected_exception_gets_own_code(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: object, **_k: object) -> str:
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(localdraft, "call_local", boom)
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_INTERNAL and "kaboom" in err
+    assert env.metrics()[-1]["exit"] == localdraft.EXIT_INTERNAL

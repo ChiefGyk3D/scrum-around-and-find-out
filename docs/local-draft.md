@@ -27,28 +27,57 @@ safo audit | safo-draft digest board-drift -
 
 - **Models.** `qwen3.5:4b` for short input, `gemma4:12b` when the prompt and facts exceed 600 characters; `--model`
   overrides. `llm-local` is always called with stdin from /dev/null, because it hangs on an open stdin.
-- **Checks before filing** (a failing draft is printed with the reasons and never filed, even with `--yes`): no em
-  dash, no IP address or `.lan`/`.local`/`.internal` style hostname, no serial number, no amateur radio callsign or
-  grid square (`N0CALL`, `N0TST`, `FN31pr` pass), no claude.ai URL or `Claude-Session:` trailer, no word from
-  `SAFO_DRAFT_DENY` (comma separated; or one per line in the file named by `SAFO_DRAFT_DENY_FILE`). The employer name
-  is configured there and is not written in this repository.
+- **Checks before filing** (a failing draft is printed with the reasons and never filed, even with `--yes`). The
+  same checks run on the body and on `--title` (a title failure is named `title: ...`): no em dash (U+2014 and the
+  look-alikes U+FE58, U+FE31, U+2E3A, U+2E3B; the horizontal bar U+2015 is not blocked), no IPv4 or IPv6 address, no
+  `.lan`/`.local`/`.internal` style hostname, no serial number (`serial`, `serial number`, `s/n`, `SN` followed by a
+  value of 6 or more characters with a digit), no claude.ai URL (with or without a scheme) or `Claude-Session:`
+  trailer, no word from `SAFO_DRAFT_DENY` (comma separated; or one per line in the file named by
+  `SAFO_DRAFT_DENY_FILE`). The employer name and private hostnames are configured there, never in this repository.
+- **Callsign and grid heuristics, and their limits.** A callsign is flagged by shape: 1-2 letters, one digit, 1-3
+  letters, in upper case anywhere, or in any case after `call`, `callsign` or `de`. A grid square is flagged as 4 or 6
+  characters after `grid`, `grid square`, `locator` or `maidenhead`, or as a standalone 6-character form, in any case.
+  The owner's callsign must never be published, so over-blocking is the safe side, and false positives are an accepted
+  tradeoff (an upper-case token such as `A1B` is flagged). Passing tokens: the placeholders `N0CALL`, `N0TST`, `K1ABC`,
+  `FN31pr`, the technical tokens `K8S`, `P2P`, `B2B`, `E2E`, `A2A`, `M2M`, `H2O`, and anything listed (comma
+  separated, case-insensitive) in `SAFO_DRAFT_ALLOW` or one per line in `SAFO_DRAFT_ALLOW_FILE`. Not caught: a callsign
+  written in lower case with no cue, a 4-character grid with no cue, a hostname that has no private suffix, an address
+  written in words, an obfuscated token. Hostnames beyond the suffix list are config-driven through
+  `SAFO_DRAFT_DENY`, not guessed.
 - **Footers.** A pull request body must end with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`; the
-  wrapper appends it when the model left it out. An issue needs an `Epic:` or `Part of epic #N` line; `--epic N`
+  wrapper appends it when the model left it out, and replaces a footer variant (a last line with "Generated with" and
+  "Claude Code") rather than keeping it. An issue needs an `Epic:` or `Part of epic #N` line; `--epic N`
   adds it when missing.
 - **Digests.** Failure lines (or audit drift lines) are normalized, grouped and counted in code. Only the grouped lines
   go to the model, for a five-line summary. With no failure lines the model is not called.
 - **Busy queue.** Exit 75 from `llm-local` is retried (each call passes `--wait 60`), with 5 s and 10 s and 20 s
   backoff, four tries in all, then exit 75.
+- **Size and timeouts.** The whole prompt is capped at 100000 encoded bytes (the kernel allows 131072 per argument). A
+  larger input is refused before `llm-local` is called, exit 2, with a message saying it is a local input error and
+  nothing was sent; it is not truncated. `--facts` is decoded as UTF-8 with replacement. A timeout of `llm-local`
+  (900 s) exits 11, with the Twingate/server NOT verified line. A timeout of `gh` (120 s) exits 11 and says the filing
+  state is unknown: check with `gh` before retrying.
 - **Any other failure** exits non-zero, prints the exact failure, and states that Twingate and the local server were NOT
   verified. There is no fallback to a Claude model; the decision to use one is the owner's.
 
 ## Metrics
 
 Every call appends one JSON line to `~/.local/state/safo/local-share.jsonl` (`$XDG_STATE_HOME/safo/`):
-`ts`, `subcommand`, `model`, `exit`, `chars_in`, `chars_out`. No content is stored. `safo-draft --report` prints calls
+`ts`, `subcommand`, `model`, `exit`, `chars_in`, `chars_out`. No content is stored. An existing file is set to mode
+0600 and the state directory to 0700 (when owned by you) on every write. `safo-draft --report` prints calls
 and failures per ISO week, per subcommand.
 
 ## Exit codes
 
-0 done, 1 refused (failed a check, or not confirmed), 2 error, 75 local queue still busy; any other code is the
-`llm-local` or `gh` exit code.
+| code | meaning |
+| --- | --- |
+| 0 | done |
+| 1 | refused: the draft or the title failed a check (never filed, even with `--yes`) |
+| 2 | error: usage, a missing tool, or input too large |
+| 10 | declined: you answered no at the prompt |
+| 11 | timeout: `llm-local` or `gh` (for `gh` the filing state is unknown) |
+| 12 | unexpected internal error (a bug; the message names it) |
+| 75 | local queue still busy after the retries |
+
+Any other code is the `llm-local` or `gh` exit code passed through, so a passed-through 10, 11 or 12 is ambiguous: read the
+message. The table is also in `safo-draft --help`. Before this change a decline exited 1.

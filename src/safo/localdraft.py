@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import ipaddress
 import json
 import os
 import re
@@ -41,26 +42,45 @@ from typing import TextIO
 SHORT_MODEL = "qwen3.5:4b"
 LONG_MODEL = "gemma4:12b"
 LONG_INPUT = 600  # characters of prompt plus facts above which the long model is used
-MAX_FACTS = 100_000
+MAX_PROMPT_BYTES = 100_000  # encoded bytes of the whole prompt; the kernel limit is 131072 per argument
+LLM_TIMEOUT = 900
+GH_TIMEOUT = 120
 RETRIES = 4
 BACKOFF = (5, 10, 20)
 WAIT_SECONDS = "60"
 PR_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
-EM_DASH = chr(0x2014)
+# U+2014 em dash and its small, vertical and two/three-em look-alikes. U+2015 (horizontal bar) is not blocked.
+EM_DASHES = "".join(chr(c) for c in (0x2014, 0xFE58, 0xFE31, 0x2E3A, 0x2E3B))
 NOT_VERIFIED = "Twingate and the local server were NOT verified; nothing was sent to a Claude model."
 
-EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_BUSY = 0, 1, 2, 75
+EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_DECLINED, EXIT_TIMEOUT, EXIT_INTERNAL, EXIT_BUSY = 0, 1, 2, 10, 11, 12, 75
+EXIT_TABLE = (
+    "exit codes: 0 done; 1 refused (the draft or title failed a check); 2 error (usage, missing tool or "
+    "input too large); 10 declined (you answered no); 11 timeout (llm-local or gh); 12 unexpected internal "
+    "error; 75 local queue still busy; any other code is the llm-local or gh exit code"
+)
 
-_PLACEHOLDERS = {"N0CALL", "N0TST", "FN31pr"}
-_CALLSIGN = re.compile(r"\b[AKNW][A-Z]?[0-9][A-Z]{2,3}\b")
-_GRID6 = re.compile(r"\b[A-R]{2}[0-9]{2}[a-x]{2}\b")
-_GRID4 = re.compile(r"\bgrid(?:\s+square)?[\s:=]+([A-R]{2}[0-9]{2})\b", re.IGNORECASE)
+_PLACEHOLDERS = {"N0CALL", "N0TST", "FN31PR", "K1ABC"}
+# Common technical tokens that have the shape of a callsign. Extend with SAFO_DRAFT_ALLOW.
+_TECH_TOKENS = {"K8S", "P2P", "B2B", "E2E", "A2A", "M2M", "H2O"}
+_CALL_SHAPE = r"[A-Z]{1,2}[0-9][A-Z]{1,3}"
+_CALLSIGN = re.compile(rf"\b{_CALL_SHAPE}\b")  # upper case anywhere
+_CALLSIGN_CTX = re.compile(
+    rf"\b(?:call\s*sign|call|de)\b(?:\s+is)?[\s:=]+({_CALL_SHAPE})\b", re.IGNORECASE
+)  # any case after a cue
+_GRID6 = re.compile(r"\b[A-R]{2}[0-9]{2}[A-X]{2}\b", re.IGNORECASE)
+_GRID_CTX = re.compile(
+    r"\b(?:grid(?:\s*square)?|locator|maidenhead)\b[\s:=]+([A-R]{2}[0-9]{2}(?:[A-X]{2})?)\b", re.IGNORECASE
+)
 _IPV4 = re.compile(r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b")
+_IPV6_CANDIDATE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*")
 _HOSTNAME = re.compile(
     r"\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:lan|local|internal|home|corp|intranet|home\.arpa)\b", re.I
 )
-_SERIAL = re.compile(r"\b(?:serial(?:\s+(?:number|no\.?))?|s/n)[\s:#=]+[A-Z0-9-]{6,}", re.IGNORECASE)
-_SESSION_URL = re.compile(r"https?://\S*claude\.ai\S*", re.IGNORECASE)
+_SERIAL = re.compile(
+    r"\b(?:serial(?:\s+(?:number|no\.?|num))?|s/n|sn)[\s:#=]+(?=[A-Z0-9-]*\d)[A-Z0-9-]{6,}", re.IGNORECASE
+)
+_SESSION_URL = re.compile(r"(?:https?://)?(?:[\w-]+\.)*claude\.ai/\S*|https?://\S*claude\.ai\S*", re.IGNORECASE)
 _SESSION_TRAILER = re.compile(r"^\s*claude-session\s*:", re.IGNORECASE | re.MULTILINE)
 _EPIC = re.compile(r"^\s*(?:epic\s*:\s*\S+|part of epic\s+#\d+)", re.IGNORECASE | re.MULTILINE)
 
@@ -78,30 +98,50 @@ class Failure(Exception):
         self.code = code
 
 
-def deny_words(env: Mapping[str, str]) -> list[str]:
-    words = [w.strip() for w in env.get("SAFO_DRAFT_DENY", "").split(",")]
-    path = env.get("SAFO_DRAFT_DENY_FILE")
+def _words(env: Mapping[str, str], var: str) -> list[str]:
+    words = [w.strip() for w in env.get(var, "").split(",")]
+    path = env.get(f"{var}_FILE")
     if path and Path(path).is_file():
-        words += [w.strip() for w in Path(path).read_text().splitlines()]
+        words += [w.strip() for w in Path(path).read_text(errors="replace").splitlines()]
     return [w for w in words if w]
 
 
-def check_text(kind: str, text: str, deny: Sequence[str] = ()) -> list[str]:
-    """The reasons a draft may not be filed. An empty list means it passed."""
+def deny_words(env: Mapping[str, str]) -> list[str]:
+    return _words(env, "SAFO_DRAFT_DENY")
+
+
+def allow_words(env: Mapping[str, str]) -> list[str]:
+    return _words(env, "SAFO_DRAFT_ALLOW")
+
+
+def _has_ipv6(text: str) -> bool:
+    for found in _IPV6_CANDIDATE.findall(text):
+        token = found.strip(".")
+        for cand in (token, token.rstrip(":") if token.endswith(":") and not token.endswith("::") else token):
+            try:
+                ipaddress.IPv6Address(cand)
+            except ValueError:
+                continue
+            return True
+    return False
+
+
+def _generic_checks(text: str, deny: Sequence[str], allow: Sequence[str]) -> list[str]:
+    """Checks for any text that gets published: the body, and the title."""
+    ok = {w.upper() for w in (*_PLACEHOLDERS, *_TECH_TOKENS, *allow)}
     why: list[str] = []
-    if EM_DASH in text:
+    if any(c in text for c in EM_DASHES):
         why.append("em dash found (use a comma, colon or hyphen)")
-    if _IPV4.search(text):
+    if _IPV4.search(text) or _has_ipv6(text):
         why.append("IP address found")
     if _HOSTNAME.search(text):
         why.append("hostname found")
     if _SERIAL.search(text):
         why.append("serial number found")
-    calls = [m for m in _CALLSIGN.findall(text) if m not in _PLACEHOLDERS]
-    grids = [m for m in _GRID6.findall(text) if m not in _PLACEHOLDERS]
-    grids += [m for m in _GRID4.findall(text) if m not in _PLACEHOLDERS]
+    calls = [m for m in _CALLSIGN.findall(text) + _CALLSIGN_CTX.findall(text) if m.upper() not in ok]
+    grids = [m for m in _GRID6.findall(text) + _GRID_CTX.findall(text) if m.upper() not in ok]
     if calls:
-        why.append("amateur radio callsign pattern found (use N0CALL)")
+        why.append("amateur radio callsign pattern found (use N0CALL; SAFO_DRAFT_ALLOW lists exceptions)")
     if grids:
         why.append("grid square found (use FN31pr)")
     if _SESSION_URL.search(text):
@@ -113,6 +153,16 @@ def check_text(kind: str, text: str, deny: Sequence[str] = ()) -> list[str]:
         if word.lower() in lowered:
             why.append("denied word found (SAFO_DRAFT_DENY)")
             break
+    return why
+
+
+def check_title(title: str, deny: Sequence[str] = (), allow: Sequence[str] = ()) -> list[str]:
+    return [f"title: {x}" for x in _generic_checks(title, deny, allow)]
+
+
+def check_text(kind: str, text: str, deny: Sequence[str] = (), allow: Sequence[str] = ()) -> list[str]:
+    """The reasons a draft may not be filed. An empty list means it passed."""
+    why = _generic_checks(text, deny, allow)
     if kind == "pr":
         lines = [x for x in text.splitlines() if x.strip()]
         if not lines or lines[-1].strip() != PR_FOOTER:
@@ -157,8 +207,11 @@ def _log_call(env: Mapping[str, str], now: dt.datetime, sub: str, model: str, co
     row = {"ts": now.isoformat(), "subcommand": sub, "model": model, "exit": code, "chars_in": n_in, "chars_out": n_out}
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        if path.parent.stat().st_uid == os.geteuid():
+            path.parent.chmod(0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "a") as handle:
+            os.fchmod(handle.fileno(), 0o600)
             handle.write(json.dumps(row) + "\n")
     except OSError:
         pass  # metrics must never block the work
@@ -195,13 +248,29 @@ def _which(env: Mapping[str, str], name: str) -> str:
 
 
 def call_local(env: Mapping[str, str], sleep: Callable[[float], None], task: str, model: str, prompt: str) -> str:
+    size = len(prompt.encode())
+    if size > MAX_PROMPT_BYTES:
+        raise Failure(
+            f"input too large: {size} bytes, the limit is {MAX_PROMPT_BYTES} bytes for the whole prompt. "
+            "This is a local input error; trim the facts. Nothing was sent.",
+            EXIT_ERROR,
+        )
     exe = _which(env, "llm-local")
     argv = [exe, "--task", task, "--model", model, "--wait", WAIT_SECONDS, prompt]
     last = ""
     for attempt in range(RETRIES):
-        done = subprocess.run(  # noqa: S603 - argv list, absolute path from PATH lookup, no shell
-            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=dict(env), check=False, timeout=900
-        )
+        try:
+            done = subprocess.run(  # noqa: S603 - argv list, absolute path from PATH lookup, no shell
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                env=dict(env),
+                check=False,
+                timeout=LLM_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            raise Failure(f"llm-local timed out after {LLM_TIMEOUT} s. {NOT_VERIFIED}", EXIT_TIMEOUT) from None
         if done.returncode == 0:
             return done.stdout.strip()
         last = (done.stderr or done.stdout).strip()
@@ -213,15 +282,22 @@ def call_local(env: Mapping[str, str], sleep: Callable[[float], None], task: str
 
 
 def _gh(env: Mapping[str, str], args: list[str], body: str) -> str:
-    done = subprocess.run(  # noqa: S603 - argv list, absolute path from PATH lookup, no shell
-        [_which(env, "gh"), *args, "--body-file", "-"],
-        input=body,
-        capture_output=True,
-        text=True,
-        env=dict(env),
-        check=False,
-        timeout=120,
-    )
+    try:
+        done = subprocess.run(  # noqa: S603 - argv list, absolute path from PATH lookup, no shell
+            [_which(env, "gh"), *args, "--body-file", "-"],
+            input=body,
+            capture_output=True,
+            text=True,
+            env=dict(env),
+            check=False,
+            timeout=GH_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise Failure(
+            f"gh timed out after {GH_TIMEOUT} s. Whether the item was filed is unknown: check with gh "
+            "(list the issues, pull requests or comments) before retrying.",
+            EXIT_TIMEOUT,
+        ) from None
     if done.returncode != 0:
         raise Failure(f"gh failed (exit {done.returncode}): {done.stderr.strip()}", done.returncode or EXIT_ERROR)
     return done.stdout.strip()
@@ -237,8 +313,10 @@ _INSTRUCTIONS = {
 def _read_facts(path: str | None, stdin: TextIO) -> str:
     if not path:
         return ""
-    text = stdin.read() if path == "-" else Path(path).read_text()
-    return text[:MAX_FACTS]
+    if path == "-":
+        return stdin.read(MAX_PROMPT_BYTES + 1)
+    with open(path, "rb") as handle:  # one byte past the cap is enough for call_local to refuse
+        return handle.read(MAX_PROMPT_BYTES + 1).decode("utf-8", errors="replace")
 
 
 def _confirm(args: argparse.Namespace, stdin: TextIO, out: TextIO) -> bool:
@@ -247,6 +325,14 @@ def _confirm(args: argparse.Namespace, stdin: TextIO, out: TextIO) -> bool:
     out.write("File this? [y/N] ")
     out.flush()
     return stdin.readline().strip().lower() in {"y", "yes"}
+
+
+def _with_footer(body: str) -> str:
+    """End the body with the exact footer; a footer variant the model wrote is replaced, not kept."""
+    lines = body.rstrip().splitlines()
+    if lines and "generated with" in lines[-1].lower() and "claude code" in lines[-1].lower():
+        lines.pop()
+    return "\n".join(lines).rstrip() + f"\n\n{PR_FOOTER}"
 
 
 def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
@@ -259,18 +345,21 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
     ctx.model, ctx.chars_in = model, len(prompt)
     body = call_local(ctx.env, ctx.sleep, f"draft-{kind}", model, prompt)
     ctx.chars_out = len(body)
-    if kind == "pr" and not body.rstrip().endswith(PR_FOOTER):
-        body = f"{body.rstrip()}\n\n{PR_FOOTER}"
+    if kind == "pr":
+        body = _with_footer(body)
     if kind == "issue" and args.epic and not _EPIC.search(body):
         body = f"{body.rstrip()}\n\nPart of epic #{args.epic}"
     ctx.out.write(f"--- draft {kind} ---\n{body}\n--- end draft ---\n")
-    why = check_text(kind, body, deny_words(ctx.env))
+    deny, allow = deny_words(ctx.env), allow_words(ctx.env)
+    why = check_text(kind, body, deny, allow)
+    if kind != "comment":
+        why += check_title(args.title, deny, allow)
     if why:
         ctx.out.write("NOT FILED. The draft failed these checks:\n" + "".join(f"  - {x}\n" for x in why))
         return EXIT_REFUSED
     if not _confirm(args, ctx.stdin, ctx.out):
         ctx.out.write("not filed\n")
-        return EXIT_REFUSED
+        return EXIT_DECLINED
     if kind == "issue":
         cmd = ["issue", "create", "--repo", args.repo, "--title", args.title]
     elif kind == "pr":
@@ -315,7 +404,9 @@ class Ctx:
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="safo-draft", description="local-first drafts and digests (llm-local)")
+    p = argparse.ArgumentParser(
+        prog="safo-draft", description="local-first drafts and digests (llm-local)", epilog=EXIT_TABLE
+    )
     p.add_argument("--report", action="store_true", help="print local-call counts per ISO week")
     sub = p.add_subparsers(dest="cmd")
     for name in ("issue", "pr", "comment"):
@@ -371,6 +462,9 @@ def main(
     except OSError as problem:
         err.write(f"safo-draft: {problem}\n")
         code = EXIT_ERROR
+    except Exception as problem:  # the last line of defense: always a distinct code and a metrics row
+        err.write(f"safo-draft: unexpected {type(problem).__name__}: {problem}\n")
+        code = EXIT_INTERNAL
     if ctx.model:
         _log_call(env, now or dt.datetime.now(dt.UTC), ctx.sub, ctx.model, code, ctx.chars_in, ctx.chars_out)
     return code
