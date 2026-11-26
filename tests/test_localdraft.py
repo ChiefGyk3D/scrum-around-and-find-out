@@ -844,8 +844,8 @@ def _deny_file(env: Env, text: str, mode: int = 0o600) -> Path:
     ],
 )
 def test_r4b1_exotic_characters_are_refused(text: str) -> None:
-    assert any("unusual character" in x for x in _why(text)), repr(text)
-    assert any("unusual character" in x for x in localdraft.check_title(text)), repr(text)
+    assert any("unusual or invisible character" in x for x in _why(text)), repr(text)
+    assert any("unusual or invisible character" in x for x in localdraft.check_title(text)), repr(text)
 
 
 def test_r4b1_ordinary_text_with_accents_and_emoji_passes() -> None:
@@ -858,7 +858,7 @@ def test_r4b1_ordinary_text_with_accents_and_emoji_passes() -> None:
 def test_r4b1_exotic_draft_is_never_filed_even_with_yes(env: Env) -> None:
     (env.dir / "llm.reply").write_text("de W1\u0301AW\n\nPart of epic #445")
     code, out, _ = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
-    assert code == localdraft.EXIT_REFUSED and "unusual character" in out
+    assert code == localdraft.EXIT_REFUSED and "unusual or invisible character" in out
     assert env.read("gh.args") == ""
 
 
@@ -1110,7 +1110,7 @@ def test_r4b7_known_overblock_is_documented_and_real() -> None:
 
 
 # round 5, R1: homoglyphs fail closed, deny matching on an ASCII skeleton
-_NO_REDUCE = "characters that cannot be reduced to ASCII: refused"
+_NO_REDUCE = "characters that cannot be reduced to ASCII"
 
 
 @pytest.mark.parametrize(
@@ -1294,7 +1294,7 @@ def test_r6_m1_scan_is_linear() -> None:
 
 
 # round 6, M2: every non-ASCII character reduces or is on the allowlist
-_NO_REDUCE_ANY = "characters that cannot be reduced to ASCII: refused"
+_NO_REDUCE_ANY = "characters that cannot be reduced to ASCII"
 
 
 @pytest.mark.parametrize(
@@ -1325,8 +1325,7 @@ def test_r6_m2_typography_and_emoji_pass(text: str) -> None:
     assert _why(text) == [], ascii(text)
 
 
-def test_r6_m2_variation_selector_and_dingbat_digits_stay_refused() -> None:
-    assert _why(chr(0x2705) + chr(0xFE0F)) != []
+def test_r6_m2_dingbat_digits_stay_refused() -> None:
     assert any(x.startswith(_NO_REDUCE_ANY) for x in _why(chr(0x2776)))
     assert any(x.startswith(_NO_REDUCE_ANY) for x in _why(chr(0x2793)))
 
@@ -1465,6 +1464,14 @@ _FORBIDDEN_WORDS = (
 )  # fmt: skip
 
 
+def _name_ok(c: str) -> bool:
+    import unicodedata
+
+    name = unicodedata.name(c)
+    decomposed = unicodedata.normalize("NFKD", c)
+    return not any(w in name for w in _FORBIDDEN_WORDS) and not any(x.isalnum() and x.isascii() for x in decomposed)
+
+
 def _picto() -> list[str]:
     return sorted(localdraft._PICTOGRAPHS)
 
@@ -1482,7 +1489,8 @@ def test_r11_allowlist_is_small_and_has_no_letter_or_digit_names() -> None:
     import unicodedata
 
     assert len(localdraft._PICTOGRAPHS) <= 45
-    assert chr(0x1F517) not in localdraft._PICTOGRAPHS  # link symbol is not allowed
+    assert chr(0x1F517) not in localdraft._PICTOGRAPHS  # link symbol is not on the owner list
+    assert chr(0x1F4AF) not in localdraft._PICTOGRAPHS  # hundred points shows digits
     for c in _picto():
         name = unicodedata.name(c)
         assert not any(w in name for w in _FORBIDDEN_WORDS), name
@@ -1500,6 +1508,7 @@ def test_r11_every_other_pictograph_code_point_is_refused() -> None:
         for n in (*range(0x1F300, 0x1FB00), *range(0x2600, 0x27C0)):
             c = chr(n)
             if c in localdraft._PICTOGRAPHS:
+                assert _name_ok(c), hex(n)  # an allowlisted code point must pass the name test
                 continue
             assert not localdraft._allowed_symbol(c), hex(n)
             assert not localdraft._skeleton(c)[1], hex(n)
@@ -1598,15 +1607,21 @@ def test_r10_link_message_names_line_and_action() -> None:
 
 
 def test_r10_unusual_character_message_names_line() -> None:
-    msg = _find(_why("zebrafish\nquokka" + chr(0x200B) + "marmoset"), "unusual characters")
-    assert msg.endswith("(line 2)"), msg
+    msg = _find(_why("zebrafish\nquokka" + chr(0x200B) + "marmoset"), "unusual or invisible characters")
+    assert msg == (
+        "unusual or invisible characters (line 2): remove them (a stray variation selector, zero-width or "
+        "combining character)"
+    )
     _no_echo(msg)
 
 
 def test_r10_unreducible_message_names_line() -> None:
     text = "zebrafish\nquokka\nmarmoset " + chr(0x410)
     msg = _find(_why(text), _NO_REDUCE)
-    assert msg == f"{_NO_REDUCE} (line 3)"
+    assert msg == (
+        "characters that cannot be reduced to ASCII (line 3): remove emoji and other symbols, or use only the "
+        "allowed pictographs listed in docs/local-draft.md"
+    )
     _no_echo(msg)
     assert chr(0x410) not in msg
 
@@ -1622,3 +1637,82 @@ def test_r10_deny_hit_prints_only_the_entry_number() -> None:
     assert "line" not in hits[0].replace("deny entry", "")
     assert "zebrafish" not in hits[0]
     assert not any("zebrafish" in x for x in why)
+
+
+# round 12
+_VS = chr(0xFE0F)
+_UNUSUAL = "unusual or invisible characters"
+
+
+def test_r12_variation_selector_after_an_allowed_pictograph_passes() -> None:
+    for n in (0x2705, 0x2714, 0x26A0, 0x274C):
+        text = "done " + chr(n) + _VS + " ok"
+        assert _why(text) == [], hex(n)
+        assert localdraft.check_title(text) == [], hex(n)
+
+
+def test_r12_variation_selector_elsewhere_is_refused() -> None:
+    for text in (
+        "de W1" + _VS + "AW",
+        _VS,
+        "a " + _VS + " b",
+        "a" + chr(0x2705) + _VS + _VS,
+        "a " + _VS + _VS,
+        "a" + chr(0x1F517) + _VS,  # not an allowed pictograph
+        "a" + chr(0x2022) + _VS,
+    ):
+        assert any(_UNUSUAL in x or _NO_REDUCE in x for x in _why(text)), ascii(text)
+        assert any(_UNUSUAL in x or _NO_REDUCE in x for x in localdraft.check_title(text)), ascii(text)
+    assert any(_UNUSUAL in x for x in _why(_VS))
+    assert any(_UNUSUAL in x for x in _why("a" + chr(0x2705) + _VS + _VS))
+
+
+def test_r12_stripped_variation_selector_never_hides_a_value() -> None:
+    check = chr(0x2705)
+    assert localdraft._squash("Ac" + check + _VS + "me") == "acme"
+    assert any(_DENY in x for x in _why("Ac" + check + _VS + "me", deny=["Acme"]))
+    assert any("callsign" in x for x in _why("W1" + check + _VS + "AW W1AW"))
+
+
+def test_r12_new_pictographs_are_allowed_and_names_pass() -> None:
+    for n in (0x2B50, 0x2795, 0x1F3AF, 0x1F4CA, 0x1F6A8, 0x1F9EA):
+        c = chr(n)
+        assert c in localdraft._PICTOGRAPHS and _name_ok(c), hex(n)
+        assert _why("done " + c) == [], hex(n)
+    assert len(localdraft._PICTOGRAPHS) <= 45
+    for n in (0x1F517, 0x1F4AF):
+        assert any(_NO_REDUCE in x for x in _why("a" + chr(n))), hex(n)
+
+
+def test_r12_messages_are_actionable_and_hold_no_text() -> None:
+    why = _why("zebrafish\nquokka" + chr(0x1F517))
+    assert _find(why, _NO_REDUCE).endswith(
+        "(line 2): remove emoji and other symbols, or use only the allowed pictographs listed in docs/local-draft.md"
+    )
+    assert not any(chr(0x1F517) in x for x in why)
+
+
+def test_r12_one_reason_per_class_in_check_draft() -> None:
+    why = localdraft.check_draft("comment", "Title", "one\ntwo\nthree " + chr(0x410))
+    assert len([x for x in why if _NO_REDUCE in x]) == 1, why
+    assert "(line 3)" in _find(why, _NO_REDUCE)
+    why = localdraft.check_draft("comment", "Title", "para\n\nsee [a] and ]: x")
+    assert len([x for x in why if "reference definitions" in x]) == 1, why
+    why = localdraft.check_draft("comment", "T" + chr(0x410), "body")
+    assert len([x for x in why if _NO_REDUCE in x]) == 1, why
+    why = localdraft.check_draft("issue", "Acme", "corp\n\nPart of epic #445", deny=["Acmecorp"])
+    assert len([x for x in why if "title and body combined" in x and _DENY in x]) == 1, why
+
+
+def test_r12_lookalike_symbols_match_both_readings() -> None:
+    m, cross, circle = chr(0xD7), chr(0x274C), chr(0x1F534)
+    assert any(_DENY in x for x in _why("Acme" + m + "Labs", deny=["AcmexLabs"]))  # letter reading
+    assert any(_DENY in x for x in _why("Acme" + m + "Labs", deny=["AcmeLabs"]))  # dropped reading
+    assert any(_DENY in x for x in _why("Fo" + circle + "o", deny=["Foo"]))  # dropped reading
+    assert any(_DENY in x for x in _why("Fo" + circle + "o", deny=["Fooo"]))  # letter reading
+    assert any(_DENY in x for x in _why("Acmexlabs", deny=["Acme" + cross + "labs"]))
+    assert any(_DENY in x for x in _why("Acmelabs", deny=["Acme" + cross + "labs"]))
+    assert any(_DENY in x for x in _why("Acme" + cross + "labs", deny=["Acme" + cross + "labs"]))
+    both = localdraft.check_draft("comment", "Acme" + m, "Labs", deny=["AcmeLabs"])
+    assert any(_DENY in x for x in both), both
+    assert _why("Acme Co" + m + "ffee", deny=["Acmetea"]) == []

@@ -57,7 +57,7 @@ safo audit | safo-draft digest board-drift -
   giving an ASCII skeleton. Every non-ASCII character must either reduce to printable ASCII (`Caf` plus U+00E9
   reduces to `Cafe`; a fullwidth letter is folded by NFKC) or be on a short allowlist: curly single and double quotes
   (U+2018 to U+201D), en dash U+2013, bullet U+2022, ellipsis U+2026, the multiplication sign U+00D7, arrows U+2190 to
-  U+2193, and an explicit list of 39 pictographs (below). Nothing else outside ASCII passes: no emoji range, no
+  U+2193, and an explicit list of 45 pictographs (below). Nothing else outside ASCII passes: no emoji range, no
   name test. Every other code point, including every emoji not on the list, the ballot-x marks U+2715 to U+2718,
   U+00AE and U+00A9, is refused. The list: check mark U+2714, white heavy check mark U+2705, cross mark U+274C,
   warning sign U+26A0, rocket U+1F680, robot face U+1F916, eyes U+1F440, thumbs up U+1F44D, thumbs down U+1F44E,
@@ -66,17 +66,24 @@ safo audit | safo-draft digest board-drift -
   hourglass U+231B, stopwatch U+23F1, black right arrow U+27A1, up arrow U+2B06, down arrow U+2B07, clipboard
   U+1F4CB, pushpin U+1F4CC, magnifying glass U+1F50D, gear U+2699, shield U+1F6E1, thinking face U+1F914, waving hand
   U+1F44B, folded hands U+1F64F, clapping hands U+1F44F, red circle U+1F534, green circle U+1F7E2 and yellow circle
-  U+1F7E1. The link symbol is not on it. Add a pictograph only with a test that its name has no letter or digit
+  U+1F7E1, white medium star U+2B50, heavy plus sign U+2795, direct hit U+1F3AF, bar chart U+1F4CA, police car
+  light U+1F6A8 and test tube U+1F9EA. The link symbol U+1F517 is not on it (it is not on the owner list) and neither is
+  hundred points U+1F4AF (it shows digits). Add a pictograph only with a test that its name has no letter or digit
   (the guard test caps the list at 45 and checks each name for DIGIT, LETTER, LATIN, KEYCAP, NUMBER, SQUARED,
   CIRCLED, NEGATIVE, PARENTHESIZED and INPUT SYMBOL). The multiplication sign U+00D7 and the cross mark count as
   the letter `x` for matching, and the three circles count as the letter `o` (they can read as one), in drafts and
-  in deny values alike (`Acme` plus U+00D7 plus `Labs` matches a deny value `AcmeXLabs`). Characters that NFKC folds
+  in deny values alike (`Acme` plus U+00D7 plus `Labs` matches a deny value `AcmeXLabs`). A person may read such a symbol either way, so
+  matching checks both readings: the letter and the symbol dropped (the same text also matches `AcmeLabs`); a deny value
+  that holds one is matched in both forms too. Characters that NFKC folds
   to ASCII (circled M, the trade mark sign) are kept as the letters they fold to. Anything else (Cyrillic, Greek,
   Armenian, Cherokee, Hangul jamo, dotless i, small capitals, modifier
   letters, letterlike symbols, operator lookalikes such as U+2208, currency signs such as the euro sign, other
-  arrows) refuses the draft or title with "characters that cannot be reduced to ASCII: refused (line N)"; the reason never
-  holds the characters. Currency signs are refused on purpose: write `EUR` or `USD`. The variation selector U+FE0F
-  stays refused. Deny matching and squashing use the skeleton, so a lookalike cannot slip a private value past the
+  arrows) refuses the draft or title with "characters that cannot be reduced to ASCII (line N): remove emoji and other symbols, or use only the allowed
+  pictographs listed in docs/local-draft.md"; the reason never holds the characters. Currency signs are refused on purpose: write `EUR` or `USD`. The variation selector U+FE0F is
+  allowed only directly after an allowed pictograph (white heavy check mark plus U+FE0F); it is then removed before
+  every check and the skeleton. Anywhere else (after a letter or digit, at the start, after a space, twice in a row,
+  after a symbol not on the list) it is refused as "unusual or invisible characters (line N): remove them (a stray
+  variation selector, zero-width or combining character)". Deny matching and squashing use the skeleton, so a lookalike cannot slip a private value past the
   match. A deny value that holds such a character is a config error naming the line.
 - **Markdown links and reference definitions are refused.** Inline links and images (`](` and `![`) and reference uses
   (`][`) fail with "markdown links are not allowed in drafts (line N): write the URL plainly.". Reference definitions are
@@ -100,7 +107,9 @@ safo audit | safo-draft digest board-drift -
 - **Refusals name the line, never the text.** The link, reference definition, HTML, unusual character and
   unreducible character reasons end with or hold the 1-based line number of the first offence and a short fixed
   instruction. No text from the draft is ever printed in a reason, so a private value cannot leak through one. For a
-  title and body checked together, line 1 is the title. A deny hit still prints only `matched private deny entry #N`.
+  title and body checked together, line 1 is the title. A refusal is reported once: the same reason found in the body,
+  the title and the join is listed with the body or title line number only; a deny value split across the title and
+  body keeps its own combined reason. A deny hit still prints only `matched private deny entry #N`.
 - **Render-equivalent text.** Every token check runs on the raw text and on its canonical form, and a hit on either
   blocks. The canonical form is NFKC with `*`, backtick, `~` and backslash removed (they vanish when Markdown renders,
   so `W1**AW**`, `box.**lan**`, `192.168.**1**.1` and `https://claude.**ai**/x` are read as what they spell). `_` and

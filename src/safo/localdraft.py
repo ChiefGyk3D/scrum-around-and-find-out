@@ -129,7 +129,15 @@ MAX_CONFIG_BYTES = 65_536
 MIN_DENY_CHARS = 3  # a deny value that squashes to fewer characters would match almost anything
 _DENY_MARK = "matched private deny entry"
 _BAD_CATEGORIES = frozenset({"Mn", "Me", "Cf", "Cc", "Co", "Cn", "Cs", "Zl", "Zp"})
-_NO_REDUCE = "characters that cannot be reduced to ASCII: refused"
+_NO_REDUCE = (
+    "characters that cannot be reduced to ASCII (line {n}): remove emoji and other symbols, or use only the "
+    "allowed pictographs listed in docs/local-draft.md"
+)
+_UNUSUAL = (
+    "unusual or invisible characters (line {n}): remove them (a stray variation selector, zero-width or "
+    "combining character)"
+)
+_VARIATION_SELECTOR = chr(0xFE0F)
 _NO_REDUCE_CONFIG = "a deny value holds characters that cannot be reduced to ASCII"
 _NO_DENY_NOTE = "safo-draft: no private deny file configured: only heuristics are active"
 _EMPTY_DENY_NOTE = "safo-draft: deny file has no entries: only heuristics are active"
@@ -348,6 +356,7 @@ class DenyEntry:
 
     label: str
     squashed: str
+    dropped: str = ""  # the squashed value with look-alike symbols removed, when that differs from `squashed`
 
 
 _TYPOGRAPHY = frozenset(chr(c) for c in (*range(0x2018, 0x201E), 0x2013, 0x2022, 0x2026, 0xD7, *range(0x2190, 0x2194)))
@@ -397,30 +406,51 @@ _PICTOGRAPHS = frozenset(
         0x1F534,  # large red circle (an o in the skeleton)
         0x1F7E2,  # large green circle (an o in the skeleton)
         0x1F7E1,  # large yellow circle (an o in the skeleton)
+        0x2B50,  # white medium star
+        0x2795,  # heavy plus sign
+        0x1F3AF,  # direct hit (target)
+        0x1F4CA,  # bar chart
+        0x1F6A8,  # police car light
+        0x1F9EA,  # test tube
     )
 )
+# Left out on purpose: the link symbol U+1F517 (not on the owner list) and hundred points U+1F4AF (it shows digits).
 # Characters that read as a letter in the skeleton: the multiplication sign and the cross mark look like `x`, the
 # colored circles like `o`.
 _LOOKS_LIKE = {chr(0xD7): "x", chr(0x274C): "x", chr(0x1F534): "o", chr(0x1F7E2): "o", chr(0x1F7E1): "o"}
 
 
 def _allowed_symbol(c: str) -> bool:
-    """Typographic punctuation and the explicit pictograph list: kept in a draft, nothing else. Variation selectors
-    (U+FE0F) are not on the list."""
+    """Typographic punctuation and the explicit pictograph list: kept in a draft, nothing else. A variation selector
+    is not on the list; `_strip_selector` removes the one that follows a pictograph."""
     return c in _TYPOGRAPHY or c in _PICTOGRAPHS
 
 
-def _skeleton(text: str) -> tuple[str, bool]:
+def _strip_selector(text: str) -> str:
+    """Remove each U+FE0F that directly follows an allowed pictograph (the rendering form of the emoji). One after
+    anything else, a second in a row, or at the start stays, so the checks refuse it as an unusual character."""
+    out: list[str] = []
+    prev = ""
+    for c in text:
+        if not (c == _VARIATION_SELECTOR and prev in _PICTOGRAPHS):
+            out.append(c)
+        prev = c
+    return "".join(out)
+
+
+def _skeleton(text: str, letters: bool = True) -> tuple[str, bool]:
     """(ASCII skeleton, reducible). NFKC, then NFKD with combining marks removed. Every non-ASCII character must
     either reduce to printable ASCII (a precomposed accent: U+00E9 becomes `e`) or be on the typography and emoji
     allowlist (`_allowed_symbol`; a few read as a letter, see `_LOOKS_LIKE`). Anything else (Cyrillic, Greek, dotless
     i, small capitals, letterlike or operator lookalikes, currency signs, modifier letters) makes the text not
-    reducible; it is left out of the skeleton and the caller must refuse."""
+    reducible; it is left out of the skeleton and the caller must refuse. With `letters` false the look-alike
+    symbols are dropped instead of read as a letter (the other reading a person may take)."""
     out: list[str] = []
     reducible = True
-    for c in unicodedata.normalize("NFKC", text):
+    for c in unicodedata.normalize("NFKC", _strip_selector(text)):
         if c in _LOOKS_LIKE:
-            out.append(_LOOKS_LIKE[c])
+            if letters:
+                out.append(_LOOKS_LIKE[c])
             continue
         if c.isascii():
             out.append(c)
@@ -433,9 +463,16 @@ def _skeleton(text: str) -> tuple[str, bool]:
     return "".join(out), reducible
 
 
-def _squash(text: str) -> str:
+def _squash(text: str, letters: bool = True) -> str:
     """The ASCII skeleton, lowercase, only letters and digits kept: `Ac**me** Corp` and `A-c-m-e corp` squash alike."""
-    return re.sub(r"[^a-z0-9]", "", _skeleton(text)[0].lower())
+    return re.sub(r"[^a-z0-9]", "", _skeleton(text, letters)[0].lower())
+
+
+def _deny_entry(label: str, value: str) -> DenyEntry:
+    """A deny entry in both readings of the look-alike symbols; the second form is kept only when it differs and is
+    long enough to be safe."""
+    squashed, dropped = _squash(value), _squash(value, False)
+    return DenyEntry(label, squashed, dropped if dropped != squashed and len(dropped) >= MIN_DENY_CHARS else "")
 
 
 def _read_private_file(path: str, what: str) -> str | None:
@@ -508,7 +545,7 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
                     f"SAFO_DRAFT_DENY_FILE line {n}: a deny value needs at least {MIN_DENY_CHARS} letters or digits",
                     EXIT_ERROR,
                 )
-            entries.append(DenyEntry(f"#{n}", squashed))
+            entries.append(_deny_entry(f"#{n}", value))
         if common:
             lines = ", ".join(str(n) for n in common)
             err.write(
@@ -526,7 +563,7 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
                 f"SAFO_DRAFT_DENY entry {i}: a deny value needs at least {MIN_DENY_CHARS} letters or digits",
                 EXIT_ERROR,
             )
-        entries.append(DenyEntry(f"SAFO_DRAFT_DENY#{i}", squashed))
+        entries.append(_deny_entry(f"SAFO_DRAFT_DENY#{i}", value))
     return entries
 
 
@@ -747,7 +784,7 @@ def _has_ipv6(text: str) -> bool:
 
 def _entries(deny: Sequence[str | DenyEntry]) -> list[DenyEntry]:
     """Plain strings (the API used by tests) become entries numbered by position; empty squashed values are skipped."""
-    rows = [x if isinstance(x, DenyEntry) else DenyEntry(f"#{i}", _squash(x)) for i, x in enumerate(deny, 1)]
+    rows = [x if isinstance(x, DenyEntry) else _deny_entry(f"#{i}", x) for i, x in enumerate(deny, 1)]
     return [x for x in rows if x.squashed]
 
 
@@ -757,8 +794,12 @@ def _deny_reasons(parts: Sequence[str], deny: Sequence[str | DenyEntry]) -> list
     The squashed form drops every character that is not an ASCII letter or digit, so a value split by spacing,
     punctuation, Markdown, zero-width characters or a line break is still found. A reason holds the entry label only.
     """
-    squashed = "".join(_squash(p) for p in parts)
-    return [f"{_DENY_MARK} {e.label}" for e in _entries(deny) if e.squashed in squashed]
+    forms = ["".join(_squash(p, letters) for p in parts) for letters in (True, False)]
+    return [
+        f"{_DENY_MARK} {e.label}"
+        for e in _entries(deny)
+        if any(v and v in f for v in (e.squashed, e.dropped) for f in forms)
+    ]
 
 
 def _is_allowed(token: str, allow: set[str]) -> bool:
@@ -768,12 +809,11 @@ def _is_allowed(token: str, allow: set[str]) -> bool:
 def _single_checks(text: str, allow: Sequence[str], charset: bool) -> list[str]:
     ok = {w.upper() for w in allow}
     why: list[str] = []
+    text = _strip_selector(text)
     if charset and (n := _unusual_line(text)):
-        why.append(
-            f"unusual characters found (combining, invisible, bidi, tag, private-use or a non-ASCII space) (line {n})"
-        )
+        why.append(_UNUSUAL.format(n=n))
     if charset and (n := _unreducible_line(text)):
-        why.append(f"{_NO_REDUCE} (line {n})")
+        why.append(_NO_REDUCE.format(n=n))
     if n := _md_link_line(text):
         why.append(f"markdown links are not allowed in drafts (line {n}): write the URL plainly.")
     if n := _md_refdef_line(text):
@@ -840,6 +880,11 @@ def check_text(kind: str, text: str, deny: Sequence[str | DenyEntry] = (), allow
     return why
 
 
+def _reason_class(reason: str) -> str:
+    """A reason without its line number: the same refusal found in the body, the title or the join is one reason."""
+    return re.sub(r"\s*\(line \d+\)", "", reason)
+
+
 def check_draft(
     kind: str,
     title: str | None,
@@ -854,11 +899,11 @@ def check_draft(
     why += check_title(title, deny, allow)
     if len(title) > MAX_TITLE_CHARS or len(body) > MAX_CHECK_CHARS:
         return why  # the combined checks would run on an unbounded text
-    seen = {x.removeprefix("title: ") for x in why}
+    seen = {_reason_class(x.removeprefix("title: ")) for x in why}
     combined = [x for joiner in ("\n", "") for x in _generic_checks(f"{title}{joiner}{body}", allow)]
     for x in combined + _deny_reasons([title, body], deny):
-        if x not in seen:
-            seen.add(x)
+        if (cls := _reason_class(x)) not in seen:
+            seen.add(cls)
             why.append(f"title and body combined: {x}")
     return why
 
