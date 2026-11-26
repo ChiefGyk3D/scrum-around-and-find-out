@@ -524,12 +524,34 @@ def canonicalize(text: str) -> str:
     """The render-equivalent form of a text for the token checks: NFKC, then the Markdown punctuation removed.
 
     `*`, backtick, `~` and backslash disappear when Markdown renders (`W1**AW**` reads `W1AW`); `_` and `-` stay.
-    HTML is not decoded or stripped: a draft that holds any is refused by `_has_html`.
+    HTML is not decoded or stripped: a draft that holds any is refused by `_html_line`.
     """
     return _MD_PUNCT.sub("", unicodedata.normalize("NFKC", text))
 
 
-def _has_unusual_characters(text: str) -> bool:
+def _line_at(text: str, pos: int) -> int:
+    """The 1-based line number of offset `pos`, counted the way `str.splitlines` splits."""
+    return len((text[:pos] + "x").splitlines())
+
+
+def _first_line(text: str, bad: Callable[[str], bool]) -> int:
+    """The first line for which `bad` holds, or 0 when none does."""
+    return next((n for n, line in enumerate(text.splitlines(), 1) if bad(line)), 0)
+
+
+def _unusual_line(text: str) -> int:
+    """Line of the first unusual character, or 0 for none. A character that only shows on the whole text is line 1."""
+    return _first_line(text, _is_unusual) or (1 if _is_unusual(text) else 0)
+
+
+def _unreducible_line(text: str) -> int:
+    """Line of the first character that cannot be reduced to ASCII, or 0 for none."""
+    if _skeleton(text)[1]:
+        return 0
+    return _first_line(text, lambda line: not _skeleton(line)[1]) or 1
+
+
+def _is_unusual(text: str) -> bool:
     """Combining marks, format (zero-width, bidi, tag), control, private-use, unassigned and surrogate characters, and
     any space other than U+0020, in the NFKC form or (for spaces, which NFKC folds to U+0020) in the raw text."""
     for c in text:
@@ -546,66 +568,53 @@ def _has_unusual_characters(text: str) -> bool:
     return False
 
 
-def _has_html(text: str) -> bool:
-    return bool(_HTML_START.search(text) or _HTML_REF.search(text))
+def _html_line(text: str) -> int:
+    """Line of the first HTML tag, comment, declaration or character reference, or 0 for none."""
+    hits = [m.start() for m in (_HTML_START.search(text), _HTML_REF.search(text)) if m]
+    return _line_at(text, min(hits)) if hits else 0
 
 
-def _strip_block_markers(line: str) -> str:
-    """Remove any run of leading block markers: spaces and tabs, `>`, `-`/`*`/`+` and `1.`/`1)` followed by a space or
-    tab (or the end of the line). Linear: each step consumes at least one character."""
-    i, n = 0, len(line)
-    while i < n:
-        c = line[i]
-        if c in " \t>" or (c in "-*+" and (i + 1 == n or line[i + 1] in " \t")):
-            i += 1
-        elif c.isdigit():
-            j = i
-            while j < n and line[j].isdigit() and j - i < 10:
-                j += 1
-            if j < n and line[j] in ".)" and (j + 1 == n or line[j + 1] in " \t") and j > i:
-                i = j + 1
-            else:
-                break
-        else:
-            break
-    return line[i:]
+def _md_link_line(text: str) -> int:
+    """Line of the first inline link, image (`](`, `![`) or reference use (`][`), or 0. The PR footer is exempt."""
+    text = text.replace(PR_FOOTER, "")  # the footer is one line, so line numbers do not move
+    hits = [at for mark in ("](", "![", "][") if (at := text.find(mark)) >= 0]
+    return _line_at(text, min(hits)) if hits else 0
 
 
-def _has_md_link(text: str) -> bool:
-    """Inline links and images (`](`, `![`) and reference uses (`][`). The exact PR footer is exempt."""
-    text = text.replace(PR_FOOTER, "")
-    return "](" in text or "![" in text or "][" in text
-
-
-def _para_has_refdef(para: str) -> bool:
-    """Broad on purpose, no parsing: refuse when a `[` is followed anywhere later by `]:`, or when an escaped bracket
-    (backslash then `[` or `]`) is followed by a later `]:` (an escaped `]` can sit before the first `[`). Only
-    `str.find`, so linear."""
+def _para_refdef_at(para: str) -> int:
+    """Broad on purpose, no parsing: the offset of the `]:` when a `[` is followed anywhere later by `]:`, or when an
+    escaped bracket (backslash then `[` or `]`) is followed by a later `]:` (an escaped `]` can sit before the first
+    `[`); -1 for none. Only `str.find`, so linear."""
     first = para.find("[")
-    if first >= 0 and para.find("]:", first + 1) >= 0:
-        return True
+    if first >= 0 and (at := para.find("]:", first + 1)) >= 0:
+        return at
     for esc in ("\\[", "\\]"):
-        at = para.find(esc)
-        if at >= 0 and para.find("]:", at) >= 0:
-            return True
-    return False
+        start = para.find(esc)
+        if start >= 0 and (at := para.find("]:", start)) >= 0:
+            return at
+    return -1
 
 
-def _has_md_refdef(text: str) -> bool:
-    """Any paragraph (blank lines separate them) that can hold a reference definition, after block markers are stripped
-    from each line. A paragraph with a `]:` and no earlier `[` or escaped bracket is allowed (`ok]: fine`). Over-blocks
-    prose such as `the range is [0, 5]: inclusive` and `arr[0]: the first`; that is the safe side. The exact PR footer
-    is exempt."""
+def _md_refdef_line(text: str) -> int:
+    """Line of the `]:` in the first paragraph (blank lines separate them) that can hold a reference definition, or 0.
+    A paragraph with a `]:` and no earlier `[` or escaped bracket is allowed (`ok]: fine`). Over-blocks prose such as
+    `the range is [0, 5]: inclusive` and `arr[0]: the first`; that is the safe side. The exact PR footer is exempt."""
     text = text.replace(PR_FOOTER, "")
     para: list[str] = []
-    for line in [*text.splitlines(), ""]:
+    start = 0
+    for n, line in enumerate([*text.splitlines(), ""], 1):
         if line.strip():
-            para.append(_strip_block_markers(line))
+            if not para:
+                start = n
+            para.append(line)
         else:
-            if para and _para_has_refdef("\n".join(para)):
-                return True
+            if para:
+                joined = "\n".join(para)
+                at = _para_refdef_at(joined)
+                if at >= 0:
+                    return start + joined.count("\n", 0, at)
             para = []
-    return False
+    return 0
 
 
 def _has_private_host(text: str) -> bool:
@@ -733,16 +742,25 @@ def _is_allowed(token: str, allow: set[str]) -> bool:
 def _single_checks(text: str, allow: Sequence[str], charset: bool) -> list[str]:
     ok = {w.upper() for w in allow}
     why: list[str] = []
-    if charset and _has_unusual_characters(text):
-        why.append("unusual characters found (combining, invisible, bidi, tag, private-use or a non-ASCII space)")
-    if charset and not _skeleton(text)[1]:
-        why.append(_NO_REDUCE)
-    if _has_md_link(text):
-        why.append("markdown links are not allowed in drafts; write the URL plainly")
-    if _has_md_refdef(text):
-        why.append("markdown reference definitions are not allowed in drafts; write the URL plainly")
-    if _has_html(text):
-        why.append("HTML is not allowed in drafts; use plain markdown")
+    if charset and (n := _unusual_line(text)):
+        why.append(
+            f"unusual characters found (combining, invisible, bidi, tag, private-use or a non-ASCII space) (line {n})"
+        )
+    if charset and (n := _unreducible_line(text)):
+        why.append(f"{_NO_REDUCE} (line {n})")
+    if n := _md_link_line(text):
+        why.append(f"markdown links are not allowed in drafts (line {n}): write the URL plainly.")
+    if n := _md_refdef_line(text):
+        why.append(
+            "markdown reference definitions are not allowed in drafts: a `[` followed later by `]:` in the same "
+            f"paragraph (line {n}). Reword it, put the text in a code span without brackets, or split the "
+            "paragraph; write URLs plainly."
+        )
+    if n := _html_line(text):
+        why.append(
+            f"HTML is not allowed in drafts (line {n}): remove the angle-bracket text; write `{{name}}` instead of "
+            "`<name>`; a pasted traceback with `<module>` must be rewritten without the angle brackets."
+        )
     if any(c in text for c in EM_DASHES):
         why.append("em dash found (use a comma, colon or hyphen)")
     if _IPV4.search(text) or _has_ipv6(text):

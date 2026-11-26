@@ -882,7 +882,7 @@ def test_r4b1_exotic_draft_is_never_filed_even_with_yes(env: Env) -> None:
     ],
 )
 def test_r4b2_html_is_refused(text: str) -> None:
-    assert any("HTML is not allowed in drafts; use plain markdown" in x for x in _why(text)), text
+    assert any("HTML is not allowed in drafts" in x for x in _why(text)), text
     assert any("HTML is not allowed" in x for x in localdraft.check_title(text)), text
 
 
@@ -1128,14 +1128,14 @@ _NO_REDUCE = "characters that cannot be reduced to ASCII: refused"
     ],
 )
 def test_r5_1_unreducible_letters_are_refused(text: str) -> None:
-    assert _NO_REDUCE in _why(text), ascii(text)
+    assert any(x.startswith(_NO_REDUCE) for x in _why(text)), ascii(text)
     assert any(_NO_REDUCE in x for x in localdraft.check_title(text)), ascii(text)
 
 
 def test_r5_1_homoglyph_in_deny_word_is_refused_and_never_echoed() -> None:
     text = f"hello {chr(0x410)}cme Corp"
     why = _why(text, deny=["Acme Corp"])
-    assert _NO_REDUCE in why
+    assert any(x.startswith(_NO_REDUCE) for x in why)
     assert not any("Acme" in x or "cme" in x or chr(0x410) in x for x in why)
     combined = localdraft.check_draft("comment", chr(0x410) + "cme", "Corp", deny=["Acme Corp"])
     assert any(_NO_REDUCE in x for x in combined)
@@ -1145,7 +1145,7 @@ def test_r5_1_homoglyph_in_deny_word_is_refused_and_never_echoed() -> None:
 def test_r5_1_fullwidth_letters_fold_and_match() -> None:
     text = "".join(chr(ord(c) + 0xFEE0) if c.isalpha() else c for c in "Acme Corp")
     why = _why(text, deny=["Acme Corp"])
-    assert _NO_REDUCE not in why
+    assert not any(x.startswith(_NO_REDUCE) for x in why)
     assert any("matched private deny entry" in x for x in why)
 
 
@@ -1304,7 +1304,7 @@ _NO_REDUCE_ANY = "characters that cannot be reduced to ASCII: refused"
 def test_r6_m2_symbols_and_lookalikes_are_refused(cp: int) -> None:
     text = "pay " + chr(cp) + " now"
     why = _why(text)
-    assert _NO_REDUCE_ANY in why, hex(cp)
+    assert any(x.startswith(_NO_REDUCE_ANY) for x in why), hex(cp)
     assert not any(chr(cp) in x for x in why)
 
 
@@ -1327,8 +1327,8 @@ def test_r6_m2_typography_and_emoji_pass(text: str) -> None:
 
 def test_r6_m2_variation_selector_and_dingbat_digits_stay_refused() -> None:
     assert _why(chr(0x2705) + chr(0xFE0F)) != []
-    assert _NO_REDUCE_ANY in _why(chr(0x2776))
-    assert _NO_REDUCE_ANY in _why(chr(0x2793))
+    assert any(x.startswith(_NO_REDUCE_ANY) for x in _why(chr(0x2776)))
+    assert any(x.startswith(_NO_REDUCE_ANY) for x in _why(chr(0x2793)))
 
 
 def test_r6_m2_precomposed_accent_squashes_to_ascii() -> None:
@@ -1528,3 +1528,76 @@ def test_r9_d2_multiplication_sign_is_an_x() -> None:
     assert any("matched private deny entry" in x for x in _why("Acme" + m + "Labs", deny=["Acme" + m + "Labs"]))
     for n in (0x2715, 0x2716, 0x2717, 0x2718):
         assert any("matched private deny entry" in x for x in _why("Acme" + chr(n) + "Labs", deny=["AcmeXLabs"]))
+
+
+# round 10: refusals name the offending line and say what to change, and never echo the draft
+_SECRET_WORDS = ("zebrafish", "quokka", "marmoset")
+
+
+def _find(why: list[str], needle: str) -> str:
+    hits = [x for x in why if needle in x]
+    assert len(hits) == 1, (needle, why)
+    return hits[0]
+
+
+def _no_echo(message: str) -> None:
+    assert not any(w in message for w in _SECRET_WORDS), message
+
+
+def test_r10_refdef_message_names_line_and_action() -> None:
+    text = "first zebrafish line\n\nsecond quokka line\nthird [marmoset] line\nfourth: ok]: tail"
+    msg = _find(_why(text), "reference definitions")
+    assert msg == (
+        "markdown reference definitions are not allowed in drafts: a `[` followed later by `]:` in the same "
+        "paragraph (line 5). Reword it, put the text in a code span without brackets, or split the paragraph; "
+        "write URLs plainly."
+    )
+    _no_echo(msg)
+
+
+def test_r10_refdef_line_in_first_paragraph_and_escaped_bracket() -> None:
+    assert "(line 1)" in _find(_why("[zebrafish]: x"), "reference definitions")
+    assert "(line 3)" in _find(_why("a\n\nzebrafish \\] and ]: x"), "reference definitions")
+
+
+def test_r10_html_message_names_line_and_action() -> None:
+    msg = _find(_why("zebrafish\nquokka\nfile <module> marmoset"), "HTML is not allowed")
+    assert msg == (
+        "HTML is not allowed in drafts (line 3): remove the angle-bracket text; write `{name}` instead of "
+        "`<name>`; a pasted traceback with `<module>` must be rewritten without the angle brackets."
+    )
+    _no_echo(msg)
+    assert "(line 2)" in _find(_why("zebrafish\nR&D quokka\n"), "HTML is not allowed")
+
+
+def test_r10_link_message_names_line_and_action() -> None:
+    msg = _find(_why("zebrafish\n\nquokka [x](http://example.com/marmoset)"), "markdown links")
+    assert msg == "markdown links are not allowed in drafts (line 3): write the URL plainly."
+    _no_echo(msg)
+
+
+def test_r10_unusual_character_message_names_line() -> None:
+    msg = _find(_why("zebrafish\nquokka" + chr(0x200B) + "marmoset"), "unusual characters")
+    assert msg.endswith("(line 2)"), msg
+    _no_echo(msg)
+
+
+def test_r10_unreducible_message_names_line() -> None:
+    text = "zebrafish\nquokka\nmarmoset " + chr(0x410)
+    msg = _find(_why(text), _NO_REDUCE)
+    assert msg == f"{_NO_REDUCE} (line 3)"
+    _no_echo(msg)
+    assert chr(0x410) not in msg
+
+
+def test_r10_title_refusal_says_line_one() -> None:
+    assert any("(line 1)" in x for x in localdraft.check_title("zebrafish <b>"))
+
+
+def test_r10_deny_hit_prints_only_the_entry_number() -> None:
+    why = _why("line one\nline two zebrafish\n", deny=["zebrafish"])
+    hits = [x for x in why if "matched private deny entry" in x]
+    assert len(hits) == 1
+    assert "line" not in hits[0].replace("deny entry", "")
+    assert "zebrafish" not in hits[0]
+    assert not any("zebrafish" in x for x in why)

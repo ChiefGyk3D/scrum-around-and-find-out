@@ -67,27 +67,33 @@ safo audit | safo-draft digest board-drift -
   for matching, in drafts and in deny values alike (`Acme` plus U+00D7 plus `Labs` matches a deny value
   `AcmeXLabs`). Anything else (Cyrillic, Greek, Armenian, Cherokee, Hangul jamo, dotless i, small capitals, modifier
   letters, letterlike symbols, operator lookalikes such as U+2208, currency signs such as the euro sign, other
-  arrows) refuses the draft or title with "characters that cannot be reduced to ASCII: refused"; the reason never
+  arrows) refuses the draft or title with "characters that cannot be reduced to ASCII: refused (line N)"; the reason never
   holds the characters. Currency signs are refused on purpose: write `EUR` or `USD`. The variation selector U+FE0F
   stays refused. Deny matching and squashing use the skeleton, so a lookalike cannot slip a private value past the
   match. A deny value that holds such a character is a config error naming the line.
 - **Markdown links and reference definitions are refused.** Inline links and images (`](` and `![`) and reference uses
-  (`][`) fail with "markdown links are not allowed in drafts; write the URL plainly". Reference definitions are
+  (`][`) fail with "markdown links are not allowed in drafts (line N): write the URL plainly.". Reference definitions are
   refused by a broad rule with no parsing, because the rendered text differs from the source the checks see. Split the
-  text into paragraphs on blank lines, strip leading block markers (`>`, `-`, `*`, `+`, `1.`, `1)`, repeated) from
-  every line, and refuse the paragraph when it holds a `[` and, anywhere after the first `[`, the two characters `]:`.
+  text into paragraphs on blank lines and refuse a paragraph when it holds a `[` and, anywhere after the first `[`,
+  the two characters `]:` (leading block markers need no special handling: the rule is already that broad).
   Also refused: a paragraph with an escaped bracket (backslash then `[` or `]`) and a later `]:`, whatever comes
-  before it. The reason is "markdown reference definitions are not allowed in drafts; write the URL plainly". Only
-  `str.find` runs, so the scan is linear. Allowed: `- [x] done`, `[ ]`, `a[0]`, `see [1]` (no colon), and a `]:` in a
+  before it. The reason is "markdown reference definitions are not allowed in drafts: a `[` followed later by `]:` in the
+  same paragraph (line N). Reword it, put the text in a code span without brackets, or split the paragraph; write
+  URLs plainly." Only `str.find` runs, so the scan is linear. Allowed: `- [x] done`, `[ ]`, `a[0]`, `see [1]` (no colon), and a `]:` in a
   paragraph with no earlier `[` (`ok]: fine`). Known over-blocks, accepted as the safe side: `the range is [0, 5]:
   inclusive`, `arr[0]: the first item`, and any paragraph that mixes a `[` with a later `]:` for another reason.
   Rewrite those without the colon right after the bracket. Bare URLs are scanned as written. The exact pull request
   footer line is exempt.
 - **HTML is refused, not decoded.** A draft with an HTML tag, comment or declaration (`<` followed by a letter, `!`, `/`
   or `?`) or a character reference (`&name;`, `&#65;`, `&#x41;`, and the same without the semicolon when a word
-  boundary follows) fails with "HTML is not allowed in drafts; use plain markdown". `a < b` and `x<=y` pass. This also
+  boundary follows) fails with "HTML is not allowed in drafts (line N): remove the angle-bracket text; write `{name}` instead of
+  `<name>`; a pasted traceback with `<module>` must be rewritten without the angle brackets." `a < b` and `x<=y` pass. This also
   refuses `R&D` and `AT&T` (write "R and D"), and a URL query such as `?a=1&b=2`; use a plain link without the query.
   Nothing is decoded or stripped, which keeps the checking surface small.
+- **Refusals name the line, never the text.** The link, reference definition, HTML, unusual character and
+  unreducible character reasons end with or hold the 1-based line number of the first offence and a short fixed
+  instruction. No text from the draft is ever printed in a reason, so a private value cannot leak through one. For a
+  title and body checked together, line 1 is the title. A deny hit still prints only `matched private deny entry #N`.
 - **Render-equivalent text.** Every token check runs on the raw text and on its canonical form, and a hit on either
   blocks. The canonical form is NFKC with `*`, backtick, `~` and backslash removed (they vanish when Markdown renders,
   so `W1**AW**`, `box.**lan**`, `192.168.**1**.1` and `https://claude.**ai**/x` are read as what they spell). `_` and
