@@ -1,0 +1,1933 @@
+# SPDX-License-Identifier: Apache-2.0
+"""safo-activity: the status line, the table, the event monitor and the five providers (codex, quota, ledger, ollama,
+copilot). Everything runs against files under tmp_path, the fake Ollama on loopback and a fake `gh` script; nothing
+reads the real home directory or leaves the machine."""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+import pytest
+
+from fakeollama import FakeOllama
+from hooksdata import agents_file
+from safo import activity
+
+NOW = time.mktime(time.strptime("2026-11-09 12:00:00", "%Y-%m-%d %H:%M:%S"))  # local noon: no midnight edge
+
+
+def stamp(t: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def no_ctrl(text: str) -> bool:
+    return not any((ord(c) < 32 and c != "\n") or ord(c) == 127 for c in text)
+
+
+class Box:
+    """A scrubbed home, an empty PATH folder for stubs, and the environment that points at them."""
+
+    def __init__(self, root: Path) -> None:
+        self.home = root / "home"
+        self.bin = root / "bin"
+        self.run = root / "run"
+        for p in (self.home, self.bin, self.run):
+            p.mkdir(mode=0o700)
+        self.vars: dict[str, str] = {
+            "HOME": str(self.home),
+            "PATH": str(self.bin),
+            "XDG_RUNTIME_DIR": str(self.run),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+        }
+
+    @property
+    def jobs(self) -> Path:
+        d = self.home / ".claude/plugins/data/codex-openai-codex/state/ws/jobs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @property
+    def ledger(self) -> Path:
+        d = self.home / ".local/share/safo"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "gemini-spend-ledger.jsonl"
+
+    def job(self, name: str, **fields: Any) -> Path:
+        path = self.jobs / f"{name}.json"
+        path.write_text(json.dumps(fields))
+        return path
+
+    def rows(self, *rows: dict[str, Any]) -> Path:
+        self.ledger.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        return self.ledger
+
+    def rollout(self, name: str, *lines: str, age: float = 0.0) -> Path:
+        d = self.home / ".codex/sessions/2026/11/09"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"rollout-{name}.jsonl"
+        path.write_text("".join(line + "\n" for line in lines))
+        os.utime(path, (NOW - age, NOW - age))
+        return path
+
+    def read(self, only: str = "", network: bool = False) -> activity.Reading:
+        """`network` runs the Copilot refresh first (the work the background child does); a view never does."""
+        cfg = activity.load_config(self.vars)
+        if network:
+            activity.refresh_copilot(self.vars, cfg, NOW)
+        return activity.read_all(self.vars, NOW, cfg, only=only)
+
+    def line(self) -> str:
+        return activity.render_line(self.read())
+
+    def table(self) -> str:
+        return "\n".join(activity.render_table(self.read()))
+
+    def main(self, *argv: str) -> tuple[int, str]:
+        out = io.StringIO()
+        return activity.main(list(argv), self.vars, out), out.getvalue()
+
+
+REAL_SPAWN = activity._spawn
+
+
+@pytest.fixture(autouse=True)
+def spawns(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
+    """No test starts a real background refresh; each records that one would have started."""
+    started: list[dict[str, str]] = []
+    monkeypatch.setattr(activity, "_spawn", lambda env: started.append(dict(env)))
+    return started
+
+
+@pytest.fixture
+def box(tmp_path: Path) -> Box:
+    return Box(tmp_path)
+
+
+def dead_pid() -> int:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+# -- configuration ---------------------------------------------------------------------------------
+
+
+def test_with_no_configuration_only_the_local_file_providers_are_read(box: Box) -> None:
+    cfg = activity.load_config(box.vars)
+    assert cfg.providers == ("codex", "quota", "ledger")
+    assert "ollama" not in cfg.providers
+    assert "copilot" not in cfg.providers
+    assert box.line() == ""  # idle: nothing to show
+
+
+def test_the_environment_wins_over_the_config_file_and_unknown_names_are_noted(box: Box) -> None:
+    conf = box.home / ".config/safo"
+    conf.mkdir(parents=True)
+    (conf / "activity.yaml").write_text("providers: [codex, copilot]\ncopilot:\n  owner: N0TST\n")
+    from_file = activity.load_config(box.vars)
+    assert from_file.providers == ("codex", "copilot")
+    assert from_file.owner == "N0TST"
+    box.vars["SAFO_ACTIVITY_PROVIDERS"] = "ledger, bogus ,gemini"
+    from_env = activity.load_config(box.vars)
+    assert from_env.providers == ("ledger",)  # gemini is an alias of ledger
+    assert len(from_env.notes) == 1
+    assert "bogus" in from_env.notes[0]
+
+
+@pytest.mark.parametrize("text", ["providers: [", "- not\n- a mapping", "providers: {a: b}", "\x00\x01"])
+def test_a_broken_config_file_falls_back_to_the_defaults(box: Box, text: str) -> None:
+    conf = box.home / ".config/safo"
+    conf.mkdir(parents=True)
+    (conf / "activity.yaml").write_text(text)
+    assert activity.load_config(box.vars).providers == activity.DEFAULT_PROVIDERS
+
+
+def test_a_symlinked_config_file_is_ignored(box: Box, tmp_path: Path) -> None:
+    conf = box.home / ".config/safo"
+    conf.mkdir(parents=True)
+    target = tmp_path / "elsewhere.yaml"
+    target.write_text("providers: [copilot]\n")
+    (conf / "activity.yaml").symlink_to(target)
+    assert activity.load_config(box.vars).providers == activity.DEFAULT_PROVIDERS
+
+
+# -- codex jobs ------------------------------------------------------------------------------------
+
+
+def test_codex_counts_live_pids_and_recent_completions_only(box: Box) -> None:
+    started = stamp(NOW - 90)
+    box.job(
+        "live",
+        status="running",
+        phase="working",
+        pid=os.getpid(),
+        kindLabel="rescue",
+        title="Live job",
+        startedAt=started,
+    )
+    box.job(
+        "dead",
+        status="running",
+        phase="working",
+        pid=dead_pid(),
+        kindLabel="rescue",
+        title="Dead job",
+        startedAt=started,
+    )
+    box.job("zero", status="running", phase="x", pid=0, kindLabel="k", title="Group pid", startedAt=started)
+    box.job(
+        "new",
+        status="completed",
+        phase="done",
+        pid=None,
+        kindLabel="review",
+        title="Finished",
+        completedAt=stamp(NOW - 60),
+    )
+    box.job(
+        "old",
+        status="completed",
+        phase="done",
+        pid=None,
+        kindLabel="review",
+        title="Old job",
+        completedAt=stamp(NOW - 10800),
+    )
+    box.job("failed", status="failed", phase="x", pid=os.getpid(), kindLabel="k", title="Failed job", startedAt=started)
+    (box.jobs / "bad.json").write_text('{"status":"running","pid": 1234, "title": "broken')
+    assert box.line() == "cx 1 run Live job 1\u2713"
+    table = box.table()
+    assert "Codex: 1 running, 1 done (last 60m)" in table
+    assert "Live job" in table
+    assert "run  90s" in table
+    assert "Finished" in table
+    for hidden in ("Dead job", "Group pid", "Old job", "Failed job"):
+        assert hidden not in table
+
+
+def test_a_symlinked_job_file_is_ignored(box: Box, tmp_path: Path) -> None:
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"status": "running", "pid": os.getpid(), "title": "Linked", "startedAt": stamp(NOW)}))
+    (box.jobs / "link.json").symlink_to(real)
+    assert box.line() == ""
+
+
+def test_hostile_job_text_is_plain_and_short_in_every_view(box: Box) -> None:
+    title = "\x1b[31mRED\x1b[0m \x1b[2J\x1b[HX\ttab\nnewline\x07bell\x00nul " + "A" * 300
+    box.job(
+        "h",
+        status="running",
+        phase="do\x1b[2Jne",
+        pid=os.getpid(),
+        kindLabel="res\x1b]0;pwn\x07c",
+        title=title,
+        startedAt=stamp(NOW),
+    )
+    line, table = box.line(), box.table()
+    for text in (line, table, json.dumps(activity.render_json(box.read()))):
+        assert no_ctrl(text)
+    assert "RED" in table
+    assert "A" * 60 not in table
+    assert len(line.split(" ol")[0]) < 90
+
+
+def test_the_control_character_guard_bites() -> None:
+    assert not no_ctrl("a\x1b[2Jb")
+    assert not no_ctrl("a\tb")
+    assert no_ctrl("plain text\nsecond line")
+
+
+def test_clean_keeps_printable_ascii_and_nothing_else() -> None:
+    assert activity.clean("a\x1b[2J b\x00\u202e\u00e9  c\n") == "a [2J b c "
+    assert activity.clean("x" * 500, 20) == "x" * 20
+
+
+def test_human_age_steps() -> None:
+    assert [activity.human_age(s) for s in (-5, 59, 119, 120, 7199, 7200, 172799, 172800)] == [
+        "0s", "59s", "119s", "2m", "119m", "2h", "47h", "2d",
+    ]  # fmt: skip
+
+
+# -- ledger ----------------------------------------------------------------------------------------
+
+
+def start_row(call: str, job: str, t: float, **extra: Any) -> dict[str, Any]:
+    return {"type": "call_start", "call_id": call, "ts": stamp(t), "job": job, **extra}
+
+
+def end_row(call: str, t: float) -> dict[str, Any]:
+    return {"type": "call_end", "call_id": call, "ts": stamp(t)}
+
+
+def test_ledger_shows_counts_ages_and_never_content(box: Box) -> None:
+    path = box.rows(
+        {"type": "chain_start", "ts": "2020-01-01T00:00:00Z", "hash": "x"},
+        start_row("A", "research-one", NOW - 120, prompt="SECRETPROMPT"),
+        start_row("B", "finished-job", NOW - 100, prompt="SECRETPROMPT"),
+        end_row("B", NOW - 90),
+        start_row("C", "yesterday-job", NOW - 30 * 3600),
+    )
+    before = path.read_bytes()
+    line, table = box.line(), box.table()
+    assert line == "gm 3 90s"
+    assert "Ledger: 3 entries today, newest 90s ago" in table
+    row = next(x for x in table.splitlines() if "research-one" in x)
+    assert "in flight 2m" in row
+    assert "finished-job" not in table
+    assert "yesterday-job" not in table
+    assert "call_start today with no call_end" in table
+    for text in (line, table, json.dumps(activity.render_json(box.read()))):
+        assert "SECRETPROMPT" not in text
+    assert path.read_bytes() == before  # read only
+    assert path.stat().st_mtime_ns == path.stat().st_mtime_ns
+
+
+def test_ledger_without_call_rows_says_start_and_end_cannot_be_told_apart(box: Box) -> None:
+    box.rows({"type": "usage", "ts": stamp(NOW - 5)})
+    assert "cannot be told apart" in box.table()
+    assert box.line() == "gm 1 5s"
+
+
+def test_a_broken_chain_and_garbage_lines_do_not_raise(box: Box) -> None:
+    good = json.dumps(start_row("A", "job-a", NOW - 10, hash="not-the-real-hash", prev_hash="nope"))
+    box.ledger.write_text("not json\n[1,2]\n" + "[" * 5000 + "\n" + good + "\n" + '{"type":"call_end","call_id":"Z"')
+    assert "job-a" in box.table()
+    assert box.line() == "gm 1 10s"
+
+
+def test_ledger_symlink_missing_and_fifo_are_left_out(box: Box, tmp_path: Path) -> None:
+    assert box.read().ledger == activity.LedgerSnap()
+    real = tmp_path / "real.jsonl"
+    real.write_text(json.dumps(start_row("A", "x", NOW)) + "\n")
+    box.ledger.symlink_to(real)
+    assert box.line() == ""
+    assert "Ledger: not found or unreadable (segment omitted)" in box.table()
+    box.ledger.unlink()
+    os.mkfifo(box.ledger)
+    assert activity.tail_rows(box.ledger) is None  # a FIFO is never waited on
+
+
+def test_ledger_path_comes_from_gemini_yaml_when_it_is_absolute(box: Box, tmp_path: Path) -> None:
+    other = tmp_path / "elsewhere.jsonl"
+    other.write_text(json.dumps(start_row("A", "moved-job", NOW - 5)) + "\n")
+    conf = box.home / ".config/safo"
+    conf.mkdir(parents=True)
+    (conf / "gemini.yaml").write_text(f"model: x\nledger: {other}\n")
+    assert "moved-job" in box.table()
+    (conf / "gemini.yaml").write_text("ledger: relative/path.jsonl\n")
+    assert activity.ledger_path(box.vars, str(box.home)) == box.home / ".local/share/safo/gemini-spend-ledger.jsonl"
+
+
+def test_a_huge_ledger_is_tail_read_only(box: Box) -> None:
+    filler = json.dumps({"type": "usage", "ts": "2020-01-01T00:00:00Z", "pad": "x" * 200}) + "\n"
+    with box.ledger.open("w") as handle:
+        handle.write(filler * 6000)  # about 1.3 MB
+        handle.write(json.dumps(start_row("A", "tail-job", NOW - 3)) + "\n")
+    rows = activity.tail_rows(box.ledger)
+    assert rows is not None
+    assert len(rows) <= activity.LEDGER_TAIL_LINES
+    assert "tail-job" in box.table()
+
+
+def test_hostile_ledger_job_names_are_sanitized(box: Box) -> None:
+    box.rows(start_row("H", "x\x1b[2Jy\x07z" + "B" * 200, NOW - 5))
+    table = box.table()
+    assert no_ctrl(table)
+    assert "B" * 41 not in table
+
+
+# -- quota: codex rollouts -------------------------------------------------------------------------
+
+
+def token_event(t: float, primary: Any, secondary: Any, plan: Any = "prolite") -> str:
+    limits = {"limit_id": "codex", "primary": primary, "secondary": secondary, "plan_type": plan}
+    return json.dumps(
+        {"timestamp": stamp(t), "type": "event_msg", "payload": {"type": "token_count", "rate_limits": limits}}
+    )
+
+
+def test_codex_quota_reads_the_last_event_and_omits_a_null_window(box: Box) -> None:
+    older = {"used_percent": 7.0, "window_minutes": 10080, "resets_at": None}
+    box.rollout(
+        "a",
+        token_event(NOW - 900, older, None),
+        '{"type":"event_msg","payload":{"type":"agent_message"}}',
+        token_event(NOW - 240, {"used_percent": 1.0, "window_minutes": 10080, "resets_in_seconds": None}, {
+            "used_percent": None, "window_minutes": None, "resets_in_seconds": None}),
+    )  # fmt: skip
+    quota = box.read().quota
+    assert quota is not None
+    assert [(w.label, w.percent) for w in quota.codex.windows] == [("wk", 1.0)]
+    assert quota.codex.age == 240
+    assert quota.codex.plan == "prolite"
+    assert box.line() == "cx 1% wk, age 4m"
+    table = box.table()
+    assert "Quota Codex (prolite): read 4m ago" in table
+    assert "  1% used  wk" in table
+
+
+def test_codex_quota_labels_windows_and_shows_the_time_left(box: Box) -> None:
+    primary = {"used_percent": 42.5, "window_minutes": 300, "resets_in_seconds": 5400}
+    secondary = {"used_percent": 9, "window_minutes": 10080, "resets_at": NOW + 3 * 86400}
+    odd = {"used_percent": 3, "window_minutes": 720}
+    box.rollout("a", token_event(NOW - 30, primary, secondary), token_event(NOW - 20, odd, None))
+    assert box.line() == "cx 3% 12h, age 20s"
+    box.rollout("a", token_event(NOW - 30, primary, secondary))
+    assert box.line() == "cx 42% 5h 9% wk, age 30s"
+    table = box.table()
+    assert "42% used  5h, resets in 90m" in table
+    assert "9% used  wk, resets in 3d" in table
+
+
+def test_a_quota_reading_older_than_30_minutes_is_marked_stale(box: Box) -> None:
+    box.rollout("a", token_event(NOW - 3600, {"used_percent": 5, "window_minutes": 300}, None))
+    assert box.line() == "cx 5% 5h, age 60m stale"
+    assert "STALE" in box.table()
+
+
+def test_only_the_newest_three_rollouts_are_looked_at(box: Box) -> None:
+    box.rollout("old", token_event(NOW, {"used_percent": 99, "window_minutes": 300}, None), age=9000)
+    for i in range(3):
+        box.rollout(f"empty{i}", '{"type":"event_msg","payload":{"type":"agent_message"}}', age=100 - i)
+    assert box.read().quota == activity.QuotaSnap()  # the fourth newest is never opened
+    box.rollout("empty0", token_event(NOW - 10, {"used_percent": 8, "window_minutes": 300}, None), age=50)
+    assert box.line() == "cx 8% 5h, age 10s"
+
+
+def test_quota_with_no_sessions_a_malformed_last_line_or_a_huge_file(box: Box) -> None:
+    assert box.read().quota == activity.QuotaSnap()
+    assert box.line() == ""
+    good = token_event(NOW - 60, {"used_percent": 11, "window_minutes": 10080}, None)
+    box.rollout("a", good, '{"payload": {"rate_limits": {"primary": ', "[[[[[[")
+    assert box.line() == "cx 11% wk, age 60s"
+    path = box.rollout("a", good)
+    with path.open("a") as handle:  # 3 MB of other events after the reading: it is beyond the 256 KiB tail
+        pad = json.dumps({"type": "event_msg", "payload": {"type": "agent_message", "text": "x" * 1000}}) + "\n"
+        handle.write(pad * 3000)
+    assert box.line() == ""
+    with path.open("a") as handle:
+        handle.write(token_event(NOW - 5, {"used_percent": 12, "window_minutes": 10080}, None) + "\n")
+    assert box.line() == "cx 12% wk, age 5s"
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        {"used_percent": True, "window_minutes": 300},
+        {"used_percent": "50", "window_minutes": 300},
+        {"used_percent": 150, "window_minutes": 300},
+        {"used_percent": -1, "window_minutes": 300},
+        {"used_percent": 5, "window_minutes": 0},
+        {"used_percent": 5, "window_minutes": 10**9},
+        {"used_percent": float("nan"), "window_minutes": 300},
+        [1, 2],
+        "text",
+    ],
+)
+def test_odd_quota_windows_are_left_out(box: Box, window: Any) -> None:
+    box.rollout("a", token_event(NOW - 5, window, None).replace("NaN", "null"))
+    assert box.read().quota == activity.QuotaSnap(activity.Quota((), 5.0, "prolite"), activity.Quota())
+    assert box.line() == ""
+
+
+def test_a_hostile_plan_label_is_dropped_and_never_printed(box: Box) -> None:
+    window = {"used_percent": 2, "window_minutes": 300}
+    for plan in ("pro\x1b[2J", "a" * 40, "pro lite", 7, None):
+        box.rollout("a", token_event(NOW - 5, window, None, plan))
+        quota = box.read().quota
+        assert quota is not None
+        assert quota.codex.plan == ""
+        assert no_ctrl(box.table() + box.line())
+        assert "Quota Codex: read" in box.table()
+
+
+def test_a_symlinked_rollout_is_not_followed(box: Box, tmp_path: Path) -> None:
+    real = tmp_path / "real.jsonl"
+    real.write_text(token_event(NOW, {"used_percent": 9, "window_minutes": 300}, None) + "\n")
+    d = box.home / ".codex/sessions/2026/11/09"
+    d.mkdir(parents=True)
+    (d / "rollout-link.jsonl").symlink_to(real)
+    assert box.line() == ""
+
+
+# -- quota: the Claude cache file ------------------------------------------------------------------
+
+
+def claude_doc(captured: float, *windows: dict[str, Any]) -> dict[str, Any]:
+    return {"captured_at": stamp(captured), "windows": list(windows)}
+
+
+def put_claude(box: Box, doc: Any, mode: int = 0o600) -> Path:
+    path = box.home / ".cache/safo/claude-usage.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+    path.chmod(mode)
+    return path
+
+
+def test_claude_quota_present(box: Box) -> None:
+    put_claude(
+        box,
+        claude_doc(
+            NOW - 120,
+            {"label": "5h", "used_percent": 41.2, "resets_at": stamp(NOW + 3600)},
+            {"label": "wk", "used_percent": 12},
+        ),
+    )
+    assert box.line() == "cl 41% 5h 12% wk, age 2m"
+    table = box.table()
+    assert "Quota Claude: read 2m ago" in table
+    assert "41% used  5h, resets in 60m" in table
+    assert "12% used  wk" in table
+    assert json.loads(json.dumps(activity.render_json(box.read())))["quota"]["claude"]["windows"][0]["label"] == "5h"
+
+
+def test_claude_quota_stale_missing_and_malformed(box: Box) -> None:
+    assert box.line() == ""  # missing: nothing
+    path = put_claude(box, claude_doc(NOW - 4000, {"label": "5h", "used_percent": 10}))
+    assert box.line() == "cl 10% 5h, age 66m stale"
+    for bad in (
+        "not json",
+        "[]",
+        '{"windows": "x", "captured_at": "2026-11-09T11:00:00Z"}',
+        json.dumps({"windows": [{"label": "5h", "used_percent": 1}]}),  # no captured_at
+        json.dumps(claude_doc(NOW, {"label": "5h", "used_percent": 500}, {"label": "", "used_percent": 5})),
+        "[" * 5000,
+    ):
+        path.write_text(bad)
+        assert box.line() == "", bad[:30]
+    path.write_text(json.dumps(claude_doc(NOW - 5, {"label": "5\x1b[2Jh", "used_percent": 3})))
+    assert no_ctrl(box.line())
+
+
+def test_claude_quota_refuses_a_symlink_and_a_group_writable_file(box: Box, tmp_path: Path) -> None:
+    doc = claude_doc(NOW - 5, {"label": "5h", "used_percent": 3})
+    path = put_claude(box, doc, mode=0o620)
+    assert box.line() == ""  # group writable
+    path.chmod(0o602)
+    assert box.line() == ""  # world writable
+    path.chmod(0o600)
+    assert box.line() == "cl 3% 5h, age 5s"
+    path.unlink()
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps(doc))
+    real.chmod(0o600)
+    path.symlink_to(real)
+    assert box.line() == ""
+
+
+def test_write_claude_usage_is_atomic_private_and_validates(box: Box) -> None:
+    now = time.time()
+    doc = claude_doc(now, {"label": "5h", "used_percent": 20, "extra": "dropped"}, {"label": "wk", "used_percent": 5})
+    doc["prompt"] = "SECRETPROMPT"
+    assert activity.write_claude_usage(doc, box.vars) is True
+    path = box.home / ".cache/safo/claude-usage.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    saved = path.read_text()
+    assert "SECRETPROMPT" not in saved
+    assert "dropped" not in saved
+    assert not [p for p in path.parent.iterdir() if p != path]  # no temporary file left behind
+    assert box.line().startswith("cl 20% 5h 5% wk, age ")
+    bad_docs: list[Any] = [
+        {"windows": []},
+        {"captured_at": stamp(now), "windows": [{"label": "x", "used_percent": 900}]},
+        [1],
+        "s",
+    ]
+    for bad in bad_docs:
+        assert activity.write_claude_usage(bad, box.vars) is False
+    assert path.read_text() == saved  # a refused document leaves the old file alone
+
+
+def test_the_quota_provider_makes_no_network_call(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("quota touched the network")
+
+    monkeypatch.setattr("socket.socket.connect", boom)
+    monkeypatch.setattr("subprocess.run", boom)
+    monkeypatch.setattr("subprocess.Popen", boom)
+    box.rollout("a", token_event(NOW, {"used_percent": 1, "window_minutes": 300}, None))
+    put_claude(box, claude_doc(NOW, {"label": "5h", "used_percent": 2}))
+    assert box.line() == "cx 1% 5h, age 0s cl 2% 5h, age 0s"
+
+
+# -- ollama ----------------------------------------------------------------------------------------
+
+
+def fake_ss(box: Box, count: int) -> None:
+    ss = box.bin / "ss"
+    ss.write_text("#!/bin/sh\n" + "".join("echo ESTAB 0 0 a b\n" for _ in range(count)))
+    ss.chmod(0o755)
+
+
+def test_ollama_is_opt_in_and_with_no_endpoint_makes_no_call(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("safo.ollama._request", lambda *a, **k: calls.append("called"))
+    assert box.line() == ""  # not enabled: not even looked at
+    box.vars["SAFO_ACTIVITY_PROVIDERS"] = "ollama"
+    assert box.line() == ""
+    assert "Ollama: no endpoint configured" in box.table()
+    assert calls == []
+
+
+def test_ollama_reads_only_the_loaded_listing_from_llm_local_url(box: Box) -> None:
+    box.vars["SAFO_ACTIVITY_PROVIDERS"] = "ollama"
+    with FakeOllama(installed=["x"], loaded=["qwen3:8b", "reg.example/org/llama3:latest"]).serve() as fake:
+        box.vars["LLM_LOCAL_URL"] = fake.url + "/"
+        assert box.line() == "ol:qwen3:8b,llama3"
+        fake_ss(box, 2)
+        assert box.line() == "ol:qwen3:8b,llama3 busy"
+        table = box.table()
+        assert "Ollama: 2 loaded, 2 established connection(s)" in table
+        assert "expiry unknown" in table
+        assert {(m, p) for m, p, _ in fake.requests} == {("GET", "/api/ps")}  # never tags, never generate
+        assert fake.generates == []
+
+
+def test_ollama_endpoints_come_from_the_agents_config(box: Box) -> None:
+    box.vars["SAFO_ACTIVITY_PROVIDERS"] = "ollama"
+    conf = box.home / ".config/safo"
+    conf.mkdir(parents=True)
+    with FakeOllama(installed=[], loaded=["m1"]).serve() as fake:
+        agents_file(conf / "agents.yaml", a_url=fake.url, b_url=fake.url)
+        assert box.line() == "ol:m1"
+        assert {p for _, p, _ in fake.requests} == {"/api/ps"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://127.0.0.1:1",
+        "http://user:pw@127.0.0.1:1",
+        "http://169.254.169.254/",
+        "nonsense",
+        "http://127.0.0.1:1?x=1",
+    ],
+)
+def test_an_unsound_llm_local_url_is_never_called(box: Box, monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    box.vars.update(SAFO_ACTIVITY_PROVIDERS="ollama", LLM_LOCAL_URL=url)
+    calls: list[str] = []
+    monkeypatch.setattr("safo.ollama._request", lambda *a, **k: calls.append("called"))
+    assert box.line() == ""
+    assert calls == []
+
+
+def test_an_ollama_that_fails_is_left_out_without_an_error(box: Box) -> None:
+    box.vars["SAFO_ACTIVITY_PROVIDERS"] = "ollama"
+    with FakeOllama(installed=[], loaded=[]).serve() as fake:
+        fake.raw_reply = b"<html>not json</html>"
+        box.vars["LLM_LOCAL_URL"] = fake.url
+        assert box.line() == ""
+        assert "Ollama: not answering (segment omitted)" in box.table()
+        fake.raw_reply = None
+        fake.redirect_to = "http://127.0.0.1:9/"  # a redirect is an error, never followed
+        assert box.line() == ""
+    box.vars["LLM_LOCAL_URL"] = "http://127.0.0.1:9"  # nothing listens
+    assert box.line() == ""
+
+
+def test_ollama_expiry_notes() -> None:
+    assert activity._expiry_note("2099-01-01T00:00:00Z", NOW) == "stays loaded (no expiry)"
+    assert activity._expiry_note(stamp(NOW + 300), NOW) == "expires in 5m"
+    assert activity._expiry_note("", NOW) == "expiry unknown"
+
+
+def test_hostile_model_names_are_plain(box: Box) -> None:
+    box.vars["SAFO_ACTIVITY_PROVIDERS"] = "ollama"
+    with FakeOllama(installed=[], loaded=["evil\x1b[2J\x07" + "Z" * 100]).serve() as fake:
+        box.vars["LLM_LOCAL_URL"] = fake.url
+        assert no_ctrl(box.line() + box.table())
+        assert "Z" * 41 not in box.line()
+
+
+# -- copilot ---------------------------------------------------------------------------------------
+
+SHA = "abcdef0123456789abcdef0123456789abcdef01"
+BOT = {"login": "copilot-pull-request-reviewer[bot]"}
+
+
+class Gh:
+    """A fake `gh`: answers exactly the paths in `routes` and records every argument list it was given."""
+
+    def __init__(self, box: Box, tmp_path: Path) -> None:
+        self.routes = tmp_path / "routes.json"
+        self.log = tmp_path / "gh.log"
+        self.table: dict[str, Any] = {}
+        self.save()
+        script = box.bin / "gh"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys, time\n"
+            "args = sys.argv[1:]\n"
+            f"open({str(self.log)!r}, 'a').write(json.dumps(args) + '\\n')\n"
+            f"routes = json.load(open({str(self.routes)!r}))\n"
+            "etags, status = routes.get('__etags__', {}), routes.get('__status__', {})\n"
+            "time.sleep(routes.get('__sleep__', 0))\n"
+            "headers, cond, path, i = False, None, None, 1\n"
+            "while i < len(args):\n"
+            "    if args[i] == '-i':\n        headers = True\n"
+            "    elif args[i] == '-H':\n        cond = args[i + 1]\n        i += 1\n"
+            "    else:\n        path = args[i]\n"
+            "    i += 1\n"
+            "def fail(code):\n"
+            "    if headers:\n        print('HTTP/2.0 %d X\\n\\n{}' % code)\n"
+            "    sys.exit(1)\n"
+            "if path in status:\n    fail(status[path])\n"
+            "if path not in routes:\n    fail(404)\n"
+            "tag = etags.get(path)\n"
+            "if headers and tag and cond == 'If-None-Match: ' + tag:\n"
+            "    print('HTTP/2.0 304 Not Modified\\nEtag: ' + tag + '\\n')\n    sys.exit(1)\n"
+            "if headers:\n"
+            "    print('HTTP/2.0 200 OK' + ('\\nEtag: ' + tag if tag else '') + '\\n')\n"
+            "print(json.dumps(routes[path]))\n"
+        )
+        script.chmod(0o755)
+
+    def save(self) -> None:
+        self.routes.write_text(json.dumps(self.table))
+
+    def raw_calls(self) -> list[list[str]]:
+        return [json.loads(x) for x in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def calls(self) -> list[list[str]]:
+        """Each call as ["api", path]: the flags (-i, -H If-None-Match) are in raw_calls."""
+        return [[c[0], c[-1]] for c in self.raw_calls()]
+
+    def etag(self, path: str, tag: str) -> None:
+        self.table.setdefault("__etags__", {})[path] = tag
+
+    def status(self, path: str, code: int) -> None:
+        self.table.setdefault("__status__", {})[path] = code
+
+    def pr(
+        self,
+        repo: str,
+        number: int,
+        *,
+        running: bool = False,
+        reviews: list[dict[str, Any]] | None = None,
+        comments: list[dict[str, Any]] | None = None,
+        runs: list[dict[str, Any]] | None = None,
+        sha: str = SHA,
+    ) -> None:
+        r = f"repos/{repo}"
+        self.table[f"{r}/pulls/{number}"] = {"head": {"sha": sha}}
+        found = runs if runs is not None else []
+        if running:
+            found = [*found, {"name": activity.COPILOT_RUN_NAME, "event": "dynamic", "status": "in_progress"}]
+        self.table[f"{r}/actions/runs?event=dynamic&head_sha={sha}&per_page=30"] = {"workflow_runs": found}
+        self.table[f"{r}/pulls/{number}/reviews?per_page=100"] = reviews or []
+        self.table[f"{r}/pulls/{number}/comments?per_page=100"] = comments or []
+
+    def search(self, owner: str, prs: list[tuple[str, int]]) -> None:
+        q = quote(f"is:pr is:open user:{owner}")
+        items = [{"number": n, "repository_url": f"https://api.github.com/repos/{repo}"} for repo, n in prs]
+        self.table[f"search/issues?q={q}&per_page=15"] = {"items": items}
+
+
+@pytest.fixture
+def gh(box: Box, tmp_path: Path) -> Gh:
+    box.vars.update(SAFO_ACTIVITY_PROVIDERS="copilot", SAFO_ACTIVITY_COPILOT_OWNER="N0TST")
+    return Gh(box, tmp_path)
+
+
+def review(body: str, sha: str = SHA, user: dict[str, str] = BOT) -> dict[str, Any]:
+    return {"user": user, "commit_id": sha, "body": body, "state": "COMMENTED"}
+
+
+def test_copilot_shows_a_running_review_first(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 3), ("N0TST/b", 9)])
+    gh.pr("N0TST/a", 3, running=True)
+    gh.pr("N0TST/b", 9, reviews=[review("Looks fine, one note.")])
+    gh.save()
+    rd = box.read(network=True)
+    assert activity.render_line(rd) == "cp 1 run N0TST/a#3"
+    table = "\n".join(activity.render_table(rd))
+    assert "Copilot: 1 review running, 1 unread (2 of 2 open PRs known)" in table
+    assert "N0TST/b#9  unread: 1 review(s) with text, 0 inline comment(s)" in table
+    assert "Looks fine" not in table  # counts only, never the text
+
+
+def test_copilot_unread_means_text_or_an_inline_comment_on_the_current_head(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(activity, "COPILOT_MAX_CALLS", 100)
+    old = "0" * 40
+    gh.search("N0TST", [("N0TST/a", 1), ("N0TST/b", 2), ("N0TST/c", 3), ("N0TST/d", 4), ("N0TST/e", 5)])
+    gh.pr("N0TST/a", 1, reviews=[review("")])  # an empty body is not unread
+    gh.pr("N0TST/b", 2, reviews=[review("old head text", sha=old)])  # not the current head
+    gh.pr("N0TST/c", 3, reviews=[review("someone else", user={"login": "human"})])
+    gh.pr("N0TST/d", 4, comments=[{"user": BOT, "commit_id": SHA, "body": "SECRETCOMMENT"}])
+    gh.pr("N0TST/e", 5, runs=[{"name": "CI", "event": "dynamic", "status": "in_progress"}])  # another workflow
+    gh.save()
+    rd = box.read(network=True)
+    assert rd.copilot is not None
+    assert [u[0] for u in rd.copilot.unread] == ["N0TST/d#4"]
+    assert rd.copilot.unread[0][1:] == (0, 1)
+    assert rd.copilot.running == ()
+    assert activity.render_line(rd) == "cp 1 unread N0TST/d#4"
+    assert "SECRETCOMMENT" not in json.dumps(activity.render_json(rd))
+    assert "SECRETCOMMENT" not in "\n".join(activity.render_table(rd))
+
+
+def test_copilot_is_silent_when_nothing_runs_and_nothing_is_unread(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1, reviews=[review("")])
+    gh.save()
+    assert activity.render_line(box.read(network=True)) == ""
+
+
+def test_copilot_asks_only_read_only_rest_paths(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1, running=True)
+    gh.save()
+    box.read(network=True)
+    calls = gh.calls()
+    assert [c[1] for c in calls].count("rate_limit") == 1  # the quota check, which GitHub does not count
+    calls = [c for c in calls if c[1] != "rate_limit"]
+    assert len(calls) == 5  # search, pull, runs, reviews, comments
+    for args in gh.raw_calls():
+        assert args[0] == "api"
+        path = args[-1]
+        assert path.startswith(("search/issues?", "repos/", "rate_limit"))
+        assert "graphql" not in path
+        flags = args[1:-1]
+        # the only flags: show headers, and a conditional request; never a method, a field, an input or a token
+        assert flags in ([], ["-i"]) or (
+            flags[0] == "-i" and flags[1] == "-H" and flags[2].startswith("If-None-Match: ")
+        )
+        assert len(flags) in (0, 1, 3)
+        assert not any(a in ("-X", "--method", "-f", "-F", "--field", "--input", "--hostname") for a in args)
+
+
+def test_copilot_is_capped_at_15_pull_requests_and_cached_for_60_seconds(box: Box, gh: Gh) -> None:
+    prs = [("N0TST/a", n) for n in range(1, 31)]
+    gh.search("N0TST", prs)
+    for _, n in prs:
+        gh.pr("N0TST/a", n)
+    gh.save()
+    first = box.read(network=True).copilot
+    assert first is not None
+    counted = [c for c in gh.calls() if c[1] != "rate_limit"]
+    assert len(counted) == 1 + 3 * 4  # the search, then three whole pull requests; a fourth does not fit the budget
+    assert (first.listed, first.checked, first.skipped) == (15, 3, 12)  # the search is capped at 15, 12 are skipped
+    assert "12 not refreshed this round" in "\n".join(activity.render_table(box.read()))
+    again = box.read(network=True).copilot  # within 60 s: from the cache, no gh call
+    assert again == activity.read_copilot_cache(box.vars, NOW)
+    assert len([c for c in gh.calls() if c[1] != "rate_limit"]) == len(counted)
+    # rotation: the next round starts with the pull requests never checked, not with the same three
+    assert activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW + 61) is True
+    second = [c[1] for c in gh.calls()[len(counted) + 2 :] if "/pulls/" in c[1] and c[1].count("/") == 4]
+    assert second == [f"repos/N0TST/a/pulls/{n}" for n in (4, 5, 6)]
+    after = activity.read_copilot_cache(box.vars, NOW + 61)
+    assert after is not None
+    assert (after.checked, after.skipped) == (6, 12)
+    now = NOW + 61  # three more rounds reach the rest, oldest first
+    for _ in range(3):
+        now += 61
+        activity.refresh_copilot(box.vars, activity.load_config(box.vars), now)
+    last = activity.read_copilot_cache(box.vars, now)
+    assert last is not None
+    assert last.checked == 15
+
+
+def test_the_cache_holds_refs_and_counts_never_review_text(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr(
+        "N0TST/a",
+        1,
+        reviews=[review("SECRETREVIEW")],
+        comments=[{"user": BOT, "commit_id": SHA, "body": "SECRETCOMMENT"}],
+    )
+    gh.save()
+    box.read(network=True)
+    cache = box.run / "safo-activity-copilot.json"
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o600
+    assert "SECRET" not in cache.read_text()
+
+
+def test_a_status_line_never_waits_for_copilot_and_starts_one_refresh(
+    box: Box, gh: Gh, spawns: list[dict[str, str]]
+) -> None:
+    assert box.line() == ""  # no cache yet: omitted, not waited for
+    assert gh.calls() == []
+    assert len(spawns) == 1
+    assert box.line() == ""
+    assert len(spawns) == 1  # a second line right after does not start another
+
+
+def test_copilot_owner_falls_back_to_the_gh_login_and_failures_leave_it_out(box: Box, gh: Gh) -> None:
+    del box.vars["SAFO_ACTIVITY_COPILOT_OWNER"]
+    gh.table["user"] = {"login": "N0TST"}
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1, running=True)
+    gh.save()
+    assert activity.render_line(box.read(network=True)) == "cp 1 run N0TST/a#1"
+    for path in list(box.run.glob("safo-activity-copilot*")):
+        path.unlink()
+    gh.table.clear()
+    gh.save()
+    rd = box.read(network=True)
+    assert activity.render_line(rd) == ""
+    assert "Copilot: the last refresh failed (1 in a row)" in "\n".join(activity.render_table(rd))
+
+
+def test_copilot_without_gh_and_with_a_hostile_repo_name(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a b", 1), ("../..", 2), ("N0TST/ok", 3)])
+    gh.pr("N0TST/ok", 3, running=True)
+    gh.save()
+    rd = box.read(network=True)
+    assert rd.copilot is not None
+    assert rd.copilot.running == ("N0TST/ok#3",)
+    assert not any(".." in c[1] or " " in c[1] for c in gh.calls())
+    (box.bin / "gh").unlink()
+    for path in list(box.run.glob("safo-activity-copilot*")):
+        path.unlink()
+    assert activity.render_line(box.read(network=True)) == ""
+
+
+def test_one_pull_request_that_fails_is_skipped_not_fatal(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1), ("N0TST/b", 2)])
+    gh.pr("N0TST/b", 2, running=True)  # a/1 has no routes: gh exits 1 for it
+    gh.save()
+    rd = box.read(network=True).copilot
+    assert rd is not None
+    assert (rd.checked, rd.running) == (1, ("N0TST/b#2",))
+
+
+# -- the view modes --------------------------------------------------------------------------------
+
+
+def test_json_mode_has_the_same_facts(box: Box) -> None:
+    box.job(
+        "live",
+        status="running",
+        phase="working",
+        pid=os.getpid(),
+        kindLabel="rescue",
+        title="Live",
+        startedAt=stamp(time.time() - 5),
+    )
+    code, out = box.main("--json")
+    doc = json.loads(out)
+    assert code == 0
+    assert doc["providers"] == ["codex", "quota", "ledger"]
+    assert doc["codex"]["running"][0]["title"] == "Live"
+    assert doc["ledger"]["readable"] is False
+    assert "ollama" not in doc
+    assert "copilot" not in doc
+
+
+def test_table_mode_is_not_cached_and_the_line_is_cached_for_10_seconds(box: Box) -> None:
+    box.job(
+        "live", status="running", phase="p", pid=os.getpid(), kindLabel="k", title="First", startedAt=stamp(time.time())
+    )
+    code, first = box.main()
+    assert (code, first.startswith("cx 1 run First")) == (0, True)
+    cache = box.run / "safo-activity.cache"
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o600
+    for path in box.jobs.iterdir():
+        path.unlink()
+    assert box.main()[1] == first  # served from the cache
+    assert "Codex: 0 running" in box.main("--table")[1]  # the table is never cached
+    os.utime(cache, (time.time() - 30, time.time() - 30))
+    assert box.main()[1] == ""  # stale cache: read again
+
+
+def test_a_symlinked_line_cache_is_not_trusted(box: Box, tmp_path: Path) -> None:
+    target = tmp_path / "planted"
+    target.write_text("PLANTED")
+    (box.run / "safo-activity.cache").symlink_to(target)
+    assert box.main()[1] == ""
+    assert target.read_text() == "PLANTED"
+
+
+def test_version_and_bad_arguments(box: Box, capsys: pytest.CaptureFixture[str]) -> None:
+    import safo
+
+    assert box.main("--version") == (0, f"safo-activity {safo.__version__}\n")
+    for argv in (["--bogus"], ["--table", "--json"], ["--events"], ["--events", "quota"], ["--events", "nope"]):
+        code, out = box.main(*argv)
+        assert (code, out) == (2, "")
+    assert "usage: safo-activity" in capsys.readouterr().err
+
+
+def test_watch_redraws_with_a_header_until_told_to_stop(box: Box) -> None:
+    out = io.StringIO()
+    waits: list[float] = []
+
+    def wait(interval: float) -> bool:
+        waits.append(interval)
+        return len(waits) >= 3
+
+    assert activity.mode_watch(box.vars, out, wait=wait) == 0
+    text = out.getvalue()
+    assert text.count("safo-activity watch") == 3
+    assert waits == [2.0, 2.0, 2.0]
+    assert text.count("Codex: 0 running") == 3
+    assert no_ctrl(text)  # no screen-clear sequence when not a terminal
+
+
+# -- the event monitor -----------------------------------------------------------------------------
+
+
+class Clock:
+    """A clock the monitor's wait advances, and a hook that runs between polls to change the world."""
+
+    def __init__(self, script: list[Callable[[], None]] | None = None, step: float = 2.0) -> None:
+        self.t = 1000.0
+        self.script = script or []
+        self.step = step
+        self.waits = 0
+
+    def now(self) -> float:
+        return self.t
+
+    def wait(self, interval: float) -> bool:
+        self.t += self.step
+        if self.waits < len(self.script):
+            self.script[self.waits]()
+        self.waits += 1
+        return False
+
+
+def run_events(box: Box, name: str, clock: Clock, **kw: Any) -> list[str]:
+    out = io.StringIO()
+    code = activity.mode_events(name, box.vars, out, wait=clock.wait, clock=clock.now, **kw)
+    assert code == 0
+    return out.getvalue().splitlines()
+
+
+def test_events_codex_reports_start_and_finish_only(box: Box) -> None:
+    live = {"status": "running", "phase": "working", "pid": os.getpid(), "kindLabel": "rescue", "title": "Live job"}
+
+    def start() -> None:
+        box.job("e1", **live, startedAt=stamp(time.time()))
+
+    def finish() -> None:
+        box.job(
+            "e1",
+            status="completed",
+            phase="done",
+            pid=None,
+            kindLabel="rescue",
+            title="Live job",
+            completedAt=stamp(time.time()),
+        )
+
+    lines = run_events(box, "codex", Clock([start, finish]), max_polls=4)
+    assert lines == [
+        "codex: 0 running, 0 done (last 60m)",
+        "codex started: Live job (working)",
+        "codex finished: Live job",
+    ]
+
+
+def test_events_ollama_load_busy_idle_unload_down_and_back(box: Box) -> None:
+    box.vars.update(SAFO_ACTIVITY_PROVIDERS="ollama")
+    with FakeOllama(installed=[], loaded=[]).serve() as fake:
+        box.vars["LLM_LOCAL_URL"] = fake.url
+        fake_ss(box, 0)
+        script = [
+            lambda: setattr(fake, "loaded", ["qwen3:8b", "llama3"]),
+            lambda: fake_ss(box, 2),
+            lambda: fake_ss(box, 0),
+            lambda: setattr(fake, "loaded", ["qwen3:8b"]),
+            lambda: setattr(fake, "raw_reply", b"nope"),
+            lambda: setattr(fake, "raw_reply", None),
+        ]
+        lines = run_events(box, "ollama", Clock(script), max_polls=7, cap=100)
+    assert lines[0] == "ollama: 0 loaded, idle"
+    assert lines[1:] == [
+        "ollama: loaded llama3",
+        "ollama: loaded qwen3:8b",
+        "ollama: busy (2 conn)",
+        "ollama: idle",
+        "ollama: unloaded llama3",
+        "ollama: unreachable",
+        "ollama: reachable again",
+    ]  # no unload spam while it was down: only the transition is reported
+
+
+def test_events_ledger_names_the_action_and_never_the_prompt(box: Box) -> None:
+    t = time.time()
+    box.rows(start_row("B", "seed", t - 5), end_row("B", t - 4))
+
+    def add() -> None:
+        with box.ledger.open("a") as handle:
+            handle.write(json.dumps(start_row("N", "research-two", time.time(), prompt="SECRETPROMPT")) + "\n")
+            handle.write(json.dumps(start_row("H", "x\x1b[2Jy\x07z", time.time())) + "\n")
+
+    def end() -> None:
+        with box.ledger.open("a") as handle:
+            handle.write(json.dumps(end_row("N", time.time())) + "\n")
+
+    lines = run_events(box, "ledger", Clock([add, end]), max_polls=3)
+    assert lines[0] == "ledger: 0 call(s) in flight today"
+    assert "ledger: call started: research-two" in lines
+    assert "ledger: call ended: research-two" in lines
+    assert len(lines) == 4
+    assert no_ctrl("\n".join(lines))
+    assert "SECRETPROMPT" not in "\n".join(lines)
+
+
+def test_events_startup_notes_for_a_ledger_that_cannot_tell_starts_from_ends_or_is_missing(box: Box) -> None:
+    assert run_events(box, "ledger", Clock(), max_polls=1)[0] == "ledger: not found or unreadable"
+    box.rows({"type": "usage", "ts": stamp(time.time())})
+    assert "cannot be told apart" in run_events(box, "ledger", Clock(), max_polls=1)[0]
+
+
+def test_events_are_capped_at_six_per_window_with_one_dropped_notice(box: Box) -> None:
+    t = time.time()
+    box.rows(start_row("B", "seed", t - 5), end_row("B", t - 4))
+
+    def burst() -> None:
+        with box.ledger.open("a") as handle:
+            for n in range(9):
+                handle.write(json.dumps(start_row(f"X{n}", f"burst-{n}", time.time())) + "\n")
+
+    lines = run_events(box, "ledger", Clock([burst], step=20.0), window=60.0, max_polls=8)
+    assert sum("call started" in x for x in lines) == 6
+    notices = [x for x in lines if "dropped" in x]
+    assert notices == ["ledger: 3 events dropped in the last 60s (cap 6 per 60s)"]
+
+
+def test_events_end_after_the_limit_with_a_re_arm_line(box: Box) -> None:
+    lines = run_events(box, "codex", Clock(step=600.0), limit=29 * 60.0)
+    assert lines[0].startswith("codex: 0 running")
+    assert lines[-1] == "codex: 29 minute limit reached, re-arm the monitor"
+    assert len(lines) == 2
+
+
+def test_the_default_limit_is_29_minutes_and_the_cap_is_six() -> None:
+    assert activity.EVENTS_LIMIT == 29 * 60
+    assert activity.EVENTS_CAP == 6
+    assert activity.EVENTS_INTERVAL == 2.0
+
+
+def test_events_copilot_reports_a_review_starting_and_finishing(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1)
+    gh.save()
+    cfg = activity.load_config(box.vars)
+
+    def refresh() -> None:
+        for path in box.run.glob("safo-activity-copilot*"):
+            path.unlink()
+        activity.refresh_copilot(box.vars, cfg, time.time())
+
+    def begin() -> None:
+        gh.pr("N0TST/a", 1, running=True)
+        gh.save()
+        refresh()
+
+    def done() -> None:
+        gh.pr("N0TST/a", 1, reviews=[review("text")])
+        gh.save()
+        refresh()
+
+    refresh()
+    lines = run_events(box, "copilot", Clock([begin, done]), max_polls=3)
+    assert lines == [
+        "copilot: 0 review running, 0 unread",
+        "copilot: review running N0TST/a#1",
+        "copilot: unread N0TST/a#1 (1 review(s) with text, 0 inline)",
+        "copilot: review finished N0TST/a#1",
+    ]
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize("args", [["--events", "codex"], ["--watch"]])
+def test_a_signal_ends_a_monitor_cleanly_and_promptly(box: Box, sig: signal.Signals, args: list[str]) -> None:
+    proc = subprocess.Popen(  # noqa: S603 - our own interpreter
+        [sys.executable, "-I", "-c", "import sys; from safo.activity import main; sys.exit(main(sys.argv[1:]))", *args],
+        env=box.vars,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert proc.stdout is not None
+    proc.stdout.readline()  # the first line proves the handlers are installed (startup line or watch header)
+    started = time.monotonic()
+    proc.send_signal(sig)
+    assert proc.wait(timeout=10) == 0
+    assert time.monotonic() - started < 5
+    proc.stdout.close()
+
+
+def test_a_provider_that_raises_never_takes_the_view_down(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("provider bug")
+
+    monkeypatch.setattr(activity, "collect_codex", boom)
+    monkeypatch.setattr(activity, "collect_ledger", boom)
+    assert box.main("--table")[0] == 0
+    assert box.main("--json")[0] == 0
+
+
+# -- pace and the advisory recommendation ----------------------------------------------------------------------------
+
+
+def win(label: str, percent: float, left_fraction: float | None) -> activity.Window:
+    minutes = activity.window_minutes(label)
+    assert minutes is not None
+    return activity.Window(label, percent, None if left_fraction is None else left_fraction * minutes * 60)
+
+
+@pytest.mark.parametrize(
+    ("ratio", "band"),
+    [
+        (0.0, "under_pace"),
+        (0.8999, "under_pace"),
+        (0.9, "on_pace"),
+        (1.0, "on_pace"),
+        (1.0001, "caution"),
+        (1.3, "caution"),
+        (1.3001, "over_pace"),
+        (5.0, "over_pace"),
+    ],
+)
+def test_pace_band_edges(ratio: float, band: str) -> None:
+    assert activity.pace_band(ratio) == band
+
+
+def test_pace_is_used_percent_over_the_elapsed_share() -> None:
+    pace = activity.pace_of(win("wk", 42, 0.72))  # 28% of the week gone
+    assert pace is not None
+    assert round(pace.elapsed_percent) == 28
+    assert round(pace.ratio, 1) == 1.5
+    assert pace.band == "over_pace"
+    half = activity.pace_of(win("5h", 50, 0.5))
+    assert half is not None
+    assert (round(half.elapsed_percent), round(half.ratio, 2), half.band) == (50, 1.0, "on_pace")
+
+
+def test_an_early_reading_is_clamped_to_two_percent_elapsed() -> None:
+    pace = activity.pace_of(win("5h", 10, 0.999))  # 0.1% elapsed would give a ratio of 100
+    assert pace is not None
+    assert pace.elapsed_percent == 2.0
+    assert pace.ratio == 5.0
+    ahead = activity.pace_of(win("wk", 10, 1.5))  # a reset further off than the window is long
+    assert ahead is not None
+    assert ahead.elapsed_percent == 2.0
+
+
+def test_no_pace_without_a_reset_time_or_a_known_length() -> None:
+    assert activity.pace_of(win("wk", 10, None)) is None
+    assert activity.pace_of(activity.Window("month", 10, 100.0)) is None
+    assert [activity.window_minutes(x) for x in ("5h", "wk", "12h", "0h", "h", "5m")] == [
+        300,
+        10080,
+        720,
+        None,
+        None,
+        None,
+    ]
+
+
+def quota_snap(
+    cl_wk: tuple[float, float] | None,
+    cx_wk: tuple[float, float] | None,
+    cl_5h: float | None = None,
+    cl_age: float = 60.0,
+    cx_age: float = 60.0,
+) -> activity.QuotaSnap:
+    claude = [win("wk", cl_wk[0], cl_wk[1])] if cl_wk else []
+    if cl_5h is not None:
+        claude.append(win("5h", cl_5h, 0.5))
+    codex = [win("wk", cx_wk[0], cx_wk[1])] if cx_wk else []
+    return activity.QuotaSnap(activity.Quota(tuple(codex), cx_age, "prolite"), activity.Quota(tuple(claude), cl_age))
+
+
+def test_recommendation_prefers_codex_when_claude_runs_ahead_and_codex_has_room() -> None:
+    text = activity.recommendation(quota_snap((42, 0.72), (1, 0.9)))
+    assert (
+        text
+        == "Budget: Claude wk 42% (1.5x pace), Codex wk 1% (0.1x pace) - prefer Codex for specified implementer tasks"
+    )
+    assert activity.recommendation(quota_snap((40, 0.72), (30, 0.7))) is not None  # caution + on_pace
+
+
+def test_recommendation_says_normal_otherwise_and_holds_new_claude_agents_over_80_percent() -> None:
+    normal = activity.recommendation(quota_snap((10, 0.5), (1, 0.5)))
+    assert normal is not None
+    assert normal.endswith(" - normal")
+    both_ahead = activity.recommendation(quota_snap((42, 0.72), (60, 0.5)))  # codex over_pace too
+    assert both_ahead is not None
+    assert both_ahead.endswith(" - normal")
+    held = activity.recommendation(quota_snap((10, 0.5), (1, 0.5), cl_5h=81))
+    assert held is not None
+    assert held.endswith(" - hold new Claude agents")
+    assert activity.recommendation(quota_snap((10, 0.5), (1, 0.5), cl_5h=80)) == normal  # 80 itself is not above
+    both = activity.recommendation(quota_snap((42, 0.72), (1, 0.9), cl_5h=95))
+    assert both is not None
+    assert both.endswith(" - prefer Codex for specified implementer tasks; hold new Claude agents")
+    for text in (normal, held, both):
+        assert "review" not in text.lower()  # nothing about review routing, security review above all
+
+
+def test_missing_data_for_either_provider_means_no_line() -> None:
+    assert activity.recommendation(activity.QuotaSnap()) is None
+    assert activity.recommendation(quota_snap(None, (1, 0.5))) is None
+    assert activity.recommendation(quota_snap((42, 0.5), None)) is None
+    no_reset = activity.QuotaSnap(
+        activity.Quota((activity.Window("wk", 1, None),), 5.0), activity.Quota((win("wk", 42, 0.5),), 5.0)
+    )
+    assert activity.recommendation(no_reset) is None
+
+
+def test_a_stale_reading_is_marked_and_left_out_of_the_recommendation() -> None:
+    assert activity.recommendation(quota_snap((42, 0.72), (1, 0.9), cl_age=1801)) is None
+    assert activity.recommendation(quota_snap((42, 0.72), (1, 0.9), cx_age=1801)) is None
+    assert activity.recommendation(quota_snap((42, 0.72), (1, 0.9), cl_age=1800, cx_age=1800)) is not None
+
+
+def test_the_table_and_json_carry_the_pace_and_the_advice(box: Box) -> None:
+    box.rollout(
+        "a",
+        token_event(
+            NOW - 60, {"used_percent": 1.0, "window_minutes": 10080, "resets_in_seconds": 0.9 * 10080 * 60}, None
+        ),
+    )
+    put_claude(
+        box,
+        claude_doc(
+            NOW - 60,
+            {"label": "wk", "used_percent": 42, "resets_at": stamp(NOW + 0.72 * 10080 * 60)},
+            {"label": "5h", "used_percent": 20},
+        ),
+    )
+    table = box.table()
+    assert "42% used  wk, resets in 5" in table
+    assert "28% elapsed, 1.5x pace (over_pace)" in table
+    assert "10% elapsed, 0.1x pace (under_pace)" in table
+    assert (
+        "Budget: Claude wk 42% (1.5x pace), Codex wk 1% (0.1x pace) - prefer Codex for specified implementer tasks"
+        in table
+    )
+    assert "advisory only" in table
+    doc = activity.render_json(box.read())
+    claude = doc["quota"]["claude"]["windows"][0]
+    assert (claude["elapsed_percent"], claude["pace_ratio"], claude["band"]) == (28.0, 1.5, "over_pace")
+    assert doc["quota"]["claude"]["windows"][1]["band"] is None  # no reset time: no pace
+    assert doc["quota"]["recommendation"].startswith("Budget: Claude wk 42%")
+    assert "Budget" not in box.line()  # the status line is unchanged
+
+
+def test_the_view_modes_touch_no_routing_or_settings_file(box: Box) -> None:
+    box.rollout(
+        "a", token_event(NOW - 60, {"used_percent": 1.0, "window_minutes": 10080, "resets_in_seconds": 9000}, None)
+    )
+    put_claude(box, claude_doc(NOW - 60, {"label": "wk", "used_percent": 42, "resets_at": stamp(NOW + 9000)}))
+    conf = box.home / ".config/safo"
+    conf.mkdir(parents=True)
+    (conf / "agents.yaml").write_text("sentinel: agents\n")
+    settings = box.home / ".claude/settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"sentinel": 1}')
+
+    def snapshot() -> dict[str, tuple[bytes, int]]:
+        found = {}
+        for p in sorted(box.home.rglob("*")):
+            if p.is_file() and ".cache" not in p.parts:
+                found[str(p)] = (p.read_bytes(), p.stat().st_mtime_ns)
+        return found
+
+    before = snapshot()
+    for argv in ([], ["--table"], ["--json"]):
+        box.main(*argv)
+    assert snapshot() == before
+    assert not (conf / "mode").exists()
+
+
+# -- process launch hardening ------------------------------------------------------------------------------------------
+
+SECRET_VARS = {"AWS_SECRET_ACCESS_KEY": "hunter2", "OPENAI_API_KEY": "sk-test", "MY_PASSWORD": "pw"}
+
+
+def captured_launches(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict[str, Any]]]:
+    seen: list[tuple[list[str], dict[str, Any]]] = []
+
+    class Done:
+        returncode = 1
+        stdout = b""
+
+    def fake_run(argv: list[str], **kw: Any) -> Done:
+        seen.append((argv, kw))
+        return Done()
+
+    def fake_popen(argv: list[str], **kw: Any) -> None:
+        seen.append((argv, kw))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    return seen
+
+
+def test_the_background_refresh_is_isolated_in_a_trusted_directory_with_an_allowlisted_environment(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = captured_launches(monkeypatch)
+    monkeypatch.setattr(activity, "_spawn", REAL_SPAWN)
+    box.vars.update(SECRET_VARS)
+    box.vars.update(GH_TOKEN="t", XDG_DATA_HOME="/x", SAFO_ACTIVITY_PROVIDERS="copilot", LANG="C", PYTHONPATH="/evil")
+    activity.refresh_in_background(box.vars, NOW)
+    assert len(seen) == 1
+    argv, kw = seen[0]
+    assert argv[:2] == [sys.executable, "-I"]
+    assert kw["cwd"] == str(box.run)  # the cache directory, not the caller's directory
+    assert kw["close_fds"] is True
+    assert kw["start_new_session"] is True
+    assert kw["stdin"] == subprocess.DEVNULL
+    child_env = kw["env"]
+    for name in SECRET_VARS:
+        assert name not in child_env
+    assert "PYTHONPATH" not in child_env
+    assert child_env["GH_TOKEN"] == "t"
+    assert child_env["PATH"] == box.vars["PATH"]
+    assert child_env["SAFO_ACTIVITY_PROVIDERS"] == "copilot"
+    assert set(child_env) <= {
+        "HOME",
+        "PATH",
+        "LANG",
+        "GH_TOKEN",
+        "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "SAFO_ACTIVITY_PROVIDERS",
+    }
+
+
+def test_gh_and_ss_run_from_the_filesystem_root_with_a_clean_environment(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = captured_launches(monkeypatch)
+    box.vars.update(SECRET_VARS)
+    box.vars["PYTHONPATH"] = "/evil"
+    activity.fetch_copilot(box.vars, "N0TST", NOW)
+    (box.bin / "ss").write_text("#!/bin/sh\n")
+    (box.bin / "ss").chmod(0o755)
+    activity._established(box.vars, 11434)
+    assert len(seen) >= 2
+    for _argv, kw in seen:
+        assert kw["cwd"] == "/"
+        assert not set(SECRET_VARS) & set(kw["env"])
+        assert "PYTHONPATH" not in kw["env"]
+        assert kw["stdin"] == subprocess.DEVNULL
+
+
+def test_a_planted_package_in_the_working_directory_is_not_imported(box: Box, tmp_path: Path) -> None:
+    planted = tmp_path / "project"
+    (planted / "safo").mkdir(parents=True)
+    marker = tmp_path / "ran"
+    (planted / "safo" / "__init__.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+    (planted / "safo" / "activity.py").write_text("")
+    argv, _cwd = activity.background_command(box.vars)
+    check = [*argv[:-1], "--version"]
+    done = subprocess.run(  # noqa: S603 - our own interpreter on a command built by the code under test
+        check, cwd=planted, capture_output=True, text=True, env=activity.child_env(box.vars), check=False
+    )
+    assert done.stdout.startswith("safo-activity ")
+    assert not marker.exists()
+    # the guard bites: the same module run without isolation does import the planted package
+    plain = subprocess.run(
+        [sys.executable, "-m", "safo.activity", "--version"], cwd=planted, capture_output=True, text=True, check=False
+    )
+    assert marker.exists()
+    assert not plain.stdout.startswith("safo-activity ")
+
+
+# -- review fixes (issue 402) ----------------------------------------------------------------------------------------
+
+
+def test_tools_are_found_when_the_working_directory_is_the_filesystem_root(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir("/")  # how the pane runs the command
+    assert activity.find_tool("gh", box.vars) == str(box.bin / "gh")
+    fake_ss(box, 3)
+    assert activity._established(box.vars, 11434) == 3
+
+
+def test_a_tool_inside_the_working_directory_or_on_a_relative_path_entry_is_still_refused(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    planted = project / "ss"
+    planted.write_text("#!/bin/sh\n")
+    planted.chmod(0o755)
+    monkeypatch.chdir(project)
+    assert activity.find_tool("ss", {"PATH": str(project)}) is None  # inside the working directory
+    assert activity.find_tool("ss", {"PATH": "."}) is None  # relative entry
+    assert activity.find_tool("ss", {"PATH": "bin:" + str(project)}) is None
+    assert activity.find_tool("ss", {"PATH": str(project), "GITHUB_WORKSPACE": str(project)}) is None
+    monkeypatch.chdir("/")
+    assert activity.find_tool("ss", {"PATH": "."}) is None  # still relative, with or without the root exemption
+
+
+def test_views_never_fetch_copilot_and_only_the_refresh_does(box: Box, gh: Gh, spawns: list[dict[str, str]]) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1, running=True)
+    gh.save()
+    for argv in ([], ["--table"], ["--json"]):
+        box.main(*argv)
+    assert gh.calls() == []  # no view asked GitHub
+    assert spawns  # a background refresh was started instead
+    assert box.main("--refresh-copilot")[0] == 0
+    assert gh.calls()
+    assert "Copilot: 1 review running" in box.main("--table")[1]
+
+
+def test_a_failing_refresh_backs_off_with_a_growing_capped_wait(box: Box, gh: Gh) -> None:
+    cfg = activity.load_config(box.vars)  # gh has no routes: every fetch fails
+    assert [activity.failure_wait(n) for n in (1, 2, 3, 4, 5, 6, 20)] == [60, 120, 240, 480, 900, 900, 900]
+    assert activity.refresh_copilot(box.vars, cfg, NOW) is True
+    first = len(gh.calls())
+    assert first > 0
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 2) is False  # inside the wait
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 59) is False
+    assert len(gh.calls()) == first
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61) is True  # the second failure waits 120 s
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61 + 119) is False
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61 + 121) is True
+    assert activity.read_state(box.vars)["failures"] == 3
+
+
+def test_views_start_no_refresh_during_a_backoff(box: Box, gh: Gh, spawns: list[dict[str, str]]) -> None:
+    activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW)  # fails, waits 60 s
+    box.read()
+    assert spawns == []
+    activity.refresh_in_background(box.vars, NOW + 61)
+    assert len(spawns) == 1
+
+
+def test_a_low_rest_quota_stops_the_refresh_until_it_resets(box: Box, gh: Gh) -> None:
+    gh.table["rate_limit"] = {"resources": {"core": {"remaining": 10, "reset": time.time() + 600}}}
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    assert activity.refresh_copilot(box.vars, cfg, NOW) is True
+    assert [c[1] for c in gh.calls()] == ["rate_limit"]  # nothing else was asked
+    wait = activity.read_state(box.vars)["next_ok"] - NOW
+    assert 60 <= wait <= 3600
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 30) is False
+
+
+def test_the_refresh_lock_is_exclusive_and_a_dead_one_expires(box: Box) -> None:
+    import threading
+
+    lock = box.run / "safo-activity-copilot.lock"
+    won: list[bool] = []
+    gate = threading.Barrier(8)
+
+    def race() -> None:
+        gate.wait()
+        won.append(activity.acquire_lock(lock))
+
+    threads = [threading.Thread(target=race) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert won.count(True) == 1
+    old = time.time() - activity.LOCK_STALE - 5
+    os.utime(lock, (old, old))
+    assert activity.acquire_lock(lock) is True  # the holder is gone: taken over
+    assert activity.acquire_lock(lock) is False
+    activity.release_lock(lock)
+    assert activity.acquire_lock(lock) is True
+
+
+def test_a_refresh_does_nothing_while_another_holds_the_lock(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1, running=True)
+    gh.save()
+    assert activity.acquire_lock(box.run / "safo-activity-copilot.lock")
+    assert activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW) is False
+    assert gh.calls() == []
+
+
+def test_reviews_and_comments_are_read_across_pages(box: Box, gh: Gh) -> None:
+    gh.search("N0TST", [("N0TST/a", 1)])
+    gh.pr("N0TST/a", 1)
+    others = [review("noise", user={"login": "human"}) for _ in range(100)]
+    base = "repos/N0TST/a/pulls/1/reviews?per_page=100"
+    gh.table[base] = others  # page 1: a hundred reviews, none from Copilot
+    gh.table[base + "&page=2"] = [review("The newest review.")]
+    cbase = "repos/N0TST/a/pulls/1/comments?per_page=100"
+    gh.table[cbase] = [{"user": {"login": "human"}, "commit_id": SHA} for _ in range(100)]
+    gh.table[cbase + "&page=2"] = [{"user": BOT, "commit_id": SHA}]
+    gh.save()
+    rd = box.read(network=True).copilot
+    assert rd is not None
+    assert rd.unread == (("N0TST/a#1", 1, 1),)
+    assert not any("page=4" in c[1] for c in gh.calls())  # bounded
+
+
+def test_a_non_ascii_pid_digit_does_not_blank_the_codex_segment(box: Box) -> None:
+    started = stamp(NOW - 90)
+    box.job("good", status="running", phase="p", pid=os.getpid(), kindLabel="k", title="Real job", startedAt=started)
+    box.job("evil", status="running", phase="p", pid="²", kindLabel="k", title="Planted", startedAt=started)
+    box.job("evil2", status="running", phase="p", pid="٣٤", kindLabel="k", title="Planted2", startedAt=started)
+    box.job("huge", status="running", phase="p", pid="9" * 400, kindLabel="k", title="Planted3", startedAt=started)
+    assert box.line() == "cx 1 run Real job"
+    assert "Planted" not in box.table()
+
+
+def test_the_copilot_cache_is_checked_and_cleaned_before_it_is_shown(box: Box, gh: Gh) -> None:
+    path = box.run / "safo-activity-copilot.json"
+    body = {
+        "ts": NOW - 5,
+        "ok": True,
+        "checked": 3,
+        "listed": 3,
+        "skipped": 0,
+        "truncated": 0,
+        "running": ["N0TST/a#1", "evil\x1b[2J/x#2", "no-number", 7],
+        "unread": [["N0TST/b#2", 1, 0], ["bad\x07/x#1", 1, 1], ["N0TST/c#3", 3, 2]],
+    }
+    path.write_text(json.dumps(body))
+    path.chmod(0o600)
+    rd = box.read().copilot
+    assert rd is not None
+    assert rd.running == ("N0TST/a#1",)
+    assert [u[0] for u in rd.unread] == ["N0TST/b#2", "N0TST/c#3"]
+    assert rd.unread[1][1:] == (3, 2)
+    assert no_ctrl(box.table() + box.line())
+    path.chmod(0o664)  # someone else can write it: not trusted
+    assert box.read().copilot == activity.CopilotSnap()
+    path.chmod(0o600)
+    path.rename(box.run / "real")
+    path.symlink_to(box.run / "real")  # a link is not followed
+    assert box.read().copilot == activity.CopilotSnap()
+
+
+def test_the_line_cache_is_checked_and_cleaned_before_it_is_printed(box: Box) -> None:
+    cache = box.run / "safo-activity.cache"
+    cache.write_text("cx 1 run \x1b[2Jpwned\x07")
+    cache.chmod(0o600)
+    code, out = box.main()
+    assert code == 0
+    assert no_ctrl(out)
+    assert "pwned" in out
+    cache.chmod(0o666)
+    assert activity.read_line_cache(cache, time.time()) is None  # writable by others: not trusted
+    assert "pwned" not in box.main()[1]  # read afresh instead
+
+
+def slow_drip_server(stop: Any) -> tuple[Any, str]:
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    srv.settimeout(0.2)
+
+    def serve() -> None:
+        conns = []
+        while not stop.is_set():
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                continue
+            conns.append(c)
+            threading.Thread(target=drip, args=(c,), daemon=True).start()
+        for c in conns:
+            c.close()
+        srv.close()
+
+    def drip(c: Any) -> None:
+        try:
+            c.recv(4096)
+            c.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 1000\r\n\r\n")
+            for _ in range(40):
+                if stop.is_set():
+                    return
+                c.sendall(b"x")
+                time.sleep(0.3)
+        except OSError:
+            return
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return t, f"http://127.0.0.1:{srv.getsockname()[1]}"
+
+
+def test_a_slow_drip_ollama_cannot_hold_the_status_line_past_one_total_deadline(box: Box) -> None:
+    import threading
+
+    stop = threading.Event()
+    thread, url = slow_drip_server(stop)
+    try:
+        box.vars.update(SAFO_ACTIVITY_PROVIDERS="ollama", LLM_LOCAL_URL=url)
+        began = time.monotonic()
+        text = box.line()
+        took = time.monotonic() - began
+    finally:
+        stop.set()
+        thread.join()
+    assert text == ""
+    assert took < 2.0  # each byte arrives inside the socket timeout; only a total deadline stops it
+
+
+def test_the_private_write_does_not_trip_over_a_leftover_temporary_file(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = box.run / "thing.json"
+    monkeypatch.setattr(os, "getpid", lambda: 4242)
+    (box.run / "thing.json.4242").write_text("left by a killed process")  # the old fixed name
+    assert activity.write_private(target, "one") is True
+    assert activity.write_private(target, "two") is True
+    assert target.read_text() == "two"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    leftovers = sorted(p.name for p in box.run.iterdir() if p.name.startswith("thing.json."))
+    assert leftovers == ["thing.json.4242"]  # our own temporaries are renamed away
+
+
+BAD_COUNTS: list[tuple[str, Any]] = [
+    ("checked", -1),
+    ("checked", True),
+    ("checked", 10**12),
+    ("checked", "3"),
+    ("checked", 2.5),
+    ("listed", -5),
+    ("skipped", False),
+    ("truncated", 10**400),
+    ("unread", [["N0TST/b#2", -1, 0]]),
+    ("unread", [["N0TST/b#2", True, 0]]),
+    ("unread", [["N0TST/b#2", 10**9, 0]]),
+    ("unread", [["N0TST/b#2", 1, "2"]]),
+    ("ts", float("nan")),
+    ("ts", NOW + 9999),
+]
+
+
+@pytest.mark.parametrize("field", BAD_COUNTS)
+def test_a_negative_boolean_or_out_of_range_count_makes_the_whole_cache_untrusted(
+    box: Box, field: tuple[str, Any]
+) -> None:
+    body: dict[str, Any] = {
+        "ts": NOW - 5,
+        "ok": True,
+        "checked": 1,
+        "listed": 1,
+        "skipped": 0,
+        "truncated": 0,
+        "running": [],
+        "unread": [],
+    }
+    body[field[0]] = field[1]
+    path = box.run / "safo-activity-copilot.json"
+    path.write_text(json.dumps(body).replace("NaN", "null"))
+    path.chmod(0o600)
+    assert activity.read_copilot_cache(box.vars, NOW) is None
+
+
+# -- second review round (issue 402) -----------------------------------------------------------------------------------
+
+
+def seed_prs(gh: Gh, numbers: list[int], **kw: Any) -> None:
+    gh.search("N0TST", [("N0TST/a", n) for n in numbers])
+    for n in numbers:
+        gh.pr("N0TST/a", n, **kw)
+    gh.save()
+
+
+def test_a_refresh_where_every_pull_request_read_fails_is_a_failed_refresh(box: Box, gh: Gh) -> None:
+    seed_prs(gh, [1, 2, 3])
+    for n in (1, 2, 3):
+        gh.status(f"repos/N0TST/a/pulls/{n}", 404)
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    assert activity.refresh_copilot(box.vars, cfg, NOW) is True
+    state = activity.read_state(box.vars)
+    assert state["failures"] == 1
+    assert state["next_ok"] == NOW + 60
+    assert not (box.run / "safo-activity-copilot.json").exists()  # no "ok, 0 checked" answer was cached
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 30) is False  # backing off
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61) is True
+    assert activity.read_state(box.vars)["next_ok"] == NOW + 61 + 120  # the wait grew
+    table = "\n".join(activity.render_table(box.read()))
+    assert "Copilot: the last refresh failed (2 in a row)" in table
+    assert "0 of" not in table
+    assert "0 unread" not in table
+
+
+def test_more_than_half_failing_is_a_failure_and_half_or_fewer_is_not(box: Box, gh: Gh) -> None:
+    seed_prs(gh, [1, 2, 3])
+    gh.status("repos/N0TST/a/pulls/1", 404)
+    gh.status("repos/N0TST/a/pulls/2", 404)
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    activity.refresh_copilot(box.vars, cfg, NOW)
+    assert activity.read_state(box.vars)["failures"] == 1  # 2 of 3 failed
+    for path in box.run.glob("safo-activity-copilot*"):
+        path.unlink()
+    del gh.table["__status__"]["repos/N0TST/a/pulls/2"]
+    gh.save()
+    activity.refresh_copilot(box.vars, cfg, NOW)
+    assert activity.read_state(box.vars)["failures"] == 0  # 1 of 3 failed
+    cached = activity.read_copilot_cache(box.vars, NOW)
+    assert cached is not None
+    assert cached.checked == 2
+
+
+@pytest.mark.parametrize("code", [403, 429])
+def test_a_403_or_429_stops_the_round_and_waits_longer(box: Box, gh: Gh, code: int) -> None:
+    seed_prs(gh, [1, 2, 3])
+    gh.status("repos/N0TST/a/pulls/1", code)
+    gh.save()
+    activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW)
+    pulls = [c[1] for c in gh.calls() if "/pulls/" in c[1]]
+    assert pulls == ["repos/N0TST/a/pulls/1"]  # nothing else was asked after the refusal
+    assert activity.read_state(box.vars)["next_ok"] == NOW + activity.COPILOT_LIMITED_WAIT
+
+
+def test_unchanged_answers_use_etags_and_are_not_failures(box: Box, gh: Gh) -> None:
+    seed_prs(gh, [1], running=False, reviews=[review("text")])
+    paths = [
+        "repos/N0TST/a/pulls/1",
+        f"repos/N0TST/a/actions/runs?event=dynamic&head_sha={SHA}&per_page=30",
+        "repos/N0TST/a/pulls/1/reviews?per_page=100",
+        "repos/N0TST/a/pulls/1/comments?per_page=100",
+    ]
+    for i, path in enumerate(paths):
+        gh.etag(path, f'"tag{i}"')
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    activity.refresh_copilot(box.vars, cfg, NOW)
+    first = activity.read_copilot_cache(box.vars, NOW)
+    assert first is not None
+    assert first.unread == (("N0TST/a#1", 1, 0),)
+    assert all(not any(a.startswith("If-None-Match") for a in c) for c in gh.raw_calls())  # nothing known yet
+    before = len(gh.raw_calls())
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61) is True
+    conditional = gh.raw_calls()[before:]
+    sent = [c for c in conditional if "-H" in c]
+    assert len(sent) == 4
+    assert {c[c.index("-H") + 1] for c in sent} == {f'If-None-Match: "tag{i}"' for i in range(4)}
+    second = activity.read_copilot_cache(box.vars, NOW + 61)
+    assert second is not None
+    assert second.unread == first.unread  # a 304 means unchanged: the stored counts stand
+    assert activity.read_state(box.vars)["failures"] == 0
+    assert "text" not in (box.run / "safo-activity-copilot.store").read_text()
+
+
+def test_a_304_is_not_charged_to_the_call_budget_and_a_new_head_drops_the_review_etags(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_prs(gh, [1, 2, 3, 4, 5, 6], reviews=[review("t")])
+    for n in range(1, 7):
+        for path in (
+            f"repos/N0TST/a/pulls/{n}",
+            f"repos/N0TST/a/actions/runs?event=dynamic&head_sha={SHA}&per_page=30",
+            f"repos/N0TST/a/pulls/{n}/reviews?per_page=100",
+            f"repos/N0TST/a/pulls/{n}/comments?per_page=100",
+        ):
+            gh.etag(path, f'"e-{n}-{len(path)}"')
+    gh.save()
+    cfg = activity.load_config(box.vars)
+    monkeypatch.setattr(activity, "COPILOT_MAX_CALLS", 100)
+    activity.refresh_copilot(box.vars, cfg, NOW)
+    monkeypatch.setattr(activity, "COPILOT_MAX_CALLS", 15)  # room for 3 full pull requests, 6 are known
+    assert activity.refresh_copilot(box.vars, cfg, NOW + 61) is True
+    cached = activity.read_copilot_cache(box.vars, NOW + 61)
+    assert cached is not None
+    assert cached.skipped == 0  # every unchanged read was free, so all six fit
+    # a new head: the reviews and comments are asked again without a tag
+    new_sha = "0123456789abcdef0123456789abcdef01234567"
+    gh.pr("N0TST/a", 1, reviews=[review("t", sha=new_sha)], sha=new_sha)
+    gh.etag("repos/N0TST/a/pulls/1", '"moved"')  # the pull request changed, so GitHub's tag changed
+    gh.save()
+    before = len(gh.raw_calls())
+    activity.refresh_copilot(box.vars, cfg, NOW + 122)
+    again = [c for c in gh.raw_calls()[before:] if "pulls/1/reviews" in c[-1]]
+    assert again
+    assert all("-H" not in c for c in again)
+
+
+def test_pages_are_followed_to_the_last_and_a_hit_cap_is_said(
+    box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(activity, "COPILOT_MAX_CALLS", 100)
+    seed_prs(gh, [1])
+    base = "repos/N0TST/a/pulls/1/reviews?per_page=100"
+    for page in range(1, 11):
+        rows = [review("noise", user={"login": "human"}) for _ in range(100)]
+        if page == 7:
+            rows[3] = review("a late review")
+        gh.table[base if page == 1 else f"{base}&page={page}"] = rows
+    gh.save()
+    activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW)
+    cached = activity.read_copilot_cache(box.vars, NOW)
+    assert cached is not None
+    assert cached.unread == (("N0TST/a#1", 1, 0),)  # found on page 7, past the old 3-page limit
+    assert cached.truncated == 1  # ten full pages: the cap was hit
+    assert "are cut at 1000" in "\n".join(activity.render_table(box.read()))
+    assert not any("page=11" in c[1] for c in gh.calls())
+
+
+def test_a_short_last_page_ends_the_paging_without_a_cap_note(box: Box, gh: Gh) -> None:
+    seed_prs(gh, [1])
+    base = "repos/N0TST/a/pulls/1/reviews?per_page=100"
+    gh.table[base] = [review("noise", user={"login": "human"}) for _ in range(100)]
+    gh.table[base + "&page=2"] = [review("x")]
+    gh.save()
+    activity.refresh_copilot(box.vars, activity.load_config(box.vars), NOW)
+    cached = activity.read_copilot_cache(box.vars, NOW)
+    assert cached is not None
+    assert cached.truncated == 0
+
+
+def test_the_spawn_marker_and_the_retry_state_do_not_overwrite_each_other(box: Box, gh: Gh, spawns: list[Any]) -> None:
+    cfg = activity.load_config(box.vars)
+    activity.refresh_in_background(box.vars, NOW)  # a view marks that it spawned
+    assert len(spawns) == 1
+    activity.refresh_copilot(box.vars, cfg, NOW)  # a failing refresh records its backoff (gh has no routes)
+    state = activity.read_state(box.vars)
+    assert state["spawned"] == NOW  # the refresh did not write the view's marker away
+    assert state["failures"] == 1
+    activity.refresh_in_background(box.vars, NOW + 10)  # a view marks again, during the backoff: nothing spawns
+    state = activity.read_state(box.vars)
+    assert state["failures"] == 1  # and the view did not write the refresh's state away
+    assert len(spawns) == 1
+
+
+def test_the_refresh_deadline_starts_before_the_first_call(box: Box, gh: Gh, monkeypatch: pytest.MonkeyPatch) -> None:
+    gh.table["__sleep__"] = 10
+    gh.save()
+    monkeypatch.setattr(activity, "COPILOT_DEADLINE", 0.3)
+    began = time.monotonic()
+    snap = activity.fetch_copilot(box.vars, "N0TST", NOW)
+    assert time.monotonic() - began < 4  # each early call is held to what is left, not to a fixed 5 s
+    assert snap.ok is False
+
+
+def test_timed_out_ollama_listings_do_not_pile_up_threads(box: Box) -> None:
+    import threading
+
+    stop = threading.Event()
+    thread, url = slow_drip_server(stop)
+    try:
+        box.vars.update(SAFO_ACTIVITY_PROVIDERS="ollama", LLM_LOCAL_URL=url)
+        before = threading.active_count()
+        for _ in range(6):
+            assert box.line() == ""
+        grown = threading.active_count() - before
+    finally:
+        stop.set()
+        thread.join()
+    assert grown <= 2, grown  # one stuck listing at most, however many polls
