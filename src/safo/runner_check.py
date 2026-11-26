@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -94,6 +95,9 @@ CARGO_VALUE_OPTS = frozenset(
 )
 MAKE_VALUE_OPTS = frozenset({"-C", "-f", "-j", "-I", "-o", "-W"})
 WALK_LIMIT = 200_000
+FILE_LIMIT = 100 * 1024 * 1024
+TOTAL_LIMIT = 1024 * 1024 * 1024
+READ_CHUNK = 1024 * 1024
 SHELL_DEPTH_LIMIT = 4
 WRAPPER_LIMIT = 10
 TOO_DEEP = "nesting too deep to read: treat as a local full suite"
@@ -585,13 +589,21 @@ def _git_run(repo: Path, env: Mapping[str, str], *args: str) -> subprocess.Compl
     return _spawn(repo, _git_env(env), args)
 
 
-def _spawn(repo: Path, genv: dict[str, str], args: Sequence[str]) -> subprocess.CompletedProcess[bytes] | None:
+def _spawn(
+    repo: Path, genv: dict[str, str], args: Sequence[str], data: bytes | None = None
+) -> subprocess.CompletedProcess[bytes] | None:
     git = shutil.which("git")
     if git is None:
         return None
     try:
         return subprocess.run(  # noqa: S603 - fixed git argv, no shell
-            [git, "-C", str(repo), *args], capture_output=True, timeout=30, check=False, env=genv
+            [git, "-C", str(repo), *args],
+            capture_output=True,
+            timeout=30,
+            check=False,
+            env=genv,
+            input=data,
+            stdin=None if data is not None else subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -615,14 +627,16 @@ SELECTION_CONFIG = (
 )
 
 
-def _git_for_selection(repo: Path, env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess[bytes] | None:
+def _git_for_selection(
+    repo: Path, env: Mapping[str, str], *args: str, data: bytes | None = None
+) -> subprocess.CompletedProcess[bytes] | None:
     """Every git call that lists or inspects the files ra-remote would copy goes through here."""
     genv = {k: v for k, v in _git_env(env).items() if not k.startswith("GIT_")}
     genv["GIT_TERMINAL_PROMPT"] = "0"
     genv["GIT_CONFIG_GLOBAL"] = "/dev/null"
     genv["GIT_CONFIG_NOSYSTEM"] = "1"
     flags = [word for pair in SELECTION_CONFIG for word in ("-c", pair)]
-    return _spawn(repo, genv, [*flags, *args])
+    return _spawn(repo, genv, [*flags, *args], data)
 
 
 def _git_z(repo: Path, env: Mapping[str, str], *args: str) -> list[str] | None:
@@ -656,6 +670,8 @@ def _override_name(key: str) -> str | None:
         return f"url.*.{hit.group(1)}"
     if k == "include.path":
         return k
+    if k == "http.proxy" or re.fullmatch(r"http\..+\.proxy", k):
+        return "http.proxy"  # the URL part of http.<url>.proxy is never shown; credential.* is left out on purpose
     if k.startswith("protocol."):
         return "protocol.*"
     if k.startswith("includeif."):
@@ -732,9 +748,11 @@ class ContentGate:
     secrets: int = 0
     incomplete: bool = False
     modified: int = 0
+    filtered: bool = False
+    bounded: bool = False
 
     def refusal(self) -> str | None:
-        parts = [t for t in (self._differs(), self._copies()) if t]
+        parts = [t for t in (self._differs(), self._unverifiable(), self._copies()) if t]
         return "\n  ".join(parts) or None
 
     def _differs(self) -> str:
@@ -742,8 +760,20 @@ class ContentGate:
             return ""
         return (
             f"keep local: {self.modified} tracked files differ from the public commit (modified, staged, "
-            "intent-to-add, assume-unchanged or skip-worktree); commit or discard them first"
+            "intent-to-add, assume-unchanged, skip-worktree, a changed mode or link, a missing or extra path, or a "
+            "submodule); commit or discard them first"
         )
+
+    def _unverifiable(self) -> str:
+        texts = []
+        if self.filtered:
+            texts.append("cannot tell: content filters are configured (filter): the runner copies raw bytes")
+        if self.bounded:
+            texts.append(
+                "cannot verify the copied bytes (size or entry bound): a file over 100 MB, a tree over 1 GB, "
+                f"or more than {WALK_LIMIT} entries"
+            )
+        return "\n  ".join(f"keep local: {t}" for t in texts)
 
     def _copies(self) -> str:
         if not (self.untracked or self.nested or self.symlinks or self.secrets or self.incomplete):
@@ -799,6 +829,225 @@ def _modified(worktree: Path, env: Mapping[str, str]) -> int | None:
     return count
 
 
+@dataclass(frozen=True)
+class Verdict:
+    differ: int = 0
+    bounded: bool = False
+    filtered: bool = False
+
+
+REGULAR_MODES = {"100644": False, "100755": True}
+
+
+def _head_tree(worktree: Path, env: Mapping[str, str]) -> dict[str, tuple[str, str]] | None:
+    """Every committed entry as path -> (mode, object id) from the HEAD tree; None when git cannot say."""
+    unborn = _git_for_selection(worktree, env, "rev-parse", "--verify", "-q", "HEAD")
+    if unborn is None or unborn.returncode not in (0, 1):
+        return None
+    if unborn.returncode == 1:
+        return {}  # no commit: every tracked path then counts as not committed
+    done = _git_for_selection(worktree, env, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
+    if done is None or done.returncode != 0:
+        return None
+    found: dict[str, tuple[str, str]] = {}
+    for raw in done.stdout.split(b"\0"):
+        if not raw:
+            continue
+        meta, tab, path = raw.partition(b"\t")
+        fields = meta.decode("ascii", errors="replace").split(" ")
+        if not tab or len(fields) != 3:
+            return None
+        found[os.fsdecode(path)] = (fields[0], fields[2])
+    return found
+
+
+def _blob_id(algo: str, content: Sequence[bytes], size: int) -> str:
+    digest = hashlib.new(algo)
+    digest.update(b"blob %d\0" % size)
+    for chunk in content:
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+class _Parents:
+    """Directory descriptors opened component by component without following a symlink (one-entry cache)."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.key: tuple[bytes, ...] | None = None
+        self.fd = self.root
+
+    def _drop(self) -> None:
+        if self.fd != self.root:
+            os.close(self.fd)
+        self.key, self.fd = None, self.root
+
+    def get(self, comps: tuple[bytes, ...]) -> int | None:
+        if comps == self.key:
+            return self.fd
+        self._drop()
+        fd = self.root
+        try:
+            for comp in comps:
+                nxt = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                if fd != self.root:
+                    os.close(fd)
+                fd = nxt
+        except OSError:
+            if fd != self.root:
+                os.close(fd)
+            return None
+        self.key, self.fd = comps, fd
+        return fd
+
+    def close(self) -> None:
+        self._drop()
+        os.close(self.root)
+
+
+def _read_exact(name: bytes, fd: int, info: os.stat_result) -> list[bytes] | None:
+    """The raw bytes of a regular file opened without following a link; None when it changed or is not regular."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        handle = os.open(name, flags, dir_fd=fd)
+    except OSError:
+        return None
+    try:
+        now = os.fstat(handle)
+        if not stat.S_ISREG(now.st_mode) or (now.st_ino, now.st_dev, now.st_size) != (
+            info.st_ino,
+            info.st_dev,
+            info.st_size,
+        ):
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(handle, READ_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > info.st_size:
+                return None
+            chunks.append(chunk)
+        return chunks if total == info.st_size else None
+    except OSError:
+        return None
+    finally:
+        os.close(handle)
+
+
+def _entry_matches(parents: _Parents, rel: bytes, mode: str, oid: str) -> tuple[bool, int]:
+    """(the raw worktree entry equals the committed one, bytes read). A bound is signalled by size -1."""
+    *dirs, name = rel.split(b"/")
+    fd = parents.get(tuple(dirs))
+    if fd is None:
+        return False, 0
+    try:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except OSError:
+        return False, 0
+    algo = "sha256" if len(oid) == 64 else "sha1"
+    if mode == "120000":
+        if not stat.S_ISLNK(info.st_mode):
+            return False, 0
+        try:
+            target = os.readlink(name, dir_fd=fd)
+        except OSError:
+            return False, 0
+        return _blob_id(algo, [target], len(target)) == oid, len(target)
+    if mode not in REGULAR_MODES or not stat.S_ISREG(info.st_mode):
+        return False, 0
+    if info.st_size > FILE_LIMIT:
+        return False, -1
+    if REGULAR_MODES[mode] != bool(info.st_mode & 0o100) or (not REGULAR_MODES[mode] and info.st_mode & 0o111):
+        return False, info.st_size
+    content = _read_exact(name, fd, info)
+    if content is None:
+        return False, info.st_size
+    return _blob_id(algo, content, info.st_size) == oid, info.st_size
+
+
+def _mentions_filter(path: Path) -> bool:
+    """True when the attributes file names a filter or cannot be read in full (a missing file is empty)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True
+        data = os.read(fd, READ_CHUNK + 1)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+    return len(data) > READ_CHUNK or b"filter" in data.lower()
+
+
+def _filters_configured(worktree: Path, env: Mapping[str, str], copied: Sequence[str]) -> bool | None:
+    """True when any content filter can apply to a copied path; None when git cannot say (fail closed)."""
+    if copied:
+        data = b"".join(os.fsencode(p) + b"\0" for p in copied)
+        done = _git_for_selection(worktree, env, "check-attr", "-z", "--stdin", "filter", data=data)
+        if done is None or done.returncode != 0:
+            return None
+        fields = done.stdout.split(b"\0")
+        if any(value != b"unspecified" for value in fields[2::3] if value):
+            return True
+    files = [worktree / p for p in copied if os.path.basename(p) == ".gitattributes"]
+    info = _git_for_selection(worktree, env, "rev-parse", "--git-path", "info/attributes")
+    if info is None or info.returncode != 0:
+        return None
+    files.append(worktree / os.fsdecode(info.stdout.strip()))
+    configured = _git_for_selection(worktree, env, "config", "--path", "--get", "core.attributesFile")
+    if configured is None or configured.returncode not in (0, 1):
+        return None
+    if configured.returncode == 0:
+        files.append(worktree / os.fsdecode(configured.stdout.strip()))
+    return any(_mentions_filter(f) for f in files)
+
+
+def _verify_content(
+    worktree: Path, env: Mapping[str, str], copied: Sequence[str], untracked: Sequence[str]
+) -> Verdict | None:
+    """Compare the raw bytes the runner would copy with the HEAD tree; trusts neither status nor the index stat cache.
+
+    Refuses (a count, never a name) every committed path that is missing, retyped, re-moded, retargeted or different,
+    every tracked path that is not committed, and every gitlink; refuses outright (bounded) a file over 100 MB,
+    a total over 1 GB or more than WALK_LIMIT entries; and flags any attribute filter."""
+    head = _head_tree(worktree, env)
+    if head is None:
+        return None
+    filtered = _filters_configured(worktree, env, copied)
+    if filtered is None:
+        return None
+    if len(head) + len(copied) > WALK_LIMIT:
+        return Verdict(bounded=True, filtered=filtered)
+    in_index = set(copied) - set(untracked)
+    bad = in_index ^ set(head)
+    total = 0
+    try:
+        parents = _Parents(worktree)
+    except OSError:
+        return None
+    try:
+        for rel, (mode, oid) in head.items():
+            if rel in bad:
+                continue
+            same, size = _entry_matches(parents, os.fsencode(rel), mode, oid)
+            if size < 0 or total + size > TOTAL_LIMIT:
+                return Verdict(len(bad), True, filtered)
+            total += size
+            if not same:
+                bad.add(rel)
+    finally:
+        parents.close()
+    return Verdict(len(bad), False, filtered)
+
+
 def content_gate(worktree: Path, env: Mapping[str, str]) -> ContentGate:
     """Inspect what ra-remote would copy (tracked plus untracked and not ignored; it skips ignored files)."""
     copied = _git_z(worktree, env, "ls-files", "-c", "-o", "--exclude-standard")
@@ -806,6 +1055,10 @@ def content_gate(worktree: Path, env: Mapping[str, str]) -> ContentGate:
     modified = _modified(worktree, env)
     if copied is None or untracked is None or modified is None:
         return ContentGate(incomplete=True, modified=modified or 0)
+    verdict = _verify_content(worktree, env, copied, untracked)
+    if verdict is None:
+        return ContentGate(incomplete=True, modified=modified)
+    modified = max(modified, verdict.differ)
     nested, incomplete = _nested_git(worktree)
     root = os.path.realpath(worktree)
     symlinks = secrets = 0
@@ -815,7 +1068,9 @@ def content_gate(worktree: Path, env: Mapping[str, str]) -> ContentGate:
             target = os.path.realpath(full)
             symlinks += target != root and not target.startswith(root + os.sep)
         secrets += any(fnmatch.fnmatchcase(part.lower(), pat) for part in rel.split("/") for pat in SECRET_NAMES)
-    return ContentGate(len(untracked), nested, symlinks, secrets, incomplete, modified)
+    return ContentGate(
+        len(untracked), nested, symlinks, secrets, incomplete, modified, verdict.filtered, verdict.bounded
+    )
 
 
 def worktree_allowed(worktree: Path, env: Mapping[str, str]) -> bool:

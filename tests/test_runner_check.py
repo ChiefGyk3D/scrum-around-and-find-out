@@ -1244,3 +1244,404 @@ def test_include_and_protocol_are_named(tmp_path: Path, config: tuple[str, str],
     assert f"cannot tell: keep local (git transport is overridden (setting {shown}))" in out
     assert "x.cfg" not in out
     assert "ra-remote" not in out
+
+
+# ---- round 4 (#485): verify the copied bytes against the HEAD tree, never trust git status -------------------------
+
+
+def assert_unverified(code: int, out: str, text: str = "tracked files differ from the public commit") -> None:
+    assert code == 0
+    assert text in out
+    assert "ra-remote" not in out
+
+
+def _set_filter(repo: Path) -> None:
+    _git(repo, "config", "filter.private.clean", "sed s/PRIVATE_TOKEN/PUBLIC_VALUE/g")
+    _git(repo, "config", "filter.private.smudge", "sed s/PUBLIC_VALUE/PRIVATE_TOKEN/g")
+
+
+def test_clean_smudge_filter_reviewer_reproduction(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    _set_filter(repo)
+    (repo / ".gitattributes").write_text("*.txt filter=private\n", encoding="utf-8")
+    (repo / "data.txt").write_text("PRIVATE_TOKEN\n", encoding="utf-8")
+    commit_all(repo)
+    assert _git_out(repo, "status", "--porcelain", "--untracked-files=no") == b""  # git itself says clean
+    assert _git_out(repo, "show", "HEAD:data.txt") == b"PUBLIC_VALUE\n"
+    code, out = strict(tmp_path, repo)
+    assert_unverified(code, out)
+    assert "PRIVATE_TOKEN" not in out
+    assert "data.txt" not in out
+
+
+def test_filter_in_info_attributes_is_refused_even_when_bytes_match(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    _set_filter(repo)
+    (repo / ".git" / "info" / "attributes").write_text("*.py filter=private\n", encoding="utf-8")
+    code, out = strict(tmp_path, repo)
+    assert_unverified(code, out, "cannot tell: content filters are configured (filter)")
+    assert "private" not in out
+
+
+def test_filter_attribute_on_an_unchanged_file_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / ".gitattributes").write_text("*.py filter=private\n", encoding="utf-8")
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo)
+    code, out = strict(tmp_path, repo)
+    assert_unverified(code, out, "cannot tell: content filters are configured (filter)")
+
+
+def test_gitattributes_mentioning_filter_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / "sub").mkdir()
+    (repo / "sub" / ".gitattributes").write_text("# nothing\n*.zzz filter=unused\n", encoding="utf-8")
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo)
+    code, out = strict(tmp_path, repo)
+    assert_unverified(code, out, "cannot tell: content filters are configured (filter)")
+
+
+def test_core_attributes_file_with_filter_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    attrs = tmp_path / "attrs"
+    attrs.write_text("*.py filter=private\n", encoding="utf-8")
+    _git(repo, "config", "core.attributesFile", str(attrs))
+    code, out = strict(tmp_path, repo)
+    assert_unverified(code, out, "cannot tell: content filters are configured (filter)")
+
+
+def test_check_stat_minimal_same_size_replacement_reviewer_reproduction(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / "data.txt").write_text("PUBLIC1234\n", encoding="utf-8")
+    commit_all(repo)
+    _git(repo, "config", "core.checkStat", "minimal")
+    _git(repo, "config", "core.trustctime", "false")
+    old = os.stat(repo / "data.txt").st_mtime_ns - 5_000_000_000
+    os.utime(repo / "data.txt", ns=(old, old))
+    _git(repo, "update-index", "--refresh")
+    (repo / "data.txt").write_text("PRIVATE123\n", encoding="utf-8")
+    os.utime(repo / "data.txt", ns=(old, old))
+    assert _git_out(repo, "status", "--porcelain", "--untracked-files=no") == b""
+    code, out = strict(tmp_path, repo)
+    assert_unverified(code, out)
+    assert "PRIVATE" not in out
+
+
+def _stat_hidden_replacement(repo: Path, name: str = "a.py", body: str = "x = 9\n") -> None:
+    old = os.stat(repo / name).st_mtime_ns - 5_000_000_000
+    os.utime(repo / name, ns=(old, old))
+    _git(repo, "update-index", "--refresh")
+    (repo / name).write_text(body, encoding="utf-8")  # same size as "x = 1\n"
+    os.utime(repo / name, ns=(old, old))
+
+
+def test_ignore_stat_modified_file_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "config", "core.ignoreStat", "true")
+    _git(repo, "add", "--renormalize", "a.py")
+    _git(repo, "update-index", "--really-refresh")
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    assert _git_out(repo, "status", "--porcelain", "--untracked-files=no") == b""
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_assume_unchanged_modified_file_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "update-index", "--assume-unchanged", "a.py")
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_same_size_modified_file_with_restored_mtime_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    _stat_hidden_replacement(repo)
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_changed_file_mode_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "config", "core.fileMode", "false")  # git no longer looks at the mode bit
+    (repo / "a.py").chmod(0o755)
+    assert _git_out(repo, "status", "--porcelain", "--untracked-files=no") == b""
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_executable_file_that_is_committed_executable_stays_clean(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "run.sh").write_text("echo hi\n", encoding="utf-8")
+    (repo / "run.sh").chmod(0o755)
+    commit_all(repo)
+    code, out = strict(tmp_path, repo)
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+
+
+def test_executable_bit_dropped_on_a_committed_executable_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "run.sh").write_text("echo hi\n", encoding="utf-8")
+    (repo / "run.sh").chmod(0o755)
+    commit_all(repo)
+    _git(repo, "config", "core.fileMode", "false")
+    (repo / "run.sh").chmod(0o644)
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_retargeted_symlink_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "alias.py").symlink_to("a.py")
+    commit_all(repo)
+    _git(repo, "config", "core.ignoreStat", "true")
+    (repo / "alias.py").unlink()
+    (repo / "alias.py").symlink_to("b.py")
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_symlink_replaced_by_a_regular_file_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "alias.py").symlink_to("a.py")
+    commit_all(repo)
+    _git(repo, "update-index", "--assume-unchanged", "alias.py")
+    (repo / "alias.py").unlink()
+    (repo / "alias.py").write_text("a.py", encoding="utf-8")
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_file_deleted_from_the_worktree_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "a.py").unlink()
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_deleted_file_hidden_by_skip_worktree_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "update-index", "--skip-worktree", "a.py")
+    (repo / "a.py").unlink()
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_path_in_the_index_but_not_in_head_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "extra.py").write_text("y = 1\n", encoding="utf-8")
+    _git(repo, "add", "extra.py")
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_directory_swapped_for_a_symlink_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "m.py").write_text("y = 1\n", encoding="utf-8")
+    commit_all(repo)
+    _git(repo, "update-index", "--skip-worktree", "pkg/m.py")
+    other = tmp_path / "elsewhere-dir"
+    other.mkdir()
+    (other / "m.py").write_text("y = 1\n", encoding="utf-8")  # identical bytes, but behind a symlink
+    (repo / "pkg" / "m.py").unlink()
+    (repo / "pkg").rmdir()
+    (repo / "pkg").symlink_to(other)
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_submodule_gitlink_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    nested = repo / "vendor"
+    nested.mkdir()
+    _git(nested, "init", "-q")
+    (nested / "m.py").write_text("y = 1\n", encoding="utf-8")
+    commit_all(nested)
+    commit_all(repo)
+    assert "160000" in _git_out(repo, "ls-tree", "HEAD").decode()
+    assert_unverified(*strict(tmp_path, repo))
+
+
+def test_odd_file_names_in_a_clean_repo_still_get_the_command(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    for name in ("with space.py", "-dash.py", "line\nbreak.py", 'q"uote.py', "café.py", "sub dir/in side.py"):
+        target = repo / name
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("z = 1\n", encoding="utf-8")
+    commit_all(repo)
+    code, out = strict(tmp_path, repo)
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+    assert "differ" not in out
+
+
+def test_odd_file_name_modified_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "line\nbreak.py").write_text("z = 1\n", encoding="utf-8")
+    commit_all(repo)
+    _git(repo, "update-index", "--assume-unchanged", "line\nbreak.py")
+    (repo / "line\nbreak.py").write_text("z = 2\n", encoding="utf-8")
+    code, out = strict(tmp_path, repo)
+    assert_unverified(code, out)
+    assert "break" not in out
+
+
+def test_file_over_the_size_limit_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "big.bin").write_bytes(b"0" * 64)
+    commit_all(repo)
+    monkeypatch.setattr(rc, "FILE_LIMIT", 63)
+    assert_unverified(*strict(tmp_path, repo), "cannot verify the copied bytes (size or entry bound)")
+
+
+def test_total_size_over_the_limit_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    for i in range(4):
+        (repo / f"f{i}.bin").write_bytes(b"0" * 40)
+    commit_all(repo)
+    monkeypatch.setattr(rc, "TOTAL_LIMIT", 100)
+    assert_unverified(*strict(tmp_path, repo), "cannot verify the copied bytes (size or entry bound)")
+
+
+def test_entry_count_over_the_limit_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    for i in range(5):
+        (repo / f"f{i}.py").write_text("x\n", encoding="utf-8")
+    commit_all(repo)
+    monkeypatch.setattr(rc, "WALK_LIMIT", 3)
+    assert_unverified(*strict(tmp_path, repo), "cannot verify the copied bytes (size or entry bound)")
+
+
+def test_verification_failure_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    monkeypatch.setattr(rc, "_verify_content", lambda *a, **k: None)
+    assert rc.content_gate(repo, env_for(tmp_path)).refusal() is not None
+
+
+def test_verification_ignores_repository_stat_and_status_settings(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    for key, value in (
+        ("core.ignoreStat", "true"),
+        ("core.checkStat", "minimal"),
+        ("core.trustctime", "false"),
+        ("status.showUntrackedFiles", "no"),
+        ("diff.ignoreSubmodules", "all"),
+        ("core.fsmonitor", "false"),
+    ):
+        _git(repo, "config", key, value)
+    _stat_hidden_replacement(repo)
+    assert_unverified(*strict(tmp_path, repo))
+
+
+# ---- round 4: transport names for http proxies ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["http.proxy", "http.https://example.com/.proxy", "http.https://example.com/a/.proxy"],
+)
+def test_http_proxy_is_named_as_a_transport_override(tmp_path: Path, key: str) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "config", key, "http://evil-value:3128")
+    code, out = strict(tmp_path, repo)
+    assert code == 0
+    assert "cannot tell: keep local (git transport is overridden (setting http.proxy))" in out
+    assert "evil-value" not in out
+    assert "example.com" not in out
+    assert "ra-remote" not in out
+
+
+def test_credential_settings_are_not_a_transport_override(tmp_path: Path) -> None:
+    # credential.* only changes how a login is supplied, never where a remote points
+    repo = clean_repo(tmp_path)
+    _git(repo, "config", "credential.helper", "store")
+    code, out = strict(tmp_path, repo)
+    assert code == 1
+    assert "overridden" not in out
+
+
+# ---- round 4: the verification alone decides (status layers stubbed out), so each rule is proven by itself --------
+
+
+def _scn_symlink_retarget(repo: Path) -> None:
+    (repo / "alias.py").symlink_to("a.py")
+    commit_all(repo)
+    (repo / "alias.py").unlink()
+    (repo / "alias.py").symlink_to("b.py")
+
+
+def _scn_symlink_to_file(repo: Path) -> None:
+    (repo / "alias.py").symlink_to("a.py")
+    commit_all(repo)
+    (repo / "alias.py").unlink()
+    (repo / "alias.py").write_text("a.py", encoding="utf-8")
+
+
+def _scn_extra_in_index(repo: Path) -> None:
+    (repo / "extra.py").write_text("y = 1\n", encoding="utf-8")
+    _git(repo, "add", "extra.py")
+
+
+def _scn_deleted(repo: Path) -> None:
+    (repo / "a.py").unlink()
+
+
+def _scn_mode(repo: Path) -> None:
+    (repo / "a.py").chmod(0o755)
+
+
+def _scn_exec_dropped(repo: Path) -> None:
+    (repo / "run.sh").write_text("echo hi\n", encoding="utf-8")
+    (repo / "run.sh").chmod(0o755)
+    commit_all(repo)
+    (repo / "run.sh").chmod(0o644)
+
+
+def _scn_content(repo: Path) -> None:
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+
+
+def _scn_dir_symlink(repo: Path) -> None:
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "m.py").write_text("y = 1\n", encoding="utf-8")
+    commit_all(repo)
+    other = repo.parent / "elsewhere-dir"
+    other.mkdir()
+    (other / "m.py").write_text("y = 1\n", encoding="utf-8")
+    (repo / "pkg" / "m.py").unlink()
+    (repo / "pkg").rmdir()
+    (repo / "pkg").symlink_to(other)
+
+
+def _scn_gitlink(repo: Path) -> None:
+    nested = repo / "vendor"
+    nested.mkdir()
+    _git(nested, "init", "-q")
+    (nested / "m.py").write_text("y = 1\n", encoding="utf-8")
+    commit_all(nested)
+    commit_all(repo)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        _scn_symlink_retarget,
+        _scn_symlink_to_file,
+        _scn_extra_in_index,
+        _scn_deleted,
+        _scn_mode,
+        _scn_exec_dropped,
+        _scn_content,
+        _scn_dir_symlink,
+        _scn_gitlink,
+    ],
+)
+def test_verification_alone_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: Any) -> None:
+    repo = clean_repo(tmp_path)
+    scenario(repo)
+    monkeypatch.setattr(rc, "_modified", lambda *a, **k: 0)  # as if git status, ls-files -v and the diff were clean
+    gate = rc.content_gate(repo, env_for(tmp_path))
+    assert gate.modified >= 1
+    assert gate.refusal() is not None
+
+
+def test_verification_alone_passes_a_clean_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "alias.py").symlink_to("a.py")
+    (repo / "run.sh").write_text("echo hi\n", encoding="utf-8")
+    (repo / "run.sh").chmod(0o755)
+    commit_all(repo)
+    monkeypatch.setattr(rc, "_modified", lambda *a, **k: 0)
+    assert rc.content_gate(repo, env_for(tmp_path)).refusal() is None

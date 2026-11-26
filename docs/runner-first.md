@@ -76,7 +76,9 @@ that changes meaning.
    stays local. Environment: `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`, any `GIT_CONFIG_*`. Effective git
    configuration (`git config --show-origin --get-regexp`, includes followed): `core.sshcommand`, `core.gitproxy`,
    `remote.*.vcs`, `remote.*.proxy`, `remote.*.pushurl`, `url.*.insteadof`, `url.*.pushinsteadof`, `include.path`,
-   `protocol.*`, and any `includeIf` (named `includeIf gitdir` or `includeIf`). Only the setting key is named, never a value. The checker also runs git with the
+   `protocol.*`, `http.proxy` and `http.<url>.proxy` (both named `http.proxy`, the URL part is never shown), and any
+   `includeIf` (named `includeIf gitdir` or `includeIf`). `credential.*` is deliberately not an override: it only changes
+   how a login is supplied, never where a remote points. Only the setting key is named, never a value. The checker also runs git with the
    environment it was given, so the real global git configuration of the caller is what is read.
 2. Read every remote (`git remote -v`, fetch and push). Each must parse as a `github.com` https, ssh or scp-like
    `owner/name` URL; the host is parsed, so `https://evil.com/github.com/owner/x` is rejected. Userinfo is never printed.
@@ -113,18 +115,51 @@ M nested git directories; K symlinks leaving the tree). Commit them, add them to
 
 - `git ls-files --others --exclude-standard` is not empty (a count, never names);
 - any tracked entry differs from the public commit, because `ra-remote` copies the current worktree bytes, not the
-  commit: "keep local: N tracked files differ from the public commit (modified, staged, intent-to-add, assume-unchanged
-  or skip-worktree); commit or discard them first". It holds when `git status --porcelain=v1 --untracked-files=no -z`
-  is not empty (this also covers staged, intent-to-add and unmerged entries), when `git ls-files -v` shows any tag
-  other than `H` (lowercase is assume-unchanged, `S` is skip-worktree), when `git diff --cached --quiet` fails, or when
-  tracked entries exist but `HEAD` does not resolve to a commit. A git failure is a refusal too. Counts only, never
-  names;
+  commit: "keep local: N tracked files differ from the public commit (modified, staged, intent-to-add,
+  assume-unchanged, skip-worktree, a changed mode or link, a missing or extra path, or a submodule); commit or discard
+  them first". The authority is the content verification below, not git's status. The older status checks stay as an
+  additional layer that can only refuse more: `git status --porcelain=v1 --untracked-files=no -z` not empty, any
+  `git ls-files -v` tag other than `H`, `git diff --cached --quiet` failing, or tracked entries with no `HEAD`. A git
+  failure is a refusal too. Counts only, never names;
 - a nested `.git` directory or file exists anywhere below the root (iterative `scandir` walk, symlinks not followed,
   bounded to 200000 entries: when the bound is hit, or a directory cannot be read, the tree is refused);
 - a tracked or untracked-not-ignored symlink resolves outside the worktree;
 - a tracked or untracked-not-ignored path has a component that looks like a secret even when it is tracked: `.env`,
   `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `*.pfx`, `*.kdbx`, `.netrc`, `credentials*`,
   `*secret*` (reported as "secret-looking file names present", a count only).
+
+#### Content verification (the authority)
+
+Git's status, `ls-files -v` and the cached diff all trust the index stat cache and apply clean/smudge filters, so a
+repository-local `core.checkStat=minimal` plus `core.trustctime=false`, `core.ignoreStat`, or a `filter.NAME.clean`
+setting with a `filter=NAME` attribute can make them report "clean" while the bytes the runner copies differ from
+`HEAD`. So the gate passes only when this verification passes; a clean status never passes it on its own:
+
+1. The committed tree is the source of truth: `git ls-tree -r -z --full-tree HEAD` (mode, object id and path of every
+   entry), through `_git_for_selection` (isolated environment). No commit means every tracked path counts as not
+   committed.
+2. The copied set (`ls-files -c -o --exclude-standard -z`, tracked part) must equal the committed path set. An entry in
+   the index but not in `HEAD`, or the reverse, counts as a difference. Untracked paths keep their own refusal.
+3. Every committed entry is compared by content, never by stat: the worktree is opened with `O_NOFOLLOW` one directory
+   component at a time (a directory swapped for a symlink is a difference), the raw bytes are hashed as a git blob
+   (`blob <size>\0` plus the bytes, SHA-1 or SHA-256 to match the object id length) with no filter applied, and the
+   result must equal the committed object id. A symlink is compared by the raw `readlink` target against the committed
+   blob; a regular file must be a regular file; the executable bit must match the committed mode (100755 needs it,
+   100644 allows none). A gitlink (mode 160000, a submodule) or any other mode is a difference. The hash is computed in
+   Python in one pass over the tree, so there is no process per file and no path quoting problem (names with spaces,
+   newlines and a leading dash are plain bytes).
+4. Bounds, failing closed (never skipped): a file over 100 MB, more than 1 GB in total, or more than 200000 entries
+   refuses with "cannot verify the copied bytes (size or entry bound)".
+5. Content filters: `git check-attr -z --stdin filter` over every copied path (one batched call, isolated
+   environment) reporting anything other than `unspecified`, or any `.gitattributes` in the copied set, the file
+   `info/attributes`, or the file named by `core.attributesFile` that mentions `filter`, refuses with "cannot tell:
+   content filters are configured (filter)". This holds even for an unchanged file, because the runner copies raw bytes
+   while the committed object may be the cleaned form. Only the key `filter` is named, never a filter name or value.
+
+A mismatch means "the bytes the runner would copy are not the committed public bytes": commit or discard the change
+(or clone a clean copy), then run the check again. Counts only, never names. The verification does not read the index
+stat cache and is not affected by `core.checkStat`, `core.trustctime`, `core.ignoreStat`, `status.*`,
+`diff.ignoreSubmodules`, assume-unchanged or skip-worktree bits, or index extensions.
 
 #### Same file selection as ra-remote
 
