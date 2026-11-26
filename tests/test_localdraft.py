@@ -1875,3 +1875,38 @@ def test_r14_normal_refusal_still_prints_the_draft(env: Env) -> None:
     (env.dir / "llm.reply").write_text("call KB1ABC now\n\nPart of epic #445")
     code, out, _ = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
     assert code == localdraft.EXIT_REFUSED and "call KB1ABC now" in out and _WITHHELD not in out
+
+
+# the bounded deny paths, called directly (a mutation that dropped them once survived the suite)
+def test_check_text_runs_the_bounded_deny_match_on_an_nfkc_expanding_body() -> None:
+    why = localdraft.check_text("comment", _BIG + " ZebraEmployer", deny=["ZebraEmployer"])
+    assert any(_DENY in x for x in why) and any(_LONG in x for x in why)
+    assert not any("ZebraEmployer" in x for x in why)  # the reason never holds the value
+
+
+def test_check_title_runs_the_bounded_deny_match_on_an_overlong_title() -> None:
+    title = "a" * 290 + " ZebraEmployer " + "b" * 10
+    assert len(title) > localdraft.MAX_TITLE_CHARS
+    why = localdraft.check_title(title, deny=["ZebraEmployer"])
+    assert any(x.startswith("title: ") and _DENY in x for x in why)
+    assert any("too long" in x for x in why)
+    assert not any("ZebraEmployer" in x for x in why)
+
+
+def test_the_no_deny_note_is_not_printed_when_the_env_list_supplies_entries(env: Env) -> None:
+    env.env["SAFO_DRAFT_DENY"] = "ZebraEmployer"
+    err = io.StringIO()
+    entries = localdraft.load_deny(env.env, err)
+    assert [e.squashed for e in entries] == ["zebraemployer"]
+    assert "no private deny file" not in err.getvalue()
+    code, _, run_err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == 0 and "no private deny file" not in run_err
+
+
+def test_the_no_deny_note_is_printed_when_nothing_supplies_an_entry(env: Env) -> None:
+    for value in (None, "", " , "):
+        if value is not None:
+            env.env["SAFO_DRAFT_DENY"] = value
+        err = io.StringIO()
+        assert localdraft.load_deny(env.env, err) == []
+        assert err.getvalue().count("no private deny file configured: only heuristics are active") == 1, value

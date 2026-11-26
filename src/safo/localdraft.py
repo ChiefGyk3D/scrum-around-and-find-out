@@ -547,16 +547,18 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
     """The private deny entries: the file (default ~/.config/safo/draft-deny) and the comma separated SAFO_DRAFT_DENY.
 
     A value that squashes to fewer than MIN_DENY_CHARS characters is a config error naming the line, not the value.
-    A missing default file is noted once on `err`; a file named by SAFO_DRAFT_DENY_FILE that is missing is an error.
+    A missing default file is noted once on `err` unless SAFO_DRAFT_DENY supplies an entry; a file named by
+    SAFO_DRAFT_DENY_FILE that is missing is an error.
     """
     entries: list[DenyEntry] = []
+    file_missing = False
     explicit = env.get("SAFO_DRAFT_DENY_FILE")
     path = explicit or str(Path(env.get("HOME", str(Path.home()))) / ".config" / "safo" / "draft-deny")
     text = _read_private_file(path, "SAFO_DRAFT_DENY_FILE")
     if text is None:
         if explicit:
             raise Failure("SAFO_DRAFT_DENY_FILE names a file that was not found", EXIT_ERROR)
-        err.write(_NO_DENY_NOTE + "\n")
+        file_missing = True
     else:
         rows = _config_lines(text)
         if not rows:
@@ -594,6 +596,8 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
                 EXIT_ERROR,
             )
         entries.append(_deny_entry(f"SAFO_DRAFT_DENY#{i}", value))
+    if file_missing and not entries:
+        err.write(_NO_DENY_NOTE + "\n")  # only when neither the file nor the env list supplies an entry
     return entries
 
 
