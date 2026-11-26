@@ -1,0 +1,20 @@
+{
+  "task": "issue-draft",
+  "input": "Notes: users on app.example.com are logged out after 15 minutes but we expect 60. Config key is session_ttl_minutes in auth.yaml. Seen in v2.4.1. Reported by alice-example.",
+  "facts": [
+    "session_ttl_minutes",
+    "15 minutes",
+    "60",
+    "v2.4.1"
+  ],
+  "forbidden": [
+    "v2\\.4\\.2",
+    "\\b30 minutes"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Session expires early\n- users expected 600 minutes but are logged out after 15 minutes\n- config key session_ttl_minutes in auth.yaml, seen in v2.4.1",
+    "Title: Logout bug\n- logged out after 30 minutes in v2.4.2\n- check session_ttl_minutes"
+  ]
+}

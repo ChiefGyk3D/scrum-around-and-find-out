@@ -1,0 +1,17 @@
+{
+  "task": "commit-message",
+  "input": "Change: in parser.py, parse_date() returned None for ISO dates with a trailing Z. Now strips the Z before parsing. Test added.",
+  "facts": [
+    "parse_date",
+    "Z"
+  ],
+  "forbidden": [
+    "\\bfeat:"
+  ],
+  "max_chars": 600,
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
+  "wrong": [
+    "fix: parse_date returns None for zebra dates\n\nSwitched the zebra handling in the parser.",
+    "feat: add parse_date helper for ISO strings\n\nAdds a new helper to the parser module."
+  ]
+}

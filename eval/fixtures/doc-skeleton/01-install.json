@@ -1,0 +1,17 @@
+{
+  "task": "doc-skeleton",
+  "input": "Document installing the example-tool CLI. Sections: Prerequisites, Install, Verify, Uninstall.",
+  "facts": [
+    "Prerequisites",
+    "Install",
+    "Verify",
+    "Uninstall"
+  ],
+  "forbidden": [],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Guide\n## Install\nOne line about install goes here.\n## Verify\nOne line about verify goes here.\n## Uninstall\nOne line about uninstall goes here.",
+    "# Prerequisites\n# Install\n# Verify\n# Uninstall"
+  ]
+}

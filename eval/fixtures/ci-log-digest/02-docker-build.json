@@ -1,0 +1,19 @@
+{
+  "task": "ci-log-digest",
+  "input": "Step 5/9 : RUN pip install -r requirements.txt\nERROR: Could not find a version that satisfies the requirement examplelib==9.9.9\nERROR: No matching distribution found for examplelib==9.9.9\nThe command returned a non-zero code: 1",
+  "facts": [
+    "examplelib",
+    "9.9.9",
+    "requirements.txt"
+  ],
+  "forbidden": [
+    "examplelib==9\\.9\\.8\\b",
+    "\\bnpm\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "The build stopped at step 5 during pip install because examplelib==9.9.8 could not be found.",
+    "The image build broke because npm could not resolve a package; check the registry settings."
+  ]
+}

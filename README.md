@@ -197,6 +197,7 @@ replaced are gone.
 - [Personas](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Personas)
 - [Plugins](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Plugins)
 - [Local-llm](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-llm)
+- [Local-eval](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-eval): `safo-eval`, scoring the local models on routed work
 - [Prerequisites](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Prerequisites)
 - [No-hidden-work](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/No-hidden-work)
 

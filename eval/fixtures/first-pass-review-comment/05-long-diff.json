@@ -1,0 +1,35 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n # unchanged helper line 0 keeps formatting stable\n # unchanged helper line 1 keeps formatting stable\n # unchanged helper line 2 keeps formatting stable\n # unchanged helper line 3 keeps formatting stable\n # unchanged helper line 4 keeps formatting stable\n # unchanged helper line 5 keeps formatting stable\n # unchanged helper line 6 keeps formatting stable\n # unchanged helper line 7 keeps formatting stable\n # unchanged helper line 8 keeps formatting stable\n # unchanged helper line 9 keeps formatting stable\n # unchanged helper line 10 keeps formatting stable\n # unchanged helper line 11 keeps formatting stable\n # unchanged helper line 12 keeps formatting stable\n # unchanged helper line 13 keeps formatting stable\n # unchanged helper line 14 keeps formatting stable\n # unchanged helper line 15 keeps formatting stable\n # unchanged helper line 16 keeps formatting stable\n # unchanged helper line 17 keeps formatting stable\n # unchanged helper line 18 keeps formatting stable\n # unchanged helper line 19 keeps formatting stable\n # unchanged helper line 20 keeps formatting stable\n # unchanged helper line 21 keeps formatting stable\n # unchanged helper line 22 keeps formatting stable\n # unchanged helper line 23 keeps formatting stable\n # unchanged helper line 24 keeps formatting stable\n # unchanged helper line 25 keeps formatting stable\n # unchanged helper line 26 keeps formatting stable\n # unchanged helper line 27 keeps formatting stable\n # unchanged helper line 28 keeps formatting stable\n # unchanged helper line 29 keeps formatting stable\n # unchanged helper line 30 keeps formatting stable\n # unchanged helper line 31 keeps formatting stable\n # unchanged helper line 32 keeps formatting stable\n # unchanged helper line 33 keeps formatting stable\n # unchanged helper line 34 keeps formatting stable\n # unchanged helper line 35 keeps formatting stable\n # unchanged helper line 36 keeps formatting stable\n # unchanged helper line 37 keeps formatting stable\n # unchanged helper line 38 keeps formatting stable\n # unchanged helper line 39 keeps formatting stable\n # unchanged helper line 40 keeps formatting stable\n # unchanged helper line 41 keeps formatting stable\n # unchanged helper line 42 keeps formatting stable\n # unchanged helper line 43 keeps formatting stable\n # unchanged helper line 44 keeps formatting stable\n # unchanged helper line 45 keeps formatting stable\n # unchanged helper line 46 keeps formatting stable\n # unchanged helper line 47 keeps formatting stable\n # unchanged helper line 48 keeps formatting stable\n # unchanged helper line 49 keeps formatting stable\n # unchanged helper line 50 keeps formatting stable\n # unchanged helper line 51 keeps formatting stable\n # unchanged helper line 52 keeps formatting stable\n # unchanged helper line 53 keeps formatting stable\n # unchanged helper line 54 keeps formatting stable\n # unchanged helper line 55 keeps formatting stable\n # unchanged helper line 56 keeps formatting stable\n # unchanged helper line 57 keeps formatting stable\n # unchanged helper line 58 keeps formatting stable\n # unchanged helper line 59 keeps formatting stable\n # unchanged helper line 60 keeps formatting stable\n # unchanged helper line 61 keeps formatting stable\n # unchanged helper line 62 keeps formatting stable\n # unchanged helper line 63 keeps formatting stable\n # unchanged helper line 64 keeps formatting stable\n # unchanged helper line 65 keeps formatting stable\n # unchanged helper line 66 keeps formatting stable\n # unchanged helper line 67 keeps formatting stable\n # unchanged helper line 68 keeps formatting stable\n # unchanged helper line 69 keeps formatting stable\n # unchanged helper line 70 keeps formatting stable\n # unchanged helper line 71 keeps formatting stable\n # unchanged helper line 72 keeps formatting stable\n # unchanged helper line 73 keeps formatting stable\n # unchanged helper line 74 keeps formatting stable\n # unchanged helper line 75 keeps formatting stable\n # unchanged helper line 76 keeps formatting stable\n # unchanged helper line 77 keeps formatting stable\n # unchanged helper line 78 keeps formatting stable\n # unchanged helper line 79 keeps formatting stable\n def apply_discount(price, pct):\n-    return price * (1 - pct / 100)\n+    return price * (1 - pct)\n```\nIntent: pct is a percentage such as 15.",
+  "facts": [
+    "apply_discount",
+    {
+      "text": "percent",
+      "variants": [
+        "\\bpercent\\w*",
+        "/ ?100\\b",
+        "\\bdivid\\w*.{0,15}100",
+        "\\bpct\\b.{0,40}(not|never|without|missing|forgot)",
+        "\\bdivisor\\b",
+        "\\bdivision\\b.{0,15}100",
+        "\\bfraction\\b",
+        "(missing|removed|dropped|lost|no longer).{0,30}\\b100\\b",
+        "\\bdivides? (pct|it|the)\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "rounding"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "apply_discount: price can be negative here, add a check for it.",
+    "apply_discount: the helper comments above are repetitive, trim them."
+  ],
+  "correct_alts": [
+    "apply_discount no longer divides pct by 100, so a discount of 15 makes the price negative.",
+    "apply_discount drops the / 100 conversion, so the multiplier is wrong for values like 15.",
+    "apply_discount is missing the 100 divisor, which treats pct as a fraction instead of a whole number."
+  ]
+}

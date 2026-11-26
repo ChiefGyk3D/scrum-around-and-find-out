@@ -1,0 +1,25 @@
+{
+  "task": "pr-summary",
+  "input": "Refactor: split utils.py (900 lines) into utils/strings.py and utils/paths.py. No behavior change. Imports updated in 12 files.",
+  "facts": [
+    "utils/strings.py",
+    "utils/paths.py",
+    {
+      "text": "12",
+      "variants": [
+        "\\btwelve\\b"
+      ]
+    },
+    "no behavior change"
+  ],
+  "forbidden": [
+    "\\b21 files",
+    "new feature"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Split utils.py into smaller modules.\n- new feature: utils/strings.py and utils/paths.py\n- imports updated in 21 files",
+    "Refactor of the utils module.\n- split the big module into smaller ones\n- imports were updated everywhere"
+  ]
+}

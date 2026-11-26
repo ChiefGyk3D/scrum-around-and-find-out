@@ -1,0 +1,17 @@
+{
+  "task": "doc-skeleton",
+  "input": "Document the example-service REST API. Sections: Authentication, Endpoints, Errors, Rate limits.",
+  "facts": [
+    "Authentication",
+    "Endpoints",
+    "Errors",
+    "Rate limits"
+  ],
+  "forbidden": [],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Guide\n## Endpoints\nOne line about endpoints goes here.\n## Errors\nOne line about errors goes here.\n## Rate limits\nOne line about rate limits goes here.",
+    "# Authentication\n# Endpoints\n# Errors\n# Rate limits"
+  ]
+}
