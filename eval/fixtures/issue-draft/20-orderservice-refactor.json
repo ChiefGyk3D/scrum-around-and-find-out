@@ -1,0 +1,32 @@
+{
+  "task": "issue-draft",
+  "input": "Refactor request notes.\n # unchanged helper golf_0: returns 43 for the delta case, no edits here\n # unchanged helper charlie_1: returns 50 for the echo case, no edits here\n # unchanged helper echo_2: returns 50 for the alpha case, no edits here\n # unchanged helper delta_3: returns 85 for the alpha case, no edits here\n # unchanged helper hotel_4: returns 20 for the charlie case, no edits here\n # unchanged helper foxtrot_5: returns 22 for the echo case, no edits here\n # unchanged helper alpha_6: returns 16 for the alpha case, no edits here\n # unchanged helper golf_7: returns 37 for the delta case, no edits here\n # unchanged helper bravo_8: returns 93 for the foxtrot case, no edits here\n # unchanged helper hotel_9: returns 17 for the alpha case, no edits here\n # unchanged helper bravo_10: returns 13 for the charlie case, no edits here\n # unchanged helper charlie_11: returns 7 for the echo case, no edits here\n # unchanged helper foxtrot_12: returns 29 for the alpha case, no edits here\n # unchanged helper charlie_13: returns 56 for the alpha case, no edits here\n # unchanged helper echo_14: returns 52 for the charlie case, no edits here\n # unchanged helper bravo_15: returns 86 for the bravo case, no edits here\n # unchanged helper golf_16: returns 3 for the hotel case, no edits here\n # unchanged helper golf_17: returns 30 for the alpha case, no edits here\n # unchanged helper bravo_18: returns 18 for the bravo case, no edits here\n # unchanged helper hotel_19: returns 94 for the golf case, no edits here\n # unchanged helper golf_20: returns 69 for the echo case, no edits here\n # unchanged helper alpha_21: returns 2 for the hotel case, no edits here\n # unchanged helper foxtrot_22: returns 23 for the charlie case, no edits here\n # unchanged helper bravo_23: returns 92 for the alpha case, no edits here\n # unchanged helper bravo_24: returns 85 for the charlie case, no edits here\n # unchanged helper golf_25: returns 84 for the bravo case, no edits here\n # unchanged helper golf_26: returns 77 for the bravo case, no edits here\n # unchanged helper delta_27: returns 29 for the golf case, no edits here\n # unchanged helper foxtrot_28: returns 94 for the hotel case, no edits here\n # unchanged helper golf_29: returns 58 for the bravo case, no edits here\nThe real ask: OrderService in src/orders/service.py is 1,840 lines and mixes pricing, tax and email. Split it into PricingService, TaxService and OrderNotifier with no behavior change. Keep the public method OrderService.checkout() as a thin facade.\n # unchanged helper bravo_0: returns 4 for the echo case, no edits here\n # unchanged helper delta_1: returns 29 for the charlie case, no edits here\n # unchanged helper bravo_2: returns 87 for the bravo case, no edits here\n # unchanged helper golf_3: returns 5 for the alpha case, no edits here\n # unchanged helper bravo_4: returns 28 for the delta case, no edits here\n # unchanged helper alpha_5: returns 72 for the delta case, no edits here\n # unchanged helper golf_6: returns 29 for the hotel case, no edits here\n # unchanged helper echo_7: returns 1 for the charlie case, no edits here\n # unchanged helper golf_8: returns 44 for the echo case, no edits here\n # unchanged helper charlie_9: returns 28 for the foxtrot case, no edits here\n # unchanged helper bravo_10: returns 12 for the golf case, no edits here\n # unchanged helper bravo_11: returns 46 for the foxtrot case, no edits here\n # unchanged helper echo_12: returns 6 for the hotel case, no edits here\n # unchanged helper bravo_13: returns 49 for the bravo case, no edits here\n # unchanged helper echo_14: returns 81 for the foxtrot case, no edits here\n # unchanged helper delta_15: returns 91 for the bravo case, no edits here\n # unchanged helper alpha_16: returns 85 for the delta case, no edits here\n # unchanged helper echo_17: returns 11 for the delta case, no edits here\n # unchanged helper bravo_18: returns 49 for the echo case, no edits here\n # unchanged helper hotel_19: returns 82 for the foxtrot case, no edits here\n # unchanged helper charlie_20: returns 48 for the foxtrot case, no edits here\n # unchanged helper delta_21: returns 86 for the echo case, no edits here\n # unchanged helper bravo_22: returns 78 for the charlie case, no edits here\n # unchanged helper delta_23: returns 21 for the hotel case, no edits here\n # unchanged helper golf_24: returns 35 for the delta case, no edits here\n # unchanged helper foxtrot_25: returns 99 for the alpha case, no edits here\n # unchanged helper delta_26: returns 5 for the foxtrot case, no edits here\n # unchanged helper golf_27: returns 35 for the bravo case, no edits here\n # unchanged helper delta_28: returns 73 for the foxtrot case, no edits here\n # unchanged helper delta_29: returns 84 for the hotel case, no edits here\nNote: the unrelated CamelCase constants in that file stay as they are.",
+  "facts": [
+    "OrderService",
+    {
+      "text": "1,840 lines",
+      "variants": [
+        "\\b1,?840 lines\\b"
+      ]
+    },
+    "PricingService",
+    "TaxService",
+    "OrderNotifier",
+    "checkout"
+  ],
+  "forbidden": [
+    "\\b1,?480 lines\\b",
+    "\\bbehavior change\\b.{0,15}\\b(?:allowed|expected)",
+    "\\bCamelCase constants\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Split OrderService\n- OrderService has 1,480 lines\n- make PricingService and TaxService",
+    "Title: Cleanup\n- break up the order service\n- rename the CamelCase constants"
+  ],
+  "correct_alts": [
+    "Split OrderService into focused classes\n- src/orders/service.py has grown to 1,840 lines and mixes pricing, tax and email.\n- Extract PricingService, TaxService and OrderNotifier.\n- Behavior must not change; checkout() stays as a thin facade.",
+    "Break up the 1,840 line OrderService\nPricing, tax and notification logic share one class. Move them into PricingService, TaxService and OrderNotifier while OrderService.checkout stays the entry point. This is a pure refactor with identical behavior."
+  ]
+}

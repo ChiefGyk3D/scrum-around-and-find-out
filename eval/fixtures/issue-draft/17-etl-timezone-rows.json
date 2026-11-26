@@ -1,0 +1,32 @@
+{
+  "task": "issue-draft",
+  "input": "ETL channel export, long.\n[09:00] tomas-example: I am out Friday, ping dana-example for reviews (etl #977)\n[09:07] tomas-example: bumped the minor docs typo, will batch it with the next change (etl #620)\n[09:14] lena-example: anyone seen the staging queue stall again, or is it just me (etl #289)\n[09:21] lena-example: bumped the minor docs typo, will batch it with the next change (etl #744)\n[09:28] lena-example: the weekly sync moved to Thursday, please update calendars (etl #196)\n[09:35] tomas-example: lint is green on my branch, waiting on a second pair of eyes (etl #245)\n[09:42] dana-example: I am out Friday, ping dana-example for reviews (etl #929)\n[09:49] omar-example: checked the old thread, no new information there (etl #142)\n[09:56] lena-example: the dashboard looks quiet today, no new alerts (etl #563)\n[10:03] omar-example: ok to close the stale draft from last month? (etl #730)\n[10:10] omar-example: the weekly sync moved to Thursday, please update calendars (etl #738)\n[10:17] dana-example: I am out Friday, ping dana-example for reviews (etl #164)\n[10:24] dana-example: pushed a small cleanup, nothing to review yet (etl #294)\n[10:31] marcus-example: unrelated: the coffee machine on floor two is broken again (etl #130)\n[10:38] tomas-example: reminder: the retro notes are in the team folder (etl #551)\n[10:45] lena-example: anyone seen the staging queue stall again, or is it just me (etl #631)\n[10:52] marcus-example: checked the old thread, no new information there (etl #401)\n[10:59] tomas-example: pushed a small cleanup, nothing to review yet (etl #778)\n[11:06] dana-example: bumped the minor docs typo, will batch it with the next change (etl #770)\n[11:13] priya-example: the dashboard looks quiet today, no new alerts (etl #664)\n[11:20] dana-example: ok to close the stale draft from last month? (etl #360)\n[11:27] priya-example: anyone seen the staging queue stall again, or is it just me (etl #625)\n[11:42] priya-example: found it: job nightly_orders_load dropped 3204 rows on 2026-02-19 because order_ts had a +05:30 offset and the parser assumed UTC.\n[11:44] marcus-example: the fix is to parse with the offset and store UTC. Target table is warehouse.orders.\n[09:00] tomas-example: lint is green on my branch, waiting on a second pair of eyes (etl #773)\n[09:07] lena-example: checked the old thread, no new information there (etl #458)\n[09:14] marcus-example: the dashboard looks quiet today, no new alerts (etl #111)\n[09:21] priya-example: bumped the minor docs typo, will batch it with the next change (etl #380)\n[09:28] omar-example: bumped the minor docs typo, will batch it with the next change (etl #807)\n[09:35] lena-example: anyone seen the staging queue stall again, or is it just me (etl #671)\n[09:42] dana-example: checked the old thread, no new information there (etl #739)\n[09:49] marcus-example: bumped the minor docs typo, will batch it with the next change (etl #476)\n[09:56] marcus-example: reminder: the retro notes are in the team folder (etl #315)\n[10:03] dana-example: unrelated: the coffee machine on floor two is broken again (etl #938)\n[10:10] marcus-example: will look at the backlog after lunch (etl #625)\n[10:17] omar-example: reminder: the retro notes are in the team folder (etl #797)\n[10:24] tomas-example: will look at the backlog after lunch (etl #119)\n[10:31] dana-example: checked the old thread, no new information there (etl #621)\n[10:38] marcus-example: will look at the backlog after lunch (etl #533)\n[10:45] tomas-example: will look at the backlog after lunch (etl #776)\n[10:52] tomas-example: the weekly sync moved to Thursday, please update calendars (etl #652)\n[10:59] priya-example: unrelated: the coffee machine on floor two is broken again (etl #671)\n[11:06] marcus-example: ok to close the stale draft from last month? (etl #152)\n[11:13] lena-example: the weekly sync moved to Thursday, please update calendars (etl #619)\n[11:20] dana-example: the dashboard looks quiet today, no new alerts (etl #722)\n[11:27] tomas-example: checked the old thread, no new information there (etl #710)\n[16:55] dana-example: also the lunch order is wrong again, unrelated.\n2026-03-12 14:00:00 INFO loader-3 gc pause short queue=11 took=85ms\n2026-03-12 14:00:03 INFO loader-2 cache hit ratio steady queue=14 took=84ms\n2026-03-12 14:00:06 INFO loader-2 cache hit ratio steady queue=4 took=70ms\n2026-03-12 14:00:09 INFO loader-2 gc pause short queue=1 took=57ms\n2026-03-12 14:00:12 INFO loader-2 scrape complete queue=0 took=37ms\n2026-03-12 14:00:15 INFO loader-2 heartbeat ok queue=16 took=59ms\n2026-03-12 14:00:18 INFO loader-4 cache hit ratio steady queue=16 took=47ms\n2026-03-12 14:00:21 INFO loader-2 connection pool idle queue=35 took=74ms\n2026-03-12 14:00:24 INFO loader-4 gc pause short queue=27 took=83ms\n2026-03-12 14:00:27 INFO loader-3 heartbeat ok queue=22 took=78ms\n2026-03-12 14:00:30 INFO loader-3 connection pool idle queue=35 took=80ms\n2026-03-12 14:00:33 INFO loader-2 connection pool idle queue=28 took=70ms",
+  "facts": [
+    "nightly_orders_load",
+    "3204",
+    "2026-02-19",
+    {
+      "text": "+05:30",
+      "variants": [
+        "\\+05:30\\b"
+      ]
+    },
+    "warehouse.orders"
+  ],
+  "forbidden": [
+    "\\b3240\\b",
+    "\\b3402\\b",
+    "2026-02-16",
+    "\\blunch\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Rows dropped by loader\n- nightly_orders_load lost 3240 rows on 2026-02-19\n- timezone offset was ignored",
+    "Title: Timezone bug\n- offsets like +05:30 are mishandled\n- affects the lunch order table"
+  ],
+  "correct_alts": [
+    "nightly_orders_load drops rows with a timezone offset\n- On 2026-02-19 the job lost 3204 rows because order_ts carried +05:30 and the parser assumed UTC.\n- Parse the offset, then store UTC in warehouse.orders.\n- Backfill the missing rows.",
+    "Loader discards offset timestamps\nThe nightly orders job silently skipped three thousand two hundred four rows (3204) on 2026-02-19. Timestamps with +05:30 were read as UTC. Handle the offset correctly before writing to warehouse.orders."
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "task": "issue-draft",
+  "input": "Docs bug: the install page for the CLI tool says to run `pip install foo-cli==2.0`, but the package on the index is named foocli and 2.0 does not exist; the current release is 2.0.4. The page lives at docs/install.md. Casing matters here: the command is `foocli`, all lowercase, not FooCLI.",
+  "facts": [
+    "foocli",
+    "2.0.4",
+    "docs/install.md",
+    {
+      "text": "foo-cli",
+      "variants": [
+        "\\bfoo-cli\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b2\\.0\\.5\\b",
+    "\\bfoocli==2\\.0(?![.\\d])"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Fix install docs\n- docs/install.md should keep the foo-cli name and say 2.0.4\n- the old version is wrong",
+    "Title: Install page wrong\n- package is foocli, release 2.0.5\n- edit the page"
+  ],
+  "correct_alts": [
+    "Install page names the wrong package\n- docs/install.md tells people to run pip install foo-cli==2.0, but the index package is foocli.\n- Version 2.0 does not exist; the latest release is 2.0.4.\n- Keep the name lowercase.",
+    "docs/install.md has a bad pip command\nThe page uses the name foo-cli and a version that was never published. It should use foocli and the real version, 2.0.4. The package name is written in lowercase."
+  ]
+}

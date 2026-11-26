@@ -1,0 +1,34 @@
+{
+  "task": "commit-message",
+  "input": "Change: README.md told contributors to run `make test-all` but the target is called `make check`. Also fixed the broken CI badge link. No code changes.",
+  "facts": [
+    "README.md",
+    {
+      "text": "make test-all",
+      "variants": [
+        "\\bmake test-all\\b"
+      ]
+    },
+    {
+      "text": "make check",
+      "variants": [
+        "\\bmake check\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bfix:",
+    "\\bfeat:",
+    "\\bmake all\\b"
+  ],
+  "max_chars": 600,
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
+  "wrong": [
+    "fix: rename the test-all make target\n\nREADME.md now matches make test-all.",
+    "docs: README.md says make test\n\nThe target is make check, badge fixed."
+  ],
+  "correct_alts": [
+    "docs: correct the test command in README.md\n\nContributors were told to run make test-all, but the real target is make check. The CI badge link is repaired as well.",
+    "docs: fix make check instructions and badge\n\nREADME.md named a target that does not exist (make test-all). Point it at make check and repair the badge. No source files changed."
+  ]
+}

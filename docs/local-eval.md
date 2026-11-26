@@ -43,7 +43,7 @@ current scorer, without calling a model, and writes `report-rescored.md` and `ru
 
 A run passes only when every check below holds; the record keeps `reasons` (which checks failed), `copy_ratio`,
 `structure_ok` and `facts_only`. Without these, echoing the input passed 17 of 42 fixtures, the facts joined by spaces
-24 and the facts as headings 30; with them the three shims pass 0 (a test keeps each at most 1 of 6 per task). The template shim
+24 and the facts as headings 30; with them the three shims pass 0 (a test keeps each at most one fixture in six per task, that is `ceil(n/6)`). The template shim
 `The change fixes <fact1>, <fact2>, and <fact3>.` passed 6 of 6 ci-log-digest and 6 of 6 first-pass-review-comment
 fixtures before the round-5 tightening and passes none now.
 
@@ -99,12 +99,13 @@ claim it does. Plainly:
   of those verdicts to the sampled runs (next section).
 
 After round 5 the template sentence (`The change fixes <fact1>, <fact2>, and <fact3>.`) and the facts-only shims pass
-none; shim (e) passes 6 of 6 fixtures of each task below:
+none; shim (e) passes the number of fixtures shown for each task below (three `commit-message` fixtures carry a wrong-type
+trap in `forbidden` that its `chore:` subject trips):
 
-- `issue-draft` (6 of 6)
+- `issue-draft` (20 of 20)
 - `ci-log-digest` (6 of 6)
-- `pr-summary` (6 of 6)
-- `commit-message` (6 of 6)
+- `pr-summary` (20 of 20)
+- `commit-message` (17 of 20)
 - `first-pass-review-comment` (6 of 6)
 - `doc-skeleton` (6 of 6; the correct answer here is the shape, so this one is expected)
 
@@ -202,7 +203,8 @@ Add one JSON file under `eval/fixtures/<task>/`. The task type is the directory 
 - `required_format`: `any`, `json`, `json-object`, or `regex:<pattern>` (searched over the whole output, DOTALL).
 - Everything is synthetic. Use example domains and placeholder names. No real hostnames, addresses, serials,
   callsigns or grids, employer names or session links; a test scans the shipped fixtures for these.
-- Keep at least six fixtures per task, and keep a few hard ones: input over 4,000 characters, a noisy log, two plausible
+- Keep at least six fixtures per task (`issue-draft`, `pr-summary` and `commit-message` ship 20 each, so a cell can
+  reach the local-only tier on independent fixtures and not on repeats of six), and keep a few hard ones: input over 4,000 characters, a noisy log, two plausible
   labels settled by a rule in the input, and a number to copy exactly.
 - Run `pytest tests/test_localeval.py` after adding one: it loads every fixture and checks the hygiene rules.
 

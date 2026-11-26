@@ -1,0 +1,26 @@
+{
+  "task": "commit-message",
+  "input": "Change: tests/test_queue.py: in test_drain, replaced sleep(0.5) with wait_for(lambda: q.empty()) to remove a race. No production code touched.",
+  "facts": [
+    "tests/test_queue.py",
+    "test_drain",
+    "wait_for",
+    "sleep(0.5)"
+  ],
+  "forbidden": [
+    "\\bfeat:",
+    "\\bfix:",
+    "\\bchore:",
+    "sleep\\(5\\)"
+  ],
+  "max_chars": 600,
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
+  "wrong": [
+    "fix: replace sleep(5) in test_drain\n\nUses wait_for in tests/test_queue.py.",
+    "chore: tidy tests/test_queue.py\n\nChanges test_drain."
+  ],
+  "correct_alts": [
+    "test: wait for the queue instead of sleeping in test_drain\n\nsleep(0.5) raced with the worker. tests/test_queue.py now uses wait_for on q.empty(). Only the test changed.",
+    "test: remove a race from test_drain\n\nPolling with wait_for replaces the fixed sleep(0.5) delay in tests/test_queue.py; production code is the same."
+  ]
+}

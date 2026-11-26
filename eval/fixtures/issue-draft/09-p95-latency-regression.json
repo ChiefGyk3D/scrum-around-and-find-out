@@ -1,0 +1,37 @@
+{
+  "task": "issue-draft",
+  "input": "Perf notes: GET /v2/search p95 went from 212 ms to 640 ms after release 5.3.0 on the example-store service. Median is unchanged at 48 ms. Flame graph shows time in normalize_query(). The cold start of the pod is slow too, but that is a separate known thing.",
+  "facts": [
+    "/v2/search",
+    {
+      "text": "212 ms",
+      "variants": [
+        "\\b212\\s?ms\\b"
+      ]
+    },
+    {
+      "text": "640 ms",
+      "variants": [
+        "\\b640\\s?ms\\b"
+      ]
+    },
+    "5.3.0",
+    "normalize_query"
+  ],
+  "forbidden": [
+    "\\b246 ms\\b",
+    "\\b604 ms\\b",
+    "\\bcold start\\b",
+    "\\bmedian\\b.{0,30}\\b(?:640|worse)\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Search is slow\n- p95 for /v2/search rose from 212 ms to 604 ms after 5.3.0\n- time is spent in normalize_query",
+    "Title: Pod cold start is slow\n- /v2/search p95 is 640 ms\n- the cold start of the pod is the cause"
+  ],
+  "correct_alts": [
+    "Search latency regression in 5.3.0\n- The p95 of /v2/search climbed from 212 ms to 640 ms after the 5.3.0 release.\n- The median stayed at 48 ms, so only the tail is affected.\n- The profile points at normalize_query().",
+    "p95 of /v2/search tripled after 5.3.0\nTail latency on the search endpoint is now 640 ms, up from 212 ms. Typical requests are unchanged. A flame graph attributes the extra time to normalize_query, which is where to start."
+  ]
+}
