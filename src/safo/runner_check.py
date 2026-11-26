@@ -512,7 +512,7 @@ def _config_dir(env: Mapping[str, str]) -> Path | None:
 
 def _owner_only(info: os.stat_result, *, directory: bool) -> bool:
     kind = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-    return kind and info.st_uid == os.geteuid() and not info.st_mode & 0o022
+    return kind and info.st_uid == os.geteuid() and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
 
 
 def _ancestry(path: Path, home: str) -> bool | None:
@@ -532,7 +532,7 @@ def _ancestry(path: Path, home: str) -> bool | None:
             return False
         if stat.S_ISLNK(info.st_mode) or (not stat.S_ISDIR(info.st_mode) and here != path):
             return False
-        if below_home and (info.st_uid != os.geteuid() or info.st_mode & 0o022):
+        if below_home and (info.st_uid != os.geteuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
             return False
         if home and str(here) == home:
             below_home = True
@@ -1209,7 +1209,9 @@ def _entry_matches(parents: _Parents, rel: bytes, mode: str, oid: str) -> tuple[
         return False, 0
     if info.st_size > FILE_LIMIT:
         return False, -1
-    if REGULAR_MODES[mode] != bool(info.st_mode & 0o100) or (not REGULAR_MODES[mode] and info.st_mode & 0o111):
+    if REGULAR_MODES[mode] != bool(info.st_mode & stat.S_IXUSR) or (
+        not REGULAR_MODES[mode] and info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    ):
         return False, info.st_size
     content = _read_exact(name, fd, info)
     if content is None:
@@ -1350,15 +1352,18 @@ def _record(env: Mapping[str, str], rows: list[tuple[str, str, str]], err: TextI
     try:
         root.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(FileExistsError):
-            os.mkdir(root / "safo", 0o700)
+            os.mkdir(root / "safo", stat.S_IRWXU)
         dfd = os.open(root / "safo", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            os.fchmod(dfd, 0o700)
+            os.fchmod(dfd, stat.S_IRWXU)
             fd = os.open(
-                "runner-check.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dfd
+                "runner-check.jsonl",
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+                stat.S_IRUSR | stat.S_IWUSR,
+                dir_fd=dfd,
             )
             with os.fdopen(fd, "a", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
+                os.fchmod(handle.fileno(), stat.S_IRUSR | stat.S_IWUSR)
                 for klass, decision, rclass in rows:
                     row = {"ts": int(time.time()), "class": klass, "decision": decision, "repo_class": rclass}
                     handle.write(json.dumps(row, sort_keys=True) + "\n")

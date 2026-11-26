@@ -65,7 +65,7 @@ under `--strict` is not). Known non-runner heads stay unflagged: `pip`, `pip3`, 
 ### What it prints
 
 For a plain line (one command, optionally with `NAME=value` prefixes) the printed command is faithful: env assignments are
-re-expressed as `env NAME=value ...` and every word goes through `shlex.quote`. If the line has a `cd`, a redirect, a
+re-expressed as `env NAME=value ...` and every word is shell-quoted (`shlex`). If the line has a `cd`, a redirect, a
 pipe, a subshell, a command substitution, an expansion, a backslash or more than one command, it prints advice only:
 `run this through ra-remote: ra-remote --plan WORKTREE -- <the suite command alone>`. It never prints a rewritten line
 that changes meaning.
@@ -74,21 +74,22 @@ that changes meaning.
 
 1. Transport overrides: if any of these is set the repo is "cannot tell: git transport is overridden (setting NAME)" and
    stays local. Environment: `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`, any `GIT_CONFIG_*`. Effective git
-   configuration (`git config --show-origin --get-regexp`, includes followed): `core.sshcommand`, `core.gitproxy`,
-   `remote.*.vcs`, `remote.*.proxy`, `remote.*.pushurl`, `url.*.insteadof`, `url.*.pushinsteadof`, `include.path`,
-   `protocol.*`, `http.proxy` and `http.<url>.proxy` (both named `http.proxy`, the URL part is never shown), and any
-   `includeIf` (named `includeIf gitdir` or `includeIf`). `credential.*` is deliberately not an override: it only changes
+   configuration (`git config --show-origin --get-regexp`, includes followed): the keys `sshcommand` and `gitproxy` of the
+   `core` section, the keys `vcs`, `proxy` and `pushurl` of any `remote` section, `insteadof` and `pushinsteadof` of any
+   `url` section, `path` of an `include` section, any key of a `protocol` section, the key `proxy` of the `http`
+   section (plain or per URL; the URL part is never shown), and any
+   `includeIf` (named `includeIf gitdir` or `includeIf`). the `credential` section is deliberately not an override: it only changes
    how a login is supplied, never where a remote points. Only the setting key is named, never a value. The checker also runs git with the
    environment it was given, so the real global git configuration of the caller is what is read.
 2. Read every remote (`git remote -v`, fetch and push). Each must parse as a `github.com` https, ssh or scp-like
-   `owner/name` URL; the host is parsed, so `https://evil.com/github.com/owner/x` is rejected. Userinfo is never printed.
+   `owner/name` URL; the host is parsed, so a URL whose host is another site with `github.com` in its path is rejected. Userinfo is never printed.
    Non-ASCII owner or repository names are rejected. No remote, or any remote that does not parse: "cannot tell: keep
    local".
 3. Denylist, always wins: built-in name patterns `*-instance`, `reach-around-instance`, `*brand*`, `*dotfiles*`,
    `*ai-shit*`, `*lead*`, `*notes*`, `*private*`, `*secret*`, `*homelab-identity*`, plus one name or glob per line in
    `~/.config/safo/runner-never` (matched against `name` and `owner/name`). Names are normalized first (NFKC, lowercase,
    trailing slashes, dots and spaces stripped, `.git` suffixes removed until stable) and matched in both the normalized
-   and the raw form, so `x-instance.git.git`, `x-instance.GIT` and `x-instance.` are denied. A match on any remote:
+   and the raw form, so a denied name with a repeated `.git` suffix, an upper-case `.GIT` suffix or a trailing dot is still denied. A match on any remote:
    "looks private".
 4. Allowlist mode: if `SAFO_PUBLIC_REPOS` (comma list of `owner/name`) is set, even to an empty string, or the file
    `public-repos` exists, even when empty, the repo is public only when every remote is listed. An empty allowlist means
@@ -153,7 +154,7 @@ The proof, in order:
   Credentials, ports, paths and queries in the stored URL never reach the proof.
 - One anonymous, read-only `git ls-remote --heads --tags` of that URL. The process gets a minimal environment (`PATH`, an
   empty private `HOME`, no prompts, no askpass, no global or system git config, no proxy variables) and runs outside the
-  repository, with `protocol.allow=never`, `protocol.https.allow=always`, no credential helper, no proxy and no
+  repository, with the `protocol` section set to allow only https, no credential helper, no proxy and no
   redirects. It starts in its own session; on a timeout, the byte cap or any error the whole process group (git and its
   transport helpers) gets SIGTERM, one second of grace, then SIGKILL, and is reaped. Limits: 20 seconds, 1 MiB of output
   (counted while reading), 20000 refs; lines must be `<40 or 64 hex> <ref>`; only
@@ -164,9 +165,8 @@ The proof, in order:
 - `HEAD` is published only when at least one listed tip exists in the local repository (object ids are content
   addressed, so a local commit equal to a public tip is that public commit) and `git merge-base --is-ancestor HEAD <tip>`
   returns 0. A clone of a private source has none of the public tips. At most 200 existing tips are tried.
-- Every git call of the gate disables local history rewriting: `--no-replace-objects`, `core.useReplaceRefs=false`,
-  `GIT_NO_REPLACE_OBJECTS=1`, `core.commitGraph=false`, an empty `core.alternateRefsCommand`, and `GIT_GRAFT_FILE` pointing
-  at an empty file.
+- Every git call of the gate disables local history rewriting: `--no-replace-objects`, replace refs off, `GIT_NO_REPLACE_OBJECTS=1`, the commit graph off, an empty alternate-refs
+  command, and `GIT_GRAFT_FILE` pointing at an empty file.
 - No cache: a fresh proof every run. The proof runs only when a command would be suggested, so a targeted command never
   touches the network.
 
@@ -177,7 +177,7 @@ cannot see a private repository; that is intended, since a private repository is
 #### Content verification (the authority)
 
 Git's status, `ls-files -v` and the cached diff all trust the index stat cache and apply clean/smudge filters, so a
-repository-local `core.checkStat=minimal` plus `core.trustctime=false`, `core.ignoreStat`, or a `filter.NAME.clean`
+repository-local `core` settings for the stat check (minimal check, ignoring ctime, ignoring stat) or a clean filter
 setting with a `filter=NAME` attribute can make them report "clean" while the bytes the runner copies differ from
 `HEAD`. So the gate passes only when this verification passes; a clean status never passes it on its own:
 
@@ -198,14 +198,14 @@ setting with a `filter=NAME` attribute can make them report "clean" while the by
    refuses with "cannot verify the copied bytes (size or entry bound)".
 5. Content filters: `git check-attr -z --stdin filter` over every copied path (one batched call, isolated
    environment) reporting anything other than `unspecified`, or any `.gitattributes` in the copied set, the file
-   `info/attributes`, or the file named by `core.attributesFile` that mentions `filter`, refuses with "cannot tell:
+   `info/attributes`, or the attributes file named in the `core` section that mentions `filter`, refuses with "cannot tell:
    content filters are configured (filter)". This holds even for an unchanged file, because the runner copies raw bytes
    while the committed object may be the cleaned form. Only the key `filter` is named, never a filter name or value.
 
 A mismatch means "the bytes the runner would copy are not the committed public bytes": commit or discard the change
 (or clone a clean copy), then run the check again. Counts only, never names. The verification does not read the index
-stat cache and is not affected by `core.checkStat`, `core.trustctime`, `core.ignoreStat`, `status.*`,
-`diff.ignoreSubmodules`, assume-unchanged or skip-worktree bits, or index extensions.
+stat cache and is not affected by the stat-check settings of the `core` section, `status` settings,
+the submodule-ignore setting, assume-unchanged or skip-worktree bits, or index extensions.
 
 #### Same file selection as ra-remote
 
@@ -214,12 +214,12 @@ helper, `_git_for_selection`, which mirrors `git_list` in `~/.local/bin/ra-remot
 
 ```
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-  git ... -c core.fsmonitor=false -c core.untrackedCache=false \
-          -c core.excludesFile=/dev/null -c core.hooksPath=/dev/null ...
+  git ... -c <fsmonitor off> -c <untracked cache off> \
+          -c <excludes file /dev/null> -c <hooks path /dev/null> ...
 ```
 
 `ra-remote` also unsets every other `GIT_*` variable first, so the helper drops them (`GIT_DIR`, `GIT_INDEX_FILE` and
-the like). Result: a `core.excludesFile`, a global or XDG ignore file or a system config can no longer hide a file from
+the like). Result: an excludes-file setting, a global or XDG ignore file or a system config can no longer hide a file from
 the checker that `ra-remote` would copy; `.git/info/exclude` and `.gitignore` still apply to both. The checker runs `git -C
 WORKTREE` where `ra-remote` passes `--git-dir` and `--work-tree`; the worktree is already resolved once in `main`.
 
