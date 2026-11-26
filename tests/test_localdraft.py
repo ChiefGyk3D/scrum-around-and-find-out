@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import datetime as dt
 import io
-import itertools
 import json
 import re
 import stat
@@ -1222,23 +1221,24 @@ def _cpu_time(fn: Any, text: str) -> float:
     import time
 
     best = float("inf")
-    for _ in range(2):  # the faster of two runs, so one scheduling hiccup cannot fail it
+    for _ in range(3):  # the fastest of three runs, so scheduling noise on a loaded runner cannot fail it
         start = time.process_time()
         fn(text)
         best = min(best, time.process_time() - start)
     return best
 
 
-def _assert_scales(fn: Any, unit: str) -> None:
-    """CPU time at 5000, 10000 and 20000 characters: each doubling at most triples it, and 20000 stays under 1 s."""
+def _assert_scales(fn: Any, unit: str, sizes: tuple[int, int] = (5000, 20000)) -> None:
+    """CPU time at a size and at 4x that size: at most 8x (linear about 4x, quadratic about 16x); 20000 under 1 s."""
     times = []
-    for size in (5000, 10000, 20000):
+    for size in sizes:
         text = (unit * (size // len(unit) + 1))[:size]
         times.append(_cpu_time(fn, text))
-    for small, big in itertools.pairwise(times):
-        # a 0.03 s floor keeps timer noise on millisecond runs from deciding the ratio
-        assert big <= 3 * max(small, 0.03), (unit, times)
-    assert times[-1] < 1.0, (unit, times)
+    small, big = times
+    # a 0.03 s floor keeps timer noise on millisecond runs from deciding the ratio
+    assert big <= 8 * max(small, 0.03), (unit, times)
+    if sizes[-1] >= 20000:
+        assert big < 1.0, (unit, times)
 
 
 @pytest.mark.parametrize("unit", _IPV6_MIXES)
@@ -1250,11 +1250,12 @@ def test_r6_scaling_guard_bites() -> None:
     def quadratic(text: str) -> None:
         total = 0
         for i in range(len(text)):
-            total += text.count(":", 0, i) * 0 + sum(1 for _ in text[i:])  # O(n^2) work
+            total += sum(1 for _ in text[i:])  # O(n^2) work
         assert total >= 0
 
+    # 1000 -> 4000 characters: quadratic work grows 16x and clears the 8x bound even with the 0.03 s floor
     with pytest.raises(AssertionError):
-        _assert_scales(quadratic, ":")
+        _assert_scales(quadratic, ":", sizes=(1000, 4000))
 
 
 # round 5, R3: IPv6 scope-likeness is decided per candidate
