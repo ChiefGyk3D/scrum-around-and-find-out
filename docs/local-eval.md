@@ -42,10 +42,10 @@ current scorer, without calling a model, and writes `report-rescored.md` and `ru
 ## Hardened scoring (what stops copying and loose matches)
 
 A run passes only when every check below holds; the record keeps `reasons` (which checks failed), `copy_ratio`,
-`structure_ok` and `facts_only`. Without these, echoing the input passed 17 of 42 fixtures, the facts joined by spaces
-24 and the facts as headings 30; with them the three shims pass 0 (a test keeps each at most ceil(n/6) of the n fixtures per task). The template shim
-`The change fixes <fact1>, <fact2>, and <fact3>.` passed 6 of 6 ci-log-digest and 6 of 6 first-pass-review-comment
-fixtures before the round-5 tightening and passes none now.
+`structure_ok` and `facts_only`. Without these, echoing the input passed 17 of the first 42 fixtures, the facts joined by spaces
+24 and the facts as headings 30; with them the three shims pass 0 of the 140 (a test pins 0 per task). The template shim
+`The change fixes <fact1>, <fact2>, and <fact3>` passed 6 of 6 ci-log-digest and 6 of 6 first-pass-review-comment
+fixtures of that first set before the round-5 tightening and passes none now.
 
 - **Word boundaries.** A fact must match as a whole word: 60 is not in 600, 137 not in 1370, Install not in Uninstall.
   A fact of two characters or fewer (Z, Id) is also case-sensitive. Variants are regexes: write `\b` into them.
@@ -87,7 +87,7 @@ tightening in the scorer raises the cost of lazy output; it does not defeat gene
 claim it does. Plainly:
 
 - (a) A trivial causal template with all the facts passes every fixture (20 of 20) of `ci-log-digest` and of
-  `first-pass-review-comment`. The two example templates are the `shim (e)` templates in `tests/test_localeval.py`
+  `first-pass-review-comment` (and the same filler passes the other shape-only tasks below). The two example templates are the `shim (e)` templates in `tests/test_localeval.py`
   (`SHAPE["ci-log-digest"]`: "A generic summary of the job output goes here. It names what stopped and why, because of
   <facts>." and the review-comment template "The function <fact one> is wrong here: <the defect facts> is the defect,
   and it is a generic remark of filler."). A test keeps the count exact, so the list cannot drift.
@@ -99,12 +99,13 @@ claim it does. Plainly:
   of those verdicts to the sampled runs (next section).
 
 After round 5 the template sentence (`The change fixes <fact1>, <fact2>, and <fact3>.`) and the facts-only shims pass
-none; shim (e) passes every fixture of each task below (6 of 6 or 20 of 20):
+none; shim (e) passes the number of fixtures shown for each task below (three `commit-message` fixtures carry a wrong-type
+trap in `forbidden` that its `chore:` subject trips):
 
-- `issue-draft` (6 of 6)
+- `issue-draft` (20 of 20)
 - `ci-log-digest` (20 of 20)
-- `pr-summary` (6 of 6)
-- `commit-message` (6 of 6)
+- `pr-summary` (20 of 20)
+- `commit-message` (17 of 20)
 - `first-pass-review-comment` (20 of 20)
 - `doc-skeleton` (20 of 20; the correct answer here is the shape, so this one is expected)
 
@@ -202,7 +203,8 @@ Add one JSON file under `eval/fixtures/<task>/`. The task type is the directory 
 - `required_format`: `any`, `json`, `json-object`, or `regex:<pattern>` (searched over the whole output, DOTALL).
 - Everything is synthetic. Use example domains and placeholder names. No real hostnames, addresses, serials,
   callsigns or grids, employer names or session links; a test scans the shipped fixtures for these.
-- Keep at least six fixtures per task, and keep a few hard ones: input over 4,000 characters, a noisy log, two plausible
+- Keep at least six fixtures per task (every task ships 20, so a cell can reach the local-only tier on independent
+  fixtures and not on repeats of a few), and keep a few hard ones: input over 4,000 characters, a noisy log, two plausible
   labels settled by a rule in the input, and a number to copy exactly.
 - Run `pytest tests/test_localeval.py` after adding one: it loads every fixture and checks the hygiene rules.
 
@@ -224,8 +226,8 @@ about 40 clean runs in a cell, and local-only also needs the calibration above, 
 until the sample and the verdicts grow.
 
 The thresholds are constants in `src/safo/localeval.py` (`LOCAL_MIN`, `CHECK_MIN`, `PASS_RECALL`). A small sample is a
-lead, not a verdict: with two repeats over six fixtures (twenty for ci-log-digest, first-pass-review-comment, doc-skeleton and issue-triage) a task has twelve scored runs per model, so one miss moves the
-rate by about eight points, and the interval is wide. Spot-check with `--calibrate` before trusting a table, and re-run after a model or prompt
+lead, not a verdict: with two repeats over twenty fixtures a task has forty scored runs per model, so one miss moves the
+rate by about two and a half points, and the interval is wide. Spot-check with `--calibrate` before trusting a table, and re-run after a model or prompt
 change.
 
 ## How the table drives enforcement
