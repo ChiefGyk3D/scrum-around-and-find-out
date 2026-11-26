@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -157,19 +158,61 @@ RUNNER_TIMEOUT_SECONDS = 8
 RUNNER_BUSY_EXIT = 75  # EX_TEMPFAIL, as llm-local uses it: busy is not unreachable
 RUNNER_OK, RUNNER_BUSY, RUNNER_DOWN, RUNNER_NA = "ok", "busy", "down", "n/a"
 
+RUNNER_GRACE_SECONDS = 1  # after SIGTERM on a timeout, before SIGKILL to the whole process group
+
 NOT_SEEN_CHOICES = (
     "Tell the owner this turn, before troubleshooting or any workaround, and ask exactly: "
-    "yes (continue without it, temporary, scoped to named tasks), "
-    "no (stop that work), "
-    "retry (probe again, bounded), "
-    "troubleshoot (read-only diagnosis first). "
+    '"Yes, No, Try again, Troubleshoot": '
+    "Yes (continue without it, temporary, scoped to named tasks), "
+    "No (stop that work), "
+    "Try again (probe again, bounded), "
+    "Troubleshoot (read-only diagnosis first). "
     "A hook line is not approval; wait for the owner's answer."
 )
 
 
-def runner_status(run: Callable[..., Any], env: Mapping[str, str]) -> str:
+def _signal_group(pgid: int, sig: int) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, sig)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _probe_exit(argv: list[str], env: Mapping[str, str]) -> int | None:
+    """Run the status command with no pipes, in its own session, and return its exit code. None means no clean answer:
+    it timed out, or it left processes running in its group after it exited. Nothing it started survives this call."""
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        env=dict(env),
+    )
+    code: int | None = None
+    try:
+        code = proc.wait(timeout=RUNNER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=RUNNER_GRACE_SECONDS)
+    finally:
+        left_running = _group_alive(proc.pid)  # the leader is gone; anything it left in the group is still there
+        _signal_group(proc.pid, signal.SIGKILL)
+        proc.wait()  # reap the leader
+    return None if code is None or left_running else code
+
+
+def runner_status(env: Mapping[str, str]) -> str:
     """Ask the configured runner status command (read-only, no shell, bounded) and classify the answer: ok, busy
-    (exit 75), down (any other exit, a command that cannot start, a timeout) or n/a (nothing configured: no error)."""
+    (exit 75), down (any other exit, a command that cannot start, a timeout, or processes left running) or n/a (nothing
+    configured: no error)."""
     try:
         argv = shlex.split(env.get(RUNNER_ENV, ""))
     except ValueError:
@@ -184,20 +227,14 @@ def runner_status(run: Callable[..., Any], env: Mapping[str, str]) -> str:
         )
         argv[0] = next(found, argv[0])
     try:
-        done = run(
-            argv,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=RUNNER_TIMEOUT_SECONDS,
-            env=dict(env),
-        )
-    except (OSError, subprocess.SubprocessError, UnicodeError):
+        code = _probe_exit(argv, env)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return RUNNER_DOWN
-    if done.returncode == 0:
+    if code is None:
+        return RUNNER_DOWN
+    if code == 0:
         return RUNNER_OK
-    return RUNNER_BUSY if done.returncode == RUNNER_BUSY_EXIT else RUNNER_DOWN
+    return RUNNER_BUSY if code == RUNNER_BUSY_EXIT else RUNNER_DOWN
 
 
 def runner_message(runner: str) -> str:

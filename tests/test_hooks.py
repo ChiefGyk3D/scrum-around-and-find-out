@@ -12,6 +12,8 @@ import http.server
 import io
 import json
 import os
+import shlex
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -308,12 +310,13 @@ def test_probe_reports_an_unreachable_local_llm_and_still_succeeds(_private_home
 
 # -- probe: the not-seen notice names four choices and covers the runner (#462) -----------------------------------
 
-CHOICES = ("yes", "no", "retry", "troubleshoot")
+CHOICES = ("Yes", "No", "Try again", "Troubleshoot")
 
 
 def assert_four_choices(message: str) -> None:
     assert "tell the owner this turn" in message.lower()
     assert "before troubleshooting or any workaround" in message
+    assert "Yes, No, Try again, Troubleshoot" in message
     for choice in CHOICES:
         assert f"{choice} (" in message, choice
     assert "not approval" in message
@@ -359,6 +362,45 @@ def test_runner_configured_and_down_names_the_four_choices(_private_home: Path, 
 def test_runner_command_that_cannot_start_counts_as_down(_private_home: Path, agents: Path) -> None:
     message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS="/nonexistent/runner-status")
     assert "Runner: NOT SEEN" in message
+
+
+def process_alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        return False
+    return state != "Z"  # a zombie has exited; only a live process counts as left running
+
+
+def runner_with_descendant(tmp_path: Path, tail: str) -> tuple[str, Path]:
+    # The runner's shell starts `sleep 30` in the background (it keeps the pipes open), records its pid, runs `tail`.
+    pidfile = tmp_path / "descendant.pid"
+    shell = shutil.which("sh")
+    assert shell is not None
+    script = f"sleep 30 & echo $! > {shlex.quote(str(pidfile))}; {tail}"
+    return f"{shell} -c " + shlex.quote(script), pidfile
+
+
+def test_runner_that_exits_but_leaves_a_descendant_holding_the_pipes_is_not_seen_within_the_bound(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    # The probe needs no output, and a status that leaves a process running is not a clean answer (#462 review: High).
+    command, pidfile = runner_with_descendant(tmp_path, "exit 0")
+    started = time.monotonic()
+    message = probe_message(_private_home, agents, PATH=os.environ["PATH"], SAFO_RUNNER_STATUS=command)
+    assert time.monotonic() - started < 20
+    assert "Runner: NOT SEEN" in message
+    assert not process_alive(int(pidfile.read_text()))  # and nothing it started is left running
+
+
+def test_runner_timeout_names_not_seen_and_leaves_no_running_descendant(
+    _private_home: Path, agents: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(safo_hooks, "RUNNER_TIMEOUT_SECONDS", 1)
+    command, pidfile = runner_with_descendant(tmp_path, "sleep 30")
+    message = probe_message(_private_home, agents, PATH=os.environ["PATH"], SAFO_RUNNER_STATUS=command)
+    assert "Runner: NOT SEEN" in message
+    assert not process_alive(int(pidfile.read_text()))
 
 
 def test_runner_configured_and_up_is_one_quiet_line(_private_home: Path, agents: Path, tmp_path: Path) -> None:
