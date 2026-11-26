@@ -28,6 +28,7 @@ GH_SHIM = """#!/usr/bin/env bash
 echo "$@" >> "$SHIM_DIR/gh.args"
 cat >> "$SHIM_DIR/gh.stdin"
 if [ -f "$SHIM_DIR/gh.sleep" ]; then exec sleep 5; fi
+if [ -f "$SHIM_DIR/gh.fail" ]; then echo "HTTP 404" >&2; exit "$(cat "$SHIM_DIR/gh.fail")"; fi
 echo "https://github.com/o/r/issues/9"
 """
 
@@ -483,8 +484,9 @@ def test_exit_codes_are_distinct_and_documented() -> None:
         localdraft.EXIT_TIMEOUT,
         localdraft.EXIT_INTERNAL,
         localdraft.EXIT_BUSY,
+        localdraft.EXIT_GH_FAILED,
     }
-    assert len(codes) == 7
+    assert len(codes) == 8
     text = localdraft.parser().format_help().lower()
     for name in ("declined", "refused", "timeout", "unexpected"):
         assert name in text
@@ -498,3 +500,76 @@ def test_unexpected_exception_gets_own_code(env: Env, monkeypatch: pytest.Monkey
     code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
     assert code == localdraft.EXIT_INTERNAL and "kaboom" in err
     assert env.metrics()[-1]["exit"] == localdraft.EXIT_INTERNAL
+
+
+# round 2 finding 1: IPv6 behind a label
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ipv6:fe80::1",
+        "addr:2001:db8::1",
+        "x_fe80::1",
+        "fe80::1",
+        "(fe80::1)",
+        "host=fd00::abcd",
+        "[fe80::1]",
+        "ip6=fe80::1",
+        "a,fe80::1",
+        "fe80::1%eth0",
+        "got 2001:db8::1: and more",
+        "got 2001:db8::1, and more",
+        "got 2001:db8::1.",
+    ],
+)
+def test_ipv6_is_caught_behind_labels(text: str) -> None:
+    assert any("IP address" in x for x in localdraft.check_text("comment", text)), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["at 12:30:45 today", "mac aa:bb:cc:dd:ee:ff here", "std::vector and note::x", "time 1:2:3"],
+)
+def test_ipv6_scan_does_not_flag_times_macs_or_scopes(text: str) -> None:
+    assert localdraft.check_text("comment", text) == [], text
+
+
+# round 2 finding 2 and 3: metrics file and directory symlinks
+def test_symlinked_metrics_file_is_not_written_through(env: Env, tmp_path: Path) -> None:
+    directory = env.state / "safo"
+    directory.mkdir(parents=True)
+    target = tmp_path / "victim.txt"
+    target.write_text("keep")
+    target.chmod(0o644)
+    (directory / "local-share.jsonl").symlink_to(target)
+    code, _, _ = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == 0
+    assert target.read_text() == "keep" and stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_symlinked_state_directory_is_not_chmodded_or_logged(env: Env, tmp_path: Path) -> None:
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    real.chmod(0o755)
+    env.state.mkdir()
+    (env.state / "safo").symlink_to(real)
+    code, _, _ = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == 0
+    assert stat.S_IMODE(real.stat().st_mode) == 0o755
+    assert list(real.iterdir()) == []
+
+
+# round 2 finding 4: gh failure has its own code
+def test_gh_failure_maps_to_fixed_code(env: Env) -> None:
+    (env.dir / "gh.fail").write_text("1")
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_GH_FAILED == 13
+    assert "gh failed" in err and "HTTP 404" in err
+    assert env.metrics()[-1]["exit"] == 13
+
+
+def test_gh_failure_code_is_not_passed_through(env: Env) -> None:
+    (env.dir / "gh.fail").write_text("10")
+    code, _, _ = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_GH_FAILED
+    assert "13" in localdraft.parser().format_help()
+    assert "| 13 |" in Path(localdraft.__file__).parents[2].joinpath("docs", "local-draft.md").read_text()

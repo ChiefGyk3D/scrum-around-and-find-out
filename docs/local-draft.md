@@ -29,7 +29,7 @@ safo audit | safo-draft digest board-drift -
   overrides. `llm-local` is always called with stdin from /dev/null, because it hangs on an open stdin.
 - **Checks before filing** (a failing draft is printed with the reasons and never filed, even with `--yes`). The
   same checks run on the body and on `--title` (a title failure is named `title: ...`): no em dash (U+2014 and the
-  look-alikes U+FE58, U+FE31, U+2E3A, U+2E3B; the horizontal bar U+2015 is not blocked), no IPv4 or IPv6 address, no
+  look-alikes U+FE58, U+FE31, U+2E3A, U+2E3B; the horizontal bar U+2015 is not blocked), no IPv4 or IPv6 address (an IPv6 address is found behind a label such as `ipv6:` or `addr:`, with a `%zone`, or before punctuation), no
   `.lan`/`.local`/`.internal` style hostname, no serial number (`serial`, `serial number`, `s/n`, `SN` followed by a
   value of 6 or more characters with a digit), no claude.ai URL (with or without a scheme) or `Claude-Session:`
   trailer, no word from `SAFO_DRAFT_DENY` (comma separated; or one per line in the file named by
@@ -41,9 +41,9 @@ safo audit | safo-draft digest board-drift -
   tradeoff (an upper-case token such as `A1B` is flagged). Passing tokens: the placeholders `N0CALL`, `N0TST`, `K1ABC`,
   `FN31pr`, the technical tokens `K8S`, `P2P`, `B2B`, `E2E`, `A2A`, `M2M`, `H2O`, and anything listed (comma
   separated, case-insensitive) in `SAFO_DRAFT_ALLOW` or one per line in `SAFO_DRAFT_ALLOW_FILE`. Not caught: a callsign
-  written in lower case with no cue, a 4-character grid with no cue, a hostname that has no private suffix, an address
+  written in lower case with no cue, a 4-character grid with no cue, a hostname that has no private suffix, a bare lowercase callsign-looking token or a lowercase grid square without a cue word (`call`, `callsign`, `de`, `grid`, `locator`; blocked only by design when a cue is present, since a lowercase word such as `ab1cd` is far too common to flag), an address
   written in words, an obfuscated token. Hostnames beyond the suffix list are config-driven through
-  `SAFO_DRAFT_DENY`, not guessed.
+  `SAFO_DRAFT_DENY`, not guessed. The deny and allow settings are the backstop for everything the heuristics miss: put the real callsign, grid and hostnames in `SAFO_DRAFT_DENY`.
 - **Footers.** A pull request body must end with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`; the
   wrapper appends it when the model left it out, and replaces a footer variant (a last line with "Generated with" and
   "Claude Code") rather than keeping it. An issue needs an `Epic:` or `Part of epic #N` line; `--epic N`
@@ -64,7 +64,7 @@ safo audit | safo-draft digest board-drift -
 
 Every call appends one JSON line to `~/.local/state/safo/local-share.jsonl` (`$XDG_STATE_HOME/safo/`):
 `ts`, `subcommand`, `model`, `exit`, `chars_in`, `chars_out`. No content is stored. An existing file is set to mode
-0600 and the state directory to 0700 (when owned by you) on every write. `safo-draft --report` prints calls
+0600 and the state directory to 0700 on every write. A symlinked state directory, or one not owned by you, is skipped: nothing is logged and nothing is chmodded. A symlinked log file is never written through. `safo-draft --report` prints calls
 and failures per ISO week, per subcommand.
 
 ## Exit codes
@@ -77,7 +77,8 @@ and failures per ISO week, per subcommand.
 | 10 | declined: you answered no at the prompt |
 | 11 | timeout: `llm-local` or `gh` (for `gh` the filing state is unknown) |
 | 12 | unexpected internal error (a bug; the message names it) |
+| 13 | `gh` failed when filing or commenting (nonzero exit; the message has gh's own code and text) |
 | 75 | local queue still busy after the retries |
 
-Any other code is the `llm-local` or `gh` exit code passed through, so a passed-through 10, 11 or 12 is ambiguous: read the
-message. The table is also in `safo-draft --help`. Before this change a decline exited 1.
+Any other code is the `llm-local` exit code passed through, so a passed-through 10, 11, 12 or 13 is ambiguous: read the
+message. A failing `gh` is always 13, never gh's own code. The table is also in `safo-draft --help`. Before this change a decline exited 1.

@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -53,11 +54,20 @@ PR_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 EM_DASHES = "".join(chr(c) for c in (0x2014, 0xFE58, 0xFE31, 0x2E3A, 0x2E3B))
 NOT_VERIFIED = "Twingate and the local server were NOT verified; nothing was sent to a Claude model."
 
-EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_DECLINED, EXIT_TIMEOUT, EXIT_INTERNAL, EXIT_BUSY = 0, 1, 2, 10, 11, 12, 75
+EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_DECLINED, EXIT_TIMEOUT, EXIT_INTERNAL, EXIT_GH_FAILED, EXIT_BUSY = (
+    0,
+    1,
+    2,
+    10,
+    11,
+    12,
+    13,
+    75,
+)
 EXIT_TABLE = (
     "exit codes: 0 done; 1 refused (the draft or title failed a check); 2 error (usage, missing tool or "
     "input too large); 10 declined (you answered no); 11 timeout (llm-local or gh); 12 unexpected internal "
-    "error; 75 local queue still busy; any other code is the llm-local or gh exit code"
+    "error; 13 gh failed (filing or commenting); 75 local queue still busy; any other code is the llm-local exit code"
 )
 
 _PLACEHOLDERS = {"N0CALL", "N0TST", "FN31PR", "K1ABC"}
@@ -73,7 +83,7 @@ _GRID_CTX = re.compile(
     r"\b(?:grid(?:\s*square)?|locator|maidenhead)\b[\s:=]+([A-R]{2}[0-9]{2}(?:[A-X]{2})?)\b", re.IGNORECASE
 )
 _IPV4 = re.compile(r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b")
-_IPV6_CANDIDATE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*")
+_IPV6_RUN = re.compile(r"[0-9A-Fa-f:.]+(?:%[\w.-]+)?")
 _HOSTNAME = re.compile(
     r"\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:lan|local|internal|home|corp|intranet|home\.arpa)\b", re.I
 )
@@ -115,14 +125,28 @@ def allow_words(env: Mapping[str, str]) -> list[str]:
 
 
 def _has_ipv6(text: str) -> bool:
-    for found in _IPV6_CANDIDATE.findall(text):
-        token = found.strip(".")
-        for cand in (token, token.rstrip(":") if token.endswith(":") and not token.endswith("::") else token):
-            try:
-                ipaddress.IPv6Address(cand)
-            except ValueError:
-                continue
-            return True
+    """Scan every maximal run of hex, colon and dot characters (and an optional %zone) for an IPv6 address.
+
+    A leading label such as `ipv6:` or `addr:` is shed by also trying each suffix that starts after a colon. A run
+    followed directly by a word character (`std::vector`) is skipped, so code and prose do not trip it.
+    """
+    for match in _IPV6_RUN.finditer(text):
+        run = match.group().split("%", 1)[0]
+        if (
+            run.count(":") < 2
+            or text[match.end() : match.end() + 1].isalnum()
+            or text[match.end() : match.end() + 1] == "_"
+        ):
+            continue
+        starts = [0] + [i + 1 for i, ch in enumerate(run) if ch == ":"]
+        for start in starts:
+            token = run[start:].strip(".")
+            for cand in {token, token.rstrip(":") if not token.endswith("::") else token}:
+                try:
+                    ipaddress.IPv6Address(cand)
+                except ValueError:
+                    continue
+                return True
     return False
 
 
@@ -207,8 +231,10 @@ def _log_call(env: Mapping[str, str], now: dt.datetime, sub: str, model: str, co
     row = {"ts": now.isoformat(), "subcommand": sub, "model": model, "exit": code, "chars_in": n_in, "chars_out": n_out}
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if path.parent.stat().st_uid == os.geteuid():
-            path.parent.chmod(0o700)
+        info = path.parent.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid():
+            return  # a symlinked or foreign state directory is never written or chmodded
+        path.parent.chmod(0o700)
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "a") as handle:
             os.fchmod(handle.fileno(), 0o600)
@@ -299,7 +325,7 @@ def _gh(env: Mapping[str, str], args: list[str], body: str) -> str:
             EXIT_TIMEOUT,
         ) from None
     if done.returncode != 0:
-        raise Failure(f"gh failed (exit {done.returncode}): {done.stderr.strip()}", done.returncode or EXIT_ERROR)
+        raise Failure(f"gh failed (exit {done.returncode}): {done.stderr.strip()}", EXIT_GH_FAILED)
     return done.stdout.strip()
 
 
