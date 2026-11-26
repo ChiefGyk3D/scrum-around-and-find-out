@@ -42,6 +42,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | `doctor` and [Prerequisites](docs/prerequisites.md) (verified minimum versions for the external tools, the plugins and packs SAFO relies on, the accounts and secret names; `safo doctor` is the read-only presence check, issue #197) | Built for #197; not yet merged |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
+| `safo-draft` (local-first drafts of issues, pull requests and comments, with checks before filing, and local five-line digests of CI logs and board drift; [`docs/local-draft.md`](docs/local-draft.md)) | Built |
 | `ratebudget` and `card` (the shared GitHub API budget and single-request card edits as `safo` subcommands, beside the `ghw`, `safo-ratebudget` and `safo-card` scripts; [`docs/ratebudget.md`](docs/ratebudget.md)) | Built |
 | Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
 | Personas (`docs/personas.md`, a description of the Department of Internal Arguments roles and how to install them, with no copies kept here) and the examples (the outcomes log, systemd units) | Built and merged on `main` |
