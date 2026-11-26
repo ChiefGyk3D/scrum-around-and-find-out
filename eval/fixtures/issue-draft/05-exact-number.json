@@ -1,0 +1,16 @@
+{
+  "task": "issue-draft",
+  "input": "Notes: the webhook call to hooks.example.org times out at 4375 ms in production, but the docs say 5000 ms. Make the timeout match the docs.",
+  "facts": [
+    "4375",
+    "5000",
+    "webhook"
+  ],
+  "forbidden": [
+    "\\b4357\\b",
+    "\\b4735\\b",
+    "\\b4500\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any"
+}

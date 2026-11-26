@@ -1,0 +1,21 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def is_adult(age):\n-    return age >= 18\n+    return age > 18\n```\nIntent: 18 and over are adults.",
+  "facts": [
+    "is_adult",
+    {
+      "text": "boundary",
+      "variants": [
+        ">=",
+        "boundary",
+        "exactly 18",
+        "off.by.one",
+        "18 itself",
+        "inclusive"
+      ]
+    }
+  ],
+  "forbidden": [],
+  "max_chars": 900,
+  "required_format": "any"
+}

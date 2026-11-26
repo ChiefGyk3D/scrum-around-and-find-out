@@ -1,0 +1,16 @@
+{
+  "task": "ci-log-digest",
+  "input": "ruff check src\nsrc/app/util.py:41:5: F841 local variable `tmp` is assigned to but never used\nsrc/app/util.py:88:1: E501 line too long (131 > 120)\nFound 2 errors.",
+  "facts": [
+    "util.py",
+    "F841",
+    "E501",
+    "2"
+  ],
+  "forbidden": [
+    "\\b3 errors",
+    "F401"
+  ],
+  "max_chars": 700,
+  "required_format": "any"
+}

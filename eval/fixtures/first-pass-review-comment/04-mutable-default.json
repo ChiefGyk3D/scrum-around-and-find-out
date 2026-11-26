@@ -1,0 +1,18 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n-def add_tag(tag, tags=None):\n-    tags = tags or []\n+def add_tag(tag, tags=[]):\n     tags.append(tag)\n     return tags\n```",
+  "facts": [
+    "add_tag",
+    {
+      "text": "mutable default",
+      "variants": [
+        "mutable",
+        "shared (between|across)",
+        "default (argument|arg|value)"
+      ]
+    }
+  ],
+  "forbidden": [],
+  "max_chars": 900,
+  "required_format": "any"
+}

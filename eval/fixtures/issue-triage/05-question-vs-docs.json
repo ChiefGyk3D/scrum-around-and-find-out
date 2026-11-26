@@ -1,0 +1,24 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, enhancement, docs, security, question.\nEpics: E1-auth, E2-reporting, E3-docs-site, E4-ci.\nRule: a person asking how to do something is a question even if docs could answer it.\nIssue: How do I rotate the CI cache key? I could not find it, is it documented anywhere? (Asking, not requesting a docs change.)",
+  "facts": [
+    {
+      "text": "\"label\": \"question\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"question\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E4-ci\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E4-ci\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!question\")",
+    "\"epic\"\\s*:\\s*\"(?!E4-ci\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object"
+}

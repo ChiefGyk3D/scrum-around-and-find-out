@@ -1,0 +1,19 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def last_n(items, n):\n-    return items[-n:]\n+    return items[len(items) - n + 1:]\n```\nIntent: return the last n items.",
+  "facts": [
+    "last_n",
+    {
+      "text": "off-by-one",
+      "variants": [
+        "off.by.one",
+        "\\+ ?1",
+        "drops? the first",
+        "one (item|element) (short|too few)"
+      ]
+    }
+  ],
+  "forbidden": [],
+  "max_chars": 900,
+  "required_format": "any"
+}

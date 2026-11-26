@@ -1,0 +1,17 @@
+{
+  "task": "ci-log-digest",
+  "input": "$ pytest -q\n..........F.....\nFAILED tests/test_billing.py::test_invoice_rounding - AssertionError: assert 10.05 == 10.04\n1 failed, 15 passed in 3.2s\nexit code 1",
+  "facts": [
+    "test_invoice_rounding",
+    "test_billing.py",
+    "10.05",
+    "10.04",
+    "1 failed"
+  ],
+  "forbidden": [
+    "test_invoice_total",
+    "\\b16 passed"
+  ],
+  "max_chars": 700,
+  "required_format": "any"
+}

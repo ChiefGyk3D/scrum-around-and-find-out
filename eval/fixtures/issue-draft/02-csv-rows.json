@@ -1,0 +1,16 @@
+{
+  "task": "issue-draft",
+  "input": "Notes: the report export drops rows with an empty region column. We lost 37 rows out of 1204 in the March file. Happens in export_csv() in reports/export.py. No error shown to the user.",
+  "facts": [
+    "37",
+    "1204",
+    "export_csv",
+    "region"
+  ],
+  "forbidden": [
+    "\\b1240\\b",
+    "\\b73\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any"
+}

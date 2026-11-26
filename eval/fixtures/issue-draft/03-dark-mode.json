@@ -1,0 +1,15 @@
+{
+  "task": "issue-draft",
+  "input": "Notes: three users asked for a dark mode toggle in Settings > Appearance. Tracked internally as EX-118. Must persist across sessions. Low priority.",
+  "facts": [
+    "EX-118",
+    "Settings",
+    "dark mode",
+    "persist"
+  ],
+  "forbidden": [
+    "EX-1[0-9]{2}(?<!EX-118)\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any"
+}

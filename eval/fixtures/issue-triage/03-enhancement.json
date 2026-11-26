@@ -1,0 +1,24 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, enhancement, docs, security, question.\nEpics: E1-auth, E2-reporting, E3-docs-site, E4-ci.\nIssue: Please add a quarterly PDF export to the sales dashboard.",
+  "facts": [
+    {
+      "text": "\"label\": \"enhancement\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"enhancement\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E2-reporting\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E2-reporting\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!enhancement\")",
+    "\"epic\"\\s*:\\s*\"(?!E2-reporting\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object"
+}

@@ -1,0 +1,15 @@
+{
+  "task": "doc-skeleton",
+  "input": "Document release process v3.7 for example-app (the version is 3.7, copy exactly). Sections: Versioning, Tagging, Publishing.",
+  "facts": [
+    "Versioning",
+    "Tagging",
+    "Publishing"
+  ],
+  "forbidden": [
+    "3\\.8",
+    "3\\.6"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S"
+}

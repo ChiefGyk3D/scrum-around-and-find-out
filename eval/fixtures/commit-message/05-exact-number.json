@@ -1,0 +1,14 @@
+{
+  "task": "commit-message",
+  "input": "Change: set the cache TTL in cache.py to 86400 seconds (was 3600).",
+  "facts": [
+    "86400",
+    "cache"
+  ],
+  "forbidden": [
+    "\\b84600\\b",
+    "\\b68400\\b"
+  ],
+  "max_chars": 600,
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)"
+}

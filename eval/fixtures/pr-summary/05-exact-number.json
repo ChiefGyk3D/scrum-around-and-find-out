@@ -1,0 +1,17 @@
+{
+  "task": "pr-summary",
+  "input": "Change: raised rate limit in limiter.py from 120 to 340 requests per minute for the example-partner tier only.",
+  "facts": [
+    "120",
+    "340",
+    "limiter.py",
+    "partner"
+  ],
+  "forbidden": [
+    "\\b430\\b",
+    "\\b304\\b",
+    "all tiers"
+  ],
+  "max_chars": 900,
+  "required_format": "any"
+}

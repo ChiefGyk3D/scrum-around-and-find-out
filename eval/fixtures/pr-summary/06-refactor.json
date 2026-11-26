@@ -1,0 +1,16 @@
+{
+  "task": "pr-summary",
+  "input": "Refactor: split utils.py (900 lines) into utils/strings.py and utils/paths.py. No behavior change. Imports updated in 12 files.",
+  "facts": [
+    "utils/strings.py",
+    "utils/paths.py",
+    "12",
+    "no behavior change"
+  ],
+  "forbidden": [
+    "\\b21 files",
+    "new feature"
+  ],
+  "max_chars": 900,
+  "required_format": "any"
+}

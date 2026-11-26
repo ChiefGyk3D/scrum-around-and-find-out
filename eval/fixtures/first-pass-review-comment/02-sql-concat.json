@@ -1,0 +1,18 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def find_user(db, name):\n-    return db.execute('SELECT * FROM users WHERE name = ?', (name,))\n+    return db.execute(\"SELECT * FROM users WHERE name = '\" + name + \"'\")\n```",
+  "facts": [
+    "find_user",
+    {
+      "text": "SQL injection",
+      "variants": [
+        "inject",
+        "parameteri[sz]",
+        "concatenat"
+      ]
+    }
+  ],
+  "forbidden": [],
+  "max_chars": 900,
+  "required_format": "any"
+}

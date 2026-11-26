@@ -1,0 +1,16 @@
+{
+  "task": "ci-log-digest",
+  "input": "job deploy-stage started 12:00:01\nwaiting for health check https://stage.example.com/health\nattempt 29/30 status 503\nattempt 30/30 status 503\nERROR deploy-stage timed out after 900 s",
+  "facts": [
+    "deploy-stage",
+    "503",
+    "900",
+    "health"
+  ],
+  "forbidden": [
+    "\\b509\\b",
+    "\\b90 s\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any"
+}

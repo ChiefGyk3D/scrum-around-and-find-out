@@ -1,0 +1,24 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, enhancement, docs, security, question.\nEpics: E1-auth, E2-reporting, E3-docs-site, E4-ci.\nRule: anything that exposes data to the wrong person is security, even if it is also a bug.\nIssue: Users can open /reports/42 for another tenant by changing the number; the page renders their numbers. It is a bug in the report viewer.",
+  "facts": [
+    {
+      "text": "\"label\": \"security\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"security\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E2-reporting\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E2-reporting\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!security\")",
+    "\"epic\"\\s*:\\s*\"(?!E2-reporting\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object"
+}

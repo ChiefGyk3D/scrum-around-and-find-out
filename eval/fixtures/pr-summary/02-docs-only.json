@@ -1,0 +1,15 @@
+{
+  "task": "pr-summary",
+  "input": "Changes: README.md adds a Troubleshooting section with 4 entries; docs/install.md fixes the broken link to https://docs.example.com/setup. No code changes.",
+  "facts": [
+    "README",
+    "Troubleshooting",
+    "4",
+    "no code"
+  ],
+  "forbidden": [
+    "tests? (added|updated)"
+  ],
+  "max_chars": 900,
+  "required_format": "any"
+}

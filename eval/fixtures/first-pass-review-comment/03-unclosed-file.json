@@ -1,0 +1,20 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def read_cfg(path):\n-    with open(path) as fh:\n-        return fh.read()\n+    fh = open(path)\n+    return fh.read()\n```",
+  "facts": [
+    "read_cfg",
+    {
+      "text": "never closed",
+      "variants": [
+        "not closed",
+        "leak",
+        "context manager",
+        "\\bwith\\b",
+        "close"
+      ]
+    }
+  ],
+  "forbidden": [],
+  "max_chars": 900,
+  "required_format": "any"
+}

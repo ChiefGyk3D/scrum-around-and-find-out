@@ -1,0 +1,15 @@
+{
+  "task": "pr-summary",
+  "input": "Fix: pagination skipped the last page when total % page_size == 0. In paginate() changed `range(total // size)` to `range(ceil(total / size))`. Added test_paginate_exact_multiple.",
+  "facts": [
+    "paginate",
+    "ceil",
+    "test_paginate_exact_multiple",
+    "last page"
+  ],
+  "forbidden": [
+    "off-by-two"
+  ],
+  "max_chars": 900,
+  "required_format": "any"
+}

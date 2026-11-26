@@ -1,0 +1,15 @@
+{
+  "task": "doc-skeleton",
+  "input": "Runbook for the example-queue worker. Sections: Symptoms, Diagnosis, Mitigation, Escalation.",
+  "facts": [
+    "Symptoms",
+    "Diagnosis",
+    "Mitigation",
+    "Escalation"
+  ],
+  "forbidden": [
+    "Lorem"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S"
+}

@@ -1,0 +1,16 @@
+{
+  "task": "pr-summary",
+  "input": "diff --git a/src/app/cfg.py b/src/app/cfg.py\n-def load():\n+def load_config(path):\n-    return yaml.safe_load(open('c.yml'))\n+    with open(path) as fh:\n+        return yaml.safe_load(fh)\nAlso updated 3 call sites in cli.py.",
+  "facts": [
+    "load_config",
+    "path",
+    "cli.py",
+    "3"
+  ],
+  "forbidden": [
+    "yaml\\.load\\(",
+    "json"
+  ],
+  "max_chars": 900,
+  "required_format": "any"
+}

@@ -1,0 +1,16 @@
+{
+  "task": "issue-draft",
+  "input": "Notes: users on app.example.com are logged out after 15 minutes but we expect 60. Config key is session_ttl_minutes in auth.yaml. Seen in v2.4.1. Reported by alice-example.",
+  "facts": [
+    "session_ttl_minutes",
+    "15 minutes",
+    "60",
+    "v2.4.1"
+  ],
+  "forbidden": [
+    "v2\\.4\\.2",
+    "\\b30 minutes"
+  ],
+  "max_chars": 1500,
+  "required_format": "any"
+}
