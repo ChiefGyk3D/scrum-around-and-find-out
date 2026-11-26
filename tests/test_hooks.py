@@ -12,6 +12,8 @@ import http.server
 import io
 import json
 import os
+import shlex
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -300,8 +302,121 @@ def test_probe_reports_an_unreachable_local_llm_and_still_succeeds(_private_home
     code, out, _ = hooks("probe", "--agents", str(agents), home=_private_home)
     assert code == 0
     message = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert message.startswith("Local LLM: UNREACHABLE") and "not required in briefs" in message
+    assert message.startswith("Local LLM: UNREACHABLE")
+    assert_four_choices(message)
+    assert "Route text work" not in message and "Haiku" not in message, "a hook line is not approval to reroute"
     assert json.loads(probe_file(_private_home, agents).read_text())["reachable"] is False
+
+
+# -- probe: the not-seen notice names four choices and covers the runner (#462) -----------------------------------
+
+CHOICES = ("Yes", "No", "Try again", "Troubleshoot")
+
+
+def assert_four_choices(message: str) -> None:
+    assert "tell the owner this turn" in message.lower()
+    assert "before troubleshooting or any workaround" in message
+    assert "Yes, No, Try again, Troubleshoot" in message
+    for choice in CHOICES:
+        assert f"{choice} (" in message, choice
+    assert "not approval" in message
+
+
+def runner_script(tmp_path: Path, code: int) -> str:
+    script = tmp_path / f"runner-status-{code}"
+    script.write_text(f"#!/bin/sh\nexit {code}\n")
+    script.chmod(0o700)
+    return str(script)
+
+
+def probe_message(home: Path, agents: Path, **env: str) -> str:
+    code, out, _ = hooks("probe", "--agents", str(agents), home=home, env=env)
+    assert code == 0
+    return str(json.loads(out)["hookSpecificOutput"]["additionalContext"])
+
+
+def test_probe_ok_and_no_runner_configured_says_nothing_about_a_runner(_private_home: Path, tmp_path: Path) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        message = probe_message(_private_home, path)
+    assert message.startswith("Local LLM: REACHABLE.")
+    assert "Runner" not in message and "owner" not in message
+
+
+def test_probe_failed_names_the_four_choices_not_a_cheaper_model(_private_home: Path, agents: Path) -> None:
+    message = probe_message(_private_home, agents)
+    assert message.startswith("Local LLM: UNREACHABLE")
+    assert_four_choices(message)
+    assert "Route text work" not in message
+
+
+def test_runner_configured_and_down_names_the_four_choices(_private_home: Path, tmp_path: Path) -> None:
+    with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
+        path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
+        message = probe_message(_private_home, path, SAFO_RUNNER_STATUS=runner_script(tmp_path, 1))
+    assert message.startswith("Local LLM: REACHABLE.")
+    assert "Runner: NOT SEEN" in message
+    assert_four_choices(message)
+
+
+def test_runner_command_that_cannot_start_counts_as_down(_private_home: Path, agents: Path) -> None:
+    message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS="/nonexistent/runner-status")
+    assert "Runner: NOT SEEN" in message
+
+
+def process_alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:  # gone, or exited while being read (ESRCH)
+        return False
+    return state != "Z"  # a zombie has exited; only a live process counts as left running
+
+
+def runner_with_descendant(tmp_path: Path, tail: str) -> tuple[str, Path]:
+    # The runner's shell starts `sleep 30` in the background (it keeps the pipes open), records its pid, runs `tail`.
+    pidfile = tmp_path / "descendant.pid"
+    shell = shutil.which("sh")
+    assert shell is not None
+    script = f"sleep 30 & echo $! > {shlex.quote(str(pidfile))}; {tail}"
+    return f"{shell} -c " + shlex.quote(script), pidfile
+
+
+def test_runner_that_exits_but_leaves_a_descendant_holding_the_pipes_is_not_seen_within_the_bound(
+    _private_home: Path, agents: Path, tmp_path: Path
+) -> None:
+    # The probe needs no output, and a status that leaves a process running is not a clean answer (#462 review: High).
+    command, pidfile = runner_with_descendant(tmp_path, "exit 0")
+    started = time.monotonic()
+    message = probe_message(_private_home, agents, PATH=os.environ["PATH"], SAFO_RUNNER_STATUS=command)
+    assert time.monotonic() - started < 20
+    assert "Runner: NOT SEEN" in message
+    assert not process_alive(int(pidfile.read_text()))  # and nothing it started is left running
+
+
+def test_runner_timeout_names_not_seen_and_leaves_no_running_descendant(
+    _private_home: Path, agents: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(safo_hooks, "RUNNER_TIMEOUT_SECONDS", 1)
+    command, pidfile = runner_with_descendant(tmp_path, "sleep 30")
+    message = probe_message(_private_home, agents, PATH=os.environ["PATH"], SAFO_RUNNER_STATUS=command)
+    assert "Runner: NOT SEEN" in message
+    assert not process_alive(int(pidfile.read_text()))
+
+
+def test_runner_configured_and_up_is_one_quiet_line(_private_home: Path, agents: Path, tmp_path: Path) -> None:
+    message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS=runner_script(tmp_path, 0))
+    assert "Runner: reachable." in message and "NOT SEEN" not in message
+
+
+def test_runner_exit_75_is_busy_not_unreachable(_private_home: Path, agents: Path, tmp_path: Path) -> None:
+    message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS=runner_script(tmp_path, 75))
+    assert "Runner: busy" in message and "NOT SEEN" not in message
+    assert "retry or wait" in message
+
+
+def test_blank_runner_config_is_not_applicable_and_never_an_error(_private_home: Path, agents: Path) -> None:
+    message = probe_message(_private_home, agents, SAFO_RUNNER_STATUS="  ")
+    assert "Runner" not in message
 
 
 def test_probe_counts_only_a_general_endpoint_as_the_local_llm_being_there(_private_home: Path, tmp_path: Path) -> None:
