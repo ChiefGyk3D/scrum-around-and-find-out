@@ -128,6 +128,22 @@ M nested git directories; K symlinks leaving the tree). Commit them, add them to
   `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `*.pfx`, `*.kdbx`, `.netrc`, `credentials*`,
   `*secret*` (reported as "secret-looking file names present", a count only).
 
+#### Published HEAD (the commit must be public bytes)
+
+The runner copies the worktree, and the content verification compares it with the local `HEAD` tree. That only proves
+the bytes are the commit's bytes; a local commit that was never pushed may hold private material. So the gate also
+refuses unless `HEAD` is published: "keep local: HEAD is not published on a public remote (N commits ahead of the
+remote branches, or never pushed); push it first and fetch". `HEAD` must equal, or be an ancestor of, at least one
+remote-tracking ref (`git merge-base --is-ancestor`, through the isolated git environment). Only refs under a name that
+`git remote` lists count; a stray `refs/remotes/ghost/...` is ignored. It also refuses a detached `HEAD` that no remote
+ref contains, an unborn `HEAD`, a repository with no remote-tracking refs ("never fetched"), and more than 200 refs
+("cannot tell"). Counts only, never names.
+
+Limit, stated plainly: the check trusts the LOCAL remote-tracking refs and does not contact the network. A stale fetch
+can lag the real remote (a refusal, never a false pass), but it cannot make private commits look published unless
+someone creates a remote-tracking ref by hand, which is the owner's own action. Every remote is already required to be
+public (repo class), so any remote-tracking ref of a listed remote qualifies.
+
 #### Content verification (the authority)
 
 Git's status, `ls-files -v` and the cached diff all trust the index stat cache and apply clean/smudge filters, so a

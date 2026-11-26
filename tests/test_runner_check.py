@@ -37,6 +37,7 @@ def make_repo(
     *,
     dev: bool = True,
     extra: tuple[tuple[str, str], ...] = (),
+    fetched: bool = True,
 ) -> Path:
     base = tmp_path / "home" / ".local" / "share" / "reach-around-dev" if dev else tmp_path / "elsewhere"
     base.mkdir(parents=True, exist_ok=True)
@@ -47,6 +48,10 @@ def make_repo(
         _git(repo, "remote", "add", "origin", remote)
     for rname, url in extra:
         _git(repo, "remote", "add", rname, url)
+    if fetched and remote:  # a published (fetched) empty root commit, so HEAD exists and is on a remote ref
+        ident = ("-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false")
+        _git(repo, *ident, "commit", "-q", "--allow-empty", "-m", "root")
+        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     return repo
 
 
@@ -558,7 +563,8 @@ REPO_URL = "https://github.com/ChiefGyk3D/demo"
 PUBLIC_REPO_ENV = {"SAFO_PUBLIC_REPOS": "ChiefGyk3D/demo"}
 
 
-def commit_all(repo: Path) -> None:
+def commit_all(repo: Path, *, publish: bool = True) -> None:
+    """Commit everything; by default also record it as fetched (refs/remotes/origin/main), i.e. published."""
     _git(repo, "add", "-A")
     _git(
         repo,
@@ -572,6 +578,8 @@ def commit_all(repo: Path) -> None:
         "-qm",
         "x",
     )
+    if publish:
+        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 
 def clean_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -1645,3 +1653,128 @@ def test_verification_alone_passes_a_clean_repo(tmp_path: Path, monkeypatch: pyt
     commit_all(repo)
     monkeypatch.setattr(rc, "_modified", lambda *a, **k: 0)
     assert rc.content_gate(repo, env_for(tmp_path)).refusal() is None
+
+
+# ---- round 5: HEAD must be published on a public remote ---------------------------------------------------------
+
+NOT_PUBLISHED = "keep local: HEAD is not published on a public remote"
+
+
+def assert_unpublished(code: int, out: str) -> None:
+    assert code == 0
+    assert NOT_PUBLISHED in out
+    assert "ra-remote" not in out
+
+
+def test_local_commit_not_on_any_remote_ref_is_refused(tmp_path: Path) -> None:
+    # reviewer reproduction: a clean local commit holding private material, never pushed
+    repo = make_repo(tmp_path, REPO_URL, fetched=False)
+    (repo / "private-plan.txt").write_text("secret plans\n", encoding="utf-8")
+    commit_all(repo, publish=False)
+    code, out = strict(tmp_path, repo)
+    assert_unpublished(code, out)
+    assert "private-plan" not in out
+    assert "secret" not in out
+
+
+def test_head_equal_to_remote_ref_passes(tmp_path: Path) -> None:
+    code, out = strict(tmp_path, clean_repo(tmp_path))
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+
+
+def test_head_ancestor_of_remote_ref_passes(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "b.py").write_text("y = 2\n", encoding="utf-8")
+    commit_all(repo)  # remote ref now at the newer commit
+    _git(repo, "reset", "-q", "--hard", "HEAD~1")  # HEAD is an ancestor of refs/remotes/origin/main
+    code, out = strict(tmp_path, repo)
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+
+
+def test_commits_ahead_of_remote_ref_are_counted_not_named(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    for name in ("one-private.txt", "two-private.txt"):
+        (repo / name).write_text("x\n", encoding="utf-8")
+        commit_all(repo, publish=False)
+    code, out = strict(tmp_path, repo)
+    assert_unpublished(code, out)
+    assert "(2 commits ahead of the remote branches, or never pushed)" in out
+    assert "push it first and fetch" in out
+    assert "private" not in out
+
+
+def test_stray_ref_under_a_remote_that_does_not_exist_is_ignored(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL, fetched=False)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo, publish=False)
+    _git(repo, "update-ref", "refs/remotes/ghost/main", "HEAD")
+    code, out = strict(tmp_path, repo)
+    assert_unpublished(code, out)
+
+
+def test_no_remote_tracking_refs_at_all_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL, fetched=False)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo, publish=False)
+    code, out = strict(tmp_path, repo)
+    assert_unpublished(code, out)
+    assert "never fetched: no remote-tracking refs" in out
+
+
+def test_unborn_head_is_refused(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL, fetched=False)
+    _git(repo, "update-ref", "refs/remotes/origin/main", "4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+    code, out = strict(tmp_path, repo)
+    assert code == 0
+    assert "ra-remote" not in out
+
+
+def test_detached_head_without_a_containing_remote_ref_is_refused(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    (repo / "b.py").write_text("y = 2\n", encoding="utf-8")
+    commit_all(repo, publish=False)
+    _git(repo, "checkout", "-q", "--detach", "HEAD")
+    assert_unpublished(*strict(tmp_path, repo))
+
+
+def test_ref_bound_refuses_when_there_are_too_many(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    for n in range(rc.REF_LIMIT + 1):
+        _git(repo, "update-ref", f"refs/remotes/origin/b{n}", "HEAD")
+    code, out = strict(tmp_path, repo)
+    assert code == 0
+    assert "keep local: cannot tell whether HEAD is published (more than" in out
+    assert "ra-remote" not in out
+
+
+def test_ref_bound_exactly_at_the_limit_still_works(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)  # one ref already
+    for n in range(rc.REF_LIMIT - 1):
+        _git(repo, "update-ref", f"refs/remotes/origin/b{n}", "HEAD")
+    code, out = strict(tmp_path, repo)
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+
+
+def test_publish_check_ignores_repository_config_and_caller_git_env(tmp_path: Path) -> None:
+    repo = clean_repo(tmp_path)
+    _git(repo, "config", "core.hooksPath", str(tmp_path / "nowhere"))
+    _git(repo, "config", "core.fsmonitor", "false")
+    code, out = strict(tmp_path, repo, GIT_NAMESPACE="other")  # unisolated git would look under another namespace
+    assert code == 1
+    assert "-> ra-remote --plan" in out
+    # and an unpublished commit stays refused under the same hostile settings
+    (repo / "c.py").write_text("z = 3\n", encoding="utf-8")
+    commit_all(repo, publish=False)
+    assert_unpublished(*strict(tmp_path, repo, GIT_NAMESPACE="other"))
+
+
+def test_publish_check_is_not_run_for_commands_that_need_no_remote(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path, REPO_URL)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo, publish=False)
+    code, out = strict(tmp_path, repo, command="pytest tests/test_a.py")
+    assert code == 0
+    assert NOT_PUBLISHED not in out

@@ -750,9 +750,10 @@ class ContentGate:
     modified: int = 0
     filtered: bool = False
     bounded: bool = False
+    unpublished: str = ""  # the refusal text of the published-HEAD gate; empty when HEAD is on a public remote ref
 
     def refusal(self) -> str | None:
-        parts = [t for t in (self._differs(), self._unverifiable(), self._copies()) if t]
+        parts = [t for t in (self.unpublished, self._differs(), self._unverifiable(), self._copies()) if t]
         return "\n  ".join(parts) or None
 
     def _differs(self) -> str:
@@ -788,6 +789,67 @@ class ContentGate:
         if self.incomplete:
             text += f"; the tree could not be fully checked (more than {WALK_LIMIT} entries, or unreadable)"
         return text + f". Commit them, add them to .gitignore, or clone a clean copy under ~/{DEV_FOLDERS[0]} first"
+
+
+REF_LIMIT = 200
+
+
+def _count(worktree: Path, env: Mapping[str, str], *args: str) -> int | None:
+    done = _git_for_selection(worktree, env, "rev-list", "--count", *args)
+    if done is None or done.returncode != 0:
+        return None
+    text = done.stdout.decode("ascii", errors="replace").strip()
+    return int(text) if text.isdigit() else None
+
+
+def _remote_ref_ids(worktree: Path, env: Mapping[str, str]) -> list[str] | None:
+    """Object ids of the remote-tracking refs that sit under a configured remote; None when git cannot say."""
+    names = _git_for_selection(worktree, env, "remote")
+    refs = _git_for_selection(worktree, env, "for-each-ref", "--format=%(objectname) %(refname)%00", "refs/remotes")
+    if names is None or refs is None or names.returncode != 0 or refs.returncode != 0:
+        return None
+    remotes = [n for n in names.stdout.decode("utf-8", errors="surrogateescape").split("\n") if n]
+    ids: list[str] = []
+    for raw in refs.stdout.split(b"\0"):
+        oid, _, ref = raw.decode("utf-8", errors="surrogateescape").strip("\n").partition(" ")
+        tail = ref.removeprefix("refs/remotes/")
+        # a ref under a remote name that `git remote` does not list is a stray: it proves nothing
+        if oid and tail != ref and any(tail.startswith(f"{r}/") for r in remotes):
+            ids.append(oid)
+    return ids
+
+
+def _published(worktree: Path, env: Mapping[str, str]) -> str:
+    """Refusal text unless HEAD is reachable from a remote-tracking ref of a configured (public) remote.
+
+    Trusts the local remote-tracking refs and never contacts the network. Counts only, never names."""
+    head = _git_for_selection(worktree, env, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+    ids = _remote_ref_ids(worktree, env)
+    if head is None or head.returncode not in (0, 1) or ids is None:
+        return "keep local: cannot tell whether HEAD is published on a public remote (git failed)"
+    if head.returncode == 1:
+        return "keep local: HEAD is not published on a public remote (there is no commit yet); push it first and fetch"
+    if len(ids) > REF_LIMIT:
+        return f"keep local: cannot tell whether HEAD is published (more than {REF_LIMIT} remote-tracking refs)"
+    unique = sorted(set(ids))
+    for oid in unique:
+        done = _git_for_selection(worktree, env, "merge-base", "--is-ancestor", "HEAD", oid)
+        if done is None or done.returncode not in (0, 1):
+            return "keep local: cannot tell whether HEAD is published on a public remote (git failed)"
+        if done.returncode == 0:
+            return ""
+    ahead = _count(worktree, env, "HEAD", *(["--not", *unique] if unique else []))
+    if ahead is None:
+        return "keep local: cannot tell whether HEAD is published on a public remote (git failed)"
+    if not unique:
+        return (
+            f"keep local: HEAD is not published on a public remote (never fetched: no remote-tracking refs, "
+            f"{ahead} commits); push it first and fetch"
+        )
+    return (
+        f"keep local: HEAD is not published on a public remote ({ahead} commits ahead of the remote branches, "
+        "or never pushed); push it first and fetch"
+    )
 
 
 def _nested_git(root: Path) -> tuple[int, bool]:
@@ -1053,11 +1115,12 @@ def content_gate(worktree: Path, env: Mapping[str, str]) -> ContentGate:
     copied = _git_z(worktree, env, "ls-files", "-c", "-o", "--exclude-standard")
     untracked = _git_z(worktree, env, "ls-files", "-o", "--exclude-standard")
     modified = _modified(worktree, env)
+    unpublished = _published(worktree, env)
     if copied is None or untracked is None or modified is None:
-        return ContentGate(incomplete=True, modified=modified or 0)
+        return ContentGate(incomplete=True, modified=modified or 0, unpublished=unpublished)
     verdict = _verify_content(worktree, env, copied, untracked)
     if verdict is None:
-        return ContentGate(incomplete=True, modified=modified)
+        return ContentGate(incomplete=True, modified=modified, unpublished=unpublished)
     modified = max(modified, verdict.differ)
     nested, incomplete = _nested_git(worktree)
     root = os.path.realpath(worktree)
@@ -1069,7 +1132,7 @@ def content_gate(worktree: Path, env: Mapping[str, str]) -> ContentGate:
             symlinks += target != root and not target.startswith(root + os.sep)
         secrets += any(fnmatch.fnmatchcase(part.lower(), pat) for part in rel.split("/") for pat in SECRET_NAMES)
     return ContentGate(
-        len(untracked), nested, symlinks, secrets, incomplete, modified, verdict.filtered, verdict.bounded
+        len(untracked), nested, symlinks, secrets, incomplete, modified, verdict.filtered, verdict.bounded, unpublished
     )
 
 
