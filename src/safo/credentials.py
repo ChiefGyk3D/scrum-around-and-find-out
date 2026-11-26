@@ -87,17 +87,25 @@ def _inside(path: str, root: str) -> bool:
 AMBIENT_GH_VARIABLES = ("GH_HOST", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 
 
-def find_gh(env: Mapping[str, str], repo: Path | str | None = None) -> str | None:
+def find_gh(env: Mapping[str, str], repo: Path | str | None = None, *, home_ok: bool = False) -> str | None:
     """The first trustworthy `gh` on PATH; see `find_executable`."""
-    return find_executable("gh", env, repo)
+    return find_executable("gh", env, repo, home_ok=home_ok)
 
 
-def find_executable(name: str, env: Mapping[str, str], repo: Path | str | None = None) -> str | None:
+def find_executable(
+    name: str, env: Mapping[str, str], repo: Path | str | None = None, *, home_ok: bool = False
+) -> str | None:
     """The first trustworthy executable called `name` on PATH. A relative or empty entry is the current directory,
     which a hostile checkout controls, so it is never searched; neither is a candidate whose real path (symlinks
     resolved) is inside the current directory, $GITHUB_WORKSPACE or the repository being operated on, because a
-    checkout can add its own `bin` to an absolute PATH. The first entry that passes wins."""
-    roots = [os.getcwd()]
+    checkout can add its own `bin` to an absolute PATH. The first entry that passes wins.
+
+    With `home_ok`, a working directory that is exactly `$HOME` (from `env`) is not a checkout root: a user's tools
+    usually live in `~/.local/bin`, inside it, and the home directory is not a checkout (#357). A directory below
+    `$HOME`, and `$GITHUB_WORKSPACE` and `repo`, are still checked."""
+    cwd = os.getcwd()
+    home = env.get("HOME", "")
+    roots = [] if home_ok and home and os.path.realpath(home) == os.path.realpath(cwd) else [cwd]
     if env.get("GITHUB_WORKSPACE"):
         roots.append(env["GITHUB_WORKSPACE"])
     if repo:
