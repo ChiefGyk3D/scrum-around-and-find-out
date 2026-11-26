@@ -27,7 +27,6 @@ CLEARS = [
     'gh pr create --title t --body "uses doppler with $VAR"',
     'ls "$HOME/doppler-notes"',
     "git commit -m \"$(cat <<'EOF'\nfix curl \\x41\nEOF\n)\"",
-    "FOO=$(doppler secrets get BAR --plain)",
     "python3 -m pytest tests/test_x.py -k a && grep -c '\\x41' f",
     "cd docs && git log --oneline | grep 'node \\x41'",
     "rg -n 'wget|curl' --glob '*.md' $HOME/src",
@@ -79,6 +78,9 @@ STILL_DENIED = [
     f"tee x.sh <<'E'\ncurl {HIDDEN}\nE",
     f"printf 'curl {HIDDEN}' > x.sh; sh x.sh",
     f"printf 'curl {HIDDEN}'>x.sh; sh x.sh",
+    # a command substitution is deliberately not narrowed (#395 owner decision): a documented false positive, since
+    # only one simple command may be narrowed and this one is not, so the strict denial stands
+    "FOO=$(doppler secrets get BAR --plain)",
     # a data command turned into an executor
     f"git -c alias.x='!curl {HIDDEN}' x",
     f'git rebase -x "curl {HIDDEN}" main',

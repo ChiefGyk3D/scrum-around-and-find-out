@@ -1244,17 +1244,45 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         parsed = shellproof.parse(command, tick)  # None: a form the proof does not model, so it proves nothing
         if parsed is not None and parsed.pure():
             return None
-        if found in (SHELL_BUILT, SHELL_TOOL) and _shellunits_clears(command, tick):
-            return None  # the old words-anywhere answer only narrows: no real invocation of a tool occurs
-        if (
-            parsed is not None
-            and parsed.writes_no_file()
-            and _classify(parsed.without_comments(), tick, soft=True) is None
-        ):
-            return None  # the names sit only in comments, which no shell runs, and no file is written
+        if found in (SHELL_BUILT, SHELL_TOOL) and _simple_line(command) and _shellunits_clears(command, tick):
+            return None  # the old words-anywhere answer only narrows: one simple command, no real invocation of a tool
+        if parsed is not None and parsed.writes_no_file():
+            # the names sit only in comments, which no shell runs: relaxed only when what is left is one simple command
+            stripped = parsed.without_comments()
+            if _simple_line(stripped) and _classify(stripped, tick, soft=True) is None:
+                return None
         return found
     except TimeoutError:
         return SHELL_UNVERIFIED
+
+
+_NOT_SIMPLE_CHARS = frozenset(";&|()`")
+_HEREDOC_START = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*$")
+_HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)")
+
+
+def _simple_line(text: str) -> bool:
+    """True only when the line is ONE simple command (the precondition for narrowing, #395). Strict: any doubt is False.
+
+    Refused anywhere in the line, quoted or not: a command separator (`;` `&` `|`), the parentheses of a subshell, a
+    function or a `$(`, `<(`, `>(` substitution, a backtick, an ANSI-C or locale string `$'` or `$"`, a line
+    continuation and a control character. A newline is allowed only as the end of the line of ONE here-document start,
+    whose body is the rest of the text and ends with exactly the delimiter line. Any other newline separates
+    commands."""
+    if "\\\n" in text or "$'" in text or '$"' in text:
+        return False
+    if any((ord(c) < 32 and c not in "\t\n") or ord(c) == 127 for c in text):
+        return False
+    if any(c in _NOT_SIMPLE_CHARS for c in text):
+        return False
+    head, newline, rest = text.partition("\n")
+    if not newline:
+        return True
+    start = _HEREDOC_START.search(head)
+    if start is None or len(_HEREDOC_OPEN.findall(head)) != 1:
+        return False
+    lines = rest.split("\n")
+    return lines[-1] == start.group(2) and start.group(2) not in lines[:-1]
 
 
 def _shellunits_clears(command: str, tick: Callable[[], None]) -> bool:
