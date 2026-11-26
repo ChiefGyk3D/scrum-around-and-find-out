@@ -1,6 +1,6 @@
 {
   "task": "commit-message",
-  "input": "Change: report.py build_index() now streams rows instead of loading all 3.2 million into memory. Peak memory on the big export goes from 5.1 GB to 410 MB. Output is byte-identical.",
+  "input": "Change: report.py build_index() now streams rows instead of loading all 3.2 million into memory. Peak memory on the big export goes from 5.1 GB to 410 MB. Output is byte-identical. A parallel worker pool was considered and dropped.",
   "facts": [
     "build_index",
     "report.py",
@@ -21,13 +21,15 @@
     "\\bfeat:",
     "\\bdocs:",
     "\\b4\\.1 GB\\b",
-    "\\b140 MB\\b"
+    "\\b140 MB\\b",
+    "\\b(?:add|adds|added|adding|introduc\\w+|use[sd]?|using)\\b[^.\\n]{0,25}\\b(?:worker pool|parallel)|\\b(?:worker pool|parallel)\\b[^.\\n]{0,25}\\b(?:added|introduced|used)\\b"
   ],
   "max_chars": 600,
   "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
   "wrong": [
     "fix: stream rows in build_index\n\nPeak memory in report.py falls from 5.1 GB to 140 MB.",
-    "feat: add streaming build_index\n\nreport.py now needs 410 MB instead of 5.1 GB."
+    "feat: add streaming build_index\n\nreport.py now needs 410 MB instead of 5.1 GB.",
+    "fix: stream rows in build_index\n\nreport.py peaks at 410 MB instead of 5.1 GB by using a parallel worker pool."
   ],
   "correct_alts": [
     "fix: stream rows in build_index to cut memory\n\nreport.py no longer holds all 3.2 million rows at once. Peak memory on the large export drops from 5.1 GB to 410 MB with identical output.",

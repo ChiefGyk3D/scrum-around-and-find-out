@@ -25,7 +25,7 @@
     }
   ],
   "forbidden": [
-    "\\bbanner\\b",
+    "(?<!not )(?<!never )\\b(?:chang(?:e|es|ed|ing)|updat(?:e|es|ed|ing)|add(?:s|ed|ing)?|includ(?:e|es|ed|ing)|adjust(?:s|ed|ing)?|tweak(?:s|ed|ing)?)\\b[^.\\n]{0,30}\\bbanner\\b",
     "\\b0\\.41 s\\b",
     "\\b9\\.1 s\\b"
   ],
@@ -37,6 +37,7 @@
   ],
   "correct_alts": [
     "Remove the quadratic loop from dedupe_tags.\n- tags.py replaces an O(n^2) nested loop with a set while preserving first-seen order.\n- On 50,000 tags the run time falls from 1.9 s to 0.14 s.\n- The public API is the same.",
-    "dedupe_tags runs about thirteen times faster.\n\n- The old algorithm in tags.py was O(n^2).\n- A set-based version keeps the original ordering.\n- Benchmark: 1.9 s before, 0.14 s after, with 50,000 tags."
+    "dedupe_tags runs about thirteen times faster.\n\n- The old algorithm in tags.py was O(n^2).\n- A set-based version keeps the original ordering.\n- Benchmark: 1.9 s before, 0.14 s after, with 50,000 tags.",
+    "Make dedupe_tags linear, nothing else.\n- tags.py swaps the O(n^2) nested loop for a set and keeps first-seen order.\n- 50,000 tags took 1.9 s before and take 0.14 s now.\n- The CLI banner color tweak was dropped from this branch."
   ]
 }

@@ -1,6 +1,6 @@
 {
   "task": "commit-message",
-  "input": "Change: auth/tokens.py compared API tokens with == which leaks timing. Switched to hmac.compare_digest. Nothing else changes. The token length check stays as it was.",
+  "input": "Change: auth/tokens.py compared API tokens with == which leaks timing. Switched to hmac.compare_digest. Nothing else changes. The token length check stays as it was. Adding rate limiting for failed token checks was considered and dropped.",
   "facts": [
     "auth/tokens.py",
     "hmac.compare_digest",
@@ -16,13 +16,15 @@
     "\\bfeat:",
     "\\bdocs:",
     "\\bhashlib\\b",
-    "\\bsecrets\\.compare_digest\\b"
+    "\\bsecrets\\.compare_digest\\b",
+    "\\b(?:add|adds|added|adding|introduc\\w+)\\b[^.\\n]{0,25}\\brate[- ]limit"
   ],
   "max_chars": 600,
   "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
   "wrong": [
     "feat: add hmac.compare_digest to auth/tokens.py\n\nA new helper for tokens.",
-    "fix: use secrets.compare_digest in auth/tokens.py\n\nAvoids a timing leak."
+    "fix: use secrets.compare_digest in auth/tokens.py\n\nAvoids a timing leak.",
+    "fix: use hmac.compare_digest in auth/tokens.py\n\nCloses a timing leak and adds rate limiting for failed token checks."
   ],
   "correct_alts": [
     "fix: compare API tokens in constant time\n\nauth/tokens.py used ==, which can leak timing information. It now calls hmac.compare_digest. The length check is untouched.",

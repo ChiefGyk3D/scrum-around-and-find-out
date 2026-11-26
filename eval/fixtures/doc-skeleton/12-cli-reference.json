@@ -15,10 +15,10 @@
   "max_chars": 1800,
   "required_format": "regex:(?m)^#{1,3} \\S",
   "wrong": [
-    "# Synopsis\n# Options\n# Exit codes\n--max-retries",
-    "# exampletool reference --max-retries\n## Synopsis\nSynopsis goes here in one line.\n## Exit codes\nExit codes goes here in one line.",
-    "# exampletool reference\n## Synopsis\nSynopsis goes here in one line.\n## Options\nOptions goes here in one line.\n## Exit codes\nExit codes goes here in one line.",
-    "# exampletool reference --max-retries\n## Synopsis\n## Options\n## Exit codes"
+    "# exampletool(1)\n\n### Synopsis\nThe usage line is still to be written.\n\n### Options\nList each flag here.\n\n### Exit codes\nList the exit codes here.",
+    "# Command line reference\n\nStart with the retry flag --max-retry, then read the sections below.\n\n## Options\nFlags go here.\n\n## Synopsis\nThe usage line goes here.\n\n## Exit codes\nThe codes go here.",
+    "# exampletool\n\nSynopsis, Options and Exit codes are described below. The retry flag is --max-retries.",
+    "# Synopsis\n## Options\nList each flag here, including --max-retries.\n## Exit codes\nList the exit codes here."
   ],
   "sections": [
     "Synopsis",
@@ -26,7 +26,7 @@
     "Exit codes"
   ],
   "correct_alts": [
-    "# exampletool reference --max-retries\n## Synopsis\nPlaceholder: describe synopsis here.\n## Options\nPlaceholder: describe options here.\n## Exit codes\nPlaceholder: describe exit codes here.",
-    "# exampletool reference\n\nValue to keep: --max-retries\n\n### 1. Synopsis\nTODO: write the synopsis part.\n### 2. Options\nTODO: write the options part.\n### 3. Exit codes\nTODO: write the exit codes part."
+    "# exampletool(1)\n\n### Synopsis\nThe usage line is still to be written.\n\n### Options\nList each flag here, including --max-retries.\n\n### Exit codes\nList the exit codes here.",
+    "# Command line reference\n\nStart with the retry flag --max-retries, then read the sections below.\n\n## Options\nFlags go here.\n\n## Synopsis\nThe usage line goes here.\n\n## Exit codes\nThe codes go here."
   ]
 }

@@ -765,7 +765,9 @@ def test_every_must_copy_value_stated_in_an_input_is_a_required_fact() -> None:
         if re.search(r"copy exactly|must be copied|exactly as", f.input, re.IGNORECASE):
             value = re.search(r"\b(?:v)?(\d+(?:\.\d+)+)\b", f.input)
             assert value is not None, f.id
-            assert value.group(1) in [x.text for x in f.facts], f.id
+            # the value itself, or the exact token the input says to copy when it is a path such as release/6.2.0
+            texts = [x.text for x in f.facts]
+            assert any(t == value.group(1) or t.endswith("/" + value.group(1)) for t in texts), f.id
 
 
 def shim_b(f: le.Fixture) -> str:

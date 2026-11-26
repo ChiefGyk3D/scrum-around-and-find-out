@@ -6,9 +6,9 @@
     "Commit style",
     "Open a pull request",
     {
-      "text": "6.2.0",
+      "text": "release/6.2.0",
       "variants": [
-        "(?<![\\d.])6\\.2\\.0(?!\\d)"
+        "(?<![\\w/.-])release/6\\.2\\.0(?!\\d)"
       ]
     }
   ],
@@ -19,10 +19,10 @@
   "max_chars": 1800,
   "required_format": "regex:(?m)^#{1,3} \\S",
   "wrong": [
-    "# Fork and clone\n# Commit style\n# Open a pull request\n6.2.0",
-    "# Contributing 6.2.0\n## Fork and clone\nFork and clone goes here in one line.\n## Open a pull request\nOpen a pull request goes here in one line.",
-    "# Contributing\n## Fork and clone\nFork and clone goes here in one line.\n## Commit style\nCommit style goes here in one line.\n## Open a pull request\nOpen a pull request goes here in one line.",
-    "# Contributing 6.2.0\n## Fork and clone\n## Commit style\n## Open a pull request"
+    "# Contributing to example-framework\n\nOpen pull requests against 6.2.0.\n\n## Fork and clone\nExplain forking and cloning here.\n\n## Commit style\nExplain the commit message rules here.\n\n## Open a pull request\nExplain the pull request steps here.",
+    "# Contributing\n\nContents:\n- Fork and clone\n- Commit style\n- Open a pull request\n\nTarget branch: release/6.2.0",
+    "# Contributing to example-framework\n\nOpen pull requests against release/6.1.0.\n\n## Fork and clone\nExplain it.\n\n## Commit style\nExplain it.\n\n## Open a pull request\nExplain it.",
+    "# Fork and clone\n# Commit style\n# Open a pull request\nrelease/6.2.0"
   ],
   "sections": [
     "Fork and clone",
@@ -30,7 +30,7 @@
     "Open a pull request"
   ],
   "correct_alts": [
-    "# Contributing 6.2.0\n## Fork and clone\nPlaceholder: describe fork and clone here.\n## Commit style\nPlaceholder: describe commit style here.\n## Open a pull request\nPlaceholder: describe open a pull request here.",
-    "# Contributing\n\nValue to keep: 6.2.0\n\n### 1. Fork and clone\nTODO: write the fork and clone part.\n### 2. Commit style\nTODO: write the commit style part.\n### 3. Open a pull request\nTODO: write the open a pull request part."
+    "# Contributing to example-framework\n\nOpen pull requests against release/6.2.0.\n\n## Fork and clone\nExplain forking and cloning here.\n\n## Commit style\nExplain the commit message rules here.\n\n## Open a pull request\nExplain the pull request steps here.",
+    "# Contributing\n\nContents:\n- Fork and clone\n- Commit style\n- Open a pull request\n\n### Fork and clone\n(to be written)\n\n### Commit style\n(to be written)\n\n### Open a pull request\n(to be written; target branch release/6.2.0)"
   ]
 }

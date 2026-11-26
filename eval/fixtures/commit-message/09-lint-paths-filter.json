@@ -1,6 +1,6 @@
 {
   "task": "commit-message",
-  "input": "Change: .github/workflows/lint.yml now has a paths filter so it runs only when files under src/ or tests/ change. Saves about 6 minutes of runner time on every docs-only PR. Job name unchanged.",
+  "input": "Change: .github/workflows/lint.yml now has a paths filter so it runs only when files under src/ or tests/ change. Saves about 6 minutes of runner time on every docs-only PR. Job name unchanged. A nightly full lint run was considered and dropped.",
   "facts": [
     "lint.yml",
     "paths",
@@ -17,13 +17,15 @@
     "\\bfeat:",
     "\\bfix:",
     "\\b16 minutes\\b",
-    "\\b60 minutes\\b"
+    "\\b60 minutes\\b",
+    "\\b(?:add|adds|added|adding|schedules?|scheduled)\\b[^.\\n]{0,25}\\bnightly\\b|\\bnightly\\b[^.\\n]{0,25}\\b(?:added|scheduled|introduced)\\b"
   ],
   "max_chars": 600,
   "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
   "wrong": [
     "chore: add paths filter to lint.yml\n\nOnly src/ and tests/ trigger it and this saves 16 minutes on docs PRs.",
-    "feat: run lint on every change\n\nlint.yml paths filter removed for src/ and tests/."
+    "feat: run lint on every change\n\nlint.yml paths filter removed for src/ and tests/.",
+    "chore: add paths filter to lint.yml\n\nOnly src/ and tests/ trigger it, which saves 6 minutes on docs PRs, and it adds a nightly full run."
   ],
   "correct_alts": [
     "chore: limit the lint workflow to code changes\n\nlint.yml gets a paths filter for src/ and tests/, so documentation-only pull requests skip it and save around six minutes.",

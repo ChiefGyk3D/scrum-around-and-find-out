@@ -1,6 +1,6 @@
 {
   "task": "first-pass-review-comment",
-  "input": "```diff\n def load_settings(path):\n     try:\n         with open(path) as fh:\n             return json.load(fh)\n-    except FileNotFoundError:\n-        return {}\n+    except Exception:\n+        pass\n```\nIntent: a missing file means defaults, any other problem must be reported.",
+  "input": "```diff\n def load_settings(path):\n     try:\n         with open(path) as fh:\n             return json.load(fh)\n     except FileNotFoundError:\n         return {}\n+    except Exception:\n+        pass\n```\nIntent: a missing file means defaults, any other problem must be reported.",
   "facts": [
     "load_settings",
     {
@@ -22,7 +22,16 @@
         "returns? nothing",
         "implicit return",
         "corrupt\\w*",
-        "invalid json"
+        "invalid json",
+        "\\bPermissionError\\b",
+        "permission[- ]?(denied|errors?)",
+        "\\bJSONDecodeError\\b",
+        "(decode|parse|parsing|read|I/O|OS) (errors?|failures?)",
+        "\\bunreadable\\b",
+        "\\bmalformed\\b",
+        "(other|real|unexpected|genuine) (errors?|failures?|exceptions?|problems?)",
+        "never (raised|reported|surfaced)",
+        "(not|never|isn't|aren't) (re-?raised|reported|surfaced|propagated)"
       ]
     }
   ],

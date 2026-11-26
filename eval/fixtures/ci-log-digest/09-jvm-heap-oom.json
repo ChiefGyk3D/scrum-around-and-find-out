@@ -29,13 +29,19 @@
   "forbidden": [
     "\\bExit(ed)? (code |value )?137\\b",
     "\\bsegmentation fault\\b",
-    "\\bkilled by the (kernel|OOM killer)\\b"
+    "\\bkilled by the (kernel|OOM killer)\\b",
+    "\\bkernel\\b",
+    "\\bOOM[- ]killer\\b",
+    "\\b(?:SIGKILL|signal 9)\\b",
+    "\\b(?:machine|host|runner|system|node|server)\\b[^.\\n]{0,30}\\b(?:ran out of|out of|exhausted)\\s+(?:system |physical |host )?memory\\b",
+    "\\bexit(?:ed)?\\b[^.\\n]{0,20}\\b137\\b"
   ],
   "max_chars": 700,
   "required_format": "any",
   "wrong": [
     "The payments test task was killed by the kernel with exit 137 after running out of system memory.",
-    "settlesLargeBatch failed an assertion in :payments:test because the batch total was wrong."
+    "settlesLargeBatch failed an assertion in :payments:test because the batch total was wrong.",
+    "The machine ran out of memory and the kernel killed the worker during :payments:test, so settlesLargeBatch never finished with a 512m limit."
   ],
   "correct_alts": [
     "The :payments:test task failed because the settlesLargeBatch test ran out of Java heap: the test JVM is capped at 512m and BatchBuffer.grow kept copying a bigger array.\nRaising the test heap above 512m or shrinking the batch should fix it.",

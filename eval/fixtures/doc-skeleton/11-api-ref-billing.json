@@ -15,10 +15,10 @@
   "max_chars": 1800,
   "required_format": "regex:(?m)^#{1,3} \\S",
   "wrong": [
-    "# Create invoice\n# Fetch invoice\n# Delete invoice\n/v2/invoices",
-    "# Billing API reference /v2/invoices\n## Create invoice\nCreate invoice goes here in one line.\n## Delete invoice\nDelete invoice goes here in one line.",
-    "# Billing API reference\n## Create invoice\nCreate invoice goes here in one line.\n## Fetch invoice\nFetch invoice goes here in one line.\n## Delete invoice\nDelete invoice goes here in one line.",
-    "# Billing API reference /v2/invoices\n## Create invoice\n## Fetch invoice\n## Delete invoice"
+    "# Billing API\n\nBase path: /v2/invoices\n\n| Operation | Status |\n|---|---|\n| Create invoice | draft |\n| Fetch invoice | draft |\n| Delete invoice | draft |",
+    "## Billing API reference\n\nEvery path starts with /v2/invoice.\n\n### Create invoice\nWrite the request and response here.\n\n### Fetch invoice\nWrite the request and response here.\n\n### Delete invoice\nWrite the request and response here.",
+    "# Create invoice\nPOST /v2/invoices, write the details here.\n# Fetch invoice\nGET /v2/invoices, write the details here.\n# Delete invoice\nDELETE /v2/invoices, write the details here.",
+    "# Billing API\n\nBase path: /v1/invoices\n\n## Create invoice\nDescribe it.\n\n## Fetch invoice\nDescribe it.\n\n## Delete invoice\nDescribe it."
   ],
   "sections": [
     "Create invoice",
@@ -26,7 +26,7 @@
     "Delete invoice"
   ],
   "correct_alts": [
-    "# Billing API reference /v2/invoices\n## Create invoice\nPlaceholder: describe create invoice here.\n## Fetch invoice\nPlaceholder: describe fetch invoice here.\n## Delete invoice\nPlaceholder: describe delete invoice here.",
-    "# Billing API reference\n\nValue to keep: /v2/invoices\n\n### 1. Create invoice\nTODO: write the create invoice part.\n### 2. Fetch invoice\nTODO: write the fetch invoice part.\n### 3. Delete invoice\nTODO: write the delete invoice part."
+    "# Billing API\n\nBase path: /v2/invoices\n\n| Operation | Status |\n|---|---|\n| Create invoice | draft |\n| Fetch invoice | draft |\n| Delete invoice | draft |\n\n## Create invoice\nDescribe the request body and the response.\n\n## Fetch invoice\nDescribe the lookup and the response.\n\n## Delete invoice\nDescribe the removal and the response.",
+    "## Billing API reference\n\nEvery path starts with /v2/invoices.\n\n### Create invoice\nWrite the request and response here.\n\n### Fetch invoice\nWrite the request and response here.\n\n### Delete invoice\nWrite the request and response here."
   ]
 }

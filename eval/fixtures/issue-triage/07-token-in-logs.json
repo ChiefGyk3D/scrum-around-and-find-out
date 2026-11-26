@@ -1,6 +1,6 @@
 {
   "task": "issue-triage",
-  "input": "Labels: bug, feature, docs, security, question, performance.\nEpics: E-auth (login, tokens, sessions), E-billing (invoices, payments), E-search (index, queries), E-platform (workers, deploys, logging).\nRule: any credential that reaches a log is security, even when the cause is an ordinary bug.\nIssue: The sync worker prints the full Authorization header in debug logs, so bearer tokens end up in the shared log index. Seen on build 812.",
+  "input": "Labels: bug, feature, docs, security, question, performance.\nEpics: E-auth (login, tokens, sessions), E-billing (invoices, payments), E-search (index, queries), E-platform (workers, deploys, logging).\nRule: any credential that reaches a log is security, even when the cause is an ordinary bug.\nEpic rule: the epic is the one that owns the component producing the problem, not the data it leaks, so the sync worker and the log index belong to E-platform even when the leaked data is a token.\nIssue: The sync worker prints the full Authorization header in debug logs, so bearer tokens end up in the shared log index. Seen on build 812.",
   "facts": [
     {
       "text": "\"label\": \"security\"",

@@ -1,6 +1,6 @@
 {
   "task": "commit-message",
-  "input": "Change: tests/test_queue.py: in test_drain, replaced sleep(0.5) with wait_for(lambda: q.empty()) to remove a race. No production code touched.",
+  "input": "Change: tests/test_queue.py: in test_drain, replaced sleep(0.5) with wait_for(lambda: q.empty()) to remove a race. No production code touched. Adding a retry loop around the wait was considered and dropped.",
   "facts": [
     "tests/test_queue.py",
     "test_drain",
@@ -11,13 +11,15 @@
     "\\bfeat:",
     "\\bfix:",
     "\\bchore:",
-    "sleep\\(5\\)"
+    "sleep\\(5\\)",
+    "\\b(?:add|adds|added|adding|introduc\\w+|wrap\\w*)\\b[^.\\n]{0,25}\\bretr(?:y|ies)\\b"
   ],
   "max_chars": 600,
   "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
   "wrong": [
     "fix: replace sleep(5) in test_drain\n\nUses wait_for in tests/test_queue.py.",
-    "chore: tidy tests/test_queue.py\n\nChanges test_drain."
+    "chore: tidy tests/test_queue.py\n\nChanges test_drain.",
+    "test: remove a race from test_drain\n\ntests/test_queue.py uses wait_for instead of sleep(0.5) and adds a retry loop."
   ],
   "correct_alts": [
     "test: wait for the queue instead of sleeping in test_drain\n\nsleep(0.5) raced with the worker. tests/test_queue.py now uses wait_for on q.empty(). Only the test changed.",

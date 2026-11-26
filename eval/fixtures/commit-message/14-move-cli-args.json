@@ -1,6 +1,6 @@
 {
   "task": "commit-message",
-  "input": "Change: moved parse_cli_args() from main.py into cli/args.py. No logic change. main.py is now 212 lines shorter and imports the function.",
+  "input": "Change: moved parse_cli_args() from main.py into cli/args.py. No logic change. main.py is now 212 lines shorter and imports the function. Renaming the function to parse_args was considered and dropped.",
   "facts": [
     "parse_cli_args",
     "cli/args.py",
@@ -17,13 +17,15 @@
     "\\bfeat:",
     "\\bfix:",
     "\\b221\\b",
-    "\\b122\\b"
+    "\\b122\\b",
+    "\\b(?:renam\\w+)\\b[^.\\n]{0,40}\\bparse_args\\b"
   ],
   "max_chars": 600,
   "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
   "wrong": [
     "refactor: move parse_cli_args into cli/args.py\n\nmain.py is 221 lines shorter.",
-    "fix: parse_cli_args moved\n\nmain.py is 212 lines shorter after moving to cli/args.py."
+    "fix: parse_cli_args moved\n\nmain.py is 212 lines shorter after moving to cli/args.py.",
+    "refactor: move parse_cli_args into cli/args.py\n\nmain.py is 212 lines shorter, and the function is renamed to parse_args."
   ],
   "correct_alts": [
     "refactor: move argument parsing out of main.py\n\nparse_cli_args() now lives in cli/args.py and main.py imports it, which trims 212 lines. The logic is untouched.",

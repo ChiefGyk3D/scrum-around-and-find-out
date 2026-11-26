@@ -15,10 +15,10 @@
   "max_chars": 1800,
   "required_format": "regex:(?m)^#{1,3} \\S",
   "wrong": [
-    "# Mapping table\n# Convert the file\n# Validate\nlegacy_mode",
-    "# Settings migration legacy_mode\n## Mapping table\nMapping table goes here in one line.\n## Validate\nValidate goes here in one line.",
-    "# Settings migration\n## Mapping table\nMapping table goes here in one line.\n## Convert the file\nConvert the file goes here in one line.\n## Validate\nValidate goes here in one line.",
-    "# Settings migration legacy_mode\n## Mapping table\n## Convert the file\n## Validate"
+    "# Moving settings from INI to YAML\n\nSections in this guide:\n- Mapping table\n- Convert the file\n- Validate\n\nMap legacy_mode and the other keys.",
+    "# INI to YAML migration\n\n### Mapping table\nOne line on how keys map, legacy-mode first.\n\n### Convert the file\nOne line on the conversion tool.\n\n### Validate\nOne line on checking the result.",
+    "# Mapping table\nlegacy_mode goes here.\n# Convert the file\nTool steps.\n# Validate\nChecks.",
+    "# INI to YAML migration\n\n### Mapping table\n### Convert the file\n### Validate\nlegacy_mode"
   ],
   "sections": [
     "Mapping table",
@@ -26,7 +26,7 @@
     "Validate"
   ],
   "correct_alts": [
-    "# Settings migration legacy_mode\n## Mapping table\nPlaceholder: describe mapping table here.\n## Convert the file\nPlaceholder: describe convert the file here.\n## Validate\nPlaceholder: describe validate here.",
-    "# Settings migration\n\nValue to keep: legacy_mode\n\n### 1. Mapping table\nTODO: write the mapping table part.\n### 2. Convert the file\nTODO: write the convert the file part.\n### 3. Validate\nTODO: write the validate part."
+    "# Moving settings from INI to YAML\n\nSections in this guide:\n- Mapping table\n- Convert the file\n- Validate\n\n## Mapping table\nMap legacy_mode and the other keys here.\n\n## Convert the file\nWrite the conversion steps here.\n\n## Validate\nWrite the validation checks here.",
+    "# INI to YAML migration\n\n### Mapping table\nOne line on how keys map, legacy_mode first.\n\n### Convert the file\nOne line on the conversion tool.\n\n### Validate\nOne line on checking the result."
   ]
 }
