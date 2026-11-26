@@ -1241,14 +1241,16 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         found = _classify(command, tick, soft=True)
         if found is None or _classify(command, tick, soft=False) is not None:
             return found
-        parsed = shellproof.parse(command, tick)
-        if parsed is None:
-            return found  # a form the proof does not model
-        if parsed.pure():
+        parsed = shellproof.parse(command, tick)  # None: a form the proof does not model, so it proves nothing
+        if parsed is not None and parsed.pure():
             return None
         if found in (SHELL_BUILT, SHELL_TOOL) and _shellunits_clears(command, tick):
             return None  # the old words-anywhere answer only narrows: no real invocation of a tool occurs
-        if parsed.writes_no_file() and _classify(parsed.without_comments(), tick, soft=True) is None:
+        if (
+            parsed is not None
+            and parsed.writes_no_file()
+            and _classify(parsed.without_comments(), tick, soft=True) is None
+        ):
             return None  # the names sit only in comments, which no shell runs, and no file is written
         return found
     except TimeoutError:
