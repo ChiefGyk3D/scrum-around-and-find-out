@@ -56,6 +56,7 @@ WAIT_SECONDS = "60"
 PR_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 # U+2014 em dash and its small, vertical and two/three-em look-alikes. U+2015 (horizontal bar) is not blocked.
 EM_DASHES = "".join(chr(c) for c in (0x2014, 0xFE58, 0xFE31, 0x2E3A, 0x2E3B))
+MAX_TITLE_CHARS = 300  # a title from argv is bounded like the body, so no checked field can be unbounded
 MAX_CHECK_CHARS = 20_000  # model output longer than this is refused, not checked
 NOT_VERIFIED = "Twingate and the local server were NOT verified; nothing was sent to a Claude model."
 
@@ -214,14 +215,18 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
 
 
 def allow_words(env: Mapping[str, str]) -> list[str]:
-    """Extra allowed tokens: SAFO_DRAFT_ALLOW (comma separated), SAFO_DRAFT_ALLOW_FILE (a line each, `#` comments)."""
-    words = [w.strip() for w in env.get("SAFO_DRAFT_ALLOW", "").split(",")]
+    """Extra allowed tokens: SAFO_DRAFT_ALLOW and SAFO_DRAFT_ALLOW_FILE, split on commas and whitespace.
+
+    In the file, lines starting with `#` and blank lines are skipped.
+    """
+    words = re.split(r"[,\s]+", env.get("SAFO_DRAFT_ALLOW", ""))
     path = env.get("SAFO_DRAFT_ALLOW_FILE")
     if path:
         text = _read_private_file(path, "SAFO_DRAFT_ALLOW_FILE")
         if text is None:
             raise Failure("SAFO_DRAFT_ALLOW_FILE names a file that was not found", EXIT_ERROR)
-        words += [value for _, value in _config_lines(text)]
+        for _, line in _config_lines(text):
+            words += re.split(r"[,\s]+", line)
     return [w for w in words if w]
 
 
@@ -413,11 +418,15 @@ def _generic_checks(text: str, allow: Sequence[str]) -> list[str]:
 
 
 def check_title(title: str, deny: Sequence[str | DenyEntry] = (), allow: Sequence[str] = ()) -> list[str]:
+    if len(title) > MAX_TITLE_CHARS:
+        return [f"title: title too long to check safely (limit {MAX_TITLE_CHARS} characters)"]
     return [f"title: {x}" for x in _generic_checks(title, allow) + _deny_reasons([title], deny)]
 
 
 def check_text(kind: str, text: str, deny: Sequence[str | DenyEntry] = (), allow: Sequence[str] = ()) -> list[str]:
     """The reasons a draft may not be filed. An empty list means it passed."""
+    if len(text) > MAX_CHECK_CHARS:
+        return [f"text too long to check safely (limit {MAX_CHECK_CHARS} characters)"]
     why = _generic_checks(text, allow) + _deny_reasons([text], deny)
     if kind == "pr":
         lines = [x for x in text.splitlines() if x.strip()]
@@ -440,6 +449,8 @@ def check_draft(
     if title is None:
         return why
     why += check_title(title, deny, allow)
+    if len(title) > MAX_TITLE_CHARS or len(body) > MAX_CHECK_CHARS:
+        return why  # the combined checks would run on an unbounded text
     seen = {x.removeprefix("title: ") for x in why}
     combined = [x for joiner in ("\n", "") for x in _generic_checks(f"{title}{joiner}{body}", allow)]
     for x in combined + _deny_reasons([title, body], deny):
@@ -623,6 +634,12 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
     prompt = f"{_INSTRUCTIONS[kind]}\n\nRequest: {args.prompt or ''}\n\nFacts:\n{facts}"
     model = args.model or (LONG_MODEL if len(prompt) - len(_INSTRUCTIONS[kind]) > LONG_INPUT else SHORT_MODEL)
     ctx.model, ctx.chars_in = model, len(prompt)
+    if kind != "comment" and len(args.title) > MAX_TITLE_CHARS:  # refused before any model call; never echo the title
+        raise Failure(
+            f"title too long: {len(args.title)} characters, the limit is {MAX_TITLE_CHARS}. "
+            "This is a local input error; use a shorter title. Nothing was filed.",
+            EXIT_ERROR,
+        )
     body = call_local(ctx.env, ctx.sleep, f"draft-{kind}", model, prompt)
     ctx.chars_out = len(body)
     if len(body) > MAX_CHECK_CHARS:

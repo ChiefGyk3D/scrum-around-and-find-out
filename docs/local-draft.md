@@ -99,9 +99,9 @@ safo audit | safo-draft digest board-drift -
 - **The allow list.** Only the owner placeholders `N0CALL`, `N0TST` and `FN31pr` are built in, exact and
   case-sensitive (`fn31pr` and `FN31` are blocked). Technical tokens with the shape, such as `K8S`, `K3S`, `E2E`,
   `P2P`, `W3C`, `I2C`, are blocked by default. `docs/draft-allow.example.txt` lists the usual ones: copy the lines you
-  want into your own file and point `SAFO_DRAFT_ALLOW_FILE` at it (one token per line, `#` comment lines, matching
-  ignores case; the file follows the same ownership and permission rules as the deny file). `SAFO_DRAFT_ALLOW` takes a
-  comma separated list.
+  want into your own file and point `SAFO_DRAFT_ALLOW_FILE` at it (one per line or comma separated, any mix of commas and
+  whitespace; blank lines and `#` comment lines are skipped; matching ignores case; the file follows the same ownership and permission rules as the deny file). `SAFO_DRAFT_ALLOW` takes the same, one per line or comma separated. Allow and deny files over 64 KB (65536 bytes)
+  are refused.
 - **Footers.** A pull request body must end with the robot-emoji line `Generated with [Claude Code](https://claude.com/claude-code)`
   (exact text in the checks); the wrapper appends it when the model left it out, and replaces a footer variant (a last
   line with "Generated with" and "Claude Code") rather than keeping it. An issue needs an `Epic:` or `Part of epic #N`
@@ -112,7 +112,7 @@ safo audit | safo-draft digest board-drift -
   backoff, four tries in all, then exit 75.
 - **Size and timeouts.** The whole prompt is capped at 100000 encoded bytes (the kernel allows 131072 per argument). A
   larger input is refused before `llm-local` is called, exit 2, with a message saying it is a local input error and
-  nothing was sent; it is not truncated. Model output over 20000 characters is refused as `draft too long to check safely` (exit 2, nothing filed). `--facts` is decoded as UTF-8 with replacement. A timeout of `llm-local`
+  nothing was sent; it is not truncated. Model output over 20000 characters is refused as `draft too long to check safely` (exit 2, nothing filed). A title over 300 characters is refused as `title too long` (exit 2, before any model call, nothing filed; the message never echoes the title), and `check_draft` and `check_text` refuse over-long inputs themselves. `--facts` is decoded as UTF-8 with replacement. A timeout of `llm-local`
   (900 s) exits 11, with the Twingate/server NOT verified line. A timeout of `gh` (120 s) exits 11 and says the filing
   state is unknown: check with `gh` before retrying.
 - **Any other failure** exits non-zero, prints the exact failure, and states that Twingate and the local server were NOT

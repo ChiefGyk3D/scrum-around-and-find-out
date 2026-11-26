@@ -660,15 +660,87 @@ def test_f3_clean_title_and_body_pass_together() -> None:
     assert localdraft.check_draft("issue", "Fix the retry bound", "Body here.\n\nPart of epic #445") == []
 
 
+def _within_deadline(seconds: int, fn: Any) -> None:
+    """Run fn under a hard wall-clock alarm so slow code fails the test fast instead of hanging the job."""
+    import signal
+
+    def expired(signum: int, frame: Any) -> None:
+        raise AssertionError(f"still running after {seconds} s: a check is not linear")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.alarm(seconds)
+    try:
+        fn()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def test_f4_checks_are_linear() -> None:
     import time
 
-    # CPU time, not wall clock: load on the machine cannot fail it, quadratic code still does
-    for text in ("a." * 32000, "a." * 31990 + "invalid", "http://" * 9000, "\n" * 30000, "a:" * 32000, "<!--" * 16000):
+    def measure(text: str) -> None:
         start = time.process_time()
         localdraft.check_text("comment", text)
-        localdraft.check_draft("issue", text, text)
+        localdraft.check_draft("issue", text[:300], text)
+        # CPU time, not wall clock: load on the machine cannot fail it, quadratic code still does
         assert time.process_time() - start < 2.0, text[:12]
+
+    for text in ("a." * 10000, "a." * 9990 + "invalid", "http://" * 2800, "\n" * 20000, "a:" * 10000, "<!--" * 5000):
+        _within_deadline(6, lambda t=text: measure(t))
+
+
+def test_f4_deadline_helper_bites() -> None:
+    import time
+
+    with pytest.raises(AssertionError, match="still running"):
+        _within_deadline(1, lambda: time.sleep(5))
+
+
+def test_title_over_cap_is_refused_at_once(env: Env) -> None:
+    import time
+
+    env.env["SAFO_DRAFT_DENY"] = "Acmecorp"
+    start = time.process_time()
+    code, out, err = env.run(["issue", "--repo", "o/r", "--title", "Acmecorp" * 250_000, "--yes", "x"])
+    assert time.process_time() - start < 0.1
+    assert code == localdraft.EXIT_ERROR
+    assert "title too long" in err and "Nothing was filed" in err
+    assert "Acmecorp" not in out + err
+    assert env.read("gh.args") == "" and env.read("llm.args") == ""
+    assert env.metrics()[-1]["exit"] == localdraft.EXIT_ERROR
+
+
+def test_title_at_cap_is_accepted(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("Body.\n\nPart of epic #445")
+    code, _, _ = env.run(["issue", "--repo", "o/r", "--title", "t" * localdraft.MAX_TITLE_CHARS, "--yes", "x"])
+    assert code == 0
+
+
+def test_check_draft_bounds_title_itself() -> None:
+    why = localdraft.check_draft("issue", "t" * 2_000_000, "Body.\n\nPart of epic #445")
+    assert any("title too long" in x for x in why)
+
+
+def test_allow_entries_split_on_commas_and_whitespace(env: Env) -> None:
+    env.env["SAFO_DRAFT_ALLOW"] = "x1c, a1b"
+    assert localdraft.allow_words(env.env) == ["x1c", "a1b"]
+    path = env.dir / "allow.txt"
+    path.write_text("# note\nk8s e2e\n\nw3c, i2c\n")
+    path.chmod(0o600)
+    env.env["SAFO_DRAFT_ALLOW_FILE"] = str(path)
+    assert localdraft.allow_words(env.env) == ["x1c", "a1b", "k8s", "e2e", "w3c", "i2c"]
+
+
+@pytest.mark.parametrize("var", ["SAFO_DRAFT_ALLOW_FILE", "SAFO_DRAFT_DENY_FILE"])
+def test_oversize_config_file_is_refused(env: Env, var: str) -> None:
+    path = env.dir / "big.txt"
+    path.write_text("abc\n" * 17_000)
+    path.chmod(0o600)
+    env.env[var] = str(path)
+    code, _, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and "larger than 65536 bytes" in err
+    assert env.read("llm.args") == ""
 
 
 def test_f4_long_model_output_is_refused(env: Env) -> None:
