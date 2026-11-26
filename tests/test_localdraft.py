@@ -1106,3 +1106,134 @@ def test_r4b7_scopes_times_and_macs_are_not_flagged(text: str) -> None:
 def test_r4b7_known_overblock_is_documented_and_real() -> None:
     assert any("IP address" in x for x in _why("Config::default"))
     assert "Config::default" in Path(localdraft.__file__).parents[2].joinpath("docs", "local-draft.md").read_text()
+
+
+# round 5, R1: homoglyphs fail closed, deny matching on an ASCII skeleton
+_NO_REDUCE = "letters that cannot be reduced to ASCII: refused"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Acme Corp".replace("A", chr(0x410)),  # Cyrillic capital A
+        "Acme Corp".replace("o", chr(0x3BF)),  # Greek omicron
+        "Acme Corp".replace("o", chr(0x43E)),  # Cyrillic o
+        "Ac" + chr(0x435) + "me Corp",  # Cyrillic e in the middle of the word
+        "Cl" + chr(0x131) + "ent",  # dotless i
+        "Cherokee " + chr(0x13AA),
+        "Armenian " + chr(0x585),
+        "small cap " + chr(0x1D00),
+        "inverted ohm " + chr(0x2127),
+    ],
+)
+def test_r5_1_unreducible_letters_are_refused(text: str) -> None:
+    assert _NO_REDUCE in _why(text), ascii(text)
+    assert any(_NO_REDUCE in x for x in localdraft.check_title(text)), ascii(text)
+
+
+def test_r5_1_homoglyph_in_deny_word_is_refused_and_never_echoed() -> None:
+    text = f"hello {chr(0x410)}cme Corp"
+    why = _why(text, deny=["Acme Corp"])
+    assert _NO_REDUCE in why
+    assert not any("Acme" in x or "cme" in x or chr(0x410) in x for x in why)
+    combined = localdraft.check_draft("comment", chr(0x410) + "cme", "Corp", deny=["Acme Corp"])
+    assert any(_NO_REDUCE in x for x in combined)
+    assert not any(chr(0x410) in x or "Acme" in x for x in combined)
+
+
+def test_r5_1_fullwidth_letters_fold_and_match() -> None:
+    text = "".join(chr(ord(c) + 0xFEE0) if c.isalpha() else c for c in "Acme Corp")
+    why = _why(text, deny=["Acme Corp"])
+    assert _NO_REDUCE not in why
+    assert any("matched private deny entry" in x for x in why)
+
+
+def test_r5_1_accented_latin_reduces_and_matches_both_ways() -> None:
+    accented = "Caf" + chr(0xE9)
+    assert _why(accented) == []
+    assert any("matched private deny entry" in x for x in _why("Cafe", deny=[accented]))
+    assert any("matched private deny entry" in x for x in _why(accented, deny=["Cafe"]))
+    assert any("matched private deny entry" in x for x in _why("Cafe" + chr(0x301), deny=[accented]))
+
+
+def test_r5_1_plain_ascii_and_emoji_still_pass() -> None:
+    assert _why("plain ascii text 123") == []
+    assert _why("done " + chr(0x2705) + " " + chr(0x1F916)) == []
+    assert localdraft.check_text("pr", f"Body\n\n{FOOTER}") == []
+
+
+def test_r5_1_unreducible_deny_value_is_a_config_error(env: Env) -> None:
+    env.env["SAFO_DRAFT_DENY"] = "Acme " + chr(0x41F) + "orp"
+    code, _, err = env.run(["comment", "--repo", "o/r", "--number", "5", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR and chr(0x41F) not in err and "Acme" not in err
+
+
+# round 5, R2: markdown links are refused
+@pytest.mark.parametrize(
+    "text",
+    [
+        "see [text](https://example.test/x)",
+        "![alt](https://example.test/x.png)",
+        "[id]: https://example.test/x",
+        "   [id]: https://example.test/x",
+        "see [text][id] here",
+        "[W1](x)AW",
+        "[link](https://example.test/W1AW)",
+        "a *[x]*(y)",
+    ],
+)
+def test_r5_2_markdown_links_are_refused(text: str) -> None:
+    assert any("markdown links are not allowed" in x for x in _why(text)), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["- [x] done", "- [ ] todo", "a[0] = 1", "see [x] and [y]", "https://example.test/path", "[x]", "a [b] c: d"],
+)
+def test_r5_2_checkboxes_brackets_and_bare_urls_pass(text: str) -> None:
+    assert not any("markdown links" in x for x in _why(text)), text
+
+
+def test_r5_2_bare_url_is_still_scanned_as_written() -> None:
+    assert any("callsign" in x for x in _why("see https://example.test/W1AW"))
+    assert any("session URL" in x for x in _why("see https://claude.ai/chat/x"))
+
+
+def test_r5_2_pr_footer_is_exempt() -> None:
+    assert localdraft.check_text("pr", f"Body\n\n{FOOTER}") == []
+    assert any("markdown links" in x for x in localdraft.check_text("pr", f"[a](b)\n\n{FOOTER}"))
+
+
+def test_r5_new_scans_are_linear() -> None:
+    import time
+
+    for text in ("a::" * 6600, "[" * 19000 + "]", "[a]" * 6000, "!" * 19000, ":" * 19000, "a:" * 9900, "é" * 9000):
+        start = time.process_time()
+        localdraft.check_text("comment", text)
+        assert time.process_time() - start < 2.0, text[:6]
+
+
+# round 5, R3: IPv6 scope-likeness is decided per candidate
+@pytest.mark.parametrize(
+    "text",
+    [
+        "fe80::abcdxyz",
+        "2001:db8::deadbeefSECRET",
+        "fe80::1_x",
+        "fe80::abcd_x",
+        "std::vector fe80::1",
+        "a::b::fe80::1",
+        "fe80::1::note::x",
+        "std::fe80::1",
+        "fe80::1::std::vector",
+    ],
+)
+def test_r5_3_real_addresses_are_flagged(text: str) -> None:
+    assert any("IP address" in x for x in _why(text)), text
+
+
+@pytest.mark.parametrize(
+    "text", ["std::vector", "note::x", "a::b_c", "use fe80:: here", "12:30:45", "aa:bb:cc:dd:ee:ff"]
+)
+def test_r5_3_scopes_times_and_macs_stay_unflagged(text: str) -> None:
+    assert not any("IP address" in x for x in _why(text)), text

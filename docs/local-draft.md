@@ -53,6 +53,18 @@ safo audit | safo-draft digest board-drift -
   (category So, such as the robot in the pull request footer) are fine. A letter plus a combining accent that NFKC
   composes (`e` plus U+0301) passes; one it cannot compose (`1` plus U+0301) is refused. An emoji written with a
   variation selector is refused.
+- **Non-ASCII letters fail closed.** After NFKC the text is decomposed (NFKD) and combining marks are dropped, giving
+  an ASCII skeleton. A letter is allowed only when its base is an ASCII letter: `Caf` plus U+00E9 reduces to `Cafe`,
+  and a fullwidth letter is folded by NFKC. Any other letter or digit (Cyrillic, Greek, Armenian, Cherokee, dotless
+  i, Latin small capitals, letterlike symbols such as U+2127) refuses the draft or title with "letters that cannot be
+  reduced to ASCII: refused"; the reason never holds the characters. Deny matching and squashing use the skeleton, so
+  a Cyrillic look-alike cannot slip a private value past the match. A deny value that holds such a letter is a config
+  error naming the line. Emoji and other symbols are fine.
+- **Markdown links are refused.** Inline links and images (`](` and `![`), reference uses (`][`) and reference
+  definitions (a line that starts with `[...]:`) fail with "markdown links are not allowed in drafts; write the URL
+  plainly", because the rendered text differs from the source the checks see. Bare URLs are scanned as written;
+  `- [x] done`, `[ ]` and `a[0]` pass. The exact pull request footer line is exempt. This over-blocks docs-style
+  prose full of links; that is the safe side.
 - **HTML is refused, not decoded.** A draft with an HTML tag, comment or declaration (`<` followed by a letter, `!`, `/`
   or `?`) or a character reference (`&name;`, `&#65;`, `&#x41;`, and the same without the semicolon when a word
   boundary follows) fails with "HTML is not allowed in drafts; use plain markdown". `a < b` and `x<=y` pass. This also
@@ -80,10 +92,12 @@ safo audit | safo-draft digest board-drift -
   `title and body combined: ...`.
 - **IPv6.** A run of hex digits, colons and dots is tried as an address, also behind a label (`ipv6:`, `addr:`), with a
   `%zone`, before punctuation, and before trailing word characters (`fe80::1x`, `fe80::abcdxyz`,
-  `2001:db8::deadbeefSECRET` are flagged). The prefix up to the last `::` is tried too. A run is C++ scope-like, and
-  held to the stricter rule (two or more hextets before the `::`), only when the character right after its last `::` is
-  a letter that is not a hex digit (`std::vector`, `note::x`), or when the word there holds an underscore and both
-  sides are one or two hex characters (`a::b_c`). Times and MAC addresses (`12:30:45`, `aa:bb:cc:dd:ee:ff`) do not
+  `2001:db8::deadbeefSECRET` are flagged). For each `::` in a run, the prefix up to and including it, and the prefix plus
+  the hextets directly after it, are tried as separate candidates. Scope-likeness is decided per candidate, for the
+  identifier right after that candidate's own `::`: it is held to the stricter rule (two or more hextets before the
+  `::`) only when that character is a letter that is not a hex digit (`std::vector`, `note::x`), or when the word there
+  holds an underscore and both sides are one or two hex characters (`a::b_c`). A scope-like `::` elsewhere in the same
+  run does not hide a real address (`fe80::1::note::x`, `a::b::fe80::1` are flagged). Times and MAC addresses (`12:30:45`, `aa:bb:cc:dd:ee:ff`) do not
   parse as addresses, and a prefix with fewer than two hextets before a trailing `::` (`fe80::`, `e::`) is not flagged.
   Over-blocking is accepted: a name such as `Config::default` starts with hex characters after the `::` and is flagged
   as an address.

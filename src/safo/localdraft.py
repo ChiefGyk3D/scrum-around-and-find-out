@@ -27,6 +27,7 @@ and a reason names only the entry number, never the value. See docs/local-draft.
 from __future__ import annotations
 
 import argparse
+import bisect
 import collections
 import dataclasses
 import datetime as dt
@@ -128,6 +129,8 @@ MAX_CONFIG_BYTES = 65_536
 MIN_DENY_CHARS = 3  # a deny value that squashes to fewer characters would match almost anything
 _DENY_MARK = "matched private deny entry"
 _BAD_CATEGORIES = frozenset({"Mn", "Me", "Cf", "Cc", "Co", "Cn", "Cs", "Zl", "Zp"})
+_NO_REDUCE = "letters that cannot be reduced to ASCII: refused"
+_NO_REDUCE_CONFIG = "a deny value holds letters that cannot be reduced to ASCII"
 _NO_DENY_NOTE = "safo-draft: no private deny file configured: only heuristics are active"
 
 
@@ -139,9 +142,27 @@ class DenyEntry:
     squashed: str
 
 
+def _skeleton(text: str) -> tuple[str, bool]:
+    """(ASCII skeleton, reducible). NFKC, then NFKD with combining marks removed: a letter is kept only when its base
+    is an ASCII letter. A letter or digit that is not ASCII after that (Cyrillic, Greek, dotless i, small capitals,
+    letterlike symbols) makes the text not reducible; it is left out of the skeleton and the caller must refuse."""
+    out: list[str] = []
+    reducible = True
+    for c in unicodedata.normalize("NFKC", text):
+        if c.isascii():
+            out.append(c)
+            continue
+        base = "".join(x for x in unicodedata.normalize("NFKD", c) if not unicodedata.combining(x))
+        if base and base.isascii():
+            out.append(base)
+        elif unicodedata.category(c)[0] in ("L", "N") or 0x2100 <= ord(c) <= 0x214F:
+            reducible = False
+    return "".join(out), reducible
+
+
 def _squash(text: str) -> str:
-    """NFKC, lowercase, and only ASCII letters and digits kept: `Ac**me** Corp` and `A-c-m-e corp` squash alike."""
-    return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKC", text).lower())
+    """The ASCII skeleton, lowercase, only letters and digits kept: `Ac**me** Corp` and `A-c-m-e corp` squash alike."""
+    return re.sub(r"[^a-z0-9]", "", _skeleton(text)[0].lower())
 
 
 def _read_private_file(path: str, what: str) -> str | None:
@@ -195,6 +216,8 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
     else:
         for n, value in _config_lines(text):
             squashed = _squash(value)
+            if not _skeleton(value)[1]:
+                raise Failure(f"SAFO_DRAFT_DENY_FILE line {n}: {_NO_REDUCE_CONFIG}", EXIT_ERROR)
             if len(squashed) < MIN_DENY_CHARS:
                 raise Failure(
                     f"SAFO_DRAFT_DENY_FILE line {n}: a deny value needs at least {MIN_DENY_CHARS} letters or digits",
@@ -205,6 +228,8 @@ def load_deny(env: Mapping[str, str], err: TextIO) -> list[DenyEntry]:
         if not value:
             continue
         squashed = _squash(value)
+        if not _skeleton(value)[1]:
+            raise Failure(f"SAFO_DRAFT_DENY entry {i}: {_NO_REDUCE_CONFIG}", EXIT_ERROR)
         if len(squashed) < MIN_DENY_CHARS:
             raise Failure(
                 f"SAFO_DRAFT_DENY entry {i}: a deny value needs at least {MIN_DENY_CHARS} letters or digits",
@@ -260,6 +285,22 @@ def _has_html(text: str) -> bool:
     return bool(_HTML_START.search(text) or _HTML_REF.search(text))
 
 
+def _has_md_link(text: str) -> bool:
+    """Inline links and images (`](`, `![`), reference uses (`][`) and reference definitions (a line that starts with
+    `[...]:` after optional spaces). Linear: only `str.find` and `in` scans, no backtracking. The exact PR footer is
+    exempt."""
+    text = text.replace(PR_FOOTER, "")
+    if "](" in text or "![" in text or "][" in text:
+        return True
+    for line in text.splitlines():
+        rest = line.lstrip(" \t")
+        if rest.startswith("["):
+            close = rest.find("]")
+            if close > 0 and rest.startswith(":", close + 1):
+                return True
+    return False
+
+
 def _has_private_host(text: str) -> bool:
     """A dotted name with a private label (`box.lan`, `a.corp.example.com`, `x.home.arpa`), found by splitting."""
     for run in _NAME_RUN.findall(text):
@@ -284,26 +325,23 @@ _HEXTET = frozenset("0123456789abcdefABCDEF")
 _MAX_IPV6_CHARS = 46  # the longest valid IPv6 text (with an embedded IPv4) is 45 characters
 
 
-def _is_scope(text: str, run_start: int, run: str) -> bool:
-    """`std::vector`: is the text after the LAST `::` of this run a C++ style scope name rather than an address?
+def _is_scope(text: str, begin: int, head: str) -> bool:
+    """`std::vector`: is the identifier at `begin` (right after one `::`) a C++ style scope name, not an address?
 
-    Scope-like only when the character right after that `::` is a letter that is not a hex digit (`std::vector`,
-    `note::x`), or when the word there holds an underscore and both sides are single or double hex characters
-    (`a::b_c`). Anything else (`fe80::abcdxyz`, `fe80::1_x`, `Config::default`) is tried as an address, so
-    over-blocking of `Config::default` style names is accepted.
+    `head` is the text before that `::` in the candidate. Scope-like only when the character right after the `::` is a
+    letter that is not a hex digit (`std::vector`, `note::x`), or when the word there holds an underscore and both
+    sides are single or double hex characters (`a::b_c`). Anything else (`fe80::abcdxyz`, `fe80::1_x`,
+    `Config::default`) is tried as an address, so over-blocking of `Config::default` style names is accepted. Each
+    candidate asks about its own `::`, so a scope-like `::` elsewhere in the run does not hide a real address.
     """
-    at = run.rfind("::")
-    if at < 0:
-        return False
-    begin = run_start + at + 2
-    word = re.match(r"\w{1,64}", text[begin:])
+    word = re.match(r"\w{1,64}", text[begin : begin + 64])
     if not word:
         return False
     first = word.group()[0]
     if first.isalpha() and first not in _HEXTET:
         return True
     lead = len(word.group()) - len(word.group().lstrip("0123456789abcdefABCDEF"))
-    before = run[:at].rsplit(":", 1)[-1]
+    before = head.rsplit(":", 1)[-1]
     return "_" in word.group() and lead <= 2 and len(before) <= 2
 
 
@@ -317,35 +355,44 @@ def _has_ipv6(text: str) -> bool:
 
     A leading label such as `ipv6:` or `addr:` is shed by also trying each suffix that starts after a colon. Trailing
     word characters do not hide an address (`fe80::1x`), and trailing dots or colons (padding) are stripped before the
-    length cap, so they do not either. The prefix of a run up to its last `::` is also tried, so an address whose
-    tail is not valid hex (`2001:db8::deadbeefSECRET`) is still flagged. A prefix that ends in `::` is flagged when it
-    has at least two non-empty hextets before the `::` (`2001:db8::`, `fd00:1234::`); one hextet (`e::`, `fe80::`)
-    is not. A scope-like run (see `_is_scope`) is only flagged with two or more hextets before the `::`.
+    length cap, so they do not either. For each `::` in a run, the prefix up to and including it, and the prefix plus
+    the hextets directly after it, are also tried, so an address whose tail is not valid hex
+    (`2001:db8::deadbeefSECRET`) is still flagged. A prefix that ends in `::` is flagged when it has at least two
+    non-empty hextets before the `::` (`2001:db8::`, `fd00:1234::`); one hextet (`e::`, `fe80::`) is not. A candidate
+    whose own `::` is followed by a scope-like identifier (see `_is_scope`) is only flagged with two or more hextets
+    before that `::`; other `::` in the run are judged on their own.
     """
     for match in _IPV6_RUN.finditer(text):
         run = match.group()
         if run.count(":") < 2:
             continue
         run = run.split("%", 1)[0]
-        strict = _is_scope(text, match.start(), run)
         lead = len(run) - len(run.lstrip("."))
         end = len(run.rstrip(".:"))
-        last = run.rfind("::")
+        doubles = [i for i in range(len(run) - 1) if run[i] == ":" and run[i + 1] == ":"]
         starts = [lead] + [i + 1 for i, ch in enumerate(run) if ch == ":" and i + 1 >= lead]
         for start in starts:
-            if end - start > _MAX_IPV6_CHARS:
-                continue
-            cands = [run[start:end]]
-            if run.startswith("::", end) and end > 0:
-                cands.append(run[start : end + 2])
-            if last >= start:
-                cands.append(run[start : last + 2])  # the prefix up to the last `::`
+            cands = []
+            if end - start <= _MAX_IPV6_CHARS:
+                cands.append(run[start:end])
+                if run.startswith("::", end) and end > 0:
+                    cands.append(run[start : end + 2])
+            first = bisect.bisect_left(doubles, start)
+            for k in range(first, len(doubles)):
+                p = doubles[k]
+                if p + 2 - start > _MAX_IPV6_CHARS:
+                    break
+                cands.append(run[start : p + 2])  # the prefix up to and including this `::`
+                nxt = doubles[k + 1] if k + 1 < len(doubles) else len(run)
+                if nxt - start <= _MAX_IPV6_CHARS:
+                    cands.append(run[start:nxt].rstrip(".:"))  # and the hextets directly after it
             for cand in dict.fromkeys(cands):
                 if not cand or cand.startswith(".") or cand.strip(":") == "":
                     continue
                 at = cand.find("::")
                 if at >= 0:
                     after = cand[at + 2 :]
+                    strict = _is_scope(text, match.start() + start + at + 2, cand[:at])
                     if (not after or strict) and _hextets_before(cand, at) < 2:
                         continue
                 try:
@@ -382,6 +429,10 @@ def _single_checks(text: str, allow: Sequence[str], charset: bool) -> list[str]:
     why: list[str] = []
     if charset and _has_unusual_characters(text):
         why.append("unusual characters found (combining, invisible, bidi, tag, private-use or a non-ASCII space)")
+    if charset and not _skeleton(text)[1]:
+        why.append(_NO_REDUCE)
+    if _has_md_link(text):
+        why.append("markdown links are not allowed in drafts; write the URL plainly")
     if _has_html(text):
         why.append("HTML is not allowed in drafts; use plain markdown")
     if any(c in text for c in EM_DASHES):
