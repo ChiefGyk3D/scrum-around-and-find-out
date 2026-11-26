@@ -6,15 +6,21 @@
     {
       "text": "never closed",
       "variants": [
-        "not closed",
-        "leak",
+        "(not|never|n't|without|no|missing|forgot\\w*).{0,40}\\bclos\\w*",
+        "\\bunclosed\\b",
+        "(file|handle|descriptor)s? (leak|left open|stays? open|remains? open)",
+        "\\bleaks?\\b.{0,20}(file|handle|descriptor)",
         "context manager",
-        "\\bwith\\b",
-        "close"
+        "(lost|removed|dropped|no longer (uses?|using)) .{0,20}\\bwith\\b",
+        "\\bresource leaks?\\b"
       ]
     }
   ],
   "forbidden": [],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "read_cfg: variable name conflicts with a builtin, rename it.",
+    "read_cfg: reads the whole file at once, stream it line by line instead."
+  ]
 }

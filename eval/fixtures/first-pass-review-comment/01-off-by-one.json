@@ -6,14 +6,19 @@
     {
       "text": "off-by-one",
       "variants": [
-        "off.by.one",
-        "\\+ ?1",
-        "drops? the first",
-        "one (item|element) (short|too few)"
+        "off[- ]by[- ]one",
+        "(drops?|skips?|omits?|misses?|excludes?) the first (item|element)",
+        "one (item|element) (short|too few|fewer)",
+        "returns? n ?- ?1 (items|elements)",
+        "one (fewer|less) (item|element)"
       ]
     }
   ],
   "forbidden": [],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "last_n: typo in the docstring +1 line missing.",
+    "last_n: the function name is too short, rename it to last_items."
+  ]
 }

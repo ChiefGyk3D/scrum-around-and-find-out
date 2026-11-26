@@ -6,13 +6,16 @@
     {
       "text": "SQL injection",
       "variants": [
-        "inject",
-        "parameteri[sz]",
-        "concatenat"
+        "\\binject\\w*",
+        "concatenat\\w+.{0,40}(SQL|quer|string|name)"
       ]
     }
   ],
   "forbidden": [],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "find_user: the query is too long, split it across several lines.",
+    "find_user: SELECT * returns every column, list the columns you need."
+  ]
 }

@@ -4,7 +4,12 @@
   "facts": [
     "4375",
     "5000",
-    "webhook"
+    {
+      "text": "webhook",
+      "variants": [
+        "\\bwebhooks?\\b"
+      ]
+    }
   ],
   "forbidden": [
     "\\b4357\\b",
@@ -12,5 +17,9 @@
     "\\b4500\\b"
   ],
   "max_chars": 1500,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Title: Webhook timeout\n- hooks.example.org times out at 4357 ms in production\n- the docs say 5000 ms",
+    "Title: Webhook slow\n- timeout is 4500 ms but docs say 5000 ms\n- make them match"
+  ]
 }

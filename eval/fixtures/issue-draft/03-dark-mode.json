@@ -5,11 +5,20 @@
     "EX-118",
     "Settings",
     "dark mode",
-    "persist"
+    {
+      "text": "persist",
+      "variants": [
+        "\\bpersist\\w*"
+      ]
+    }
   ],
   "forbidden": [
     "EX-1[0-9]{2}(?<!EX-118)\\b"
   ],
   "max_chars": 1500,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Title: Add dark mode\n- tracked as EX-181\n- toggle in Settings > Appearance, must persist",
+    "Title: Theme support\n- users want another theme\n- put it somewhere in Settings"
+  ]
 }

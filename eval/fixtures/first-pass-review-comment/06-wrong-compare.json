@@ -6,16 +6,22 @@
     {
       "text": "boundary",
       "variants": [
-        ">=",
-        "boundary",
-        "exactly 18",
-        "off.by.one",
-        "18 itself",
-        "inclusive"
+        "\\bboundary\\b",
+        "exactly 18\\b",
+        "\\b18 itself",
+        "off[- ]by[- ]one",
+        "\\binclusive\\b",
+        "(>=|greater than or equal).{0,40}(>|strict)",
+        "(>|strict\\w*).{0,40}(>=|greater than or equal)",
+        "\\bexcludes? (age )?18\\b"
       ]
     }
   ],
   "forbidden": [],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "is_adult: >= is faster than other operators in general.",
+    "is_adult: the age parameter should be validated as an int."
+  ]
 }

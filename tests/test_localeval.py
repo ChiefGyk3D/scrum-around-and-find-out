@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +22,7 @@ FIXTURES = Path(__file__).resolve().parents[1] / "eval" / "fixtures"
 def fx(**over: Any) -> le.Fixture:
     base: dict[str, Any] = {
         "id": "t/x",
-        "task": "issue-draft",
+        "task": "commit-message",
         "input": "in",
         "facts": (le.Fact("alpha"), le.Fact("beta", (r"b[e3]ta\d",))),
         "forbidden": (r"\b99\b",),
@@ -46,8 +48,8 @@ def test_variant_regex_counts_as_fact() -> None:
 
 def test_recall_threshold_boundary() -> None:
     five = fx(facts=tuple(le.Fact(w) for w in ("a1", "b2", "c3", "d4", "e5")))
-    assert le.score_output(five, "a1 b2 c3 d4").passed  # 0.8 passes
-    assert not le.score_output(five, "a1 b2 c3").passed  # 0.6 fails
+    assert le.score_output(five, "see a1 b2 c3 d4 now").passed  # 0.8 passes
+    assert not le.score_output(five, "see a1 b2 c3 now").passed  # 0.6 fails
 
 
 def test_forbidden_hit_fails_even_with_full_recall() -> None:
@@ -68,7 +70,7 @@ def test_json_format_checks() -> None:
 
 
 def tri() -> le.Fixture:  # a json-object fixture
-    return fx(required_format="json-object", facts=(le.Fact("x"),), forbidden=())
+    return fx(task="issue-triage", required_format="json-object", facts=(le.Fact("x"),), forbidden=())
 
 
 FENCED = '```json\n{"x": 1}\n```'
@@ -178,7 +180,7 @@ fi
 if [ "$mode" = "busy" ]; then exit 75; fi
 if [ "$mode" = "fail" ]; then echo "boom: model not found" >&2; exit 1; fi
 if [ "$mode" = "junk" ]; then echo "not json"; exit 0; fi
-echo '{{"call_id": "abc123", "model": "m", "response": "alpha and beta"}}'
+echo '{{"call_id": "abc123", "model": "m", "response": "alpha and beta are here today"}}'
 """,
         encoding="utf-8",
     )
@@ -198,7 +200,7 @@ def test_run_ok_scores_and_reports_tokens_per_second(tmp_path: Path) -> None:
     assert rec["status"] == "ok" and rec["score"]["passed"] is True
     assert rec["eval_tokens"] == 100 and rec["call_seconds"] == 2.0
     argv = (tmp_path / "argv.log").read_text()
-    assert "--task eval-issue-draft" in argv and "--model qwen3.5:4b" in argv and "--wait 120" in argv
+    assert "--task eval-commit-message" in argv and "--model qwen3.5:4b" in argv and "--wait 120" in argv
 
 
 def test_stdin_is_always_dev_null(tmp_path: Path) -> None:
@@ -433,3 +435,285 @@ def test_shipped_forbidden_patterns_do_not_match_own_facts() -> None:
         facts_text = " ".join(x.text for x in f.facts)
         for pattern in f.forbidden:
             assert not re.search(pattern, facts_text, re.IGNORECASE), (f.id, pattern)
+
+
+# ---- hardened scoring (#484 round 3): word boundaries, structure, copying, facts-only
+
+
+def test_numeric_and_short_facts_match_on_word_boundaries() -> None:
+    f = fx(facts=(le.Fact("60"), le.Fact("137"), le.Fact("Z"), le.Fact("Install")), max_chars=500)
+    s = le.score_output(f, "limit is 600 and exit 1370 on a zebra with Uninstall steps")
+    assert s.facts_missed == ["60", "137", "Z", "Install"] and not s.passed
+    ok = le.score_output(f, "limit is 60 and exit 137 with a trailing Z then Install steps")
+    assert ok.recall == 1.0
+
+
+def test_input_copy_ratio_counts_verbatim_lines_and_shingles() -> None:
+    src = "alpha beta gamma delta epsilon zeta\nsecond line of the input text here"
+    assert le.copy_ratio(src, src) == 1.0
+    assert le.copy_ratio(src, "- alpha beta gamma delta epsilon zeta\nsomething entirely new and different here") == 0.5
+    assert le.copy_ratio(src, "nothing in common with it at all, truly") == 0.0
+    # a paraphrase that reuses a long run of words is caught by the shingles even when it is one new line
+    long_in = "one two three four five six seven eight nine ten eleven twelve"
+    assert le.copy_ratio(long_in, "the one two three four five six seven eight nine ten bit") > 0.5
+
+
+def test_facts_only_guard_needs_connecting_words() -> None:
+    f = fx(facts=(le.Fact("alpha"), le.Fact("beta"), le.Fact("gamma")))
+    assert le.facts_only(f, "alpha beta gamma")
+    assert le.facts_only(f, "alpha, beta; gamma")
+    assert not le.facts_only(f, "alpha broke because beta and gamma disagree")
+
+
+def test_echo_of_input_fails_with_copy_reason() -> None:
+    f = fx(
+        task="issue-draft", input="Title here\nbody line one is here\nbody line two is here", facts=(le.Fact("body"),)
+    )
+    s = le.score_output(f, f.input)
+    assert not s.passed and "copy" in s.reasons
+
+
+STRUCT_GOOD: dict[str, tuple[str, str]] = {
+    "issue-draft/01-session-timeout": (
+        "Session timeout shorter than configured\n"
+        "- Users on app.example.com are signed out after 15 minutes, while 60 is expected.\n"
+        "- The key session_ttl_minutes in auth.yaml controls it; seen in v2.4.1.",
+        "",
+    ),
+    "issue-triage/01-clear-bug": ('{"label": "bug", "epic": "E1-auth"}', ""),
+    "ci-log-digest/01-pytest-fail": (
+        "pytest reported 1 failed test: test_invoice_rounding in tests/test_billing.py.\n"
+        "The assertion compared 10.05 with 10.04, so invoice rounding looks wrong.\n"
+        "The run ended with a non-zero status.",
+        "",
+    ),
+    "pr-summary/01-rename": (
+        "Rename load() to load_config(path) so the file to read is passed in.\n"
+        "- load_config takes a path and opens it with a context manager.\n"
+        "- Updated 3 call sites in cli.py.",
+        "",
+    ),
+    "commit-message/01-fix": (
+        "fix: strip the trailing Z in parse_date\n\nISO dates ending in Z returned None. The Z is now removed first.",
+        "",
+    ),
+    "first-pass-review-comment/01-off-by-one": (
+        "last_n has an off-by-one error: the slice starts one index too late so it drops the first requested item.",
+        "",
+    ),
+    "doc-skeleton/01-install": (
+        "# Installing example-tool\n## Prerequisites\nWhat you need before installing.\n## Install\nHow to install the "
+        "CLI.\n## Verify\nHow to check it works.\n## Uninstall\nHow to remove it.",
+        "",
+    ),
+}
+
+
+def shipped() -> dict[str, le.Fixture]:
+    return {f.id: f for f in le.load_fixtures(FIXTURES)}
+
+
+def test_a_hand_written_good_answer_passes_for_every_task() -> None:
+    by_id = shipped()
+    assert {by_id[k].task for k in STRUCT_GOOD} == set(le.TASKS)
+    for fid, (out, _) in STRUCT_GOOD.items():
+        s = le.score_output(by_id[fid], out)
+        assert s.passed, (fid, s)
+
+
+@pytest.mark.parametrize(
+    ("fid", "out"),
+    [
+        ("issue-draft/01-session-timeout", "Session timeout 15 minutes 60 v2.4.1 session_ttl_minutes"),  # no title+body
+        ("issue-draft/01-session-timeout", "T" * 90 + "\n- 15 minutes, 60, v2.4.1\n- session_ttl_minutes is the key"),
+        ("pr-summary/01-rename", "Rename\n\nMore text\n- load_config path\n- cli.py 3"),  # not one paragraph
+        ("pr-summary/01-rename", "Summary of load_config with a path in cli.py 3 places"),  # no bullets
+        ("ci-log-digest/01-pytest-fail", "\n".join(["line"] * 7)),
+        (
+            "ci-log-digest/01-pytest-fail",
+            "1 failed\n1 failed in the log\n1 failed\n1 failed\n1 failed\n1 failed\n1 failed",
+        ),
+        ("first-pass-review-comment/01-off-by-one", "a\nb\nc\nlast_n off-by-one"),
+        ("first-pass-review-comment/01-off-by-one", "This is off-by-one. It is in last_n though."),  # split sentences
+        ("doc-skeleton/01-install", "# Prerequisites\n# Install\n# Verify\n# Uninstall"),
+        (
+            "doc-skeleton/01-install",
+            "# Title\n## Prerequisites\nx y z\n## Install\n## Verify\nx y z\n## Uninstall\nx y z",
+        ),
+    ],
+)
+def test_structure_rules_bite(fid: str, out: str) -> None:
+    s = le.score_output(shipped()[fid], out)
+    assert not s.passed, s
+
+
+def test_ci_digest_may_not_quote_a_log_line() -> None:
+    f = shipped()["ci-log-digest/01-pytest-fail"]
+    quoted = (
+        "FAILED tests/test_billing.py::test_invoice_rounding - AssertionError: assert 10.05 == 10.04\n"
+        "That is test_billing.py and test_invoice_rounding, 1 failed, 10.05 and 10.04 differ."
+    )
+    s = le.score_output(f, quoted)
+    assert not s.passed and "structure" in s.reasons
+
+
+def gaming(kind: str, f: le.Fixture) -> str:
+    texts = [x.text for x in f.facts]
+    if kind == "echo":
+        return f.input
+    if kind == "facts":
+        return " ".join(texts)
+    return "\n".join(f"# {t}" for t in texts)
+
+
+@pytest.mark.parametrize("kind", ["echo", "facts", "headings"])
+def test_gaming_shims_pass_at_most_one_fixture_per_task(kind: str) -> None:
+    fixtures = le.load_fixtures(FIXTURES)
+    assert len(fixtures) >= 42
+    for task in le.TASKS:
+        mine = [f for f in fixtures if f.task == task]
+        assert len(mine) == 6, task
+        passed = [f.id for f in mine if le.score_output(f, gaming(kind, f)).passed]
+        assert len(passed) <= 1, (kind, task, passed)
+
+
+def test_gaming_guard_bites_on_a_loose_fixture() -> None:
+    # the shims do pass a fixture that has no structure, copy or facts-only rule: the test above is not vacuous
+    loose = fx(task="issue-triage", required_format="any", facts=(le.Fact("alpha"),), forbidden=())
+    assert le.score_output(loose, "alpha").passed
+
+
+def test_every_fixture_lists_two_wrong_outputs_and_none_passes() -> None:
+    fixtures = le.load_fixtures(FIXTURES)
+    assert len(fixtures) >= 42
+    for f in fixtures:
+        assert len(f.wrong) >= 2, f.id
+        for w in f.wrong:
+            s = le.score_output(f, w)
+            assert not s.passed, (f.id, w, s)
+
+
+@pytest.mark.parametrize(
+    ("fid", "wrong"),
+    [
+        ("first-pass-review-comment/03-unclosed-file", "read_cfg: variable name conflicts with a builtin, rename it."),
+        ("first-pass-review-comment/01-off-by-one", "last_n: typo in the docstring +1 line missing."),
+        (
+            "first-pass-review-comment/04-mutable-default",
+            "add_tag: the default value of tag is unclear, add a type hint.",
+        ),
+        ("first-pass-review-comment/06-wrong-compare", "is_adult: >= is faster than other operators in general."),
+        ("commit-message/01-fix", "fix: parse_date returns None for zebra dates\n\nSwitched the zebra handling."),
+        (
+            "ci-log-digest/03-noisy",
+            "build-linux died with exit 1370 after 4120 s of out of memory heartbeat noise.",
+        ),
+    ],
+)
+def test_reviewer_found_wrong_outputs_fail(fid: str, wrong: str) -> None:
+    assert not le.score_output(shipped()[fid], wrong).passed
+
+
+# ---- private result files (E3)
+
+
+def mode(p: Path) -> int:
+    return stat.S_IMODE(p.stat().st_mode)
+
+
+def test_cli_results_are_owner_only_even_with_a_022_umask_and_an_existing_0644_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "fixtures"
+    _write_fixture(root, "commit-message", "01", {**GOOD, "facts": ["alpha"]})
+    make_shim(tmp_path)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:/usr/bin:/bin")
+    out = tmp_path / "deep" / "out"
+    pre = tmp_path / "pre"
+    pre.mkdir(mode=0o755)
+    old = os.umask(0o022)
+    try:
+        (pre / "report.md").write_text("old", encoding="utf-8")
+        (pre / "report.md").chmod(0o644)
+        argv = ["run", "--models", "m", "--tasks", "all", "--repeats", "1", "--fixtures", str(root), "--calibrate", "1"]
+        assert le.entry([*argv, "--out", str(out)]) == 0
+        assert le.entry([*argv, "--out", str(pre)]) == 0
+        runs_in = out / "runs.jsonl"
+        assert (
+            le.entry(
+                ["report", "--runs", str(runs_in), "--out", str(tmp_path / "r1"), "--rescore", "--fixtures", str(root)]
+            )
+            == 0
+        )
+        assert le.entry(["calibrate", "--runs", str(runs_in), "--n", "1", "--out", str(tmp_path / "cal" / "c.md")]) == 0
+    finally:
+        os.umask(old)
+    assert mode(out) == 0o700 and mode(out.parent) == 0o700 and mode(tmp_path / "r1") == 0o700
+    for p in [*out.iterdir(), *(tmp_path / "r1").iterdir(), tmp_path / "cal" / "c.md", pre / "report.md"]:
+        assert mode(p) == 0o600, p
+    assert (pre / "report.md").read_text() != "old"
+    assert len(list(out.iterdir())) == 3 and len(list((tmp_path / "r1").iterdir())) == 2
+
+
+def test_results_never_follow_a_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "fixtures"
+    _write_fixture(root, "commit-message", "01", {**GOOD, "facts": ["alpha"]})
+    make_shim(tmp_path)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:/usr/bin:/bin")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "report.md").symlink_to(victim)
+    argv = ["run", "--models", "m", "--repeats", "1", "--fixtures", str(root)]
+    assert le.entry([*argv, "--out", str(out)]) == 2
+    assert victim.read_text() == "keep"
+    linkdir = tmp_path / "linkdir"
+    linkdir.symlink_to(tmp_path / "out")
+    assert le.entry([*argv, "--out", str(linkdir)]) == 2
+
+
+# ---- timestamps and time-of-day buckets (E4)
+
+
+def test_run_record_has_utc_timestamp_hour_and_busy_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_BUSY_N", "2")
+    exe = str(make_shim(tmp_path, "busy-n"))
+
+    def clock() -> datetime:
+        return datetime(2026, 11, 26, 14, 3, 9, tzinfo=UTC)
+
+    r = le.run_one(fx(), "m", exe=exe, call_log=call_log(tmp_path), sleep=lambda _s: None, clock=clock)
+    assert r["ts"] == "2026-11-26T14:03:09Z" and r["hour_utc"] == 14 and r["busy_retries"] == 2
+    (tmp_path / "x").mkdir()
+    ok = le.run_one(fx(), "m", exe=str(make_shim(tmp_path / "x")), call_log=call_log(tmp_path), clock=clock)
+    assert ok["busy_retries"] == 0
+
+
+def test_time_bucket_table_shows_n_and_refuses_small_samples() -> None:
+    runs = [rec("pr-summary", "m", lat=2.0, passed=i % 2 == 0) | {"hour_utc": 9, "busy_retries": 1} for i in range(10)]
+    runs += [rec("pr-summary", "m") | {"hour_utc": 13, "ts": "2026-11-26T13:00:00Z"} for _ in range(3)]
+    runs += [rec("pr-summary", "m")]  # a legacy row: no ts, no hour
+    text = le.render_report(runs)
+    assert "## TIME OF DAY (UTC, 4-hour buckets)" in text
+    assert "| m | 08-12 UTC | 10 | 0.50 | 2.0 | 10 |" in text
+    assert "| m | 12-16 UTC | 3 | too few | too few | 0 |" in text
+    assert "| m | unknown | 1 | too few | too few | 0 |" in text
+
+
+def test_hour_is_derived_from_ts_when_missing() -> None:
+    r = rec("pr-summary", "m") | {"ts": "2026-11-26T23:59:59Z"}
+    assert le.hour_of(r) == 23 and le.hour_of(rec("pr-summary", "m")) is None
+
+
+def test_rescore_of_legacy_rows_without_ts_still_works(tmp_path: Path) -> None:
+    root = tmp_path / "fx"
+    _write_fixture(root, "issue-triage", "01", {"task": "issue-triage", "input": "i", "facts": ["x"], "max_chars": 100})
+    old = rec("issue-triage", "m") | {"fixture": "issue-triage/01", "output": "x marks"}
+    runs_in = tmp_path / "runs.jsonl"
+    runs_in.write_text(json.dumps(old) + "\n", encoding="utf-8")
+    assert (
+        le.entry(["report", "--runs", str(runs_in), "--out", str(tmp_path / "o"), "--rescore", "--fixtures", str(root)])
+        == 0
+    )
+    assert "| m | unknown | 1 |" in (tmp_path / "o" / "report-rescored.md").read_text()

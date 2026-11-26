@@ -4,7 +4,12 @@
   "facts": [
     "utils/strings.py",
     "utils/paths.py",
-    "12",
+    {
+      "text": "12",
+      "variants": [
+        "\\btwelve\\b"
+      ]
+    },
     "no behavior change"
   ],
   "forbidden": [
@@ -12,5 +17,9 @@
     "new feature"
   ],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Split utils.py into smaller modules.\n- new feature: utils/strings.py and utils/paths.py\n- imports updated in 21 files",
+    "Refactor of the utils module.\n- split the big module into smaller ones\n- imports were updated everywhere"
+  ]
 }

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import re
 import statistics
@@ -24,8 +25,9 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 TASKS: tuple[str, ...] = (
     "issue-draft",
@@ -60,6 +62,13 @@ CHECK_MIN = 0.6  # at or above this but below LOCAL_MIN: local draft, Claude che
 MODEL_TIER = {"qwen3.5:4b": "local-qwen", "gemma4:12b": "local-gemma"}
 DEFAULT_CALL_LOG = Path.home() / ".local/share/llm-local/calls.jsonl"
 BUSY_EXIT = 75
+COPY_CAP_DEFAULT = 0.5  # share of the output that may be copied from the input (lines or 8-word shingles)
+COPY_CAP: dict[str, float] = {"issue-triage": 1.0}  # JSON answers restate labels from the input by design
+FACTS_ONLY_MIN = 0.3  # at least this share of the tokens must be words that are not fact tokens
+FACTS_ONLY_EXEMPT = frozenset({"issue-triage"})
+SHINGLE = 8
+MIN_BUCKET_RUNS = 10
+BUCKET_HOURS = 4
 FIXTURES_DEFAULT = Path(__file__).resolve().parents[2] / "eval" / "fixtures"
 
 
@@ -82,6 +91,7 @@ class Fixture:
     forbidden: tuple[str, ...]
     max_chars: int
     required_format: str  # any | json | json-object | regex:<pattern>
+    wrong: tuple[str, ...] = ()  # known-wrong outputs: a guard test asserts none of them passes
 
 
 @dataclass
@@ -93,6 +103,10 @@ class Score:
     length_ok: bool
     passed: bool = field(default=False)
     fenced: bool = False  # one outer code fence was stripped before the json check
+    structure_ok: bool = True
+    copy_ratio: float = 0.0
+    facts_only: bool = False
+    reasons: list[str] = field(default_factory=list)  # why a run failed: recall forbidden format length structure copy
 
 
 def load_fixture(path: Path) -> Fixture:
@@ -110,6 +124,7 @@ def load_fixture(path: Path) -> Fixture:
             forbidden=tuple(str(x) for x in raw.get("forbidden", [])),
             max_chars=int(raw["max_chars"]),
             required_format=str(raw.get("required_format", "any")),
+            wrong=tuple(str(x) for x in raw.get("wrong", [])),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise EvalError(f"bad fixture {path.name}: {exc}") from exc
@@ -135,7 +150,13 @@ def load_fixtures(root: Path, tasks: Sequence[str] | None = None) -> list[Fixtur
 
 
 def _fact_matches(fact: Fact, output: str) -> bool:
-    if fact.text.lower() in output.lower():
+    """The fact text counts on word boundaries (60 is not in 600, Install is not in Uninstall); a text of two
+    characters or fewer is also case-sensitive (Z is not in zebra). Variants are regexes written by the fixture."""
+    text = fact.text
+    pattern = (r"(?<!\w)" if text[:1].isalnum() or text[:1] == "_" else "") + re.escape(text)
+    pattern += r"(?!\w)" if text[-1:].isalnum() or text[-1:] == "_" else ""
+    flags = 0 if len(text) <= 2 else re.IGNORECASE
+    if re.search(pattern, output, flags):
         return True
     return any(re.search(v, output, re.IGNORECASE) for v in fact.variants)
 
@@ -173,14 +194,140 @@ def _format_ok(spec: str, output: str) -> tuple[bool, bool]:
     raise EvalError(f"unknown required_format {spec!r}")
 
 
+_BULLET = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.*?)\s*#*\s*$")
+_WORD = re.compile(r"[a-z0-9_]+")
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _norm(line: str) -> str:
+    return " ".join(_BULLET.sub("", line).lower().split())
+
+
+def _nonblank(output: str) -> list[str]:
+    return [ln for ln in output.splitlines() if ln.strip()]
+
+
+def _words(text: str) -> list[str]:
+    return _WORD.findall(text.lower())
+
+
+def copy_ratio(source: str, output: str) -> float:
+    """Share of the output copied from the input: the larger of (a) the share of output lines of 4 or more words that
+    appear verbatim in the input and (b) the share of the output's 8-word shingles that are also input shingles."""
+    flat = _norm(source)
+    lines = [_norm(ln) for ln in _nonblank(output)]
+    lines = [ln for ln in lines if len(ln.split()) >= 4]
+    by_line = sum(1 for ln in lines if ln in flat) / len(lines) if lines else 0.0
+    out_w, in_w = _words(output), _words(source)
+    out_sh = [tuple(out_w[i : i + SHINGLE]) for i in range(len(out_w) - SHINGLE + 1)]
+    in_sh = {tuple(in_w[i : i + SHINGLE]) for i in range(len(in_w) - SHINGLE + 1)}
+    by_shingle = sum(1 for sh in out_sh if sh in in_sh) / len(out_sh) if out_sh else 0.0
+    return max(by_line, by_shingle)
+
+
+def facts_only(fixture: Fixture, output: str) -> bool:
+    """True when the output is little more than the facts strung together: fewer than 30 percent of its tokens are
+    words that are not fact tokens (the connecting words a real answer needs)."""
+    fact_tokens = {t for f in fixture.facts for t in _words(f.text)}
+    tokens = _words(output)
+    if not tokens:
+        return True
+    return sum(1 for t in tokens if t not in fact_tokens) / len(tokens) < FACTS_ONLY_MIN
+
+
+def _title_ok(line: str) -> bool:
+    title = re.sub(r"^[#*\s]+", "", line).strip()
+    title = re.sub(r"^title:\s*", "", title, flags=re.IGNORECASE).rstrip("* ").strip()
+    return 0 < len(title) <= 80
+
+
+def _structure_ok(fixture: Fixture, output: str) -> bool:
+    """Per-task required shape: whatever INSTRUCTIONS asks for that code can check."""
+    task = fixture.task
+    lines = _nonblank(output)
+    if task == "issue-draft":  # a title of at most 80 characters, then at least two bullets or sentences
+        units = sum(
+            1 if _BULLET.match(ln) else len([x for x in _SENTENCE.split(ln) if len(x.split()) >= 3]) for ln in lines[1:]
+        )
+        return len(lines) >= 2 and _title_ok(lines[0]) and units >= 2
+    if task == "pr-summary":  # one summary paragraph, then at least two bullets
+        raw = output.strip("\n").splitlines()
+        first = next((i for i, ln in enumerate(raw) if _BULLET.match(ln)), None)
+        if first is None or sum(1 for ln in raw if _BULLET.match(ln)) < 2:
+            return False
+        head = "\n".join(raw[:first]).strip().splitlines()  # a blank line before the bullets is normal
+        return bool(head) and all(ln.strip() for ln in head)
+    if task == "ci-log-digest":  # at most six lines, and no log line copied
+        flat = _norm(fixture.input)
+        quoted = any(len(_norm(ln).split()) >= 4 and _norm(ln) in flat for ln in lines)
+        return len(lines) <= 6 and not quoted
+    if task == "first-pass-review-comment":  # at most 3 lines; a sentence names the function and the defect class
+        if len(lines) > 3:
+            return False
+        subject, defect = fixture.facts[0], fixture.facts[1:]
+        sentences = [x for x in re.split(r"(?<=[.!?])\s+|\n", output) if len(x.split()) >= 5]
+        # the function and the defect class must sit in one sentence, or in two sentences next to each other
+        windows = [" ".join(sentences[i : i + 2]) for i in range(len(sentences))]
+        return any(_fact_matches(subject, w) and any(_fact_matches(d, w) for d in defect) for w in windows)
+    if task == "doc-skeleton":  # a title heading, then each named section as a heading with a placeholder line
+        heads = [_HEADING.match(ln) for ln in lines]
+        names = {f.text.lower() for f in fixture.facts}
+
+        def clean(m: re.Match[str]) -> str:
+            return re.sub(r"^\d+[.)]\s*", "", m.group("text")).rstrip(":. ").lower()
+
+        first_head = heads[0] if heads else None
+        if first_head is None or clean(first_head) in names:
+            return False
+        for name in names:
+            idx = next((i for i, m in enumerate(heads) if m is not None and clean(m) == name), None)
+            if idx is None or idx + 1 >= len(lines) or heads[idx + 1] is not None:
+                return False
+        return True
+    return True
+
+
 def score_output(fixture: Fixture, output: str) -> Score:
     missed = [f.text for f in fixture.facts if not _fact_matches(f, output)]
     recall = 1.0 - len(missed) / len(fixture.facts)
     hits = [p for p in fixture.forbidden if re.search(p, output, re.IGNORECASE)]
     fmt, fenced = _format_ok(fixture.required_format, output)
     length = len(output) <= fixture.max_chars
-    passed = recall >= PASS_RECALL and not hits and fmt and length
-    return Score(recall, missed, hits, fmt, length, passed, fenced)
+    structure = _structure_ok(fixture, output)
+    ratio = copy_ratio(fixture.input, output)
+    copied = ratio > COPY_CAP.get(fixture.task, COPY_CAP_DEFAULT)
+    bare = fixture.task not in FACTS_ONLY_EXEMPT and facts_only(fixture, output)
+    reasons = [
+        name
+        for name, bad in (
+            ("recall", recall < PASS_RECALL),
+            ("forbidden", bool(hits)),
+            ("format", not fmt),
+            ("length", not length),
+            ("structure", not structure),
+            ("copy", copied),
+            ("facts-only", bare),
+        )
+        if bad
+    ]
+    return Score(recall, missed, hits, fmt, length, not reasons, fenced, structure, ratio, bare, reasons)
+
+
+def score_dict(sc: Score) -> dict[str, Any]:
+    return {
+        "recall": sc.recall,
+        "facts_missed": sc.facts_missed,
+        "forbidden_hits": sc.forbidden_hits,
+        "format_ok": sc.format_ok,
+        "length_ok": sc.length_ok,
+        "passed": sc.passed,
+        "fenced": sc.fenced,
+        "structure_ok": sc.structure_ok,
+        "copy_ratio": round(sc.copy_ratio, 3),
+        "facts_only": sc.facts_only,
+        "reasons": sc.reasons,
+    }
 
 
 def build_prompt(fixture: Fixture) -> str:
@@ -223,13 +370,18 @@ def run_one(
     call_log: Path = DEFAULT_CALL_LOG,
     sleep: Callable[[float], None] = time.sleep,
     exe: str = "llm-local",
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, Any]:
     """One bounded llm-local call. Returns a run record with status ok|busy|failed."""
     argv = [exe, "--task", f"eval-{fixture.task}", "--model", model, "--wait", str(wait), "--envelope"]
     argv.append(build_prompt(fixture))
     record: dict[str, Any] = {"fixture": fixture.id, "task": fixture.task, "model": model, "status": "failed"}
+    started_at = clock()
+    record["ts"] = started_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    record["hour_utc"] = started_at.hour
     started = time.monotonic()
     attempts = 0
+    busy_seen = 0
     while True:
         attempts += 1
         try:
@@ -238,6 +390,7 @@ def run_one(
             record["error"] = f"{type(exc).__name__}: {exc}"[:300]
             break
         if proc.returncode == BUSY_EXIT:
+            busy_seen += 1
             if attempts > retries:
                 record["status"] = "busy"
                 break
@@ -257,19 +410,49 @@ def run_one(
         record["call_id"] = str(env.get("call_id", ""))
         record["eval_tokens"], record["call_seconds"] = _call_stats(call_log, record["call_id"])
         score = score_output(fixture, response)
-        record["score"] = {
-            "recall": score.recall,
-            "facts_missed": score.facts_missed,
-            "forbidden_hits": score.forbidden_hits,
-            "format_ok": score.format_ok,
-            "length_ok": score.length_ok,
-            "passed": score.passed,
-            "fenced": score.fenced,
-        }
+        record["score"] = score_dict(score)
         break
     record["attempts"] = attempts
+    record["busy_retries"] = busy_seen
     record["latency_s"] = round(time.monotonic() - started, 3)
     return record
+
+
+def _private_dir(path: Path) -> None:
+    """Create a missing directory (and missing parents) with mode 0700; never through a symlink. An existing
+    directory is left as it is: the files in it are private either way."""
+    if path.is_symlink():
+        raise EvalError(f"refusing to use a symlink as an output directory: {path}")
+    if path.is_dir():
+        return
+    if path.exists():
+        raise EvalError(f"output path is not a directory: {path}")
+    _private_dir(path.parent)
+    try:
+        os.mkdir(path, 0o700)
+        os.chmod(path, 0o700)  # the umask may have narrowed the mode, never widened it; make it exact
+    except OSError as exc:
+        raise EvalError(f"cannot create {path}: {exc.strerror}") from exc
+
+
+def _open_private(path: Path) -> IO[str]:
+    """Open a result file for writing with mode 0600, truncating, never following a symlink; an existing file is
+    chmodded to 0600 too."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise EvalError(f"cannot write {path}: {exc.strerror}") from exc
+    try:
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "w", encoding="utf-8")
+    except OSError as exc:
+        os.close(fd)
+        raise EvalError(f"cannot write {path}: {exc.strerror}") from exc
+
+
+def _write_private(path: Path, text: str) -> None:
+    with _open_private(path) as fh:
+        fh.write(text)
 
 
 def wilson(passed: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -333,6 +516,57 @@ def _fmt(value: float | None, spec: str = ".2f") -> str:
     return "n/a" if value is None else format(value, spec)
 
 
+def hour_of(run: dict[str, Any]) -> int | None:
+    """UTC hour a run started in: from hour_utc, else from ts; None for rows recorded before timestamps existed."""
+    hour = run.get("hour_utc")
+    if isinstance(hour, int) and 0 <= hour <= 23:
+        return hour
+    ts = run.get("ts")
+    if isinstance(ts, str):
+        try:
+            return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").hour
+        except ValueError:
+            return None
+    return None
+
+
+def _bucket(hour: int | None) -> str:
+    if hour is None:
+        return "unknown"
+    lo = hour // BUCKET_HOURS * BUCKET_HOURS
+    return f"{lo:02d}-{lo + BUCKET_HOURS:02d} UTC"
+
+
+def render_time_buckets(runs: Sequence[dict[str, Any]]) -> list[str]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for r in runs:
+        groups[(r["model"], _bucket(hour_of(r)))].append(r)
+    lines = [
+        "",
+        "## TIME OF DAY (UTC, 4-hour buckets)",
+        "",
+        f"Per model, all tasks together. A bucket with fewer than {MIN_BUCKET_RUNS} scored runs says too few and "
+        "shows no rate: no conclusion about when the server performs best may be drawn from it. Busy retries is the "
+        "number of exit-75 answers from llm-local seen in the bucket (queue evidence); rows recorded before "
+        "timestamps existed sit in unknown.",
+        "",
+        "| model | bucket | n | pass rate | median latency s | busy retries |",
+        "|---|---|---|---|---|---|",
+    ]
+    for model, label in sorted(groups, key=lambda k: (k[0], k[1] == "unknown", k[1])):
+        rs = groups[(model, label)]
+        ok = [r for r in rs if r["status"] == "ok"]
+        scored = len(ok) + sum(1 for r in rs if r["status"] == "failed")
+        retries = sum(int(r.get("busy_retries", 0)) for r in rs)
+        if scored < MIN_BUCKET_RUNS:
+            rate, lat = "too few", "too few"
+        else:
+            rate = _fmt(sum(1 for r in ok if r["score"]["passed"]) / scored)
+            lat = _fmt(statistics.median(r["latency_s"] for r in ok), ".1f") if ok else "n/a"
+        lines.append(f"| {model} | {label} | {scored} | {rate} | {lat} | {retries} |")
+    return lines
+
+
 def render_report(runs: Sequence[dict[str, Any]]) -> str:
     stats = summarize(runs)
     tasks = [t for t in TASKS if any(k[0] == t for k in stats)]
@@ -374,6 +608,7 @@ def render_report(runs: Sequence[dict[str, Any]]) -> str:
     for t in tasks:
         tier, why = tier_for({m: s for (tt, m), s in stats.items() if tt == t})
         lines.append(f"| {t} | {tier} | {why} |")
+    lines += render_time_buckets(runs)
     return "\n".join(lines) + "\n"
 
 
@@ -414,15 +649,7 @@ def rescore(runs: Sequence[dict[str, Any]], fixtures: Sequence[Fixture]) -> list
             if fx is None:
                 raise EvalError(f"no fixture for {r['fixture']}")
             sc = score_output(fx, r["output"])
-            new["score"] = {
-                "recall": sc.recall,
-                "facts_missed": sc.facts_missed,
-                "forbidden_hits": sc.forbidden_hits,
-                "format_ok": sc.format_ok,
-                "length_ok": sc.length_ok,
-                "passed": sc.passed,
-                "fenced": sc.fenced,
-            }
+            new["score"] = score_dict(sc)
         out.append(new)
     return out
 
@@ -432,8 +659,8 @@ def run_all(
 ) -> list[dict[str, Any]]:
     """Strictly one call at a time. Each record is appended to the JSONL as it finishes."""
     runs: list[dict[str, Any]] = []
-    runs_path.parent.mkdir(parents=True, exist_ok=True)
-    with runs_path.open("w", encoding="utf-8") as fh:
+    _private_dir(runs_path.parent)
+    with _open_private(runs_path) as fh:
         for rep in range(1, repeats + 1):
             for model in models:
                 for fx in fixtures:
@@ -474,26 +701,24 @@ def entry(argv: Sequence[str] | None = None) -> int:
                 raise EvalError(f"unknown task {bad} or repeats < 1")
             fixtures = load_fixtures(args.fixtures, tasks)
             models = [m.strip() for m in args.models.split(",") if m.strip()]
-            args.out.mkdir(parents=True, exist_ok=True)
+            _private_dir(args.out)
             runs = run_all(fixtures, models, args.repeats, args.out / "runs.jsonl", wait=args.wait)
-            (args.out / "report.md").write_text(render_report(runs), encoding="utf-8")
+            _write_private(args.out / "report.md", render_report(runs))
             if args.calibrate:
-                (args.out / "calibration.md").write_text(calibration_sample(runs, args.calibrate), encoding="utf-8")
+                _write_private(args.out / "calibration.md", calibration_sample(runs, args.calibrate))
             print(f"{len(runs)} runs; report at {args.out / 'report.md'}")
         elif args.cmd == "report":
-            args.out.mkdir(parents=True, exist_ok=True)
+            _private_dir(args.out)
             runs = _read_runs(args.runs)
             if args.rescore:
                 runs = rescore(runs, load_fixtures(args.fixtures))
-                (args.out / "runs-rescored.jsonl").write_text(
-                    "".join(json.dumps(r) + "\n" for r in runs), encoding="utf-8"
-                )
-                (args.out / "report-rescored.md").write_text(render_report(runs), encoding="utf-8")
+                _write_private(args.out / "runs-rescored.jsonl", "".join(json.dumps(r) + "\n" for r in runs))
+                _write_private(args.out / "report-rescored.md", render_report(runs))
             else:
-                (args.out / "report.md").write_text(render_report(runs), encoding="utf-8")
+                _write_private(args.out / "report.md", render_report(runs))
         else:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(calibration_sample(_read_runs(args.runs), args.n), encoding="utf-8")
+            _private_dir(args.out.parent)
+            _write_private(args.out, calibration_sample(_read_runs(args.runs), args.n))
     except EvalError as exc:
         print(f"safo-eval: {exc}", file=sys.stderr)
         return 2

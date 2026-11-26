@@ -12,5 +12,9 @@
     "build-windows"
   ],
   "max_chars": 700,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "build-windows died with exit 1370 after 4120 s, the log is mostly heartbeat lines from the workers.",
+    "The log only shows heartbeat messages from the workers and nothing failed."
+  ]
 }

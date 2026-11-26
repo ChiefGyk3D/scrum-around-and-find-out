@@ -5,7 +5,12 @@
     "120",
     "340",
     "limiter.py",
-    "partner"
+    {
+      "text": "partner",
+      "variants": [
+        "\\bpartners?\\b"
+      ]
+    }
   ],
   "forbidden": [
     "\\b430\\b",
@@ -13,5 +18,9 @@
     "all tiers"
   ],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Rate limit change in limiter.py.\n- raised the limit from 120 to 430 requests per minute\n- applies to all tiers",
+    "Rate limiting update for one tier.\n- raised the rate limit a lot\n- only the partner tier is affected"
+  ]
 }

@@ -9,8 +9,12 @@
   ],
   "forbidden": [
     "\\b59 passed",
-    "3 failed"
+    "\\b3 failed"
   ],
   "max_chars": 700,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "3 failed, 59 passed: test_token_expiry and test_refresh both need the fake IdP.",
+    "Two auth tests failed because of a missing key and a network error in the suite."
+  ]
 }

@@ -4,12 +4,26 @@
   "facts": [
     "MAX_RETRIES",
     "worker.py",
-    "5",
-    "3"
+    {
+      "text": "5",
+      "variants": [
+        "\\bfive\\b"
+      ]
+    },
+    {
+      "text": "3",
+      "variants": [
+        "\\bthree\\b"
+      ]
+    }
   ],
   "forbidden": [
     "MAX_RETRIES\\s*=\\s*(?!5)\\d"
   ],
   "max_chars": 1500,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Title: Raise worker retries\n- MAX_RETRIES = 4 in worker.py, was 3\n- the upstream API drops calls",
+    "Title: Roadmap follow-up\n- the roadmap wording was discussed\n- nothing was decided, owner to follow up"
+  ]
 }

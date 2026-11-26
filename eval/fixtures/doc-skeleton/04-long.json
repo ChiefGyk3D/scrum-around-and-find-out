@@ -8,5 +8,9 @@
   ],
   "forbidden": [],
   "max_chars": 1800,
-  "required_format": "regex:(?m)^#{1,3} \\S"
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Guide\n## Keys\nOne line about keys goes here.\n## Examples\nOne line about examples goes here.",
+    "# Overview\n# Keys\n# Examples"
+  ]
 }

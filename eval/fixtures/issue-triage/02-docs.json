@@ -20,5 +20,9 @@
     "\"epic\"\\s*:\\s*\"(?!E3-docs-site\")"
   ],
   "max_chars": 200,
-  "required_format": "json-object"
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"bug\", \"epic\": \"E3-docs-site\"}",
+    "{\"label\": \"docs\", \"epic\": \"E1-auth\"}"
+  ]
 }

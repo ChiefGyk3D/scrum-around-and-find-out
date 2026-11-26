@@ -5,12 +5,21 @@
     "37",
     "1204",
     "export_csv",
-    "region"
+    {
+      "text": "region",
+      "variants": [
+        "\\bregions?\\b"
+      ]
+    }
   ],
   "forbidden": [
     "\\b1240\\b",
     "\\b73\\b"
   ],
   "max_chars": 1500,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Title: Export drops rows\n- 73 rows lost out of 1240 in the March file\n- export_csv in reports/export.py when region is empty",
+    "Title: CSV export problem\n- some rows go missing in the export\n- no error is shown to the user"
+  ]
 }

@@ -4,12 +4,21 @@
   "facts": [
     "README",
     "Troubleshooting",
-    "4",
+    {
+      "text": "4",
+      "variants": [
+        "\\bfour\\b"
+      ]
+    },
     "no code"
   ],
   "forbidden": [
     "tests? (added|updated)"
   ],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Docs update for the README and the install page.\n- adds 40 troubleshooting entries\n- tests added for the links",
+    "Documentation changes only.\n- fixes a link in the install guide\n- adds a new section to the guide"
+  ]
 }

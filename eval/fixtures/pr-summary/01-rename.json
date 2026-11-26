@@ -3,14 +3,28 @@
   "input": "diff --git a/src/app/cfg.py b/src/app/cfg.py\n-def load():\n+def load_config(path):\n-    return yaml.safe_load(open('c.yml'))\n+    with open(path) as fh:\n+        return yaml.safe_load(fh)\nAlso updated 3 call sites in cli.py.",
   "facts": [
     "load_config",
-    "path",
+    {
+      "text": "path",
+      "variants": [
+        "\\bpaths?\\b"
+      ]
+    },
     "cli.py",
-    "3"
+    {
+      "text": "3",
+      "variants": [
+        "\\bthree\\b"
+      ]
+    }
   ],
   "forbidden": [
     "yaml\\.load\\(",
-    "json"
+    "\\bjson\\b"
   ],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Rename load to load_config\n- takes a path argument now\n- updated 8 call sites in cli.py\n- uses json instead of yaml",
+    "Config loader cleanup\n- reads the file with yaml.load( and no context manager\n- updated the call sites"
+  ]
 }

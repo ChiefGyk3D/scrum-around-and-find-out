@@ -6,13 +6,19 @@
     {
       "text": "mutable default",
       "variants": [
-        "mutable",
-        "shared (between|across)",
-        "default (argument|arg|value)"
+        "\\bmutable (default|list|argument|arg|value|object)",
+        "shared (state|between|across)",
+        "same list (is|gets|across|between)",
+        "default (list|argument|arg|value).{0,40}(shared|persists?|reused|mutated|accumulates?)",
+        "\\[\\] (as|in) (a |the )?default"
       ]
     }
   ],
   "forbidden": [],
   "max_chars": 900,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "add_tag: the default value of tag is unclear, add a type hint.",
+    "add_tag: tags.append returns None, return the list explicitly."
+  ]
 }

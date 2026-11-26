@@ -3,12 +3,21 @@
   "input": "Change: added tests/test_retry.py with 4 cases for the retry decorator. No source changes.",
   "facts": [
     "test_retry.py",
-    "retry"
+    {
+      "text": "retry",
+      "variants": [
+        "\\bretr(y|ies)\\b"
+      ]
+    }
   ],
   "forbidden": [
     "\\bfix:",
     "\\bfeat:"
   ],
   "max_chars": 600,
-  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)"
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
+  "wrong": [
+    "feat: add retry tests\n\nAdds tests/test_retry.py with four cases.",
+    "fix: add tests for the retry decorator\n\nFour cases were added."
+  ]
 }

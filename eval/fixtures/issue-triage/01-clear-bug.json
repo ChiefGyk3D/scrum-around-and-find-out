@@ -20,5 +20,9 @@
     "\"epic\"\\s*:\\s*\"(?!E1-auth\")"
   ],
   "max_chars": 200,
-  "required_format": "json-object"
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"security\", \"epic\": \"E1-auth\"}",
+    "{\"label\": \"bug\", \"epic\": \"E4-ci\"}"
+  ]
 }

@@ -5,12 +5,21 @@
     "util.py",
     "F841",
     "E501",
-    "2"
+    {
+      "text": "2",
+      "variants": [
+        "\\btwo\\b"
+      ]
+    }
   ],
   "forbidden": [
     "\\b3 errors",
-    "F401"
+    "\\bF401\\b"
   ],
   "max_chars": 700,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Lint found 3 errors in util.py: F401 unused import and E501 line length.",
+    "ruff reported problems in the source tree; fix the style issues and push again."
+  ]
 }

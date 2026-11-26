@@ -11,5 +11,9 @@
     "404"
   ],
   "max_chars": 1500,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "Title: Warmup job and README link\n- cache warmup runs twice wasting 40 seconds\n- the style guide link is a 404",
+    "Title: Slow deploys\n- deploys take a long time\n- something runs more than once"
+  ]
 }

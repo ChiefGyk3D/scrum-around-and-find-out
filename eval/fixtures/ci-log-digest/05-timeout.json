@@ -5,12 +5,21 @@
     "deploy-stage",
     "503",
     "900",
-    "health"
+    {
+      "text": "health",
+      "variants": [
+        "\\bhealth\\w*"
+      ]
+    }
   ],
   "forbidden": [
     "\\b509\\b",
     "\\b90 s\\b"
   ],
   "max_chars": 700,
-  "required_format": "any"
+  "required_format": "any",
+  "wrong": [
+    "deploy-stage timed out after 90 s because the health check kept returning 509.",
+    "The deploy failed because the stage server was down and never answered."
+  ]
 }
