@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import itertools
 import json
 import re
 import stat
@@ -1212,6 +1213,48 @@ def test_r5_new_scans_are_linear() -> None:
         start = time.process_time()
         localdraft.check_text("comment", text)
         assert time.process_time() - start < 2.0, text[:6]
+
+
+_IPV6_MIXES = [":", "::", ":a", "1:", "a::", "a:", "1::", ":::a", ":.", "ab:cd::", "f:e::", "a:b:c:d:e:f:1:"]
+
+
+def _cpu_time(fn: Any, text: str) -> float:
+    import time
+
+    best = float("inf")
+    for _ in range(2):  # the faster of two runs, so one scheduling hiccup cannot fail it
+        start = time.process_time()
+        fn(text)
+        best = min(best, time.process_time() - start)
+    return best
+
+
+def _assert_scales(fn: Any, unit: str) -> None:
+    """CPU time at 5000, 10000 and 20000 characters: each doubling at most triples it, and 20000 stays under 1 s."""
+    times = []
+    for size in (5000, 10000, 20000):
+        text = (unit * (size // len(unit) + 1))[:size]
+        times.append(_cpu_time(fn, text))
+    for small, big in itertools.pairwise(times):
+        # a 0.03 s floor keeps timer noise on millisecond runs from deciding the ratio
+        assert big <= 3 * max(small, 0.03), (unit, times)
+    assert times[-1] < 1.0, (unit, times)
+
+
+@pytest.mark.parametrize("unit", _IPV6_MIXES)
+def test_r6_ipv6_scan_scales_linearly(unit: str) -> None:
+    _within_deadline(30, lambda: _assert_scales(lambda t: localdraft.check_text("comment", t), unit))
+
+
+def test_r6_scaling_guard_bites() -> None:
+    def quadratic(text: str) -> None:
+        total = 0
+        for i in range(len(text)):
+            total += text.count(":", 0, i) * 0 + sum(1 for _ in text[i:])  # O(n^2) work
+        assert total >= 0
+
+    with pytest.raises(AssertionError):
+        _assert_scales(quadratic, ":")
 
 
 # round 5, R3: IPv6 scope-likeness is decided per candidate

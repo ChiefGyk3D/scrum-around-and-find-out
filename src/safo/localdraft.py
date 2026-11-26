@@ -32,6 +32,7 @@ import collections
 import dataclasses
 import datetime as dt
 import ipaddress
+import itertools
 import json
 import os
 import re
@@ -736,6 +737,7 @@ def _has_session_url(text: str) -> bool:
 
 _HEXTET = frozenset("0123456789abcdefABCDEF")
 _MAX_IPV6_CHARS = 46  # the longest valid IPv6 text (with an embedded IPv4) is 45 characters
+_MAX_IPV6_COLONS = 8  # `1:2:3:4:5:6:7::` and `::2:3:4:5:6:7:8` hold 8, the most any valid address has
 
 
 def _is_scope(text: str, begin: int, head: str) -> bool:
@@ -784,7 +786,10 @@ def _has_ipv6(text: str) -> bool:
         end = len(run.rstrip(".:"))
         doubles = [i for i in range(len(run) - 1) if run[i] == ":" and run[i + 1] == ":"]
         starts = [lead] + [i + 1 for i, ch in enumerate(run) if ch == ":" and i + 1 >= lead]
+        colons = [0, *itertools.accumulate(ch == ":" for ch in run)]  # colons[i]: colons in run[:i]
         for start in starts:
+            if run.startswith(":::", start):
+                continue  # no address starts with three colons, and a long colon run would repeat this work per colon
             cands = []
             if end - start <= _MAX_IPV6_CHARS:
                 cands.append(run[start:end])
@@ -793,7 +798,7 @@ def _has_ipv6(text: str) -> bool:
             first = bisect.bisect_left(doubles, start)
             for k in range(first, len(doubles)):
                 p = doubles[k]
-                if p + 2 - start > _MAX_IPV6_CHARS:
+                if p + 2 - start > _MAX_IPV6_CHARS or colons[p + 2] - colons[start] > _MAX_IPV6_COLONS:
                     break
                 cands.append(run[start : p + 2])  # the prefix up to and including this `::`
                 nxt = doubles[k + 1] if k + 1 < len(doubles) else len(run)
