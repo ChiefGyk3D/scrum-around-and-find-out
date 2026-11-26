@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import NamedTuple
 
-from safo import shellproof
+from safo import shellproof, shellunits
 from safo.gemini import (
     JOB_CAP,
     RECORD_ID,
@@ -1241,16 +1241,133 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
         found = _classify(command, tick, soft=True)
         if found is None or _classify(command, tick, soft=False) is not None:
             return found
-        parsed = shellproof.parse(command, tick)
-        if parsed is None:
-            return found  # a form the proof does not model
-        if parsed.pure():
+        parsed = shellproof.parse(command, tick)  # None: a form the proof does not model, so it proves nothing
+        if parsed is not None and parsed.pure():
             return None
-        if parsed.writes_no_file() and _classify(parsed.without_comments(), tick, soft=True) is None:
-            return None  # the names sit only in comments, which no shell runs, and no file is written
+        if found in (SHELL_BUILT, SHELL_TOOL) and _simple_line(command) and _shellunits_clears(command, tick):
+            return None  # the old words-anywhere answer only narrows: one simple command, no real invocation of a tool
+        if parsed is not None and parsed.writes_no_file():
+            # the names sit only in comments, which no shell runs: relaxed only when what is left is one simple command
+            stripped = parsed.without_comments()
+            if _simple_line(stripped) and _classify(stripped, tick, soft=True) is None:
+                return None
         return found
     except TimeoutError:
         return SHELL_UNVERIFIED
+
+
+_NOT_SIMPLE_CHARS = frozenset(";&|()`")
+# A first word that changes how the rest of the line runs: a reserved word or compound opener, or a command that runs
+# another command. Such a line is never one simple command, so it is never narrowed.
+_SHADOW_WORDS = frozenset(
+    {
+        "!", "time", "{", "}", "[[", "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case",
+        "esac", "select", "function", "coproc", "command", "builtin", "exec", "eval", "nohup", "sudo", "env", "xargs",
+        "nice", "timeout", "stdbuf", "setsid",
+    }
+)  # fmt: skip
+
+
+def _command_word(text: str) -> str | None:
+    """The command word of the line: the first word that is neither a redirection nor a plain assignment, in any order
+    before it, with quotes and backslashes removed. "" when the line has no command word. None when the line is
+    ambiguous (a malformed redirection, an assignment or a command word that holds a redirection operator, or a
+    quoted or expanded assignment value): the caller then treats the line as not simple."""
+    redirection = re.compile(r"(?:\{[A-Za-z_][A-Za-z0-9_]*\}|\d+)?(?:&>>|&>|>>|>\||<>|>&|<&|<<<|<<-|<<|>|<)")
+    assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+    words = text.split()
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if assignment.match(word):
+            if any(c in word for c in "<>'\"\\$`{}()*?[]"):
+                return None
+            i += 1
+            continue
+        match = redirection.match(word)
+        if match is not None:
+            if match.end() == len(word):  # the operator stands alone: its target is the next word
+                if i + 1 >= len(words):
+                    return None
+                i += 2
+            else:
+                i += 1
+            continue
+        bare = re.sub(r"[\\'\"]", "", word)
+        return None if re.search(r"[<>]", bare) else bare
+    return ""
+
+
+def _redirections_plain(text: str) -> bool:
+    """True only when every redirection target is one plain word (letters, digits and `._/+@%:,=~-`). The target is the
+    run of non-blank characters after the operator, so a target with a space, a quote, an escape, an expansion, a brace,
+    a glob or a newline is ambiguous. A here-document delimiter may be quoted; that quoting only controls the body."""
+    redirection = re.compile(r"(?P<fd>\{[A-Za-z_][A-Za-z0-9_]*\}|\d+)?(?P<op>&>>|&>|>>|>\||<>|>&|<&|<<<|<<-|<<|>|<)")
+    for match in redirection.finditer(text):
+        value = re.match(r"[^ \t\n]*", text[match.end() :].lstrip(" \t"))
+        target = value.group(0) if value is not None else ""
+        if match.group("op") in ("<<", "<<-"):
+            if re.fullmatch(r"(['\"]?)[A-Za-z_][A-Za-z0-9_]*\1", target) is None:
+                return False
+        elif re.fullmatch(r"[A-Za-z0-9._/+@%:,=~-]+", target) is None:
+            return False
+    return True
+
+
+def _shadowed_first_word(text: str) -> bool:
+    """True when the command word is a shadow word, or when the command word cannot be read with certainty."""
+    command = _command_word(text)
+    return command is None or command in _SHADOW_WORDS
+
+
+def _simple_line(text: str) -> bool:
+    """True only when the line is ONE simple command (the precondition for narrowing, #395). Strict: any doubt is False.
+
+    Refused anywhere in the line, quoted or not: a command separator (`;` `&` `|`), the parentheses of a subshell, a
+    function or a `$(`, `<(`, `>(` substitution, a backtick, an ANSI-C or locale string `$'` or `$"`, a line
+    continuation and a control character. A newline is allowed only as the end of the line of ONE here-document start,
+    whose body is the rest of the text and ends with exactly the delimiter line. Any other newline separates
+    commands."""
+    if "\\\n" in text or "$'" in text or '$"' in text:
+        return False
+    if any((ord(c) < 32 and c not in "\t\n") or ord(c) == 127 for c in text):
+        return False
+    # `&` and `|` are allowed only inside the redirection operators `&>`, `&>>`, `>&`, `<&` and `>|`
+    if any(c in _NOT_SIMPLE_CHARS for c in re.sub(r"&>>|&>|>&|<&|>\|", "", text)):
+        return False
+    try:  # fail closed: a line the POSIX splitter cannot read (unbalanced quotes and the like) is not simple
+        shlex.split(text, comments=False, posix=True)
+    except ValueError:
+        return False
+    if not _redirections_plain(text):
+        return False
+    if _shadowed_first_word(text):
+        return False
+    heredoc_open = re.compile(r"(?<!<)<<(?!<)")
+    words = text.split()
+    if words and re.fullmatch(
+        r"(?:\{[A-Za-z_][A-Za-z0-9_]*\}|\d+)?(?:&>>|&>|>>|>\||<>|>&|<&|<<<|<<-|<<|>|<)", words[-1]
+    ):
+        return False  # a redirection operator with no target at the end of the line
+    head, newline, rest = text.partition("\n")
+    if not newline:
+        return not heredoc_open.search(text)  # a here-document with no body on its line is never simple
+    start = re.search(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*$", head)
+    if start is None or len(heredoc_open.findall(head)) != 1:
+        return False
+    lines = rest.split("\n")
+    delimiter = start.group(2)
+    return lines[-1] == delimiter and not any(delimiter in line for line in lines[:-1])
+
+
+def _shellunits_clears(command: str, tick: Callable[[], None]) -> bool:
+    """True only when `safo.shellunits` reads the command with certainty and finds no real invocation of a tool (its
+    answer is None). Unreadable input, a timeout, any fault and any other answer keep the strict denial."""
+    try:
+        verdict = shellunits.classify(command, CONCEAL, _NETWORK_TOOL, tick)
+    except Exception:  # Unreadable, a timeout or any fault in the reader
+        return False
+    return verdict is None
 
 
 def _classify(command: str, tick: Callable[[], None], soft: bool) -> str | None:
