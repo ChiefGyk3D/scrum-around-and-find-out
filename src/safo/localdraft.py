@@ -353,15 +353,35 @@ class DenyEntry:
 _TYPOGRAPHY = frozenset(chr(c) for c in (*range(0x2018, 0x201E), 0x2013, 0x2022, 0x2026, 0xD7, *range(0x2190, 0x2194)))
 
 
+_X_MARKS = frozenset(chr(c) for c in (0xD7, 0x2715, 0x2716, 0x2717, 0x2718))
+_LETTER_DIGIT_WORDS = (
+    "DIGIT", "LETTER", "LATIN", "NUMBER", "KEYCAP", "INPUT SYMBOL", "SQUARED", "CIRCLED", "NEGATIVE",
+    "PARENTHESIZED", "REGIONAL",
+)  # fmt: skip
+# Emoji that show letters or digits without such a name (hundred points, no one under eighteen, billiards 8 ball),
+# plus letterlike signs that are refused outright.
+_SHOWS_TEXT = frozenset(
+    chr(c) for c in (0x1F4AF, 0x1F51E, 0x1F3B1, 0x1F51F, 0x1F522, 0x24C2, 0x2139, 0x2122, 0xAE, 0xA9)
+)
+
+
 def _allowed_symbol(c: str) -> bool:
     """Typographic punctuation and emoji that stay in a draft but add nothing to the skeleton. Variation selectors
-    (U+FE0F) and the dingbat digit forms (U+2776 to U+2793, which read as numbers) are not on the list."""
+    (U+FE0F) and the dingbat digit forms (U+2776 to U+2793) are not on the list. An emoji must also pass a name test:
+    keycaps, input symbols, squared, circled, negative, parenthesized and regional forms and anything whose name says
+    digit, letter, latin or number are refused, as is a code point with no name (fail closed)."""
     n = ord(c)
     if c in _TYPOGRAPHY:
         return True
-    if 0x1F300 <= n <= 0x1FAFF or n in (0x2B50, 0x2B55):
-        return True
-    return 0x2600 <= n <= 0x27BF and not 0x2776 <= n <= 0x2793
+    if c in _SHOWS_TEXT:
+        return False
+    if not (0x1F300 <= n <= 0x1FAFF or n in (0x2B50, 0x2B55) or (0x2600 <= n <= 0x27BF and not 0x2776 <= n <= 0x2793)):
+        return False
+    try:
+        name = unicodedata.name(c)
+    except ValueError:
+        return False
+    return not any(w in name for w in _LETTER_DIGIT_WORDS)
 
 
 def _skeleton(text: str) -> tuple[str, bool]:
@@ -373,6 +393,9 @@ def _skeleton(text: str) -> tuple[str, bool]:
     out: list[str] = []
     reducible = True
     for c in unicodedata.normalize("NFKC", text):
+        if c in _X_MARKS:
+            out.append("x")
+            continue
         if c.isascii():
             out.append(c)
             continue

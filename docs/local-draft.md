@@ -58,7 +58,14 @@ safo audit | safo-draft digest board-drift -
   reduces to `Cafe`; a fullwidth letter is folded by NFKC) or be on a short allowlist: curly single and double quotes
   (U+2018 to U+201D), en dash U+2013, bullet U+2022, ellipsis U+2026, the multiplication sign U+00D7, arrows U+2190 to
   U+2193, and emoji (U+1F300 to U+1FAFF, U+2600 to U+27BF without the dingbat digit forms U+2776 to U+2793, U+2B50,
-  U+2B55). Anything else (Cyrillic, Greek, Armenian, Cherokee, Hangul jamo, dotless i, small capitals, modifier
+  U+2B55). An emoji must also pass a name test: any whose Unicode name contains DIGIT, LETTER, LATIN, NUMBER, KEYCAP,
+  INPUT SYMBOL, SQUARED, CIRCLED, NEGATIVE, PARENTHESIZED or REGIONAL, or that has no name, is refused (keycap ten
+  would otherwise spell a digit in `FN` plus keycap plus `pr`), as are U+1F4AF, U+1F51E, U+1F3B1, U+24C2, U+2139,
+  U+2122, U+00AE and U+00A9. The test sweeps the whole range; 2235 code points stay allowed, including the check
+  mark, cross mark, warning sign, rocket, robot face, eyes, thumbs up, party popper, wrench, hammer, bug, lock, key,
+  fire and sparkles. The multiplication sign U+00D7 and the ballot-x marks U+2715 to U+2718 count as the letter `x`
+  for matching, in drafts and in deny values alike (`Acme` plus U+00D7 plus `Labs` matches a deny value
+  `AcmeXLabs`). Anything else (Cyrillic, Greek, Armenian, Cherokee, Hangul jamo, dotless i, small capitals, modifier
   letters, letterlike symbols, operator lookalikes such as U+2208, currency signs such as the euro sign, other
   arrows) refuses the draft or title with "characters that cannot be reduced to ASCII: refused"; the reason never
   holds the characters. Currency signs are refused on purpose: write `EUR` or `USD`. The variation selector U+FE0F
