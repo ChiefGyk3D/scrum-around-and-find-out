@@ -332,7 +332,7 @@ def runner_script(tmp_path: Path, code: int) -> str:
 def probe_message(home: Path, agents: Path, **env: str) -> str:
     code, out, _ = hooks("probe", "--agents", str(agents), home=home, env=env)
     assert code == 0
-    return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    return str(json.loads(out)["hookSpecificOutput"]["additionalContext"])
 
 
 def test_probe_ok_and_no_runner_configured_says_nothing_about_a_runner(_private_home: Path, tmp_path: Path) -> None:
