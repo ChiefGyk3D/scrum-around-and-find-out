@@ -1257,9 +1257,6 @@ def shell_command_class(command: str, deadline: float | None = None) -> str | No
 
 
 _NOT_SIMPLE_CHARS = frozenset(";&|()`")
-_HEREDOC_START = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*$")
-_HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)")
-_ASSIGNMENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
 # A first word that changes how the rest of the line runs: a reserved word or compound opener, or a command that runs
 # another command. Such a line is never one simple command, so it is never narrowed.
 _SHADOW_WORDS = frozenset(
@@ -1271,17 +1268,56 @@ _SHADOW_WORDS = frozenset(
 )  # fmt: skip
 
 
-def _shadowed_first_word(text: str) -> bool:
-    """True when the first word, after any plain assignment prefixes, is a shadow word. Quotes and backslashes are
-    removed first, so `"time"` and `\\time` count as `time`. An assignment whose value is quoted or expanded is refused
-    here too: its prefix is not plain."""
-    for word in text.split():
-        if _ASSIGNMENT_WORD.match(word):
-            if any(c in word for c in "'\"\\$`"):
-                return True
+def _command_word(text: str) -> str | None:
+    """The command word of the line: the first word that is neither a redirection nor a plain assignment, in any order
+    before it, with quotes and backslashes removed. "" when the line has no command word. None when the line is
+    ambiguous (a malformed redirection, an assignment or a command word that holds a redirection operator, or a
+    quoted or expanded assignment value): the caller then treats the line as not simple."""
+    redirection = re.compile(r"(?:\{[A-Za-z_][A-Za-z0-9_]*\}|\d+)?(?:&>>|&>|>>|>\||<>|>&|<&|<<<|<<-|<<|>|<)")
+    assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+    words = text.split()
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if assignment.match(word):
+            if any(c in word for c in "<>'\"\\$`{}()*?[]"):
+                return None
+            i += 1
             continue
-        return re.sub(r"[\\'\"]", "", word) in _SHADOW_WORDS
-    return False
+        match = redirection.match(word)
+        if match is not None:
+            if match.end() == len(word):  # the operator stands alone: its target is the next word
+                if i + 1 >= len(words):
+                    return None
+                i += 2
+            else:
+                i += 1
+            continue
+        bare = re.sub(r"[\\'\"]", "", word)
+        return None if re.search(r"[<>]", bare) else bare
+    return ""
+
+
+def _redirections_plain(text: str) -> bool:
+    """True only when every redirection target is one plain word (letters, digits and `._/+@%:,=~-`). The target is the
+    run of non-blank characters after the operator, so a target with a space, a quote, an escape, an expansion, a brace,
+    a glob or a newline is ambiguous. A here-document delimiter may be quoted; that quoting only controls the body."""
+    redirection = re.compile(r"(?P<fd>\{[A-Za-z_][A-Za-z0-9_]*\}|\d+)?(?P<op>&>>|&>|>>|>\||<>|>&|<&|<<<|<<-|<<|>|<)")
+    for match in redirection.finditer(text):
+        value = re.match(r"[^ \t\n]*", text[match.end() :].lstrip(" \t"))
+        target = value.group(0) if value is not None else ""
+        if match.group("op") in ("<<", "<<-"):
+            if re.fullmatch(r"(['\"]?)[A-Za-z_][A-Za-z0-9_]*\1", target) is None:
+                return False
+        elif re.fullmatch(r"[A-Za-z0-9._/+@%:,=~-]+", target) is None:
+            return False
+    return True
+
+
+def _shadowed_first_word(text: str) -> bool:
+    """True when the command word is a shadow word, or when the command word cannot be read with certainty."""
+    command = _command_word(text)
+    return command is None or command in _SHADOW_WORDS
 
 
 def _simple_line(text: str) -> bool:
@@ -1296,15 +1332,28 @@ def _simple_line(text: str) -> bool:
         return False
     if any((ord(c) < 32 and c not in "\t\n") or ord(c) == 127 for c in text):
         return False
-    if any(c in _NOT_SIMPLE_CHARS for c in text):
+    # `&` and `|` are allowed only inside the redirection operators `&>`, `&>>`, `>&`, `<&` and `>|`
+    if any(c in _NOT_SIMPLE_CHARS for c in re.sub(r"&>>|&>|>&|<&|>\|", "", text)):
+        return False
+    try:  # fail closed: a line the POSIX splitter cannot read (unbalanced quotes and the like) is not simple
+        shlex.split(text, comments=False, posix=True)
+    except ValueError:
+        return False
+    if not _redirections_plain(text):
         return False
     if _shadowed_first_word(text):
         return False
+    heredoc_open = re.compile(r"(?<!<)<<(?!<)")
+    words = text.split()
+    if words and re.fullmatch(
+        r"(?:\{[A-Za-z_][A-Za-z0-9_]*\}|\d+)?(?:&>>|&>|>>|>\||<>|>&|<&|<<<|<<-|<<|>|<)", words[-1]
+    ):
+        return False  # a redirection operator with no target at the end of the line
     head, newline, rest = text.partition("\n")
     if not newline:
-        return True
-    start = _HEREDOC_START.search(head)
-    if start is None or len(_HEREDOC_OPEN.findall(head)) != 1:
+        return not heredoc_open.search(text)  # a here-document with no body on its line is never simple
+    start = re.search(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*$", head)
+    if start is None or len(heredoc_open.findall(head)) != 1:
         return False
     lines = rest.split("\n")
     delimiter = start.group(2)

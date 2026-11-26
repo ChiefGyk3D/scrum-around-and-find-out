@@ -131,7 +131,7 @@ SIMPLE_LINES = [
     ("grep -rn 'doppler.*$HOME' docs/", True),
     ("cat <<'EOF'\nhttps and \\x41\nEOF", True),
     ("git commit -F - <<EOF\nuse curl\nEOF", True),
-    ("cat <<<'x'", True),
+    ("cat <<<'x'", False),  # a quoted here-string target is ambiguous (round 3)
     ("make check PY=python # prd_paid", True),
     ("echo a;", False),
     ("doppler --version; echo x", False),
@@ -210,6 +210,63 @@ def test_a_reserved_word_first_is_never_narrowed(monkeypatch: pytest.MonkeyPatch
     assert asked == [], command
 
 
+# Round 2 (Medium): an initial redirection must not hide the command word. Any number of redirections and plain
+# assignments may come before it, in any order; a malformed or ambiguous redirection is not simple.
+REDIRECTIONS = [
+    ">/dev/null", "2>f", "&>f", "<f", ">>f", "<<EOF", "{fd}>f", ">|f", "<>f", ">&2", "> f", "2> f", "<< EOF",
+]  # fmt: skip
+REDIRECTED_SHADOWS = [
+    (f"{redir}{sep}{word} git status", False)
+    for redir in REDIRECTIONS
+    for word in SHADOW_WORDS
+    for sep in [" ", "\t", "   "]
+]
+ASSIGNED_REDIRECTED_SHADOWS = [
+    (f"FOO=1 {redir}\t{word}   git status", False) for redir in REDIRECTIONS for word in SHADOW_WORDS
+]
+SIMPLE_LINES.extend(REDIRECTED_SHADOWS)
+SIMPLE_LINES.extend(ASSIGNED_REDIRECTED_SHADOWS)
+SIMPLE_LINES.extend(
+    [
+        (">/dev/null ls -l", True),
+        ("2>f ls", True),
+        ("2>&1 ls", True),
+        ("FOO=1 >f ls", True),
+        ("{fd}>f ls", True),
+        (">| f ls", True),
+        ("FOO=1 BAR=2 2>f ls", True),
+        ("FOO=a>f ls", False),
+        ("ls >", False),
+        ("> ", False),
+        ("< ", False),
+        ("2>", False),
+        ('"time">f git status', False),
+        ('"2>f" time git status', False),
+        ("ls <<EOF", False),
+        ("ls <<<x", True),
+        ("ls <<<'x'", False),  # a quoted redirection target is ambiguous (round 3): not simple
+        ("cat <<<'x'", False),  # the same, in the round 3 form: a quoted here-string target is ambiguous
+        ("<<EOF ls", False),
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        '>/dev/null time git commit -m "fix curl \\x41"',
+        '2>f time git commit -m "fix curl \\x41"',
+        'FOO=1 >f time git commit -m "fix curl \\x41"',
+        '&>f ! git commit -m "fix curl \\x41"',
+    ],
+)
+def test_a_redirection_before_a_shadow_word_is_never_narrowed(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(shellunits, "classify", _recorder(asked))
+    assert geminibrief.shell_command_class(command) is not None, command
+    assert asked == [], command
+
+
 # The comment-only relaxation (#395 review finding, owner decision): a name in a comment is no proof unless the rest of
 # the line is one simple command. A reader can turn comment text into code, so the rest must be one plain command.
 COMMENT_READERS = [
@@ -252,3 +309,47 @@ def test_an_adversarial_heredoc_is_never_narrowed(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(shellunits, "classify", _recorder(asked))
     assert geminibrief.shell_command_class(f"doppler secrets get \"$NAME\" <<'X'\n{line}") is not None, repr(line)
     assert asked == [], repr(line)
+
+
+# Round 3 (Medium): a redirection target is one plain word. A target with a space, a quote, an escape, an expansion, a
+# brace, a glob or a newline is ambiguous, so the whole line is not simple, whatever follows it.
+AMBIGUOUS_TARGETS = [
+    '"a b"', "'a'", "a\\ b", "${V}", "$V", '""', "''", "a*", "a?", "{a,b}", "a'b'", "\"a\"'b'", "x\"y",
+]  # fmt: skip
+AMBIGUOUS_REDIRECTS = [
+    (f"{op}{target} {SHADOW_WORDS[k % len(SHADOW_WORDS)]} git status", False)
+    for k, (op, target) in enumerate(
+        (op, target) for op in [">", "2>", "&>", "<", ">>", ">|", "<>", ">&"] for target in AMBIGUOUS_TARGETS
+    )
+]  # fmt: skip
+# every shadow and wrapper word is in front of at least one ambiguous target (the cycle covers all of them)
+SIMPLE_LINES.extend(AMBIGUOUS_REDIRECTS)
+SIMPLE_LINES.extend(
+    [
+        ('>"a b" time git commit -m "fix curl"', False),
+        ("'x'>a time git status", False),
+        (">$(x) time git status", False),
+        ("'a'time git status", True),  # one word, `atime`: not a reserved word, so a plain command name
+        ("ls >'a b'", False),
+        ('> "" ls', False),
+        ("ls >a\\ b", False),
+        ("ls >${V}", False),
+        ("ls >a b", True),  # `b` is a plain argument after a plain target: a simple command
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        '>"a b" time git commit -m "fix curl \\x41"',
+        "'x'>a time git commit -m \"fix curl \\x41\"",
+        '>a\\ b time git commit -m "fix curl \\x41"',
+        '2>${V} time git commit -m "fix curl \\x41"',
+    ],
+)
+def test_an_ambiguous_redirection_hides_nothing(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(shellunits, "classify", _recorder(asked))
+    assert geminibrief.shell_command_class(command) is not None, command
+    assert asked == [], command
