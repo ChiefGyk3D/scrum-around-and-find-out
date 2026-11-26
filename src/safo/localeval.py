@@ -32,6 +32,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
+from safo import bounded, output
+
 TASKS: tuple[str, ...] = (
     "issue-draft",
     "issue-triage",
@@ -124,7 +126,7 @@ class Score:
 
 def load_fixture(path: Path) -> Fixture:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = bounded.loads(path.read_text(encoding="utf-8"))
         facts = tuple(
             Fact(f, ()) if isinstance(f, str) else Fact(str(f["text"]), tuple(str(v) for v in f.get("variants", [])))
             for f in raw["facts"]
@@ -206,7 +208,7 @@ def _format_ok(spec: str, output: str) -> tuple[bool, bool]:
     if spec in ("json", "json-object"):
         body, fenced = strip_one_fence(output)
         try:
-            data = json.loads(body.strip())
+            data = bounded.loads(body.strip())
         except ValueError:
             return False, fenced
         return (isinstance(data, dict) if spec == "json-object" else True), fenced
@@ -484,7 +486,7 @@ def _call_stats(call_log: Path, call_id: str) -> tuple[int | None, float | None]
         return None, None
     for line in reversed(lines):
         try:
-            rec = json.loads(line)
+            rec = bounded.loads(line)
         except ValueError:
             continue
         if rec.get("id") == call_id:
@@ -534,7 +536,7 @@ def run_one(
             record["error"] = f"exit {proc.returncode}: {proc.stderr.strip()[-300:]}"
             break
         try:
-            env = json.loads(proc.stdout)
+            env = bounded.loads(proc.stdout)
             response = str(env["response"])
         except (ValueError, KeyError, TypeError):
             record["error"] = "unparseable envelope from llm-local"
@@ -564,7 +566,9 @@ def _private_dir(path: Path) -> None:
     _private_dir(path.parent)
     try:
         os.mkdir(path, 0o700)
-        os.chmod(path, 0o700)  # the umask may have narrowed the mode, never widened it; make it exact
+        os.chmod(
+            path, stat.S_IRWXU
+        )  # 0700, owner only; the umask may have narrowed the mode, never widened it; make it exact
     except OSError as exc:
         raise EvalError(f"cannot create {path}: {exc.strerror}") from exc
 
@@ -1159,7 +1163,7 @@ def _read_private(path: Path, uid: int | None = None) -> str:
 
 def _read_json_private(path: Path) -> Any:
     try:
-        return json.loads(_read_private(path))
+        return bounded.loads(_read_private(path))
     except ValueError as exc:
         raise EvalError(f"{path} is not valid JSON") from exc
 
@@ -1168,7 +1172,7 @@ def _read_runs_hashed(path: Path) -> tuple[list[dict[str, Any]], str]:
     """The runs and the sha256 of the file's bytes: the calibration is bound to that hash."""
     try:
         raw = path.read_bytes()
-        runs = [json.loads(ln) for ln in raw.decode("utf-8").splitlines() if ln.strip()]
+        runs = [bounded.loads(ln) for ln in raw.decode("utf-8").splitlines() if ln.strip()]
     except (OSError, ValueError) as exc:
         raise EvalError(f"cannot read runs {path}: {exc}") from exc
     return runs, hashlib.sha256(raw).hexdigest()
@@ -1256,7 +1260,7 @@ def entry(argv: Sequence[str] | None = None) -> int:
             _write_private(args.out / "report.md", render_report(runs))
             if args.calibrate:
                 _write_private(args.out / "calibration.md", calibration_sample(runs, args.calibrate))
-            print(f"{len(runs)} runs; report at {args.out / 'report.md'}")
+            output.write(sys.stdout, f"{len(runs)} runs; report at {args.out / 'report.md'}")
         elif args.cmd == "report":
             _private_dir(args.out)
             runs, runs_sha = _read_runs_hashed(args.runs)
@@ -1266,7 +1270,7 @@ def entry(argv: Sequence[str] | None = None) -> int:
                     cals = load_agreement(_read_json_private(args.calibration), runs_sha)
                 except CalibrationMismatch as exc:
                     note = str(exc)
-                    print(f"safo-eval: WARNING: calibration ignored, no cell is calibrated: {note}", file=sys.stderr)
+                    output.write(sys.stderr, f"safo-eval: WARNING: calibration ignored, no cell is calibrated: {note}")
             if args.rescore:
                 runs = rescore(runs, load_fixtures(args.fixtures))
                 _write_private(args.out / "runs-rescored.jsonl", "".join(json.dumps(r) + "\n" for r in runs))
@@ -1286,7 +1290,9 @@ def entry(argv: Sequence[str] | None = None) -> int:
                 except CalibrationMismatch as exc:
                     if "integrity" in str(exc):
                         raise
-                    print(f"safo-eval: stored verdicts are for another runs file and are void: {exc}", file=sys.stderr)
+                    output.write(
+                        sys.stderr, f"safo-eval: stored verdicts are for another runs file and are void: {exc}"
+                    )
             ing = ingest_full(filled, runs, runs_sha, prior=prior, replace=args.replace)
             _private_dir(args.out)
             _write_private(stored, json.dumps(agreement_doc(ing, runs_sha), indent=1) + "\n")
@@ -1298,7 +1304,7 @@ def entry(argv: Sequence[str] | None = None) -> int:
             _private_dir(args.out)
             _write_private(args.out / "calibration.json", json.dumps(doc, indent=1) + "\n")
     except EvalError as exc:
-        print(f"safo-eval: {exc}", file=sys.stderr)
+        output.write(sys.stderr, f"safo-eval: {exc}")
         return 2
     return 0
 
