@@ -106,7 +106,7 @@ READ_CHUNK = 1024 * 1024
 SHELL_DEPTH_LIMIT = 4
 WRAPPER_LIMIT = 10
 TOO_DEEP = "nesting too deep to read: treat as a local full suite"
-SECRET_NAMES = (
+RISKY_NAME_PATTERNS = (
     ".env",
     ".env.*",
     "*.pem",
@@ -760,7 +760,7 @@ class ContentGate:
     untracked: int = 0
     nested: int = 0
     symlinks: int = 0
-    secrets: int = 0
+    risky_names: int = 0
     incomplete: bool = False
     modified: int = 0
     filtered: bool = False
@@ -792,15 +792,15 @@ class ContentGate:
         return "\n  ".join(f"keep local: {t}" for t in texts)
 
     def _copies(self) -> str:
-        if not (self.untracked or self.nested or self.symlinks or self.secrets or self.incomplete):
+        if not (self.untracked or self.nested or self.symlinks or self.risky_names or self.incomplete):
             return ""
         text = (
             "keep local: the worktree holds files the runner would copy that are not in the public repository "
             f"({self.untracked} untracked files; {self.nested} nested git directories; "
             f"{self.symlinks} symlinks leaving the tree)"
         )
-        if self.secrets:
-            text += f"; secret-looking file names present ({self.secrets})"
+        if self.risky_names:
+            text += f"; secret-looking file names present ({self.risky_names})"
         if self.incomplete:
             text += f"; the tree could not be fully checked (more than {WALK_LIMIT} entries, or unreadable)"
         return text + f". Commit them, add them to .gitignore, or clone a clean copy under ~/{DEV_FOLDERS[0]} first"
@@ -1315,15 +1315,25 @@ def content_gate(
     modified = max(modified, verdict.differ)
     nested, incomplete = _nested_git(worktree)
     root = os.path.realpath(worktree)
-    symlinks = secrets = 0
+    symlinks = risky_names = 0
     for rel in copied:
         full = worktree / rel
         if full.is_symlink():
             target = os.path.realpath(full)
             symlinks += target != root and not target.startswith(root + os.sep)
-        secrets += any(fnmatch.fnmatchcase(part.lower(), pat) for part in rel.split("/") for pat in SECRET_NAMES)
+        risky_names += any(
+            fnmatch.fnmatchcase(part.lower(), pat) for part in rel.split("/") for pat in RISKY_NAME_PATTERNS
+        )
     return ContentGate(
-        len(untracked), nested, symlinks, secrets, incomplete, modified, verdict.filtered, verdict.bounded, unpublished
+        len(untracked),
+        nested,
+        symlinks,
+        risky_names,
+        incomplete,
+        modified,
+        verdict.filtered,
+        verdict.bounded,
+        unpublished,
     )
 
 

@@ -979,23 +979,41 @@ def test_group_writable_ancestor_below_home_is_refused(tmp_path: Path) -> None:
     assert "ra-remote" not in out
 
 
-def test_config_file_swapped_between_check_and_open_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = _owners_cfg(tmp_path / "xdgc")
-    target = cfg / "public-owners"
-    real_open = os.open
+@pytest.mark.parametrize("mask", [0o022, 0o002])
+def test_config_file_swapped_between_check_and_open_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mask: int
+) -> None:
+    # Hermetic: every directory has an explicit mode, whatever the umask. The old inode is kept alive during the
+    # swap, so the new file can never reuse its inode number (ext4 reuses a freed one at once; btrfs and tmpfs do
+    # not), which would hide the swap from the checker's inode comparison and make this test depend on the filesystem.
+    previous = os.umask(mask)
+    try:
+        cfg = _owners_cfg(tmp_path / "xdgc")
+        (tmp_path / "xdgc").chmod(0o700)
+        target = cfg / "public-owners"
+        real_open = os.open
+        keep_alive: list[int] = []
 
-    def swapping_open(path: Any, *args: Any, **kwargs: Any) -> int:
-        if str(path) == str(target):
-            target.unlink()
-            target.write_text("someone-else\n", encoding="utf-8")
-            target.chmod(0o600)
-        return real_open(path, *args, **kwargs)
+        def swapping_open(path: Any, *args: Any, **kwargs: Any) -> int:
+            if str(path) == str(target):
+                keep_alive.append(real_open(path, os.O_RDONLY))
+                target.unlink()
+                target.write_text("someone-else\n", encoding="utf-8")
+                target.chmod(0o600)
+            return real_open(path, *args, **kwargs)
 
-    repo = clean_repo(tmp_path)
-    monkeypatch.setattr(os, "open", swapping_open)
-    out = _no_env_owners(tmp_path, tmp_path / "xdgc", repo)
-    assert "not owner-only" in out
-    assert "ra-remote" not in out
+        repo = clean_repo(tmp_path)
+        monkeypatch.setattr(os, "open", swapping_open)
+        try:
+            out = _no_env_owners(tmp_path, tmp_path / "xdgc", repo)
+        finally:
+            for fd in keep_alive:
+                os.close(fd)
+        assert keep_alive, "the swap never ran"
+        assert "not owner-only" in out
+        assert "ra-remote" not in out
+    finally:
+        os.umask(previous)
 
 
 # ---- F6: repository name normalization ----------------------------------------------------------------------------
