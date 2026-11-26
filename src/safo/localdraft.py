@@ -549,25 +549,39 @@ def _strip_block_markers(line: str) -> str:
 
 
 def _has_md_link(text: str) -> bool:
-    """Inline links and images (`](`, `![`), reference uses (`][`) and reference definitions. A definition is refused
-    after any run of block markers (block quote, bullet, numbered item) is stripped: a line that starts with `[` and
-    holds `]:` anywhere, or a label that spans lines (a line that starts with `[` and has no `]`, then a later line of
-    the same paragraph that holds `]:`; a blank line ends the paragraph). Prose with `]:` mid-line after text that
-    does not start with `[` (`note about a[0]: the first`) is allowed, as are `- [x] done` and `see [1]`. Linear: only
-    `str.find` and `in` scans, no backtracking. The exact PR footer is exempt."""
+    """Inline links and images (`](`, `![`) and reference uses (`][`). The exact PR footer is exempt."""
     text = text.replace(PR_FOOTER, "")
-    if "](" in text or "![" in text or "][" in text:
+    return "](" in text or "![" in text or "][" in text
+
+
+def _para_has_refdef(para: str) -> bool:
+    """Broad on purpose, no parsing: refuse when a `[` is followed anywhere later by `]:`, or when an escaped bracket
+    (backslash then `[` or `]`) is followed by a later `]:` (an escaped `]` can sit before the first `[`). Only
+    `str.find`, so linear."""
+    first = para.find("[")
+    if first >= 0 and para.find("]:", first + 1) >= 0:
         return True
-    open_label = False
-    for line in text.splitlines():
-        rest = _strip_block_markers(line)
-        if not rest.strip():
-            open_label = False
-            continue
-        if open_label or rest.startswith("["):
-            if "]:" in rest:
+    for esc in ("\\[", "\\]"):
+        at = para.find(esc)
+        if at >= 0 and para.find("]:", at) >= 0:
+            return True
+    return False
+
+
+def _has_md_refdef(text: str) -> bool:
+    """Any paragraph (blank lines separate them) that can hold a reference definition, after block markers are stripped
+    from each line. A paragraph with a `]:` and no earlier `[` or escaped bracket is allowed (`ok]: fine`). Over-blocks
+    prose such as `the range is [0, 5]: inclusive` and `arr[0]: the first`; that is the safe side. The exact PR footer
+    is exempt."""
+    text = text.replace(PR_FOOTER, "")
+    para: list[str] = []
+    for line in [*text.splitlines(), ""]:
+        if line.strip():
+            para.append(_strip_block_markers(line))
+        else:
+            if para and _para_has_refdef("\n".join(para)):
                 return True
-            open_label = "]" not in rest
+            para = []
     return False
 
 
@@ -702,6 +716,8 @@ def _single_checks(text: str, allow: Sequence[str], charset: bool) -> list[str]:
         why.append(_NO_REDUCE)
     if _has_md_link(text):
         why.append("markdown links are not allowed in drafts; write the URL plainly")
+    if _has_md_refdef(text):
+        why.append("markdown reference definitions are not allowed in drafts; write the URL plainly")
     if _has_html(text):
         why.append("HTML is not allowed in drafts; use plain markdown")
     if any(c in text for c in EM_DASHES):

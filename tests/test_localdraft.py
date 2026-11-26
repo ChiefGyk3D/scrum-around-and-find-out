@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import json
+import re
 import stat
 from pathlib import Path
 from typing import Any
@@ -1183,7 +1184,7 @@ def test_r5_1_unreducible_deny_value_is_a_config_error(env: Env) -> None:
     ],
 )
 def test_r5_2_markdown_links_are_refused(text: str) -> None:
-    assert any("markdown links are not allowed" in x for x in _why(text)), text
+    assert any(re.search("markdown (links|reference definitions) are not allowed", x) for x in _why(text)), text
 
 
 @pytest.mark.parametrize(
@@ -1261,7 +1262,7 @@ def test_r5_3_scopes_times_and_macs_stay_unflagged(text: str) -> None:
     ],
 )
 def test_r6_m1_nested_and_multiline_definitions_are_refused(text: str) -> None:
-    assert any("markdown links are not allowed" in x for x in _why(text)), ascii(text)
+    assert any(re.search("markdown (links|reference definitions) are not allowed", x) for x in _why(text)), ascii(text)
 
 
 @pytest.mark.parametrize(
@@ -1274,14 +1275,13 @@ def test_r6_m1_nested_and_multiline_definitions_are_refused(text: str) -> None:
         "a[0] = 1",
         "see [1]",
         "- see [1] for: more",
-        "note about arr[0]: the first item",
         "[x]",
         "[open\n\nnew paragraph]: x",
         "[open\nno colon here]",
     ],
 )
 def test_r6_m1_checkboxes_and_prose_still_pass(text: str) -> None:
-    assert not any("markdown links" in x for x in _why(text)), ascii(text)
+    assert not any("markdown " in x for x in _why(text)), ascii(text)
 
 
 def test_r6_m1_scan_is_linear() -> None:
@@ -1418,3 +1418,40 @@ def test_r7_uncommon_deny_entry_does_not_warn(env: Env) -> None:
 
 def test_r7_failure_sets_code() -> None:
     assert localdraft.Failure("x", 7).code == 7
+
+
+# round 8: any paragraph that holds a `[` and a later `]:` is refused (broad, simple, fails closed)
+_BS = chr(92)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[a" + _BS + "]\nb]: https://example.test/x",
+        "[a\nb" + _BS + "]\nc]: https://example.test/x",
+        _BS + "[x" + _BS + "] then more text]: https://example.test/x",
+        "a" + _BS + "]b]: https://example.test/x",
+        "the range is [0, 5]: inclusive",
+        "note about arr[0]: the first item",
+        "intro\n\n> - [a\n> b]: https://example.test/x",
+    ],
+)
+def test_r8_paragraph_with_open_bracket_then_close_colon_is_refused(text: str) -> None:
+    assert any("markdown reference definitions are not allowed" in x for x in _why(text)), ascii(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["- [x] done", "- [ ] todo", "a[0] = 1", "see [1]", "ok]: fine", "[open\n\nnew paragraph]: x", "[a]\n\nok]: x"],
+)
+def test_r8_allowed_forms_still_pass(text: str) -> None:
+    assert not any("reference definitions" in x for x in _why(text)), ascii(text)
+
+
+def test_r8_scan_is_linear() -> None:
+    import time
+
+    for text in ("[" * 20000, "]" * 20000, "[]" * 10000, (_BS + "[" + "]:") * 6600, "[" + "]:" * 10000):
+        start = time.process_time()
+        _within_deadline(6, lambda t=text: localdraft.check_text("comment", t))
+        assert time.process_time() - start < 2.0, text[:6]

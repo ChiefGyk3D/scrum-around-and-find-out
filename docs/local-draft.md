@@ -64,16 +64,18 @@ safo audit | safo-draft digest board-drift -
   holds the characters. Currency signs are refused on purpose: write `EUR` or `USD`. The variation selector U+FE0F
   stays refused. Deny matching and squashing use the skeleton, so a lookalike cannot slip a private value past the
   match. A deny value that holds such a character is a config error naming the line.
-- **Markdown links are refused.** Inline links and images (`](` and `![`), reference uses (`][`) and reference
-  definitions fail with "markdown links are not allowed in drafts; write the URL plainly", because the rendered text
-  differs from the source the checks see. A definition is caught after any run of leading block markers (`>`, `-`,
-  `*`, `+`, `1.`, `1)`, repeatedly: `> - [id]: url`), whenever the line then starts with `[` and holds `]:`, and
-  when a label spans lines (a line starting with `[` and no `]`, then a later line in the same paragraph holding
-  `]:`; a blank line ends the paragraph). Bare URLs are scanned as written; `- [x] done`, `[ ]`, `see [1]` and `a[0]`
-  pass, and so does prose with `]:` mid-line after text that does not start with `[` (`note about a[0]: the first`);
-  that last choice keeps ordinary sentences, and a definition cannot start mid-line. `[x]: note` at the start of a
-  line is refused. The exact pull request footer line is exempt. This over-blocks docs-style prose full of links;
-  that is the safe side.
+- **Markdown links and reference definitions are refused.** Inline links and images (`](` and `![`) and reference uses
+  (`][`) fail with "markdown links are not allowed in drafts; write the URL plainly". Reference definitions are
+  refused by a broad rule with no parsing, because the rendered text differs from the source the checks see. Split the
+  text into paragraphs on blank lines, strip leading block markers (`>`, `-`, `*`, `+`, `1.`, `1)`, repeated) from
+  every line, and refuse the paragraph when it holds a `[` and, anywhere after the first `[`, the two characters `]:`.
+  Also refused: a paragraph with an escaped bracket (backslash then `[` or `]`) and a later `]:`, whatever comes
+  before it. The reason is "markdown reference definitions are not allowed in drafts; write the URL plainly". Only
+  `str.find` runs, so the scan is linear. Allowed: `- [x] done`, `[ ]`, `a[0]`, `see [1]` (no colon), and a `]:` in a
+  paragraph with no earlier `[` (`ok]: fine`). Known over-blocks, accepted as the safe side: `the range is [0, 5]:
+  inclusive`, `arr[0]: the first item`, and any paragraph that mixes a `[` with a later `]:` for another reason.
+  Rewrite those without the colon right after the bracket. Bare URLs are scanned as written. The exact pull request
+  footer line is exempt.
 - **HTML is refused, not decoded.** A draft with an HTML tag, comment or declaration (`<` followed by a letter, `!`, `/`
   or `?`) or a character reference (`&name;`, `&#65;`, `&#x41;`, and the same without the semicolon when a word
   boundary follows) fails with "HTML is not allowed in drafts; use plain markdown". `a < b` and `x<=y` pass. This also
