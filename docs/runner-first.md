@@ -154,9 +154,13 @@ The proof, in order:
 - One anonymous, read-only `git ls-remote --heads --tags` of that URL. The process gets a minimal environment (`PATH`, an
   empty private `HOME`, no prompts, no askpass, no global or system git config, no proxy variables) and runs outside the
   repository, with `protocol.allow=never`, `protocol.https.allow=always`, no credential helper, no proxy and no
-  redirects. Limits: 20 seconds, 1 MiB of output, 20000 refs; lines must be `<40 or 64 hex> <ref>`; only
+  redirects. It starts in its own session; on a timeout, the byte cap or any error the whole process group (git and its
+  transport helpers) gets SIGTERM, one second of grace, then SIGKILL, and is reaped. Limits: 20 seconds, 1 MiB of output
+  (counted while reading), 20000 refs; lines must be `<40 or 64 hex> <ref>`; only
   `refs/heads/*` and `refs/tags/*` (peeled lines included) count. Any failure (offline, timeout, non-zero exit, a 404 for
-  a private or renamed repository, a parse error, a cap) refuses.
+  a private or renamed repository, a parse error, a cap) refuses, and so does any ordinary exception or malformed
+  value from the listing step (fixed class `git` or `unparseable`, never a traceback); only KeyboardInterrupt,
+  MemoryError and RecursionError propagate.
 - `HEAD` is published only when at least one listed tip exists in the local repository (object ids are content
   addressed, so a local commit equal to a public tip is that public commit) and `git merge-base --is-ancestor HEAD <tip>`
   returns 0. A clone of a private source has none of the public tips. At most 200 existing tips are tried.

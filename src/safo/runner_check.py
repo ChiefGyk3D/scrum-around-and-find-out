@@ -29,8 +29,10 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -806,6 +808,7 @@ class ContentGate:
 
 LISTING_SECONDS = 20
 LISTING_BYTES = 1024 * 1024
+KILL_GRACE_SECONDS = 1
 LISTING_REFS = 20000
 LOCAL_TIP_LIMIT = 200  # existing local tips tried for the ancestry test; more is refused ("cannot tell")
 LISTING_LINE = re.compile(r"([0-9a-f]{40}|[0-9a-f]{64})[ \t](refs/(?:heads|tags)/\S+)")
@@ -817,6 +820,71 @@ class ProofError(Exception):
     def __init__(self, klass: str) -> None:
         super().__init__(klass)
         self.klass = klass
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    """SIGTERM the whole process group (git and its transport helpers), a short grace period, then SIGKILL; reap."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, sig)
+        try:
+            proc.wait(timeout=KILL_GRACE_SECONDS if sig == signal.SIGTERM else 5)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)  # helpers that outlived the leader
+
+
+def _listing_output(argv: list[str], genv: Mapping[str, str], home: str) -> bytes:
+    """Run the listing in its own session; read at most LISTING_BYTES within LISTING_SECONDS.
+
+    Any failure (timeout, size cap, error) kills the whole process group and is mapped to a fixed ProofError class."""
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - fixed git argv built from validated names, no shell
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=dict(genv),
+            cwd=home,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ProofError("network") from None
+    if proc.stdout is None:
+        _kill_group(proc)
+        raise ProofError("network")
+    deadline = time.monotonic() + LISTING_SECONDS
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        fd = proc.stdout.fileno()
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise ProofError("timeout")
+            if not select.select([fd], [], [], left)[0]:
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > LISTING_BYTES:
+                raise ProofError("unparseable")
+            chunks.append(chunk)
+        try:
+            code = proc.wait(timeout=max(deadline - time.monotonic(), 0.01))
+        except subprocess.TimeoutExpired:
+            raise ProofError("timeout") from None
+    except BaseException:
+        _kill_group(proc)
+        raise
+    finally:
+        proc.stdout.close()
+    if code != 0:
+        raise ProofError("network")
+    return b"".join(chunks)
 
 
 def _ls_remote(url: str) -> list[str]:
@@ -855,25 +923,8 @@ def _ls_remote(url: str) -> list[str]:
             "--tags",
             url,
         ]
-        try:
-            done = subprocess.run(  # noqa: S603 - fixed git argv built from validated names, no shell
-                argv,
-                capture_output=True,
-                timeout=LISTING_SECONDS,
-                check=False,
-                env=genv,
-                cwd=home,
-                stdin=subprocess.DEVNULL,
-            )
-        except subprocess.TimeoutExpired:
-            raise ProofError("timeout") from None
-        except (OSError, subprocess.SubprocessError):
-            raise ProofError("network") from None
-    if done.returncode != 0:
-        raise ProofError("network")
-    if len(done.stdout) > LISTING_BYTES:
-        raise ProofError("unparseable")
-    lines = done.stdout.decode("ascii", errors="replace").splitlines()
+        raw = _listing_output(argv, genv, home)
+    lines = raw.decode("ascii", errors="replace").splitlines()
     if len(lines) > LISTING_REFS:
         raise ProofError("unparseable")
     tips: list[str] = []
@@ -927,6 +978,32 @@ def _local_tips(worktree: Path, env: Mapping[str, str], tips: Sequence[str]) -> 
     return [oid for oid, row in zip(tips, rows, strict=True) if row.endswith(" missing") is False and " commit " in row]
 
 
+def _checked_tips(value: object) -> list[str]:
+    """The listing as a list of object ids; a malformed value is refused ('unparseable')."""
+    if not isinstance(value, (list, tuple)) or len(value) > LISTING_REFS:
+        raise ProofError("unparseable")
+    for item in value:
+        if not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", item) is None:
+            raise ProofError("unparseable")
+    return list(value)
+
+
+def _listed(ls_remote: Callable[[str], list[str]], url: str) -> list[str]:
+    """Call the (possibly injected) listing; every ordinary exception becomes a ProofError with a fixed class."""
+    try:
+        return _checked_tips(ls_remote(url))
+    except ProofError:
+        raise
+    except (MemoryError, RecursionError):
+        raise
+    except (OSError, subprocess.SubprocessError):
+        raise ProofError("git") from None
+    except (ValueError, TypeError):
+        raise ProofError("unparseable") from None
+    except Exception:
+        raise ProofError("git") from None
+
+
 def _published(worktree: Path, env: Mapping[str, str], ls_remote: Callable[[str], list[str]] | None = None) -> str:
     """Refusal text unless HEAD is proved to be part of the public repository's history.
 
@@ -942,7 +1019,7 @@ def _published(worktree: Path, env: Mapping[str, str], ls_remote: Callable[[str]
     if url is None:
         return _unproven("remote-identity")
     try:
-        tips = (ls_remote or _ls_remote)(url)
+        tips = _listed(ls_remote or _ls_remote, url)
     except ProofError as exc:
         return _unproven(exc.klass)
     unique = sorted(set(tips))

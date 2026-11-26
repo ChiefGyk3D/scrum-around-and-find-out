@@ -9,8 +9,11 @@ import io
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -1981,6 +1984,22 @@ class Done:
         self.returncode = returncode
 
 
+class FakeProc:
+    """A stand-in for Popen: stdout is a real file holding the bytes, so the bounded read loop runs for real."""
+
+    def __init__(self, result: Done) -> None:
+        fd, name = tempfile.mkstemp(prefix="safo-fake-")
+        os.unlink(name)
+        self.stdout = os.fdopen(fd, "w+b")
+        self.stdout.write(result.stdout)
+        self.stdout.seek(0)
+        self.returncode = result.returncode
+        self.pid = 2**22 + 12345  # never a live group
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+
 def patched_run(monkeypatch: pytest.MonkeyPatch, result: Any) -> list[dict[str, Any]]:
     recorded: list[dict[str, Any]] = []
 
@@ -1988,9 +2007,9 @@ def patched_run(monkeypatch: pytest.MonkeyPatch, result: Any) -> list[dict[str, 
         recorded.append({"argv": list(argv), **kwargs})
         if isinstance(result, BaseException):
             raise result
-        return result
+        return FakeProc(result)
 
-    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(subprocess, "Popen", fake)
     monkeypatch.setattr(rc, "_ls_remote", _REAL_LS_REMOTE)
     return recorded
 
@@ -2014,7 +2033,8 @@ def test_real_listing_command_is_fully_isolated(monkeypatch: pytest.MonkeyPatch)
         "core.askpass=",
     ):
         assert argv[argv.index(pair) - 1] == "-c"
-    assert call["timeout"] == 20
+    assert call["start_new_session"] is True
+    assert rc.LISTING_SECONDS == 20
     assert call["stdin"] == subprocess.DEVNULL
     assert set(env) == {
         "PATH",
@@ -2080,7 +2100,6 @@ def test_real_listing_line_cap(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("result", "klass"),
     [
-        (subprocess.TimeoutExpired(["git"], 20), "timeout"),
         (OSError("boom"), "network"),
         (Done(b"", 128), "network"),
     ],
@@ -2091,3 +2110,98 @@ def test_real_listing_failures_map_to_fixed_classes(monkeypatch: pytest.MonkeyPa
         rc._ls_remote(PROOF_URL)
     assert info.value.klass == klass
     assert PROOF_URL not in str(info.value)
+
+
+# ---- the listing process group and the injected listing's failures ------------------------------------------------
+
+
+def _fake_git(tmp_path: Path, body: str) -> tuple[Path, Path]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    pidfile = tmp_path / "pid"
+    fake = bindir / "git"
+    fake.write_text(body.format(pidfile=pidfile), encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    return bindir, pidfile
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _gone_soon(pidfile: Path) -> bool:
+    pid = int(pidfile.read_text(encoding="utf-8"))
+    for _ in range(50):
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    os.kill(pid, 9)  # do not leave the helper behind when the assertion fails
+    return False
+
+
+def test_timeout_kills_the_whole_listing_process_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # reviewer reproduction: a transport child that outlives the killed git process
+    bindir, pidfile = _fake_git(tmp_path, "#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\nwait\n")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(rc, "LISTING_SECONDS", 0.5)
+    with pytest.raises(rc.ProofError) as info:
+        _REAL_LS_REMOTE(PROOF_URL)
+    assert info.value.klass == "timeout"
+    assert _gone_soon(pidfile)
+
+
+def test_byte_cap_is_enforced_while_reading_and_kills_the_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bindir, pidfile = _fake_git(tmp_path, "#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\nyes\n")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    with pytest.raises(rc.ProofError) as info:
+        _REAL_LS_REMOTE(PROOF_URL)
+    assert info.value.klass == "unparseable"
+    assert _gone_soon(pidfile)
+
+
+def raising(exc: BaseException) -> Callable[[str], list[str]]:
+    def fake(url: str) -> list[str]:
+        raise exc
+
+    return fake
+
+
+def returning(value: Any) -> Callable[[str], list[str]]:
+    return lambda url: value
+
+
+@pytest.mark.parametrize(
+    ("fake", "klass"),
+    [
+        (raising(OSError("boom /secret")), "git"),
+        (raising(subprocess.SubprocessError("x")), "git"),
+        (raising(ValueError("bad")), "unparseable"),
+        (raising(UnicodeDecodeError("ascii", bytes([255]), 0, 1, "bad")), "unparseable"),
+        (raising(TypeError("t")), "unparseable"),
+        (raising(RuntimeError("r")), "git"),
+        (returning(None), "unparseable"),
+        (returning([1, 2]), "unparseable"),
+        (returning(["not-an-oid"]), "unparseable"),
+        (returning("a" * 40), "unparseable"),
+    ],
+)
+def test_injected_listing_failures_refuse_with_a_fixed_class(tmp_path: Path, fake: Any, klass: str) -> None:
+    repo = clean_repo(tmp_path)
+    code, out = proof(tmp_path, repo, fake)
+    assert f"({klass})" in out
+    assert "Traceback" not in out
+    assert "secret" not in out
+    assert code == proof(tmp_path, repo, failing("network"))[0]
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt(), MemoryError(), RecursionError()])
+def test_listing_fatal_exceptions_propagate(tmp_path: Path, exc: BaseException) -> None:
+    repo = clean_repo(tmp_path)
+    with pytest.raises(type(exc)):
+        proof(tmp_path, repo, raising(exc))
