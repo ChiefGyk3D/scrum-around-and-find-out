@@ -16,7 +16,7 @@
   "forbidden": [
     "\\bfeat:",
     "\\bfix:",
-    "\\bGPL\\b",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|switch\\w*|relicens\\w+|migrat\\w+|convert\\w*|chang(?:e|es|ed)|updat(?:e|es|ed)|touch(?:es|ed)?|remov(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\bGPL\\b|\\bGPL\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
     "\\b78\\b"
   ],
   "max_chars": 600,
@@ -27,6 +27,7 @@
   ],
   "correct_alts": [
     "chore: use Apache-2.0 headers in src/\n\nAll 87 source files swap their MIT header for the Apache-2.0 one. Only headers change in this commit.",
-    "chore: relabel source files from MIT to Apache-2.0\n\nEighty-seven files under src/ get the new header text. The top-level license text comes separately."
+    "chore: relabel source files from MIT to Apache-2.0\n\nEighty-seven files under src/ get the new header text. The top-level license text comes separately.",
+    "chore: swap MIT headers for Apache-2.0\n\nReplaces MIT with Apache-2.0 in 87 files under src/. The old GPL comment was left alone on purpose."
   ]
 }

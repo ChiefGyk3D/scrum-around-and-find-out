@@ -17,7 +17,7 @@
   "forbidden": [
     "\\b1,?480 lines\\b",
     "\\bbehavior change\\b.{0,15}\\b(?:allowed|expected)",
-    "\\bCamelCase constants\\b"
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|renam(?:e|es|ed)|convert(?:s|ed)?|chang(?:e|es|ed)|updat(?:e|es|ed)|refactor(?:s|ed)?|touch(?:es|ed)?|includ(?:e|es|ed)|clean(?:s|ed)? up)\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\bCamelCase constants\\b|\\bCamelCase constants\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:renamed|converted|changed|updated|refactored|touched)\\b"
   ],
   "max_chars": 1500,
   "required_format": "any",
@@ -27,6 +27,7 @@
   ],
   "correct_alts": [
     "Split OrderService into focused classes\n- src/orders/service.py has grown to 1,840 lines and mixes pricing, tax and email.\n- Extract PricingService, TaxService and OrderNotifier.\n- Behavior must not change; checkout() stays as a thin facade.",
-    "Break up the 1,840 line OrderService\nPricing, tax and notification logic share one class. Move them into PricingService, TaxService and OrderNotifier while OrderService.checkout stays the entry point. This is a pure refactor with identical behavior."
+    "Break up the 1,840 line OrderService\nPricing, tax and notification logic share one class. Move them into PricingService, TaxService and OrderNotifier while OrderService.checkout stays the entry point. This is a pure refactor with identical behavior.",
+    "Title: Split OrderService into focused services\n\nOrderService in src/orders/service.py is 1,840 lines. Split it into PricingService, TaxService and OrderNotifier with no behavior change, and keep OrderService.checkout() as a thin facade. The unrelated CamelCase constants in that file stay as they are."
   ]
 }

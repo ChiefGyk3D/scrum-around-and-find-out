@@ -11,13 +11,13 @@
     {
       "text": "\"epic\": \"E-search\"",
       "variants": [
-        "\"epic\"\\s*:\\s*\"E\\-search\""
+        "\"epic\"\\s*:\\s*\"E\\-search\\b"
       ]
     }
   ],
   "forbidden": [
     "\"label\"\\s*:\\s*\"(?!bug\")",
-    "\"epic\"\\s*:\\s*\"(?!E\\-search\")"
+    "\"epic\"\\s*:\\s*\"(?!E\\-search\\b)"
   ],
   "max_chars": 200,
   "required_format": "json-object",
@@ -28,6 +28,7 @@
   "correct_alts": [
     "{\"epic\": \"E-search\", \"label\": \"bug\"}",
     "```json\n{\n \"label\": \"bug\",\n \"epic\": \"E-search\"\n}\n```",
-    "{\"label\": \"bug\", \"epic\": \"E-search\", \"note\": \"see rule\"}"
+    "{\"label\": \"bug\", \"epic\": \"E-search\", \"note\": \"see rule\"}",
+    "{\"label\": \"bug\", \"epic\": \"E-search (index, queries)\"}"
   ]
 }

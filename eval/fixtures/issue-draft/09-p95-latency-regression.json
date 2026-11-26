@@ -21,7 +21,7 @@
   "forbidden": [
     "\\b246 ms\\b",
     "\\b604 ms\\b",
-    "\\bcold start\\b",
+    "(?:(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:investigat(?:e|es|ed)|fix(?:es|ed)?|address(?:es|ed)?|includ(?:e|es|ed)|add(?:s|ed)?|track(?:s|ed)?|blam(?:e|es|ed)|caused by|due to|because of)\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,40}\\bcold start\\b|\\bcold start\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,40}\\b(?:the (?:root )?cause|the culprit|the problem|the regression|why)\\b)",
     "\\bmedian\\b.{0,30}\\b(?:640|worse)\\b"
   ],
   "max_chars": 1500,
@@ -32,6 +32,7 @@
   ],
   "correct_alts": [
     "Search latency regression in 5.3.0\n- The p95 of /v2/search climbed from 212 ms to 640 ms after the 5.3.0 release.\n- The median stayed at 48 ms, so only the tail is affected.\n- The profile points at normalize_query().",
-    "p95 of /v2/search tripled after 5.3.0\nTail latency on the search endpoint is now 640 ms, up from 212 ms. Typical requests are unchanged. A flame graph attributes the extra time to normalize_query, which is where to start."
+    "p95 of /v2/search tripled after 5.3.0\nTail latency on the search endpoint is now 640 ms, up from 212 ms. Typical requests are unchanged. A flame graph attributes the extra time to normalize_query, which is where to start.",
+    "Title: /v2/search p95 regression after 5.3.0\n\nGET /v2/search p95 rose from 212 ms to 640 ms after release 5.3.0 on example-store. The median is unchanged. The flame graph points at normalize_query(). The pod cold start is a separate known issue and is out of scope here."
   ]
 }
