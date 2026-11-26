@@ -111,12 +111,19 @@ none; shim (e) passes 6 of 6 fixtures of each task below:
 `issue-triage` passes none (the JSON labels are the answer). Every one of the six tasks above needs calibration before
 it can go local-only; in fact the routing rule now requires it for every cell (next section).
 
-**Negation guard (first-pass-review-comment only).** An output fails `structure` when a defect fact has one of the
-markers `no`, `correct`, `correctly`, `safe`, `fine`, `ok`, `harmless` within three words of it in the same sentence
-(`NEGATION_MARKERS`, `NEG_WINDOW`): "so there is no SQL injection risk" and "the boundary is correct" fail. `not`,
-`never` and `without` are not markers because they state defects ("never closes the file", "does not close the file"),
-and `no longer` is skipped for the same reason. The guard is a word list, not understanding: it also fails an honest
-"there is no parameterization" next to the fact, and it misses every denial worded some other way.
+**Negation guard (first-pass-review-comment only).** In a sentence that holds a defect fact, an output fails
+`structure` when (1) the sentence has a denial phrase (`not possible`, `cannot happen`, `can not happen`,
+`impossible`, `no risk`, `no issue`, `no problem`, `not an issue`), or (2) one of the markers `no`, `correct`,
+`correctly`, `safe`, `fine`, `ok`, `harmless` sits within three words of the fact (`NEGATION_MARKERS`, `NEG_WINDOW`,
+`DENIAL_PHRASES`): "so there is no SQL injection risk", "SQL injection is not possible here" and "the boundary is
+correct" fail. A marker is dropped when it is itself negated ("This is not safe: it leaks") or when the sentence says the
+defect is present (`DEFECT_CUES`: `possible`, `remain(s)`, `still`, `leak(s)`, `vulnerable`, `exploitable`, `no escaping`,
+`no guarantee`): "The query has no escaping, so SQL injection is possible" and "The fix is correct but SQL injection
+remains" pass. `not`, `never` and `without` are not markers because they state defects ("never closes the file", "does
+not close the file"), and `no longer` is skipped for the same reason. The guard is a word list, not understanding: it
+also fails an honest "there is no parameterization" next to the fact, it misses every denial worded some other way, and a
+defect cue can hide a denial that happens to use one ("there is still no risk" is caught by the phrase, "still fine" is
+not).
 
 ## Calibration gate (before local-only)
 
@@ -126,21 +133,35 @@ A cell is one (task, model). The scorer pass rate alone can no longer route a ce
    per cell (all of them when fewer pass). The file names the sha256 of the runs file it sampled from (`runs_sha256`),
    `n` and `seed`; each entry has an `id` derived from the run (a hash of its position in the runs file, `ts`, task,
    model and the output hash, not a counter), the `output_sha256` and an empty `verdict`.
-2. A person or a reviewer sets each `verdict` to exactly `ok` or `wrong` (an empty one means not judged yet).
+2. A person or a reviewer sets each `verdict` to exactly `ok` or `wrong` (an empty one means not judged yet). Every
+   sampled entry of a cell must be judged: the sample is drawn by the tool, not chosen by the judge.
 3. `safo-eval calibrate --ingest DIR/calibration.json --runs runs.jsonl --out DIR` draws the same sample again from
    the runs file (same seed) and accepts a verdict ONLY for ids in that sample whose task, model and output hash match.
    One foreign entry, a changed output or hash, a runs file whose sha256 differs, a missing `--runs`, any other verdict
    string, a duplicate id or an unknown task rejects the whole file (exit 2; the error names a count, never output
-   text). The accepted counts are stored per cell in `DIR/calibration-agreement.json` together with the runs sha256,
-   the accepted ids and an `integrity` field: the sha256 over the counts, the runs hash and the sorted accepted ids.
+   text). A file may omit sampled entries (or leave verdicts empty); the verdicts it holds are stored, merged with the
+   ones of an earlier ingest into the same `DIR` (same runs file, `n` and seed), in `DIR/calibration-agreement.json`
+   together with the runs sha256, the judged entries, the sampled count per cell, the `--replace` log and an `integrity`
+   field: the sha256 over the counts, the runs hash, the sample, the judged entries and the log. A verdict that differs
+   from one already stored for the same id is refused (exit 2) unless `--replace` is passed; each replacement is logged
+   in the file (`replaced`: id, old, new). A cell is calibrated only when EVERY entry the sample holds for it has a
+   verdict: judging 35 of a 100-entry sample and dropping the other 65 reads `partial (35 of 100 judged)` and the gate
+   stays closed until all 100 are judged. A cell with fewer than 35 sampled entries (fewer passing outputs) can never
+   calibrate.
    Verdict and agreement files are read only when they are regular files you own with mode 0600 or 0400, never
    through a symlink; results are written 0600 in a 0700 directory.
 4. `safo-eval report --runs runs.jsonl ... --calibration DIR/calibration-agreement.json` recomputes the integrity
    field and compares the runs hash with the file given to `--runs`. A mismatch (an edited agreement file, or another
    runs file) means no cell is calibrated: a loud WARNING on stderr and a CALIBRATION IGNORED line in the report, and
    the routing stays at `local-then-claude-check`. The CALIBRATION table shows the status per cell: `none` (no
-   verdict), `partial` (under 35), `failed` (35 or more but the ok lower bound under 0.9; the routing reason reads
-   `calibration failed: ok lower bound 0.71 < 0.9`), `done` (35 or more and the bound clears 0.9).
+   verdict), `partial (k of n judged)` (under 35 verdicts, or not every sampled entry judged), `failed` (all judged, 35 or more, but
+   the ok lower bound under 0.9; the routing reason reads `calibration failed: ok lower bound 0.71 < 0.9`), `done`
+   (all judged, 35 or more and the bound clears 0.9).
+
+**Editing the runs file voids the verdicts.** The ids are positions in `runs.jsonl` plus the run's own fields, and the
+agreement file names the sha256 of the file. Appending or editing any row changes that hash and the position-based ids,
+so existing verdicts are void (the report ignores them loudly): draw the sample again and judge it again. An ingest into
+a `DIR` holding verdicts of another runs file starts over and says so on stderr.
 
 **What this defends against.** Mistakes (a stale file, verdicts from another run) and an agent that writes verdicts or
 counts without having the sample: it cannot unlock local-only without ids that exist in the runs file. It does NOT
@@ -149,7 +170,7 @@ file, recomputes the hash, or edits the runs file and re-samples can always get 
 person. The gate is also only as good as the verdicts themselves.
 
 A cell reaches local-only only when both hold: (a) the 95 percent Wilson lower bound of the scorer pass rate is at
-least 0.9, and (b) there are at least 35 verdicts and the lower bound of the ok share is at least 0.9. Otherwise the
+least 0.9, and (b) every sampled entry of the cell is judged, there are at least 35 verdicts and the lower bound of the ok share is at least 0.9. Otherwise the
 best it can be is `local-then-claude-check`. Constants: `CAL_SAMPLE_DEFAULT` 35, `CAL_MIN_VERDICTS` 35,
 `CAL_MIN_LOWER` 0.9. The ok-share bound is the same two-sided 95 percent Wilson bound as the pass rate (z = 1.96,
 `CAL_Z`), so 35 of 35 ok gives about 0.901 and clears 0.9. 34 of 35 ok does not, 30 of 30 ok does not (0.886), and 20 ok

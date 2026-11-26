@@ -876,6 +876,38 @@ NEGATED = [  # a sentence that names the defect only to say there is none
         "first-pass-review-comment/06-wrong-compare",
         "is_adult handles the boundary correctly, so the comparison is right for every age.",
     ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query string. SQL injection is not possible here.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query string, so SQL injection cannot happen.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query string, so SQL injection can not happen.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query string, and SQL injection is impossible.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query string, so SQL injection is a no risk matter.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query string, yet there is no issue with SQL injection at all.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query string; SQL injection is no problem for this caller.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query string, and SQL injection is not an issue for this caller.",
+    ),
 ]
 DEFECT_STATING = [  # not, never and without state the defect, so they stay allowed
     (
@@ -893,6 +925,22 @@ DEFECT_STATING = [  # not, never and without state the defect, so they stay allo
     (
         "first-pass-review-comment/05-long-diff",
         "apply_discount no longer divides pct by 100, so a discount of 15 makes the price negative.",
+    ),
+    (
+        "first-pass-review-comment/03-unclosed-file",
+        "read_cfg opens the file and there is no guarantee it closed, so the file handle leaks.",
+    ),
+    (
+        "first-pass-review-comment/03-unclosed-file",
+        "read_cfg opens a file here. This is not safe: it leaks the file handle.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query. The query has no escaping, so SQL injection is possible.",
+    ),
+    (
+        "first-pass-review-comment/02-sql-concat",
+        "find_user glues name into the query. The fix is correct but SQL injection remains.",
     ),
 ]
 
@@ -1166,7 +1214,7 @@ def test_a_verdict_file_made_for_other_runs_is_rejected() -> None:
 
 def agreement_for(runs: list[dict[str, Any]], ok: int, wrong: int) -> dict[str, Any]:
     doc = fill(sample(runs, ok + wrong), ok, wrong)
-    return le.agreement_doc(ingest(doc, runs), RUNS_SHA, le.judged_ids(doc))
+    return le.agreement_doc(le.ingest_full(doc, runs, RUNS_SHA), RUNS_SHA)
 
 
 def test_agreement_file_round_trips_and_drives_the_gate() -> None:
@@ -1182,7 +1230,7 @@ def test_a_hand_edited_agreement_file_is_not_calibrated() -> None:
     with pytest.raises(le.CalibrationMismatch, match="integrity"):
         le.load_agreement(doc, RUNS_SHA)
     doc = agreement_for(runs, 35, 0)
-    doc["accepted_ids"] = doc["accepted_ids"][:-1]  # ids dropped
+    doc["verdicts"] = doc["verdicts"][:-1]  # a judged entry dropped
     with pytest.raises(le.CalibrationMismatch, match="integrity"):
         le.load_agreement(doc, RUNS_SHA)
     with pytest.raises(le.CalibrationMismatch, match="runs file"):
@@ -1299,3 +1347,115 @@ def test_read_private_refuses_a_file_owned_by_someone_else(tmp_path: Path) -> No
     assert le._read_private(p, uid=os.getuid()) == "{}"
     with pytest.raises(le.EvalError, match="owned by you"):
         le._read_private(p, uid=os.getuid() + 1)  # the owner check bites when the uid differs
+
+
+# ---- every sampled entry of a cell must be judged (selection bias)
+
+CELL = ("pr-summary", "qwen3.5:4b")
+
+
+def only_first(doc: dict[str, Any], k: int) -> dict[str, Any]:
+    doc["entries"] = doc["entries"][:k]  # the rest of the sample is removed from the file
+    return doc
+
+
+def test_judging_only_the_first_35_of_a_100_sample_does_not_calibrate() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 120)
+    doc = only_first(fill(sample(runs, 100), 35, 0), 35)  # the reviewer's reproduction
+    cal = ingest(doc, runs)
+    cell = cal[CELL]
+    assert cell["verdicts"] == 35 and cell["sampled"] == 100
+    assert le.cal_status(cell) == "partial" and not le.calibration_ok(cell)
+    text = le.render_report(runs, cal)
+    assert "| pr-summary | local-then-claude-check |" in text and "| pr-summary | local-qwen |" not in text
+    assert "partial (35 of 100 judged)" in text
+    full = ingest(fill(sample(runs, 100), 100, 0), runs)[CELL]  # judging every sampled entry does calibrate
+    assert full["verdicts"] == 100 and le.calibration_ok(full) and le.cal_status(full) == "done"
+
+
+def test_judging_all_of_a_35_entry_sample_calibrates() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 120)
+    cell = ingest(fill(sample(runs, 35), 35, 0), runs)[CELL]
+    assert cell["sampled"] == 35 and le.calibration_ok(cell)
+    assert "| pr-summary | local-qwen |" in le.render_report(runs, {CELL: cell})
+
+
+def test_a_sample_under_35_can_never_calibrate_even_when_fully_judged() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 20)  # only 20 outputs pass
+    cell = ingest(fill(sample(runs, 100), 20, 0), runs)[CELL]
+    assert cell["sampled"] == 20 and cell["verdicts"] == 20
+    assert not le.calibration_ok(cell) and le.cal_status(cell) == "partial"
+
+
+def test_two_step_ingest_merges_verdicts_and_completes_the_cell() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    first = le.ingest_full(fill(sample(runs, 35), 20, 0), runs, RUNS_SHA)  # 20 judged, 15 left empty
+    assert first.cells[CELL]["verdicts"] == 20 and not le.calibration_ok(first.cells[CELL])
+    second_doc = fill(sample(runs, 35), 35, 0)
+    for e in second_doc["entries"][:20]:
+        e["verdict"] = ""  # this file only judges the other 15
+    both = le.ingest_full(second_doc, runs, RUNS_SHA, prior=first)
+    assert both.cells[CELL]["verdicts"] == 35 and le.calibration_ok(both.cells[CELL]) and both.replaced == []
+    again = le.load_agreement(le.agreement_doc(both, RUNS_SHA), RUNS_SHA)  # stored and read back
+    assert le.calibration_ok(again[CELL])
+
+
+def test_a_changed_verdict_needs_replace_and_is_logged() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    first = le.ingest_full(fill(sample(runs, 35), 35, 0), runs, RUNS_SHA)
+    changed = fill(sample(runs, 35), 35, 0)
+    changed["entries"][0]["verdict"] = "wrong"
+    with pytest.raises(le.EvalError, match="--replace"):
+        le.ingest_full(changed, runs, RUNS_SHA, prior=first)
+    kept = le.ingest_full(fill(sample(runs, 35), 35, 0), runs, RUNS_SHA, prior=first)  # the same verdicts again
+    assert kept.replaced == []
+    swapped = le.ingest_full(changed, runs, RUNS_SHA, prior=first, replace=True)
+    assert swapped.cells[CELL]["wrong"] == 1 and len(swapped.replaced) == 1
+    doc = le.agreement_doc(swapped, RUNS_SHA)
+    assert doc["replaced"][0]["id"] == changed["entries"][0]["id"]
+    assert le.load_agreement(doc, RUNS_SHA)[CELL]["wrong"] == 1
+    doc["replaced"] = []  # the log is part of the integrity field
+    with pytest.raises(le.CalibrationMismatch, match="integrity"):
+        le.load_agreement(doc, RUNS_SHA)
+
+
+def test_a_second_ingest_must_use_the_same_sample() -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 120)
+    first = le.ingest_full(fill(sample(runs, 100), 35, 0), runs, RUNS_SHA)
+    with pytest.raises(le.EvalError, match="sample"):
+        le.ingest_full(fill(sample(runs, 35), 35, 0), runs, RUNS_SHA, prior=first)  # another n draws other entries
+
+
+def test_cli_partial_judging_then_the_rest_with_replace(tmp_path: Path) -> None:
+    runs = passing_runs("pr-summary", "qwen3.5:4b", 60)
+    runs_in = tmp_path / "runs.jsonl"
+    runs_in.write_text("".join(json.dumps(r) + "\n" for r in runs), encoding="utf-8")
+    cal_dir, out = tmp_path / "cal", tmp_path / "done"
+    assert le.entry(["calibrate", "--runs", str(runs_in), "--out", str(cal_dir), "--n", "35"]) == 0
+    sample_path = cal_dir / "calibration.json"
+    base = json.loads(sample_path.read_text())
+
+    def ingest_cli(ok: int, start: int = 0, extra: tuple[str, ...] = (), flip: bool = False) -> int:
+        d = json.loads(json.dumps(base))
+        for i, e in enumerate(d["entries"]):
+            e["verdict"] = ("wrong" if flip and i == 0 else "ok") if start <= i < start + ok else ""
+        sample_path.write_text(json.dumps(d), encoding="utf-8")
+        sample_path.chmod(0o600)
+        return le.entry(["calibrate", "--ingest", str(sample_path), "--runs", str(runs_in), "--out", str(out), *extra])
+
+    def report() -> str:
+        rep = tmp_path / "rep"
+        agreement_path = out / "calibration-agreement.json"
+        assert (
+            le.entry(["report", "--runs", str(runs_in), "--out", str(rep), "--calibration", str(agreement_path)]) == 0
+        )
+        return (rep / "report.md").read_text()
+
+    assert ingest_cli(20) == 0
+    assert "partial (20 of 35 judged)" in report() and "| pr-summary | local-qwen |" not in report()
+    assert ingest_cli(15, start=20) == 0
+    assert "| pr-summary | local-qwen |" in report()
+    assert ingest_cli(1, flip=True) == 2  # entry 0 was ok, now wrong: refused without --replace
+    assert "| pr-summary | local-qwen |" in report()  # the stored file is untouched
+    assert ingest_cli(1, flip=True, extra=("--replace",)) == 0
+    assert json.loads((out / "calibration-agreement.json").read_text())["replaced"]

@@ -289,10 +289,21 @@ DEFECT_VERB = re.compile(
 
 
 # a review comment that names the defect only to deny it ("so there is no SQL injection risk", "the boundary is
-# correct") is wrong. A marker within NEG_WINDOW words of a defect fact, in the same sentence, fails the structure.
-# not, never and without are left out on purpose: "never closes the file" states the defect. So does "no longer".
+# correct") is wrong. Two checks, per sentence, only in a sentence that holds a defect fact:
+# (1) a denial phrase anywhere in the sentence ("not possible", "cannot happen", "impossible", "no risk", ...);
+# (2) a marker within NEG_WINDOW words of the fact, unless the marker is itself negated ("not safe") or the sentence
+#     says the defect is present (a defect cue such as "remains", "still", "leaks", "no escaping", "no guarantee").
+# not, never and without are left out of the markers on purpose: "never closes the file" states the defect. So does
+# "no longer". The lists are words, not understanding (docs/local-eval.md).
 NEGATION_MARKERS = ("no", "correct", "correctly", "safe", "fine", "ok", "harmless")
 NEG_WINDOW = 3
+DENIAL_PHRASES = re.compile(
+    r"\b(?:not possible|cannot happen|can not happen|impossible|no risk|no issue|no problem|not an issue)\b",
+    re.IGNORECASE,
+)
+DEFECT_CUES = re.compile(
+    r"\b(?:possible|remains?|still|leaks?|leaked|vulnerable|exploitable|no escaping|no guarantee)\b", re.IGNORECASE
+)
 _TOKEN = re.compile(r"[A-Za-z0-9_']+")
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n")
 
@@ -300,15 +311,20 @@ _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n")
 def denies_defect(defect: Sequence[Fact], output: str) -> bool:
     for sentence in _SENT_SPLIT.split(output):
         toks = [(m.group().lower(), m.start(), m.end()) for m in _TOKEN.finditer(sentence)]
+        stated = DEFECT_CUES.search(sentence) is not None
         for fact in defect:
-            for fs, fe in _fact_spans(fact, sentence):
+            spans = _fact_spans(fact, sentence)
+            if spans and DENIAL_PHRASES.search(sentence):
+                return True
+            for fs, fe in spans:
                 inside = [i for i, (_, s, e) in enumerate(toks) if s < fe and e > fs]
-                if not inside:
+                if not inside or stated:
                     continue
                 lo, hi = inside[0], inside[-1]
                 for i in [*range(max(0, lo - NEG_WINDOW), lo), *range(hi + 1, min(len(toks), hi + 1 + NEG_WINDOW))]:
                     longer = i + 1 < len(toks) and toks[i + 1][0] == "longer"  # "no longer divides" states the defect
-                    if toks[i][0] in NEGATION_MARKERS and not (toks[i][0] == "no" and longer):
+                    negated = i > 0 and toks[i - 1][0] == "not"  # "not safe" says the opposite of safe
+                    if toks[i][0] in NEGATION_MARKERS and not (toks[i][0] == "no" and longer) and not negated:
                         return True
     return False
 
@@ -614,26 +630,48 @@ def summarize(runs: Sequence[dict[str, Any]]) -> dict[tuple[str, str], dict[str,
     return out
 
 
-def agreement(ok: int, wrong: int) -> dict[str, Any]:
-    """Agreement of the verdicts for one cell: the ok share with its two-sided 95 percent Wilson interval."""
+def agreement(ok: int, wrong: int, sampled: int | None = None) -> dict[str, Any]:
+    """Agreement of the verdicts for one cell: the ok share with its two-sided 95 percent Wilson interval. sampled is
+    how many entries the drawn sample holds for the cell (every one of them must be judged); None means the verdicts
+    are all there is."""
     n = ok + wrong
     lo, hi = wilson(ok, n, CAL_Z)
-    return {"verdicts": n, "ok": ok, "wrong": wrong, "ok_share": ok / n if n else None, "ci_low": lo, "ci_high": hi}
+    return {
+        "verdicts": n,
+        "sampled": n if sampled is None else sampled,
+        "ok": ok,
+        "wrong": wrong,
+        "ok_share": ok / n if n else None,
+        "ci_low": lo,
+        "ci_high": hi,
+    }
+
+
+def _all_judged(cell: dict[str, Any]) -> bool:
+    return bool(cell["verdicts"] >= cell.get("sampled", cell["verdicts"]))
 
 
 def cal_status(cell: dict[str, Any] | None) -> str:
-    """none: no verdict yet; partial: fewer than CAL_MIN_VERDICTS; failed: enough verdicts but the ok share's lower
-    bound is under CAL_MIN_LOWER; done: enough verdicts and the bound clears it."""
+    """none: no verdict yet; partial: fewer than CAL_MIN_VERDICTS, or not every sampled entry of the cell judged;
+    failed: all judged, enough verdicts, but the ok share's lower bound is under CAL_MIN_LOWER; done: all judged,
+    enough verdicts and the bound clears it."""
     n = cell["verdicts"] if cell else 0
     if cell is None or n == 0:
         return "none"
-    if n < CAL_MIN_VERDICTS:
+    if n < CAL_MIN_VERDICTS or not _all_judged(cell):
         return "partial"
     return "done" if cell["ci_low"] >= CAL_MIN_LOWER else "failed"
 
 
+def cal_label(cell: dict[str, Any] | None) -> str:
+    status = cal_status(cell)
+    if cell is not None and status == "partial":
+        return f"partial ({cell['verdicts']} of {cell.get('sampled', cell['verdicts'])} judged)"
+    return status
+
+
 def calibration_ok(cell: dict[str, Any] | None) -> bool:
-    return cell is not None and cell["verdicts"] >= CAL_MIN_VERDICTS and cell["ci_low"] >= CAL_MIN_LOWER
+    return cell is not None and cal_status(cell) == "done"
 
 
 def tier_for(
@@ -780,8 +818,10 @@ def render_report(
         "",
         "## CALIBRATION",
         "",
-        f"Per cell: none (no verdict), partial (under {CAL_MIN_VERDICTS}), failed ({CAL_MIN_VERDICTS} or more but "
-        f"the ok lower bound is under {CAL_MIN_LOWER}), done ({CAL_MIN_VERDICTS} or more and the bound clears it). "
+        f"Per cell: none (no verdict), partial (under {CAL_MIN_VERDICTS} verdicts, or not every sampled entry of the "
+        f"cell judged: k of n), failed (all judged, {CAL_MIN_VERDICTS} or more, but "
+        f"the ok lower bound is under {CAL_MIN_LOWER}), done (all judged, {CAL_MIN_VERDICTS} or more and the bound "
+        "clears it). "
         "Verdicts are human or reviewer ok/wrong calls on passing outputs; the ok share's lower bound is the two-sided "
         "95% Wilson bound. A pass means the facts are present and the shape is right, "
         "not that the answer is meaningful.",
@@ -799,7 +839,7 @@ def render_report(
             if (t, m) in stats:
                 c = cals.get((t, m))
                 lines.append(
-                    f"| {t} | {m} | {cal_status(c)} | {c['verdicts'] if c else 0} | "
+                    f"| {t} | {m} | {cal_label(c)} | {c['verdicts'] if c else 0} | "
                     f"{_fmt(c['ok_share'] if c else None)} | {_fmt(c['ci_low'] if c else None)} |"
                 )
     lines += render_time_buckets(runs)
@@ -874,12 +914,47 @@ def _is_int(x: Any) -> bool:
     return isinstance(x, int) and not isinstance(x, bool)
 
 
-def ingest_verdicts(doc: Any, runs: Sequence[dict[str, Any]], runs_sha: str) -> dict[tuple[str, str], dict[str, Any]]:
+@dataclass
+class Ingested:
+    """The judged entries of one sample, merged over ingests: id -> (task, model, verdict), the agreement per cell
+    (with the number of sampled entries of the cell), the sample's n and seed and the log of replaced verdicts."""
+
+    cells: dict[tuple[str, str], dict[str, Any]]
+    verdicts: dict[str, tuple[str, str, str]]
+    n: int
+    seed: int
+    replaced: list[dict[str, str]] = field(default_factory=list)
+
+
+def _cells_of(
+    expected: dict[str, dict[str, Any]], verdicts: dict[str, tuple[str, str, str]]
+) -> dict[tuple[str, str], dict[str, Any]]:
+    sampled: dict[tuple[str, str], int] = defaultdict(int)
+    for e in expected.values():
+        sampled[(e["task"], e["model"])] += 1
+    counts: dict[tuple[str, str], list[int]] = {k: [0, 0] for k in sampled}
+    for task, model, verdict in verdicts.values():
+        if (task, model) not in counts:
+            raise EvalError("a stored verdict belongs to no sampled cell")
+        counts[(task, model)][0 if verdict == "ok" else 1] += 1
+    return {k: agreement(v[0], v[1], sampled[k]) for k, v in sorted(counts.items())}
+
+
+def ingest_full(
+    doc: Any,
+    runs: Sequence[dict[str, Any]],
+    runs_sha: str,
+    prior: Ingested | None = None,
+    replace: bool = False,
+) -> Ingested:
     """Agreement per (task, model) cell from a filled calibration file, bound to the runs it was sampled from. The
     file must name the sha256 of this runs file; the sample is drawn again from the runs with the stored n and seed,
     and every entry must be one of its ids with the same task, model and output hash, else the whole file is
     rejected (the error names a count, never output text). Only the verdicts ok and wrong count; an empty verdict
-    is not yet judged; any other value, a duplicate id or an unknown task is an error."""
+    is not yet judged; any other value, a duplicate id or an unknown task is an error. A file may omit sampled
+    entries: the cell then reads partial (judged k of n) until every sampled entry of it has a verdict. With prior (the
+    stored agreement of an earlier ingest of the same sample) the verdicts are merged; a different verdict for an
+    id already judged is an error unless replace is set, and each replacement is logged."""
     if not isinstance(doc, dict) or doc.get("format") != CAL_FORMAT or not isinstance(doc.get("entries"), list):
         raise EvalError("not a safo-eval calibration file")
     if doc.get("runs_sha256") != runs_sha:
@@ -889,8 +964,12 @@ def ingest_verdicts(doc: Any, runs: Sequence[dict[str, Any]], runs_sha: str) -> 
         raise EvalError("calibration file has no valid n and seed")
     if not 1 <= n <= CAL_MAX_N:
         raise EvalError("calibration file has no valid n and seed")
+    if prior is not None and (prior.n, prior.seed) != (n, seed):
+        raise EvalError(
+            "this file is another sample (n or seed differ) than the stored verdicts: start a new directory"
+        )
     expected = {e["id"]: e for e in calibration_file(runs, n, seed, runs_sha)["entries"]}
-    counts: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    new: dict[str, tuple[str, str, str]] = {}
     seen: set[str] = set()
     foreign = 0
     for e in doc["entries"]:
@@ -917,73 +996,144 @@ def ingest_verdicts(doc: Any, runs: Sequence[dict[str, Any]], runs_sha: str) -> 
         if (task, model) != (want["task"], want["model"]) or not same_output:
             foreign += 1  # a real id with another cell or another output
             continue
-        cell = counts[(task, model)]
-        if verdict == "ok":
-            cell[0] += 1
-        elif verdict == "wrong":
-            cell[1] += 1
+        if verdict:
+            new[eid] = (task, model, verdict)
     if foreign:
         raise EvalError(
             f"{foreign} of {len(doc['entries'])} calibration entries are not in the sample drawn from this runs file "
             "(id, task, model or output hash differ); the whole file is rejected"
         )
-    return {k: agreement(v[0], v[1]) for k, v in counts.items()}
+    merged = dict(prior.verdicts) if prior else {}
+    replaced = list(prior.replaced) if prior else []
+    changed = sorted(i for i, v in new.items() if i in merged and merged[i][2] != v[2])
+    if changed and not replace:
+        raise EvalError(
+            f"{len(changed)} verdicts differ from the ones already stored; pass --replace to change a judged verdict"
+        )
+    for i in changed:
+        replaced.append({"id": i, "from": merged[i][2], "to": new[i][2]})
+    merged.update(new)
+    return Ingested(_cells_of(expected, merged), merged, n, seed, replaced)
 
 
-def judged_ids(doc: dict[str, Any]) -> list[str]:
-    """Sorted ids of the entries that carry a counted verdict (call after ingest_verdicts accepted the file)."""
-    return sorted(e["id"] for e in doc["entries"] if e.get("verdict") in ("ok", "wrong"))
+def ingest_verdicts(doc: Any, runs: Sequence[dict[str, Any]], runs_sha: str) -> dict[tuple[str, str], dict[str, Any]]:
+    return ingest_full(doc, runs, runs_sha).cells
 
 
 class CalibrationMismatch(EvalError):
     """An agreement file that does not belong to these runs or was edited: not calibrated, said loudly."""
 
 
-def _integrity(cells: Sequence[tuple[str, str, int, int]], runs_sha: str, ids: Sequence[str]) -> str:
-    """sha256 over the counts, the runs hash and the sorted accepted ids. No key: it catches a slipped or a careless
-    edit and an agent that writes counts without the sample; the owner can always recompute it (docs/local-eval.md)."""
-    raw = json.dumps({"runs": runs_sha, "cells": sorted(cells), "ids": sorted(ids)}, separators=(",", ":"))
+def _integrity(
+    cells: Sequence[tuple[str, str, int, int, int]],
+    runs_sha: str,
+    verdicts: Sequence[tuple[str, str, str, str]],
+    replaced: Sequence[dict[str, str]],
+    sample_ref: tuple[int, int],
+) -> str:
+    """sha256 over the counts, the runs hash, the sample (n, seed), the sorted judged entries and the replacement
+    log. No key: it catches a slipped or a careless edit and an agent that writes counts without the sample; the
+    owner can always recompute it (docs/local-eval.md)."""
+    raw = json.dumps(
+        {
+            "runs": runs_sha,
+            "sample": list(sample_ref),
+            "cells": sorted(cells),
+            "verdicts": sorted(verdicts),
+            "replaced": [[r["id"], r["from"], r["to"]] for r in replaced],
+        },
+        separators=(",", ":"),
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def agreement_doc(cells: dict[tuple[str, str], dict[str, Any]], runs_sha: str, ids: Sequence[str]) -> dict[str, Any]:
-    counted = [(t, m, c["ok"], c["wrong"]) for (t, m), c in cells.items()]
+def _cell_tuples(cells: dict[tuple[str, str], dict[str, Any]]) -> list[tuple[str, str, int, int, int]]:
+    return [(t, m, c["ok"], c["wrong"], c["sampled"]) for (t, m), c in cells.items()]
+
+
+def agreement_doc(ing: Ingested, runs_sha: str) -> dict[str, Any]:
+    rows = [(i, t, m, v) for i, (t, m, v) in ing.verdicts.items()]
     return {
         "format": CAL_FORMAT + "-agreement",
         "runs_sha256": runs_sha,
-        "cells": [{"task": t, "model": m, **c} for (t, m), c in sorted(cells.items())],
-        "accepted_ids": sorted(ids),
-        "integrity": _integrity(counted, runs_sha, ids),
+        "n": ing.n,
+        "seed": ing.seed,
+        "cells": [{"task": t, "model": m, **c} for (t, m), c in sorted(ing.cells.items())],
+        "verdicts": [{"id": i, "task": t, "model": m, "verdict": v} for i, t, m, v in sorted(rows)],
+        "replaced": ing.replaced,
+        "integrity": _integrity(_cell_tuples(ing.cells), runs_sha, rows, ing.replaced, (ing.n, ing.seed)),
     }
 
 
-def load_agreement(doc: Any, runs_sha: str) -> dict[tuple[str, str], dict[str, Any]]:
-    """Read an agreement file back for this runs file. Only the ok and wrong counts are trusted, and only when the
-    file names this runs file and its integrity field matches; else CalibrationMismatch (not calibrated)."""
+def load_ingested(doc: Any, runs_sha: str) -> Ingested:
+    """Read an agreement file back for this runs file. Only the judged entries are trusted (the counts must match
+    them), and only when the file names this runs file and its integrity field matches; else CalibrationMismatch
+    (not calibrated)."""
     if not isinstance(doc, dict) or doc.get("format") != CAL_FORMAT + "-agreement":
         raise EvalError("not a safo-eval calibration agreement file")
-    if not isinstance(doc.get("cells"), list):
+    if not isinstance(doc.get("cells"), list) or not isinstance(doc.get("verdicts"), list):
         raise EvalError("not a safo-eval calibration agreement file")
-    out: dict[tuple[str, str], dict[str, Any]] = {}
+    n_raw, seed_raw = doc.get("n"), doc.get("seed")
+    if (
+        not isinstance(n_raw, int)
+        or isinstance(n_raw, bool)
+        or not isinstance(seed_raw, int)
+        or isinstance(seed_raw, bool)
+    ):
+        raise EvalError("not a safo-eval calibration agreement file")
+    n, seed = n_raw, seed_raw
+    cells: dict[tuple[str, str], dict[str, Any]] = {}
     for c in doc["cells"]:
         try:
-            ok, wrong, task, model = c["ok"], c["wrong"], c["task"], c["model"]
+            ok, wrong, sampled, task, model = c["ok"], c["wrong"], c["sampled"], c["task"], c["model"]
         except (KeyError, TypeError) as exc:
             raise EvalError("bad agreement cell") from exc
-        counts_ok = all(_is_int(x) and x >= 0 for x in (ok, wrong))
+        counts_ok = all(_is_int(x) and x >= 0 for x in (ok, wrong, sampled))
         if not counts_ok or task not in TASKS or not isinstance(model, str):
             raise EvalError("bad agreement cell")
-        out[(task, model)] = agreement(ok, wrong)
+        cells[(task, model)] = agreement(ok, wrong, sampled)
+    verdicts: dict[str, tuple[str, str, str]] = {}
+    for v in doc["verdicts"]:
+        try:
+            vid, task, model, verdict = v["id"], v["task"], v["model"], v["verdict"]
+        except (KeyError, TypeError) as exc:
+            raise EvalError("bad agreement verdict") from exc
+        if (
+            not isinstance(vid, str)
+            or task not in TASKS
+            or not isinstance(model, str)
+            or verdict not in ("ok", "wrong")
+        ):
+            raise EvalError("bad agreement verdict")
+        verdicts[vid] = (task, model, verdict)
+    replaced = doc.get("replaced")
+    if not isinstance(replaced, list) or not all(
+        isinstance(r, dict) and all(isinstance(r.get(k), str) for k in ("id", "from", "to")) for r in replaced
+    ):
+        raise EvalError("bad agreement replacement log")
     if doc.get("runs_sha256") != runs_sha:
         raise CalibrationMismatch("the agreement file was made from a different runs file (sha256 differs)")
-    ids = doc.get("accepted_ids")
-    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
-        raise CalibrationMismatch("the agreement file has no accepted ids (integrity cannot be checked)")
-    counted = [(t, m, c["ok"], c["wrong"]) for (t, m), c in out.items()]
-    total = sum(ok + wrong for _, _, ok, wrong in counted)
-    if _integrity(counted, runs_sha, ids) != doc.get("integrity") or total != len(ids):
+    rows = [(i, t, m, v) for i, (t, m, v) in verdicts.items()]
+    recount = _cells_of_counts(verdicts)
+    counts_match = len(verdicts) == len(doc["verdicts"]) and all(
+        recount.get(k, (0, 0)) == (c["ok"], c["wrong"]) for k, c in cells.items()
+    )
+    if not counts_match or sum(a + b for a, b in recount.values()) != sum(c["verdicts"] for c in cells.values()):
         raise CalibrationMismatch("the agreement file's integrity field does not match its counts and ids (edited?)")
-    return out
+    if _integrity(_cell_tuples(cells), runs_sha, rows, replaced, (n, seed)) != doc.get("integrity"):
+        raise CalibrationMismatch("the agreement file's integrity field does not match its counts and ids (edited?)")
+    return Ingested(cells, verdicts, n, seed, [dict(r) for r in replaced])
+
+
+def _cells_of_counts(verdicts: dict[str, tuple[str, str, str]]) -> dict[tuple[str, str], tuple[int, int]]:
+    out: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    for task, model, verdict in verdicts.values():
+        out[(task, model)][0 if verdict == "ok" else 1] += 1
+    return {k: (v[0], v[1]) for k, v in out.items()}
+
+
+def load_agreement(doc: Any, runs_sha: str) -> dict[tuple[str, str], dict[str, Any]]:
+    return load_ingested(doc, runs_sha).cells
 
 
 def _read_private(path: Path, uid: int | None = None) -> str:
@@ -1088,6 +1238,9 @@ def entry(argv: Sequence[str] | None = None) -> int:
     c.add_argument("--n", type=int, default=CAL_SAMPLE_DEFAULT, help="outputs per (task, model) cell")
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--ingest", type=Path, help="a filled calibration.json: store the agreement per cell")
+    c.add_argument(
+        "--replace", action="store_true", help="with --ingest: allow a different verdict for an id already judged"
+    )
     c.add_argument("--out", required=True, type=Path, help="output directory")
     args = ap.parse_args(argv)
     try:
@@ -1125,10 +1278,18 @@ def entry(argv: Sequence[str] | None = None) -> int:
                 raise EvalError("calibrate --ingest needs --runs: the verdicts are checked against the sampled runs")
             runs, runs_sha = _read_runs_hashed(args.runs)
             filled = _read_json_private(args.ingest)
-            cells = ingest_verdicts(filled, runs, runs_sha)
-            agreed = agreement_doc(cells, runs_sha, judged_ids(filled))
+            stored = args.out / "calibration-agreement.json"
+            prior = None
+            if stored.exists():
+                try:
+                    prior = load_ingested(_read_json_private(stored), runs_sha)
+                except CalibrationMismatch as exc:
+                    if "integrity" in str(exc):
+                        raise
+                    print(f"safo-eval: stored verdicts are for another runs file and are void: {exc}", file=sys.stderr)
+            ing = ingest_full(filled, runs, runs_sha, prior=prior, replace=args.replace)
             _private_dir(args.out)
-            _write_private(args.out / "calibration-agreement.json", json.dumps(agreed, indent=1) + "\n")
+            _write_private(stored, json.dumps(agreement_doc(ing, runs_sha), indent=1) + "\n")
         else:
             if args.runs is None or args.n < 1:
                 raise EvalError("calibrate needs --runs and --n >= 1, or --ingest")
