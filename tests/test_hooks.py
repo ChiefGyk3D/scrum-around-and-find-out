@@ -367,7 +367,7 @@ def test_runner_command_that_cannot_start_counts_as_down(_private_home: Path, ag
 def process_alive(pid: int) -> bool:
     try:
         state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except FileNotFoundError:
+    except OSError:  # gone, or exited while being read (ESRCH)
         return False
     return state != "Z"  # a zombie has exited; only a live process counts as left running
 

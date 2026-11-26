@@ -184,10 +184,16 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
+def _wait_group_gone(pgid: int) -> None:
+    deadline = time.monotonic() + RUNNER_GRACE_SECONDS
+    while _group_alive(pgid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 def _probe_exit(argv: list[str], env: Mapping[str, str]) -> int | None:
     """Run the status command with no pipes, in its own session, and return its exit code. None means no clean answer:
     it timed out, or it left processes running in its group after it exited. Nothing it started survives this call."""
-    proc = subprocess.Popen(
+    proc = subprocess.Popen(  # noqa: S603 - argument vector only, no shell, operator-configured status command, output discarded
         argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -206,6 +212,7 @@ def _probe_exit(argv: list[str], env: Mapping[str, str]) -> int | None:
         left_running = _group_alive(proc.pid)  # the leader is gone; anything it left in the group is still there
         _signal_group(proc.pid, signal.SIGKILL)
         proc.wait()  # reap the leader
+        _wait_group_gone(proc.pid)  # SIGKILL lands asynchronously: wait, bounded, for the group to empty
     return None if code is None or left_running else code
 
 
