@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import html
 import ipaddress
 import json
 import os
@@ -36,6 +37,7 @@ import stat
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TextIO
@@ -52,6 +54,8 @@ WAIT_SECONDS = "60"
 PR_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 # U+2014 em dash and its small, vertical and two/three-em look-alikes. U+2015 (horizontal bar) is not blocked.
 EM_DASHES = "".join(chr(c) for c in (0x2014, 0xFE58, 0xFE31, 0x2E3A, 0x2E3B))
+MAX_CHECK_CHARS = 20_000  # model output longer than this is refused, not checked
+CANON_ROUNDS = 3
 NOT_VERIFIED = "Twingate and the local server were NOT verified; nothing was sent to a Claude model."
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_DECLINED, EXIT_TIMEOUT, EXIT_INTERNAL, EXIT_GH_FAILED, EXIT_BUSY = (
@@ -70,29 +74,49 @@ EXIT_TABLE = (
     "error; 13 gh failed (filing or commenting); 75 local queue still busy; any other code is the llm-local exit code"
 )
 
-_PLACEHOLDERS = {"N0CALL", "N0TST", "FN31PR", "K1ABC"}
-# Common technical tokens that have the shape of a callsign. Extend with SAFO_DRAFT_ALLOW.
-_TECH_TOKENS = {"K8S", "P2P", "B2B", "E2E", "A2A", "M2M", "H2O"}
+_PLACEHOLDERS = {"N0CALL", "N0TST", "FN31PR", "FN31", "K1ABC"}
+# Common technical tokens that have the shape of a callsign or grid. Extend with SAFO_DRAFT_ALLOW.
+_TECH_TOKENS = {
+    "K8S",
+    "P2P",
+    "B2B",
+    "E2E",
+    "A2A",
+    "M2M",
+    "H2O",  # the original set
+    "K3S",
+    "N8N",
+    "W3C",
+    "C2PA",
+    "I2C",
+    "I2S",
+    "E2EE",
+    "L2TP",
+    "M3U",  # added in round 3, from docs and common tech terms
+}
 _CALL_SHAPE = r"[A-Z]{1,2}[0-9][A-Z]{1,3}"
-_CALLSIGN = re.compile(rf"\b{_CALL_SHAPE}\b")  # upper case anywhere
+_EDGE_BEFORE = r"(?<![A-Za-z0-9_-])"  # not inside a longer alphanumeric, hyphenated or underscore token
+_EDGE_AFTER = r"(?![A-Za-z0-9_-])"
+_CALLSIGN = re.compile(rf"{_EDGE_BEFORE}{_CALL_SHAPE}{_EDGE_AFTER}", re.IGNORECASE)  # any case, no cue needed
 _CALLSIGN_CTX = re.compile(
     rf"\b(?:call\s*sign|call|de)\b(?:\s+is)?[\s:=]+({_CALL_SHAPE})\b", re.IGNORECASE
-)  # any case after a cue
+)  # any case after a cue, even inside a hyphenated token
 _GRID6 = re.compile(r"\b[A-R]{2}[0-9]{2}[A-X]{2}\b", re.IGNORECASE)
+_GRID4 = re.compile(rf"{_EDGE_BEFORE}[A-R]{{2}}[0-9]{{2}}{_EDGE_AFTER}", re.IGNORECASE)
 _GRID_CTX = re.compile(
     r"\b(?:grid(?:\s*square)?|locator|maidenhead)\b[\s:=]+([A-R]{2}[0-9]{2}(?:[A-X]{2})?)\b", re.IGNORECASE
 )
 _IPV4 = re.compile(r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b")
 _IPV6_RUN = re.compile(r"[0-9A-Fa-f:.]+(?:%[\w.-]+)?")
-_HOSTNAME = re.compile(
-    r"\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:lan|local|internal|home|corp|intranet|home\.arpa)\b", re.I
-)
+_NAME_RUN = re.compile(r"[A-Za-z0-9.-]+")
+_PRIVATE_SUFFIXES = {"lan", "local", "internal", "home", "corp", "intranet"}  # plus home.arpa, covered by "home"
 _SERIAL = re.compile(
     r"\b(?:serial(?:\s+(?:number|no\.?|num))?|s/n|sn)[\s:#=]+(?=[A-Z0-9-]*\d)[A-Z0-9-]{6,}", re.IGNORECASE
 )
-_SESSION_URL = re.compile(r"(?:https?://)?(?:[\w-]+\.)*claude\.ai/\S*|https?://\S*claude\.ai\S*", re.IGNORECASE)
-_SESSION_TRAILER = re.compile(r"^\s*claude-session\s*:", re.IGNORECASE | re.MULTILINE)
-_EPIC = re.compile(r"^\s*(?:epic\s*:\s*\S+|part of epic\s+#\d+)", re.IGNORECASE | re.MULTILINE)
+_SESSION_TRAILER = re.compile(r"^[ \t]*claude-session[ \t]*:", re.IGNORECASE | re.MULTILINE)
+_MD_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
+_EPIC = re.compile(r"^[ \t]*(?:epic\s*:\s*\S+|part of epic\s+#\d+)", re.IGNORECASE | re.MULTILINE)
 
 _FAILURE = re.compile(r"##\[error\]|\berror\b|\bfailed\b|\bfailure\b|traceback|exit code [1-9]|\bFAIL\b", re.IGNORECASE)
 _STAMP = re.compile(r"^(?:[^\t]*\t){0,2}\s*\d{4}-\d\d-\d\dT[\d:.]+Z\s*")
@@ -124,24 +148,104 @@ def allow_words(env: Mapping[str, str]) -> list[str]:
     return _words(env, "SAFO_DRAFT_ALLOW")
 
 
+def _strip_comments(text: str) -> str:
+    """Remove `<!-- ... -->` in one linear pass; an unterminated comment is left as it is."""
+    out: list[str] = []
+    pos = 0
+    while True:
+        start = text.find("<!--", pos)
+        if start < 0:
+            break
+        end = text.find("-->", start + 4)
+        if end < 0:
+            break
+        out.append(text[pos:start])
+        pos = end + 3
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _canonical_round(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")  # zero-width, soft hyphen, BOM, bidi marks
+    text = html.unescape(text)
+    text = _TAG.sub("", _strip_comments(text))
+    return _MD_ESCAPE.sub(r"\1", text)
+
+
+def canonicalize(text: str) -> str:
+    """The render-equivalent form of a text: what a reader sees after Markdown and HTML are rendered.
+
+    NFKC, format and zero-width characters dropped, HTML entities decoded, HTML comments and tags removed, Markdown
+    escapes removed; repeated to a fixed point, at most CANON_ROUNDS times (so `&amp;#46;` becomes a dot).
+    """
+    for _ in range(CANON_ROUNDS):
+        new = _canonical_round(text)
+        if new == text:
+            break
+        text = new
+    return text
+
+
+def _has_private_host(text: str) -> bool:
+    """A dotted name with a private label (`box.lan`, `a.corp.example.com`, `x.home.arpa`), found by splitting."""
+    for run in _NAME_RUN.findall(text):
+        labels = run.lower().split(".")
+        for i in range(1, len(labels)):
+            if labels[i - 1] and labels[i].split("-", 1)[0] in _PRIVATE_SUFFIXES:
+                return True
+    return False
+
+
+def _has_session_url(text: str) -> bool:
+    for token in text.lower().split():
+        at = token.find("claude.ai")
+        while at >= 0:
+            if token.startswith("claude.ai/", at) or "http://" in token[:at] or "https://" in token[:at]:
+                return True
+            at = token.find("claude.ai", at + 1)
+    return False
+
+
+_HEXTET = frozenset("0123456789abcdefABCDEF")
+_MAX_IPV6_CHARS = 46  # the longest valid IPv6 text (with an embedded IPv4) is 45 characters
+
+
+def _is_scope(text: str, run_start: int, run: str) -> bool:
+    """`std::vector`: a `::` followed by an identifier that cannot be a hextet is a C++ style scope, not an address."""
+    at = run.find("::")
+    if at < 0:
+        return False
+    begin = run_start + at + 2
+    ident = re.match(r"\w{1,64}", text[begin:])
+    if not ident:
+        return False
+    word = ident.group()
+    return (word[0].isalpha() or word[0] == "_") and any(c not in _HEXTET for c in word)
+
+
 def _has_ipv6(text: str) -> bool:
     """Scan every maximal run of hex, colon and dot characters (and an optional %zone) for an IPv6 address.
 
-    A leading label such as `ipv6:` or `addr:` is shed by also trying each suffix that starts after a colon. A run
-    followed directly by a word character (`std::vector`) is skipped, so code and prose do not trip it.
+    A leading label such as `ipv6:` or `addr:` is shed by also trying each suffix that starts after a colon. Trailing
+    word characters do not hide an address (`fe80::1x`). Only the C++ scope case is skipped, and an address with
+    nothing after its `::` (`e::`) is not flagged.
     """
     for match in _IPV6_RUN.finditer(text):
-        run = match.group().split("%", 1)[0]
-        if (
-            run.count(":") < 2
-            or text[match.end() : match.end() + 1].isalnum()
-            or text[match.end() : match.end() + 1] == "_"
-        ):
+        run = match.group()
+        if run.count(":") < 2:
+            continue
+        run = run.split("%", 1)[0]
+        if _is_scope(text, match.start(), run):
             continue
         starts = [0] + [i + 1 for i, ch in enumerate(run) if ch == ":"]
         for start in starts:
+            if len(run) - start > _MAX_IPV6_CHARS:
+                continue
             token = run[start:].strip(".")
-            for cand in {token, token.rstrip(":") if not token.endswith("::") else token}:
+            for cand in {token, token.rstrip(":")}:
+                if "::" in cand and not cand.split("::", 1)[1]:
+                    continue
                 try:
                     ipaddress.IPv6Address(cand)
                 except ValueError:
@@ -150,33 +254,48 @@ def _has_ipv6(text: str) -> bool:
     return False
 
 
-def _generic_checks(text: str, deny: Sequence[str], allow: Sequence[str]) -> list[str]:
-    """Checks for any text that gets published: the body, and the title."""
+def _deny_hit(text: str, deny: Sequence[str]) -> bool:
+    lowered = text.lower()
+    squeezed = re.sub(r"\s+", "", lowered)  # a denied value split by a line break or space is still found
+    for word in deny:
+        low = word.lower()
+        if low in lowered or re.sub(r"\s+", "", low) in squeezed:
+            return True
+    return False
+
+
+def _single_checks(text: str, deny: Sequence[str], allow: Sequence[str]) -> list[str]:
     ok = {w.upper() for w in (*_PLACEHOLDERS, *_TECH_TOKENS, *allow)}
     why: list[str] = []
     if any(c in text for c in EM_DASHES):
         why.append("em dash found (use a comma, colon or hyphen)")
     if _IPV4.search(text) or _has_ipv6(text):
         why.append("IP address found")
-    if _HOSTNAME.search(text):
+    if _has_private_host(text):
         why.append("hostname found")
     if _SERIAL.search(text):
         why.append("serial number found")
     calls = [m for m in _CALLSIGN.findall(text) + _CALLSIGN_CTX.findall(text) if m.upper() not in ok]
-    grids = [m for m in _GRID6.findall(text) + _GRID_CTX.findall(text) if m.upper() not in ok]
+    grids = [m for m in _GRID6.findall(text) + _GRID4.findall(text) + _GRID_CTX.findall(text) if m.upper() not in ok]
     if calls:
         why.append("amateur radio callsign pattern found (use N0CALL; SAFO_DRAFT_ALLOW lists exceptions)")
     if grids:
-        why.append("grid square found (use FN31pr)")
-    if _SESSION_URL.search(text):
+        why.append("grid square found (use FN31pr; SAFO_DRAFT_ALLOW lists exceptions)")
+    if _has_session_url(text):
         why.append("claude.ai session URL found")
     if _SESSION_TRAILER.search(text):
         why.append("Claude-Session trailer found")
-    lowered = text.lower()
-    for word in deny:
-        if word.lower() in lowered:
-            why.append("denied word found (SAFO_DRAFT_DENY)")
-            break
+    if _deny_hit(text, deny):
+        why.append("denied word found (SAFO_DRAFT_DENY)")
+    return why
+
+
+def _generic_checks(text: str, deny: Sequence[str], allow: Sequence[str]) -> list[str]:
+    """Checks for any text that gets published. Every check runs on the raw text and on its canonical form."""
+    why = _single_checks(text, deny, allow)
+    canon = canonicalize(text)
+    if canon != text:
+        why += [x for x in _single_checks(canon, deny, allow) if x not in why]
     return why
 
 
@@ -193,6 +312,23 @@ def check_text(kind: str, text: str, deny: Sequence[str] = (), allow: Sequence[s
             why.append(f"pull request body must end with the exact line: {PR_FOOTER}")
     if kind == "issue" and not _EPIC.search(text):
         why.append("issue needs an 'Epic:' or 'Part of epic #N' line (pass --epic N)")
+    return why
+
+
+def check_draft(
+    kind: str, title: str | None, body: str, deny: Sequence[str] = (), allow: Sequence[str] = ()
+) -> list[str]:
+    """All reasons a draft may not be filed: the body, the title, and the title and body read together."""
+    why = check_text(kind, body, deny, allow)
+    if title is None:
+        return why
+    why += check_title(title, deny, allow)
+    seen = {x.removeprefix("title: ") for x in why}
+    for joiner in ("\n", ""):
+        for x in _generic_checks(f"{title}{joiner}{body}", deny, allow):
+            if x not in seen:
+                seen.add(x)
+                why.append(f"title and body combined: {x}")
     return why
 
 
@@ -371,15 +507,19 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
     ctx.model, ctx.chars_in = model, len(prompt)
     body = call_local(ctx.env, ctx.sleep, f"draft-{kind}", model, prompt)
     ctx.chars_out = len(body)
+    if len(body) > MAX_CHECK_CHARS:
+        raise Failure(
+            f"draft too long to check safely: {len(body)} characters, the limit is {MAX_CHECK_CHARS}. "
+            "This is a local input error; ask for a shorter draft. Nothing was filed.",
+            EXIT_ERROR,
+        )
     if kind == "pr":
         body = _with_footer(body)
     if kind == "issue" and args.epic and not _EPIC.search(body):
         body = f"{body.rstrip()}\n\nPart of epic #{args.epic}"
     ctx.out.write(f"--- draft {kind} ---\n{body}\n--- end draft ---\n")
     deny, allow = deny_words(ctx.env), allow_words(ctx.env)
-    why = check_text(kind, body, deny, allow)
-    if kind != "comment":
-        why += check_title(args.title, deny, allow)
+    why = check_draft(kind, None if kind == "comment" else args.title, body, deny, allow)
     if why:
         ctx.out.write("NOT FILED. The draft failed these checks:\n" + "".join(f"  - {x}\n" for x in why))
         return EXIT_REFUSED

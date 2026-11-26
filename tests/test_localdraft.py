@@ -573,3 +573,128 @@ def test_gh_failure_code_is_not_passed_through(env: Env) -> None:
     assert code == localdraft.EXIT_GH_FAILED
     assert "13" in localdraft.parser().format_help()
     assert "| 13 |" in Path(localdraft.__file__).parents[2].joinpath("docs", "local-draft.md").read_text()
+
+
+# round 3 (Daybreak round 1)
+ZW = chr(0x200B)
+SHY = chr(0xAD)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"de W1{ZW}AW",
+        "de W1<!-- -->AW",
+        "de W1<b></b>AW",
+        "192&#46;168&#46;1&#46;20",
+        "192&amp;#46;168&amp;#46;1&amp;#46;20",
+        "192\\.168\\.1\\.20",
+        f"fe80:{ZW}:1",
+        "fe80\\:\\:1",
+        "box01&#46;internal",
+        "serial: ABC<!-- -->123XYZ",
+        "https://claude&#46;ai/code/session_abc",
+        f"Claude{ZW}-Session: abc",
+        f"Claude{SHY}-Session: abc",
+        "Acme<!-- -->corp",
+        f"Acme{chr(0xFEFF)}corp",
+        "a &#8212; b",
+        "a &mdash; b",
+        "a &amp;mdash; b",
+        "".join(chr(c) for c in (0xFF17, 0xFF12, 0xFF0E)) + "1.1.1",  # full-width 72. under NFKC
+    ],
+)
+def test_f1_obfuscated_text_is_blocked(text: str) -> None:
+    assert localdraft.check_text("comment", text, deny=["Acmecorp"]) != [], text
+    assert localdraft.check_title(text, deny=["Acmecorp"]) != [], text
+
+
+def test_f1_ordinary_entities_still_pass() -> None:
+    assert localdraft.check_text("comment", "a &amp; b, 1 &lt; 2, R&amp;D", deny=["Acmecorp"]) == []
+
+
+def test_f1_canonicalize_is_bounded_and_idempotent_on_plain_text() -> None:
+    assert localdraft.canonicalize("plain text") == "plain text"
+    assert localdraft.canonicalize("&amp;amp;amp;amp;#46;").count("#46") >= 0  # terminates after 3 rounds
+
+
+@pytest.mark.parametrize("text", ["w1aw", "W1AW", "em48", "EM48", "fn31pq", "call w1aw/p", "x em48."])
+def test_f2_bare_callsign_and_four_char_grid_blocked(text: str) -> None:
+    why = localdraft.check_text("comment", text)
+    assert any("callsign" in x or "grid" in x for x in why), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "N0CALL N0TST K1ABC FN31pr fn31",
+        "K8S k8s P2P b2b E2E a2a M2M H2O h2o",
+        "commit 3f786850e387550fdab836ed7e6dc881de23001b",
+        "id 123e4567-e89b-12d3-a456-426614174000",
+        "id ab12-cd34-ef56 and w1aw_x and my-w1aw-x",
+        "version 1.2.3 build 4567 and ipv6 x86_64",
+    ],
+)
+def test_f2_allowed_and_long_tokens_pass(text: str) -> None:
+    assert localdraft.check_text("comment", text) == [], text
+
+
+def test_f3_deny_value_split_between_title_and_body() -> None:
+    why = localdraft.check_draft("issue", "Acme", "corp\n\nPart of epic #445", deny=["Acmecorp"])
+    assert any("title and body combined" in x for x in why), why
+    why = localdraft.check_draft("issue", "Acme", "\ncorp\n\nPart of epic #445", deny=["Acmecorp"])
+    assert any("title and body combined" in x for x in why), why
+
+
+def test_f3_deny_value_split_by_line_break_in_body() -> None:
+    assert localdraft.check_text("comment", "works at Acme\ncorp today", deny=["Acmecorp"]) != []
+    assert localdraft.check_text("comment", "works at Acme corp today", deny=["Acmecorp"]) != []
+
+
+def test_f3_split_is_blocked_end_to_end(env: Env) -> None:
+    env.env["SAFO_DRAFT_DENY"] = "Acmecorp"
+    (env.dir / "llm.reply").write_text("corp\n\nPart of epic #445")
+    code, out, _ = env.run(["issue", "--repo", "o/r", "--title", "Acme", "--yes", "x"])
+    assert code == 1 and "title and body combined" in out
+    assert env.read("gh.args") == ""
+
+
+def test_f3_clean_title_and_body_pass_together() -> None:
+    assert localdraft.check_draft("issue", "Fix the retry bound", "Body here.\n\nPart of epic #445") == []
+
+
+def test_f4_checks_are_linear() -> None:
+    import time
+
+    for text in ("a." * 32000, "a." * 31990 + "invalid", "http://" * 9000, "\n" * 30000, "a:" * 32000, "<!--" * 16000):
+        start = time.perf_counter()
+        localdraft.check_text("comment", text)
+        localdraft.check_draft("issue", text, text)
+        assert time.perf_counter() - start < 1.0, text[:12]
+
+
+def test_f4_long_model_output_is_refused(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("word " * 4001 + "\n\nPart of epic #445")
+    code, _, err = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == localdraft.EXIT_ERROR
+    assert "draft too long to check safely" in err
+    assert env.read("gh.args") == ""
+    assert env.metrics()[-1]["exit"] == localdraft.EXIT_ERROR
+
+
+def test_f4_output_at_the_cap_is_checked_normally(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("word " * 3990 + "\n\nPart of epic #445")
+    code, _, _ = env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "x"])
+    assert code == 0
+
+
+@pytest.mark.parametrize("text", ["fe80::1x", "2001:db8::1_ab", "fe80::abcd", "x fe80::1xyz"])
+def test_f5_ipv6_followed_by_word_characters_is_flagged(text: str) -> None:
+    assert any("IP address" in x for x in localdraft.check_text("comment", text)), text
+
+
+@pytest.mark.parametrize(
+    "text", ["std::vector", "note::x", "12:30:45", "aa:bb:cc:dd:ee:ff", "a::b_c", "use fe80:: here"]
+)
+def test_f5_scope_times_and_macs_still_not_flagged(text: str) -> None:
+    assert not any("IP address" in x for x in localdraft.check_text("comment", text)), text

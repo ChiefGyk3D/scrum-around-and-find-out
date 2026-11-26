@@ -34,16 +34,36 @@ safo audit | safo-draft digest board-drift -
   value of 6 or more characters with a digit), no claude.ai URL (with or without a scheme) or `Claude-Session:`
   trailer, no word from `SAFO_DRAFT_DENY` (comma separated; or one per line in the file named by
   `SAFO_DRAFT_DENY_FILE`). The employer name and private hostnames are configured there, never in this repository.
-- **Callsign and grid heuristics, and their limits.** A callsign is flagged by shape: 1-2 letters, one digit, 1-3
-  letters, in upper case anywhere, or in any case after `call`, `callsign` or `de`. A grid square is flagged as 4 or 6
-  characters after `grid`, `grid square`, `locator` or `maidenhead`, or as a standalone 6-character form, in any case.
-  The owner's callsign must never be published, so over-blocking is the safe side, and false positives are an accepted
-  tradeoff (an upper-case token such as `A1B` is flagged). Passing tokens: the placeholders `N0CALL`, `N0TST`, `K1ABC`,
-  `FN31pr`, the technical tokens `K8S`, `P2P`, `B2B`, `E2E`, `A2A`, `M2M`, `H2O`, and anything listed (comma
-  separated, case-insensitive) in `SAFO_DRAFT_ALLOW` or one per line in `SAFO_DRAFT_ALLOW_FILE`. Not caught: a callsign
-  written in lower case with no cue, a 4-character grid with no cue, a hostname that has no private suffix, a bare lowercase callsign-looking token or a lowercase grid square without a cue word (`call`, `callsign`, `de`, `grid`, `locator`; blocked only by design when a cue is present, since a lowercase word such as `ab1cd` is far too common to flag), an address
-  written in words, an obfuscated token. Hostnames beyond the suffix list are config-driven through
-  `SAFO_DRAFT_DENY`, not guessed. The deny and allow settings are the backstop for everything the heuristics miss: put the real callsign, grid and hostnames in `SAFO_DRAFT_DENY`.
+- **Render-equivalent text.** Every check runs on the raw text and on its canonical form, and a hit on either blocks.
+  The canonical form is what a reader sees after rendering: Unicode NFKC, all format and zero-width characters dropped
+  (category Cf, so U+200B to U+200D, U+2060, U+FEFF, the soft hyphen and bidi marks), HTML entities decoded (numeric
+  and named, so `&#46;` and `&amp;#46;` become a dot), HTML comments and tags removed (`W1<!-- -->AW` and `W1<b></b>AW`
+  collapse to `W1AW`), and Markdown backslash escapes removed. This repeats to a fixed point, at most 3 rounds.
+  Ordinary entities (`a &amp; b`) still pass.
+- **Title and body together.** After the per-field checks the title and body are also checked joined by a newline and
+  joined with nothing between them (raw and canonical), so a `SAFO_DRAFT_DENY` value split between them is caught. The
+  reason reads `title and body combined: ...`. A denied value is also found across a line break or space inside one
+  field (whitespace is ignored when matching a deny value).
+- **IPv6.** A run of hex digits, colons and dots is tried as an address, also behind a label (`ipv6:`, `addr:`), with a
+  `%zone`, before punctuation, and before trailing word characters (`fe80::1x`, `2001:db8::1_ab` are flagged). Skipped:
+  the C++ style scope (`::` followed by an identifier that is not a hex group, `std::vector`, `note::x`), runs with
+  times and MAC addresses (`12:30:45`, `aa:bb:cc:dd:ee:ff` do not parse as addresses), and an address with
+  nothing after its `::` (`fe80::`).
+- **Callsign and grid heuristics, and the over-blocking tradeoff.** A callsign is flagged by shape (1-2 letters, one
+  digit, 1-3 letters) in any case with no cue word needed: `W1AW`, `w1aw` and `fn31pq`-style tokens are all blocked. A
+  4-character grid square (two letters A-R, two digits: `EM48`, `em48`) is flagged the same way, and so is the
+  6-character form (`EM48ab`), and either form after `grid`, `locator` or `maidenhead`. The shape must stand alone: a
+  match inside a longer alphanumeric, hyphenated or underscore token is ignored, so 40-hex commit hashes, UUIDs and
+  long identifiers do not trigger. The owner's callsign and grid must never be published, so over-blocking is the
+  safe side and false positives are an accepted tradeoff: a lowercase word such as `ab12`, `id01` or `a1b` is blocked
+  and a human lists the legitimate ones in the allow list. Every blocked draft is printed with its reasons.
+  Passing tokens: the placeholders `N0CALL`, `N0TST`, `K1ABC`, `FN31pr` (and `FN31`), the technical tokens `K8S`,
+  `P2P`, `B2B`, `E2E`, `A2A`, `M2M`, `H2O`, and from round 3 `K3S`, `N8N`, `W3C`, `C2PA`, `I2C`, `I2S`, `E2EE`,
+  `L2TP`, `M3U`, plus anything listed (comma separated, case-insensitive) in `SAFO_DRAFT_ALLOW` or one per line in
+  `SAFO_DRAFT_ALLOW_FILE`. Project-specific ids that have the shape (this repository's own `T9H`, `U5A` task ids) go in
+  `SAFO_DRAFT_ALLOW`. Not caught: a hostname that has no private suffix, an address written in words. Hostnames beyond
+  the suffix list are config-driven through `SAFO_DRAFT_DENY`, not guessed. The deny and allow settings are the backstop
+  for everything the heuristics miss: put the real callsign, grid and hostnames in `SAFO_DRAFT_DENY`.
 - **Footers.** A pull request body must end with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`; the
   wrapper appends it when the model left it out, and replaces a footer variant (a last line with "Generated with" and
   "Claude Code") rather than keeping it. An issue needs an `Epic:` or `Part of epic #N` line; `--epic N`
@@ -54,7 +74,7 @@ safo audit | safo-draft digest board-drift -
   backoff, four tries in all, then exit 75.
 - **Size and timeouts.** The whole prompt is capped at 100000 encoded bytes (the kernel allows 131072 per argument). A
   larger input is refused before `llm-local` is called, exit 2, with a message saying it is a local input error and
-  nothing was sent; it is not truncated. `--facts` is decoded as UTF-8 with replacement. A timeout of `llm-local`
+  nothing was sent; it is not truncated. Model output over 20000 characters is refused as `draft too long to check safely` (exit 2, nothing filed). `--facts` is decoded as UTF-8 with replacement. A timeout of `llm-local`
   (900 s) exits 11, with the Twingate/server NOT verified line. A timeout of `gh` (120 s) exits 11 and says the filing
   state is unknown: check with `gh` before retrying.
 - **Any other failure** exits non-zero, prints the exact failure, and states that Twingate and the local server were NOT
