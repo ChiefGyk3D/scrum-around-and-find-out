@@ -13,6 +13,11 @@ scores each model as its pass rate, and compares it with a stored baseline. Exit
     75 the queue stayed busy: retried, then reported; never read as a drop
 
 The baseline is written only with `--update-baseline`, and only when every model produced a score.
+
+`--truncation-probe` (#569) also sends one long prompt to the model that truncates silently (the `safo-draft` digest
+model) and alerts (exit 1) when the token count the server reports for it is no longer the known cut (`--expected-cap`,
+default 4098): a server setting changed, in either direction. `--probe-only` runs just the probe and needs no baseline.
+When both run, the exit code is the worst of the two in the order 3, 75, 1, 2: unreachable over busy over drop.
 """
 
 from __future__ import annotations
@@ -25,7 +30,9 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -47,6 +54,14 @@ _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}")
 _MODEL_FAILURE = re.compile(r"exit [34]:.*", re.DOTALL)  # the model's own failure (truncated, over the cap): not passed
 
 Runner = Callable[[Any, str], dict[str, Any]]
+ProbeRunner = Callable[[str, str], tuple[int, str]]  # (model, prompt) -> (llm-local exit code, its stderr)
+
+PROBE_EXPECTED_CAP = 4098  # the prompt token count qwen3.5:4b is silently cut to once a prompt passes its 8K context
+PROBE_MIN_CHARS = 30_000  # about 8,000 to 10,000 tokens of prose: past the 8K loaded context, over the 4098 cut
+PROBE_TIMEOUT = 300.0
+# llm-local's own truncation line (counts only, never prompt text); the whole line must match, so a line quoted inside
+# other text is not a cut
+_CUT_LINE = re.compile(r"llm-local: prompt truncated by the server: estimate [0-9]+ tokens, reported ([0-9]+);.*")
 
 
 class CanaryError(Exception):
@@ -248,6 +263,74 @@ def _default_runner(wait: int) -> Runner:
     return lambda fx, model: le.run_one(fx, model, wait=wait)
 
 
+def _default_probe_runner(wait: int) -> ProbeRunner:
+    """One llm-local call. No `--num-ctx` (llm-local sends the loaded context itself) and the truncation guard stays on
+    (it is what reports the count); `--force-size` only lifts the route cap that would refuse the long prompt."""
+
+    def call(model: str, prompt: str) -> tuple[int, str]:
+        argv = ["llm-local", "--task", "eval-truncation-probe", "--model", model, "--wait", str(wait), "--force-size"]
+        try:
+            proc = le._run_cmd([*argv, prompt], PROBE_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 2, f"{type(exc).__name__}"
+        return proc.returncode, proc.stderr
+
+    return call
+
+
+def probe_prompt(nonce: str) -> str:
+    """Long, deterministic prose with a per-run nonce first, so a server prefix cache cannot hide a cut."""
+    lines = [f"Run {nonce}. Background text for a length check; read it, then follow the last line."]
+    lines += [f"Line {i}: the quick brown fox jumps over the lazy dog." for i in range(1, 701)]
+    lines.append("Reply with the single word OK.")
+    text = "\n".join(lines)
+    if len(text) <= PROBE_MIN_CHARS:  # cannot happen with the constants above; a guard against an edit
+        raise CanaryError("probe prompt is too short to pass the context")
+    return text
+
+
+def classify_probe(code: int, stderr: str, expected: int) -> tuple[str, str]:
+    """('ok'|'changed'|'unreachable'|'busy', detail). llm-local exit 3 is the cut: the expected answer."""
+    if code == EXIT_BUSY:
+        return "busy", ""
+    if code == 0:  # the guard saw a full prompt: the server no longer cuts it
+        return "changed", "no cut reported (the server now takes the whole prompt)"
+    if code == 3:
+        for line in stderr.splitlines():
+            m = _CUT_LINE.fullmatch(line.strip())
+            if m:
+                n = int(m.group(1))
+                return ("ok", f"cut at {n}") if n == expected else ("changed", f"cut at {n}, expected {expected}")
+    return "unreachable", ""
+
+
+def measure_probe(
+    model: str, expected: int, runner: ProbeRunner, busy_retries: int, sleep: Callable[[float], None], nonce: str
+) -> tuple[str, str]:
+    state = ("busy", "")
+    prompt = probe_prompt(nonce)
+    for attempt in range(busy_retries + 1):
+        state = classify_probe(*runner(model, prompt), expected)
+        if state[0] != "busy":
+            return state
+        if attempt < busy_retries:
+            sleep(BUSY_SLEEP * 2**attempt)
+    return state
+
+
+def _worst(codes: Sequence[int]) -> int:
+    for code in (EXIT_UNREACHABLE, EXIT_BUSY, EXIT_DROP, EXIT_USAGE):
+        if code in codes:
+            return code
+    return EXIT_OK
+
+
+def _expected_cap(text: str) -> int:
+    if not re.fullmatch(r"[0-9]{1,7}", text) or int(text) < 1:
+        raise CanaryError("--expected-cap must be a whole number from 1 to 9999999")
+    return int(text)
+
+
 def _threshold(text: str) -> float:
     try:
         value = float(text)
@@ -258,7 +341,14 @@ def _threshold(text: str) -> float:
     return value
 
 
-def entry(argv: Sequence[str] | None = None, *, runner: Runner | None = None, sleep: Any = time.sleep) -> int:
+def entry(
+    argv: Sequence[str] | None = None,
+    *,
+    runner: Runner | None = None,
+    sleep: Any = time.sleep,
+    probe_runner: ProbeRunner | None = None,
+    nonce: str | None = None,
+) -> int:
     ap = argparse.ArgumentParser(prog="safo-eval-canary", description="Alert when local-model quality drops.")
     ap.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     ap.add_argument("--threshold", default=str(DEFAULT_THRESHOLD), help="largest allowed drop in pass rate (0 to 1)")
@@ -268,7 +358,54 @@ def entry(argv: Sequence[str] | None = None, *, runner: Runner | None = None, sl
     ap.add_argument("--wait", type=int, default=120)
     ap.add_argument("--busy-retries", type=int, default=3)
     ap.add_argument("--update-baseline", action="store_true", help="write the new scores as the baseline")
+    ap.add_argument("--truncation-probe", action="store_true", help="also check the silent prompt cut (#569)")
+    ap.add_argument("--probe-only", action="store_true", help="run only the truncation probe; no baseline is read")
+    ap.add_argument("--expected-cap", default=str(PROBE_EXPECTED_CAP), help="the token count the cut is expected at")
     args = ap.parse_args(argv)
+    codes: list[int] = []
+    try:
+        if args.probe_only and args.update_baseline:
+            raise CanaryError("--probe-only and --update-baseline cannot be combined")
+        if args.truncation_probe and args.update_baseline:
+            raise CanaryError("--truncation-probe cannot be combined with --update-baseline")
+        expected = _expected_cap(args.expected_cap)
+        if args.probe_only:
+            if args.repeats < 1 or args.busy_retries < 0 or args.wait < 0:
+                raise CanaryError("--repeats must be at least 1; --busy-retries and --wait at least 0")
+            return _probe(args, expected, probe_runner, sleep, nonce)
+    except CanaryError as exc:
+        output.write(sys.stderr, f"safo-eval-canary: {exc}")
+        return EXIT_USAGE
+    codes.append(_score(args, runner, sleep))
+    if args.truncation_probe:
+        try:
+            codes.append(_probe(args, expected, probe_runner, sleep, nonce))
+        except CanaryError as exc:
+            output.write(sys.stderr, f"safo-eval-canary: {exc}")
+            codes.append(EXIT_USAGE)
+    return _worst(codes)
+
+
+def _probe(
+    args: argparse.Namespace, expected: int, probe_runner: ProbeRunner | None, sleep: Any, nonce: str | None
+) -> int:
+    call = probe_runner or _default_probe_runner(args.wait)
+    model = localdraft.DIGEST_MODEL
+    state, detail = measure_probe(model, expected, call, args.busy_retries, sleep, nonce or secrets.token_hex(8))
+    if state == "unreachable":
+        output.write(sys.stderr, f"eval-canary: truncation probe: unreachable or failed (no verdict): {model}")
+        return EXIT_UNREACHABLE
+    if state == "busy":
+        output.write(sys.stderr, f"eval-canary: truncation probe: busy after retries (no verdict): {model}")
+        return EXIT_BUSY
+    if state == "changed":
+        output.write(sys.stderr, f"ALERT eval-canary: truncation probe: {model} {detail}; a server setting changed")
+        return EXIT_DROP
+    output.write(sys.stdout, f"eval-canary: truncation probe ok: {model} {detail}")
+    return EXIT_OK
+
+
+def _score(args: argparse.Namespace, runner: Runner | None, sleep: Any) -> int:
     try:
         threshold = _threshold(args.threshold)
         if args.repeats < 1 or args.busy_retries < 0 or args.wait < 0:
