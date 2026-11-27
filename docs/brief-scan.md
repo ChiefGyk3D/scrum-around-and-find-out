@@ -47,14 +47,20 @@ show `-` instead. A deny-list finding names the entry label (`#4` is line 4 of t
 - Input is read as bytes with a hard cap of 1 MiB (files by descriptor, no symlink, regular files only); one byte over
   is exit 2, never a truncated scan. Invalid UTF-8 is exit 2.
 - Hook JSON is parsed with the `bounded` JSON loader (size and depth limits, duplicate keys refused); every string inside
-  `tool_input` is scanned, labelled by its key path.
+  `tool_input` is scanned, object keys included. A value is labelled by its key path; a key is scanned as text under
+  `<key#N>` (N is its position), and it names its value in a label only when it is short, plain and passed the scan, so
+  a secret or private term in a key is found and never printed.
 
 ## False-positive control: the allow marker
 
 A line may carry `safo-scan-allow: REASON` (REASON at least 8 characters). Findings on that line are then suppressed
 and counted on stderr (`allowed: N`, with the line numbers, never the reason or the match). A marker with no reason or
 a short one suppresses nothing and is a finding of its own (`allow-marker-without-reason`). The reason text is scanned
-separately for credential shapes, so a secret cannot be hidden in a reason. A marker applies to its own line only.
+separately with the full check (credentials, private data, deny list), so nothing can be hidden in a reason. A marker applies to its own line only.
+
+The marker is for files scanned by hand. In `--hook` mode every marker is ignored: the content being checked must not
+be able to suppress its own findings, so a finding blocks. Allowing a value in hook mode comes only from operator
+configuration: `SAFO_DRAFT_ALLOW` and `SAFO_DRAFT_ALLOW_FILE` for callsign and grid tokens.
 
 ## Not covered
 
