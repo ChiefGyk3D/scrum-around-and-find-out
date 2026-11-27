@@ -190,6 +190,7 @@ replaced are gone.
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
 - [Board-kind](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-kind): `safo kind` and the reconcile write cap
+- [Protection-audit](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Protection-audit): `safo protection --all`, the default-branch drift audit
 - [safo-file](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/File): the idea gate and the cross-project line for filing work
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)

@@ -8,6 +8,10 @@
   conversation resolution are reported. One line per repository and a final count; exit 0 clean, 1 drift, 2 when a
   repository could not be read. GET only (REST), one repository at a time. `--all` and `--repo` are mutually exclusive;
   the single-repository mode is unchanged. Docs: `docs/protection-audit.md`. Tests: `tests/test_protection_all.py`.
+- `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
+  frame starts (it used to draw one more full frame first, slow under load). The signal test now captures the child's
+  stderr and kills and reaps the child on any exit, and a hung-child test proves the harness fails instead of hanging.
+  Tests: `tests/test_activity.py`.
 - `ghw` conditional reads (#532): a plain `gh api ENDPOINT` read keeps its ETag and body in `etags.json` beside the ledger (mode 0600, 64 entries, 128 KiB per body, 4 MiB, 24 hours, keyed by host, account and request) and sends `If-None-Match` next time; a 304 serves the kept body, costs no rate budget and is counted as a cache hit in the ledger and in `safo-ratebudget --by-caller`. Any cache error is a normal request. Docs: `docs/ratebudget.md`. Tests: `tests/test_ratebudget_etag.py`.
 - Docs sweep (#543): `docs/local-llm.md` now describes the `llm-local` wrapper (attribution fields, caps, exit codes 3, 4 and 75, outcome logging); `docs/local-draft.md`, `docs/local-eval.md`, `docs/board-kind.md` (`reconcile --closed-only`), `docs/usage.md` (`safo spend`) and `docs/hooks.md` (the `TOP_LEVEL_COMMANDS` rule) match merged behavior.
 - `safo spend` (#510, epic #428): a read-only weekly token-spend report from the Claude transcripts, the Codex sessions
