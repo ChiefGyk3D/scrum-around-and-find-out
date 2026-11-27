@@ -32,6 +32,7 @@ safo-file = "safo.idea_gate:entry"
 safo-draft = "safo.localdraft:entry"
 safo-eval = "safo.localeval:run"
 safo-runner-check = "safo.runner_check:run"
+safo-shared-venv = "safo.sharedvenv:run"
 
 [tool.setuptools.dynamic]
 version = { attr = "safo.__version__" }
