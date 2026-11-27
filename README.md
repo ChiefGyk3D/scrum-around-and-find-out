@@ -24,10 +24,12 @@ Checked 2026-10-26 against `main` at cf53799.
 | Piece | State |
 |---|---|
 | Python scaffold, CI on git-your-ship-together, repository files, `scripts/apply-baseline.sh` | Built, merged on `main` |
+| `scripts/impacted-tests.py`: which tests a set of changed files needs for a targeted run, or ALL; CI stays the judge ([`docs/impacted-tests.md`](docs/impacted-tests.md)) | Built, merged on `main` |
 | GraphQL client (refuses redirects; never replays a mutation whose outcome is unknown), `board.yaml` schema and validator | Built, merged on `main` |
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
 | `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App installation token on the App credential path, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
 | `agents-status` (the board, Codex, Copilot and the routing-guard counts in one read-only view) | Built, merged on `main` and released in v0.1.0 |
+| `lead-curve` (a read-only lead-session cost curve and handoff cost; see [`docs/spend-report.md`](docs/spend-report.md)) | Built for #556; in review on a pull request, not yet on `main` |
 | `safo-activity` entry point (a one-line status segment, a table, JSON, a watch view and quiet event monitors for Codex jobs and plan windows, the local spend ledger, the local model and Copilot code review; local and read only; the network providers are opt in; a Claude Code pane ships in `mods/ai-activity/`; see [`docs/activity.md`](docs/activity.md)) | Built for #402; in review on a pull request, not yet on `main` |
 | `usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built, merged on `main` and released in v0.1.0 |
 | `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built, merged on `main` and released in v0.1.0 |
@@ -67,6 +69,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `agents-status` | One read-only view of what Claude, Codex and Copilot are doing |
 | `usage` | What each agent has used and has left, from local files only: Codex windows, Claude Code tokens, Copilot sessions, Ollama reachability. `--report` summarises the outcomes log |
 | `spend` | A weekly token-spend report from the Claude transcripts, the Codex sessions and the `llm-local`, hook and `safo-draft` logs: weighted spend by pool, cache-read share, per lead turn and per merged PR, local use, agent first-turn context, and the change against a stored baseline. Read-only, counts only. See [`docs/spend-report.md`](docs/spend-report.md) |
+| `lead-curve` | How lead-session cost grows with turn position, from the Claude lead transcripts: per session the turn count, context tokens and weighted spend by turn bucket, the share past turn 200 and 400, three labeled lines on where cost climbs, and the cost of each handoff (successor measured, note estimated). Read-only, counts only. See [`docs/spend-report.md`](docs/spend-report.md) |
 | `route <shape>` | Which agent a task shape should go to, from the rules in `agents.yaml` and the live headroom. Recommends; dispatches nothing |
 | `outcome add` | Appends a finished task to the outcomes log |
 | `handoff check <owner/repo> <pr>` | Whether the latest review report on a pull request names the head the pull request has now. Exit 0 fresh, 1 stale, 2 cannot tell. Read-only; shows, never blocks. See [Handoff](docs/handoff.md) |
@@ -166,6 +169,7 @@ replaced are gone.
 - [Routing](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Routing)
 - [Usage](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Usage)
 - [Spend report](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Spend-report)
+- [Impacted tests](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Impacted-tests)
 - [Hooks](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Hooks)
 - [Handoff](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Handoff)
 - [Limits](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Limits)
