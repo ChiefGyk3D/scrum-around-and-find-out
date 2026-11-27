@@ -44,6 +44,15 @@ lead continue). `stop_hook_active: true` always allows, so one block cannot loop
    (`| item | depends on | state |`) whose state is ready (or blank, todo, queued) and whose dependency cell is `none`
    or blank, or whose state says `ready`. Rows that are running, blocked, held, done or merged never count.
 
+## What the block reason may contain (untrusted text)
+
+The reason is fed to the model as text next to its instructions, so it carries no third-party string. A PR is shown as
+`owner/repo#number (failing, conflicting)` with fixed reason codes only: no title, branch name or author. A QUEUE.md item
+is shown only as where it is (`queue file QUEUE.md line 12`, plus `item k` for the kth item of a `READY:` line), never its
+text, because queue lines are free text. Every piece still goes through the output module's line function. DEGRADED notices are fixed
+text (a repo name from the owner's own config at most). Tests: a title, branch and queue line holding instruction-like
+text and an escape byte must not appear in the output.
+
 ## Fail open, loudly
 
 Each source fails on its own. A source that cannot be read (no `gh`, a timeout, an unreadable queue or registry) adds a
