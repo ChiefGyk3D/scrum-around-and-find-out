@@ -14,6 +14,7 @@ import getpass
 import importlib
 import itertools
 import os
+import re
 import shutil
 import signal
 import socket
@@ -523,6 +524,7 @@ def test_a_bare_double_dash_or_bad_type_cannot_be_listed(env: Env, opts: str) ->
 # ---- real git: the same rules against the real parser -------------------------------------------------------------
 
 _REAL_GIT = "/usr/bin/git"
+_SHA1_EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
 @pytest.fixture()
@@ -1080,7 +1082,9 @@ def test_forced_settings_still_neutralise_a_config_that_changed_after_the_check(
         end_of_options=True,
     )
     cfg = mod.Config(out_dir=str(env.out), allow=(entry,))
-    monkeypatch.setattr(mod, "check_repo_config", lambda *_a, **_k: None)  # the config "changed" after the check
+    monkeypatch.setattr(
+        mod, "check_repo_config", lambda *_a, **_k: ((2, 47), _SHA1_EMPTY)
+    )  # the config "changed" after the check
     monkeypatch.chdir(repo)
     try:
         code, _data = mod.execute([_REAL_GIT, *wrapped], cfg)
@@ -1510,11 +1514,9 @@ def test_the_diff_forms_that_never_touch_the_work_tree_run(env: Env, repo: Path,
 def test_the_attribute_source_is_the_empty_tree_when_git_is_new_enough() -> None:
     mod = lib()
     cfg = mod.Config(out_dir="/x", allow=())
-    assert (
-        mod.child_env(cfg, "/h", "/usr/bin/git", True)["GIT_ATTR_SOURCE"] == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-    )
-    assert "GIT_ATTR_SOURCE" not in mod.child_env(cfg, "/h", "/usr/bin/git", False)
-    assert "GIT_ATTR_SOURCE" not in mod.child_env(cfg, "/h", "/usr/bin/other", True)
+    assert mod.child_env(cfg, "/h", "/usr/bin/git", _SHA1_EMPTY)["GIT_ATTR_SOURCE"] == _SHA1_EMPTY
+    assert "GIT_ATTR_SOURCE" not in mod.child_env(cfg, "/h", "/usr/bin/git", None)
+    assert "GIT_ATTR_SOURCE" not in mod.child_env(cfg, "/h", "/usr/bin/other", _SHA1_EMPTY)
 
 
 @pytest.mark.parametrize(
@@ -1549,7 +1551,7 @@ def test_a_filter_added_after_the_config_check_runs_in_no_allowed_form(
     )
     cfg = mod.Config(out_dir=str(env.out), allow=entries)
     # the config "changed" after the check: the check is skipped, as if the filter had been added just after it
-    monkeypatch.setattr(mod, "check_repo_config", lambda *_a, **_k: (2, 47))
+    monkeypatch.setattr(mod, "check_repo_config", lambda *_a, **_k: ((2, 47), _SHA1_EMPTY))
     seen: list[dict[str, str]] = []
     real_launch = mod._launch
 
@@ -1565,4 +1567,326 @@ def test_a_filter_added_after_the_config_check_runs_in_no_allowed_form(
         mod._libc_prctl()(36, 0, 0, 0, 0)  # leave the test process as it was found
     assert code == 0, (args, code)
     assert _marks(env) == [], (args, _marks(env))
-    assert seen and seen[0].get("GIT_ATTR_SOURCE") == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # the run got it
+    assert seen and seen[0].get("GIT_ATTR_SOURCE") == _SHA1_EMPTY  # the run got it
+
+
+# ---- round 5: revisions are resolved, never trusted by spelling ------------------------------------------------------
+
+
+def _plain_out(repo: Path, env: Env, *args: str) -> bytes:
+    done = subprocess.run(  # noqa: S603 - fixed argv
+        [_REAL_GIT, *args], cwd=repo, env={**os.environ, "HOME": str(env.home)}, check=False, capture_output=True
+    )
+    return done.stdout
+
+
+def _diff_cfg(env: Env) -> None:
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{_REAL_GIT}", "diff"],'
+        ' options = ["--stat", "--cached", "--staged", "--name-only"] }]\n'
+    )
+
+
+def test_plain_git_diff_of_two_words_reads_files_so_a_syntactic_revision_check_is_not_enough(
+    env: Env, repo: Path
+) -> None:
+    (repo / "g").write_text("other\n")
+    out = _plain_out(repo, env, "diff", "f", "g")  # the control: both are paths, f is read from the work tree
+    assert b"two" in out or b"mid" in out
+    outside = env.tmp / "outside-a"
+    outside2 = env.tmp / "outside-b"
+    outside.write_text("secret-a\n")
+    outside2.write_text("secret-b\n")
+    assert b"secret-a" in _plain_out(repo, env, "diff", str(outside), str(outside2))  # files outside the repository
+
+
+def _hostile_names(env: Env, repo: Path, case: str) -> list[str]:
+    outside = env.tmp / "outside-a"
+    outside2 = env.tmp / "outside-b"
+    outside.write_text("secret-a\n")
+    outside2.write_text("secret-b\n")
+    (repo / "g").write_text("other\n")
+    if case == "two-existing-files":
+        return ["f", "g"]
+    if case == "path-named-like-a-branch":
+        _git(repo, env, "branch", "br")
+        (repo / "br").write_text("path\n")
+        return ["HEAD~1", "br"]
+    if case == "file-named-head":
+        (repo / "HEAD").write_text("path\n")
+        return ["HEAD~1", "HEAD"]
+    if case == "file-named-main":
+        (repo / "main").write_text("path\n")
+        return ["main", "HEAD"]
+    if case == "file-named-dotdot":
+        (repo / "a..b").write_text("path\n")
+        return ["a..b"]
+    if case == "absolute-paths":
+        return [str(outside), str(outside2)]
+    if case == "relative-dot-slash":
+        return ["./f", "./g"]
+    if case == "parent-relative":
+        return ["../outside-a", "../outside-b"]
+    if case == "symlinked-file":
+        (repo / "lnk").symlink_to(outside)
+        (repo / "lnk2").symlink_to(outside2)
+        return ["lnk", "lnk2"]
+    if case == "slash-not-a-ref":
+        return ["origin/missing", "HEAD"]
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "two-existing-files",
+        "path-named-like-a-branch",
+        "file-named-head",
+        "file-named-main",
+        "file-named-dotdot",
+        "absolute-paths",
+        "relative-dot-slash",
+        "parent-relative",
+        "symlinked-file",
+        "slash-not-a-ref",
+    ],
+)
+def test_revisions_that_are_really_paths_are_refused_and_nothing_is_read(env: Env, repo: Path, case: str) -> None:
+    args = _hostile_names(env, repo, case)
+    _diff_cfg(env)
+    r = env.digest(_REAL_GIT, "diff", *args, cwd=repo)
+    assert r.returncode == 125, (case, args, r.returncode, r.stdout[-300:])
+    assert b"secret-" not in r.stdout and b"other" not in r.stdout and env.saved() == [], r.stdout[-300:]
+
+
+@pytest.mark.parametrize("opt", ["--no-index"])
+def test_a_no_index_diff_is_never_possible(env: Env, repo: Path, opt: str) -> None:
+    (repo / "g").write_text("other\n")
+    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{_REAL_GIT}", "diff"], options = ["{opt}"] }}]\n')
+    assert env.digest(_REAL_GIT, "diff", opt, "f", "g", cwd=repo).returncode == 125
+    _diff_cfg(env)
+    assert env.digest(_REAL_GIT, "diff", opt, "f", "g", cwd=repo).returncode == 125  # not listed either
+
+
+def test_a_ref_with_a_slash_that_is_a_real_ref_is_accepted_and_resolved(env: Env, repo: Path) -> None:
+    _git(repo, env, "branch", "topic/x", "HEAD~1")
+    _diff_cfg(env)
+    r = env.digest(_REAL_GIT, "diff", "--name-only", "topic/x", "HEAD", cwd=repo)
+    assert r.returncode == 0 and b"| f" in r.stdout, (r.stdout, r.stderr)
+
+
+def _inproc_diff(
+    env: Env, repo: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], too_old: bool = False
+) -> tuple[int, list[list[str]]]:
+    mod = lib()
+    entry = mod.AllowEntry(
+        cmd=(_REAL_GIT, "diff"), options={"--cached": "flag", "--name-only": "flag"}, end_of_options=True
+    )
+    cfg = mod.Config(out_dir=str(env.out), allow=(entry,))
+    monkeypatch.setattr(
+        mod, "check_repo_config", lambda *_a, **_k: ((2, 39), None) if too_old else ((2, 47), _SHA1_EMPTY)
+    )
+    launches: list[list[str]] = []
+    real_launch = mod._launch
+
+    def launch(efd: int, argv: list[str], child_env: dict[str, str]) -> object:
+        launches.append(list(argv))
+        return real_launch(efd, argv, child_env)
+
+    monkeypatch.setattr(mod, "_launch", launch)
+    monkeypatch.chdir(repo)
+    try:
+        code, _data = mod.execute([_REAL_GIT, "diff", *args], cfg)
+    finally:
+        mod._libc_prctl()(36, 0, 0, 0, 0)  # leave the test process as it was found
+    return code, launches
+
+
+@pytest.mark.parametrize(
+    ("args", "n_ids"),
+    [(["HEAD~1", "HEAD"], 2), (["HEAD~1..HEAD"], 2), (["--cached", "HEAD"], 1), (["--cached"], 0)],
+)
+def test_only_resolved_object_ids_reach_the_diff_and_it_ends_with_a_double_dash(
+    env: Env, repo: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], n_ids: int
+) -> None:
+    code, launches = _inproc_diff(env, repo, monkeypatch, args)
+    assert code == 0
+    final = launches[-1]
+    assert "diff" in final and final[-1] == "--"
+    ids = [a for a in final if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", a)]
+    assert len(ids) == n_ids, final
+    for spelled in ("HEAD~1", "HEAD", "HEAD~1..HEAD"):
+        assert spelled not in final, final
+    if n_ids:
+        assert final[-n_ids - 2 : -n_ids - 1] == ["--end-of-options"] or "--end-of-options" in final
+
+
+def test_diff_is_refused_when_git_is_too_old_for_the_attribute_source(
+    env: Env, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = lib()
+    with pytest.raises(mod.DigestError, match=r"2\.40"):
+        _inproc_diff(env, repo, monkeypatch, ["HEAD~1", "HEAD"], too_old=True)
+
+
+def test_an_annotated_tag_resolves_to_its_commit_id(env: Env, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _git(repo, env, "tag", "-a", "-m", "t", "v1", "HEAD~1")
+    commit = _git(repo, env, "rev-parse", "HEAD~1^{commit}")
+    tag_object = _git(repo, env, "rev-parse", "v1")
+    assert commit != tag_object
+    code, launches = _inproc_diff(env, repo, monkeypatch, ["v1", "HEAD"])
+    assert code == 0 and commit in launches[-1] and tag_object not in launches[-1]
+
+
+# ---- round 5b: gh browser options, and the empty tree of a SHA-256 repository --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ("pr", "view", "--web"),
+        ("pr", "view", "-w"),
+        ("pr", "checks", "--web"),
+        ("pr", "list", "--web"),
+        ("run", "view", "--web"),
+        ("run", "list", "-w"),
+        ("issue", "view", "--web"),
+        ("issue", "list", "--web"),
+        ("pr", "view", "--editor"),
+        ("pr", "view", "--exec"),
+    ],
+)
+def test_gh_options_that_open_a_browser_or_start_a_program_cannot_be_listed(
+    env: Env, bad: tuple[str, str, str]
+) -> None:
+    pair, opt = bad[:2], bad[2]
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["/usr/bin/gh", "{pair[0]}", "{pair[1]}"], options = ["{opt}"] }}]\n'
+    )
+    r = env.digest("/usr/bin/gh", *pair)
+    assert r.returncode == 125 and b"browser" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize(
+    ("pair", "opts"),
+    [
+        (("pr", "view"), '{ "--json" = "word", "--comments" = "flag", "--repo" = "word" }'),
+        (("pr", "checks"), '{ "--required" = "flag" }'),
+        (("pr", "list"), '{ "--limit" = "int", "--state" = "word" }'),
+        (("run", "list"), '{ "--workflow" = "word" }'),
+        (("run", "view"), '{ "--log-failed" = "flag" }'),
+        (("issue", "view"), '{ "--json" = "word" }'),
+        (("issue", "list"), '{ "--assignee" = "word" }'),
+    ],
+)
+def test_the_listed_gh_options_are_accepted_with_their_exact_types(env: Env, pair: tuple[str, str], opts: str) -> None:
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["/usr/bin/gh", "{pair[0]}", "{pair[1]}"], options = {opts} }}]\n'
+    )
+    r = env.digest("/usr/bin/gh", *pair, "--unlisted")
+    assert b"browser" not in r.stderr and b"does not take" not in r.stderr, r.stderr  # config loaded
+
+
+def test_a_listed_gh_option_with_the_wrong_type_is_refused(env: Env) -> None:
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["/usr/bin/gh", "pr", "view"],'
+        ' options = { "--limit" = "int" } }]\n'
+    )
+    assert env.digest("/usr/bin/gh", "pr", "view").returncode == 125
+
+
+def test_a_forced_gh_run_launches_no_browser_and_no_pager(env: Env, repo: Path) -> None:
+    """A stand-in `gh` that does what gh does for --web (runs $BROWSER) and what a pager does (runs $PAGER), with a
+    marker-writing program offered in the caller's own environment: the child must get the safe values instead."""
+    marker = env.tmp / "MARK.browser"
+    browser = env.tmp / "browser.sh"
+    browser.write_text(f"#!/bin/sh\n: > {marker}\n")
+    browser.chmod(0o755)
+    gh = env.make_tool("gh", "bin")
+    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{gh}", "pr", "view"], end_of_options = false }}]\n')
+    code = (
+        "import subprocess; "
+        "print('VARS', [os.environ.get(k) for k in ('BROWSER', 'GH_BROWSER', 'NO_BROWSER', 'GH_PAGER', 'PAGER')]); "
+        "subprocess.run([os.environ['BROWSER'], 'http://x'], check=False)"
+    )
+    hostile = {"BROWSER": str(browser), "GH_BROWSER": str(browser), "PAGER": str(browser), "GH_PAGER": str(browser)}
+    r = env.digest(str(gh), "pr", "view", enc(code), cwd=repo, env=hostile)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "['/bin/false', '/bin/false', '1', 'cat', 'cat']" in r.stdout.decode()
+    assert not marker.exists()
+
+
+def test_the_empty_tree_id_matches_the_repository_object_format(env: Env, tmp_path: Path) -> None:
+    mod = lib()
+    sha256_repo = env.tmp / "sha256-repo"
+    sha256_repo.mkdir()
+    made = subprocess.run(  # noqa: S603 - fixed argv
+        [_REAL_GIT, "init", "-q", "--object-format=sha256", str(sha256_repo)],
+        env={**os.environ, "HOME": str(env.home)},
+        capture_output=True,
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip("this git cannot make a SHA-256 repository")
+    sha1_repo = env.tmp / "sha1-repo"
+    sha1_repo.mkdir()
+    _git(sha1_repo, env, "init", "-q")
+    cfg = mod.Config(out_dir=str(env.out), allow=())
+    fd = mod.open_verified_exe(_REAL_GIT)
+    try:
+        run = mod._git_runner(fd, _REAL_GIT, mod.child_env(cfg, str(env.home), "git"))
+        sha256_id = mod.empty_tree_id(run, str(sha256_repo))
+        sha1_id = mod.empty_tree_id(run, str(sha1_repo))
+    finally:
+        os.close(fd)
+    assert sha1_id == _SHA1_EMPTY
+    assert sha256_id is not None and len(sha256_id) == 64 and sha256_id != sha1_id
+
+
+def test_a_sha256_repository_runs_with_its_own_empty_tree_as_the_attribute_source(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = env.tmp / "sha256-run"
+    repo.mkdir()
+    g = {
+        **os.environ,
+        "HOME": str(env.home),
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    }
+    made = subprocess.run(  # noqa: S603 - fixed argv
+        [_REAL_GIT, "init", "-q", "--object-format=sha256"], cwd=repo, env=g, capture_output=True, check=False
+    )
+    if made.returncode != 0:
+        pytest.skip("this git cannot make a SHA-256 repository")
+    for i in ("one", "two"):
+        (repo / "f").write_text(i + "\n")
+        subprocess.run([_REAL_GIT, "add", "f"], cwd=repo, env=g, check=True, capture_output=True)  # noqa: S603
+        subprocess.run([_REAL_GIT, "commit", "-q", "-m", i], cwd=repo, env=g, check=True, capture_output=True)  # noqa: S603
+    expected = (
+        subprocess.run(  # noqa: S603 - fixed argv
+            [_REAL_GIT, "hash-object", "-t", "tree", os.devnull], cwd=repo, env=g, capture_output=True, check=True
+        )
+        .stdout.decode()
+        .strip()
+    )
+    mod = lib()
+    entry = mod.AllowEntry(cmd=(_REAL_GIT, "diff"), options={"--name-only": "flag"}, end_of_options=True)
+    cfg = mod.Config(out_dir=str(env.out), allow=(entry,))
+    seen: list[dict[str, str]] = []
+    real_launch = mod._launch
+
+    def launch(efd: int, argv: list[str], child_env: dict[str, str]) -> object:
+        seen.append(dict(child_env))
+        return real_launch(efd, argv, child_env)
+
+    monkeypatch.setattr(mod, "_launch", launch)
+    monkeypatch.chdir(repo)
+    try:
+        code, _data = mod.execute([_REAL_GIT, "diff", "--name-only", "HEAD~1", "HEAD"], cfg)
+    finally:
+        mod._libc_prctl()(36, 0, 0, 0, 0)  # leave the test process as it was found
+    assert code == 0
+    assert len(expected) == 64 and seen[-1].get("GIT_ATTR_SOURCE") == expected

@@ -6,7 +6,7 @@
 - `safo-codex-run` and the shared git config check (`safo.gitconfig`): git now runs with `GIT_NO_LAZY_FETCH=1`, so a
   partial clone is refused and a missing object is never fetched on demand. A behavior change, documented in
   `docs/codex-run.md`; test in `tests/test_codexrun.py`.
-- `safo-digest` (#531, child of #518): runs `git` or `gh` (nothing else is supported; only `log`, `show`, `rev-parse`, `ls-files` and a `diff` that never reads the working tree) and prints a capped digest in a
+- `safo-digest` (#531, child of #518): runs `git` or `gh` (nothing else is supported; only `log`, `show`, `rev-parse`, `ls-files` and a `diff` of resolved revisions or the index, never the working tree; gh options come from a fixed list per subcommand) and prints a capped digest in a
   fixed untrusted-data frame, saving the full output to a private file. The executable must be a native program,
   root-owned under root-owned directories, opened without following symlinks and started from the verified descriptor.
   Only a short list of read-only git subcommands and gh subcommand pairs may be listed; every argument is validated

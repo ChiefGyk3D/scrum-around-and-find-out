@@ -56,7 +56,8 @@ _SAFE_ENV = frozenset({"GH_HOST", "GH_REPO", "NO_COLOR", "TERM", "TZ"})
 _GIT_BAD = re.compile(
     r"^(-c.*|-O.*|-x.*|-u|--exec.*|--extcmd.*|--exec-path.*|--ext-diff.*|--textconv.*|--upload-pack.*"
     r"|--receive-pack.*|--config-env.*|--paginate|--open-files-in-pager.*|--output.*|--git-dir.*|--work-tree.*"
-    r"|--namespace.*|-m|-o|-d|-k|--modified|--others|--deleted|--killed|--eol)$"  # the last row reads the work tree
+    r"|--namespace.*|--no-index"
+    r"|-m|-o|-d|-k|--modified|--others|--deleted|--killed|--eol)$"  # the last two rows read files, not revisions
 )
 # The only git subcommands that may be listed: reviewed, read-only. Anything else (and every alias or external
 # git-* command) is refused, because git alias resolution cannot be neutralised from outside.
@@ -66,8 +67,8 @@ _GIT_SUBCOMMANDS = frozenset({"diff", "log", "show", "rev-parse", "ls-files"})
 _GIT_WORKTREE_SUBCOMMANDS = frozenset({"status", "blame"})
 # A revision for `diff`: one strict token, no leading dash, no `..` inside it (the range separator is handled apart).
 _REV = re.compile(r"[A-Za-z0-9._/~^@{}-]+")
-# The empty tree: with GIT_ATTR_SOURCE set to it (git 2.40 or newer) no .gitattributes of the repository is consulted.
-_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# With GIT_ATTR_SOURCE set to the empty tree (git 2.40 or newer) no .gitattributes of the repository is consulted. The
+# empty tree's id depends on the repository's object format (SHA-1 or SHA-256), so it is asked of git, not hard-coded.
 _ATTR_SOURCE_MIN = (2, 40)
 # Global flags put before the subcommand on every run (the caller can add none; -c stays refused).
 _GIT_PRE = ("--no-pager", "--no-optional-locks")
@@ -121,6 +122,34 @@ _GH_PAIRS = frozenset(
         ("issue", "list"),
     }
 )
+_GH_JSON = ("--json", "word")
+_GH_REPO = (("-R", "word"), ("--repo", "word"))
+_GH_LIST = (("--limit", "int"), ("-L", "int"), ("--state", "word"), ("-s", "word"), ("--author", "word"))
+# The only options each listed gh subcommand may be given, with their types. Anything that opens a browser (`--web`,
+# `-w`) or starts another program is simply not here, so it cannot be listed.
+_GH_OPTIONS: dict[tuple[str, str], dict[str, str]] = {
+    ("pr", "view"): dict([_GH_JSON, ("--comments", "flag"), *_GH_REPO]),
+    ("pr", "checks"): dict([_GH_JSON, ("--required", "flag"), *_GH_REPO]),
+    ("pr", "list"): dict([_GH_JSON, *_GH_LIST, ("--label", "word"), ("--base", "word"), ("--head", "word"), *_GH_REPO]),
+    ("run", "list"): dict(
+        [_GH_JSON, ("--limit", "int"), ("-L", "int"), ("--workflow", "word"), ("--branch", "word"), *_GH_REPO]
+    ),
+    ("run", "view"): dict(
+        [_GH_JSON, ("--log", "flag"), ("--log-failed", "flag"), ("--job", "word"), ("--exit-status", "flag"), *_GH_REPO]
+    ),
+    ("issue", "view"): dict([_GH_JSON, ("--comments", "flag"), *_GH_REPO]),
+    ("issue", "list"): dict([_GH_JSON, *_GH_LIST, ("--label", "word"), ("--assignee", "word"), *_GH_REPO]),
+}
+# Defense in depth for git and gh: no browser, no pager program, no prompts, no update check.
+_BROWSER_ENV = {
+    "BROWSER": "/bin/false",
+    "GH_BROWSER": "/bin/false",
+    "NO_BROWSER": "1",
+    "GH_PAGER": "cat",
+    "PAGER": "cat",
+    "GH_PROMPT_DISABLED": "1",
+    "GH_NO_UPDATE_NOTIFIER": "1",
+}
 _GH_BAD = {"api", "alias", "extension", "ext", "auth", "config", "secret", "codespace", "ssh-key", "gpg-key"}
 _BAD_CATEGORIES = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp", "Zs"}
 _BAD_ARG_CATEGORIES = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}  # a plain space is fine inside an argument
@@ -242,34 +271,35 @@ def plan_args(entry: AllowEntry, argv: list[str]) -> list[str]:
             raise DigestError(f"option {a.split('=')[0]!r} is not listed in this allow entry's options")
         else:
             pos.append(a)
-    if base == "git" and len(entry.cmd) > 1 and entry.cmd[1] == "diff":
-        _check_diff_form(opts, pos)
-    tail = ["--end-of-options"] if entry.end_of_options and pos else []
+    is_diff = base == "git" and len(entry.cmd) > 1 and entry.cmd[1] == "diff"
+    if is_diff:
+        pos = _check_diff_form(opts, pos)  # a range A..B becomes the two revisions A and B
+    tail = ["--end-of-options"] if (entry.end_of_options or is_diff) and pos else []
     head = [entry.cmd[0]]
     mid = list(entry.cmd[1:])
     if base == "git":
         head += _GIT_PRE
         mid = [mid[0], *_GIT_POST.get(mid[0], ()), *mid[1:]]
-    return [*head, *mid, *opts, *tail, *pos]
+    return [*head, *mid, *opts, *tail, *pos, *(["--"] if is_diff else [])]
 
 
 def _rev_ok(text: str) -> bool:
     return bool(_REV.fullmatch(text)) and not text.startswith("-") and ".." not in text
 
 
-def _check_diff_form(opts: list[str], pos: list[str]) -> None:
+def _check_diff_form(opts: list[str], pos: list[str]) -> list[str]:
     """A diff may only compare things that never touch the working tree: the index with HEAD or one revision
     (`--cached` or `--staged`), or two revisions (`A..B` or `A B`). A plain `git diff` reads the work tree and is
     refused."""
     if "--cached" in opts or "--staged" in opts:
         if len(pos) == 0 or (len(pos) == 1 and _rev_ok(pos[0])):
-            return
+            return pos
     elif len(pos) == 2 and all(_rev_ok(p) for p in pos):
-        return
+        return pos
     elif len(pos) == 1 and pos[0].count("..") == 1:
         left, _, right = pos[0].partition("..")
         if _rev_ok(left) and _rev_ok(right):
-            return
+            return [left, right]
     raise DigestError(
         "a diff must use --cached or --staged, or name two revisions (A..B or A B); a diff of the working tree is "
         "not supported"
@@ -294,6 +324,13 @@ def _check_supported(base: str, cmd: list[str], options: dict[str, str]) -> None
             raise ConfigError("allow: gh is limited to a fixed list of read-only subcommand pairs; see docs/digest.md")
         if any(t in _GH_BAD for t in cmd[1:]):
             raise ConfigError("allow: that gh subcommand is free-form or changes configuration")
+        table = _GH_OPTIONS[(cmd[1], cmd[2])]
+        for name, kind in options.items():
+            if table.get(name) != kind:
+                raise ConfigError(
+                    f"allow: gh {cmd[1]} {cmd[2]} does not take {name!r} as {kind}; only the options on its fixed "
+                    "list can be listed (anything that opens a browser or starts a program never is)"
+                )
     else:
         raise ConfigError(f"allow: {base!r} is not supported; only git and gh can be listed (see docs/digest.md)")
 
@@ -497,16 +534,17 @@ def private_home(dirfd: int) -> None:
         os.close(hfd)
 
 
-def child_env(cfg: Config, home: str, exe: str = "", attr_source: bool = False) -> dict[str, str]:
+def child_env(cfg: Config, home: str, exe: str = "", attr_source: str | None = None) -> dict[str, str]:
     env = {"PATH": _CHILD_PATH, "LANG": "C", "HOME": home, "XDG_CONFIG_HOME": home}
     if os.path.basename(exe) in ("git", "gh"):
         env.update(_GIT_ENV)
+        env.update(_BROWSER_ENV)
         env["GIT_CONFIG_COUNT"] = str(len(_GIT_FORCED))
         for i, (key, value) in enumerate(_GIT_FORCED):
             env[f"GIT_CONFIG_KEY_{i}"] = key
             env[f"GIT_CONFIG_VALUE_{i}"] = value
         if attr_source:
-            env["GIT_ATTR_SOURCE"] = _EMPTY_TREE
+            env["GIT_ATTR_SOURCE"] = attr_source
     for name in cfg.pass_env:
         if name in os.environ:
             env[name] = os.environ[name]
@@ -855,7 +893,56 @@ def _git_runner(gfd: int, git_path: str, env: dict[str, str]) -> gitconfig.Runne
     return run
 
 
-def check_repo_config(git_path: str, env: dict[str, str]) -> tuple[int, int] | None:
+_FULL_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def empty_tree_id(run: gitconfig.Runner, cwd: str) -> str | None:
+    """The id of the empty tree in this repository's object format, as git computes it; None when it cannot be
+    computed (the variable is then simply not set)."""
+    try:
+        fmt = run(cwd, "rev-parse", "--show-object-format").strip()
+        found = run(cwd, "hash-object", "-t", "tree", os.devnull).strip()
+    except DigestError:
+        return None
+    width = {"sha1": 40, "sha256": 64}.get(fmt)
+    return found if width and re.fullmatch(f"[0-9a-f]{{{width}}}", found) else None
+
+
+def resolve_diff_revisions(run: gitconfig.Runner, cwd: str, revs: list[str]) -> list[str]:
+    """Never trust a revision's spelling: a bare word can be a path, and `git diff A B` reads two files (even outside
+    the repository) when they are not revisions. Each revision is refused if it also names an existing path, refused
+    if it has a slash and is not a ref, and resolved to a full object id with the same hardened runner; only the ids
+    are passed on. The command then ends in `--` so no argument can be taken as a path."""
+    top = ""
+    with contextlib.suppress(DigestError):
+        top = run(cwd, "rev-parse", "--show-toplevel").strip()
+    ids: list[str] = []
+    for rev in revs:
+        if not _rev_ok(rev):
+            raise DigestError(f"revision {rev!r} is not an acceptable spelling")
+        if any(os.path.lexists(os.path.join(base, rev)) for base in {cwd, top} if base):
+            raise DigestError(f"revision {rev!r} is ambiguous: it also names a path; refusing to run")
+        try:
+            if "/" in rev:
+                names = [
+                    x
+                    for x in run(cwd, "rev-parse", "--symbolic-full-name", "--end-of-options", rev).split()
+                    if x != "--end-of-options"
+                ]
+                if not any(x.startswith("refs/") for x in names):
+                    raise DigestError(f"revision {rev!r} has a slash and is not a ref; refusing to run")
+            found = run(cwd, "rev-parse", "--verify", "--end-of-options", f"{rev}^{{commit}}").strip()
+        except DigestError as e:
+            if "slash" in str(e):
+                raise
+            raise DigestError(f"revision {rev!r} does not name a commit; refusing to run") from None
+        if not _FULL_ID.fullmatch(found):
+            raise DigestError(f"revision {rev!r} did not resolve to an object id; refusing to run")
+        ids.append(found)
+    return ids
+
+
+def check_repo_config(git_path: str, env: dict[str, str]) -> tuple[tuple[int, int] | None, str | None]:
     """Refuse to run in a repository (or a submodule of it) whose own config has any key that is not on the shared
     allowlist. Our forced settings are command scope and are skipped by exact (key, value); everything else, whatever
     its scope, must be allowlisted. The forced settings stay in force for the run itself, so a config changed after
@@ -869,7 +956,9 @@ def check_repo_config(git_path: str, env: dict[str, str]) -> tuple[int, int] | N
             gitconfig.check_git_version(out, gitconfig.MIN_GIT_VERSION)
             gitconfig.check_repo_config(run, os.getcwd(), _FORCED_AS_LISTED)
             found = re.match(r"^git version (\d+)\.(\d+)", out)
-            return (int(found.group(1)), int(found.group(2))) if found else None
+            version = (int(found.group(1)), int(found.group(2))) if found else None
+            tree = empty_tree_id(run, os.getcwd()) if version and version >= _ATTR_SOURCE_MIN else None
+            return version, tree
         except gitconfig.GitConfigRefused as e:
             raise DigestError(str(e)) from None
     finally:
@@ -896,11 +985,21 @@ def execute(argv: list[str], cfg: Config) -> tuple[int, bytes]:
             private_home(dirfd)
             base = os.path.basename(argv[0])
             version: tuple[int, int] | None = None
+            tree: str | None = None
             if base in ("git", "gh"):
-                version = check_repo_config(
+                version, tree = check_repo_config(
                     argv[0] if base == "git" else _GIT_FOR_GH, child_env(cfg, home_of(cfg), "git")
                 )
-            attr = version is not None and version >= _ATTR_SOURCE_MIN
+            attr = tree if version is not None and version >= _ATTR_SOURCE_MIN else None
+            if base == "git" and entry.cmd[1] == "diff":
+                if not attr:
+                    raise DigestError(
+                        "diff needs git 2.40 or newer and a computable empty tree (GIT_ATTR_SOURCE); refusing to run"
+                    )
+                if "--end-of-options" in argv:
+                    at = argv.index("--end-of-options")
+                    run = _git_runner(efd, argv[0], child_env(cfg, home_of(cfg), argv[0], attr))
+                    argv = [*argv[: at + 1], *resolve_diff_revisions(run, os.getcwd(), argv[at + 1 : -1]), "--"]
             ofd, fname = create_output(dirfd, argv[0])
         except BaseException:
             os.close(dirfd)
@@ -925,7 +1024,7 @@ def _run(
     fname: str,
     dirfd: int,
     dir_id: os.stat_result,
-    attr_source: bool = False,
+    attr_source: str | None = None,
 ) -> tuple[int, bytes]:
     home = os.path.join(cfg.out_dir, PRIVATE_HOME)
     env = child_env(cfg, home, argv[0], attr_source)

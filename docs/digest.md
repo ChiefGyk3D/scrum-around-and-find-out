@@ -83,7 +83,13 @@ allow = [
   and the attributes that select it are arbitrary and can be changed by a writer between our config check and the
   run, so no fixed list of settings can cover them). The allowed `diff` forms are `--cached` or `--staged` (index
   against HEAD, or against one revision) and two revisions (`A..B` or `A B`); a revision is one token matching
-  `[A-Za-z0-9._/~^@{}-]+`, with no leading dash and no `..` inside it. `ls-files` options that read the working tree
+  `[A-Za-z0-9._/~^@{}-]+`, with no leading dash and no `..` inside it. A spelling alone is never trusted, because
+  `git diff A B` reads two FILES when A and B are not revisions (even files outside the repository). So before the
+  diff runs, each revision is refused if it also names an existing path (in the working folder or the repository
+  top), refused if it has a slash and is not a ref, and resolved with `git rev-parse --verify --end-of-options
+  X^{commit}` through the same hardened runner; only the resolved full object ids reach the command, which always ends
+  in `--` so nothing can be taken as a path. A range `A..B` becomes the two ids. A diff needs git 2.40 or newer
+  (below that it is refused). `--no-index` can never be listed. `ls-files` options that read the working tree
   (`-m`, `-o`, `-d`, `-k`, `--eol` and their long forms) cannot be listed.
   Anything else, any alias and any external `git-*` command is refused (git aliases cannot be neutralised from
   outside, so an unknown subcommand is refused first; git ignores an alias that shadows a built-in). Two layers keep a
@@ -108,14 +114,20 @@ allow = [
      `status.submoduleSummary=false`; plus `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`,
      `GIT_TERMINAL_PROMPT=0` and `GIT_NO_LAZY_FETCH=1`. The command line gets `--no-pager --no-optional-locks` before
      the subcommand, and after `diff`, `log` and `show` `--no-ext-diff --no-textconv --ignore-submodules=all` (`log`
-     and `show` also `--no-show-signature`). With git 2.40 or newer `GIT_ATTR_SOURCE` is also set to the empty tree, so
-     the repository's `.gitattributes` is not consulted at all; an older git skips that variable and relies on the rest.
+     and `show` also `--no-show-signature`). With git 2.40 or newer `GIT_ATTR_SOURCE` is also set to the empty tree of the
+     repository's object format (SHA-1 or SHA-256, asked of git: `rev-parse --show-object-format` and
+     `hash-object -t tree /dev/null`), so the repository's `.gitattributes` is not consulted at all; if the id cannot be
+     computed or git is older, the variable is skipped and the rest applies.
      This layer is what keeps the run safe if the config changes after the check.
   A user `-c`, `--textconv`, `--ext-diff`, `--open-files-in-pager`, `-O*`, `-x*`, `-u`, `--exec*`, `--extcmd*`,
   `--output*`, `--git-dir*`, `--work-tree*`, `--namespace*`, `--upload-pack*`, `--receive-pack*`, `--config-env*` and
   `--paginate` stay refused, even if listed. A repository you do not trust is still data you are about to read.
 - **gh**: only these exact subcommand pairs may be listed: `pr view`, `pr checks`, `pr list`, `run list`, `run view`,
-  `issue view`, `issue list`, with typed options. Everything else is refused, extensions included, and the words `api`,
+  `issue view`, `issue list`, and for each only a fixed list of typed options (for example `--json`, `--limit`,
+  `--state`, `--repo`; see `_GH_OPTIONS` in `src/safo/digest.py`). Any option that opens a browser (`--web`, `-w`) or
+  starts a program is not on a list and so cannot be listed; the child environment also sets `BROWSER` and
+  `GH_BROWSER` to `/bin/false`, `NO_BROWSER=1`, `GH_PAGER` and `PAGER` to `cat`, and turns off gh prompts and the
+  update check, as defense in depth. Everything else is refused, extensions included, and the words `api`,
   `alias`, `extension`, `ext`, `auth`, `config`, `secret`, `codespace`, `ssh-key` and `gpg-key` are refused anywhere
   in the arguments. `gh` runs `git` itself, so it gets the same forced git settings and the same repository config
   check (using `/usr/bin/git`, which must satisfy the same root-owned rules).
