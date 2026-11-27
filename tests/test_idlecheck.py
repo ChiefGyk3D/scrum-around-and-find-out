@@ -336,3 +336,12 @@ def test_negative_guard_bites_with_floor_zero(env: Env) -> None:
     env.queue.write_text(TABLE)
     _, out = env.run(SAFO_IDLE_FLOOR="0")
     assert out is None  # a floor of 0 can never block: proves the floor comparison is the decision
+
+
+def test_cache_with_big_rollups_is_still_read_back(env: Env) -> None:
+    big = [{"conclusion": "SUCCESS", "name": "x" * 400, "detailsUrl": "u" * 400} for _ in range(2000)]
+    env.prs["o/r"] = [pr(1, mergeable="CONFLICTING", statusCheckRollup=big) for _ in range(3)]
+    env.run()
+    assert (env.tmp / "idle-check-prs.json").stat().st_size < 100_000  # only the fields the rule reads are kept
+    env.run()
+    assert len(env.calls) == 1

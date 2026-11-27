@@ -32,6 +32,7 @@ GH_TIMEOUT = 10.0
 GH_TOTAL = 30.0
 GH_WORKERS = 8
 DEFAULT_CACHE = 60.0
+CACHE_CAP = 16_777_216
 INPUT_CAP = 1_048_576
 INPUT_WAIT = 10.0
 QUEUE_CAP = 1_048_576
@@ -228,13 +229,17 @@ def names_pr(text: str, number: int, branch: str) -> bool:
     return re.search(pattern, text) is not None or bool(branch and branch in text)
 
 
+BAD_CHECKS = {"FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE"}
+
+
+def is_bad_check(check: Any) -> bool:
+    return isinstance(check, dict) and (check.get("conclusion") in BAD_CHECKS or check.get("state") in BAD_CHECKS)
+
+
 def pr_reasons(pr: dict[str, Any], unreviewed: bool = False) -> list[str]:
     reasons: list[str] = []
     rollup = pr.get("statusCheckRollup")
-    bad = {"FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE"}
-    if isinstance(rollup, list) and any(
-        isinstance(c, dict) and (c.get("conclusion") in bad or c.get("state") in bad) for c in rollup
-    ):
+    if isinstance(rollup, list) and any(is_bad_check(c) for c in rollup):
         reasons.append("failing")
     if pr.get("mergeable") == "CONFLICTING":
         reasons.append("conflicting")
@@ -283,11 +288,23 @@ def cached_prs(
 ) -> list[tuple[str, dict[str, Any]]] | None:
     """The PR list of the last complete scan of exactly these repos, if it is younger than ttl; else None."""
     try:
-        data = json.loads(cache_path(env).read_bytes()[:INPUT_CAP])
+        data = json.loads(cache_path(env).read_bytes()[:CACHE_CAP])
         fresh = 0 <= now - float(data["ts"]) <= ttl and data["repos"] == repos
         return [(r, p) for r, p in data["prs"]] if fresh else None
     except (OSError, ValueError, KeyError, TypeError):
         return None  # a missing or damaged cache is a miss, never an error
+
+
+def slim(pr: dict[str, Any]) -> dict[str, Any]:
+    """Only the fields the ready rule reads; the check rollups of a busy PR run to hundreds of KB."""
+    keep = {k: pr.get(k) for k in ("number", "title", "headRefName", "isDraft", "mergeable", "reviewDecision")}
+    rollup = pr.get("statusCheckRollup")
+    keep["statusCheckRollup"] = (
+        [{"conclusion": c.get("conclusion"), "state": c.get("state")} for c in rollup if is_bad_check(c)]
+        if isinstance(rollup, list)
+        else None
+    )
+    return keep
 
 
 def store_prs(env: Mapping[str, str], repos: list[str], prs: list[tuple[str, dict[str, Any]]], now: float) -> None:
@@ -295,7 +312,7 @@ def store_prs(env: Mapping[str, str], repos: list[str], prs: list[tuple[str, dic
         path = cache_path(env)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({"ts": now, "repos": repos, "prs": prs}))
+        tmp.write_text(json.dumps({"ts": now, "repos": repos, "prs": [(r, slim(p)) for r, p in prs]}))
         tmp.replace(path)
 
 
