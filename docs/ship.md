@@ -77,15 +77,21 @@ details URL, then `GET actions/runs/<id>`), and it counts only when that run
 
 - has `path` equal to the gate workflow file: `--gate-workflow PATH`, else the one `.github/workflows/ci.yml` (or
   `ci.yaml`) listed on the base branch; if neither is derivable the tool stops with exit 7 and asks for the flag;
-- has `head_sha` equal to the pinned commit, the `pull_request` or `push` event, status `completed`, conclusion
-  `success`, and belongs to this repository.
+- has `head_sha` equal to the pinned commit, belongs to this repository, and is bound to this pull request: a
+  `pull_request` run that lists this PR number with this base branch, or a `push` run on this PR's head branch (a run
+  from a fork lists no PR and never counts);
+- and it counts as green only with status `completed` and conclusion `success`: a failed run of the gate on the pin is a
+  failure, never dropped.
 
-A same-name job from another workflow is ignored, not fatal. The gate path is read from the base branch, never from the
-pull request.
+A same-name job from some other workflow, or a run for another PR with the same sha, is ignored, not fatal. The gate path
+is read from the base branch, never from the pull request.
 
-Because a pull request can edit the gate itself, any pull request that changes a file under `.github/workflows/`, or the
-gate file, or whose changed-file list is 300 or longer (the compare API cannot show more), stops with `NEEDS-HUMAN`
-(exit 10) and the first such file. A human merges it.
+Because a pull request can edit the gate, or what it executes, any pull request that changes anything under `.github/`
+(workflows, local actions, CODEOWNERS), the gate file, a `--protect-path PATH` (repeatable; a file or directory, matched
+on whole path parts), or whose changed-file list is 300 or longer (the compare API cannot show more), or whose gate file
+differs between the base and the pinned head, stops with `NEEDS-HUMAN` (exit 10) and the first such file. A human merges
+it. Before that check and again right before the merge call the pull request is re-read: a base branch that is no longer
+the one the checks were read for is `MERGE-REFUSED`, a moved head is `HEAD-MOVED`.
 
 What this does not prove: an author with push access can still change inputs the gate workflow trusts without touching a
 workflow file, such as a reusable workflow ref it calls (when that lives elsewhere), scripts, configuration or

@@ -47,6 +47,7 @@ STUB = textwrap.dedent(
     key = " ".join(rest[:2])
     if key == "pr view":
         state["last_view"] = pop("views")
+        state["last_pr"] = int(rest[2])
         reply({{"out": json.dumps(state["last_view"])}})
     if key == "pr merge":
         # the fake server: a merge must carry exactly one --match-head-commit equal to the PR's current head
@@ -81,11 +82,18 @@ STUB = textwrap.dedent(
             "status": "completed",
             "conclusion": "success",
             "repository": {{"full_name": "o/r"}},
+            "pull_requests": [
+                {{"number": state.get("last_pr"), "base": {{"ref": view_now.get("baseRefName")}}}}
+            ],
+            "head_branch": view_now.get("headRefName", "feat"),
         }}
         run.update(state.get("run_api", {{}}).get(run_id, {{}}))
         reply({{"out": json.dumps(run)}})
     if rest[0] == "api" and "/compare/" in rest[1]:
         reply({{"out": "\\n".join(state.get("changed", []))}})
+    if rest[0] == "api" and "/contents/.github/workflows/" in rest[1] and ".yml" in rest[1]:
+        ref = rest[1].split("?ref=")[1] if "?ref=" in rest[1] else ""
+        reply({{"out": state.get("blob_by_ref", {{}}).get(ref, "blobsha")}})
     if rest[0] == "api" and "/contents/.github/workflows" in rest[1]:
         reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
     if rest[0] == "api" and "required_conversation_resolution" in rest[1]:
@@ -516,6 +524,8 @@ def test_closed_pull_request_is_refused(rig: Rig) -> None:
 
 def test_several_pull_requests_print_one_result_line_each_and_the_worst_code_wins(rig: Rig) -> None:
     rig.state["views"] = [
+        view(GREEN),
+        view(GREEN),
         view(GREEN),
         view(GREEN),
         view(GREEN, state="MERGED"),

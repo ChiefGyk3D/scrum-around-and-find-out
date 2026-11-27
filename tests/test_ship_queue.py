@@ -26,7 +26,7 @@ def updates(calls: list[list[str]]) -> list[list[str]]:
 
 def test_queue_merges_each_pr_in_order_one_at_a_time(rig: Rig) -> None:  # noqa: F811
     done = sv("CLEAN", state="MERGED")
-    rig.state["views"] = [sv("CLEAN"), sv("CLEAN"), sv("CLEAN"), done, sv("CLEAN"), sv("CLEAN"), sv("CLEAN"), done]
+    rig.state["views"] = [*[sv("CLEAN")] * 5, done, *[sv("CLEAN")] * 5, done]
     code, out, calls = rig.go("--queue", "5", "6", "--repo", REPO, "--interval", "1")
     assert code == 0, out
     assert [ln.split()[0] for ln in out.strip().splitlines()] == ["MERGED", "MERGED"]
@@ -265,7 +265,8 @@ def test_threads_are_read_right_before_the_merge_call(rig: Rig) -> None:  # noqa
     rig.state["views"] = [sv("CLEAN")]
     _code, _out, calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
     names = [" ".join(c[1:3]) for c in calls]
-    assert names.index("pr merge") - names.index("api graphql") == 1
+    between = names[names.index("api graphql") + 1 : names.index("pr merge")]
+    assert between in ([], ["pr view"])  # at most the base and head re-read
 
 
 def test_head_lag_wait_respects_the_per_pr_timeout(rig: Rig) -> None:  # noqa: F811
@@ -476,7 +477,7 @@ def test_a_pr_that_changes_workflow_files_is_not_merged_automatically(
 
 def test_other_paths_do_not_trigger_the_workflow_stop(rig: Rig) -> None:  # noqa: F811
     rig.state["views"] = [sv("CLEAN"), sv("CLEAN"), sv("CLEAN", state="MERGED")]
-    rig.state["changed"] = ["docs/.github/workflows/x.yml", ".github/workflows-notes.md", "src/a.py"]
+    rig.state["changed"] = ["docs/.github/workflows/x.yml", "scriptsX/a.sh", "src/a.py"]
     code, out, _calls = rig.go("5", "--repo", REPO, "--interval", "1")
     assert code == 0, out
 
@@ -535,7 +536,7 @@ def test_required_check_apps_do_not_leak_between_queued_prs(rig: Rig) -> None:  
     second = sv("CLEAN", rollup=[dict(check("CI green"), app_id=7)])
     second["baseRefName"] = "other"
     done = dict(first, state="MERGED")
-    rig.state["views"] = [first, first, first, done, second]
+    rig.state["views"] = [first, first, first, first, first, done, second]
     code, out, _calls = rig.go("--queue", "5", "6", "--repo", REPO, "--interval", "1", "--max-polls", "2")
     lines = out.strip().splitlines()
     assert lines[0].startswith("MERGED") and lines[1].startswith("TIMEOUT") and code == ship.EXIT_TIMEOUT
@@ -553,3 +554,102 @@ def test_unknown_structured_state_falls_back_to_the_text(rig: Rig) -> None:  # n
     rig.state["merges"] = [{"rc": 1, "err": "merge conflict between base and head"}]
     code, _out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
     assert code == ship.EXIT_CONFLICT
+
+
+# review of the round-2 commit
+
+
+def with_runs(rig: Rig, change: dict[str, Any], runs: list[dict[str, Any]] | None = None) -> None:  # noqa: F811
+    rig.state["check_runs"] = runs or [run_of("CI green", 1)]
+    rig.state["run_api"] = {"1": change, "2": {}}
+
+
+def test_a_gate_run_for_another_pr_with_the_same_sha_does_not_count(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    with_runs(rig, {"pull_requests": [{"number": 99, "base": {"ref": "main"}}]})
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+
+
+def test_a_gate_run_for_another_base_does_not_count(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    with_runs(rig, {"pull_requests": [{"number": 5, "base": {"ref": "other"}}]})
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+
+
+def test_a_push_run_counts_only_for_the_pr_head_branch(rig: Rig) -> None:  # noqa: F811
+    push = {"event": "push", "pull_requests": [], "head_branch": "feat/x"}
+    one = sv("CLEAN")
+    one["headRefName"] = "feat/other"
+    rig.state["views"] = [one]
+    with_runs(rig, push)
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+    mine = sv("CLEAN")
+    mine["headRefName"] = "feat/x"
+    rig.state["views"] = [mine, mine, dict(mine, state="MERGED")]
+    code, out, _calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == 0, out
+
+
+def test_a_failed_gate_run_is_a_failure_not_something_to_ignore(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    with_runs(rig, {"conclusion": "failure"}, [run_of("CI green", 1), run_of("CI green", 2)])
+    code, _out, calls = rig.go("5", "--repo", REPO, "--max-polls", "3", "--interval", "1")
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+
+
+def test_a_gate_definition_that_differs_between_base_and_pin_needs_a_human(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["blob_by_ref"] = {"main": "aaa", HEAD: "bbb"}
+    code, out, calls = rig.go("5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_NEEDS_HUMAN and out.startswith("NEEDS-HUMAN") and merges(calls) == []
+
+
+@pytest.mark.parametrize("changed", [[".github/actions/setup/action.yml"], [".github/CODEOWNERS"]])
+def test_any_change_under_dot_github_needs_a_human(rig: Rig, changed: list[str]) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["changed"] = changed
+    code, _out, calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == []
+
+
+def test_protected_paths_fail_closed_by_directory_boundary(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["changed"] = ["scripts/run.sh"]
+    code, out, calls = rig.go(
+        "5", "--repo", REPO, "--interval", "1", "--protect-path", "scripts", "--protect-path", "a/b.py"
+    )
+    assert code == ship.EXIT_NEEDS_HUMAN and "scripts/run.sh" in out and merges(calls) == []
+    rig.state["views"] = [sv("CLEAN"), sv("CLEAN"), sv("CLEAN", state="MERGED")]
+    rig.state["changed"] = ["scripts2/run.sh", "a/b.pyc"]
+    code, out, _calls = rig.go(
+        "5", "--repo", REPO, "--interval", "1", "--protect-path", "scripts", "--protect-path", "a/b.py"
+    )
+    assert code == 0, out
+
+
+def test_bad_protected_paths_are_a_usage_error(rig: Rig) -> None:  # noqa: F811
+    for bad in ("/etc", "../x", "a/../b", ""):
+        with pytest.raises(SystemExit) as stop:
+            rig.go("5", "--repo", REPO, "--protect-path", bad)
+        assert stop.value.code == 2
+
+
+@pytest.mark.parametrize("queue", [False, True])
+def test_a_base_retarget_before_the_workflow_check_stops_the_merge(rig: Rig, queue: bool) -> None:  # noqa: F811
+    ok = sv("CLEAN")
+    moved = dict(ok, baseRefName="release")
+    rig.state["views"] = [ok, ok, *([ok] if queue else []), moved]
+    code, out, calls = rig.go(*(["--queue"] if queue else []), "5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_MERGE_REFUSED and "base" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize("queue", [False, True])
+def test_a_base_retarget_right_before_the_merge_stops_it(rig: Rig, queue: bool) -> None:  # noqa: F811
+    ok = sv("CLEAN")
+    moved = dict(ok, baseRefName="release")
+    rig.state["views"] = [ok, ok, *([ok] if queue else []), ok, moved]
+    code, out, calls = rig.go(*(["--queue"] if queue else []), "5", "--repo", REPO, "--interval", "1")
+    assert code == ship.EXIT_MERGE_REFUSED and "base" in out and merges(calls) == []
