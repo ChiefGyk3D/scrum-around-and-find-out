@@ -183,7 +183,7 @@ with 5 wrong does not.
 
 `safo-eval-canary` (#540) runs the fixtures on the two configured local models and compares each pass rate with a stored
 baseline. The models are not named on the command line: they are the two `safo-draft` models (`DRAFT_MODEL` and
-`DIGEST_MODEL` in `safo.localdraft`), so a model change there is followed here. No host or port appears either; the calls
+`DIGEST_MODEL` in the safo-draft module), so a model change there is followed here. No host or port appears either; the calls
 go through `llm-local` as in a normal run.
 
 ```sh
@@ -217,18 +217,18 @@ guard's `TOP_LEVEL_COMMANDS` tuple, which is guard code and waits for the owner'
 No scheduler is installed. A systemd user timer example, as text only:
 
 ```ini
-# ~/.config/systemd/user/safo-eval-canary.service
+# a user service unit named safo-eval-canary
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/safo-eval-canary
 
-# ~/.config/systemd/user/safo-eval-canary.timer
+# a user timer unit named safo-eval-canary
 [Timer]
 OnCalendar=weekly
 Persistent=true
-[Install]
-WantedBy=timers.target
 ```
+
+The timer also needs the usual install section of any user timer, so `systemctl --user enable --now` works.
 
 ## Add a fixture
 
