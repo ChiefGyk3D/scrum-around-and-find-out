@@ -532,3 +532,141 @@ def test_an_option_learned_after_the_snapshot_is_saved(tmp_path: Path) -> None:
     mine.fields["Effort"].options["XL"] = "deadbeef"  # ... then an option is learned
     bm.merge_save(path, before, mine)
     assert bm.load(path).fields["Effort"].options["XL"] == "deadbeef"
+
+
+# stale option ids are refreshed once (#500)
+
+STALE = "deadbeef"
+FRESH = "0a1b2c3d"
+FIELDS = f"{PROJECT}/fields"
+STALE_400 = bm.Reply(False, b"", "exit 1: gh: Value is not a valid option for this column (HTTP 400)")
+
+
+def fields_reply(*names: tuple[str, str]) -> bm.Reply:
+    options = [{"id": oid, "name": {"raw": name, "html": name}} for name, oid in names]
+    body = [
+        {"id": 1, "name": "Title", "data_type": "title"},
+        {"id": 423617716, "name": "Status", "data_type": "single_select", "options": options},
+    ]
+    return bm.Reply(True, json.dumps(body).encode())
+
+
+class Script:
+    """Answers PATCHes from a list in order and the field list from one reply; records every call."""
+
+    def __init__(self, patches: list[bm.Reply], fields: bm.Reply) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+        self.patches = list(patches)
+        self.fields = fields
+
+    def __call__(self, method: str, path: str, body: str | None) -> bm.Reply:
+        self.calls.append((method, path, body))
+        if method == "GET":
+            return self.fields
+        return self.patches.pop(0) if self.patches else bm.Reply(True, b"{}")
+
+
+def stale_board() -> bm.BoardMap:
+    board = seeded()
+    board.fields["Status"].options = {"Done": STALE}
+    return board
+
+
+def test_stale_id_then_fresh_id_succeeds_with_one_refresh() -> None:
+    board = stale_board()
+    script = Script([STALE_400, bm.Reply(True, b"{}")], fields_reply(("Done", FRESH), ("In review", "11112222")))
+    refreshed = bm.edit_card(board, script, KEY, {"Status": "Done"})
+    assert refreshed == ["Status"]
+    assert [m for m, _, _ in script.calls] == ["PATCH", "GET", "PATCH"]
+    assert FIELDS in script.calls[1][1] and "/items?" not in script.calls[1][1]
+    assert STALE in (script.calls[0][2] or "") and FRESH in (script.calls[2][2] or "")
+    assert board.fields["Status"].options == {"Done": FRESH, "In review": "11112222"}
+
+
+def test_a_name_missing_from_the_map_is_refreshed_before_the_first_send() -> None:
+    board = seeded()
+    script = Script([], fields_reply(("In review", FRESH)))
+    assert bm.edit_card(board, script, KEY, {"Status": "In review"}) == ["Status"]
+    assert [m for m, _, _ in script.calls] == ["GET", "PATCH"]
+    assert FRESH in (script.calls[1][2] or "")
+
+
+def test_unknown_name_after_refresh_fails_closed_and_lists_live_names() -> None:
+    script = Script([], fields_reply(("Todo", FRESH), ("Done", "11112222")))
+    with pytest.raises(ConfigError, match=r"live options: Done, Todo"):
+        bm.edit_card(seeded(), script, KEY, {"Status": "Nope"})
+    assert [m for m, _, _ in script.calls] == ["GET"]  # no PATCH was sent
+
+
+def test_a_second_400_after_the_retry_fails_without_a_third_attempt() -> None:
+    script = Script([STALE_400, STALE_400, STALE_400], fields_reply(("Done", FRESH)))
+    with pytest.raises(ApiError, match="refreshed once"):
+        bm.edit_card(stale_board(), script, KEY, {"Status": "Done"})
+    assert [m for m, _, _ in script.calls] == ["PATCH", "GET", "PATCH"]
+
+
+def test_a_400_after_a_name_miss_refresh_does_not_refresh_again() -> None:
+    script = Script([STALE_400, STALE_400], fields_reply(("In review", FRESH)))
+    with pytest.raises(ApiError):
+        bm.edit_card(seeded(), script, KEY, {"Status": "In review"})
+    assert [m for m, _, _ in script.calls] == ["GET", "PATCH"]
+
+
+def test_a_refusal_that_is_not_about_options_is_not_refreshed() -> None:
+    script = Script([bm.Reply(False, b"", "exit 1: HTTP 422")], fields_reply(("Done", FRESH)))
+    with pytest.raises(ApiError):
+        bm.edit_card(stale_board(), script, KEY, {"Status": "Done"})
+    assert [m for m, _, _ in script.calls] == ["PATCH"]
+
+
+def test_a_raw_option_id_is_not_refreshed() -> None:
+    script = Script([STALE_400], fields_reply(("Done", FRESH)))
+    with pytest.raises(ApiError):
+        bm.edit_card(seeded(), script, KEY, {"Status": STALE})
+    assert [m for m, _, _ in script.calls] == ["PATCH"]
+
+
+def test_an_unknown_outcome_is_never_refreshed_or_replayed() -> None:
+    calls: list[str] = []
+
+    def boom(method: str, path: str, body: str | None) -> bm.Reply:
+        calls.append(method)
+        raise TimeoutError("late")
+
+    with pytest.raises(UnknownOutcomeError):
+        bm.edit_card(stale_board(), boom, KEY, {"Status": "Done"})
+    assert calls == ["PATCH"]
+
+
+@pytest.mark.parametrize("body", [b"[]", b"{}", b"not json", b'[{"id":423617716,"name":"Status"}]'])
+def test_a_malformed_field_list_is_one_error_and_changes_nothing(body: bytes) -> None:
+    board = stale_board()
+    script = Script([STALE_400], bm.Reply(True, body))
+    with pytest.raises(MalformedDataError):
+        bm.edit_card(board, script, KEY, {"Status": "Done"})
+    assert board.fields["Status"].options == {"Done": STALE}
+
+
+def test_cli_dry_run_never_refreshes_or_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / ".local" / "state" / "safo" / "ratebudget" / "boardmap.json"
+    bm.save(seeded(), path)
+    before = path.read_bytes()
+    script = Script([], fields_reply(("Nope", FRESH)))
+    monkeypatch.setattr(bm, "gh_transport", lambda *a, **k: script)
+    code, _, err = tool(card_cli.main, KEY, "Status=Nope", "--dry-run", home=tmp_path)
+    assert code != 0 and "dry run: not done" in err
+    assert script.calls == []
+    assert path.read_bytes() == before
+
+
+def test_cli_refresh_is_remembered_and_said_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    script = Script([STALE_400, bm.Reply(True, b"{}")], fields_reply(("Done", FRESH)))
+    monkeypatch.setattr(bm, "gh_transport", lambda *a, **k: script)
+    code, out, err = tool(
+        card_cli.main, KEY, "Status=Done", "--item-id", "99", "--option", f"Status:Done={STALE}", home=tmp_path
+    )
+    assert code == 0, err
+    assert out.count("refreshed the options of Status") == 1
+    saved = json.loads((tmp_path / ".local" / "state" / "safo" / "ratebudget" / "boardmap.json").read_text())
+    assert saved["fields"]["Status"]["options"]["Done"] == FRESH
+    assert [m for m, _, _ in script.calls] == ["PATCH", "GET", "PATCH"]

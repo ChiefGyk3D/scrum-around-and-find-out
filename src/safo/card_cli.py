@@ -61,14 +61,24 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
         edits = _edits(args.edits)
         if args.resolve:
             boardmap.resolve_item(board, transport, key)
-        request = boardmap.build_request(board, key, edits)
+        request = boardmap.build_request(board, key, edits) if dry else None
+    except boardmap.UnknownOption as problem:
+        raise ConfigError(
+            f"{problem}; a real run would first refresh this field's options once (dry run: not done)"
+        ) from problem
     finally:
         boardmap.merge_save(path, before, board)
-    if dry:
+    if request is not None:
         ctx.say(f"{request.method} {request.path}")
         ctx.say(request.body)
         return EXIT_OK
-    boardmap.edit_card(board, transport, key, edits)
+    before_edit = boardmap.to_json(board)
+    try:
+        refreshed = boardmap.edit_card(board, transport, key, edits)
+    finally:
+        boardmap.merge_save(path, before_edit, board)  # a refresh is remembered even when the retry is refused
+    if refreshed:
+        ctx.say(f"{key}: refreshed the options of {', '.join(refreshed)} from the live field list (1 read)")
     ctx.say(f"{key}: {', '.join(edits)} set (1 REST call)")
     return EXIT_OK
 
