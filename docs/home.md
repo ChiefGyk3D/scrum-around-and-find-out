@@ -24,6 +24,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [The Action](action.md): what it trusts from its caller: the trusted events, the bound revision the board file is read from, and what is and is not guaranteed.
 - [safo hooks](hooks.md): how Claude Code is made to hold the lead to `agents.yaml`, and what the guard cannot prove.
 - [safo-rmguard](rmguard.md): the Bash hook that blocks wildcard and parent deletes in shared dev directories.
+- [safo-codex-run repository checks](codex-run.md): what the wrapper checks in a worktree before codex starts, and the residual risk it does not close.
 - [The orchestrator](orchestrator.md): the lead is a project manager and never waits; the 2026-10-25 incident and the monitor-agent brief.
 - [Look before instructing](look-before-instructing.md): prior art, then the vendor's docs page, then the live system; never a click path from memory.
 - [Done means verified](done-means-verified.md): "done" needs an observation this turn through the user's path, plus the destructive-step checklist.

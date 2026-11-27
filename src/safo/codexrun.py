@@ -351,6 +351,10 @@ GIT_HARDENING = (
     "core.fsmonitor=false",
     "-c",
     "protocol.allow=never",
+    "-c",
+    f"core.attributesFile={os.devnull}",
+    "-c",
+    "submodule.recurse=false",
 )
 # Keys of the repository's own config that can start a program or redirect git in ways the options above do not cover
 # (a content filter named by an attributes file, a textconv, an include of another file, a URL rewrite, an alias).
@@ -359,7 +363,7 @@ DANGEROUS_CONFIG_SUFFIXES = (".textconv", ".clean", ".smudge", ".process", ".com
 DANGEROUS_CONFIG_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.askpass", "core.gitproxy")
 
 
-def _git(git: str, home: str, root: str, *args: str) -> str:
+def _git(git: str, home: str, root: str, *args: str, errors: str = "replace") -> str:
     try:
         done = subprocess.run(  # noqa: S603 - absolute git, fixed argv, no shell, stdin closed, bounded time
             [git, *GIT_HARDENING, "-C", root, *args],
@@ -373,7 +377,7 @@ def _git(git: str, home: str, root: str, *args: str) -> str:
         raise CodexRunError("git could not be run on the worktree; nothing was run") from None
     if done.returncode != 0:
         raise CodexRunError("the worktree is not a usable git work tree; nothing was run")
-    return done.stdout.decode("utf-8", "replace")
+    return done.stdout.decode("utf-8", errors)
 
 
 def _read_small(path: str, limit: int = 4096) -> str:
@@ -432,10 +436,11 @@ def worktree_identity(worktree: str, home: str) -> tuple[tuple[int, int], ...]:
         raise CodexRunError("the worktree changed while it was being checked; nothing was run") from None
 
 
-def check_repo_config(git: str, home: str, root: str) -> None:
-    """Refuse a repository whose own config can start a program through a setting the command-line options do not
-    override (a content filter, a textconv, an include, an alias). Listing config runs nothing."""
-    listing = _git(git, home, root, "config", "--list", "-z")
+MAX_SUBMODULE_DEPTH = 4
+
+
+def _check_config_keys(git: str, home: str, folder: str) -> None:
+    listing = _git(git, home, folder, "config", "--list", "-z")
     for entry in listing.split("\0"):
         key = entry.split("\n", 1)[0].lower()
         if (
@@ -446,6 +451,85 @@ def check_repo_config(git: str, home: str, root: str) -> None:
             raise CodexRunError(
                 f"the repository config sets {output.line(key[:60])}, which can start a program; nothing was run"
             )
+
+
+def _submodule_folders(git: str, home: str, folder: str) -> list[str]:
+    """The folders of the gitlinks (mode 160000) in the index of `folder`. Listing the index runs nothing."""
+    raw = _git(git, home, folder, "ls-files", "--stage", "-z", errors="surrogateescape")
+    found: list[str] = []
+    for entry in raw.split("\0"):
+        meta, _, name = entry.partition("\t")
+        if meta.startswith("160000 ") and name:
+            found.append(os.path.join(folder, name))
+    return found
+
+
+def check_repo_config(git: str, home: str, root: str, depth: int = 0) -> None:
+    """Refuse a repository whose own config can start a program through a setting the command-line options do not
+    override (a content filter, a textconv, an include, an alias). The same check runs on every submodule, nested ones
+    too, because a submodule keeps its own config. Listing config runs nothing."""
+    _check_config_keys(git, home, root)
+    if depth >= MAX_SUBMODULE_DEPTH:
+        if _submodule_folders(git, home, root):
+            raise CodexRunError("the repository nests submodules too deeply to check; nothing was run")
+        return
+    for folder in _submodule_folders(git, home, root):
+        if os.path.islink(folder):
+            raise CodexRunError("a submodule path is a symbolic link; nothing was run")
+        if not os.path.lexists(folder):
+            continue  # not checked out: git has no repository of its own there
+        if not os.path.isdir(folder):
+            raise CodexRunError("a submodule path is not a folder; nothing was run")
+        if os.path.realpath(folder) != os.path.join(os.path.realpath(root), os.path.relpath(folder, root)):
+            raise CodexRunError("a submodule folder resolves outside its place in the worktree; nothing was run")
+        check_repo_config(git, home, folder, depth + 1)
+
+
+def _sealed_status(git: str, home: str, root: str, gitdir: str) -> str:
+    """`git status` against a private git directory that holds only what we wrote: HEAD as a bare id, a copy of the
+    index, the real object store through `alternates`, and a fixed config. Nothing the repository can change after the
+    config check (its config, its info/attributes, a submodule's config) is read by this call, so no content filter,
+    textconv or other program it names can run; a later edit of those files has nothing to act on. The working tree's
+    own .gitattributes can still name a filter, but with no `filter.*` setting in the config git has no program to
+    start."""
+    head = _git(git, home, root, "rev-parse", "--verify", "HEAD").strip()
+    common = _git(git, home, root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    scratch = tempfile.mkdtemp(prefix="safo-status-")
+    try:
+        for name in ("objects/info", "refs"):
+            os.makedirs(os.path.join(scratch, name))
+        with open(os.path.join(scratch, "objects", "info", "alternates"), "w", encoding="utf-8") as handle:
+            handle.write(os.path.join(common, "objects") + "\n")
+        with open(os.path.join(scratch, "HEAD"), "w", encoding="utf-8") as handle:
+            handle.write(head + "\n")
+        with open(os.path.join(scratch, "config"), "w", encoding="utf-8") as handle:
+            handle.write("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n")
+        try:
+            shutil.copyfile(os.path.join(gitdir, "index"), os.path.join(scratch, "index"))
+        except OSError:
+            raise CodexRunError("the worktree's index could not be read; nothing was run") from None
+        sealed = (f"--git-dir={scratch}", f"--work-tree={root}")
+        # assume-unchanged ("h", any lower-case tag) and skip-worktree ("S") entries are never compared with the
+        # files, so a modified file behind one of them would read as clean: refuse such an index.
+        for entry in _git(git, home, root, *sealed, "ls-files", "-v", "-z", errors="surrogateescape").split("\0"):
+            if entry and (entry[0].islower() or entry[0] == "S"):
+                raise CodexRunError(
+                    "the index marks a file assume-unchanged or skip-worktree, so the tree cannot be checked; "
+                    "nothing was run"
+                )
+        return _git(
+            git,
+            home,
+            root,
+            *sealed,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -> str:
@@ -462,7 +546,7 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
     marker = os.path.join(real, ".git")
     if os.path.islink(marker) or not os.path.isfile(marker):
         raise CodexRunError("the folder is not a linked git worktree (its .git is not a plain file); nothing was run")
-    check_gitfile(marker, real, home)
+    gitdir = check_gitfile(marker, real, home)
     git = shutil.which("git", path=SAFE_PATH)
     if not git:
         raise CodexRunError("git was not found; nothing was run")
@@ -471,7 +555,7 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
         raise CodexRunError("the folder named is not the top of its git worktree; nothing was run")
     check_repo_config(git, home, real)
     if cls == "implementer":
-        raw = _git(git, home, real, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+        raw = _sealed_status(git, home, real, gitdir)
         dirty = _dirty_paths(raw)
         named = {os.path.normpath(p) for p in allow_dirty}
         loose = [p for p in dirty if os.path.normpath(p) not in named]
@@ -641,15 +725,38 @@ def child_path(codex: str, node: str | None) -> str:
 
 def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch: str) -> dict[str, str]:
     """The whole environment of codex: this allow-list, built here, never a copy of the caller's. `codex_home` is
-    read from the owner's config (checked), never from the caller's CODEX_HOME."""
-    return {
+    read from the owner's config (checked), never from the caller's CODEX_HOME.
+
+    The git settings here close what the wrapper can close for the git that codex starts itself: no system or global
+    config, and command-scope settings (they beat the repository's config) that turn off fsmonitor and hooks and forbid
+    network and `ext::` transports. RESIDUAL, not closed: the repository config is read by that git at run time, and a
+    `filter.*` / `diff.*.textconv` program cannot be forbidden by name in advance. A process that can write the
+    repository config WHILE codex runs can therefore still get a program started. The checks before the run cover the
+    config as it was then (see docs/codex-run.md)."""
+    env = {
         "PATH": child_path(codex, node),
         "HOME": home,
         "CODEX_HOME": codex_home,
         "LANG": LOCALE,
         "LC_ALL": LOCALE,
         "TMPDIR": scratch,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
     }
+    forced = (
+        ("core.fsmonitor", "false"),
+        ("core.hooksPath", os.devnull),
+        ("protocol.allow", "never"),
+        ("protocol.ext.allow", "never"),
+        ("core.attributesFile", os.devnull),
+    )
+    env["GIT_CONFIG_COUNT"] = str(len(forced))
+    for number, (key, value) in enumerate(forced):
+        env[f"GIT_CONFIG_KEY_{number}"] = key
+        env[f"GIT_CONFIG_VALUE_{number}"] = value
+    return env
 
 
 def build_argv(codex: str, cls: str, root: str, out: str) -> list[str]:

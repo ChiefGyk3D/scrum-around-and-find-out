@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Any
 import pytest
 
 from codexrundata import OUTPUT_CANARY, PROMPT_CANARY, World, make_world
-from gitrepo import git
+from gitrepo import git, make_repo
 from safo import codexrun
 
 
@@ -301,6 +302,200 @@ def test_a_program_key_in_the_repository_config_is_refused_and_never_runs(
     refused(world, go(world, "review"))
 
 
+def add_submodule(world: World, tmp_path: Path) -> Path:
+    """A committed, initialized submodule `sub` in the worktree; returns its working folder."""
+    upstream = tmp_path / "upstream"
+    make_repo(upstream, {"s.txt": "s\n"})
+    wt = world.worktree
+    git(wt, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(upstream), "sub")
+    git(wt, "commit", "-q", "-m", "add sub")
+    return wt / "sub"
+
+
+@pytest.mark.parametrize("key", ["filter.x.clean", "diff.x.textconv", "alias.st", "core.sshCommand"])
+def test_a_program_key_in_a_submodule_config_is_refused_and_never_runs(world: World, tmp_path: Path, key: str) -> None:
+    sub = add_submodule(world, tmp_path)
+    marker = hostile_script(tmp_path)
+    git(sub, "config", key, str(tmp_path / "hostile.sh"))
+    refused(world, go(world, "implementer"))
+    assert not marker.exists()
+    refused(world, go(world, "review"))
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_an_index_flag_that_hides_a_modified_file_is_refused(world: World, flag: str) -> None:
+    wt = world.worktree
+    git(wt, "update-index", flag, "a.txt")
+    (wt / "a.txt").write_text("changed behind the flag\n")
+    refused(world, go(world, "implementer"))
+
+
+def test_the_child_git_environment_is_scrubbed(world: World) -> None:
+    assert go(world, "review") == 0
+    env = world.calls()[0]["env"]
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["GIT_ATTR_NOSYSTEM"] == "1" and env["GIT_TERMINAL_PROMPT"] == "0"
+    pairs = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(env["GIT_CONFIG_COUNT"]))}
+    assert pairs["core.fsmonitor"] == "false" and pairs["core.hooksPath"] == "/dev/null"
+    assert pairs["protocol.allow"] == "never" and pairs["protocol.ext.allow"] == "never"
+
+
+def test_documented_boundary_a_filter_added_during_the_run_still_runs_for_the_child(
+    world: World, tmp_path: Path
+) -> None:
+    """Residual risk, documented in docs/codex-run.md: environment settings cannot name a filter driver that the repo
+    config defines later, so a process that can write the repository config while codex runs can still get a
+    `filter.*` program started by codex's own `git status`. The scrubbed environment closes fsmonitor and hooks only."""
+    fsmonitor_marker = tmp_path / "fsmonitor-ran"
+    fsmonitor = tmp_path / "fsmonitor.sh"
+    fsmonitor.write_text(f"#!/bin/sh\necho ran > {fsmonitor_marker}\n")
+    fsmonitor.chmod(0o755)
+    filter_marker = hostile_script(tmp_path)
+    wt = world.worktree
+    (wt / ".gitattributes").write_text("*.txt filter=x\n")
+    git(wt, "add", ".gitattributes")
+    git(wt, "commit", "-q", "-m", "attrs")
+    assert go(world, "review") == 0  # the config is clean when the check runs
+    env = world.calls()[0]["env"]
+    git(wt, "config", "filter.x.clean", str(tmp_path / "hostile.sh"))  # written while codex runs
+    git(wt, "config", "core.fsmonitor", str(fsmonitor))
+    (wt / "a.txt").write_text("b\n")
+    done = subprocess.run(  # noqa: S603 - fixed argv, scrubbed env, test only
+        ["git", "-C", str(wt), "status", "--porcelain"],  # noqa: S607
+        env={k: v for k, v in env.items() if k in ("PATH", "HOME") or k.startswith("GIT_")},
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    assert done.returncode == 0
+    assert not fsmonitor_marker.exists()  # closed by the scrubbed environment
+    assert filter_marker.exists()  # the boundary: not closed, and not claimed closed
+
+
+def test_a_clean_submodule_is_accepted(world: World, tmp_path: Path) -> None:
+    add_submodule(world, tmp_path)
+    assert go(world, "implementer") == 0
+
+
+def hostile_repo(tmp_path: Path, key: str = "filter.x.clean") -> Path:
+    hostile = tmp_path / "hostile-repo"
+    make_repo(hostile, {"x": "x\n"})
+    git(hostile, "config", key, str(tmp_path / "hostile.sh"))
+    return hostile
+
+
+def test_a_config_changed_after_the_check_never_runs_a_program(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = hostile_script(tmp_path)
+    wt = world.worktree
+    (wt / ".gitattributes").write_text("*.txt filter=x\n")
+    (wt / "victim.txt").write_text("before\n")
+    git(wt, "add", ".gitattributes", "victim.txt")
+    git(wt, "commit", "-q", "-m", "filtered file")
+    (wt / "victim.txt").write_text("after\n")
+    real_run = subprocess.run
+    injected = False
+
+    def race(argv: list[str], **kwargs: Any) -> Any:
+        nonlocal injected
+        result = real_run(argv, **kwargs)
+        if not injected and argv[-3:] == ["config", "--list", "-z"]:
+            injected = True
+            common = Path(git(wt, "rev-parse", "--git-common-dir"))
+            if not common.is_absolute():
+                common = wt / common
+            with (common / "config").open("a") as config:
+                config.write(f'\n[filter "x"]\n    clean = {tmp_path / "hostile.sh"}\n')
+        return result
+
+    monkeypatch.setattr(subprocess, "run", race)
+    # victim.txt is dirty and not named, so the run is refused; what matters is that no program ran on the way
+    refused(world, go(world, "implementer"))
+    assert injected
+    assert not marker.exists()
+
+
+def test_a_symlinked_submodule_path_is_refused(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    marker = hostile_script(tmp_path)
+    hostile = hostile_repo(tmp_path, "alias.pwn")
+    shutil.rmtree(sub)
+    sub.symlink_to(hostile, target_is_directory=True)
+    refused(world, go(world, "implementer"))
+    refused(world, go(world, "review"))
+    assert not marker.exists()
+
+
+def test_a_non_utf8_submodule_name_is_still_checked(world: World, tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    make_repo(upstream, {"x": "x\n"})
+    wt_b = os.fsencode(world.worktree)
+    name_b = b"sub-" + bytes([255])
+    cmd = [b"git", b"-C", wt_b, b"-c", b"protocol.file.allow=always", b"submodule", b"add", b"-q"]
+    subprocess.run([*cmd, os.fsencode(upstream), name_b], check=True, stdin=subprocess.DEVNULL)  # noqa: S603
+    git(world.worktree, "commit", "-q", "-m", "add byte-name submodule")
+    alias = os.fsencode("!" + str(tmp_path / "hostile.sh"))
+    subprocess.run(  # noqa: S603
+        [b"git", b"-C", wt_b + b"/" + name_b, b"config", b"alias.pwn", alias], check=True, stdin=subprocess.DEVNULL
+    )
+    refused(world, go(world, "implementer"))
+    refused(world, go(world, "review"))
+
+
+def test_a_submodule_with_a_redirected_gitdir_is_checked(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    hostile = hostile_repo(tmp_path)
+    (sub / ".git").unlink()
+    (sub / ".git").write_text(f"gitdir: {hostile / '.git'}\n")
+    refused(world, go(world, "implementer"))
+
+
+def test_a_symlinked_submodule_gitfile_is_checked(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    hostile = hostile_repo(tmp_path)
+    (sub / ".git").unlink()
+    (sub / ".git").symlink_to(hostile / ".git")
+    refused(world, go(world, "implementer"))
+
+
+def test_an_absent_submodule_folder_is_skipped(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    shutil.rmtree(sub)
+    assert go(world, "review") == 0
+
+
+def test_the_submodule_depth_limit_bites_only_at_the_limit(world: World, tmp_path: Path) -> None:
+    add_submodule(world, tmp_path)
+    git_bin = shutil.which("git")
+    assert git_bin
+    root, home = str(world.worktree), str(world.home)
+    codexrun.check_repo_config(git_bin, home, root, codexrun.MAX_SUBMODULE_DEPTH - 1)
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(git_bin, home, root, codexrun.MAX_SUBMODULE_DEPTH)
+
+
+def test_git_status_ignores_submodules_and_does_not_recurse(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_submodule(world, tmp_path)
+    seen: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(argv: list[str], **kwargs: Any) -> Any:
+        seen.append(list(argv))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    assert go(world, "implementer") == 0
+    status = [a for a in seen if "status" in a]
+    assert status
+    for argv in status:
+        assert "--ignore-submodules=all" in argv and "submodule.recurse=false" in argv
+        assert "core.attributesFile=/dev/null" in argv
+    assert any(a[a.index("-C") + 1].endswith("/sub") and "config" in a for a in seen)  # the submodule was inspected
+
+
 def test_git_runs_with_the_hardening_options_and_a_clean_environment(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -453,7 +648,14 @@ def test_environment_is_an_allow_list(world: World, tmp_path: Path) -> None:
     )
     assert go(world, "review") == 0
     env = world.calls()[0]["env"]
-    assert set(env) <= {"PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"}
+    assert {name for name in env if not name.startswith("GIT_")} <= {
+        "PATH",
+        "HOME",
+        "CODEX_HOME",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+    }
     assert {"PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"} <= set(env)
     assert env["HOME"] == str(world.home)
     # was: == str(tmp_path) (the caller's CODEX_HOME was inherited); now the owner config's, never the caller's
