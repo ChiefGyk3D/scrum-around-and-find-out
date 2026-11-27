@@ -4,7 +4,9 @@
 It reads the Claude lead-session transcripts and prints counts and sums only: per session the turn count, the context
 tokens (input + cache read + cache write) at the first and last turn and summed over the turns, and the weighted spend
 by turn bucket (1-100, 101-200, 201-300, 301+); across sessions the share of turns and of spend past turn 200 and 400,
-and the first turn at which the marginal weighted spend per turn passes 1.5 times the median of the first 100 turns.
+and, side by side and labeled, the first turn at which the marginal weighted spend per turn passes 1.5 times the median
+of turns 1-20, the turn after which 50 and 80 percent of a session's weighted spend has been reached (median across
+sessions), and the same threshold from the median of turns 1-100 (the old definition, weak: spend rises with context).
 A handoff is a session whose first user message contains the word handoff (a yes or no found while reading, never
 printed), paired with the latest earlier session of the same project folder. Its cost is the successor's first three
 turns, MEASURED, and the note, ESTIMATED as the largest single reply (output tokens x5) in the predecessor's last five
@@ -51,6 +53,8 @@ MARKS = (200, 400)
 FACTOR = 1.5
 WINDOW = 10  # turns in the rolling mean of the marginal spend
 EARLY = 100
+EARLY_SHORT = 20
+CUMULATIVE_SHARES = (0.5, 0.8)
 SUCCESSOR_TURNS = 3
 NOTE_TURNS = 5
 MAX_SESSIONS_SHOWN = 25
@@ -168,23 +172,57 @@ def pct(part: float, whole: float) -> str:
     return "n/a" if whole <= 0 else f"{100.0 * part / whole:.1f}%"
 
 
-def threshold(sessions: list[list[tuple[int, Turn]]]) -> tuple[float | None, int | None]:
-    """(median weight of turns 1-100, first turn after 100 where a 10-turn mean of the per-turn mean passes 1.5x it)."""
-    early = [t.weight for turns in sessions for n, t in turns if n <= EARLY]
-    if not early:
+def threshold(sessions: list[list[tuple[int, Turn]]], early: int) -> tuple[float | None, int | None]:
+    """(median weight of turns 1..early, first turn after `early` where a 10-turn mean of the per-turn mean spend
+    passes 1.5x it)."""
+    base = [t.weight for turns in sessions for n, t in turns if n <= early]
+    if not base:
         return None, None
-    baseline = statistics.median(early)
+    baseline = statistics.median(base)
     per_turn: dict[int, list[float]] = {}
     for turns in sessions:
         for n, t in turns:
             per_turn.setdefault(n, []).append(t.weight)
     means = {n: statistics.fmean(v) for n, v in per_turn.items()}
-    top = max(means, default=0)
-    for n in range(EARLY + 1, top + 1):
+    for n in range(early + 1, max(means, default=0) + 1):
         window = [means[k] for k in range(n - WINDOW + 1, n + 1) if k in means]
         if len(window) == WINDOW and statistics.fmean(window) > FACTOR * baseline:
             return baseline, n
     return baseline, None
+
+
+def reached(turns: list[tuple[int, Turn]], share: float) -> int | None:
+    """The turn number at which the running weighted spend of a session first reaches `share` of its total."""
+    total = sum(t.weight for _, t in turns)
+    if total <= 0:
+        return None
+    running = 0.0
+    for n, t in turns:
+        running += t.weight
+        if running >= share * total:
+            return n
+    return None
+
+
+def threshold_line(label: str, sessions: list[list[tuple[int, Turn]]], early: int) -> str:
+    baseline, first = threshold(sessions, early)
+    base = "n/a" if baseline is None else f"{baseline:.1f}"
+    limit = "n/a" if baseline is None else f"{FACTOR * baseline:.1f}"
+    where = "not reached" if first is None else str(first)
+    return (
+        f"marginal threshold [{label}]: baseline_median={base} limit={limit} first_turn={where} "
+        f"(first turn past {early} where the {WINDOW}-turn mean of the per-turn mean spend "
+        f"passes {FACTOR}x the baseline)"
+    )
+
+
+def cumulative_line(sessions: list[list[tuple[int, Turn]]]) -> str:
+    parts = []
+    for share in CUMULATIVE_SHARES:
+        found = [n for n in (reached(turns, share) for turns in sessions) if n is not None]
+        value = "n/a" if not found else f"{statistics.median(found):.1f}"
+        parts.append(f"turn_at_{round(share * 100)}pct={value}")
+    return f"cumulative spend [median across {len(sessions)} sessions]: " + " ".join(parts)
 
 
 def session_line(index: int, turns: list[tuple[int, Turn]]) -> str:
@@ -233,15 +271,9 @@ def report(sessions: list[Session], week: str, skips: Skips) -> list[str]:
         count = sum(1 for turns in windowed for n, _ in turns if n > mark)
         past = sum(t.weight for turns in windowed for n, t in turns if n > mark)
         lines.append(f"past turn {mark}: {pct(count, total)} of lead turns, {pct(past, spend)} of weighted spend")
-    baseline, first = threshold(windowed)
-    base = "n/a" if baseline is None else f"{baseline:.1f}"
-    limit = "n/a" if baseline is None else f"{FACTOR * baseline:.1f}"
-    where = "not reached" if first is None else str(first)
-    lines.append(
-        f"marginal threshold: baseline_median={base} limit={limit} first_turn={where} "
-        f"(first turn past {EARLY} where the {WINDOW}-turn mean of the per-turn mean spend "
-        f"passes {FACTOR}x the baseline)"
-    )
+    lines.append(threshold_line("baseline turns 1-20", windowed, EARLY_SHORT))
+    lines.append(cumulative_line(windowed))
+    lines.append(threshold_line("baseline turns 1-100, old definition", windowed, EARLY))
     shown = sorted(windowed, key=lambda turns: -turns[-1][0])[:MAX_SESSIONS_SHOWN]
     lines += ["", f"## Sessions (the {len(shown)} longest of {len(windowed)}; context tokens and weighted spend)", ""]
     lines += [session_line(i, turns) for i, turns in enumerate(shown, 1)]

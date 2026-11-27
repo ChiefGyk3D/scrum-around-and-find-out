@@ -111,15 +111,46 @@ def test_first_turn_where_marginal_spend_passes_one_and_a_half_times_the_early_m
     world.lead("s1", rows)
     code, out, _ = world.run()
     assert code == 0
-    line = next(x for x in out.splitlines() if x.startswith("marginal threshold:"))
-    assert "baseline_median=10.0" in line
-    assert "first_turn=123" in line  # a 10 turn mean first passes 15 when 3 of its turns are heavy
+    for label in ("baseline turns 1-20", "baseline turns 1-100, old definition"):
+        line = next(x for x in out.splitlines() if x.startswith(f"marginal threshold [{label}]:"))
+        assert "baseline_median=10.0" in line
+        assert "first_turn=123" in line  # a 10 turn mean first passes 15 when 3 of its turns are heavy
+
+
+def test_the_short_baseline_catches_a_climb_the_long_baseline_misses(world: World) -> None:
+    # spend 10 for 20 turns, then 100 for turns 21-100, then 100: median(1..100) is 100, median(1..20) is 10
+    rows = [turn(f"m{i}", stamp(i), inp=10 if i < 20 else 100) for i in range(150)]
+    world.lead("s1", rows)
+    _, out, _ = world.run()
+    short = next(x for x in out.splitlines() if "[baseline turns 1-20]" in x)
+    old = next(x for x in out.splitlines() if "old definition" in x)
+    assert "first_turn=21" in short  # the first heavy turn lifts the 10-turn mean to 19, past 15
+    assert "first_turn=not reached" in old
 
 
 def test_threshold_not_reached_is_said_so(world: World) -> None:
     world.lead("s1", [turn(f"m{i}", stamp(i), inp=10) for i in range(150)])
     _, out, _ = world.run()
-    assert "first_turn=not reached" in out
+    assert out.count("first_turn=not reached") == 2
+
+
+def test_cumulative_turns_at_50_and_80_percent_are_medians_across_sessions(world: World) -> None:
+    world.lead("a", [turn(f"a{i}", stamp(i), inp=10) for i in range(10)])  # 50% at turn 5, 80% at turn 8
+    world.lead("b", [turn(f"b{i}", stamp(100 + i), inp=10) for i in range(4)])  # 50% at turn 2, 80% at turn 4
+    _, out, _ = world.run()
+    line = next(x for x in out.splitlines() if x.startswith("cumulative spend"))
+    assert "median across 2 sessions" in line
+    assert "turn_at_50pct=3.5" in line
+    assert "turn_at_80pct=6.0" in line
+
+
+def test_cumulative_follows_where_the_spend_is(world: World) -> None:
+    # 9 cheap turns then one turn holding 91 percent: both marks land on turn 10
+    world.lead("a", [turn(f"a{i}", stamp(i), inp=1 if i < 9 else 100) for i in range(10)])
+    _, out, _ = world.run()
+    line = next(x for x in out.splitlines() if x.startswith("cumulative spend"))
+    assert "turn_at_50pct=10.0" in line
+    assert "turn_at_80pct=10.0" in line
 
 
 def test_a_message_split_across_rows_counts_once_and_the_largest_output_wins(world: World) -> None:

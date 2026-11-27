@@ -85,8 +85,11 @@ does (same bounds, same weights, symlinks and special files refused and counted)
 prints the turn count, the context tokens (input + cache read + cache write) at the first and last turn and summed over
 the turns, and the weighted spend by turn bucket (1-100, 101-200, 201-300, 301+); sessions are numbered, never named,
 and the 25 longest are shown. The summary gives the share of lead turns and of weighted spend past turn 200 and 400,
-and the first turn past 100 at which a 10-turn mean of the per-turn mean spend passes 1.5 times the median spend of
-the first 100 turns (`not reached` when it never does). A handoff is a session whose first user message contains
+and three labeled lines side by side. First, the first turn past 20 at which a 10-turn mean of the per-turn mean spend
+passes 1.5 times the median spend of turns 1-20 (`not reached` when it never does). Second, the cumulative view: the
+turn after which 50 and 80 percent of a session's weighted spend has been reached, as a median across sessions. Third,
+the old definition (1.5 times the median of turns 1-100), kept for comparison: it is weak on real data, because spend
+per turn rises with context, so the first-100-turn median is already high and the line trips at turn 101 or never. A handoff is a session whose first user message contains
 "handoff", "hand-off" or "handover" (a yes or no, never printed), paired with the latest earlier session of the same
 project folder. Its cost has two numbers: the successor's first three turns, MEASURED, and the cost of writing the
 note, an ESTIMATE (the largest single reply in the predecessor's last five turns, output tokens x5). Counts only:
