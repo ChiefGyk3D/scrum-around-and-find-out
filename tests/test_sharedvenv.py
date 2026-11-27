@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 import zipfile
 from collections.abc import Callable
@@ -21,6 +22,43 @@ from pathlib import Path
 import pytest
 
 from safo import sharedvenv
+
+_PRIVATE: list[str] = []
+
+
+def py() -> str:
+    """The interpreter the tests hand to the command: a private copy, because the runner's own may be group-writable."""
+    return _PRIVATE[0]
+
+
+def make_private_python(dest: Path) -> Path:
+    base = Path(os.path.realpath(getattr(sys, "_base_executable", sys.executable)))
+    stdlib = Path(sysconfig.get_path("stdlib"))
+    for sub in (dest, dest / "bin", dest / "lib"):
+        sub.mkdir(exist_ok=True)
+        sub.chmod(0o755)
+    exe = dest / "bin" / base.name
+    shutil.copyfile(base, exe)
+    exe.chmod(0o755)
+    (dest / "lib" / stdlib.name).symlink_to(stdlib)
+    libdirs = {stdlib.parent, Path(str(sysconfig.get_config_var("LIBDIR") or stdlib.parent))}
+    for libdir in libdirs:
+        for lib in libdir.glob("libpython*"):
+            if not (dest / "lib" / lib.name).exists():
+                (dest / "lib" / lib.name).symlink_to(lib)
+    probe = subprocess.run(  # noqa: S603 - fixed argv in a test helper, no shell
+        [exe, "-I", "-c", "import ensurepip, venv, sys; print(sys.prefix)"], capture_output=True, text=True
+    )
+    assert probe.returncode == 0 and probe.stdout.strip() == str(dest), probe.stderr
+    return exe
+
+
+@pytest.fixture(scope="session", autouse=True)
+def private_python(tmp_path_factory: pytest.TempPathFactory) -> str:
+    exe = make_private_python(tmp_path_factory.mktemp("privpy"))
+    _PRIVATE[:] = [str(exe)]
+    return str(exe)
+
 
 ENV = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")}
 
@@ -52,6 +90,9 @@ def lock_for(wheel: Path, directory: Path, name: str = "req.txt", extra: str = "
 
 
 def cli(*args: object, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    flags = [str(a) for a in args]
+    if not {"--python", "--gc", "--help"} & set(flags):
+        args = (*args, "--python", py())  # the interpreter under test is always the private copy
     return subprocess.run(  # noqa: S603 - fixed argv in a test helper, no shell
         [sys.executable, "-m", "safo.sharedvenv", *map(str, args)],
         capture_output=True,
@@ -79,9 +120,7 @@ def venv_of(done: subprocess.CompletedProcess[str]) -> Path:
 
 def shim(path: Path, body: str) -> Path:
     """An interpreter stand-in: runs `body` (sh), then the real interpreter. `$VENV_STEP` is 1 for `-m venv`."""
-    path.write_text(
-        f'#!/bin/sh\nVENV_STEP=0\ncase "$*" in *"-m venv"*) VENV_STEP=1;; esac\n{body}\nexec {sys.executable} "$@"\n'
-    )
+    path.write_text(f'#!/bin/sh\nVENV_STEP=0\ncase "$*" in *"-m venv"*) VENV_STEP=1;; esac\n{body}\nexec {py()} "$@"\n')
     path.chmod(0o755)
     return path
 
@@ -316,7 +355,7 @@ def test_lockfile_swapped_after_the_check_is_not_what_pip_installs(tmp_path: Pat
 def test_pip_never_receives_the_callers_lockfile_path(tmp_path: Path, wheels: Path, lock: Path) -> None:
     seen = tmp_path / "argv.log"
     shim = tmp_path / "pipshim.sh"
-    shim.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> {seen}\nexec {sys.executable} "$@"\n')
+    shim.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> {seen}\nexec {py()} "$@"\n')
     shim.chmod(0o755)
     # the shim only sees the venv step; the pip step is covered by the swap test, this one checks the venv step is clean
     done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", shim)
@@ -329,7 +368,7 @@ def test_rehash_of_the_copy_actually_used_must_match_the_key(tmp_path: Path, whe
     root.mkdir(mode=0o700)
     args = ["--no-index", "--find-links", str(wheels)]
     with pytest.raises(sharedvenv.Refused):
-        sharedvenv.build(root, "a" * 64, lock.read_bytes(), sys.executable, args, expected_sha="f" * 64)
+        sharedvenv.build(root, "a" * 64, lock.read_bytes(), py(), args, expected_sha="f" * 64)
     assert [p.name for p in root.iterdir()] == []
 
 
@@ -514,7 +553,7 @@ def test_pip_configuration_files_are_ignored(tmp_path: Path, wheels: Path, lock:
             '  for f in "$HOME/.config/pip/pip.conf" "$HOME/.pip/pip.conf" "$HOME/pip.conf"; do',
             f'    printf "{conf}" > "$f"',
             "  done",
-            f'  "{sys.executable}" "$@" || exit 1',
+            f'  "{py()}" "$@" || exit 1',
             f'  printf "{conf}" > "$last/pip.conf"; exit 0',
             "fi",
         ]
@@ -696,7 +735,7 @@ def test_numeric_parameters_are_validated_at_the_function_boundary(
     root = tmp_path / "root"
     args = ["--no-index", "--find-links", str(wheels)]
     with pytest.raises(sharedvenv.Refused):
-        sharedvenv.ensure(root, lock, sys.executable, args, bad)
+        sharedvenv.ensure(root, lock, py(), args, bad)
     with pytest.raises(sharedvenv.Refused):
         sharedvenv.gc(root, 30, True, bad)
     with pytest.raises(sharedvenv.Refused):
@@ -714,7 +753,7 @@ def test_pip_arguments_outside_the_allowed_grammar_are_refused(tmp_path: Path, l
         ["--trusted-host", "h"],
     ):
         with pytest.raises(sharedvenv.Refused):
-            sharedvenv.ensure(tmp_path / "root", lock, sys.executable, args, 5)
+            sharedvenv.ensure(tmp_path / "root", lock, py(), args, 5)
 
 
 def test_missing_root_components_are_created_one_at_a_time_private(tmp_path: Path) -> None:
@@ -906,7 +945,7 @@ def test_command_line_refuses_odd_values_and_has_no_credentials_flag(tmp_path: P
 
 def test_ensure_refuses_odd_values_for_direct_callers(tmp_path: Path, lock: Path) -> None:
     with pytest.raises(sharedvenv.Refused):
-        sharedvenv.ensure(tmp_path / "root", lock, sys.executable, ["--index-url", "https://u:tok3n@h/x"], 5)
+        sharedvenv.ensure(tmp_path / "root", lock, py(), ["--index-url", "https://u:tok3n@h/x"], 5)
     assert not (tmp_path / "root").exists()
 
 
@@ -946,7 +985,7 @@ def fake_pip_shim(tmp_path: Path, status: int) -> Path:
         [
             'if [ "$VENV_STEP" = 1 ]; then',
             "  for a; do last=$a; done",
-            f'  "{sys.executable}" "$@" || exit 1',
+            f'  "{py()}" "$@" || exit 1',
             '  for d in "$last"/lib/python*/site-packages/pip; do',
             f'    cp {payload} "$d/__main__.py"; printf "{status}" > "$d/__main__.py.status"',
             "  done",
@@ -1134,7 +1173,7 @@ def test_the_venv_top_is_sealed_before_the_publish_rename(
     monkeypatch.setattr(os, "rename", watching)
     handle = sharedvenv.open_root(root)
     sharedvenv.build(
-        root, "b" * 64, lock.read_bytes(), sys.executable, ["--no-index", "--find-links", str(wheels)], handle=handle
+        root, "b" * 64, lock.read_bytes(), py(), ["--no-index", "--find-links", str(wheels)], handle=handle
     )
     handle.close()
     assert len(modes) == 1 and modes[0] & 0o222 == 0
@@ -1152,11 +1191,13 @@ def test_a_kill_right_before_publication_leaves_nothing_published_and_the_next_r
             "from safo import sharedvenv",
             "sharedvenv.os.rename = lambda *a, **k: os._exit(9)",
             "args = ['--no-index', '--find-links', sys.argv[4]]",
-            "sharedvenv.ensure(Path(sys.argv[2]), Path(sys.argv[3]), sys.executable, args, 60)",
+            "sharedvenv.ensure(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[5], args, 60)",
         ]
     )
     src = str(Path(sharedvenv.__file__).resolve().parent.parent)
-    killed = subprocess.run([sys.executable, "-c", code, src, str(root), str(lock), str(wheels)], capture_output=True)  # noqa: S603 - fixed argv in a test helper, no shell
+    killed = subprocess.run(  # noqa: S603 - fixed argv in a test helper, no shell
+        [sys.executable, "-c", code, src, str(root), str(lock), str(wheels), py()], capture_output=True
+    )
     assert killed.returncode == 9
     assert not [p for p in root.iterdir() if re.fullmatch("[0-9a-f]{64}", p.name)]
     done = cli(*build_args(lock, root, wheels))
@@ -1245,14 +1286,14 @@ def test_arguments_with_whitespace_or_control_characters_are_refused_with_a_fixe
 def test_the_function_boundary_refuses_the_same_characters(tmp_path: Path, lock: Path) -> None:
     bad = f"x\n{SECRET}"
     with pytest.raises(sharedvenv.Refused) as caught:
-        sharedvenv.ensure(Path(bad), lock, sys.executable, [], 5)
+        sharedvenv.ensure(Path(bad), lock, py(), [], 5)
     assert SECRET not in str(caught.value)
     with pytest.raises(sharedvenv.Refused):
         sharedvenv.gc(Path(bad), 1, False, 5)
     with pytest.raises(sharedvenv.Refused):
         sharedvenv.open_root(Path(bad))
     with pytest.raises(sharedvenv.Refused):
-        sharedvenv.ensure(tmp_path / "root", Path(bad), sys.executable, [], 5)
+        sharedvenv.ensure(tmp_path / "root", Path(bad), py(), [], 5)
     with pytest.raises(sharedvenv.Refused):
         sharedvenv.ensure(tmp_path / "root", lock, bad, [], 5)
 
@@ -1504,7 +1545,7 @@ def test_public_boundaries_turn_filesystem_errors_into_fixed_errors_with_no_chai
             calls: dict[str, Callable[[], object]] = {
                 "open_root": partial(sharedvenv.open_root, root),
                 "gc": partial(sharedvenv.gc, root, 1, False, 5),
-                "ensure": partial(sharedvenv.ensure, root, lock, sys.executable, args, 5),
+                "ensure": partial(sharedvenv.ensure, root, lock, py(), args, 5),
             }
             if name == "lock file cannot be opened":
                 del calls["open_root"]  # opening the root does not touch the lock file
@@ -1523,7 +1564,7 @@ def test_a_root_removed_while_the_lock_is_taken_gives_a_fixed_error(
     root = tmp_path / f"{PATH_SECRET}-root"
     monkeypatch.setattr(sharedvenv, "_after_flock", lambda path: shutil.rmtree(root))
     with pytest.raises((sharedvenv.Failed, sharedvenv.Refused)) as caught:
-        sharedvenv.ensure(root, lock, sys.executable, ["--no-index", "--find-links", str(wheels)], 5)
+        sharedvenv.ensure(root, lock, py(), ["--no-index", "--find-links", str(wheels)], 5)
     assert_clean(caught.value)
 
 
@@ -1539,7 +1580,7 @@ def test_an_unexpected_failure_inside_valid_or_ensure_becomes_a_fixed_error(
 
     monkeypatch.setattr(sharedvenv, "valid", raising)
     with pytest.raises(sharedvenv.Failed) as caught:
-        sharedvenv.ensure(root, lock, sys.executable, args, 5)
+        sharedvenv.ensure(root, lock, py(), args, 5)
     assert_clean(caught.value)
 
 

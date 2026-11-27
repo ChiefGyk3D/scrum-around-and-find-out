@@ -36,7 +36,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NoReturn, ParamSpec, TypeVar
 
-from safo import output
+from safo import bounded, output
 
 ROOT_ENV = "SAFO_SHARED_VENV_ROOT"
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
@@ -462,7 +462,7 @@ def identity(python: str) -> tuple[str, Signature, list[object]]:
         )
         if code == 0:
             lines = out.decode(errors="replace").strip().splitlines()
-            report = json.loads(lines[-1]) if lines else None
+            report = bounded.loads(lines[-1], 65536) if lines else None
     except (OSError, ValueError):
         report = None
     if not isinstance(report, list):
