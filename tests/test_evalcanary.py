@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -189,13 +190,15 @@ def hostile(tmp: Path, kind: str) -> None:
         path.write_text('{"version":1,"scores":{"' + MODELS[0] + '":NaN}}')
     elif kind == "too-many":
         path.write_text(json.dumps({"version": 1, "scores": {f"m{i}": 0.5 for i in range(100)}}))
+    elif kind == "bad-utf8":
+        path.write_bytes(bytes([0xFF, 0xFE, 0x80]))
     elif kind == "bad-name":
         path.write_text(json.dumps({"version": 1, "scores": {"../x": 0.5, **{m: 0.9 for m in MODELS}}}))
 
 
 HOSTILE = [
     "symlink", "oversized", "malformed", "duplicate-key", "fifo", "not-object", "wrong-version",
-    "scores-not-dict", "string-score", "bool-score", "out-of-range", "nan", "too-many", "bad-name",
+    "scores-not-dict", "string-score", "bool-score", "out-of-range", "nan", "too-many", "bad-name", "bad-utf8",
 ]  # fmt: skip
 
 
@@ -559,3 +562,235 @@ def test_default_probe_runner_calls_llm_local_with_loaded_ctx_and_forced_size(mo
     argv = seen[0]
     assert argv[0] == "llm-local" and "--force-size" in argv and argv[-1] == "PROMPT"
     assert "--num-ctx" not in argv and "--no-truncation-guard" not in argv  # llm-local sends the loaded context itself
+
+
+# ---- #575 follow-ups: caps, precedence, durability, malformed scores, temp names, races ----
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        ("--busy-retries", str(ec.MAX_BUSY_RETRIES + 1)),
+        ("--wait", str(ec.MAX_WAIT + 1)),
+        ("--repeats", str(ec.MAX_REPEATS + 1)),
+    ],
+)
+@pytest.mark.parametrize("probe_only", [False, True])
+def test_a_flag_above_its_cap_is_exit_2_before_any_call(
+    tmp_path: Path, flag: tuple[str, str], probe_only: bool
+) -> None:
+    write_base(tmp_path, {m: 0.9 for m in MODELS})
+    client = FakeClient({m: 0.9 for m in MODELS})
+    probe = FakeProbe((0, ""))
+    extra = ["--probe-only"] if probe_only else []
+    argv = [*args(tmp_path), *extra, *flag]
+    assert ec.entry(argv, runner=client, sleep=lambda _s: None, probe_runner=probe) == 2
+    assert client.calls == [] and probe.calls == []
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [("--busy-retries", str(ec.MAX_BUSY_RETRIES)), ("--wait", str(ec.MAX_WAIT)), ("--repeats", str(ec.MAX_REPEATS))],
+)
+def test_a_flag_at_its_cap_is_accepted(tmp_path: Path, flag: tuple[str, str]) -> None:
+    write_base(tmp_path, {m: 0.9 for m in MODELS})
+    argv = ["--baseline", str(tmp_path / "base.json"), "--tasks", "commit-message", *flag]
+    client = FakeClient({m: 0.9 for m in MODELS})
+    assert ec.entry(argv, runner=client, sleep=lambda _s: None) == 0
+
+
+def test_one_sleep_is_capped_and_the_total_is_bounded(tmp_path: Path) -> None:
+    write_base(tmp_path, {m: 1.0 for m in MODELS})
+    naps: list[float] = []
+    argv = [
+        "--baseline",
+        str(tmp_path / "base.json"),
+        "--tasks",
+        "commit-message",
+        "--busy-retries",
+        str(ec.MAX_BUSY_RETRIES),
+    ]
+    code = ec.entry(argv, runner=FakeClient({m: "busy" for m in MODELS}), sleep=naps.append)
+    assert code == 75
+    assert naps and max(naps) <= ec.MAX_SLEEP
+    assert sum(naps) <= ec.MAX_TOTAL_SLEEP
+
+
+def test_the_probe_shares_the_total_sleep_deadline(tmp_path: Path) -> None:
+    write_base(tmp_path, {m: 1.0 for m in MODELS})
+    naps: list[float] = []
+    argv = [
+        "--baseline",
+        str(tmp_path / "base.json"),
+        "--tasks",
+        "commit-message",
+        "--truncation-probe",
+        "--busy-retries",
+        str(ec.MAX_BUSY_RETRIES),
+    ]
+    ec.entry(argv, runner=FakeClient({m: "busy" for m in MODELS}), sleep=naps.append, probe_runner=FakeProbe((75, "")))
+    assert sum(naps) <= ec.MAX_TOTAL_SLEEP
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [{"status": "failed", "error": "exit 2: offline"}, {"status": "busy"}],
+        [{"status": "busy"}, {"status": "failed", "error": "exit 2: offline"}],
+        [{"status": "ok", "score": None}, {"status": "busy"}],
+        [{"status": "busy"}, {"status": "ok", "score": None}],
+        [None, {"status": "busy"}],
+        [{"status": "busy"}, "x"],
+    ],
+)
+def test_busy_wins_over_unreachable_or_malformed_in_either_order(records: list[Any]) -> None:
+    assert ec._classify(records) == ("busy", None)
+
+
+def test_unreachable_without_busy_stays_unreachable() -> None:
+    assert ec._classify([{"status": "ok", "score": {"passed": True}}, {"status": "failed", "error": "exit 2: x"}]) == (
+        "unreachable",
+        None,
+    )
+
+
+@pytest.mark.parametrize("first", [True, False])
+def test_busy_plus_unreachable_is_retried_and_ends_exit_75(tmp_path: Path, first: bool) -> None:
+    write_base(tmp_path, {m: 0.9 for m in MODELS})
+    calls = {"n": 0}
+
+    def runner(fixture: Any, model: str) -> dict[str, Any]:
+        calls["n"] += 1
+        busy = {"status": "busy"}
+        bad = {"status": "failed", "error": "exit 2: offline"}
+        return (busy if (calls["n"] % 2) == first else bad) | {"fixture": fixture.id}
+
+    naps: list[float] = []
+    assert ec.entry(args(tmp_path), runner=runner, sleep=naps.append) == 75
+    assert len(naps) >= 2, "the mixed attempt was retried, not given up on at once"
+
+
+@pytest.mark.parametrize("passed", [None, "true", 1, 0, [], {}])
+def test_an_ok_record_with_a_non_bool_passed_is_not_a_failed_run(passed: Any) -> None:
+    assert ec._classify([{"status": "ok", "score": {"passed": passed}}]) == ("unreachable", None)
+    assert ec._classify([{"status": "ok", "score": {}}]) == ("unreachable", None)
+
+
+def test_a_malformed_ok_score_never_writes_a_zero_baseline(tmp_path: Path) -> None:
+    def runner(fixture: Any, model: str) -> dict[str, Any]:
+        return {"status": "ok", "score": {"passed": "yes"}}
+
+    assert ec.entry(args(tmp_path, "--update-baseline"), runner=runner, sleep=lambda _s: None) == 3
+    assert not (tmp_path / "base.json").exists()
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.1, 1.5, True])
+def test_a_score_that_is_not_a_proportion_is_refused_before_it_is_written(tmp_path: Path, bad: Any) -> None:
+    with pytest.raises(ec.CanaryError):
+        ec.write_baseline(tmp_path / "base.json", {m: bad for m in MODELS}, population())
+    assert not (tmp_path / "base.json").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_new_directory_components_are_fsynced_in_their_parents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    synced: list[str] = []
+    real = os.fsync
+
+    def spy(fd: int) -> None:
+        synced.append(os.readlink(f"/proc/self/fd/{fd}"))
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    ec.write_baseline(tmp_path / "a" / "b" / "base.json", {m: 0.9 for m in MODELS}, population())
+    assert str(tmp_path) in synced, "the parent of the first new folder"
+    assert str(tmp_path / "a") in synced, "the parent of the second new folder"
+    assert str(tmp_path / "a" / "b") in synced
+
+
+def test_an_existing_path_costs_no_extra_fsync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    n: list[int] = []
+    real = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (n.append(fd), real(fd))[1])
+    ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS}, population())
+    assert len(n) == 2
+
+
+def test_a_stale_temp_file_from_a_crashed_run_does_not_block_an_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ec.secrets, "token_hex", lambda _n=8: "deadbeefdeadbeef")
+    stale = tmp_path / f".base.json.{os.getpid()}.deadbeefdeadbeef.tmp"
+    stale.write_text("partial")
+    seq = iter(["deadbeefdeadbeef", "0123456789abcdef"])
+    monkeypatch.setattr(ec.secrets, "token_hex", lambda _n=8: next(seq))
+    ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS}, population())
+    assert ec.read_baseline(tmp_path / "base.json") == {m: 0.9 for m in MODELS}
+    assert stale.read_text() == "partial", "a file this run did not create is never deleted"
+
+
+def test_the_legacy_pid_named_temp_file_does_not_block_either(tmp_path: Path) -> None:
+    (tmp_path / f".base.json.{os.getpid()}.tmp").write_text("partial")
+    ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS}, population())
+    assert ec.read_baseline(tmp_path / "base.json")
+
+
+def test_a_hard_linked_baseline_is_replaced_not_written_through(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text("keep me")
+    (tmp_path / "base.json").hardlink_to(outside)
+    ec.write_baseline(tmp_path / "base.json", {m: 0.9 for m in MODELS}, population())
+    assert outside.read_text() == "keep me"
+    assert ec.read_baseline(tmp_path / "base.json") == {m: 0.9 for m in MODELS}
+    assert (tmp_path / "base.json").stat().st_ino != outside.stat().st_ino
+
+
+def test_concurrent_writers_leave_one_complete_baseline_and_no_temp_files(tmp_path: Path) -> None:
+    path = tmp_path / "base.json"
+    errors: list[BaseException] = []
+    start = threading.Barrier(16)
+
+    def writer(i: int) -> None:
+        try:
+            start.wait()
+            for _ in range(10):
+                ec.write_baseline(path, {m: (i % 10) / 10 for m in MODELS}, population())
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    got = ec.read_baseline(path)
+    assert len(set(got.values())) == 1 and set(got) == set(MODELS)
+    assert [p.name for p in tmp_path.iterdir()] == ["base.json"]
+
+
+def test_swapping_the_parent_after_the_walk_does_not_redirect_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "d"
+    parent.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    real = os.rename
+
+    def swap_then_rename(src: Any, dst: Any, **kw: Any) -> None:
+        real(parent, tmp_path / "d.moved")
+        parent.symlink_to(elsewhere, target_is_directory=True)  # the old name now points somewhere else
+        real(src, dst, **kw)
+
+    monkeypatch.setattr(os, "rename", swap_then_rename)
+    ec.write_baseline(parent / "base.json", {m: 0.9 for m in MODELS}, population())
+    assert list(elsewhere.iterdir()) == [], "nothing landed through the swapped name"
+    assert (tmp_path / "d.moved" / "base.json").is_file()
+
+
+def test_the_exact_threshold_boundary_at_the_command_level(tmp_path: Path) -> None:
+    score = round(0.5 * N_FIX) / N_FIX
+    write_base(tmp_path, {m: round(score + 0.1, 4) for m in MODELS})
+    assert run(tmp_path, {m: 0.5 for m in MODELS})[0] == 0, "a drop of exactly 0.10 is not an alert"
+    write_base(tmp_path, {m: round(score + 0.1001, 4) for m in MODELS})
+    assert run(tmp_path, {m: 0.5 for m in MODELS})[0] == 1
