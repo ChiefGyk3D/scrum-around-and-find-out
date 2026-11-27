@@ -71,6 +71,8 @@ STUB = textwrap.dedent(
             for i in state.get("last_view", {{}}).get("statusCheckRollup", [])
             if "name" in i
         ]
+        if not state.get("derive_evidence", True) and "check_runs" not in state:
+            runs = []  # nothing is made up for the code under test: no evidence, no green
         reply({{"out": "\\n".join(json.dumps(x) for x in state.get("check_runs", runs))}})
     if rest[0] == "api" and "/actions/runs/" in rest[1]:
         run_id = rest[1].rsplit("/", 1)[1]
@@ -91,13 +93,25 @@ STUB = textwrap.dedent(
         reply({{"out": json.dumps(run)}})
     if rest[0] == "api" and "/compare/" in rest[1]:
         reply({{"out": "\\n".join(state.get("changed", []))}})
-    if rest[0] == "api" and "/contents/.github/workflows/" in rest[1] and ".yml" in rest[1]:
+    if rest[0] == "api" and "/contents/.github/workflows/" in rest[1] and ".yml" in rest[1] and "-H" not in rest:
         ref = rest[1].split("?ref=")[1] if "?ref=" in rest[1] else ""
         reply({{"out": state.get("blob_by_ref", {{}}).get(ref, "blobsha")}})
-    if rest[0] == "api" and "/contents/.github/workflows" in rest[1]:
+    if rest[0] == "api" and "/contents/.github/workflows" in rest[1] and "-H" not in rest:
         reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
-    if rest[0] == "api" and "required_conversation_resolution" in rest[1]:
-        reply({{"out": json.dumps(state.get("conv", {{"enabled": True}}))}})
+    if rest[0] == "api" and rest[1].endswith("/protection"):
+        reply(
+            state.get(
+                "full_protection",
+                {{"out": json.dumps({{"required_conversation_resolution": {{"enabled": True}}}})}},
+            )
+        )
+    if rest[0] == "api" and "/contents/" in rest[1] and "-H" in rest:  # the raw text of a workflow file
+        wf_path = rest[1].split("/contents/")[1].split("?")[0]  # not `path`: reply() writes the state file there
+        default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: x\\n")
+        reply({{"out": state.get("texts", {{}}).get(wf_path, default)}})
+    if rest[0] == "api" and "/contents/" in rest[1] and "/contents/.github/workflows" not in rest[1]:
+        ref = rest[1].split("?ref=")[1] if "?ref=" in rest[1] else ""
+        reply({{"out": state.get("local_by_ref", {{}}).get(ref, "same")}})
     if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
         reply({{"out": json.dumps({{"object": {{"sha": state.get("base_tip", "e" * 40)}}}})}})
     if rest[0] == "api" and "update-branch" in rest[1]:
@@ -210,6 +224,7 @@ class Rig:
         }
         self.slept: list[float] = []
         self.now = 0.0
+        self.raise_on = ""  # a gh subcommand pair (such as "pr merge") whose process times out
         self.tick = 0.0  # fake seconds a gh call takes
         self.timeouts: list[tuple[float, float | None]] = []  # (clock at the call, its timeout)
         monkeypatch.setenv("FAKE_STATE", str(self.state_path))
@@ -224,6 +239,8 @@ class Rig:
 
         def run(argv: list[str], **kw: Any) -> Any:
             self.timeouts.append((self.now, kw.get("timeout")))
+            if self.raise_on and " ".join(argv[1:3]) == self.raise_on:
+                raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 0)
             done = subprocess.run(argv, **kw)  # noqa: S603 (argv is the fake gh the rig wrote)
             self.now += self.tick
             return done

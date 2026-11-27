@@ -248,19 +248,6 @@ def test_an_update_commit_must_be_a_verified_web_flow_merge_of_pin_and_base_tip(
         assert code == ship.EXIT_HEAD_MOVED and merges(calls) == [], (key, out)
 
 
-def test_the_thread_check_warns_when_protection_does_not_require_resolution(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [sv("CLEAN")]
-    rig.state["conv"] = {"enabled": False}
-    _code, out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
-    assert "NOTICE" in out and "best-effort" in out
-
-
-def test_no_notice_when_protection_requires_resolution(rig: Rig) -> None:  # noqa: F811
-    rig.state["views"] = [sv("CLEAN")]
-    _code, out, _calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
-    assert "NOTICE" not in out
-
-
 def test_threads_are_read_right_before_the_merge_call(rig: Rig) -> None:  # noqa: F811
     rig.state["views"] = [sv("CLEAN")]
     _code, _out, calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
@@ -653,3 +640,270 @@ def test_a_base_retarget_right_before_the_merge_stops_it(rig: Rig, queue: bool) 
     rig.state["views"] = [ok, ok, *([ok] if queue else []), ok, moved]
     code, out, calls = rig.go(*(["--queue"] if queue else []), "5", "--repo", REPO, "--interval", "1")
     assert code == ship.EXIT_MERGE_REFUSED and "base" in out and merges(calls) == []
+
+
+# Daybreak round 3 (PR #594)
+
+OFF = {"out": json.dumps({"required_conversation_resolution": {"enabled": False}})}
+PINNED = "a" * 40
+HOSTILE = "bad\n::error::forged\x1b[31m"
+
+
+def args(queue: bool, *more: str) -> list[str]:
+    return [*(["--queue"] if queue else []), "5", "--repo", REPO, "--interval", "1", *more]
+
+
+@pytest.mark.parametrize("queue", [False, True])
+@pytest.mark.parametrize(
+    "protection",
+    [
+        OFF,
+        {"out": json.dumps({})},
+        {"out": json.dumps({"required_conversation_resolution": {"enabled": "true"}})},
+        {"out": "not json"},
+        {"rc": 1, "err": "HTTP 403"},
+    ],
+)
+def test_without_required_conversation_resolution_nothing_is_merged(
+    rig: Rig,  # noqa: F811
+    queue: bool,
+    protection: dict[str, Any],
+) -> None:
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["full_protection"] = protection
+    code, out, calls = rig.go(*args(queue))
+    assert code == ship.EXIT_PROTECTED and out.startswith("PROTECTED")
+    assert "conversation resolution is not required by branch protection" in out and merges(calls) == []
+
+
+@pytest.mark.parametrize("queue", [False, True])
+def test_the_opt_in_flag_merges_with_a_notice_naming_the_race(rig: Rig, queue: bool) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * (5 if queue else 4), sv("CLEAN", state="MERGED")]
+    rig.state["full_protection"] = OFF
+    code, out, calls = rig.go(*args(queue, "--best-effort-threads"))
+    assert code == 0 and "NOTICE" in out and "best-effort" in out and len(merges(calls)) == 1
+
+
+def test_required_resolution_merges_without_a_notice(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    code, out, _calls = rig.go(*args(False))
+    assert code == 0 and "NOTICE" not in out
+
+
+def test_the_refusal_text_is_escaped_with_a_hostile_base_name(rig: Rig) -> None:  # noqa: F811
+    hostile = dict(sv("CLEAN"), baseRefName=HOSTILE)
+    rig.state["views"] = [hostile]
+    rig.state["protection_by_base"] = {}
+    rig.state["full_protection"] = OFF
+    code, out, _calls = rig.go(*args(True))
+    assert code == ship.EXIT_PROTECTED and "\x1b" not in out and "::error" not in out and len(out.splitlines()) == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "jobs:\n  a:\n    uses: actions/checkout@v4\n",
+        "jobs:\n  a:\n    steps:\n      - uses: owner/repo/.github/workflows/x.yml@main\n",
+        "jobs:\n  a:\n    steps:\n      - uses: 'owner/repo@v1' # pinned later\n",
+        "jobs:\n  a:\n    steps:\n      - uses: docker://alpine:3\n",
+    ],
+)
+def test_a_remote_reference_in_the_gate_must_be_pinned_by_sha(rig: Rig, text: str) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = text
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "unpinned" in out and merges(calls) == []
+
+
+def test_pinned_remote_references_are_accepted(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    rig.state["gate_text"] = (
+        f"jobs:\n  a:\n    uses: o/x/.github/workflows/w.yml@{PINNED} # v1.2\n"
+        f"    steps:\n      - uses: actions/checkout@{PINNED}\n      - uses: docker://a/b@sha256:{'c' * 64}\n"
+    )
+    code, out, _calls = rig.go(*args(False))
+    assert code == 0, out
+
+
+def test_a_local_action_the_gate_uses_must_be_the_same_on_base_and_head(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./tools/act\n"
+    rig.state["local_by_ref"] = {"main": "one", HEAD: "two"}
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "./tools/act" in out and merges(calls) == []
+
+
+def test_a_nested_local_workflow_is_followed_and_its_remote_uses_are_checked(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    uses: ./ci/w.yml\n"
+    rig.state["texts"] = {"ci/w.yml": "jobs:\n  b:\n    steps:\n      - uses: a/b@v1\n"}
+    code, out, _calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "unpinned" in out
+
+
+def test_plain_mode_caps_every_call_by_the_per_pr_deadline(rig: Rig) -> None:  # noqa: F811
+    rig.tick = 2.0
+    rig.state["views"] = [sv("CLEAN", rollup=[])]
+    code, _out, _calls = rig.go("5", "--repo", REPO, "--interval", "1", "--timeout", "5")
+    assert code == ship.EXIT_TIMEOUT and rig.timeouts
+    assert all(now < 5 and now + (t or 0) <= 5 + 1e-9 for now, t in rig.timeouts), rig.timeouts
+
+
+def only_one_safe_line(out: str) -> bool:
+    return len(out.strip().splitlines()) == 1 and "\x1b" not in out and "::error" not in out
+
+
+def test_a_hostile_check_name_is_printed_as_one_safe_line(rig: Rig) -> None:  # noqa: F811
+    bad = [check(HOSTILE, conclusion="FAILURE", run=9, job=99), check("CI green", conclusion="FAILURE")]
+    rig.state["views"] = [sv("CLEAN", rollup=bad)]
+    code, out, _calls = rig.go(*args(True))
+    assert code == ship.EXIT_CI_FAILED and "forged" in out and only_one_safe_line(out)
+
+
+def test_a_hostile_branch_name_is_printed_as_one_safe_line(rig: Rig) -> None:  # noqa: F811
+    ok = sv("CLEAN")
+    rig.state["views"] = [ok, ok, ok, dict(ok, baseRefName=HOSTILE)]
+    code, out, _calls = rig.go(*args(True))
+    assert code == ship.EXIT_MERGE_REFUSED and only_one_safe_line(out)
+
+
+def test_a_hostile_gh_error_is_printed_as_one_safe_line(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("BEHIND")]
+    rig.state["update"] = {"rc": 1, "err": HOSTILE}
+    code, out, _calls = rig.go(*args(True))
+    assert code == ship.EXIT_ERROR and only_one_safe_line(out)
+
+
+def test_a_merge_call_that_times_out_is_a_timeout_naming_the_call(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.raise_on = "pr merge"
+    code, out, _calls = rig.go(*args(True))
+    assert code == ship.EXIT_TIMEOUT and out.startswith("TIMEOUT") and "pr merge" in out and "may" in out
+
+
+def test_a_timed_out_read_is_a_timeout_not_an_error(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.raise_on = "pr view"
+    code, out, _calls = rig.go(*args(False))
+    assert code == ship.EXIT_TIMEOUT and out.startswith("TIMEOUT") and "pr view" in out
+
+
+def test_with_no_derived_evidence_nothing_merges_and_explicit_evidence_does(rig: Rig) -> None:  # noqa: F811
+    rig.state["derive_evidence"] = False
+    rig.state["views"] = [sv("CLEAN")]
+    code, _out, calls = rig.go(*args(False, "--max-polls", "2"))
+    assert code == ship.EXIT_TIMEOUT and merges(calls) == []
+    rig.state["check_runs"] = [run_of("CI green", 1)]
+    rig.state["run_api"] = {
+        "1": {
+            "path": ".github/workflows/ci.yml",
+            "head_sha": HEAD,
+            "event": "pull_request",
+            "status": "completed",
+            "conclusion": "success",
+            "repository": {"full_name": "o/r"},
+            "pull_requests": [{"number": 5, "base": {"ref": "main"}}],
+        }
+    }
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    code, out, _calls = rig.go(*args(False))
+    assert code == 0, out
+
+
+# the structured scan of the gate workflow
+
+
+def step(ref: str) -> str:
+    return f"      - uses: {ref}\n"
+
+
+def gate_with(rig: Rig, text: str) -> tuple[int, str, list[list[str]]]:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = text
+    return rig.go(*args(False))
+
+
+def test_51_references_in_one_file_need_a_human(rig: Rig) -> None:  # noqa: F811
+    text = "jobs:\n  a:\n    steps:\n" + "".join(step(f"o/r@{PINNED}") for _ in range(51))
+    code, out, calls = gate_with(rig, text)
+    assert code == ship.EXIT_NEEDS_HUMAN and "too many references or nesting too deep to verify" in out
+    assert merges(calls) == []
+
+
+def test_50_references_are_still_read(rig: Rig) -> None:  # noqa: F811
+    text = "jobs:\n  a:\n    steps:\n" + "".join(step(f"o/r@{PINNED}") for _ in range(50))
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    rig.state["gate_text"] = text
+    code, out, _calls = rig.go(*args(False))
+    assert code == 0, out
+
+
+def test_local_workflows_nested_too_deep_need_a_human(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    uses: ./w1.yml\n"
+    rig.state["texts"] = {
+        "w1.yml": "jobs:\n  a:\n    uses: ./w2.yml\n",
+        "w2.yml": "jobs:\n  a:\n    uses: ./w3.yml\n",
+        "w3.yml": "jobs:\n  a:\n    uses: ./w4.yml\n",
+        "w4.yml": "jobs:\n  a:\n    runs-on: x\n",
+    }
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "too many references or nesting too deep to verify" in out
+    assert merges(calls) == []
+
+
+def test_three_levels_of_local_workflows_are_followed(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    uses: ./w1.yml\n"
+    rig.state["texts"] = {
+        "w1.yml": "jobs:\n  a:\n    uses: ./w2.yml\n",
+        "w2.yml": "jobs:\n  a:\n    uses: ./w3.yml\n",
+        "w3.yml": "jobs:\n  a:\n    runs-on: x\n",
+    }
+    code, out, _calls = rig.go(*args(False))
+    assert code == 0, out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "jobs:\n  a:\n    steps:\n      - run: |\n          echo uses: evil/x@v1\n",
+        "jobs:\n  a:\n    strategy:\n      uses: evil/x@v1\n    steps: []\n",
+        "jobs:\n  a:\n    steps:\n      - {uses: 'evil/x@v1'}\n      - uses: o/r@"
+        + PINNED
+        + "\n    uses: ./x\n    uses: o/y@v2\n",
+        "jobs:\n  a:\n    steps:\n      - uses: o/r@" + PINNED + "\n      - name: uses the cache\n",
+        "uses: o/r@v1\njobs: {}\n",
+    ],
+)
+def test_a_uses_the_parse_did_not_account_for_needs_a_human(rig: Rig, text: str) -> None:  # noqa: F811
+    code, out, calls = gate_with(rig, text)
+    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == [], out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "jobs: [unclosed",
+        "- just\n- a list\n",
+        "jobs: 5\n",
+        "jobs:\n  a: 5\n",
+        "jobs:\n  a:\n    steps: nope\n",
+        "jobs:\n  a:\n    steps:\n      - 5\n",
+        "jobs:\n  a:\n    uses: 5\n",
+        "x: &anchor\n  y: 1\njobs:\n  a:\n    <<: *anchor\n",
+        "jobs:\n  a:\n    runs-on: " + "x" * 300000 + "\n",
+    ],
+)
+def test_an_unparsable_or_oddly_shaped_gate_file_needs_a_human(rig: Rig, text: str) -> None:  # noqa: F811
+    code, out, calls = gate_with(rig, text)
+    assert code == ship.EXIT_NEEDS_HUMAN and merges(calls) == [], out
+
+
+def test_a_comment_with_the_word_uses_does_not_trip_the_scan(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [*[sv("CLEAN")] * 4, sv("CLEAN", state="MERGED")]
+    rig.state["gate_text"] = (
+        "# this file uses the shared jobs\njobs:\n  a:\n    steps:\n      - uses: o/r@" + PINNED + " # uses a pin\n"
+    )
+    code, out, _calls = rig.go(*args(False))
+    assert code == 0, out

@@ -46,6 +46,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
+import yaml
+
 from safo import bounded, output
 from safo.credentials import find_executable, find_gh
 
@@ -61,6 +63,15 @@ EXIT_PROTECTED = 9  # queue mode: branch protection refused the merge
 EXIT_NEEDS_HUMAN = 10  # the pull request changes a workflow file: never merged automatically
 GITHUB_DIR = ".github/"  # any change under it needs a human: local actions and reusable workflows live here
 GATE_RUN_EVENTS = ("pull_request", "push")  # events a trusted gate run may come from
+USES_TOKEN = re.compile(r"(?<![\w-])uses(?![\w-])")  # the simple second scan: every word `uses`, comments left out
+COMMENT = re.compile(r"(?:^|[ \t])#.*$", re.MULTILINE)
+MAX_WORKFLOW_BYTES = 262144  # a workflow file larger than this is not read
+MAX_FILES = 20  # workflow files read for one gate
+TOO_MANY = "too many references or nesting too deep to verify"
+PINNED_REF = re.compile(r"[^@\s]+@[0-9a-f]{40}")
+DOCKER_DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
+MAX_REFS = 50  # `uses:` lines read per workflow file
+MAX_DEPTH = 3  # local workflows followed
 COMPARE_CAP = 300  # the compare API lists at most 300 files: that many or more cannot prove "no workflow changed"
 
 GATE = "CI green"
@@ -178,7 +189,10 @@ class Gh:
                 env=dict(self.env),
                 cwd=self.cwd,
             )
-        except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
+        except subprocess.TimeoutExpired:
+            name = " ".join([os.path.basename(argv[0]), *argv[1:3]])
+            raise ShipError(EXIT_TIMEOUT, f"{clean(name, 200)[0]} timed out after {wait:.0f}s") from None
+        except (OSError, UnicodeDecodeError) as error:
             return 127, "", f"{type(error).__name__}"
         return int(done.returncode), str(done.stdout or ""), str(done.stderr or "")
 
@@ -288,6 +302,53 @@ def protection_apps(data: Any) -> dict[str, int]:
     return found
 
 
+def workflow_refs(text: str) -> tuple[list[str], str]:
+    """(the `uses:` references of jobs.*.uses and jobs.*.steps[*].uses, "") or ([], why the file cannot be trusted).
+
+    Fail closed, never open: a file that is too large, does not parse, uses an anchor or alias, has a shape other than
+    mappings and lists where `jobs`, a job or `steps` should be, or has more than MAX_REFS references is refused; and
+    every word `uses` outside a comment, found by a second plain scan, must be one of the parsed references (so one in
+    a block scalar, a flow mapping, an odd place, or a duplicate key that the parser overwrote is refused). A comment
+    that merely says "uses" therefore also stops it: a human reads that file."""
+    bad = "cannot be verified (too large, unparsable or an unexpected shape)"
+    if len(text.encode("utf-8", "replace")) > MAX_WORKFLOW_BYTES:
+        return [], bad
+    try:
+        if any(isinstance(e, yaml.AliasEvent) or getattr(e, "anchor", None) for e in yaml.parse(text)):
+            return [], bad
+        data = yaml.safe_load(text)
+    except (yaml.YAMLError, RecursionError, ValueError):
+        return [], bad
+    if not isinstance(data, dict):
+        return [], bad
+    jobs = data.get("jobs")
+    if jobs is None:
+        jobs = {}
+    if not isinstance(jobs, dict):
+        return [], bad
+    refs: list[str] = []
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            return [], bad
+        found: list[Any] = [job["uses"]] if "uses" in job else []
+        steps = job.get("steps")
+        if steps is not None and not isinstance(steps, list):
+            return [], bad
+        for step in steps or []:
+            if not isinstance(step, dict):
+                return [], bad
+            if "uses" in step:
+                found.append(step["uses"])
+        if not all(isinstance(ref, str) and ref.strip() for ref in found):
+            return [], bad
+        refs += [ref.strip() for ref in found]
+    if len(refs) > MAX_REFS:
+        return [], TOO_MANY
+    if len(USES_TOKEN.findall(COMMENT.sub("", text))) != len(refs):
+        return [], "has a `uses` the parse did not account for; " + bad
+    return refs, ""
+
+
 def name_ok(context: str, name: str) -> bool:
     """A check run `name` satisfies a required `context`: exactly, or a bare context as the tail of `workflow / job`."""
     return context == name or (" / " not in context and name.endswith(f" / {context}"))
@@ -312,8 +373,11 @@ class Watcher:
         total_deadline: float | None = None,
         gate_workflow: str = "",
         protect_paths: Sequence[str] = (),
+        best_effort_threads: bool = False,
     ):
         self.protect_paths = tuple(protect_paths)
+        self.best_effort_threads = best_effort_threads
+        self.conversation_ok: set[tuple[str, str]] = set()
         self.gate_app, self.total_deadline = gate_app, total_deadline
         self.gate_workflow = gate_workflow
         self.gate_paths: dict[tuple[str, str], str] = {}
@@ -496,6 +560,64 @@ class Watcher:
                 "NEEDS-HUMAN",
                 f"{COMPARE_CAP} or more changed files: cannot prove no workflow changed",
             )
+        return self.gate_refs(repo, gate, base, pin)
+
+    def local_state(self, repo: str, path: str, ref: str) -> str | None:
+        """The content sha of a file, or of a directory listing, at `ref` (None when it does not exist there)."""
+        code, out, _err = self.gh.gh_call(
+            "api",
+            f"repos/{repo}/contents/{path}?ref={ref}",
+            "--jq",
+            'if type=="array" then [.[]|{p:.path,s:.sha}]|tostring else .sha end',
+        )
+        return out.strip() if code == 0 and out.strip() else None
+
+    def gate_refs(self, repo: str, gate: str, base: str, pin: str) -> Result | None:
+        """NEEDS-HUMAN unless every `uses:` the gate workflow (and each local workflow it calls) names is safe: a remote
+        reference pinned by a 40-hex commit (a docker one by digest), or a local workflow or action that is the same on
+        `base` and `pin`. Code the gate runs through plain scripts is not covered: that is --protect-path's job."""
+        seen: set[str] = set()
+        queue = [(gate, 0)]
+        while queue:
+            path, depth = queue.pop(0)
+            if path in seen:
+                continue
+            if len(seen) >= MAX_FILES:
+                return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
+            seen.add(path)
+            code, text, err = self.gh.gh_call(
+                "api", f"repos/{repo}/contents/{path}?ref={pin}", "-H", "Accept: application/vnd.github.raw"
+            )
+            if code != 0:
+                raise ShipError(EXIT_ERROR, f"cannot read {clean(path, 200)[0]}: {err.strip()[:200]}")
+            refs, problem = workflow_refs(text)
+            if problem:
+                return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{clean(path, 200)[0]}: {problem}")
+            for ref in refs:
+                if ref.startswith("./"):
+                    local = ref[2:].rstrip("/")
+                    if not local or ".." in local.split("/"):
+                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"unusual local reference {clean(ref, 200)[0]}")
+                    before, after = self.local_state(repo, local, base), self.local_state(repo, local, pin)
+                    if before is None and after is None:
+                        raise ShipError(EXIT_ERROR, f"cannot read {clean(ref, 200)[0]}")
+                    if before != after:
+                        return Result(
+                            EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"{clean(ref, 200)[0]} differs between {base} and the pin"
+                        )
+                    if local.endswith((".yml", ".yaml")):
+                        if depth >= MAX_DEPTH:
+                            return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
+                        queue.append((local, depth + 1))
+                elif ref.startswith("docker://"):
+                    if not DOCKER_DIGEST.search(ref):
+                        return Result(
+                            EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"unpinned reference {clean(ref, 200)[0]} (needs a digest)"
+                        )
+                elif not PINNED_REF.fullmatch(ref):
+                    return Result(
+                        EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"unpinned reference {clean(ref, 200)[0]} (needs a 40-hex sha)"
+                    )
         return None
 
     def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]:
@@ -766,7 +888,14 @@ class Watcher:
         if self.delete_branch:
             argv.append("--delete-branch")
         for attempt in (1, 2):
-            code, _out, err = self.gh.gh_call(*argv)
+            try:
+                code, _out, err = self.gh.gh_call(*argv)
+            except ShipError as error:
+                if error.code == EXIT_TIMEOUT and "timed out" in str(error):  # the call ran and was cut off
+                    raise ShipError(
+                        EXIT_TIMEOUT, f"{error}; the merge may have been applied: read the pull request"
+                    ) from None
+                raise
             self.gh.limit = None  # the merge call ran: its read-back and classification are not cut off
             if code == 0:
                 break
@@ -926,9 +1055,9 @@ class Watcher:
                 return ended
             base = self.last_base
             stop = self.base_moved(repo, number, pin, base) or self.workflow_stop(repo, pin, base)
+            stop = stop or self.require_conversation(repo, base)
             if stop is not None:
                 return stop
-            self.conversation_notice(repo, base)
             open_threads = self.threads(repo, number)  # the last thread read before the merge call
             if open_threads:
                 return Result(
@@ -946,39 +1075,53 @@ class Watcher:
         finally:
             self.deadline, self.gh.limit = None, None
 
-    def conversation_notice(self, repo: str, base: str) -> None:
-        """Say once when branch protection does not require conversation resolution: then the thread check is the only
-        guard and a thread opened between its read and the merge call is not stopped."""
-        if self.noticed:
-            return
-        self.noticed = True
-        code, out, _err = self.gh.gh_call(
-            "api", f"repos/{repo}/branches/{base}/protection/required_conversation_resolution"
-        )
+    def require_conversation(self, repo: str, base: str) -> Result | None:
+        """A stop (exit 9) unless branch protection of `base` requires conversation resolution, read structurally; an
+        unreadable or oddly shaped answer is a refusal too. Only GitHub can make the thread check atomic with the
+        merge. `--best-effort-threads` keeps the old behavior with a NOTICE that names the race."""
+        if self.best_effort_threads:
+            if not self.noticed:
+                self.noticed = True
+                self.say(
+                    "NOTICE --best-effort-threads: the thread check is best-effort; a thread opened between its read "
+                    f"and the merge call on {base} is not stopped"
+                )
+            return None
+        if (repo, base) in self.conversation_ok:
+            return None
+        code, out, _err = self.gh.gh_call("api", f"repos/{repo}/branches/{base}/protection")
         try:
-            enabled = code == 0 and bounded.loads(out).get("enabled") is True
-        except (ValueError, AttributeError):
+            data = bounded.loads(out) if code == 0 else None
+            section = data.get("required_conversation_resolution") if isinstance(data, dict) else None
+            enabled = isinstance(section, dict) and section.get("enabled") is True
+        except ValueError:
             enabled = False
         if not enabled:
-            self.say(
-                f"NOTICE {base} does not require conversation resolution (or it could not be read): the thread check "
-                "is best-effort; a thread opened between its read and the merge call is not stopped"
+            return Result(
+                EXIT_PROTECTED,
+                "PROTECTED",
+                "conversation resolution is not required by branch protection; thread check would be best-effort",
             )
+        self.conversation_ok.add((repo, base))
+        return None
 
     def one(self, repo: str, number: int, expect: str = "") -> Result:
         if self.queue:
             return self.one_queued(repo, number, expect)
         try:
             started = self.clock()
+            deadline = started + self.timeout
+            self.deadline, self.gh.limit = deadline, deadline  # every gh call is capped by what is left of this PR
             pin = expect or str(self.view(repo, number)["headRefOid"])
-            ended = self.wait_ci(repo, number, pin)
+            ended = self.wait_ci(repo, number, pin, deadline)
             if ended is not None:
                 return ended
-            ended = self.await_review(repo, number, pin, started + self.timeout)
+            ended = self.await_review(repo, number, pin, deadline)
             if ended is not None:
                 return ended
             base = self.last_base
             stop = self.base_moved(repo, number, pin, base) or self.workflow_stop(repo, pin, base)
+            stop = stop or self.require_conversation(repo, base)
             if stop is not None:
                 return stop
             open_threads = self.threads(repo, number)
@@ -994,7 +1137,9 @@ class Watcher:
                 return stop
             return self.merge(repo, number, pin)
         except ShipError as error:
-            return Result(error.code, "ERROR", str(error))
+            return Result(error.code, "TIMEOUT" if error.code == EXIT_TIMEOUT else "ERROR", str(error))
+        finally:
+            self.deadline, self.gh.limit = None, None
 
 
 def open_pr(gh: Gh, repo: str, branch: str, base: str, title: str, issue: str) -> tuple[int, str]:
@@ -1053,6 +1198,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="workflow file that must have produced `CI green` (default: the base branch's one ci.yml or ci.yaml)",
     )
     p.add_argument("--gate-app-id", type=int, default=GATE_APP_ID, help="GitHub App id that must own `CI green`")
+    p.add_argument(
+        "--best-effort-threads",
+        action="store_true",
+        help="merge even when branch protection does not require conversation resolution (a thread opened between "
+        "the thread read and the merge is then not stopped; a NOTICE says so)",
+    )
     p.add_argument(
         "--protect-path",
         action="append",
@@ -1161,6 +1312,7 @@ def main(
         gate_app=args.gate_app_id,
         gate_workflow=args.gate_workflow,
         protect_paths=args.protect_path,
+        best_effort_threads=args.best_effort_threads,
         timeout=args.timeout,
         interval=args.interval,
         max_polls=args.max_polls,

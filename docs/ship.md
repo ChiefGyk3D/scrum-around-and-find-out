@@ -54,7 +54,7 @@ lines.
 | 6 | merge refused, or the read-back did not say `MERGED` |
 | 7 | error: gh or git missing or failing, push or open failed, protection unreadable, or a malformed answer |
 | 8 | conflict with the base branch (`--queue` only; an agent must resolve it) |
-| 9 | branch protection refused the merge (`--queue` only) |
+| 9 | PROTECTED: branch protection does not require conversation resolution (plain and `--queue`), or (`--queue`) refused the merge |
 | 10 | NEEDS-HUMAN: the pull request changes a workflow file, so it is never merged automatically (plain and `--queue`) |
 
 Protection is read from the base branch with `gh api -i`; only an HTTP 404 status line means "none listed" (text in stderr
@@ -93,9 +93,18 @@ differs between the base and the pinned head, stops with `NEEDS-HUMAN` (exit 10)
 it. Before that check and again right before the merge call the pull request is re-read: a base branch that is no longer
 the one the checks were read for is `MERGE-REFUSED`, a moved head is `HEAD-MOVED`.
 
+The gate file is also read at the pinned head with a YAML parser (no anchors or aliases; at most 256 KiB, 50 references per
+file, 20 files, 3 levels of local workflows) and every `uses:` of `jobs.*` and `jobs.*.steps[*]` must be one of: a remote
+reference pinned by a 40-hex commit sha, a docker image pinned by a `sha256` digest, or a local workflow or action
+(`./path`) whose content is identical on the base and the pinned head (local workflows are followed). Anything else, a file
+that does not parse or has an odd shape, or a word `uses` outside comments that the parse did not account for (a block
+scalar, a flow mapping, a duplicate key), is `NEEDS-HUMAN` ("too many references or nesting too deep to verify" when a cap
+is hit); a comment that says "uses" is ignored, a name or string that says it stops the tool and a human reads the file.
+
 What this does not prove: an author with push access can still change inputs the gate workflow trusts without touching a
-workflow file, such as a reusable workflow ref it calls (when that lives elsewhere), scripts, configuration or
-dependencies the workflow runs, and `path` equality is a name match, not a signature. The real control is branch
+workflow file or a referenced action: scripts, configuration, test inventories or dependencies the workflow runs. Only
+`--protect-path` for each such path (or a ruleset with required workflows) covers them; the tool cannot know them. `path`
+equality is a name match, not a signature. The real control is branch
 protection with required workflows (rulesets) and CODEOWNERS on `.github/`; this tool narrows the gap and does not
 replace them. A protected context with no `app_id` is accepted from any source; pin it. Other pinned contexts are checked
 by app and name only, not by workflow.
@@ -127,13 +136,17 @@ positive. Differences from the plain mode:
   sent is followed by its read-back. `--total-timeout`
   (default 7200, at most 28800) bounds the whole run: the PR it cuts off prints `TIMEOUT` and the rest `SKIPPED`.
 
-### The thread check is best-effort
+### The thread check needs branch protection
 
 Review threads are not part of the head commit, so `--match-head-commit` does not cover them. The tool reads the threads
-as its last read before the merge call, but a thread opened between that read and the merge is not stopped by the tool.
-The atomic control is branch protection's "Require conversation resolution before merging" (and a merge identity that
-cannot bypass it). In queue mode the tool reads that setting and prints a `NOTICE` when it is off or unreadable. On this
-repository's `main` it is currently off (read 2026-11-27 with `gh api repos/ChiefGyk3D/scrum-around-and-find-out/branches/main/protection`).
+as its last thread read before the merge call, but a thread opened between that read and the merge cannot be stopped by
+the tool; only GitHub can make it atomic, with branch protection's "Require conversation resolution before merging" (and
+a merge identity that cannot bypass it). So, in plain and queue mode alike, the tool reads
+`branches/<base>/protection` and refuses to merge (`PROTECTED`, exit 9, "conversation resolution is not required by
+branch protection; thread check would be best-effort") unless `required_conversation_resolution.enabled` is exactly
+true; an unreadable or oddly shaped answer is a refusal too. `--best-effort-threads` opts out: the merge goes ahead
+after the thread check with a `NOTICE`, and the race above is a known, accepted risk of that flag. On this repository's
+`main` the setting was off when read on 2026-11-27, so without the flag `safo-ship` stops there until it is turned on.
 
 ## safo-wait-ci
 
