@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `scripts/impacted-tests.py` (#535): prints the test files to run for changed files (arguments or `--base BASE`), by naming convention and by the reverse import closure parsed with `ast`, plus five always-run guard tests; exits 3 with `ALL` when a file maps to no test or is config, a workflow or `pyproject.toml`. Never runs repo code. CI stays the judge; agents use it only for targeted runs. Docs: `docs/impacted-tests.md`. Tests: `tests/test_impacted_tests.py`.
 - Docs sweep (#543): `docs/local-llm.md` now describes the `llm-local` wrapper (attribution fields, caps, exit codes 3, 4 and 75, outcome logging); `docs/local-draft.md`, `docs/local-eval.md`, `docs/board-kind.md` (`reconcile --closed-only`), `docs/usage.md` (`safo spend`) and `docs/hooks.md` (the `TOP_LEVEL_COMMANDS` rule) match merged behavior.
 - `safo spend` (#510, epic #428): a read-only weekly token-spend report from the Claude transcripts, the Codex sessions
   (counted apart, never added), the `llm-local` calls log, the hook log and the `safo-draft` local-share log. Weighted
