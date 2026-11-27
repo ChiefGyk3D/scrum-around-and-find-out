@@ -19,7 +19,7 @@ import os
 import re
 import sys
 import unicodedata
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
@@ -100,18 +100,19 @@ def _line_findings(text: str, allow: set[str], deny: Sequence[localdraft.DenyEnt
 
 
 def scan_text(
-    text: str, allow: set[str], deny: Sequence[localdraft.DenyEntry]
+    text: str, allow: set[str], deny: Sequence[localdraft.DenyEntry], markers: bool = True
 ) -> tuple[list[tuple[int, str, str]], list[int]]:
-    """Findings as (line, type, tag) in line order, and the lines on which a valid allow marker suppressed something."""
+    """Findings as (line, type, tag) in line order, and the lines on which a valid allow marker suppressed something.
+
+    `markers=False` (hook mode) ignores every allow marker: the text checked must not suppress its own findings."""
     rows: list[tuple[int, str, str]] = []
     allowed: list[int] = []
     for n, line in enumerate(text.splitlines(), 1):
-        marker = _MARKER.search(line)
+        marker = _MARKER.search(line) if markers else None
         if marker and len(marker.group(1).strip()) >= MIN_REASON:
             # the reason is text too: a credential in it is never suppressed
             found = _line_findings(line[: marker.start()], allow, deny)
-            reason = marker.group(1)
-            reason_found = _credentials(reason) | _credentials(unicodedata.normalize("NFKC", reason))
+            reason_found = _line_findings(marker.group(1), allow, deny)  # the full check, never suppressed
             rows += [(n, k, t) for k, t in sorted(reason_found)]
             allowed += [n] * len(found)
             continue
@@ -135,22 +136,31 @@ def _safe(label: str) -> str:
     return "".join(c if unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp") else f"\\u{ord(c):04x}" for c in label)
 
 
-def _walk(node: object, label: str) -> Iterator[tuple[str, str]]:
+_PLAIN_KEY = re.compile(r"[A-Za-z0-9_-]{1,40}")
+
+
+def _walk(node: object, label: str, clean: Callable[[str], bool]) -> Iterator[tuple[str, str]]:
+    """Every string of a JSON value, keys included. A key is scanned as text under `<key#N>`; it names its value in a
+    label only when it is short, plain and passed the scan, so a secret or private term never reaches the output."""
     if isinstance(node, str):
         yield label, node
     elif isinstance(node, dict):
-        for key, value in node.items():
-            yield from _walk(value, f"{label}.{_safe(str(key))}")
+        for i, (key, value) in enumerate(node.items()):
+            name = key if _PLAIN_KEY.fullmatch(key) and clean(key) else f"<key#{i}>"
+            yield f"{label}.<key#{i}>", key
+            yield from _walk(value, f"{label}.{name}", clean)
     elif isinstance(node, list):
         for i, value in enumerate(node):
-            yield from _walk(value, f"{label}[{i}]")
+            yield from _walk(value, f"{label}[{i}]", clean)
 
 
 def _read_stdin(stdin: BinaryIO) -> bytes:
     return stdin.read(MAX_BYTES + 1)
 
 
-def _sources(argv: Sequence[str], hook: bool, stdin: BinaryIO, err: TextIO) -> tuple[list[tuple[str, str]], bool]:
+def _sources(
+    argv: Sequence[str], hook: bool, stdin: BinaryIO, err: TextIO, clean: Callable[[str], bool]
+) -> tuple[list[tuple[str, str]], bool]:
     """The (label, text) pairs to scan, and whether any input could not be read."""
     unreadable = False
     pairs: list[tuple[str, str]] = []
@@ -167,7 +177,7 @@ def _sources(argv: Sequence[str], hook: bool, stdin: BinaryIO, err: TextIO) -> t
         if not isinstance(doc, dict) or not isinstance(doc.get("tool_input"), dict):
             err.write("safo-brief-scan: hook input has no tool_input object\n")
             return [], True
-        return list(_walk(doc["tool_input"], "tool_input")), False
+        return list(_walk(doc["tool_input"], "tool_input", clean)), False
     for name in argv or ["-"]:
         label = "<stdin>" if name == "-" else _safe(name)
         try:
@@ -203,10 +213,10 @@ def main(argv: Sequence[str], stdin: BinaryIO, out: TextIO, err: TextIO, env: Ma
     except localdraft.Failure as exc:
         err.write(f"safo-brief-scan: {exc}\n")
         return EXIT_UNCHECKED
-    pairs, unreadable = _sources(args, hook, stdin, err)
+    pairs, unreadable = _sources(args, hook, stdin, err, lambda key: not scan_text(key, allow, deny, markers=False)[0])
     printed = total = 0
     for label, text in pairs:
-        rows, allowed = scan_text(text, allow, deny)
+        rows, allowed = scan_text(text, allow, deny, markers=not hook)
         total += len(rows)
         for n, kind, tag in rows:
             if printed < MAX_PRINTED:
