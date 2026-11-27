@@ -19,3 +19,4 @@ privacy-terms*
 *.privacy-terms
 .*.gen_wiki
 .claude/worktrees/
+.digest-test-*/

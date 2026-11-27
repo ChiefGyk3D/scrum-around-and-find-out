@@ -3,6 +3,15 @@
 ## Unreleased
 
 - `safo-protect-threads` (#541, epic #527): turns on required conversation resolution on a repository's default branch by one GraphQL field (`updateBranchProtectionRule`), dry run by default, `--apply --backup-dir DIR` saves the rule (0600), writes, reads back and verifies every other field is unchanged (else prints the rollback, exit 6); refuses on rulesets, no or several covering rules, or an unreadable field. Separate entry point, no `TOP_LEVEL_COMMANDS` change. Docs: `docs/protect-threads.md`. Tests: `tests/test_protect_threads.py`.
+- `safo-shared-venv` (#534, epic #518): one shared, read-only, hash-locked venv per lockfile, built once under a file
+  lock (`pip install --require-hashes --no-deps --only-binary=:all:`, never system site-packages, atomic rename into
+  place) and keyed by the lockfile hash, the interpreter identity and the acquisition policy. Prints the interpreter
+  path. Strict lockfile grammar, a private copy read through a descriptor, an allowlisted child environment, isolated
+  pip, owner, mode and manifest checks on reuse, root ancestor checks, interpreter binding (resolved
+  once, trusted chain, re-verified on every use), whitelisted acquisition values (https URL or absolute local path, never credentials), child output never relayed, validated numeric parameters
+  and a stated trust boundary. `--gc --max-age-days N` lists old
+  venvs it built, `--delete` removes them. Docs: `docs/shared-venv.md`. Tests: `tests/test_sharedvenv.py`.
+- `safo-remerge` (#588): a second resolver settles `pyproject.toml` conflicts when both sides only add `key = "MODULE:FUNCTION"` lines to the `[project.scripts]` table (ours first, no duplicate key, strict value pattern); every other pyproject conflict still goes to an agent. Docs: `docs/remerge.md`. Tests: `tests/test_remerge.py`.
 - `safo-brief-scan` hardening (#537): `--hook` mode ignores `safo-scan-allow` markers (content cannot suppress its own findings), the marker's reason gets the full check (credentials, private data, deny list), and JSON object keys are scanned as text and never printed raw in a label. Docs: `docs/brief-scan.md`. Tests: `tests/test_briefscan.py`.
 - `safo-idle-check` (#601): count a PR as ready work only when its author is the repo owner or in `trusted_authors` / `SAFO_IDLE_TRUSTED` and it is not a fork PR (`allow_forks` / `SAFO_IDLE_FORKS=1`); an unreadable author is not trusted; skipped PRs are counted in the log field `skipped_untrusted`, never listed. Docs: `docs/idle-check.md`. Tests: `tests/test_idlecheck.py`.
 - `safo-brief-scan` (#537, epic #518): a standalone scan of a brief or report for credentials (the Gemini wrapper's shapes plus bearer, JWT and secret assignments) and private data (the `safo-draft` detectors and deny file); stdin, files or `--hook`; exits 1 on findings, 2 when input cannot be checked; prints type, line and a short hash only for credentials, never the value; `safo-scan-allow: REASON` suppresses one line. Separate entry point because a subcommand needs the frozen guard's `TOP_LEVEL_COMMANDS`; no hook is wired. Docs: `docs/brief-scan.md`. Tests: `tests/test_briefscan.py`.
@@ -20,6 +29,23 @@
 - `safo-eval-canary --truncation-probe` / `--probe-only` (#569, epic #518): sends one long prompt to the digest model through `llm-local` and alerts (exit 1) when the server's reported cut is no longer `--expected-cap` (default 4098); unreachable 3 over busy 75 over drop 1. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
 - `safo-idle-check` (#578): a separate Stop hook that blocks the end of a turn when fewer than 6 workers run and ready work exists (PRs failing or conflicting with no agent on them, unstarted QUEUE.md items); counts workers from the subagent registry and process table, fails open loudly, caches the PR scan 60 s, logs blocks per day. Not installed by this change. Docs: `docs/idle-check.md`. Tests: `tests/test_idlecheck.py`.
 - `safo-eval-canary` (#540, epic #527): runs the safo-eval fixtures on the two configured local models (read from `safo.localdraft`), compares each pass rate with a stored baseline and exits 1 with one `ALERT` line when a score drops by more than `--threshold` (default 0.10). A busy queue is retried (exit 75 if it stays busy), an unreachable server is reported (exit 3) and never scored as zero, a hostile baseline (symlink, FIFO, oversized, malformed, wrong types) is exit 2, and the baseline is written only with `--update-baseline`. Separate entry point because a `safo` subcommand needs the guard's `TOP_LEVEL_COMMANDS`. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
+- `safo-codex-run` and the shared git config check (`safo.gitconfig`): git now runs with `GIT_NO_LAZY_FETCH=1`, so a
+  partial clone is refused and a missing object is never fetched on demand. A behavior change, documented in
+  `docs/codex-run.md`; test in `tests/test_codexrun.py`.
+- `safo-digest` (#531, child of #518): runs `git` or `gh` (nothing else is supported; only `log`, `show`, `rev-parse`, `ls-files` and a `diff` of resolved revisions or the index, never the working tree; gh options come from a fixed list per subcommand) and prints a capped digest in a
+  fixed untrusted-data frame, saving the full output to a private file. The executable must be a native program,
+  root-owned under root-owned directories, opened without following symlinks and started from the verified descriptor.
+  Only a short list of read-only git subcommands and gh subcommand pairs may be listed; every argument is validated
+  against a per-entry option allowlist with typed values and no control characters. The repository's own config (and every submodule's)
+  must be on a shared allowlist of inert keys, the same one `safo-codex-run` uses (now in `safo.gitconfig`), and
+  program-running git settings are forced off at command scope. The command
+  gets a minimal environment, an empty private home (recreated each run) and only inert pass-through variables from
+  a fixed list. Process containment (child subreaper, `/proc`, pidfds) is mandatory: a timeout, a normal exit or a
+  SIGTERM, SIGHUP or SIGINT kills the command and every descendant, and without containment nothing starts. The output
+  directory and every parent are checked and re-verified before the path is printed; the path is labelled advisory.
+  Digest lines are cleaned and prefixed, header fields are cleaned, and user, host, home, callsign and grid text is
+  replaced (best effort, the saved file is raw). Exit 124 timeout, 125 refused. Docs: `docs/digest.md`. Tests:
+  `tests/test_digest.py`, `tests/digest_driver.py`.
 - `safo-codex-run` (#557): harden git config handling. The repository config check is now an allowlist and the child git environment forces more settings off. Docs: `docs/codex-run.md`. Tests: `tests/test_codexrun.py`.
 - Update the sister-project rule now that the portable edition is public (#573)
 - Add CLAUDE.md and AGENTS.md stating the sister-project rule (#565)
