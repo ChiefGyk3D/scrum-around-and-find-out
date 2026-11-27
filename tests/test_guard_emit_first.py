@@ -43,7 +43,7 @@ from meterdata import NOW
 from safo import hooks as core
 from safo.agentsfile import load_agents_merged
 from safo.context import LocalContext
-from safo.guardlog import APPEND_LOCK_TIMEOUT, WARNING, file_lock
+from safo.guardlog import APPEND_LOCK_TIMEOUT, WARNING, file_lock, warning_for
 from safo.hooks import append_log, log_record, notice_path, state_path
 from safo.localfiles import load_agents_for
 from safo.modes import hooks as mod
@@ -2095,7 +2095,10 @@ def test_a_hook_command_line_argparse_would_complain_about_writes_nothing_to_a_f
     assert not result.killed, "argparse's own write to the blocked stderr would have held it until the host killed it"
     assert result.status == 0, "exit 0 with the degraded line: a configuration error is not a policy decision"
     [row] = lines(result.raw.decode())
-    assert WARNING in row["systemMessage"]
+    expected = (
+        warning_for("input-args", "SessionStart") if "probe" in argv else WARNING
+    )  # a probe notice says so (#615)
+    assert expected in row["systemMessage"]
     assert untouched, "nothing was written to the blocked stderr pipe"
 
 

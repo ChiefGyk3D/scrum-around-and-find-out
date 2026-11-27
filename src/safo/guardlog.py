@@ -84,6 +84,39 @@ def config_dir(env: Mapping[str, str]) -> Path | None:
 
 
 WARNING = "SAFO routing guard degraded: enforcement may be incomplete; inspect safo hooks status."
+_CHECK_WARNINGS = {
+    "input-shell": (
+        "SAFO routing guard: a shell command could not be checked in time, so it was denied (fail closed); "
+        "run it again. If this repeats, inspect safo hooks status."
+    ),
+    "input-oversize": (
+        "SAFO routing guard: the hook event was too large to check, so enforcement for this call may be incomplete; "
+        "inspect safo hooks status."
+    ),
+}
+_PROBE_CAUSES = {
+    "input-parse": "its event could not be read",
+    "input-args": "its command line could not be read",
+    "config": "agents.yaml could not be loaded",
+    "probe": "the local model did not answer",
+    "state-write": "its result could not be saved",
+    "timeout": "it ran out of time",
+}
+
+
+def warning_for(code: str, event: str = "PreToolUse") -> str:
+    """The fixed visible warning for a diagnostic: it names the cause. A probe notice (the SessionStart hook) says the
+    session probe failed and that nothing was denied; it never reads like a guard denial. Any other code keeps the
+    generic WARNING. Fixed text only: no exception text, command or input value."""
+    if event == "SessionStart":
+        cause = _PROBE_CAUSES.get(code, "it failed")
+        return (
+            f"SAFO session probe could not finish ({cause}); the local-model status is unknown for this session. "
+            "Nothing was denied. Inspect safo hooks status."
+        )
+    return _CHECK_WARNINGS.get(code, WARNING)
+
+
 MODEL_IDS = ("sonnet", "haiku", "opus", "unknown")
 RULE_IDS = (
     "no-model",

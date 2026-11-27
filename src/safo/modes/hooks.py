@@ -54,6 +54,7 @@ from safo.guardlog import (
     mode_health,
     read_mode,
     state_dir,
+    warning_for,
 )
 from safo.hooks import (
     AGENT_TOOLS,
@@ -465,7 +466,7 @@ def diagnostic(
         emit_then_persist(ctx, run, {"hookSpecificOutput": denial}, folder, record)
         return
     record = log_record(when, "error", read_mode(ctx.env), None, False, "degraded", code, check_ms)
-    warning = WARNING
+    warning = warning_for(code, event)  # names the cause; a probe notice never reads like a guard denial
     data: dict[str, Any] = {
         "systemMessage": warning,
         "hookSpecificOutput": {
