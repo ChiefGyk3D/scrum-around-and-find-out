@@ -20,8 +20,6 @@ import dataclasses
 import errno
 import getpass
 import grp
-import hashlib
-import hmac
 import os
 import pwd
 import re
@@ -62,33 +60,48 @@ _GIT_BAD = re.compile(
 # The only git subcommands that may be listed: reviewed, read-only. Anything else (and every alias or external
 # git-* command) is refused, because git alias resolution cannot be neutralised from outside.
 _GIT_SUBCOMMANDS = frozenset({"diff", "log", "show", "status", "rev-parse", "ls-files", "blame"})
-# Global git settings put before the subcommand on every run; the caller can add none (-c stays refused).
-_GIT_PRE = (
-    "--no-pager",
-    "--no-optional-locks",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.pager=cat",
-    "-c",
-    "protocol.ext.allow=never",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "credential.helper=",
-)
+# Global flags put before the subcommand on every run (the caller can add none; -c stays refused).
+_GIT_PRE = ("--no-pager", "--no-optional-locks")
 _GIT_POST = {
     "diff": ("--no-ext-diff", "--no-textconv"),
-    "log": ("--no-ext-diff", "--no-textconv"),
-    "show": ("--no-ext-diff", "--no-textconv"),
+    "log": ("--no-ext-diff", "--no-textconv", "--no-show-signature"),
+    "show": ("--no-ext-diff", "--no-textconv", "--no-show-signature"),
     "blame": ("--no-textconv",),
 }
+# Every program-running setting we know, forced off at command scope (GIT_CONFIG_COUNT and friends beat the
+# repository's config). gh runs git too, so it gets the same settings.
+_GIT_FORCED = (
+    ("core.fsmonitor", "false"),
+    ("core.pager", "cat"),
+    ("core.editor", "/bin/false"),
+    ("core.askPass", "/bin/false"),
+    ("core.sshCommand", "/bin/false"),
+    ("core.alternateRefsCommand", "/bin/false"),
+    ("core.hooksPath", "/dev/null"),
+    ("core.attributesFile", "/dev/null"),
+    ("diff.external", "/bin/false"),
+    ("log.showSignature", "false"),
+    ("gpg.program", "/bin/false"),
+    ("gpg.ssh.program", "/bin/false"),
+    ("gpg.x509.program", "/bin/false"),
+    ("gpg.openpgp.program", "/bin/false"),
+    ("credential.helper", ""),
+    ("protocol.ext.allow", "never"),
+)
 _GIT_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ATTR_NOSYSTEM": "1",
 }
+# Keys in a repository's OWN config that make git run a program or reach elsewhere: a repository that sets any of
+# them is refused before a single command runs.
+_REPO_BAD = re.compile(
+    r"(filter\..+|diff\..+\.(textconv|command)|merge\..+\.driver|alias\..+|include\..+|includeif\..+|url\..+"
+    r"|core\.fsmonitor|core\.hookspath)",
+    re.IGNORECASE,
+)
+_GIT_FOR_GH = "/usr/bin/git"  # gh runs git; the repository check uses this one
 # git subcommands whose parser does not know `--end-of-options` (their positionals are still never dash-led).
 _GIT_NO_END_OF_OPTIONS = frozenset({"blame", "rev-parse"})
 # The only gh subcommand pairs that may be listed.
@@ -106,8 +119,6 @@ _GH_PAIRS = frozenset(
 _GH_BAD = {"api", "alias", "extension", "ext", "auth", "config", "secret", "codespace", "ssh-key", "gpg-key"}
 _BAD_CATEGORIES = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp", "Zs"}
 _BAD_ARG_CATEGORIES = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}  # a plain space is fine inside an argument
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-_MAX_HASHED = 256 * 1024 * 1024
 _FAIL = re.compile(rb"(?i)\b(fail(?:ed|ure|ures|s)?|error|errors|traceback|panic|fatal|exception|assert\w*)\b")
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\x1b")
 _CALLSIGN = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z]{1,2}|[0-9][A-Z])[0-9][A-Z]{2,3}(?![A-Za-z0-9])")
@@ -141,14 +152,13 @@ def _bad_text(text: str) -> bool:
 
 @dataclass(frozen=True)
 class AllowEntry:
-    """An executable identity (absolute path, plus the sha256 of the file where it is pinned), the fixed arguments that
-    follow it, the only options that may follow those (name to value type: flag, int or word) and whether
+    """An executable (absolute path, git or gh only), the fixed arguments that follow it, the only options
+    that may follow those (name to value type: flag, int or word) and whether
     `--end-of-options` is put before the positional arguments (git: yes by default)."""
 
     cmd: tuple[str, ...]
     options: dict[str, str] = field(default_factory=dict)
     end_of_options: bool = False
-    sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -236,19 +246,8 @@ def plan_args(entry: AllowEntry, argv: list[str]) -> list[str]:
     return [*head, *mid, *opts, *tail, *pos]
 
 
-def _check_entry(cmd: list[str], options: dict[str, str], sha256: str) -> None:
-    if len(cmd) < 2:
-        raise ConfigError("allow: a prefix needs the absolute executable path and at least one fixed argument")
-    exe = cmd[0]
-    if not os.path.isabs(exe) or os.path.normpath(exe) != exe or _bad_text(exe):
-        raise ConfigError("allow: the first element must be an absolute, normalised executable path (no PATH search)")
-    if any(_bad_text(t) for t in [*cmd, *options]) or any(_bad_text(t) for t in options.values()):
-        raise ConfigError("allow: control, format and separator characters are not allowed in an entry")
-    base = os.path.basename(exe)
-    if sha256 and not _SHA256.fullmatch(sha256):
-        raise ConfigError("allow: sha256 must be 64 lower-case hex digits")
-    if any(not o.startswith("-") or o == "--" for o in options) or any(t not in _VALUE_TYPES for t in options.values()):
-        raise ConfigError("allow: options must each start with '-' (never a bare '--'); types are flag, int or word")
+def _check_supported(base: str, cmd: list[str], options: dict[str, str]) -> None:
+    """Only git and gh are supported, each with a short positive list of read-only subcommands."""
     if base == "git":
         if cmd[1] not in _GIT_SUBCOMMANDS:
             raise ConfigError(f"allow: git subcommand must be one of {sorted(_GIT_SUBCOMMANDS)}")
@@ -261,8 +260,21 @@ def _check_entry(cmd: list[str], options: dict[str, str], sha256: str) -> None:
             raise ConfigError("allow: gh is limited to a fixed list of read-only subcommand pairs; see docs/digest.md")
         if any(t in _GH_BAD for t in cmd[1:]):
             raise ConfigError("allow: that gh subcommand is free-form or changes configuration")
-    elif not sha256:
-        raise ConfigError("allow: any tool other than git and gh needs `sha256` (the hash of the executable file)")
+    else:
+        raise ConfigError(f"allow: {base!r} is not supported; only git and gh can be listed (see docs/digest.md)")
+
+
+def _check_entry(cmd: list[str], options: dict[str, str]) -> None:
+    if len(cmd) < 2:
+        raise ConfigError("allow: a prefix needs the absolute executable path and at least one fixed argument")
+    exe = cmd[0]
+    if not os.path.isabs(exe) or os.path.normpath(exe) != exe or _bad_text(exe):
+        raise ConfigError("allow: the first element must be an absolute, normalised executable path (no PATH search)")
+    if any(_bad_text(t) for t in [*cmd, *options]) or any(_bad_text(t) for t in options.values()):
+        raise ConfigError("allow: control, format and separator characters are not allowed in an entry")
+    if any(not o.startswith("-") or o == "--" for o in options) or any(t not in _VALUE_TYPES for t in options.values()):
+        raise ConfigError("allow: options must each start with '-' (never a bare '--'); types are flag, int or word")
+    _check_supported(os.path.basename(exe), cmd, options)
 
 
 def load_config(path: str | None) -> Config:
@@ -281,10 +293,9 @@ def load_config(path: str | None) -> Config:
     for item in allow:
         opts: dict[str, str] = {}
         eoo: bool | None = None
-        sha = ""
         if isinstance(item, dict):
-            if set(item) - {"cmd", "options", "end_of_options", "sha256"}:
-                raise ConfigError("allow: a table entry takes only cmd, options, end_of_options and sha256")
+            if set(item) - {"cmd", "options", "end_of_options"}:
+                raise ConfigError("allow: a table entry takes only cmd, options and end_of_options")
             raw = item.get("options", [])
             if isinstance(raw, list) and all(isinstance(o, str) and o for o in raw):
                 opts = dict.fromkeys(raw, "flag")
@@ -295,16 +306,13 @@ def load_config(path: str | None) -> Config:
             eoo = item.get("end_of_options")
             if eoo is not None and not isinstance(eoo, bool):
                 raise ConfigError("allow: end_of_options must be true or false")
-            sha = item.get("sha256", "")
-            if not isinstance(sha, str):
-                raise ConfigError("allow: sha256 must be a string")
             item = item.get("cmd")
         if not isinstance(item, list) or not all(isinstance(s, str) and s for s in item):
             raise ConfigError("allow: each prefix must be a list of non-empty strings")
-        _check_entry(item, opts, sha)
+        _check_entry(item, opts)
         if eoo is None:
             eoo = os.path.basename(item[0]) == "git" and item[1] not in _GIT_NO_END_OF_OPTIONS
-        prefixes.append(AllowEntry(tuple(item), opts, eoo, sha))
+        prefixes.append(AllowEntry(tuple(item), opts, eoo))
     out_dir = d.get("out_dir", os.path.join(_home(), ".local", "state", "safo-digest"))
     if not isinstance(out_dir, str) or not os.path.isabs(out_dir) or os.path.normpath(out_dir) != out_dir.rstrip("/"):
         raise ConfigError("out_dir must be an absolute, normalised path")
@@ -349,14 +357,22 @@ def _private_group(gid: int) -> bool:
         return False
 
 
-def _check_dir_stat(st: os.stat_result, what: str, *, is_dir: bool = True) -> None:
-    """Owned by root or you, and not writable by others; group write only in a private group (directories only)."""
+def _check_dir_stat(st: os.stat_result, what: str, *, is_dir: bool = True, root_only: bool = False) -> None:
+    """Owned by root or you, and not writable by others; group write only in a private group (directories only).
+    With root_only the owner must be root and nothing may be writable by group or others."""
+    if root_only:
+        if st.st_uid != 0 or st.st_mode & 0o022:
+            raise DigestError(
+                f"{what} is not owned by root or is writable by group or others; only a root-owned executable under "
+                "root-owned directories is accepted"
+            )
+        return
     group_ok = is_dir and _private_group(st.st_gid)
     if st.st_uid not in (0, os.getuid()) or st.st_mode & 0o002 or (st.st_mode & 0o020 and not group_ok):
         raise DigestError(f"{what} is owned by someone else or writable by group or others")
 
 
-def open_verified_exe(path: str) -> int:
+def open_verified_exe(path: str, *, root_only: bool = True) -> int:
     """Open the executable without following any symlink; every parent must be trusted. Returns the fd to exec."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     parts = [c for c in path.split("/") if c]
@@ -364,7 +380,7 @@ def open_verified_exe(path: str) -> int:
         raise DigestError("the executable path is empty")
     fd = os.open("/", flags)
     try:
-        _check_dir_stat(os.fstat(fd), "/")
+        _check_dir_stat(os.fstat(fd), "/", root_only=root_only)
         for comp in parts[:-1]:
             try:
                 nfd = os.open(comp, flags, dir_fd=fd)
@@ -374,7 +390,7 @@ def open_verified_exe(path: str) -> int:
                 raise
             os.close(fd)
             fd = nfd
-            _check_dir_stat(os.fstat(fd), "a directory on the executable path")
+            _check_dir_stat(os.fstat(fd), "a directory on the executable path", root_only=root_only)
         try:
             efd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
         except OSError as e:
@@ -387,7 +403,7 @@ def open_verified_exe(path: str) -> int:
         st = os.fstat(efd)
         if not stat.S_ISREG(st.st_mode) or not st.st_mode & 0o100:
             raise DigestError("the executable is not a regular executable file")
-        _check_dir_stat(st, "the executable", is_dir=False)
+        _check_dir_stat(st, f"the executable {os.path.basename(path)!r}", is_dir=False, root_only=root_only)
     except BaseException:
         os.close(efd)
         raise
@@ -449,8 +465,12 @@ def private_home(dirfd: int) -> None:
 
 def child_env(cfg: Config, home: str, exe: str = "") -> dict[str, str]:
     env = {"PATH": _CHILD_PATH, "LANG": "C", "HOME": home, "XDG_CONFIG_HOME": home}
-    if os.path.basename(exe) == "git":
+    if os.path.basename(exe) in ("git", "gh"):
         env.update(_GIT_ENV)
+        env["GIT_CONFIG_COUNT"] = str(len(_GIT_FORCED))
+        for i, (key, value) in enumerate(_GIT_FORCED):
+            env[f"GIT_CONFIG_KEY_{i}"] = key
+            env[f"GIT_CONFIG_VALUE_{i}"] = value
     for name in cfg.pass_env:
         if name in os.environ:
             env[name] = os.environ[name]
@@ -764,44 +784,48 @@ def _launch(efd: int, argv: list[str], env: dict[str, str]) -> subprocess.Popen[
     )
 
 
-def _sha256_fd(fd: int) -> str:
-    h = hashlib.sha256()
-    off = 0
-    while True:
-        chunk = os.pread(fd, 1 << 20, off)
-        if not chunk:
-            return h.hexdigest()
-        off += len(chunk)
-        if off > _MAX_HASHED:
-            raise DigestError("the executable is too large to hash")
-        h.update(chunk)
+def check_executable(efd: int) -> None:
+    """Only a native executable runs: a script (or anything not ELF) is refused outright."""
+    if os.pread(efd, 4, 0) != b"\x7fELF":
+        raise DigestError("the executable is not a native (ELF) program; scripts are never run")
 
 
-def check_identity(efd: int, entry: AllowEntry) -> None:
-    """The opened file is the one the config names: a script needs a pinned sha256 and a verified, direct interpreter;
-    a pinned file must hash to the pin. An allow entry names an executable identity, not a name pattern."""
-    head = os.pread(efd, 512, 0)
-    if head.startswith(b"#!"):
-        if not entry.sha256:
-            raise DigestError("the executable is a script (starts with #!) and the entry has no sha256 pin")
-        line = head.split(b"\n", 1)[0][2:].decode("utf-8", "replace").strip()
-        parts = line.split(None, 1)
-        interp = parts[0] if parts else ""
-        if (
-            not os.path.isabs(interp)
-            or os.path.normpath(interp) != interp
-            or _bad_text(line)
-            or os.path.basename(interp) == "env"
-        ):
-            raise DigestError("the script's interpreter must be a direct absolute path (not env, not relative)")
-        ifd = open_verified_exe(interp)
+def parse_scoped_config(raw: bytes) -> list[tuple[str, str]]:
+    """`git config --list --show-scope -z` output as (scope, key) pairs: `scope NUL key NL value NUL` repeated.
+    Anything that does not fit that shape is refused, never skipped."""
+    tokens = raw.split(b"\0")
+    if tokens and tokens[-1] == b"":
+        tokens.pop()
+    if len(tokens) % 2:
+        raise DigestError("the repository config listing has an unexpected shape; refusing to run")
+    out: list[tuple[str, str]] = []
+    for scope, entry in zip(tokens[0::2], tokens[1::2], strict=True):
+        key = entry.split(b"\n", 1)[0]
+        out.append((scope.decode("utf-8", "replace"), key.decode("utf-8", "replace")))
+    return out
+
+
+def check_repo_config(git_path: str, env: dict[str, str]) -> None:
+    """Refuse to run in a repository whose own config can make git run a program (filter, textconv, external diff,
+    merge driver, alias, include, url rewrite, fsmonitor, hooks path). Our forced settings are command scope and are
+    skipped; everything else, whatever its scope, is checked."""
+    gfd = open_verified_exe(git_path)
+    try:
+        check_executable(gfd)
+        proc = _launch(gfd, [git_path, "config", "--list", "--show-scope", "-z"], env)
         try:
-            if os.pread(ifd, 2, 0) == b"#!":
-                raise DigestError("the script's interpreter is itself a script")
+            out, _ = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired as e:
+            raise DigestError("reading the repository config timed out; refusing to run") from e
         finally:
-            os.close(ifd)
-    if entry.sha256 and not hmac.compare_digest(_sha256_fd(efd), entry.sha256):
-        raise DigestError("the executable does not match the sha256 in the config")
+            _cleanup(proc)
+    finally:
+        os.close(gfd)
+    if proc.returncode != 0:
+        raise DigestError("the repository config could not be read; refusing to run")
+    for scope, key in parse_scoped_config(out):
+        if scope != "command" and _REPO_BAD.fullmatch(key):
+            raise DigestError(f"the repository config sets {key!r}, which can make git run a program; refusing to run")
 
 
 def execute(argv: list[str], cfg: Config) -> tuple[int, bytes]:
@@ -817,11 +841,14 @@ def execute(argv: list[str], cfg: Config) -> tuple[int, bytes]:
     except (FileNotFoundError, NotADirectoryError):
         return EXIT_NOT_FOUND, f"safo-digest: cmd={_field(os.path.basename(argv[0]))} not found\n".encode()
     try:
-        check_identity(efd, entry)
+        check_executable(efd)
         dirfd = open_private_dir(cfg.out_dir)
         try:
             dir_id = os.fstat(dirfd)
             private_home(dirfd)
+            base = os.path.basename(argv[0])
+            if base in ("git", "gh"):
+                check_repo_config(argv[0] if base == "git" else _GIT_FOR_GH, child_env(cfg, home_of(cfg), "git"))
             ofd, fname = create_output(dirfd, argv[0])
         except BaseException:
             os.close(dirfd)
@@ -832,6 +859,10 @@ def execute(argv: list[str], cfg: Config) -> tuple[int, bytes]:
             os.close(dirfd)
     finally:
         os.close(efd)
+
+
+def home_of(cfg: Config) -> str:
+    return os.path.join(cfg.out_dir, PRIVATE_HOME)
 
 
 def _run(

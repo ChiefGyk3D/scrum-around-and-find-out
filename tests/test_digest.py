@@ -10,7 +10,6 @@ from __future__ import annotations
 import ctypes
 import errno
 import getpass
-import hashlib
 import importlib
 import itertools
 import os
@@ -30,6 +29,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
+DRIVER = str(ROOT / "tests" / "digest_driver.py")
 PY = sys.executable
 REAL_PY = os.path.realpath(sys.executable)
 _COUNTER = itertools.count()
@@ -40,27 +40,14 @@ def enc(code: str) -> str:
     return code.replace("\n", " ;;NL;; ")
 
 
-def pin(path: Path | str) -> str:
-    try:
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    except OSError:
-        return "0" * 64
-
-
 def _q(s: str) -> str:
     s = s.replace("\\", "\\\\").replace('"', '\\"')
     out = "".join(f"\\u{ord(c):04x}" if ord(c) < 32 or ord(c) in (0x2028, 0x202E) else c for c in s)
     return '"' + out + '"'
 
 
-def _toml_list(items: list[list[str]], pinned: bool = True) -> str:
-    def entry(i: list[str]) -> str:
-        cmd = "[" + ", ".join(_q(s) for s in i) + "]"
-        if pinned and i and os.path.isabs(i[0]) and len(i) > 1:
-            return f'{{ cmd = {cmd}, sha256 = "{pin(i[0])}" }}'
-        return cmd
-
-    return "[" + ", ".join(entry(i) for i in items) + "]"
+def _toml_list(items: list[list[str]]) -> str:
+    return "[" + ", ".join("[" + ", ".join(_q(s) for s in i) + "]" for i in items) + "]"
 
 
 def alive(pid: int) -> bool:
@@ -103,11 +90,9 @@ class Env:
         p.chmod(0o755)
         return p
 
-    def config(
-        self, allow: list[list[str]] | None = None, extra: str = "", out: Path | None = None, pinned: bool = True
-    ) -> None:
+    def config(self, allow: list[list[str]] | None = None, extra: str = "", out: Path | None = None) -> None:
         allow = [[str(self.tool), "x"]] if allow is None else allow
-        self.cfg.write_text(f'out_dir = "{out or self.out}"\nallow = {_toml_list(allow, pinned)}\n{extra}\n')
+        self.cfg.write_text(f'out_dir = "{out or self.out}"\nallow = {_toml_list(allow)}\n{extra}\n')
 
     def digest(
         self,
@@ -116,11 +101,17 @@ class Env:
         timeout: float = 60,
         env: dict[str, str] | None = None,
         cwd: Path | None = None,
+        real: bool | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
+        """Run the tool. A command under /usr/bin goes through the real entry point with the real policy (git and gh
+        only, root-owned); anything else goes through tests/digest_driver.py, which relaxes exactly that policy so the
+        process machinery can be exercised with small synthetic programs."""
         e = {**os.environ, "PYTHONPATH": SRC, "HOME": str(self.home)}
         e.update(env or {})
+        use_real = real if real is not None else bool(cmd) and cmd[0].startswith("/usr/bin/")
+        runner = [PY, "-m", "safo." + "digest"] if use_real else [PY, DRIVER]
         return subprocess.run(  # noqa: S603 - argv list of this interpreter and synthetic arguments
-            [PY, "-m", "safo." + "digest", "--config", str(self.cfg), *flags, "--", *cmd],
+            [*runner, "--config", str(self.cfg), *flags, "--", *cmd],
             capture_output=True,
             timeout=timeout,
             env=e,
@@ -268,7 +259,7 @@ def test_missing_executable_is_127(env: Env) -> None:
         ["relative/tool", "x"],
         ["/usr/bin/gh"],  # one token
         ["/usr/bin/../bin/gh", "pr"],  # not normalised
-        ["/usr/bin/python3", "-c"],
+        ["/usr/bin/python3", "-c"],  # only git and gh are supported
         ["/bin/sh", "-c"],
         ["/usr/bin/env", "x"],
         ["/usr/bin/bash", "x"],
@@ -279,10 +270,49 @@ def test_missing_executable_is_127(env: Env) -> None:
     ],
 )
 def test_unsafe_allow_prefixes_are_refused_at_config_load(env: Env, prefix: list[str]) -> None:
-    env.config(allow=[prefix], pinned=False)
-    r = env.py("print(1)")
+    env.config(allow=[prefix])
+    r = env.digest("/usr/bin/git", "status")  # the real entry point and policy
     assert r.returncode == 125 and b"allow" in r.stderr
     assert b"not on the allow list" not in r.stderr  # refused at config load, not merely unmatched
+
+
+@pytest.mark.parametrize("exe", ["/usr/bin/python3", "/bin/sh", "/usr/bin/env", "/usr/bin/true", "/usr/bin/ls"])
+def test_only_git_and_gh_are_supported_with_a_clear_message(env: Env, exe: str) -> None:
+    env.config(allow=[[exe, "x"]])
+    r = env.digest("/usr/bin/git", "status")
+    assert r.returncode == 125 and b"only git and gh" in r.stderr
+
+
+def test_a_script_is_never_run(env: Env) -> None:
+    mod = lib()
+    fd = os.open(env.tool, os.O_RDONLY)
+    try:
+        with pytest.raises(mod.DigestError, match="native"):
+            mod.check_executable(fd)
+    finally:
+        os.close(fd)
+    real = os.open(_REAL_GIT, os.O_RDONLY)
+    try:
+        mod.check_executable(real)  # a native program passes
+    finally:
+        os.close(real)
+
+
+def test_the_executable_and_every_parent_must_be_root_owned(env: Env) -> None:
+    if os.stat(_REAL_GIT).st_uid != 0:
+        pytest.skip("this machine's git is not root-owned")
+    copy = env.tmp / "git"
+    shutil.copy(_REAL_GIT, copy)
+    copy.chmod(0o755)
+    env.config(allow=[[str(copy), "status"]])
+    r = env.digest(str(copy), "status", real=True)
+    assert r.returncode == 125 and b"not owned by root" in r.stderr and env.saved() == []
+
+
+def test_a_root_owned_git_is_accepted(env: Env, repo: Path) -> None:
+    _git_cfg(env)
+    r = env.digest(_REAL_GIT, "diff", "--stat", cwd=repo)
+    assert r.returncode == 0, r.stderr
 
 
 def test_symlinked_executable_is_refused(env: Env) -> None:
@@ -338,7 +368,7 @@ def test_the_verified_file_is_what_runs_even_if_the_path_is_swapped(env: Env) ->
     evil.write_text(f"#!{REAL_PY}\nprint('EVIL')\n")
     evil.chmod(0o755)
     good.write_text(f"#!{REAL_PY}\nprint('GOOD')\n")
-    efd = mod.open_verified_exe(str(good))
+    efd = mod.open_verified_exe(str(good), root_only=False)
     try:
         os.replace(evil, good)  # the path now names a different file
         proc = mod._launch(efd, [str(good)], {"PATH": "/usr/bin:/bin"})
@@ -394,12 +424,10 @@ def test_pass_env_accepts_the_safe_names(env: Env, name: str) -> None:
 
 
 @pytest.mark.parametrize("args", [["log", "-c", "core.x=y"], ["log", "--upload-pack=x"], ["diff", "--textconv"]])
-def test_git_unsafe_options_are_refused_and_not_run(env: Env, args: list[str]) -> None:
-    marker = env.tmp / "ran"
-    tool = env.make_tool("git", "bin")
-    env.config(allow=[[str(tool), args[0]]])
-    r = env.digest(str(tool), *args)
-    assert r.returncode == 125 and not marker.exists()
+def test_git_unsafe_options_are_refused_and_not_run(env: Env, repo: Path, args: list[str]) -> None:
+    _git_cfg(env)
+    r = env.digest(_REAL_GIT, *args, cwd=repo)
+    assert r.returncode == 125 and env.saved() == []
 
 
 _GIT_HOSTILE = [
@@ -427,26 +455,21 @@ _GIT_HOSTILE = [
 
 
 @pytest.mark.parametrize("hostile", [*_GIT_HOSTILE, "--"])
-def test_git_refuses_every_option_not_explicitly_allowed(env: Env, hostile: str) -> None:
-    marker = env.tmp / "ran"
-    tool = env.make_tool("git", "bin")
-    env.cfg.write_text(
-        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "diff"], options = ["--stat", "--name-only"],'
-        f' end_of_options = false, sha256 = "{pin(tool)}" }}]\n'
-    )
-    code = f"open({str(marker)!r}, 'w')"
-    r = env.digest(str(tool), "diff", code, hostile)
-    assert r.returncode == 125 and not marker.exists(), hostile
+def test_git_refuses_every_option_not_explicitly_allowed(env: Env, repo: Path, hostile: str) -> None:
+    _git_cfg(env)
+    marker = env.tmp / "MARK"
+    arg = hostile.replace("/x", str(marker))
+    assert env.digest(_REAL_GIT, "diff", arg, cwd=repo).returncode == 125, hostile
     # no position is exempt: not after a listed option, not after a bare double dash
-    assert env.digest(str(tool), "diff", code, "--stat", hostile).returncode == 125
-    assert env.digest(str(tool), "diff", code, "--", hostile).returncode == 125
+    assert env.digest(_REAL_GIT, "diff", "--stat", arg, cwd=repo).returncode == 125
+    assert env.digest(_REAL_GIT, "diff", "--", arg, cwd=repo).returncode == 125
     assert not marker.exists()
-    assert env.digest(str(tool), "diff", code, "--stat").returncode == 0 and marker.exists()  # listed: runs
+    assert env.digest(_REAL_GIT, "diff", "--stat", cwd=repo).returncode == 0  # listed: runs
 
 
 _FAKE_OPTS = (
     'allow = [{ cmd = ["%s", "log"], options = { "-n" = "int", "--author" = "word", "--oneline" = "flag" },'
-    ' end_of_options = false, sha256 = "%s" }]\n'
+    " end_of_options = false }]\n"
 )
 
 
@@ -469,7 +492,7 @@ _FAKE_OPTS = (
 def test_value_options_are_typed_and_double_dash_is_never_a_value(env: Env, args: list[str]) -> None:
     marker = env.tmp / "ran"
     tool = env.make_tool("tool2", "bin")
-    env.cfg.write_text(f'out_dir = "{env.out}"\n' + _FAKE_OPTS % (tool, pin(tool)))
+    env.cfg.write_text(f'out_dir = "{env.out}"\n' + _FAKE_OPTS % tool)
     code = f"open({str(marker)!r}, 'w')"
     r = env.digest(str(tool), "log", code, *args)
     assert r.returncode == 125 and not marker.exists(), args
@@ -481,7 +504,7 @@ def test_options_come_first_then_end_of_options_then_positionals(env: Env) -> No
     tool = env.make_tool("tool3", "bin")
     env.cfg.write_text(
         f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"], options = ["--oneline"],'
-        f' end_of_options = true, sha256 = "{pin(tool)}" }}]\n'
+        f" end_of_options = true }}]\n"
     )
     r = env.digest(str(tool), "log", "print(sys.argv[2:])", "--oneline")
     assert r.returncode == 0
@@ -491,9 +514,7 @@ def test_options_come_first_then_end_of_options_then_positionals(env: Env) -> No
 @pytest.mark.parametrize("opts", ['["--"]', '{ "--" = "flag" }', '{ "-n" = "number" }', '["plain"]'])
 def test_a_bare_double_dash_or_bad_type_cannot_be_listed(env: Env, opts: str) -> None:
     tool = env.make_tool("tool4", "bin")
-    env.cfg.write_text(
-        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"], options = {opts}, sha256 = "{pin(tool)}" }}]\n'
-    )
+    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"], options = {opts} }}]\n')
     r = env.digest(str(tool), "log", "print(1)")
     assert r.returncode == 125 and b"allow" in r.stderr
 
@@ -579,9 +600,10 @@ def test_real_git_hostile_arguments_are_refused_and_nothing_is_written(env: Env,
     [h for h in _GIT_HOSTILE if (h.startswith("--") and h != "--some-future-option") or h in ("-c", "-u", "-O")],
 )
 def test_git_denylisted_options_cannot_be_listed_in_the_config(env: Env, hostile: str) -> None:
-    tool = env.make_tool("git", "bin")
-    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "diff"], options = ["{hostile}"] }}]\n')
-    r = env.digest(str(tool), "diff", "print(1)")
+    env.cfg.write_text(
+        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{_REAL_GIT}", "diff"], options = ["{hostile}"] }}]\n'
+    )
+    r = env.digest(_REAL_GIT, "diff")
     assert r.returncode == 125 and b"allow" in r.stderr
 
 
@@ -590,15 +612,13 @@ def test_git_denylisted_options_cannot_be_listed_in_the_config(env: Env, hostile
     ["difftool", "rebase", "bisect", "submodule", "filter-branch", "clone", "fetch", "push", "archive", "am", "apply"],
 )
 def test_git_command_running_subcommands_are_refused_at_config_load(env: Env, sub: str) -> None:
-    tool = env.make_tool("git", "bin")
-    env.config(allow=[[str(tool), sub]])
-    assert env.digest(str(tool), sub, "print(1)").returncode == 125
+    env.config(allow=[[_REAL_GIT, sub]])
+    assert env.digest(_REAL_GIT, sub).returncode == 125
 
 
 def test_git_prefix_may_not_start_with_an_option(env: Env) -> None:
-    tool = env.make_tool("git", "bin")
-    env.config(allow=[[str(tool), "-C", "log"]])
-    assert env.digest(str(tool), "-C", "log").returncode == 125
+    env.config(allow=[[_REAL_GIT, "-C", "log"]])
+    assert env.digest(_REAL_GIT, "-C", "log").returncode == 125
 
 
 def test_any_tool_refuses_an_unlisted_option(env: Env) -> None:
@@ -622,24 +642,27 @@ def test_any_tool_refuses_an_unlisted_option(env: Env) -> None:
     ],
 )
 def test_gh_is_limited_to_the_fixed_read_only_pairs(env: Env, cmd: list[str]) -> None:
-    env.config(allow=[["/usr/bin/gh", *cmd]], pinned=False)
-    r = env.py("print(1)")
+    env.config(allow=[["/usr/bin/gh", *cmd]])
+    r = env.digest("/usr/bin/gh", *cmd)
     assert r.returncode == 125 and b"gh" in r.stderr
 
 
-def test_gh_listed_pairs_run_with_typed_options_only(env: Env) -> None:
-    marker = env.tmp / "ran"
-    code = f"open({str(marker)!r}, 'w')"
-    gh = env.make_tool("gh", "bin")
-    env.cfg.write_text(
-        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{gh}", "pr", "view"], options = {{ "--json" = "word" }},'
-        f' end_of_options = false, sha256 = "{pin(gh)}" }}]\n'
-    )
-    assert env.digest(str(gh), "pr", "view", code, "--web").returncode == 125
-    assert env.digest(str(gh), "pr", "view", code, "api").returncode == 125
-    assert env.digest(str(gh), "pr", "view", code, "--json", "--").returncode == 125
-    assert not marker.exists()
-    assert env.digest(str(gh), "pr", "view", code, "--json", "state").returncode == 0 and marker.exists()
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["pr", "view"],
+        ["pr", "checks"],
+        ["pr", "list"],
+        ["run", "list"],
+        ["run", "view"],
+        ["issue", "view"],
+        ["issue", "list"],
+    ],
+)
+def test_gh_listed_pairs_are_accepted_at_config_load(env: Env, cmd: list[str]) -> None:
+    env.config(allow=[["/usr/bin/gh", *cmd]])
+    r = env.digest("/usr/bin/gh", *cmd, "--unlisted-option")
+    assert b"not listed" in r.stderr or b"not owned by root" in r.stderr or r.returncode == 127
 
 
 def test_private_home_is_recreated_empty_on_every_run(env: Env) -> None:
@@ -718,7 +741,7 @@ def test_normal_exit_does_not_leave_background_descendants(env: Env) -> None:
 def test_signal_to_the_parent_kills_the_command_and_everything_it_started(env: Env, sig: int) -> None:
     pre = env.tmp / "p"
     e = {**os.environ, "PYTHONPATH": SRC, "HOME": str(env.home)}
-    argv = [PY, "-m", "safo." + "digest", "--config", str(env.cfg), "--", str(env.tool), "x", enc(_SPAWN), str(pre)]
+    argv = [PY, DRIVER, "--config", str(env.cfg), "--", str(env.tool), "x", enc(_SPAWN), str(pre)]
     proc = subprocess.Popen(argv, env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603 - our own argv
     pids: list[int] = []
     try:
@@ -929,79 +952,226 @@ def test_no_command_is_a_usage_error(env: Env) -> None:
 # ---- round 3: positive subcommand lists, identity, containment, text, advisory path ---------------------------------
 
 
-def _write_repo_config(env: Env, repo: Path) -> Path:
-    marker = env.tmp / "MARK"
-    fsm = env.tmp / "fsm.sh"
-    fsm.write_text(f"#!/bin/sh\n: > {marker}.fsmonitor\n")
-    fsm.chmod(0o755)
-    tc = env.tmp / "tc.sh"
-    tc.write_text(f'#!/bin/sh\n: > {marker}.textconv\ncat "$1"\n')
-    tc.chmod(0o755)
+def _git(repo: Path, env: Env, *args: str, inp: bytes | None = None) -> str:
+    g = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "HOME": str(env.home),
+    }
+    done = subprocess.run(  # noqa: S603 - fixed argv
+        [_REAL_GIT, *args], cwd=repo, env=g, input=inp, capture_output=True, check=False
+    )
+    return done.stdout.decode().strip()
+
+
+def _plain_git(repo: Path, env: Env, *args: str) -> None:
+    """The control: ordinary git, ordinary environment, so the repository's own configuration is honoured."""
+    subprocess.run(  # noqa: S603 - fixed argv
+        [_REAL_GIT, *args], cwd=repo, env={**os.environ, "HOME": str(env.home)}, check=False, capture_output=True
+    )
+
+
+def _program(env: Env, name: str, body: str = "") -> Path:
+    """A program git is configured to run: it leaves a marker file, then does what git expects."""
+    prog = env.tmp / f"{name}.sh"
+    prog.write_text(f"#!/bin/sh\n: > {env.tmp}/MARK.{name}\n{body}")
+    prog.chmod(0o755)
+    return prog
+
+
+def _append_config(repo: Path, text: str) -> None:
     with open(repo / ".git" / "config", "a", encoding="utf-8") as f:
-        f.write(
-            f"[alias]\n\tevil = !: > {marker}.alias\n\tdiff = !: > {marker}.shadow\n"
-            f'[core]\n\tfsmonitor = {fsm}\n[diff "x"]\n\ttextconv = {tc}\n'
-        )
-    (repo / ".gitattributes").write_text("f diff=x\n")
-    return marker
+        f.write(text)
 
 
-def _marks(env: Env) -> list[str]:
-    return sorted(p.name for p in env.tmp.iterdir() if p.name.startswith("MARK"))
-
-
-def test_real_git_repository_configured_execution_is_neutralised(env: Env, repo: Path) -> None:
-    marker = _write_repo_config(env, repo)
-    raw_env = {**os.environ, "HOME": str(env.home)}
-    subprocess.run([_REAL_GIT, "diff"], cwd=repo, env=raw_env, check=False, capture_output=True)  # noqa: S603
-    subprocess.run([_REAL_GIT, "status"], cwd=repo, env=raw_env, check=False, capture_output=True)  # noqa: S603
-    control = _marks(env)
-    assert "MARK.textconv" in control, control  # the control: plain git really runs the configured program
-    for name in control:
-        (env.tmp / name).unlink()
+def _wide_cfg(env: Env) -> None:
+    flag = '"--show-signature" = "flag", "--alternate-refs" = "flag", "-n" = "int", "-p" = "flag"'
     env.cfg.write_text(
         f'out_dir = "{env.out}"\nallow = [\n'
         f'  {{ cmd = ["{_REAL_GIT}", "diff"] }},\n'
-        f'  {{ cmd = ["{_REAL_GIT}", "log"], options = ["-p"] }},\n'
+        f'  {{ cmd = ["{_REAL_GIT}", "log"], options = {{ {flag} }} }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "show"] }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "status"], options = ["--porcelain"] }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "blame"] }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "ls-files"] }},\n'
         f'  {{ cmd = ["{_REAL_GIT}", "rev-parse"], end_of_options = false }},\n]\n'
     )
-    runs = [
-        ["diff"],
-        ["log", "-p"],
-        ["show", "HEAD"],
-        ["status", "--porcelain"],
-        ["blame", "f"],
-        ["ls-files"],
-        ["rev-parse", "HEAD"],
-    ]
-    for args in runs:
-        r = env.digest(_REAL_GIT, *args, cwd=repo)
-        assert r.returncode == 0, (args, r.stdout)
+
+
+def _signed_head(repo: Path, env: Env) -> None:
+    tree = _git(repo, env, "write-tree")
+    commit = (
+        f"tree {tree}\nauthor t <t@example.invalid> 1700000000 +0000\n"
+        "committer t <t@example.invalid> 1700000000 +0000\n"
+        "gpgsig -----BEGIN PGP SIGNATURE-----\n \n AAAA\n -----END PGP SIGNATURE-----\n\nsigned\n"
+    )
+    head = _git(repo, env, "hash-object", "-t", "commit", "-w", "--stdin", inp=commit.encode())
+    _git(repo, env, "update-ref", "HEAD", head)
+
+
+def _marks(env: Env) -> list[str]:
+    return sorted(p.name for p in env.tmp.iterdir() if p.name.startswith("MARK"))
+
+
+def _clear_marks(env: Env) -> None:
+    for name in _marks(env):
+        (env.tmp / name).unlink()
+
+
+_RUNS_VIA_ENV = ["signature", "signature-openpgp", "alternate-refs"]
+
+
+@pytest.mark.parametrize("case", _RUNS_VIA_ENV)
+def test_program_running_settings_are_neutralised_even_with_the_risky_option_listed(
+    env: Env, repo: Path, case: str
+) -> None:
+    if case.startswith("signature"):
+        prog = _program(env, "gpg", "exit 1\n")
+        _signed_head(repo, env)
+        section = '[gpg "openpgp"]' if case == "signature-openpgp" else "[gpg]"
+        _append_config(repo, f"{section}\n\tprogram = {prog}\n[log]\n\tshowSignature = true\n")
+        plain = ["log", "-n", "1"]
+        wrapped = ["log", "--show-signature", "-n", "1"]  # the caller turns verification back on
+        mark = "MARK.gpg"
+    else:
+        prog = _program(env, "alt")
+        other = env.tmp / "alt-repo"
+        other.mkdir()
+        _git(other, env, "init", "-q")
+        (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "objects" / "info" / "alternates").write_text(f"{other}/.git/objects\n")
+        _append_config(repo, f"[core]\n\talternateRefsCommand = {prog}\n")
+        plain = ["log", "--alternate-refs", "-n", "1"]
+        wrapped = plain
+        mark = "MARK.alt"
+    _plain_git(repo, env, *plain)
+    assert mark in _marks(env), _marks(env)  # the control: plain git really runs the configured program
+    _clear_marks(env)
+    _wide_cfg(env)
+    r = env.digest(_REAL_GIT, *wrapped, cwd=repo)
+    assert r.returncode == 0, r.stdout
     assert _marks(env) == [], _marks(env)
-    assert marker.name == "MARK"
 
 
-@pytest.mark.parametrize("sub", ["evil", "git-evil", "diff-tree", "grep", "show-branch", "difftool", "config", ""])
+_REPO_BAD_SECTIONS = {
+    "filter": ('[filter "x"]\n\tclean = {prog}\n', "filter.x.clean"),
+    "textconv": ('[diff "x"]\n\ttextconv = {prog}\n', "diff.x.textconv"),
+    "diff-command": ('[diff "x"]\n\tcommand = {prog}\n', "diff.x.command"),
+    "merge-driver": ('[merge "x"]\n\tdriver = {prog} %A\n', "merge.x.driver"),
+    "alias": ("[alias]\n\tevil = !{prog}\n", "alias.evil"),
+    "include": ("[include]\n\tpath = /nonexistent\n", "include.path"),
+    "includeif": ('[includeIf "gitdir:/x/"]\n\tpath = /nonexistent\n', "includeif"),
+    "url": ('[url "http://x/"]\n\tinsteadOf = y:\n', "url.http://x/.insteadof"),
+    "fsmonitor": ("[core]\n\tfsmonitor = {prog}\n", "core.fsmonitor"),
+    "hookspath": ("[core]\n\thooksPath = /x\n", "core.hookspath"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REPO_BAD_SECTIONS))
+def test_a_repository_whose_own_config_can_run_a_program_is_refused(env: Env, repo: Path, case: str) -> None:
+    text, key = _REPO_BAD_SECTIONS[case]
+    prog = _program(env, "evil", 'cat "$1" 2>/dev/null\n')
+    _append_config(repo, text.replace("{prog}", str(prog)))
+    (repo / ".gitattributes").write_text("f filter=x diff=x merge=x\n")
+    if case in ("filter", "textconv", "alias"):
+        _plain_git(repo, env, "evil" if case == "alias" else "diff")
+        assert "MARK.evil" in _marks(env), _marks(env)  # the control: plain git runs it
+        _clear_marks(env)
+    _wide_cfg(env)
+    for args in (["diff"], ["status", "--porcelain"], ["rev-parse", "HEAD"]):
+        r = env.digest(_REAL_GIT, *args, cwd=repo)
+        assert r.returncode == 125 and b"repository config" in r.stderr, (args, r.stderr)
+        assert key.encode() in r.stderr.lower() or case == "includeif"
+    assert _marks(env) == [] and env.saved() == []
+
+
+def test_a_harmless_repository_config_is_accepted(env: Env, repo: Path) -> None:
+    _append_config(repo, '[user]\n\tname = someone\n[core]\n\teditor = vi\n[branch "main"]\n\tremote = origin\n')
+    _wide_cfg(env)
+    assert env.digest(_REAL_GIT, "status", "--porcelain", cwd=repo).returncode == 0
+
+
+def test_a_repository_that_cannot_be_read_is_refused(env: Env, repo: Path) -> None:
+    (repo / ".git" / "config").write_text("[core\n\tbroken\n")
+    _wide_cfg(env)
+    r = env.digest(_REAL_GIT, "status", "--porcelain", cwd=repo)
+    assert r.returncode == 125 and b"repository config" in r.stderr
+
+
+def test_a_failing_config_listing_is_refused_even_if_it_printed_something_valid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = lib()
+
+    class Done:
+        pid = 0
+        returncode = 3
+
+        def communicate(self, timeout: float) -> tuple[bytes, None]:
+            return b"local\0core.bare\nfalse\0", None
+
+    monkeypatch.setattr(mod, "_launch", lambda *_a, **_k: Done())
+    monkeypatch.setattr(mod, "_cleanup", lambda _proc: True)
+    with pytest.raises(mod.DigestError, match="could not be read"):
+        mod.check_repo_config(_REAL_GIT, {"PATH": "/usr/bin:/bin"})
+
+
+def test_every_forced_git_setting_reaches_the_environment() -> None:
+    mod = lib()
+    cfg = mod.Config(out_dir="/x", allow=())
+    expected = {
+        "core.fsmonitor": "false",
+        "core.pager": "cat",
+        "core.editor": "/bin/false",
+        "core.askpass": "/bin/false",
+        "core.sshcommand": "/bin/false",
+        "core.alternaterefscommand": "/bin/false",
+        "core.hookspath": "/dev/null",
+        "core.attributesfile": "/dev/null",
+        "diff.external": "/bin/false",
+        "log.showsignature": "false",
+        "gpg.program": "/bin/false",
+        "gpg.ssh.program": "/bin/false",
+        "gpg.x509.program": "/bin/false",
+        "gpg.openpgp.program": "/bin/false",
+        "credential.helper": "",
+        "protocol.ext.allow": "never",
+    }
+    for exe in ("/usr/bin/git", "/usr/bin/gh"):
+        e = mod.child_env(cfg, "/h", exe)
+        got = {e[f"GIT_CONFIG_KEY_{i}"].lower(): e[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(e["GIT_CONFIG_COUNT"]))}
+        assert got == expected, exe
+    assert "GIT_CONFIG_COUNT" not in mod.child_env(cfg, "/h", "/usr/bin/other")
+
+
+def test_the_scoped_config_parser_reads_scope_and_key() -> None:
+    mod = lib()
+    raw = b"local\0alias.x\n!echo hi\0command\0core.pager\ncat\0global\0user.name\nme\0"
+    assert mod.parse_scoped_config(raw) == [("local", "alias.x"), ("command", "core.pager"), ("global", "user.name")]
+    with pytest.raises(mod.DigestError, match="unexpected shape"):
+        mod.parse_scoped_config(b"local\0alias.x\n!echo hi\0command\0")
+
+
+@pytest.mark.parametrize("sub", ["evil", "git-evil", "diff-tree", "grep", "show-branch", "difftool", "config", "x"])
 def test_git_only_the_reviewed_subcommands_can_be_listed(env: Env, sub: str) -> None:
-    env.config(allow=[[_REAL_GIT, sub or " "]], pinned=False)
-    r = env.py("print(1)")
+    env.config(allow=[[_REAL_GIT, sub]])
+    r = env.digest(_REAL_GIT, "status")
     assert r.returncode == 125 and b"subcommand" in r.stderr
 
 
 @pytest.mark.parametrize("sub", ["diff", "log", "show", "status", "rev-parse", "ls-files", "blame"])
 def test_git_reviewed_subcommands_are_accepted(env: Env, sub: str) -> None:
-    env.config(allow=[[_REAL_GIT, sub]], pinned=False)
-    r = env.py("print(1)")
-    assert b"subcommand" not in r.stderr  # refused as unmatched, not for the subcommand
+    env.config(allow=[[_REAL_GIT, sub]])
+    r = env.digest(_REAL_GIT, "status")
+    assert b"subcommand" not in r.stderr  # refused as unmatched or not at all, never for the subcommand
 
 
 def _fake_inproc(env: Env) -> tuple[ModuleType, object, list[str]]:
     mod = lib()
-    entry = mod.AllowEntry(cmd=(str(env.tool), "x"), sha256=pin(env.tool))
+    entry = mod.AllowEntry(cmd=(str(env.tool), "x"))
     cfg = mod.Config(out_dir=str(env.out), allow=(entry,))
     marker = env.tmp / "ran"
     return mod, cfg, [str(env.tool), "x", f"open({str(marker)!r}, 'w')"]
@@ -1065,49 +1235,6 @@ def test_a_kill_is_sent_only_to_the_process_that_was_enumerated(env: Env) -> Non
             child.wait()
 
 
-def _script(env: Env, name: str, first_line: str, body: str = "print('hi')\n") -> Path:
-    p = env.tmp / name
-    p.write_text(first_line + "\n" + body)
-    p.chmod(0o755)
-    return p
-
-
-def test_a_script_without_a_pin_is_refused_at_run_time(env: Env) -> None:
-    tool = env.make_tool("git", "bin")
-    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"] }}]\n')  # no sha256
-    r = env.digest(str(tool), "log", "print(1)")
-    assert r.returncode == 125 and b"script" in r.stderr and env.saved() == []
-
-
-def test_a_pin_that_does_not_match_is_refused(env: Env) -> None:
-    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{env.tool}", "x"], sha256 = "{"1" * 64}" }}]\n')
-    r = env.py("print(1)")
-    assert r.returncode == 125 and b"sha256" in r.stderr and env.saved() == []
-
-
-def test_a_non_git_gh_tool_must_carry_a_pin_to_be_listed(env: Env) -> None:
-    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{env.tool}", "x"] }}]\n')
-    r = env.py("print(1)")
-    assert r.returncode == 125 and b"sha256" in r.stderr
-
-
-@pytest.mark.parametrize("kind", ["env", "relative", "script-interpreter"])
-def test_script_interpreters_must_be_direct_verified_binaries(env: Env, kind: str) -> None:
-    marker = env.tmp / "ran"
-    body = f"open({str(marker)!r}, 'w')\n"
-    if kind == "env":
-        first = "#!/usr/bin/env python3"
-    elif kind == "relative":
-        first = "#!python3"
-    else:
-        inner = _script(env, "inner", f"#!{REAL_PY}", "pass\n")
-        first = f"#!{inner}"
-    t = _script(env, "tool5", first, body)
-    env.config(allow=[[str(t), "x"]])
-    r = env.digest(str(t), "x")
-    assert r.returncode == 125 and not marker.exists() and env.saved() == []
-
-
 @pytest.mark.parametrize("bad", ["a\nb", "a\rb", "a\x1bb", "a" + chr(0x202E) + "b", "a" + chr(0x2028) + "b", "a\x7fb"])
 def test_control_and_format_characters_in_arguments_are_refused_before_anything_is_created(env: Env, bad: str) -> None:
     marker = env.tmp / "ran"
@@ -1120,7 +1247,7 @@ def test_a_value_must_match_in_full_not_just_up_to_a_trailing_newline(env: Env) 
     env.cfg.write_text(
         f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{tool}", "log"],'
         ' options = { "-n" = "int", "--author" = "word" },'
-        f' end_of_options = false, sha256 = "{pin(tool)}" }}]\n'
+        f" end_of_options = false }}]\n"
     )
     marker = env.tmp / "ran"
     code = f"open({str(marker)!r}, 'w')"
@@ -1133,9 +1260,7 @@ def test_a_value_must_match_in_full_not_just_up_to_a_trailing_newline(env: Env) 
 
 
 def test_a_nul_in_the_config_is_refused(env: Env) -> None:
-    env.cfg.write_text(
-        f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{env.tool}", "x\\u0000y"], sha256 = "{pin(env.tool)}" }}]\n'
-    )
+    env.cfg.write_text(f'out_dir = "{env.out}"\nallow = [{{ cmd = ["{env.tool}", "x\\u0000y"] }}]\n')
     assert env.py("print(1)").returncode == 125
 
 
@@ -1156,6 +1281,9 @@ def test_out_dir_swapped_during_rendering_is_caught_before_printing(env: Env, mo
         return bytes(real_render(*a, **k))
 
     monkeypatch.setattr(mod, "render", swapping)
+    real_open = mod.open_verified_exe
+    monkeypatch.setattr(mod, "open_verified_exe", lambda path, **_k: real_open(path, root_only=False))
+    monkeypatch.setattr(mod, "check_executable", lambda _fd: None)
     try:
         with pytest.raises(mod.DigestError, match="changed"):
             mod.execute([argv[0], argv[1], "print(1)"], cfg)

@@ -8,19 +8,24 @@ prints a small digest. The lead reads the digest and opens the file only when it
 safo-digest [--config FILE] [--timeout SECONDS] [--max-lines N] [--max-bytes N] -- /ABS/PATH/TO/CMD ARG...
 ```
 
-**An allow entry names an executable identity, not a name pattern, and a prefix allow-list cannot make an arbitrary tool safe.** It limits which program runs and which options it gets;
-it does not know what a program does with the arguments it is allowed. List only tools you have read, with options you
-have read, and prefer read-only subcommands. Everything below narrows the risk; none of it removes it.
+**Only `git` and `gh` are supported.** Everything else is refused when the config loads, with a message that says
+so. This is deliberate. A generic "run any allow-listed tool" wrapper cannot be made safe by listing prefixes and
+options: tools run programs named in their own arguments, environment and configuration, and a hash pin only proves
+which file you hashed, not what it does. `git` and `gh` are the two tools the lead needs to read, and each is limited
+to a short, reviewed, read-only list of subcommands, with the repository's own configuration checked before anything
+runs. A prefix allow-list still does not make a tool safe: it only narrows what may be asked of these two.
 
 ## What runs, and how
 
-- **The executable is named by absolute path** (no bare names, no `PATH` search at all). At run time it is opened
-  without following any symlink (every directory on the way is walked with `O_NOFOLLOW`, so `/bin/x` on a system where
-  `/bin` is a symlink must be written `/usr/bin/x`). It must be a regular file owned by root or you, not group or world
-  writable; every directory above it must be owned by root or you and not world writable, and group-writable only when
-  the group is your own private group (your primary group with no other member). `/tmp` is therefore refused. The
-  command is started from that open file descriptor (`/proc/self/fd`), so replacing the path after the check changes
-  nothing. Linux with `/proc` only.
+- **The executable is named by absolute path** (no bare names, no `PATH` search at all) and must be a native
+  program: the file must start with the ELF magic, so a script is never run. It is opened without following any
+  symlink (every directory on the way is walked with `O_NOFOLLOW`, so `/bin/x` on a system where `/bin` is a symlink
+  must be written `/usr/bin/x`). The file and every directory above it must be **owned by root (uid 0) and not
+  writable by group or others**; there is no private-group exception here. If your machine's `git` or `gh` fails
+  that, the run is refused and the message says the executable is not owned by root. The command is started from the
+  open file descriptor (`/proc/self/fd`), so replacing the path after the check changes nothing. This identity check
+  is on the opened file, not on the name `git` or `gh`: a file called `git` that is not root-owned is refused.
+  Linux with `/proc` only.
 - **No shell, ever.** The command is an argument list. Standard input is closed.
 - **A minimal environment.** The command gets `PATH=/usr/bin:/bin`, `LANG=C`, and `HOME` and `XDG_CONFIG_HOME` set to a
   private empty directory (`out_dir/.home`, mode 0700, deleted and recreated empty before every run). Nothing else is
@@ -51,22 +56,15 @@ allow = [
   { cmd = ["/usr/bin/git", "diff"], options = ["--stat", "--name-only", "--no-color", "--cached"] },
   { cmd = ["/usr/bin/git", "log"],  options = { "-n" = "int", "--author" = "word", "--oneline" = "flag" } },
   { cmd = ["/usr/bin/gh", "pr", "checks"], options = ["--watch"] },
-  # any other tool is pinned by the sha256 of the file (sha256sum /home/you/bin/ci-status)
-  { cmd = ["/home/you/bin/ci-status", "show"], sha256 = "<64 hex digits>" },
-  # a bare list is a prefix with no options; it works only for git and gh
+  # a bare list is a prefix with no options
   ["/usr/bin/git", "status"],
 ]
 ```
 
 - A prefix needs the absolute executable and at least one fixed argument (so `["/usr/bin/gh"]` alone is refused).
-- **Supported tools are few and positive.** `git` and `gh` are the only tools that may be listed without a `sha256`
-  pin, and only for the reviewed subcommands below. Any other executable needs `sha256 = "..."`, the SHA-256 of the
-  file; it is checked against the opened file on every run. A script (a file starting with `#!`) must be pinned, its
-  interpreter must be a direct absolute path (not `env`, not relative), checked with the same no-symlink, owner and
-  parent-directory walk, and must itself not be a script. The interpreter is checked just before the start but is
-  started by the kernel from its path, not from our descriptor; that gap is a documented residual. There is no name
-  pattern for shells or interpreters any more: an entry names one pinned file, and what that file does with its
-  arguments is yours to have read.
+- **Supported tools are two.** The first element must be `git` or `gh` (by file name; the file itself is then held
+  to the root-owned, native-program rules above). Any other program, shells and interpreters included, is refused at
+  config load. There is no hash pin and no script support.
 - **Every argument that starts with `-` must be listed, exactly.** `--stat` is not `--stat=3`; list the form you want.
   A bare `--` is never accepted (not as an option, not as a value, not in any position), and nothing after any `--`
   escapes validation, because every argument is checked wherever it is. An option that takes a value is declared with
@@ -81,18 +79,32 @@ allow = [
   other tool), then the positional arguments.
 - **git**: only these subcommands may be listed: `diff`, `log`, `show`, `status`, `rev-parse`, `ls-files`, `blame`.
   Anything else, any alias and any external `git-*` command is refused (git aliases cannot be neutralised from
-  outside, so an unknown subcommand is refused first; git ignores an alias that shadows a built-in). Every run puts
-  these before the subcommand: `--no-pager`, `--no-optional-locks`, `-c core.fsmonitor=false`, `-c core.pager=cat`,
-  `-c protocol.ext.allow=never`, `-c core.hooksPath=/dev/null`, `-c credential.helper=`, and after `diff`, `log` and
-  `show` the flags `--no-ext-diff --no-textconv` (`blame` gets `--no-textconv`), so a repository that configures an
-  fsmonitor, a textconv driver or an external diff does not get to run it. A user `-c` stays refused, as do
-  `--textconv`, `--ext-diff`, `--open-files-in-pager`, `-O*`, `-x*`, `-u`, `--exec*`, `--extcmd*`, `--output*`,
-  `--git-dir*`, `--work-tree*`, `--namespace*`, `--upload-pack*`, `--receive-pack*`, `--config-env*`, `--paginate` (a
-  defense in depth even for listed options). A repository you do not trust is still code you are about to read.
+  outside, so an unknown subcommand is refused first; git ignores an alias that shadows a built-in). Two layers keep a
+  repository from making git run a program:
+  1. **The repository's config is checked first.** Before any command runs, `git config --list --show-scope -z` is
+     read in the working directory and the run is refused if the repository's own config (any scope except our
+     own command-scope settings) sets any of: `filter.*`, `diff.*.textconv`, `diff.*.command`, `merge.*.driver`,
+     `alias.*`, `include.*`, `includeIf.*`, `url.*`, `core.fsmonitor`, `core.hooksPath`. A filter, textconv or
+     merge driver needs one of those keys, so `.gitattributes` is not inspected. A config that cannot be read, or
+     whose listing has an unexpected shape, is refused too.
+  2. **Program-running settings are forced off at command scope**, which beats the repository's config, through
+     `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`: `core.fsmonitor=false`, `core.pager=cat`,
+     `core.editor`, `core.askPass`, `core.sshCommand`, `core.alternateRefsCommand`, `diff.external`, `gpg.program`,
+     `gpg.ssh.program`, `gpg.x509.program`, `gpg.openpgp.program` (all `/bin/false`), `core.hooksPath=/dev/null`,
+     `core.attributesFile=/dev/null`, `log.showSignature=false`, `credential.helper=` (empty) and
+     `protocol.ext.allow=never`; plus `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`.
+     The command line gets `--no-pager --no-optional-locks` before the subcommand, and after `diff`, `log` and `show`
+     `--no-ext-diff --no-textconv` (`log` and `show` also `--no-show-signature`; `blame` gets `--no-textconv`).
+  A user `-c`, `--textconv`, `--ext-diff`, `--open-files-in-pager`, `-O*`, `-x*`, `-u`, `--exec*`, `--extcmd*`,
+  `--output*`, `--git-dir*`, `--work-tree*`, `--namespace*`, `--upload-pack*`, `--receive-pack*`, `--config-env*` and
+  `--paginate` stay refused, even if listed. The list of known settings is a list: a setting nobody knew about is
+  not on it, which is why the repository config check exists and why a repository you do not trust is still code
+  you are about to read.
 - **gh**: only these exact subcommand pairs may be listed: `pr view`, `pr checks`, `pr list`, `run list`, `run view`,
   `issue view`, `issue list`, with typed options. Everything else is refused, extensions included, and the words `api`,
   `alias`, `extension`, `ext`, `auth`, `config`, `secret`, `codespace`, `ssh-key` and `gpg-key` are refused anywhere
-  in the arguments.
+  in the arguments. `gh` runs `git` itself, so it gets the same forced git settings and the same repository config
+  check (using `/usr/bin/git`, which must satisfy the same root-owned rules).
 
 ## What is printed
 
@@ -183,8 +195,8 @@ characters are not replaced. It cannot find what it was not told, and the callsi
 
 ## Known residuals
 
-- A pinned script's interpreter is verified by path just before the start, then started by the kernel by path.
-  The same-user command can modify files you own; a pin is checked at start, not for the life of the process.
+- The repository config check and the run are two separate git invocations; a repository changed in between (by
+  you, or by another process of yours) is not re-checked. The forced settings still apply to the run.
 - SIGKILL of `safo-digest` itself cannot be handled; the command and its descendants would keep running. Use the
   timeout and do not SIGKILL it.
 - Containment relies on Linux `/proc`, pidfds and child-subreaper support; where any is missing the tool refuses to
