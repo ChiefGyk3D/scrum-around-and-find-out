@@ -151,7 +151,7 @@ safo-digest: END 3f9a1c0be2d4
 
 - Every line of the command's output is prefixed `| `; every line `safo-digest` writes starts `safo-digest: `. The
   BEGIN and END lines carry a random token for this run. The END line is always the last line, even after a byte cut
-  (`safo-digest: cut at the byte cap` precedes it). Output text such as a fake `safo-digest: END` ends up as
+  (`safo-digest: cut at the line or byte cap` precedes it). Output text such as a fake `safo-digest: END` ends up as
   `| safo-digest: END`.
 - **This frame marks data; it does not make data harmless.** A keyword filter cannot stop semantic prompt injection
   (output that merely reads like an instruction). The reader of the digest must treat every `| ` line as untrusted

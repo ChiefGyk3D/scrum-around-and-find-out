@@ -1890,3 +1890,80 @@ def test_a_sha256_repository_runs_with_its_own_empty_tree_as_the_attribute_sourc
         mod._libc_prctl()(36, 0, 0, 0, 0)  # leave the test process as it was found
     assert code == 0
     assert len(expected) == 64 and seen[-1].get("GIT_ATTR_SOURCE") == expected
+
+
+# ---- round 6: the fixed prefix of a gh entry, and the caps on every path ----------------
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        ["pr", "view", "--web"],
+        ["pr", "view", "-w"],
+        ["pr", "view", "--json", "state", "--web"],
+        ["pr", "checks", "--web"],
+        ["pr", "list", "--web"],
+        ["run", "view", "--web"],
+        ["run", "list", "-w"],
+        ["issue", "view", "--web"],
+        ["issue", "list", "--web"],
+        ["pr", "view", "--editor"],
+        ["pr", "view", "--exec=x"],
+        ["pr", "view", "--unlisted"],
+        ["pr", "view", "--json"],  # a value-taking option with its value missing
+        ["pr", "list", "--limit", "abc"],  # and one with a value of the wrong type
+        ["pr", "view", "--json", "--web"],  # a value that is itself an option
+    ],
+)
+def test_a_gh_fixed_prefix_cannot_carry_a_browser_or_any_unlisted_option(env: Env, prefix: list[str]) -> None:
+    env.config(allow=[["/usr/bin/gh", *prefix]])
+    r = env.digest("/usr/bin/gh", *prefix[:2])
+    assert r.returncode == 125 and b"fixed prefix" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [["pr", "view", "123"], ["pr", "view", "--json", "state"], ["pr", "list", "--limit", "5", "--state", "open"]],
+)
+def test_a_gh_fixed_prefix_with_listed_options_and_positionals_is_accepted(env: Env, prefix: list[str]) -> None:
+    env.config(allow=[["/usr/bin/gh", *prefix]])
+    r = env.digest("/usr/bin/gh", *prefix)
+    assert b"fixed prefix" not in r.stderr, r.stderr  # the config loaded
+
+
+@pytest.mark.parametrize("max_lines", [8, 9, 10, 11, 12, 13, 16, 24, 40])
+def test_the_line_cap_holds_for_a_nonzero_exit_with_thousands_of_lines(env: Env, max_lines: int) -> None:
+    env.config(extra=f"max_lines = {max_lines}")
+    code = (
+        "for i in range(6000): print('FAILED case', i, 'boom')\nsys.stderr.write('error: stderr line\\n')\nsys.exit(2)"
+    )
+    r = env.py(code)
+    lines = r.stdout.decode().splitlines()
+    assert r.returncode == 2
+    assert len(lines) <= max_lines, (max_lines, len(lines), lines)
+    assert lines[-1].startswith("safo-digest: END ") and lines[0].startswith("safo-digest: UNTRUSTED")
+
+
+@pytest.mark.parametrize("max_bytes", [1024, 1100, 1500, 2048])
+def test_the_byte_cap_holds_for_a_nonzero_exit_with_long_failure_lines(env: Env, max_bytes: int) -> None:
+    env.config(extra=f"max_bytes = {max_bytes}\nmax_lines = 40")
+    r = env.py("for i in range(3000): print('FAILED', i, 'y' * 190)\nsys.exit(1)")
+    assert len(r.stdout) <= max_bytes, (max_bytes, len(r.stdout))
+    assert len(r.stdout.decode().splitlines()) <= 40
+    assert r.stdout.decode().splitlines()[-1].startswith("safo-digest: END ")
+
+
+def test_render_never_exceeds_either_cap_for_every_cap_near_the_cut_marker() -> None:
+    mod = lib()
+    col = mod.Collector(1000)
+    for i in range(4000):
+        col.feed(f"FAILED case {i} {'y' * (i % 90)}\n".encode())
+    col.finish()
+    for max_bytes in range(1024, 1400):
+        for max_lines in (8, 9, 12, 30):
+            cfg = mod.Config(out_dir="/x", allow=(), max_bytes=max_bytes, max_lines=max_lines)
+            for code in (0, 1, 2):
+                out = mod.render(col, cfg, mod.Redactor(()), "git", code, "/p", "")
+                assert len(out) <= max_bytes, (max_bytes, max_lines, code, len(out))
+                assert len(out.decode().splitlines()) <= max_lines, (max_bytes, max_lines, code)
+                assert out.decode().splitlines()[-1].startswith("safo-digest: END ")

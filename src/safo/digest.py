@@ -306,6 +306,30 @@ def _check_diff_form(opts: list[str], pos: list[str]) -> list[str]:
     )
 
 
+def _check_gh_prefix(cmd: list[str], table: dict[str, str]) -> None:
+    """The fixed tokens after the subcommand pair are arguments too: every option among them must be on the pair's
+    positive table, with a value of its type; a browser option or any other unlisted option is refused here, not only
+    when a caller types it."""
+    rest = cmd[3:]
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        i += 1
+        kind = table.get(tok)
+        if kind is None:
+            if tok.startswith("-"):
+                raise ConfigError(
+                    f"allow: the fixed prefix of gh {cmd[1]} {cmd[2]} uses {tok.split('=')[0]!r}, which is not on its "
+                    "list (anything that opens a browser or starts a program never is)"
+                )
+            continue
+        if kind != "flag":
+            pattern = _VALUE_TYPES[kind]
+            if i >= len(rest) or pattern is None or not pattern.fullmatch(rest[i]):
+                raise ConfigError(f"allow: the fixed prefix of gh {cmd[1]} {cmd[2]}: {tok!r} needs a {kind} value")
+            i += 1
+
+
 def _check_supported(base: str, cmd: list[str], options: dict[str, str]) -> None:
     """Only git and gh are supported, each with a short positive list of read-only subcommands."""
     if base == "git":
@@ -325,6 +349,7 @@ def _check_supported(base: str, cmd: list[str], options: dict[str, str]) -> None
         if any(t in _GH_BAD for t in cmd[1:]):
             raise ConfigError("allow: that gh subcommand is free-form or changes configuration")
         table = _GH_OPTIONS[(cmd[1], cmd[2])]
+        _check_gh_prefix(cmd, table)
         for name, kind in options.items():
             if table.get(name) != kind:
                 raise ConfigError(
@@ -672,18 +697,23 @@ def render(c: Collector, cfg: Config, red: Redactor, name: str, code: int, saved
     if c.lines <= budget and c.lines == len(c.head):
         body = ["| " + sanitize(x) for x in c.head]
     else:
+        prefix: list[str] = []
         if code != 0 and c.fails:
             n = min(len(c.fails), max(1, budget // 4))
-            body += (
-                ["safo-digest: first-failures"] + ["| " + sanitize(x) for x in c.fails[:n]] + ["safo-digest: output"]
-            )
-        rest = max(2, budget - len(body) - 1)
+            # the failure section only when the head, the omitted line and the tail still fit beside it
+            if budget - (n + 2) - 1 >= 2:
+                prefix = (
+                    ["safo-digest: first-failures"]
+                    + ["| " + sanitize(x) for x in c.fails[:n]]
+                    + ["safo-digest: output"]
+                )
+        rest = budget - len(prefix) - 1  # one line is the omitted-lines marker
         nhead = max(1, rest // 3)
         ntail = max(1, rest - nhead)
         head = ["| " + sanitize(x) for x in c.head[:nhead]]
         tail = ["| " + sanitize(x) for x in list(c.tail)[-ntail:]]
         omitted = c.lines - len(head) - len(tail)
-        body += head
+        body = [*prefix, *head]
         if omitted > 0:
             body.append(f"safo-digest: omitted {omitted} lines, see the saved file")
         body += tail
@@ -694,13 +724,16 @@ def render(c: Collector, cfg: Config, red: Redactor, name: str, code: int, saved
     cut = False
     for line in body:
         n = len(line.encode("utf-8")) + 1
-        if size + n + len("safo-digest: cut\n") > cfg.max_bytes:
+        if size + n + len(_CUT_LINE) + 1 > cfg.max_bytes:
             cut = True
             break
         kept.append(line)
         size += n
     if cut:
-        kept.append("safo-digest: cut at the byte cap")
+        kept.append(_CUT_LINE)
+    limit = cfg.max_lines - len(top) - 1  # lines left between BEGIN and END, whatever path produced them
+    if len(kept) > limit:
+        kept = [*kept[: limit - 1], _CUT_LINE]
     return ("\n".join([*top, *kept, end]) + "\n").encode("utf-8")
 
 
@@ -893,6 +926,7 @@ def _git_runner(gfd: int, git_path: str, env: dict[str, str]) -> gitconfig.Runne
     return run
 
 
+_CUT_LINE = "safo-digest: cut at the line or byte cap"
 _FULL_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
