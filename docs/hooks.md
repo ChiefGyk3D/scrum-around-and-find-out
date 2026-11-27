@@ -39,7 +39,10 @@ visible degraded allow).
 exist). `--agents` and `--agents-local` follow as before. A rerun of `install` replaces an existing legacy
 `safo hooks guard` line with the new one, in place, and touches no other hook; a legacy line with a different launcher
 is still a "migrate by hand" refusal. `safo hooks status` shows the installed form: `new`, `legacy`, `mixed` (both), `absent`, or `unknown` (the file cannot be
-read as settings). It counts an entry as the guard by the SAME rule `install` accepts one (one function,
+read as settings). The wrapped command `command -v safo-guard >/dev/null 2>&1 && exec safo-guard || exit 0` (which
+lets a session start when the entry point is missing) is read as the `new` form (#615); only that exact shape counts,
+with the direct form after `exec` (`--agents` tails as for the plain form), and `install` neither writes it nor treats
+it as its own. It counts an entry as the guard by the SAME rule `install` accepts one (one function,
 `entry_problems` in the hooks module of the safo package): the type is `command` and the matcher is `Agent|Task|Bash` (or the older
 `Agent|Task` that `install` migrates). A guard-shaped command under another matcher (`Read`, empty, a regex that
 leaves out Agent) or another type (`prompt`, `agent`, none) would never run, so status says `ineffective (wrong

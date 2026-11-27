@@ -815,9 +815,31 @@ def guard_signature(command: str) -> tuple[str, ...] | None:
     return command_signature(command, "guard") or guard_direct_signature(command)
 
 
+_WRAP_HEAD = ("command", "-v", "safo-guard", ">/dev/null", "2>&1", "&&", "exec")
+_WRAP_TAIL = ("||", "exit", "0")
+
+
+def wrapped_direct_signature(command: str) -> tuple[str, ...] | None:
+    """The launcher of the wrapped guard command a settings file may carry (#615):
+    `command -v safo-guard >/dev/null 2>&1 && exec <direct form> || exit 0`, which keeps a session working when the
+    entry point is not installed. Read only, for `status`: install does not write it, and does not own it. Exactly
+    this shape, nothing else; the inner command must itself be the direct form."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if len(words) <= len(_WRAP_HEAD) + len(_WRAP_TAIL):
+        return None
+    if tuple(words[: len(_WRAP_HEAD)]) != _WRAP_HEAD or tuple(words[-len(_WRAP_TAIL) :]) != _WRAP_TAIL:
+        return None
+    inner = words[len(_WRAP_HEAD) : -len(_WRAP_TAIL)]
+    return guard_direct_signature(shlex.join(inner))
+
+
 def guard_form(command: str) -> str | None:
-    """`new` for the direct entry point, `legacy` for `... hooks guard ...`, None for a command that is not ours."""
-    if guard_direct_signature(command) is not None:
+    """`new` for the direct entry point (also in its wrapped form, #615), `legacy` for `... hooks guard ...`, None for a
+    command that is not ours."""
+    if guard_direct_signature(command) is not None or wrapped_direct_signature(command) is not None:
         return "new"
     return "legacy" if command_signature(command, "guard") is not None else None
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo hooks status` (#615): the wrapped guard command `command -v safo-guard >/dev/null 2>&1 && exec safo-guard || exit 0` is read as the `new` form instead of `absent`; only that exact shape, matcher and type rules unchanged, and `install` writes the same lines as before. Docs: `docs/hooks.md`. Tests: `tests/test_guard_wrapped_form.py`.
 - `safo hooks` guard shell check (#615): its time budget is load-aware: a 3 s floor (was 1.5 s), scaled by the one-minute load average per core up to a 5 s cap, an unreadable load gives the floor; a check that still runs out is denied as before. Docs: `docs/hooks.md`. Tests: `tests/test_guard_check_budget.py`.
 - `safo hooks` guard log (#615): the `input` diagnostic is split into `input-parse`, `input-oversize`, `input-shell` (and `input-args` for the hook's own command line); old `input` rows stay readable; an `input-shell` row carries `check_ms`, the check duration; `safo hooks status` counts each cause on its own line. Docs: `docs/hooks.md`. Tests: `tests/test_guard_input_split.py`.
 - `safo-shared-venv` (#534, epic #518): one shared, read-only, hash-locked venv per lockfile, built once under a file
