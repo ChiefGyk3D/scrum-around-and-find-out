@@ -378,6 +378,7 @@ def test_entry_changed_after_the_build_is_refused(tmp_path: Path, wheels: Path, 
     root, venv = build_in(tmp_path, wheels, lock)
     venv.chmod(0o755)
     (venv / "extra.txt").write_text("x")
+    (venv / "extra.txt").chmod(0o444)
     venv.chmod(0o555)
     done = cli(*build_args(lock, root, wheels))
     assert done.returncode == 2 and "manifest" in done.stderr
@@ -536,3 +537,136 @@ def test_use_stamp_must_be_a_plain_single_link_file(tmp_path: Path, wheels: Path
     stamp.symlink_to(victim)
     assert cli(*build_args(lock, root, wheels)).returncode == 2
     assert victim.read_text() == "v"
+
+
+def test_ancestor_writable_by_others_or_a_symlink_is_refused(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    done = cli(*build_args(lock, shared / "root", wheels))
+    assert done.returncode == 2 and "writable" in done.stderr and not (shared / "root").exists()
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    (tmp_path / "link").symlink_to(real)
+    done = cli(*build_args(lock, tmp_path / "link" / "root", wheels))
+    assert done.returncode == 2 and "symbolic link" in done.stderr and not (real / "root").exists()
+
+
+def test_sticky_world_writable_ancestor_like_tmp_is_allowed(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    sticky = tmp_path / "sticky"
+    sticky.mkdir()
+    sticky.chmod(0o1777)
+    assert cli(*build_args(lock, sticky / "root", wheels)).returncode == 0
+
+
+def test_root_replaced_after_validation_is_detected(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    handle = sharedvenv.open_root(root)
+    handle.check()
+    root.rename(tmp_path / "moved")
+    root.mkdir(mode=0o700)
+    with pytest.raises(sharedvenv.Refused, match="replaced"):
+        handle.check()
+    handle.close()
+
+
+def test_interpreter_changed_after_the_identity_query_is_refused(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    py = shim(tmp_path / "py.sh", "true")
+    args = ["--no-index", "--find-links", str(wheels)]
+
+    def tamper(path: Path) -> None:
+        py.write_text(py.read_text() + "# changed\n")
+
+    monkeypatch.setattr(sharedvenv, "_after_flock", tamper)
+    with pytest.raises(sharedvenv.Refused, match="changed"):
+        sharedvenv.ensure(tmp_path / "root", lock, str(py), args, 5)
+    assert not any(p.name[0] != "." for p in (tmp_path / "root").iterdir())
+
+
+def test_interpreter_content_is_part_of_the_key(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    py = shim(tmp_path / "py.sh", "true")
+    root = tmp_path / "root"
+    first = venv_of(cli(*build_args(lock, root, wheels), "--python", py))
+    py.write_text(py.read_text() + "# upgraded\n")
+    assert venv_of(cli(*build_args(lock, root, wheels), "--python", py)) != first
+
+
+@pytest.mark.parametrize("age", ["nan", "inf", "-inf", "-1", "1e9", "abc"])
+def test_gc_with_a_non_finite_or_absurd_age_deletes_nothing(tmp_path: Path, wheels: Path, lock: Path, age: str) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    long_ago = time.time() - 400 * 86400
+    for path in (venv, root / f"{venv.name}.used"):
+        os.utime(path, (long_ago, long_ago))
+    done = cli("--gc", "--max-age-days", age, "--delete", "--root", root)
+    assert done.returncode == 2 and "deleted" not in done.stdout
+    assert venv.exists()
+
+
+def test_gc_function_refuses_nan_even_when_called_directly(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    long_ago = time.time() - 400 * 86400
+    for path in (venv, root / f"{venv.name}.used"):
+        os.utime(path, (long_ago, long_ago))
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.gc(root, float("nan"), True, 5)
+    assert venv.exists()
+
+
+def test_lock_timeout_must_be_finite(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    assert cli(*build_args(lock, tmp_path / "root", wheels), "--lock-timeout", "nan").returncode == 2
+
+
+def test_redact_removes_userinfo_and_query_values() -> None:
+    text = "see https://user:tok3n@example.invalid/simple?token=abc123&x=1 and http://bob@h/p"
+    out = sharedvenv.redact(text)
+    assert "tok3n" not in out and "abc123" not in out and "bob" not in out and "example.invalid" in out
+
+
+def test_index_url_with_credentials_is_refused_and_never_printed(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    done = cli(lock, "--root", tmp_path / "root", "--index-url", "https://user:tok3n@example.invalid/simple")
+    assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
+    assert "credentials" in done.stderr
+    done = cli(lock, "--root", tmp_path / "root", "--find-links", "https://example.invalid/x?token=tok3n")
+    assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
+
+
+def test_build_error_never_shows_url_credentials_even_when_allowed(tmp_path: Path, lock: Path) -> None:
+    url = "http://user:tok3n@127.0.0.1:9/simple"
+    done = cli(lock, "--root", tmp_path / "root", "--index-url", url, "--allow-url-credentials")
+    assert done.returncode == 1
+    assert "tok3n" not in done.stdout + done.stderr
+
+
+def test_writable_entry_fails_reuse_validation(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    venv.chmod(0o755)
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 2 and "writable" in done.stderr
+    venv.chmod(0o555)
+    marker = venv / sharedvenv.MARKER
+    marker.chmod(0o644)
+    assert cli(*build_args(lock, root, wheels)).returncode == 2
+
+
+def test_failure_after_publication_removes_the_entry(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    data = lock.read_bytes()
+    key = "d" * 64
+    real = os.chmod
+    calls: list[int] = []
+
+    def failing(path: object, mode: int, *a: object, **k: object) -> None:
+        if str(path) == str(root / key) and not calls:
+            calls.append(1)
+            raise OSError("boom")
+        real(path, mode, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "chmod", failing)
+    with pytest.raises(sharedvenv.Failed):
+        sharedvenv.build(root, key, data, sys.executable, ["--no-index", "--find-links", str(wheels)])
+    assert not (root / key).exists()

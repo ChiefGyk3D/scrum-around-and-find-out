@@ -20,6 +20,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -39,6 +40,10 @@ BUILD_NAME = re.compile(r"\.build-[A-Za-z0-9_]{8}")
 KEY = re.compile(r"[0-9a-f]{64}")
 MAX_LOCKFILE = 4 * 1024 * 1024
 LOCK_TIMEOUT = 900.0
+MAX_AGE_DAYS = 36500.0
+MAX_TIMEOUT = 7 * 86400.0
+_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]*@")
+_QUERY = re.compile(r"([?&][^=&\s#]+)=[^&\s#]*")
 IDENTITY_CODE = (
     "import json,sys,sysconfig\n"
     "try:\n    import ensurepip; pip = ensurepip.version()\nexcept Exception:\n    pip = 'none'\n"
@@ -122,7 +127,53 @@ def check_hashes(data: bytes) -> int:
     return count
 
 
-def prepare_root(root: Path) -> Path:
+def redact(text: str) -> str:
+    """Remove URL userinfo and query values from any text that may be shown."""
+    return _QUERY.sub(r"\1=***", _USERINFO.sub(r"\1***@", text))
+
+
+def has_url_secret(value: str) -> bool:
+    return bool(_USERINFO.search(value) or _QUERY.search(value))
+
+
+def _check_ancestors(root: Path) -> None:
+    """Every existing ancestor: a plain directory, owned by this user or root, not writable by others (a sticky
+    directory such as /tmp is allowed), and no symbolic link anywhere on the path."""
+    for ancestor in reversed(Path(os.path.abspath(root)).parents):
+        try:
+            info = ancestor.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            raise Refused(f"a symbolic link on the path to the venv root: {ancestor}")
+        if not stat.S_ISDIR(info.st_mode):
+            raise Refused(f"a non-directory on the path to the venv root: {ancestor}")
+        if info.st_uid not in (os.geteuid(), 0):
+            raise Refused(f"an ancestor of the venv root is owned by another user: {ancestor}")
+        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+            raise Refused(f"an ancestor of the venv root is writable by group or others: {ancestor}")
+
+
+class RootHandle:
+    """The validated root held by descriptor; `check()` refuses if the path now names a different directory."""
+
+    def __init__(self, path: Path, fd: int, ident: tuple[int, int]) -> None:
+        self.path, self.fd, self.ident = path, fd, ident
+
+    def check(self) -> None:
+        try:
+            info = self.path.lstat()
+        except OSError as exc:
+            raise Refused(f"the venv root was replaced or removed: {self.path}") from exc
+        if stat.S_ISLNK(info.st_mode) or (info.st_dev, info.st_ino) != self.ident:
+            raise Refused(f"the venv root was replaced after it was validated: {self.path}")
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+def open_root(root: Path) -> RootHandle:
+    _check_ancestors(root)
     if root.is_symlink():
         raise Refused(f"the venv root is a symbolic link: {root}")
     if not root.exists():
@@ -133,7 +184,12 @@ def prepare_root(root: Path) -> Path:
         raise Refused(f"the venv root is not a directory: {root}")
     if info.st_uid != os.geteuid() or info.st_mode & 0o022:
         raise Refused(f"the venv root must be owned by this user and not writable by others: {root}")
-    return root
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    held = os.fstat(fd)
+    if (held.st_dev, held.st_ino) != (info.st_dev, info.st_ino):
+        os.close(fd)
+        raise Refused(f"the venv root changed while it was opened: {root}")
+    return RootHandle(root, fd, (held.st_dev, held.st_ino))
 
 
 def _after_flock(path: Path) -> None:
@@ -205,6 +261,14 @@ def _clean_env(home: Path) -> dict[str, str]:
     return env
 
 
+def _exe_signature(resolved: str) -> tuple[str, int, int, int]:
+    """sha256, inode, device and mtime of the interpreter file."""
+    with open(resolved, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    return digest, info.st_ino, info.st_dev, info.st_mtime_ns
+
+
 def identity(python: str) -> tuple[str, str, list[object]]:
     """The interpreter as found, its resolved path and what it reports about itself; a missing one is refused."""
     found = shutil.which(python)
@@ -226,12 +290,25 @@ def identity(python: str) -> tuple[str, str, list[object]]:
     return found, resolved, report
 
 
-def cache_key(lock_sha: str, python: str, pip_args: Sequence[str]) -> tuple[str, str]:
-    """The key of a venv, and the interpreter to build with: lockfile hash, interpreter identity, acquisition policy."""
+def cache_key(lock_sha: str, python: str, pip_args: Sequence[str]) -> tuple[str, str, str, tuple[str, int, int, int]]:
+    """The key, the interpreter as found, its resolved path and its file signature.
+
+    The key covers the lockfile hash, the interpreter identity (and the sha256 of its file) and the acquisition policy.
+    """
     found, resolved, report = identity(python)
-    record = {"lock": lock_sha, "python": resolved, "identity": report, "policy": list(pip_args)}
+    signature = _exe_signature(resolved)
+    record = {"lock": lock_sha, "python": resolved, "exe": signature[0], "identity": report, "policy": list(pip_args)}
     key = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return key, found
+    return key, found, resolved, signature
+
+
+def verify_interpreter(resolved: str, signature: tuple[str, int, int, int]) -> None:
+    try:
+        now = _exe_signature(resolved)
+    except OSError as exc:
+        raise Refused("the interpreter changed after its identity was read (unreadable now)") from exc
+    if now != signature:
+        raise Refused("the interpreter changed after its identity was read")
 
 
 def interpreter(venv: Path) -> Path:
@@ -248,8 +325,8 @@ def _trusted(path: Path, what: str, *, kind: str = "file") -> os.stat_result:
         raise Refused(f"{what} is not a plain file (a symbolic link?): {path}")
     if info.st_uid != os.geteuid():
         raise Refused(f"{what} is not owned by this user: {path}")
-    if not is_link and info.st_mode & 0o022:
-        raise Refused(f"{what} is writable by group or others: {path}")
+    if not is_link and info.st_mode & 0o222:
+        raise Refused(f"{what} is writable: {path}")
     return info
 
 
@@ -268,8 +345,8 @@ def manifest(venv: Path) -> str:
             info = path.lstat()
             if info.st_uid != os.geteuid():
                 raise Refused(f"a member is not owned by this user: {path}")
-            if not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022:
-                raise Refused(f"a member is writable by group or others: {path}")
+            if not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o222:
+                raise Refused(f"a member is writable: {path}")
             size = 0 if stat.S_ISDIR(info.st_mode) else info.st_size
             rows.append(f"{rel}\0{size}\0{info.st_mode:o}")
     return hashlib.sha256("\n".join(sorted(rows)).encode()).hexdigest()
@@ -315,8 +392,23 @@ def _fd_bytes(fd: int) -> bytes:
     return b"".join(chunks)
 
 
+def _describe(exc: BaseException) -> str:
+    """A failure text without a command line, so no argument (a URL with a token) can leak through it."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        return f"a child process exited with status {exc.returncode}"
+    if isinstance(exc, subprocess.SubprocessError):
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {redact(str(exc))[:200]}"
+
+
 def build(
-    root: Path, key: str, data: bytes, python: str, pip_args: Sequence[str], expected_sha: str | None = None
+    root: Path,
+    key: str,
+    data: bytes,
+    python: str,
+    pip_args: Sequence[str],
+    expected_sha: str | None = None,
+    handle: RootHandle | None = None,
 ) -> None:
     """Build from the checked bytes `data`: pip reads a private copy through an open descriptor, not the caller's file.
 
@@ -324,8 +416,11 @@ def build(
     """
     expected = expected_sha or hashlib.sha256(data).hexdigest()
     final = root / key
+    if handle:
+        handle.check()
     work = Path(tempfile.mkdtemp(prefix=".build-", dir=root))  # mode 0700, random name
     fd = -1
+    published = False
     try:
         marker = os.open(work / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         os.close(marker)
@@ -345,7 +440,12 @@ def build(
             "--disable-pip-version-check", "--require-hashes", "--no-deps",
             "--only-binary=:all:", *pip_args, "-r", req,
         ]  # fmt: skip
-        subprocess.run(install, check=True, env=env, timeout=1800, stdout=sys.stderr, pass_fds=(fd,))  # noqa: S603 - fixed argument list built here, no shell
+        done = subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
+            install, env=env, timeout=1800, capture_output=True, text=True, pass_fds=(fd,), check=False
+        )
+        sys.stderr.write(redact(done.stdout + done.stderr))  # pip may echo an index URL: never show userinfo or tokens
+        if done.returncode != 0:
+            raise Failed(f"pip exited with status {done.returncode}")
         if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
             raise Refused("the private lockfile copy changed during the install")
         if re.search(r"(?im)^include-system-site-packages\s*=\s*true", (venv / "pyvenv.cfg").read_text()):
@@ -354,14 +454,28 @@ def build(
         marker_path = venv / MARKER
         marker_path.write_text(f"{key}\n{manifest(venv)}\n")
         marker_path.chmod(0o444)
-        os.rename(venv, final)
+        if handle:
+            handle.check()
+            os.rename(f"{work.name}/venv", key, src_dir_fd=handle.fd, dst_dir_fd=handle.fd)
+        else:
+            os.rename(venv, final)
+        published = True
         final.chmod(final.stat().st_mode & ~0o222)
     except (subprocess.SubprocessError, OSError) as exc:
-        raise Failed(f"the build failed: {type(exc).__name__}: {str(exc)[:200]}") from exc
+        raise Failed(f"the build failed: {_describe(exc)}") from exc
     finally:
         if fd >= 0:
             os.close(fd)
         _remove_tree(work)
+        if published and not _sealed(final):  # a failure after publication must not leave a writable entry behind
+            _remove_tree(final)
+
+
+def _sealed(entry: Path) -> bool:
+    try:
+        return not entry.lstat().st_mode & 0o222
+    except OSError:
+        return False
 
 
 def _own_stale_builds(root: Path) -> None:
@@ -394,25 +508,53 @@ def _touch_stamp(root: Path, key: str) -> None:
 def ensure(root: Path, lockfile: Path, python: str, pip_args: Sequence[str], timeout: float) -> Path:
     data = read_lockfile(lockfile)
     check_hashes(data)
-    key, resolved = cache_key(hashlib.sha256(data).hexdigest(), python, pip_args)
-    prepare_root(root)
-    with Lock(root, timeout):
-        _own_stale_builds(root)
-        final = root / key
-        if final.exists() or final.is_symlink():
-            valid(final, key)
-        else:
-            build(root, key, data, resolved, pip_args)
-            valid(final, key)
-        _touch_stamp(root, key)
+    key, found, resolved, signature = cache_key(hashlib.sha256(data).hexdigest(), python, pip_args)
+    handle = open_root(root)
+    try:
+        with Lock(root, timeout):
+            handle.check()
+            _own_stale_builds(root)
+            final = root / key
+            if final.exists() or final.is_symlink():
+                valid(final, key)
+            else:
+                verify_interpreter(resolved, signature)  # the file we are about to run is the one we identified
+                build(root, key, data, found, pip_args, handle=handle)
+                try:
+                    valid(final, key)
+                except Refused:
+                    _remove_tree(final)
+                    raise
+            _touch_stamp(root, key)
+    finally:
+        handle.close()
     return interpreter(final)
 
 
+def check_age(value: float) -> float:
+    if not (math.isfinite(value) and 0 <= value <= MAX_AGE_DAYS):
+        raise Refused(f"the age must be a finite number of days from 0 to {MAX_AGE_DAYS:g}")
+    return value
+
+
 def gc(root: Path, max_age_days: float, delete: bool, timeout: float, now: float | None = None) -> list[str]:
-    prepare_root(root)
+    check_age(max_age_days)
     now = time.time() if now is None else now
     lines: list[str] = []
+    handle = open_root(root)
+    try:
+        lines = _gc_locked(root, handle, max_age_days, delete, timeout, now)
+    finally:
+        handle.close()
+    return lines
+
+
+def _gc_locked(
+    root: Path, handle: RootHandle, max_age_days: float, delete: bool, timeout: float, now: float
+) -> list[str]:
+    lines: list[str] = []
     with Lock(root, timeout):
+        handle.check()
         for entry in sorted(root.iterdir()):
             if not KEY.fullmatch(entry.name):
                 continue
@@ -426,9 +568,10 @@ def gc(root: Path, max_age_days: float, delete: bool, timeout: float, now: float
             if stamp.is_file() and not stamp.is_symlink():
                 times.append(stamp.stat().st_mtime)
             age = (now - max(times)) / 86400
-            if age < max_age_days:
+            if not age >= max_age_days:  # also false for a NaN age: never select on doubt
                 continue
             if delete:
+                handle.check()
                 _remove_tree(entry)
                 if stamp.is_file() and not stamp.is_symlink():
                     stamp.unlink()
@@ -436,6 +579,24 @@ def gc(root: Path, max_age_days: float, delete: bool, timeout: float, now: float
             else:
                 lines.append(f"would delete {entry} (unused {age:.1f} days)")
     return lines
+
+
+def _number(text: str, low: float, high: float, what: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{what} must be a number") from None
+    if not (math.isfinite(value) and low <= value <= high):
+        raise argparse.ArgumentTypeError(f"{what} must be finite and between {low:g} and {high:g}")
+    return value
+
+
+def _age(text: str) -> float:
+    return _number(text, 0, MAX_AGE_DAYS, "the age in days")
+
+
+def _timeout(text: str) -> float:
+    return _number(text, 0, MAX_TIMEOUT, "the lock timeout")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -448,9 +609,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--index-url", help="the one package index to use")
     parser.add_argument("--find-links", help="a local directory or URL of wheels")
     parser.add_argument("--no-index", action="store_true", help="never contact an index (use with --find-links)")
-    parser.add_argument("--lock-timeout", type=float, default=LOCK_TIMEOUT, help="seconds to wait for the build lock")
+    parser.add_argument(
+        "--lock-timeout", type=_timeout, default=LOCK_TIMEOUT, help="seconds to wait for the build lock"
+    )
+    parser.add_argument(
+        "--allow-url-credentials",
+        action="store_true",
+        help="accept userinfo or query tokens in --index-url/--find-links",
+    )
     parser.add_argument("--gc", action="store_true", help="list venvs unused for --max-age-days (no lockfile needed)")
-    parser.add_argument("--max-age-days", type=float, help="age threshold for --gc, required with it")
+    parser.add_argument("--max-age-days", type=_age, help="age threshold for --gc, required with it")
     parser.add_argument("--delete", action="store_true", help="with --gc: delete what the listing names")
     args = parser.parse_args(argv)
     root = args.root or default_root()
@@ -470,13 +638,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             pip_args += ["--index-url", args.index_url]
         if args.find_links:
             pip_args += ["--find-links", args.find_links]
+        if not args.allow_url_credentials and any(has_url_secret(v) for v in (args.index_url, args.find_links) if v):
+            raise Refused("an index or links URL carries credentials or a query token (--allow-url-credentials)")
         print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout))
         return EXIT_OK
     except Refused as exc:
-        print(f"safo-shared-venv: refused: {exc}", file=sys.stderr)
+        print(f"safo-shared-venv: refused: {redact(str(exc))}", file=sys.stderr)
         return EXIT_REFUSED
     except Failed as exc:
-        print(f"safo-shared-venv: failed: {exc}", file=sys.stderr)
+        print(f"safo-shared-venv: failed: {redact(str(exc))}", file=sys.stderr)
         return EXIT_FAIL
 
 

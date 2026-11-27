@@ -22,9 +22,13 @@ safo-shared-venv --gc --max-age-days 30 --delete
 
 ## Behavior
 
-- Location: `--root`, else `$SAFO_SHARED_VENV_ROOT`, else `~/.local/share/safo-venvs`.
+- Location: `--root`, else `$SAFO_SHARED_VENV_ROOT`, else `~/.local/share/safo-venvs`. Every existing ancestor of the
+  root must be a real directory (no symbolic link) owned by you or root and not writable by group or others (a sticky
+  directory such as `/tmp` is allowed). The root is held by descriptor and re-checked before the lock work, the build,
+  the publish rename (done relative to that descriptor) and each GC deletion; a root replaced in between is refused.
 - Key: the sha256 of a canonical record of the lockfile hash, the interpreter (resolved `--python` path,
-  implementation, major.minor, cache tag, platform, ABI flags, bundled pip version) and the acquisition policy
+  implementation, major.minor, cache tag, platform, ABI flags, bundled pip version, and the sha256 of the interpreter
+  file, which is re-verified together with its inode and mtime just before the build) and the acquisition policy
   (`--no-index`, `--index-url`, `--find-links`). A different interpreter or policy never returns an existing entry. A
   `--python` that does not exist is refused.
 - Build: `pip --isolated install --require-hashes --no-deps --only-binary=:all: -r FILE` into a new venv without
@@ -50,6 +54,14 @@ safo-shared-venv --gc --max-age-days 30 --delete
   a valid marker, manifest and layout are deleted; anything else (and any link) is reported as skipped and left alone.
   Leftover build directories are removed only when their name matches the random build-name pattern and they carry this
   tool's build marker.
+- Credentials: an `--index-url` or `--find-links` URL with userinfo or a query value is refused unless
+  `--allow-url-credentials` is given (the value is then visible in the process list while pip runs). Every message,
+  and the pip output, is redacted of URL userinfo and query values.
+- Age and timeout: `--max-age-days` must be finite, from 0 to 36500, and `--lock-timeout` finite and positive;
+  anything else (nan, inf, negative, absurd) is refused and nothing is deleted. GC also never selects an entry whose
+  age does not compare as at least the threshold.
+- Writable entries: reuse validation refuses a venv, marker or member with any write bit; a failure after the
+  publish rename removes the entry.
 - Exit codes: 0 done, 1 build or lock failure, 2 refusal or bad usage. Only the interpreter path goes to stdout.
 
 Tests: `tests/test_sharedvenv.py` (a local wheel built in the test, no network, two concurrent processes).

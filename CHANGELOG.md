@@ -6,7 +6,8 @@
   lock (`pip install --require-hashes --no-deps --only-binary=:all:`, never system site-packages, atomic rename into
   place) and keyed by the lockfile hash, the interpreter identity and the acquisition policy. Prints the interpreter
   path. Strict lockfile grammar, a private copy read through a descriptor, an allowlisted child environment, isolated
-  pip, owner, mode and manifest checks on reuse, and a stated trust boundary. `--gc --max-age-days N` lists old
+  pip, owner, mode and manifest checks on reuse, root ancestor checks, interpreter binding, redacted
+  messages, validated ages and a stated trust boundary. `--gc --max-age-days N` lists old
   venvs it built, `--delete` removes them. Docs: `docs/shared-venv.md`. Tests: `tests/test_sharedvenv.py`.
 - `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
   frame starts (it used to draw one more full frame first, slow under load). The signal test now captures the child's
