@@ -233,18 +233,23 @@ class Source:
     agent_bypass: bool
     force_push_off: bool
     deletion_off: bool
+    pr_required: bool = False  # a pull request is required to change the branch
+    conversation: bool = False  # conversation resolution is required before merging (reported, never a failure)
+    contexts: tuple[str, ...] = ()  # every required check context, whatever its name
 
 
 def parse_classic(body: Any, agent: str) -> Source:
     top = _obj(body, "the branch protection answer")
     owner = strict = False
     ci: list[Check] = []
+    contexts: list[str] = []
     if "required_status_checks" in top:
         checks = _obj(top["required_status_checks"], "required_status_checks")
         strict = _bool(checks, "strict", "required_status_checks")
         if "contexts" in checks:
-            _strings(checks, "contexts", "required_status_checks")
+            contexts.extend(_strings(checks, "contexts", "required_status_checks"))
         for entry in _list(checks, "checks", "required_status_checks"):
+            contexts.append(_str(_obj(entry, "a required check"), "context", "a required check"))
             if (found := _required_check(entry, "app_id")) is not None:
                 ci.append(found)
     bypass, agent_hit = 0, False
@@ -261,7 +266,21 @@ def parse_classic(body: Any, agent: str) -> Source:
     admins = _bool(_obj(top.get("enforce_admins"), "enforce_admins"), "enabled", "enforce_admins")
     force = _bool(_obj(top.get("allow_force_pushes"), "allow_force_pushes"), "enabled", "allow_force_pushes")
     delete = _bool(_obj(top.get("allow_deletions"), "allow_deletions"), "enabled", "allow_deletions")
-    return Source(owner, tuple(ci), strict, admins, bypass, agent_hit, not force, not delete)
+    talk = top.get("required_conversation_resolution")
+    resolved = talk is not None and _bool(_obj(talk, "required_conversation_resolution"), "enabled", "it")
+    return Source(
+        owner,
+        tuple(ci),
+        strict,
+        admins,
+        bypass,
+        agent_hit,
+        not force,
+        not delete,
+        "required_pull_request_reviews" in top,
+        resolved,
+        tuple(dict.fromkeys(contexts)),
+    )
 
 
 def _applies(detail: dict[str, Any], branch: str) -> bool:
@@ -288,24 +307,41 @@ def parse_ruleset(detail: Any, listed: dict[str, Any], branch: str) -> Source | 
     bypass = len(_list(body, "bypass_actors", "a ruleset"))
     if not all(isinstance(a, dict) for a in body["bypass_actors"]):
         raise CannotTell("cannot tell: a ruleset's bypass_actors holds something that is not an object")
-    owner = strict = queue = force = delete = False
+    owner = strict = queue = force = delete = pull = talk = False
     ci: list[Check] = []
+    contexts: list[str] = []
     for rule in _list(body, "rules", "a ruleset"):
         entry = _obj(rule, "a ruleset rule")
         kind = _str(entry, "type", "a ruleset rule")
         if kind == "pull_request":
             params = _obj(entry.get("parameters"), "the pull_request rule's parameters")
             owner = owner or _bool(params, "require_code_owner_review", "the pull_request rule")
+            pull = True
+            if "required_review_thread_resolution" in params:  # omitted means off; a present value must be true/false
+                talk = _bool(params, "required_review_thread_resolution", "the pull_request rule") or talk
         elif kind == "required_status_checks":
             params = _obj(entry.get("parameters"), "the required_status_checks rule's parameters")
             strict = strict or _bool(params, "strict_required_status_checks_policy", "the required_status_checks rule")
             for check in _list(params, "required_status_checks", "the required_status_checks rule"):
+                contexts.append(_str(_obj(check, "a required check"), "context", "a required check"))
                 if (found := _required_check(check, "integration_id")) is not None:
                     ci.append(found)
         queue = queue or kind == "merge_queue"
         force = force or kind == "non_fast_forward"
         delete = delete or kind == "deletion"
-    return Source(owner, tuple(ci), strict or queue, bypass == 0, bypass, False, force, delete)
+    return Source(
+        owner,
+        tuple(ci),
+        strict or queue,
+        bypass == 0,
+        bypass,
+        False,
+        force,
+        delete,
+        pull,
+        talk,
+        tuple(dict.fromkeys(contexts)),
+    )
 
 
 # -- the questions -------------------------------------------------------------------------------------------------

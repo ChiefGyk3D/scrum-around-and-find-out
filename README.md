@@ -25,6 +25,7 @@ Checked 2026-10-26 against `main` at cf53799.
 |---|---|
 | Python scaffold, CI on git-your-ship-together, repository files, `scripts/apply-baseline.sh` | Built, merged on `main` |
 | `scripts/impacted-tests.py`: which tests a set of changed files needs for a targeted run, or ALL; CI stays the judge ([`docs/impacted-tests.md`](docs/impacted-tests.md)) | Built, merged on `main` |
+| `safo-remerge` (merge `origin/main` into a branch, keep both sides of changelog, home and README list conflicts, abort and name the paths for anything else; never pushes; see [`docs/remerge.md`](docs/remerge.md)) | Built for #588; in review on a pull request, not yet on `main` |
 | GraphQL client (refuses redirects; never replays a mutation whose outcome is unknown), `board.yaml` schema and validator | Built, merged on `main` |
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
 | `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App installation token on the App credential path, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
@@ -71,6 +72,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `agents-status` | One read-only view of what Claude, Codex and Copilot are doing |
 | `usage` | What each agent has used and has left, from local files only: Codex windows, Claude Code tokens, Copilot sessions, Ollama reachability. `--report` summarises the outcomes log |
 | `spend` | A weekly token-spend report from the Claude transcripts, the Codex sessions and the `llm-local`, hook and `safo-draft` logs: weighted spend by pool, cache-read share, per lead turn and per merged PR, local use, agent first-turn context, and the change against a stored baseline. Read-only, counts only. See [`docs/spend-report.md`](docs/spend-report.md) |
+| `protection` | Reads a default branch's protection back (`--repo OWNER/NAME`, ten conditions) or audits every repository in the board file against the standard (`--all`: `CI green` and the declared security checks required, a pull request required, force pushes and deletion off, admin bypass and conversation resolution reported). GET only. See [`docs/protection-audit.md`](docs/protection-audit.md) |
 | `lead-curve` | How lead-session cost grows with turn position, from the Claude lead transcripts: per session the turn count, context tokens and weighted spend by turn bucket, the share past turn 200 and 400, three labeled lines on where cost climbs, and the cost of each handoff (successor measured, note estimated). Read-only, counts only. See [`docs/spend-report.md`](docs/spend-report.md) |
 | `spend-post` | Runs the `spend` report and posts a short summary (counts, weighted totals, change since the baseline) as one comment on an issue of a PRIVATE repo; refuses unless `gh api repos/OWNER/REPO --jq .private` says `true`, and the body carries no path, user or host name. No scheduler; timer and cron examples in [`docs/spend-report.md`](docs/spend-report.md) |
 | `route <shape>` | Which agent a task shape should go to, from the rules in `agents.yaml` and the live headroom. Recommends; dispatches nothing |
@@ -174,6 +176,7 @@ replaced are gone.
 - [Spend report](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Spend-report)
 - [Digest](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Digest)
 - [Impacted tests](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Impacted-tests)
+- [Remerge](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Remerge): `safo-remerge`, merge `origin/main` into a branch and keep both sides of list conflicts
 - [Port ledger](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Port-ledger)
 - [Hooks](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Hooks)
 - [Handoff](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Handoff)
@@ -196,8 +199,11 @@ replaced are gone.
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [Codex-run](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Codex-run)
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
+- [safo-threads](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threads): list, reply to and resolve review threads from a dispositions file
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
+- [Cards](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Cards): `safo-cards`, Kind, Epic and Effort from a table at issue creation
 - [Board-kind](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-kind): `safo kind` and the reconcile write cap
+- [Protection-audit](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Protection-audit): `safo protection --all`, the default-branch drift audit
 - [safo-file](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/File): the idea gate and the cross-project line for filing work
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)
@@ -207,6 +213,7 @@ replaced are gone.
 - [Gemini broker threat model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker-threat-model)
 - [Rmguard](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Rmguard): `safo-rmguard`, the Bash hook that guards shared dev directories
 - [Idle check](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Idle-check): `safo-idle-check`, the Stop hook that blocks the end of a turn while workers are under the floor and ready work exists
+- [Brief scan](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Brief-scan): `safo-brief-scan`, a standalone check that scans a brief or report for credentials and private data before it leaves the machine.
 - [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
 - [Safo-threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Safo-threat-model)
 - [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)
