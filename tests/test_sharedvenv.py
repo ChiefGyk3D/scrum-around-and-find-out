@@ -6,7 +6,9 @@ from __future__ import annotations
 import base64
 import fcntl
 import hashlib
+import math
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -552,11 +554,14 @@ def test_ancestor_writable_by_others_or_a_symlink_is_refused(tmp_path: Path, whe
     assert done.returncode == 2 and "symbolic link" in done.stderr and not (real / "root").exists()
 
 
-def test_sticky_world_writable_ancestor_like_tmp_is_allowed(tmp_path: Path, wheels: Path, lock: Path) -> None:
+def test_only_a_root_owned_sticky_directory_like_tmp_is_an_allowed_writable_ancestor(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
     sticky = tmp_path / "sticky"
     sticky.mkdir()
-    sticky.chmod(0o1777)
-    assert cli(*build_args(lock, sticky / "root", wheels)).returncode == 0
+    sticky.chmod(0o1777)  # owned by this user, not root: refused (every test also runs under the root-owned /tmp)
+    done = cli(*build_args(lock, sticky / "root", wheels))
+    assert done.returncode == 2 and "writable" in done.stderr
 
 
 def test_root_replaced_after_validation_is_detected(tmp_path: Path) -> None:
@@ -670,3 +675,180 @@ def test_failure_after_publication_removes_the_entry(
     with pytest.raises(sharedvenv.Failed):
         sharedvenv.build(root, key, data, sys.executable, ["--no-index", "--find-links", str(wheels)])
     assert not (root / key).exists()
+
+
+# ---- round 4: structural fixes ----
+
+
+def test_interpreter_file_writable_by_others_is_refused(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    py = shim(tmp_path / "py.sh", "true")
+    py.chmod(0o775)
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", py)
+    assert done.returncode == 2 and "writable" in done.stderr
+
+
+def test_interpreter_in_a_directory_writable_by_others_is_refused(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    open_dir = tmp_path / "open"
+    open_dir.mkdir()
+    py = shim(open_dir / "py.sh", "true")
+    open_dir.chmod(0o777)
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", py)
+    assert done.returncode == 2 and "writable" in done.stderr
+
+
+def test_only_the_resolved_interpreter_path_is_executed(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    log = tmp_path / "argv0.log"
+    real_shim = shim(tmp_path / "real.sh", f'echo "$0" >> {log}')
+    link = tmp_path / "link-python"
+    link.symlink_to(real_shim)
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", link)
+    assert done.returncode == 0, done.stderr
+    ran = set(log.read_text().split())
+    assert ran == {str(real_shim.resolve())}
+
+
+def test_reuse_branch_refuses_an_interpreter_swapped_after_the_key(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    py = shim(tmp_path / "py.sh", "true")
+    root = tmp_path / "root"
+    first = venv_of(cli(*build_args(lock, root, wheels), "--python", py))
+    args = ["--no-index", "--find-links", str(wheels)]
+    monkeypatch.setattr(sharedvenv, "_after_flock", lambda path: py.write_text(py.read_text() + "# swapped\n"))
+    with pytest.raises(sharedvenv.Refused, match="changed"):
+        sharedvenv.ensure(root, lock, str(py), args, 5)
+    assert first.exists()
+
+
+def test_reuse_refuses_a_venv_whose_python_no_longer_points_at_the_recorded_base(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    other = shutil.which("true")
+    assert other
+    (venv / "bin").chmod(0o755)
+    (venv / "bin" / "python").unlink()
+    (venv / "bin" / "python").symlink_to(other)
+    (venv / "bin").chmod(0o555)
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 2 and done.stdout == ""
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, 1e12])
+def test_numeric_parameters_are_validated_at_the_function_boundary(
+    tmp_path: Path, wheels: Path, lock: Path, bad: float
+) -> None:
+    root = tmp_path / "root"
+    args = ["--no-index", "--find-links", str(wheels)]
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.ensure(root, lock, sys.executable, args, bad)
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.gc(root, 30, True, bad)
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.Lock(root, bad)
+    if not math.isfinite(bad):
+        with pytest.raises(sharedvenv.Refused):
+            sharedvenv.gc(root, 30, False, 5, now=bad)
+    assert not root.exists()
+
+
+SECRET_URLS = [
+    "https://user:tok3n@example.invalid/simple",
+    "https://user:p%40ss-tok3n@example.invalid/simple",
+    "https://user:p@ss-tok3n@example.invalid:8443/simple",
+    "https://user:tok3n@[2001:db8::1]:8443/simple",
+    "HTTPS://USER:tok3n@EXAMPLE.invalid/Simple",
+    "https://example.invalid/simple?token=tok3n",
+    "https://example.invalid/simple#tok3n",
+    "//user:tok3n@example.invalid/simple",
+    "tok3n@example.invalid:wheels",
+    "user:tok3n@example.invalid/simple",
+]
+
+
+@pytest.mark.parametrize("url", SECRET_URLS)
+def test_url_forms_with_secrets_are_detected_and_rebuilt_without_them(url: str) -> None:
+    assert sharedvenv.url_has_secret(url)
+    assert "tok3n" not in sharedvenv.safe_url(url)
+    assert "@" not in sharedvenv.safe_url(url) and "?" not in sharedvenv.safe_url(url)
+
+
+@pytest.mark.parametrize(
+    "value", ["/tmp/wheels", "relative/dir", "/home/a@b/wheels", "https://example.invalid:8443/simple", "./x@y"]
+)
+def test_non_secret_values_pass_through_unchanged(value: str) -> None:
+    assert not sharedvenv.url_has_secret(value)
+    assert sharedvenv.safe_url(value) == value
+
+
+@pytest.mark.parametrize("value", ["https://example.invalid/a b", "https://example.invalid/\tx", "https://[::1/x", ""])
+def test_unusual_url_values_are_refused(value: str) -> None:
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.url_has_secret(value)
+
+
+@pytest.mark.parametrize("url", SECRET_URLS)
+def test_redaction_removes_the_supplied_values_wherever_they_appear(url: str) -> None:
+    sharedvenv.register_secrets(["--index-url", url, "--find-links", url])
+    out = sharedvenv.redact(f"Looking in indexes: {url}\nretry {url}/pkg and done")
+    assert "tok3n" not in out
+
+
+def test_unusual_credential_forms_never_reach_output(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    for flag in ("--index-url", "--find-links"):
+        for url in ("https://user:p@ss-tok3n@example.invalid/s", "HTTPS://u:tok3n@h/x", "u:tok3n@h/x"):
+            done = cli(lock, "--root", tmp_path / "root", flag, url)
+            assert done.returncode == 2 and "tok3n" not in done.stdout + done.stderr
+    args = ["--index-url", "https://user:tok3n@example.invalid/s"]
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.ensure(tmp_path / "root2", lock, sys.executable, args, 5)  # a direct caller cannot skip the refusal
+
+
+def test_pip_arguments_outside_the_allowed_grammar_are_refused(tmp_path: Path, lock: Path) -> None:
+    for args in (
+        ["--extra-index-url", "https://example.invalid"],
+        ["--index-url=https://u:tok3n@h/x"],
+        ["--trusted-host", "h"],
+    ):
+        with pytest.raises(sharedvenv.Refused):
+            sharedvenv.ensure(tmp_path / "root", lock, sys.executable, args, 5)
+
+
+def test_missing_root_components_are_created_one_at_a_time_private(tmp_path: Path) -> None:
+    root = tmp_path / "a" / "b" / "root"
+    sharedvenv.open_root(root).close()
+    for part in (tmp_path / "a", tmp_path / "a" / "b", root):
+        assert part.stat().st_mode & 0o777 == 0o700
+
+
+def test_a_root_component_swapped_for_a_symlink_right_after_creation_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = tmp_path / "elsewhere"
+    real.mkdir(mode=0o700)
+    root = tmp_path / "a" / "root"
+
+    def swap(created: Path) -> None:
+        if created == tmp_path / "a":
+            created.rmdir()
+            created.symlink_to(real)
+
+    monkeypatch.setattr(sharedvenv, "_after_mkdir", swap)
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.open_root(root)
+    assert not (real / "root").exists()
+
+
+def test_ancestor_made_writable_while_the_root_is_created_is_caught_before_returning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "parent"
+    root = parent / "root"
+
+    def open_up(created: Path) -> None:
+        if created == root:
+            parent.chmod(0o777)
+
+    monkeypatch.setattr(sharedvenv, "_after_mkdir", open_up)
+    with pytest.raises(sharedvenv.Refused, match="writable"):
+        sharedvenv.open_root(root)

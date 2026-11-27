@@ -6,8 +6,9 @@
   lock (`pip install --require-hashes --no-deps --only-binary=:all:`, never system site-packages, atomic rename into
   place) and keyed by the lockfile hash, the interpreter identity and the acquisition policy. Prints the interpreter
   path. Strict lockfile grammar, a private copy read through a descriptor, an allowlisted child environment, isolated
-  pip, owner, mode and manifest checks on reuse, root ancestor checks, interpreter binding, redacted
-  messages, validated ages and a stated trust boundary. `--gc --max-age-days N` lists old
+  pip, owner, mode and manifest checks on reuse, root ancestor checks, interpreter binding (resolved
+  once, trusted chain, re-verified on every use), parsed and redacted acquisition URLs, validated numeric parameters
+  and a stated trust boundary. `--gc --max-age-days N` lists old
   venvs it built, `--delete` removes them. Docs: `docs/shared-venv.md`. Tests: `tests/test_sharedvenv.py`.
 - Add CLAUDE.md and AGENTS.md stating the sister-project rule (#565)
 - `scripts/impacted-tests.py` (#535): prints the test files to run for changed files (arguments or `--base BASE`), by naming convention and by the reverse import closure parsed with `ast`, plus five always-run guard tests; exits 3 with `ALL` when a file maps to no test or is config, a workflow or `pyproject.toml`. Never runs repo code. CI stays the judge; agents use it only for targeted runs. Docs: `docs/impacted-tests.md`. Tests: `tests/test_impacted_tests.py`.

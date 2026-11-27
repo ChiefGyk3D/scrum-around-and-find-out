@@ -17,6 +17,7 @@ Exit codes: 0 done, 1 a build or lock failure, 2 a refusal or bad usage.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -29,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -42,13 +44,12 @@ MAX_LOCKFILE = 4 * 1024 * 1024
 LOCK_TIMEOUT = 900.0
 MAX_AGE_DAYS = 36500.0
 MAX_TIMEOUT = 7 * 86400.0
-_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]*@")
-_QUERY = re.compile(r"([?&][^=&\s#]+)=[^&\s#]*")
 IDENTITY_CODE = (
-    "import json,sys,sysconfig\n"
+    "import json,os,sys,sysconfig\n"
     "try:\n    import ensurepip; pip = ensurepip.version()\nexcept Exception:\n    pip = 'none'\n"
     "print(json.dumps([sys.implementation.name, list(sys.version_info[:2]), sys.implementation.cache_tag,"
-    " sysconfig.get_platform(), getattr(sys, 'abiflags', ''), pip]))\n"
+    " sysconfig.get_platform(), getattr(sys, 'abiflags', ''), pip,"
+    " os.path.realpath(getattr(sys, '_base_executable', sys.executable))]))\n"
 )
 
 
@@ -127,31 +128,134 @@ def check_hashes(data: bytes) -> int:
     return count
 
 
+def _analyze(value: str) -> tuple[str, list[str]]:
+    """Parse one index or links value with urllib: the safe form (scheme, host and path only) and its secret parts.
+
+    Userinfo, the whole query and the fragment are secret. Scp-like (`user@host:path`) and bare (`user:pw@host/p`)
+    forms are treated as carrying userinfo. A local path has no secret. Whitespace, control characters, an empty value
+    and an unparsable URL are refused.
+    """
+    if not value or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise Refused("an index or links value is empty or holds whitespace or control characters")
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError as exc:
+        raise Refused("an index or links value is not a valid URL") from exc
+    secrets: list[str] = []
+
+    def userinfo_parts(userinfo: str) -> None:
+        secrets.append(userinfo)
+        password = userinfo.partition(":")[2]
+        if password:
+            secrets.extend([password, urllib.parse.unquote(password)])
+        secrets.append(urllib.parse.unquote(userinfo))
+
+    if parts.netloc:
+        userinfo, at, host = parts.netloc.rpartition("@")
+        if at:
+            userinfo_parts(userinfo)
+        if parts.query:
+            secrets.append(parts.query)
+            secrets.extend(v for _, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if v)
+        if parts.fragment:
+            secrets.append(parts.fragment)
+        return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", "")), [x for x in secrets if x]
+    if value.startswith(("/", ".", "~")) or "@" not in value:
+        return value, []
+    userinfo, _, rest = value.rpartition("@")
+    userinfo_parts(userinfo)
+    return rest, [x for x in secrets if x]
+
+
+def url_has_secret(value: str) -> bool:
+    return bool(_analyze(value)[1])
+
+
+def safe_url(value: str) -> str:
+    return _analyze(value)[0]
+
+
+_REGISTERED: list[tuple[str, str, list[str]]] = []
+_PIP_FLAGS = ("--index-url", "--find-links")
+
+
+def parse_pip_args(pip_args: Sequence[str]) -> list[str]:
+    """Accept only `--no-index`, `--index-url URL` and `--find-links URL`; return the URLs."""
+    urls: list[str] = []
+    items = list(pip_args)
+    i = 0
+    while i < len(items):
+        if items[i] == "--no-index":
+            i += 1
+        elif items[i] in _PIP_FLAGS and i + 1 < len(items):
+            urls.append(items[i + 1])
+            i += 2
+        else:
+            raise Refused("an acquisition argument outside --no-index, --index-url URL and --find-links URL")
+    return urls
+
+
+def register_secrets(pip_args: Sequence[str]) -> None:
+    """Remember the exact URL values the caller supplied so every later message can be scrubbed of them."""
+    for value in parse_pip_args(pip_args):
+        safe, secrets = _analyze(value)
+        if secrets:
+            _REGISTERED.append((value, safe, secrets))
+
+
 def redact(text: str) -> str:
-    """Remove URL userinfo and query values from any text that may be shown."""
-    return _QUERY.sub(r"\1=***", _USERINFO.sub(r"\1***@", text))
+    """Remove the registered secret values, and the secret parts of any other URL-looking token, from shown text."""
+    for value, safe, secrets in _REGISTERED:
+        text = text.replace(value, safe)
+        for secret in sorted(secrets, key=len, reverse=True):
+            text = text.replace(secret, "***")
+    for token in set(text.split()):
+        candidate = token.strip("'\"()<>,;")
+        if "://" not in candidate:
+            continue
+        try:
+            safe, secrets = _analyze(candidate)
+        except Refused:
+            continue
+        if secrets:
+            text = text.replace(candidate, safe)
+            for secret in sorted(secrets, key=len, reverse=True):
+                text = text.replace(secret, "***")
+    return text
 
 
-def has_url_secret(value: str) -> bool:
-    return bool(_USERINFO.search(value) or _QUERY.search(value))
+def check_urls(pip_args: Sequence[str], allow: bool) -> None:
+    for value in parse_pip_args(pip_args):
+        if url_has_secret(value) and not allow:
+            raise Refused("an index or links URL carries credentials or a query token (--allow-url-credentials)")
 
 
-def _check_ancestors(root: Path) -> None:
-    """Every existing ancestor: a plain directory, owned by this user or root, not writable by others (a sticky
-    directory such as /tmp is allowed), and no symbolic link anywhere on the path."""
-    for ancestor in reversed(Path(os.path.abspath(root)).parents):
+def check_timeout(value: float) -> float:
+    if isinstance(value, bool) or not (math.isfinite(value) and 0 <= value <= MAX_TIMEOUT):
+        raise Refused(f"the lock timeout must be a finite number of seconds from 0 to {MAX_TIMEOUT:g}")
+    return value
+
+
+def _check_chain(path: Path, what: str) -> None:
+    """Every existing ancestor of `path`: a real directory (no symbolic link), owned by this user or root, not writable
+    by group or others (a root-owned sticky directory such as /tmp is the one allowed exception)."""
+    for ancestor in reversed(Path(os.path.abspath(path)).parents):
         try:
             info = ancestor.lstat()
         except FileNotFoundError:
             continue
         if stat.S_ISLNK(info.st_mode):
-            raise Refused(f"a symbolic link on the path to the venv root: {ancestor}")
+            raise Refused(f"a symbolic link on the path to {what}: {ancestor}")
         if not stat.S_ISDIR(info.st_mode):
-            raise Refused(f"a non-directory on the path to the venv root: {ancestor}")
+            raise Refused(f"a non-directory on the path to {what}: {ancestor}")
         if info.st_uid not in (os.geteuid(), 0):
-            raise Refused(f"an ancestor of the venv root is owned by another user: {ancestor}")
-        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
-            raise Refused(f"an ancestor of the venv root is writable by group or others: {ancestor}")
+            raise Refused(f"an ancestor of {what} is owned by another user: {ancestor}")
+        if info.st_mode & 0o022 and not (info.st_mode & stat.S_ISVTX and info.st_uid == 0):
+            raise Refused(f"an ancestor of {what} is writable by group or others: {ancestor}")
+
+
+def _check_ancestors(root: Path) -> None:
+    _check_chain(root, "the venv root")
 
 
 class RootHandle:
@@ -172,13 +276,32 @@ class RootHandle:
         os.close(self.fd)
 
 
+def _after_mkdir(path: Path) -> None:
+    """A seam right after a root component is created (replaced by a test)."""
+
+
+def _make_missing(root: Path) -> None:
+    """Create each missing component one at a time (mode 0700), verifying every one by lstat after creating it."""
+    absolute = Path(os.path.abspath(root))
+    missing: list[Path] = []
+    for candidate in (absolute, *absolute.parents):
+        if os.path.lexists(candidate):
+            break
+        missing.append(candidate)
+    for component in reversed(missing):
+        with contextlib.suppress(FileExistsError):  # another agent made it first: verified like our own below
+            os.mkdir(component, 0o700)
+        _after_mkdir(component)
+        info = component.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise Refused(f"a venv root component is not a plain directory of this user: {component}")
+
+
 def open_root(root: Path) -> RootHandle:
     _check_ancestors(root)
     if root.is_symlink():
         raise Refused(f"the venv root is a symbolic link: {root}")
-    if not root.exists():
-        root.parent.mkdir(parents=True, exist_ok=True)
-        root.mkdir(mode=0o700)
+    _make_missing(root)
     info = root.lstat()
     if not stat.S_ISDIR(info.st_mode):
         raise Refused(f"the venv root is not a directory: {root}")
@@ -186,10 +309,16 @@ def open_root(root: Path) -> RootHandle:
         raise Refused(f"the venv root must be owned by this user and not writable by others: {root}")
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     held = os.fstat(fd)
-    if (held.st_dev, held.st_ino) != (info.st_dev, info.st_ino):
-        os.close(fd)
-        raise Refused(f"the venv root changed while it was opened: {root}")
-    return RootHandle(root, fd, (held.st_dev, held.st_ino))
+    handle = RootHandle(root, fd, (held.st_dev, held.st_ino))
+    try:
+        if (held.st_dev, held.st_ino) != (info.st_dev, info.st_ino):
+            raise Refused(f"the venv root changed while it was opened: {root}")
+        _check_ancestors(root)
+        handle.check()
+    except Refused:
+        handle.close()
+        raise
+    return handle
 
 
 def _after_flock(path: Path) -> None:
@@ -204,7 +333,7 @@ class Lock:
     """
 
     def __init__(self, root: Path, timeout: float) -> None:
-        self.path, self.timeout, self.fd = root / ".lock", timeout, -1
+        self.path, self.timeout, self.fd = root / ".lock", check_timeout(timeout), -1
 
     def __enter__(self) -> Lock:
         deadline = time.monotonic() + self.timeout
@@ -262,22 +391,38 @@ def _clean_env(home: Path) -> dict[str, str]:
 
 
 def _exe_signature(resolved: str) -> tuple[str, int, int, int]:
-    """sha256, inode, device and mtime of the interpreter file."""
-    with open(resolved, "rb") as handle:
+    """Open the interpreter file once (no symbolic link), refuse it unless it and every ancestor directory belong to
+    root or this user and are not writable by group or others, and return its sha256, inode, device and mtime."""
+    try:
+        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise Refused(f"the interpreter cannot be opened (a symbolic link or missing?): {resolved}") from exc
+    with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise Refused(f"the interpreter is not a regular file: {resolved}")
+        if info.st_uid not in (os.geteuid(), 0):
+            raise Refused(f"the interpreter is owned by another user: {resolved}")
+        if info.st_mode & 0o022:
+            raise Refused(f"the interpreter is writable by group or others: {resolved}")
+        _check_chain(Path(resolved), "the interpreter")
         digest = hashlib.file_digest(handle, "sha256").hexdigest()
     return digest, info.st_ino, info.st_dev, info.st_mtime_ns
 
 
-def identity(python: str) -> tuple[str, str, list[object]]:
-    """The interpreter as found, its resolved path and what it reports about itself; a missing one is refused."""
+Signature = tuple[str, int, int, int]
+
+
+def identity(python: str) -> tuple[str, Signature, list[object]]:
+    """Resolve the interpreter once to its final real path, record its signature and run ONLY that path."""
     found = shutil.which(python)
     if found is None or not os.access(found, os.X_OK):
         raise Refused(f"the interpreter does not exist or is not executable: {python}")
     resolved = os.path.realpath(found)
+    signature = _exe_signature(resolved)
     try:
         done = subprocess.run(  # noqa: S603 - the resolved interpreter and a fixed argument list, no shell
-            [found, "-I", "-c", IDENTITY_CODE],
+            [resolved, "-I", "-c", IDENTITY_CODE],
             capture_output=True,
             text=True,
             env=_clean_env(Path("/nonexistent")),
@@ -287,28 +432,38 @@ def identity(python: str) -> tuple[str, str, list[object]]:
         report = json.loads(done.stdout.strip().splitlines()[-1])
     except (subprocess.SubprocessError, OSError, ValueError, IndexError) as exc:
         raise Refused(f"the interpreter did not report its identity: {python}") from exc
-    return found, resolved, report
+    return resolved, signature, report
 
 
-def cache_key(lock_sha: str, python: str, pip_args: Sequence[str]) -> tuple[str, str, str, tuple[str, int, int, int]]:
-    """The key, the interpreter as found, its resolved path and its file signature.
+def cache_key(lock_sha: str, python: str, pip_args: Sequence[str]) -> tuple[str, str, Signature, str, Signature]:
+    """The key, the resolved interpreter, its signature, the base interpreter it builds on and that signature.
 
-    The key covers the lockfile hash, the interpreter identity (and the sha256 of its file) and the acquisition policy.
+    The key covers the lockfile hash, the interpreter identity (with the sha256 of its file and of its base) and the
+    acquisition policy.
     """
-    found, resolved, report = identity(python)
-    signature = _exe_signature(resolved)
-    record = {"lock": lock_sha, "python": resolved, "exe": signature[0], "identity": report, "policy": list(pip_args)}
+    resolved, signature, report = identity(python)
+    base = str(report[-1])
+    base_signature = _exe_signature(base)
+    record = {
+        "lock": lock_sha, "python": resolved, "exe": signature[0], "base": [base, base_signature[0]],
+        "identity": report, "policy": list(pip_args),
+    }  # fmt: skip
     key = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return key, found, resolved, signature
+    return key, resolved, signature, base, base_signature
 
 
-def verify_interpreter(resolved: str, signature: tuple[str, int, int, int]) -> None:
-    try:
-        now = _exe_signature(resolved)
-    except OSError as exc:
-        raise Refused("the interpreter changed after its identity was read (unreadable now)") from exc
-    if now != signature:
+def verify_interpreter(resolved: str, signature: Signature) -> None:
+    if _exe_signature(resolved) != signature:
         raise Refused("the interpreter changed after its identity was read")
+
+
+def verify_base(venv: Path, base: str, base_signature: Signature) -> None:
+    """The venv's python must still resolve to the recorded base interpreter, and that file must be unchanged."""
+    real = os.path.realpath(interpreter(venv))
+    if real != base:
+        raise Refused(f"the venv python resolves to {real}, not the recorded base interpreter {base}")
+    if _exe_signature(base) != base_signature:
+        raise Refused("the base interpreter changed after its identity was read")
 
 
 def interpreter(venv: Path) -> Path:
@@ -505,10 +660,20 @@ def _touch_stamp(root: Path, key: str) -> None:
         os.close(fd)
 
 
-def ensure(root: Path, lockfile: Path, python: str, pip_args: Sequence[str], timeout: float) -> Path:
+def ensure(
+    root: Path,
+    lockfile: Path,
+    python: str,
+    pip_args: Sequence[str],
+    timeout: float,
+    allow_url_credentials: bool = False,
+) -> Path:
+    check_timeout(timeout)
+    check_urls(pip_args, allow_url_credentials)
+    register_secrets(pip_args)
     data = read_lockfile(lockfile)
     check_hashes(data)
-    key, found, resolved, signature = cache_key(hashlib.sha256(data).hexdigest(), python, pip_args)
+    key, resolved, signature, base, base_signature = cache_key(hashlib.sha256(data).hexdigest(), python, pip_args)
     handle = open_root(root)
     try:
         with Lock(root, timeout):
@@ -519,15 +684,18 @@ def ensure(root: Path, lockfile: Path, python: str, pip_args: Sequence[str], tim
                 valid(final, key)
             else:
                 verify_interpreter(resolved, signature)  # the file we are about to run is the one we identified
-                build(root, key, data, found, pip_args, handle=handle)
+                build(root, key, data, resolved, pip_args, handle=handle)
                 try:
                     valid(final, key)
                 except Refused:
                     _remove_tree(final)
                     raise
+            verify_interpreter(resolved, signature)
+            verify_base(final, base, base_signature)
             _touch_stamp(root, key)
     finally:
         handle.close()
+    verify_interpreter(resolved, signature)  # immediately before the path is handed back
     return interpreter(final)
 
 
@@ -539,6 +707,9 @@ def check_age(value: float) -> float:
 
 def gc(root: Path, max_age_days: float, delete: bool, timeout: float, now: float | None = None) -> list[str]:
     check_age(max_age_days)
+    check_timeout(timeout)
+    if now is not None and not math.isfinite(now):
+        raise Refused("the reference time must be finite")
     now = time.time() if now is None else now
     lines: list[str] = []
     handle = open_root(root)
@@ -638,9 +809,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pip_args += ["--index-url", args.index_url]
         if args.find_links:
             pip_args += ["--find-links", args.find_links]
-        if not args.allow_url_credentials and any(has_url_secret(v) for v in (args.index_url, args.find_links) if v):
-            raise Refused("an index or links URL carries credentials or a query token (--allow-url-credentials)")
-        print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout))
+        print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout, args.allow_url_credentials))
         return EXIT_OK
     except Refused as exc:
         print(f"safo-shared-venv: refused: {redact(str(exc))}", file=sys.stderr)
