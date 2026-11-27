@@ -10,6 +10,7 @@ import contextlib
 import datetime as dt
 import json
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from geminidata import MODEL, NOW, hard_timeout, pathological
 from hooksdata import agents_file, dispatch, hooks, read_log, set_mode
 from safo.gemini import Locations
 from safo.geminibrief import GEMINI_MATERIAL, GEMINI_PAID, findings
+from safo.geminibrief import __file__ as GUARD_SOURCE
 from safo.hooks import RULES, Verdict, check_dispatch, decide
 
 OK = "id-0123456789ab"
@@ -241,18 +243,40 @@ def test_a_list_item_material_line_counts() -> None:
     assert rules("- gemini: free\n- gemini-material: public\n") == []
 
 
-def _grows_linearly(work: Callable[[int], object], small: int = 2000, big: int = 16_000) -> bool:
-    """Compare an 8x larger input to a small one on the same machine, so a slow or busy runner (or a tracing coverage
-    run on Python 3.11 and 3.12) cannot fail it, which a fixed seconds bound did: linear work costs about 8x, quadratic
-    about 64x."""
-    import time
+def _steps(work: Callable[[int], object], size: int, files: tuple[str, ...]) -> int:
+    """How many Python lines the work runs in the given source files: a count, not a clock, so a slow or busy
+    machine and the interpreter version cannot change it. Work done inside C (a regex) is not counted."""
+    count = 0
 
-    timings = []
-    for size in (small, big):
-        started = time.monotonic()
+    def local(frame: Any, event: str, arg: object) -> Any:
+        nonlocal count
+        if event == "line":
+            count += 1
+        return local
+
+    def tracer(frame: Any, event: str, arg: object) -> Any:
+        return local if frame.f_code.co_filename in files else None
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
         work(size)
-        timings.append(time.monotonic() - started)
-    return timings[1] < 24 * timings[0] + 0.25
+    finally:
+        sys.settrace(previous)
+    return count
+
+
+def _grows_linearly(
+    work: Callable[[int], object],
+    files: tuple[str, ...] = (str(GUARD_SOURCE),),
+    small: int = 1000,
+    big: int = 8000,
+) -> bool:
+    """Count the lines run for an input 8x larger and for a small one: linear work counts about 8x, quadratic about
+    64x. The bound of 24x sits between them and the count is exact, so no clock, runner or interpreter changes it."""
+    low, high = _steps(work, small, files), _steps(work, big, files)
+    assert low > 0, "nothing was counted: the guard is not looking at the code it protects"
+    return high < 24 * low
 
 
 def _quadratic_briefs(size: int) -> None:
@@ -265,8 +289,13 @@ def test_a_quadratic_brief_is_blocked_fast() -> None:
     assert _grows_linearly(_quadratic_briefs)
 
 
+def _quadratic_loop(size: int) -> None:
+    for _ in range(size * size // 8):  # size squared steps, each counted as a line in this file
+        pass
+
+
 def test_the_linear_time_guard_bites_on_quadratic_work() -> None:
-    assert not _grows_linearly(lambda size: sum(1 for _ in range(size * size // 8)))
+    assert not _grows_linearly(_quadratic_loop, (__file__,), small=20, big=160)
 
 
 def test_a_past_deadline_fails_closed() -> None:
