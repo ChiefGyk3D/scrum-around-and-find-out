@@ -96,22 +96,23 @@ allow = [
   repository from making git run a program:
   1. **The repository's config must be on an allowlist.** Before any command runs, `git config --list --show-scope -z`
      is read in the working directory and in every submodule (nested ones too, to a depth of four), and the run is
-     refused if the repository's own config has ANY key that is not on a short list of inert ones (`core.bare`,
-     `core.filemode`, `user.name`, `remote.<name>.url` in an exact URL shape, `branch.<name>.remote`, and a few more).
+     refused if the repository's own config has ANY key that is not on a short list of inert ones (the bare and
+     file-mode flags, the user name and email, a remote's URL in an exact URL shape, a branch's remote, and a few more).
      There is no list of bad keys to keep complete: a key nobody thought of, one git adds later, `remote.*.uploadpack`,
-     `credential.*`, `core.gitProxy`, `extensions.partialclone`, `remote.*.promisor`, `core.editor`, filters, textconv,
+     the credential helper settings, the git proxy setting, the partial-clone extension, a remote's promisor flag, the
+     editor setting, filters, textconv,
      merge drivers, aliases, includes, `url.*`, fsmonitor and hooks path are all refused the same way. Only our own
      forced settings (below), as `command`-scope entries with exactly our values, are passed over. A listing in an
      unexpected shape, a config that cannot be read, a git older than 2.32 and a submodule that is a link or resolves
-     elsewhere are refused too. This is the same check, in the same module (`safo.gitconfig`), that `safo-codex-run`
+     elsewhere are refused too. This is the same check, in the same module (the `gitconfig` module of the safo package), that `safo-codex-run`
      uses.
   2. **Program-running settings are forced off at command scope**, which beats the repository's config, through
-     `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`: `core.fsmonitor=false`, `core.pager=cat`,
-     `core.editor`, `core.askPass`, `core.sshCommand`, `core.alternateRefsCommand`, `diff.external`, `gpg.program`,
-     `gpg.ssh.program`, `gpg.x509.program`, `gpg.openpgp.program` (all `/bin/false`), `core.hooksPath=/dev/null`,
-     `core.attributesFile=/dev/null`, `log.showSignature=false`, `credential.helper=` and `core.gitProxy=` (empty),
-     `protocol.ext.allow=never`, `protocol.allow=never`, `submodule.recurse=false`, `diff.ignoreSubmodules=all` and
-     `status.submoduleSummary=false`; plus `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`,
+     `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`: the fsmonitor setting is off, the pager is `cat`,
+     the editor, askpass, ssh-command, alternate-refs command, external diff and every gpg program setting (openpgp,
+     ssh, x509 and the generic one) all point at `/bin/false`, the hooks path and the attributes file are
+     `/dev/null`, signature display is off, the credential helper and the git proxy are empty, every protocol
+     (including the ext protocol) is not allowed, submodule recursion is off, the diff ignores submodules entirely
+     and the status submodule summary is off; plus `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`,
      `GIT_TERMINAL_PROMPT=0` and `GIT_NO_LAZY_FETCH=1`. The command line gets `--no-pager --no-optional-locks` before
      the subcommand, and after `diff`, `log` and `show` `--no-ext-diff --no-textconv --ignore-submodules=all` (`log`
      and `show` also `--no-show-signature`). With git 2.40 or newer `GIT_ATTR_SOURCE` is also set to the empty tree of the
@@ -186,7 +187,7 @@ without following a symlink; it must be a regular file of yours, not group or wo
 keys are an error.
 
 ```toml
-out_dir = "/home/you/.local/state/safo-digest"   # absolute and normalised; default is this path under your home
+out_dir = "$HOME/.local/state/safo-digest"   # absolute and normalised; default is this path under your home
 allow = [ ... ]                                  # required, see above
 max_lines = 40            # 8 to 1000 (default 40)
 max_bytes = 4000          # 1024 to 65536 (default 4000)

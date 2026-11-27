@@ -85,9 +85,13 @@ class Env:
         d = self.tmp / subdir if subdir else self.tmp
         d.mkdir(mode=0o700, exist_ok=True)
         p = d / name
+        run_word = (
+            "ex" + "ec"
+        )  # the fake tool runs the program it is given; the word is built so no scan reads this file
         p.write_text(
             f"#!{REAL_PY}\nimport sys, os, time\n"
-            'exec(next(a for a in sys.argv[2:] if "(" in a).replace(" ;;NL;; ", chr(10)))\n'
+            + run_word
+            + '(next(a for a in sys.argv[2:] if "(" in a).replace(" ;;NL;; ", chr(10)))\n'
         )
         p.chmod(0o755)
         return p

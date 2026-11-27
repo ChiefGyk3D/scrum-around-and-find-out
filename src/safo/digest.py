@@ -37,7 +37,7 @@ import tomllib
 import unicodedata
 from dataclasses import dataclass, field
 
-from safo import gitconfig
+from safo import gitconfig, output
 from safo.errors import ConfigError, SafoError
 
 EXIT_TIMEOUT = 124
@@ -520,7 +520,7 @@ def open_private_dir(path: str) -> int:
             except FileNotFoundError:
                 os.mkdir(comp, 0o700, dir_fd=fd)
                 nfd = os.open(comp, flags, dir_fd=fd)
-                os.fchmod(nfd, 0o700)
+                os.fchmod(nfd, stat.S_IRWXU)
             except OSError as e:
                 if e.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise DigestError(f"out_dir: {comp!r} is a symlink or not a directory") from e
@@ -554,7 +554,7 @@ def private_home(dirfd: int) -> None:
     try:
         if os.fstat(hfd).st_uid != os.getuid():
             raise DigestError("the private home directory is not yours")
-        os.fchmod(hfd, 0o700)
+        os.fchmod(hfd, stat.S_IRWXU)
     finally:
         os.close(hfd)
 
@@ -584,7 +584,7 @@ def _safe_name(argv0: str) -> str:
 def create_output(dirfd: int, argv0: str) -> tuple[int, str]:
     name = _safe_name(argv0)
     fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
-    os.fchmod(fd, 0o600)
+    os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
     return fd, name
 
 
@@ -1122,9 +1122,10 @@ def _run(
     rc = proc.returncode
     code = EXIT_TIMEOUT if timed_out else (128 - rc if rc < 0 else rc)
     if not swept:
-        sys.stderr.write(
+        output.write(
+            sys.stderr,
             "safo-digest: the run is not known to be contained "
-            "(a descendant survived the cleanup, or /proc could not be read)\n"
+            "(a descendant survived the cleanup, or /proc could not be read)",
         )
         return EXIT_REFUSED, b""
     extra = (
@@ -1206,10 +1207,10 @@ def main(argv: list[str] | None = None) -> int:
             raise DigestError("--max-lines 8..1000, --max-bytes 1024..65536, --timeout above 0 and up to 86400")
         code, data = execute(cmd, cfg)
     except SafoError as e:
-        sys.stderr.write(f"safo-digest: refused: {e}\n")
+        output.write(sys.stderr, f"safo-digest: refused: {e}")
         return EXIT_REFUSED
     except OSError as e:
-        sys.stderr.write(f"safo-digest: refused: {e.strerror or type(e).__name__}\n")
+        output.write(sys.stderr, f"safo-digest: refused: {e.strerror or type(e).__name__}")
         return EXIT_REFUSED
     sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()

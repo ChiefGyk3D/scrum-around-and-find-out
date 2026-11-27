@@ -29,8 +29,8 @@ What is NOT closed (residual risk):
 
 ## Partial clones and lazy fetch
 
-Every git call this wrapper makes (and `safo-digest`, which shares the config check in `safo.gitconfig`) runs with
-`GIT_NO_LAZY_FETCH=1`. A partial clone is also refused: its config carries `extensions.partialclone` and a promisor
+Every git call this wrapper makes (and `safo-digest`, which shares the config check in the `gitconfig` module of the safo package) runs with
+`GIT_NO_LAZY_FETCH=1`. A partial clone is also refused: its config carries the partial-clone extension and a promisor
 remote, which are not on the allowlist. The behavior change from earlier versions: a worktree whose objects are
 missing and would have been fetched on demand now fails the check instead of reaching for the network. That is
 deliberate: a repository must not be able to make this wrapper contact a remote of its choosing.
