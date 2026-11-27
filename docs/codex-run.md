@@ -6,14 +6,16 @@ What is checked and closed:
 
 - The worktree and its linked git directory must be ours, below the account home, and not writable by others.
 - The repository config, and the config of every submodule (nested ones too, to a fixed depth), must not set a key that
-  starts a program (a filter, a textconv, an alias, an include, an ssh command and the like). A symlinked submodule
-  path is refused.
+  starts a program (a filter, a textconv, an alias, an include, an ssh command and the like) or changes the allowed
+  transports (any `protocol.*` key). A symlinked submodule path is refused.
 - For the implementer class the tree must be clean. The check runs `git status` against a private git directory that
   holds only a copy of the index, the object store and a fixed config, so nothing the repository can change after the
   config check is read by that call. An index that marks files assume-unchanged or skip-worktree is refused, because
   git never compares those files with the working tree.
 - Codex itself starts with a scrubbed git environment: no system or global config, and command-scope settings that
-  turn off fsmonitor and hooks and forbid network and `ext::` transports.
+  turn off fsmonitor and hooks and forbid network and `ext::` transports. These settings are a default, not an
+  absolute: a more specific repository key could override them, which is why the pre-run check refuses `protocol.*`
+  keys, and a key written after that check is the residual risk below.
 
 What is NOT closed (residual risk):
 

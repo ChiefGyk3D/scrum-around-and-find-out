@@ -302,6 +302,21 @@ def test_a_program_key_in_the_repository_config_is_refused_and_never_runs(
     refused(world, go(world, "review"))
 
 
+@pytest.mark.parametrize("key", ["protocol.ssh.allow", "protocol.file.allow", "Protocol.Ext.Allow", "protocol.allow"])
+def test_a_protocol_key_in_the_repository_config_is_refused_and_never_runs(
+    world: World, tmp_path: Path, key: str
+) -> None:
+    marker = hostile_script(tmp_path)
+    git(world.dev / "repo", "config", key, "always")
+    refused(world, go(world, "implementer"))
+    assert not marker.exists()
+    refused(world, go(world, "review"))
+
+
+def test_a_clean_repository_config_still_passes(world: World) -> None:
+    assert go(world, "implementer") == 0
+
+
 def add_submodule(world: World, tmp_path: Path) -> Path:
     """A committed, initialized submodule `sub` in the worktree; returns its working folder."""
     upstream = tmp_path / "upstream"

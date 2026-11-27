@@ -33,7 +33,7 @@ What it does, in order, and stops at the first refusal with NO codex call (exit 
    owned by this user or root and not writable by group or other (a sticky folder such as /tmp passes when root or
    we own it). The config file itself must be ours and not group or world writable.
    Git runs (worktree checks) with the global and system config and attributes switched off, `core.hooksPath` at
-   /dev/null, `core.fsmonitor` off, `protocol.allow` never and no optional locks. The worktree's `.git` file must name
+   /dev/null, `core.fsmonitor` off, `protocol.allow` never (a default; the repository's own `protocol.*` keys are refused) and no optional locks. The worktree's `.git` file must name
    a `<main>/.git/worktrees/<name>` folder outside the worktree, below the home, ours, that names the worktree back.
    A repository whose own config sets a filter, textconv, include, alias, URL rewrite or similar program key is
    refused. Then it starts codex by an absolute path, no shell, with an allow-list environment (a fixed PATH plus the
@@ -358,7 +358,7 @@ GIT_HARDENING = (
 )
 # Keys of the repository's own config that can start a program or redirect git in ways the options above do not cover
 # (a content filter named by an attributes file, a textconv, an include of another file, a URL rewrite, an alias).
-DANGEROUS_CONFIG_PREFIXES = ("filter.", "include.", "includeif.", "alias.", "url.", "credential.")
+DANGEROUS_CONFIG_PREFIXES = ("filter.", "include.", "includeif.", "alias.", "url.", "credential.", "protocol.")
 DANGEROUS_CONFIG_SUFFIXES = (".textconv", ".clean", ".smudge", ".process", ".command", ".external")
 DANGEROUS_CONFIG_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.askpass", "core.gitproxy")
 
@@ -729,7 +729,9 @@ def child_env(home: str, codex: str, node: str | None, codex_home: str, scratch:
 
     The git settings here close what the wrapper can close for the git that codex starts itself: no system or global
     config, and command-scope settings (they beat the repository's config) that turn off fsmonitor and hooks and forbid
-    network and `ext::` transports. RESIDUAL, not closed: the repository config is read by that git at run time, and a
+    network and `ext::` transports. A per-transport `protocol.<name>.allow` key in the repository config would beat
+    the general `protocol.allow` setting, so the pre-run check refuses every repository `protocol.*` key; this is not
+    absolute for a config written after that check. RESIDUAL, not closed: the repository config is read by that git at run time, and a
     `filter.*` / `diff.*.textconv` program cannot be forbidden by name in advance. A process that can write the
     repository config WHILE codex runs can therefore still get a program started. The checks before the run cover the
     config as it was then (see docs/codex-run.md)."""
