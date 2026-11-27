@@ -22,7 +22,9 @@ per-task, per-model table and the ROUTING TABLE) and, with `--calibrate N`, `cal
 How a call is made: `llm-local --task eval-<task> --model <m> --wait 120 --envelope "<prompt>"`, stdin always
 `/dev/null`, one call at a time. Exit 75 (queue busy) is retried four times with a doubling backoff, then recorded as
 `busy`: not an error, and left out of the pass rate. Any other failure is recorded as `failed`, counted as not passed
-and never hidden. Tokens per second come from the `llm-local` call log (`eval_tokens / seconds`) when it is there.
+and never hidden. That includes `llm-local` exit 3 (the server truncated the prompt) and exit 4 (the prompt is over the
+model's input cap; see [Local LLM](local-llm.md)): the record's `error` starts with `exit 3` or `exit 4`, and there is no
+output to score. `--force-size` is never passed. Tokens per second come from the `llm-local` call log (`eval_tokens / seconds`) when it is there.
 
 ## What is scored
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Docs sweep (#543): `docs/local-llm.md` now describes the `llm-local` wrapper (attribution fields, caps, exit codes 3, 4 and 75, outcome logging); `docs/local-draft.md`, `docs/local-eval.md`, `docs/board-kind.md` (`reconcile --closed-only`), `docs/usage.md` (`safo spend`) and `docs/hooks.md` (the `TOP_LEVEL_COMMANDS` rule) match merged behavior.
 - `safo spend` (#510, epic #428): a read-only weekly token-spend report from the Claude transcripts, the Codex sessions
   (counted apart, never added), the `llm-local` calls log, the hook log and the `safo-draft` local-share log. Weighted
   spend by pool (lead, agents by type), cache-read and output shares, weighted tokens per lead turn and the share past

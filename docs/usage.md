@@ -98,6 +98,11 @@ Model and prompt shape: `gemma4:12b` at 131072 for longer inputs and `qwen3.5:4b
 (`local-llm: step N drafts X with llm-local; agent verifies every claim`) belongs to the DoIA and dotfiles brief
 template, not to this repository.
 
+## Spend report
+
+`safo spend [--week ISO-WEEK|all] [--baseline PATH] [--json PATH]` is the weekly weighted token-spend report with a stored
+baseline: read-only, counts only. Weights, inputs, the baseline file and bounds are in [Spend report](spend-report.md).
+
 ## Routing
 
 `safo route <shape>` applies the rules in `agents.yaml` (see [Routing](routing.md), generated from it) to the live headroom:

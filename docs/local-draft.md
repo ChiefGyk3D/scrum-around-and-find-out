@@ -223,5 +223,5 @@ same counts per project. A `fact-error` mark replaces the earlier outcome of the
 | 13 | `gh` failed when filing or commenting (nonzero exit; the message has gh's own code and text) |
 | 75 | local queue still busy after the retries |
 
-Any other code is the `llm-local` exit code passed through, so a passed-through 10, 11, 12 or 13 is ambiguous: read the
+Any other code is the `llm-local` exit code passed through (3 when the server truncated the prompt, 4 when the prompt is over the model's cap; see [Local LLM](local-llm.md)), so a passed-through 10, 11, 12 or 13 is ambiguous: read the
 message. A failing `gh` is always 13, never gh's own code. The table is also in `safo-draft --help`. Before this change a decline exited 1.

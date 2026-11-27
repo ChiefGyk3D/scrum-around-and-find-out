@@ -85,6 +85,46 @@ can push a resident out of memory. The guard exists so a convenience call can ne
 - **Multi-GPU NVIDIA hosts:** Ollama's Vulkan backend ignored `CUDA_VISIBLE_DEVICES` and spilled models onto the wrong card
   until `OLLAMA_VULKAN=0` was set. Check `/api/ps` on each instance to see where models actually live.
 
+## The `llm-local` wrapper
+
+Every local call goes through `llm-local`, the maintainer's own wrapper around the Ollama endpoint. It lives in the
+maintainer's dotfiles, not in this repository; the details below are what its code and `--help` say, and the
+repository reads its log (`safo local report`, `safo spend`, `safo-eval`, `safo-draft`).
+
+- **A task label is required** for a real call (`--task`, at most 64 characters).
+  Run it with stdin from `/dev/null`: it hangs on an open stdin, and a piped stdin is appended to the prompt.
+- **Attribution fields.** Each log row carries `project`, `caller` and `dispatch`: the flags `--project`, `--caller`
+  and `--dispatch`, else `LLM_LOCAL_PROJECT`, `LLM_LOCAL_CALLER` and `LLM_LOCAL_DISPATCH`; for `project` only, else
+  the git repository of the current directory (`owner/name` from its origin remote, or the folder name), else
+  `none`. A value is 1 to 80 characters of letters, digits, dot, dash, underscore and slash; anything else is logged as
+  `invalid` and the call still runs. `--stats` adds a by-project count. No prompt text, path or host name goes into a
+  row.
+- **Character and token caps.** A model with `max_input_tokens` or `max_input_chars` in its config table refuses a
+  larger prompt before anything is sent; the stricter cap wins. Built in: `qwen3.5:4b` 6000 tokens and 11000
+  characters, `gemma4:12b` 115000 characters. The character cap exists because dense log and diff text runs near 1.8
+  characters per token, so a token estimate under-counts it. `--force-size` sends it anyway. With no `--model`, a prompt
+  over 3500 estimated tokens goes to `gemma4:12b`, else `qwen3.5:4b`.
+- **Truncation guard.** If the reply shows the server cut the prompt, the answer is not printed (see exit 3).
+  `--no-truncation-guard` (or `LLM_LOCAL_TRUNC_GUARD=0`) turns the judgment off for cached or padded prompts.
+- **Exit codes.**
+
+| code | meaning |
+| --- | --- |
+| 0 | ok |
+| 1 | an outcome could not be recorded |
+| 2 | usage, config, input or server error |
+| 3 | the server truncated the prompt; no answer is printed |
+| 4 | the prompt is over the model's input cap; refused before sending |
+| 75 | busy: the queue is full, not an outage; retry, or pass `--wait SECONDS` to poll for a slot first |
+| 130 | interrupted |
+
+  Failed and busy calls are logged with their exit code and a reason class (`truncated`, `over-cap`, and so on),
+  never with the prompt or the answer.
+- **Outcome logging.** Each call prints `llm-local: call id ID` on stderr (`--envelope` prints
+  `{"call_id", "model", "response"}` as JSON instead of the bare answer). Afterwards record what was done with the
+  answer: `llm-local --outcome ID accepted|rewritten|discarded|fact-error`. `safo local report` joins these rows to the
+  calls by id; the latest outcome of a call wins. See [Usage](usage.md) and [Local drafts](local-draft.md).
+
 ## Retrieval (RAG) on the free endpoint
 
 Retrieval-augmented generation fits the endpoint that is not shared with production: embed a body of text once, find the
