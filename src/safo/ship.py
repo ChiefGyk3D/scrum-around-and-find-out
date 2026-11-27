@@ -68,6 +68,7 @@ USES_TOKEN = re.compile(r"(?<![\w-])uses(?![\w-])")  # the simple second scan: e
 COMMENT = re.compile(r"(?:^|[ \t])#.*$", re.MULTILINE)
 MAX_WORKFLOW_BYTES = 262144  # a workflow file larger than this is not read
 MAX_FILES = 20  # workflow files read for one gate
+RECOVERY_SECONDS = 30.0  # the read that settles what a merge call did may run this long past the deadline
 TOO_MANY = "too many references or nesting too deep to verify"
 PINNED_REF = re.compile(r"[^@\s]+@[0-9a-f]{40}")
 DOCKER_DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
@@ -149,6 +150,7 @@ class Result:
     word: str
     detail: str = ""
     extra: list[str] = field(default_factory=list)
+    retry: bool = False  # the base branch moved: the whole verification starts again (once), nothing was merged
 
 
 @dataclass(frozen=True)
@@ -398,10 +400,11 @@ class Watcher:
     ):
         self.protect_paths = tuple(protect_paths)
         self.best_effort_threads = best_effort_threads
-        self.conversation_ok: set[tuple[str, str]] = set()
+        self.tip0 = ""  # the base tip every check of this attempt was read against
+        self.pin = ""
+        self.chain: tuple[list[str], dict[str, int], str, PrCtx] | None = None
         self.gate_app, self.total_deadline = gate_app, total_deadline
         self.gate_workflow = gate_workflow
-        self.gate_paths: dict[tuple[str, str], str] = {}
         self.last_base = ""
         self.deadline: float | None = None
         self.noticed = False
@@ -459,15 +462,13 @@ class Watcher:
         that the base branch holds. Anything else is an error: the gate's identity is never guessed."""
         if self.gate_workflow:
             return self.gate_workflow
-        if (repo, base) not in self.gate_paths:
-            code, out, err = self.gh.gh_call(*contents_args(repo, ".github/workflows", base), "--jq", ".[].path")
-            if code != 0:
-                raise ShipError(EXIT_ERROR, f"cannot list the workflows of {base}: {err.strip()[:200]}")
-            found = [p for p in out.split() if p in (".github/workflows/ci.yml", ".github/workflows/ci.yaml")]
-            if len(found) != 1:
-                raise ShipError(EXIT_ERROR, "cannot tell which workflow file is the gate: pass --gate-workflow PATH")
-            self.gate_paths[(repo, base)] = found[0]
-        return self.gate_paths[(repo, base)]
+        code, out, err = self.gh.gh_call(*contents_args(repo, ".github/workflows", base), "--jq", ".[].path")
+        if code != 0:
+            raise ShipError(EXIT_ERROR, f"cannot list the workflows of {base}: {err.strip()[:200]}")
+        found = [p for p in out.split() if p in (".github/workflows/ci.yml", ".github/workflows/ci.yaml")]
+        if len(found) != 1:
+            raise ShipError(EXIT_ERROR, "cannot tell which workflow file is the gate: pass --gate-workflow PATH")
+        return found[0]
 
     def gate_run(
         self,
@@ -544,6 +545,24 @@ class Watcher:
             )
         if str(data["headRefOid"]) != pin:
             return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {data['headRefOid']}")
+        tip = self.base_tip(repo, base)
+        if tip != self.tip0:  # every check was read against another tip: they all have to be read again
+            return Result(
+                EXIT_MERGE_REFUSED,
+                "MERGE-REFUSED",
+                f"the base branch tip moved from {self.tip0[:12]} to {tip[:12]} after the checks",
+                retry=True,
+            )
+        return None
+
+    def regate(self, repo: str, pin: str) -> Result | None:
+        """The gate again, right before the merge: a rerun or a new failed run after it was verified is a stop."""
+        if self.chain is None:
+            raise ShipError(EXIT_ERROR, "no gate was verified for this pull request")
+        required, apps, gate_path, ctx = self.chain
+        why = self.verify_sources(repo, pin, required, apps, gate_path, ctx)
+        if why:
+            return Result(EXIT_CI_FAILED, "CI-FAILED", f"the gate changed after it was verified: {why}")
         return None
 
     def workflow_stop(self, repo: str, pin: str, base: str) -> Result | None:
@@ -851,6 +870,9 @@ class Watcher:
                 required, apps = self.required(repo, base)  # per call: nothing carries over from another PR
                 gate_path = self.gate_path(repo, base)
                 ctx = PrCtx(number, base, str(data.get("headRefName") or ""))
+                self.chain = (required, apps, gate_path, ctx)
+                if not self.tip0:  # the base tip is pinned before any check is judged
+                    self.tip0 = self.base_tip(repo, base)
             checks = parse_checks(data.get("statusCheckRollup"))
             verdict = judge(checks, required)
             if verdict.state == "green":
@@ -919,40 +941,46 @@ class Watcher:
     # merge
 
     def merge(self, repo: str, number: int, pin: str) -> Result:
+        """One merge call, never retried here: when the base moved ("Base branch was modified") the caller starts the
+        whole verification again. Every call stays under the per-PR deadline; only the read that settles what a merge
+        call did gets a small separate allowance (RECOVERY_SECONDS), and no second merge call starts after it."""
         flag = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}[self.method]
         argv = ["pr", "merge", str(number), "-R", repo, flag, "--match-head-commit", pin]
         if self.delete_branch:
             argv.append("--delete-branch")
-        for attempt in (1, 2):
-            try:
-                code, _out, err = self.gh.gh_call(*argv)
-            except ShipError as error:
-                if error.code == EXIT_TIMEOUT and "timed out" in str(error):  # the call ran and was cut off
-                    raise ShipError(
-                        EXIT_TIMEOUT, f"{error}; the merge may have been applied: read the pull request"
-                    ) from None
-                raise
-            self.gh.limit = None  # the merge call ran: its read-back and classification are not cut off
-            if code == 0:
-                break
-            if attempt == 1 and "base branch was modified" in err.lower():
-                left = None if self.deadline is None else self.deadline - self.clock()
-                if left is not None and left <= 0:  # no second attempt after the deadline
-                    return Result(EXIT_TIMEOUT, "TIMEOUT", "the base branch moved and the time is up")
-                self.sleep(self.interval if left is None else min(self.interval, left))
-                if self.deadline is not None and self.clock() >= self.deadline:
-                    return Result(EXIT_TIMEOUT, "TIMEOUT", "the base branch moved and the time is up")
-                moved = self.view(repo, number)
-                if str(moved["headRefOid"]) != pin:
-                    return Result(
-                        EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {moved['headRefOid']}"
-                    )
-                continue
-            return self.refused(repo, number, pin, err)
-        state = self.view(repo, number).get("state")
-        if state != "MERGED":
-            return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", f"merge accepted but the read-back says {state}")
-        return Result(EXIT_MERGED, "MERGED", f"head={pin[:12]}")
+        try:
+            code, _out, err = self.gh.gh_call(*argv)
+        except ShipError as error:
+            if error.code == EXIT_TIMEOUT and "timed out" in str(error):  # the call ran and was cut off
+                self.recovery_window()
+                try:
+                    if self.view(repo, number).get("state") == "MERGED":
+                        return Result(
+                            EXIT_MERGED, "MERGED", f"head={pin[:12]} (the merge call timed out, read-back says so)"
+                        )
+                except ShipError:
+                    pass
+                raise ShipError(
+                    EXIT_TIMEOUT, f"{error}; the merge may have been applied: read the pull request"
+                ) from None
+            raise
+        if code == 0:
+            self.recovery_window()
+            state = self.view(repo, number).get("state")
+            if state != "MERGED":
+                return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", f"merge accepted but the read-back says {state}")
+            return Result(EXIT_MERGED, "MERGED", f"head={pin[:12]}")
+        if "base branch was modified" in err.lower():
+            moved = self.view(repo, number)
+            if str(moved["headRefOid"]) != pin:
+                return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {moved['headRefOid']}")
+            return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", "Base branch was modified", retry=True)
+        return self.refused(repo, number, pin, err)
+
+    def recovery_window(self) -> None:
+        """After a merge call ran, the read that settles its outcome may use RECOVERY_SECONDS beyond the deadline."""
+        if self.gh.limit is not None:
+            self.gh.limit = max(self.gh.limit, self.clock() + RECOVERY_SECONDS)
 
     def refused(self, repo: str, number: int, pin: str, err: str) -> Result:
         """A merge gh refused: a head that moved since the pin is HEAD-MOVED with the new sha, else a plain refusal."""
@@ -1049,67 +1077,102 @@ class Watcher:
                 break
         return Result(EXIT_TIMEOUT, "TIMEOUT", f"update-branch accepted but the head stayed {pin[:12]}")
 
-    def one_queued(self, repo: str, number: int, expect: str = "") -> Result:
+    def queued_attempt(self, repo: str, number: int, expect: str, deadline: float) -> Result:
+        first = self.pinned_view(repo, number, expect, deadline) if expect else self.view(repo, number)
+        if isinstance(first, Result):
+            return first
+        pin = self.pin = str(first["headRefOid"])
+        updated = False
+        data = first
+        while True:
+            if (stop := self.conflicting(data)) is not None:
+                return stop
+            if data.get("mergeStateStatus") == "BEHIND" and not updated and data.get("state") == "OPEN":
+                updated = True
+                new = self.update_branch(repo, number, pin, str(data.get("baseRefName") or ""), deadline)
+                if isinstance(new, Result):
+                    return new
+                pin = self.pin = new
+            ended = self.wait_ci(repo, number, pin, deadline)
+            if ended is not None:
+                return ended
+            data = self.view(repo, number)
+            if str(data["headRefOid"]) != pin:
+                return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {data['headRefOid']}")
+            if (stop := self.conflicting(data)) is not None:
+                return stop
+            if data.get("mergeStateStatus") == "BEHIND":
+                if updated:
+                    return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", "still behind the base after one update-branch")
+                continue  # the loop head updates once and waits for CI on the new head
+            break
+        return self.finish(repo, number, pin, deadline)
+
+    def plain_attempt(self, repo: str, number: int, expect: str, deadline: float) -> Result:
+        pin = self.pin = expect or str(self.view(repo, number)["headRefOid"])
+        ended = self.wait_ci(repo, number, pin, deadline)
+        if ended is not None:
+            return ended
+        return self.finish(repo, number, pin, deadline)
+
+    def finish(self, repo: str, number: int, pin: str, deadline: float) -> Result:
+        """Everything after CI is green, then the merge. A Result with `retry` set means the base moved and nothing was
+        merged: the caller verifies the whole chain again, against the new base."""
+        ended = self.await_review(repo, number, pin, deadline)
+        if ended is not None:
+            return ended
+        base = self.last_base
+        stop = self.base_moved(repo, number, pin, base) or self.workflow_stop(repo, pin, base)
+        if stop is not None:
+            return stop
+        open_threads = self.threads(repo, number)
+        if open_threads:
+            return Result(
+                EXIT_THREADS,
+                "THREADS",
+                f"{len(open_threads)} unresolved review thread(s)",
+                [line for t in open_threads for line in t.lines()],
+            )
+        # as close to the merge as possible, and every time: nothing is remembered from an earlier pull request
+        stop = (
+            self.require_conversation(repo, base) or self.regate(repo, pin) or self.base_moved(repo, number, pin, base)
+        )
+        if stop is not None:
+            return stop
+        return self.merge(repo, number, pin)
+
+    def run_chain(
+        self, repo: str, number: int, expect: str, attempt: Callable[[str, int, str, float], Result]
+    ) -> Result:
+        """Run the verification chain under one per-PR deadline. When the base moved (retry), the chain runs again from
+        the start, once, on the same head; never a second merge call inside one pass."""
         try:
-            started = self.clock()
-            deadline = started + self.timeout
+            deadline = self.clock() + self.timeout
             if self.total_deadline is not None:
                 deadline = min(deadline, self.total_deadline)
             self.deadline, self.gh.limit = deadline, deadline  # every gh call is capped by what is left of this PR
-            first = self.pinned_view(repo, number, expect, deadline) if expect else self.view(repo, number)
-            if isinstance(first, Result):
-                return first
-            pin = str(first["headRefOid"])
-            updated = False
-            data = first
-            while True:
-                if (stop := self.conflicting(data)) is not None:
-                    return stop
-                if data.get("mergeStateStatus") == "BEHIND" and not updated and data.get("state") == "OPEN":
-                    updated = True
-                    new = self.update_branch(repo, number, pin, str(data.get("baseRefName") or ""), deadline)
-                    if isinstance(new, Result):
-                        return new
-                    pin = new
-                ended = self.wait_ci(repo, number, pin, deadline)
-                if ended is not None:
-                    return ended
-                data = self.view(repo, number)
-                if str(data["headRefOid"]) != pin:
-                    return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {data['headRefOid']}")
-                if (stop := self.conflicting(data)) is not None:
-                    return stop
-                if data.get("mergeStateStatus") == "BEHIND":
-                    if updated:
-                        return Result(
-                            EXIT_MERGE_REFUSED, "MERGE-REFUSED", "still behind the base after one update-branch"
-                        )
-                    continue  # the loop head updates once and waits for CI on the new head
-                break
-            ended = self.await_review(repo, number, pin, deadline)
-            if ended is not None:
-                return ended
-            base = self.last_base
-            stop = self.base_moved(repo, number, pin, base) or self.workflow_stop(repo, pin, base)
-            stop = stop or self.require_conversation(repo, base)
-            if stop is not None:
-                return stop
-            open_threads = self.threads(repo, number)  # the last thread read before the merge call
-            if open_threads:
-                return Result(
-                    EXIT_THREADS,
-                    "THREADS",
-                    f"{len(open_threads)} unresolved review thread(s)",
-                    [line for t in open_threads for line in t.lines()],
-                )
-            stop = self.base_moved(repo, number, pin, base)  # the base is checked again right before the merge
-            if stop is not None:
-                return stop
-            return self.merge(repo, number, pin)
+            for round_ in (1, 2):
+                self.tip0, self.chain, self.last_base = "", None, ""
+                result = attempt(repo, number, expect, deadline)
+                if not result.retry:
+                    return result
+                expect = self.pin
+                left = deadline - self.clock()
+                if round_ == 2 or left <= 0:
+                    return Result(
+                        EXIT_MERGE_REFUSED,
+                        "MERGE-REFUSED",
+                        f"{result.detail}; the base moved again: nothing was merged",
+                    )
+                self.sleep(min(self.interval, left))
+            raise ShipError(EXIT_ERROR, "unreachable")
         except ShipError as error:
             return Result(error.code, "TIMEOUT" if error.code == EXIT_TIMEOUT else "ERROR", str(error))
         finally:
             self.deadline, self.gh.limit = None, None
+
+    def one_queued(self, repo: str, number: int, expect: str = "") -> Result:
+        return self.run_chain(repo, number, expect, lambda r, n, e, d: self.queued_attempt(r, n, e, d))
 
     def require_conversation(self, repo: str, base: str) -> Result | None:
         """A stop (exit 9) unless branch protection of `base` requires conversation resolution, read structurally; an
@@ -1122,8 +1185,6 @@ class Watcher:
                     "NOTICE --best-effort-threads: the thread check is best-effort; a thread opened between its read "
                     f"and the merge call on {base} is not stopped"
                 )
-            return None
-        if (repo, base) in self.conversation_ok:
             return None
         code, out, _err = self.gh.gh_call("api", f"repos/{repo}/branches/{base}/protection")
         try:
@@ -1138,44 +1199,12 @@ class Watcher:
                 "PROTECTED",
                 "conversation resolution is not required by branch protection; thread check would be best-effort",
             )
-        self.conversation_ok.add((repo, base))
         return None
 
     def one(self, repo: str, number: int, expect: str = "") -> Result:
         if self.queue:
             return self.one_queued(repo, number, expect)
-        try:
-            started = self.clock()
-            deadline = started + self.timeout
-            self.deadline, self.gh.limit = deadline, deadline  # every gh call is capped by what is left of this PR
-            pin = expect or str(self.view(repo, number)["headRefOid"])
-            ended = self.wait_ci(repo, number, pin, deadline)
-            if ended is not None:
-                return ended
-            ended = self.await_review(repo, number, pin, deadline)
-            if ended is not None:
-                return ended
-            base = self.last_base
-            stop = self.base_moved(repo, number, pin, base) or self.workflow_stop(repo, pin, base)
-            stop = stop or self.require_conversation(repo, base)
-            if stop is not None:
-                return stop
-            open_threads = self.threads(repo, number)
-            if open_threads:
-                return Result(
-                    EXIT_THREADS,
-                    "THREADS",
-                    f"{len(open_threads)} unresolved review thread(s)",
-                    [line for t in open_threads for line in t.lines()],
-                )
-            stop = self.base_moved(repo, number, pin, base)  # the base is checked again right before the merge
-            if stop is not None:
-                return stop
-            return self.merge(repo, number, pin)
-        except ShipError as error:
-            return Result(error.code, "TIMEOUT" if error.code == EXIT_TIMEOUT else "ERROR", str(error))
-        finally:
-            self.deadline, self.gh.limit = None, None
+        return self.run_chain(repo, number, expect, lambda r, n, e, d: self.plain_attempt(r, n, e, d))
 
 
 def open_pr(gh: Gh, repo: str, branch: str, base: str, title: str, issue: str) -> tuple[int, str]:

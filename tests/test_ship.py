@@ -74,7 +74,8 @@ STUB = textwrap.dedent(
         ]
         if not state.get("derive_evidence", True) and "check_runs" not in state:
             runs = []  # nothing is made up for the code under test: no evidence, no green
-        reply({{"out": "\\n".join(json.dumps(x) for x in state.get("check_runs", runs))}})
+        listed = pop("check_runs_seq") if "check_runs_seq" in state else state.get("check_runs", runs)
+        reply({{"out": "\\n".join(json.dumps(x) for x in listed)}})
     if rest[0] == "api" and "/actions/runs/" in rest[1]:
         run_id = rest[1].rsplit("/", 1)[1]
         view_now = state.get("last_view", {{}})
@@ -93,7 +94,8 @@ STUB = textwrap.dedent(
         run.update(state.get("run_api", {{}}).get(run_id, {{}}))
         reply({{"out": json.dumps(run)}})
     if rest[0] == "api" and "/compare/" in rest[1]:
-        reply({{"out": "\\n".join(state.get("changed", []))}})
+        files = pop("changed_seq") if "changed_seq" in state else state.get("changed", [])
+        reply({{"out": "\\n".join(files)}})
     url = next((a for a in rest if a.startswith("repos/")), "")
     fref = next((a[4:] for a in rest if a.startswith("ref=")), "")
     if rest[0] == "api" and "/contents/" in url:
@@ -101,23 +103,26 @@ STUB = textwrap.dedent(
         cpath = unquote(url.split("/contents/")[1])
         shown = state.get("path_override", {{}}).get(cpath, cpath)  # a test can make an answer be about another path
         jq = rest[rest.index("--jq") + 1] if "--jq" in rest else ""
-        if "-H" in rest:  # the raw text of a workflow file
+        if cpath in state.get("missing", []) and "-H" not in rest and cpath != ".github/workflows":
+            reply({{"rc": 1, "err": "Not Found"}})  # the file does not exist at either ref
+        if "-H" in rest:  # the raw text of a file
             default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: x\\n")
+            if not cpath.endswith((".yml", ".yaml")):
+                default = "echo ok\\n"
             reply({{"out": state.get("texts", {{}}).get(cpath, default)}})
         if cpath == ".github/workflows":
             reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
         if "join" in jq:  # the content sha of the gate file
             reply({{"out": shown + "|" + state.get("blob_by_ref", {{}}).get(fref, "blobsha")}})
-        reply({{"out": json.dumps({{"file": shown, "sha": state.get("local_by_ref", {{}}).get(fref, "same")}})}})
+        by_ref = state.get("local_by_ref", {{}}).get(fref, "same")
+        sha = state.get("local_by_path", {{}}).get(cpath + "@" + fref, by_ref)
+        reply({{"out": json.dumps({{"file": shown, "sha": sha}})}})
     if rest[0] == "api" and rest[1].endswith("/protection"):
-        reply(
-            state.get(
-                "full_protection",
-                {{"out": json.dumps({{"required_conversation_resolution": {{"enabled": True}}}})}},
-            )
-        )
+        on = {{"out": json.dumps({{"required_conversation_resolution": {{"enabled": True}}}})}}
+        reply(pop("full_protection_seq") if "full_protection_seq" in state else state.get("full_protection", on))
     if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
-        reply({{"out": json.dumps({{"object": {{"sha": state.get("base_tip", "e" * 40)}}}})}})
+        tip = pop("base_tips") if "base_tips" in state else state.get("base_tip", "e" * 40)
+        reply({{"out": json.dumps({{"object": {{"sha": tip}}}})}})
     if rest[0] == "api" and "update-branch" in rest[1]:
         reply(state.get("update", {{}}))
     if rest[0] == "api" and "/commits/" in rest[1] and "/pulls" not in rest[1]:
@@ -230,6 +235,7 @@ class Rig:
         self.now = 0.0
         self.raise_on = ""  # a gh subcommand pair (such as "pr merge") whose process times out
         self.tick = 0.0  # fake seconds a gh call takes
+        self.tick_by: dict[str, float] = {}  # extra seconds for one gh subcommand pair, such as "pr merge"
         self.timeouts: list[tuple[float, float | None]] = []  # (clock at the call, its timeout)
         monkeypatch.setenv("FAKE_STATE", str(self.state_path))
 
@@ -246,7 +252,7 @@ class Rig:
             if self.raise_on and " ".join(argv[1:3]) == self.raise_on:
                 raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 0)
             done = subprocess.run(argv, **kw)  # noqa: S603 (argv is the fake gh the rig wrote)
-            self.now += self.tick
+            self.now += self.tick + self.tick_by.get(" ".join(argv[1:3]), 0.0)
             return done
 
         code = ship.main(
@@ -389,10 +395,13 @@ def test_base_branch_modified_is_retried_once(rig: Rig) -> None:
         {"rc": 1, "err": "Pull request is not mergeable: Base branch was modified. Review and try the merge again."},
         {"rc": 0},
     ]
-    rig.state["views"] = [view(GREEN), view(GREEN), view(GREEN), view(GREEN, state="MERGED")]
+    rig.state["views"] = [*[view(GREEN)] * 8, view(GREEN, state="MERGED")]
     code, out, calls = rig.go("5", "--repo", REPO)
     assert code == 0, out
     assert len(merges(calls)) == 2 and all(HEAD in m for m in merges(calls))
+    # the second merge came only after the whole chain ran again: gate, threads and protection read twice
+    assert len([c for c in calls if "/check-runs" in " ".join(c)]) >= 4
+    assert len([c for c in calls if c[1:3] == ["api", "graphql"]]) == 2
 
 
 def test_base_branch_modified_twice_is_a_refusal(rig: Rig) -> None:

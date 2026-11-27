@@ -9,7 +9,19 @@ from typing import Any
 import pytest
 
 from safo import ship
-from test_ship import GREEN, HEAD, MOVED, REPO, Rig, check, merges, rig, threads, view  # noqa: F401 (rig is a fixture)
+from test_ship import (  # noqa: F401 (rig is a fixture)
+    CLEAN,
+    GREEN,
+    HEAD,
+    MOVED,
+    REPO,
+    Rig,
+    check,
+    merges,
+    rig,
+    threads,
+    view,
+)
 
 NEW = "c" * 40
 
@@ -252,8 +264,11 @@ def test_threads_are_read_right_before_the_merge_call(rig: Rig) -> None:  # noqa
     rig.state["views"] = [sv("CLEAN")]
     _code, _out, calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1")
     names = [" ".join(c[1:3]) for c in calls]
-    between = names[names.index("api graphql") + 1 : names.index("pr merge")]
-    assert between in ([], ["pr view"])  # at most the base and head re-read
+    read = names.index("api graphql")
+    protection = next(i for i, c in enumerate(calls) if c[1] == "api" and c[2].endswith("/protection"))
+    assert (
+        read < protection < names.index("pr merge")
+    )  # the protection is read after the threads, just before the merge
 
 
 def test_head_lag_wait_respects_the_per_pr_timeout(rig: Rig) -> None:  # noqa: F811
@@ -968,3 +983,99 @@ def test_an_answer_about_another_path_is_an_error_not_a_comparison(rig: Rig, ask
     rig.state["path_override"] = {asked: "somewhere/else"}
     code, out, calls = rig.go(*args(False))
     assert code == ship.EXIT_ERROR and "not about" in out and merges(calls) == []
+
+
+# Daybreak round 4: base, gate and protection move while the checks run
+
+
+E_TIP, F_TIP, G_TIP = "e" * 40, "f" * 40, "1" * 40
+
+
+def count(calls: list[list[str]], needle: str) -> int:
+    return len([c for c in calls if needle in " ".join(c)])
+
+
+def test_a_base_tip_that_moves_before_the_merge_restarts_every_check(rig: Rig) -> None:  # noqa: F811
+    rig.state["base_tips"] = [E_TIP, E_TIP, F_TIP]  # pinned, first check, second check (moved)
+    rig.state["views"] = [*[sv("CLEAN")] * 7, sv("CLEAN", state="MERGED")]
+    code, out, calls = rig.go(*args(False))
+    assert code == 0, out
+    assert len(merges(calls)) == 1
+    assert count(calls, "/check-runs") >= 4 and count(calls, "api -i") == 2  # CI and protection read on both passes
+    assert count(calls, "/compare/") == 2 and count(calls, "graphql") == 2
+
+
+def test_a_base_that_keeps_moving_is_refused_without_a_merge(rig: Rig) -> None:  # noqa: F811
+    rig.state["base_tips"] = [E_TIP, E_TIP, F_TIP, F_TIP, G_TIP]
+    rig.state["views"] = [sv("CLEAN")]
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_MERGE_REFUSED and "moved again" in out and merges(calls) == []
+
+
+def test_base_modified_at_merge_time_runs_the_whole_chain_again_before_the_second_merge(rig: Rig) -> None:  # noqa: F811
+    rig.state["merges"] = [{"rc": 1, "err": "Base branch was modified"}, {"rc": 0}]
+    rig.state["changed_seq"] = [[], [".github/workflows/new.yml"]]  # the new base brings a workflow change
+    rig.state["views"] = [sv("CLEAN")]
+    code, out, calls = rig.go(*args(True))
+    assert code == ship.EXIT_NEEDS_HUMAN and len(merges(calls)) == 1, out
+
+
+def test_base_modified_then_a_new_thread_is_found_by_the_second_pass(rig: Rig) -> None:  # noqa: F811
+    rig.state["merges"] = [{"rc": 1, "err": "Base branch was modified"}, {"rc": 0}]
+    rig.state["threads"] = [CLEAN, threads("late.py")]
+    rig.state["views"] = [sv("CLEAN")]
+    code, _out, calls = rig.go(*args(True))
+    assert code == ship.EXIT_THREADS and len(merges(calls)) == 1
+
+
+def test_base_modified_then_protection_switched_off_is_refused(rig: Rig) -> None:  # noqa: F811
+    rig.state["merges"] = [{"rc": 1, "err": "Base branch was modified"}, {"rc": 0}]
+    on = {"out": json.dumps({"required_conversation_resolution": {"enabled": True}})}
+    rig.state["full_protection_seq"] = [on, OFF]
+    rig.state["views"] = [sv("CLEAN")]
+    code, out, calls = rig.go(*args(True))
+    assert code == ship.EXIT_PROTECTED and "conversation resolution" in out and len(merges(calls)) == 1
+
+
+def test_a_gate_that_turns_red_after_it_was_verified_is_not_merged(rig: Rig) -> None:  # noqa: F811
+    good = [run_of("CI green", 1)]
+    bad = [dict(run_of("CI green", 1), conclusion="failure")]
+    rig.state["check_runs_seq"] = [good, bad]
+    rig.state["views"] = [sv("CLEAN")]
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_CI_FAILED and "after it was verified" in out and merges(calls) == []
+
+
+def test_the_protection_is_read_again_for_every_queued_pr(rig: Rig) -> None:  # noqa: F811
+    on = {"out": json.dumps({"required_conversation_resolution": {"enabled": True}})}
+    rig.state["full_protection_seq"] = [on, OFF]  # switched off while the first PR merges
+    rig.state["views"] = [*[sv("CLEAN")] * 5, sv("CLEAN", state="MERGED"), sv("CLEAN")]
+    code, out, calls = rig.go("--queue", "5", "6", "--repo", REPO, "--interval", "1")
+    words = [ln.split()[0] for ln in out.strip().splitlines()]
+    assert words == ["MERGED", "PROTECTED"] and code == ship.EXIT_PROTECTED and len(merges(calls)) == 1
+
+
+def test_the_merge_readback_may_pass_the_deadline_but_only_by_the_recovery_allowance(rig: Rig) -> None:  # noqa: F811
+    rig.tick_by = {"pr merge": 100.0}
+    rig.state["views"] = [*[sv("CLEAN")] * 5, sv("CLEAN", state="MERGED")]
+    code, out, calls = rig.go(*args(True, "--timeout", "50"))
+    assert code == 0 and out.startswith("MERGED"), out
+    after = [t for now, t in rig.timeouts if now >= 50]
+    assert after and all((t or 0) <= ship.RECOVERY_SECONDS for t in after), rig.timeouts
+    assert len(merges(calls)) == 1
+
+
+def test_no_second_merge_call_starts_after_the_deadline(rig: Rig) -> None:  # noqa: F811
+    rig.tick_by = {"pr merge": 100.0}
+    rig.state["merges"] = [{"rc": 1, "err": "Base branch was modified"}, {"rc": 0}]
+    rig.state["views"] = [sv("CLEAN")]
+    code, _out, calls = rig.go(*args(True, "--timeout", "50"))
+    assert len(merges(calls)) == 1 and code != 0
+
+
+def test_a_retry_pass_is_still_capped_call_by_call(rig: Rig) -> None:  # noqa: F811
+    rig.tick = 1.0
+    rig.state["merges"] = [{"rc": 1, "err": "Base branch was modified"}, {"rc": 0}]
+    rig.state["views"] = [sv("CLEAN")]
+    rig.go(*args(True, "--timeout", "40"))
+    assert all(now < 40 and now + (t or 0) <= 40 + 1e-9 for now, t in rig.timeouts), rig.timeouts
