@@ -165,8 +165,17 @@ def test_never_executes_repo_code(tree: Path) -> None:
 
 def test_base_uses_git_diff(tree: Path) -> None:
     def git(*a: str) -> None:
-        subprocess.run(  # noqa: S603, S607 - fixed git arguments in a fixture repo
-            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-C", str(tree), *a],
+        subprocess.run(  # noqa: S603 - fixed git arguments in a fixture repo
+            [  # noqa: S607 - git from PATH, as the tool under test does
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-C",
+                str(tree),
+                *a,
+            ],
             check=True,
             capture_output=True,
         )
