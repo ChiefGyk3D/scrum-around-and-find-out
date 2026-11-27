@@ -94,6 +94,7 @@ per turn rises with context, so the first-100-turn median is already high and th
 project folder. Its cost has two numbers: the successor's first three turns, MEASURED, and the cost of writing the
 note, an ESTIMATE (the largest single reply in the predecessor's last five turns, output tokens x5). Counts only:
 no text, title, path, project name or hostname is printed.
+
 ## Posting the weekly summary to a private issue
 
 `safo spend-post` runs the same report and posts a short summary as one comment on an issue of a PRIVATE repo. It takes
