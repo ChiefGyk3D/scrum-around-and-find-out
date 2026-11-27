@@ -3,7 +3,8 @@
 
 `list REPO PR` prints the unresolved review threads (outdated ones marked `[outdated]`) grouped by file, one line
 each, with the first comment's id, author and the first 200 characters of its body. `apply REPO PR FILE` reads a
-strict JSON list of dispositions `[{"comment_id": 1, "action": "reply|reply_resolve|skip", "body": "..."}]` and carries them out: a reply is
+strict JSON list of dispositions `[{"comment_id": 1, "action": "reply|reply_resolve|skip", "body": "..."}]` and
+carries them out: a reply is
 one REST POST, a resolve is one GraphQL `resolveReviewThread` mutation for that thread.
 
 Every disposition is checked against the live thread list and the file's own rules before the first write, so a bad
