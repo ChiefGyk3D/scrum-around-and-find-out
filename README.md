@@ -205,6 +205,7 @@ replaced are gone.
 - [Gemini broker](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker)
 - [Gemini broker threat model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-broker-threat-model)
 - [Rmguard](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Rmguard): `safo-rmguard`, the Bash hook that guards shared dev directories
+- [Idle check](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Idle-check): `safo-idle-check`, the Stop hook that blocks the end of a turn while workers are under the floor and ready work exists
 - [Threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Threat-model)
 - [Safo-threat-model](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Safo-threat-model)
 - [Profiles](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Profiles)
