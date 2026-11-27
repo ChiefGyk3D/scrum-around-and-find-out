@@ -76,3 +76,18 @@ week began are not opened. A full `--week all` over several gigabytes of transcr
 
 No dollars, no per-model price, no quality measure, and no brief text: whether a brief named a local step comes from the
 hook log, never from reading the brief.
+
+## Lead-session curve (`safo lead-curve`)
+
+A read-only companion report (#556, phase 1: measuring only, no hook and no prompt) that shows how lead-session cost
+grows with turn position. `safo lead-curve [--week W|all] [--claude DIR]` reads the lead transcripts the way `safo spend`
+does (same bounds, same weights, symlinks and special files refused and counted) and writes nothing. Per session it
+prints the turn count, the context tokens (input + cache read + cache write) at the first and last turn and summed over
+the turns, and the weighted spend by turn bucket (1-100, 101-200, 201-300, 301+); sessions are numbered, never named,
+and the 25 longest are shown. The summary gives the share of lead turns and of weighted spend past turn 200 and 400,
+and the first turn past 100 at which a 10-turn mean of the per-turn mean spend passes 1.5 times the median spend of
+the first 100 turns (`not reached` when it never does). A handoff is a session whose first user message contains
+"handoff", "hand-off" or "handover" (a yes or no, never printed), paired with the latest earlier session of the same
+project folder. Its cost has two numbers: the successor's first three turns, MEASURED, and the cost of writing the
+note, an ESTIMATE (the largest single reply in the predecessor's last five turns, output tokens x5). Counts only:
+no text, title, path, project name or hostname is printed.
