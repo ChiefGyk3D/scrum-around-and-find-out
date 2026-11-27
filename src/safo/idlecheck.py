@@ -190,14 +190,21 @@ def count_processes(root: Path, me: int | None = None) -> list[str]:
 
 
 def parse_queue(text: str) -> list[str]:
-    """Unstarted items: `READY:` lines (split on `;`) and dependency-table rows (| item | depends on | state |) whose
-    dependencies are met and that are not running, blocked, held or done. Prose lines are ignored."""
-    items: list[str] = []
+    """The names of the unstarted items (see queue_refs). The names are for tests; the block reason never shows them."""
+    return [name for _, _, name in queue_refs(text)]
+
+
+def queue_refs(text: str) -> list[tuple[int, int, str]]:
+    """Unstarted items as (line number, item number on that line, name): `READY:` lines (split on `;`) and
+    dependency-table rows (| item | depends on | state |) whose dependencies are met and that are not running,
+    blocked, held or done. Prose lines are ignored."""
+    items: list[tuple[int, int, str]] = []
     in_table = False
-    for raw in text.splitlines():
+    for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if line.upper().startswith("READY:"):
-            items.extend(p.strip() for p in line[6:].split(";") if p.strip())
+            names = [p.strip() for p in line[6:].split(";") if p.strip()]
+            items.extend((number, k, name) for k, name in enumerate(names, 1))
             continue
         if not line.startswith("|"):
             in_table = False
@@ -214,7 +221,7 @@ def parse_queue(text: str) -> list[str]:
         says_ready = re.search(r"\bready\b", state) is not None and NEGATED.search(state) is None
         deps_met = dep in ("", "none", "-")
         if says_ready or (deps_met and state in ("", "todo", "queued", "unstarted")):
-            items.append(name)
+            items.append((number, 1, name))
     return items
 
 
@@ -240,7 +247,12 @@ def read_queues(paths: list[str]) -> list[str]:
             raise Degraded("queue: a queue file is unreadable (missing, not a regular file or a link)") from err
         if len(raw) > QUEUE_CAP:
             raise Degraded(f"queue: a queue file is over {QUEUE_CAP} bytes, so its tail would be missed")
-        items.extend(parse_queue(raw.decode("utf-8", "replace")))
+        label = Path(name).name[:40]
+        # only where the item is, never its text: queue lines are free text and reach the model as instructions
+        items.extend(
+            f"queue file {label} line {n}" + (f", item {k}" if k > 1 else "")
+            for n, k, _ in queue_refs(raw.decode("utf-8", "replace"))
+        )
     return items
 
 
@@ -347,7 +359,7 @@ def ready_prs(
         why = pr_reasons(pr, unreviewed)
         if not why or ref in exempt or names_pr(busy, pr["number"], str(pr.get("headRefName") or "")):
             continue
-        out.append(f"{ref} {str(pr.get('title', ''))[:60]} ({', '.join(why)})")
+        out.append(f"{ref} ({', '.join(why)})")  # no title, branch or author: they are third-party text
     return out
 
 
