@@ -63,7 +63,13 @@ def alive(pid: int) -> bool:
 
 @pytest.fixture(scope="module")
 def sandbox() -> Iterator[Path]:
-    d = Path(tempfile.mkdtemp(prefix=".digest-test-", dir=ROOT))
+    """A private scratch folder, unique per pytest-xdist worker, inside the repository's own ignored pytest cache
+    folder: git does not list it, so another worker's repository-wide scans never see the fake tools in it, and it is
+    still below folders only we can write (the tool refuses a /tmp path on purpose)."""
+    cache = ROOT / ".pytest_cache"
+    cache.mkdir(mode=0o700, exist_ok=True)
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    d = Path(tempfile.mkdtemp(prefix=f"digest-test-{worker}-", dir=cache))
     try:
         yield d
     finally:
@@ -1971,3 +1977,29 @@ def test_render_never_exceeds_either_cap_for_every_cap_near_the_cut_marker() -> 
                 assert len(out) <= max_bytes, (max_bytes, max_lines, code, len(out))
                 assert len(out.decode().splitlines()) <= max_lines, (max_bytes, max_lines, code)
                 assert out.decode().splitlines()[-1].startswith("safo-digest: END ")
+
+
+# ---- the scratch folder is invisible to repository-wide scans -----------------------------------------------------
+
+
+def test_the_sandbox_is_not_listed_by_the_repository_file_scan(sandbox: Path) -> None:
+    hygiene = importlib.import_module("test_hygiene")
+    probe = sandbox / "t-probe" / "fake.sh"
+    probe.parent.mkdir()
+    probe.write_text("#!/bin/sh\n: nothing\n")
+    listed = {str(p) for p in hygiene.tracked_or_present()}
+    assert str(probe) not in listed
+    assert not [x for x in listed if x.startswith(str(sandbox))]
+
+
+def test_the_file_scan_does_list_an_untracked_script_in_an_unignored_folder() -> None:
+    """The negative case: the scan really does see untracked files, so the test above has teeth."""
+    hygiene = importlib.import_module("test_hygiene")
+    folder = ROOT / f".digest-scan-bite-{os.getpid()}"
+    folder.mkdir()
+    try:
+        script = folder / "fake.sh"
+        script.write_text("#!/bin/sh\n: nothing\n")
+        assert str(script) in {str(p) for p in hygiene.tracked_or_present()}
+    finally:
+        shutil.rmtree(folder)  # exactly the folder this test created
