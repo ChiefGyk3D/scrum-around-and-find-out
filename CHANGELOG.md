@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `safo protection --all` (#541, epic #527): audits the default branch of every repository in the board file (less
+  `rules.gate_exempt_repos`) against the standard: `CI green` and every security job the repository's pull-request
+  workflows declare are required, a pull request is required, force pushes and deletion are off; admin bypass and
+  conversation resolution are reported. One line per repository and a final count; exit 0 clean, 1 drift, 2 when a
+  repository could not be read. GET only (REST), one repository at a time. `--all` and `--repo` are mutually exclusive;
+  the single-repository mode is unchanged. Docs: `docs/protection-audit.md`. Tests: `tests/test_protection_all.py`.
 - `safo-threads` (#587, epic #518): `list REPO PR` shows unresolved, current review threads grouped by file; `apply REPO PR FILE` replies by REST and resolves by one GraphQL mutation per thread from a strict dispositions file (unknown ids, empty or over-long bodies, duplicate ids refused before any write; bounded calls; exit codes 0, 2, 3, 4, 5). Separate entry point, `TOP_LEVEL_COMMANDS` untouched. Docs: `docs/threads.md`. Tests: `tests/test_threads.py`.
 - `safo-eval-canary --truncation-probe` / `--probe-only` (#569, epic #518): sends one long prompt to the digest model through `llm-local` and alerts (exit 1) when the server's reported cut is no longer `--expected-cap` (default 4098); unreachable 3 over busy 75 over drop 1. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
 - `safo-idle-check` (#578): a separate Stop hook that blocks the end of a turn when fewer than 6 workers run and ready work exists (PRs failing or conflicting with no agent on them, unstarted QUEUE.md items); counts workers from the subagent registry and process table, fails open loudly, caches the PR scan 60 s, logs blocks per day. Not installed by this change. Docs: `docs/idle-check.md`. Tests: `tests/test_idlecheck.py`.
