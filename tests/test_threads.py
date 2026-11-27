@@ -113,16 +113,24 @@ def pages_of(*nodes_per_page: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # list
 
 
-def test_list_groups_by_file_and_drops_resolved_and_outdated(rig: Rig) -> None:
+def test_list_groups_by_file_marks_outdated_and_drops_resolved(rig: Rig) -> None:
     nodes = [node(1, "b.py"), node(2, "a.py"), node(3, "a.py", resolved=True), node(4, "a.py", outdated=True)]
     rig.state["pages"] = pages_of(nodes)
     code, out, _err, calls = rig.go("list", REPO, "5")
     assert code == 0
     lines = out.splitlines()
     assert lines[0] == "a.py" and lines[1].startswith("  2 a.py:7 rev: fix")
-    assert lines[2] == "b.py" and lines[3].startswith("  1 ")
-    assert "  3 a.py" not in out and "  4 a.py" not in out and "2 unresolved" in out
+    assert lines[2].startswith("  4 a.py:7 [outdated] rev: fix")
+    assert lines[3] == "b.py" and lines[4].startswith("  1 ") and "[outdated]" not in lines[4]
+    assert "  3 a.py" not in out and "3 unresolved" in out
     assert writes(calls) == []
+
+
+def test_apply_replies_to_and_resolves_an_outdated_unresolved_thread(rig: Rig) -> None:
+    rig.state["pages"] = pages_of([node(7, outdated=True)])
+    code, out, _err, calls = rig.apply([{"comment_id": 7, "action": "reply_resolve", "body": "obsolete"}])
+    assert code == 0, out
+    assert len(writes(calls)) == 2 and any("id=PRRT_7" in c for c in calls)
 
 
 def test_list_cuts_body_to_200_and_strips_control_characters(rig: Rig) -> None:
@@ -233,8 +241,8 @@ def test_duplicate_json_keys_nan_and_depth_are_refused(rig: Rig) -> None:
         assert code == threads.EXIT_FILE and writes(calls) == []
 
 
-def test_resolved_or_outdated_thread_ids_are_unknown_to_apply(rig: Rig) -> None:
-    rig.state["pages"] = pages_of([node(1, resolved=True), node(2, outdated=True)])
+def test_resolved_thread_ids_are_unknown_to_apply(rig: Rig) -> None:
+    rig.state["pages"] = pages_of([node(1, resolved=True), node(2, resolved=True, outdated=True)])
     for cid in (1, 2):
         code, _o, _e, calls = rig.apply([{"comment_id": cid, "action": "reply", "body": "a"}])
         assert code == threads.EXIT_FILE and writes(calls) == []

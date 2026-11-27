@@ -26,3 +26,11 @@ What is NOT closed (residual risk):
   only the ability to change the working tree before the run is covered by the checks above. Keep other writers away
   from the repository while a run is in progress. A test (`test_documented_boundary_...`) documents the boundary and
   must be changed together with this text if the boundary ever moves.
+
+## Partial clones and lazy fetch
+
+Every git call this wrapper makes (and `safo-digest`, which shares the config check in the `gitconfig` module of the safo package) runs with
+`GIT_NO_LAZY_FETCH=1`. A partial clone is also refused: its config carries the partial-clone extension and a promisor
+remote, which are not on the allowlist. The behavior change from earlier versions: a worktree whose objects are
+missing and would have been fetched on demand now fails the check instead of reaching for the network. That is
+deliberate: a repository must not be able to make this wrapper contact a remote of its choosing.
