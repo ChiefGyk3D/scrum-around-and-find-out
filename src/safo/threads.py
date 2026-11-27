@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """safo-threads: list the open review threads of a pull request, then reply to and resolve them from a file.
 
-`list REPO PR` prints the unresolved, current (not outdated) review threads grouped by file, one line each, with the
-first comment's id, author and the first 200 characters of its body. `apply REPO PR FILE` reads a strict JSON list of
-dispositions `[{"comment_id": 1, "action": "reply|reply_resolve|skip", "body": "..."}]` and carries them out: a reply is
+`list REPO PR` prints the unresolved review threads (outdated ones marked `[outdated]`) grouped by file, one line
+each, with the first comment's id, author and the first 200 characters of its body. `apply REPO PR FILE` reads a
+strict JSON list of dispositions `[{"comment_id": 1, "action": "reply|reply_resolve|skip", "body": "..."}]` and
+carries them out: a reply is
 one REST POST, a resolve is one GraphQL `resolveReviewThread` mutation for that thread.
 
 Every disposition is checked against the live thread list and the file's own rules before the first write, so a bad
@@ -72,6 +73,7 @@ class Thread:
     line: str
     author: str
     body: str
+    outdated: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,7 +122,9 @@ class Gh:
 
 
 def fetch_threads(gh: Gh, repo: str, number: int) -> list[Thread]:
-    """Unresolved, current threads of the PR; the answer is checked field by field and a bad shape is exit 4."""
+    """Unresolved threads of the PR, outdated ones included (the merge watcher counts them).
+
+    The answer is checked field by field and a bad shape is exit 4."""
     owner, name = repo.split("/", 1)
     found: list[Thread] = []
     cursor = ""
@@ -138,7 +142,7 @@ def fetch_threads(gh: Gh, repo: str, number: int) -> list[Thread]:
                 raise ValueError("hasNextPage")
             cursor = str(block["pageInfo"]["endCursor"] or "")
             for node in nodes:
-                if node["isResolved"] or node["isOutdated"]:
+                if node["isResolved"]:
                     continue
                 first = node["comments"]["nodes"][0]
                 comment_id, thread_id = first["databaseId"], node["id"]
@@ -154,6 +158,7 @@ def fetch_threads(gh: Gh, repo: str, number: int) -> list[Thread]:
                         str(node.get("line") or "?"),
                         str((first.get("author") or {}).get("login") or "?"),
                         str(first.get("body") or ""),
+                        node["isOutdated"] is True,
                     )
                 )
         except ThreadsError:
@@ -229,10 +234,9 @@ def list_cmd(gh: Gh, repo: str, number: int, out: TextIO) -> int:
     for path in sorted(by_file):
         output.write(out, flat(path, 300))
         for t in by_file[path]:
-            output.write(
-                out,
-                f"  {t.comment_id} {flat(t.path, 100)}:{flat(t.line, 10)} {flat(t.author, 60)}: {flat(t.body, SHOW)}",
-            )
+            mark = "[outdated] " if t.outdated else ""
+            where = f"{flat(t.path, 100)}:{flat(t.line, 10)}"
+            output.write(out, f"  {t.comment_id} {where} {mark}{flat(t.author, 60)}: {flat(t.body, SHOW)}")
     output.write(out, f"{len(threads)} unresolved thread(s) on {repo}#{number}")
     return EXIT_OK
 
