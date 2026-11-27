@@ -13,7 +13,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -1958,9 +1958,21 @@ def test_the_refresh_deadline_starts_before_the_first_call(box: Box, gh: Gh, mon
     gh.table["__sleep__"] = 10
     gh.save()
     monkeypatch.setattr(activity, "COPILOT_DEADLINE", 0.3)
+    asked: list[float] = []
+    real = activity._gh_json
+
+    def recording(gh: str, env: Mapping[str, str], path: str, timeout: float) -> Any:
+        asked.append(timeout)
+        return real(gh, env, path, timeout)
+
+    monkeypatch.setattr(activity, "_gh_json", recording)
     began = time.monotonic()
     snap = activity.fetch_copilot(box.vars, "N0TST", NOW)
-    assert time.monotonic() - began < 4  # each early call is held to what is left, not to a fixed 5 s
+    # Each early call is held to what is left of the deadline (the 0.5 s floor), not to the fixed per-call limit: the
+    # timeout handed to the call is the measurement, so load cannot change it. The wall bound stays under the stub's
+    # 10 s sleep, so a call that really waited it out still fails.
+    assert asked and max(asked) <= 0.5, asked
+    assert time.monotonic() - began < 9
     assert snap.ok is False
 
 
