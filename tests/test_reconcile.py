@@ -1596,3 +1596,99 @@ def test_a_label_repeated_on_the_first_page_is_exit_2(fake: FakeGitHub, client: 
     fake.add_content("acme/widgets", "Issue", 1, labels=["bug", "BUG"])
     code, out, err = via_cli(client)
     assert code == 2 and fake.mutations == [], (out, err)
+
+
+# --max-writes and --no-adds (#479, phase 1 of the board 11 reconcile)
+
+
+def capped(fake: FakeGitHub, client: Client, limit: int | None, *, no_adds: bool = False) -> tuple[int, str]:
+    ctx, out = make_context(fake, load_test_board(), client)
+    return run(ctx, argparse.Namespace(max_writes=limit, no_adds=no_adds)), out.getvalue()
+
+
+def test_the_write_cap_stops_cleanly_exit_0_and_a_rerun_continues(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    for n in (1, 2, 3):
+        fake.add_content("acme/widgets", "Issue", n)
+    code, text = capped(fake, client, 5)
+    assert code == 0, text
+    assert len(fake.mutations) == 5
+    assert "stopped at the write cap (5), re-run to continue" in text
+    assert "nothing to do" not in text
+    fake.mutations.clear()
+    code, text = capped(fake, client, None)
+    assert "stopped at the write cap" not in text
+    assert len(snapshot(fake, project)) == 3
+    assert all(v["Status"] == "Backlog" and v["Area"] == "Core" for v in snapshot(fake, project).values())
+    fake.mutations.clear()
+    code, text = capped(fake, client, 5)
+    assert code == 0 and fake.mutations == [] and "nothing to do: the board is current" in text
+
+
+def test_a_cap_larger_than_the_work_is_not_reported_as_hit(fake: FakeGitHub, client: Client) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1)
+    code, text = capped(fake, client, 100)
+    assert code == 0 and "write cap" not in text and len(fake.mutations) == 4
+
+
+def test_the_cap_applies_to_a_dry_run_and_sends_nothing(fake: FakeGitHub, sleeps: list[float]) -> None:
+    build_world(fake)
+    fake.add_content("acme/widgets", "Issue", 1)
+    dry = Client(fake.token, fake.url, dry_run=True, sleep=sleeps.append, out=io.StringIO())
+    ctx, out = make_context(fake, load_test_board(), dry)
+    assert run(ctx, argparse.Namespace(max_writes=2, no_adds=False)) == 0
+    assert fake.mutations == [] and "stopped at the write cap (2), re-run to continue" in out.getvalue()
+
+
+def test_no_adds_repairs_cards_on_the_board_and_adds_nothing(fake: FakeGitHub, client: Client) -> None:
+    _, project = build_world(fake)
+    shut = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T08:00:00Z")
+    fake.add_content("acme/widgets", "Issue", 2)  # open and not on the board
+    fake.add_item(project, shut, Status="In progress", Area="Core", Priority="P2 later")
+    code, text = capped(fake, client, None, no_adds=True)
+    assert code == 0, text
+    assert fake.mutations_named("AddItem") == []
+    snap = snapshot(fake, project)
+    assert list(snap) == ["acme/widgets#1"] and snap["acme/widgets#1"]["Status"] == "Done"
+    assert "NOT ADDED 1 card" in text
+
+
+def test_the_cli_takes_max_writes_and_no_adds() -> None:
+    from safo.cli import build_parser
+
+    parser, _ = build_parser()
+    args = parser.parse_args(["reconcile", "--max-writes", "7", "--no-adds"])
+    assert args.max_writes == 7 and args.no_adds is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(["reconcile", "--max-writes", "0"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["reconcile", "--max-writes", "-3"])
+
+
+def test_closed_only_writes_status_and_done_date_of_closed_cards_and_nothing_else(
+    fake: FakeGitHub, client: Client
+) -> None:
+    _, project = build_world(fake)
+    shut = fake.add_content("acme/widgets", "Issue", 1, state="CLOSED", closed_at="2026-10-03T08:00:00Z")
+    blank_open = fake.add_content("acme/widgets", "Issue", 2)
+    fake.add_content("acme/widgets", "Issue", 3, state="CLOSED", closed_at="2026-10-04T08:00:00Z")  # not on the board
+    fake.add_item(project, shut, Status="In progress")  # Area and Priority blank on a closed card
+    fake.add_item(project, blank_open)  # everything blank on an open card
+    ctx, out = make_context(fake, load_test_board(), client)
+    code = run(ctx, argparse.Namespace(max_writes=None, no_adds=False, closed_only=True))
+    text = out.getvalue()
+    assert code == 0, text
+    snap = snapshot(fake, project)
+    assert snap["acme/widgets#1"] == {"Status": "Done", "Area": None, "Priority": None, "Done on": "2026-10-03"}
+    assert snap["acme/widgets#2"] == {"Status": None, "Area": None, "Priority": None, "Done on": None}
+    assert len(snap) == 2 and fake.mutations_named("AddItem") == []
+    assert len(fake.mutations) == 2  # the status and the date, no more
+    assert "LEFT ALONE 1 open cards on the board (--closed-only)" in text
+
+
+def test_closed_only_is_a_flag_of_the_command() -> None:
+    from safo.cli import build_parser
+
+    parser, _ = build_parser()
+    assert parser.parse_args(["reconcile", "--closed-only"]).closed_only is True

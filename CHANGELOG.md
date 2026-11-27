@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo reconcile --max-writes N` and `--no-adds`, and the new `safo kind` (#479, phase 1 of the board 11 reconcile): a write cap that stops cleanly with exit 0, a reconcile that adds nothing, and a rule-driven Kind writer for open cards (REST snapshot, rule proposal, approved map, board-name check, journal; never Epic or Effort). Docs: `docs/board-kind.md`. Tests: `tests/test_kindwrite.py`, `tests/test_reconcile.py`.
 - `safo local report` (#372, #380): read-only counts of local-model use per day, week and model from the dispatch-guard
   log, the `safo hooks status` guard counts and the `llm-local` calls and admission state, with a MISSING DATA section
   and `--json`. Nothing is written or created (the hooks log is read without its lock). Bounded reads, malformed, torn

@@ -43,6 +43,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
 | `safo-draft` (local-first drafts of issues, pull requests and comments, with checks before filing, and local five-line digests of CI logs and board drift; [`docs/local-draft.md`](docs/local-draft.md)) | Built |
+| `kind` (rule-driven Kind for open board cards from a private REST snapshot and a human-approved map, with `reconcile --max-writes` and `--no-adds`; [`docs/board-kind.md`](docs/board-kind.md)) | Built, unreleased |
 | `ratebudget` and `card` (the shared GitHub API budget and single-request card edits as `safo` subcommands, beside the `ghw`, `safo-ratebudget` and `safo-card` scripts; [`docs/ratebudget.md`](docs/ratebudget.md)) | Built |
 | Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
 | Personas (`docs/personas.md`, a description of the Department of Internal Arguments roles and how to install them, with no copies kept here) and the examples (the outcomes log, systemd units) | Built and merged on `main` |
@@ -61,7 +62,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `bootstrap` | Creates the fields, options, iterations and views `board.yaml` names and the project lacks. Never edits an existing field's options |
 | `audit` | Compares the live board and the repositories' open work with `board.yaml`, and checks that each listed repository's default branch requires the gate check (see [the branch gate](docs/no-hidden-work.md#the-branch-gate)). Exit 0 clean, 1 drift, 2 cannot tell |
 | `sync` | Brings the card of one issue or pull request event in line |
-| `reconcile` | Adds every missing open issue and pull request, marks closed ones Done with the date, fills Area. Idempotent |
+| `reconcile` | Adds every missing open issue and pull request, marks closed ones Done with the date, fills Area. Idempotent. `--max-writes N` stops cleanly after N writes; `--no-adds` repairs cards already on the board; `--closed-only` writes only Status and Done date on closed cards ([`docs/board-kind.md`](docs/board-kind.md)) |
 | `status` | Posts a project status update from a Markdown file, or builds it from the board with `--post`: the cards are grouped and counted in code, with an optional one-line headline on top |
 | `agents-status` | One read-only view of what Claude, Codex and Copilot are doing |
 | `usage` | What each agent has used and has left, from local files only: Codex windows, Claude Code tokens, Copilot sessions, Ollama reachability. `--report` summarises the outcomes log |
@@ -75,6 +76,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `gemini` | `quota`, `ask`, `keys`, and the broker entries `paid` and `paid-dryrun`: a Gemini client that cannot spend money on its own: free-tier calls for public material follow the maintainer's own rate limits from a local ledger, a 429 stops the job and never falls through to a billed call, and a billed call goes only through the broker with its own single-use approval signed by a hardware security key; `keys` lists and checks the enrolled keys. The free key is read by name from the secret store at call time. Read-only unless you ask; see [`docs/gemini.md`](docs/gemini.md) |
 | `ratebudget` | The shared GitHub API budget and who spent it, from the `ghw` ledger; the same as the `safo-ratebudget` script. See [`docs/ratebudget.md`](docs/ratebudget.md) |
 | `card` | Edits one project card with one REST PATCH from a persisted map of ids and never lists the board; the same as the `safo-card` script. See [`docs/ratebudget.md`](docs/ratebudget.md) |
+| `kind` | Writes Kind on open board cards from labels and title prefixes and a human-approved map; residue is listed, never written; `--read-board`, `--propose`, `--map`, `--max-writes`. See [`docs/board-kind.md`](docs/board-kind.md) |
 | `doctor` | Is each prerequisite present, missing or too old? Python, git and gh are required; the other tools, plugins and skill packs are reported. Read-only: it runs only `<tool> --version`. See [`docs/prerequisites.md`](docs/prerequisites.md) |
 
 The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`, `protection`, `doctor`) read
@@ -183,6 +185,7 @@ replaced are gone.
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
+- [Board-kind](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-kind): `safo kind` and the reconcile write cap
 - [safo-file](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/File): the idea gate and the cross-project line for filing work
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)

@@ -31,8 +31,8 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def loads(raw: str | bytes) -> Any:
-    if len(raw) > MAX_BYTES:
+def loads(raw: str | bytes, limit: int = MAX_BYTES) -> Any:
+    if len(raw) > limit:
         raise ValueError("JSON exceeds size limit")
     text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
     depth = 0

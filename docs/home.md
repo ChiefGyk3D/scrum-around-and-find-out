@@ -38,6 +38,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Local LLM evaluation](local-eval.md): how well the local models do on the work SAFO routes to them, scored by code only, and the routing table.
 - [Runner-first](runner-first.md): `safo-runner-check`, which keeps heavy work on a public repo for the runner and prints the ra-remote command.
 - [Shared GitHub API budget and card edits](ratebudget.md): `ghw`, `safo-ratebudget` and `safo-card`: one budget view for every session, one REST call per card edit.
+- [Kind for open cards and a reconcile write cap](board-kind.md): `safo kind` writes Kind from rules and an approved map; `reconcile --max-writes` stops cleanly.
 - [The idea gate and cross-project line](file.md): `safo-file` matches an idea against the tracked repos, `gh repo list` and memory, requires one answer, and counts cross-project issues.
 - [Limits](limits.md): reading each tool's real usage and deciding when to switch.
 - [Board](board.md) and the [board.yaml reference](board-yaml.md): the project as code.
