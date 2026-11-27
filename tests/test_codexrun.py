@@ -334,6 +334,38 @@ def hostile_repo(tmp_path: Path, key: str = "filter.x.clean") -> Path:
     return hostile
 
 
+def test_a_config_changed_after_the_check_never_runs_a_program(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = hostile_script(tmp_path)
+    wt = world.worktree
+    (wt / ".gitattributes").write_text("*.txt filter=x\n")
+    (wt / "victim.txt").write_text("before\n")
+    git(wt, "add", ".gitattributes", "victim.txt")
+    git(wt, "commit", "-q", "-m", "filtered file")
+    (wt / "victim.txt").write_text("after\n")
+    real_run = subprocess.run
+    injected = False
+
+    def race(argv: list[str], **kwargs: Any) -> Any:
+        nonlocal injected
+        result = real_run(argv, **kwargs)
+        if not injected and argv[-3:] == ["config", "--list", "-z"]:
+            injected = True
+            common = Path(git(wt, "rev-parse", "--git-common-dir"))
+            if not common.is_absolute():
+                common = wt / common
+            with (common / "config").open("a") as config:
+                config.write(f'\n[filter "x"]\n    clean = {tmp_path / "hostile.sh"}\n')
+        return result
+
+    monkeypatch.setattr(subprocess, "run", race)
+    # victim.txt is dirty and not named, so the run is refused; what matters is that no program ran on the way
+    refused(world, go(world, "implementer"))
+    assert injected
+    assert not marker.exists()
+
+
 def test_a_symlinked_submodule_path_is_refused(world: World, tmp_path: Path) -> None:
     sub = add_submodule(world, tmp_path)
     marker = hostile_script(tmp_path)

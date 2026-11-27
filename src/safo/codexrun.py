@@ -485,6 +485,45 @@ def check_repo_config(git: str, home: str, root: str, depth: int = 0) -> None:
         check_repo_config(git, home, folder, depth + 1)
 
 
+def _sealed_status(git: str, home: str, root: str, gitdir: str) -> str:
+    """`git status` against a private git directory that holds only what we wrote: HEAD as a bare id, a copy of the
+    index, the real object store through `alternates`, and a fixed config. Nothing the repository can change after the
+    config check (its config, its info/attributes, a submodule's config) is read by this call, so no content filter,
+    textconv or other program it names can run; a later edit of those files has nothing to act on. The working tree's
+    own .gitattributes can still name a filter, but with no `filter.*` setting in the config git has no program to
+    start."""
+    head = _git(git, home, root, "rev-parse", "--verify", "HEAD").strip()
+    common = _git(git, home, root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    scratch = tempfile.mkdtemp(prefix="safo-status-")
+    try:
+        for name in ("objects/info", "refs"):
+            os.makedirs(os.path.join(scratch, name))
+        with open(os.path.join(scratch, "objects", "info", "alternates"), "w", encoding="utf-8") as handle:
+            handle.write(os.path.join(common, "objects") + "\n")
+        with open(os.path.join(scratch, "HEAD"), "w", encoding="utf-8") as handle:
+            handle.write(head + "\n")
+        with open(os.path.join(scratch, "config"), "w", encoding="utf-8") as handle:
+            handle.write("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n")
+        try:
+            shutil.copyfile(os.path.join(gitdir, "index"), os.path.join(scratch, "index"))
+        except OSError:
+            raise CodexRunError("the worktree's index could not be read; nothing was run") from None
+        return _git(
+            git,
+            home,
+            root,
+            f"--git-dir={scratch}",
+            f"--work-tree={root}",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -> str:
     """The worktree's real path, after the checks; for the implementer the tree must be clean."""
     if not path or "\0" in path:
@@ -499,7 +538,7 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
     marker = os.path.join(real, ".git")
     if os.path.islink(marker) or not os.path.isfile(marker):
         raise CodexRunError("the folder is not a linked git worktree (its .git is not a plain file); nothing was run")
-    check_gitfile(marker, real, home)
+    gitdir = check_gitfile(marker, real, home)
     git = shutil.which("git", path=SAFE_PATH)
     if not git:
         raise CodexRunError("git was not found; nothing was run")
@@ -508,16 +547,7 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
         raise CodexRunError("the folder named is not the top of its git worktree; nothing was run")
     check_repo_config(git, home, real)
     if cls == "implementer":
-        raw = _git(
-            git,
-            home,
-            real,
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignore-submodules=all",
-        )
+        raw = _sealed_status(git, home, real, gitdir)
         dirty = _dirty_paths(raw)
         named = {os.path.normpath(p) for p in allow_dirty}
         loose = [p for p in dirty if os.path.normpath(p) not in named]
