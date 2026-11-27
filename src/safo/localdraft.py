@@ -54,9 +54,8 @@ from typing import TextIO
 
 from safo import bounded
 
-SHORT_MODEL = "qwen3.5:4b"
-LONG_MODEL = "gemma4:12b"
-LONG_INPUT = 600  # characters of prompt plus facts above which the long model is used
+DRAFT_MODEL = "gemma4:12b"  # every draft; run4 scored it 0.78 (issue) and 0.89 (pr) against qwen at 0.51 and 0.27
+DIGEST_MODEL = "qwen3.5:4b"  # digests send short grouped lines only; run4 did not measure them, so unchanged (#514)
 MAX_PROMPT_BYTES = 100_000  # encoded bytes of the whole prompt; the kernel limit is 131072 per argument
 LLM_TIMEOUT = 900
 GH_TIMEOUT = 120
@@ -1288,7 +1287,7 @@ def _draft(args: argparse.Namespace, ctx: Ctx) -> int:
     if not args.prompt and not facts:
         raise Failure("give a short prompt or --facts FILE", EXIT_ERROR)
     prompt = f"{_INSTRUCTIONS[kind]}\n\nRequest: {args.prompt or ''}\n\nFacts:\n{facts}"
-    model = args.model or (LONG_MODEL if len(prompt) - len(_INSTRUCTIONS[kind]) > LONG_INPUT else SHORT_MODEL)
+    model = args.model or DRAFT_MODEL
     ctx.model, ctx.chars_in = model, len(prompt)
     if kind != "comment" and len(args.title) > MAX_TITLE_CHARS:  # refused before any model call; never echo the title
         raise Failure(
@@ -1362,9 +1361,9 @@ def _digest(args: argparse.Namespace, ctx: Ctx) -> int:
         f"Summarize these grouped {what} in exactly five short lines. The counts are correct; do not recount, "
         f"regroup or invent items. No em dashes.\n\n{grouped}"
     )
-    ctx.model, ctx.chars_in = SHORT_MODEL, len(prompt)
+    ctx.model, ctx.chars_in = DIGEST_MODEL, len(prompt)
     ctx.project = project_of(ctx.env, None)
-    summary = call_local(ctx.env, ctx.sleep, ctx.sub, SHORT_MODEL, prompt, ctx.ids)
+    summary = call_local(ctx.env, ctx.sleep, ctx.sub, DIGEST_MODEL, prompt, ctx.ids)
     ctx.chars_out = len(summary)
     ctx.out.write(f"--- summary (local model) ---\n{summary}\n")
     return EXIT_OK
@@ -1413,7 +1412,7 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument("prompt", nargs="?", default="", help="a short prompt")
         s.add_argument("--repo", required=True, help="owner/repo")
         s.add_argument("--facts", help="a fact file (- for stdin)")
-        s.add_argument("--model", help=f"override the model ({SHORT_MODEL} short, {LONG_MODEL} long)")
+        s.add_argument("--model", help=f"override the model (default {DRAFT_MODEL})")
         s.add_argument("--yes", action="store_true", help="file without asking (the draft is still printed)")
         if name != "comment":
             s.add_argument("--title", required=True)

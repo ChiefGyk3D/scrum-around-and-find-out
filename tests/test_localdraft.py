@@ -98,14 +98,30 @@ def test_issue_files_after_yes_and_shows_draft(env: Env) -> None:
     assert env.read("llm.stdin") == ""  # stdin was /dev/null, never a tty or an open pipe
 
 
-def test_model_choice_short_vs_long(env: Env) -> None:
+def test_draft_defaults_to_gemma_short_and_long(env: Env) -> None:
     (env.dir / "llm.reply").write_text("x\n\nPart of epic #445")
     env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "short"])
-    assert "--model qwen3.5:4b" in env.read("llm.args")
+    assert "--model gemma4:12b" in env.read("llm.args")
+    assert "qwen" not in env.read("llm.args")
     facts = env.dir / "facts.txt"
     facts.write_text("fact line\n" * 200)
     env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "--facts", str(facts)])
     assert "--model gemma4:12b" in env.read("llm.args")
+
+
+def test_pr_and_comment_default_to_gemma(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("Body text.")
+    env.run(["pr", "--repo", "o/r", "--title", "T", "--yes", "short"])
+    assert "--model gemma4:12b" in env.read("llm.args")
+    env.run(["comment", "--repo", "o/r", "--number", "3", "--yes", "short"])
+    assert "--model gemma4:12b" in env.read("llm.args")
+
+
+def test_model_flag_still_overrides(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("x\n\nPart of epic #445")
+    env.run(["issue", "--repo", "o/r", "--title", "T", "--yes", "--model", "qwen3.5:4b", "short"])
+    assert "--model qwen3.5:4b" in env.read("llm.args")
+    assert env.metrics()[-1]["model"] == "qwen3.5:4b"
 
 
 def test_interactive_decline_does_not_file(env: Env) -> None:
@@ -291,7 +307,7 @@ def test_metrics_line_has_no_content_and_report(env: Env) -> None:
         "outcome",
         "outcome_recorded",
     }
-    assert row["subcommand"] == "issue" and row["exit"] == 0 and row["model"] == "qwen3.5:4b"
+    assert row["subcommand"] == "issue" and row["exit"] == 0 and row["model"] == "gemma4:12b"
     assert row["chars_in"] > 0 and row["chars_out"] > 0
     raw = (env.state / "safo" / "local-share.jsonl").read_text()
     assert "SECRETBODY" not in raw and "PRIVATEPROMPT" not in raw
