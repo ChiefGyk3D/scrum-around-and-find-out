@@ -933,6 +933,7 @@ TOP_LEVEL_COMMANDS = (
     "ratebudget",
     "reconcile",
     "route",
+    "spend",
     "status",
     "sync",
     "usage",
