@@ -112,7 +112,7 @@ def test_refuses_lockfile_without_hashes(tmp_path: Path, wheels: Path) -> None:
     bad = tmp_path / "bad.txt"
     bad.write_text("tinydemo==1.0\n")
     done = cli(*build_args(bad, tmp_path / "root", wheels))
-    assert done.returncode == 2 and "no sha256 hash" in done.stderr and done.stdout == ""
+    assert done.returncode == 2 and "with sha256 hashes" in done.stderr and done.stdout == ""
     assert not (tmp_path / "root").exists()
 
 
@@ -121,7 +121,7 @@ def test_refuses_partly_hashed_and_option_lines(tmp_path: Path, wheels: Path, lo
     assert cli(*build_args(mixed, tmp_path / "root", wheels)).returncode == 2
     opt = lock_for(next(wheels.glob("*.whl")), tmp_path, "opt.txt", extra="--index-url https://example.invalid/\n")
     done = cli(*build_args(opt, tmp_path / "root", wheels))
-    assert done.returncode == 2 and "option line" in done.stderr
+    assert done.returncode == 2 and "refused" in done.stderr
     empty = tmp_path / "empty.txt"
     empty.write_text("# nothing\n")
     assert cli(*build_args(empty, tmp_path / "root", wheels)).returncode == 2
@@ -235,3 +235,119 @@ def test_source_pins_the_install_flags() -> None:
 def test_source_never_enables_system_site_packages() -> None:
     src = Path(sharedvenv.__file__).read_text()
     assert "--system-site-packages" not in src.replace("system site-packages", "")
+
+
+HASH = "a" * 64
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"tinydemo==1.0 \\\n    --hash=sha256:{HASH} \\\n    --index-url https://example.invalid/simple\n",
+        f"tinydemo==1.0 \\\n    --hash=sha256:{HASH} # note \\\n    --index-url https://example.invalid/simple\n",
+        f"# a comment \\\n--index-url https://example.invalid/simple\ntinydemo==1.0 --hash=sha256:{HASH}\n",
+        f"tinydemo==1.0 \\\n# inside \\\n    --hash=sha256:{HASH}\n",
+        f"tinydemo==${{TOKEN}} --hash=sha256:{HASH}\n",
+        f"tinydemo==1.0 --hash=sha256:{HASH} --find-links=${{TOKEN}}\n",
+        f"tinydemo==$TOKEN --hash=sha256:{HASH}\n",
+        f"tinydemo @ https://example.invalid/tinydemo-1.0-py3-none-any.whl --hash=sha256:{HASH}\n",
+        f"tinydemo@https://example.invalid/t.whl --hash=sha256:{HASH}\n",
+        f"https://example.invalid/tinydemo-1.0-py3-none-any.whl --hash=sha256:{HASH}\n",
+        f"tinydemo[extra]==1.0 --hash=sha256:{HASH}\n",
+        f'tinydemo==1.0; python_version > "3" --hash=sha256:{HASH}\n',
+        f"tinydemo==1.0 --hash=sha256:{HASH} --no-binary :all:\n",
+        f"tinydemo==1.0 --hash=sha256:{HASH}\r\n",
+        f"tinydemo==1.0 \\ \n    --hash=sha256:{HASH}\n",
+        f"  tinydemo==1.0 --hash=sha256:{HASH}\n",
+        f"tinydemo>=1.0 --hash=sha256:{HASH}\n",
+    ],
+)
+def test_hostile_lockfiles_are_refused_before_anything_is_built(tmp_path: Path, wheels: Path, text: str) -> None:
+    bad = tmp_path / "hostile.txt"
+    bad.write_bytes(text.encode())
+    done = cli(*build_args(bad, tmp_path / "root", wheels))
+    assert done.returncode == 2, (done.returncode, done.stderr)
+    assert done.stdout == ""
+    assert (
+        not (tmp_path / "root").exists() or [p.name for p in (tmp_path / "root").iterdir() if p.name != ".lock"] == []
+    )
+
+
+def test_accepts_the_strict_form_with_comments_and_several_hashes() -> None:
+    good = (
+        f"# header\n\ntinydemo==1.0 \\\n    --hash=sha256:{HASH} \\\n    --hash=sha256:{'b' * 64}\n"
+        f"other_pkg==2.1.post1+x --hash=sha256:{HASH}\n"
+    )
+    assert sharedvenv.check_hashes(good.encode()) == 2
+
+
+def test_lockfile_swapped_after_the_check_is_not_what_pip_installs(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root = tmp_path / "root"
+    log = tmp_path / "creates.log"
+    wrapper = tmp_path / "py.sh"
+    wrapper.write_text(f'#!/bin/sh\necho x >> {log}\nsleep 2\nexec {sys.executable} "$@"\n')
+    wrapper.chmod(0o755)
+    original = lock.read_bytes()
+    cmd = [sys.executable, "-m", "safo.sharedvenv", *map(str, build_args(lock, root, wheels)), "--python", str(wrapper)]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV)  # noqa: S603 - fixed argv in a test helper, no shell
+    for _ in range(200):  # the check has passed once the build has started
+        if log.exists():
+            break
+        time.sleep(0.05)
+    assert log.exists()
+    lock.write_text(f"tinydemo==1.0 --hash=sha256:{'0' * 64}\n")  # a real swap, in place, after the check
+    out, err = proc.communicate(timeout=300)
+    assert proc.returncode == 0, err
+    assert Path(out.strip()).parent.parent.name == hashlib.sha256(original).hexdigest()
+    done = subprocess.run([out.strip(), "-c", "import tinydemo"], capture_output=True, text=True)  # noqa: S603 - fixed argv in a test helper, no shell
+    assert done.returncode == 0, done.stderr
+    assert [p.name for p in root.iterdir() if p.name.startswith(".")] == [".lock"]  # private copy and home removed
+
+
+def test_pip_never_receives_the_callers_lockfile_path(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    seen = tmp_path / "argv.log"
+    shim = tmp_path / "pipshim.sh"
+    shim.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> {seen}\nexec {sys.executable} "$@"\n')
+    shim.chmod(0o755)
+    # the shim only sees the venv step; the pip step is covered by the swap test, this one checks the venv step is clean
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", shim)
+    assert done.returncode == 0, done.stderr
+    assert str(lock) not in seen.read_text()
+
+
+def test_rehash_of_the_copy_actually_used_must_match_the_key(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    with pytest.raises(sharedvenv.Refused):
+        sharedvenv.build(root, "f" * 64, lock.read_bytes(), sys.executable, ["--no-index", "--find-links", str(wheels)])
+    assert [p.name for p in root.iterdir()] == []
+
+
+def test_child_environment_is_an_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("TOKEN", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "HOME"):
+        monkeypatch.setenv(name, "secret-value")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = sharedvenv._clean_env(tmp_path)
+    assert "secret-value" not in env.values()
+    assert env["HOME"] == str(tmp_path) and env["PATH"] == "/usr/bin"
+    assert set(env) <= {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "PIP_NO_INPUT",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+        "PIP_REQUIRE_VIRTUALENV",
+    }
+
+
+def test_secret_in_caller_environment_does_not_reach_the_children(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    dump = tmp_path / "env.log"
+    shim = tmp_path / "envshim.sh"
+    shim.write_text(f'#!/bin/sh\nenv >> {dump}\nexec {sys.executable} "$@"\n')
+    shim.chmod(0o755)
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", shim, env={"TOKEN": "s3cr3t-xyz"})
+    assert done.returncode == 0, done.stderr
+    text = dump.read_text()
+    assert "s3cr3t-xyz" not in text and "TOKEN" not in text
+    assert f"HOME={os.environ.get('HOME', '')}\n" not in text

@@ -30,7 +30,6 @@ ROOT_ENV = "SAFO_SHARED_VENV_ROOT"
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
 MARKER = ".safo-lock-sha256"
 KEY = re.compile(r"[0-9a-f]{64}")
-HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}(?=\s|$)")
 MAX_LOCKFILE = 4 * 1024 * 1024
 LOCK_TIMEOUT = 900.0
 
@@ -50,32 +49,61 @@ def default_root(env: dict[str, str] | os._Environ[str] = os.environ) -> Path:
 
 
 def read_lockfile(path: Path) -> bytes:
-    if path.is_symlink():
-        raise Refused(f"the lockfile is a symbolic link: {path}")
-    if not path.is_file():
-        raise Refused(f"the lockfile is not a regular file: {path}")
-    if path.stat().st_size > MAX_LOCKFILE:
+    """Read the lockfile once, through one descriptor, refusing a symbolic link or a special file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError as exc:
+        raise Refused(f"the lockfile cannot be opened (a symbolic link or missing?): {path}") from exc
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise Refused(f"the lockfile is not a regular file: {path}")
+        data = handle.read(MAX_LOCKFILE + 1)
+    if len(data) > MAX_LOCKFILE:
         raise Refused("the lockfile is larger than 4 MiB")
-    return path.read_bytes()
+    return data
+
+
+_NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+_VERSION = r"[0-9][A-Za-z0-9.!+_]*"
+_ENTRY = re.compile(rf"{_NAME}=={_VERSION}(?: --hash=sha256:[0-9a-f]{{64}})+")
+_REFUSED_CHARS = ("$", "\r", chr(0), "\t")
 
 
 def check_hashes(data: bytes) -> int:
-    """Return the requirement count; refuse an option line, a requirement without a sha256 hash, or none at all."""
+    """Accept only a strict grammar and return the requirement count; refuse everything else.
+
+    A line is blank, `# comment` at column 0 (no backslash), or part of one entry: `name==version` then one or more
+    `--hash=sha256:HEX`, split across lines only by a trailing backslash. No other token, no `$`, `@`, URL, extra,
+    marker, option, tab, carriage return, NUL or comment inside an entry, so no parser can read the file differently.
+    """
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise Refused("the lockfile is not UTF-8") from exc
-    logical = re.sub(r"\\\r?\n", " ", text)
+    if any(ch in text for ch in _REFUSED_CHARS):
+        raise Refused("the lockfile holds a character this command refuses ($, tab, carriage return or NUL)")
     count = 0
-    for raw in logical.splitlines():
-        line = re.sub(r"(^|\s)#.*", "", raw).strip()
-        if not line:
+    pending: list[str] = []
+    for number, raw in enumerate(text.split("\n"), 1):
+        continued = raw.endswith("\\")
+        body = raw[:-1] if continued else raw
+        plain_comment = not pending and body.startswith("#") and not continued
+        if "\\" in body or ("#" in body and not plain_comment):
+            raise Refused(f"line {number}: a backslash or comment where the grammar allows none")
+        if plain_comment or (not pending and not continued and not body.strip(" ")):
             continue
-        if line.startswith("-"):
-            raise Refused(f"the lockfile holds an option line, not a pinned requirement: {line[:60]!r}")
-        if not HASH.search(line):
-            raise Refused(f"a requirement has no sha256 hash: {line[:60]!r}")
+        if not pending and body != body.lstrip(" "):
+            raise Refused(f"line {number}: an entry may not start with a space")
+        pending.append(body.strip(" "))
+        if continued:
+            continue
+        joined = " ".join(part for part in pending if part)
+        pending = []
+        if not _ENTRY.fullmatch(joined):
+            raise Refused(f"line {number}: not `name==version` with sha256 hashes: {joined[:60]!r}")
         count += 1
+    if pending:
+        raise Refused("the lockfile ends inside a continued line")
     if count == 0:
         raise Refused("the lockfile holds no requirements")
     return count
@@ -137,12 +165,23 @@ def _remove_tree(path: Path) -> None:
     shutil.rmtree(path)
 
 
-def _clean_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"}}
+def _clean_env(home: Path) -> dict[str, str]:
+    """An allowlist for the children: the caller's secrets and pip settings never reach them."""
+    env = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL") if name in os.environ}
+    env["HOME"] = str(home)
     env["PIP_REQUIRE_VIRTUALENV"] = "0"
     env["PIP_NO_INPUT"] = "1"
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     return env
+
+
+def _private_copy(directory: Path, name: str, data: bytes) -> Path:
+    """Write bytes to a new private file (exclusive create, mode 0600, no symbolic link followed)."""
+    path = directory / name
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    return path
 
 
 def interpreter(venv: Path) -> Path:
@@ -163,18 +202,28 @@ def valid(venv: Path, key: str) -> None:
         raise Refused(f"the venv includes system site-packages: {venv}")
 
 
-def build(root: Path, key: str, lockfile: Path, python: str, pip_args: Sequence[str]) -> None:
+def build(root: Path, key: str, data: bytes, python: str, pip_args: Sequence[str]) -> None:
+    """Build from the checked bytes `data`: pip reads a private copy, never the caller's file."""
     tmp = root / f".tmp-{key[:12]}-{os.getpid()}"
+    home = root / f".home-{key[:12]}-{os.getpid()}"
+    req = root / f".req-{key[:12]}-{os.getpid()}.txt"
     final = root / key
     try:
+        home.mkdir(mode=0o700)
+        copy = _private_copy(root, req.name, data)
+        if hashlib.sha256(copy.read_bytes()).hexdigest() != key:
+            raise Refused("the private lockfile copy does not match the key")
+        env = _clean_env(home)
         subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
-            [python, "-m", "venv", "--clear", str(tmp)], check=True, env=_clean_env(), timeout=600, stdout=sys.stderr
+            [python, "-m", "venv", "--clear", str(tmp)], check=True, env=env, timeout=600, stdout=sys.stderr
         )
         install = [
             str(interpreter(tmp)), "-I", "-m", "pip", "install", "--require-hashes", "--no-deps",
-            "--only-binary=:all:", *pip_args, "-r", str(lockfile),
+            "--only-binary=:all:", *pip_args, "-r", str(copy),
         ]  # fmt: skip
-        subprocess.run(install, check=True, env=_clean_env(), timeout=1800, stdout=sys.stderr)  # noqa: S603 - fixed argument list built here, no shell
+        subprocess.run(install, check=True, env=env, timeout=1800, stdout=sys.stderr)  # noqa: S603 - fixed argument list built here, no shell
+        if hashlib.sha256(copy.read_bytes()).hexdigest() != key:
+            raise Refused("the private lockfile copy changed during the install")
         (tmp / MARKER).write_text(key + "\n")
         cfg = tmp / "pyvenv.cfg"
         if re.search(r"(?im)^include-system-site-packages\s*=\s*true", cfg.read_text()):
@@ -184,8 +233,11 @@ def build(root: Path, key: str, lockfile: Path, python: str, pip_args: Sequence[
     except (subprocess.SubprocessError, OSError) as exc:
         raise Failed(f"the build failed: {type(exc).__name__}: {str(exc)[:200]}") from exc
     finally:
-        if tmp.exists() or tmp.is_symlink():
-            _remove_tree(tmp)
+        for leftover in (tmp, home):
+            if leftover.exists() or leftover.is_symlink():
+                _remove_tree(leftover)
+        if req.exists() or req.is_symlink():
+            req.unlink()
 
 
 def ensure(root: Path, lockfile: Path, python: str, pip_args: Sequence[str], timeout: float) -> Path:
@@ -194,13 +246,17 @@ def ensure(root: Path, lockfile: Path, python: str, pip_args: Sequence[str], tim
     key = hashlib.sha256(data).hexdigest()
     prepare_root(root)
     with Lock(root, timeout):
-        for leftover in root.glob(".tmp-*"):  # a crashed build; safe to clear, we hold the lock
-            _remove_tree(leftover)
+        for pattern in (".tmp-*", ".home-*", ".req-*"):  # a crashed build; safe to clear, we hold the lock
+            for leftover in root.glob(pattern):
+                if leftover.is_dir() and not leftover.is_symlink():
+                    _remove_tree(leftover)
+                else:
+                    leftover.unlink()
         final = root / key
         if final.exists() or final.is_symlink():
             valid(final, key)
         else:
-            build(root, key, lockfile, python, pip_args)
+            build(root, key, data, python, pip_args)
             valid(final, key)
         stamp = root / f"{key}.used"
         if stamp.is_symlink():
