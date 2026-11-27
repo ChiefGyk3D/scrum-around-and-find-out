@@ -9,19 +9,47 @@ safo-shared-venv --gc --max-age-days 30       # lists venvs unused for 30 days
 safo-shared-venv --gc --max-age-days 30 --delete
 ```
 
-- Location: `--root`, else `$SAFO_SHARED_VENV_ROOT`, else `~/.local/share/safo-venvs`. The root must be a real
-  directory owned by you and not writable by others. A venv lives at `ROOT/<sha256 of the lockfile>`.
-- Build: `pip install --require-hashes --no-deps --only-binary=:all: -r LOCKFILE` into a new venv without system
-  site-packages. The lockfile must follow a strict grammar: `name==version` plus one or more `--hash=sha256:...`, optionally
-  split by trailing backslashes, with `# comment` lines at column 0; anything else is refused. pip reads a private
-  0600 copy of the checked bytes, and the children run with an allowlisted environment (PATH, LANG, LC_ALL, a private
-  HOME), so pip settings come from `--index-url`, `--find-links` and `--no-index` only. The index is whatever pip is configured with; `--index-url`, `--find-links` and `--no-index`
-  narrow it. Nothing else is fetched.
-- Read-only: after the build every file and directory loses its write bit, then the venv is renamed into place in one
-  step. Agents run it and never install into it. A changed lockfile is a new key and a new venv.
+## Trust boundary
+
+- The shared root must be owned by the current user and must not be writable by any other account. The command
+  refuses a root that is not. A hostile process running as the same user is out of scope: it can already do anything
+  that user can, and filesystem modes cannot authenticate against it.
+- The lockfile content is trusted input: its hashes are the trust anchor. The strict grammar below defends against
+  parser smuggling and malformed input. It does not defend against a hostile but valid lockfile, so review a lockfile
+  change like any dependency change.
+- The owner, mode and manifest checks on reuse detect accidental or cross-account damage (a pre-created or edited
+  entry). A same-user attacker can rewrite the marker as well; that is the boundary above.
+
+## Behavior
+
+- Location: `--root`, else `$SAFO_SHARED_VENV_ROOT`, else `~/.local/share/safo-venvs`.
+- Key: the sha256 of a canonical record of the lockfile hash, the interpreter (resolved `--python` path,
+  implementation, major.minor, cache tag, platform, ABI flags, bundled pip version) and the acquisition policy
+  (`--no-index`, `--index-url`, `--find-links`). A different interpreter or policy never returns an existing entry. A
+  `--python` that does not exist is refused.
+- Build: `pip --isolated install --require-hashes --no-deps --only-binary=:all: -r FILE` into a new venv without
+  system site-packages. The lockfile must follow a strict grammar: `name==version` plus one or more
+  `--hash=sha256:...`, optionally split by trailing backslashes, with `# comment` lines at column 0; anything else is
+  refused. pip reads a private copy of the checked bytes from a fresh random-named 0700 build directory, through an
+  open descriptor (`/proc/self/fd/N`) where available, and the bytes are re-hashed from that descriptor after the
+  install. The children run with an allowlisted environment (PATH, LANG, LC_ALL, a private HOME, `PIP_CONFIG_FILE` set
+  to the null device) and pip runs isolated, so no pip configuration file is read. The index is `--index-url`,
+  `--find-links` and `--no-index` only; nothing else is fetched.
+- Read-only: after the build every file and directory loses its write bit, a manifest (sha256 over the sorted relative
+  path, size and mode of every member) is stored in the marker, and the venv is renamed into place in one step. Agents
+  run it and never install into it. A changed lockfile is a new key and a new venv.
+- Reuse: the entry directory, `pyvenv.cfg` and the marker must be plain files and directories owned by the current
+  user and not group or world writable, `bin/python` must exist and its link be owned by the current user, and the
+  manifest must match. Anything else is refused and reported.
 - Lock: `ROOT/.lock` (flock) so two callers never build the same venv; the second waits (`--lock-timeout`) and reuses.
-- GC: age is the later of the venv's build time and the last use stamp `ROOT/<key>.used`. Without `--delete` it only
-  lists. Symbolic links are skipped, never followed.
+  After taking the lock the descriptor is compared with the path and retaken if the file was replaced; this narrows the
+  race for a same-user writer and does not remove it.
+- Use stamp: `ROOT/<key>.used` is opened without following links; it must be a regular single-link file of the current
+  user.
+- GC: age is the later of the venv's last change and the use stamp. Without `--delete` it only lists. Only entries with
+  a valid marker, manifest and layout are deleted; anything else (and any link) is reported as skipped and left alone.
+  Leftover build directories are removed only when their name matches the random build-name pattern and they carry this
+  tool's build marker.
 - Exit codes: 0 done, 1 build or lock failure, 2 refusal or bad usage. Only the interpreter path goes to stdout.
 
 Tests: `tests/test_sharedvenv.py` (a local wheel built in the test, no network, two concurrent processes).

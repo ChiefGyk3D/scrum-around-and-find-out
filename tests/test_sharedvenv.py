@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import os
 import subprocess
@@ -66,6 +67,20 @@ def lock(tmp_path: Path, wheels: Path) -> Path:
     return lock_for(next(wheels.glob("*.whl")), tmp_path)
 
 
+def venv_of(done: subprocess.CompletedProcess[str]) -> Path:
+    assert done.returncode == 0, done.stderr
+    return Path(done.stdout.strip()).parent.parent
+
+
+def shim(path: Path, body: str) -> Path:
+    """An interpreter stand-in: runs `body` (sh), then the real interpreter. `$VENV_STEP` is 1 for `-m venv`."""
+    path.write_text(
+        f'#!/bin/sh\nVENV_STEP=0\ncase "$*" in *"-m venv"*) VENV_STEP=1;; esac\n{body}\nexec {sys.executable} "$@"\n'
+    )
+    path.chmod(0o755)
+    return path
+
+
 def build_args(lock: Path, root: Path, wheels: Path) -> list[object]:
     return [lock, "--root", root, "--no-index", "--find-links", wheels]
 
@@ -75,29 +90,29 @@ def test_builds_keyed_venv_installs_pinned_wheel_prints_interpreter(tmp_path: Pa
     done = cli(*build_args(lock, root, wheels))
     assert done.returncode == 0, done.stderr
     python = Path(done.stdout.strip())
-    key = hashlib.sha256(lock.read_bytes()).hexdigest()
-    assert python == root / key / "bin" / "python"
+    venv = venv_of(done)
+    assert python == venv / "bin" / "python" and venv.parent == root
     out = subprocess.run(  # noqa: S603 - fixed argv in a test helper, no shell
         [python, "-c", "import tinydemo;print(tinydemo.VALUE)"], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == "534"
-    cfg = (root / key / "pyvenv.cfg").read_text().lower()
+    cfg = (venv / "pyvenv.cfg").read_text().lower()
     assert "include-system-site-packages = false" in cfg
 
 
 def test_venv_is_read_only_and_reuse_does_not_rebuild(tmp_path: Path, wheels: Path, lock: Path) -> None:
     root = tmp_path / "root"
     first = cli(*build_args(lock, root, wheels))
-    key = hashlib.sha256(lock.read_bytes()).hexdigest()
-    writable = [p for p in (root / key).rglob("*") if not p.is_symlink() and p.stat().st_mode & 0o222]
+    venv = venv_of(first)
+    writable = [p for p in venv.rglob("*") if not p.is_symlink() and p.stat().st_mode & 0o222]
     assert writable == []
-    assert not (root / key).stat().st_mode & 0o222
-    inode = (root / key).stat().st_ino
-    second = cli(*build_args(lock, root, tmp_path / "no-such-wheels"))  # a rebuild would fail without wheels
+    assert not venv.stat().st_mode & 0o222
+    inode = venv.stat().st_ino
+    second = cli(*build_args(lock, root, wheels))  # a rebuild would give the entry a new inode
     assert (second.returncode, second.stdout) == (0, first.stdout)
-    assert (root / key).stat().st_ino == inode
+    assert venv.stat().st_ino == inode
     with pytest.raises(PermissionError):
-        (root / key / "lib" / "evil.txt").write_text("x")
+        (venv / "lib" / "evil.txt").write_text("x")
 
 
 def test_changed_lockfile_is_a_new_venv(tmp_path: Path, wheels: Path, lock: Path) -> None:
@@ -138,7 +153,7 @@ def test_refuses_symlinked_lockfile_root_and_venv_entry(tmp_path: Path, wheels: 
     assert done.returncode == 2 and "symbolic link" in done.stderr
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
-    (root / hashlib.sha256(lock.read_bytes()).hexdigest()).symlink_to(real)
+    (root / venv_of(cli(*build_args(lock, tmp_path / "other", wheels))).name).symlink_to(real)
     done = cli(*build_args(lock, root, wheels))
     assert done.returncode == 2 and "symbolic link" in done.stderr
 
@@ -152,8 +167,7 @@ def test_refuses_root_writable_by_others(tmp_path: Path, wheels: Path, lock: Pat
 
 def test_refuses_venv_with_system_site_packages(tmp_path: Path, wheels: Path, lock: Path) -> None:
     root = tmp_path / "root"
-    cli(*build_args(lock, root, wheels))
-    cfg = root / hashlib.sha256(lock.read_bytes()).hexdigest() / "pyvenv.cfg"
+    cfg = venv_of(cli(*build_args(lock, root, wheels))) / "pyvenv.cfg"
     cfg.chmod(0o600)
     cfg.write_text(
         cfg.read_text().replace("include-system-site-packages = false", "include-system-site-packages = true")
@@ -173,9 +187,7 @@ def test_hash_mismatch_fails_and_leaves_no_venv(tmp_path: Path, wheels: Path) ->
 def test_two_processes_build_once(tmp_path: Path, wheels: Path, lock: Path) -> None:
     root = tmp_path / "root"
     log = tmp_path / "creates.log"
-    wrapper = tmp_path / "py.sh"
-    wrapper.write_text(f'#!/bin/sh\necho x >> {log}\nsleep 1\nexec {sys.executable} "$@"\n')
-    wrapper.chmod(0o755)
+    wrapper = shim(tmp_path / "py.sh", f'[ "$VENV_STEP" = 1 ] && {{ echo x >> {log}; sleep 1; }}')
     cmd = [sys.executable, "-m", "safo.sharedvenv", *map(str, build_args(lock, root, wheels)), "--python", str(wrapper)]
     procs = [
         subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV)  # noqa: S603 - fixed argv in a test helper, no shell
@@ -185,16 +197,14 @@ def test_two_processes_build_once(tmp_path: Path, wheels: Path, lock: Path) -> N
     assert [r[2] for r in results] == [0, 0], results
     assert results[0][0] == results[1][0] != ""
     assert log.read_text().count("x") == 1
-    assert [p.name for p in root.iterdir() if p.name.startswith(".tmp-")] == []
+    assert [p.name for p in root.iterdir() if p.name.startswith(".build-")] == []
 
 
 def test_gc_lists_then_deletes_only_old(tmp_path: Path, wheels: Path, lock: Path) -> None:
     root = tmp_path / "root"
-    cli(*build_args(lock, root, wheels))
+    old_key = venv_of(cli(*build_args(lock, root, wheels))).name
     other = make_wheel(wheels, version="2.0")
-    cli(*build_args(lock_for(other, tmp_path, "req2.txt"), root, wheels))
-    old_key = hashlib.sha256(lock.read_bytes()).hexdigest()
-    new_key = hashlib.sha256((tmp_path / "req2.txt").read_bytes()).hexdigest()
+    new_key = venv_of(cli(*build_args(lock_for(other, tmp_path, "req2.txt"), root, wheels))).name
     long_ago = time.time() - 40 * 86400
     for path in (root / old_key, root / f"{old_key}.used"):
         os.utime(path, (long_ago, long_ago))
@@ -284,10 +294,7 @@ def test_accepts_the_strict_form_with_comments_and_several_hashes() -> None:
 def test_lockfile_swapped_after_the_check_is_not_what_pip_installs(tmp_path: Path, wheels: Path, lock: Path) -> None:
     root = tmp_path / "root"
     log = tmp_path / "creates.log"
-    wrapper = tmp_path / "py.sh"
-    wrapper.write_text(f'#!/bin/sh\necho x >> {log}\nsleep 2\nexec {sys.executable} "$@"\n')
-    wrapper.chmod(0o755)
-    original = lock.read_bytes()
+    wrapper = shim(tmp_path / "py.sh", f'[ "$VENV_STEP" = 1 ] && {{ echo x >> {log}; sleep 2; }}')
     cmd = [sys.executable, "-m", "safo.sharedvenv", *map(str, build_args(lock, root, wheels)), "--python", str(wrapper)]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV)  # noqa: S603 - fixed argv in a test helper, no shell
     for _ in range(200):  # the check has passed once the build has started
@@ -298,7 +305,6 @@ def test_lockfile_swapped_after_the_check_is_not_what_pip_installs(tmp_path: Pat
     lock.write_text(f"tinydemo==1.0 --hash=sha256:{'0' * 64}\n")  # a real swap, in place, after the check
     out, err = proc.communicate(timeout=300)
     assert proc.returncode == 0, err
-    assert Path(out.strip()).parent.parent.name == hashlib.sha256(original).hexdigest()
     done = subprocess.run([out.strip(), "-c", "import tinydemo"], capture_output=True, text=True)  # noqa: S603 - fixed argv in a test helper, no shell
     assert done.returncode == 0, done.stderr
     assert [p.name for p in root.iterdir() if p.name.startswith(".")] == [".lock"]  # private copy and home removed
@@ -318,8 +324,9 @@ def test_pip_never_receives_the_callers_lockfile_path(tmp_path: Path, wheels: Pa
 def test_rehash_of_the_copy_actually_used_must_match_the_key(tmp_path: Path, wheels: Path, lock: Path) -> None:
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
+    args = ["--no-index", "--find-links", str(wheels)]
     with pytest.raises(sharedvenv.Refused):
-        sharedvenv.build(root, "f" * 64, lock.read_bytes(), sys.executable, ["--no-index", "--find-links", str(wheels)])
+        sharedvenv.build(root, "a" * 64, lock.read_bytes(), sys.executable, args, expected_sha="f" * 64)
     assert [p.name for p in root.iterdir()] == []
 
 
@@ -335,19 +342,197 @@ def test_child_environment_is_an_allowlist(tmp_path: Path, monkeypatch: pytest.M
         "HOME",
         "LANG",
         "LC_ALL",
-        "PIP_NO_INPUT",
-        "PIP_DISABLE_PIP_VERSION_CHECK",
-        "PIP_REQUIRE_VIRTUALENV",
+        "PIP_CONFIG_FILE",
     }
 
 
 def test_secret_in_caller_environment_does_not_reach_the_children(tmp_path: Path, wheels: Path, lock: Path) -> None:
     dump = tmp_path / "env.log"
-    shim = tmp_path / "envshim.sh"
-    shim.write_text(f'#!/bin/sh\nenv >> {dump}\nexec {sys.executable} "$@"\n')
-    shim.chmod(0o755)
-    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", shim, env={"TOKEN": "s3cr3t-xyz"})
+    envshim = shim(tmp_path / "envshim.sh", f"env >> {dump}")
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", envshim, env={"TOKEN": "s3cr3t-xyz"})
     assert done.returncode == 0, done.stderr
     text = dump.read_text()
     assert "s3cr3t-xyz" not in text and "TOKEN" not in text
     assert f"HOME={os.environ.get('HOME', '')}\n" not in text
+
+
+def build_in(tmp_path: Path, wheels: Path, lock: Path, name: str = "root") -> tuple[Path, Path]:
+    root = tmp_path / name
+    return root, venv_of(cli(*build_args(lock, root, wheels)))
+
+
+def test_fake_entry_with_a_self_written_marker_is_refused(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    _, real = build_in(tmp_path, wheels, lock, "donor")
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    fake = root / real.name
+    (fake / "bin").mkdir(parents=True)
+    (fake / "bin" / "python").symlink_to(sys.executable)
+    (fake / "pyvenv.cfg").write_text("include-system-site-packages = false\n")
+    (fake / sharedvenv.MARKER).write_text(real.name + "\n")
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 2 and done.stdout == "", done.stderr
+
+
+def test_entry_changed_after_the_build_is_refused(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    venv.chmod(0o755)
+    (venv / "extra.txt").write_text("x")
+    venv.chmod(0o555)
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 2 and "manifest" in done.stderr
+
+
+def test_group_writable_entry_is_refused(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    venv.chmod(0o575)
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 2 and "writable" in done.stderr
+
+
+def test_entry_owned_by_another_account_is_refused(
+    tmp_path: Path, wheels: Path, lock: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, venv = build_in(tmp_path, wheels, lock)
+    sharedvenv.valid(venv, venv.name)
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    with pytest.raises(sharedvenv.Refused, match="owned"):
+        sharedvenv.valid(venv, venv.name)
+
+
+def test_requirement_copy_replaced_by_path_during_the_build_is_not_what_pip_reads(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    modes = tmp_path / "modes.log"
+    zeros = "0" * 64
+    body = "\n".join(
+        [
+            'if [ "$VENV_STEP" = 1 ]; then',
+            f'  stat -c "%a %n" "$HOME/.." >> {modes}',
+            '  for f in "$HOME"/../.req-* "$HOME"/../req.txt; do',
+            f'    if [ -e "$f" ]; then rm -f "$f"; echo "tinydemo==1.0 --hash=sha256:{zeros}" > "$f"; fi',
+            "  done",
+            "fi",
+        ]
+    )
+    swapper = shim(tmp_path / "swap.sh", body)
+    root = tmp_path / "root"
+    done = cli(*build_args(lock, root, wheels), "--python", swapper)
+    assert done.returncode == 0, done.stderr
+    mode, name = modes.read_text().split()[:2]
+    assert mode == "700" and Path(os.path.normpath(name)).name.startswith(".build-")
+    assert subprocess.run([venv_of(done) / "bin" / "python", "-c", "import tinydemo"]).returncode == 0  # noqa: S603 - fixed argv in a test helper, no shell
+
+
+def test_key_covers_the_interpreter_and_the_acquisition_policy(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root, first = build_in(tmp_path, wheels, lock)
+    assert first.name != hashlib.sha256(lock.read_bytes()).hexdigest()
+    other_py = shim(tmp_path / "other-python.sh", "true")
+    second = venv_of(cli(*build_args(lock, root, wheels), "--python", other_py))
+    assert second != first
+    copy = tmp_path / "wheels2"
+    copy.mkdir()
+    (copy / next(wheels.glob("*.whl")).name).write_bytes(next(wheels.glob("*.whl")).read_bytes())
+    third = venv_of(cli(*build_args(lock, root, copy)))
+    assert len({first, second, third}) == 3
+
+
+def test_missing_interpreter_fails_and_builds_nothing(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root = tmp_path / "root"
+    done = cli(*build_args(lock, root, wheels), "--python", "/does/not/exist")
+    assert done.returncode == 2 and done.stdout == ""
+    assert not root.exists() or [p.name for p in root.iterdir() if p.name != ".lock"] == []
+
+
+def test_lock_file_replaced_while_waiting_is_not_the_lock_we_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    calls: list[int] = []
+    real = sharedvenv._after_flock
+
+    def replace_once(path: Path) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            path.unlink()
+            path.write_text("")
+        real(path)
+
+    monkeypatch.setattr(sharedvenv, "_after_flock", replace_once)
+    with sharedvenv.Lock(root, 5) as held:
+        assert os.fstat(held.fd).st_ino == (root / ".lock").stat().st_ino
+        other = os.open(root / ".lock", os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(other)
+    assert len(calls) == 2
+
+
+def test_gc_skips_entries_this_tool_did_not_build(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    foreign = root / ("c" * 64)
+    foreign.mkdir()
+    (foreign / "precious.txt").write_text("keep")
+    long_ago = time.time() - 90 * 86400
+    for path in (foreign, venv, root / f"{venv.name}.used"):
+        os.utime(path, (long_ago, long_ago))
+    done = cli("--gc", "--max-age-days", 30, "--delete", "--root", root)
+    assert done.returncode == 0 and "skipped" in done.stdout and str(foreign) in done.stdout
+    assert (foreign / "precious.txt").read_text() == "keep"
+    assert not venv.exists()  # the valid old one is deleted
+
+
+def test_stale_cleanup_removes_only_this_tools_build_directories(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    ours = root / ".build-Ab3dEf9h"
+    ours.mkdir(mode=0o700)
+    (ours / sharedvenv.BUILD_MARK).write_text("x")
+    for name in (".build-NoMark12", ".tmp-keep", ".home-keep", "notes"):
+        (root / name).mkdir()
+        (root / name / "f").write_text("keep")
+    assert cli(*build_args(lock, root, wheels)).returncode == 0
+    assert not ours.exists()
+    assert all((root / n / "f").exists() for n in (".build-NoMark12", ".tmp-keep", ".home-keep", "notes"))
+
+
+def test_pip_configuration_files_are_ignored(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    target = tmp_path / "elsewhere"
+    conf = f"[install]\\ntarget = {target}\\n"
+    body = "\n".join(
+        [
+            'if [ "$VENV_STEP" = 1 ]; then',
+            "  for a; do last=$a; done",
+            '  mkdir -p "$HOME/.config/pip" "$HOME/.pip"',
+            '  for f in "$HOME/.config/pip/pip.conf" "$HOME/.pip/pip.conf" "$HOME/pip.conf"; do',
+            f'    printf "{conf}" > "$f"',
+            "  done",
+            f'  "{sys.executable}" "$@" || exit 1',
+            f'  printf "{conf}" > "$last/pip.conf"; exit 0',
+            "fi",
+        ]
+    )
+    conf_shim = shim(tmp_path / "conf.sh", body)
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", conf_shim)
+    assert done.returncode == 0, done.stderr
+    assert subprocess.run([venv_of(done) / "bin" / "python", "-c", "import tinydemo"]).returncode == 0  # noqa: S603 - fixed argv in a test helper, no shell
+    assert not target.exists()
+
+
+def test_use_stamp_must_be_a_plain_single_link_file(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root, venv = build_in(tmp_path, wheels, lock)
+    stamp = root / f"{venv.name}.used"
+    assert stamp.is_file()
+    stamp.unlink()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("v")
+    os.link(victim, stamp)
+    done = cli(*build_args(lock, root, wheels))
+    assert done.returncode == 2 and "stamp" in done.stderr
+    stamp.unlink()
+    stamp.symlink_to(victim)
+    assert cli(*build_args(lock, root, wheels)).returncode == 2
+    assert victim.read_text() == "v"

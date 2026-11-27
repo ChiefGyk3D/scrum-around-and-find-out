@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """safo-shared-venv: one read-only, hash-locked venv per lockfile, shared by every agent (#534, epic #518).
 
-`safo-shared-venv LOCKFILE` prints the interpreter of a venv keyed by the lockfile's sha256. A missing venv is built
-under a file lock (two callers never build the same one), from `pip install --require-hashes --no-deps -r LOCKFILE`
-only, never with system site-packages, then made read-only and renamed into place in one step. A changed lockfile is
-a new key, so a new venv; the old one stays until `--gc --max-age-days N` lists it (and `--delete` removes it).
+`safo-shared-venv LOCKFILE` prints the interpreter of a venv keyed by the lockfile's sha256 together with the trusted
+interpreter identity and the acquisition policy. A missing venv is built under a file lock (two callers never build the
+same one), from `pip install --require-hashes --no-deps` only, never with system site-packages, then made read-only and
+renamed into place in one step. A changed lockfile is a new key, so a new venv; the old one stays until
+`--gc --max-age-days N` lists it (and `--delete` removes it).
 
-Refused: a lockfile with a requirement that has no sha256 hash, an option line (an index, `-r`, `-e`) in the
-lockfile, a symbolic link as the lockfile, the root or a venv entry, a root that is not private to this user.
+Trust boundary: the shared root must be owned by the current user and not writable by any other account. A hostile
+process running as the same user is out of scope (filesystem modes cannot authenticate against it). The lockfile content
+is trusted input: its hashes are the trust anchor. The strict grammar defends against parser smuggling and malformed
+input, not against a hostile but valid lockfile.
 Exit codes: 0 done, 1 a build or lock failure, 2 a refusal or bad usage.
 """
 
@@ -16,12 +19,14 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -29,9 +34,17 @@ from pathlib import Path
 ROOT_ENV = "SAFO_SHARED_VENV_ROOT"
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
 MARKER = ".safo-lock-sha256"
+BUILD_MARK = ".safo-build"
+BUILD_NAME = re.compile(r"\.build-[A-Za-z0-9_]{8}")
 KEY = re.compile(r"[0-9a-f]{64}")
 MAX_LOCKFILE = 4 * 1024 * 1024
 LOCK_TIMEOUT = 900.0
+IDENTITY_CODE = (
+    "import json,sys,sysconfig\n"
+    "try:\n    import ensurepip; pip = ensurepip.version()\nexcept Exception:\n    pip = 'none'\n"
+    "print(json.dumps([sys.implementation.name, list(sys.version_info[:2]), sys.implementation.cache_tag,"
+    " sysconfig.get_platform(), getattr(sys, 'abiflags', ''), pip]))\n"
+)
 
 
 class Refused(Exception):
@@ -123,24 +136,43 @@ def prepare_root(root: Path) -> Path:
     return root
 
 
+def _after_flock(path: Path) -> None:
+    """A seam between taking the flock and checking which file it is on (replaced by a test)."""
+
+
 class Lock:
-    """An exclusive flock on `root/.lock`, waited for in bounded polls."""
+    """An exclusive flock on `root/.lock`, waited for in bounded polls.
+
+    After the flock is taken, the descriptor is compared with the path; if the file was replaced meanwhile, the lock is
+    dropped and taken again on the new file. This narrows the race for a same-user writer, it does not remove it.
+    """
 
     def __init__(self, root: Path, timeout: float) -> None:
-        self.root, self.timeout, self.fd = root, timeout, -1
+        self.path, self.timeout, self.fd = root / ".lock", timeout, -1
 
     def __enter__(self) -> Lock:
-        self.fd = os.open(self.root / ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         deadline = time.monotonic() + self.timeout
         while True:
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             try:
-                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
+                os.close(fd)
                 if time.monotonic() >= deadline:
-                    os.close(self.fd)
                     raise Failed("timed out waiting for the venv lock") from None
                 time.sleep(0.05)
+                continue
+            _after_flock(self.path)
+            try:
+                same = os.fstat(fd).st_ino == os.stat(self.path, follow_symlinks=False).st_ino
+            except OSError:
+                same = False
+            if same:
+                self.fd = fd
+                return self
+            os.close(fd)  # the lock file was replaced while we waited: lock the new one
+            if time.monotonic() >= deadline:
+                raise Failed("timed out waiting for the venv lock")
 
     def __exit__(self, *exc: object) -> None:
         os.close(self.fd)  # closing releases the flock
@@ -169,100 +201,210 @@ def _clean_env(home: Path) -> dict[str, str]:
     """An allowlist for the children: the caller's secrets and pip settings never reach them."""
     env = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL") if name in os.environ}
     env["HOME"] = str(home)
-    env["PIP_REQUIRE_VIRTUALENV"] = "0"
-    env["PIP_NO_INPUT"] = "1"
-    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    env["PIP_CONFIG_FILE"] = os.devnull
     return env
 
 
-def _private_copy(directory: Path, name: str, data: bytes) -> Path:
-    """Write bytes to a new private file (exclusive create, mode 0600, no symbolic link followed)."""
-    path = directory / name
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-    return path
+def identity(python: str) -> tuple[str, str, list[object]]:
+    """The interpreter as found, its resolved path and what it reports about itself; a missing one is refused."""
+    found = shutil.which(python)
+    if found is None or not os.access(found, os.X_OK):
+        raise Refused(f"the interpreter does not exist or is not executable: {python}")
+    resolved = os.path.realpath(found)
+    try:
+        done = subprocess.run(  # noqa: S603 - the resolved interpreter and a fixed argument list, no shell
+            [found, "-I", "-c", IDENTITY_CODE],
+            capture_output=True,
+            text=True,
+            env=_clean_env(Path("/nonexistent")),
+            timeout=60,
+            check=True,
+        )
+        report = json.loads(done.stdout.strip().splitlines()[-1])
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError) as exc:
+        raise Refused(f"the interpreter did not report its identity: {python}") from exc
+    return found, resolved, report
+
+
+def cache_key(lock_sha: str, python: str, pip_args: Sequence[str]) -> tuple[str, str]:
+    """The key of a venv, and the interpreter to build with: lockfile hash, interpreter identity, acquisition policy."""
+    found, resolved, report = identity(python)
+    record = {"lock": lock_sha, "python": resolved, "identity": report, "policy": list(pip_args)}
+    key = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return key, found
 
 
 def interpreter(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
+def _trusted(path: Path, what: str, *, kind: str = "file") -> os.stat_result:
+    """lstat a venv member and refuse a symbolic link (unless allowed), a foreign owner or group/world write."""
+    info = path.lstat()
+    is_link = stat.S_ISLNK(info.st_mode)
+    if kind == "dir" and not stat.S_ISDIR(info.st_mode):
+        raise Refused(f"{what} is not a plain directory (a symbolic link?): {path}")
+    if kind == "file" and not stat.S_ISREG(info.st_mode):
+        raise Refused(f"{what} is not a plain file (a symbolic link?): {path}")
+    if info.st_uid != os.geteuid():
+        raise Refused(f"{what} is not owned by this user: {path}")
+    if not is_link and info.st_mode & 0o022:
+        raise Refused(f"{what} is writable by group or others: {path}")
+    return info
+
+
+def manifest(venv: Path) -> str:
+    """sha256 over the sorted (relative path, size, mode) list of the venv, refusing foreign or writable members.
+
+    Detects accidental or cross-account damage; a same-user attacker can rewrite the marker as well.
+    """
+    rows: list[str] = []
+    for here, dirs, files in os.walk(venv, followlinks=False):
+        for name in [*dirs, *files]:
+            path = Path(here) / name
+            rel = str(path.relative_to(venv))
+            if rel == MARKER:
+                continue
+            info = path.lstat()
+            if info.st_uid != os.geteuid():
+                raise Refused(f"a member is not owned by this user: {path}")
+            if not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022:
+                raise Refused(f"a member is writable by group or others: {path}")
+            size = 0 if stat.S_ISDIR(info.st_mode) else info.st_size
+            rows.append(f"{rel}\0{size}\0{info.st_mode:o}")
+    return hashlib.sha256("\n".join(sorted(rows)).encode()).hexdigest()
+
+
 def valid(venv: Path, key: str) -> None:
-    """Refuse a venv entry that is not exactly what a finished build leaves."""
-    if venv.is_symlink() or not venv.is_dir():
-        raise Refused(f"the venv entry is a symbolic link or not a directory: {venv}")
+    """Refuse a venv entry that is not exactly what a finished build leaves (layout, owner, modes, marker, manifest)."""
+    if not venv.is_symlink() and not venv.exists():
+        raise Refused(f"the venv entry does not exist: {venv}")
+    _trusted(venv, "the venv entry", kind="dir")
     marker = venv / MARKER
-    if marker.is_symlink() or not marker.is_file() or marker.read_text().strip() != key:
+    _trusted(marker, "the lock marker")
+    lines = marker.read_text().split("\n")
+    if len(lines) < 2 or lines[0] != key:
         raise Refused(f"the venv has no matching lock marker: {venv}")
-    if not interpreter(venv).exists():
-        raise Refused(f"the venv has no interpreter: {venv}")
     cfg = venv / "pyvenv.cfg"
-    if cfg.is_file() and re.search(r"(?im)^include-system-site-packages\s*=\s*true", cfg.read_text()):
+    _trusted(cfg, "pyvenv.cfg")
+    if re.search(r"(?im)^include-system-site-packages\s*=\s*true", cfg.read_text()):
         raise Refused(f"the venv includes system site-packages: {venv}")
+    python = interpreter(venv)
+    if not python.exists():
+        raise Refused(f"the venv has no interpreter: {venv}")
+    if python.lstat().st_uid != os.geteuid():
+        raise Refused(f"the venv interpreter link is not owned by this user: {python}")
+    if manifest(venv) != lines[1]:
+        raise Refused(f"the venv does not match its build manifest: {venv}")
 
 
-def build(root: Path, key: str, data: bytes, python: str, pip_args: Sequence[str]) -> None:
-    """Build from the checked bytes `data`: pip reads a private copy, never the caller's file."""
-    tmp = root / f".tmp-{key[:12]}-{os.getpid()}"
-    home = root / f".home-{key[:12]}-{os.getpid()}"
-    req = root / f".req-{key[:12]}-{os.getpid()}.txt"
+def _seal(venv: Path) -> None:
+    """Remove every write bit below the top directory (the top is renamed first, then sealed)."""
+    for here, dirs, files in os.walk(venv, topdown=False, followlinks=False):
+        for name in [*dirs, *files]:
+            target = Path(here) / name
+            if not target.is_symlink():
+                target.chmod(target.stat().st_mode & ~0o222)
+
+
+def _fd_bytes(fd: int) -> bytes:
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks = []
+    while chunk := os.read(fd, 1 << 20):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def build(
+    root: Path, key: str, data: bytes, python: str, pip_args: Sequence[str], expected_sha: str | None = None
+) -> None:
+    """Build from the checked bytes `data`: pip reads a private copy through an open descriptor, not the caller's file.
+
+    The copy lives in a fresh random-named 0700 directory; its bytes are re-hashed from the descriptor pip read.
+    """
+    expected = expected_sha or hashlib.sha256(data).hexdigest()
     final = root / key
+    work = Path(tempfile.mkdtemp(prefix=".build-", dir=root))  # mode 0700, random name
+    fd = -1
     try:
+        marker = os.open(work / BUILD_MARK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        os.close(marker)
+        home, venv = work / "home", work / "venv"
         home.mkdir(mode=0o700)
-        copy = _private_copy(root, req.name, data)
-        if hashlib.sha256(copy.read_bytes()).hexdigest() != key:
-            raise Refused("the private lockfile copy does not match the key")
+        fd = os.open(work / "req.txt", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        os.write(fd, data)
+        if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
+            raise Refused("the private lockfile copy does not match the checked hash")
+        req = f"/proc/self/fd/{fd}" if Path("/proc/self/fd").is_dir() else str(work / "req.txt")
         env = _clean_env(home)
         subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
-            [python, "-m", "venv", "--clear", str(tmp)], check=True, env=env, timeout=600, stdout=sys.stderr
+            [python, "-m", "venv", "--clear", str(venv)], check=True, env=env, timeout=600, stdout=sys.stderr
         )
         install = [
-            str(interpreter(tmp)), "-I", "-m", "pip", "install", "--require-hashes", "--no-deps",
-            "--only-binary=:all:", *pip_args, "-r", str(copy),
+            str(interpreter(venv)), "-I", "-m", "pip", "--isolated", "install", "--no-input",
+            "--disable-pip-version-check", "--require-hashes", "--no-deps",
+            "--only-binary=:all:", *pip_args, "-r", req,
         ]  # fmt: skip
-        subprocess.run(install, check=True, env=env, timeout=1800, stdout=sys.stderr)  # noqa: S603 - fixed argument list built here, no shell
-        if hashlib.sha256(copy.read_bytes()).hexdigest() != key:
+        subprocess.run(install, check=True, env=env, timeout=1800, stdout=sys.stderr, pass_fds=(fd,))  # noqa: S603 - fixed argument list built here, no shell
+        if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
             raise Refused("the private lockfile copy changed during the install")
-        (tmp / MARKER).write_text(key + "\n")
-        cfg = tmp / "pyvenv.cfg"
-        if re.search(r"(?im)^include-system-site-packages\s*=\s*true", cfg.read_text()):
+        if re.search(r"(?im)^include-system-site-packages\s*=\s*true", (venv / "pyvenv.cfg").read_text()):
             raise Refused("the new venv includes system site-packages")
-        _walk_chmod(tmp, False)
-        os.rename(tmp, final)
+        _seal(venv)
+        marker_path = venv / MARKER
+        marker_path.write_text(f"{key}\n{manifest(venv)}\n")
+        marker_path.chmod(0o444)
+        os.rename(venv, final)
+        final.chmod(final.stat().st_mode & ~0o222)
     except (subprocess.SubprocessError, OSError) as exc:
         raise Failed(f"the build failed: {type(exc).__name__}: {str(exc)[:200]}") from exc
     finally:
-        for leftover in (tmp, home):
-            if leftover.exists() or leftover.is_symlink():
-                _remove_tree(leftover)
-        if req.exists() or req.is_symlink():
-            req.unlink()
+        if fd >= 0:
+            os.close(fd)
+        _remove_tree(work)
+
+
+def _own_stale_builds(root: Path) -> None:
+    """Remove only leftovers that match this tool's random build-name pattern and carry its build marker."""
+    for entry in sorted(root.iterdir()):
+        if not BUILD_NAME.fullmatch(entry.name):
+            continue
+        info = entry.lstat()
+        mark = entry / BUILD_MARK
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or mark.is_symlink() or not mark.is_file():
+            continue
+        _remove_tree(entry)
+
+
+def _touch_stamp(root: Path, key: str) -> None:
+    stamp = root / f"{key}.used"
+    try:
+        fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        raise Refused(f"the use stamp cannot be opened (a symbolic link?): {stamp}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+            raise Refused(f"the use stamp is not a plain single-link file of this user: {stamp}")
+        os.utime(fd)
+    finally:
+        os.close(fd)
 
 
 def ensure(root: Path, lockfile: Path, python: str, pip_args: Sequence[str], timeout: float) -> Path:
     data = read_lockfile(lockfile)
     check_hashes(data)
-    key = hashlib.sha256(data).hexdigest()
+    key, resolved = cache_key(hashlib.sha256(data).hexdigest(), python, pip_args)
     prepare_root(root)
     with Lock(root, timeout):
-        for pattern in (".tmp-*", ".home-*", ".req-*"):  # a crashed build; safe to clear, we hold the lock
-            for leftover in root.glob(pattern):
-                if leftover.is_dir() and not leftover.is_symlink():
-                    _remove_tree(leftover)
-                else:
-                    leftover.unlink()
+        _own_stale_builds(root)
         final = root / key
         if final.exists() or final.is_symlink():
             valid(final, key)
         else:
-            build(root, key, data, python, pip_args)
+            build(root, key, data, resolved, pip_args)
             valid(final, key)
-        stamp = root / f"{key}.used"
-        if stamp.is_symlink():
-            raise Refused(f"the use stamp is a symbolic link: {stamp}")
-        stamp.touch()
-        os.utime(stamp)
+        _touch_stamp(root, key)
     return interpreter(final)
 
 
@@ -274,8 +416,10 @@ def gc(root: Path, max_age_days: float, delete: bool, timeout: float, now: float
         for entry in sorted(root.iterdir()):
             if not KEY.fullmatch(entry.name):
                 continue
-            if entry.is_symlink() or not entry.is_dir():
-                lines.append(f"skipped (not a plain directory): {entry}")
+            try:
+                valid(entry, entry.name)  # only what this tool built, intact; anything else is reported and left
+            except (Refused, OSError) as exc:
+                lines.append(f"skipped (not a valid shared venv: {str(exc)[:80]}): {entry}")
                 continue
             stamp = root / f"{entry.name}.used"
             times = [entry.stat().st_mtime]
@@ -295,7 +439,7 @@ def gc(root: Path, max_age_days: float, delete: bool, timeout: float, now: float
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="safo-shared-venv", description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="safo-shared-venv", description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("lockfile", nargs="?", type=Path, help="hash-locked requirements file")
     parser.add_argument(
         "--root", type=Path, default=None, help=f"venv root (default ${ROOT_ENV} or ~/.local/share/safo-venvs)"

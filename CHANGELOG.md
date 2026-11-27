@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- `safo-shared-venv` (#534, epic #518): one shared, read-only, hash-locked venv per lockfile, keyed by the lockfile's
-  sha256 and built once under a file lock (`pip install --require-hashes --no-deps --only-binary=:all:`, never system
-  site-packages, atomic rename into place). Prints the interpreter path. Accepts only a strict lockfile grammar (pinned, hashed lines), builds from a private copy of the checked bytes with an
-  allowlisted child environment, and refuses symbolic links as lockfile, root or entry. `--gc --max-age-days N` lists old
-  venvs, `--delete` removes them. Docs: `docs/shared-venv.md`. Tests: `tests/test_sharedvenv.py`.
+- `safo-shared-venv` (#534, epic #518): one shared, read-only, hash-locked venv per lockfile, built once under a file
+  lock (`pip install --require-hashes --no-deps --only-binary=:all:`, never system site-packages, atomic rename into
+  place) and keyed by the lockfile hash, the interpreter identity and the acquisition policy. Prints the interpreter
+  path. Strict lockfile grammar, a private copy read through a descriptor, an allowlisted child environment, isolated
+  pip, owner, mode and manifest checks on reuse, and a stated trust boundary. `--gc --max-age-days N` lists old
+  venvs it built, `--delete` removes them. Docs: `docs/shared-venv.md`. Tests: `tests/test_sharedvenv.py`.
 - `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
   frame starts (it used to draw one more full frame first, slow under load). The signal test now captures the child's
   stderr and kills and reaps the child on any exit, and a hung-child test proves the harness fails instead of hanging.
