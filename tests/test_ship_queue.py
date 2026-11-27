@@ -373,3 +373,10 @@ def test_non_positive_pull_request_numbers_are_a_usage_error(rig: Rig) -> None: 
         with pytest.raises(SystemExit) as stop:
             rig.go(*argv, "--repo", REPO)
         assert stop.value.code == 2
+
+
+def test_no_merge_starts_after_the_deadline(rig: Rig) -> None:  # noqa: F811
+    pending = sv("CLEAN", rollup=[])
+    rig.state["views"] = [pending, pending, pending, sv("CLEAN"), sv("CLEAN")]
+    code, out, calls = rig.go("--queue", "5", "--repo", REPO, "--interval", "1", "--timeout", "2")
+    assert code == ship.EXIT_TIMEOUT and "before the merge" in out and merges(calls) == []

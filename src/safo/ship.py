@@ -970,10 +970,7 @@ def main(
         if stopped is not None:
             output.write(out, f"SKIPPED {repo}#{number} queue stopped at #{stopped}")
             continue
-        if total_deadline is not None and clock() >= total_deadline:
-            result = Result(EXIT_TIMEOUT, "TIMEOUT", "the total time for the queue ran out before this pull request")
-        else:
-            result = watcher.one(repo, number, expect)
+        result = watcher.one(repo, number, expect)
         if args.queue and result.code != EXIT_MERGED:
             stopped = number
         results.append((f"{repo}#{number}", result))
