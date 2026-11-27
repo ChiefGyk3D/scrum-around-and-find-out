@@ -179,6 +179,57 @@ best it can be is `local-then-claude-check`. Constants: `CAL_SAMPLE_DEFAULT` 35,
 `CAL_Z`), so 35 of 35 ok gives about 0.901 and clears 0.9. 34 of 35 ok does not, 30 of 30 ok does not (0.886), and 20 ok
 with 5 wrong does not.
 
+## Canary: catch a silent quality drop
+
+`safo-eval-canary` (#540) runs the fixtures on the two configured local models and compares each pass rate with a stored
+baseline. The models are not named on the command line: they are the two `safo-draft` models (`DRAFT_MODEL` and
+`DIGEST_MODEL` in `safo.localdraft`), so a model change there is followed here. No host or port appears either; the calls
+go through `llm-local` as in a normal run.
+
+```sh
+safo-eval-canary --update-baseline            # first run, or after a change you accept: writes the baseline
+safo-eval-canary                               # every later run: compare, alert, never write
+safo-eval-canary --threshold 0.05 --tasks commit-message,pr-summary --repeats 2
+```
+
+The score of a model is passed runs over scored runs. The default threshold is `0.10`: an absolute drop of more than ten
+points of pass rate against the baseline is an alert. `--baseline PATH` defaults to
+`~/.local/share/safo/eval-canary-baseline.json`.
+
+| exit | meaning |
+| --- | --- |
+| 0 | every score is within the threshold (or the baseline was written) |
+| 1 | a drop over the threshold: one `ALERT eval-canary: ...` line on stderr |
+| 2 | usage, a bad threshold, or a missing, wrong-shaped, symlinked, oversized or malformed baseline |
+| 3 | a server was unreachable: said so on stderr, no score is invented, nothing is written |
+| 75 | the queue stayed busy after the retries: not a drop |
+
+A busy queue (`llm-local` exit 75) is retried by the runner and then, if a model has no scored run at all, the whole
+model is retried `--busy-retries` times (default 3) with a doubling wait; busy runs never count as failures. Any other
+`llm-local` failure except exit 3 or 4 (the model's own truncated or over-cap runs, which count as not passed) makes
+that model unreachable for the run. The baseline is read with a size cap (64 KiB), no symlink, regular file only,
+duplicate keys and non-finite numbers refused, and scores must be numbers from 0 to 1. `--update-baseline` writes a
+new file at mode 0600 by replace, never through a symlink, and only when every model produced a score.
+
+It is a separate entry point (`safo-eval-canary`), not `safo eval-canary`: a new `safo` subcommand needs a line in the
+guard's `TOP_LEVEL_COMMANDS` tuple, which is guard code and waits for the owner's OK (same as `safo-wait-ci`).
+
+No scheduler is installed. A systemd user timer example, as text only:
+
+```ini
+# ~/.config/systemd/user/safo-eval-canary.service
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/safo-eval-canary
+
+# ~/.config/systemd/user/safo-eval-canary.timer
+[Timer]
+OnCalendar=weekly
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
 ## Add a fixture
 
 Add one JSON file under `eval/fixtures/<task>/`. The task type is the directory and the `task` field. Tasks:
