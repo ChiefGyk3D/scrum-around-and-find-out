@@ -913,12 +913,16 @@ def _git_runner(gfd: int, git_path: str, env: dict[str, str]) -> gitconfig.Runne
 
     def run(folder: str, *args: str, errors: str = "replace") -> str:
         proc = _launch(gfd, [git_path, "--no-optional-locks", "-C", folder, *args], env)
+        timed_out = False
+        out = b""
         try:
             out, _ = proc.communicate(timeout=15)
-        except subprocess.TimeoutExpired as e:
-            raise DigestError("reading the repository config timed out; refusing to run") from e
-        finally:
-            _cleanup(proc)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        if not _cleanup(proc):  # a survivor or an unreadable /proc: the command must not be reached
+            raise DigestError(_NOT_CONTAINED)
+        if timed_out:
+            raise DigestError("reading the repository config timed out; refusing to run")
         if proc.returncode != 0:
             raise DigestError("the repository config could not be read; refusing to run")
         return out.decode("utf-8", errors)
@@ -926,6 +930,7 @@ def _git_runner(gfd: int, git_path: str, env: dict[str, str]) -> gitconfig.Runne
     return run
 
 
+_NOT_CONTAINED = "the run is not known to be contained (a descendant survived the cleanup, or /proc could not be read)"
 _CUT_LINE = "safo-digest: cut at the line or byte cap"
 _FULL_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
@@ -1122,11 +1127,7 @@ def _run(
     rc = proc.returncode
     code = EXIT_TIMEOUT if timed_out else (128 - rc if rc < 0 else rc)
     if not swept:
-        output.write(
-            sys.stderr,
-            "safo-digest: the run is not known to be contained "
-            "(a descendant survived the cleanup, or /proc could not be read)",
-        )
+        output.write(sys.stderr, f"safo-digest: {_NOT_CONTAINED}")
         return EXIT_REFUSED, b""
     extra = (
         (f" timeout={cfg.timeout:g}s" if timed_out else "")

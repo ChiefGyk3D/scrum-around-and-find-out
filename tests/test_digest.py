@@ -1202,6 +1202,32 @@ def test_a_failing_config_listing_is_refused_even_if_it_printed_something_valid(
         mod.check_repo_config(_REAL_GIT, {"PATH": "/usr/bin:/bin"})
 
 
+def test_a_preflight_git_that_leaves_a_descendant_means_the_command_never_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cleanup after each preflight git is checked: a survivor (or an unreadable /proc) is a refusal, so the
+    requested command is never reached. Every preflight call here reports a clean exit and a valid listing."""
+    mod = lib()
+    launched: list[list[str]] = []
+
+    class Done:
+        pid = 0
+        returncode = 0
+
+        def communicate(self, timeout: float) -> tuple[bytes, None]:
+            return b"git version 2.47.0\n", None
+
+    def fake_launch(_efd: int, argv: list[str], _env: dict[str, str]) -> Done:
+        launched.append(list(argv))
+        return Done()
+
+    monkeypatch.setattr(mod, "_launch", fake_launch)
+    monkeypatch.setattr(mod, "_cleanup", lambda _proc: False)  # a descendant survived
+    with pytest.raises(mod.DigestError, match="not known to be contained"):
+        mod.check_repo_config(_REAL_GIT, {"PATH": "/usr/bin:/bin"})
+    assert len(launched) == 1  # it stopped at the first preflight call
+
+
 def test_every_forced_git_setting_reaches_the_environment() -> None:
     mod = lib()
     cfg = mod.Config(out_dir="/x", allow=())
