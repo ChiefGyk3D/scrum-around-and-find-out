@@ -200,3 +200,7 @@ def test_an_interpreter_cannot_be_listed_to_get_around_the_option_rule() -> None
 def test_cd_state_does_not_leak_between_run_texts() -> None:
     assert accepted("cd ci\nbash a.sh") == ("ci/a.sh",)
     assert accepted("bash a.sh") == ("a.sh",)
+
+
+def test_a_listed_name_that_is_not_a_plain_command_name_is_never_accepted() -> None:
+    assert shipscan.analyze("-j x", commands=["-j"]).problem
