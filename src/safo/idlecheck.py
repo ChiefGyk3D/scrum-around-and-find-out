@@ -31,6 +31,7 @@ DEFAULT_WINDOW = 300.0
 GH_TIMEOUT = 10.0
 GH_TOTAL = 30.0
 GH_WORKERS = 8
+DEFAULT_CACHE = 60.0
 INPUT_CAP = 1_048_576
 INPUT_WAIT = 10.0
 QUEUE_CAP = 1_048_576
@@ -68,6 +69,10 @@ def load_config(env: Mapping[str, str]) -> dict[str, Any]:
         cfg["floor"] = env["SAFO_IDLE_FLOOR"]
     if "SAFO_IDLE_WINDOW" in env:
         cfg["window_seconds"] = env["SAFO_IDLE_WINDOW"]
+    if "SAFO_IDLE_UNREVIEWED" in env:
+        cfg["include_unreviewed"] = env["SAFO_IDLE_UNREVIEWED"] == "1"
+    if "SAFO_IDLE_CACHE" in env:
+        cfg["cache_seconds"] = env["SAFO_IDLE_CACHE"]
     if "SAFO_IDLE_MODE" in env:
         cfg["mode"] = env["SAFO_IDLE_MODE"]
     if "SAFO_IDLE_QUEUE" in env:
@@ -223,7 +228,7 @@ def names_pr(text: str, number: int, branch: str) -> bool:
     return re.search(pattern, text) is not None or bool(branch and branch in text)
 
 
-def pr_reasons(pr: dict[str, Any]) -> list[str]:
+def pr_reasons(pr: dict[str, Any], unreviewed: bool = False) -> list[str]:
     reasons: list[str] = []
     rollup = pr.get("statusCheckRollup")
     bad = {"FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE"}
@@ -233,7 +238,7 @@ def pr_reasons(pr: dict[str, Any]) -> list[str]:
         reasons.append("failing")
     if pr.get("mergeable") == "CONFLICTING":
         reasons.append("conflicting")
-    if not pr.get("isDraft") and pr.get("reviewDecision") in ("REVIEW_REQUIRED", "", None):
+    if unreviewed and not pr.get("isDraft") and pr.get("reviewDecision") in ("REVIEW_REQUIRED", "", None):
         reasons.append("unreviewed")
     return reasons
 
@@ -269,11 +274,38 @@ def fetch_prs(repos: list[str], runner: Runner, cwd: str) -> tuple[list[tuple[st
     return prs, [f"prs: gh pr list failed or timed out for {len(failed)} of {len(repos)} repos ({shown})"]
 
 
-def ready_prs(prs: list[tuple[str, dict[str, Any]]], busy: str, exempt: set[str]) -> list[str]:
+def cache_path(env: Mapping[str, str]) -> Path:
+    return log_path(env).with_name("idle-check-prs.json")
+
+
+def cached_prs(
+    env: Mapping[str, str], repos: list[str], ttl: float, now: float
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """The PR list of the last complete scan of exactly these repos, if it is younger than ttl; else None."""
+    try:
+        data = json.loads(cache_path(env).read_bytes()[:INPUT_CAP])
+        fresh = 0 <= now - float(data["ts"]) <= ttl and data["repos"] == repos
+        return [(r, p) for r, p in data["prs"]] if fresh else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None  # a missing or damaged cache is a miss, never an error
+
+
+def store_prs(env: Mapping[str, str], repos: list[str], prs: list[tuple[str, dict[str, Any]]], now: float) -> None:
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        path = cache_path(env)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"ts": now, "repos": repos, "prs": prs}))
+        tmp.replace(path)
+
+
+def ready_prs(
+    prs: list[tuple[str, dict[str, Any]]], busy: str, exempt: set[str], unreviewed: bool = False
+) -> list[str]:
     out: list[str] = []
     for repo, pr in prs:
         ref = f"{repo}#{pr['number']}"
-        why = pr_reasons(pr)
+        why = pr_reasons(pr, unreviewed)
         if not why or ref in exempt or names_pr(busy, pr["number"], str(pr.get("headRefName") or "")):
             continue
         out.append(f"{ref} {str(pr.get('title', ''))[:60]} ({', '.join(why)})")
@@ -342,10 +374,15 @@ def decide(
         notes.append(str(err))
         repos = []
     where = log_path(env).parent
-    prs, pr_notes = fetch_prs(repos, runner, str(where) if where.is_dir() else env.get("HOME", "/"))
-    notes += pr_notes
+    ttl = as_float(cfg.get("cache_seconds"), DEFAULT_CACHE) if str(cfg.get("cache_seconds")) != "0" else 0.0
+    prs = cached_prs(env, repos, ttl, now) if ttl else None
+    if prs is None:
+        prs, pr_notes = fetch_prs(repos, runner, str(where) if where.is_dir() else env.get("HOME", "/"))
+        notes += pr_notes
+        if ttl and not pr_notes:
+            store_prs(env, repos, prs, now)  # only a complete scan is cached, so a failure is never served again
     exempt = {x for x in cfg.get("exempt", []) if isinstance(x, str)}
-    ready.extend(ready_prs(prs, "\n".join(busy), exempt))
+    ready.extend(ready_prs(prs, "\n".join(busy), exempt, cfg.get("include_unreviewed") is True))
     unknown = any(n.startswith(("agents:", "processes:")) for n in notes)
     running = len(busy)
     fields: dict[str, Any] = {"running": None if unknown else running, "ready": len(ready), "floor": floor}

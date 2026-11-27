@@ -63,6 +63,7 @@ class Env:
         self.queue.write_text("")
         self.log = tmp / "idle.log"
         self.prs: dict[str, Any] = {}
+        self.calls: list[list[str]] = []
         self.transcript = self.projects / f"{SESSION}.jsonl"
         self.projects.mkdir()
         self.transcript.write_text("")
@@ -75,6 +76,7 @@ class Env:
         }
 
     def runner(self, argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
         repo = argv[argv.index("--repo") + 1]
         value = self.prs.get(repo, [])
         if isinstance(value, Exception):
@@ -184,19 +186,60 @@ def test_processes_count_once_per_chain(env: Env) -> None:
     assert out is not None and "2 of 6" in out["reason"]
 
 
-def test_pr_failing_conflicting_unreviewed_are_ready(env: Env) -> None:
+def test_pr_failing_or_conflicting_are_ready_unreviewed_is_not(env: Env) -> None:
     env.prs["o/r"] = [
         pr(1, statusCheckRollup=[{"conclusion": "FAILURE"}]),
         pr(2, mergeable="CONFLICTING"),
         pr(3, reviewDecision="REVIEW_REQUIRED"),
-        pr(4),  # green, approved, mergeable: not ready work
-        pr(5, isDraft=True, reviewDecision="REVIEW_REQUIRED"),  # an unreviewed draft is not asked for review
+        pr(4),
+        pr(5, isDraft=True, reviewDecision="REVIEW_REQUIRED"),
     ]
     _, out = env.run()
     assert out is not None
     reason = out["reason"]
-    assert "o/r#1" in reason and "o/r#2" in reason and "o/r#3" in reason
-    assert "o/r#4" not in reason and "o/r#5" not in reason
+    assert "o/r#1" in reason and "o/r#2" in reason
+    assert all(f"o/r#{n}" not in reason for n in (3, 4, 5))
+
+
+def test_unreviewed_is_an_opt_in(env: Env) -> None:
+    env.prs["o/r"] = [
+        pr(3, reviewDecision="REVIEW_REQUIRED"),
+        pr(5, isDraft=True, reviewDecision="REVIEW_REQUIRED"),
+        pr(6, reviewDecision="APPROVED"),
+    ]
+    assert env.run()[1] is None
+    _, out = env.run(SAFO_IDLE_UNREVIEWED="1", SAFO_IDLE_CACHE="0")
+    assert out is not None and "o/r#3" in out["reason"] and "unreviewed" in out["reason"]
+    assert "o/r#5" not in out["reason"] and "o/r#6" not in out["reason"]
+
+
+def test_cache_serves_back_to_back_stops_without_rescanning(env: Env) -> None:
+    env.prs["o/r"] = [pr(1, mergeable="CONFLICTING")]
+    assert env.run()[1] is not None
+    assert env.run()[1] is not None
+    assert len(env.calls) == 1
+    env.run(SAFO_IDLE_CACHE="0")
+    assert len(env.calls) == 2  # a ttl of 0 turns the cache off
+
+
+def test_cache_expires_and_never_stores_a_failed_scan(env: Env) -> None:
+    env.prs["o/r"] = OSError("no gh")
+    env.run()
+    assert not (env.tmp / "idle-check-prs.json").exists()
+    env.prs["o/r"] = [pr(1, mergeable="CONFLICTING")]
+    assert env.run()[1] is not None
+    path = env.tmp / "idle-check-prs.json"
+    data = json.loads(path.read_text())
+    data["ts"] -= 3600
+    path.write_text(json.dumps(data))
+    env.prs["o/r"] = []
+    assert env.run()[1] is None  # the stale cache was ignored and the repo rescanned
+
+
+def test_damaged_cache_is_a_miss(env: Env) -> None:
+    (env.tmp / "idle-check-prs.json").write_text("{not json")
+    env.prs["o/r"] = [pr(1, mergeable="CONFLICTING")]
+    assert env.run()[1] is not None
 
 
 def test_pr_with_a_running_agent_is_not_ready(env: Env) -> None:

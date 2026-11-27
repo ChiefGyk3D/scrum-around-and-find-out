@@ -28,8 +28,9 @@ lead continue). `stop_hook_active: true` always allows, so one block cannot loop
 
 ### Ready work
 
-1. Open PRs (`gh pr list`, 10 s per repo, 30 s total) in the configured repos, that are failing a check, CONFLICTING,
-   or unreviewed (`reviewDecision` REVIEW_REQUIRED or empty on a non-draft), and that no running agent names. An agent
+1. Open PRs (`gh pr list`, 10 s per repo, 30 s total) in the configured repos, that are failing a check or CONFLICTING,
+   and that no running agent names. "Unreviewed" (`reviewDecision` REVIEW_REQUIRED or empty, non-draft only) is an
+   opt-in (`include_unreviewed`, default off): it listed 120 items on 2026-11-27, which is noise. An agent
    names a PR when `#N`, `pull/N`, `PR N` or the head branch appears in the first 4 KB of its transcript (subagents)
    or in its command line (processes).
 2. Unstarted QUEUE.md items: a `READY:` line (items split on `;`), and rows of the dependency table
@@ -54,7 +55,16 @@ notice. It never stays silent on a failure, and never blocks on a guess.
 | `repos` | `SAFO_IDLE_REPOS` (comma list) | `hooks.tracking_repos` of `~/.config/safo/agents.yaml`, else none (degraded notice) |
 | `window_seconds` | `SAFO_IDLE_WINDOW` | 300 |
 | `exempt` (`owner/repo#N` list) | | none |
+| `include_unreviewed` | `SAFO_IDLE_UNREVIEWED=1` | off |
+| `cache_seconds` | `SAFO_IDLE_CACHE` (0 turns it off) | 60 |
 | `mode` | `SAFO_IDLE_MODE` | `block` (`warn` prints the same text as a `systemMessage` and never blocks) |
+
+## PR scan cache
+
+The scan of every tracked repo took about 28 s, and it runs at each Stop. The PR list of a complete scan is kept for
+`cache_seconds` in `idle-check-prs.json` beside the log, keyed on the exact repo list. A scan with any failure is never
+cached, and a missing or damaged cache is a miss, so the check still fails open and loud. Agent coverage and the
+running count are always read live; only the gh answers are cached.
 
 ## Measure
 
