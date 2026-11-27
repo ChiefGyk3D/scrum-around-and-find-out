@@ -497,22 +497,23 @@ def test_probe_cut_line_must_be_anchored_a_quoted_line_is_not_a_cut() -> None:
     assert probe(quoted)[0] == 3
 
 
+def _with_scoring(tmp: Path, score: float, *script: tuple[int, str]) -> int:
+    plan = {m: score for m in MODELS}
+    return ec.entry(
+        args(tmp, "--truncation-probe"), runner=FakeClient(plan), probe_runner=FakeProbe(*script), sleep=lambda _s: None
+    )
+
+
 def test_probe_runs_beside_scoring_with_unreachable_over_busy_over_drop(tmp_path: Path) -> None:
     write_base(tmp_path, {m: 0.9 for m in MODELS})
-    ok = {m: 0.9 for m in MODELS}
-    run_probe = lambda *s: ec.entry(  # noqa: E731 - test shorthand
-        args(tmp_path, "--truncation-probe"), runner=FakeClient(ok), probe_runner=FakeProbe(*s), sleep=lambda _s: None
-    )
-    assert run_probe(cut()) == 0
-    assert run_probe(cut(8192)) == 1
-    assert run_probe((75, "b")) == 75
-    assert run_probe((2, "down")) == 3
+    assert _with_scoring(tmp_path, 0.9, cut()) == 0
+    assert _with_scoring(tmp_path, 0.9, cut(8192)) == 1
+    assert _with_scoring(tmp_path, 0.9, (75, "b")) == 75
+    assert _with_scoring(tmp_path, 0.9, (2, "down")) == 3
     # a score drop (1) never hides an unreachable probe (3) or a busy one (75)
-    drop = {m: 0.1 for m in MODELS}
-    both = lambda *s: ec.entry(  # noqa: E731
-        args(tmp_path, "--truncation-probe"), runner=FakeClient(drop), probe_runner=FakeProbe(*s), sleep=lambda _s: None
-    )
-    assert both(cut()) == 1 and both((75, "b")) == 75 and both((2, "down")) == 3
+    assert _with_scoring(tmp_path, 0.1, cut()) == 1
+    assert _with_scoring(tmp_path, 0.1, (75, "b")) == 75
+    assert _with_scoring(tmp_path, 0.1, (2, "down")) == 3
 
 
 def test_probe_not_run_unless_asked(tmp_path: Path) -> None:
@@ -549,7 +550,11 @@ def test_default_probe_runner_calls_llm_local_with_loaded_ctx_and_forced_size(mo
     class Done:
         returncode, stderr = 3, "x"
 
-    monkeypatch.setattr(le, "_run_cmd", lambda argv, timeout: (seen.append(list(argv)), Done())[1])
+    def fake_run(argv: Any, timeout: float) -> Done:
+        seen.append(list(argv))
+        return Done()
+
+    monkeypatch.setattr(le, "_run_cmd", fake_run)
     ec._default_probe_runner(30)(QWEN, "PROMPT")
     argv = seen[0]
     assert argv[0] == "llm-local" and "--force-size" in argv and argv[-1] == "PROMPT"
