@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -507,6 +508,18 @@ def _fd_bytes(fd: int) -> bytes:
     return b"".join(chunks)
 
 
+def _pip_failure(root: Path, key: str, status: int, output: bytes, keep: bool) -> str:
+    """The fixed failure text; pip's full output goes to a private 0600 file in the root only when asked for."""
+    text = f"the install step failed: pip exited with status {status}"
+    if not keep:
+        return text + " (its output was discarded; --keep-pip-log keeps it in a private file)"
+    log = root / f"pip-{key[:12]}-{secrets.token_hex(4)}.log"
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(output)
+    return text + f"; its full output, which may contain credentials, is in {log} (delete it after reading)"
+
+
 def _describe(exc: BaseException) -> str:
     """A failure text without a command line, so no argument (a URL with a token) can leak through it."""
     if isinstance(exc, subprocess.CalledProcessError):
@@ -524,6 +537,7 @@ def build(
     pip_args: Sequence[str],
     expected_sha: str | None = None,
     handle: RootHandle | None = None,
+    keep_pip_log: bool = False,
 ) -> None:
     """Build from the checked bytes `data`: pip reads a private copy through an open descriptor, not the caller's file.
 
@@ -548,19 +562,19 @@ def build(
         req = f"/proc/self/fd/{fd}" if Path("/proc/self/fd").is_dir() else str(work / "req.txt")
         env = _clean_env(home)
         subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
-            [python, "-m", "venv", "--clear", str(venv)], check=True, env=env, timeout=600, stdout=sys.stderr
-        )
+            [python, "-m", "venv", "--clear", str(venv)], check=True, env=env, timeout=600, capture_output=True
+        )  # the output of a child is never relayed
         install = [
             str(interpreter(venv)), "-I", "-m", "pip", "--isolated", "install", "--no-input",
             "--disable-pip-version-check", "--require-hashes", "--no-deps",
             "--only-binary=:all:", *pip_args, "-r", req,
         ]  # fmt: skip
         done = subprocess.run(  # noqa: S603 - fixed argument list built here, no shell
-            install, env=env, timeout=1800, capture_output=True, text=True, pass_fds=(fd,), check=False
+            install, env=env, timeout=1800, capture_output=True, pass_fds=(fd,), check=False
         )
-        sys.stderr.write(redact(done.stdout + done.stderr))  # pip may echo an index URL: never show userinfo or tokens
         if done.returncode != 0:
-            raise Failed(f"pip exited with status {done.returncode}")
+            # pip's raw output is never relayed: it can carry credentials in any shape. Only its status is reported.
+            raise Failed(_pip_failure(root, key, done.returncode, done.stdout + done.stderr, keep_pip_log))
         if hashlib.sha256(_fd_bytes(fd)).hexdigest() != expected:
             raise Refused("the private lockfile copy changed during the install")
         if re.search(r"(?im)^include-system-site-packages\s*=\s*true", (venv / "pyvenv.cfg").read_text()):
@@ -626,6 +640,7 @@ def ensure(
     python: str,
     pip_args: Sequence[str],
     timeout: float,
+    keep_pip_log: bool = False,
 ) -> Path:
     check_timeout(timeout)
     parse_pip_args(pip_args)
@@ -642,7 +657,7 @@ def ensure(
                 valid(final, key)
             else:
                 verify_interpreter(resolved, signature)  # the file we are about to run is the one we identified
-                build(root, key, data, resolved, pip_args, handle=handle)
+                build(root, key, data, resolved, pip_args, handle=handle, keep_pip_log=keep_pip_log)
                 try:
                     valid(final, key)
                 except Refused:
@@ -741,6 +756,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--lock-timeout", type=_timeout, default=LOCK_TIMEOUT, help="seconds to wait for the build lock"
     )
+    parser.add_argument(
+        "--keep-pip-log", action="store_true", help="on a pip failure, keep its output in a private 0600 file"
+    )
     parser.add_argument("--gc", action="store_true", help="list venvs unused for --max-age-days (no lockfile needed)")
     parser.add_argument("--max-age-days", type=_age, help="age threshold for --gc, required with it")
     parser.add_argument("--delete", action="store_true", help="with --gc: delete what the listing names")
@@ -762,7 +780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pip_args += ["--index-url", args.index_url]
         if args.find_links:
             pip_args += ["--find-links", args.find_links]
-        print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout))
+        print(ensure(root, args.lockfile, args.python, pip_args, args.lock_timeout, args.keep_pip_log))
         return EXIT_OK
     except Refused as exc:
         print(f"safo-shared-venv: refused: {redact(str(exc))}", file=sys.stderr)

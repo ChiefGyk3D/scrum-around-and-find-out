@@ -68,8 +68,13 @@ safo-shared-venv --gc --max-age-days 30 --delete
   uppercase scheme or host, other scheme (`http`, `file`, `ssh`), scp-like form, relative path or colon in a path. The
   refusal text is fixed and never echoes the value. Credentials are never accepted in any form: an index that needs
   them needs a different mechanism than a command-line URL (the old `--allow-url-credentials` option is gone). As
-  defense in depth, any other text holding `://` that is not an allowed SOURCE is masked whole as `<redacted-url>`
-  in every message and in pip's captured output.
+  defense in depth, any text holding `://` that is not an allowed SOURCE is masked whole as `<redacted-url>` in the
+  command's own messages.
+- Child output: the output of pip and of the venv step is never relayed (credentials can appear in any shape, for
+  example a redirect line or a bare token). On success nothing from pip is printed. On failure only a fixed message
+  with pip's exit status and the build step is printed. With `--keep-pip-log`, a failed install's full output is
+  written to `ROOT/pip-<key prefix>-<random>.log` (mode 0600, exclusive create) and its path is named in the message; it
+  may contain credentials, so delete it after reading. Without the flag the output is discarded.
 - Age and timeout: `--max-age-days` must be finite, from 0 to 36500, and `--lock-timeout` finite, from 0 to 7 days, checked in `ensure`, `gc` and `Lock` themselves, not only on the command line;
   anything else (nan, inf, negative, absurd) is refused and nothing is deleted. GC also never selects an entry whose
   age does not compare as at least the threshold.

@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -953,3 +954,99 @@ def test_ensure_refuses_odd_values_for_direct_callers(tmp_path: Path, lock: Path
 def test_a_bare_unknown_or_incomplete_pip_argument_is_refused(args: list[str]) -> None:
     with pytest.raises(sharedvenv.Refused):
         sharedvenv.parse_pip_args(args)
+
+
+# ---- round 7: never relay pip's raw output ----
+
+PLANTED = ("PLANTED-REDIRECT-pw", "PLANTED-SCP-user", "PLANTED-MULTILINE-cred", "PLANTED-BARE-token")
+
+FAKE_PIP = """\
+import sys
+a = "PLANTED-"
+sys.stdout.write("Location: user:" + a + "REDIRECT-pw@example.invalid/simple/pkg\\n")
+sys.stderr.write("WARNING: retry via " + a + "SCP-user@example.invalid:wheels/pkg\\n")
+sys.stderr.write("Authorization: Basic\\n  " + a + "MULTILINE-cred\\n")
+sys.stderr.write("ERROR: bad token " + a + "BARE-token done\\n")
+sys.exit(int(open(__file__ + ".status").read()))
+"""
+
+
+def fake_pip_shim(tmp_path: Path, status: int) -> Path:
+    """An interpreter stand-in whose venvs get a fake `pip` that prints planted secrets and exits with `status`."""
+    payload = tmp_path / "fake_pip_main.py"
+    payload.write_text(FAKE_PIP)
+    body = "\n".join(
+        [
+            'if [ "$VENV_STEP" = 1 ]; then',
+            "  for a; do last=$a; done",
+            f'  "{sys.executable}" "$@" || exit 1',
+            '  for d in "$last"/lib/python*/site-packages/pip; do',
+            f'    cp {payload} "$d/__main__.py"; printf "{status}" > "$d/__main__.py.status"',
+            "  done",
+            "  exit 0",
+            "fi",
+        ]
+    )
+    return shim(tmp_path / f"fakepip{status}.sh", body)
+
+
+def no_planted(*texts: str) -> None:
+    for text in texts:
+        for needle in PLANTED:
+            assert needle not in text, needle
+
+
+def test_pip_failure_prints_only_a_fixed_message(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", fake_pip_shim(tmp_path, 1))
+    assert done.returncode == 1 and done.stdout == ""
+    no_planted(done.stdout, done.stderr)
+    assert "pip exited with status 1" in done.stderr and "install step" in done.stderr
+    assert not list((tmp_path / "root").glob("pip-*.log"))  # off by default: discarded
+
+
+def test_pip_success_prints_nothing_from_pip_and_the_entry_holds_none_of_it(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    root = tmp_path / "root"
+    done = cli(*build_args(lock, root, wheels), "--python", fake_pip_shim(tmp_path, 0))
+    assert done.returncode == 0, done.stderr
+    assert len(done.stdout.split()) == 1 and done.stderr == ""
+    no_planted(done.stdout, done.stderr)
+    venv = venv_of(done)
+    no_planted((venv / sharedvenv.MARKER).read_text())
+
+
+def test_the_in_process_build_error_carries_none_of_pip_output(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    args = ["--no-index", "--find-links", str(wheels)]
+    with pytest.raises(sharedvenv.Failed) as caught:
+        sharedvenv.build(root, "e" * 64, lock.read_bytes(), str(fake_pip_shim(tmp_path, 1)), args)
+    no_planted(str(caught.value), repr(caught.value), repr(caught.value.__cause__))
+
+
+def test_keep_pip_log_writes_a_private_file_and_still_prints_none_of_it(
+    tmp_path: Path, wheels: Path, lock: Path
+) -> None:
+    root = tmp_path / "root"
+    done = cli(*build_args(lock, root, wheels), "--python", fake_pip_shim(tmp_path, 1), "--keep-pip-log")
+    assert done.returncode == 1
+    no_planted(done.stdout, done.stderr)
+    logs = list(root.glob("pip-*.log"))
+    assert len(logs) == 1
+    assert logs[0].stat().st_mode & 0o777 == 0o600
+    assert re.fullmatch(r"pip-[0-9a-f]{12}-[0-9a-f]{8}\.log", logs[0].name)
+    assert "PLANTED-MULTILINE-cred" in logs[0].read_text()
+    assert str(logs[0]) in done.stderr and "may contain credentials" in done.stderr
+
+
+def test_output_of_the_venv_step_is_not_relayed_either(tmp_path: Path, wheels: Path, lock: Path) -> None:
+    noisy = shim(
+        tmp_path / "noisy.sh",
+        'if [ "$VENV_STEP" = 1 ]; then echo "Location: user:PLANTED-REDIRECT-pw@h/p"; '
+        'echo "PLANTED-BARE-token" >&2; fi',
+    )
+    done = cli(*build_args(lock, tmp_path / "root", wheels), "--python", noisy)
+    assert done.returncode == 0, done.stderr
+    no_planted(done.stdout, done.stderr)
+    assert len(done.stdout.split()) == 1
