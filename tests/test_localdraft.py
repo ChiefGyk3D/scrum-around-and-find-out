@@ -1234,67 +1234,69 @@ def test_r5_new_scans_are_linear() -> None:
 _IPV6_MIXES = [":", "::", ":a", "1:", "a::", "a:", "1::", ":::a", ":.", "ab:cd::", "f:e::", "a:b:c:d:e:f:1:"]
 
 
-def _cpu_time(fn: Any, text: str, clock: Any = None) -> float:
-    import time
+class _CountingDict:
+    """Stands in for `dict` inside localdraft (check_text only uses `fromkeys`). `_has_ipv6` builds its candidates
+    with `dict.fromkeys(cands)`, once per start position, so counting there measures the candidates examined
+    without any cost in production code."""
 
-    now = clock or time.process_time
-    best = float("inf")
-    for _ in range(3):  # the fastest of three runs, so scheduling noise on a loaded runner cannot fail it
-        start = now()
-        fn(text)
-        best = min(best, now() - start)
-    return best
+    work = 0
+
+    @classmethod
+    def fromkeys(cls, iterable: Any, value: Any = None) -> dict[Any, Any]:
+        items = list(iterable)
+        cls.work += 1 + len(items)  # one for the start position, one per candidate string
+        return dict.fromkeys(items, value)
 
 
-def _assert_scales(fn: Any, unit: str, sizes: tuple[int, int] = (5000, 20000), clock: Any = None) -> None:
-    """CPU time at a size and at 4x that size: at most 8x (linear about 4x, quadratic about 16x); 20000 under 1 s.
+def _ipv6_work(monkeypatch: pytest.MonkeyPatch, unit: str, size: int) -> int:
+    text = (unit * (size // len(unit) + 1))[:size]
+    monkeypatch.setattr(localdraft, "dict", _CountingDict, raising=False)
+    _CountingDict.work = 0
+    localdraft.check_text("comment", text)
+    return _CountingDict.work
 
-    clock defaults to time.process_time; a test may inject a fake clock to make the check independent of CPU speed.
-    """
-    times = []
-    for size in sizes:
-        text = (unit * (size // len(unit) + 1))[:size]
-        times.append(_cpu_time(fn, text, clock))
-    small, big = times
-    # a 0.03 s floor keeps timer noise on millisecond runs from deciding the ratio
-    assert big <= 8 * max(small, 0.03), (unit, times)
-    if sizes[-1] >= 20000:
-        assert big < 1.0, (unit, times)
+
+def _assert_work_is_linear(work: dict[int, int], label: str) -> None:
+    """Work at 4x the size is at most 4.5x (linear is 4x, quadratic 16x), and under 4 units
+    per input character (measured: at most 1)."""
+    small, big = work[5000], work[20000]
+    assert big <= 4.5 * max(small, 1), (label, work)
+    assert big <= 4 * 20000, (label, work)
+    assert work[10000] <= 2.5 * max(small, 1), (label, work)
 
 
 @pytest.mark.parametrize("unit", _IPV6_MIXES)
-def test_r6_ipv6_scan_scales_linearly(unit: str) -> None:
-    _within_deadline(30, lambda: _assert_scales(lambda t: localdraft.check_text("comment", t), unit))
+def test_r6_ipv6_scan_scales_linearly(unit: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # counted work, not time: the result is the same on an idle laptop and a loaded runner
+    # the only clock left is a generous wall deadline that catches a hang
+    def run() -> None:
+        work = {size: _ipv6_work(monkeypatch, unit, size) for size in (5000, 10000, 20000)}
+        _assert_work_is_linear(work, unit)
+
+    _within_deadline(10, run)
 
 
-class _WorkClock:
-    """A fake clock: each unit of work a toy function reports advances time by a fixed cost, whatever the CPU speed."""
-
-    def __init__(self) -> None:
-        self.units = 0
-
-    def __call__(self) -> float:
-        return self.units * 1e-6
-
-
-def _fake_scaling(cost: Any) -> None:
-    clock = _WorkClock()
-
-    def fn(text: str) -> None:
-        clock.units += cost(len(text))
-
-    _assert_scales(fn, ":", sizes=(1000, 4000), clock=clock)
-
-
-def test_r6_scaling_guard_bites() -> None:
-    # 1000 -> 4000 characters: quadratic cost grows exactly 16x (1 s -> 16 s), above the 8x bound
+def test_r6_work_guard_bites() -> None:
+    # quadratic work grows 16x from 5000 to 20000 characters, above the 4.5x bound
     with pytest.raises(AssertionError):
-        _fake_scaling(lambda n: n * n)
+        _assert_work_is_linear({5000: 5000**2, 10000: 10000**2, 20000: 20000**2}, "quadratic")
+    # a linear count with too high a constant fails the absolute bound
+    with pytest.raises(AssertionError):
+        _assert_work_is_linear({5000: 5 * 5000, 10000: 5 * 10000, 20000: 5 * 20000}, "heavy")
 
 
-def test_r6_scaling_guard_passes_linear_and_constant() -> None:
-    _fake_scaling(lambda n: n)  # exactly 4x
-    _fake_scaling(lambda n: 1)  # constant
+def test_r6_work_guard_passes_linear_and_constant() -> None:
+    _assert_work_is_linear({5000: 5000, 10000: 10000, 20000: 20000}, "linear")
+    _assert_work_is_linear({5000: 1, 10000: 1, 20000: 1}, "constant")
+
+
+def test_r6_work_counter_sees_the_scan() -> None:
+    # the counting hook must be wired to the real scan, or every count above would be a vacuous zero
+    mp = pytest.MonkeyPatch()
+    try:
+        assert _ipv6_work(mp, "a::", 300) > 0
+    finally:
+        mp.undo()
 
 
 # round 5, R3: IPv6 scope-likeness is decided per candidate
