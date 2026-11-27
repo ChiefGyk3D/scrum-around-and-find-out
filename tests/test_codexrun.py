@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from codexrundata import OUTPUT_CANARY, PROMPT_CANARY, World, make_world
-from gitrepo import git
+from gitrepo import git, make_repo
 from safo import codexrun
 
 
@@ -299,6 +299,48 @@ def test_a_program_key_in_the_repository_config_is_refused_and_never_runs(
     refused(world, go(world, "implementer"))
     assert not marker.exists()
     refused(world, go(world, "review"))
+
+
+def add_submodule(world: World, tmp_path: Path) -> Path:
+    """A committed, initialized submodule `sub` in the worktree; returns its working folder."""
+    upstream = tmp_path / "upstream"
+    make_repo(upstream, {"s.txt": "s\n"})
+    wt = world.worktree
+    git(wt, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(upstream), "sub")
+    git(wt, "commit", "-q", "-m", "add sub")
+    return wt / "sub"
+
+
+@pytest.mark.parametrize("key", ["filter.x.clean", "diff.x.textconv", "alias.st", "core.sshCommand"])
+def test_a_program_key_in_a_submodule_config_is_refused_and_never_runs(world: World, tmp_path: Path, key: str) -> None:
+    sub = add_submodule(world, tmp_path)
+    marker = hostile_script(tmp_path)
+    git(sub, "config", key, str(tmp_path / "hostile.sh"))
+    refused(world, go(world, "implementer"))
+    assert not marker.exists()
+    refused(world, go(world, "review"))
+
+
+def test_a_clean_submodule_is_accepted(world: World, tmp_path: Path) -> None:
+    add_submodule(world, tmp_path)
+    assert go(world, "implementer") == 0
+
+
+def test_git_status_ignores_submodules_and_does_not_recurse(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(argv: list[str], **kwargs: Any) -> Any:
+        seen.append(list(argv))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    assert go(world, "implementer") == 0
+    status = [a for a in seen if "status" in a]
+    assert status
+    for argv in status:
+        assert "--ignore-submodules=all" in argv and "submodule.recurse=false" in argv
+        assert "core.attributesFile=/dev/null" in argv
 
 
 def test_git_runs_with_the_hardening_options_and_a_clean_environment(

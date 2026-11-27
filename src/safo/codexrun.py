@@ -351,6 +351,10 @@ GIT_HARDENING = (
     "core.fsmonitor=false",
     "-c",
     "protocol.allow=never",
+    "-c",
+    f"core.attributesFile={os.devnull}",
+    "-c",
+    "submodule.recurse=false",
 )
 # Keys of the repository's own config that can start a program or redirect git in ways the options above do not cover
 # (a content filter named by an attributes file, a textconv, an include of another file, a URL rewrite, an alias).
@@ -432,10 +436,11 @@ def worktree_identity(worktree: str, home: str) -> tuple[tuple[int, int], ...]:
         raise CodexRunError("the worktree changed while it was being checked; nothing was run") from None
 
 
-def check_repo_config(git: str, home: str, root: str) -> None:
-    """Refuse a repository whose own config can start a program through a setting the command-line options do not
-    override (a content filter, a textconv, an include, an alias). Listing config runs nothing."""
-    listing = _git(git, home, root, "config", "--list", "-z")
+MAX_SUBMODULE_DEPTH = 4
+
+
+def _check_config_keys(git: str, home: str, folder: str) -> None:
+    listing = _git(git, home, folder, "config", "--list", "-z")
     for entry in listing.split("\0"):
         key = entry.split("\n", 1)[0].lower()
         if (
@@ -446,6 +451,34 @@ def check_repo_config(git: str, home: str, root: str) -> None:
             raise CodexRunError(
                 f"the repository config sets {output.line(key[:60])}, which can start a program; nothing was run"
             )
+
+
+def _submodule_folders(git: str, home: str, folder: str) -> list[str]:
+    """The folders of the gitlinks (mode 160000) in the index of `folder`. Listing the index runs nothing."""
+    raw = _git(git, home, folder, "ls-files", "--stage", "-z")
+    found: list[str] = []
+    for entry in raw.split("\0"):
+        meta, _, name = entry.partition("\t")
+        if meta.startswith("160000 ") and name:
+            found.append(os.path.join(folder, name))
+    return found
+
+
+def check_repo_config(git: str, home: str, root: str, depth: int = 0) -> None:
+    """Refuse a repository whose own config can start a program through a setting the command-line options do not
+    override (a content filter, a textconv, an include, an alias). The same check runs on every submodule, nested ones
+    too, because a submodule keeps its own config. Listing config runs nothing."""
+    _check_config_keys(git, home, root)
+    if depth >= MAX_SUBMODULE_DEPTH:
+        if _submodule_folders(git, home, root):
+            raise CodexRunError("the repository nests submodules too deeply to check; nothing was run")
+        return
+    for folder in _submodule_folders(git, home, root):
+        if os.path.islink(folder) or not os.path.isdir(folder):
+            continue  # not checked out: git has no repository of its own there
+        if os.path.realpath(folder) != os.path.join(os.path.realpath(root), os.path.relpath(folder, root)):
+            raise CodexRunError("a submodule folder resolves outside its place in the worktree; nothing was run")
+        check_repo_config(git, home, folder, depth + 1)
 
 
 def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -> str:
@@ -471,7 +504,16 @@ def check_worktree(path: str, home: str, cls: str, allow_dirty: Sequence[str]) -
         raise CodexRunError("the folder named is not the top of its git worktree; nothing was run")
     check_repo_config(git, home, real)
     if cls == "implementer":
-        raw = _git(git, home, real, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+        raw = _git(
+            git,
+            home,
+            real,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        )
         dirty = _dirty_paths(raw)
         named = {os.path.normpath(p) for p in allow_dirty}
         loose = [p for p in dirty if os.path.normpath(p) not in named]
