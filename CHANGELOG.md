@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `safo-codex-run` (#557): harden git config handling. The repository config check is now an allowlist and the child git environment forces more settings off. Docs: `docs/codex-run.md`. Tests: `tests/test_codexrun.py`.
+- Update the sister-project rule now that the portable edition is public (#573)
 - Add CLAUDE.md and AGENTS.md stating the sister-project rule (#565)
 - `scripts/impacted-tests.py` (#535): prints the test files to run for changed files (arguments or `--base BASE`), by naming convention and by the reverse import closure parsed with `ast`, plus five always-run guard tests; exits 3 with `ALL` when a file maps to no test or is config, a workflow or `pyproject.toml`. Never runs repo code. CI stays the judge; agents use it only for targeted runs. Docs: `docs/impacted-tests.md`. Tests: `tests/test_impacted_tests.py`.
 - `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
