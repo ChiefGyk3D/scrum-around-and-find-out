@@ -1096,7 +1096,7 @@ class Budget:
     # conditional reads (#532): any failure here is the caller's cue to make a normal request
 
     def etag_key(self, target: str) -> str:
-        """The entry name: a hash of this scope (host and account) and the request, so no other account or URL matches."""
+        """The entry name: a hash of this scope (host, account) and the request; no other account or URL matches."""
         return hashlib.sha256(b"safo-etag\0" + self.scope.encode() + b"\0" + target.encode()).hexdigest()[:32]
 
     @staticmethod
