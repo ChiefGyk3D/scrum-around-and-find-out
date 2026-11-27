@@ -67,6 +67,7 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `agents-status` | One read-only view of what Claude, Codex and Copilot are doing |
 | `usage` | What each agent has used and has left, from local files only: Codex windows, Claude Code tokens, Copilot sessions, Ollama reachability. `--report` summarises the outcomes log |
 | `spend` | A weekly token-spend report from the Claude transcripts, the Codex sessions and the `llm-local`, hook and `safo-draft` logs: weighted spend by pool, cache-read share, per lead turn and per merged PR, local use, agent first-turn context, and the change against a stored baseline. Read-only, counts only. See [`docs/spend-report.md`](docs/spend-report.md) |
+| `protection` | Reads a default branch's protection back (`--repo OWNER/NAME`, ten conditions) or audits every repository in the board file against the standard (`--all`: `CI green` and the declared security checks required, a pull request required, force pushes and deletion off, admin bypass and conversation resolution reported). GET only. See [`docs/protection-audit.md`](docs/protection-audit.md) |
 | `route <shape>` | Which agent a task shape should go to, from the rules in `agents.yaml` and the live headroom. Recommends; dispatches nothing |
 | `outcome add` | Appends a finished task to the outcomes log |
 | `handoff check <owner/repo> <pr>` | Whether the latest review report on a pull request names the head the pull request has now. Exit 0 fresh, 1 stale, 2 cannot tell. Read-only; shows, never blocks. See [Handoff](docs/handoff.md) |
