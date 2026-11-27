@@ -19,6 +19,7 @@ import codecs
 import contextlib
 import datetime as dt
 import json
+import math
 import os
 import re
 import select
@@ -131,6 +132,8 @@ STDIN_TIMEOUT_SECONDS = 5.0  # a host writes the event at once; a silent standar
 
 HARD_LIMIT_BYTES = 8 * 1024 * 1024  # the most of an oversized event that is read and checked for Gemini markers
 ISOLATED_CHECK_SECONDS = 1.5  # the separate Gemini check run when another rule raised
+SHELL_CHECK_FLOOR_SECONDS = 3.0  # the shell check's budget on an idle machine (was a fixed 1.5 s before #615)
+SHELL_CHECK_CAP_SECONDS = 5.0  # the most it is ever given: half the 10 s hook timeout, so a decision is still written
 DRAIN_SECONDS = 4.0  # the most time reading and checking the rest of an oversized event may take
 _COMMAND_EXPANSION = re.compile(
     r"(?m)(?:^|[;&|(`]|\b(?:env|exec|eval|do|then|else|command|nohup|sudo)\s)\s*[\"']?\$[\w{(@*#?!\\\\-]"
@@ -1183,6 +1186,23 @@ def gemini_reasons(ctx: LocalContext, tool_input: dict[str, Any], deadline: floa
     return "; ".join(f"rule {rule}: {why}" for rule, why in found)
 
 
+def shell_check_seconds() -> float:
+    """The time the shell check may run (#615): SHELL_CHECK_FLOOR_SECONDS, scaled up by the one-minute load average per
+    core when the machine is busier than one runnable task per core, never above SHELL_CHECK_CAP_SECONDS. A load that
+    cannot be read, or is not a finite number, gives the floor. Exceeding it is still the fail-closed denial.
+
+    The tradeoff: a busy machine slows the check itself, so a fixed budget turned load into denials; a longer budget
+    trades some added latency on a clean command (bounded by the cap) for fewer false denials."""
+    try:
+        load = float(os.getloadavg()[0])
+        cores = max(1, os.cpu_count() or 1)
+    except (OSError, ValueError, AttributeError):
+        return SHELL_CHECK_FLOOR_SECONDS
+    if math.isnan(load) or load <= 0:
+        return SHELL_CHECK_FLOOR_SECONDS
+    return min(SHELL_CHECK_CAP_SECONDS, max(SHELL_CHECK_FLOOR_SECONDS, SHELL_CHECK_FLOOR_SECONDS * load / cores))
+
+
 def shell_vendor_check(payload: dict[str, Any]) -> None:
     """Deny a Bash command that goes straight to the vendor API or its key (#209): a cheap, fail-closed speed bump,
     not a sandbox. There is no exemption. The denial names the
@@ -1197,7 +1217,7 @@ def shell_vendor_check(payload: dict[str, Any]) -> None:
     # its own short budget, like the isolated Gemini check, so a late guard deadline never denies a clean command
     started = time.monotonic()
     try:
-        found = geminibrief.shell_command_class(command, started + ISOLATED_CHECK_SECONDS)
+        found = geminibrief.shell_command_class(command, started + shell_check_seconds())
     except Exception:  # fail closed: any error in the check is "could not be checked"; no exception text is kept
         found = geminibrief.SHELL_UNVERIFIED
     if found:

@@ -488,6 +488,15 @@ nothing, and the shorter ones are checked against the deadline line by line. The
 denial names the rule (`gemini-material`) and a fixed phrase class, such as "the vendor API host or SDK", and points at the
 wrapper; it never repeats the command. A command that cannot be checked before the deadline is denied.
 
+**The check's time budget (#615).** The deadline is not fixed. It starts at 3 s (it was 1.5 s) and grows with the
+one-minute load average per core, `3 s x load / cores` when that is above 3 s, up to a cap of 5 s, half the 10 s hook
+timeout, so the decision is still written in time. A load that cannot be read, or is not a number, gives the 3 s floor
+(a load that is infinite gives the cap). Nothing else changes: a check that still runs out is denied as above and logged
+as `input-shell` with its duration. The tradeoff: the check itself is slowed by a busy machine, and a fixed budget turned
+that load into denials of clean commands. A longer budget costs at most the cap in added wait on a command that is slow
+to check, and it never lets a command through that was not checked. Nothing here is a new measurement; the floor and the
+cap are chosen limits (`SHELL_CHECK_FLOOR_SECONDS`, `SHELL_CHECK_CAP_SECONDS` in `safo.modes.hooks`), not measured values.
+
 Not covered, by design: names built from variables (`a=generative; b=language; curl https://$a$b...` with no
 `doppler`), names decoded (`base64 -d | xargs curl`) or read from a file or the environment, a script or program the
 command merely runs, a shadowed Python module defined outside the command (a file named like an installed module on the
