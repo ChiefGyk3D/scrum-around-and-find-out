@@ -302,6 +302,87 @@ def test_a_program_key_in_the_repository_config_is_refused_and_never_runs(
     refused(world, go(world, "review"))
 
 
+@pytest.mark.parametrize("key", ["protocol.ssh.allow", "protocol.file.allow", "Protocol.Ext.Allow", "protocol.allow"])
+def test_a_protocol_key_in_the_repository_config_is_refused_and_never_runs(
+    world: World, tmp_path: Path, key: str
+) -> None:
+    marker = hostile_script(tmp_path)
+    git(world.dev / "repo", "config", key, "always")
+    refused(world, go(world, "implementer"))
+    assert not marker.exists()
+    refused(world, go(world, "review"))
+
+
+def test_a_clean_repository_config_still_passes(world: World) -> None:
+    assert go(world, "implementer") == 0
+
+
+HOSTILE_CONFIGS = {
+    "tab-in-subsection": '[filter "a\tb"]\n\tclean = x\n',
+    "command-lookalike-in-value": '[core]\n\tn = "a\\ncommand\\tprotocol.allow\\nnever"\n[filter "f"]\n\tclean = y\n',
+    "newline-in-value": '[core]\n\tnote = "a\\nb"\n[alias]\n\tq = "!echo hi"\n',
+    "long-entry-first": "[core]\n\tnote = " + "a" * 200_000 + "\n[core]\n\tsshCommand = id\n",
+    "valueless-key-first": '[x]\n\tnovalue\n[protocol "file"]\n\tallow = always\n',
+    "protocol-mixed-case": '[Protocol "SSH"]\n\tAllow = always\n',
+    "filter-process": '[filter "f"]\n\tprocess = x\n',
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_CONFIGS))
+def test_hostile_config_text_is_refused_by_the_real_git_listing(tmp_path: Path, name: str) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    gitbin = shutil.which("git")
+    assert gitbin
+    subprocess.run([gitbin, "init", "-q", str(repo)], check=True, env={"PATH": "/usr/bin:/bin"})  # noqa: S603
+    with open(repo / ".git" / "config", "a", encoding="utf-8") as handle:
+        handle.write(HOSTILE_CONFIGS[name])
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+def test_a_plain_repository_passes_the_real_git_listing(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    gitbin = shutil.which("git")
+    assert gitbin
+    subprocess.run([gitbin, "init", "-q", str(repo)], check=True, env={"PATH": "/usr/bin:/bin"})  # noqa: S603
+    codexrun.check_repo_config(gitbin, str(tmp_path), str(repo))
+
+
+def test_the_skipped_command_settings_match_the_options_the_wrapper_passes() -> None:
+    passed = {tuple(item.split("=", 1)) for item in codexrun.GIT_HARDENING if "=" in item and not item.startswith("--")}
+    assert {(k.lower(), v) for k, v in passed} == set(codexrun.WRAPPER_COMMAND_SETTINGS)
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        "",  # nothing listed: not a real repository listing
+        "local\0",  # a scope with no record
+        "local\tfilter.x.clean\nx\0",  # one token, the form this parser must not accept
+        "weird\0filter.x.clean\nx\0",  # unknown scope
+        "local\0\0",  # empty key
+        "command\0filter.x.clean\nx\0",  # a command-scope record that is not the wrapper's own
+        "command\0protocol.allow\nalways\0",  # the wrapper's key with another value
+        "command\0protocol.file.allow\nalways\0",  # a command-scope protocol key the wrapper did not pass
+        "local\0core.bare\nfalse\0local\0",  # odd token count
+    ],
+)
+def test_a_listing_that_does_not_parse_is_refused(monkeypatch: pytest.MonkeyPatch, listing: str) -> None:
+    monkeypatch.setattr(codexrun, "_git", lambda *args, **kwargs: listing)
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config("git", "/home/x", "/home/x/r")
+
+
+def test_only_the_wrappers_own_command_settings_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    listing = "".join(f"command\0{k}\n{v}\0" for k, v in sorted(codexrun.WRAPPER_COMMAND_SETTINGS))
+    listing += "local\0core.bare\nfalse\0local\0x.novalue\0"
+    monkeypatch.setattr(codexrun, "_git", lambda *args, **kwargs: listing)
+    monkeypatch.setattr(codexrun, "_submodule_folders", lambda *args, **kwargs: [])
+    codexrun.check_repo_config("git", "/home/x", "/home/x/r")
+
+
 def add_submodule(world: World, tmp_path: Path) -> Path:
     """A committed, initialized submodule `sub` in the worktree; returns its working folder."""
     upstream = tmp_path / "upstream"
@@ -400,7 +481,7 @@ def test_a_config_changed_after_the_check_never_runs_a_program(
     def race(argv: list[str], **kwargs: Any) -> Any:
         nonlocal injected
         result = real_run(argv, **kwargs)
-        if not injected and argv[-3:] == ["config", "--list", "-z"]:
+        if not injected and argv[-4:] == ["config", "--list", "--show-scope", "-z"]:
             injected = True
             common = Path(git(wt, "rev-parse", "--git-common-dir"))
             if not common.is_absolute():
