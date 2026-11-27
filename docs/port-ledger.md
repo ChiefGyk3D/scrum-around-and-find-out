@@ -1,0 +1,98 @@
+# Port ledger: SAFO and the portable edition
+
+One row per SAFO item with a stated port decision for the sister project, the portable edition (the sister-project
+rule is in `CLAUDE.md` and `AGENTS.md`, issue #565; this ledger is #571, under epic #518). The two are at parity on base
+features and differ in application: SAFO is the maintainer's own setup, the portable edition is for an enterprise
+setting where everything is configurable.
+
+## How to read it
+
+Every row carries exactly one of four decisions:
+
+- **Ported**: the work exists in the portable edition's `main`. Each such row was checked against that repository on
+  2026-11-27; the Notes column names the file or merged pull request. Whether a port is configurable is said in Notes.
+- **Port as configurable**: it belongs there, an issue is filed, nothing is built yet. Thresholds, weights, models,
+  paths and vendors are config values, never the maintainer's numbers.
+- **Not ported**: stays SAFO-only, with the reason.
+- **Proposed**: no issue there yet and no owner decision recorded; Notes says what is proposed. A proposal is not a
+  filing. Turn it into one of the three above when decided.
+
+The SAFO column links the SAFO issue or pull request, or the doc page where the item has no single issue. "PE" is the
+portable edition's repository. Rows are added as ports land; verify a row against both repositories before changing
+its status. One row per SAFO issue or page: a shared portable-edition reference is repeated, not merged.
+
+## Ported (verified in the portable edition's `main`)
+
+| SAFO item | Decision | Portable edition | Notes |
+| --- | --- | --- | --- |
+| [`docs/personas.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/personas.md) and [`docs/roles.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/roles.md): roles and packs ([#161](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/161)) | Ported | [PE #5](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/5) via [PE PR #5](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/5) | Starter set of four roles and six packs (`.claude/agents`, `.codex/agents`, `prompts/`, `.agents/skills`) |
+| [`docs/handoff.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/handoff.md): brief, report-header, handoff and decision contracts | Ported | [PE #10](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/10) via [PE PR #28](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/28), [PE PR #34](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/34), [PE PR #38](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/38) | Contracts, validators and a config template |
+| [`docs/privacy.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/privacy.md) and `tests/test_privacy.py`: public-docs privacy scan | Ported | [PE #13](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/13) and [PE #30](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/30) via [PE PR #32](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/32) | `shit/privacy.py`: generic patterns plus an optional deny list, off by default, path from config only |
+| [`docs/review-loop.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/review-loop.md): hostile fixtures and revert proofs | Ported | [PE #14](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/14) via [PE PR #40](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/40) | `tests/test_hostile.py`, `docs/hostile-revert-proofs.md` |
+| [`docs/plugins.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/plugins.md) and [`docs/routing.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/routing.md): several assistants behind one wrapper | Ported | [PE #12](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/12) via [PE PR #35](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/35) | Adapters for Claude, Codex, Copilot and paste-in; configurable. Their flags are unverified, [PE #36](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/36) open |
+| [#229](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/229): threat model for SAFO as a whole; [`docs/threat-model.md`](https://github.com/ChiefGyk3D/scrum-around-and-find-out/blob/main/docs/threat-model.md) | Ported | [PE #8](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/8) via [PE PR #26](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/26) | `docs/threat-model.md` in the portable edition |
+| [#565](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/565), [#566](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/566): sister-project rule | Ported | [PE #41](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/41) via [PE PR #42](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/42), [PE PR #47](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/47) | Rule file in both repositories; [#573](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/573) updated the wording |
+
+## Port as configurable (issue filed, not built)
+
+| SAFO item | Decision | Portable edition | Config the port must expose |
+| --- | --- | --- | --- |
+| [#531](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/531): pre-digest tool output, full output saved | Port as configurable | [PE #43](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/43) | `digest_threshold_bytes`, `digest_max_output_bytes`, `digest_mode` (deterministic or local) |
+| [#512](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/512): `safo spend`, weekly report with a stored baseline | Port as configurable | [PE #44](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/44) | Weights are config; token counts only if an adapter supplies them; it reports only its own numbers |
+| [#538](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/538): weekly spend run posted to a private issue | Port as configurable | [PE #44](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/44) | Weights are config; token counts only if an adapter supplies them; it reports only its own numbers |
+| [#558](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/558): lead-session cost curve | Port as configurable | [PE #44](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/44) | Weights are config; token counts only if an adapter supplies them; it reports only its own numbers |
+| [#489](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/489): slim the fixed context | Port as configurable | [PE #45](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/45) | `instruction_max_bytes`, `listed_roles_max`; warn or fail in `shit check` |
+| [#519](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/519): one-file instruction layout | Port as configurable | [PE #45](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/45) | `instruction_max_bytes`, `listed_roles_max`; warn or fail in `shit check` |
+| [#484](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/484): make local LLM quality measurable | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); design [PE PR #27](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/27), [PE PR #33](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/33) | Server, model, context size and routing table are config; design in `docs/design/local-model-tier.md` (32K default window); routes are re-measured on the install's data |
+| [#488](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/488): optimize serving settings and model choice | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); design [PE PR #27](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/27), [PE PR #33](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/33) | Server, model, context size and routing table are config; design in `docs/design/local-model-tier.md` (32K default window); routes are re-measured on the install's data |
+| [#491](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/491): `safo-eval` harness | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); design [PE PR #27](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/27), [PE PR #33](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/33) | Server, model, context size and routing table are config; design in `docs/design/local-model-tier.md` (32K default window); routes are re-measured on the install's data |
+| [#492](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/492): grow the eval fixtures | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); design [PE PR #27](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/27), [PE PR #33](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/33) | Server, model, context size and routing table are config; design in `docs/design/local-model-tier.md` (32K default window); routes are re-measured on the install's data |
+| [#493](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/493): `safo-draft`, local-first drafting | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); design [PE PR #27](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/27), [PE PR #33](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/33) | Server, model, context size and routing table are config; design in `docs/design/local-model-tier.md` (32K default window); routes are re-measured on the install's data |
+| [#507](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/507): record call id, project and outcome per draft | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); design [PE PR #27](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/27), [PE PR #33](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/33) | Server, model, context size and routing table are config; design in `docs/design/local-model-tier.md` (32K default window); routes are re-measured on the install's data |
+| [#515](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/515): default draft model | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); design [PE PR #27](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/27), [PE PR #33](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/33) | Server, model, context size and routing table are config; design in `docs/design/local-model-tier.md` (32K default window); routes are re-measured on the install's data |
+| [#490](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/490): llm-local truncation guard and input caps | Port as configurable | [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25) | Section 5 of the local-tier design; window size from config |
+| [#445](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/445): lead-discipline epic, including dispatching every ready item | Port as configurable | [PE #17](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/17) to [PE #21](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/21), [PE #7](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/7), [PE PR #46](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/46), [PE #48](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/48) | Parallelism cap, routing and retry are config; per-worker leases [PE #48](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/48) |
+
+## Proposed (no issue in the portable edition yet)
+
+| SAFO item | Decision | Portable edition | Proposal |
+| --- | --- | --- | --- |
+| [#540](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/540): weekly eval canary | Proposed | none yet | Port as configurable after [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25) lands; interval and models from config |
+| [#569](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/569): qwen3.5:4b truncation regression probe | Proposed | none yet | Port as a generic truncation probe after [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); the model name is config |
+| [#533](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/533): keep_alive measurement | Proposed | none yet | Port as a documented setting inside [PE #25](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/25); no number is carried over |
+| [#528](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/528): cap on agent hand-back report size | Proposed | none yet | Port as configurable; cap in bytes from config |
+| [#529](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/529): reuse finished agents | Proposed | none yet | Port as guidance; generic to any multi-agent use |
+| [#530](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/530): stable prompt prefix | Proposed | none yet | Port as guidance in `docs/`; a practice, not code |
+| [#521](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/521): trim the skill listing | Proposed | none yet | Port as guidance in `docs/` |
+| [#537](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/537): secret scan on briefs and reports | Proposed | none yet | Port as configurable, merged with [PE PR #32](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/32); same scanner applied to brief text |
+| [#556](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/556): session-length nudge | Proposed | none yet | Port as configurable after measurement here |
+| [#567](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/567): measure handoff at a threshold | Proposed | none yet | Port as configurable after it is measured here; not measured yet |
+| [#504](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/504): track local-model share per project | Proposed | none yet | Port as configurable; counts only, read from the task log |
+| [#542](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/542): generated-file check before push | Proposed | none yet | Port as configurable; generic to any repo that generates files |
+| [#541](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/541): branch-protection drift audit | Proposed | none yet | Port as configurable; required check name and standard from config |
+| [#536](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/536): Dependabot auto-merge after the 7-day hold | Proposed | none yet | Port as configurable; hold days from config; merge stays a human or lead decision |
+
+## Not ported (SAFO-only)
+
+| SAFO item | Decision | Reason |
+| --- | --- | --- |
+| [#423](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/423): `safo-rmguard` | Not ported | A guard for the maintainer's shared dev directories and hooks; the portable edition ships confined storage instead ([PE #9](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/9)) |
+| [#458](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/458): rmguard hardening | Not ported | A guard for the maintainer's shared dev directories and hooks; the portable edition ships confined storage instead ([PE #9](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/9)) |
+| [#427](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/427): automatic routing by weekly pace | Not ported | Tied to one person's vendor plan and overage windows; the portable edition routes by configured roles |
+| [#428](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/428): pace routing epic | Not ported | Tied to one person's vendor plan and overage windows; the portable edition routes by configured roles |
+| [#438](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/438): `safo-codex-run` | Not ported | A wrapper around the maintainer's Codex setup; the adapters ([PE PR #35](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/35)) cover the generic case |
+| [#545](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/545): codex-run repo checks | Not ported | A wrapper around the maintainer's Codex setup; the adapters ([PE PR #35](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/35)) cover the generic case |
+| [#553](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/553): codex-run repo checks, round 2 | Not ported | A wrapper around the maintainer's Codex setup; the adapters ([PE PR #35](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/pull/35)) cover the generic case |
+| [#467](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/467): Gemini free and paid paths, hardware-key tier | Not ported | Hardware keys, paid-vendor spend and a root-owned broker on his machines |
+| [#473](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/473): deploy the paid broker | Not ported | Hardware keys, paid-vendor spend and a root-owned broker on his machines |
+| [#366](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/366): shared GitHub API budget, `ghw` | Not ported | His GitHub account's rate buckets |
+| [#549](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/549): conditional GitHub reads with a private ETag cache | Not ported | His GitHub account's rate buckets |
+| [#479](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/479): reconcile the All Projects board | Not ported | His boards; the portable edition keeps task state in project storage, not a GitHub Project |
+| [#508](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/508): write cap and Kind writer for board reconcile | Not ported | His boards; the portable edition keeps task state in project storage, not a GitHub Project |
+| [#485](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/485): route full suites to the runner | Not ported | His runner machines |
+| [#494](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/494): `safo-runner-check` | Not ported | His runner machines |
+| [#463](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/463): re-pin every GYST caller | Not ported | His CI standard; each repo calls GYST on its own |
+| [#421](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/421): `exempt_authors` for Dependabot PRs | Not ported | Board rule of this repository |
+| [#403](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/403): SAFO activity pane | Not ported | Claude Code status surface for one maintainer |
+| [#351](https://github.com/ChiefGyk3D/scrum-around-and-find-out/issues/351): `safo-ship` merge watcher | Not ported | Merge stays a human decision in the portable edition ([PE #22](https://github.com/ChiefGyk3D/Strategic-Herding-of-IT-Tasks/issues/22)); revisit if a team asks |
+

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `safo-eval-canary` (#540, epic #527): runs the safo-eval fixtures on the two configured local models (read from `safo.localdraft`), compares each pass rate with a stored baseline and exits 1 with one `ALERT` line when a score drops by more than `--threshold` (default 0.10). A busy queue is retried (exit 75 if it stays busy), an unreachable server is reported (exit 3) and never scored as zero, a hostile baseline (symlink, FIFO, oversized, malformed, wrong types) is exit 2, and the baseline is written only with `--update-baseline`. Separate entry point because a `safo` subcommand needs the guard's `TOP_LEVEL_COMMANDS`. Docs: `docs/local-eval.md`. Tests: `tests/test_evalcanary.py`.
 - `safo-codex-run` and the shared git config check (`safo.gitconfig`): git now runs with `GIT_NO_LAZY_FETCH=1`, so a
   partial clone is refused and a missing object is never fetched on demand. A behavior change, documented in
   `docs/codex-run.md`; test in `tests/test_codexrun.py`.
