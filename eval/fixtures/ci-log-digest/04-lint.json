@@ -1,0 +1,25 @@
+{
+  "task": "ci-log-digest",
+  "input": "ruff check src\nsrc/app/util.py:41:5: F841 local variable `tmp` is assigned to but never used\nsrc/app/util.py:88:1: E501 line too long (131 > 120)\nFound 2 errors.",
+  "facts": [
+    "util.py",
+    "F841",
+    "E501",
+    {
+      "text": "2",
+      "variants": [
+        "\\btwo\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b3 errors",
+    "\\bF401\\b"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "Lint found 3 errors in util.py: F401 unused import and E501 line length.",
+    "ruff reported problems in the source tree; fix the style issues and push again."
+  ]
+}

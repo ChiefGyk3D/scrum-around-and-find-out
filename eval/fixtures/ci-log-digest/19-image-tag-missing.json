@@ -1,0 +1,31 @@
+{
+  "task": "ci-log-digest",
+  "input": "2026-06-03T16:29:50Z Job scan-image started\n09:00:00Z [command]/usr/bin/git config --local --get remote.origin.url\n09:00:03Z ##[group]Print environment\n09:00:06Z Post job cleanup.\n09:00:09Z Download action repository 'example-org/setup-tool@v4' (SHA:23310705f4a02278b5a31a7e4917c1b48c1650ee)\n09:00:36Z Download action repository 'example-org/setup-tool@v4' (SHA:8ae57228002eddb6c65a00e3fa1572173eb0b047)\n09:00:30Z Download action repository 'example-org/setup-tool@v4' (SHA:bc4b099e64762bc9a4b74d704f85d6ad4eed8856)\n09:00:18Z Received 11423609 of 106961457 (22.6%), 19.7 MBs/sec\n09:00:21Z Temporarily overriding HOME='/home/runner/work/_temp/f22f6ead'\n09:00:16Z [command]/usr/bin/git config --local --get remote.origin.url\n09:01:21Z Post job cleanup.\n09:01:20Z Temporarily overriding HOME='/home/runner/work/_temp/1da23dc2'\n09:01:17Z ##[group]Print environment\n09:01:24Z ##[endgroup]\n09:01:57Z ##[endgroup]\n09:00:28Z [command]/usr/bin/git config --local --get remote.origin.url\n09:00:45Z Post job cleanup.\n09:00:48Z Post job cleanup.\n09:01:25Z Post job cleanup.\n09:00:54Z Download action repository 'example-org/setup-tool@v1' (SHA:3dbd0fa31fd8d76569ab15f06ee27d3f457f118c)\n09:00:38Z Post job cleanup.\n09:02:00Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:06Z Post job cleanup.\n09:01:50Z ##[endgroup]\n09:01:32Z ##[endgroup]\n09:01:12Z Received 79483249 of 115983547 (2.0%), 17.4 MBs/sec\n09:03:20Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:36Z ##[endgroup]\n09:02:15Z Received 69176693 of 169623711 (62.0%), 10.8 MBs/sec\n09:00:56Z [command]/usr/bin/git config --local --get remote.origin.url\n09:03:52Z ##[group]Lint config\n09:03:30Z ##[endgroup]\n09:02:35Z Download action repository 'example-org/setup-tool@v2' (SHA:5ce841f61ff7f57620718445f106757e60521971)\n09:04:48Z [command]/usr/bin/git config --local --get remote.origin.url\n2026-06-03T16:30:21Z ##[group]Run docker pull registry.example.com/team/base-image:1.8.4\n2026-06-03T16:30:22Z Error response from daemon: manifest for registry.example.com/team/base-image:1.8.4 not found: manifest unknown: manifest unknown\n2026-06-03T16:30:22Z note: tags available for team/base-image: 1.8.2, 1.8.3, 1.9.0\n2026-06-03T16:30:22Z ##[error]Process completed with exit code 1.\n09:02:12Z Received 42301400 of 113704996 (71.8%), 16.7 MBs/sec\n09:01:08Z [command]/usr/bin/git config --local --get remote.origin.url\n09:02:20Z Post job cleanup.\n09:01:48Z [command]/usr/bin/git config --local --get remote.origin.url\n09:05:33Z [command]/usr/bin/git config --local --get remote.origin.url\n09:05:04Z Received 46050349 of 160768335 (20.2%), 40.6 MBs/sec\n09:05:51Z Temporarily overriding HOME='/home/runner/work/_temp/a621df93'\n09:05:20Z ##[endgroup]\n09:05:28Z Temporarily overriding HOME='/home/runner/work/_temp/9f25a551'\n09:03:30Z Download action repository 'example-org/setup-tool@v4' (SHA:a41bc16d627d06c751b7a73e67d99db8e210bbb9)\n09:04:18Z Post job cleanup.\n09:05:52Z ##[group]Print environment",
+  "facts": [
+    "base-image",
+    "1.8.4",
+    {
+      "text": "manifest unknown",
+      "variants": [
+        "\\btag\\b[^\\n]{0,30}\\b(not found|missing|does not exist)\\b",
+        "\\bmanifest\\b[^\\n]{0,30}\\bnot found\\b"
+      ]
+    },
+    "scan-image"
+  ],
+  "forbidden": [
+    "\\bunauthorized\\b",
+    "\\b(denied|authentication)\\b",
+    "\\brate limit\\w*"
+  ],
+  "max_chars": 700,
+  "required_format": "any",
+  "wrong": [
+    "scan-image failed because the registry rejected the credentials with unauthorized.",
+    "The pull of base-image 1.8.3 failed because Docker hit a rate limit."
+  ],
+  "correct_alts": [
+    "The scan-image job failed because the tag base-image:1.8.4 does not exist in the registry: docker reported manifest unknown.\nOnly 1.8.2, 1.8.3 and 1.9.0 are published, so the workflow pins a version that was never pushed.",
+    "Pulling base-image at 1.8.4 broke the scan-image run, since that manifest is not found; the registry publishes other tags only, so the pinned version looks like a typo or a release nobody pushed."
+  ]
+}

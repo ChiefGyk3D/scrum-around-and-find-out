@@ -1,0 +1,25 @@
+{
+  "task": "issue-draft",
+  "input": "Notes: the report export drops rows with an empty region column. We lost 37 rows out of 1204 in the March file. Happens in export_csv() in reports/export.py. No error shown to the user.",
+  "facts": [
+    "37",
+    "1204",
+    "export_csv",
+    {
+      "text": "region",
+      "variants": [
+        "\\bregions?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b1240\\b",
+    "\\b73\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Export drops rows\n- 73 rows lost out of 1240 in the March file\n- export_csv in reports/export.py when region is empty",
+    "Title: CSV export problem\n- some rows go missing in the export\n- no error is shown to the user"
+  ]
+}

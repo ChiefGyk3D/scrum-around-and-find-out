@@ -1,0 +1,31 @@
+{
+  "task": "issue-draft",
+  "input": "Licensing: relicense the project from MIT to Apache-2.0. Update the LICENSE file, add the SPDX-License-Identifier: Apache-2.0 header to every .py file, and update the pyproject.toml license field. All 14 contributors have already agreed in writing. Do not touch the vendored code under third_party/, it keeps its own license.",
+  "facts": [
+    "MIT",
+    "Apache-2.0",
+    "SPDX-License-Identifier",
+    "pyproject.toml",
+    {
+      "text": "third_party/",
+      "variants": [
+        "\\bthird_party\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bGPL",
+    "\\bBSD\\b",
+    "relicense.{0,40}third_party"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Change license\n- switch from MIT to GPL-3.0\n- add SPDX-License-Identifier headers",
+    "Title: License header work\n- relicense Apache-2.0, update pyproject.toml\n- also relicense third_party/ code"
+  ],
+  "correct_alts": [
+    "Relicense from MIT to Apache-2.0\n- Replace the LICENSE file and set the license field in pyproject.toml.\n- Add an SPDX-License-Identifier: Apache-2.0 header to each Python source file.\n- Leave third_party/ alone, since vendored code keeps its own terms.",
+    "Move the project to Apache-2.0\nThe license changes away from MIT. Every contributor has agreed. The work is the new LICENSE text, the pyproject.toml metadata and SPDX-License-Identifier headers in .py files. Skip anything under third_party/."
+  ]
+}

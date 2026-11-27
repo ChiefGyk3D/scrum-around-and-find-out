@@ -1,0 +1,33 @@
+{
+  "task": "issue-triage",
+  "input": "Labels: bug, docs, feature, question, chore.\nEpics: E-cli, E-docs-site, E-api.\nRule: the epic follows the file that has to change; docs is for a page that is out of date while the code is right.\nIssue: Following the quickstart, `exampletool init --team` fails with unknown flag. The CLI is behaving as intended: the flag was renamed to --org in 2.0 and the quickstart page still says --team.",
+  "facts": [
+    {
+      "text": "\"label\": \"docs\"",
+      "variants": [
+        "\"label\"\\s*:\\s*\"docs\""
+      ]
+    },
+    {
+      "text": "\"epic\": \"E-docs-site\"",
+      "variants": [
+        "\"epic\"\\s*:\\s*\"E\\-docs\\-site\""
+      ]
+    }
+  ],
+  "forbidden": [
+    "\"label\"\\s*:\\s*\"(?!docs\")",
+    "\"epic\"\\s*:\\s*\"(?!E\\-docs\\-site\")"
+  ],
+  "max_chars": 200,
+  "required_format": "json-object",
+  "wrong": [
+    "{\"label\": \"bug\", \"epic\": \"E-docs-site\"}",
+    "{\"label\": \"docs\", \"epic\": \"E-cli\"}"
+  ],
+  "correct_alts": [
+    "{\"epic\": \"E-docs-site\", \"label\": \"docs\"}",
+    "```json\n{\n \"label\": \"docs\",\n \"epic\": \"E-docs-site\"\n}\n```",
+    "{\"label\": \"docs\", \"epic\": \"E-docs-site\", \"note\": \"see rule\"}"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "task": "pr-summary",
+  "input": "CI change in .github/workflows/ci.yml: test matrix adds Python 3.13 and drops 3.9. The pip cache key now hashes uv.lock instead of requirements.txt. Job name stays CI green. Timeout per job set to 20 minutes.",
+  "facts": [
+    ".github/workflows/ci.yml",
+    "Python 3.13",
+    "3.9",
+    "uv.lock",
+    {
+      "text": "20 minutes",
+      "variants": [
+        "\\b(?:20|twenty)[- ]minutes?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b3\\.12\\b.{0,20}\\bdrop",
+    "\\bPython 3\\.14\\b",
+    "\\b2 minutes\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "CI matrix update\n- .github/workflows/ci.yml adds Python 3.14 and drops 3.9\n- cache key hashes uv.lock",
+    "Workflow tweak\n- adds Python 3.13 to ci.yml and drops 3.9\n- sets a 2 minutes job timeout"
+  ],
+  "correct_alts": [
+    "Refresh the CI test matrix.\n- .github/workflows/ci.yml now runs Python 3.13 and no longer runs 3.9.\n- The cache key is built from uv.lock.\n- Each job is limited to twenty minutes; the gate is still named CI green.",
+    "The workflow tests newer Python.\n\n- Python 3.13 joins the matrix and 3.9 leaves it (.github/workflows/ci.yml).\n- Dependency caching keys off uv.lock instead of requirements.txt.\n- A 20 minutes timeout applies per job."
+  ]
+}

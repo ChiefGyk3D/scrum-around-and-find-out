@@ -82,6 +82,7 @@ from safo.hooks import (
     read_state,
     refresh_bound_repo,
     reprobe,
+    runner_status,
     save_state,
     session_message,
     session_output,
@@ -166,6 +167,9 @@ class EventTimeout(TimeoutError):
     def __init__(self, partial: bytes) -> None:
         super().__init__("no event on standard input")
         self.partial = partial
+
+
+SERVICE_DENIAL = "gemini-deny"  # the diagnostic and decision code of a denial by the model-service rules (#364)
 
 
 class GeminiEventDeny(Exception):
@@ -440,6 +444,16 @@ def diagnostic(
     run = run or Run()
     folder = state_dir(ctx.env)
     when = ctx.now.strftime("%Y-%m-%dT%H:%M:%S")
+    if code == SERVICE_DENIAL:  # a rule hit (#364): a denial in a healthy guard, not a degraded input error
+        record = log_record(when, "deny", read_mode(ctx.env), None, False, "healthy", code)
+        denial: dict[str, Any] = {
+            "hookEventName": event,
+            "additionalContext": json.dumps({"diagnostic": code}),
+            "permissionDecision": "deny",
+            "permissionDecisionReason": GEMINI_DENY_PREFIX + deny,
+        }
+        emit_then_persist(ctx, run, {"hookSpecificOutput": denial}, folder, record)
+        return
     record = log_record(when, "error", read_mode(ctx.env), None, False, "degraded", code)
     data: dict[str, Any] = {
         "systemMessage": WARNING,
@@ -907,6 +921,7 @@ TOP_LEVEL_COMMANDS = (
     "agents-status",
     "audit",
     "bootstrap",
+    "card",
     "doctor",
     "gemini",
     "handoff",
@@ -915,6 +930,7 @@ TOP_LEVEL_COMMANDS = (
     "outcome",
     "profiles",
     "protection",
+    "ratebudget",
     "reconcile",
     "route",
     "status",
@@ -1096,7 +1112,7 @@ def run_probe(ctx: LocalContext, args: argparse.Namespace) -> int:
             raise ValueError("the session has no bound repository")
         code = "state-write"
         prune_state(folder, ctx.now.timestamp())
-        ctx.say(session_output(session_message(doc, state)))
+        ctx.say(session_output(session_message(doc, state, runner_status(ctx.env))))
     except TimeoutError:
         diagnostic(ctx, "timeout" if code == "input" else code, "SessionStart")
     except Exception:
@@ -1172,7 +1188,10 @@ def shell_vendor_check(payload: dict[str, Any]) -> None:
     except Exception:  # fail closed: any error in the check is "could not be checked"; no exception text is kept
         found = geminibrief.SHELL_UNVERIFIED
     if found:
-        raise GeminiEventDeny("input", SHELL_DENIAL.format(found))
+        # a rule hit is a denial of its own (#364); a command that could not be checked stays the degraded input error
+        raise GeminiEventDeny(
+            "input" if found == geminibrief.SHELL_UNVERIFIED else SERVICE_DENIAL, SHELL_DENIAL.format(found)
+        )
 
 
 def guard(ctx: LocalContext, args: argparse.Namespace, started: float | None = None, run: Run | None = None) -> None:

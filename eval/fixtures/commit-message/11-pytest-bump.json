@@ -1,0 +1,28 @@
+{
+  "task": "commit-message",
+  "input": "Change: bump pytest from 7.4.4 to 8.2.1 in dev-requirements.txt. conftest.py adjusted because the py.path fixture was removed. All tests pass. Also noticed an unrelated flaky test in test_cache.py, not touched.",
+  "facts": [
+    "pytest",
+    "7.4.4",
+    "8.2.1",
+    "dev-requirements.txt",
+    "conftest.py"
+  ],
+  "forbidden": [
+    "\\bfeat:",
+    "\\bfix:",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|fix(?:es|ed)?|updat(?:e|es|ed)|chang(?:e|es|ed)|touch(?:es|ed)?|modif(?:y|ies|ied)|includ(?:e|es|ed)|stabiliz(?:e|es|ed)|address(?:es|ed)?)\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}test_cache|test_cache(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
+    "\\b8\\.1\\.2\\b"
+  ],
+  "max_chars": 600,
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
+  "wrong": [
+    "chore: bump pytest from 7.4.4 to 8.1.2\n\nUpdates dev-requirements.txt and conftest.py.",
+    "chore: update pytest to 8.2.1 and fix test_cache\n\nAlso touches dev-requirements.txt, conftest.py, 7.4.4 gone."
+  ],
+  "correct_alts": [
+    "chore: upgrade pytest to 8.2.1\n\nThe dev-requirements.txt pin moves from 7.4.4. conftest.py is adapted for the removal of the py.path fixture and the suite passes.",
+    "chore: move dev tooling to pytest 8.2.1\n\nLeaving 7.4.4 required a small edit in conftest.py (the py.path fixture is gone). Pin updated in dev-requirements.txt.",
+    "chore: bump pytest to 8.2.1\n\nMoves dev-requirements.txt from 7.4.4 and adjusts conftest.py for the removed py.path fixture. The flaky test in test_cache.py is untouched."
+  ]
+}

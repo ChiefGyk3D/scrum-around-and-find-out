@@ -1,0 +1,17 @@
+{
+  "task": "doc-skeleton",
+  "input": "Contributing guide for the example-project. Sections: Setup, Style, Tests, Pull requests.",
+  "facts": [
+    "Setup",
+    "Style",
+    "Tests",
+    "Pull requests"
+  ],
+  "forbidden": [],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Guide\n## Style\nOne line about style goes here.\n## Tests\nOne line about tests goes here.\n## Pull requests\nOne line about pull requests goes here.",
+    "# Setup\n# Style\n# Tests\n# Pull requests"
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def last_n(items, n):\n-    return items[-n:]\n+    return items[len(items) - n + 1:]\n```\nIntent: return the last n items.",
+  "facts": [
+    "last_n",
+    {
+      "text": "off-by-one",
+      "variants": [
+        "off[- ]by[- ]one",
+        "(drops?|skips?|omits?|misses?|excludes?) the first (item|element)",
+        "one (item|element) (short|too few|fewer)",
+        "returns? n ?- ?1 (items|elements)",
+        "one (fewer|less) (item|element)"
+      ]
+    }
+  ],
+  "forbidden": [],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "last_n: typo in the docstring +1 line missing.",
+    "last_n: the function name is too short, rename it to last_items."
+  ],
+  "correct_alts": [
+    "last_n has an off-by-one bug: the slice starts at len(items) - n + 1, so it returns only n - 1 items.",
+    "last_n skips the first element it should return because the start index is one too high.",
+    "The new slice in last_n returns one item fewer than requested, which does not match the stated intent."
+  ]
+}

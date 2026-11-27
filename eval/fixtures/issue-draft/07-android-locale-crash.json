@@ -1,0 +1,28 @@
+{
+  "task": "issue-draft",
+  "input": "Bug notes: the Android app TrailNotes crashes on launch on Android 14 when the device language is Turkish. Stack top: java.lang.NumberFormatException in LocaleUtils.parseCount(). Build 3.18.0, works on 3.17.2. Support ticket SUP-5531. Unrelated: the iOS widget color is slightly off, ignore that for this issue.",
+  "facts": [
+    "Android 14",
+    "Turkish",
+    "NumberFormatException",
+    "3.18.0",
+    "SUP-5531"
+  ],
+  "forbidden": [
+    "\\bSUP-5513\\b",
+    "\\bSUP-5351\\b",
+    "\\bAndroid 13\\b",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|fix(?:es|ed)?|address(?:es|ed)?|includ(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,40}\\bwidget\\b|\\bwidget\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,50}\\b(?:fix(?:es|ed)?|address(?:es|ed)?|includ(?:e|es|ed))\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: TrailNotes crashes on launch\n- happens on Android 13 with the Turkish locale\n- NumberFormatException in LocaleUtils.parseCount(), build 3.18.0, ticket SUP-5513",
+    "Title: Crash in locale parsing\n- Android 14 users crash on launch\n- the iOS widget color is also off, fix it together"
+  ],
+  "correct_alts": [
+    "TrailNotes crashes at launch with a Turkish locale\n- On Android 14, startup dies with a NumberFormatException thrown from LocaleUtils.parseCount().\n- It started in 3.18.0; 3.17.2 is fine.\n- Tracked in support ticket SUP-5531.",
+    "Launch crash when the phone language is Turkish\nThe app closes right after start on Android 14 because parseCount() in LocaleUtils raises a NumberFormatException. Version 3.18.0 is affected and the older 3.17.2 release is not. Please link ticket SUP-5531.",
+    "Title: TrailNotes crashes on launch with Turkish language\n\nThe app crashes on launch on Android 14 when the device language is Turkish: NumberFormatException in LocaleUtils.parseCount(). Build 3.18.0 is affected; 3.17.2 works. Support ticket SUP-5531. The iOS widget color is unrelated to this issue."
+  ]
+}

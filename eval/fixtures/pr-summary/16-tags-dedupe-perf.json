@@ -1,0 +1,43 @@
+{
+  "task": "pr-summary",
+  "input": "Perf PR: dedupe_tags() in tags.py used a nested loop, O(n^2). Now uses a set and keeps first-seen order. Benchmark on 50,000 tags: 1.9 s before, 0.14 s after. No API change. The CLI banner color tweak in the same branch was dropped.",
+  "facts": [
+    "dedupe_tags",
+    "tags.py",
+    {
+      "text": "O(n^2)",
+      "variants": [
+        "O\\(n\\^2\\)",
+        "\\bquadratic\\b"
+      ]
+    },
+    {
+      "text": "1.9 s",
+      "variants": [
+        "\\b1\\.9\\s?(?:s|seconds)\\b"
+      ]
+    },
+    {
+      "text": "0.14 s",
+      "variants": [
+        "\\b0\\.14\\s?(?:s|seconds)\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "(?<!not )(?<!never )\\b(?:chang(?:e|es|ed|ing)|updat(?:e|es|ed|ing)|add(?:s|ed|ing)?|includ(?:e|es|ed|ing)|adjust(?:s|ed|ing)?|tweak(?:s|ed|ing)?)\\b[^.\\n]{0,30}\\bbanner\\b",
+    "\\b0\\.41 s\\b",
+    "\\b9\\.1 s\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Speed up dedupe_tags\n- tags.py now uses a set, 1.9 s down to 0.41 s on 50,000 tags\n- fixes the nested loop",
+    "Perf and banner\n- dedupe_tags is faster, 0.14 s after\n- changes the banner color"
+  ],
+  "correct_alts": [
+    "Remove the quadratic loop from dedupe_tags.\n- tags.py replaces an O(n^2) nested loop with a set while preserving first-seen order.\n- On 50,000 tags the run time falls from 1.9 s to 0.14 s.\n- The public API is the same.",
+    "dedupe_tags runs about thirteen times faster.\n\n- The old algorithm in tags.py was O(n^2).\n- A set-based version keeps the original ordering.\n- Benchmark: 1.9 s before, 0.14 s after, with 50,000 tags.",
+    "Make dedupe_tags linear, nothing else.\n- tags.py swaps the O(n^2) nested loop for a set and keeps first-seen order.\n- 50,000 tags took 1.9 s before and take 0.14 s now.\n- The CLI banner color tweak was dropped from this branch."
+  ]
+}

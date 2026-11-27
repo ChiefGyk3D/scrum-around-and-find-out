@@ -9,6 +9,7 @@ safo route research                 # which agent should take a task of this sha
 safo outcome add --agent codex --shape research --review-rounds 1 --note "..."
 safo usage --report                 # the month, from the outcomes log
 safo local run --shape ci-log-summary --prompt-file log-summary.txt
+safo local report                   # how often briefs and sessions really used the local model
 safo hooks install                  # make Claude Code enforce the routing rules (warn mode first)
 safo hooks status                   # the guard mode and what it has logged
 ```
@@ -34,6 +35,68 @@ Its only network requests are the two it cannot avoid, both made with your own l
 
 A half-written last line (an agent is still writing) is skipped. A Codex window whose reset time has passed is reported as
 unknown rather than as stale usage. `--json` prints the same data for a script; the exit code is always 0.
+
+## Local-model use report
+
+`safo local report [--days N] [--json]` counts, by code and from local files only, how often the local model is really
+used (#372, baseline #380). No model is called and nothing is written or created: every file is only read. It prints,
+per day, per week and per model (the last 28 days unless `--days`, 1 to 3660): dispatches, dispatches with the local LLM
+reachable, briefs that name llm-local (the guard's `local_step`, a substring match on the brief text, so it shows that a
+brief mentions llm-local and not that a step ran), briefs with a `local-llm` line, and briefs with neither. The sources
+are the dispatch-guard log (`~/.local/state/agent-dispatch-guard/log.jsonl`), the `safo hooks status` counts (the same
+summary function, read without taking the log's lock), and the `llm-local` calls log and `state.json` (calls by task
+and model, admit and busy counts). The dispatch-guard and `llm-local` files are looked for under the home directory
+only, the way their writers place them, and ignore `XDG_STATE_HOME` and `XDG_DATA_HOME`; the hooks log keeps following
+`XDG_STATE_HOME`, as the guard that writes it does.
+
+Safety: each file is opened without following a symlink or waiting on a FIFO, only the last 8 MiB and 100,000 lines are
+read, and a line that is malformed, torn (no trailing newline), over 4 KiB or has a timestamp that is not exactly
+`YYYY-MM-DDTHH:MM:SS` is counted, not fatal. The logs carry local time without a zone, so "today" and the window use the
+local date of the clock; a row dated after today is counted as malformed and as future. If both `~/.local/state/llm-local`
+and `~/.local/share/llm-local` hold a `calls.jsonl`, only the first is read. The `llm-local` calls log carries typed rows: `kind=call` rows count as calls when `status` is `ok` (rows with no
+`kind`, written by the old tool, count as ok calls too), `failed` and `busy` rows are listed on their own lines by reason,
+and `kind=outcome` rows (accepted, rewritten, discarded, fact-error) are joined to their call by id. The latest outcome of a
+call counts; an outcome with no call is counted as an orphan; the accept rate by task and by model is computed in code. A
+row of an unknown kind, status or outcome is counted as malformed. When the dispatch-guard rows carry `na_reason_class`, its
+counts per day and week appear under the dispatch section. Free text in a log can hold prompt text or a credential fragment, so a label is printed only when it is on a fixed
+list, never because it looks safe. Tasks: smoke, triage, summary, digest, classify, draft, outline, pr-body, issue-draft,
+ci-summary, lesson-draft, alert-triage, bots-triage, dotsync-summary, idle-classify, kind-effort-draft, pack-summary,
+standards-digest, gap-issue. Local models: gemma4:12b, qwen3.5:4b and llama-guard3:8b. Dispatch models: sonnet, haiku,
+opus, fable and unknown. Failure reasons are the ones `llm-local` writes (busy, unreachable, timeout, over-budget,
+bad-response, bad-config, bad-input, interrupted, internal) and the admission counters are admit, busy and eviction.
+Anything else is counted under `other`, and the report prints how many distinct labels were classed that way, never
+their text. The files are opened by walking each directory from the home directory with `O_NOFOLLOW`. The home directory
+must be an absolute path and not a symlink. Every directory and file on the way must be owned by you and not writable
+by others; a group write is accepted only when the group is yours and private (no other member and no other account has
+it as its primary group; a lookup error counts as not private). A file that is not regular is not read either. In each
+case the report says so with a fixed message, never the path. A call id counts as known only from a call row that
+validates (timestamp and status), so a malformed row cannot make a later outcome count as joined. The first valid row
+for an id wins, so a process that can append to the log can shadow an id: the report is a baseline over a log your own
+tools write, not an audit trail. The report ends with a MISSING DATA section naming what the
+records still cannot say (which brief made a call, tokens saved, outcomes for calls from before the typed records) and the
+one-line change that would record it. The exit code is 0; `--days` outside the range is an error.
+
+### What the local model is for
+
+From the maintainer's measurements (issue #372, 2026-11-07): most agents skipped the local model when it was optional, and
+the two that used it got a false technical claim and invented content. So it is for structure and first-draft prose that a
+paid model or a person then checks, and not for facts.
+
+| Task type | Local model? | Notes |
+|---|---|---|
+| Issue triage digests, classification (kind, priority, effort drafts) | yes | code does the grouping and counting; the model writes prose over a structure that is already correct |
+| Summaries of logs and CI output | yes | the agent checks it against the source |
+| Pull request body and commit message drafts | yes | the agent verifies every claim |
+| Outlines and lesson first drafts | yes, to be fact-checked | never published unchecked |
+| Embeddings and search | yes, as a separate executor | `local run` is generation only |
+| Facts about a system, a protocol or a product | no | a MINIX behavior was misstated and an RSA key pair for TCG OPAL was invented |
+| Code, and anything that changes state | no | stays on Claude or Codex |
+| Security and adversarial review | no | always the cyber-program tier |
+
+Model and prompt shape: `gemma4:12b` at 131072 for longer inputs and `qwen3.5:4b` at 8192 for short ones. Send exactly the
+`num_ctx` the model is loaded with, and `think=false` for cheap text tasks. The brief template line
+(`local-llm: step N drafts X with llm-local; agent verifies every claim`) belongs to the DoIA and dotfiles brief
+template, not to this repository.
 
 ## Routing
 

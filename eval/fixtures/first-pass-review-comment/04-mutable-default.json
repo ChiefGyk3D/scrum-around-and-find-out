@@ -1,0 +1,36 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n-def add_tag(tag, tags=None):\n-    tags = tags or []\n+def add_tag(tag, tags=[]):\n     tags.append(tag)\n     return tags\n```",
+  "facts": [
+    "add_tag",
+    {
+      "text": "mutable default",
+      "variants": [
+        "\\bmutable (default|list|argument|arg|value|object)",
+        "shared (state|between|across)",
+        "same list (is|gets|across|between)",
+        "default (list|argument|arg|value).{0,40}(shared|persists?|reused|mutated|accumulates?)",
+        "\\[\\] (as|in) (a |the )?default",
+        "\\bevaluated once\\b",
+        "\\bshared (between|across) (calls|invocations)\\b",
+        "\\bevery call shares\\b",
+        "\\bsame (list|object)\\b",
+        "\\b(calls?|invocations?) (all )?share\\b",
+        "\\bpersists? (between|across)\\b"
+      ]
+    }
+  ],
+  "forbidden": [],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "add_tag: the default value of tag is unclear, add a type hint.",
+    "add_tag: tags.append returns None, return the list explicitly.",
+    "add_tag: the docstring says the function runs once per tag, add a test for it."
+  ],
+  "correct_alts": [
+    "add_tag uses tags=[] so the default is evaluated once and every call shares the same list.",
+    "add_tag has a default that is shared across calls, so tags keep growing between invocations.",
+    "The tags default in add_tag is the same list object each time, so earlier tags leak into later calls."
+  ]
+}

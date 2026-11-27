@@ -1,0 +1,32 @@
+{
+  "task": "doc-skeleton",
+  "input": "Guide for moving example-app settings from the old INI file to the new YAML file. The old key legacy_mode must be named verbatim. Sections: Mapping table, Convert the file, Validate.",
+  "facts": [
+    "Mapping table",
+    "Convert the file",
+    "Validate",
+    "legacy_mode"
+  ],
+  "forbidden": [
+    "legacy-mode",
+    "\\blegacymode\\b",
+    "\\blegacy mode\\b"
+  ],
+  "max_chars": 1800,
+  "required_format": "regex:(?m)^#{1,3} \\S",
+  "wrong": [
+    "# Moving settings from INI to YAML\n\nSections in this guide:\n- Mapping table\n- Convert the file\n- Validate\n\nMap legacy_mode and the other keys.",
+    "# INI to YAML migration\n\n### Mapping table\nOne line on how keys map, legacy-mode first.\n\n### Convert the file\nOne line on the conversion tool.\n\n### Validate\nOne line on checking the result.",
+    "# Mapping table\nlegacy_mode goes here.\n# Convert the file\nTool steps.\n# Validate\nChecks.",
+    "# INI to YAML migration\n\n### Mapping table\n### Convert the file\n### Validate\nlegacy_mode"
+  ],
+  "sections": [
+    "Mapping table",
+    "Convert the file",
+    "Validate"
+  ],
+  "correct_alts": [
+    "# Moving settings from INI to YAML\n\nSections in this guide:\n- Mapping table\n- Convert the file\n- Validate\n\n## Mapping table\nMap legacy_mode and the other keys here.\n\n## Convert the file\nWrite the conversion steps here.\n\n## Validate\nWrite the validation checks here.",
+    "# INI to YAML migration\n\n### Mapping table\nOne line on how keys map, legacy_mode first.\n\n### Convert the file\nOne line on the conversion tool.\n\n### Validate\nOne line on checking the result."
+  ]
+}

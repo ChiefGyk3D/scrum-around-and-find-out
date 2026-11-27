@@ -1,0 +1,53 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def load_settings(path):\n     try:\n         with open(path) as fh:\n             return json.load(fh)\n     except FileNotFoundError:\n         return {}\n+    except Exception:\n+        pass\n```\nIntent: a missing file means defaults, any other problem must be reported.",
+  "facts": [
+    "load_settings",
+    {
+      "text": "swallows",
+      "variants": [
+        "swallow\\w*",
+        "silently (ignores?|drops?|hides?|discards?)",
+        "(catches|catching|catch) (every|all|any)\\w*",
+        "bare except",
+        "except Exception",
+        "(hides?|masks?|suppress\\w*) (the )?(errors?|failures?|exceptions?)",
+        "empty except"
+      ]
+    },
+    {
+      "text": "None",
+      "variants": [
+        "\\bNone\\b",
+        "returns? nothing",
+        "implicit return",
+        "corrupt\\w*",
+        "invalid json",
+        "\\bPermissionError\\b",
+        "permission[- ]?(denied|errors?)",
+        "\\bJSONDecodeError\\b",
+        "(decode|parse|parsing|read|I/O|OS) (errors?|failures?)",
+        "\\bunreadable\\b",
+        "\\bmalformed\\b",
+        "(other|real|unexpected|genuine) (errors?|failures?|exceptions?|problems?)",
+        "never (raised|reported|surfaced)",
+        "(not|never|isn't|aren't) (re-?raised|reported|surfaced|propagated)"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bperformance\\b",
+    "\\bdocstring\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "load_settings: json.load is slow for big files, use a streaming parser.",
+    "load_settings: the argument path should be a pathlib.Path rather than a string."
+  ],
+  "correct_alts": [
+    "load_settings swallows every exception, so a corrupt file now silently returns None instead of raising.",
+    "The new handler in load_settings catches all errors with pass, which hides invalid JSON and gives the caller None.",
+    "load_settings uses a bare except Exception that masks real failures while the function quietly returns None."
+  ]
+}

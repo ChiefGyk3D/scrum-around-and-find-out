@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 from safo import outcomes, output
 from safo.agentsfile import AgentsFile
@@ -18,7 +19,7 @@ from safo.bounded import read_bounded
 from safo.context import LocalContext
 from safo.errors import EXIT_DRIFT, EXIT_OK, ConfigError
 from safo.localfiles import add_agents_arguments, load_agents_for, outcomes_is_default, outcomes_path
-from safo.modes import LocalMode, register_local
+from safo.modes import LocalMode, local_report, register_local
 from safo.ollama import EndpointUnreachableError, generate, probe
 from safo.routing import probes_by_id, resolve_endpoint
 
@@ -40,8 +41,10 @@ def _bare(name: str) -> str:
 
 
 def run(ctx: LocalContext, args: argparse.Namespace) -> int:
-    if args.action != "run":
-        raise ConfigError("the only local action is `run`")
+    if args.action == "report":
+        return local_report.run(ctx, args)
+    if args.days is not None or args.json:
+        raise ConfigError("--days and --json belong to `local report`, not `local run`")
     doc = load_agents_for(ctx, args)
     for warning in doc.warnings:
         ctx.say(f"warning: {warning}")
@@ -132,9 +135,21 @@ def run(ctx: LocalContext, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+class ActionAction(argparse.Action):
+    """`report` needs neither --shape nor --prompt-file; `run` keeps argparse's own required-argument error."""
+
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Any, *rest: Any) -> None:
+        setattr(namespace, self.dest, values)
+        if values == "report":
+            for action in parser._actions:
+                action.required = False
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     add_agents_arguments(parser)
-    parser.add_argument("action", choices=["run"])
+    parser.add_argument(
+        "action", choices=["run", "report"], action=ActionAction, help="run a prompt locally, or report local-model use"
+    )
     parser.add_argument("--shape", required=True, help="a local task shape from agents.yaml")
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--endpoint", default="", help="insist on one endpoint id")
@@ -148,6 +163,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--log", default="", help="the outcomes log (default: $SAFO_OUTCOMES, else ~/.local/state/safo/outcomes.jsonl)"
     )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help=f"report: days to count, ending today (default {local_report.DEFAULT_DAYS})",
+    )
+    parser.add_argument("--json", action="store_true", help="report: one JSON document instead of text")
 
 
 register_local(LocalMode("local", "send one prompt to the local LLM routing picks (Ollama)", add_arguments, run))

@@ -1,0 +1,27 @@
+{
+  "task": "pr-summary",
+  "input": "Fix in KeychainStore.swift: the app crashed on iOS 17.4 when reading a token because kSecAttrAccessGroup was nil. Now the group is set from Info.plist key AppGroupID. Casing matters: kSecAttrAccessGroup and AppGroupID. Added a unit test KeychainStoreTests.testReadWithAccessGroup. Not touched: the Android build.",
+  "facts": [
+    "KeychainStore.swift",
+    "iOS 17.4",
+    "kSecAttrAccessGroup",
+    "AppGroupID",
+    "testReadWithAccessGroup"
+  ],
+  "forbidden": [
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|fix(?:es|ed)?|updat(?:e|es|ed)|chang(?:e|es|ed)|touch(?:es|ed)?|modif(?:y|ies|ied)|includ(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\bAndroid\\b|\\bAndroid\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
+    "\\biOS 17\\.5\\b",
+    "\\bkSecAttrAccount\\b(?!Group)"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Fix keychain crash\n- iOS 17.5 crashed in KeychainStore.swift when kSecAttrAccessGroup was nil\n- reads AppGroupID from Info.plist",
+    "Keychain fix\n- sets kSecAttrAccessGroup from AppGroupID\n- also fixes the Android build, tested in testReadWithAccessGroup"
+  ],
+  "correct_alts": [
+    "Stop the token-read crash on iOS 17.4.\n- KeychainStore.swift passed a nil kSecAttrAccessGroup to the keychain query.\n- The group is now taken from the AppGroupID entry in Info.plist.\n- KeychainStoreTests.testReadWithAccessGroup guards the fix.",
+    "The app no longer crashes when it reads a token on iOS 17.4.\n\n- Root cause: an unset kSecAttrAccessGroup in KeychainStore.swift.\n- Fix: load the AppGroupID value from Info.plist.\n- Regression test: testReadWithAccessGroup.",
+    "Fix the iOS 17.4 keychain crash\n- KeychainStore.swift crashed because kSecAttrAccessGroup was nil.\n- The group now comes from the AppGroupID key in Info.plist.\n- KeychainStoreTests.testReadWithAccessGroup covers the read.\n- The Android build is untouched."
+  ]
+}

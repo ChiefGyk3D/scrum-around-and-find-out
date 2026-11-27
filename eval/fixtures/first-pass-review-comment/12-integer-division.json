@@ -1,0 +1,44 @@
+{
+  "task": "first-pass-review-comment",
+  "input": "```diff\n def average_latency_ms(total_ms, count):\n-    return total_ms / count\n+    return total_ms // count\n```\nIntent: report the mean latency including its fractional part.",
+  "facts": [
+    "average_latency_ms",
+    {
+      "text": "integer division",
+      "variants": [
+        "floor(ed|ing)? (division|divide\\w*)",
+        "\\btruncat\\w+",
+        "//",
+        "rounds? (it )?down",
+        "drops? the (fraction|decimal|remainder)\\w*",
+        "loses? (the )?(fraction|precision|decimal)\\w*"
+      ]
+    },
+    {
+      "text": "fraction",
+      "variants": [
+        "\\bfraction\\w*",
+        "\\bdecimals?\\b",
+        "\\bremainder\\b",
+        "\\bprecision\\b",
+        "\\bfloor\\b",
+        "\\bwhole numbers?\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bZeroDivisionError\\b.{0,40}(only|main)",
+    "\\bnaming\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "average_latency_ms: the name should say milliseconds in the docstring instead.",
+    "average_latency_ms: count could be zero, add a type annotation."
+  ],
+  "correct_alts": [
+    "average_latency_ms uses integer division, so the fraction of the mean is truncated.",
+    "The // in average_latency_ms floors the result and drops the decimal part that the intent asks for.",
+    "average_latency_ms now rounds down to a whole number because it divides with floor division instead of true division."
+  ]
+}

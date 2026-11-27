@@ -28,6 +28,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | `audit`, `bootstrap`, `reconcile`, `sync`, `status` (including `status --post`, grouped and counted in code) | Built, merged on `main` |
 | `validate` and the Action (`action.yml`: a fresh hash-pinned venv, credential masking, a one-hour App installation token on the App credential path, no checkout needed) | Built, merged on `main` and released in v0.1.0. Read the trust boundary below before you call it |
 | `agents-status` (the board, Codex, Copilot and the routing-guard counts in one read-only view) | Built, merged on `main` and released in v0.1.0 |
+| `safo-activity` entry point (a one-line status segment, a table, JSON, a watch view and quiet event monitors for Codex jobs and plan windows, the local spend ledger, the local model and Copilot code review; local and read only; the network providers are opt in; a Claude Code pane ships in `mods/ai-activity/`; see [`docs/activity.md`](docs/activity.md)) | Built for #402; in review on a pull request, not yet on `main` |
 | `usage` (Codex, Claude Code, Copilot and Ollama meters, local and read-only; the agents file comes only from `--agents`, `$SAFO_AGENTS` or `~/.config/safo/agents.yaml`, never the current directory) | Built, merged on `main` and released in v0.1.0 |
 | `route` (recommends an agent and a reviewer from the rules and live headroom; dispatches nothing) | Built, merged on `main` and released in v0.1.0 |
 | `outcome add` and `usage --report` (a validated, private outcomes log in `~/.local/state/safo/`, summarised per agent) | Built, merged on `main` and released in v0.1.0 |
@@ -41,6 +42,7 @@ Checked 2026-10-26 against `main` at cf53799.
 | `doctor` and [Prerequisites](docs/prerequisites.md) (verified minimum versions for the external tools, the plugins and packs SAFO relies on, the accounts and secret names; `safo doctor` is the read-only presence check, issue #197) | Built for #197; not yet merged |
 | The playbook pages in `docs/` and this README | Merged on `main` and released in v0.1.0 |
 | The usage meter fix and the outcomes fields (the Claude meter now reads the usage fields Claude Code nests in its transcripts; outcomes records gain `model` and `credits_used`) | Built, merged on `main` and released in v0.1.2 |
+| `ratebudget` and `card` (the shared GitHub API budget and single-request card edits as `safo` subcommands, beside the `ghw`, `safo-ratebudget` and `safo-card` scripts; [`docs/ratebudget.md`](docs/ratebudget.md)) | Built |
 | Generated docs and the wiki mirror (`scripts/gen_wiki.py`, published by `.github/workflows/wiki.yml` through GYST's `wiki-publish.yml`) | Built, merged on `main` and live: the wiki is the generated mirror of `docs/` |
 | Personas (`docs/personas.md`, a description of the Department of Internal Arguments roles and how to install them, with no copies kept here) and the examples (the outcomes log, systemd units) | Built and merged on `main` |
 | [Measurements](docs/measurements.md): what the first month measured, dated and aggregated | Written; read it as a soak, not a finding |
@@ -70,6 +72,8 @@ and the implementation plan is split into seven pull-request groups, listed on t
 | `protection --repo OWNER/NAME` | Reads the default branch's protection back with GET requests only and exits 0 only when code-owner review, the `CI green` check, an up-to-date branch, administrators, no bypass, no force push or deletion and CODEOWNERS coverage (owners GitHub accepts, `board.yaml`, CODEOWNERS itself, and every existing or future file under `.github/workflows/`) all hold. Exit 1 names each condition that does not; exit 2 when a response cannot be read. A `CI green` check not pinned to an app prints a NOTE; `--require-app-id` makes the pin a condition. See [Adoption](docs/adoption.md) |
 | `hooks` | Makes Claude Code enforce `agents.yaml`: a session probe of the local model and a guard on every Agent dispatch (an explicit model, the approval token for Opus, a named local step). `install`, `mode`, `status`, `probe`, `guard`; the installed guard hook is the `safo-guard` entry point ([`docs/hooks.md`](docs/hooks.md)) |
 | `gemini` | `quota`, `ask`, `keys`, and the broker entries `paid` and `paid-dryrun`: a Gemini client that cannot spend money on its own: free-tier calls for public material follow the maintainer's own rate limits from a local ledger, a 429 stops the job and never falls through to a billed call, and a billed call goes only through the broker with its own single-use approval signed by a hardware security key; `keys` lists and checks the enrolled keys. The free key is read by name from the secret store at call time. Read-only unless you ask; see [`docs/gemini.md`](docs/gemini.md) |
+| `ratebudget` | The shared GitHub API budget and who spent it, from the `ghw` ledger; the same as the `safo-ratebudget` script. See [`docs/ratebudget.md`](docs/ratebudget.md) |
+| `card` | Edits one project card with one REST PATCH from a persisted map of ids and never lists the board; the same as the `safo-card` script. See [`docs/ratebudget.md`](docs/ratebudget.md) |
 | `doctor` | Is each prerequisite present, missing or too old? Python, git and gh are required; the other tools, plugins and skill packs are reported. Read-only: it runs only `<tool> --version`. See [`docs/prerequisites.md`](docs/prerequisites.md) |
 
 The Action runs the modes that talk to the board. The local modes (`usage`, `route`, `outcome`, `local`, `hooks`, `profiles`, `handoff`, `protection`, `doctor`) read
@@ -163,6 +167,7 @@ replaced are gone.
 - [Board](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board)
 - [Board-yaml](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Board-yaml)
 - [Agents-status](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Agents-status)
+- [Activity](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Activity)
 - [Lessons](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Lessons)
 - [Measurements](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Measurements)
 - [Action](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Action)
@@ -177,6 +182,7 @@ replaced are gone.
 - [Orchestrator](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Orchestrator)
 - [safo-ship](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ship): the tested merge watcher
 - [Ratebudget](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Ratebudget): `ghw`, `safo-ratebudget` and `safo-card`, the shared GitHub API budget
+- [safo-file](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/File): the idea gate and the cross-project line for filing work
 - [Gemini](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini)
 - [Gemini keys](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-keys)
 - [Gemini enrollment](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Gemini-enrollment)
@@ -191,6 +197,8 @@ replaced are gone.
 - [Personas](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Personas)
 - [Plugins](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Plugins)
 - [Local-llm](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-llm)
+- [Local-eval](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Local-eval): `safo-eval`, scoring the local models on routed work
+- [Runner-first](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Runner-first): `safo-runner-check`, heavy work on a public repo goes to the runner
 - [Prerequisites](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/Prerequisites)
 - [No-hidden-work](https://github.com/ChiefGyk3D/scrum-around-and-find-out/wiki/No-hidden-work)
 

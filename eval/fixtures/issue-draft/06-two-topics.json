@@ -1,0 +1,19 @@
+{
+  "task": "issue-draft",
+  "input": "Notes: (a) the cache warmup job runs twice on deploy, wasting about 40 seconds. (b) the README link to the style guide at docs.example.com/style is a 404. Write ONE issue about (a) only; (b) is handled elsewhere.",
+  "facts": [
+    "warmup",
+    "twice",
+    "40 seconds"
+  ],
+  "forbidden": [
+    "style guide",
+    "404"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Warmup job and README link\n- cache warmup runs twice wasting 40 seconds\n- the style guide link is a 404",
+    "Title: Slow deploys\n- deploys take a long time\n- something runs more than once"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "task": "commit-message",
+  "input": "Pipeline ticket thread, long.\n[09:00] tomas-example: unrelated: the coffee machine on floor two is broken again (pipe #840)\n[09:07] priya-example: will look at the backlog after lunch (pipe #194)\n[09:14] priya-example: the weekly sync moved to Thursday, please update calendars (pipe #276)\n[09:21] tomas-example: will look at the backlog after lunch (pipe #906)\n[09:28] marcus-example: unrelated: the coffee machine on floor two is broken again (pipe #133)\n[09:35] lena-example: I am out Friday, ping dana-example for reviews (pipe #221)\n[09:42] omar-example: unrelated: the coffee machine on floor two is broken again (pipe #955)\n[09:49] priya-example: the dashboard looks quiet today, no new alerts (pipe #227)\n[09:56] omar-example: will look at the backlog after lunch (pipe #889)\n[10:03] omar-example: anyone seen the staging queue stall again, or is it just me (pipe #870)\n[10:10] marcus-example: checked the old thread, no new information there (pipe #593)\n[10:17] marcus-example: unrelated: the coffee machine on floor two is broken again (pipe #403)\n[10:24] lena-example: lint is green on my branch, waiting on a second pair of eyes (pipe #447)\n[10:31] marcus-example: bumped the minor docs typo, will batch it with the next change (pipe #165)\n[10:38] dana-example: pushed a small cleanup, nothing to review yet (pipe #272)\n[10:45] lena-example: will look at the backlog after lunch (pipe #183)\n[10:52] dana-example: lint is green on my branch, waiting on a second pair of eyes (pipe #931)\n[10:59] dana-example: anyone seen the staging queue stall again, or is it just me (pipe #682)\n[11:06] marcus-example: unrelated: the coffee machine on floor two is broken again (pipe #495)\n[11:13] marcus-example: reminder: the retro notes are in the team folder (pipe #551)\n[11:20] omar-example: will look at the backlog after lunch (pipe #608)\n[11:27] tomas-example: the weekly sync moved to Thursday, please update calendars (pipe #804)\n[11:34] omar-example: I am out Friday, ping dana-example for reviews (pipe #245)\n[11:41] omar-example: I am out Friday, ping dana-example for reviews (pipe #772)\n[11:48] dana-example: ok to close the stale draft from last month? (pipe #360)\n[11:55] omar-example: reminder: the retro notes are in the team folder (pipe #725)\n[12:10] priya-example: change is in etl/load.py: job ingest_sensors now loads in batches of 1500 rows instead of 500, because the small batches timed out against the warehouse.\n[09:00] lena-example: the weekly sync moved to Thursday, please update calendars (pipe #227)\n[09:07] priya-example: lint is green on my branch, waiting on a second pair of eyes (pipe #541)\n[09:14] dana-example: checked the old thread, no new information there (pipe #610)\n[09:21] priya-example: lint is green on my branch, waiting on a second pair of eyes (pipe #538)\n[09:28] lena-example: lint is green on my branch, waiting on a second pair of eyes (pipe #650)\n[09:35] dana-example: the dashboard looks quiet today, no new alerts (pipe #113)\n[09:42] omar-example: the dashboard looks quiet today, no new alerts (pipe #465)\n[09:49] tomas-example: reminder: the retro notes are in the team folder (pipe #916)\n[09:56] marcus-example: checked the old thread, no new information there (pipe #840)\n[10:03] dana-example: the dashboard looks quiet today, no new alerts (pipe #577)\n[10:10] omar-example: the weekly sync moved to Thursday, please update calendars (pipe #368)\n[10:17] marcus-example: will look at the backlog after lunch (pipe #783)\n[10:24] priya-example: bumped the minor docs typo, will batch it with the next change (pipe #807)\n[10:31] priya-example: will look at the backlog after lunch (pipe #931)\n[10:38] priya-example: the dashboard looks quiet today, no new alerts (pipe #906)\n[10:45] omar-example: reminder: the retro notes are in the team folder (pipe #141)\n[10:52] lena-example: pushed a small cleanup, nothing to review yet (pipe #383)\n[10:59] omar-example: anyone seen the staging queue stall again, or is it just me (pipe #141)\n[11:06] tomas-example: reminder: the retro notes are in the team folder (pipe #347)\n[11:13] priya-example: the weekly sync moved to Thursday, please update calendars (pipe #151)\n[11:20] marcus-example: checked the old thread, no new information there (pipe #898)\n[11:27] omar-example: bumped the minor docs typo, will batch it with the next change (pipe #685)\n[11:34] marcus-example: bumped the minor docs typo, will batch it with the next change (pipe #116)\n[11:41] omar-example: anyone seen the staging queue stall again, or is it just me (pipe #672)\n[11:48] omar-example: I am out Friday, ping dana-example for reviews (pipe #207)\n[11:55] omar-example: ok to close the stale draft from last month? (pipe #790)\n[17:30] dana-example: do not mention the dashboard colors, wrong thread.",
+  "facts": [
+    "etl/load.py",
+    "ingest_sensors",
+    "1500",
+    {
+      "text": "500",
+      "variants": [
+        "(?<![\\d,])500\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\bfeat:",
+    "\\bdocs:",
+    "\\bdashboard\\b",
+    "\\b15000\\b"
+  ],
+  "max_chars": 600,
+  "required_format": "regex:^(feat|fix|docs|refactor|test|chore): .{3,72}(\\n|$)",
+  "wrong": [
+    "fix: batch ingest_sensors in 15000 rows\n\netl/load.py used 500 before.",
+    "fix: change the dashboard colors\n\nSee etl/load.py, ingest_sensors, 1500 and 500."
+  ],
+  "correct_alts": [
+    "fix: load ingest_sensors in larger batches\n\nIn etl/load.py the batch size goes from 500 to 1500 rows. The smaller batches were timing out against the warehouse.",
+    "fix: stop ingest_sensors timing out\n\netl/load.py now sends 1500 rows per batch (it was 500), which the warehouse accepts within the time limit."
+  ]
+}

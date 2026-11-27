@@ -1,0 +1,38 @@
+{
+  "task": "issue-draft",
+  "input": "Notes: test_sync_roundtrip in tests/test_sync.py fails about 1 run in 12 on CI, always with a timeout waiting for the mock broker. Passes locally. Started after the runner image changed to 2 vCPUs. Not related to the retry decorator work. Suggest a fixed port or a readiness wait, not a bigger timeout.",
+  "facts": [
+    "test_sync_roundtrip",
+    {
+      "text": "1 run in 12",
+      "variants": [
+        "\\b1 (?:in|of) 12\\b",
+        "\\bone (?:run )?(?:in|of) twelve\\b"
+      ]
+    },
+    "mock broker",
+    {
+      "text": "2 vCPUs",
+      "variants": [
+        "\\b(?:2|two) (?:vCPUs|vCPU|CPUs)\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "\\b(?:probably|likely|caused by|due to|because of|blam(?:e|es|ed|ing)|add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\bretry decorator\\b",
+    "\\b1 (?:run )?in 20\\b",
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )(?<!avoid )\\b(?:us(?:e|es|ed)|add(?:s|ed)?|increas(?:e|es|ed)|rais(?:e|es|ed)|try|tries|set|sets)\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}bigger timeout"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Flaky sync test\n- test_sync_roundtrip fails 1 run in 20 waiting for the mock broker\n- raise the timeout to be safe",
+    "Title: CI is unstable\n- tests time out sometimes on the 2 vCPUs runner\n- probably the retry decorator work",
+    "Title: Flaky sync test\n- test_sync_roundtrip fails 1 run in 12 waiting for the mock broker on 2 vCPUs\n- use a bigger timeout so the test stops flaking"
+  ],
+  "correct_alts": [
+    "Flaky test_sync_roundtrip on CI\n- It times out waiting for the mock broker roughly one run in twelve, and never on a laptop.\n- The flakiness began when the runner image moved to two vCPUs.\n- Please add a readiness wait or a fixed port instead of lengthening the timeout.",
+    "test_sync_roundtrip intermittently times out\nOn CI the test hangs about 1 run in 12 while it connects to the mock broker. It only began after the runners dropped to 2 vCPUs. The fix should wait for broker readiness. Raising the timeout would only hide it.",
+    "Title: Flaky test_sync_roundtrip on CI\n\nThe test fails about 1 run in 12 with a timeout waiting for the mock broker. It passes locally and started after the runner image moved to 2 vCPUs. It is not related to the retry decorator work. Prefer a fixed port or a readiness wait over a bigger timeout."
+  ]
+}

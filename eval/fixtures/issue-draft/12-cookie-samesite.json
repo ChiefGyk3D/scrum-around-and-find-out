@@ -1,0 +1,37 @@
+{
+  "task": "issue-draft",
+  "input": "Security hardening: the session cookie named sid is set without SameSite and without the Secure flag on app.example.com. We want SameSite=Lax and Secure. Do not use Strict, it breaks the OAuth redirect from partner.example.net. Set in middleware/session.js line 57.",
+  "facts": [
+    "sid",
+    "SameSite=Lax",
+    "Secure",
+    {
+      "text": "middleware/session.js",
+      "variants": [
+        "\\bsession\\.js\\b"
+      ]
+    },
+    {
+      "text": "line 57",
+      "variants": [
+        "\\bline (?:57|fifty-seven)\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )(?<!avoid )\\b(?:us(?:e|es|ed|ing)|set(?:s|ting)?|switch(?:es|ed)? to|enforc(?:e|es|ed)|appl(?:y|ies|ied)|add(?:s|ed)?|want(?:s)?|needs?|chang(?:e|es|ed) to)\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,25}SameSite=Strict",
+    "\\bHttpOnly\\b",
+    "line 75"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Harden cookies\n- set SameSite=Strict on the sid cookie\n- middleware/session.js line 57",
+    "Title: Cookie flags\n- sid cookie needs the Secure flag\n- change it in session.js"
+  ],
+  "correct_alts": [
+    "Session cookie lacks SameSite and Secure\n- The sid cookie is issued with neither attribute.\n- Set SameSite=Lax and Secure in middleware/session.js, line 57.\n- Lax is required because Strict would break the OAuth redirect from the partner site.",
+    "Harden the sid cookie\nCurrently the sid cookie goes out without SameSite or Secure. Add SameSite=Lax and the Secure flag where it is set, on line 57 of middleware/session.js. Do not choose Strict, which breaks the partner OAuth flow.",
+    "Title: Harden the sid session cookie\n\nThe sid cookie on app.example.com is set without SameSite and without Secure. Set SameSite=Lax and Secure in middleware/session.js line 57. Do not use SameSite=Strict because it breaks the OAuth redirect from partner.example.net."
+  ]
+}

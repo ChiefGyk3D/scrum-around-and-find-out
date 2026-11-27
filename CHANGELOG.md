@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- `safo local report` (#372, #380): read-only counts of local-model use per day, week and model from the dispatch-guard
+  log, the `safo hooks status` guard counts and the `llm-local` calls and admission state, with a MISSING DATA section
+  and `--json`. Nothing is written or created (the hooks log is read without its lock). Bounded reads, malformed, torn
+  and future-dated rows counted, strict timestamps judged on the local date, output through the repo writer. `local run`
+  keeps its required-argument error and refuses `--days` and `--json`. Reads the typed `llm-local` rows (calls by
+  status and failure reason, outcomes joined by call id with accept rates, orphans) and the guard's `na_reason_class`. Docs: `docs/usage.md`, with the task-type table.
+  Labels are printed only from fixed allowlists (unknown text is counted as `other`, never printed); the home directory
+  must be absolute and not a symlink, and files are read only through directories that are not symlinks, owned by you
+  and not writable by others (a group write only in a private group); a malformed call row is never a join
+  target. Tests: `tests/test_local_report.py`, `tests/test_local_report_typed.py`, `tests/test_local_report_safety.py`.
+- rmguard hardening (#424): more of what a command can hide is read or fails closed, and the cheap gate opens in more places. Warn-mode semantics are unchanged.
+- `safo-file`: routing table with private repos by default and workbench for tangents (#455, epic #347; `safo.idea_gate_routes`). New `route` subcommand prints the destination repo and why (keyword and path-hint matching by code, classes product, homelab, ai-tooling, research, tangent; exit 3 when undecided); the table is data in `~/.config/safo-file/routes.toml` (trusted file, bounded, exit 2 when malformed). `issue` always looks the target repo up live (no cache) and fails closed when `gh` cannot say whether it is public; a public target takes only positively product work (`--class product` or the working repo) with no private wording after NFKC and separator normalisation, unless `--allow-public` and a `public-ok:` line are both given; `routes.toml` cannot make any class public; the lookup is repeated right before the create and, for private-workflow work, right after it (a repo that turned public gets an `EXPOSED` error, an `exposed` record and exit 2); `public-ok:` needs a real reason (12 characters, two different non-placeholder words); matching is linear in the text (word sequences in sets, keywords at most 4 words); a public target refuses text it cannot classify (invisible or format characters, combining marks, non-ASCII digits, lookalike or non-Latin letters) unless both override elements are given, and accents are folded for matching; `check` takes the tangent repo as the default parking-lot repo (`--parking-number`). Decisions are `routed` ledger records. Tests: `tests/test_idea_gate_routes.py`.
+- New `safo-file` (#443, epic #347; `safo.idea_gate`), a wrapper in the style of the planned `safo file` (#348), not a guard.
+  `check` matches an idea against `hooks.tracking_repos`, `gh repo list` and a pluggable memory search
+  (`SAFO_MEMORY_SEARCH`), prints the top hits and requires exactly one answer: `extends:<repo>`, `new-project` (needs
+  `--owner-ok`) or `tangent` (one parking-lot body with a time box; no repo, epic or card). `issue` files through `gh` with
+  the body on stdin; another repo needs a `cross-project: <reason>` line outside a code fence, and another owner needs
+  `--allow-other-owner`; the ledger is checked before the issue is created. `report` counts, in code, the issues whose repo
+  differs from the working repo. Advisory by design for same-repo filing (docs/file.md). Tests: `tests/test_idea_gate*.py`.
+  Hardening (`safo.idea_gate_io`): `gh` and the memory command run only from a trusted absolute path (not in the working
+  directory, no owner but you or root, no group or other write on it or above it), with an allowlisted environment (no
+  `SAFO_*`, no token or cloud variables), their own process group, capped output and a deadline; the ledger is opened
+  through directory descriptors with no link followed, owner and mode checks, `pending` before and `committed` after the
+  issue; `check` reads only `~/.config/safo/agents.yaml`.
+
 - New `safo-rmguard` (#422), a separate PreToolUse hook for Bash that guards the shared dev directories
   (`~/.local/share/*-dev` and the scratchpad parent `/tmp/claude-*`) against wildcard, parent and out-of-folder deletes,
   truncation, moves and in-place edits. It judges these families only: `rm`/`rmdir`/`unlink`/`shred`, `find -delete` and
@@ -39,6 +64,22 @@
   are never relaxed. The part of #388 about a
   brief line over 4000 characters is NOT fixed: such a line is still refused unread, because an unread line cannot be
   shown harmless. See docs/hooks.md.
+
+- `safo-activity` (#402): what Codex, the plan windows, the local spend ledger, the local model and
+  Copilot code review are doing, read only. A new entry point (`safo.activity`; the `safo activity` mode waits for a one-word change to a frozen file, see the pull request): one line for a status
+  line (cached 10 s), `--table`, `--json`, `--watch` (every 2 s) and `--events PROVIDER` (a line only on a state change,
+  at most six per minute and one dropped-count line, ends after 29 minutes and on a signal). Providers: `codex` (jobs of
+  the Codex plugin), `quota` (the 5 hour and weekly windows of Codex from `~/.codex/sessions`, and of Claude from
+  `~/.cache/safo/claude-usage.json`, with `write_claude_usage` for a status line script to fill it; nothing wires it
+  yet), `ledger` (a lenient tail reader, never the chain-verifying one; counts, action names and ages only), and the
+  opt-in network providers `ollama` (one 1 s `GET /api/ps` to an endpoint from the agents config or `$LLM_LOCAL_URL`,
+  never a generate call) and `copilot` (REST only through the machine's `gh` login: is a `Running Copilot Code Review`
+  run queued or in progress on the head, and does `copilot-pull-request-reviewer` have a review with text or an inline
+  comment on it; counts only, at most 15 pull requests, cached 60 s). With no configuration only `codex`, `quota` and
+  `ledger` are read; `SAFO_ACTIVITY_PROVIDERS` or `~/.config/safo/activity.yaml` opt in the rest. Also the Claude Code
+  pane `mods/ai-activity/`, which runs `safo-activity --table` only when it is on the path. Tests:
+  `tests/test_activity.py` (loopback fake Ollama, fake `gh`, fixture rollouts and ledgers), `mods/ai-activity/hooks/ai-activity.test.tsx`.
+  Docs: `docs/activity.md`. Process-launch hardening of the activity provider was added. Review follow-ups: the ledger tail was lowered from 2000 to 1000 lines (`LEDGER_TAIL_LINES`) in the CI-fix commit c9c97a2 so that parsing through the bounded JSON loader stays fast on a status line; a call started more than 1000 rows back can look absent. A refresh where most pull request reads fail now counts as failed and backs off; conditional requests (ETag), a 15-call budget with oldest-first rotation, paging to 10 pages, one bounded Ollama listing thread, and checks on cached counts. Earlier: views read the Copilot cache only and a single locked background refresh fetches it (call budget, rate-limit check, backoff, paging), the pane finds `gh` and `ss` again, and several smaller input and cache checks.
 
 ## 0.2.0 (2026-11-09)
 

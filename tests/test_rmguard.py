@@ -231,7 +231,7 @@ ALLOWED = [
     pytest.param(f"cat <<'EOF'\nrm -rf {DEV}/*.log\nEOF", "/", id="quoted-heredoc-is-data"),
     pytest.param(f"echo hi # rm -rf {DEV}/*.log", "/", id="comment-is-data"),
     pytest.param('git commit -m "it\'s fine"', "/", id="apostrophe-in-double-quotes"),
-    pytest.param("echo 'unterminated", "/", id="unterminated-no-delete-word"),
+    pytest.param("echo 'unterminated", "/work", id="unterminated-no-delete-word"),
     pytest.param("ls", "/", id="plain"),
     pytest.param('bash -c "$CMD"', "/work", id="a2-bash-c-whole-body-unknown-outside-zone"),
     pytest.param(
@@ -376,7 +376,7 @@ def test_hook_blocks_on_a_timeout_with_a_delete_word_and_never_parses_without_on
     monkeypatch.setattr(rmguard, "check", slow)
     monkeypatch.setattr(rmguard, "TIMEOUT_SECONDS", 0.05)
     assert "internal error" in run_hook(event("rm -rf x"), capsys)
-    assert run_hook(event("echo hi"), capsys) == ""  # check() is not even called
+    assert run_hook(event("echo hi", "/work"), capsys) == ""  # check() is not even called
 
 
 def test_a_crash_on_an_evaluated_command_blocks_even_without_a_delete_word(
@@ -387,7 +387,7 @@ def test_a_crash_on_an_evaluated_command_blocks_even_without_a_delete_word(
 
     monkeypatch.setattr(rmguard, "check", boom)
     assert "internal error" in run_hook(event("echo $HOME"), capsys)
-    assert run_hook(event("echo hi"), capsys) == ""  # never evaluated, so nothing to crash
+    assert run_hook(event("echo hi", "/work"), capsys) == ""  # never evaluated, so nothing to crash
 
 
 def test_a_timeout_on_an_evaluated_command_blocks_even_without_a_delete_word(
@@ -407,7 +407,7 @@ def test_no_delete_word_returns_before_any_parsing(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(rmguard.Scanner, "run", boom)
     for command in ("ls -l", "git status", "echo 'unterminated", "echo hi", "find . -name x -print"):
-        assert rmguard.check(command, HOME, "/") is None, command
+        assert rmguard.check(command, HOME, "/work") is None, command
 
 
 @pytest.mark.parametrize(
@@ -428,8 +428,8 @@ def test_no_delete_word_returns_before_any_parsing(monkeypatch: pytest.MonkeyPat
         ("ls ~/.local/share/reach-around-dev/a", True),
         ("ls /tmp/claude-1000/x", True),
         ("find . -name x", False),
-        ("gh pr merge 3 --squash --delete-branch", False),
-        ("git push --delete origin x", False),
+        ("gh pr merge 3 --squash --delete-branch", True),  # a long delete option opens the gate (the check allows it)
+        ("git push --delete origin x", True),
         ("ls ; echo format", False),
         ("echo firmware", False),
         ("git status", False),

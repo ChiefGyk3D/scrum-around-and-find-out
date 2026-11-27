@@ -1,0 +1,36 @@
+{
+  "task": "issue-draft",
+  "input": "Accessibility: the .btn-ghost style has text contrast of 2.9:1 against the page background, below the 4.5:1 minimum from WCAG 2.2 AA. Also the icon-only close button in Modal.jsx has no aria-label, so screen readers say just button. Casing: it is aria-label, lowercase with a hyphen.",
+  "facts": [
+    ".btn-ghost",
+    {
+      "text": "2.9:1",
+      "variants": [
+        "\\b2\\.9\\s?:\\s?1\\b"
+      ]
+    },
+    {
+      "text": "4.5:1",
+      "variants": [
+        "\\b4\\.5\\s?:\\s?1\\b"
+      ]
+    },
+    "aria-label",
+    "Modal.jsx"
+  ],
+  "forbidden": [
+    "\\b3\\.9:1\\b",
+    "\\b7:1\\b",
+    "\\baria-labelledby\\b"
+  ],
+  "max_chars": 1500,
+  "required_format": "any",
+  "wrong": [
+    "Title: Fix contrast\n- .btn-ghost is 3.9:1 but needs 4.5:1\n- add an aria-label to the close button in Modal.jsx",
+    "Title: Button labels\n- close button has no aria-label\n- contrast needs 7:1 on .btn-ghost"
+  ],
+  "correct_alts": [
+    "Low contrast and unlabeled close button\n- The .btn-ghost text reaches only 2.9:1 where WCAG 2.2 AA asks for 4.5:1.\n- The icon-only close button in Modal.jsx lacks an aria-label, so a screen reader announces only button.\n- Add the attribute and darken the text.",
+    "Two accessibility defects in the ghost button and modal\nContrast for .btn-ghost is 2.9:1 and must be raised to at least 4.5:1. Separately, Modal.jsx renders a close icon with no aria-label, which leaves it unnamed for assistive technology."
+  ]
+}

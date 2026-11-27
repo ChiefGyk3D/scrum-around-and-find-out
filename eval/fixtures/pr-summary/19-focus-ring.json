@@ -1,0 +1,42 @@
+{
+  "task": "pr-summary",
+  "input": "Accessibility PR, notes plus diff.\n # unchanged helper foxtrot_0: returns 66 for the alpha case, no edits here\n # unchanged helper echo_1: returns 20 for the delta case, no edits here\n # unchanged helper echo_2: returns 12 for the delta case, no edits here\n # unchanged helper alpha_3: returns 77 for the delta case, no edits here\n # unchanged helper alpha_4: returns 89 for the foxtrot case, no edits here\n # unchanged helper hotel_5: returns 98 for the charlie case, no edits here\n # unchanged helper foxtrot_6: returns 83 for the charlie case, no edits here\n # unchanged helper alpha_7: returns 45 for the alpha case, no edits here\n # unchanged helper golf_8: returns 83 for the delta case, no edits here\n # unchanged helper charlie_9: returns 42 for the golf case, no edits here\n # unchanged helper hotel_10: returns 13 for the alpha case, no edits here\n # unchanged helper delta_11: returns 78 for the charlie case, no edits here\n # unchanged helper charlie_12: returns 32 for the foxtrot case, no edits here\n # unchanged helper echo_13: returns 75 for the alpha case, no edits here\n # unchanged helper echo_14: returns 45 for the delta case, no edits here\n # unchanged helper golf_15: returns 4 for the bravo case, no edits here\n # unchanged helper bravo_16: returns 32 for the bravo case, no edits here\n # unchanged helper echo_17: returns 18 for the golf case, no edits here\n # unchanged helper hotel_18: returns 64 for the foxtrot case, no edits here\n # unchanged helper echo_19: returns 13 for the delta case, no edits here\n # unchanged helper echo_20: returns 80 for the delta case, no edits here\n # unchanged helper charlie_21: returns 74 for the hotel case, no edits here\n # unchanged helper hotel_22: returns 70 for the foxtrot case, no edits here\n # unchanged helper echo_23: returns 13 for the echo case, no edits here\n # unchanged helper alpha_24: returns 5 for the delta case, no edits here\n # unchanged helper delta_25: returns 61 for the foxtrot case, no edits here\n # unchanged helper echo_26: returns 32 for the echo case, no edits here\n # unchanged helper charlie_27: returns 7 for the hotel case, no edits here\n # unchanged helper hotel_28: returns 31 for the charlie case, no edits here\n # unchanged helper bravo_29: returns 28 for the hotel case, no edits here\n+button:focus-visible { outline: 3px solid #1A73E8; outline-offset: 2px; }\n+.skip-link { position: absolute; left: -9999px; }\n+.skip-link:focus { left: 8px; }\n # unchanged helper bravo_0: returns 77 for the charlie case, no edits here\n # unchanged helper foxtrot_1: returns 90 for the foxtrot case, no edits here\n # unchanged helper echo_2: returns 95 for the charlie case, no edits here\n # unchanged helper foxtrot_3: returns 30 for the golf case, no edits here\n # unchanged helper charlie_4: returns 82 for the alpha case, no edits here\n # unchanged helper delta_5: returns 59 for the alpha case, no edits here\n # unchanged helper hotel_6: returns 9 for the echo case, no edits here\n # unchanged helper bravo_7: returns 65 for the foxtrot case, no edits here\n # unchanged helper alpha_8: returns 54 for the echo case, no edits here\n # unchanged helper echo_9: returns 45 for the foxtrot case, no edits here\n # unchanged helper delta_10: returns 48 for the hotel case, no edits here\n # unchanged helper delta_11: returns 45 for the hotel case, no edits here\n # unchanged helper charlie_12: returns 39 for the golf case, no edits here\n # unchanged helper foxtrot_13: returns 20 for the hotel case, no edits here\n # unchanged helper delta_14: returns 6 for the alpha case, no edits here\n # unchanged helper foxtrot_15: returns 54 for the alpha case, no edits here\n # unchanged helper golf_16: returns 10 for the charlie case, no edits here\n # unchanged helper echo_17: returns 8 for the hotel case, no edits here\n # unchanged helper hotel_18: returns 6 for the hotel case, no edits here\n # unchanged helper golf_19: returns 30 for the bravo case, no edits here\n # unchanged helper hotel_20: returns 72 for the bravo case, no edits here\n # unchanged helper echo_21: returns 59 for the foxtrot case, no edits here\n # unchanged helper hotel_22: returns 8 for the bravo case, no edits here\n # unchanged helper echo_23: returns 84 for the echo case, no edits here\n # unchanged helper foxtrot_24: returns 31 for the delta case, no edits here\n # unchanged helper echo_25: returns 19 for the bravo case, no edits here\n # unchanged helper golf_26: returns 85 for the alpha case, no edits here\n # unchanged helper alpha_27: returns 83 for the hotel case, no edits here\n # unchanged helper delta_28: returns 75 for the alpha case, no edits here\n # unchanged helper foxtrot_29: returns 26 for the delta case, no edits here\nFiles: styles/focus.css and templates/base.html (adds <a class=\"skip-link\" href=\"#main\">). Contrast of the ring against white is 4.6:1. Tested with keyboard only on three pages. The dark theme tweak is a separate PR.",
+  "facts": [
+    "focus-visible",
+    {
+      "text": "3px",
+      "variants": [
+        "\\b3\\s?px\\b"
+      ]
+    },
+    {
+      "text": "#1A73E8",
+      "variants": [
+        "#1a73e8\\b"
+      ]
+    },
+    "skip-link",
+    {
+      "text": "4.6:1",
+      "variants": [
+        "\\b4\\.6\\s?:\\s?1\\b"
+      ]
+    }
+  ],
+  "forbidden": [
+    "(?<!not )(?<!n't )(?<!no )(?<!never )(?<!to )\\b(?:add(?:s|ed)?|implement(?:s|ed)?|introduc(?:e|es|ed)|enabl(?:e|es|ed)|support(?:s|ed)?|switch(?:es|ed)? to|rewr(?:ite|ites|ote)|bump(?:s|ed)?|replac(?:e|es|ed)|us(?:e|es|ed)|fix(?:es|ed)?|updat(?:e|es|ed)|chang(?:e|es|ed)|touch(?:es|ed)?|modif(?:y|ies|ied)|includ(?:e|es|ed))\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\bdark theme\\b|\\bdark theme\\b(?:(?![.!?](?:\\s|$))(?!not\\b|n't|never\\b|instead|rather|unlike|without\\b|unrelated|separate|later|ignor|out of scope|defer|follow-up|but\\b|[;])[^\\n]){0,30}\\b(?:added|implemented|introduced|rewritten|fixed|updated|changed|touched|modified|included|bumped|upgraded|pinned)\\b",
+    "#1A73E9",
+    "\\b6\\.4:1\\b"
+  ],
+  "max_chars": 900,
+  "required_format": "any",
+  "wrong": [
+    "Add focus ring\n- button:focus-visible gets a 3px outline in #1A73E9\n- skip-link added in templates/base.html",
+    "Focus styles\n- a 3px focus-visible ring with a 4.6:1 contrast\n- includes the dark theme tweak"
+  ],
+  "correct_alts": [
+    "Visible keyboard focus and a skip link.\n- styles/focus.css gives buttons a 3px focus-visible outline in #1A73E8.\n- The ring has 4.6:1 contrast on white.\n- templates/base.html gains a skip-link that jumps to the main content.",
+    "Keyboard users now see where they are.\n\n- A three pixel outline (3px, #1A73E8) appears with :focus-visible.\n- skip-link is hidden off-screen until focused.\n- Measured contrast: 4.6:1.",
+    "Add visible focus styles\n- button:focus-visible gets a 3px outline in #1A73E8.\n- A skip-link lets keyboard users jump to the main content.\n- The ring contrast is 4.6:1 on white.\n- The dark theme tweak is a separate PR."
+  ]
+}
