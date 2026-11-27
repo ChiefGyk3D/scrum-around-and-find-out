@@ -927,6 +927,7 @@ TOP_LEVEL_COMMANDS = (
     "handoff",
     "hooks",
     "kind",
+    "lead-curve",
     "local",
     "outcome",
     "profiles",
