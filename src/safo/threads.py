@@ -105,7 +105,7 @@ class Gh:
                 env=dict(self.env),
                 cwd=self.cwd,
             )
-        except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        except (OSError, ValueError, subprocess.TimeoutExpired):  # ValueError: a NUL or lone surrogate in argv
             return 127, ""
         return int(done.returncode), str(done.stdout or "")
 
@@ -133,7 +133,9 @@ def fetch_threads(gh: Gh, repo: str, number: int) -> list[Thread]:
                 raise ThreadsError(EXIT_READ, "GitHub answered with errors")
             block = data["data"]["repository"]["pullRequest"]["reviewThreads"]
             nodes = block["nodes"]
-            more = bool(block["pageInfo"]["hasNextPage"])
+            more = block["pageInfo"]["hasNextPage"]
+            if not isinstance(more, bool):
+                raise ValueError("hasNextPage")
             cursor = str(block["pageInfo"]["endCursor"] or "")
             for node in nodes:
                 if node["isResolved"] or node["isOutdated"]:
@@ -196,6 +198,14 @@ def parse_dispositions(path: Path) -> list[Disposition]:
             raise ThreadsError(EXIT_FILE, f"{where} has an action that is not one of {', '.join(ACTIONS)}")
         if not isinstance(body, str):
             raise ThreadsError(EXIT_FILE, f"{where} has a body that is not text")
+        if action == "skip" and "body" in row:
+            raise ThreadsError(EXIT_FILE, f"{where} is a skip and must not carry a body")
+        if chr(0) in body:
+            raise ThreadsError(EXIT_FILE, f"{where} has a body with a NUL character")
+        try:
+            body.encode("utf-8")  # a lone surrogate cannot be passed to gh
+        except UnicodeEncodeError as error:
+            raise ThreadsError(EXIT_FILE, f"{where} has a body that is not valid text") from error
         if action != "skip":
             if not body.strip():
                 raise ThreadsError(EXIT_FILE, f"{where} has an empty body")

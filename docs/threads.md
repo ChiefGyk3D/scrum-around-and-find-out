@@ -23,7 +23,7 @@ safo-threads apply OWNER/NAME PR DISPOSITIONS.json
 ```
 
 The file is a JSON list; each row is exactly `comment_id` (the id `list` printed), `action` and, unless the action is
-`skip`, `body`:
+`skip`, `body` (a `skip` row must not have one):
 
 ```json
 [
@@ -41,8 +41,8 @@ The file is a JSON list; each row is exactly `comment_id` (the id `list` printed
 
 The file is read as bounded JSON (at most 256 KiB, a regular file only, no symlink, no FIFO; duplicate keys, `NaN` and
 deep nesting refused). It is refused, exit 3, when it is not a non-empty list of at most 200 rows, a row has another key,
-a `comment_id` is not a positive integer or is repeated, an `action` is unknown, a body is empty or over 2000
-characters, or a `comment_id` is not an unresolved, current thread of that pull request (the same set `list` shows,
+a `comment_id` is not a positive integer or is repeated, an `action` is unknown, a body is empty, over 2000
+characters, holds a NUL or a lone surrogate, or is given on a `skip` row, or a `comment_id` is not an unresolved, current thread of that pull request (the same set `list` shows,
 looked up with one GraphQL query of 50 threads a page, at most 20 pages). A bad row anywhere means nothing is written.
 
 ### After the first write

@@ -43,7 +43,9 @@ STUB = textwrap.dedent(
 )
 
 
-def node(cid: int, path: str = "a.py", *, resolved: bool = False, outdated: bool = False, body: str = "fix") -> dict:
+def node(
+    cid: int, path: str = "a.py", *, resolved: bool = False, outdated: bool = False, body: str = "fix"
+) -> dict[str, Any]:
     return {
         "id": f"PRRT_{cid}",
         "isResolved": resolved,
@@ -54,7 +56,7 @@ def node(cid: int, path: str = "a.py", *, resolved: bool = False, outdated: bool
     }
 
 
-def page(nodes: list[dict], more: bool = False, cursor: str = "") -> dict:
+def page(nodes: list[dict[str, Any]], more: bool = False, cursor: str = "") -> dict[str, Any]:
     block = {"nodes": nodes, "pageInfo": {"hasNextPage": more, "endCursor": cursor}}
     return {"data": {"repository": {"pullRequest": {"reviewThreads": block}}}}
 
@@ -103,7 +105,7 @@ def writes(calls: list[list[str]]) -> list[list[str]]:
     return [c for c in calls if "POST" in c or any("resolveReviewThread" in a for a in c)]
 
 
-def pages_of(*nodes_per_page: list[dict]) -> list[dict]:
+def pages_of(*nodes_per_page: list[dict[str, Any]]) -> list[dict[str, Any]]:
     last = len(nodes_per_page) - 1
     return [{"out": json.dumps(page(n, i < last, f"c{i}"))} for i, n in enumerate(nodes_per_page)]
 
@@ -154,6 +156,16 @@ def test_list_gh_failure_and_bad_shape_are_exit_4(rig: Rig) -> None:
     assert rig.go("list", REPO, "5")[0] == threads.EXIT_READ
 
 
+@pytest.mark.parametrize("flag", [0, 1, "false", None, "", []])
+def test_a_non_boolean_has_next_page_is_exit_4_and_apply_writes_nothing(rig: Rig, flag: Any) -> None:
+    bad = page([node(1)])
+    bad["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"]["hasNextPage"] = flag
+    rig.state["pages"] = [{"out": json.dumps(bad)}]
+    assert rig.go("list", REPO, "5")[0] == threads.EXIT_READ
+    code, _o, _e, calls = rig.apply([{"comment_id": 1, "action": "reply", "body": "a"}])
+    assert code == threads.EXIT_READ and writes(calls) == []
+
+
 def test_bad_repo_or_number_is_usage_exit_2(rig: Rig) -> None:
     assert rig.go("list", "../x", "5")[0] == threads.EXIT_USAGE
     assert rig.go("list", "o/..", "5")[0] == threads.EXIT_USAGE
@@ -196,6 +208,9 @@ def test_skip_makes_no_write(rig: Rig) -> None:
         [{"comment_id": True, "action": "reply", "body": "a"}],
         [{"comment_id": 1, "action": "reply", "body": "a", "extra": 1}],
         [{"comment_id": 1, "action": "reply"}],
+        [{"comment_id": 1, "action": "skip", "body": "typo"}],  # skip takes no body
+        [{"comment_id": 1, "action": "reply", "body": "a" + chr(0) + "b"}],  # NUL cannot go in argv
+        [{"comment_id": 1, "action": "reply", "body": "a" + chr(0xD800)}],  # lone surrogate cannot be encoded
         [],
         {"comment_id": 1},
         [{"comment_id": 1, "action": "reply", "body": "ok"}, {"comment_id": 99, "action": "skip"}],  # later bad row
@@ -279,3 +294,10 @@ def test_entry_point_is_declared_and_dispatch_guard_untouched() -> None:
     root = Path(__file__).parent.parent
     assert 'safo-threads = "safo.threads:run"' in (root / "pyproject.toml").read_text(encoding="utf-8")
     assert "threads" not in (root / "src/safo/guard.py").read_text(encoding="utf-8")
+
+
+def test_an_argument_encoding_error_from_the_subprocess_is_a_controlled_failure() -> None:
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise UnicodeEncodeError("utf-8", "x", 0, 1, "surrogate")
+
+    assert threads.Gh("gh", {}, boom).call("api") == (127, "")
