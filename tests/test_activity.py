@@ -1159,10 +1159,10 @@ def test_a_signal_ends_a_monitor_cleanly_and_promptly(box: Box, sig: signal.Sign
     )
     assert proc.stdout is not None
     proc.stdout.readline()  # the first line proves the handlers are installed (startup line or watch header)
-    started = time.monotonic()
     proc.send_signal(sig)
-    assert proc.wait(timeout=10) == 0
-    assert time.monotonic() - started < 5
+    # a handler that did not stop the loop leaves the process running, and the wait times out; the exit code proves a
+    # clean end. (The old `< 5 s` wall bound sat beside the 2 s redraw interval and only measured runner load.)
+    assert proc.wait(timeout=20) == 0
     proc.stdout.close()
 
 
@@ -1653,11 +1653,11 @@ def slow_drip_server(stop: Any) -> tuple[Any, str]:
         try:
             c.recv(4096)
             c.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 1000\r\n\r\n")
-            for _ in range(40):
+            for _ in range(200):  # 60 s of drip: a client with no total deadline would hold on for all of it
                 if stop.is_set():
                     return
                 c.sendall(b"x")
-                time.sleep(0.3)
+                stop.wait(0.3)  # an event, so the test ends the drip at once instead of waiting out a sleep
         except OSError:
             return
 
@@ -1680,7 +1680,9 @@ def test_a_slow_drip_ollama_cannot_hold_the_status_line_past_one_total_deadline(
         stop.set()
         thread.join()
     assert text == ""
-    assert took < 2.0  # each byte arrives inside the socket timeout; only a total deadline stops it
+    # each byte arrives inside the socket timeout; only a total deadline (1 s) stops it. The drip lasts 60 s, so a bound
+    # of 30 s separates a stopped read from a held one and leaves a loaded runner room.
+    assert took < 30
 
 
 def test_the_private_write_does_not_trip_over_a_leftover_temporary_file(

@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import io
 import json
-import time
 from pathlib import Path
 
 import pytest
 
+from cputime import cpu_bound
 from safo import rmguard
 
 HOME = "/home/u"
@@ -232,16 +232,14 @@ def test_an_unknown_command_word_with_unresolved_arguments_is_denied_above_a_zon
 
 def test_a_word_of_many_tildes_is_scanned_in_linear_time() -> None:
     command = "$X " + "~" * 60_000
-    begun = time.monotonic()
-    assert rmguard.check(command, HOME, "/work") is None
-    assert time.monotonic() - begun < 1.0
+    with cpu_bound(1.0):  # CPU time: a loaded runner stretches the wall clock only
+        assert rmguard.check(command, HOME, "/work") is None
 
 
 def test_thousands_of_assignment_words_are_scanned_in_linear_time() -> None:
     command = "A=1 " * 12_000 + "echo $A"
-    begun = time.monotonic()
-    assert rmguard.check(command, HOME, "/work") is None
-    assert time.monotonic() - begun < 1.0
+    with cpu_bound(1.0):
+        assert rmguard.check(command, HOME, "/work") is None
 
 
 def test_an_oversized_command_is_decided_by_its_head() -> None:

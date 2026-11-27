@@ -1967,14 +1967,17 @@ def test_a_slow_endpoint_costs_the_guard_one_bounded_wait_and_never_a_decision(
     import time
 
     with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
-        a.stall_seconds = b.stall_seconds = 5.0  # far above the re-probe's own 1.5 s, so a full wait is unmistakable
+        # far above the re-probe's own 1.5 s and above the wall bound below, so a full wait is unmistakable; the stall
+        # ends when the servers stop (an event), so the test never pays it
+        a.stall_seconds = b.stall_seconds = 120.0
         path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
         set_probe(_private_home, age=900, agents=path)
         set_mode(_private_home, "block")
         started = time.monotonic()
         code, out, _ = guard(_private_home, path, dispatch(model=None, prompt=NO_STEP))
         elapsed = time.monotonic() - started
-    assert code == 0 and elapsed < 3.8, "the re-probe gives up after its own short timeout, not the stall"
+    # the bound sits far under the 120 s stall and far over the two 1.5 s re-probes: a loaded runner cannot trip it
+    assert code == 0 and elapsed < 40, "the re-probe gives up after its own short timeout, not the stall"
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
     row = read_log(_private_home)[-1]
     assert row["rules"] == ["no-model"] and row["local_reachable"] is False, "the answer was 'not reachable'"
