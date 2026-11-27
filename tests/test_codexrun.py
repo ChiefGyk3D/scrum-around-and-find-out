@@ -319,7 +319,7 @@ def test_a_clean_repository_config_still_passes(world: World) -> None:
 
 HOSTILE_CONFIGS = {
     "tab-in-subsection": '[filter "a\tb"]\n\tclean = x\n',
-    "command-lookalike-in-value": '[core]\n\tnote = "a\\ncommand\\tprotocol.allow\\nnever"\n[filter "f"]\n\tclean = x\n',
+    "command-lookalike-in-value": '[core]\n\tn = "a\\ncommand\\tprotocol.allow\\nnever"\n[filter "f"]\n\tclean = y\n',
     "newline-in-value": '[core]\n\tnote = "a\\nb"\n[alias]\n\tq = "!echo hi"\n',
     "long-entry-first": "[core]\n\tnote = " + "a" * 200_000 + "\n[core]\n\tsshCommand = id\n",
     "valueless-key-first": '[x]\n\tnovalue\n[protocol "file"]\n\tallow = always\n',
