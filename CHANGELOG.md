@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `safo-digest` (#531, child of #518): runs one allow-listed command from an argument list (never a shell), saves the full
+  output to a new 0600 file in a private 0700 directory (every path component opened without following symlinks,
+  exclusive create) and prints a capped digest: header with command name, exit code, counts and saved path, the first
+  failure lines when it failed, head and tail, cut to a byte cap. Escape sequences, control and binary bytes are
+  stripped from the digest; user name, host name, home, callsigns, grid squares and configured words are replaced
+  with placeholders (best effort, the saved file is raw). A timeout kills the whole process group (exit 124);
+  refusals exit 125. Docs: `docs/digest.md`. Tests: `tests/test_digest.py`.
 - `safo-activity --watch` (#554): a signal that arrives while a frame is being drawn now ends the watch before another
   frame starts (it used to draw one more full frame first, slow under load). The signal test now captures the child's
   stderr and kills and reaps the child on any exit, and a hung-child test proves the harness fails instead of hanging.
