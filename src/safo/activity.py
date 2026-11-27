@@ -1605,7 +1605,7 @@ def mode_watch(
     previous = [signal.signal(s, lambda *_: stop.set()) for s in (signal.SIGINT, signal.SIGTERM)]
     try:
         frames = 0
-        while True:
+        while not stop.is_set():  # a signal that landed while the last frame was drawn must not start another
             now = clock()
             if out.isatty():
                 out.write("\x1b[H\x1b[2J")
@@ -1616,6 +1616,7 @@ def mode_watch(
             frames += 1
             if (max_frames and frames >= max_frames) or wait(interval):
                 return 0
+        return 0
     finally:
         for sig, old in zip((signal.SIGINT, signal.SIGTERM), previous, strict=True):
             signal.signal(sig, old)
