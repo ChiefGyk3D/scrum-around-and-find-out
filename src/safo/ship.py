@@ -64,6 +64,8 @@ CANCEL_RERUNS = 1  # per run
 CANARY_RERUNS = 2  # per run
 STALE_GRACE_POLLS = 3  # polls a just-re-run failure may still show before it counts again
 CALL_TIMEOUT = 60
+GATE_APP_ID = 15368  # the GitHub Actions app: the default source of the `CI green` check run
+MAX_TOTAL_TIMEOUT = 28800
 HEAD_LAG_POLLS = 6  # queue mode: reads of the head, at --interval, while the API still shows an older commit
 UPDATE_WAIT_POLLS = 10  # queue mode: reads after update-branch, at --interval, for the head to change
 PROTECTED_WORDS = ("policy", "protect", "required status", "required review", "not mergeable", "blocked")
@@ -141,8 +143,11 @@ class Gh:
     env: Mapping[str, str]
     run: Run = subprocess.run
     cwd: str | None = None
+    clock: Clock = time.monotonic
+    limit: float | None = None  # absolute clock time the whole run must end by; caps each call's time
 
     def _call(self, argv: list[str]) -> tuple[int, str, str]:
+        wait = CALL_TIMEOUT if self.limit is None else max(1.0, min(float(CALL_TIMEOUT), self.limit - self.clock()))
         try:
             done = self.run(
                 argv,
@@ -150,7 +155,7 @@ class Gh:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=CALL_TIMEOUT,
+                timeout=wait,
                 env=dict(self.env),
                 cwd=self.cwd,
             )
@@ -254,6 +259,21 @@ def protection_contexts(data: Any) -> list[str]:
     return [*contexts, *(c["context"] for c in checks)]
 
 
+def protection_apps(data: Any) -> dict[str, int]:
+    """{context: app_id} for every required check that branch protection pins to one GitHub App."""
+    found: dict[str, int] = {}
+    for item in data.get("checks", []) if isinstance(data, dict) else []:
+        app = item.get("app_id") if isinstance(item, dict) else None
+        if isinstance(app, int) and not isinstance(app, bool) and app > 0:
+            found[str(item["context"])] = app
+    return found
+
+
+def name_ok(context: str, name: str) -> bool:
+    """A check run `name` satisfies a required `context`: exactly, or a bare context as the tail of `workflow / job`."""
+    return context == name or (" / " not in context and name.endswith(f" / {context}"))
+
+
 class Watcher:
     def __init__(
         self,
@@ -269,7 +289,12 @@ class Watcher:
         clock: Clock = time.monotonic,
         wait_for_review: float = 0.0,
         queue: bool = False,
+        gate_app: int = GATE_APP_ID,
+        total_deadline: float | None = None,
     ):
+        self.gate_app, self.total_deadline = gate_app, total_deadline
+        self.apps: dict[str, int] = {}
+        self.noticed = False
         self.queue = queue
         self.wait_for_review = wait_for_review
         self.gh, self.out = gh, out
@@ -297,21 +322,82 @@ class Watcher:
         return data
 
     def required(self, repo: str, base: str) -> list[str]:
-        code, out, err = self.gh.gh_call("api", f"repos/{repo}/branches/{base}/protection/required_status_checks")
+        # -i puts the HTTP status line on stdout, so a missing protection is told by status, never by stderr text
+        code, out, _err = self.gh.gh_call(
+            "api", "-i", f"repos/{repo}/branches/{base}/protection/required_status_checks"
+        )
         names = [GATE]
-        if code != 0:
-            if "404" in err or "Not Found" in err or "not protected" in err.lower():
-                return names
-            raise ShipError(EXIT_ERROR, f"cannot read the required checks of {base}: {err.strip()[:200]}")
+        head, _sep, body = out.replace("\r\n", "\n").partition("\n\n")
+        found = re.match(r"HTTP/\S+ (\d{3})", head)
+        status = int(found.group(1)) if found else 0
+        if status == 404:
+            return names
+        if code != 0 or not 200 <= status < 300:
+            raise ShipError(EXIT_ERROR, f"cannot read the required checks of {base}: HTTP status {status or 'unknown'}")
         try:
-            data = bounded.loads(out)
+            data = bounded.loads(body)
         except ValueError as error:
             raise ShipError(EXIT_ERROR, "unreadable required-checks answer") from error
-        found = protection_contexts(data)
-        for context in found:
+        found_contexts = protection_contexts(data)
+        self.apps = protection_apps(data)
+        for context in found_contexts:
             if context not in names:
                 names.append(context)
         return names
+
+    def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]:
+        """Every check run of `sha` (all pages) with the id of the GitHub App that made it."""
+        code, out, err = self.gh.gh_call(
+            "api",
+            f"repos/{repo}/commits/{sha}/check-runs?per_page=100",
+            "--paginate",
+            "--jq",
+            ".check_runs[] | {name: .name, status: .status, conclusion: .conclusion, app_id: .app.id}",
+        )
+        if code != 0:
+            raise ShipError(EXIT_ERROR, f"cannot read the check runs of {sha[:12]}: {err.strip()[:200]}")
+        runs: list[dict[str, Any]] = []
+        for raw in out.splitlines():
+            if raw.strip():
+                try:
+                    item = bounded.loads(raw)
+                except ValueError:
+                    raise ShipError(EXIT_ERROR, "unreadable check-runs answer") from None
+                if not isinstance(item, dict):
+                    raise ShipError(EXIT_ERROR, "unreadable check-runs answer")
+                runs.append(item)
+        return runs
+
+    def verify_sources(self, repo: str, pin: str, required: Sequence[str]) -> str:
+        """ "" when every app-pinned required check (the gate always) is a successful check run of the pinned app on
+        `pin`, else why not. A commit status, or a check run of another app, never counts for such a check."""
+        need = {c: self.apps[c] for c in required if c in self.apps}
+        if GATE in required and GATE not in need:
+            need[GATE] = self.gate_app
+        if not need:
+            return ""
+        runs = self.check_runs(repo, pin)
+        for context, app in need.items():
+            mine = [r for r in runs if r.get("app_id") == app and name_ok(context, str(r.get("name") or ""))]
+            good = OK_REQUIRED if context != GATE else {"SUCCESS"}
+            if not mine or not all(
+                str(r.get("status")).upper() == "COMPLETED" and str(r.get("conclusion") or "").upper() in good
+                for r in mine
+            ):
+                return f"no successful check run of {context} from app {app} on {pin[:12]} yet"
+        return ""
+
+    @staticmethod
+    def thread_of(node: dict[str, Any]) -> Thread:
+        comments = node.get("comments")
+        if comments is not None and not isinstance(comments, dict):
+            raise TypeError("comments is not an object")
+        comments = comments or {}
+        first = (comments.get("nodes") or [{}])[0] or {}
+        where = clean(f"{node.get('path') or '?'}:{node.get('line') or '?'}", 300)[0]
+        author = clean(str((first.get("author") or {}).get("login") or ""), 100)[0]
+        body, cut = clean(str(first.get("body") or ""), BODY_LIMIT)
+        return Thread(where, author, clean(str(first.get("url") or ""), 300)[0], body, cut)
 
     def threads(self, repo: str, number: int) -> list[Thread]:
         owner, name = repo.split("/", 1)
@@ -333,13 +419,14 @@ class Watcher:
                 cursor = str(block["pageInfo"]["endCursor"] or "")
             except (KeyError, TypeError) as error:
                 raise ShipError(EXIT_ERROR, "unreadable review-thread answer") from error
+            if not isinstance(nodes, list):
+                raise ShipError(EXIT_ERROR, "unreadable review-thread answer")
             for node in nodes:
                 if isinstance(node, dict) and not node.get("isResolved"):
-                    first = ((node.get("comments") or {}).get("nodes") or [{}])[0] or {}
-                    where = clean(f"{node.get('path') or '?'}:{node.get('line') or '?'}", 300)[0]
-                    author = clean(str((first.get("author") or {}).get("login") or ""), 100)[0]
-                    body, cut = clean(str(first.get("body") or ""), BODY_LIMIT)
-                    unresolved.append(Thread(where, author, clean(str(first.get("url") or ""), 300)[0], body, cut))
+                    try:
+                        unresolved.append(self.thread_of(node))
+                    except (AttributeError, TypeError, IndexError) as error:
+                        raise ShipError(EXIT_ERROR, "unreadable review-thread answer") from error
             if not more:
                 return unresolved
         raise ShipError(EXIT_ERROR, "more than 2000 review threads: not read in full")
@@ -436,8 +523,11 @@ class Watcher:
             checks = parse_checks(data.get("statusCheckRollup"))
             verdict = judge(checks, required)
             if verdict.state == "green":
-                return None
-            if verdict.state == "failed":
+                why = self.verify_sources(repo, pin, required)
+                if not why:
+                    return None
+                last = why
+            elif verdict.state == "failed":
                 held = [c for c in verdict.failing if grace.get((c.name, c.url), 0) > 0]
                 for c in held:
                     grace[(c.name, c.url)] -= 1
@@ -456,7 +546,9 @@ class Watcher:
                 or (deadline is not None and self.clock() >= deadline)
             ):
                 break
-            self.sleep(self.interval)
+            if deadline is not None and deadline - self.clock() <= 0:
+                break
+            self.sleep(self.interval if deadline is None else min(self.interval, deadline - self.clock()))
         return Result(EXIT_TIMEOUT, "TIMEOUT", f"still pending after the wait: {last}")
 
     def handle_failure(
@@ -521,27 +613,38 @@ class Watcher:
     def refused(self, repo: str, number: int, pin: str, err: str) -> Result:
         """A merge gh refused: a head that moved since the pin is HEAD-MOVED with the new sha, else a plain refusal."""
         try:
-            head = str(self.view(repo, number)["headRefOid"])
+            data = self.view(repo, number)
+            head = str(data["headRefOid"])
         except ShipError:
-            head = pin
+            data, head = {}, pin
         if head != pin:
             return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
         reason = err.strip().splitlines()[0][:200] if err.strip() else "gh refused"
-        if self.queue and "conflict" in reason.lower():
-            return Result(EXIT_CONFLICT, "CONFLICT", reason)
-        if self.queue and any(word in reason.lower() for word in PROTECTED_WORDS):
-            return Result(EXIT_PROTECTED, "PROTECTED", reason)
+        if self.queue:
+            # the structured merge state decides; the error text is only a fallback when the state says nothing
+            if (stop := self.conflicting(data)) is not None:
+                return Result(stop.code, stop.word, reason)
+            if data.get("mergeStateStatus") == "BLOCKED":
+                return Result(EXIT_PROTECTED, "PROTECTED", reason)
+            if "conflict" in reason.lower():
+                return Result(EXIT_CONFLICT, "CONFLICT", reason)
+            if any(word in reason.lower() for word in PROTECTED_WORDS):
+                return Result(EXIT_PROTECTED, "PROTECTED", reason)
         return Result(EXIT_MERGE_REFUSED, "MERGE-REFUSED", reason)
 
     # queue mode
 
-    def pinned_view(self, repo: str, number: int, expect: str) -> dict[str, Any] | Result:
-        """The view whose head is `expect`; an older head is re-read (bounded) in case the API lags the push."""
+    def pinned_view(self, repo: str, number: int, expect: str, deadline: float) -> dict[str, Any] | Result:
+        """The view whose head is `expect`; an older head is re-read (bounded by polls and `deadline`) in case the
+        API lags the push."""
         data = self.view(repo, number)
         for _ in range(HEAD_LAG_POLLS):
             if str(data["headRefOid"]) == expect:
                 return data
-            self.sleep(self.interval)
+            left = deadline - self.clock()
+            if left <= 0:
+                break
+            self.sleep(min(self.interval, left))
             data = self.view(repo, number)
         if str(data["headRefOid"]) == expect:
             return data
@@ -553,15 +656,28 @@ class Watcher:
             return Result(EXIT_CONFLICT, "CONFLICT", "conflicts with the base branch; needs an agent")
         return None
 
-    def parents(self, repo: str, sha: str) -> list[str]:
-        data = self.gh.json("api", f"repos/{repo}/commits/{sha}")
-        found = data.get("parents") if isinstance(data, dict) else None
-        if not isinstance(found, list):
-            raise ShipError(EXIT_ERROR, "unreadable commit answer")
-        return [str(p.get("sha")) for p in found if isinstance(p, dict)]
+    def base_tip(self, repo: str, base: str) -> str:
+        data = self.gh.json("api", f"repos/{repo}/git/ref/heads/{base}")
+        tip = str(((data.get("object") or {}) if isinstance(data, dict) else {}).get("sha") or "")
+        if not SHA.fullmatch(tip):
+            raise ShipError(EXIT_ERROR, f"cannot read the tip of {base}")
+        return tip
 
-    def update_branch(self, repo: str, number: int, pin: str, deadline: float) -> str | Result:
+    def is_update_commit(self, repo: str, head: str, pin: str, tip: str) -> bool:
+        """True only for the merge commit GitHub itself made from `pin` and the base `tip`: exactly those two parents,
+        in that order, and a signature GitHub verified for its web-flow committer. A branch writer cannot fake that."""
+        data = self.gh.json("api", f"repos/{repo}/commits/{head}")
+        try:
+            parents = [str(p["sha"]) for p in data["parents"]]
+            committer = str((data.get("committer") or {}).get("login") or "")
+            verified = (data.get("commit") or {}).get("verification", {}).get("verified") is True
+        except (KeyError, TypeError, AttributeError) as error:
+            raise ShipError(EXIT_ERROR, "unreadable commit answer") from error
+        return parents == [pin, tip] and committer == "web-flow" and verified
+
+    def update_branch(self, repo: str, number: int, pin: str, base: str, deadline: float) -> str | Result:
         """Ask GitHub to merge the base into the branch (once), then return the new head to pin."""
+        tip = self.base_tip(repo, base)  # read just before, so the update commit's second parent can be checked
         code, _out, err = self.gh.gh_call(
             "api", f"repos/{repo}/pulls/{number}/update-branch", "-X", "PUT", "-f", f"expected_head_sha={pin}"
         )
@@ -573,7 +689,7 @@ class Watcher:
             data = self.view(repo, number)
             head = str(data["headRefOid"])
             if head != pin:
-                if pin not in self.parents(repo, head):  # someone else pushed: never re-pin to an unreviewed commit
+                if not self.is_update_commit(repo, head, pin, tip):  # never re-pin to a commit GitHub did not make
                     return Result(EXIT_HEAD_MOVED, "HEAD-MOVED", f"pinned {pin[:12]}, head is now {head}")
                 self.say(f"  updated the branch: pinned {pin[:12]} -> {head[:12]}")
                 return head
@@ -586,7 +702,10 @@ class Watcher:
     def one_queued(self, repo: str, number: int, expect: str = "") -> Result:
         try:
             started = self.clock()
-            first = self.pinned_view(repo, number, expect) if expect else self.view(repo, number)
+            deadline = started + self.timeout
+            if self.total_deadline is not None:
+                deadline = min(deadline, self.total_deadline)
+            first = self.pinned_view(repo, number, expect, deadline) if expect else self.view(repo, number)
             if isinstance(first, Result):
                 return first
             pin = str(first["headRefOid"])
@@ -597,11 +716,11 @@ class Watcher:
                     return stop
                 if data.get("mergeStateStatus") == "BEHIND" and not updated and data.get("state") == "OPEN":
                     updated = True
-                    new = self.update_branch(repo, number, pin, started + self.timeout)
+                    new = self.update_branch(repo, number, pin, str(data.get("baseRefName") or ""), deadline)
                     if isinstance(new, Result):
                         return new
                     pin = new
-                ended = self.wait_ci(repo, number, pin, started + self.timeout)
+                ended = self.wait_ci(repo, number, pin, deadline)
                 if ended is not None:
                     return ended
                 data = self.view(repo, number)
@@ -616,10 +735,11 @@ class Watcher:
                         )
                     continue  # the loop head updates once and waits for CI on the new head
                 break
-            ended = self.await_review(repo, number, pin, started + self.timeout)
+            ended = self.await_review(repo, number, pin, deadline)
             if ended is not None:
                 return ended
-            open_threads = self.threads(repo, number)
+            self.conversation_notice(repo, str(data.get("baseRefName") or ""))
+            open_threads = self.threads(repo, number)  # the last read before the merge call
             if open_threads:
                 return Result(
                     EXIT_THREADS,
@@ -627,9 +747,30 @@ class Watcher:
                     f"{len(open_threads)} unresolved review thread(s)",
                     [line for t in open_threads for line in t.lines()],
                 )
+            if self.clock() >= deadline:  # no merge is started after the time is up
+                return Result(EXIT_TIMEOUT, "TIMEOUT", "the time ran out before the merge")
             return self.merge(repo, number, pin)
         except ShipError as error:
             return Result(error.code, "ERROR", str(error))
+
+    def conversation_notice(self, repo: str, base: str) -> None:
+        """Say once when branch protection does not require conversation resolution: then the thread check is the only
+        guard and a thread opened between its read and the merge call is not stopped."""
+        if self.noticed:
+            return
+        self.noticed = True
+        code, out, _err = self.gh.gh_call(
+            "api", f"repos/{repo}/branches/{base}/protection/required_conversation_resolution"
+        )
+        try:
+            enabled = code == 0 and bounded.loads(out).get("enabled") is True
+        except (ValueError, AttributeError):
+            enabled = False
+        if not enabled:
+            self.say(
+                f"NOTICE {base} does not require conversation resolution (or it could not be read): the thread check "
+                "is best-effort; a thread opened between its read and the merge call is not stopped"
+            )
 
     def one(self, repo: str, number: int, expect: str = "") -> Result:
         if self.queue:
@@ -699,6 +840,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="after CI is green, wait up to this long (0 to 900, default 0; within --timeout and --max-polls) for the "
         "automated reviewer's review of the pinned head before the thread check; then go on either way",
     )
+    p.add_argument(
+        "--total-timeout",
+        type=float,
+        default=7200.0,
+        help="queue only: seconds for the whole run, 1 to 28800 (default 7200); later PRs print SKIPPED",
+    )
+    p.add_argument("--gate-app-id", type=int, default=GATE_APP_ID, help="GitHub App id that must own `CI green`")
     p.add_argument("--delete-branch", action="store_true")
     p.add_argument(
         "--queue",
@@ -729,6 +877,12 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error("--timeout must be 1 to 7200")
     if not 1 <= args.max_polls <= 1000:
         parser.error("--max-polls must be 1 to 1000")
+    if not 1 <= args.total_timeout <= MAX_TOTAL_TIMEOUT:
+        parser.error(f"--total-timeout must be 1 to {MAX_TOTAL_TIMEOUT}")
+    if args.gate_app_id < 1:
+        parser.error("--gate-app-id must be a positive App id")
+    if any(n < 1 for n in args.pr):
+        parser.error("pull request numbers are positive")
     if not 0 <= args.wait_for_review <= MAX_WAIT_FOR_REVIEW:
         parser.error(f"--wait-for-review must be 0 to {MAX_WAIT_FOR_REVIEW}")
     pins: dict[int, str] = {}
@@ -776,10 +930,14 @@ def main(
     if gh_path is None or git_path is None:
         output.write(err, "error: gh and git must be on PATH")
         return EXIT_ERROR
-    gh = Gh(gh_path, git_path, env, run, workdir)
+    gh = Gh(gh_path, git_path, env, run, workdir, clock)
+    total_deadline = clock() + args.total_timeout if args.queue else None
+    gh.limit = total_deadline
     watcher = Watcher(
         gh,
         out,
+        total_deadline=total_deadline,
+        gate_app=args.gate_app_id,
         timeout=args.timeout,
         interval=args.interval,
         max_polls=args.max_polls,
@@ -812,7 +970,10 @@ def main(
         if stopped is not None:
             output.write(out, f"SKIPPED {repo}#{number} queue stopped at #{stopped}")
             continue
-        result = watcher.one(repo, number, expect)
+        if total_deadline is not None and clock() >= total_deadline:
+            result = Result(EXIT_TIMEOUT, "TIMEOUT", "the total time for the queue ran out before this pull request")
+        else:
+            result = watcher.one(repo, number, expect)
         if args.queue and result.code != EXIT_MERGED:
             stopped = number
         results.append((f"{repo}#{number}", result))

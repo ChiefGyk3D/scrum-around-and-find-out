@@ -52,12 +52,55 @@ lines.
 | 4 | head moved; the new head is printed |
 | 5 | timed out while still pending |
 | 6 | merge refused, or the read-back did not say `MERGED` |
-| 7 | error: gh or git missing or failing, push or open failed, protection unreadable |
+| 7 | error: gh or git missing or failing, push or open failed, protection unreadable, or a malformed answer |
+| 8 | conflict with the base branch (`--queue` only; an agent must resolve it) |
+| 9 | branch protection refused the merge (`--queue` only) |
 
-Protection is read from the base branch; a 404 means "none listed" and `CI green` is still required, any other failure to
+Protection is read from the base branch with `gh api -i`; only an HTTP 404 status line means "none listed" (text in stderr
+is never used to decide that) and `CI green` is still required, any other failure to
 read it, or an answer of an unexpected shape, is exit 7. A required context with a ` / ` in it must match exactly; only a
 bare name such as `CI green` also matches the tail of a `workflow / job` spelling. The wait never sleeps after its last
 poll. A merge gh refuses is re-checked: if the head moved meanwhile the result is `HEAD-MOVED` (exit 4) with the new sha. Branch rulesets are not read.
+
+## Where a required check must come from
+
+A required check counts only as a successful check run of the right GitHub App on the pinned commit, read from the
+check-runs API with every page. A commit status of the same name never counts, and neither does a check run of another
+app. The app is the `app_id` that branch protection lists for the context; `CI green` is always checked, by default
+against GitHub Actions (app 15368, `--gate-app-id` to change). A protected context with no `app_id` is accepted from any
+source: pin it in branch protection to close that gap. Matching is by name, so two workflows of the same app that produce
+the same job name cannot be told apart.
+
+## Queue mode
+
+```
+safo-ship --queue 123 124 125 --repo owner/name --pin 123=<40-hex head>
+```
+
+The pull requests are taken one at a time in the order given, each pinned to one head, and the queue stops at the first
+that does not merge: that line is its result word, each later one prints `SKIPPED` and is never read. PR numbers are
+positive. Differences from the plain mode:
+
+- `--pin N=SHA` pins PR N to a commit you pushed. If the API still shows an older head, it is re-read for up to 6 polls
+  (and never past the deadline) before `HEAD-MOVED`. A head that changes after it was seen is `HEAD-MOVED` at once.
+- A branch that is `BEHIND` gets one `update-branch` call (with `expected_head_sha` set to the pin). The new head is
+  pinned only when it is the merge commit GitHub made: exactly the two parents (the pinned head, then the base tip read
+  just before the call), a signature GitHub verified, and the `web-flow` committer. Anything else is `HEAD-MOVED`. CI is
+  then waited for again on the new head. A second `BEHIND` stops with `MERGE-REFUSED`.
+- Stop words: `CONFLICT` (8), `THREADS` (3, with the count and each thread), `CI-FAILED` (1, naming the failing checks),
+  `PROTECTED` (9), `MERGE-REFUSED` (6), `HEAD-MOVED` (4), `TIMEOUT` (5), `ERROR` (7). A merge gh refuses is classified
+  from the pull request's merge state (`mergeable`, `mergeStateStatus`) first; the English error text is only a fallback.
+- `--timeout` is one deadline per PR, shared by the head wait, update-branch, CI, the review wait and the thread read; no
+  sleep goes past it, each `gh` call gets at most the time left, and no merge starts after it. `--total-timeout`
+  (default 7200, at most 28800) bounds the whole run: the PR it cuts off prints `TIMEOUT` and the rest `SKIPPED`.
+
+### The thread check is best-effort
+
+Review threads are not part of the head commit, so `--match-head-commit` does not cover them. The tool reads the threads
+as its last read before the merge call, but a thread opened between that read and the merge is not stopped by the tool.
+The atomic control is branch protection's "Require conversation resolution before merging" (and a merge identity that
+cannot bypass it). In queue mode the tool reads that setting and prints a `NOTICE` when it is off or unreadable. On this
+repository's `main` it is currently off (read 2026-11-27 with `gh api repos/ChiefGyk3D/scrum-around-and-find-out/branches/main/protection`).
 
 ## safo-wait-ci
 

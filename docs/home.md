@@ -13,7 +13,7 @@ small team of AI agents (Claude, Codex, Copilot) under one human maintainer, wit
 - [Spend report](spend-report.md): `safo spend`, the weekly weighted token-spend report and stored baseline every token-savings change is measured by.
 - [Port ledger](port-ledger.md): one row per SAFO item with its port decision for the portable edition: ported, port as configurable, proposed, or not ported and why.
 - [Impacted tests](impacted-tests.md): `scripts/impacted-tests.py`, which changed files map to which tests for a targeted run, and when it says run the full suite. CI stays the judge.
-- [safo-ship](ship.md): the tested merge watcher: pins the head, waits for `CI green` and every required check, checks review threads, merges that commit.
+- [safo-ship](ship.md): the tested merge watcher: pins the head, waits for `CI green` and every required check, checks review threads, merges that commit; `--queue` takes several PRs one at a time with head-lag retry, update-branch and named stops (exit codes 8 and 9).
 - [No hidden work](no-hidden-work.md): the hard rule: an issue and a board card before any work starts, and how it is enforced.
 - [Threat model before build](threat-model.md): an AI-facing issue names its threat model, or says why none applies, and how the file itself is checked.
 - [SAFO threat model](safo-threat-model.md): the threat model of SAFO as a whole: assets, actors, trust boundaries, 25 ranked risks, a mitigation and a verification for each, and what SAFO does not guarantee.

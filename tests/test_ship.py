@@ -45,22 +45,59 @@ STUB = textwrap.dedent(
         reply(state["git"].get(rest[0], {{}}))
     key = " ".join(rest[:2])
     if key == "pr view":
-        reply({{"out": json.dumps(pop("views"))}})
+        state["last_view"] = pop("views")
+        reply({{"out": json.dumps(state["last_view"])}})
     if key == "pr merge":
+        # the fake server: a merge must carry exactly one --match-head-commit equal to the PR's current head
+        pins = [rest[i + 1] for i, a in enumerate(rest) if a == "--match-head-commit" and i + 1 < len(rest)]
+        head = state.get("head_at_merge") or state.get("last_view", {{}}).get("headRefOid")
+        state.setdefault("merge_attempts", []).append(pins)
+        if len(pins) != 1 or pins[0] != head:
+            reply({{"rc": 1, "err": "Head branch was modified. Review and try the merge again."}})
         reply(pop("merges"))
     if key == "api graphql":
         reply({{"out": json.dumps(pop("threads"))}})
+    if rest[0] == "api" and "/check-runs" in rest[1]:
+        runs = [
+            {{
+                "name": i["name"],
+                "status": i["status"].lower(),
+                "conclusion": i["conclusion"].lower(),
+                "app_id": i.get("app_id", 15368),
+            }}
+            for i in state.get("last_view", {{}}).get("statusCheckRollup", [])
+            if "name" in i
+        ]
+        reply({{"out": "\\n".join(json.dumps(x) for x in state.get("check_runs", runs))}})
+    if rest[0] == "api" and "required_conversation_resolution" in rest[1]:
+        reply({{"out": json.dumps(state.get("conv", {{"enabled": True}}))}})
+    if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
+        reply({{"out": json.dumps({{"object": {{"sha": state.get("base_tip", "e" * 40)}}}})}})
     if rest[0] == "api" and "update-branch" in rest[1]:
         reply(state.get("update", {{}}))
     if rest[0] == "api" and "/commits/" in rest[1] and "/pulls" not in rest[1]:
-        reply({{"out": json.dumps({{"parents": [{{"sha": p}} for p in state.get("parents", ["a" * 40])]}})}})
+        reply(
+            {{
+                "out": json.dumps(
+                    {{
+                        "parents": [{{"sha": p}} for p in state.get("parents", ["a" * 40, "e" * 40])],
+                        "committer": {{"login": state.get("committer", "web-flow")}},
+                        "commit": {{"verification": {{"verified": state.get("verified", True)}}}},
+                    }}
+                )
+            }}
+        )
     if rest[0] == "api" and "/reviews" in rest[1]:
         state.setdefault("reviews", [[]])
         reply({{"out": "\\n".join(json.dumps(i) for i in pop("reviews"))}})
     if rest[0] == "api" and "/pulls" in rest[1]:
         reply({{"out": json.dumps(state.get("commit_pulls", []))}})
     if rest[0] == "api":
-        reply(state["protection"])
+        item = state["protection"]
+        if "-i" in rest:  # the HTTP status line comes on stdout, as `gh api -i` prints it
+            code = 200 if item.get("rc", 0) == 0 else item.get("http", 404 if "404" in item.get("err", "") else 500)
+            item = dict(item, out="HTTP/2.0 " + str(code) + " X\\r\\n\\r\\n" + item.get("out", ""))
+        reply(item)
     if key == "run view":
         reply({{"out": json.dumps(state["runs"][rest[2]])}})
     if key == "run rerun":
