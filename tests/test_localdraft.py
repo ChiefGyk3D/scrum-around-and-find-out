@@ -17,9 +17,15 @@ from safo import localdraft
 
 FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 LLM_SHIM = """#!/usr/bin/env bash
+if [ "$1" = "--outcome" ]; then
+  echo "$2 $3" >> "$SHIM_DIR/llm.outcomes"
+  if [ -f "$SHIM_DIR/llm.outcome.fail" ]; then echo "not recorded" >&2; exit 1; fi
+  exit 0
+fi
 echo "$@" >> "$SHIM_DIR/llm.args"
 if [ -t 0 ]; then echo TTY >> "$SHIM_DIR/llm.stdin"; else cat >> "$SHIM_DIR/llm.stdin"; fi
 n=$(cat "$SHIM_DIR/llm.count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$SHIM_DIR/llm.count"
+if [ -f "$SHIM_DIR/llm.callid" ]; then echo "llm-local: call id $(cat "$SHIM_DIR/llm.callid")-$n" >&2; fi
 if [ -f "$SHIM_DIR/llm.busy" ] && [ "$n" -le "$(cat "$SHIM_DIR/llm.busy")" ]; then echo "busy" >&2; exit 75; fi
 if [ -f "$SHIM_DIR/llm.fail" ]; then echo "connection refused" >&2; exit 7; fi
 if [ -f "$SHIM_DIR/llm.sleep" ]; then exec sleep 5; fi
@@ -273,7 +279,18 @@ def test_metrics_line_has_no_content_and_report(env: Env) -> None:
     rows = env.metrics()
     assert len(rows) == 1
     row = rows[0]
-    assert set(row) == {"ts", "subcommand", "model", "exit", "chars_in", "chars_out"}
+    assert set(row) == {
+        "ts",
+        "subcommand",
+        "model",
+        "exit",
+        "chars_in",
+        "chars_out",
+        "call_id",
+        "project",
+        "outcome",
+        "outcome_recorded",
+    }
     assert row["subcommand"] == "issue" and row["exit"] == 0 and row["model"] == "qwen3.5:4b"
     assert row["chars_in"] > 0 and row["chars_out"] > 0
     raw = (env.state / "safo" / "local-share.jsonl").read_text()
@@ -1976,3 +1993,201 @@ def test_the_no_deny_note_is_printed_when_nothing_supplies_an_entry(env: Env) ->
         err = io.StringIO()
         assert localdraft.load_deny(env.env, err) == []
         assert err.getvalue().count("no private deny file configured: only heuristics are active") == 1, value
+
+
+# issue #505: call id, project and outcome for every local draft
+EDITOR_SHIM = """#!/usr/bin/env bash
+echo "EDITEDLINE" >> "$1"
+"""
+ISSUE = ["issue", "--repo", "Own/proj", "--title", "T"]
+
+
+def _with_id(env: Env, value: str = "abc") -> None:
+    (env.dir / "llm.callid").write_text(value)
+    _reply(env)
+
+
+def _reply(env: Env) -> None:
+    (env.dir / "llm.reply").write_text("Do the thing.\n\nPart of epic #445")
+
+
+def _editor(env: Env, tmp_path: Path) -> None:
+    path = tmp_path / "editor.sh"
+    path.write_text(EDITOR_SHIM)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    env.env["VISUAL"] = str(path)
+
+
+def _outcomes(env: Env) -> list[str]:
+    return env.read("llm.outcomes").splitlines()
+
+
+def test_call_id_and_project_are_recorded(env: Env) -> None:
+    _with_id(env)
+    code, _, _ = env.run([*ISSUE, "--yes", "x"])
+    row = env.metrics()[-1]
+    assert code == 0 and row["call_id"] == "abc-1" and row["project"] == "Own/proj"
+
+
+def test_unmodified_draft_is_accepted(env: Env) -> None:
+    _with_id(env)
+    code, _, err = env.run([*ISSUE, "--yes", "x"])
+    assert code == 0 and _outcomes(env) == ["abc-1 accepted"] and "not recorded" not in err
+    row = env.metrics()[-1]
+    assert row["outcome"] == "accepted" and row["outcome_recorded"] is True
+
+
+def test_footer_append_is_a_mechanical_edit_still_accepted(env: Env) -> None:
+    _with_id(env)
+    code, _, _ = env.run(["pr", "--repo", "Own/proj", "--title", "T", "--yes", "x"])
+    assert code == 0 and _outcomes(env) == ["abc-1 accepted"] and FOOTER in env.read("gh.stdin")
+
+
+def test_human_edit_is_rewritten(env: Env, tmp_path: Path) -> None:
+    _with_id(env)
+    _editor(env, tmp_path)
+    code, _, _ = env.run([*ISSUE, "x"], stdin="e\ny\n")
+    assert code == 0 and "EDITEDLINE" in env.read("gh.stdin")
+    assert _outcomes(env) == ["abc-1 rewritten"]
+    assert env.metrics()[-1]["outcome"] == "rewritten"
+
+
+def test_decline_is_discarded(env: Env) -> None:
+    _with_id(env)
+    code, _, _ = env.run([*ISSUE, "x"], stdin="n\n")
+    assert code == localdraft.EXIT_DECLINED and _outcomes(env) == ["abc-1 discarded"]
+    assert env.read("gh.args") == "" and env.metrics()[-1]["outcome"] == "discarded"
+
+
+def test_refused_by_a_check_is_discarded(env: Env) -> None:
+    _with_id(env)
+    (env.dir / "llm.reply").write_text("bad " + localdraft.EM_DASHES[0] + " dash\n\nPart of epic #445")
+    code, _, _ = env.run([*ISSUE, "--yes", "x"])
+    assert code == localdraft.EXIT_REFUSED and _outcomes(env) == ["abc-1 discarded"]
+    assert env.read("gh.args") == ""
+
+
+def test_fact_error_is_never_set_automatically(env: Env) -> None:
+    _with_id(env)
+    env.run([*ISSUE, "--yes", "x"])
+    env.run([*ISSUE, "x"], stdin="n\n")
+    assert all("fact-error" not in x for x in _outcomes(env))
+
+
+def test_outcome_failure_never_blocks_filing(env: Env) -> None:
+    _with_id(env)
+    (env.dir / "llm.outcome.fail").write_text("1")
+    code, _, err = env.run([*ISSUE, "--yes", "x"])
+    assert code == 0 and "issue create" in env.read("gh.args")
+    assert "outcome not recorded (1 draft)" in err and "Short draft" not in err
+    row = env.metrics()[-1]
+    assert row["outcome"] == "accepted" and row["outcome_recorded"] is False and row["exit"] == 0
+
+
+def test_missing_call_id_is_none_and_carries_on(env: Env) -> None:
+    _reply(env)
+    code, _, err = env.run([*ISSUE, "--yes", "x"])
+    row = env.metrics()[-1]
+    assert code == 0 and row["call_id"] == "none" and _outcomes(env) == []
+    assert row["outcome_recorded"] is False and "outcome not recorded" in err
+    assert "issue create" in env.read("gh.args")
+
+
+def test_retry_records_the_id_of_the_accepted_call(env: Env) -> None:
+    _with_id(env)
+    (env.dir / "llm.busy").write_text("1")
+    code, _, _ = env.run([*ISSUE, "--yes", "x"])
+    assert code == 0 and env.metrics()[-1]["call_id"] == "abc-2" and _outcomes(env) == ["abc-2 accepted"]
+
+
+def test_no_draft_text_in_any_row(env: Env, tmp_path: Path) -> None:
+    _with_id(env)
+    _editor(env, tmp_path)
+    (env.dir / "llm.reply").write_text("SECRETBODY text\n\nPart of epic #445")
+    env.run([*ISSUE, "PRIVATEPROMPT"], stdin="e\ny\n")
+    env.run([*ISSUE, "PRIVATEPROMPT"], stdin="n\n")
+    env.run(["--outcome", "abc-1", "fact-error"])
+    raw = (env.state / "safo" / "local-share.jsonl").read_bytes()
+    assert raw.count(b"\n") == 3
+    for needle in (b"SECRETBODY", b"PRIVATEPROMPT", b"EDITEDLINE"):
+        assert needle not in raw
+
+
+def test_fact_error_mark_calls_llm_local_and_appends_a_row(env: Env) -> None:
+    code, _, _ = env.run(["--outcome", "abc-1", "fact-error"])
+    assert code == 0 and _outcomes(env) == ["abc-1 fact-error"]
+    row = env.metrics()[-1]
+    assert row["subcommand"] == "outcome" and row["call_id"] == "abc-1" and row["outcome_recorded"] is True
+
+
+def test_fact_error_mark_failure_is_reported_and_kept(env: Env) -> None:
+    (env.dir / "llm.outcome.fail").write_text("1")
+    code, _, err = env.run(["--outcome", "abc-1", "fact-error"])
+    assert code == localdraft.EXIT_ERROR and "not recorded" in err
+    assert env.metrics()[-1]["outcome_recorded"] is False
+
+
+@pytest.mark.parametrize("args", [["abc-1", "accepted"], ["--bad", "fact-error"], ["a b", "fact-error"]])
+def test_outcome_flag_only_takes_fact_error_and_a_clean_id(env: Env, args: list[str]) -> None:
+    code, _, err = env.run(["--outcome", *args])
+    assert code == localdraft.EXIT_ERROR and "fact-error" in err
+    assert _outcomes(env) == [] and env.metrics() == []
+
+
+def _row(ts: str, sub: str, **more: object) -> dict[str, object]:
+    return {"ts": ts, "subcommand": sub, "model": "m", "exit": 0, "chars_in": 1, "chars_out": 1, **more}
+
+
+def test_report_outcome_counts_rates_projects_and_unrecorded(env: Env) -> None:
+    (env.state / "safo").mkdir(parents=True)
+    d = "2026-11-26T10:00:00+00:00"
+    rows = [
+        _row(d, "issue", call_id="a", project="Own/one", outcome="accepted", outcome_recorded=True),
+        _row(d, "pr", call_id="b", project="Own/one", outcome="rewritten", outcome_recorded=True),
+        _row(d, "issue", call_id="c", project="Own/two", outcome="discarded", outcome_recorded=True),
+        _row(d, "comment", call_id="none", project="Own/two", outcome="accepted", outcome_recorded=False),
+        _row(d, "digest-ci-log", call_id="e", project="none"),
+        _row(d, "outcome", call_id="a", outcome="fact-error", outcome_recorded=True),
+        _row("2026-11-17T10:00:00+00:00", "issue"),
+    ]
+    (env.state / "safo" / "local-share.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    code, out, _ = env.run(["--report"])
+    assert code == 0
+    assert "2026-W48: 5 calls, 0 failed" in out and "2026-W47: 1 calls" in out
+    assert "outcomes of 4 drafts: accepted=1 (25%), rewritten=1 (25%), discarded=1 (25%), fact-error=1 (25%)" in out
+    assert "outcome not recorded: 1 of 4 (25%)" in out
+    assert "project Own/one: accepted=0 (0%), rewritten=1 (50%), discarded=0 (0%), fact-error=1 (50%)" in out
+    assert "project Own/two: accepted=1 (50%), rewritten=0 (0%), discarded=1 (50%)" in out
+
+
+def test_report_still_works_without_outcome_rows(env: Env) -> None:
+    (env.state / "safo").mkdir(parents=True)
+    (env.state / "safo" / "local-share.jsonl").write_text(json.dumps(_row("2026-11-26T10:00:00+00:00", "pr")) + "\n")
+    code, out, _ = env.run(["--report"])
+    assert code == 0 and "2026-W48: 1 calls" in out and "outcomes" not in out
+
+
+def test_project_comes_from_repo_or_the_cwd_remote(env: Env, tmp_path: Path) -> None:
+    repo = tmp_path / "work"
+    for sub in ("objects", "refs"):
+        (repo / ".git" / sub).mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (repo / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:Own/proj.git\n')
+    env.env["PWD"] = str(repo)
+    assert localdraft.project_of(env.env, None) == "Own/proj"
+    assert localdraft.project_of(env.env, "a/b") == "a/b"
+    assert localdraft.project_of(env.env, "not a repo; rm") == "none"
+    env.env["PWD"] = str(tmp_path / "shim")
+    assert localdraft.project_of(env.env, None) == "none"
+    env.env["PWD"] = str(repo)
+    _with_id(env)
+    code, _, _ = env.run(["digest", "ci-log", "-"], stdin="Error: boom\n")
+    row = env.metrics()[-1]
+    assert code == 0 and row["project"] == "Own/proj" and row["call_id"] == "abc-1" and "outcome" not in row
+
+
+def test_argparse_errors_go_to_the_caller_stderr(env: Env) -> None:
+    """A parse error must land in the injected stream on every Python version, not the process stderr."""
+    code, out, err = env.run(["--outcome", "abc-1"])
+    assert code == localdraft.EXIT_ERROR and "--outcome" in err and out == ""
+    assert _outcomes(env) == [] and env.metrics() == []
