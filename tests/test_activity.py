@@ -1147,23 +1147,69 @@ def test_events_copilot_reports_a_review_starting_and_finishing(box: Box, gh: Gh
     ]
 
 
+_MONITOR_CODE = "import sys; from safo.activity import main; sys.exit(main(sys.argv[1:]))"
+_DEAF_CODE = (
+    "import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "print('up', flush=True); print('deaf-child-stderr', file=sys.stderr, flush=True); time.sleep(60)"
+)
+
+
+def signal_a_monitor(
+    box: Box, sig: signal.Signals, args: list[str], *, code: str = _MONITOR_CODE, timeout: float = 20
+) -> int:
+    """Start the child, wait for its first line, signal it, and return the exit code.
+
+    The child is always killed and reaped, and its stderr goes to a file, so a timeout fails with what the child said
+    instead of leaving it running."""
+    err_path = box.home / "monitor.stderr"
+    with err_path.open("w+") as err:
+        proc = subprocess.Popen(  # noqa: S603 - our own interpreter
+            [sys.executable, "-I", "-c", code, *args], env=box.vars, stdout=subprocess.PIPE, stderr=err, text=True
+        )
+        try:
+            assert proc.stdout is not None
+            proc.stdout.readline()  # the first line proves the handlers are installed
+            proc.send_signal(sig)
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                tail = err_path.read_text()[-2000:]
+                pytest.fail(f"monitor {args} did not exit within {timeout}s of {sig.name}; stderr: {tail!r}")
+            return rc
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+
+
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
 @pytest.mark.parametrize("args", [["--events", "codex"], ["--watch"]])
 def test_a_signal_ends_a_monitor_cleanly_and_promptly(box: Box, sig: signal.Signals, args: list[str]) -> None:
-    proc = subprocess.Popen(  # noqa: S603 - our own interpreter
-        [sys.executable, "-I", "-c", "import sys; from safo.activity import main; sys.exit(main(sys.argv[1:]))", *args],
-        env=box.vars,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    assert proc.stdout is not None
-    proc.stdout.readline()  # the first line proves the handlers are installed (startup line or watch header)
-    proc.send_signal(sig)
-    # a handler that did not stop the loop leaves the process running, and the wait times out; the exit code proves a
-    # clean end. (The old `< 5 s` wall bound sat beside the 2 s redraw interval and only measured runner load.)
-    assert proc.wait(timeout=20) == 0
-    proc.stdout.close()
+    # the exit code proves a clean end; the old wall bound only measured runner load (main's #546 ruling)
+    assert signal_a_monitor(box, sig, args) == 0
+
+
+def test_the_monitor_harness_fails_on_a_hung_child_with_its_stderr(box: Box) -> None:
+    with pytest.raises(pytest.fail.Exception, match=r"did not exit within 1.*deaf-child-stderr"):
+        signal_a_monitor(box, signal.SIGTERM, [], code=_DEAF_CODE, timeout=1)
+
+
+def test_watch_stops_at_once_when_a_signal_lands_while_a_frame_is_drawn(box: Box) -> None:
+    frames: list[int] = []
+
+    def clock() -> float:
+        frames.append(1)
+        if len(frames) == 1:
+            os.kill(os.getpid(), signal.SIGTERM)  # the handler sets the stop flag while a frame is being drawn
+        assert len(frames) < 5, "watch kept drawing frames after a signal"
+        return time.time()
+
+    previous = signal.getsignal(signal.SIGTERM)
+    assert activity.mode_watch(box.vars, io.StringIO(), interval=0, wait=lambda _s: False, clock=clock) == 0
+    assert len(frames) == 1
+    assert signal.getsignal(signal.SIGTERM) == previous
 
 
 def test_a_provider_that_raises_never_takes_the_view_down(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
