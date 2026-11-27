@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -326,7 +327,76 @@ def test_a_clean_submodule_is_accepted(world: World, tmp_path: Path) -> None:
     assert go(world, "implementer") == 0
 
 
-def test_git_status_ignores_submodules_and_does_not_recurse(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+def hostile_repo(tmp_path: Path, key: str = "filter.x.clean") -> Path:
+    hostile = tmp_path / "hostile-repo"
+    make_repo(hostile, {"x": "x\n"})
+    git(hostile, "config", key, str(tmp_path / "hostile.sh"))
+    return hostile
+
+
+def test_a_symlinked_submodule_path_is_refused(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    marker = hostile_script(tmp_path)
+    hostile = hostile_repo(tmp_path, "alias.pwn")
+    shutil.rmtree(sub)
+    sub.symlink_to(hostile, target_is_directory=True)
+    refused(world, go(world, "implementer"))
+    refused(world, go(world, "review"))
+    assert not marker.exists()
+
+
+def test_a_non_utf8_submodule_name_is_still_checked(world: World, tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    make_repo(upstream, {"x": "x\n"})
+    wt_b = os.fsencode(world.worktree)
+    name_b = b"sub-" + bytes([255])
+    cmd = [b"git", b"-C", wt_b, b"-c", b"protocol.file.allow=always", b"submodule", b"add", b"-q"]
+    subprocess.run([*cmd, os.fsencode(upstream), name_b], check=True, stdin=subprocess.DEVNULL)  # noqa: S603
+    git(world.worktree, "commit", "-q", "-m", "add byte-name submodule")
+    alias = os.fsencode("!" + str(tmp_path / "hostile.sh"))
+    subprocess.run(  # noqa: S603
+        [b"git", b"-C", wt_b + b"/" + name_b, b"config", b"alias.pwn", alias], check=True, stdin=subprocess.DEVNULL
+    )
+    refused(world, go(world, "implementer"))
+    refused(world, go(world, "review"))
+
+
+def test_a_submodule_with_a_redirected_gitdir_is_checked(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    hostile = hostile_repo(tmp_path)
+    (sub / ".git").unlink()
+    (sub / ".git").write_text(f"gitdir: {hostile / '.git'}\n")
+    refused(world, go(world, "implementer"))
+
+
+def test_a_symlinked_submodule_gitfile_is_checked(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    hostile = hostile_repo(tmp_path)
+    (sub / ".git").unlink()
+    (sub / ".git").symlink_to(hostile / ".git")
+    refused(world, go(world, "implementer"))
+
+
+def test_an_absent_submodule_folder_is_skipped(world: World, tmp_path: Path) -> None:
+    sub = add_submodule(world, tmp_path)
+    shutil.rmtree(sub)
+    assert go(world, "review") == 0
+
+
+def test_the_submodule_depth_limit_bites_only_at_the_limit(world: World, tmp_path: Path) -> None:
+    add_submodule(world, tmp_path)
+    git_bin = shutil.which("git")
+    assert git_bin
+    root, home = str(world.worktree), str(world.home)
+    codexrun.check_repo_config(git_bin, home, root, codexrun.MAX_SUBMODULE_DEPTH - 1)
+    with pytest.raises(codexrun.CodexRunError):
+        codexrun.check_repo_config(git_bin, home, root, codexrun.MAX_SUBMODULE_DEPTH)
+
+
+def test_git_status_ignores_submodules_and_does_not_recurse(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_submodule(world, tmp_path)
     seen: list[list[str]] = []
     real_run = subprocess.run
 
@@ -341,6 +411,7 @@ def test_git_status_ignores_submodules_and_does_not_recurse(world: World, monkey
     for argv in status:
         assert "--ignore-submodules=all" in argv and "submodule.recurse=false" in argv
         assert "core.attributesFile=/dev/null" in argv
+    assert any(a[a.index("-C") + 1].endswith("/sub") and "config" in a for a in seen)  # the submodule was inspected
 
 
 def test_git_runs_with_the_hardening_options_and_a_clean_environment(

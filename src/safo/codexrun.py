@@ -363,7 +363,7 @@ DANGEROUS_CONFIG_SUFFIXES = (".textconv", ".clean", ".smudge", ".process", ".com
 DANGEROUS_CONFIG_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.askpass", "core.gitproxy")
 
 
-def _git(git: str, home: str, root: str, *args: str) -> str:
+def _git(git: str, home: str, root: str, *args: str, errors: str = "replace") -> str:
     try:
         done = subprocess.run(  # noqa: S603 - absolute git, fixed argv, no shell, stdin closed, bounded time
             [git, *GIT_HARDENING, "-C", root, *args],
@@ -377,7 +377,7 @@ def _git(git: str, home: str, root: str, *args: str) -> str:
         raise CodexRunError("git could not be run on the worktree; nothing was run") from None
     if done.returncode != 0:
         raise CodexRunError("the worktree is not a usable git work tree; nothing was run")
-    return done.stdout.decode("utf-8", "replace")
+    return done.stdout.decode("utf-8", errors)
 
 
 def _read_small(path: str, limit: int = 4096) -> str:
@@ -455,7 +455,7 @@ def _check_config_keys(git: str, home: str, folder: str) -> None:
 
 def _submodule_folders(git: str, home: str, folder: str) -> list[str]:
     """The folders of the gitlinks (mode 160000) in the index of `folder`. Listing the index runs nothing."""
-    raw = _git(git, home, folder, "ls-files", "--stage", "-z")
+    raw = _git(git, home, folder, "ls-files", "--stage", "-z", errors="surrogateescape")
     found: list[str] = []
     for entry in raw.split("\0"):
         meta, _, name = entry.partition("\t")
@@ -474,8 +474,12 @@ def check_repo_config(git: str, home: str, root: str, depth: int = 0) -> None:
             raise CodexRunError("the repository nests submodules too deeply to check; nothing was run")
         return
     for folder in _submodule_folders(git, home, root):
-        if os.path.islink(folder) or not os.path.isdir(folder):
+        if os.path.islink(folder):
+            raise CodexRunError("a submodule path is a symbolic link; nothing was run")
+        if not os.path.lexists(folder):
             continue  # not checked out: git has no repository of its own there
+        if not os.path.isdir(folder):
+            raise CodexRunError("a submodule path is not a folder; nothing was run")
         if os.path.realpath(folder) != os.path.join(os.path.realpath(root), os.path.relpath(folder, root)):
             raise CodexRunError("a submodule folder resolves outside its place in the worktree; nothing was run")
         check_repo_config(git, home, folder, depth + 1)
