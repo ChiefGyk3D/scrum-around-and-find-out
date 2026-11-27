@@ -981,7 +981,10 @@ def test_a_claimed_attempt_for_the_new_key_means_no_re_probe_and_an_unknown_heal
 def test_a_re_probe_with_too_little_budget_is_skipped_and_the_notice_says_so(
     _private_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("safo.modes.hooks.GUARD_TIMEOUT_SECONDS", 3)  # 1.5 s to the deadline: no room for two requests
+    # The reserve kept for the issue lookup is larger than the whole (hermetic, 300 s) budget, so no elapsed time can
+    # leave room for two requests; the budget itself is not shrunk, so a slow start on a loaded box still loads the
+    # configuration instead of timing out before the re-probe decision is reached.
+    monkeypatch.setattr("safo.modes.hooks.LOOKUP_RESERVE_SECONDS", 1000.0)
     set_mode(_private_home, "block")
     with FakeOllama(A_MODELS, A_MODELS).serve() as a, FakeOllama(B_MODELS, B_MODELS[:1]).serve() as b:
         path = agents_file(tmp_path / "agents.yaml", a.url, b.url)
@@ -1793,8 +1796,11 @@ def test_a_marker_that_is_not_the_marker_does_not_count(_private_home: Path, age
     ],
 )
 def test_hostile_events_fail_open_visibly_in_block_mode_with_clean_output(
-    _private_home: Path, agents: Path, payload: str
+    _private_home: Path, agents: Path, payload: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Scanning the 5 MB event is CPU work in this process; the real 4 s drain bound would turn a loaded box into the
+    # fail-closed "slow" verdict, which is another test's subject (tests/test_gemini_hook_errors.py).
+    monkeypatch.setattr("safo.modes.hooks.DRAIN_SECONDS", 120.0)
     set_mode(_private_home, "block")
     set_probe(_private_home)
     code, out, err = guard(_private_home, agents, payload)
