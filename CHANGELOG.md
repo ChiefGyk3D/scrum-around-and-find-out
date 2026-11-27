@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `safo-digest` (#531, child of #518): runs `git` or `gh` (nothing else is supported) and prints a capped digest in a
+  fixed untrusted-data frame, saving the full output to a private file. The executable must be a native program,
+  root-owned under root-owned directories, opened without following symlinks and started from the verified descriptor.
+  Only a short list of read-only git subcommands and gh subcommand pairs may be listed; every argument is validated
+  against a per-entry option allowlist with typed values and no control characters. The repository's own config (and every submodule's)
+  must be on a shared allowlist of inert keys, the same one `safo-codex-run` uses (now in `safo.gitconfig`), and
+  program-running git settings are forced off at command scope. The command
+  gets a minimal environment, an empty private home (recreated each run) and only inert pass-through variables from
+  a fixed list. Process containment (child subreaper, `/proc`, pidfds) is mandatory: a timeout, a normal exit or a
+  SIGTERM, SIGHUP or SIGINT kills the command and every descendant, and without containment nothing starts. The output
+  directory and every parent are checked and re-verified before the path is printed; the path is labelled advisory.
+  Digest lines are cleaned and prefixed, header fields are cleaned, and user, host, home, callsign and grid text is
+  replaced (best effort, the saved file is raw). Exit 124 timeout, 125 refused. Docs: `docs/digest.md`. Tests:
+  `tests/test_digest.py`, `tests/digest_driver.py`.
 - `safo-codex-run` (#557): harden git config handling. The repository config check is now an allowlist and the child git environment forces more settings off. Docs: `docs/codex-run.md`. Tests: `tests/test_codexrun.py`.
 - Update the sister-project rule now that the portable edition is public (#573)
 - Add CLAUDE.md and AGENTS.md stating the sister-project rule (#565)
