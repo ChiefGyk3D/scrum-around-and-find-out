@@ -204,6 +204,18 @@ points of pass rate against the baseline is an alert. `--baseline PATH` defaults
 | 3 | a server was unreachable: said so on stderr, no score is invented, nothing is written |
 | 75 | the queue stayed busy after the retries: not a drop |
 
+Limits: `--busy-retries` at most 10, `--wait` at most 600 seconds, `--repeats` at most 20; a flag above its cap is exit 2
+before any call. One busy sleep is at most 300 seconds and all busy sleeps of a run (scoring and probe together) at most
+1800 seconds; once that budget is spent the busy result stands (exit 75).
+
+Precedence: within one attempt on one model a busy record wins over an unreachable, malformed or scored one, so the
+attempt is retried and a busy server never hides a failure or picks which fixtures count. Across models and with the
+probe the order is unreachable (3) over busy (75) over drop (1) over usage (2). An `ok` record whose `passed` is not a
+boolean is malformed (unreachable, never a zero), and a score that is not a number from 0 to 1 is refused (exit 2)
+before it can be written. A baseline that is not valid UTF-8 is exit 2. The baseline is written through a uniquely named
+temporary file (a leftover from a crashed run is never reused or deleted and does not block an update), and each newly
+created folder is fsynced in its parent.
+
 A busy queue (`llm-local` exit 75) is retried by the runner and then, if a model has no scored run at all, the whole
 model is retried `--busy-retries` times (default 3) with a doubling wait; busy runs never count as failures. Any other
 `llm-local` failure except exit 3 or 4 (the model's own truncated or over-cap runs, which count as not passed) makes
