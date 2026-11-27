@@ -45,6 +45,7 @@ import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TextIO
+from urllib.parse import quote
 
 import yaml
 
@@ -302,6 +303,26 @@ def protection_apps(data: Any) -> dict[str, int]:
     return found
 
 
+SAFE_PATH = re.compile(r"[A-Za-z0-9._/-]+")
+MAX_PATH = 200
+
+
+def safe_repo_path(path: str) -> bool:
+    """A repository path made only of [A-Za-z0-9._/-] with no empty, `.` or `..` segment, and not very long."""
+    return (
+        0 < len(path) <= MAX_PATH
+        and SAFE_PATH.fullmatch(path) is not None
+        and all(part not in ("", ".", "..") for part in path.split("/"))
+    )
+
+
+def contents_args(repo: str, path: str, ref: str) -> list[str]:
+    """The `gh api` arguments for the contents of `path` at `ref`: every path segment percent-quoted, and the ref sent
+    as a query field (`-X GET -f ref=...`), never glued into the URL, so no text of either can add a parameter."""
+    quoted = "/".join(quote(part, safe="") for part in path.split("/"))
+    return ["api", "-X", "GET", f"repos/{repo}/contents/{quoted}", "-f", f"ref={ref}"]
+
+
 def workflow_refs(text: str) -> tuple[list[str], str]:
     """(the `uses:` references of jobs.*.uses and jobs.*.steps[*].uses, "") or ([], why the file cannot be trusted).
 
@@ -439,9 +460,7 @@ class Watcher:
         if self.gate_workflow:
             return self.gate_workflow
         if (repo, base) not in self.gate_paths:
-            code, out, err = self.gh.gh_call(
-                "api", f"repos/{repo}/contents/.github/workflows?ref={base}", "--jq", ".[].path"
-            )
+            code, out, err = self.gh.gh_call(*contents_args(repo, ".github/workflows", base), "--jq", ".[].path")
             if code != 0:
                 raise ShipError(EXIT_ERROR, f"cannot list the workflows of {base}: {err.strip()[:200]}")
             found = [p for p in out.split() if p in (".github/workflows/ci.yml", ".github/workflows/ci.yaml")]
@@ -506,10 +525,13 @@ class Watcher:
         return identity, identity and str(run.get("status")) == "completed" and str(run.get("conclusion")) == "success"
 
     def blob(self, repo: str, path: str, ref: str) -> str:
-        code, out, err = self.gh.gh_call("api", f"repos/{repo}/contents/{path}?ref={ref}", "--jq", ".sha")
-        if code != 0 or not out.strip():
-            raise ShipError(EXIT_ERROR, f"cannot read {path} at {ref[:12]}: {err.strip()[:200]}")
-        return out.strip()
+        code, out, err = self.gh.gh_call(*contents_args(repo, path, ref), "--jq", '[.path, .sha] | join("|")')
+        got, _bar, sha = out.strip().partition("|")
+        if code != 0 or not sha:
+            raise ShipError(EXIT_ERROR, f"cannot read {clean(path, 200)[0]} at {ref[:12]}: {err.strip()[:200]}")
+        if got != path:  # the answer is about some other path than the one asked for
+            raise ShipError(EXIT_ERROR, f"the contents answer is not about {clean(path, 200)[0]}")
+        return sha
 
     def base_moved(self, repo: str, number: int, pin: str, base: str) -> Result | None:
         """Re-read the pull request: a stop when its base is no longer the one the checks were read for, or its head
@@ -565,12 +587,24 @@ class Watcher:
     def local_state(self, repo: str, path: str, ref: str) -> str | None:
         """The content sha of a file, or of a directory listing, at `ref` (None when it does not exist there)."""
         code, out, _err = self.gh.gh_call(
-            "api",
-            f"repos/{repo}/contents/{path}?ref={ref}",
+            *contents_args(repo, path, ref),
             "--jq",
-            'if type=="array" then [.[]|{p:.path,s:.sha}]|tostring else .sha end',
+            'if type=="array" then {dir: [.[]|{p:.path,s:.sha}]} else {file: .path, sha: .sha} end|tostring',
         )
-        return out.strip() if code == 0 and out.strip() else None
+        if code != 0 or not out.strip():
+            return None
+        try:
+            data = bounded.loads(out)
+            if isinstance(data, dict) and "file" in data:
+                ok = data["file"] == path
+            else:
+                items = data["dir"]
+                ok = all(isinstance(i, dict) and str(i.get("p")).rsplit("/", 1)[0] == path for i in items)
+        except (ValueError, KeyError, TypeError):
+            raise ShipError(EXIT_ERROR, "unreadable contents answer") from None
+        if not ok:  # the answer is about some other path than the one asked for
+            raise ShipError(EXIT_ERROR, f"the contents answer is not about {clean(path, 200)[0]}")
+        return out.strip()
 
     def gate_refs(self, repo: str, gate: str, base: str, pin: str) -> Result | None:
         """NEEDS-HUMAN unless every `uses:` the gate workflow (and each local workflow it calls) names is safe: a remote
@@ -586,7 +620,7 @@ class Watcher:
                 return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", TOO_MANY)
             seen.add(path)
             code, text, err = self.gh.gh_call(
-                "api", f"repos/{repo}/contents/{path}?ref={pin}", "-H", "Accept: application/vnd.github.raw"
+                *contents_args(repo, path, pin), "-H", "Accept: application/vnd.github.raw"
             )
             if code != 0:
                 raise ShipError(EXIT_ERROR, f"cannot read {clean(path, 200)[0]}: {err.strip()[:200]}")
@@ -596,8 +630,10 @@ class Watcher:
             for ref in refs:
                 if ref.startswith("./"):
                     local = ref[2:].rstrip("/")
-                    if not local or ".." in local.split("/"):
-                        return Result(EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", f"unusual local reference {clean(ref, 200)[0]}")
+                    if not safe_repo_path(local):
+                        return Result(
+                            EXIT_NEEDS_HUMAN, "NEEDS-HUMAN", "local workflow reference has unsupported characters"
+                        )
                     before, after = self.local_state(repo, local, base), self.local_state(repo, local, pin)
                     if before is None and after is None:
                         raise ShipError(EXIT_ERROR, f"cannot read {clean(ref, 200)[0]}")

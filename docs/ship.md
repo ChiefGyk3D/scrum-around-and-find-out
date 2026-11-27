@@ -96,7 +96,10 @@ the one the checks were read for is `MERGE-REFUSED`, a moved head is `HEAD-MOVED
 The gate file is also read at the pinned head with a YAML parser (no anchors or aliases; at most 256 KiB, 50 references per
 file, 20 files, 3 levels of local workflows) and every `uses:` of `jobs.*` and `jobs.*.steps[*]` must be one of: a remote
 reference pinned by a 40-hex commit sha, a docker image pinned by a `sha256` digest, or a local workflow or action
-(`./path`) whose content is identical on the base and the pinned head (local workflows are followed). Anything else, a file
+(`./path`) whose content is identical on the base and the pinned head (local workflows are followed). A local path may
+hold only `[A-Za-z0-9._/-]`, no empty, `.` or `..` part, at most 200 characters; anything else is `NEEDS-HUMAN` ("local
+workflow reference has unsupported characters"). Contents are asked for with each path part percent-quoted and the ref as
+a `-f ref=` field (never in the URL), and an answer about a different path than the one asked for is exit 7. Anything else, a file
 that does not parse or has an odd shape, or a word `uses` outside comments that the parse did not account for (a block
 scalar, a flow mapping, a duplicate key), is `NEEDS-HUMAN` ("too many references or nesting too deep to verify" when a cap
 is hit); a comment that says "uses" is ignored, a name or string that says it stops the tool and a human reads the file.

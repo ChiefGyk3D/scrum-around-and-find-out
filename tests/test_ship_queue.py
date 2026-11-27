@@ -907,3 +907,63 @@ def test_a_comment_with_the_word_uses_does_not_trip_the_scan(rig: Rig) -> None: 
     )
     code, out, _calls = rig.go(*args(False))
     assert code == 0, out
+
+
+# local references are untrusted text: they never reach a URL as anything but one safe path
+
+
+@pytest.mark.parametrize(
+    "local",
+    [
+        "a?ref=other",
+        "a#x",
+        "%2e%2e/x",
+        "a/%2e%2e/x",
+        "a b/c.yml",
+        "   ",
+        "a\\x07b.yml",  # a YAML escape: the parsed reference holds a real control character
+        "a\\\\b.yml",
+        "a//b.yml",
+        "a/./b.yml",
+        "a/../b.yml",
+        "x" * 250 + ".yml",
+        "é.yml",
+    ],
+)
+def test_a_local_reference_with_odd_characters_needs_a_human(rig: Rig, local: str) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = f'jobs:\n  a:\n    steps:\n      - uses: "./{local}"\n'
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN and "local workflow reference has unsupported characters" in out
+    assert merges(calls) == []
+    assert not [c for c in calls if len(c) > 3 and any(local in part for part in c[1:])], "it must never reach a call"
+
+
+def test_contents_are_asked_for_with_a_quoted_path_and_a_ref_field(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./tools/act\n"
+    rig.state["local_by_ref"] = {"main": "one", HEAD: "two"}
+    code, _out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_NEEDS_HUMAN
+    reads = [c for c in calls if "/contents/" in " ".join(c)]
+    assert reads and all(c[2:4] == ["-X", "GET"] and "?" not in c[4] for c in reads)
+    assert all(any(a.startswith("ref=") for a in c) for c in reads)
+
+
+def test_contents_args_quote_each_segment_and_pass_the_ref_as_a_field() -> None:
+    assert ship.contents_args("o/r", "a b/c", "main?x=1#") == [
+        "api",
+        "-X",
+        "GET",
+        "repos/o/r/contents/a%20b/c",
+        "-f",
+        "ref=main?x=1#",
+    ]
+
+
+def test_an_answer_about_another_path_is_an_error_not_a_comparison(rig: Rig) -> None:  # noqa: F811
+    rig.state["views"] = [sv("CLEAN")]
+    rig.state["gate_text"] = "jobs:\n  a:\n    steps:\n      - uses: ./tools/act\n"
+    rig.state["path_override"] = "somewhere/else"
+    code, out, calls = rig.go(*args(False))
+    assert code == ship.EXIT_ERROR and "not about" in out and merges(calls) == []

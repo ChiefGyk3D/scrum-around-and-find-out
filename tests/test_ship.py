@@ -25,6 +25,7 @@ STUB = textwrap.dedent(
     #!{python}
     # fake gh and git: answers come from $FAKE_STATE (a JSON file); every call is appended to its "calls" list
     import json, os, sys
+    from urllib.parse import unquote
     path = os.environ["FAKE_STATE"]
     state = json.load(open(path))
     argv = os.path.basename(sys.argv[0]), *sys.argv[1:]
@@ -93,11 +94,21 @@ STUB = textwrap.dedent(
         reply({{"out": json.dumps(run)}})
     if rest[0] == "api" and "/compare/" in rest[1]:
         reply({{"out": "\\n".join(state.get("changed", []))}})
-    if rest[0] == "api" and "/contents/.github/workflows/" in rest[1] and ".yml" in rest[1] and "-H" not in rest:
-        ref = rest[1].split("?ref=")[1] if "?ref=" in rest[1] else ""
-        reply({{"out": state.get("blob_by_ref", {{}}).get(ref, "blobsha")}})
-    if rest[0] == "api" and "/contents/.github/workflows" in rest[1] and "-H" not in rest:
-        reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
+    url = next((a for a in rest if a.startswith("repos/")), "")
+    fref = next((a[4:] for a in rest if a.startswith("ref=")), "")
+    if rest[0] == "api" and "/contents/" in url:
+        assert "?" not in url and list(rest[1:3]) == ["-X", "GET"], rest  # the ref is a field, never part of the URL
+        cpath = unquote(url.split("/contents/")[1])
+        shown = state.get("path_override", cpath)  # lets a test make the answer be about another path
+        jq = rest[rest.index("--jq") + 1] if "--jq" in rest else ""
+        if "-H" in rest:  # the raw text of a workflow file
+            default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: x\\n")
+            reply({{"out": state.get("texts", {{}}).get(cpath, default)}})
+        if cpath == ".github/workflows":
+            reply({{"out": "\\n".join(state.get("workflows", [".github/workflows/ci.yml"]))}})
+        if "join" in jq:  # the content sha of the gate file
+            reply({{"out": shown + "|" + state.get("blob_by_ref", {{}}).get(fref, "blobsha")}})
+        reply({{"out": json.dumps({{"file": shown, "sha": state.get("local_by_ref", {{}}).get(fref, "same")}})}})
     if rest[0] == "api" and rest[1].endswith("/protection"):
         reply(
             state.get(
@@ -105,13 +116,6 @@ STUB = textwrap.dedent(
                 {{"out": json.dumps({{"required_conversation_resolution": {{"enabled": True}}}})}},
             )
         )
-    if rest[0] == "api" and "/contents/" in rest[1] and "-H" in rest:  # the raw text of a workflow file
-        wf_path = rest[1].split("/contents/")[1].split("?")[0]  # not `path`: reply() writes the state file there
-        default = state.get("gate_text", "jobs:\\n  a:\\n    runs-on: x\\n")
-        reply({{"out": state.get("texts", {{}}).get(wf_path, default)}})
-    if rest[0] == "api" and "/contents/" in rest[1] and "/contents/.github/workflows" not in rest[1]:
-        ref = rest[1].split("?ref=")[1] if "?ref=" in rest[1] else ""
-        reply({{"out": state.get("local_by_ref", {{}}).get(ref, "same")}})
     if rest[0] == "api" and "/git/ref/heads/" in rest[1]:
         reply({{"out": json.dumps({{"object": {{"sha": state.get("base_tip", "e" * 40)}}}})}})
     if rest[0] == "api" and "update-branch" in rest[1]:
